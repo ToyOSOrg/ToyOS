@@ -425,11 +425,6 @@ impl Controller {
         self.io.iter().map(Queue::busy).sum()
     }
 
-    /// How many commands the device can hold at once, over every I/O queue.
-    pub fn capacity(&self) -> usize {
-        self.io.len() * COMMANDS_PER_QUEUE as usize
-    }
-
     /// Whether some I/O queue can take a command.
     pub fn has_room(&self) -> bool {
         self.io.iter().any(|q| !q.free.is_empty())

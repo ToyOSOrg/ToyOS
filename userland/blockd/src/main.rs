@@ -305,12 +305,7 @@ impl Service {
 
     /// Take what `id`'s client has published, while the device and the
     /// session's completion ring have room for it.
-    ///
-    /// **No session holds more than its share of the device**: the device's
-    /// commands over the sessions held, so a session that publishes as fast
-    /// as it can leaves room for every other one.
     fn pull(&mut self, id: u64) {
-        let share = (self.ctrl.capacity() / self.sessions.len()).max(1);
         let s = self.sessions.get_mut(&id).expect("a live session");
         let page = s.region.words();
         loop {
@@ -324,10 +319,7 @@ impl Service {
                 break;
             };
             let unread = (DEPTH - space) as usize;
-            if s.state.inflight() + unread >= DEPTH as usize
-                || s.state.inflight() >= share
-                || !self.ctrl.has_room()
-            {
+            if s.state.inflight() + unread >= DEPTH as usize || !self.ctrl.has_room() {
                 break;
             }
             let words = match s.rings.0.pop(page) {

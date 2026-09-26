@@ -296,6 +296,14 @@ fn reissued_after(trace: &Path, span: Span) -> Result<Vec<u64>, String> {
     };
     let mut unflushed = tail(volume[died]);
     let withheld = unflushed.pop().expect("a tail is not empty");
+    // An empty prefix equals anything, so a loss with nothing acknowledged
+    // before it would pass with no write to reissue.
+    if unflushed.is_empty() {
+        return Err(format!(
+            "blockd died with only the withheld write at sector {withheld} unflushed, so nothing \
+             acknowledged was left to reissue"
+        ));
+    }
     let next: Vec<u64> = volume[died + 1]
         .iter()
         .filter_map(|d| match d { Did::Wrote { lba, .. } => Some(*lba), _ => None })
@@ -607,12 +615,19 @@ pub fn blockd_dma_outside_the_lent(
 /// - lends 2 MiB regions beside the claim's own 2 MiB grant until the claim's
 ///   bound refuses the next with `ResourceExhausted`, at exactly the count the
 ///   bound leaves room for; and takes the grant's address back as a lent
-///   region, which is `NotFound`;
+///   region, which is `NotFound`; then frees leaves 0, 2, 4 and 15 of the
+///   window, room the bound allows in no one run, and a 4 MiB region is
+///   `ResourceExhausted`;
 /// - lends one region and takes it back until ten such domains' worth of
 ///   addresses went by, and the device then reads into it.
 ///
 /// Off the log: every domain the kernel made is the narrow one, one of them
 /// for the claim, and nothing panicked.
+///
+/// Then, on a boot where no release resets the function
+/// (`pcidev-reset-nothing`), three claims in turn: the first lends a region
+/// and the device reads into it, the second lends and takes it back, and
+/// neither the second nor the third lends where the first did.
 pub fn blockd_lends_within_its_bound(
     _test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -674,6 +689,23 @@ pub fn blockd_lends_within_its_bound(
     let _ = std::fs::remove_file(&disk);
     let _ = std::fs::remove_file(&trace);
     eprintln!("  [blockd] {}; {bound}; {churn}", lines[0].trim());
+    residue_is_never_lent(c_bins, rust_bins)
+}
+
+/// The second boot of [`blockd_lends_within_its_bound`].
+fn residue_is_never_lent(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (mut qemu, _layout, disk, trace, _before) =
+        boot(c_bins, rust_bins, "blockd-residue", &["pcidev-reset-nothing"])?;
+    let result = role(&mut qemu, "dma-residue", Duration::from_secs(120))?;
+    let third = said(&result, "claim 3 lent at")?.to_string();
+    let mut log = format!("{}{}", result.before, result.serial);
+    let tail = partclaim::shut_down(qemu);
+    partclaim::no_panic("on the way down", &tail)?;
+    log.push_str(&tail);
+    Serial::named("blockd_lends_within_its_bound, residue", log).must_be_clean()?;
+    let _ = std::fs::remove_file(&disk);
+    let _ = std::fs::remove_file(&trace);
+    eprintln!("  [blockd] {}", third.trim());
     Ok(())
 }
 

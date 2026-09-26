@@ -1519,7 +1519,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // What a claim may lend: a kernel driver's pool refused, the claim's bound
     // refusing the next region at the count it leaves room for, and lending and
     // taking back ten narrowed domains' worth of addresses with the kernel
-    // standing.
+    // standing; then, on a second boot, a function no release resets is never
+    // lent where it was left aimed.
     ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Nightly),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven

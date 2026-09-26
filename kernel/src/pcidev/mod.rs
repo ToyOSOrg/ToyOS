@@ -70,12 +70,14 @@
 //! died: the first grant that starts it mastering again lets that transfer out.
 //! So [`release`] takes those grants back like any other — mastering is off,
 //! so the function reaches nothing until its next claim's first grant — and
-//! keeps only their device addresses, as the slot's [`RESIDUE`]: the domain
-//! never hands an address out twice, and the slot is that function's alone
-//! (`toyos_pci::slot`), for the rest of the boot if it is never claimed again.
-//! The next claim's grant of a range's size is fresh pages placed at that
-//! range; a range it places nothing at stays unmapped, so a transfer aimed there
-//! faults, and its own release drops it. No page is ever two holders'.
+//! keeps only their device addresses, as the slot's [`RESIDUE`], and the slot
+//! is that function's alone (`toyos_pci::slot`), for the rest of the boot if it
+//! is never claimed again. A residue address is never lent
+//! ([`Bound::lend_room`]) and never a fresh grant's, so the next claim's grant
+//! of a range's size is fresh pages placed at that range; a range it places
+//! nothing at stays unmapped, so a transfer aimed there faults, and stays
+//! residue across its release until a release resets the function. No page is
+//! ever two holders'.
 //!
 //! **That rests on the next holder laying its grants out as the last one
 //! did.** The stale transfer — data and descriptor write-back — lands in
@@ -1557,7 +1559,13 @@ fn tear_down(slot: usize, mut bound: Bound) {
             }
             let mut residue = RESIDUE[slot].lock();
             assert!(residue.is_empty(), "pcidev: slot {slot} was claimed with a residue left untaken");
-            *residue = grants.iter().map(|grant| Aimed { at: grant.at, bytes: grant.bytes }).collect();
+            // With what this claim took over and placed nothing at: the function may
+            // still be aimed there too, until something resets it.
+            *residue = grants
+                .iter()
+                .map(|grant| Aimed { at: grant.at, bytes: grant.bytes })
+                .chain(bound.residue.iter().copied())
+                .collect();
         }
     }
     IRQ[slot].clear();

@@ -24,8 +24,10 @@
 //!   aimed by this process at a lent region, past it, and at one taken back;
 //! - `dma-pool`, `dma-bound`, `dma-churn` — what a claim may lend: a kernel
 //!   driver's pool refused, regions lent until the claim's bound refuses the
-//!   next, and one region lent and taken back until ten domains' worth of
-//!   addresses went by.
+//!   next and a region no run of the window fits, and one region lent and taken
+//!   back until ten domains' worth of addresses went by;
+//! - `dma-residue` — on a boot where no release resets the function, three
+//!   claims in turn, and none lends where the first one did.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
@@ -846,6 +848,35 @@ fn dma_bound() {
         "blockd_io: {room} regions of {REGION} bytes lent beside the claim's own grant, the next refused \
          with ResourceExhausted, and one taken back made room for one more"
     );
+    // Room the bound allows and the window has in no one run: leaves 0, 2, 4
+    // and 15 free is 8 MiB, and no two of them touch.
+    let leaf = REGION as u64;
+    let window = lent.iter().map(|(_, mapping)| mapping.device_addr).min().expect("regions were lent");
+    if lent.iter().any(|(_, mapping)| mapping.device_addr == window + 15 * leaf) {
+        fail(format!("the window's last leaf, {:#x}, was lent though the bound had no room for it", window + 15 * leaf));
+    }
+    for n in [0, 2, 4] {
+        let at = window + n * leaf;
+        let index = lent
+            .iter()
+            .position(|(_, mapping)| mapping.device_addr == at)
+            .unwrap_or_else(|| fail(format!("no region was lent at the window's leaf {n}, {at:#x}")));
+        let (_, mapping) = lent.remove(index);
+        dev.dma_unmap(mapping.device_addr).unwrap_or_else(|e| fail(format!("dma_unmap of leaf {n}: {e:?}")));
+    }
+    let wide = SharedMemory::create(2 * REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
+    match dev.dma_map(wide.as_handle()) {
+        Err(SyscallError::ResourceExhausted) => {}
+        other => fail(format!(
+            "a {}-byte region, with leaves 0, 2, 4 and 15 of the window free, was answered {other:?}",
+            2 * REGION
+        )),
+    }
+    println!(
+        "blockd_io: with leaves 0, 2, 4 and 15 of the window free, a {}-byte region is refused with \
+         ResourceExhausted",
+        2 * REGION
+    );
     println!("blockd_io: PASS dma-bound");
 }
 
@@ -882,6 +913,51 @@ fn dma_churn() {
     println!("blockd_io: PASS dma-churn");
 }
 
+/// The controller's claim once the last holder's release has run.
+fn claim_when_free(syscap: &SysCap) -> toyos::PciDev {
+    let asked = Instant::now();
+    loop {
+        match syscap.claim_pci(BLOCKD) {
+            Err(SyscallError::AlreadyExists) if asked.elapsed() < CLAIM_RETURN => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(claim) => return claim,
+            Err(e) => fail(format!("the controller's claim was refused: {e:?}")),
+        }
+    }
+}
+
+/// On a boot where no release resets the function, the first claim's lent
+/// address stays where the function may be aimed: the second claim lends
+/// elsewhere and ends holding nothing, and the third still lends elsewhere.
+fn dma_residue() {
+    let syscap = capability();
+    let first = {
+        let dev = claim_when_free(&syscap);
+        let mut ctrl = Controller::open(dev, None).unwrap_or_else(|e| fail(format!("the controller: {e}")));
+        let mut region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
+        region.as_mut_slice().fill(0xA5);
+        let mapping = ctrl.claim().dma_map(region.as_handle()).unwrap_or_else(|e| fail(format!("dma_map: {e:?}")));
+        match transfer(&mut ctrl, 0, mapping.device_addr) {
+            Ok(true) if is_block_zero(region.as_slice()) => {}
+            other => fail(format!("claim 1's read into its lent region was answered {other:?}")),
+        }
+        mapping.device_addr
+    };
+    println!("blockd_io: claim 1 lent a region at {first:#x}, the device read into it, and the claim ended holding it");
+    for n in [2, 3] {
+        let dev = claim_when_free(&syscap);
+        let region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
+        let mapping = dev.dma_map(region.as_handle()).unwrap_or_else(|e| fail(format!("claim {n}'s dma_map: {e:?}")));
+        if mapping.device_addr == first {
+            fail(format!("claim {n} lent a region at {first:#x}, where the unreset function was left aimed"));
+        }
+        dev.dma_unmap(mapping.device_addr).unwrap_or_else(|e| fail(format!("claim {n}'s dma_unmap: {e:?}")));
+        println!("blockd_io: claim {n} lent at {:#x}, not {first:#x}, and ended holding nothing", mapping.device_addr);
+    }
+    println!("blockd_io: PASS dma-residue");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -894,6 +970,7 @@ fn main() {
         Some("dma-pool") => dma_pool(),
         Some("dma-bound") => dma_bound(),
         Some("dma-churn") => dma_churn(),
+        Some("dma-residue") => dma_residue(),
         other => fail(format!("no role {other:?}")),
     }
 }
