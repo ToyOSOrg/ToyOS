@@ -16,7 +16,7 @@ captured `nothing at all`. The harness's re-run alone was green in 2 s.
 `cargo run -- --known-red` answers NO.
 
 The same shape as
-`issues/kernel/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md`,
+`issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md`,
 on the sibling arm.
 
 **Exit**: a cause for the empty uart on a boot that rebooted as designed, or
