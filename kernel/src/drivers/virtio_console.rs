@@ -97,11 +97,11 @@ pub fn write_bytes_locked(bytes: &[u8]) {
         let mut off = 0;
         while off < bytes.len() {
             let n = (bytes.len() - off).min(TX_BUF_SIZE);
-            // `n` is bounded to `TX_BUF_SIZE`; the `BackendGuard` excludes other
-            // callers, and the previous chunk's `submit_and_wait` already
-            // returned, so the device is done with `tx_buf` too.
+            // `n` is bounded to `TX_BUF_SIZE`, and the device is done with
+            // `tx_buf`: the slot is back, from the previous chunk or from the
+            // burst whose completion `slot` waits out.
+            let slot = tx_slot(c);
             c.tx_buf.copy_from(0, &bytes[off..off + n]);
-            let slot = c.tx_slot.take().expect("vconsole: no tx slot");
             c.tx_slot = Some(c.tx.submit_and_wait(
                 slot,
                 &[(c.tx_buf.device_addr(), n as u32, BufDir::Readable)],
@@ -112,6 +112,103 @@ pub fn write_bytes_locked(bytes: &[u8]) {
             off += n;
         }
     });
+}
+
+/// The transmit slot, waiting out a burst [`write_burst`] left in flight when
+/// the caller is the panic path that found it so.
+fn tx_slot(c: &mut VConsole) -> DescSlot {
+    if let Some(slot) = c.tx_slot.take() {
+        return slot;
+    }
+    let answers = Answers::new();
+    loop {
+        if let Some((slot, _)) = c.tx.poll_used() {
+            return slot;
+        }
+        answers.check();
+        core::hint::spin_loop();
+    }
+}
+
+/// One transmit buffer's worth, with interrupts off only to submit it and to
+/// look for its completion: the device takes it at the host's pace, which a
+/// loaded host can stretch to tens of milliseconds, and no interrupt waits on
+/// that. The caller holds the wire, so no other burst is in flight.
+pub fn write_burst(bytes: &[u8]) {
+    assert!(bytes.len() <= TX_BUF_SIZE, "vconsole: a burst of {} bytes", bytes.len());
+    let submitted = {
+        let _burst = super::serial::BackendGuard::lock();
+        with_console(|c| {
+            let slot = tx_slot(c);
+            c.tx_buf.copy_from(0, bytes);
+            c.tx.submit(
+                slot,
+                &[(c.tx_buf.device_addr(), bytes.len() as u32, BufDir::Readable)],
+                c.device.notify_mmio(),
+                c.device.notify_off_multiplier(),
+                1,
+            );
+        })
+        .is_some()
+    };
+    if !submitted {
+        return;
+    }
+    let answers = Answers::new();
+    loop {
+        let done = {
+            let _look = super::serial::BackendGuard::lock();
+            with_console(|c| {
+                // The panic path may have waited this burst out already.
+                if c.tx_slot.is_some() {
+                    return true;
+                }
+                match c.tx.poll_used() {
+                    Some((slot, _)) => {
+                        c.tx_slot = Some(slot);
+                        true
+                    }
+                    None => false,
+                }
+            })
+            .unwrap_or(true)
+        };
+        if done {
+            return;
+        }
+        answers.check();
+        core::hint::spin_loop();
+    }
+}
+
+/// The bound on the device taking one burst: an emulated device that has not
+/// in this long never will, and the panic names it where a spin hangs.
+struct Answers {
+    began: u64,
+    spins: core::cell::Cell<u32>,
+}
+
+impl Answers {
+    const BOUND: crate::time::Tripwire = crate::time::Tripwire::absurd(
+        crate::time::Duration::from_secs(5),
+        "far above any completion a live device delivers",
+    );
+    /// Spaced: `nanos_since_boot`'s 128-bit divide is too costly per spin.
+    const SPINS_PER_CHECK: u32 = 1024;
+
+    fn new() -> Self {
+        Self { began: crate::clock::nanos_since_boot(), spins: core::cell::Cell::new(0) }
+    }
+
+    fn check(&self) {
+        let spins = self.spins.get() + 1;
+        self.spins.set(spins % Self::SPINS_PER_CHECK);
+        if spins < Self::SPINS_PER_CHECK {
+            return;
+        }
+        let waited = crate::clock::nanos_since_boot().saturating_sub(self.began);
+        assert!(waited < Self::BOUND.nanos(), "vconsole: the transmit queue completed nothing in {}", Self::BOUND);
+    }
 }
 
 /// Read one byte from RX. Caller must hold `serial::BackendGuard` with IRQs disabled.

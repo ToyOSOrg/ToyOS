@@ -5,9 +5,10 @@
 //! and the few drains that stand in for it. It is held for a whole line, so
 //! a line is one writer's, and with interrupts on. [`BackendGuard`] is the
 //! registers' lock, held with interrupts off for one burst: a FIFO's worth
-//! to a 16550, a transmit buffer's to virtio-console, a byte read. The panic
-//! path takes the registers alone, and bypasses them once they stay held.
-//! Nothing that holds a kernel lock formats here.
+//! to a 16550; the submit of a transmit buffer to virtio-console, and each
+//! look for its completion, which the host takes at its own pace; a byte
+//! read. The panic path takes the registers alone, and bypasses them once
+//! they stay held. Nothing that holds a kernel lock formats here.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::cpu::{inb, outb};
@@ -290,14 +291,13 @@ pub fn try_wire() -> Option<SleepGuard<'static, ()>> {
 const UART_FIFO: usize = 16;
 
 /// `bytes` onto the wire the caller holds, in bursts: one FIFO's worth to a
-/// 16550, one transmit buffer's to virtio-console, each under its own
-/// [`BackendGuard`] and interrupts on between two.
+/// 16550, one transmit buffer's to virtio-console, with interrupts on
+/// between every two looks at the device.
 pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
     match backend() {
         Backend::Virtio => {
             for chunk in bytes.chunks(super::virtio_console::TX_BUF_SIZE) {
-                let _burst = BackendGuard::lock();
-                super::virtio_console::write_bytes_locked(chunk);
+                super::virtio_console::write_burst(chunk);
             }
         }
         Backend::Uart => uart_write_fifo(bytes),
