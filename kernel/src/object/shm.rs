@@ -102,7 +102,7 @@ impl SharedMemObject {
     /// a second device's domain would be one device reaching another's
     /// registers.
     pub fn ram(&self) -> Option<(u64, u64)> {
-        (self.region.pages.is_some() && self.region.cache == CachePolicy::DeferToMtrr)
+        (self.region.pages.is_some() && self.region.cache == CachePolicy::Normal)
             .then(|| (self.region.phys.phys(), self.region.size))
     }
 

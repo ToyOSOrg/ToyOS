@@ -204,7 +204,7 @@ impl DeviceSpace {
     pub fn reserve(self, bytes: u64) -> Result<u64, IommuError> {
         match self {
             Self::Untranslated => panic!("iommu: an untranslated space was asked for room"),
-            Self::Own(id) => vtd::domain::reserve(id, bytes).map(Iova::raw),
+            Self::Own(id) => unit::domain::reserve(id, bytes).map(Iova::raw),
         }
     }
 
@@ -214,7 +214,7 @@ impl DeviceSpace {
     pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
         match self {
             Self::Untranslated => panic!("iommu: an untranslated space was asked to place {phys:#x} at {at:#x}"),
-            Self::Own(id) => vtd::domain::place(id, Iova::translated(at), phys, bytes).map(|_| ()),
+            Self::Own(id) => unit::domain::place(id, Iova::translated(at), phys, bytes).map(|_| ()),
         }
     }
 

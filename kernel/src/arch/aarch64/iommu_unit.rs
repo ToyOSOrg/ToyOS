@@ -24,6 +24,14 @@ pub mod domain {
         unreachable!("no domain exists: `create` refuses every one")
     }
 
+    pub fn reserve(_id: DomainId, _bytes: u64) -> Result<Iova, IommuError> {
+        unreachable!("no domain exists: `create` refuses every one")
+    }
+
+    pub fn place(_id: DomainId, _at: Iova, _phys: u64, _bytes: u64) -> Result<u16, IommuError> {
+        unreachable!("no domain exists: `create` refuses every one")
+    }
+
     pub fn unmap(_id: DomainId, _at: Iova, _bytes: u64) -> Result<(), IommuError> {
         unreachable!("no domain exists: `create` refuses every one")
     }
