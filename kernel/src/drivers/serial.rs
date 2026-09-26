@@ -84,10 +84,17 @@ impl BackendGuard {
     /// Non-blocking acquire: `None` if another CPU already holds the backend.
     pub fn try_lock() -> Option<Self> {
         let irq = IrqGuard::close();
-        BACKEND_LOCKED
+        // Not `then_some`: its argument is built whether or not the exchange
+        // won, and a `BackendGuard` built on a loss drops, and its drop
+        // releases the backend another CPU holds.
+        if BACKEND_LOCKED
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
-            .then_some(Self { _irq: irq })
+        {
+            Some(Self { _irq: irq })
+        } else {
+            None
+        }
     }
 
     /// Writes raw bytes with no escape stripping; callers must pre-strip via [`write_console`].
