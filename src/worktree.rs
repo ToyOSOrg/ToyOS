@@ -462,6 +462,7 @@ fn ok(dir: &Path, args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toyos_tmpdir::TempDir;
 
     /// `--worktree` owns the rest of the command line, so this refusal is the
     /// only one between `--worktree add --help` and a worktree named `--help`.
@@ -508,13 +509,13 @@ mod tests {
         assert!(line.contains("2.0 GiB"), "the offer has to say what it is worth: {line}");
     }
 
-    /// A linked worktree of a fresh repository whose `.gitignore` names `target/`.
-    fn linked(name: &str) -> (PathBuf, PathBuf) {
-        let (_origin, work) = crate::pr::tests::repo(name);
-        let tree = work.with_file_name(format!("{}-linked", work.file_name().unwrap().to_string_lossy()));
-        let _ = fs::remove_dir_all(&tree);
+    /// A linked worktree of a fresh repository whose `.gitignore` names `target/`,
+    /// both in the directory that comes first.
+    fn linked(name: &str) -> (TempDir, PathBuf, PathBuf) {
+        let (dir, _origin, work) = crate::pr::tests::repo(name);
+        let tree = dir.join("linked");
         git(&work, &["worktree", "add", "-q", "-b", "linked", tree.to_str().unwrap()]);
-        (work, tree)
+        (dir, work, tree)
     }
 
     /// **git unregisters, then fails to delete, and exits non-zero.** A path
@@ -522,7 +523,7 @@ mod tests {
     /// way to make it do that.
     #[test]
     fn a_worktree_git_unregistered_but_left_on_disk_is_deleted_whole() {
-        let (work, tree) = linked("wt-remove-leftovers");
+        let (_dir, work, tree) = linked("wt-remove-leftovers");
         // Two chains of twenty, each short enough to make, one renamed into
         // the other's end: no path any call here names exceeds `PATH_MAX`.
         let chain = |at: &Path| {
@@ -551,7 +552,7 @@ mod tests {
     /// and nothing of it is deleted.
     #[test]
     fn a_worktree_holding_untracked_work_is_refused_and_left_whole() {
-        let (work, tree) = linked("wt-remove-dirty");
+        let (_dir, work, tree) = linked("wt-remove-dirty");
         fs::write(tree.join("unsaved.rs"), "the only copy\n").unwrap();
 
         let refused = std::panic::catch_unwind(|| remove(&work, tree.to_str().unwrap()));

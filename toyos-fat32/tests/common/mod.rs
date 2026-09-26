@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use toyos_fat32::{BlockAccess, IoError};
+use toyos_tmpdir::TempDir;
 
 /// `hdiutil` hands out device nodes from one global pool and mounts into one
 /// global `/Volumes`. Two tests attaching at once is a race in macOS, not in
@@ -34,12 +35,6 @@ use toyos_fat32::{BlockAccess, IoError};
 static HDIUTIL: Mutex<()> = Mutex::new(());
 
 static LABEL_SEQ: AtomicU32 = AtomicU32::new(0);
-
-fn scratch_root() -> PathBuf {
-    let dir = std::env::temp_dir().join("toyos-fat32-tests");
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
-}
 
 fn run(cmd: &mut Command) -> (bool, String) {
     let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {cmd:?}: {e}"));
@@ -506,6 +501,8 @@ impl AdapterCache {
 pub struct Image {
     pub path: PathBuf,
     label: String,
+    /// Where the image file is, gone with it.
+    _dir: TempDir,
 }
 
 impl Image {
@@ -519,8 +516,8 @@ impl Image {
     pub fn new(name: &str, bytes: u64, sectors_per_cluster: u32) -> Image {
         let seq = LABEL_SEQ.fetch_add(1, Ordering::Relaxed);
         let label = format!("TF{:09}", (std::process::id() * 1000 + seq) % 1_000_000_000);
-        let path = scratch_root().join(format!("{name}-{label}.img"));
-        let _ = std::fs::remove_file(&path);
+        let dir = TempDir::new(&format!("fat32-{name}"));
+        let path = dir.join(format!("{label}.img"));
         let file = File::create(&path).expect("create image");
         file.set_len(bytes).expect("size image");
         drop(file);
@@ -542,7 +539,7 @@ impl Image {
         drop(guard);
         assert!(ok, "newfs_msdos failed on {}:\n{out}", path.display());
 
-        Image { path, label }
+        Image { path, label, _dir: dir }
     }
 
     pub fn size(&self) -> u64 {
@@ -600,12 +597,6 @@ impl Image {
             self.path.display(),
             toyos_fat32_check::describe(&complaints)
         );
-    }
-}
-
-impl Drop for Image {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 

@@ -12,6 +12,7 @@ use object::{
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use toyos_tmpdir::TempDir;
 
 // ── Input synthesis ──────────────────────────────────────────────────────
 
@@ -369,17 +370,19 @@ fn push_bsd_member(out: &mut Vec<u8>, name: &[u8], data: &[u8]) {
 // ── Harness ──────────────────────────────────────────────────────────────
 
 pub struct Case {
-    dir: PathBuf,
+    dir: TempDir,
     inputs: Vec<PathBuf>,
     args: Vec<String>,
 }
 
 impl Case {
     pub fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("toyos-ld-det-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Case { dir, inputs: Vec::new(), args: Vec::new() }
+        Case { dir: TempDir::new(&format!("ld-{name}")), inputs: Vec::new(), args: Vec::new() }
+    }
+
+    /// The directory its inputs and outputs are in, gone with the case.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     pub fn input(mut self, name: &str, bytes: Vec<u8>) -> Self {
