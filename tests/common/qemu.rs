@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -2357,6 +2357,12 @@ pub struct BootOptions {
     /// Forward this host port to the guest's TCP [`toyos_logstream::PORT`],
     /// where `logd` serves the boot's log.
     pub log_port: Option<u16>,
+    /// The virtio console's output into a regular file the harness follows,
+    /// and its input through a FIFO, instead of QEMU's stdio. QEMU's
+    /// `virtconsole` drops what a full non-blocking stdout refuses, and a
+    /// regular file refuses no write: for a test whose verdict is a line after
+    /// megabytes of console (`issues/build/qemu-drops-console-output-the-harness-is-slow-to-read.md`).
+    pub console_file: bool,
     /// Put the host on the guest's own segment (`super::segment`): frames
     /// it writes reach the NIC as if off the cable, and it sees every frame the
     /// guest sends. Refused by name on a profile with no NIC.
@@ -2443,6 +2449,7 @@ impl Default for BootOptions {
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
+            console_file: false,
             segment: None,
             ssh_port: None,
             wire_dump: None,
@@ -2543,7 +2550,7 @@ impl ConsoleStream {
 
 pub struct QemuInstance {
     child: Child,
-    stdin: BufWriter<ChildStdin>,
+    stdin: BufWriter<Box<dyn Write + Send>>,
     rx: Receiver<String>,
     console: ConsoleStream,
     _reader_thread: thread::JoinHandle<String>,
@@ -3059,6 +3066,7 @@ impl QemuInstance {
         // let instances read each other's early boot.
         let uart_log = test_dir.join(format!("uart-{seq}.log"));
         let _ = fs::remove_file(&uart_log);
+        let console_file = options.console_file.then(|| ConsoleFile::make(&test_dir, seq));
 
         let qemu = qemu_command(
             &boot_image,
@@ -3067,6 +3075,7 @@ impl QemuInstance {
             &audio_wav,
             &uart_log,
             qmp_socket.as_deref(),
+            console_file.as_ref(),
             &options,
         );
         spawn_and_wait_ready(
@@ -3082,6 +3091,7 @@ impl QemuInstance {
                 screendump,
                 own_boot_image,
                 carried,
+                console_file,
             },
         )
     }
@@ -3348,7 +3358,7 @@ impl QemuInstance {
         &self.usb_images
     }
 
-    pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
+    pub fn stdin_mut(&mut self) -> &mut BufWriter<Box<dyn Write + Send>> {
         &mut self.stdin
     }
 
@@ -4175,7 +4185,7 @@ impl QmpDevices {
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
     let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
-    qemu_command(p, p, &usb, p, p, None, options)
+    qemu_command(p, p, &usb, p, p, None, None, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -4202,12 +4212,17 @@ fn qemu_command(
     audio_wav: &Path,
     uart_log: &Path,
     qmp_socket: Option<&Path>,
+    console_file: Option<&ConsoleFile>,
     options: &BootOptions,
 ) -> Command {
     let shape = options.profile.shape();
     assert!(
         !options.mute || !shape.virtio.present(),
         "mute removes the only console a virtio profile has"
+    );
+    assert!(
+        console_file.is_none() || shape.virtio.present(),
+        "console_file is the virtio console's, and this profile has none"
     );
 
     let repo = compile::repo_root();
@@ -4545,7 +4560,10 @@ fn qemu_command(
             .arg("-serial")
             .arg(format!("file:{}", uart_log.display()))
             .arg("-chardev")
-            .arg("stdio,id=cs0,signal=off")
+            .arg(match console_file {
+                Some(file) => format!("file,id=cs0,path={},input-path={}", file.out.display(), file.input.display()),
+                None => "stdio,id=cs0,signal=off".to_string(),
+            })
             .arg("-device")
             .arg(format!(
                 "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
@@ -4588,6 +4606,64 @@ struct Files {
     screendump: PathBuf,
     own_boot_image: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
+    console_file: Option<ConsoleFile>,
+}
+
+/// [`BootOptions::console_file`]'s two paths: the file QEMU writes the console
+/// into, and the FIFO it reads the console's input from.
+struct ConsoleFile {
+    out: PathBuf,
+    input: PathBuf,
+}
+
+impl ConsoleFile {
+    fn make(dir: &Path, seq: u32) -> Self {
+        let out = dir.join(format!("console-{seq}.log"));
+        let input = dir.join(format!("console-{seq}.in"));
+        // Made here so the follower can open it before QEMU does.
+        fs::File::create(&out).unwrap_or_else(|e| panic!("create {}: {e}", out.display()));
+        let _ = fs::remove_file(&input);
+        let c = std::ffi::CString::new(input.as_os_str().as_encoded_bytes()).expect("a path holds no NUL");
+        // SAFETY: a NUL-terminated path this call owns.
+        if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+            panic!("mkfifo {}: {}", input.display(), std::io::Error::last_os_error());
+        }
+        Self { out, input }
+    }
+}
+
+/// The console file read as a stream. At its end a read waits for more on the
+/// one event QEMU gives: its stdout, which it never writes with a file
+/// console, ending when it exits. A regular file has no readiness of its own
+/// on either host, so between those the file is asked again every
+/// [`Self::PERIOD_MS`].
+struct Followed {
+    file: fs::File,
+    exit: std::process::ChildStdout,
+    gone: bool,
+}
+
+impl Followed {
+    const PERIOD_MS: i32 = 2;
+}
+
+impl Read for Followed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        loop {
+            let n = self.file.read(buf)?;
+            if n > 0 || self.gone {
+                return Ok(n);
+            }
+            let mut fd = libc::pollfd { fd: self.exit.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one `pollfd` this call owns, for the one entry it holds.
+            if unsafe { libc::poll(&mut fd, 1, Self::PERIOD_MS) } > 0 {
+                let mut stray = [0u8; 256];
+                // Its end, after which the file is read once more for what QEMU wrote last.
+                self.gone = self.exit.read(&mut stray)? == 0;
+            }
+        }
+    }
 }
 
 fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) -> QemuInstance {
@@ -4601,19 +4677,39 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         screendump,
         own_boot_image,
         carried,
+        console_file,
     } = files;
 
     qemu.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
+    // Read and write, so QEMU's read-only open finds a writer and does not block.
+    let input = console_file.as_ref().map(|f| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&f.input)
+            .unwrap_or_else(|e| panic!("open {}: {e}", f.input.display()))
+    });
     if VERBOSE.load(Ordering::Relaxed) {
         eprintln!("[qemu {seq}] Launching QEMU...");
     }
     let mut child = qemu.spawn().expect("Failed to launch QEMU");
 
-    let stdin = BufWriter::new(child.stdin.take().unwrap());
-    let stdout = child.stdout.take().unwrap();
+    let stdin: Box<dyn Write + Send> = match input {
+        Some(fifo) => Box::new(fifo),
+        None => Box::new(child.stdin.take().unwrap()),
+    };
+    let stdin = BufWriter::new(stdin);
+    let stdout: Box<dyn Read + Send> = match &console_file {
+        Some(f) => Box::new(Followed {
+            file: fs::File::open(&f.out).unwrap_or_else(|e| panic!("open {}: {e}", f.out.display())),
+            exit: child.stdout.take().unwrap(),
+            gone: false,
+        }),
+        None => Box::new(child.stdout.take().unwrap()),
+    };
 
     let (tx, rx) = mpsc::channel::<String>();
     let console = ConsoleStream::new();

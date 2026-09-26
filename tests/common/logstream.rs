@@ -77,11 +77,13 @@ pub fn stage_armed(
     Ok(Staged { image, start, len })
 }
 
-/// A boot of `bench` with `logd`'s port forwarded to `port`, up and serving.
+/// A boot of `bench` with `logd`'s port forwarded to `port`, up and serving;
+/// its console a file where `console_file` says ([`BootOptions::console_file`]).
 fn boot(
     bench: Bench,
     staged: &Staged,
     port: u16,
+    console_file: bool,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(QemuInstance, String), String> {
@@ -89,6 +91,7 @@ fn boot(
         profile: bench.profile,
         boot_image: Some(qemu::Staged::Written(staged.image.clone())),
         log_port: Some(port),
+        console_file,
         ..Default::default()
     };
     if !qemu::profile_argv(&options).iter().any(|a| a.contains(bench.device)) {
@@ -186,7 +189,7 @@ pub fn stream(
     let name = format!("logstream-{}", bench.device);
     let staged = stage(bench.config, &name, c_bins, rust_bins)?;
     let port = qemu::free_host_port();
-    let (mut guest, mut console) = boot(bench, &staged, port, c_bins, rust_bins)?;
+    let (mut guest, mut console) = boot(bench, &staged, port, false, c_bins, rust_bins)?;
 
     // Before any reader exists.
     let job = "test_rs_log_origin";
@@ -264,7 +267,9 @@ pub fn stalled_reader(
     let bench = VIRTIO;
     let staged = stage(bench.config, "logstream-stalled", c_bins, rust_bins)?;
     let port = qemu::free_host_port();
-    let (mut guest, mut console) = boot(bench, &staged, port, c_bins, rust_bins)?;
+    // The flood puts a mebibyte of program lines on the console ahead of the
+    // runner's end marker, which a stdio console under host load drops.
+    let (mut guest, mut console) = boot(bench, &staged, port, true, c_bins, rust_bins)?;
 
     let stalled = (0..NETWORK_READERS)
         .map(|_| never_read(port))

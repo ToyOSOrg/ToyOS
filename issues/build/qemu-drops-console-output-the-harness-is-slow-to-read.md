@@ -32,6 +32,17 @@ Across 8 runs that day, 2 hung this way. Any test that waits for a line on a
 virtio console under host load is exposed in the same way; the flood only
 makes it likely.
 
+**`log_stream_stalled_reader` no longer reads that channel.** It boots with
+`BootOptions::console_file`: the virtio console's output goes to a regular
+file the harness follows and its input through a FIFO, so no write is refused.
+Twenty runs of it after that change: 18 green; one red was the kernel's TLB
+shootdown panic on a starved vCPU
+(`issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md`), which
+killed a `logd` reader thread so it was never let go, and one had `logd` let
+none of the eight stalled readers go in 90 s while every host guest slot was
+held by other worktrees, green alone. Neither lost a console line. Every other
+test still reads the stdio console.
+
 ## Exit condition
 
 The console chardev the harness reads cannot refuse a write — for example a
