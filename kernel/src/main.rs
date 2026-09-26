@@ -650,6 +650,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     #[cfg(feature = "boot-actuators")]
     if actuator::virtio_used_selftest() {
         drivers::virtio::used_selftest();
+        drivers::virtio::wait_selftest();
     }
 
     // Needs interrupts on and the timer already ticking: its last assertion is that the interrupt after the spurious one arrives.

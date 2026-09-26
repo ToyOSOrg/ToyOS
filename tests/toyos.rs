@@ -13855,6 +13855,12 @@ fn run_machine_test(
             if ran != 1 {
                 return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
             }
+            // The one wait on a used ring: a completion found only after the
+            // bound, as a waiter off its CPU for all of it finds one, is
+            // taken, and a device that never answers is not.
+            if !log.lines().any(|l| l.contains("virtio: wait selftest 2/2")) {
+                return Err(format!("the wait's self-test did not pass both cases:\n{log}"));
+            }
             eprintln!("  [virtio] {}", verdict.trim());
             Ok(())
         }

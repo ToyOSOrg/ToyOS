@@ -8,7 +8,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::pci::PciDevice;
-use super::virtio::{BufDir, DescSlot, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
+use super::virtio::{wait_used, BufDir, DescSlot, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
 use super::DmaPool;
 use crate::log;
 use crate::mm::{Dma, Unaligned};
@@ -117,16 +117,9 @@ pub fn write_bytes_locked(bytes: &[u8]) {
 /// The transmit slot, waiting out a burst [`write_burst`] left in flight when
 /// the caller is the panic path that found it so.
 fn tx_slot(c: &mut VConsole) -> DescSlot {
-    if let Some(slot) = c.tx_slot.take() {
-        return slot;
-    }
-    let answers = Answers::new();
-    loop {
-        if let Some((slot, _)) = c.tx.poll_used() {
-            return slot;
-        }
-        answers.check();
-        core::hint::spin_loop();
+    match c.tx_slot.take() {
+        Some(slot) => slot,
+        None => wait_used(1, || c.tx.poll_used().map(|(slot, _)| slot)),
     }
 }
 
@@ -154,61 +147,18 @@ pub fn write_burst(bytes: &[u8]) {
     if !submitted {
         return;
     }
-    let answers = Answers::new();
-    loop {
-        let done = {
-            let _look = super::serial::BackendGuard::lock();
-            with_console(|c| {
-                // The panic path may have waited this burst out already.
-                if c.tx_slot.is_some() {
-                    return true;
-                }
-                match c.tx.poll_used() {
-                    Some((slot, _)) => {
-                        c.tx_slot = Some(slot);
-                        true
-                    }
-                    None => false,
-                }
-            })
-            .unwrap_or(true)
-        };
-        if done {
-            return;
-        }
-        answers.check();
-        core::hint::spin_loop();
-    }
-}
-
-/// The bound on the device taking one burst: an emulated device that has not
-/// in this long never will, and the panic names it where a spin hangs.
-struct Answers {
-    began: u64,
-    spins: core::cell::Cell<u32>,
-}
-
-impl Answers {
-    const BOUND: crate::time::Tripwire = crate::time::Tripwire::absurd(
-        crate::time::Duration::from_secs(5),
-        "far above any completion a live device delivers",
-    );
-    /// Spaced: `nanos_since_boot`'s 128-bit divide is too costly per spin.
-    const SPINS_PER_CHECK: u32 = 1024;
-
-    fn new() -> Self {
-        Self { began: crate::clock::nanos_since_boot(), spins: core::cell::Cell::new(0) }
-    }
-
-    fn check(&self) {
-        let spins = self.spins.get() + 1;
-        self.spins.set(spins % Self::SPINS_PER_CHECK);
-        if spins < Self::SPINS_PER_CHECK {
-            return;
-        }
-        let waited = crate::clock::nanos_since_boot().saturating_sub(self.began);
-        assert!(waited < Self::BOUND.nanos(), "vconsole: the transmit queue completed nothing in {}", Self::BOUND);
-    }
+    wait_used(1, || {
+        let _look = super::serial::BackendGuard::lock();
+        with_console(|c| {
+            // The panic path may have waited this burst out already.
+            if c.tx_slot.is_none() {
+                c.tx_slot = c.tx.poll_used().map(|(slot, _)| slot);
+            }
+            c.tx_slot.is_some()
+        })
+        .unwrap_or(true)
+        .then_some(())
+    });
 }
 
 /// Read one byte from RX. Caller must hold `serial::BackendGuard` with IRQs disabled.
