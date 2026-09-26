@@ -1,0 +1,50 @@
+# A member of the host workspace (root `Cargo.toml`). What lives here is the
+# block protocol between a block service and its client — the shared session
+# page's layout, the two rings on it, the words a request and a completion are,
+# the control frames a session is opened and bound with, and every decision
+# either end makes about what a completion means — with nothing that touches a
+# device, a handle or a mapping. `userland/blockd` serves it and its client
+# glue speaks it; both map the page and hand this crate the words.
+#
+# Its defects are orders — a completion racing a crash, a flush racing a reset,
+# a reconnect racing a reissue — so `src/model.rs` enumerates every ordering of
+# a scripted client against a server, a device and a crash, and
+# `tests/loom_ring.rs` checks the rings' publication under loom.
+
+[package]
+name = "toyos-blockring"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[features]
+# Declared, never enabled by any build that ships: each reverts one decision so
+# the model that refuses it is shown able to red at all. `src/ci.rs`'s
+# `CONTROLS` runs each and demands the named test's own FAILED line.
+#
+# `Client::session_ended` forgets the requests that were on the wire instead of
+# answering them: a request a crash took is then answered by nobody.
+mutate-session-end-forgets = []
+# `ServerSession::abort_all` answers every request in flight and keeps them in
+# flight, so the device's own late completion answers them a second time.
+mutate-abort-keeps-inflight = []
+# `Client` takes a loss — a flush answered `Lost`, or a session that ended — and
+# re-issues nothing: writes it had acknowledged are gone and a later flush
+# still says durable.
+mutate-no-reissue-after-loss = []
+# The rings publish a tail with `Relaxed`, so the consumer can see the index
+# before the entry's words.
+mutate-ring-publish-relaxed = []
+
+[dependencies]
+# Whose flush answers for which writes the disk lost, and who holds which span:
+# the server half's bookkeeping, decided where the kernel's block layer decides
+# it today.
+toyos-blockhold = { path = "../toyos-blockhold" }
+
+[dev-dependencies]
+# Already resolved in this workspace for `kernel-loom` and `toyos-sched/loom`.
+loom = "0.7"
+
+[lints.rust]
+warnings = "deny"

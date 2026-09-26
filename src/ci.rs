@@ -224,6 +224,7 @@ const KERNEL_LOOM: &[&str] = &["--manifest-path", "kernel-loom/Cargo.toml"];
 const SCHED_LOOM: &[&str] = &["-p", "toyos-sched-loom"];
 const SCHED_SIM: &[&str] = &["-p", "toyos-sched-sim"];
 const PROCLIFE: &[&str] = &["-p", "toyos-proclife"];
+const BLOCKRING: &[&str] = &["-p", "toyos-blockring"];
 
 const fn red(
     krate: &'static [&'static str],
@@ -339,6 +340,21 @@ pub(crate) const CONTROLS: &[Control] = &[
     ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         "a_stopped_cpu_stops_taking_work ... FAILED",
+    ]),
+    // The block protocol's three: a completion lost to a session's end, a
+    // completion given twice after a reset, and a loss nothing is written
+    // again after.
+    red(BLOCKRING, "mutate-session-end-forgets", None, &[
+        "every_request_is_answered_exactly_once ... FAILED",
+    ]),
+    red(BLOCKRING, "mutate-abort-keeps-inflight", None, &[
+        "every_request_is_answered_exactly_once ... FAILED",
+    ]),
+    red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
+        "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
+    ]),
+    red(BLOCKRING, "mutate-ring-publish-relaxed", Some("loom_ring"), &[
+        "a_published_request_is_read_whole ... FAILED",
     ]),
 ];
 
