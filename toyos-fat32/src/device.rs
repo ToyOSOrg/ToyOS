@@ -41,9 +41,13 @@ pub trait BlockAccess {
 /// unit struct this replaces carried none. But an implementor of
 /// [`BlockAccess`] may also have a *bound of its own* on how long one call may
 /// take, and reaching it is a statement about the caller's clock rather than
-/// about the volume: nothing was attempted, nothing is in flight, and asking
-/// again later is the honest response. Flattening the two costs the caller the
-/// only decision it could make.
+/// about the volume, and asking again later is the honest response. Flattening
+/// the two costs the caller the only decision it could make.
+///
+/// Neither variant says whether a refused write reached the medium: an
+/// implementor may have issued it before its bound or the device gave up.
+/// This crate treats every refused write as of unknown outcome — see
+/// `crate::repair`.
 ///
 /// The kernel's implementor is `kernel/src/fat32_adapter.rs` over
 /// `block::BlockDevice`, whose `block::OPERATION` budget is that bound.
@@ -51,7 +55,7 @@ pub trait BlockAccess {
 pub enum IoError {
     /// The device refused, failed, or would not answer.
     Device,
-    /// The implementor's own bound on the operation expired before it was
-    /// attempted. The volume is untouched and the caller may ask again.
+    /// The implementor's own bound on the operation expired. A write may
+    /// have landed before it did; the caller may ask again.
     BudgetExpired,
 }
