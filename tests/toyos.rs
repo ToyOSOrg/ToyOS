@@ -9814,12 +9814,12 @@ fn netd_tcp_reset(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 }
 
 /// Every byte written before `shutdown(Write)` reaches the host, which says
-/// so on the half still open — the second time with the host's window held
-/// shut until after the shutdown, so the whole send pipe is still unread when
-/// it is asked for — and no frame of netd's is dropped on the way.
+/// so on the half still open — first with the host's window held shut until
+/// after the shutdown, so the whole send pipe is still unread when it is
+/// asked for — and no frame of netd's is dropped on the way.
 fn netd_tcp_half_close(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["half_close 4194304", "late_shutdown"], BootOptions::default())?;
-    for (i, case) in ["half_close", "late_shutdown"].into_iter().enumerate() {
+    let run = netd_tcp_run(rust_bins, &["late_shutdown", "half_close 4194304"], BootOptions::default())?;
+    for (i, case) in ["late_shutdown", "half_close"].into_iter().enumerate() {
         let line = run.ok_line(i, case)?;
         let served = run
             .served
