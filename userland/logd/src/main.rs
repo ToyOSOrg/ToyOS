@@ -66,6 +66,9 @@
 //! rotation, and when init asks before the machine stops
 //! ([`toyos_logstream::FLUSH`]). The kernel waits on none of it: a panicking
 //! kernel's report is in its black box, and so are the stop's own last records.
+//! **A line after that flush reaches the console and nothing else**: the stop
+//! syncs no file still open, so the file ends where the flush made it durable,
+//! and a reader of the served log is handed what the file holds and no more.
 //!
 //! `SYS_FSYNC` reaches the device's own cache flush. **A flush that would block
 //! is not a flush that failed**: `io::ErrorKind::WouldBlock` from `sync_all` is
@@ -205,6 +208,7 @@ fn main() {
         boot_local,
         hub,
         stall: Stall::from_args(),
+        stopping: false,
     };
     log.run(&published);
 }
@@ -237,6 +241,8 @@ struct Log {
     boot_local: Option<u64>,
     hub: Arc<serve::Hub>,
     stall: Option<Stall>,
+    /// init's flush was answered: the machine stops.
+    stopping: bool,
 }
 
 /// One line on its way out: when it was stamped, and what it is.
@@ -544,6 +550,9 @@ impl Log {
                 }
             }
         }
+        if self.stopping {
+            return;
+        }
         // The file first: a reader is served only what /log already holds,
         // whenever the machine stops between the two.
         self.to_volume(file.as_bytes());
@@ -690,6 +699,7 @@ impl Log {
     fn flushed(&mut self) {
         let refused = self.sync().err();
         self.answered(Instant::now(), refused);
+        self.stopping = true;
         self.feed_console();
         if let Err(e) = self.from_init.signal(FLUSHED) {
             panic!("logd: init could not be told the log is whole: {e:?}");
