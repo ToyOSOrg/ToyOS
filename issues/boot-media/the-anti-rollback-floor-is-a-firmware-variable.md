@@ -27,6 +27,13 @@ to the disk can lower it, because the variable is unreachable once
   the log partition's GUID, so a running system that rewrites that GUID
   resets it; that is the price of an old stick or a bisect still booting, and
   a throwaway key signs nothing the owner's machine runs.
+- **a kernel booted before the first raise** — it can make a variable of the
+  floor's name with runtime access, which a later `SetVariable` from the
+  loader cannot replace. The loader deletes it; where the firmware keeps it
+  (an authenticated-write variable on firmware that enforces that), the loader
+  refuses rather than boot with no floor, so nothing boots until the
+  firmware's variables are reset. OVMF deletes one made with time-based
+  authenticated write, so no guest reaches that refusal.
 
 `/system/bin/update`'s own check — newer than the running image — reads the
 versions in the slot table, which is on the disk and is advisory; the loader's
