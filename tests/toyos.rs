@@ -494,6 +494,10 @@ const RUST_SKIP: &[&str] = &[
 /// what the host staged: the shipping build here, `sched_check_build`'s
 /// assert-carrying build there.
 const DRIVEN_AND_SHARED: &[&str] = &[
+    // The lost-wake canary: its shared run is the count on the shipping
+    // kernel with nothing staged, and `blocking_read_window` drives it again
+    // with the watch's window held open.
+    "blocking_read_stress",
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",

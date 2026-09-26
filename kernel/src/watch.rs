@@ -166,20 +166,25 @@ pub fn wait_until(
             return Ok(());
         }
         #[cfg(feature = "boot-actuators")]
-        hold_the_window();
+        hold_the_window(&armed);
         wait(p, &armed, deadline)?;
     }
     Ok(())
 }
 
-/// `watch-window`: widen the gap between a waiter reading its condition false and
-/// its phase 1, so a post lands there — the post only the notified bit carries.
+/// `watch-window`: hold a waiter between reading its condition false and its
+/// phase 1 until a post lands there — the post only the notified bit carries.
+/// The bound is for the waits nothing posts, a sleep's: past it the hold has
+/// staged nothing and the wait goes on as it would have.
 #[cfg(feature = "boot-actuators")]
-fn hold_the_window() {
+fn hold_the_window(armed: &Armed<'_>) {
     if !crate::actuator::watch_window() {
         return;
     }
     for _ in 0..20_000 {
+        if armed.shared.notified() {
+            return;
+        }
         core::hint::spin_loop();
     }
 }
