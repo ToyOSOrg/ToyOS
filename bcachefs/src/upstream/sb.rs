@@ -342,9 +342,10 @@ impl Superblock {
 pub const EXTENT_TYPES_MAX: usize = 16;
 /// `BCH_EXTENT_ENTRY_MAX`: how many of those this reader has read the layout of.
 pub const EXTENT_ENTRY_TYPES_KNOWN: usize = 9;
-/// `extent_entry_u64s_known`, as `sizeof` gives it at the pinned commit: ptr,
-/// crc32, crc64, crc128, stripe_ptr, rebalance_v1, flags, reconcile,
-/// reconcile_bp. The last four are each one 64-bit bitfield.
+/// Each entry type's length in u64s, the `sizeof` of its format struct at
+/// the pinned commit: ptr, crc32, crc64, crc128, stripe_ptr, rebalance_v1,
+/// flags, reconcile, reconcile_bp. The last four are each one 64-bit
+/// bitfield.
 const EXTENT_ENTRY_U64S_KNOWN: [u8; EXTENT_TYPES_MAX] =
     [1, 1, 2, 3, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
 
