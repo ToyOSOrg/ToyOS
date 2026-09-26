@@ -60,7 +60,7 @@ pub struct Builder<'a> {
 }
 
 /// A fixed-capacity name blob and vector, so building a namespace needs no
-/// allocator — `/bin/init` builds one per program before anything else runs.
+/// allocator — `/system/bin/init` builds one per program before anything else runs.
 mod heapless_names {
     use toyos_abi::syscall::{MAX_NAMESPACE_ENTRIES, MAX_SERVICE_NAME};
 

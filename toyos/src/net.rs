@@ -328,7 +328,7 @@ impl NetdConn {
 /// already exited *succeeds* — the connection queues on a port nobody will
 /// ever accept from — and the hang-up arrives at the first send or the first
 /// read instead. Reporting that as [`NetError::Io`] left every caller unable
-/// to tell "this machine has no network" from "netd failed", and `/bin/sshd`
+/// to tell "this machine has no network" from "netd failed", and `/system/bin/sshd`
 /// panicked across the boot of every NIC-less machine that lost the race
 /// rather than exiting with the line it has for exactly this.
 ///
@@ -603,7 +603,7 @@ mod tests {
 
     /// Everything that is *not* a peer that has gone. Each of these on a
     /// machine with a live netd is a real failure and must reach the caller as
-    /// one — `/bin/sshd` panics on `NetError::Io` by design.
+    /// one — `/system/bin/sshd` panics on `NetError::Io` by design.
     #[test]
     fn nothing_else_becomes_a_missing_netd() {
         for e in [

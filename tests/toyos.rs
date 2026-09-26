@@ -480,6 +480,9 @@ const RUST_SKIP: &[&str] = &[
     "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
+    // Its listings are exact against `tests/sshdcase`'s services, and every
+    // boot but that one runs others. `layout_fresh_boot` runs it.
+    "layout_paths",
     // Needs a package installed under `/apps` and a config whose `[apps]` row
     // is what a launch out of it holds; `pkg_install_gbae` gives both, and on
     // any other boot this exits on a launch nothing could satisfy.
@@ -598,13 +601,13 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
 /// The command's *output* differs from the command, which is the whole point:
 /// the shell echoes what is typed, so an assertion satisfiable by the echo says
 /// only that the console drew a key, not that anything ran. This is asserted as
-/// a whole trimmed row, so the echoed `/home/root> echo zqjxk` cannot satisfy
+/// a whole trimmed row, so the echoed `/home/toy> echo zqjxk` cannot satisfy
 /// it either.
 const CONSOLE_NONCE: &str = "zqjxk";
 /// `/system/bin/shell` cds to `$HOME` before its first prompt, and prints
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
-const CONSOLE_PROMPT: &str = "/home/root>";
+const CONSOLE_PROMPT: &str = "/home/toy>";
 /// The seed's witness on the panel.
 ///
 /// `/system/bin/console` draws the boot so far, as `logd` serves it, above its
@@ -904,6 +907,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
+    // The same boot with a blank DATA volume, read for where everything it
+    // wrote went. Every verdict is a listing; no clock in any.
+    ("layout_fresh_boot", Sched::Parallel, Tier::Fast),
     // One `SSHD_LOGIN` boot for the three, driven by `tests/ssh-client-host`.
     // Adjacent because `group_of` makes adjacency load-bearing, and one tier
     // because one boot cannot be in two. Every verdict is bytes or an exit
@@ -1629,6 +1635,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("https_tls13_e1000e", &["test_rs_https_fetch"]),
     ("pkg_install_gbae", &["test_rs_pkg_launch_gbae"]),
     ("apps_and_home_are_one_filesystem", &["test_rs_hierarchy_paths"]),
+    ("layout_fresh_boot", &["test_rs_layout_paths"]),
     ("broken_data_volume_is_absent", &["test_rs_home_absent"]),
     ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
     ("home_budget_refusal_retried", &["test_rs_home_fsync_budget"]),
@@ -5166,7 +5173,7 @@ fn run_screen_test(
             let after = dump.console_text(&font);
             print_screen(name, &after);
             // A whole trimmed row, because the shell echoes what is typed:
-            // `contains` would be satisfied by `/home/root> echo zqjxk`, which
+            // `contains` would be satisfied by `/home/toy> echo zqjxk`, which
             // says the console drew a keystroke and nothing about anything
             // having run.
             if !dump.console_rows(&font).iter().any(|r| r.trim() == CONSOLE_NONCE) {
@@ -14679,7 +14686,7 @@ fn run_machine_test(
         "sshd_fail_closed" => {
             // sshd with a network under it — the only boot that gets past its
             // bind. What that reaches for the first time is the daemon's own
-            // state on disk: the identity it mints under `/home`, and the file
+            // state on disk: the identity it mints under `/state/sshd`, and the file
             // it authenticates against.
             //
             // The verdict is that it authenticates nobody and says which file
@@ -14698,17 +14705,17 @@ fn run_machine_test(
             let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
             let mut console = qemu.boot_log().to_string();
 
-            // Minting proves `/home/root/.ssh` is creatable and writable from
-            // userland; the fingerprint proves the key it wrote reads back.
+            // Minting proves init made `/state/sshd` and set it as the daemon's
+            // `HOME`; the fingerprint proves the key it wrote reads back.
             //
             // **Both files are named, because either one alone authorizes.**
             // This boot stages neither, so the daemon has to report both as
             // unreadable — a check on only the writable one would pass a
             // machine whose image file was silently never consulted.
             const WANT: [&str; 5] = [
-                "sshd: minted a new host identity at /home/root/.ssh/host_ed25519",
+                "sshd: minted a new host identity at /state/sshd/host_ed25519",
                 "sshd: host identity SHA256:",
-                "sshd: cannot read /home/root/.ssh/authorized_keys",
+                "sshd: cannot read /state/sshd/authorized_keys",
                 "sshd: cannot read /system/etc/ssh_authorized_keys",
                 "sshd: no file names a usable key",
             ];
@@ -14731,9 +14738,38 @@ fn run_machine_test(
                 ));
             }
             eprintln!(
-                "  [sshd] host identity minted under /home, and neither authorized_keys file \
+                "  [sshd] host identity minted under /state/sshd, and neither authorized_keys file \
                  left it refusing to listen at all"
             );
+            Ok(())
+        }
+        "layout_fresh_boot" => {
+            // The layout as ruled, on a boot of its own with a blank DATA
+            // volume: three services, each given a `/state` of its own, and a
+            // session program whose child is the judge. sshd's identity is the
+            // one file a service writes on every such boot, and sshd's last line
+            // on a boot that stages no key follows it, so the listing waits for
+            // that line rather than for a clock.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sshdcase");
+            let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, options);
+            let mut console = qemu.boot_log().to_string();
+            const MINTED: &str = "sshd: minted a new host identity at /state/sshd/host_ed25519";
+            await_guest(&mut qemu, &mut console, "sshd's last line", |c| {
+                c.contains("sshd: no file names a usable key")
+            })
+            .map_err(|why| format!("{why}\n{console}"))?;
+            if !console.contains(MINTED) {
+                return Err(format!("{MINTED:?} never reached the console:\n{console}"));
+            }
+            let result = qemu.run_test("test_rs_layout_paths", Duration::from_secs(60));
+            if result.exit_code != Some(0) {
+                return Err(format!(
+                    "layout_paths guest failed:\n{}\nkernel log while it ran:\n{}{}",
+                    result.stdout, result.before, result.serial
+                ));
+            }
+            eprintln!("  [layout] {}", result.stdout.trim());
             Ok(())
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),

@@ -265,7 +265,7 @@ pub const SYS_PROCESS_KILL: u64 = 109;
 /// A `Process` handle for a pid, gated by [`Rights::MANAGE`] on a `SysCap`.
 /// See [`process_open`].
 ///
-/// The one place a pid becomes authority, and only `/bin/init` holds a cap that
+/// The one place a pid becomes authority, and only `/system/bin/init` holds a cap that
 /// carries the right — so the set of processes that can reach a process they
 /// did not start is exactly what init endowed.
 ///
@@ -273,7 +273,7 @@ pub const SYS_PROCESS_KILL: u64 = 109;
 pub const SYS_PROCESS_OPEN: u64 = 110;
 
 /// Mint a device claim for a class, gated by [`Rights::DEVICE`] on a `SysCap`.
-/// Only `/bin/init` holds such a cap, so the set of processes that can ever
+/// Only `/system/bin/init` holds such a cap, so the set of processes that can ever
 /// claim a device is exactly what init endowed. See [`device_claim`].
 ///
 /// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
@@ -301,7 +301,7 @@ pub const SYS_RT_ENTER: u64 = 112;
 /// [`crate::log`].
 ///
 /// **The kernel keeps no per-reader state**, so a second reader costs nothing
-/// and the stream is not consumed: `/bin/logd` and a `log-follow` tool coexist
+/// and the stream is not consumed: `/system/bin/logd` and a `log-follow` tool coexist
 /// with no coordination. Reading the whole machine's log is authority, which is
 /// why it rides a right rather than being ambient.
 ///
@@ -402,7 +402,7 @@ pub struct EndowEntry {
 
 const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
 
-/// The label the kernel puts on `/bin/init`'s system capability, and the one
+/// The label the kernel puts on `/system/bin/init`'s system capability, and the one
 /// init puts on the `RT`-only dup it endows a `realtime` program.
 ///
 /// Here rather than in the SDK because the kernel writes it and userland reads
@@ -1186,7 +1186,7 @@ pub fn reboot(syscap: RawHandle) -> SyscallError {
 /// `devices` entry and a `dev:` endowment label spell each one with.
 ///
 /// **One row per class, so the four cannot disagree.** The build system checks
-/// a config against this table, `/bin/init` mints from it, and a claimant finds
+/// a config against this table, `/system/bin/init` mints from it, and a claimant finds
 /// its own claim by it; a second spelling anywhere is a class a config can name
 /// and no program can find. The wire number is here too, because a class whose
 /// number and name came from different lists is the same defect one level down.

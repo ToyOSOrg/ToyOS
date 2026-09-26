@@ -206,7 +206,7 @@ fn guest_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String>
     // The gate's other half: the shell resolves what its user typed, so a
     // dotted path still runs.
     let ran = passed(qemu, log, "test_rs_pkg_launch_gbae relative-path")?;
-    for said in ["./home/root/reltest/echo ran", "../home/root/reltest/echo ran"] {
+    for said in ["./home/toy/reltest/echo ran", "../home/toy/reltest/echo ran"] {
         if !ran.contains(said) {
             return Err(format!("no {said:?} line:\n{ran}"));
         }

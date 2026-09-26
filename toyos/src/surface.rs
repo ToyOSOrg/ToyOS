@@ -1,7 +1,7 @@
 //! Key events down the surface tree.
 //!
 //! A **surface** is something with a screen and a keyboard: the compositor's
-//! windows, `/bin/terminal`, `/bin/console`. Its owner reads key transitions
+//! windows, `/system/bin/terminal`, `/system/bin/console`. Its owner reads key transitions
 //! from whatever is above it and decides what they mean — which for a terminal
 //! is bytes on its child's stdin, through a [`toyos_keymap::Translator`] it
 //! owns alone.
@@ -47,10 +47,9 @@ pub const SERVICE: &str = "surface";
 
 /// The file that says which keyboard layout this machine uses.
 ///
-/// One path, read by every translator and written by `locale` alone. It is on
-/// tmpfs until a writable store lands, so it survives a login and not a
-/// reboot.
-pub const LAYOUT_CONFIG: &str = "/home/root/.config/keyboard_layout";
+/// One path, read by every translator and written by `locale` alone. A machine
+/// setting, so it is in `/config` and in no user's home.
+pub const LAYOUT_CONFIG: &str = "/config/keyboard-layout";
 
 /// SAFETY: `RawKeyEvent` is `#[repr(C)]` and two `u8`s, so it has no padding
 /// and no pointers, and every bit pattern of both fields is a valid value —

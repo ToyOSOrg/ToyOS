@@ -1,7 +1,7 @@
 //! Hardware device access.
 //!
 //! Typed device wrappers, one per class. **None of them opens anything**: a
-//! claim is minted by `/bin/init` alone and arrives in this process's endowment
+//! claim is minted by `/system/bin/init` alone and arrives in this process's endowment
 //! table under `dev:<class>`, so [`crate::endow::device`] is the only way to
 //! get one and a program the manifest gives no device cannot express reaching
 //! hardware.

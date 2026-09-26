@@ -21,7 +21,7 @@ use crate::AsHandle;
 ///
 /// A fresh tail starts at the oldest record every shard still holds, which is
 /// the whole boot on a machine that has not logged 512 records on any CPU yet —
-/// so `/bin/logd` starting late still writes this boot's log from its first
+/// so `/system/bin/logd` starting late still writes this boot's log from its first
 /// line.
 pub struct LogTail {
     cursor: LogCursor,

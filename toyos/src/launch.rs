@@ -1,4 +1,4 @@
-//! Asking `/bin/init` to start a declared program.
+//! Asking `/system/bin/init` to start a declared program.
 //!
 //! **`SYS_SPAWN` can only give a child what the caller holds, and that is not
 //! enough.** doom is started from a shell and doom is to hold sound; the shell
@@ -14,7 +14,7 @@
 //! its own manifest row rather than a narrowing of its parent's.
 //!
 //! The wire is a single frame plus one handle batch, and this module is both
-//! halves of it — std's `Command` encodes and `/bin/init` decodes.
+//! halves of it — std's `Command` encodes and `/system/bin/init` decodes.
 
 use crate::ipc::{Connection, IpcError};
 use crate::RawHandle;
@@ -55,8 +55,8 @@ const HEADER: usize = 32;
 pub struct Launch<'a> {
     /// The program's path, exactly as the caller resolved it.
     ///
-    /// **Not a `[programs]` key**, because `/bin/ls` is a symlink to
-    /// `/bin/toybox` and the row that says what an applet may hold is
+    /// **Not a `[programs]` key**, because `/system/bin/ls` is a symlink to
+    /// `/system/bin/toybox` and the row that says what an applet may hold is
     /// `toybox`'s. init resolves the path to a key; the caller does not parse
     /// the manifest and there is deliberately no second reader of it.
     pub program: &'a str,

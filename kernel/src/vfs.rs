@@ -126,7 +126,8 @@ pub enum UserAccess {
 
 /// The entries `/` has, in listing order. `/` is synthesized rather than
 /// mounted: it is no filesystem, and nothing outside this set can be mounted.
-pub const ROOT_ENTRIES: [&str; 7] = ["apps", "boot", "home", "log", "media", "system", "tmp"];
+pub const ROOT_ENTRIES: [&str; 9] =
+    ["apps", "boot", "config", "home", "log", "media", "state", "system", "tmp"];
 
 struct Mount {
     fs: Box<dyn FileSystem>,

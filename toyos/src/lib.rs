@@ -104,7 +104,7 @@ impl Drop for OwnedHandle {
 
 /// A claimed hardware device, out of this process's endowment table.
 ///
-/// There is no `open`: `/bin/init` mints every claim from the machine's one
+/// There is no `open`: `/system/bin/init` mints every claim from the machine's one
 /// system capability and endows it, so which process drives a device is a fact
 /// the image was built with. See [`endow::device`].
 pub struct Device(pub(crate) OwnedHandle);

@@ -278,12 +278,12 @@ mod tests {
     /// Checked against the gate itself, not a shape written down twice.
     #[test]
     fn what_a_shell_resolves_is_what_the_launcher_accepts() {
-        let cwd = "/home/root/reltest";
+        let cwd = "/home/toy/reltest";
         for (typed, want) in [
-            ("./foo", "/home/root/reltest/foo"),
-            ("../bin/foo", "/home/root/bin/foo"),
-            ("./a/./b/../c", "/home/root/reltest/a/c"),
-            ("sub/foo", "/home/root/reltest/sub/foo"),
+            ("./foo", "/home/toy/reltest/foo"),
+            ("../bin/foo", "/home/toy/bin/foo"),
+            ("./a/./b/../c", "/home/toy/reltest/a/c"),
+            ("sub/foo", "/home/toy/reltest/sub/foo"),
             ("/system/bin/toybox", "/system/bin/toybox"),
             ("/system//bin/./toybox", "/system/bin/toybox"),
             ("/../system/bin/toybox", "/system/bin/toybox"),

@@ -9,10 +9,12 @@ start = ["logd", "netd", "test-runner"]
 # `receives = ["netd"]` is what lets `logd` serve this boot's log on the
 # network.
 [programs.logd]
+service = true
 syscap = ["logread"]
 receives = ["netd"]
 
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 

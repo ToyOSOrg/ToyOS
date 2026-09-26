@@ -4,10 +4,10 @@ kind: tooling
 opened: 2026-09-24
 ---
 
-# `sshd_fail_closed` assumes a `/home` no earlier boot of its lane wrote
+# `sshd_fail_closed` assumes a `/state/sshd` no earlier boot of its lane wrote
 
 `sshd_fail_closed` owes `sshd: minted a new host identity at
-/home/root/.ssh/host_ed25519`, and boots `tests/sshdcase` on the lane's shared
+/state/sshd/host_ed25519`, and boots `tests/sshdcase` on the lane's shared
 scratch disk (`tests/common/qemu.rs`: "Reused across the boots of one lane").
 Any earlier boot of the same lane whose sshd ran leaves its identity on that
 disk, and this boot then reads it and mints nothing.

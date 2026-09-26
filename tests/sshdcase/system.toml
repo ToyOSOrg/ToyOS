@@ -21,15 +21,18 @@ start = ["logd", "netd", "sshd", "test-runner"]
 # which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and init hands
 # it every program's output beside that.
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 # netd holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
 [programs.sshd]
+service = true
 receives = ["netd", "launcher"]
 
 # `logread` is the log gate's own: a spawned test binary does not inherit a

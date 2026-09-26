@@ -15,8 +15,9 @@ use std::io::Write;
 use toyos_abi::syscall::{self, OpenFlags, SyscallError};
 
 /// `vfs::ROOT_ENTRIES`: the kernel's set and this one are two spellings of the
-/// hierarchy, so a boot that grew an eighth entry reds here.
-const ROOT_ENTRIES: [&str; 7] = ["apps", "boot", "home", "log", "media", "system", "tmp"];
+/// hierarchy, so a boot that grew another entry reds here.
+const ROOT_ENTRIES: [&str; 9] =
+    ["apps", "boot", "config", "home", "log", "media", "state", "system", "tmp"];
 
 /// Mirrored in `tests/common/storage.rs`, whose reader sees them without the
 /// mount point, inside the one volume.

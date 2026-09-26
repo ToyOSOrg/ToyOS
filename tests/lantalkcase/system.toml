@@ -12,17 +12,20 @@
 start = ["logd", "netd", "sshd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 # What lets `logd` serve this boot's log on the network, to whoever connects:
 # without it the log is served on this machine only.
 receives = ["netd"]
 
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:8086:15fc"]
 
 # `swap` too: the host replaces netd on this boot without rebooting it.
 [programs.sshd]
+service = true
 receives = ["netd", "launcher", "swap"]
 
 [programs.test-runner]

@@ -7,6 +7,7 @@
 start = ["logd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 [programs.test-runner]

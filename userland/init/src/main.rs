@@ -26,6 +26,10 @@
 //! once, so a client's next connect is `ServerGone` exactly as it is for a
 //! server nothing keeps. A program started through `launcher` still gets its
 //! acceptor by move and is started once per boot.
+//!
+//! **Every program it starts gets `HOME` from its row** (`Program::home`), over
+//! anything a launching caller carried: a service its own `/state/<name>`, made
+//! before it runs, and everything else the session user's home, made at boot.
 
 /// One line, one `write`, into init's own pipe to `logd` ([`Log`]): a line of
 /// init's is a line in the log under init's name, whether or not `logd` has run
@@ -65,6 +69,11 @@ use toyos_abi::syscall::{
 /// The service init answers on. Its own, so it has no `[programs]` row and the
 /// manifest carries it as an `init-serve` record.
 const LAUNCHER: &str = "launcher";
+
+/// What init makes in the session user's home before anything runs. English on
+/// disk in every locale: a translation is a label, never a rename.
+const HOME_FOLDERS: [&str; 8] =
+    ["Apps", "Desktop", "Documents", "Downloads", "Fonts", "Music", "Pictures", "Videos"];
 
 /// Connections accepted and not yet carrying a whole launch.
 ///
@@ -177,6 +186,30 @@ impl Log {
     }
 }
 
+/// The session user's home and [`HOME_FOLDERS`]. A boot whose DATA volume did
+/// not mount has no `/home`, which the kernel has already said; this says what
+/// it cost and starts the machine without it.
+fn make_session_home() {
+    let home = format!("/home/{}", toyos_manifest::USER);
+    let folders = HOME_FOLDERS.iter().map(|folder| format!("{home}/{folder}"));
+    for path in std::iter::once(home.clone()).chain(folders) {
+        if let Err(e) = make_dir(&path) {
+            say!("init: {path} could not be made, so this boot has no session home: {e}");
+            return;
+        }
+    }
+}
+
+/// One directory, whose parent is there already. Not `create_dir_all`: DATA
+/// keeps no directories, and the VFS's own record of one takes a child whose
+/// parent it never made, so every level is made in turn.
+fn make_dir(path: &str) -> std::io::Result<()> {
+    match std::fs::create_dir(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    }
+}
+
 fn main() {
     // Before anything is started, so every program's first line has a pipe to
     // go into, and before init says anything.
@@ -185,6 +218,8 @@ fn main() {
     let syscap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("init: the kernel spawns this program holding the system capability");
+
+    make_session_home();
 
     let text = std::fs::read_to_string(toyos_manifest::GUEST_PATH)
         .unwrap_or_else(|e| panic!("init: cannot read {}: {e}", toyos_manifest::GUEST_PATH));
@@ -1131,6 +1166,16 @@ fn start<'a>(
 ) -> std::io::Result<(Child, Vec<String>)> {
     command.args(&program.args);
     let booting = log.is_some();
+
+    // **Set here, over whatever a launching caller carried**: the row decides
+    // where a program's home is, and a service's is made before it first runs.
+    let home = program.home();
+    if program.service {
+        if let Err(e) = make_dir(&home) {
+            say!("init: {}: {home} could not be made: {e}", program.name);
+        }
+    }
+    command.env("HOME", &home);
 
     // **Everything endowed stays owned until the spawn that moves it
     // succeeds.** `endow` records a number; a refused spawn moves nothing

@@ -25,23 +25,30 @@ use russh::server::{Auth, Msg, Server, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use tokio::sync::{mpsc, watch};
 
-/// Where this machine keeps its SSH identity and the keys it trusts. `/home`
-/// is the only mount that is both persistent and writable by userland; where
-/// it is a tmpfs the identity lasts one boot, which the fingerprint printed at
-/// every start is what makes visible.
-const SSH_DIR: &str = "/home/root/.ssh";
-const HOST_KEY: &str = "/home/root/.ssh/host_ed25519";
+/// Where this machine keeps its SSH identity and the keys it trusts: this
+/// daemon's own `HOME`, which init makes `/state/sshd`. Machine state, so it is
+/// in no user's home; where DATA is a tmpfs the identity lasts one boot, which
+/// the fingerprint printed at every start is what makes visible.
+fn state() -> String {
+    let home = std::env::home_dir().expect("sshd: init starts every service with HOME");
+    home.to_str().expect("sshd: HOME is not UTF-8").to_string()
+}
+
+fn host_key_path() -> String {
+    format!("{}/host_ed25519", state())
+}
 
 /// The two files that name who may log in; a key in either authorizes.
 ///
 /// **The second is why a freshly flashed machine can be reached at all.** A
-/// bench boot mints an identity into a `/home` that may be a tmpfs and starts
+/// bench boot mints an identity into a `/state` that may be a tmpfs and starts
 /// with nothing in it, so a key that has to be *installed* before the first
 /// login is a key nobody can install. Neither file is protected from anything
 /// else on the machine — see
 /// `issues/isolation/sshd-authorized-keys-unprotected.md`.
-const AUTHORIZED_KEYS: [&str; 2] =
-    ["/home/root/.ssh/authorized_keys", "/system/etc/ssh_authorized_keys"];
+fn authorized_keys() -> [String; 2] {
+    [format!("{}/authorized_keys", state()), "/system/etc/ssh_authorized_keys".to_string()]
+}
 
 /// How long a program may take none of the input a client is sending before
 /// this daemon stops offering it and the program runs on with a closed stdin.
@@ -69,27 +76,27 @@ const EXTENDED_STDERR: u32 = 1;
 /// over it would change the identity every client has pinned without anyone
 /// asking, which is the one event a host key exists to make noisy.
 fn host_key() -> Result<PrivateKey, String> {
-    match fs::read(HOST_KEY) {
+    let path = host_key_path();
+    match fs::read(&path) {
         Ok(pem) => PrivateKey::from_openssh(&pem).map_err(|e| {
             format!(
-                "{HOST_KEY} is not an OpenSSH private key ({e}); refusing to \
+                "{path} is not an OpenSSH private key ({e}); refusing to \
                  replace it — move it aside to mint a new identity"
             )
         }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => mint_host_key(),
-        Err(e) => Err(format!("cannot read {HOST_KEY}: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => mint_host_key(&path),
+        Err(e) => Err(format!("cannot read {path}: {e}")),
     }
 }
 
-fn mint_host_key() -> Result<PrivateKey, String> {
+fn mint_host_key(path: &str) -> Result<PrivateKey, String> {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .map_err(|e| format!("cannot generate a host key: {e}"))?;
     let pem = key
         .to_openssh(LineEnding::LF)
         .map_err(|e| format!("cannot encode the host key: {e}"))?;
-    fs::create_dir_all(SSH_DIR).map_err(|e| format!("cannot create {SSH_DIR}: {e}"))?;
-    fs::write(HOST_KEY, pem.as_bytes()).map_err(|e| format!("cannot write {HOST_KEY}: {e}"))?;
-    println!("sshd: minted a new host identity at {HOST_KEY}");
+    fs::write(path, pem.as_bytes()).map_err(|e| format!("cannot write {path}: {e}"))?;
+    println!("sshd: minted a new host identity at {path}");
     Ok(key)
 }
 
@@ -114,7 +121,7 @@ fn authorizes(text: &str, offered: &PublicKey) -> bool {
 /// restart — there is nothing here to send a reload signal to. An unreadable
 /// file names nobody, so every failure answers "not authorized".
 fn is_authorized(key: &PublicKey) -> bool {
-    AUTHORIZED_KEYS
+    authorized_keys()
         .iter()
         .any(|path| fs::read_to_string(path).is_ok_and(|text| authorizes(&text, key)))
 }
@@ -123,8 +130,8 @@ fn is_authorized(key: &PublicKey) -> bool {
 /// visible before somebody tries it. `Err` means nobody can authenticate.
 fn authorized_key_count() -> Result<usize, String> {
     let mut total = 0;
-    for path in AUTHORIZED_KEYS {
-        let text = match fs::read_to_string(path) {
+    for path in authorized_keys() {
+        let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) => {
                 println!("sshd: cannot read {path} ({e})");
@@ -154,7 +161,7 @@ fn authorized_key_count() -> Result<usize, String> {
     if total == 0 {
         return Err(format!(
             "no file names a usable key ({}); put a public key in one of them and start again",
-            AUTHORIZED_KEYS.join(" or ")
+            authorized_keys().join(" or ")
         ));
     }
     Ok(total)

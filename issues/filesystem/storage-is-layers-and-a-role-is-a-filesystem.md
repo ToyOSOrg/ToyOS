@@ -41,7 +41,7 @@ volume, handed to whichever driver recognises its superblock.
 |---|---|---|---|
 | ESP | FAT32, firmware's rule | `/boot` | kernel only |
 | ROOT | bcachefs image the build writes | `/system` | no; versioned per release |
-| DATA | bcachefs, formatted on first boot | `/apps`, `/home` | yes |
+| DATA | bcachefs, formatted on first boot | `/apps`, `/config`, `/home`, `/state` | yes |
 | LOG | FAT32 while a Mac has to read the dev stick | `/log` | yes |
 
 `/tmp` has no backing. The dev loop keeps the ESP and ROOT on the stick and
@@ -66,8 +66,8 @@ kernel's `root=` argument, mounted read-only through `ReadOnlyBcacheFsAdapter`
 **Every other filesystem is a userland server** behind the VFS's existing
 trait (`kernel/src/vfs.rs`, `FileSystem`, one access mode per mount) through
 a mount protocol: init's manifest row moves the DATA members' device handles
-into the storage server, which links the whole crate and mounts `/home` and
-`/apps` read-write. A server that crashes loses its mounts and nothing else,
+into the storage server, which links the whole crate and mounts DATA's four
+names read-write. A server that crashes loses its mounts and nothing else,
 and no foreign parser runs in the kernel on bytes another OS wrote. This is
 `issues/kernel/every-driver-is-still-in-the-kernel.md` applied to storage; FAT32
 moves out first, being a pure crate already whose two volumes are the cheapest
@@ -96,25 +96,13 @@ shape if wanted.
 
 ## Paths
 
-No drive letters, no `/usr`, `/var`, `/opt`, `/dev`, `/proc` or `/sys`:
-devices and processes are capabilities and syscalls here, not files. Each
-process sees the part of this hierarchy its parent gave it
-(`issues/isolation/every-program-sees-only-the-files-it-was-given.md`); today paths are still ambient and `/boot`'s mount guard is the one
-restriction.
-
-- `/boot` — bootloader, kernel, kernel arguments.
-- `/system` — the OS image, read-only, versioned: today's `bin`, `lib`, `share`
-  and the manifest.
-- `/apps/<name>` — each installed program in its own directory with its own
-  binaries, data and manifest row; doom moves here with its WAD.
-- `/home/<user>` — Documents, Downloads, `.config/<app>` for settings,
-  `.local/<app>` for saves and caches.
-- `/log`, `/tmp` — as today.
-- `/media/<label>` — foreign and unassigned volumes; a Windows disk is
-  `/media/windows`. A mount point is exactly one top-level name
-  (`kernel/src/vfs.rs`, `ROOT_ENTRIES` and the array indexed by it), so
-  `/media/<label>` is a nested mount the structure cannot represent: the
-  mount protocol owes that, and `/media` is an empty directory until then.
+The tree, its names and how a program finds them are
+`issues/filesystem/where-everything-lives.md`. What this track owes it is the
+mount structure: a mount point is exactly one top-level name
+(`kernel/src/vfs.rs`, `ROOT_ENTRIES` and the array indexed by it), so
+`/media/<label>` for a foreign volume — a Windows disk is `/media/windows` — is
+a nested mount the structure cannot represent. The mount protocol owes that,
+and `/media` is an empty directory until then.
 
 Users are a track of their own,
 `issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`: a `/home/<user>`

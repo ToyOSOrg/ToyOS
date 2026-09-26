@@ -4,7 +4,7 @@
 //! the real-time band, turning a pid into a process handle, listing every
 //! process in the machine, reading what the machine is made of, and taking its
 //! power away, off or back to firmware — and each is one bit on a handle to
-//! this. The kernel makes exactly one at boot, for `/bin/init`, so the set of
+//! this. The kernel makes exactly one at boot, for `/system/bin/init`, so the set of
 //! processes that can ever do any of them is exactly what init endowed.
 
 use toyos_abi::handle::Rights;
@@ -95,7 +95,7 @@ impl SysCap {
     ///
     /// Needs [`Rights::ROSTER`], which is what makes the entries — a pid, a
     /// size, a CPU time and a **name** for every process in the machine — the
-    /// business of `/bin/ps` and not of every program that can make a syscall.
+    /// business of `/system/bin/ps` and not of every program that can make a syscall.
     /// [`crate::system::sysinfo`] is the header on its own and needs nothing.
     ///
     /// A `buf` too small for an entry asks for the header, which this
@@ -131,7 +131,7 @@ impl SysCap {
     ///
     /// The one place a pid becomes authority over anything, and only a cap
     /// carrying [`Rights::MANAGE`] reaches it — which in the whole system is
-    /// `/bin/init`'s.
+    /// `/system/bin/init`'s.
     pub fn open_process(&self, pid: toyos_abi::Pid) -> Result<crate::process::Process, SyscallError> {
         let raw = syscall::process_open(self.0.raw(), pid)?;
         // SAFETY: the kernel installed this handle in this process's table for

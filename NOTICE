@@ -157,8 +157,14 @@ Two derived artifacts come from it, and whether a 1-bit rasterization is still
 - `share/fonts/JetBrainsMono-Regular-8x16.font` on every ROOT that ships
   `assets/`, rasterized at build time by `src/assets.rs`.
 
-The OFL's reserved-name clause is not engaged: neither artifact is distributed
-as a font under the JetBrains Mono name.
+The OFL's reserved-name clause is not engaged: neither derived artifact is
+distributed as a font under the JetBrains Mono name.
+
+The font itself ships unmodified as `share/fonts/jetbrainsmono-regular.ttf` on
+every ROOT that ships `assets/`, the system's monospace family where fontdb and
+fontique look, with its licence text beside it as
+`share/licenses/OFL-1.1-JetBrainsMono.txt`: the OFL permits bundling and
+redistributing it with any software, provided that text travels with it.
 
 
 assets/icons/*.svg — Phosphor Icons, MIT

@@ -24,7 +24,7 @@ down, where `set_current_dir(&home)` is at least a stated policy.
 
 ## Reproduction
 
-Spawn `/system/bin/shell` with `Command::current_dir("/home/root")` and the
+Spawn `/system/bin/shell` with `Command::current_dir("/home/toy")` and the
 arguments `-c`, `pwd`. It answers `/`.
 
 Read from the source rather than measured: `pkg_install_gbae`'s

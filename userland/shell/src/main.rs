@@ -8,7 +8,9 @@ use std::sync::OnceLock;
 
 use toyos::port::Connector;
 
-const HISTORY_PATH: &str = "/home/root/.config/shell_history";
+/// Where the history lives under `$HOME`: this program's own `State` in the
+/// session's `Apps`, never a dotfile in the user's home.
+const HISTORY: &str = "Apps/shell/State/history";
 const HISTORY_MAX: usize = 200;
 
 static mut LAST_STATUS: i32 = 0;
@@ -16,9 +18,6 @@ static mut LAST_STATUS: i32 = 0;
 fn main() {
     if env::var_os("PATH").is_none() {
         env::set_var("PATH", "/system/bin");
-    }
-    if env::var_os("HOME").is_none() {
-        env::set_var("HOME", "/home/root");
     }
 
     let args: Vec<String> = env::args().collect();
@@ -28,8 +27,9 @@ fn main() {
         std::process::exit(unsafe { LAST_STATUS });
     }
 
-    let home = env::var("HOME").unwrap_or_else(|_| "/".into());
-    let _ = env::set_current_dir(&home);
+    if let Some(home) = env::var_os("HOME") {
+        let _ = env::set_current_dir(home);
+    }
     let mut history = load_history();
     std::os::toyos::io::set_stdin_raw(true);
 
@@ -795,15 +795,24 @@ fn print_help() {
 
 // --- History ---
 
+fn history_path() -> Option<std::path::PathBuf> {
+    env::var_os("HOME").map(|home| Path::new(&home).join(HISTORY))
+}
+
 fn load_history() -> Vec<String> {
-    fs::read_to_string(HISTORY_PATH)
+    let Some(path) = history_path() else { return Vec::new() };
+    fs::read_to_string(path)
         .map(|s| s.lines().map(String::from).collect())
         .unwrap_or_default()
 }
 
 fn save_history(history: &[String]) {
+    let Some(path) = history_path() else { return };
     let content = history.join("\n");
-    let _ = fs::write(HISTORY_PATH, &content);
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(path, &content);
 }
 
 // --- Readline helpers ---

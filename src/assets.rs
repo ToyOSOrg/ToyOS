@@ -270,6 +270,20 @@ fn absentees(dir: &Path, declared: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
 /// `only_doom_opens_doom_s_assets` is what keeps the right-hand column true.
 const OPENED_BY: &[(&str, &str)] = &[("doom1.wad", "doom"), ("soundfont.sf2", "doom")];
 
+/// The licence text under `licenses/` that travels with each font an image
+/// ships as it is: the OFL's second condition.
+const FONT_LICENCES: &[(&str, &str)] = &[("JetBrainsMono-Regular.ttf", "OFL-1.1-JetBrainsMono.txt")];
+
+/// A font with no row in [`FONT_LICENCES`] stops the build rather than ship
+/// without its licence.
+fn font_licence(name: &str) -> &'static str {
+    FONT_LICENCES
+        .iter()
+        .find(|(font, _)| *font == name)
+        .map(|(_, licence)| *licence)
+        .unwrap_or_else(|| panic!("{name} has no licence text in FONT_LICENCES, so it cannot ship"))
+}
+
 /// ROOT's asset files, for an image building exactly `programs`.
 pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u8>)> {
     let mut files = vec![];
@@ -305,7 +319,8 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
             true
         };
 
-        // Pre-rasterize TTF fonts
+        // A top-level TTF ships twice: rasterized for the console, and as it is,
+        // with its licence text, where the toolkits look for system fonts.
         for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("Failed to read {}: {e}", dir.display())) {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|e| e == "ttf") && ships(&path) {
@@ -313,6 +328,12 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
                 let stem = path.file_stem().unwrap().to_str().unwrap();
                 let font_data = rasterize_font(&ttf, 8, 16);
                 files.push((format!("share/fonts/{stem}-8x16.font"), font_data));
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let licence = font_licence(name);
+                let text = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("licenses").join(licence))
+                    .unwrap_or_else(|e| panic!("Failed to read licenses/{licence}: {e}"));
+                files.push((format!("share/fonts/{}", name.to_lowercase()), ttf));
+                files.push((format!("share/licenses/{licence}"), text));
             }
         }
 
@@ -506,6 +527,42 @@ mod tests {
             without,
             BTreeSet::from(["share/wallpaper.rgb".to_string()]),
             "an image with no doom in it still carries what only doom opens"
+        );
+    }
+
+    /// The system monospace font ships byte for byte where fontdb and fontique
+    /// look, its licence text beside it, and its raster for the console.
+    #[test]
+    fn a_top_level_font_ships_as_it_is_with_its_licence_and_as_its_raster() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dir = std::env::temp_dir().join(format!("toyos-font-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("make the asset tree");
+        let ttf = fs::read(root.join("assets/JetBrainsMono-Regular.ttf")).expect("the font");
+        fs::write(dir.join("JetBrainsMono-Regular.ttf"), &ttf).unwrap();
+        let out = Command::new("git").args(["-C", &dir.display().to_string(), "init", "-q"]).output();
+        assert!(out.expect("run git").status.success());
+        let out = Command::new("git")
+            .args(["-C", &dir.display().to_string(), "add", "JetBrainsMono-Regular.ttf"])
+            .output();
+        assert!(out.expect("run git").status.success());
+
+        let shipped: std::collections::BTreeMap<String, Vec<u8>> =
+            collect(&[dir.display().to_string()], &BTreeSet::new()).into_iter().collect();
+        fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            shipped.keys().collect::<Vec<_>>(),
+            [
+                "share/fonts/JetBrainsMono-Regular-8x16.font",
+                "share/fonts/jetbrainsmono-regular.ttf",
+                "share/licenses/OFL-1.1-JetBrainsMono.txt",
+            ],
+        );
+        assert_eq!(shipped["share/fonts/jetbrainsmono-regular.ttf"], ttf, "the font was changed");
+        assert_eq!(
+            shipped["share/licenses/OFL-1.1-JetBrainsMono.txt"],
+            fs::read(root.join("licenses/OFL-1.1-JetBrainsMono.txt")).unwrap(),
         );
     }
 

@@ -88,7 +88,7 @@ impl Rights {
     /// On a `SysCap`: read the whole machine's kernel log.
     ///
     /// [`SYS_LOG_READ`] answers every record every CPU wrote, which is every
-    /// process's business and no process's right by default. `/bin/logd` holds
+    /// process's business and no process's right by default. `/system/bin/logd` holds
     /// it because writing `/log` is its job and `test-runner` because a gate
     /// reads what the kernel said; no other program in any boot config does.
     ///
@@ -101,10 +101,10 @@ impl Rights {
     /// carries — one bit for both, because a machine taken away from its
     /// processes is the same authority whichever state it is left in. It rides a bit for
     /// the same reason minting a device claim and entering the real-time band
-    /// do: what can cut the power is exactly what `/bin/init` endowed, and
+    /// do: what can cut the power is exactly what `/system/bin/init` endowed, and
     /// there is nothing a program can name to reach it otherwise.
     ///
-    /// The kernel mints one carrying it, at boot, for `/bin/init`
+    /// The kernel mints one carrying it, at boot, for `/system/bin/init`
     /// (`kernel::loader::spawn_init`); every other holder is a narrowed
     /// duplicate init endowed from a `system.toml` row that named `power`.
     ///
@@ -120,7 +120,7 @@ impl Rights {
     /// ambient; the entries are a census of what the machine is running, and a
     /// process that was endowed one connector has no business reading it.
     ///
-    /// `/bin/toybox` holds it because `/bin/ps` is that binary under another
+    /// `/system/bin/toybox` holds it because `/system/bin/ps` is that binary under another
     /// name, and `test-runner` because several guest binaries read their own
     /// threads back out of the roster.
     ///

@@ -278,7 +278,7 @@ pub fn broken_data_volume_is_absent(
     for said in [
         "storage: the DATA volume does not mount, and nothing says it is another's: \
          ChecksumMismatch",
-        "storage: /apps and /home are absent this boot",
+        "storage: /apps, /config, /home and /state are absent this boot",
         "Boot: complete",
     ] {
         if !log.contains(said) {
@@ -303,8 +303,8 @@ pub fn broken_data_volume_is_absent(
     let result = qemu.run_test("test_rs_home_absent", Duration::from_secs(20));
     if result.exit_code != Some(0) {
         return Err(format!(
-            "home_absent guest failed — /apps, /home or /home/root answered a write, a chdir or \
-             a listing that an absent DATA volume must refuse:\n{}\nkernel log while it ran:\n{}{}",
+            "home_absent guest failed — /apps, /config, /home, /state or /home/toy answered a write, \
+             a chdir or a listing that an absent DATA volume must refuse:\n{}\nkernel log while it ran:\n{}{}",
             result.stdout, result.before, result.serial
         ));
     }
@@ -363,7 +363,7 @@ pub fn data_candidate_with_bad_geometry_is_absent(
             return Err(format!("{bad:?}: a misaligned candidate must not be fatal\n{log}"));
         }
     }
-    for said in ["not whole", "storage: /apps and /home are absent this boot", "Boot: complete"] {
+    for said in ["not whole", "storage: /apps, /config, /home and /state are absent this boot", "Boot: complete"] {
         if !log.contains(said) {
             return Err(format!("the kernel never said {said:?}\n{log}"));
         }

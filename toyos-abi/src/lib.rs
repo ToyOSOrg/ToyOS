@@ -79,7 +79,7 @@ impl core::ops::Add for Tid {
 /// **The three handles are installed by the read that answers this.** A
 /// description is a set of buffers, and the process being told about them is
 /// the one that must be able to map them — which is never the process that
-/// minted the claim, because `/bin/init` mints every claim and holds none.
+/// minted the claim, because `/system/bin/init` mints every claim and holds none.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FramebufferInfo {

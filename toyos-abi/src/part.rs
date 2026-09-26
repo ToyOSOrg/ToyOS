@@ -1,6 +1,6 @@
 //! What a claim on one GPT partition names and hands its holder.
 //!
-//! A partition is claimed the way a PCI function is: `/bin/init` mints it from a
+//! A partition is claimed the way a PCI function is: `/system/bin/init` mints it from a
 //! `system.toml` `devices` entry and endows it, and the holder reads and writes
 //! the partition's blocks through [`syscall::partition_read`] and
 //! [`syscall::partition_write`], durable at [`syscall::fsync`] on the claim.
