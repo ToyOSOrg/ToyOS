@@ -1,6 +1,6 @@
 [package]
 name = "toyos-font"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Pre-rasterized glyph bitmaps drawn into a pixel buffer, for ToyOS programs."
@@ -11,3 +11,4 @@ repository = "https://github.com/ToyOSOrg/ToyOS"
 # citations are written in and no branch of this shape may edit.
 [lib]
 name = "font"
+doctest = false

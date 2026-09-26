@@ -1,8 +1,8 @@
 //! Identifiers a tree may not name, and the exceptions that are named instead.
 //!
 //! **Clippy runs now, and these scans are what it cannot say.** `cargo run --
-//! --ci host-full` runs default clippy with warnings denied over three trees
-//! every night — the host workspace
+//! --ci host` runs default clippy with warnings denied over three trees
+//! on every merge — the host workspace
 //! (`--workspace --all-targets`), the kernel (`--target x86_64-unknown-none`)
 //! and the bootloader (`--target x86_64-unknown-uefi`) — so a `clippy.toml` is
 //! no longer a wall with nothing behind it.
@@ -775,6 +775,11 @@ const CI_ACTIONS: &[Action] = &[
     Action {
         name: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
         why: "how a red guest job keeps its boots' serial logs (v4.6.2)",
+    },
+    Action {
+        name: "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18",
+        why: "the Rust project's own crates.io trusted-publishing exchange: the publish job's \
+              only registry credential, a token that lives for one run (v1.0.5)",
     },
 ];
 

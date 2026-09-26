@@ -1469,7 +1469,7 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-font"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "toyos-i219"
@@ -1518,7 +1518,7 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "toyos 0.13.0",
  "toyos-abi 0.12.0",
