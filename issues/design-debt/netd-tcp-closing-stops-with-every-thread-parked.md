@@ -6,24 +6,27 @@ opened: 2026-09-26
 
 # `netd_tcp_closing` stops with every thread parked
 
-Twice, in `cargo test --test toyos-build -- --nightly netd_` on the dev host,
-12 wide under TCG, and never alone: at `ce0bb621` (killed by hand after 21
-minutes) and at `7687422b` (killed by hand after 84 minutes; the harness's
-re-run alone was green). `netd_tcp_closing` opens netd's cap and one more
-connections one after another, each written to and dropped against a host
-peer that never closes. Neither run finished the loop.
+`netd_tcp_closing` opens netd's cap and one more connections one after
+another, each written to and dropped against a host peer that never closes.
+It stopped in every `cargo test --test toyos-build -- --nightly netd_` on the
+dev host, 12 wide under TCG, since `ce0bb621`: there (killed by hand after 21
+minutes), at `7687422b` (after 84 minutes) and at `81d0a454` (after 10
+minutes), and was green alone each time. It passed in every fast run of the
+netd tests the same day, and in the one nightly run before `ce0bb621`, at
+`00325ad5`. No stopped run finished the loop.
 
 At `7687422b` the host peer had accepted 65 connections, each `Ok`, and never
-a 66th. The log partition of the stopped boot's image, read from the host,
-holds the test's spawn at 2.963 s and after it only the kernel's periodic
-summaries, at 594 s, 863 s, 1334 s, 1885 s and 2137 s, each saying both CPUs
-had `ready=0` and `current=None`, with 4 and 7 threads parked, and 396 pipes
-allocated of which 7 were still held. It holds no line of netd's after its
-ready line. So nothing ran, and netd did not wake for its own deadlines:
-the streams the loop had dropped were orphans netd bounds by 60 s or 100 s
-(`userland/netd/src/stream.rs`), and a reset past either bound says so in
-the log. netd was either parked in a call with no timeout, or in its
-poller's wait with a timeout that never returned.
+a 66th; at `81d0a454`, 5 and never a sixth. The log partition of each stopped
+boot's image, read from the host, holds the test's spawn and after it only the
+kernel's periodic summaries (at `7687422b`: 594 s, 863 s, 1334 s, 1885 s and
+2137 s; at `81d0a454`: 451 s), each saying both CPUs had `ready=0` and
+`current=None`, with 4 and 7 threads parked, and 7 pipes still held (of 396
+and of 45 allocated). Neither holds a line of netd's after its ready line. So
+nothing ran, and netd did not wake for its own deadlines: the streams the
+loop had dropped were orphans netd bounds by 60 s or 100 s
+(`userland/netd/src/stream.rs`), and a reset past either bound says so in the
+log. netd was either parked in a call with no timeout, or in its poller's wait
+with a timeout that never returned.
 
 The guest's every wait of its own is bounded (a connect, each `inspect`),
 except a netd request's answer, which is what a stopped netd leaves it
