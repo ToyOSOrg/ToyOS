@@ -34,6 +34,9 @@ pub mod lan;
 pub mod logread;
 #[allow(dead_code)]
 pub mod logstream;
+/// A wire between the guest and slirp that drops and reorders TCP data.
+#[allow(dead_code)]
+pub mod middlebox;
 pub mod metal;
 #[allow(dead_code)]
 pub mod origin;
@@ -56,6 +59,9 @@ pub mod segment;
 pub mod serial;
 #[allow(dead_code)]
 pub mod ssh;
+/// The far end of `netd_tcp`'s connections, on this host's own TCP stack.
+#[allow(dead_code)]
+pub mod tcppeer;
 #[allow(dead_code)]
 pub mod stats;
 #[allow(dead_code)]

@@ -2361,6 +2361,10 @@ pub struct BootOptions {
     /// it writes reach the NIC as if off the cable, and it sees every frame the
     /// guest sends. Refused by name on a profile with no NIC.
     pub segment: Option<super::segment::Tap>,
+    /// Pass every frame the guest's NIC sends or receives through
+    /// `super::middlebox`, which drops and reorders TCP data on its way.
+    /// Refused by name on a profile with no NIC.
+    pub middlebox: Option<super::middlebox::Wire>,
     /// Forward this host port to the guest's TCP 22. **slirp is one-way
     /// without it**: nothing on the host can open a connection into the guest
     /// unless QEMU is told which port to translate. A profile with no NIC
@@ -2444,6 +2448,7 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             log_port: None,
             segment: None,
+            middlebox: None,
             ssh_port: None,
             wire_dump: None,
         }
@@ -4546,6 +4551,13 @@ fn qemu_command(
         );
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
+    }
+    if let Some(wire) = &options.middlebox {
+        assert!(
+            !matches!(shape.nic, Nic::Absent),
+            "this profile carries no NIC, so there is no `net0` wire to stand in"
+        );
+        qemu.args(wire.argv());
     }
     if let Some(tap) = &options.segment {
         assert!(
