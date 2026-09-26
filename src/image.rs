@@ -1184,8 +1184,7 @@ mod tests {
     fn an_image_s_marked_slot_is_signed_over_exactly_what_it_carries() {
         let key = key();
         let root = tiny_root();
-        let dir = std::env::temp_dir().join(format!("toyos-image-slot-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let dir = toyos_tmpdir::TempDir::new("image-slot");
         let path = dir.join("slotted.img");
         let disk = create_boot_image(b"\x7fELF kernel", b"bootloader", &root, "sched-fast-health", signing(&key), Some(SecondSlot { root_bytes: 8 << 20 }));
         std::fs::write(&path, &disk).expect("write the image");
@@ -1210,7 +1209,8 @@ mod tests {
         assert_eq!(kernel, b"\x7fELF kernel");
         assert_eq!(on_disk, &root[..]);
         assert_eq!(header, toyos_update::image::Header::of(7, &kernel, &cmdline, on_disk));
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(file);
+        drop(dir);
 
         let update = update_image(b"\x7fELF kernel", &root, "sched-fast-health", signing(&key));
         let parts = toyos_update::image::Parts::split(&update).expect("an update image splits");
@@ -1229,8 +1229,7 @@ mod tests {
     /// nothing. Both directions, because the reader is the writer's inverse.
     #[test]
     fn an_image_says_what_it_is_armed_with() {
-        let dir = std::env::temp_dir().join(format!("toyos-image-params-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let dir = toyos_tmpdir::TempDir::new("image-params");
         let root_image = tiny_root();
         let write = |name: &str, params: &str| {
             let path = dir.join(name);
@@ -1270,8 +1269,6 @@ mod tests {
                 "the refusal does not name {name}, which is the whole of what it is about: {why}"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **One ordering of one set is one image.** The judge below compares
@@ -1407,11 +1404,10 @@ mod tests {
         // And the kernel argument names *this* filesystem: the parameter comes
         // off the ESP through the FAT driver, the UUID out of the superblock
         // the mount above read.
-        let path = std::env::temp_dir()
-            .join(format!("toyos-root-oracle-{}.img", std::process::id()));
+        let scratch = toyos_tmpdir::TempDir::new("root-oracle");
+        let path = scratch.join("root-oracle.img");
         std::fs::write(&path, &disk).expect("stage the image");
         let cmdline = cmdline_of(&path).expect("the ESP carries a boot parameter");
-        let _ = std::fs::remove_file(&path);
         assert_eq!(
             toyos_abi::boot::root_uuid(&cmdline),
             Some(fs.uuid().to_string().as_str()),

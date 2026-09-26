@@ -36,7 +36,6 @@ pub mod metaltalk;
 pub mod pr;
 pub mod redlist;
 pub mod release;
-pub mod scratch;
 pub mod sdkversion;
 pub mod soundfont;
 /// Nothing outside its own gates reads this, so it is not compiled into the

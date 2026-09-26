@@ -52,6 +52,7 @@ members = [
     "toyos-swap",
     "toyos-symbols",
     "toyos-tco",
+    "toyos-tmpdir",
     "toyos-untrusted",
     "toyos-update",
     "toyos-userbound",
@@ -137,6 +138,9 @@ toyos-swap = { path = "toyos-swap" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "toyos-tco" }
+# The one scratch directory under `$TMPDIR`: the harness's run takes one, and so does
+# every test here; `--ci host` holds the host tests to leaving nothing behind.
+toyos-tmpdir = { path = "toyos-tmpdir" }
 toyos-blackbox = { path = "toyos-blackbox" }
 # The signed image, the slot table and the signer: `src/signing.rs` signs with
 # the same crate the loader and `/system/bin/update` verify with.

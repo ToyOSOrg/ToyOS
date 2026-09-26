@@ -2817,13 +2817,11 @@ mod tests {
 
         // A case outside the tree has no name under the one naming rule, and
         // the fallback was the shipped artifact's: measured, it rewrote it.
-        let outside = std::env::temp_dir().join(format!("toyos-outside-{}", std::process::id()));
-        std::fs::create_dir_all(&outside).expect("a scratch directory");
+        let outside = toyos_tmpdir::TempDir::new("outside");
         std::fs::copy(root.join("tests/jobcase").join(CONFIG), outside.join(CONFIG))
             .expect("a config to point at");
         let refusal = refused(&outside.to_string_lossy());
         assert!(refusal.contains("not in this repository"), "{refusal}");
-        std::fs::remove_dir_all(&outside).expect("clean up");
     }
 
     /// **Every config with a `[boot] start` runs `/system/bin/logd`, `logd` always holds
