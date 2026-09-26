@@ -1373,7 +1373,7 @@ dependencies = [
 [[package]]
 name = "getrandom"
 version = "0.2.17"
-source = "git+https://github.com/ToyOSOrg/getrandom?branch=toyos-0.2-sdk-0.12#18e38de3f3cf479eaf32ed552ddb6e2169365532"
+source = "git+https://github.com/ToyOSOrg/getrandom?branch=toyos-0.2-sdk-0.12#2092d1ccd2833f00559ed27850c576ab37fe9347"
 dependencies = [
  "cfg-if",
  "js-sys",
@@ -1386,7 +1386,7 @@ dependencies = [
 [[package]]
 name = "getrandom"
 version = "0.3.4"
-source = "git+https://github.com/ToyOSOrg/getrandom?branch=toyos-0.3-sdk-0.12#548991842b04873b59f177a5e1cbeab3e5bd0455"
+source = "git+https://github.com/ToyOSOrg/getrandom?branch=toyos-0.3-sdk-0.12#67c17e0a7cd6d29e8ce231073746970cbd7dade7"
 dependencies = [
  "cfg-if",
  "libc",
@@ -1853,7 +1853,7 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 [[package]]
 name = "libloading"
 version = "0.8.9"
-source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#87c4acd521d5ef57a43a86522b5f3c4be84960d9"
+source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#bad8d494d4faaa8dacbe8963ca27c1c538894953"
 dependencies = [
  "cfg-if",
  "toyos-abi",
