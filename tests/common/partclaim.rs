@@ -46,8 +46,8 @@ const STAYING: &str = "2A4C6E80-1B3D-4F57-9E6A-C8D0B2F4A6E1";
 const EARLIER: &str = "4C6E8A02-3D5F-4179-A0B2-D4F6A8C0E2B4";
 
 /// The two FAT32 neighbours' type, and every other test partition's.
-const NEIGHBOUR_TYPE: &str = "5C3E8F21-9A4B-4D7E-8F10-2B3C4D5E6F70";
-const PLAIN_TYPE: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
+pub(super) const NEIGHBOUR_TYPE: &str = "5C3E8F21-9A4B-4D7E-8F10-2B3C4D5E6F70";
+pub(super) const PLAIN_TYPE: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 
 /// Mirrored: the target's length in blocks.
 const TARGET_BLOCKS: u64 = 2048;
@@ -92,16 +92,16 @@ fn departure_block(which: u8, n: u64) -> Vec<u8> {
 
 /// Where one partition landed, in bytes.
 #[derive(Clone, Copy, Debug)]
-struct Span {
-    start: u64,
-    len: u64,
+pub(super) struct Span {
+    pub(super) start: u64,
+    pub(super) len: u64,
 }
 
 impl Span {
-    fn end(self) -> u64 {
+    pub(super) fn end(self) -> u64 {
         self.start + self.len
     }
-    fn of(self, disk: &[u8]) -> &[u8] {
+    pub(super) fn of(self, disk: &[u8]) -> &[u8] {
         &disk[self.start as usize..self.end() as usize]
     }
 }
@@ -450,7 +450,7 @@ fn main_kernel_lines(kernel: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn no_panic(when: &str, log: &str) -> Result<(), String> {
+pub(super) fn no_panic(when: &str, log: &str) -> Result<(), String> {
     for bad in ["PANIC:", "panicked at"] {
         if log.contains(bad) {
             return Err(format!("{bad:?} {when}\n{log}"));
@@ -460,7 +460,7 @@ fn no_panic(when: &str, log: &str) -> Result<(), String> {
 }
 
 /// `run shutdown`, and what the console said on the way down.
-fn shut_down(mut qemu: QemuInstance) -> String {
+pub(super) fn shut_down(mut qemu: QemuInstance) -> String {
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
     qemu.drain_serial(Duration::from_secs(30))
@@ -588,7 +588,7 @@ fn home_file_reads_back(image: &Path) -> Result<(), String> {
 
 /// `span`'s bytes of the file at `path`, without reading the rest of a sparse
 /// stick.
-fn read_span(path: &Path, span: Span) -> Result<Vec<u8>, String> {
+pub(super) fn read_span(path: &Path, span: Span) -> Result<Vec<u8>, String> {
     let mut file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     file.seek(SeekFrom::Start(span.start)).map_err(|e| format!("seek: {e}"))?;
     let mut buf = vec![0u8; span.len as usize];
@@ -598,15 +598,15 @@ fn read_span(path: &Path, span: Span) -> Result<Vec<u8>, String> {
 
 /// One partition a crafted table carries: its name, length in bytes, type,
 /// unique GUID, and the boundary it begins on in 512-byte LBAs.
-type Part = (&'static str, u64, &'static str, &'static str, u64);
+pub(super) type Part = (&'static str, u64, &'static str, &'static str, u64);
 
 /// Where every partition but one begins.
-const ALIGNED: u64 = MIB / 512;
+pub(super) const ALIGNED: u64 = MIB / 512;
 
 /// A disk of `bytes` at `path` holding `parts` in order, each on its own
 /// boundary, with the `gpt` crate writing both copies of the table; the disk,
 /// and each partition's span in the same order.
-fn table(path: &Path, bytes: u64, parts: &[Part]) -> Result<(Box<dyn gpt::DiskDevice>, Vec<Span>), String> {
+pub(super) fn table(path: &Path, bytes: u64, parts: &[Part]) -> Result<(Box<dyn gpt::DiskDevice>, Vec<Span>), String> {
     let file = std::fs::File::create(path).map_err(|e| format!("create the disk: {e}"))?;
     file.set_len(bytes).map_err(|e| format!("size the disk: {e}"))?;
     let mut file = std::fs::OpenOptions::new()
@@ -734,7 +734,7 @@ fn craft_stick(
 
 /// A FAT32 volume of `bytes` holding one file, so the check has a directory
 /// entry and a cluster chain to judge and not only a boot sector.
-fn fat32(bytes: usize, label: &str) -> Result<Vec<u8>, String> {
+pub(super) fn fat32(bytes: usize, label: &str) -> Result<Vec<u8>, String> {
     let mut volume = vec![0u8; bytes];
     let mut name = [b' '; 11];
     name[..label.len()].copy_from_slice(label.as_bytes());

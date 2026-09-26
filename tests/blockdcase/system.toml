@@ -1,0 +1,70 @@
+# The blockd boot: `tests/testcases`'s estate, and `/system/bin/blockd` in the
+# image started by nothing. `test_rs_blockd_io` is blockd's supervisor as init
+# is a service's: it mints the claim on the machine's second NVMe controller
+# from its capability, starts blockd holding it and a port it made, and is the
+# only thing that can end or restart it. The disks are crafted by
+# `tests/common/blockd.rs`.
+
+[boot]
+start = ["logd", "soundd", "test-runner"]
+
+# **Every image that carries a `TOYOS-LOG` partition runs this**, and every
+# image does. The kernel keeps the record ring and writes no file at all, so a
+# boot config without `logd` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logd` is what refuses one.
+# It claims no device and serves no port: its whole authority
+# is `logread`, which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate.
+[programs.logd]
+syscap = ["logread"]
+
+[programs.soundd]
+serves = ["soundd"]
+devices = ["hda-audio", "virtio-sound"]
+syscap = ["rt"]
+
+# The test estate's authority.
+# `device` because five of the guest binaries claim the keyboard or the mouse
+# and no manifest row can name them — they are not `[programs]` keys — and `dup`
+# because a claim moves and one boot runs several of them.
+# `logread` because the log gate reads the kernel's own records and cannot be
+# a spawned binary: a `SysCap` dup is not part of the namespace test-runner
+# hands down.
+# `power` because `run shutdown` is how a dozen host-side gates end their guest
+# and read what reached the volume, and test-runner spawns `/system/bin/shutdown`
+# directly — it holds no `launcher` connector, so the applet's authority is the
+# dup it is endowed here rather than the `toybox` row.
+# `roster` because four guest binaries read `SYS_SYSINFO`'s per-thread entries —
+# soundd's, for the idle-suspend certification, and their own, which arrive in
+# the same machine-wide answer and have no narrower question in the ABI. It is
+# also what `endowment_denied` narrows *away* to prove the refusal, so an estate
+# without it would make that arm vacuous rather than red.
+[programs.test-runner]
+receives = ["soundd"]
+syscap = ["device", "dup", "logread", "power", "roster"]
+
+# The NVMe driver, from userland. No row starts it and it holds nothing here:
+# the test that runs it hands it its claim and its port itself.
+[programs.blockd]
+
+[programs.toybox]
+receives = ["soundd"]
+
+[symlinks]
+"bin/cat" = "/system/bin/toybox"
+"bin/cp" = "/system/bin/toybox"
+"bin/echo" = "/system/bin/toybox"
+"bin/free" = "/system/bin/toybox"
+"bin/grep" = "/system/bin/toybox"
+"bin/hexdump" = "/system/bin/toybox"
+"bin/ls" = "/system/bin/toybox"
+"bin/mkdir" = "/system/bin/toybox"
+"bin/mv" = "/system/bin/toybox"
+"bin/ps" = "/system/bin/toybox"
+"bin/pwd" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"
+"bin/rm" = "/system/bin/toybox"
+"bin/shutdown" = "/system/bin/toybox"
+# The shipped audio client, and the one the T14 hangs on. The raw-API tone in
+# `toyos-rust-tests` drains the same sink perfectly, so a suite that ran only
+# that one certified a path no user takes.
+"bin/tone" = "/system/bin/toybox"

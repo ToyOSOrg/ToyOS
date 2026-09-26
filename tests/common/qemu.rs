@@ -2370,6 +2370,21 @@ pub struct BootOptions {
     /// pcap. **The only way to read what the guest asked for**: a request the
     /// server ignores reaches no log on either side.
     pub wire_dump: Option<PathBuf>,
+    /// A second NVMe controller, for a driver in userland, backed by this file.
+    ///
+    /// QEMU's NVMe under Intel's ids (`use-intel-id`, `8086:5845`), so a claim
+    /// names it apart from the one the kernel drives; its MSI-X table in a BAR
+    /// of its own (`msix-exclusive-bar`), because a claim never maps the BAR
+    /// holding the table and NVMe keeps its registers in BAR 0; and its
+    /// namespace's write cache on, so the controller has a volatile cache a
+    /// flush has to issue Flush for. Emitted after the kernel's controller, so
+    /// the kernel's first-by-class probe takes that one, and refused on a
+    /// profile with none — the kernel would take this one.
+    pub userland_nvme: Option<PathBuf>,
+    /// Have QEMU record every NVMe command it is sent, every completion it
+    /// posts and every flush it runs into this file: the device's own account
+    /// of what reached it, which no line a driver prints can be.
+    pub nvme_trace: Option<PathBuf>,
 }
 
 /// Where the guest sees the host under QEMU's user-mode networking, and where
@@ -2446,6 +2461,8 @@ impl Default for BootOptions {
             segment: None,
             ssh_port: None,
             wire_dump: None,
+            userland_nvme: None,
+            nvme_trace: None,
         }
     }
 }
@@ -4443,6 +4460,27 @@ fn qemu_command(
                 "nvme-ns,drive=nvme0,bus=nvme0ctl,logical_block_size={0},physical_block_size={0}",
                 shape.nvme_lba_bytes
             ));
+    }
+    if let Some(image) = &options.userland_nvme {
+        assert!(
+            shape.nvme_bytes != 0,
+            "a userland NVMe on a machine whose kernel drives none is the one the kernel takes"
+        );
+        qemu.arg("-drive")
+            .arg(format!("if=none,id=nvme1,format=raw,file={}", image.display()))
+            .arg("-device")
+            .arg("nvme,serial=userland,id=nvme1ctl,use-intel-id=on,msix-exclusive-bar=on")
+            .arg("-device")
+            .arg(
+                "nvme-ns,drive=nvme1,bus=nvme1ctl,logical_block_size=512,physical_block_size=512,\
+                 write-cache=on",
+            );
+    }
+    if let Some(trace) = &options.nvme_trace {
+        for event in ["pci_nvme_io_cmd", "pci_nvme_enqueue_req_completion", "pci_nvme_flush_ns"] {
+            qemu.arg("-trace").arg(event);
+        }
+        qemu.arg("-D").arg(trace);
     }
 
     // The mass-storage devices beside the boot stick, and the only ones a test
