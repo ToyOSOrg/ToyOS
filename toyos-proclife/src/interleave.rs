@@ -236,7 +236,7 @@ impl Op {
                         *pc = 1;
                     }
                 },
-                // `completion::wait_until` re-checks its predicate after the
+                // `watch::wait_until` re-checks its predicate after the
                 // arm, so a zombie that appeared in the window is collected
                 // rather than waited for.
                 _ => {

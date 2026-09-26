@@ -1,8 +1,7 @@
 use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
-use crate::inbox::InboxId;
 use crate::sync::Lock;
+use crate::watch::Watch;
 pub use toyos_abi::input::MouseEvent;
 
 static MOUSE_BUF: Lock<VecDeque<MouseEvent>> = Lock::new(VecDeque::new());
@@ -23,7 +22,8 @@ pub fn source_exists() -> bool {
 pub const MAX_QUEUED_EVENTS: usize = 512;
 static LAST_X: AtomicU16 = AtomicU16::new(0);
 static LAST_Y: AtomicU16 = AtomicU16::new(0);
-static INBOX_WATCHERS: Lock<Vec<InboxId>> = Lock::new(Vec::new());
+/// What a pointer poll waits on; no read blocks on the mouse.
+pub static WATCH: Watch = Watch::new();
 
 /// Which physical pointer a report came from, keyed by device and not by bus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -107,19 +107,6 @@ pub fn set_screen(width: u32, height: u32) {
     SCALE_X.store(x, Ordering::Relaxed);
     SCALE_Y.store(y, Ordering::Relaxed);
     crate::log!("mouse: rel scale x={} y={} (screen {}x{})", x, y, width, height);
-}
-
-pub fn add_inbox_watcher(id: InboxId) {
-    let mut w = INBOX_WATCHERS.lock();
-    if !w.contains(&id) { w.push(id); }
-}
-
-pub fn remove_inbox_watcher(id: InboxId) {
-    INBOX_WATCHERS.lock().retain(|&x| x != id);
-}
-
-pub fn inbox_watchers() -> Vec<InboxId> {
-    INBOX_WATCHERS.lock().clone()
 }
 
 /// The only path that merges buttons and accumulates motion; queues an update and returns true iff one was queued.

@@ -267,11 +267,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "shard-publish-relaxed", Some("log_publish"), &[
         "a_reader_that_finds_a_shard_finds_it_built ... FAILED",
     ]),
-    red(KERNEL_LOOM, "inbox-release-off", Some("inbox"), &[
-        "a_record_reaches_its_taker_intact ... FAILED",
-    ]),
-    red(KERNEL_LOOM, "inbox-signal-as-post", Some("inbox"), &[
-        "two_unlocked_producers_are_a_race_and_a_signal_is_not ... FAILED",
+    red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
+        "a_post_and_a_recheck_answer_a_poll_once ... FAILED",
+        "a_withdrawal_and_a_post_never_both_take_a_poll ... FAILED",
     ]),
     red(KERNEL_LOOM, "sleeplock-acquire-off", Some("sleep_lock"), &[
         "a_parking_contender_observes_the_holders_writes ... FAILED",
@@ -301,6 +299,26 @@ pub(crate) const CONTROLS: &[Control] = &[
         "halted with 2 of 2 messages queued and no IPI in flight",
     ]),
     red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &["published and no push behind it"]),
+    // The watch's lost wake, staged: the waiter parks over a post it was flagged
+    // with. A double panic, so the verdict is the first one's message.
+    red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
+        "parked with the condition true and no wake owed: the post was lost",
+    ]),
+    // The notify's flagged arm answering off a load: a second post reads the
+    // word from before the waiter consumed the first flag.
+    red(SCHED_LOOM, "notify-flag-load-only", Some("loom_watch"), &[
+        "parked with both conditions true and no wake owed: a post answered off a load",
+    ]),
+    // The stop's store-buffering pair with the gate's fences gone.
+    red(SCHED_LOOM, "gate-fence-off", Some("loom_watch"), &[
+        "the stop parked over a thread that had parked, and nothing posted it",
+    ]),
+    // `kernel-loom`'s control, over the kernel's `Once` as the watch models'
+    // ring entry.
+    red(SCHED_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
+        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
+        "a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED",
+    ]),
     // Reproduces an open defect
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
     // proving a lie is caught, and goes with its fix.

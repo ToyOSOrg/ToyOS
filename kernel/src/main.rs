@@ -84,7 +84,7 @@ mod time;
 mod clock;
 mod rtc;
 
-mod completion;
+mod watch;
 mod iod;
 mod object;
 mod inbox;
@@ -496,7 +496,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         sched_gate::run("boot");
     }
     pipe::init();
-    inbox::init();
 
     // ROOT is the loader's image in memory, so nothing from here to init's
     // spawn asks a disk for anything: every storage driver comes up after it.

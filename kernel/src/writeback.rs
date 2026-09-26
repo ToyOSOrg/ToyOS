@@ -12,7 +12,7 @@ use alloc::string::String;
 
 use toyos_abi::syscall::SyscallError;
 
-use crate::completion::{self, Armed, Outcome, Subject, Token, Watch};
+use crate::watch::{self, Armed, Watch};
 use crate::file_cache::{self, FileId, Teardown};
 use crate::scheduler::Parkable;
 use crate::sync::Lock;
@@ -33,13 +33,10 @@ pub static WORK: Watch = Watch::new();
 pub fn enqueue(file_id: FileId, path: String, mtime: u64) {
     QUEUE.lock().push_back(Pending { file_id, path, mtime });
     // Edge-triggered: `iod` rechecks the queue itself, never reads state off the post.
-    completion::post(Subject::of(&WORK), Outcome::Ready);
+    WORK.post();
 }
 
-/// The token `iod` arms with; opaque, but must match the post's arm token for the drop-time check.
-pub const TOKEN: Token = Token::new(0);
-
-/// Runs every pending teardown to durability; for callers holding no completion arm (`iod` uses [`drain_all_iod`]).
+/// Runs every pending teardown to durability; for callers holding no watch registration (`iod` uses [`drain_all_iod`]).
 pub fn drain_all() {
     drain_retrying(crate::block::between_attempts);
 }
@@ -52,7 +49,7 @@ pub fn drain_all_iod(parkable: &Parkable, armed: &Armed<'_>) {
         } else {
             // Reuses `armed`; arming again panics.
             let deadline = Deadline::at(crate::clock::now() + crate::block::backoff_step(attempt));
-            let _ = completion::wait(parkable, armed, deadline);
+            let _ = watch::wait(parkable, armed, deadline);
         }
     });
 }

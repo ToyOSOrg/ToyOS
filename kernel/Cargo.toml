@@ -19,12 +19,11 @@ loom = []
 # with either fence removed behaves identically, which is the whole reason the
 # obligation is a model.
 wake-fence-off = []
-# The same arrangement for the completion core: `kernel-loom` turns it on to
-# make `completion::inbox`'s record publication relaxed, and
-# `kernel-loom/tests/inbox.rs` must red when it does. On x86 a build with the
-# release removed behaves identically, which is the whole reason the obligation
-# is a model.
-inbox-release-off = []
+# The same arrangement for a poll ring's one-shot answer: `kernel-loom` turns it
+# on to split `inbox/once.rs`'s exchange into a load and a store, and
+# `kernel-loom/tests/poll_once.rs` must red when it does — a poll two posts
+# both answer.
+poll-fire-load-store = []
 # The same arrangement, five more times, one per `kernel-loom` model that had
 # no control of its own until 2026-08-17. Each is declared here and never
 # enabled here; `kernel-loom` turns exactly one on at a time and the named

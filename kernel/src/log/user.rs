@@ -2,39 +2,22 @@
 //!
 //! No per-reader state in a read: a cursor is the caller's own sequence numbers and loss count, copied in, walked, and copied back; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap`, not ambient. [`LOG_HOLDERS`] is the one table here, and it is the shutdown's, not a reader's.
 
-use alloc::vec::Vec;
-
 use toyos_abi::log::{LogCursor, LogRecord, RECORD_BYTES};
 use toyos_abi::syscall::SyscallError;
 
-use crate::inbox::InboxId;
-use crate::sync::Lock;
+use crate::watch::Watch;
 use crate::user_ptr::UserBytesMut;
 
 use super::read::{drain_ordered, Cursor, RecordSink};
 
-static INBOX_WATCHERS: Lock<Vec<InboxId>> = Lock::new(Vec::new());
-
-pub fn add_inbox_watcher(id: InboxId) {
-    let mut w = INBOX_WATCHERS.lock();
-    if !w.contains(&id) {
-        w.push(id);
-    }
-}
-
-pub fn remove_inbox_watcher(id: InboxId) {
-    INBOX_WATCHERS.lock().retain(|&x| x != id);
-}
-
-pub fn inbox_watchers() -> Vec<InboxId> {
-    INBOX_WATCHERS.lock().clone()
-}
+/// What a log poll waits on: edge-triggered, since a reader's position is its own cursor and the kernel holds none.
+pub static WATCH: Watch = Watch::new();
 
 /// Tell every ring watching the log that records have moved.
 // Posted only by `klogd` after a drain batch — `emit` runs under sync.rs/IRQ/scheduler locks and may not lock.
 // Edge, not level: whether a caller has unread records is a property of its cursor, which the kernel does not hold.
 pub fn post_readiness() {
-    crate::inbox::Source::Log.wake();
+    WATCH.post();
 }
 
 // Fixed `RECORD_BYTES` stride, never packed: the caller indexes by shift, so the kernel does no length arithmetic.

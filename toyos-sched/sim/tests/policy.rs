@@ -478,7 +478,7 @@ fn an_interactive_wake_waits_out_at_most_the_band_it_is_queued_behind() {
 /// over and over, on machines from one CPU to eight.
 ///
 /// The drain — how long the last waiter waits for a CPU — is what a storm costs,
-/// and the failure everyone fears is that it is *serialized*: `wake_all` claims
+/// and the failure everyone fears is that it is *serialized*: a post claims
 /// every waiter in one loop, and each claim posts a `Msg::Wake` to that waiter's
 /// home CPU.
 ///

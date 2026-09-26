@@ -22,9 +22,8 @@ What is to be built:
 - **The boundary, named by function and not by chip.** A driver is written
   against four small traits: register access, a clock, DMA buffers, and
   interrupt arrival. They are generic parameters resolved at compile time
-  (the dispatch ruling in
-  `issues/kernel/arm64-is-a-decision-nobody-has-made.md`: no trait objects,
-  no `Kernel<A>`), and they are the same three things the userland-device
+  (the dispatch ruling in `issues/kernel/toyos-runs-on-arm64.md`: no trait
+  objects, no `Kernel<A>`), and they are the same three things the userland-device
   substrate hands a process, so a driver moved to userland keeps its tests.
 - **A real implementation is one instruction's worth of meaning per function**
   — a volatile access, a barrier, a register write, a counter read — with no
