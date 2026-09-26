@@ -1442,9 +1442,9 @@ dependencies = [
 
 [[package]]
 name = "toyos"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
- "toyos-abi 0.11.0",
+ "toyos-abi 0.12.0",
 ]
 
 [[package]]
@@ -1461,7 +1461,11 @@ checksum = "ec119a115b619cec7ca5e56858e98db6558658d6cc9b400906187e62f2877f48"
 
 [[package]]
 name = "toyos-abi"
-version = "0.11.0"
+version = "0.12.0"
+
+[[package]]
+name = "toyos-dns"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-font"
@@ -1470,6 +1474,13 @@ version = "0.1.0"
 [[package]]
 name = "toyos-i219"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-inspect"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi 0.12.0",
+]
 
 [[package]]
 name = "toyos-keymap"
@@ -1489,9 +1500,11 @@ dependencies = [
  "rustls-pki-types",
  "rustls-rustcrypto",
  "sha2",
- "toyos 0.12.0",
- "toyos-abi 0.11.0",
+ "toyos 0.13.0",
+ "toyos-abi 0.12.0",
+ "toyos-dns",
  "toyos-i219",
+ "toyos-inspect",
  "toyos-quiesce",
  "toyos-tco",
  "toyos-window",
@@ -1505,10 +1518,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
- "toyos 0.12.0",
- "toyos-abi 0.11.0",
+ "toyos 0.13.0",
+ "toyos-abi 0.12.0",
  "toyos-font",
  "toyos-keymap",
 ]

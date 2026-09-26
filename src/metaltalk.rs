@@ -383,9 +383,10 @@ fn count_or_give_up(shared: &Shared, last: &str) -> Option<String> {
 }
 
 /// A connect that ended this way may be taken once the machine is up: it was
-/// refused, or its host or network is down or unreachable from here.
+/// refused, or reset by a listener going away under it, or its host or network
+/// is down or unreachable from here.
 fn not_yet_reachable(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::ConnectionRefused
+    matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset)
         || matches!(e.raw_os_error(), Some(libc::EHOSTDOWN | libc::EHOSTUNREACH | libc::ENETUNREACH))
 }
 
@@ -1452,29 +1453,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **A redial counts every refused dial, and gives up at its ceiling
-    /// saying so.** The listener is dropped, as a netd with no `logd` listener
-    /// answers a SYN with a reset, so every connect the redial makes is
-    /// refused at once: exactly the ceiling's number are counted, and the
-    /// redial ends long before its time bound.
+    /// A machine whose first dial is taken and whose every later one is turned
+    /// away before a connection exists: refused and reset in turn, the two
+    /// answers a SYN gets from a machine whose listener is gone or going,
+    /// depending on when it went.
+    struct TurnedAway {
+        dials: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Reach for TurnedAway {
+        fn resolve(&self, _: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+            unreachable!("the stream is dialled by address")
+        }
+
+        fn ask(&self, _: &str, _: Instant) -> Result<Option<Ipv4Addr>, String> {
+            unreachable!("the stream is dialled by address")
+        }
+
+        fn dial(&self, at: SocketAddr) -> std::io::Result<TcpStream> {
+            match self.dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => TcpStream::connect(at),
+                n if n % 2 == 1 => Err(std::io::ErrorKind::ConnectionRefused.into()),
+                _ => Err(std::io::Error::from_raw_os_error(libc::ECONNRESET)),
+            }
+        }
+    }
+
+    /// **A redial counts every dial refused or reset, and gives up at its
+    /// ceiling saying so.** Staged through [`Reach`], so each dial's answer is
+    /// the one this test gives it and arrives at once: exactly the ceiling's
+    /// number are counted, and the redial ends long before its time bound.
     #[test]
-    fn a_redial_counts_every_refusal_and_gives_up_at_its_ceiling() {
+    fn a_redial_counts_every_refusal_and_reset_and_gives_up_at_its_ceiling() {
         const CEILING: usize = 3;
         let dir = std::env::temp_dir().join(format!("metaltalk-refused-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
-        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+        let reach: Arc<dyn Reach> = Arc::new(TurnedAway { dials: 0.into() });
+        let stream = Stream::through(reach, Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
             .expect("a loopback reader");
         let mut first = accepted(&server, "the first dial");
         writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
         assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
-        drop(server);
         stream.redial(Duration::from_secs(60), CEILING);
         assert_eq!(stream.wait_for_connection(1, Duration::from_secs(5)), None, "nothing listens");
         let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
         assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
-        assert_eq!(stream.turned_away(), CEILING, "every refused dial, and no more");
+        assert_eq!(stream.turned_away(), CEILING, "every refused or reset dial, and no more");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

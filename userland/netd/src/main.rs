@@ -36,6 +36,7 @@ mod dhcp;
 mod i219;
 mod mdns;
 mod report;
+mod resolve;
 mod virtio_net;
 
 /// The cards this program can drive, named by what identifies one rather than
@@ -109,9 +110,9 @@ use toyos::net::*;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::{dhcpv4, dns, tcp, udp};
+use smoltcp::socket::{dhcpv4, tcp, udp};
 use smoltcp::time::Instant as SmoltcpInstant;
-use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpEndpoint};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpEndpoint, IpListenEndpoint};
 
 use std::net::Ipv4Addr;
 
@@ -378,11 +379,6 @@ struct PendingUdpRecv {
     max_len: u32,
 }
 
-struct PendingDns {
-    client: Client,
-    query: dns::QueryHandle,
-}
-
 /// A piped TCP connection: data flows through kernel pipes instead of IPC messages.
 struct PipedConnection {
     handle: SocketHandle,
@@ -519,6 +515,21 @@ impl Client {
         self.answered(self.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, encoded));
     }
 
+    /// Whether this client, waiting for its answer, has left. A connection
+    /// carries one request, so hanging up is the one thing it may say while
+    /// it waits; a client that says more is dropped by name.
+    fn gone(&self) -> bool {
+        let mut byte = [0u8; 1];
+        match self.conn.read_nonblock(&mut byte) {
+            Err(toyos_abi::syscall::SyscallError::WouldBlock) => false,
+            Ok(0) | Err(_) => true,
+            Ok(_) => {
+                say!("netd: dropping client {} — it spoke again before its answer", self.conn.as_handle().0);
+                true
+            }
+        }
+    }
+
     /// **The answer goes out in one non-blocking write, and a refusal is not
     /// retried.** `ipc::send` parks in `sys_write` until the client drains,
     /// which is a client deciding when the network stack runs again; and
@@ -573,13 +584,17 @@ const MAX_KEPT_REQUEST: usize = 256;
 /// its rx pipe while that pipe is holding bytes back.
 const POLL_HANDLES_PER_PIPED: u32 = 2;
 
+/// Registrations the lookups make in a batch: each waiting client's
+/// connection, which is how netd hears it hang up.
+const LOOKUP_POLL_HANDLES: u32 = resolve::MAX_LOOKUPS as u32;
+
 /// Hard ceiling on live piped connections, from the poller rather than from
 /// memory: netd registers every connection's pipes in the same batch as the two
-/// fixed registrations and the pending connections, and `Poller::MAX_HANDLES`
-/// is the widest set one poller can carry. The memory budget below is what
-/// binds on any machine with less than 3.5 GiB.
-const MAX_PIPED_SLOTS: u64 =
-    ((Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS) / POLL_HANDLES_PER_PIPED) as u64;
+/// fixed registrations, the pending connections and the lookups' clients, and
+/// `Poller::MAX_HANDLES` is the widest set one poller can carry. The memory
+/// budget below binds first on a machine whose eighth holds fewer connections.
+const MAX_PIPED_SLOTS: u64 = ((Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS - LOOKUP_POLL_HANDLES)
+    / POLL_HANDLES_PER_PIPED) as u64;
 
 /// One client's inbound framing.
 ///
@@ -678,8 +693,20 @@ fn total_memory() -> u64 {
 /// client can name (`issues/isolation/netd-socket-ids-are-ambient.md`).
 fn first_socket_id() -> u32 {
     let mut bytes = [0u8; 4];
-    toyos_abi::syscall::random(&mut bytes);
+    toyos_abi::syscall::random(&mut bytes)
+        .unwrap_or_else(|e| panic!("netd: the kernel's random source refused the first socket id: {e:?}"));
     u32::from_le_bytes(bytes).max(1)
+}
+
+/// smoltcp's one random source, which every TCP connection's initial sequence
+/// number (RFC 6528 asks for one an off-path sender cannot predict) and every
+/// DHCP transaction ID are drawn from. `Config::new` seeds it with 0, which
+/// is the same sequence on every boot of every machine.
+fn smoltcp_seed() -> u64 {
+    let mut bytes = [0u8; 8];
+    toyos_abi::syscall::random(&mut bytes)
+        .unwrap_or_else(|e| panic!("netd: the kernel's random source refused smoltcp's seed: {e:?}"));
+    u64::from_le_bytes(bytes)
 }
 
 struct NetDaemon {
@@ -687,8 +714,7 @@ struct NetDaemon {
     next_id: u32,
     next_local_port: u16,
     pending_udp_recvs: Vec<PendingUdpRecv>,
-    pending_dns: Vec<PendingDns>,
-    dns_handle: SocketHandle,
+    resolver: resolve::Resolver<Client, fn() -> u16>,
     piped_connections: Vec<PipedConnection>,
     piped_listeners: HashMap<u32, PipedListener>,
     pending_piped_connects: Vec<PendingPipedConnect>,
@@ -697,14 +723,13 @@ struct NetDaemon {
 }
 
 impl NetDaemon {
-    fn new(dns_handle: SocketHandle, max_piped_connections: usize) -> Self {
+    fn new(max_piped_connections: usize) -> Self {
         Self {
             sockets: HashMap::new(),
             next_id: first_socket_id(),
             next_local_port: 49152,
             pending_udp_recvs: Vec::new(),
-            pending_dns: Vec::new(),
-            dns_handle,
+            resolver: resolve::Resolver::new(Instant::now(), resolve::random_u16),
             piped_connections: Vec::new(),
             piped_listeners: HashMap::new(),
             pending_piped_connects: Vec::new(),
@@ -732,7 +757,18 @@ impl NetDaemon {
 
     /// The socket table's size, as `inspect` reads it: counts, and no
     /// endpoint, because every client holding `netd` can ask.
-    fn inspect(&self, snap: &mut Snapshot) {
+    ///
+    /// `sockets.untabled` is every socket the stack holds that no table entry
+    /// names, the resolver's left out: netd's own, and any that outlived its
+    /// entry, which moves it and no other count. The resolver's are left out
+    /// because their number is every program's lookups in flight.
+    fn inspect(&self, snap: &mut Snapshot, socket_set: &SocketSet<'_>) {
+        let untabled = socket_set
+            .iter()
+            .count()
+            .checked_sub(self.sockets.len() + self.resolver.sockets())
+            .expect("netd: a table entry or a lookup names a socket the stack does not hold");
+        snap.put("sockets.untabled", untabled);
         let (mut streams, mut listeners, mut udp) = (0u32, 0u32, 0u32);
         for kind in self.sockets.values() {
             match kind {
@@ -763,6 +799,14 @@ impl NetDaemon {
         port
     }
 
+    /// The first port from [`alloc_port`](Self::alloc_port)'s cursor that no
+    /// UDP socket holds, and the cursor moves past it; `None` once every one
+    /// is held.
+    fn alloc_free_udp_port(&mut self, socket_set: &SocketSet<'_>) -> Option<u16> {
+        self.next_local_port = resolve::free_port(socket_set, self.next_local_port)?;
+        Some(self.alloc_port())
+    }
+
     /// Dispatch one whole request.
     ///
     /// A synchronous handler answers and lets the connection close where it
@@ -781,7 +825,7 @@ impl NetDaemon {
             Some(MsgType::UdpSendTo) => self.handle_udp_send_to(&req, socket_set),
             Some(MsgType::UdpRecvFrom) => self.handle_udp_recv_from(req, socket_set),
             Some(MsgType::UdpClose) => self.handle_udp_close(&req, socket_set),
-            Some(MsgType::DnsLookup) => self.handle_dns_lookup(req, socket_set, iface),
+            Some(MsgType::DnsLookup) => self.handle_dns_lookup(req, socket_set),
             Some(MsgType::TcpSetOption) => self.handle_tcp_set_option(&req, socket_set),
             Some(MsgType::TcpGetOption) => self.handle_tcp_get_option(&req, socket_set),
             Some(MsgType::TcpConnectPiped) => self.handle_tcp_connect_piped(req, socket_set, iface),
@@ -852,13 +896,25 @@ impl NetDaemon {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let port = if req.port == 0 { self.alloc_port() } else { req.port };
-
         let Some(pipes) = DataPipes::take(&msg.client) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
         let (rx_write, tx_read) = (pipes.to_client, pipes.from_client);
+        let port = match req.port {
+            0 => match self.alloc_free_udp_port(socket_set) {
+                Some(port) => port,
+                None => {
+                    msg.client.error(ERR_ADDR_IN_USE);
+                    return;
+                }
+            },
+            port if resolve::udp_port_taken(socket_set, port) => {
+                msg.client.error(ERR_ADDR_IN_USE);
+                return;
+            }
+            port => port,
+        };
 
         let rx_buf = udp::PacketBuffer::new(
             vec![udp::PacketMetadata::EMPTY; 16],
@@ -869,11 +925,15 @@ impl NetDaemon {
             vec![0u8; UDP_SOCKET_BUFFER],
         );
         let mut socket = udp::Socket::new(rx_buf, tx_buf);
-        let endpoint = IpEndpoint::new(IpAddress::Ipv4(Ipv4Addr::from(req.addr)), port);
-        if socket.bind(endpoint).is_err() {
-            msg.client.error(ERR_ADDR_IN_USE);
-            return;
-        }
+        // **The unspecified address binds as no address at all.** smoltcp
+        // reads `Some(0.0.0.0)` as a socket for datagrams addressed to
+        // 0.0.0.0, and none ever is, so a socket bound the ordinary way to
+        // receive on every address would receive nothing but broadcast.
+        let addr = Ipv4Addr::from(req.addr);
+        let endpoint = IpListenEndpoint { addr: (!addr.is_unspecified()).then_some(IpAddress::Ipv4(addr)), port };
+        socket
+            .bind(endpoint)
+            .unwrap_or_else(|e| panic!("netd: a fresh socket refused to bind the free port {port}: {e:?}"));
 
         let handle = socket_set.add(socket);
         let socket_id = self.alloc_id();
@@ -1015,31 +1075,24 @@ impl NetDaemon {
         msg.client.done();
     }
 
-    fn handle_dns_lookup(
-        &mut self,
-        msg: Request,
-        socket_set: &mut SocketSet<'_>,
-        iface: &mut Interface,
-    ) {
+    /// Start resolving the name `msg` carries, or answer at once where there
+    /// is nothing to ask: an address written as one, or a name no server can
+    /// be asked for.
+    fn handle_dns_lookup(&mut self, msg: Request, socket_set: &mut SocketSet<'_>) {
         let Ok(hostname) = std::str::from_utf8(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-
         if let Ok(ip) = hostname.parse::<std::net::Ipv4Addr>() {
-            let octets = ip.octets();
-            let mut resp = vec![1u8];
-            resp.push(4);
-            resp.extend_from_slice(&octets);
-            msg.client.result_bytes(&resp);
+            answer_lookup(&msg.client, &[ip.octets()]);
             return;
         }
-
-        let dns = socket_set.get_mut::<dns::Socket>(self.dns_handle);
-        match dns.start_query(iface.context(), hostname, DnsQueryType::A) {
-            // Async — hold the connection until the query resolves.
-            Ok(query) => self.pending_dns.push(PendingDns { client: msg.client, query }),
-            Err(_) => msg.client.error(ERR_OTHER),
+        let Ok(name) = toyos_dns::Name::parse(hostname) else {
+            msg.client.error(ERR_INVALID_INPUT);
+            return;
+        };
+        if let Err((client, why)) = self.resolver.start(msg.client, name, socket_set, Instant::now()) {
+            client.error(why.code());
         }
     }
 
@@ -1433,7 +1486,7 @@ impl NetDaemon {
         }
     }
 
-    /// Process pending async operations (UDP recvs, DNS, piped connects).
+    /// Process pending async operations (UDP recvs, lookups, piped connects).
     fn process_pending(&mut self, socket_set: &mut SocketSet<'_>) {
         let now = Instant::now();
 
@@ -1443,35 +1496,22 @@ impl NetDaemon {
             }
         }
 
-        // Pending DNS queries
-        let mut i = 0;
-        while i < self.pending_dns.len() {
-            let pd = &self.pending_dns[i];
-            let dns = socket_set.get_mut::<dns::Socket>(self.dns_handle);
-            match dns.get_query_result(pd.query) {
-                Ok(addrs) => {
-                    let mut resp = Vec::new();
-                    resp.push(addrs.len() as u8);
-                    for addr in addrs.iter() {
-                        match addr {
-                            IpAddress::Ipv4(a) => {
-                                resp.push(4);
-                                resp.extend_from_slice(&a.octets());
-                            }
-                        }
-                    }
-                    pd.client.result_bytes(&resp);
-                    self.pending_dns.swap_remove(i);
-                    continue;
+        for (client, name, ended) in self.resolver.pass(socket_set, now) {
+            use resolve::Ended;
+            use toyos_dns::Failure;
+            match ended {
+                Ok(addrs) => answer_lookup(&client, &addrs),
+                // The protocol's one answer for a name with no address,
+                // whether the name or only its address is missing.
+                Err(Ended::Failed(Failure::NoSuchName | Failure::NoAddress)) => answer_lookup(&client, &[]),
+                Err(Ended::Failed(Failure::TimedOut)) => client.error(ERR_TIMED_OUT),
+                Err(Ended::Failed(why @ (Failure::Truncated | Failure::ServerFailed(_) | Failure::TooManyAliases))) => {
+                    say!("netd: a lookup of {name} ended without an answer: {why:?}");
+                    client.error(ERR_OTHER);
                 }
-                Err(dns::GetQueryResultError::Pending) => {
-                    i += 1;
-                    continue;
-                }
-                Err(_) => {
-                    pd.client.error(ERR_OTHER);
-                    self.pending_dns.swap_remove(i);
-                    continue;
+                Err(Ended::NoPort) => {
+                    say!("netd: a lookup of {name} ended with every dynamic port bound, none left for its next query");
+                    client.error(ERR_RESOURCE_EXHAUSTED);
                 }
             }
         }
@@ -1515,12 +1555,29 @@ impl NetDaemon {
     }
 }
 
+/// The most addresses one lookup's answer carries: what
+/// `toyos::net::dns_lookup`'s 256-byte buffer holds, a count byte and five
+/// bytes an address. A resolver may answer with a subset of a name's
+/// addresses, and these are the ones the server put first.
+const MAX_ANSWERED: usize = (256 - 1) / 5;
+
+/// A lookup's answer: a count, then each address behind the family tag 4.
+fn answer_lookup(client: &Client, addrs: &[[u8; 4]]) {
+    let addrs = &addrs[..addrs.len().min(MAX_ANSWERED)];
+    let mut answer = vec![addrs.len() as u8];
+    for addr in addrs {
+        answer.push(4);
+        answer.extend_from_slice(addr);
+    }
+    client.result_bytes(&answer);
+}
+
 /// Answer `inspect` with what this pass knows, in one non-blocking write, and
 /// let the connection close as every other answer does.
 ///
 /// Here and not in [`NetDaemon::handle_message`] because the card and the
 /// lease are the loop's and not the socket table's.
-fn answer_inspect(request: &Request, daemon: &NetDaemon, card: &Card, dhcp: &dhcp::Dhcp) {
+fn answer_inspect(request: &Request, daemon: &NetDaemon, card: &Card, dhcp: &dhcp::Dhcp, socket_set: &SocketSet<'_>) {
     // The request is a bare header, and anything riding on one is not this
     // protocol.
     if request.payload_len != 0 {
@@ -1530,7 +1587,7 @@ fn answer_inspect(request: &Request, daemon: &NetDaemon, card: &Card, dhcp: &dhc
     let mut snap = Snapshot::new(toyos_inspect::NET);
     card.inspect(&mut snap);
     dhcp.inspect(&mut snap);
-    daemon.inspect(&mut snap);
+    daemon.inspect(&mut snap, socket_set);
     let encoded = snap.encode().unwrap_or_else(|why| panic!("netd: its snapshot: {why}"));
     request.client.snapshot(&encoded);
 }
@@ -1612,17 +1669,14 @@ fn main() {
         "netd: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
-    let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
+    config.random_seed = smoltcp_seed();
     let epoch = Instant::now();
     let now = SmoltcpInstant::from_millis(0);
     let mut iface = Interface::new(config, &mut device, now);
 
     let mut socket_set = SocketSet::new(vec![]);
 
-    // Empty, because the lease names the resolvers and nothing else may: a
-    // server written down here would answer for one network on every other.
-    let dns_socket = dns::Socket::new(&[], vec![]);
-    let dns_handle = socket_set.add(dns_socket);
     let dhcp_handle = socket_set.add(dhcp::socket());
     let mut dhcp = dhcp::Dhcp::new();
     if let Card::Intel(nic) = &device.nic {
@@ -1632,14 +1686,17 @@ fn main() {
 
     let total_mem = total_memory();
     let max_piped = max_piped_connections(total_mem);
-    let mut daemon = NetDaemon::new(dns_handle, max_piped);
+    let mut daemon = NetDaemon::new(max_piped);
 
     // Sized for the slot ceiling rather than for `max_piped`: the batch
     // between two `wait` calls is the two fixed registrations, at most two per live
-    // piped connection and one per pending connection, and the ceiling is what that
-    // can never exceed.
+    // piped connection, one per pending connection and one per lookup, and the
+    // ceiling is what that can never exceed.
     let poller = Poller::new(
-        FIXED_POLL_HANDLES + POLL_HANDLES_PER_PIPED * MAX_PIPED_SLOTS as u32 + MAX_PENDING_CONNS,
+        FIXED_POLL_HANDLES
+            + POLL_HANDLES_PER_PIPED * MAX_PIPED_SLOTS as u32
+            + MAX_PENDING_CONNS
+            + LOOKUP_POLL_HANDLES,
     );
     const TOKEN_LISTENER: u64 = 0;
     const TOKEN_NIC: u64 = 1;
@@ -1649,6 +1706,8 @@ fn main() {
     // connection's own handle by more than `MAX_HANDLES` (4096,
     // `kernel/src/object/handle.rs`).
     const TOKEN_PENDING_BASE: u64 = 0x1_0000;
+    // Clear of the pending range by the same margin.
+    const TOKEN_LOOKUP_BASE: u64 = 0x2_0000;
 
     let mut pending: Vec<PendingConn> = Vec::new();
 
@@ -1692,7 +1751,7 @@ fn main() {
                 None => {}
             }
         }
-        if dhcp.pass(change, &mut iface, socket_set.get_mut::<dns::Socket>(dns_handle)) {
+        if dhcp.pass(change, &mut iface, &mut daemon.resolver) {
             say!(
                 "netd: ready, at most {max_piped} piped connections \
                  ({} MiB each of {} MiB total)",
@@ -1716,9 +1775,8 @@ fn main() {
         let smoltcp_due =
             iface.poll_delay(now, &socket_set).map_or(u64::MAX, |d| d.total_micros().saturating_mul(1000));
 
-        // A pending UDP receive, DNS query or connect has no wake of its own.
+        // A pending UDP receive or connect has no wake of its own.
         let has_pending_async = !daemon.pending_udp_recvs.is_empty()
-            || !daemon.pending_dns.is_empty()
             || !daemon.pending_piped_connects.is_empty();
         let timeout = if has_pending_async {
             smoltcp_due.min(Duration::from_millis(1).as_nanos() as u64)
@@ -1749,7 +1807,19 @@ fn main() {
             poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
         }
 
+        // A client waiting on a lookup hangs up by closing its connection,
+        // which makes it readable.
+        for client in daemon.resolver.clients() {
+            poller.watch(&client.conn, READABLE, TOKEN_LOOKUP_BASE + client.conn.as_handle().0 as u64);
+        }
+
         let timeout = match mdns.wake_in(Instant::now()) {
+            Some(left) => timeout.min(left.as_nanos() as u64),
+            None => timeout,
+        };
+        // A lookup waiting on its answer is woken when its wait is over, to
+        // ask the next server.
+        let timeout = match daemon.resolver.wake_in(Instant::now()) {
             Some(left) => timeout.min(left.as_nanos() as u64),
             None => timeout,
         };
@@ -1790,6 +1860,11 @@ fn main() {
             );
         }
         pending.retain(|p| now_wall.duration_since(p.since) < HANDSHAKE_TIMEOUT);
+
+        // A lookup whose client has left ends now, not when its servers are
+        // done with it: its sockets and its slot are another client's.
+        let spoke = |c: &Client| ready.contains(&(TOKEN_LOOKUP_BASE + c.conn.as_handle().0 as u64));
+        daemon.resolver.let_go(&mut socket_set, |c| spoke(c) && c.gone());
 
         // Accept and the request are two events. Nothing is read here: a client
         // that connects and then says nothing costs a slot and a deadline, not
@@ -1855,7 +1930,7 @@ fn main() {
 
         for request in requests {
             if request.msg_type == toyos_inspect::MSG_INSPECT {
-                answer_inspect(&request, &daemon, &device.nic, &dhcp);
+                answer_inspect(&request, &daemon, &device.nic, &dhcp, &socket_set);
                 continue;
             }
             daemon.handle_message(request, &mut socket_set, &mut iface);

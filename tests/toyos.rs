@@ -287,12 +287,16 @@ const RUST_SKIP: &[&str] = &[
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
     // `netd_slow_reader`, `netd_held_open`, `netd_stalled_peer`,
-    // `netd_udp_refused` and `netd_refused_pipes` run them on `tests/netcase`.
+    // `netd_udp_refused`, `netd_udp_any_address` and `netd_refused_pipes` run
+    // them on `tests/netcase`, and `netd_lookup_let_go` on it with its frames
+    // held.
     "netd_slow_reader",
     "netd_held_open",
     "netd_stalled_peer",
     "netd_udp_refused",
+    "netd_udp_any_address",
     "netd_refused_pipes",
+    "netd_lookup_let_go",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
@@ -869,6 +873,25 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // pipe will not take whole ends that socket by name and no other. The
     // verdict is each socket's answer; its clocks are liveness guards.
     ("netd_udp_refused", Sched::Parallel, Tier::Fast),
+    // The netcase boot again, beside a host UDP echo: a socket bound through
+    // std to 0.0.0.0 receives the echo's unicast reply. The verdict is the
+    // reply's bytes; its clock is a liveness guard.
+    ("netd_udp_any_address", Sched::Parallel, Tier::Fast),
+    // The netcase boot, whose user network forwards 10.0.2.3 to this host's
+    // resolver: `host` resolves a real name to the addresses this host's
+    // resolver gives it, and a `.invalid` name to none. The verdict is the
+    // two answers; its clocks are liveness guards. Nightly, because both
+    // answers rest on this host's network, which no change to the tree moves.
+    ("dns_resolve", Sched::Parallel, Tier::Nightly),
+    // The netcase boot, every frame it sends held once it has its lease:
+    // lookups whose clients hung up or spoke again are let go at once, and
+    // one nobody answers ends when its schedule does. The verdict is netd's
+    // answers; the schedule's end is a bound derived from it.
+    ("netd_lookup_let_go", Sched::Parallel, Tier::Fast),
+    // Two netcase boots, each frame put on the wire kept: the first DHCP
+    // transaction ID of each differs, because netd seeds smoltcp's random
+    // source from the kernel's. The verdict is two numbers off the wire.
+    ("netd_seeds_its_stack", Sched::Parallel, Tier::Fast),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
     ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
@@ -1568,6 +1591,8 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_held_open", &["test_rs_netd_held_open"]),
     ("netd_stalled_peer", &["test_rs_netd_stalled_peer"]),
     ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
+    ("netd_udp_any_address", &["test_rs_netd_udp_any_address"]),
+    ("netd_lookup_let_go", &["test_rs_netd_lookup_let_go"]),
     ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
     ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
@@ -9587,6 +9612,184 @@ fn netd_udp_refused(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
+/// A socket bound to 0.0.0.0 receives the unicast reply to what it sent: the
+/// guest's comparison of the echo's reply with its datagram is the verdict.
+fn netd_udp_any_address(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let echo = UdpEcho::start()?;
+    let run = netcase_against_host(rust_bins, "netd_udp_any_address", false, &format!(" {}", echo.port));
+    let echoed = echo.finish();
+    let HostRun { result, console, .. } = run.map_err(|e| format!("{e}\nthe UDP echo ended {echoed:?}"))?;
+    let echoed = echoed?;
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_udp_any_address: ok")) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] a socket bound to 0.0.0.0 got the echo's reply ({echoed} echoed)");
+    Ok(())
+}
+
+/// A real name, resolved through the guest's user network: QEMU's `10.0.2.3`
+/// forwards each query to this host's own resolver, so what `host` prints in
+/// the guest is judged by what this host's resolver answers for the same name,
+/// a resolver this tree did not write. A name under `.invalid` has none (RFC 6761 §6.4),
+/// and is answered as none rather than as a timeout.
+fn dns_resolve() -> Result<(), String> {
+    use std::collections::BTreeSet;
+    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+    let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+        return Err("this test needs a NIC and the profile has none".to_string());
+    }
+    let oracle: BTreeSet<Ipv4Addr> = (DNS_REAL_NAME, 0)
+        .to_socket_addrs()
+        .map_err(|e| format!("this host's resolver would not resolve {DNS_REAL_NAME}: {e}"))?
+        .filter_map(|a| match a.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    if oracle.is_empty() {
+        return Err(format!("this host's resolver has no IPv4 address for {DNS_REAL_NAME}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
+
+    let found = qemu.run_test(&format!("host {DNS_REAL_NAME}"), Duration::from_secs(60));
+    if let Some(err) = &found.error {
+        return Err(format!("{err}\n{}", found.stdout));
+    }
+    if found.exit_code != Some(0) {
+        return Err(format!("host {DNS_REAL_NAME} exited {:?}:\n{}{}", found.exit_code, found.stdout, found.serial));
+    }
+    let said = format!("{DNS_REAL_NAME} has address ");
+    let guest: BTreeSet<Ipv4Addr> = found
+        .stdout
+        .lines()
+        .filter_map(|l| l.trim_end().split_once(&said).and_then(|(_, a)| a.parse().ok()))
+        .collect();
+    if guest != oracle {
+        return Err(format!(
+            "the guest resolved {DNS_REAL_NAME} to {guest:?} and this host to {oracle:?}:\n{}",
+            found.stdout
+        ));
+    }
+
+    let missing = qemu.run_test(&format!("host {DNS_NO_NAME}"), Duration::from_secs(60));
+    if let Some(err) = &missing.error {
+        return Err(format!("{err}\n{}", missing.stdout));
+    }
+    let output = format!("{}{}", missing.stdout, missing.serial);
+    if missing.exit_code != Some(1) || output.contains(" has address ") || !output.contains(DNS_NO_ADDRESS) {
+        return Err(format!(
+            "host {DNS_NO_NAME} exited {:?} and did not say {DNS_NO_ADDRESS:?}:\n{output}",
+            missing.exit_code
+        ));
+    }
+    console.push_str(&found.serial);
+    console.push_str(&missing.serial);
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] {DNS_REAL_NAME} resolved in the guest to {guest:?}, as this host resolves it");
+    eprintln!("  [netcase] {DNS_NO_NAME} resolved to no address, not to a timeout");
+    Ok(())
+}
+
+const DNS_REAL_NAME: &str = "dns.google";
+
+/// A name no resolver can find (RFC 6761 §6.4).
+const DNS_NO_NAME: &str = "doesnotexist.invalid";
+
+/// What std's `lookup_host` says for a name netd answered with no address,
+/// and so what `host` prints for one: its word, not netd's, and not a
+/// timeout's.
+const DNS_NO_ADDRESS: &str = "no results";
+
+/// netd's loop lets a lookup go the moment its client hangs up or speaks
+/// again, and ends one nobody answers when its schedule does: the netcase boot
+/// once it has its lease, with every frame it sends from then on held by
+/// QEMU, so no query reaches its resolver. The verdict is the guest's, from
+/// netd's answers and their times.
+fn netd_lookup_let_go(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    const NAME: &str = "netd_lookup_let_go";
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+    let bins: Vec<(String, Vec<u8>)> = rust_bins.iter().filter(|(n, _)| n == NAME).cloned().collect();
+    if bins.is_empty() {
+        return Err(format!("{NAME} was not built"));
+    }
+    let options = BootOptions { profile: qemu::Profile::Headless, qmp: true, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+        return Err("this test needs a NIC and the profile has none".to_string());
+    }
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
+    // A lookup before the lease is refused as having no server.
+    await_marker(&mut qemu, &mut console, "netd: DHCP: lease ", "netd's lease")?;
+    // One lookup before the frames are held, whatever it is answered, has
+    // netd learn its resolver's link address. Every query after it leaves and
+    // is lost, so no link-address retry wakes netd's loop, and only the
+    // resolver's own wake carries a lookup to its end.
+    let primed = qemu.run_test(&format!("host {DNS_NO_NAME}"), Duration::from_secs(60));
+    if let Some(err) = &primed.error {
+        return Err(format!("the lookup before the frames were held: {err}\n{}", primed.stdout));
+    }
+    console.push_str(&primed.serial);
+    qemu::QmpDevices::open(qemu.qmp_socket()).hold_outbound("net0");
+    let result = qemu.run_test(&format!("test_rs_{NAME}"), Duration::from_secs(180));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) || !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_lookup_let_go: ok")) {
+        return Err(format!("{NAME} exited {:?}:\n{}{}", result.exit_code, result.stdout, result.serial));
+    }
+    let spoke = "it spoke again before its answer";
+    if !result.serial.contains(spoke) {
+        return Err(format!("netd dropped a client that spoke again without a `{spoke}` line:\n{}", result.serial));
+    }
+    console.push_str(&result.serial);
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    for line in result.stdout.lines().filter(|l| l.contains("netd_lookup_let_go: ")) {
+        eprintln!("  [netcase] {}", line.trim_end());
+    }
+    Ok(())
+}
+
+/// Two boots of one image draw different first DHCP transaction IDs, because
+/// netd seeds smoltcp's random source from the kernel's; seeded as smoltcp's
+/// `Config::new` leaves it, every boot draws the same one. Read off the wire
+/// QEMU's user network was handed, where a server reads them.
+fn netd_seeds_its_stack() -> Result<(), String> {
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+    let mut firsts = Vec::new();
+    for boot in 0..2 {
+        let dump = std::env::temp_dir().join(format!("toyos-seed-{}-{boot}.pcap", std::process::id()));
+        let _ = fs::remove_file(&dump);
+        let options =
+            BootOptions { profile: qemu::Profile::Headless, wire_dump: Some(dump.clone()), ..Default::default() };
+        if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+            return Err("this test needs a NIC and the profile has none".to_string());
+        }
+        let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+        let mut console = qemu.boot_log().to_string();
+        await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
+        // QEMU owns the pcap while it runs.
+        drop(qemu);
+        let frames = fs::read(&dump).map_err(|e| format!("{}: {e}", dump.display()))?;
+        let _ = fs::remove_file(&dump);
+        serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+        let ids = toyos_build::lan::dhcp_transaction_ids(&frames)?;
+        let first = *ids.first().ok_or_else(|| format!("boot {boot} put no DHCP frame on the wire"))?;
+        firsts.push(first);
+    }
+    if firsts[0] == firsts[1] {
+        return Err(format!("both boots' first DHCP transaction ID was {:#010x}", firsts[0]));
+    }
+    eprintln!("  [netcase] the two boots' first DHCP transaction IDs: {:#010x} and {:#010x}", firsts[0], firsts[1]);
+    Ok(())
+}
+
 /// Client pipes netd cannot use, or loses under it, end that client's
 /// connection and never netd: the guest's round trip after each case is the
 /// verdict that netd survived it. This side carries what the guest cannot
@@ -14937,6 +15140,10 @@ fn run_machine_test(
         "netd_held_open" => netd_held_open(rust_bins),
         "netd_stalled_peer" => netd_stalled_peer(rust_bins),
         "netd_udp_refused" => netd_udp_refused(rust_bins),
+        "netd_udp_any_address" => netd_udp_any_address(rust_bins),
+        "dns_resolve" => dns_resolve(),
+        "netd_lookup_let_go" => netd_lookup_let_go(rust_bins),
+        "netd_seeds_its_stack" => netd_seeds_its_stack(),
         "netd_hostile_peer" => {
             // The netcase boot again, and for the same reason: netd's `main`
             // returns on a machine with no NIC, so this is the only config

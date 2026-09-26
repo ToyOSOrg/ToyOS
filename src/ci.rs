@@ -404,7 +404,7 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// The userland crates whose decisions are testable on the host. They name the
 /// host triple because `userland/.cargo/config.toml` cross-compiles by default,
 /// which is also why they cannot be host-workspace members.
-const USERLAND_HOST_CRATES: &[&str] = &["sshd", "calc", "soundd", "logd", "pkg"];
+const USERLAND_HOST_CRATES: &[&str] = &["sshd", "calc", "soundd", "logd", "pkg", "netd"];
 
 fn host_full(root: &Path) -> Vec<Step> {
     let host_triple = crate::toolchain::host_triple();
