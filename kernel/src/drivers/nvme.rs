@@ -100,6 +100,7 @@ mod census {
             (Queue::Io, _) => &IO_OTHER,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+        crate::block::census::command_issued();
     }
 
     pub(super) fn line() -> (u64, u64, u64, u64, u64) {

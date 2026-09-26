@@ -389,7 +389,7 @@ pub fn stats() -> (u64, u64) {
 }
 
 const EFI_LOADER_CODE: u32 = 1;
-const EFI_LOADER_DATA: u32 = 2;
+pub const EFI_LOADER_DATA: u32 = 2;
 const EFI_BOOT_SERVICES_CODE: u32 = 3;
 const EFI_BOOT_SERVICES_DATA: u32 = 4;
 const EFI_CONVENTIONAL_MEMORY: u32 = 7;

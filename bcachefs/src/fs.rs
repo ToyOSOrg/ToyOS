@@ -667,6 +667,11 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         })
     }
 
+    /// The device this filesystem was opened over.
+    pub fn io(&self) -> &IO {
+        &self.io
+    }
+
     /// What this filesystem is named, or [`FsUuid::UNNAMED`].
     pub fn uuid(&self) -> FsUuid {
         self.sb.uuid

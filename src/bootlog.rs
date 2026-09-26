@@ -303,7 +303,7 @@ pub fn split_listing(listing: &str) -> (Option<&str>, Vec<&str>) {
 
 /// The kernel's boot-phase record for the end of boot, in
 /// `kernel/src/log/mod.rs`'s `boot_phase!`.
-const COMPLETE: &str = "Boot: complete (";
+pub const COMPLETE: &str = "Boot: complete (";
 
 /// Why a log is not a passing boot's.
 #[derive(Debug, Clone, PartialEq, Eq)]

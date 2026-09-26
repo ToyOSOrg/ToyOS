@@ -25,7 +25,9 @@ mod spec_volume;
 
 use spec_volume::{fat_offset, Volume, BYTES_PER_SECTOR, CLUSTERS, FAT_SECTORS, NUM_FATS};
 use common::{AdapterCache, Landing};
-use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, File, IoError, MAX_LFN_CHARS, MAX_REPAIR_STEPS};
+use toyos_fat32::{
+    BlockAccess, Error, Fat32, FatTime, File, IoError, RepairNotice, MAX_LFN_CHARS, MAX_REPAIR_STEPS,
+};
 use toyos_fat32_check::Complaint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -724,8 +726,11 @@ fn a_stop_that_refuses_every_retry_for_a_while_leaks_nothing() {
     }));
     assert_eq!(append_two_clusters(&mut fs, &mut h, 0), Err(Error::BudgetExpired));
     assert!(fs.device().refused >= 2, "the link and the rollback's re-drive were both refused");
+    assert!(!RepairNotice::waits_on(Error::BudgetExpired, fs.repair_episode()), "its own refusal, not a wait");
     let episode = fs.repair_episode();
     assert!(episode.is_some(), "the refused rollback is queued");
+    let mut notice = RepairNotice::default();
+    assert!(notice.first_sight(episode), "a repair not yet announced");
 
     // Each later attempt, and a sync, meets the first attempt's repair still
     // unlanded, and says so by name rather than as a refusal of its own.
@@ -734,6 +739,8 @@ fn a_stop_that_refuses_every_retry_for_a_while_leaks_nothing() {
         assert_eq!(append_two_clusters(&mut fs, &mut h, attempt), Err(Error::RepairPending));
         assert_eq!(fs.sync(), Err(Error::RepairPending), "sync on attempt {attempt}");
         assert_eq!(fs.repair_episode(), episode, "the same repair, still pending");
+        assert!(!notice.first_sight(fs.repair_episode()), "announced again on attempt {attempt}");
+        assert!(RepairNotice::waits_on(Error::RepairPending, fs.repair_episode()));
     }
     fs.device().plan = None;
     append_two_clusters(&mut fs, &mut h, 10).expect("attempt 10 on an answering device");
@@ -753,9 +760,11 @@ fn a_stop_that_refuses_every_retry_for_a_while_leaks_nothing() {
     assert_eq!(fs.write(f, 1536, &common::pattern(1024, 7)), Err(Error::BudgetExpired));
     let later = fs.repair_episode();
     assert!(later.is_some() && later != episode, "{later:?} after {episode:?}");
+    assert!(notice.first_sight(later), "a later repair is announced too");
     fs.device().plan = None;
     fs.sync().expect("sync lands the later repair");
     assert_eq!(fs.repair_episode(), None);
+    assert!(!notice.first_sight(fs.repair_episode()), "nothing pending is announced");
     assert_clean(&mut fs, true, "after the tenth attempt and the refused write after it");
     (s.verify)(&mut fs, &mut h);
 }
@@ -916,10 +925,12 @@ fn a_remove_whose_free_the_device_fails_answers_ok_and_the_next_call_the_failure
     assert!(fs.device().refused > refused, "the next call drove the free first");
     assert!(!fs.exists("after.txt").expect("exists"), "a call behind an unlanded free starts nothing");
     assert_eq!(fs.sync(), Err(Error::Io));
+    assert!(RepairNotice::waits_on(Error::Io, fs.repair_episode()), "an `Io` behind the queued free is that free");
 
     fs.device().plan = None;
     fs.create("after.txt", stamp()).expect("create once the device answers");
     assert_eq!(fs.pending_repair(), 0);
+    assert!(!RepairNotice::waits_on(Error::Io, fs.repair_episode()));
     fs.sync().expect("sync");
     assert_clean(&mut fs, true, "after the failed free landed");
     (s.verify)(&mut fs, &mut None);

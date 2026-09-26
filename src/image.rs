@@ -3,7 +3,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::Path;
 
-use bcachefs::{Formatted, FsUuid, VecBlockIO};
+use bcachefs::{BlockBuf, Formatted, FsUuid, Superblock, VecBlockIO};
 use sha2::{Digest, Sha256};
 use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
 
@@ -33,15 +33,33 @@ pub fn create_root_image(
     let btree_blocks = (total_entries / 30).max(2);
     let overhead = 64;
     let total_blocks = (1 + overhead + btree_blocks + data_blocks) * 11 / 10;
-    // Whole alignment units: `Superblock::check` refuses a superblock whose
-    // block count is not its view's exactly, so a partitioner rounding the
-    // size up to the alignment would leave an image nothing can mount.
-    let total_blocks = align_up(total_blocks.max(64), PARTITION_ALIGN / 4096) as u64;
+    let estimate = align_up(total_blocks.max(64), PARTITION_ALIGN / 4096) as u64;
+    let spacious = format_root(&files, &symlinks, estimate, quiet);
 
+    // Built again at the blocks the estimate's build used and no more: ROOT is
+    // read-only, and the loader reads and the kernel keeps every block of it,
+    // so a free block is a read and a page for nothing. Fewer blocks need no
+    // more bitmap, so the second build fits in what the first used.
+    let sb = superblock_of(&spacious);
+    let used = sb.block_count - sb.free_blocks;
+    format_root(&files, &symlinks, align_up(used as usize, PARTITION_ALIGN / 4096) as u64, true)
+}
+
+/// A ROOT volume of `total_blocks`, holding `files` and `symlinks` in the
+/// order given. Whole alignment units: `Superblock::check` refuses a
+/// superblock whose block count is not its view's exactly, so a partitioner
+/// rounding the size up to the alignment would leave an image nothing can
+/// mount.
+fn format_root(
+    files: &[&(String, Vec<u8>)],
+    symlinks: &[&(String, String)],
+    total_blocks: u64,
+    quiet: bool,
+) -> Vec<u8> {
     let io = VecBlockIO::new(total_blocks);
     let mut fs = Formatted::format(io).expect("format an in-memory image");
 
-    for (name, data) in &files {
+    for (name, data) in files {
         if !quiet {
             eprintln!("root: adding '{}' ({} bytes)", name, data.len());
         }
@@ -49,7 +67,7 @@ pub fn create_root_image(
             .unwrap_or_else(|e| panic!("root: failed to add '{}': {:?}", name, e));
     }
 
-    for (name, target) in &symlinks {
+    for (name, target) in symlinks {
         if !quiet {
             eprintln!("root: symlink '{}' -> '{}'", name, target);
         }
@@ -57,7 +75,7 @@ pub fn create_root_image(
             .unwrap_or_else(|e| panic!("root: failed to symlink '{}' -> '{}': {:?}", name, target, e));
     }
 
-    fs.set_uuid(root_uuid(&files, &symlinks));
+    fs.set_uuid(root_uuid(files, symlinks));
     fs.into_io().expect("write an in-memory image").into_vec()
 }
 
@@ -89,11 +107,12 @@ fn root_uuid(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> Fs
 /// the kernel argument says what the image says rather than what whoever
 /// assembled it meant to stamp.
 pub fn root_uuid_of(bytes: &[u8]) -> FsUuid {
-    let block = <[u8; 4096]>::try_from(&bytes[..4096])
-        .expect("a bcachefs image is at least one block");
-    bcachefs::Superblock::parse(&bcachefs::BlockBuf(block))
-        .expect("the ROOT image this build wrote carries a superblock")
-        .uuid
+    superblock_of(bytes).uuid
+}
+
+fn superblock_of(bytes: &[u8]) -> Superblock {
+    let block = <[u8; 4096]>::try_from(&bytes[..4096]).expect("a bcachefs image is at least one block");
+    Superblock::parse(&BlockBuf(block)).expect("the ROOT image this build wrote carries a superblock")
 }
 
 /// Takes the artifacts as bytes rather than reading them: the caller stages them
@@ -849,6 +868,18 @@ mod tests {
     /// rather than a placeholder: the assembler reads its superblock.
     fn tiny_root() -> Vec<u8> {
         create_root_image(&[("bin/init".to_string(), b"init".to_vec())], &[], true)
+    }
+
+    /// ROOT carries its contents and less than one alignment unit of free
+    /// blocks: the loader reads every block of it and the kernel keeps them.
+    #[test]
+    fn root_carries_less_than_an_alignment_unit_of_free_blocks() {
+        let files: Vec<(String, Vec<u8>)> =
+            (0..8u8).map(|i| (format!("bin/f{i}"), vec![i; 3 << 20])).collect();
+        let image = create_root_image(&files, &[], true);
+        let sb = superblock_of(&image);
+        assert_eq!(sb.block_count * 4096, image.len() as u64);
+        assert!(sb.free_blocks < (PARTITION_ALIGN / 4096) as u64, "{} free blocks", sb.free_blocks);
     }
 
     /// The two volumes this build writes break no rule of the format, and the

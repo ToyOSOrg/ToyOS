@@ -649,6 +649,18 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // over records, with no clock in the judging, so all six are Parallel.
     ("smp_roster_and_tsc_trail", Sched::Parallel, Tier::Fast),
     ("pmm_accounting", Sched::Parallel, Tier::Fast),
+    // ROOT is the loader's image in memory: the kernel says it mounted it
+    // from memory, and that init was spawned with no storage command issued;
+    // and a loader that hands no image is a boot refused by name, never one
+    // that goes to a disk for ROOT. Both are records of one boot each, with no
+    // clock in the verdict.
+    ("root_from_memory", Sched::Parallel, Tier::Fast),
+    ("root_withheld_refused", Sched::Parallel, Tier::Fast),
+    // The boot from power-on, as the kernel converts the loader's TSC readings:
+    // judged against the loader's raw counts and the kernel's own rate, and
+    // bounded above by the host's clock, which is Parallel-safe because load
+    // only widens that bound.
+    ("boot_from_power_on", Sched::Parallel, Tier::Fast),
     ("acpi_table_inventory", Sched::Parallel, Tier::Fast),
     ("timer_calibration", Sched::Parallel, Tier::Fast),
     ("pci_inventory", Sched::Parallel, Tier::Fast),
@@ -1395,12 +1407,19 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
-    // The three ways a machine's ROOT set can be wrong. Serial, not by
-    // association: each stages a whole boot image and up to a second 32 GiB
-    // stick beside it, and the three of them widening the parallel phase is
-    // what pushed `port_poll_churn` over its 300 s ceiling twice in a row.
+    // What the loader does with a ROOT set: a bad candidate, an absent name, an
+    // overlapping candidate, a twin on the boot disk, an unreadable superblock
+    // and an unreadable chunk refused by name, a bad primary superblock read
+    // past to its backup, and a twin on another disk never read. Serial, not by
+    // association: each stages a whole boot image, one a second 32 GiB stick
+    // beside it.
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
+    ("root_chunk_refused", Sched::Serial, Tier::Fast),
+    ("root_candidate_overlaps", Sched::Serial, Tier::Fast),
+    ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Fast),
+    ("root_backup_superblock", Sched::Serial, Tier::Fast),
+    ("root_superblock_unreadable", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
@@ -1489,6 +1508,161 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Same: whether a run that did not attempt most of the suite's measured cost says
     // so where its verdict is read.
     ("nightly_tier_is_announced", Sched::Parallel, Tier::Fast),
+];
+
+/// The test binaries a [`MACHINE_TESTS`] or [`SCREEN_TESTS`] entry runs, which
+/// are all its boots carry of the suite's catalogue: **ROOT is held whole in
+/// the guest's memory**, so a binary a boot does not run is memory the guest
+/// pays for nothing, twelve guests at a time.
+///
+/// A name with no row carries none. A grouped boot carries its members' union;
+/// what a named binary spawns or links is carried with it
+/// ([`qemu::carrying`]). A `run` of a binary the boot does not carry panics
+/// naming this table, and a row naming what the suite did not build panics
+/// before the boot.
+const CARRIES: &[(&str, &[&str])] = &[
+    ("writeback_reopen", &["test_rs_writeback_reopen"]),
+    ("writeback_spawn", &["test_rs_writeback_spawn"]),
+    ("xhci_second_controller", &["test_rs_input_events"]),
+    ("xhci_msi_only", &["test_rs_input_events"]),
+    ("metal_sim_input", &["test_rs_input_events"]),
+    ("xhci_flap", &["test_rs_input_events"]),
+    ("xhci_hotplug", &["test_rs_input_events"]),
+    ("xhci_hid_break", &["test_rs_input_events"]),
+    ("nvme_large_device", &["test_rs_nvme_home_roundtrip"]),
+    ("va_exhaustion", &["test_rs_va_exhaustion"]),
+    ("readdir_bound", &["test_rs_readdir_bound"]),
+    ("mkdir_cap", &["test_rs_mkdir_cap"]),
+    ("fpu_isolation", &["test_rs_fpu_isolation"]),
+    ("gsbase_locked", &["test_rs_gsbase_locked"]),
+    ("sched_check_build", &["test_rs_sched_stress"]),
+    ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
+    ("heap_ceiling_recovery", &["test_rs_heap_ceiling"]),
+    ("cache_eviction", &["test_rs_cache_eviction"]),
+    ("irq_census_conservation", &["test_rs_std_mmap"]),
+    ("i8042_health_cadence", &["test_rs_i8042_keyboard"]),
+    ("i8042_health", &["test_rs_i8042_keyboard"]),
+    ("i8042_fadt_denial", &["test_rs_i8042_keyboard"]),
+    ("i8042_kbd_echo", &["test_rs_i8042_keyboard"]),
+    ("i8042_undecoded_bytes", &["test_rs_i8042_keyboard"]),
+    ("i8042_quarantine", &["test_rs_i8042_keyboard"]),
+    ("i8042_keyboard", &["test_rs_i8042_keyboard"]),
+    ("i8042_no_spurious_wake", &["test_rs_i8042_keyboard"]),
+    ("i8042_mouse", &["test_rs_i8042_mouse"]),
+    ("swiss_german_layout", &["test_rs_locale_gate"]),
+    ("locale_detect", &["test_rs_locale_gate"]),
+    ("locale_detect_unrecognized", &["test_rs_locale_gate"]),
+    ("netd_connection_caps", &["test_rs_netd_caps"]),
+    ("netd_listener_forgery", &["test_rs_netd_listener_forgery"]),
+    ("netd_slow_reader", &["test_rs_netd_slow_reader"]),
+    ("netd_refused_pipes", &["test_rs_netd_refused_pipes"]),
+    ("netd_held_open", &["test_rs_netd_held_open"]),
+    ("netd_stalled_peer", &["test_rs_netd_stalled_peer"]),
+    ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
+    ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
+    ("launcher_refusals", &["test_rs_launcher_refusals"]),
+    ("spawn_cwd", &["test_rs_spawn_cwd"]),
+    ("input_claim_absent", &["test_rs_input_absent"]),
+    ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
+    ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
+    ("userdev_dma_fault", &["test_rs_handle_basic"]),
+    ("userdev_residue_is_its_own", &["test_rs_userdev_residue"]),
+    (
+        "inspect_reads_its_owners",
+        &["test_rs_inspect_denied", "test_rs_inspect_plays", "test_rs_inventory_bounds"],
+    ),
+    ("metal_sim_compositor", METAL_SIM_CLIENTS),
+    ("metal_sim_scanout_wc", METAL_SIM_CLIENTS),
+    ("metal_sim_window_caps", METAL_SIM_CLIENTS),
+    ("metal_sim_ipc_hostile_peer", METAL_SIM_CLIENTS),
+    ("metal_sim_compositor_stall", METAL_SIM_CLIENTS),
+    ("metal_sim_client_death", METAL_SIM_CLIENTS),
+    ("metal_sim_window_drag", &["test_rs_window_drag"]),
+    ("desktop_window_child", &["test_rs_window_child"]),
+    ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
+    ("doom_music", &["test_rs_doom_music"]),
+    ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
+    ("metal_sim_null_audio", &["test_rs_audio_tone"]),
+    ("null_sink_shipped_client", &["test_rs_null_sink_client_exits"]),
+    ("hda_tone", &["test_rs_audio_tone"]),
+    ("hda_client_stall", &["test_rs_hda_client_stall"]),
+    ("latency_wake", &["test_rs_cyclictest", "test_rs_sched_stress"]),
+    ("smp_failed_ap_leaves_no_hole", &["test_rs_smp_hole_shootdown"]),
+    ("sshd_exec", &["test_rs_empty_dir_stat"]),
+    ("sshd_files", &["test_rs_empty_dir_stat"]),
+    ("sshd_key_auth", &["test_rs_empty_dir_stat"]),
+    ("https_tls13", &["test_rs_https_fetch"]),
+    ("https_tls13_e1000e", &["test_rs_https_fetch"]),
+    ("pkg_install_gbae", &["test_rs_pkg_launch_gbae"]),
+    ("apps_and_home_are_one_filesystem", &["test_rs_hierarchy_paths"]),
+    ("broken_data_volume_is_absent", &["test_rs_home_absent"]),
+    ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
+    ("home_budget_refusal_retried", &["test_rs_home_fsync_budget"]),
+    ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
+    ("so_cache_refusals", &["test_rs_so_cache_policy"]),
+    ("boot_volume_metadata_error", &["test_rs_boot_volume_metadata_error"]),
+    ("esp_filesystem", &["test_rs_esp_files"]),
+    ("log_flush_retry", &["test_rs_esp_files"]),
+    ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),
+    ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
+    ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
+    ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
+    ("ftruncate_flush_race", &["test_rs_ftruncate_flush_race", "test_rs_fs_rename_durable"]),
+    ("log_backing_read_error", &["test_rs_log_volume_reread"]),
+    ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
+    ("writeback_durability", &["test_rs_writeback_durability", "test_rs_fat_backing_revoked"]),
+    ("kernel_log_file", &["test_rs_writeback_durability"]),
+    ("double_fault_stack", &["test_rs_test_panic_child"]),
+    ("idle_stack_guard", &["test_rs_test_panic_child"]),
+    ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
+    ("dump_nmi_probe", &["test_rs_dump_stage_load"]),
+    ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
+    ("syscall_window_nmi_controls", &["test_rs_nmi_window_spin"]),
+    ("partition_claim", &["test_rs_partition_claimant"]),
+    ("partition_claim_gives_up", &["test_rs_partition_claimant"]),
+    ("partition_claim_departure", &["test_rs_partition_claimant"]),
+    ("log_program_line", &["test_rs_log_origin"]),
+    ("log_program_forgery", &["test_rs_log_forger"]),
+    ("log_program_flood", &["test_rs_log_flood"]),
+    ("log_program_line_after_its_records", &["test_rs_log_hold"]),
+    ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
+    ("log_stream", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
+    ("log_stream_e1000e", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
+    ("log_stream_stalled_reader", &["test_rs_log_flood"]),
+    ("console_line_atomicity", &["test_rs_console_line_atomicity"]),
+    ("c_capture_ignores_daemon_lines", &["test_c_71_macro_empty_arg"]),
+    ("quiesce_stops_the_machine", &["test_rs_quiesce_writers"]),
+    ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
+    ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
+    ("quiesce_wakes_on_the_last_exit", &["test_rs_quiesce_last"]),
+    ("quiesce_dump_holds_the_stopped", &["test_rs_quiesce_writers"]),
+    ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
+    ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
+    ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
+    ("swap_fault_tells_its_holder", &["test_rs_swap_claim_astray"]),
+    ("swap_resets_the_function", &["test_rs_swap_flr_probe"]),
+    ("swap_not_inherited", &["test_rs_swap_probe"]),
+    ("wall_clock_file", &["test_rs_wall_clock_now"]),
+    ("wall_clock_rtc_dead", &["test_rs_wall_clock_now"]),
+    ("wall_clock_rtc_unstable", &["test_rs_wall_clock_now"]),
+    ("wall_clock_no_century", &["test_rs_wall_clock_now"]),
+    ("wall_clock_century_register", &["test_rs_wall_clock_now"]),
+    ("wall_clock_zone", &["test_rs_wall_clock_now"]),
+    ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
+    ("screen_console_scroll", &["test_rs_test_screen_churn"]),
+    ("screen_console_panic", &["test_rs_test_panic_child"]),
+    ("screen_fatal_halt", &["test_rs_test_panic_child"]),
+    ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
+    ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
+];
+
+/// The clients every `tests/metalcase` desktop boot carries: the group shares
+/// one boot, so each member's row names them all.
+const METAL_SIM_CLIENTS: &[&str] = &[
+    "test_rs_window_caps",
+    "test_rs_ipc_hostile_peer",
+    "test_rs_compositor_stall",
+    "test_rs_compositor_client_death",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -3580,11 +3754,13 @@ fn measure_audio_run(
     };
     // Bounds every duration soundd can report: its whole life is inside this
     // process's. See `audio::check_physical`.
+    let job = format!("test_rs_{name}");
+    let carried = qemu::carrying(c_bins, rust_bins, [job.as_str()]);
     let run_start = std::time::Instant::now();
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
-        c_bins,
-        rust_bins,
+        &carried.c,
+        &carried.rust,
         BootOptions {
             smp,
             kernel_params: if SLOW_USB.load(std::sync::atomic::Ordering::Relaxed) {
@@ -3596,7 +3772,7 @@ fn measure_audio_run(
         },
     );
 
-    let result = qemu.run_test(&format!("test_rs_{name}"), Duration::from_secs(30));
+    let result = qemu.run_test(&job, Duration::from_secs(30));
     if let Some(err) = &result.error {
         return Err(err.to_string());
     }
@@ -10868,6 +11044,15 @@ fn run_machine_test(
         "root_named_but_absent" => {
             common::volumes::root_named_but_absent(test_config, c_bins, rust_bins)
         }
+        "root_chunk_refused" => common::volumes::root_chunk_refused(test_config, c_bins, rust_bins),
+        "root_candidate_overlaps" => common::volumes::root_candidate_overlaps(test_config, c_bins, rust_bins),
+        "root_named_twice_on_the_boot_disk" => {
+            common::volumes::root_named_twice_on_the_boot_disk(test_config, c_bins, rust_bins)
+        }
+        "root_backup_superblock" => common::volumes::root_backup_superblock(test_config, c_bins, rust_bins),
+        "root_superblock_unreadable" => {
+            common::volumes::root_superblock_unreadable(test_config, c_bins, rust_bins)
+        }
         "root_named_twice" => {
             common::volumes::root_named_twice(test_config, c_bins, rust_bins)
         }
@@ -12595,12 +12780,13 @@ fn run_machine_test(
             );
             let mut boot = serial::Serial::boot(&qemu);
             // Every phase up to the wedge, oldest first — the first line the
-            // machine ever logs, both boot checkpoints before phase 3, and a
-            // phase-3 line from between them and the wedge.
+            // machine ever logs, a line from between the first two checkpoints,
+            // and the storage phase the wedge follows.
             for needle in [
                 "serial: 16550 loopback read",
                 "Boot: CPU ready",
                 "gpt: firmware booted us from partition",
+                "Boot: peripherals ready",
                 "Boot: storage ready",
                 WEDGE,
             ] {
@@ -12610,9 +12796,7 @@ fn run_machine_test(
             // is wedged rather than slow — over a window the later phases could
             // have reached, the marker here being the wedge line itself.
             boot.push(&qemu.drain_serial(STAYED_WEDGED));
-            for needle in ["Boot: peripherals ready", "Boot: complete"] {
-                boot.must_not_say(needle)?;
-            }
+            boot.must_not_say("Boot: complete")?;
             eprintln!(
                 "  [wedge] {} kernel line(s) reached the console from a machine that never \
                  reached a scheduler pass",
@@ -13042,6 +13226,31 @@ fn run_machine_test(
         "pmm_accounting" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
             pmm_accounting(qemu.boot_log())
+        }
+        "root_from_memory" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            root_from_memory(qemu.boot_log())
+        }
+        "boot_from_power_on" => {
+            let asked = std::time::Instant::now();
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            let host = asked.elapsed();
+            // The loader speaks on the firmware's serial, the kernel on the console.
+            boot_from_power_on(&format!("{}{}", qemu.uart_log(), qemu.boot_log()), host)
+        }
+        "root_withheld_refused" => {
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &[ROOT_WITHHELD_PARAM],
+                    ready_marker: ROOT_WITHHELD_REFUSAL,
+                    ..Default::default()
+                },
+            );
+            // Both channels: this kernel dies before virtio-console init.
+            root_withheld_refused(&format!("{}{}", qemu.boot_log(), qemu.uart_log()))
         }
         "acpi_table_inventory" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
@@ -17240,7 +17449,8 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
 /// and drain one console between them.
 #[derive(Clone)]
 enum Task<'a> {
-    /// Rust and C tests on one guest, and the kernel that guest boots.
+    /// Rust and C tests on one lane's guests in turn ([`shared_boots`]), and
+    /// the kernel they boot.
     ///
     /// Two blocks rather than one: [`ACTUATOR_TESTS`] needs `SYS_DEBUG` and
     /// everything else must not have it, which is what makes the second list
@@ -18563,6 +18773,49 @@ struct Bins<'a> {
     rust_bins: &'a [(String, Vec<u8>)],
 }
 
+/// What a task's boots carry: its members' [`CARRIES`] rows, unioned.
+fn carried_by(names: &[&str], bins: &Bins<'_>) -> qemu::Carried {
+    let rows = CARRIES.iter().filter(|(test, _)| names.contains(test));
+    qemu::carrying(bins.c_bins, bins.rust_bins, rows.flat_map(|(_, carries)| carries.iter().copied()))
+}
+
+/// The most test-binary bytes one shared boot carries. The list is run on
+/// boots of one lane in turn, each carrying its own part, so what a shared
+/// guest holds is bounded by this rather than by the list — and a guest's
+/// memory is released between parts. A part costs one boot.
+const SHARED_BOOT_BYTES: usize = 64 << 20;
+
+/// `tests` cut in order into parts whose binaries fit [`SHARED_BOOT_BYTES`],
+/// each with what it carries; a test whose own binaries do not fit is a part
+/// by itself.
+fn shared_boots<'a>(tests: &[&'a TestDef], bins: &Bins<'_>) -> Vec<(Vec<&'a TestDef>, qemu::Carried)> {
+    let mut parts: Vec<Vec<&TestDef>> = Vec::new();
+    let mut held: BTreeMap<String, usize> = BTreeMap::new();
+    for &test in tests {
+        let own = qemu::carrying(bins.c_bins, bins.rust_bins, [test.qemu_name.as_str()]).sizes();
+        let mut with = held.clone();
+        with.extend(own.clone());
+        match parts.last_mut() {
+            Some(part) if with.values().sum::<usize>() <= SHARED_BOOT_BYTES => {
+                part.push(test);
+                held = with;
+            }
+            _ => {
+                parts.push(vec![test]);
+                held = own;
+            }
+        }
+    }
+    parts
+        .into_iter()
+        .map(|part| {
+            let carried =
+                qemu::carrying(bins.c_bins, bins.rust_bins, part.iter().map(|t| t.qemu_name.as_str()));
+            (part, carried)
+        })
+        .collect()
+}
+
 fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Outcome>) {
     // Both clocks, at every test, because what the host did *between* two of
     // them is a different question from what it did during one: a lid closed
@@ -18577,6 +18830,7 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
     };
     match task {
         Task::Shared(tests, features) => {
+            let boots = shared_boots(&tests, bins);
             // The boot itself can fail, and it used to take the run with it.
             // Reporting the block's tests against its reason keeps the count
             // honest and says which one it died on.
@@ -18588,73 +18842,83 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                 // produce one are this line and `QemuInstance::shutdown`, and
                 // `shutdown` takes the guest by value.
                 let smp = shared_smp(&tests[0].name);
-                let boot = |_: qemu::LaneFree| {
-                    QemuInstance::boot_with_options(
-                        bins.test_config,
-                        bins.c_bins,
-                        bins.rust_bins,
-                        BootOptions { kernel_features: features, smp, ..Default::default() },
-                    )
-                };
-                let mut qemu = boot(qemu::LaneFree::no_guest_yet());
-                let mut reboots = 0usize;
-                for test in &tests {
-                    let start = common::clock::mark();
-                    let mut result = qemu.run_test(&test.qemu_name, test.timeout);
-                    // **A guest that stopped answering is answered with a new
-                    // one.** Its turn came, its whole ceiling passed, and it was
-                    // never announced — so what this measured is the previous
-                    // test's wreckage and not this one. Run `31241099454` is the
-                    // bill: `abuse_gpu_resolution` took the shared boot with it
-                    // and the 150 tests behind it each paid a full ceiling for a
-                    // guest that was gone, 65 minutes of nothing and a job
-                    // cancelled at 90.
-                    //
-                    // A reboot rather than an abandonment because every one of
-                    // those tests still has a verdict owed to it, and the
-                    // alternative is a suite that reports 150 reds it never ran.
-                    // Bounded, because a block whose every member kills the
-                    // guest must not boot one per test.
-                    //
-                    // **The old guest goes before the new one exists.** This
-                    // was `qemu = boot()`, and Rust evaluates the right-hand
-                    // side first: the replacement was launched, and waited on,
-                    // while the instance it replaced still held the lane's
-                    // `test-nvme-*.img` open for write. It exited 1 on QEMU's
-                    // own image lock before saying anything, `wait_for_ready`
-                    // panicked, and that panic escaped this block — so **every
-                    // test still owed a verdict was reported red on it**. 129
-                    // of one run's 131 reds carried that one sentence on
-                    // 2026-08-17, against two real failures. The ordering is
-                    // now the type's: `shutdown` takes the guest by value and
-                    // is the only thing `boot` can be called with.
-                    if result.boot_stopped_answering() && reboots < MAX_SHARED_REBOOTS {
-                        reboots += 1;
-                        eprintln!(
-                            "  ---- the shared boot stopped answering before {}; rebooting \
-                             ({reboots}/{MAX_SHARED_REBOOTS}) ----",
-                            test.name
-                        );
-                        qemu = boot(qemu.shutdown());
-                        result = qemu.run_test(&test.qemu_name, test.timeout);
+                let mut free = qemu::LaneFree::no_guest_yet();
+                for (part, carried) in &boots {
+                    eprintln!(
+                        "  [shared] {} test(s) on {features:?}, carrying {} binaries, {} MiB",
+                        part.len(),
+                        carried.c.len() + carried.rust.len(),
+                        carried.bytes() >> 20
+                    );
+                    let boot = |_: qemu::LaneFree| {
+                        QemuInstance::boot_with_options(
+                            bins.test_config,
+                            &carried.c,
+                            &carried.rust,
+                            BootOptions { kernel_features: features, smp, ..Default::default() },
+                        )
+                    };
+                    let mut qemu = boot(free);
+                    let mut reboots = 0usize;
+                    for test in part {
+                        let start = common::clock::mark();
+                        let mut result = qemu.run_test(&test.qemu_name, test.timeout);
+                        // **A guest that stopped answering is answered with a new
+                        // one.** Its turn came, its whole ceiling passed, and it was
+                        // never announced — so what this measured is the previous
+                        // test's wreckage and not this one. Run `31241099454` is the
+                        // bill: `abuse_gpu_resolution` took the shared boot with it
+                        // and the 150 tests behind it each paid a full ceiling for a
+                        // guest that was gone, 65 minutes of nothing and a job
+                        // cancelled at 90.
+                        //
+                        // A reboot rather than an abandonment because every one of
+                        // those tests still has a verdict owed to it, and the
+                        // alternative is a suite that reports 150 reds it never ran.
+                        // Bounded, because a block whose every member kills the
+                        // guest must not boot one per test.
+                        //
+                        // **The old guest goes before the new one exists.** This
+                        // was `qemu = boot()`, and Rust evaluates the right-hand
+                        // side first: the replacement was launched, and waited on,
+                        // while the instance it replaced still held the lane's
+                        // `test-nvme-*.img` open for write. It exited 1 on QEMU's
+                        // own image lock before saying anything, `wait_for_ready`
+                        // panicked, and that panic escaped this block — so **every
+                        // test still owed a verdict was reported red on it**. 129
+                        // of one run's 131 reds carried that one sentence on
+                        // 2026-08-17, against two real failures. The ordering is
+                        // now the type's: `shutdown` takes the guest by value and
+                        // is the only thing `boot` can be called with.
+                        if result.boot_stopped_answering() && reboots < MAX_SHARED_REBOOTS {
+                            reboots += 1;
+                            eprintln!(
+                                "  ---- the shared boot stopped answering before {}; rebooting \
+                                 ({reboots}/{MAX_SHARED_REBOOTS}) ----",
+                                test.name
+                            );
+                            qemu = boot(qemu.shutdown());
+                            result = qemu.run_test(&test.qemu_name, test.timeout);
+                        }
+                        // Between the test and its check, with the guest still up:
+                        // see [`TestDef::settle`].
+                        (test.settle)(&mut qemu, &mut result);
+                        let reason = (!(test.check)(&result)).then(|| {
+                            result
+                                .error
+                                .as_ref()
+                                .map(ToString::to_string)
+                                // What the guest said rides the reason, as a machine
+                                // test's capture does: a quarantine row quotes the
+                                // assertion, and an exit code is every assertion's.
+                                .unwrap_or_else(|| {
+                                    format!("exit code {:?}\n{}", result.exit_code, result.stdout)
+                                })
+                        });
+                        done += 1;
+                        send(test.name.clone(), reason, start);
                     }
-                    // Between the test and its check, with the guest still up:
-                    // see [`TestDef::settle`].
-                    (test.settle)(&mut qemu, &mut result);
-                    let reason = (!(test.check)(&result)).then(|| {
-                        result
-                            .error
-                            .as_ref()
-                            .map(ToString::to_string)
-                            // What the guest said rides the reason, as a machine
-                            // test's capture does: a quarantine row quotes the
-                            // assertion, and an exit code is every assertion's.
-                            .unwrap_or_else(|| {
-                                format!("exit code {:?}\n{}", result.exit_code, result.stdout)
-                            })
-                    });
-                    done += 1;
-                    send(test.name.clone(), reason, start);
+                    free = qemu.shutdown();
                 }
                 Ok(())
             });
@@ -18665,13 +18929,14 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
             }
         }
         Task::Machine(names) => {
+            let carried = carried_by(&names, bins);
             // Dropped with the task, so no group's guest outlives the worker
             // that booted it.
             let mut held: Grouped = None;
             for name in names {
                 let start = common::clock::mark();
                 let outcome = catching(|| {
-                    run_machine_test(name, bins.test_config, bins.c_bins, bins.rust_bins, &mut held)
+                    run_machine_test(name, bins.test_config, &carried.c, &carried.rust, &mut held)
                 });
                 // **A member that failed does not hand its guest on.** The
                 // shared block answers a boot that stopped answering with a new
@@ -18693,9 +18958,10 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
             }
         }
         Task::Screen(name) => {
+            let carried = carried_by(&[name], bins);
             let start = common::clock::mark();
             let outcome =
-                catching(|| run_screen_test(name, bins.test_config, bins.c_bins, bins.rust_bins));
+                catching(|| run_screen_test(name, bins.test_config, &carried.c, &carried.rust));
             send(name.to_string(), outcome.err(), start);
         }
     }
@@ -19288,6 +19554,14 @@ fn the_metal_gates_refuse_what_they_name() -> Result<(), String> {
 
 fn check_registration() {
     check_metal_registration();
+    let mut rows: BTreeSet<&str> = BTreeSet::new();
+    for (test, _) in CARRIES {
+        assert!(rows.insert(test), "CARRIES has two rows for {test}");
+        assert!(
+            MACHINE_TESTS.iter().chain(SCREEN_TESTS).any(|(name, _, _)| name == test),
+            "CARRIES has a row for {test}, which no MACHINE_TESTS or SCREEN_TESTS entry registers"
+        );
+    }
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for name in MACHINE_TESTS
         .iter()
@@ -19602,6 +19876,11 @@ fn main() {
     let all_tests = build_test_registry(&rust_bins, &c_compiled);
     check_no_collisions(&all_tests);
     check_metal_only_unshared(&rust_bins, &c_bins);
+    // Every row against the catalogue before any boot, so a name the suite did
+    // not build is refused here and not by whichever worker reaches it.
+    for (_, names) in CARRIES {
+        qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
+    }
     check_shard_partition(&all_tests);
     // Every name this process could produce a verdict for, which is what a
     // quarantine row has to be one of. Taken before the filter, so a filtered
@@ -19715,8 +19994,9 @@ fn main() {
         let actuator_count =
             tests_to_run.iter().filter(|t| ACTUATOR_TESTS.contains(&t.name.as_str())).count();
         eprintln!(
-            "[toyos] The shared boot carries {} C + {} Rust binaries: {} on the shipping \
+            "[toyos] The shared boots run {} of {} C + {} Rust binaries: {} on the shipping \
              kernel, {} on the actuator one",
+            tests_to_run.len(),
             c_bins.len(),
             rust_bins.len(),
             tests_to_run.len() - actuator_count,
@@ -19923,4 +20203,130 @@ fn main() {
 
     eprint!("{}", tally.summary(total, suite_start.elapsed(), suite_start.suspended()));
     run.exit(tally.exit_code());
+}
+
+/// `rootfs::MOUNTED_FROM_MEMORY`: the kernel mounted ROOT off the loader's image.
+const ROOT_MOUNTED_FROM_MEMORY: &str = "root: mounted read-only from memory at";
+/// `rootfs::INIT_WITHOUT_A_DISK`, followed by the count of storage commands.
+const INIT_WITHOUT_A_DISK: &str = "boot: init spawned with ROOT from memory; storage commands before it:";
+/// `toyos_abi::boot::WITHHOLD_ROOT_PARAM`.
+const ROOT_WITHHELD_PARAM: &str = toyos_abi::boot::WITHHOLD_ROOT_PARAM;
+/// The kernel's refusal of a handoff that carries no ROOT image.
+const ROOT_WITHHELD_REFUSAL: &str =
+    "boot: the loader handed no ROOT image, and this kernel reads ROOT from memory and nowhere else";
+
+/// ROOT came from memory: the kernel's mount record names the image, and the
+/// record at init's spawn counts zero storage commands before it — every NVMe
+/// command and every USB mass-storage command counts, so a ROOT read off a disk
+/// could not leave it at zero. Both precede the first storage driver's line.
+fn root_from_memory(log: &str) -> Result<(), String> {
+    let mounted = log
+        .find(ROOT_MOUNTED_FROM_MEMORY)
+        .ok_or_else(|| format!("no {ROOT_MOUNTED_FROM_MEMORY:?} record in the boot log"))?;
+    let spawned = log
+        .find(INIT_WITHOUT_A_DISK)
+        .ok_or_else(|| format!("no {INIT_WITHOUT_A_DISK:?} record in the boot log"))?;
+    let count = log[spawned + INIT_WITHOUT_A_DISK.len()..]
+        .lines()
+        .next()
+        .map(str::trim)
+        .ok_or("the spawn record carries no count")?;
+    if count != "0" {
+        return Err(format!("init was spawned after {count} storage command(s), wanted none"));
+    }
+    if mounted > spawned {
+        return Err("the ROOT mount record follows init's spawn".to_string());
+    }
+    for driver in ["nvme:", "NVMe:", "usb-storage:", "gpt: device"] {
+        if let Some(at) = log.find(driver) {
+            if at < spawned {
+                return Err(format!("{driver:?} spoke before init's spawn record"));
+            }
+        }
+    }
+    eprintln!("  [root] mounted from memory, init spawned with 0 storage commands before it");
+    Ok(())
+}
+
+/// The loader's line: its TSC at entry, at the handoff, and `IA32_TSC_ADJUST`.
+const LOADER_TSC: &str = "Loader TSC: ";
+/// The kernel's line, followed by its four spans in milliseconds.
+const POWER_ON: &str = "boot: power-on to loader ";
+/// The kernel's `TSC:` record, followed by the period it calibrated.
+const TSC_PERIOD: &str = "MHz (period=";
+
+/// **The boot from power-on is the loader's raw counts at the kernel's rate,
+/// and no longer than the host took.** The kernel's first two spans are the
+/// loader's counts converted at the `TSC:` record's period, the ROOT read sits
+/// inside the loader's span, `Boot: complete`'s own count inside the kernel's,
+/// and the sum is bounded by the host's clock from before the image was built
+/// to the guest's ready line — the one reading nothing in the guest took.
+fn boot_from_power_on(log: &str, host: Duration) -> Result<(), String> {
+    let after = |head: &str| -> Result<Vec<u128>, String> {
+        let at = log.find(head).ok_or_else(|| format!("no {head:?} line in the boot log"))?;
+        let line = log[at + head.len()..].lines().next().unwrap_or("");
+        Ok(line
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|word| !word.is_empty())
+            .map(|word| word.parse().expect("a run of digits"))
+            .collect())
+    };
+    let (loader, spans, rate) = (after(LOADER_TSC)?, after(POWER_ON)?, after(TSC_PERIOD)?);
+    let (&[entry, handoff, ..], &[to_loader, in_loader, root_read, to_complete], &[period_fs, ..]) =
+        (&loader[..], &spans[..], &rate[..])
+    else {
+        return Err(format!(
+            "the lines do not carry their numbers: {loader:?} after {LOADER_TSC:?}, {spans:?} after \
+             {POWER_ON:?}, {rate:?} after {TSC_PERIOD:?}"
+        ));
+    };
+    let ms = |ticks: u128| ticks * period_fs / 1_000_000_000_000;
+    if (to_loader, in_loader) != (ms(entry), ms(handoff - entry)) {
+        return Err(format!(
+            "the kernel says {to_loader} ms to the loader and {in_loader} ms in it; the loader's \
+             counts {entry} and {handoff} at {period_fs} fs a tick are {} and {}",
+            ms(entry),
+            ms(handoff - entry)
+        ));
+    }
+    if root_read > in_loader {
+        return Err(format!("the ROOT read took {root_read} ms of a loader that took {in_loader}"));
+    }
+    let complete = after("Boot: complete (")?;
+    if complete.first().is_none_or(|&own| own > to_complete) {
+        return Err(format!(
+            "`Boot: complete` counts {complete:?} ms from its own start, inside a kernel span the \
+             power-on line puts at {to_complete} ms"
+        ));
+    }
+    let total = to_loader + in_loader + to_complete;
+    if total > host.as_millis() {
+        return Err(format!(
+            "power-on to Boot: complete is {total} ms by the TSC, and the host saw the whole boot \
+             in {} ms",
+            host.as_millis()
+        ));
+    }
+    eprintln!(
+        "  [boot] power-on to loader {to_loader} ms, loader {in_loader} ms (ROOT read {root_read} \
+         ms), kernel {to_complete} ms: {total} ms of the host's {} ms; IA32_TSC_ADJUST {}",
+        host.as_millis(),
+        log.split("IA32_TSC_ADJUST ").nth(1).and_then(|rest| rest.lines().next()).unwrap_or("unsaid")
+    );
+    Ok(())
+}
+
+/// A loader that hands no ROOT image is a boot refused by name: the kernel's
+/// refusal is on the console, and nothing after it mounted ROOT from anywhere.
+fn root_withheld_refused(log: &str) -> Result<(), String> {
+    if !log.contains(ROOT_WITHHELD_REFUSAL) {
+        return Err(format!("no {ROOT_WITHHELD_REFUSAL:?} in the boot log"));
+    }
+    for never in [ROOT_MOUNTED_FROM_MEMORY, INIT_WITHOUT_A_DISK, "Boot: storage ready"] {
+        if log.contains(never) {
+            return Err(format!("a boot handed no ROOT image still said {never:?}"));
+        }
+    }
+    eprintln!("  [root] a handoff with no ROOT image refused the boot by name");
+    Ok(())
 }

@@ -51,6 +51,7 @@ dependencies = [
  "toyos-proclife",
  "toyos-ps2",
  "toyos-quiesce",
+ "toyos-rootimage",
  "toyos-sched",
  "toyos-symbols",
  "toyos-tco",
@@ -74,7 +75,7 @@ checksum = "b50b8869d9fc858ce7266cce0194bd74df58b9d0e3f6df3a9fc8eb470d95c09d"
 
 [[package]]
 name = "toyos-abi"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "toyos-acpi"
@@ -142,6 +143,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-quiesce"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]

@@ -44,6 +44,7 @@ members = [
     "toyos-proclife",
     "toyos-ps2",
     "toyos-quiesce",
+    "toyos-rootimage",
     "toyos-sched",
     "toyos-sched/loom",
     "toyos-sched/sim",

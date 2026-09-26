@@ -39,6 +39,10 @@ actuators! {
     /// control on `crate::deadline`: nothing else in this kernel ends it.
     wedge_before_reset = "wedge-before-reset";
 
+    /// The loader hands the kernel no ROOT image, which `rootfs::mount` has to
+    /// refuse by name; read by the loader as [`toyos_abi::boot::WITHHOLD_ROOT_PARAM`].
+    loader_withholds_root = "loader-withholds-root";
+
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
@@ -661,3 +665,8 @@ const _: () = {
         i += 1;
     }
 };
+
+// The loader reads this actuator's word out of the ABI and the table above
+// spells it as a literal; the two are one name or the build fails.
+#[cfg(feature = "boot-actuators")]
+const _: () = assert!(str_eq("loader-withholds-root", toyos_abi::boot::WITHHOLD_ROOT_PARAM));

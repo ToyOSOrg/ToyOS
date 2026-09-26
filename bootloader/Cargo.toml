@@ -18,6 +18,13 @@ toyos-bootmap = { path = "../toyos-bootmap" }
 toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-wallclock = { path = "../toyos-wallclock" }
 toyos-elf = { path = "../toyos-elf" }
+# ROOT is picked off the boot disk with the kernel's own readers: the GPT, and
+# the superblock `Superblock::read` decides, which is the kernel's mount too.
+toyos-gpt = { path = "../toyos-gpt" }
+# Which ROOT, how it is read in bounded chunks, and the handoff the kernel
+# checks: host-tested there.
+toyos-rootimage = { path = "../toyos-rootimage" }
+bcachefs = { path = "../bcachefs", default-features = false }
 toyos-tco = { path = "../toyos-tco" }
 # `alloc`: `variable_keys` and `get_variable_boxed`, which are how the boot
 # entry pointing at this image is found among the firmware's own variables.

@@ -87,5 +87,5 @@ pub use dir::MAX_DIR_ENTRIES;
 pub use error::Error;
 pub use fs::{DirEntry, Extent, Fat32, File, Metadata, ReplaceFailed, Replaced};
 pub use name::MAX_LFN_CHARS;
-pub use repair::MAX_REPAIR_STEPS;
+pub use repair::{RepairNotice, MAX_REPAIR_STEPS};
 pub use time::FatTime;

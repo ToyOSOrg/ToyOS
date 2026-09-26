@@ -355,7 +355,8 @@ pub enum Landing {
 ///
 /// A refusal falls on a request's first block write, and the request stops
 /// there as the adapter's `?` stops it. A request refused at a later block, the
-/// earlier ones written and retained, is not generated.
+/// earlier ones written and retained, is not generated, which is sound only
+/// while no metadata write crosses a block.
 pub struct AdapterCache {
     /// Padded to whole blocks, as the partition under a volume is.
     medium: Vec<u8>,

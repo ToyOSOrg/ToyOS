@@ -1,15 +1,16 @@
 //! Resolves the partitions the bootloader handed off ([`KernelArgs`]) to
-//! locations on a probed block device ([`probe`]), and collects every ROOT and
-//! DATA candidate those devices carry.
+//! locations on a probed block device ([`probe`]), and collects every DATA
+//! candidate those devices carry. ROOT is none of this module's business: the
+//! loader reads it into memory (`rootfs`).
 //!
 //! The boot partition's location must match firmware's account or is
 //! refused; the log partition is trusted only on the device already found
 //! to carry the boot partition, since its GUID names a file on that volume.
-//! A ROOT or DATA candidate is selected by partition *type* and nothing more —
-//! which of them is a role's filesystem is answered against each one's own
-//! superblock, by `rootfs` and by `bcachefs_adapter::probe`. A partition a
-//! process claims is found by [`claimable`], on the disks [`probe`] read, and
-//! the inventory is answered from the tables [`probe`] listed ([`inventory`]).
+//! A DATA candidate is selected by partition *type* and nothing more — which of
+//! them is the role's filesystem is answered against each one's own superblock,
+//! by `bcachefs_adapter::probe`. A partition a process claims is found by
+//! [`claimable`], on the disks [`probe`] read, and the inventory is answered
+//! from the tables [`probe`] listed ([`inventory`]).
 //! Nothing here writes.
 
 use alloc::vec::Vec;
@@ -60,7 +61,6 @@ static FIRMWARE: Lock<Option<BootPartition>> = Lock::new(None);
 /// The log partition's identity; `None` only before [`init`] runs.
 static LOG_GUID: Lock<Option<Guid>> = Lock::new(None);
 static RESOLVED: Lock<Resolution> = Lock::new(Resolution::Unknown);
-static ROOTS: Lock<Vec<Candidate>> = Lock::new(Vec::new());
 static DATA: Lock<Vec<Candidate>> = Lock::new(Vec::new());
 /// Every device [`probe`] read, with its logical block size: the disks a
 /// partition claim is looked for on. Taken alone.
@@ -177,18 +177,12 @@ pub fn log_volume() -> Option<Volume> {
     }
 }
 
-/// Every ROOT candidate seen so far, across every device probed.
-pub fn root_candidates() -> Vec<Candidate> {
-    ROOTS.lock().clone()
-}
-
 /// Every DATA candidate seen so far, across every device probed.
 pub fn data_candidates() -> Vec<Candidate> {
     DATA.lock().clone()
 }
 
-/// Ask one registered block device what it carries: ROOT and DATA candidates
-/// always, and the boot partition when firmware named one.
+/// Ask one registered block device what it carries: DATA candidates always, and the boot partition when firmware named one.
 pub fn probe(handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
     let first = {
@@ -203,7 +197,6 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
     if first {
         list(&mut sectors, handle, lba_bytes);
     }
-    collect(&mut sectors, id, lba_bytes, "ROOT", Guid::TOYOS_ROOT, &ROOTS);
     collect(&mut sectors, id, lba_bytes, "DATA", Guid::TOYOS_DATA, &DATA);
 
     let Some(firmware) = boot_partition() else {

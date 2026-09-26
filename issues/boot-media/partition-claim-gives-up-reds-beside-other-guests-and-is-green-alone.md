@@ -66,3 +66,33 @@ whichever fsync the boot reaches first) is real and independent of this
 session's diff, and widens the exit condition beyond `partition_claim_gives_up`
 alone: `partition_claim_departure`'s `silent` case names the same premise in
 its own doc comment and should get the same fix.
+
+**A third rate, from `wt/toyos-ramroot` (PR #506), same shape, same day.**
+`cargo test --test toyos-build -- partition_claim` (all three
+`partition_claim*` names, `Sched::Parallel`) run alone five times on the
+branch head (`390660c4`, which reorders storage to come up after init's spawn
+and adds `rootfs::hold_source`) and, alternating, five times on `origin/main`
+(`cbc56889`) in a second worktree, same host, same session:
+
+| run | branch (390660c4) | `origin/main` (cbc56889) |
+|-----|--------------------|---------------------------|
+| 1   | PASS/PASS/PASS (exit 0) | PASS/PASS/PASS (exit 0) |
+| 2   | PASS/PASS/PASS (exit 0) | PASS/PASS/PASS (exit 0) |
+| 3   | PASS/PASS/PASS (exit 0) | PASS/PASS/PASS (exit 0) |
+| 4   | `partition_claim_gives_up` deadman FAIL, re-run alone GREEN, suite exit 1 | PASS/PASS/PASS (exit 0) |
+| 5   | PASS/PASS/PASS (exit 0) | PASS/PASS/PASS (exit 0) |
+
+Branch: 1 red in 5 (20%). Main: 0 red in 5. The one branch red carries the
+identical message and shape already on record above — `FAIL
+partition_claim_gives_up: deadman: the kernel never said "partclaim: a write
+still refused after 1 attempt(s)"`, immediately green when the harness
+re-ran it alone, with the suite's own diagnosis: `ALONE
+partition_claim_gives_up: GREEN — it fails only beside other guests, so its
+`Sched::Parallel` is wrong`. 1/5 sits inside the 1-in-3-to-1-in-10 band this
+file already carries from two unrelated diffs (`bcachefs/` work, an
+`inspect`/`toyos-abi` round), and 0/5 on main is unremarkable at that rate —
+five trials is too few to call 20% against 0% a rate difference, and the
+branch's storage reordering and `rootfs::hold_source` touch none of
+`tests/common/partclaim.rs`, the kernel's `partclaim` module, or the fsync
+deadman path this file already names as the cause. No code change made on
+`wt/toyos-ramroot` for this.
