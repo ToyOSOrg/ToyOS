@@ -9360,16 +9360,14 @@ fn netd_slow_reader(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// so nothing but the pipe's own room can be what moved them.
 fn netd_held_open(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let HostRun { result, sent, .. } = netcase_against_host(rust_bins, "netd_held_open", false, "")?;
-    // The held stream, then the round trip that orders the guest's reading
-    // behind its last bytes.
-    let [Ok(sent), Ok(16)] = sent.as_slice() else {
-        return Err(format!("the host server's connections ended {sent:?}, not a held stream and a round trip"));
+    let [Ok(sent)] = sent.as_slice() else {
+        return Err(format!("the host server's connections ended {sent:?}, not one held stream"));
     };
-    let ok = format!("netd_held_open: ok bytes={sent}");
-    if !result.stdout.lines().any(|l| l.trim_end().ends_with(&ok)) {
+    let ok = format!("netd_held_open: ok bytes={sent},");
+    let Some(line) = result.stdout.lines().find(|l| l.contains(&ok)) else {
         return Err(format!("the host sent {sent} bytes and the guest never said {ok:?}:\n{}", result.stdout));
-    }
-    eprintln!("  [netcase] all {sent} bytes came, those past a full pipe on the pipe's room alone");
+    };
+    eprintln!("  [netcase] {}", line.trim_end());
     Ok(())
 }
 

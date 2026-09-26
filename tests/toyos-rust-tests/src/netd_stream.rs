@@ -132,20 +132,27 @@ pub fn keep_full_until_released(write: &Pipe, within: Duration, what: &str) {
 /// **A poll, because nothing announces a full ring to its reader**: readiness
 /// fires on the first byte. `within` is a liveness guard, said by name.
 pub fn await_ring_full(rx: &Pipe, capacity: u64, within: Duration) {
+    await_ring_holds(rx, capacity, capacity - 16, within)
+}
+
+/// Wait until `rx`'s ring holds the pattern's 16-byte group at stream position
+/// `group_start`, in the slot a ring of `capacity` bytes puts it: a group of an
+/// earlier lap in that slot carries another stamp. A poll, as
+/// [`await_ring_full`] is.
+pub fn await_ring_holds(rx: &Pipe, capacity: u64, group_start: u64, within: Duration) {
     const POLL: Duration = Duration::from_millis(1);
     let page = rx.pipe_map().expect("map the receive pipe") as *const u8;
-    let group_start = capacity - 16;
     // SAFETY: `pipe_map` returned the base of this pipe's mapped page, whose
     // data region starts after the header and is `capacity` bytes long; the
     // window lives as long as `rx`, which outlives this function.
-    let group = unsafe { page.add(core::mem::size_of::<RingHeader>() + group_start as usize) };
+    let group = unsafe { page.add(core::mem::size_of::<RingHeader>() + (group_start % capacity) as usize) };
     // SAFETY: inside the data region, as `group` above.
     let at = |i: u64| unsafe { group.add(i as usize).read_volatile() };
     let started = Instant::now();
     while !(0..16).all(|i| at(i) == stream_byte(group_start + i)) {
         assert!(
             started.elapsed() < within,
-            "the receive ring never filled in {within:?}: its last group reads {:02x?}, want {:02x?}",
+            "the receive ring never held stream byte {group_start} in {within:?}: its group reads {:02x?}, want {:02x?}",
             (0..16).map(at).collect::<Vec<_>>(),
             (0..16).map(|i| stream_byte(group_start + i)).collect::<Vec<_>>(),
         );
@@ -158,15 +165,16 @@ pub fn await_ring_full(rx: &Pipe, capacity: u64, within: Duration) {
 /// name at the first byte that is not the pattern's. Answers how many bytes
 /// came.
 pub fn read_pattern(rx: &Pipe, within: Duration, what: &str) -> u64 {
-    read_pattern_upto(rx, u64::MAX, within, what)
+    read_pattern_from(rx, 0, u64::MAX, within, what)
 }
 
-/// [`read_pattern`], ending once `limit` bytes have come.
-pub fn read_pattern_upto(rx: &Pipe, limit: u64, within: Duration, what: &str) -> u64 {
+/// [`read_pattern`] from stream position `from`, ending at position `until`.
+/// Answers the position reached.
+pub fn read_pattern_from(rx: &Pipe, from: u64, until: u64, within: Duration, what: &str) -> u64 {
     let mut buf = vec![0u8; 65536];
-    let mut at = 0u64;
-    while at < limit {
-        let want = buf.len().min((limit - at) as usize);
+    let mut at = from;
+    while at < until {
+        let want = buf.len().min((until - at) as usize);
         let waiting = format!("{what}: the stream after byte {at}");
         let n = await_until(rx, READABLE, within, &waiting, || match rx.read_nonblock(&mut buf[..want]) {
             Ok(n) => Some(n),
