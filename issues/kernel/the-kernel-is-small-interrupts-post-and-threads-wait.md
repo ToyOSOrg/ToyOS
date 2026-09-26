@@ -60,10 +60,68 @@ times:
    The kernel's NVMe driver, USB storage, block layer, page cache and the whole
    budget and refusal chain are deleted. **Exit**: a crashed disk service
    restarts without the kernel noticing, `/log` and `/home` survive it, and
-   NVMe keeps more than one command in flight.
-4. **Where the data filesystem lives** (kernel VFS over a userland block
-   service, or a userland file server) is decided with the owner from a roasted
-   proposal before it is built.
+   NVMe keeps more than one command in flight. Met on QEMU at step 6 below.
+   **On the T14 it is met only when usbd lands** (step 10): the T14's only
+   writable storage is its stick, and until then that is the kernel's.
+4. **Where the data filesystem lives** — owner ruling, 2026-09-26, from the
+   roasted proposal: userland file servers, the VFS a client library, and a
+   program's view a set of directory capabilities init hands it, each resolved
+   by its server. The page cache lives in the file server. One file server per
+   role (LOG, DATA, BOOT), so one crashing cannot take another down. A
+   file-server crash is survivable, not invisible: data survives on disk,
+   clients reopen, and the few states that cannot be recovered answer `Gone`;
+   invisible restart can come later. The kernel keeps ROOT's in-memory read
+   path and exec from it. USB storage stays in the kernel until stage 5 moves
+   the whole xHCI out, because its one IOMMU domain is shared with the
+   keyboard, and the panic console and the kernel's hotkeys never depend on a
+   userland USB program. No swap, declared. `SYS_DEVICE_DMA_MAP` for zero-copy
+   block I/O. FAT32 on `/log` in the installed product is deferred.
+
+   Stages 3 and 4 are built as these steps, one pull request each:
+   1. **`toyos-blockring`**, the protocol, pure. **Exit**: an interleaving
+      model of submit, complete, reset, crash and reconnect, red under a lost
+      completion, a double completion, and a loss nothing is written again
+      after. **Done** (#525).
+   2. **`SYS_DEVICE_DMA_MAP`**. **Exit**: a claimed function reaches a lent
+      region and nothing else, and a transfer past it or after it is taken back
+      is a `DMA FAULT` record. **Done** (#525).
+   3. **blockd**, NVMe in userland beside the kernel's driver. **Exit**: more
+      than one command in flight across several queues, measured; Flush issued
+      when the controller has a volatile write cache; killed with a write on
+      the device and restarted, what was acknowledged survives, what was not is
+      refused, and the volume checks clean; init restarts it. **Built** (#525)
+      but for the last: init closes the ports of a service that ends, so the
+      restart is a supervisor's in the test.
+   4. **Partitions in blockd**. **Exit**: a partition held by one session at a
+      time, the idle slot claimed by GUID and written through blockd, and
+      `SYS_PARTITION_READ/WRITE` retired once no disk the kernel drives serves
+      a claim. **Built** (#525) but for the last: the kernel's disks, the stick
+      among them, still serve claims until step 10, and a `part:` row still
+      mints a kernel claim.
+   5. **Spawn and dlopen from an image handle.** **Exit**: a program in `/apps`
+      runs having been read by userland, its faults served from the image
+      object and not the VFS.
+   6. **fsd for DATA over blockd**, with the `toyos::fs` client the std fork
+      uses; the kernel's DATA mount deleted with it. **Exit**:
+      `home_overwrite_reads_back` and `apps_and_home_are_one_filesystem`
+      green; fsd killed mid-write, restarted, the volume mounts, fsync'd data
+      reads back on the host, and the kernel log does not change.
+   7. **fsd for LOG and BOOT; logd on the client library.** On the T14 it runs
+      over the kernel's USB path until step 10. **Exit**: the log's durability
+      tests without `WouldBlock`, the quiesce cases green with the storage
+      chain kept running, and the panic wait still publishes the last line.
+   8. **Views as capabilities**, the isolation track's stage 1. **Exit**: that
+      stage's escape suite, run against fsd.
+   9. **Delete the kernel storage stack**: the VFS down to ROOT's resolver,
+      both writable adapters, both caches, write-back, durability, tmpfs, the
+      block layer, GPT, the NVMe driver, the refusal chain and the retired file
+      syscalls' numbers. **Exit**: `BudgetExpired`, `DEADMAN` and
+      `between_attempts` appear nowhere, and the kernel's lines and longest
+      interrupts-off and preemption-off windows are measured.
+   10. **usbd**, stage 5's second half: the whole xHCI moves, HID to the
+       keyboard claim and mass storage over `toyos-blockring`. **Exit**, on the
+       T14: `/log` survives usbd killed mid-batch, and the keyboard keeps
+       working while a stick misbehaves.
 5. **USB owned by its thread, then by userland**, with discovery and recovery
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
