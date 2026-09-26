@@ -134,6 +134,29 @@ fn main() {
         toyos_build::forkcheck::dispatch_callers(&root, &args);
         return;
     }
+    // Writes one file outside the checkout and builds nothing.
+    if asked(&flags::SIGNING_KEY_NEW) {
+        match toyos_build::signing::mint_owner_key() {
+            Ok((path, fingerprint)) => println!("The owner's image-signing key is at {} ({fingerprint}).", path.display()),
+            Err(why) => {
+                eprintln!("Error: {why}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    // Before anything is built, so a missing key is refused before any lock
+    // and no image this run writes is signed by two keys.
+    let update_image = CARGO_RUN.value(&args, &flags::UPDATE_IMAGE).map(PathBuf::from);
+    if asked(&flags::OWNER_KEY) || update_image.is_some() {
+        match toyos_build::signing::use_owner() {
+            Ok(key) => println!("Signing with the owner's key {}.", key.fingerprint()),
+            Err(why) => {
+                eprintln!("Error: {why}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     check_prerequisites(&root);
     env::set_current_dir(&root).expect("Failed to cd to project root");
@@ -231,6 +254,11 @@ fn main() {
     // Toolchain included: `build` holds the build lock across both, so no other
     // agent's clean or bootstrap can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
+    if let Some(out) = update_image {
+        toyos_build::build::build_update(&root, &boot, rebuild_toolchain, &plan, &out);
+        println!("Update image: {} (ssh <machine> update < it)", out.display());
+        return;
+    }
     let image = toyos_build::build::build(&root, boot, rebuild_toolchain, &plan);
     println!("Build finished.");
     println!("Boot image: {}", image.display());

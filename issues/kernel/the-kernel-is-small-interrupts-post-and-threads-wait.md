@@ -42,8 +42,9 @@ times:
    **Done** (#506; T14 run 143 green): on the stick the loader reads ROOT in
    1160 ms, the kernel reaches `Boot: complete` 1229 ms after it starts, and
    the kernel issues 0 storage commands before init. The NVMe cost is not
-   measured and cannot be on the T14: nothing is ever written to its NVMe, so
-   there is no ROOT there to read.
+   measured yet: ToyOS is not installed on the T14's NVMe, so there is no ROOT
+   there to read until the self-update track installs it
+   (`issues/boot-media/the-machine-updates-itself-without-ubuntu.md`).
 2. **One way to wait.** Every waitable object has one `Watch`, and a waiter is
    either a thread (woken) or a user poll ring (posted). The multi-waiter queue,
    the per-thread record ring, the `Source` double dispatch and the per-module

@@ -333,7 +333,10 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
             }
         }
 
-        // Include all other files recursively (skipping pre-processed types)
+        // Include all other files recursively (skipping pre-processed types).
+        // A TTF at the top is the console font's raster source and ships only
+        // as the raster above; one under `fonts/` is a system font and ships
+        // as it is, to `/system/share/fonts/`, where the toolkits look.
         fn add_dir(
             dir: &Path,
             prefix: &str,
@@ -342,10 +345,11 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
         ) {
             for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("Failed to read {}: {e}", dir.display())) {
                 let path = entry.unwrap().path();
+                let system_font = prefix == "share/fonts/" && path.extension().is_some_and(|e| e == "ttf");
                 if path.is_dir() {
                     let subdir = path.file_name().unwrap().to_str().unwrap();
                     add_dir(&path, &format!("{prefix}{subdir}/"), ships, files);
-                } else if path.extension().is_some_and(|e| e == "ttf" || e == "jpg") {
+                } else if !system_font && path.extension().is_some_and(|e| e == "ttf" || e == "jpg") {
                     continue;
                 } else if ships(&path) {
                     let name = path.file_name().unwrap().to_str().unwrap().to_lowercase();
@@ -501,6 +505,62 @@ mod tests {
             without,
             BTreeSet::from(["share/wallpaper.rgb".to_string()]),
             "an image with no doom in it still carries what only doom opens"
+        );
+    }
+
+    /// A TTF under `fonts/` ships byte for byte where the toolkits look for
+    /// system fonts; the one at the top ships only as the console's raster.
+    #[test]
+    fn a_system_font_ships_as_it_is_and_the_console_font_as_its_raster() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dir = toyos_tmpdir::TempDir::new("fonts");
+        fs::create_dir_all(dir.join("fonts")).expect("make the asset tree");
+        let console = fs::read(root.join("assets/JetBrainsMono-Regular.ttf")).expect("the console font");
+        let system = fs::read(root.join("assets/fonts/OpenSans-Regular.ttf")).expect("a system font");
+        fs::write(dir.join("Console.ttf"), &console).unwrap();
+        fs::write(dir.join("fonts/System-Regular.ttf"), &system).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(["-C", &dir.display().to_string()])
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["add", "Console.ttf", "fonts/System-Regular.ttf"]);
+
+        let shipped: std::collections::BTreeMap<String, Vec<u8>> =
+            collect(&[dir.display().to_string()], &BTreeSet::new()).into_iter().collect();
+
+        assert_eq!(
+            shipped.keys().collect::<Vec<_>>(),
+            ["share/fonts/Console-8x16.font", "share/fonts/system-regular.ttf"],
+            "the fonts did not land where the toolkits and the console look"
+        );
+        assert_eq!(
+            shipped["share/fonts/system-regular.ttf"], system,
+            "a system font was changed on its way into the image"
+        );
+    }
+
+    /// The image carries the system fonts' licence beside them, as the OFL
+    /// asks of every copy.
+    #[test]
+    fn the_system_fonts_ship_with_their_licence() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let shipped: std::collections::BTreeMap<String, Vec<u8>> =
+            collect(&[root.join("assets").display().to_string()], &BTreeSet::new())
+                .into_iter()
+                .collect();
+        let fonts: Vec<&String> =
+            shipped.keys().filter(|k| k.starts_with("share/fonts/") && k.ends_with(".ttf")).collect();
+        assert!(!fonts.is_empty(), "the image ships no system font:\n{:?}", shipped.keys());
+        let licence = fs::read(root.join("assets/fonts/OFL.txt")).expect("the fonts' licence");
+        assert_eq!(
+            shipped.get("share/fonts/ofl.txt"),
+            Some(&licence),
+            "{fonts:?} ship without the licence text beside them"
         );
     }
 

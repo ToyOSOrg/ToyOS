@@ -356,24 +356,27 @@ struct App {
 }
 
 struct Ui {
-    window: Arc<dyn Window>,
-    surface: Surface<OwnedDisplayHandle, Arc<dyn Window>>,
+    window: Arc<Window>,
+    surface: Surface<OwnedDisplayHandle, Arc<Window>>,
     fonts: Fonts,
     calc: Calc,
     width: u32,
     height: u32,
     hover: Option<Target>,
     pressed: Option<Target>,
+    /// Where the pointer last was in the window: a button event says which
+    /// button and not where.
+    pointer: Option<(i32, i32)>,
 }
 
 impl Ui {
-    fn new(elwt: &dyn ActiveEventLoop, context: &Context<OwnedDisplayHandle>) -> Ui {
+    fn new(elwt: &ActiveEventLoop, context: &Context<OwnedDisplayHandle>) -> Ui {
         let attrs = WindowAttributes::default()
             .with_title("Calculator")
-            .with_surface_size(PhysicalSize::new(OPEN_W, OPEN_H))
-            .with_min_surface_size(PhysicalSize::new(MIN_W as u32, MIN_H as u32));
-        let window: Arc<dyn Window> = elwt.create_window(attrs).unwrap().into();
-        let size = window.surface_size();
+            .with_inner_size(PhysicalSize::new(OPEN_W, OPEN_H))
+            .with_min_inner_size(PhysicalSize::new(MIN_W as u32, MIN_H as u32));
+        let window = Arc::new(elwt.create_window(attrs).unwrap());
+        let size = window.inner_size();
         let mut surface = Surface::new(context, window.clone()).unwrap();
         let (w, h) = (size.width.max(1), size.height.max(1));
         surface.resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap()).unwrap();
@@ -386,6 +389,7 @@ impl Ui {
             height: h,
             hover: None,
             pressed: None,
+            pointer: None,
         }
     }
 
@@ -643,13 +647,13 @@ fn key_colour(button: &Button) -> Color {
 }
 
 impl ApplicationHandler for App {
-    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.ui.is_none() {
             self.ui = Some(Ui::new(event_loop, &self.context));
         }
     }
 
-    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(ui) = self.ui.as_mut() else { return };
         let mut dirty = false;
         match event {
@@ -657,7 +661,7 @@ impl ApplicationHandler for App {
                 event_loop.exit();
                 return;
             }
-            WindowEvent::SurfaceResized(size) => {
+            WindowEvent::Resized(size) => {
                 ui.resize(size.width, size.height);
                 // Whatever the pointer was over is somewhere else now.
                 ui.hover = None;
@@ -674,25 +678,27 @@ impl ApplicationHandler for App {
                     dirty = true;
                 }
             }
-            WindowEvent::PointerMoved { position, .. } => {
+            WindowEvent::CursorMoved { position, .. } => {
+                ui.pointer = Some((position.x as i32, position.y as i32));
                 let over = ui.layout().hit(position.x as i32, position.y as i32);
                 if over != ui.hover {
                     ui.hover = over;
                     dirty = true;
                 }
             }
-            WindowEvent::PointerLeft { .. } => {
+            WindowEvent::CursorLeft { .. } => {
+                ui.pointer = None;
                 if ui.hover.is_some() || ui.pressed.is_some() {
                     ui.hover = None;
                     ui.pressed = None;
                     dirty = true;
                 }
             }
-            WindowEvent::PointerButton { state, position, button, .. } => {
-                if button.mouse_button() != Some(MouseButton::Left) {
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button != MouseButton::Left {
                     return;
                 }
-                let over = ui.layout().hit(position.x as i32, position.y as i32);
+                let over = ui.pointer.and_then(|(x, y)| ui.layout().hit(x, y));
                 ui.hover = over;
                 match state {
                     ElementState::Pressed => ui.pressed = over,
@@ -730,7 +736,7 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
     let context = Context::new(event_loop.owned_display_handle()).unwrap();
-    event_loop.run_app(App { context, ui: None }).unwrap();
+    event_loop.run_app(&mut App { context, ui: None }).unwrap();
 }
 
 /// Every character outside ASCII that the panel can put on the screen.
