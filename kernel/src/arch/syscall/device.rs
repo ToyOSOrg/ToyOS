@@ -216,7 +216,7 @@ pub(super) fn sys_device_dma_alloc(
         Err(e) => return e.to_u64(),
     };
     let installed = process::with_process_data(|data| {
-        ops::install(&mut data.handles, KObjectRef::SharedMem(memory))
+        ops::install(&mut data.handles, KObjectRef::SharedMem(alloc::sync::Arc::clone(&memory)))
     });
     let shm = match installed {
         Ok(handle) => handle,
@@ -224,7 +224,7 @@ pub(super) fn sys_device_dma_alloc(
         // it: a caller left holding neither the handle nor the quota would be
         // refused every later grant with no way out but dying.
         Err(e) => {
-            crate::pcidev::dma_undo(slot);
+            crate::pcidev::dma_undo(slot, &memory);
             return e.to_u64();
         }
     };
@@ -238,6 +238,63 @@ pub(super) fn sys_device_dma_alloc(
         }),
     );
     0
+}
+
+/// A region the caller holds, put into the claimed function's domain.
+///
+/// The caller must hold the region with [`Rights::MAP`]: a device writing into
+/// it is the same authority as a store through the caller's own mapping, and
+/// no more. The output window is taken before the mapping, as
+/// [`sys_device_dma_alloc`] takes its own: a bad address must not leave the
+/// function reaching memory the caller was never told the address of.
+pub(super) fn sys_device_dma_map(
+    ctx: &SyscallContext,
+    handle: RawHandle,
+    region: RawHandle,
+    out: UserAddr,
+) -> u64 {
+    let slot = match pci_slot(handle) {
+        Ok(slot) => slot,
+        Err(e) => return e.refuse(),
+    };
+    let memory = match process::with_process_data(|data| {
+        data.handles.get::<crate::object::shm::SharedMemObject>(region, Rights::MAP)
+    }) {
+        Ok(memory) => memory,
+        Err(e) => return e.refuse(),
+    };
+    let len = core::mem::size_of::<toyos_abi::pci::DmaMapping>() as u64;
+    let Some(mut window) = ctx.user_bytes_mut(out, len) else {
+        return SyscallError::BadAddress.to_u64();
+    };
+    let (device_addr, bytes) = match crate::pcidev::dma_map(slot, &memory) {
+        Ok(mapped) => mapped,
+        Err(e) => return e.to_u64(),
+    };
+    let mapping = toyos_abi::pci::DmaMapping { device_addr, bytes };
+    // SAFETY: `mapping` is a live value readable for its own size, and the
+    // layout assertion beside its declaration proves every byte of that width
+    // is an initialised field.
+    let raw = unsafe {
+        core::slice::from_raw_parts(
+            &mapping as *const _ as *const u8,
+            core::mem::size_of::<toyos_abi::pci::DmaMapping>(),
+        )
+    };
+    window.write_at(0, raw);
+    0
+}
+
+/// Take back what [`sys_device_dma_map`] put at `device_addr`.
+pub(super) fn sys_device_dma_unmap(handle: RawHandle, device_addr: u64) -> u64 {
+    let slot = match pci_slot(handle) {
+        Ok(slot) => slot,
+        Err(e) => return e.refuse(),
+    };
+    match crate::pcidev::dma_unmap(slot, device_addr) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
 }
 
 /// The grant as the bytes that cross the boundary; its `const _` in `toyos-abi`

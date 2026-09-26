@@ -21,6 +21,7 @@ members = [
     "toyos-acpi",
     "toyos-blackbox",
     "toyos-blockhold",
+    "toyos-blockring",
     "toyos-bootmap",
     "toyos-cc",
     "toyos-desktop",

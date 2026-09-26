@@ -2542,6 +2542,7 @@ mod tests {
             ("toyos-sched-loom", "toyos-sched/loom/Cargo.toml"),
             ("toyos-sched-sim", "toyos-sched/sim/Cargo.toml"),
             ("toyos-proclife", "toyos-proclife/Cargo.toml"),
+            ("toyos-blockring", "toyos-blockring/Cargo.toml"),
         ] {
             let path = root.join(manifest);
             let text = fs::read_to_string(&path)
@@ -2808,6 +2809,7 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
+        "tests/blockdcase/system.toml",
         "tests/desktopcase/system.toml",
         "tests/desktopaudiocase/system.toml",
         "tests/doomcase/system.toml",

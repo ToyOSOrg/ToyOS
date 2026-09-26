@@ -12,6 +12,11 @@ toyos-tco = { path = "../../toyos-tco" }
 toyos-quiesce = { path = "../../toyos-quiesce" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-inspect = { path = "../../toyos-inspect" }
+# blockd's client and its NVMe driver, for `blockd_io`, and the FAT32 crate it
+# writes a volume through a session with.
+blockd = { path = "../../userland/blockd" }
+toyos-blockring = { path = "../../toyos-blockring" }
+toyos-fat32 = { path = "../../toyos-fat32" }
 toyos-dns = { path = "../../toyos-dns" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.2" }
