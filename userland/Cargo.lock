@@ -286,6 +286,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockd"
+version = "0.0.0"
+dependencies = [
+ "toyos 0.14.0",
+ "toyos-abi 0.13.0",
+ "toyos-blockhold",
+ "toyos-blockring",
+ "toyos-gpt",
+]
+
+[[package]]
 name = "blowfish"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -478,7 +489,7 @@ version = "0.1.0"
 dependencies = [
  "sprite",
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-desktop",
  "toyos-font 0.2.0",
  "toyos-inspect",
@@ -501,7 +512,7 @@ version = "0.1.0"
 dependencies = [
  "terminal",
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-font 0.2.0",
  "toyos-logstream",
  "toyos-window 0.15.0",
@@ -1533,7 +1544,7 @@ name = "init"
 version = "0.1.0"
 dependencies = [
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-logstream",
  "toyos-manifest",
  "toyos-swap",
@@ -1568,7 +1579,7 @@ name = "inspect"
 version = "0.1.0"
 dependencies = [
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-inspect",
 ]
 
@@ -1817,7 +1828,7 @@ name = "logd"
 version = "0.1.0"
 dependencies = [
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-inspect",
  "toyos-logstream",
  "toyos-swap",
@@ -1853,7 +1864,7 @@ name = "metalprobe"
 version = "0.1.0"
 dependencies = [
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-tco",
 ]
 
@@ -1939,7 +1950,7 @@ version = "0.0.0"
 dependencies = [
  "smoltcp",
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-dns",
  "toyos-i219",
  "toyos-inspect",
@@ -3441,7 +3452,7 @@ version = "0.0.0"
 dependencies = [
  "rubato",
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-hda",
  "toyos-inspect",
  "toyos-mixer",
@@ -3594,7 +3605,7 @@ name = "test-runner"
 version = "0.1.0"
 dependencies = [
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-tco",
 ]
 
@@ -3725,7 +3736,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-keymap 0.1.0",
  "toyos-window 0.15.0",
 ]
@@ -3752,7 +3763,7 @@ dependencies = [
 name = "toyos"
 version = "0.14.0"
 dependencies = [
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
 ]
 
 [[package]]
@@ -3769,13 +3780,24 @@ checksum = "ec119a115b619cec7ca5e56858e98db6558658d6cc9b400906187e62f2877f48"
 
 [[package]]
 name = "toyos-abi"
-version = "0.12.0"
+version = "0.13.0"
+
+[[package]]
+name = "toyos-blockhold"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blockring"
+version = "0.1.0"
+dependencies = [
+ "toyos-blockhold",
+]
 
 [[package]]
 name = "toyos-desktop"
 version = "0.1.0"
 dependencies = [
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
 ]
 
 [[package]]
@@ -3793,6 +3815,10 @@ name = "toyos-font"
 version = "0.2.0"
 
 [[package]]
+name = "toyos-gpt"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-hda"
 version = "0.1.0"
 
@@ -3804,7 +3830,7 @@ version = "0.1.0"
 name = "toyos-inspect"
 version = "0.1.0"
 dependencies = [
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
 ]
 
 [[package]]
@@ -3825,7 +3851,7 @@ version = "0.1.0"
 name = "toyos-manifest"
 version = "0.1.0"
 dependencies = [
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
 ]
 
 [[package]]
@@ -3876,7 +3902,7 @@ name = "toyos-window"
 version = "0.15.0"
 dependencies = [
  "toyos 0.14.0",
- "toyos-abi 0.12.0",
+ "toyos-abi 0.13.0",
  "toyos-font 0.2.0",
  "toyos-keymap 0.1.0",
 ]
