@@ -61,10 +61,12 @@
 //!
 //! # Durability, which is a contract and not a hope
 //!
-//! A round's lines are written; the volume is made durable at an `Alert`, at
-//! most [`SYNC_INTERVAL`] after the oldest line not yet durable, at a
-//! rotation, and when init asks before the machine stops
-//! ([`toyos_logstream::FLUSH`]). The kernel waits on none of it: a panicking
+//! **A round's lines are written and the volume made durable before the next
+//! round**, and again when init asks before the machine stops
+//! ([`toyos_logstream::FLUSH`]): lines batched for one later sync put one
+//! larger flush on the stick, and a tone playing beside it gaps. A sync the
+//! kernel declined to start is owed and asked again each round until it is
+//! made. The kernel waits on none of it: a panicking
 //! kernel's report is in its black box, and so are the stop's own last records.
 //! **A line after that flush reaches the console and is held back from the
 //! file**: the stop syncs no file still open, so the file ends where the flush
@@ -92,7 +94,7 @@ use std::time::{Duration, Instant};
 
 use toyos::endow::{self, Endowments, SYSCAP_LABEL};
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::log::{LogTail, Record, Severity};
+use toyos::log::{LogTail, Record};
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::port::Acceptor;
 use toyos::say;
@@ -131,14 +133,6 @@ const MAX_ORIGINS: usize = Poller::MAX_HANDLES as usize - ORIGIN_BASE as usize;
 /// machine.
 const POLL_QUICK: Duration = Duration::from_millis(10);
 const POLL_SLOW: Duration = Duration::from_millis(250);
-
-/// The longest a written line waits for the volume to be made durable.
-///
-/// **A policy number**: what it trades is a device flush per round — the
-/// worst workload FAT has — against how much a machine that loses power
-/// loses. The crash that matters is the kernel's, and its tail is in the black
-/// box.
-const SYNC_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How much of this boot a reader who connects late can be handed: as much as
 /// the volume keeps, so the stream is never the shorter of the two.
@@ -203,8 +197,7 @@ fn main() {
         lost: 0,
         waiting: Vec::new(),
         volume,
-        unsynced_since: None,
-        alert_unsynced: false,
+        owed: false,
         retrying_since: None,
         degraded: false,
         boot_local,
@@ -232,10 +225,8 @@ struct Log {
     /// round merges.
     waiting: Vec<Line>,
     volume: Option<Volume>,
-    /// When the oldest line not yet made durable was written.
-    unsynced_since: Option<Instant>,
-    /// Whether an `Alert` was written and not yet made durable.
-    alert_unsynced: bool,
+    /// Lines the volume took and has not made durable: its sync was declined.
+    owed: bool,
     /// When the current run of consecutive refused rounds began.
     retrying_since: Option<Instant>,
     /// Whether the volume answers, slower than `LOG_WRITE_BUDGET` a round.
@@ -308,7 +299,7 @@ impl Log {
                 self.flushed();
                 read_any = true;
             }
-            self.sync_if_due();
+            self.sync_owed();
             self.feed_console();
 
             cadence = if read_any { POLL_QUICK } else { (cadence * 2).min(POLL_SLOW) };
@@ -316,13 +307,9 @@ impl Log {
                 continue;
             }
             // Nothing new: park until the kernel posts, init speaks, a program
-            // ends, the console has room, the cadence comes round, or the
-            // volume is owed its sync.
-            let mut wait = cadence;
-            if let Some(since) = self.unsynced_since {
-                wait = wait.min(SYNC_INTERVAL.saturating_sub(since.elapsed()));
-            }
-            poller.wait(1, wait.as_nanos().max(1) as u64, |token| {
+            // ends, the console has room, or the cadence comes round, which is
+            // also when an owed sync is asked again.
+            poller.wait(1, cadence.as_nanos() as u64, |token| {
                 if token >= ORIGIN_BASE {
                     ended.push((token - ORIGIN_BASE) as usize);
                 }
@@ -535,12 +522,10 @@ impl Log {
         for line in &lines {
             match &line.kind {
                 Kind::Kernel(record) => {
-                    self.alert_unsynced |= record.severity() >= Some(Severity::Alert);
                     file.push_str(&format!("{}\n", record.tagged(&stamp(self.boot_local, record.at_ns))));
                 }
                 Kind::Program { tag, owner, said } => {
                     let severity = said.severity;
-                    self.alert_unsynced |= severity >= Severity::Alert || a_panic(&said.text);
                     let tag = Tag::new(tag).expect("an origin's name is a tag");
                     let pid = (said.pid != *owner).then_some(said.pid);
                     let at = stamp(self.boot_local, said.at_ns);
@@ -617,17 +602,14 @@ impl Log {
         }
     }
 
-    /// Write a round to the volume, and make it durable when it is owed.
+    /// Write a round to the volume, and make it durable.
     fn to_volume(&mut self, text: &[u8]) {
         let Some(v) = self.volume.as_mut() else { return };
         let began = Instant::now();
         let mut refused = v.write(text).err().map(|e| (Step::Append, e.kind(), e.to_string()));
-        let full = v.full();
         if refused.is_none() {
-            let since = *self.unsynced_since.get_or_insert(began);
-            if self.alert_unsynced || since.elapsed() >= SYNC_INTERVAL || full {
-                refused = self.sync().err();
-            }
+            self.owed = true;
+            refused = self.sync().err();
         }
         // A volume that answered, and took longer than a log is worth doing it.
         if refused.is_none() && began.elapsed() > LOG_WRITE_BUDGET {
@@ -637,10 +619,10 @@ impl Log {
         self.answered(began, refused);
     }
 
-    /// Make the volume durable once its oldest unsynced line has waited
-    /// [`SYNC_INTERVAL`], whether or not this round wrote anything.
-    fn sync_if_due(&mut self) {
-        if self.unsynced_since.is_some_and(|since| since.elapsed() >= SYNC_INTERVAL) {
+    /// Ask again for a sync the volume declined, whether or not this round
+    /// wrote anything.
+    fn sync_owed(&mut self) {
+        if self.owed {
             let began = Instant::now();
             let refused = self.sync().err();
             self.answered(began, refused);
@@ -651,8 +633,7 @@ impl Log {
     fn sync(&mut self) -> Result<(), (Step, std::io::ErrorKind, String)> {
         let Some(v) = self.volume.as_mut() else { return Ok(()) };
         v.sync().map_err(|e| (Step::Flush, e.kind(), e.to_string()))?;
-        self.unsynced_since = None;
-        self.alert_unsynced = false;
+        self.owed = false;
         Ok(())
     }
 
@@ -697,8 +678,7 @@ impl Log {
             // Every call answered, slowly: the round is durable.
             Fate::Degraded => {
                 self.retrying_since = None;
-                self.unsynced_since = None;
-                self.alert_unsynced = false;
+                self.owed = false;
                 if !self.degraded {
                     self.degraded = true;
                     toyos::warn!(
@@ -763,15 +743,6 @@ impl Log {
             );
         }
     }
-}
-
-/// Whether a program's line opens its panic: std's `thread '<name>' ...
-/// panicked at`, which it writes to stderr at `Error`. It is made durable at
-/// once, as an `Alert` is: a kernel panic within the sync interval would
-/// otherwise take it, and the black box holds only the kernel's records.
-fn a_panic(text: &[u8]) -> bool {
-    const PANICKED: &[u8] = b" panicked at ";
-    text.starts_with(b"thread '") && text.windows(PANICKED.len()).any(|w| w == PANICKED)
 }
 
 fn ahead_note(ahead: u64, tag: &str) -> String {
@@ -856,16 +827,6 @@ pub(crate) fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// std's panic header, with and without the thread's id, is a panic; a
-    /// line that only mentions one is not.
-    #[test]
-    fn a_panic_is_std_s_header_and_nothing_else() {
-        assert!(super::a_panic(b"thread 'main' (1) panicked at src/bin/x.rs:61:5:"));
-        assert!(super::a_panic(b"thread 'mix' panicked at soundd/src/mix.rs:9:1:"));
-        assert!(!super::a_panic(b"logd: a reader panicked at nothing"));
-        assert!(!super::a_panic(b"thread 'main' exited"));
-    }
-
     /// The `log` port answers a reader and `inspect` on one acceptor, told
     /// apart by the request's frame type alone.
     #[test]
