@@ -365,3 +365,7 @@ pub mod capture_access;
 /// `tests/panic_console_publish.rs`.
 #[path = "../../kernel/src/drivers/panic_console/published.rs"]
 pub mod panic_console_published;
+
+/// The console backend's lock, driven by `tests/serial_lock.rs`.
+#[path = "../../kernel/src/drivers/serial_lock.rs"]
+pub mod serial_lock;

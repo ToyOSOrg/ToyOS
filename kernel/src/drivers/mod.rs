@@ -5,6 +5,7 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod serial;
+pub mod serial_lock;
 pub mod acpi;
 pub mod pci;
 pub mod nvme;

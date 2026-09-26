@@ -2571,6 +2571,10 @@ mod tests {
                 // only by `kernel-loom`, to drop the panic console publisher's
                 // `Release` fence and prove `panic_console_publish` reds without it.
                 "seqlock-writer-fence-off",
+                // Costs no kernel build: turned on only by `kernel-loom`, to build
+                // the backend lock's `try_lock` with `then_some` and prove
+                // `serial_lock` reds.
+                "serial-try-lock-then-some",
                 "shard-publish-relaxed",
                 "shootdown-serve-relaxed",
                 // The eighth loom control, and the first over a *contended*

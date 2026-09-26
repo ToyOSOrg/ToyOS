@@ -251,6 +251,10 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
         "a_snapshot_is_one_publication_whole ... FAILED",
     ]),
+    red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
+        "a_lost_try_lock_leaves_the_lock_held ... FAILED",
+        "two_writers_never_overlap ... FAILED",
+    ]),
     red(KERNEL_LOOM, "poison-overwrite", Some("poison_set"), &[
         "a_second_death_banks_beside_the_first ... FAILED",
     ]),

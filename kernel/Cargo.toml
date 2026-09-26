@@ -24,6 +24,10 @@ wake-fence-off = []
 # and `kernel-loom/tests/panic_console_publish.rs` must red — a reader keeping a
 # descriptor that is half one publication and half the next.
 seqlock-writer-fence-off = []
+# The same for the console backend's lock: `kernel-loom` turns it on to build
+# `drivers/serial_lock.rs`'s `try_lock` with `then_some`, whose lost exchange
+# releases the holder's lock, and `kernel-loom/tests/serial_lock.rs` must red.
+serial-try-lock-then-some = []
 # The same arrangement for a poll ring's one-shot answer: `kernel-loom` turns it
 # on to split `inbox/once.rs`'s exchange into a load and a store, and
 # `kernel-loom/tests/poll_once.rs` must red when it does — a poll two posts

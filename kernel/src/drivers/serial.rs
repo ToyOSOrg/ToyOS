@@ -9,6 +9,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::IrqGuard;
+use super::serial_lock::{BackendLock, Held};
 
 use crate::arch::console_uart as uart;
 
@@ -58,43 +59,27 @@ pub fn backend() -> Backend {
 }
 
 
-static BACKEND_LOCKED: AtomicBool = AtomicBool::new(false);
+static BACKEND: BackendLock = BackendLock::new();
 
 /// Exclusive access to the serial backend; interrupts are off for as long as the guard lives.
 /// Same-CPU re-entry from an IRQ handler deadlocks the spin.
 pub struct BackendGuard {
-    // Dropped after `Drop::drop` releases the backend, so interrupts reopen last.
+    // Fields drop in order: the backend is released before interrupts reopen.
+    _held: Held<'static>,
     _irq: IrqGuard,
 }
 
 impl BackendGuard {
     pub fn lock() -> Self {
         let irq = IrqGuard::close();
-        while BACKEND_LOCKED
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            while BACKEND_LOCKED.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
-            }
-        }
-        Self { _irq: irq }
+        Self { _held: BACKEND.lock(), _irq: irq }
     }
 
     /// Non-blocking acquire: `None` if another CPU already holds the backend.
     pub fn try_lock() -> Option<Self> {
         let irq = IrqGuard::close();
-        // Not `then_some`: its argument is built whether or not the exchange
-        // won, and a `BackendGuard` built on a loss drops, and its drop
-        // releases the backend another CPU holds.
-        if BACKEND_LOCKED
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            Some(Self { _irq: irq })
-        } else {
-            None
-        }
+        let held = BACKEND.try_lock()?;
+        Some(Self { _held: held, _irq: irq })
     }
 
     /// Writes raw bytes with no escape stripping; callers must pre-strip via [`write_console`].
@@ -122,12 +107,6 @@ impl BackendGuard {
         } else {
             None
         }
-    }
-}
-
-impl Drop for BackendGuard {
-    fn drop(&mut self) {
-        BACKEND_LOCKED.store(false, Ordering::Release);
     }
 }
 
