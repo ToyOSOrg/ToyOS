@@ -22,11 +22,7 @@ use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::udp;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, DHCP_MAX_DNS_SERVER_COUNT};
 use toyos_dns::{Asked, Failure, Lookup, Name, Step};
-
-/// Lookups in flight at once. Policy: each holds a socket and its buffers per
-/// query waiting for its answer until it ends, and a client may start any
-/// number of them.
-pub const MAX_LOOKUPS: usize = 16;
+pub use toyos_dns::MAX_LOOKUPS;
 
 /// Datagrams, and bytes, a query's socket holds between two passes: two of the
 /// largest an unfragmented Ethernet frame carries. A reply to a query sent

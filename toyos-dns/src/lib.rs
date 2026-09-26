@@ -54,6 +54,11 @@ pub const ROUNDS: usize = 3;
 /// is ended by this bound.
 pub const MAX_ALIASES: usize = 8;
 
+/// Lookups in flight at once. Policy: each holds a socket and its buffers per
+/// query waiting for its answer until it ends, and a client may start any
+/// number of them.
+pub const MAX_LOOKUPS: usize = 16;
+
 /// RFC 1035 §4.1.1.
 const HEADER: usize = 12;
 const QR: u16 = 0x8000;

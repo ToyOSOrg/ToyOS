@@ -466,3 +466,18 @@ fn a_server_that_never_answers_is_asked_at_each_waits_end() {
     assert_eq!(net.now_ms, toyos_dns::ROUNDS as u64 * toyos_dns::WAIT_MS, "the lookup ended late");
     assert_eq!(net.queried, [ANSWERS; toyos_dns::ROUNDS]);
 }
+
+/// **A lookup's wait is its own, not the latest of every lookup in flight.**
+/// A second lookup started half a wait behind the first must not push the
+/// first's wake back to the second's: `wake_in` names the soonest due lookup,
+/// and the first here ends on its own schedule regardless of the second.
+#[test]
+fn a_lookup_is_not_carried_by_a_later_ones_schedule() {
+    let mut net = Net::new(&[ANSWERS]);
+    net.start(1, "www.example").unwrap();
+    net.until(toyos_dns::WAIT_MS / 2);
+    net.start(2, "other.example").unwrap();
+    let ended = net.run(1, 10 * toyos_dns::WAIT_MS);
+    assert_eq!(ended, Some(Err(Ended::Failed(Failure::TimedOut))));
+    assert_eq!(net.now_ms, toyos_dns::ROUNDS as u64 * toyos_dns::WAIT_MS, "lookup 1 waited on lookup 2's schedule");
+}

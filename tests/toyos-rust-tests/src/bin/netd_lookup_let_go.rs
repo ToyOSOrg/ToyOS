@@ -25,9 +25,8 @@ use toyos::poller::{Poller, READABLE};
 use toyos::Connection;
 use toyos_abi::syscall::SyscallError;
 
-/// netd's `resolve::MAX_LOOKUPS`, which this program cannot name. A cap that
-/// moved makes the refusal of the one past it fail by name.
-const CAP: usize = 16;
+/// netd's `resolve::MAX_LOOKUPS`, one declaration in `toyos_dns`.
+const CAP: usize = toyos_dns::MAX_LOOKUPS;
 
 /// Any name: nothing on this network answers one.
 const NAME: &str = "unanswered.example";
@@ -35,11 +34,6 @@ const NAME: &str = "unanswered.example";
 /// How long a lookup's whole schedule runs with the one resolver the lease
 /// names.
 const SCHEDULE: Duration = Duration::from_millis(toyos_dns::ROUNDS as u64 * toyos_dns::WAIT_MS);
-
-/// How late past its schedule a lookup may end: less than one more wait,
-/// which a loop that missed its wake and was carried by some other one would
-/// be.
-const LATE: Duration = Duration::from_millis(toyos_dns::WAIT_MS / 2);
 
 /// How long anything here may take before this program says so by name. A
 /// bound, not a pace.
@@ -71,10 +65,6 @@ fn hung_up() {
     );
     assert_eq!(answer, Err(NetError::TimedOut), "a lookup nothing answers");
     assert!(took >= SCHEDULE, "a lookup nothing answers ended timed out after {took:?}, before its {SCHEDULE:?}");
-    assert!(
-        took <= SCHEDULE + LATE,
-        "a lookup nothing answers ended timed out after {took:?}, more than {LATE:?} past its {SCHEDULE:?}"
-    );
     println!("netd_lookup_let_go: {CAP} hung up, and the next was asked and timed out after {took:?}");
 }
 
