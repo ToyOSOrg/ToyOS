@@ -591,6 +591,9 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // than through `halt_all_cpus`.
     ("screen_fatal_halt_composited", Sched::Parallel, Tier::Nightly),
     ("screen_pager_keys", Sched::Serial, Tier::Nightly),
+    // AArch64 guests on QEMU `virt`: local, because no CI runner boots one yet.
+    ("virt_early_panic", Sched::Parallel, Tier::Local),
+    ("virt_early_fault", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -5829,6 +5832,99 @@ fn run_screen_test(
                 &["PANIC:", "test-late-panic: on-screen console check"],
                 "late_panic::Nest",
             )?;
+            Ok(())
+        }
+        "virt_early_panic" => {
+            // The AArch64 port's stage 3, whole: the loader on AAVMF, the entry's
+            // drop and declaration, the PL011 SPCR names, the boot's survey of
+            // the machine, and a panic on both channels. No userland: that
+            // architecture has none to put on ROOT yet.
+            let started = std::time::Instant::now();
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::Virt,
+                    qmp: true,
+                    kernel_params: &["test-early-panic"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            let rest = qemu.drain_serial(Duration::from_secs(1));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            eprintln!("  [virt] the panel is up {} ms after the boot began", started.elapsed().as_millis());
+            // What stage 3 prints before it panics: every item is a record
+            // only the AArch64 side of the kernel writes.
+            for want in [
+                "serial: PL011 at",
+                "control registers: SCTLR_EL1=",
+                "as declared; entered at EL",
+                "memory: 0x0000400",
+                "ACPI: MADT GICD at 0x8000000, GIC version 3",
+                "ACPI: MADT GICC uid=0 mpidr=0x0 enabled=true",
+                "ACPI: GTDT timers:",
+                "EARLY PANIC: panicked at",
+                "test-early-panic: on-screen console check",
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            let text = dump.text();
+            print_screen(name, &text);
+            for want in ["EARLY PANIC:", "test-early-panic: on-screen console check"] {
+                if !text.contains(want) {
+                    return Err(format!("{want:?} not on the ramfb panel\ndecoded screen:\n{text}"));
+                }
+            }
+            check_colors(
+                &dump,
+                FILL_FATAL,
+                &["EARLY PANIC:", "test-early-panic: on-screen console check"],
+                "ACPI: GTDT timers:",
+            )?;
+            Ok(())
+        }
+        "virt_early_fault" => {
+            // The vectors, judged by the one thing a broken table cannot do:
+            // report. An undefined instruction right after the console step
+            // reaches `trap::exception`, which says what was taken and panics,
+            // and the panic reaches both channels. A table that is misaligned,
+            // never installed, or whose entry does not reach the handler
+            // leaves the guest silent, and this waits for a line that never
+            // comes.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::Virt,
+                    qmp: true,
+                    kernel_params: &["test-early-fault"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            let rest = qemu.drain_serial(Duration::from_secs(1));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            for want in [
+                "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
+                "EARLY PANIC: panicked at",
+                "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x",
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            let text = dump.text();
+            print_screen(name, &text);
+            if !text.contains("EARLY PANIC:") || !text.contains("undefined instruction") {
+                return Err(format!("the fault's report is not on the ramfb panel\ndecoded screen:\n{text}"));
+            }
             Ok(())
         }
         "screen_early_panic" => {
@@ -19528,7 +19624,8 @@ fn build_tasks<'a>(
 fn check_shard_partition(all_tests: &[TestDef]) {
     let pricing = shard_pricing();
     for &nightly in &[false, true] {
-        let in_tier = |tier: Tier| nightly || tier == Tier::Fast;
+        // Sharded, because every run this partition is for is one.
+        let in_tier = |tier: Tier| tier.selected(nightly, true);
         let tests_to_run: Vec<&TestDef> =
             all_tests.iter().filter(|_| in_tier(SHARED_TIER)).collect();
         let machine_to_run: Vec<(&str, Sched)> = MACHINE_TESTS
@@ -20175,7 +20272,7 @@ fn main() {
     // nobody remembers. `cargo test -- desktop_window_child` refuses below and
     // says what to type instead, which is the same information a silent skip
     // would have withheld.
-    let in_tier = |tier: Tier| nightly || tier == Tier::Fast;
+    let in_tier = |tier: Tier| tier.selected(nightly, shard.is_some());
     let tests_to_run: Vec<&TestDef> = all_tests
         .iter()
         .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
@@ -20201,18 +20298,30 @@ fn main() {
     // introduces, so the names are printed rather than counted, and the line
     // carries both the command that runs them and the record that says what each
     // one guarded.
-    let held_back: Vec<&str> = MACHINE_TESTS
-        .iter()
-        .chain(SCREEN_TESTS)
-        .filter(|(n, _, tier)| keep(n) && !in_tier(*tier))
-        .map(|(n, _, _)| *n)
-        .chain(
-            AUDIO_TESTS
-                .iter()
-                .filter(|(name, tier)| keep(name) && !in_tier(*tier))
-                .map(|(name, _)| *name),
-        )
-        .collect();
+    let held = |which: Tier| -> Vec<&str> {
+        MACHINE_TESTS
+            .iter()
+            .chain(SCREEN_TESTS)
+            .filter(|(n, _, tier)| keep(n) && *tier == which && !in_tier(*tier))
+            .map(|(n, _, _)| *n)
+            .chain(
+                AUDIO_TESTS
+                    .iter()
+                    .filter(|(name, tier)| keep(name) && *tier == which && !in_tier(*tier))
+                    .map(|(name, _)| *name),
+            )
+            .collect()
+    };
+    let held_back = held(Tier::Nightly);
+    let held_local = held(Tier::Local);
+    if !held_local.is_empty() {
+        eprintln!(
+            "[toyos] local tier: {} test(s) NOT run, because a sharded run is CI's and no CI \
+             runner boots their architecture yet. An unsharded `cargo test` runs them.",
+            held_local.len(),
+        );
+        eprintln!("[toyos]   {}", held_local.join(", "));
+    }
     if !held_back.is_empty() {
         eprintln!(
             "[toyos] nightly tier: {} test(s) NOT run. \

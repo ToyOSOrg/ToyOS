@@ -1374,6 +1374,21 @@ pub enum Profile {
     /// that is the driver's work. The negative control on the whole bind path
     /// — a first-match kernel would go green on every other HDA test.
     HdaTwoLive,
+    /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
+    /// stick on an xHCI, the PL011, and nothing else — no virtio, NIC, NVMe or
+    /// IOMMU. The machine the AArch64 port reaches its console on, and the only
+    /// profile that is not a q35.
+    Virt,
+}
+
+impl Profile {
+    /// The architecture this machine is: every profile is a q35 but `Virt`.
+    pub fn arch(self) -> Arch {
+        match self {
+            Self::Virt => Arch::Aarch64,
+            _ => Arch::X86_64,
+        }
+    }
 }
 
 /// The vIOMMU a profile puts on the machine.
@@ -1697,6 +1712,21 @@ pub const NVME_T14_BLOCKS: u64 = NVME_T14_BYTES / 4096;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
+            Self::Virt => Shape {
+                vga: "std",
+                panel: None,
+                gpu: None,
+                virtio: Virtio::Absent,
+                nic: Nic::Absent,
+                xhci: &[XHCI_DEFAULT],
+                storage_bus: "xhci.0",
+                usb: &[],
+                nvme_bytes: 0,
+                nvme_lba_bytes: NVME_LBA_DEFAULT,
+                usb_disks: &[],
+                hda: &[],
+                iommu: None,
+            },
             Self::Headless => Shape {
                 vga: "none",
                 panel: None,
@@ -2716,7 +2746,7 @@ pub fn build_boot_image_carrying(
         } else {
             toyos_build::build::TEST_KERNEL
         };
-    build_boot_image_with(test_crate, c_tests, rust_tests, staged, kernel, kernel_params, false)
+    build_boot_image_with(SUITE_ARCH, test_crate, c_tests, rust_tests, staged, kernel, kernel_params, false)
 }
 
 /// Refuse a staged [`BootOptions::boot_image`] that is not the image this
@@ -2799,6 +2829,7 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
 }
 
 fn build_boot_image_with(
+    arch: Arch,
     test_crate: &Path,
     c_tests: &[(String, Vec<u8>)],
     rust_tests: &[(String, Vec<u8>)],
@@ -2847,6 +2878,14 @@ fn build_boot_image_with(
         toyos_build::build::DEBUG_KERNEL_BUILD,
     );
     KERNELS.lock().expect("the kernel census").insert(joined);
+    // The suite's programs are built for one architecture, and a ROOT of
+    // another carries none of them.
+    assert!(
+        arch == SUITE_ARCH || (c_tests.is_empty() && rust_tests.is_empty()),
+        "a {} image was handed programs built for {}",
+        arch.name(),
+        SUITE_ARCH.name()
+    );
     let mut extra_files: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, data) in c_tests {
         extra_files.push((format!("bin/test_c_{name}"), data.clone()));
@@ -2868,7 +2907,7 @@ fn build_boot_image_with(
     );
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let plan = toyos_build::build::Plan::new(SUITE_ARCH, &config_path, kernel_features, kernel_params);
+    let plan = toyos_build::build::Plan::new(arch, &config_path, kernel_features, kernel_params);
     toyos_build::build::build_test_image(&compile::repo_root(), &plan, quiet, &extra_files)
 }
 
@@ -2963,6 +3002,7 @@ impl QemuInstance {
             let params = options.params();
             let params: Vec<&str> = params.iter().map(String::as_str).collect();
             build_boot_image_with(
+                options.profile.arch(),
                 test_crate,
                 c_tests,
                 rust_tests,
@@ -4246,12 +4286,13 @@ fn qemu_command(
         "mute removes the only console a virtio profile has"
     );
 
+    let arch = options.profile.arch();
     let repo = compile::repo_root();
-    let [firmware_code, firmware_vars] = SUITE_ARCH.pflash(&repo);
+    let [firmware_code, firmware_vars] = arch.pflash(&repo);
 
-    let mut qemu = Command::new(SUITE_ARCH.qemu());
+    let mut qemu = Command::new(arch.qemu());
 
-    let accel = SUITE_ARCH.accel();
+    let accel = arch.accel();
     if accel.is_hardware() {
         qemu.arg("-accel").arg(accel.name());
     }
@@ -4269,7 +4310,15 @@ fn qemu_command(
     // `kernel-irqchip=split` only when there is a unit: interrupt remapping
     // needs the userspace half of the irqchip, and a machine with no unit has
     // no reason to be built differently from the one it has always been.
-    let mut machine = String::from("q35");
+    let mut machine = match arch {
+        Arch::X86_64 => String::from("q35"),
+        Arch::Aarch64 => {
+            // `virt` has no i8042 to take away, and the unit a profile declares
+            // is VT-d, which it has none of either.
+            assert!(options.i8042 && shape.iommu.is_none(), "`virt` has neither an i8042 nor VT-d");
+            String::from("virt,gic-version=3")
+        }
+    };
     if !options.i8042 {
         machine.push_str(",i8042=off");
     }
@@ -4281,14 +4330,21 @@ fn qemu_command(
         qemu.arg("-rtc").arg(format!("base={base}"));
     }
 
+    // `virt` puts RAM at 1 GiB and AAVMF allocates from its top, so with 4 GiB
+    // the loader's allocations land past the 4 GiB its boot map reaches and it
+    // refuses the boot: issues/boot-media/the-boot-map-reaches-4-gib-and-firmware-decides-what-lands-in-it.md.
+    let memory = match arch {
+        Arch::X86_64 => "4G",
+        Arch::Aarch64 => "2G",
+    };
     qemu.arg("-machine")
         .arg(&machine)
         .arg("-cpu")
-        .arg(SUITE_ARCH.cpu(accel))
+        .arg(arch.cpu(accel))
         .arg("-smp")
         .arg(options.smp.to_string())
         .arg("-m")
-        .arg("4G")
+        .arg(memory)
         .arg("-drive")
         .arg(firmware_code)
         .arg("-drive")
@@ -4406,11 +4462,24 @@ fn qemu_command(
         );
         qemu.arg("-device").arg(format!("{gpu}{platform}"));
     }
-    qemu.arg("-vga").arg(shape.vga).arg("-display").arg("none");
+    match (arch, shape.vga) {
+        (Arch::X86_64, vga) => {
+            qemu.arg("-vga").arg(vga);
+        }
+        // `virt` has no VGA: a GOP there is firmware's over `ramfb`, a
+        // framebuffer in guest memory that needs no driver after it.
+        (Arch::Aarch64, "std") => {
+            qemu.arg("-device").arg("ramfb");
+        }
+        (Arch::Aarch64, "none") => {}
+        (Arch::Aarch64, other) => panic!("`virt` has no `-vga {other}`"),
+    }
+    qemu.arg("-display").arg("none");
     if !options.takes_the_reset {
         qemu.arg("-no-reboot");
     }
     if let Some((w, h)) = shape.panel {
+        assert_eq!(arch, Arch::X86_64, "a panel is declared through VGA's EDID, and `virt` has no VGA");
         // A panel on a machine with no VGA adapter is a declaration nothing
         // emits, which is the silently-inert field this suite refuses by name.
         assert_eq!(
