@@ -5,6 +5,9 @@ use std::process::Command;
 /// The crate every sysroot links into std, so into every userland binary.
 pub const CRATE: &str = "userland/libc";
 
+/// The features [`build`] gives [`CRATE`].
+pub const FEATURES: &str = "std-runtime";
+
 /// Build toyos-libc against the toolchain at `toolchain`, in `target_dir`, and
 /// install it there as `libtoyos_c.a`. Part of making a sysroot
 /// (`src/sysroot.rs`), whose key `userland/libc/src` is one of.
@@ -29,7 +32,7 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path) {
             "--target",
             "x86_64-unknown-toyos",
             "--features",
-            "std-runtime",
+            FEATURES,
             "--message-format=json",
             "--manifest-path",
         ])

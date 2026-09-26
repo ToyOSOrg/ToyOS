@@ -307,19 +307,100 @@ fn invalidate_stale(
     );
 }
 
-/// Every crate a config builds into, and how much of each goes when stale.
+/// Every target directory a config builds into, and how much of each goes when
+/// stale.
 fn config_targets(root: &Path, config: &SystemConfig) -> Vec<(PathBuf, Clean)> {
-    let mut targets = vec![
-        (root.join("kernel"), Clean::All),
-        (root.join("bootloader"), Clean::All),
-        (root.join("userland"), Clean::All),
-    ];
-    for (name, cfg) in &config.programs {
-        if !cfg.is_workspace_member() {
-            targets.push((cfg.crate_dir(root, name), Clean::ToyosOnly));
+    let mut targets: Vec<(PathBuf, Clean)> = Vec::new();
+    for c in config_crates(root, config) {
+        let target = match c.built {
+            Built::Kernel | Built::Bootloader => (c.dir, Clean::All),
+            Built::Member => (root.join("userland"), Clean::All),
+            Built::Standalone => (c.dir, Clean::ToyosOnly),
+        };
+        if !targets.iter().any(|(dir, _)| *dir == target.0) {
+            targets.push(target);
         }
     }
     targets
+}
+
+/// Which features the build gives a crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Features {
+    /// Its manifest's defaults.
+    Default,
+    /// None of its defaults: a `[programs]` row's `no-default-features`.
+    NoDefault,
+    /// Its defaults and these, comma-separated.
+    With(&'static str),
+    /// Any it declares, since the command line picks: the kernel's, which
+    /// `--kernel-feature` names.
+    AnyDeclared,
+}
+
+impl Features {
+    /// The `cargo` arguments that give a crate these features.
+    pub fn args(self) -> Vec<&'static str> {
+        match self {
+            Features::Default => vec![],
+            Features::NoDefault => vec!["--no-default-features"],
+            Features::With(names) => vec!["--features", names],
+            Features::AnyDeclared => vec!["--all-features"],
+        }
+    }
+}
+
+/// Where [`build`] runs `cargo build` for one crate of a config.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Built {
+    Kernel,
+    Bootloader,
+    /// A package of the userland workspace, built there with `-p`.
+    Member,
+    /// A program built in its own directory.
+    Standalone,
+}
+
+/// One crate a config's image is built from.
+struct ConfigCrate {
+    name: String,
+    dir: PathBuf,
+    built: Built,
+    features: Features,
+}
+
+/// Every crate a config's image is built from: the one list the build, its
+/// staleness sweep and the licence gate read.
+fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
+    let mut crates = vec![
+        ConfigCrate {
+            name: "kernel".to_string(),
+            dir: root.join("kernel"),
+            built: Built::Kernel,
+            features: Features::AnyDeclared,
+        },
+        ConfigCrate {
+            name: "bootloader".to_string(),
+            dir: root.join("bootloader"),
+            built: Built::Bootloader,
+            features: Features::Default,
+        },
+    ];
+    for (name, cfg) in &config.programs {
+        crates.push(ConfigCrate {
+            name: name.clone(),
+            dir: cfg.crate_dir(root, name),
+            built: if cfg.is_workspace_member() { Built::Member } else { Built::Standalone },
+            features: if cfg.no_default_features { Features::NoDefault } else { Features::Default },
+        });
+    }
+    crates.push(ConfigCrate {
+        name: INIT_PROGRAM.to_string(),
+        dir: ProgramConfig::default().crate_dir(root, INIT_PROGRAM),
+        built: Built::Member,
+        features: Features::Default,
+    });
+    crates
 }
 
 // --- Cargo helpers ---
@@ -619,21 +700,20 @@ fn build_and_assemble(
 ) -> Vec<u8> {
     let userland_dir = root.join("userland");
 
-    let mut workspace_packages: Vec<&str> = vec![INIT_PROGRAM];
-    let mut standalone: Vec<(&String, &ProgramConfig)> = Vec::new();
-    for (name, cfg) in &config.programs {
-        let crate_dir = cfg.crate_dir(root, name);
+    let programs: Vec<ConfigCrate> = config_crates(root, config)
+        .into_iter()
+        .filter(|c| matches!(c.built, Built::Member | Built::Standalone))
+        .collect();
+    for c in &programs {
         assert!(
-            crate_dir.join("Cargo.toml").exists(),
-            "Program '{name}' crate not found at {}",
-            crate_dir.display()
+            c.dir.join("Cargo.toml").exists(),
+            "Program '{}' crate not found at {}",
+            c.name,
+            c.dir.display()
         );
-        if cfg.is_workspace_member() {
-            workspace_packages.push(name);
-        } else {
-            standalone.push((name, cfg));
-        }
     }
+    let workspace_packages: Vec<&str> =
+        programs.iter().filter(|c| c.built == Built::Member).map(|c| c.name.as_str()).collect();
 
     let mut root_files: Vec<(String, Vec<u8>)> = Vec::new();
     let ws_target = userland_dir.join(format!("target/x86_64-unknown-toyos/{PROFILE}"));
@@ -663,38 +743,22 @@ fn build_and_assemble(
             );
         }
 
-        for (name, cfg) in &standalone {
-            let crate_dir = cfg.crate_dir(root, name);
-            let mut extra: Vec<&str> = Vec::new();
-            if cfg.no_default_features {
-                extra.push("--no-default-features");
-            }
-            cargo_build(
-                &crate_dir,
-                "x86_64-unknown-toyos",
-                &extra,
-                env,
-                &[],
-                quiet,
-            );
+        for c in programs.iter().filter(|c| c.built == Built::Standalone) {
+            cargo_build(&c.dir, "x86_64-unknown-toyos", &c.features.args(), env, &[], quiet);
         }
 
-        for (name, cfg) in &config.programs {
-            let binary = if cfg.is_workspace_member() {
-                ws_target.join(name)
-            } else {
-                let crate_dir = cfg.crate_dir(root, name);
-                hostws::target_dir(root, &crate_dir)
-                    .join(format!("x86_64-unknown-toyos/{PROFILE}/{name}"))
+        for c in &programs {
+            let name = &c.name;
+            let binary = match c.built {
+                Built::Member => ws_target.join(name),
+                Built::Standalone => hostws::target_dir(root, &c.dir)
+                    .join(format!("x86_64-unknown-toyos/{PROFILE}/{name}")),
+                Built::Kernel | Built::Bootloader => unreachable!("filtered out above"),
             };
             let data =
                 fs::read(&binary).unwrap_or_else(|_| panic!("Failed to read binary for {name}"));
             root_files.push((format!("bin/{name}"), data));
         }
-
-        let init = ws_target.join(INIT_PROGRAM);
-        let data = fs::read(&init).expect("Failed to read binary for init");
-        root_files.push((format!("bin/{INIT_PROGRAM}"), data));
         root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
     }
 
@@ -925,11 +989,12 @@ impl Boot {
     }
 }
 
-/// What the three modes' images are built from, besides std: every directory
-/// [`build`] runs `cargo build` in for one of them, and the asset directories
-/// their configs copy onto ROOT. A case's config is a test image and is not here.
+/// What the three modes' images are built from, besides std: every crate
+/// [`config_crates`] names for one of them with the features the build gives
+/// it, and the asset directories their configs copy onto ROOT. A case's config
+/// is a test image and is not here.
 pub struct Shipped {
-    pub crates: BTreeSet<PathBuf>,
+    pub crates: BTreeSet<(PathBuf, Features)>,
     pub assets: BTreeSet<PathBuf>,
 }
 
@@ -938,7 +1003,7 @@ pub struct Shipped {
 /// **A config that ships the hosted compiler is refused**: its dependencies are
 /// the rust fork's `compiler/` workspace, which no reader of this answer walks.
 pub fn shipped(root: &Path) -> Result<Shipped, String> {
-    let mut crates = BTreeSet::from([root.join("kernel"), root.join("bootloader")]);
+    let mut crates = BTreeSet::new();
     let mut assets = BTreeSet::new();
     for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
         let config = parse_config(&boot.config);
@@ -948,10 +1013,7 @@ pub fn shipped(root: &Path) -> Result<Shipped, String> {
                 boot.config.display()
             ));
         }
-        crates.insert(ProgramConfig::default().crate_dir(root, INIT_PROGRAM));
-        for (name, program) in &config.programs {
-            crates.insert(program.crate_dir(root, name));
-        }
+        crates.extend(config_crates(root, &config).into_iter().map(|c| (c.dir, c.features)));
         assets.extend(config.assets.iter().map(|dir| root.join(dir)));
     }
     Ok(Shipped { crates, assets })
@@ -2110,6 +2172,26 @@ fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `console` is reached by `console/system.toml` alone and `init` by no
+    /// `[programs]` row, so a reader that drops a mode or init loses one.
+    #[test]
+    fn every_modes_crates_and_init_ship() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shipped = shipped(root).expect("the modes' configs");
+        for (dir, features) in [
+            ("userland/console", Features::Default),
+            ("userland/init", Features::Default),
+            ("kernel", Features::AnyDeclared),
+            ("bootloader", Features::Default),
+        ] {
+            assert!(
+                shipped.crates.contains(&(root.join(dir), features)),
+                "{dir} with {features:?} is not among {:?}",
+                shipped.crates
+            );
+        }
+    }
 
     #[test]
     fn an_artifact_build_is_not_part_of_a_test_execution_price() {

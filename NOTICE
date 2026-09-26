@@ -8,11 +8,12 @@ Some of what this repository carries is not ours and is under other terms.
 This file is the list. It exists because until 2026-08-08 there wasn't one: an
 audit that day found six committed binary files — 11,094,369 bytes of the
 14,634,080 git tracks — plus a source corpus, all outside the declared licence
-and none of them documented. Nothing here is a violation. Everything here is an
-obligation somebody has to be able to find.
+and none of them documented. Everything here is an obligation somebody has to
+be able to find.
 
-Each section names its terms on one `SPDX-License-Identifier:` line, and
-`src/licence.rs` holds every section an image ships against the licence gate.
+Each section names its terms on one `SPDX-License-Identifier:` line, which
+agrees with the licence column of `COMMITTED_FILES` in `src/licence.rs` for
+every file both name, and that file judges what an image ships by them.
 
 Provenance below was established by inspecting content, not by trusting
 memory: `assets/` and `ovmf/` both entered in the initial squashed commit and
@@ -113,7 +114,7 @@ userland/doom — GPL-2.0
 -----------------------
 
     Licence text: licenses/GPL-2.0-doomgeneric.txt
-    SPDX-License-Identifier: GPL-2.0-only
+    SPDX-License-Identifier: GPL-2.0-or-later
 
 `/system/bin/doom` links doomgeneric, so the program is GPL-2.0. The C sources are not
 committed: `userland/doom/build.rs` fetches upstream commit `fc60163` into a
@@ -267,7 +268,7 @@ digest above and that file carries the matching line.
 tests/testcases/ — TinyCC's corpus, LGPL-2.1, and picoc, BSD-3-Clause
 ---------------------------------------------------------------------
 
-    SPDX-License-Identifier: LGPL-2.1-only AND BSD-3-Clause AND (MIT OR Apache-2.0)
+    SPDX-License-Identifier: LGPL-2.1-or-later AND BSD-3-Clause AND (MIT OR Apache-2.0)
 
 The C cases `toyos-cc` is tested against are mostly TinyCC's `tests/tests2` and
 `tests/pp`. They are compiler *input* — data, not linked code — so their terms
@@ -300,8 +301,9 @@ bcachefs/tests/fixtures/ — volumes upstream's tools wrote
     144,978 bytes gzip -9, of a 33,554,432-byte raw volume
     sha256 7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e
     raw    021c816a064fc2fca2402c8b2a87a9e6124e0b2f4a32779ef14654e908bcacff
-    Terms: ours — see below
-    SPDX-License-Identifier: MIT OR Apache-2.0
+    Terms: pending the owner with the crate itself,
+    issues/filesystem/whether-bcachefs-is-ours-to-license-is-the-owners.md
+    SPDX-License-Identifier: NOASSERTION
 
 `bcachefs/src/upstream` implements upstream's on-disk format, and the only
 honest judge of a format reader is bytes the format's own implementation wrote.
