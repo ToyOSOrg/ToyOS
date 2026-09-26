@@ -471,6 +471,32 @@ fn rfc1035_2_3_4_a_name_built_past_255_bytes_by_pointers_is_refused() {
     );
 }
 
+/// RFC 1035 §2.3.4's bound read off the wire at its edge: an owner of exactly
+/// 255 bytes is read, and one of 256 is refused, through the reader the
+/// resolver and `toyos-mdns` share.
+#[test]
+fn rfc1035_2_3_4_an_owner_of_255_bytes_is_read_and_one_of_256_is_refused() {
+    let owner = |last: usize| {
+        let mut wire = Vec::new();
+        for len in [63, 63, 63, last] {
+            wire.push(len as u8);
+            wire.extend(core::iter::repeat_n(b'z', len));
+        }
+        wire.push(0);
+        wire
+    };
+    let (edge, past) = (owner(61), owner(62));
+    assert_eq!((edge.len(), past.len()), (255, 256));
+    let at = FIRST_ANSWER as usize;
+    let msg = with_owner(&edge);
+    let (read_back, after) = name_at(&msg, at).expect("a 255-byte owner");
+    assert_eq!((read_back.wire(), after), (&edge[..], at + 255));
+    assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), answer(&[], &[]), "255 bytes, not asked about");
+    let msg = with_owner(&past);
+    assert_eq!(name_at(&msg, at).map(|_| ()), Err(Stray::Malformed("a name longer than 255 bytes")));
+    assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), stray("a name longer than 255 bytes"));
+}
+
 // --- Every malformed input (the fuzz-like half) ---
 
 /// A deterministic byte stream: xorshift64*, so a failing case is reproduced
@@ -599,138 +625,198 @@ fn random_bytes_are_never_an_answer_to_an_id_they_do_not_carry() {
 const S1: [u8; 4] = [10, 0, 2, 3];
 const S2: [u8; 4] = [192, 168, 1, 1];
 
-fn asked(step: &Step) -> ([u8; 4], u16) {
+/// The query `step` sends: which one it is, its server and its ID.
+fn asked(step: &Step) -> (Asked, [u8; 4], u16) {
     match step {
-        Step::Ask { to, query } => (*to, u16::from_be_bytes([query[0], query[1]])),
+        Step::Ask { asked, to, query } => (*asked, *to, u16::from_be_bytes([query[0], query[1]])),
         other => panic!("expected a query, got {other:?}"),
     }
+}
+
+/// Where `step` sends its query, and with which ID.
+fn to(step: &Step) -> ([u8; 4], u16) {
+    let (_, to, id) = asked(step);
+    (to, id)
+}
+
+fn waiting(lookup: &Lookup) -> Vec<Asked> {
+    lookup.waiting().collect()
 }
 
 #[test]
 fn rfc1035_4_2_1_every_server_is_asked_before_any_again_and_the_lookup_ends_after_its_rounds() {
     let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, 100).unwrap();
-    assert_eq!(asked(&first), (S1, 100));
+    assert_eq!(to(&first), (S1, 100));
     assert_eq!(lookup.due(), WAIT_MS);
     assert_eq!(lookup.on_time(WAIT_MS - 1, 999), Step::Wait, "before its wait is up");
     let mut now = WAIT_MS;
-    let mut sent = vec![S1];
+    let mut sent = vec![asked(&first)];
     loop {
         match lookup.on_time(now, 101 + sent.len() as u16) {
             Step::Done(result) => {
                 assert_eq!(result, Err(Failure::TimedOut));
                 break;
             }
-            step => sent.push(asked(&step).0),
+            step => sent.push(asked(&step)),
         }
         now += WAIT_MS;
     }
-    assert_eq!(sent, [S1, S2].repeat(ROUNDS), "round robin, {ROUNDS} rounds");
+    let servers: Vec<[u8; 4]> = sent.iter().map(|s| s.1).collect();
+    assert_eq!(servers, [S1, S2].repeat(ROUNDS), "round robin, {ROUNDS} rounds");
+    let mut each: Vec<Asked> = sent.iter().map(|s| s.0).collect();
+    each.sort();
+    each.dedup();
+    assert_eq!(each.len(), sent.len(), "every query is told apart from the others");
 }
 
 #[test]
 fn rfc5452_9_1_only_the_asked_server_port_and_id_are_read() {
     let (mut lookup, first) = Lookup::start(name("www.example"), &[S1], 0, 0x4242).unwrap();
-    assert_eq!(asked(&first), (S1, 0x4242));
+    let (q, ..) = asked(&first);
+    assert_eq!(to(&first), (S1, 0x4242));
     let good = reply(0x4242, OK, "www.example", &[a("www.example", [1, 2, 3, 4])]);
-    assert_eq!(lookup.on_datagram(S2, PORT, &good, 5, 1), Step::Wait, "another server");
-    assert_eq!(lookup.on_datagram(S1, 5353, &good, 5, 1), Step::Wait, "another port");
+    assert_eq!(lookup.on_datagram(q, S2, PORT, &good, 5, 1), Step::Wait, "another server");
+    assert_eq!(lookup.on_datagram(q, S1, 5353, &good, 5, 1), Step::Wait, "another port");
+    assert_eq!(lookup.on_datagram(Asked(1), S1, PORT, &good, 5, 1), Step::Wait, "another query's port");
     let forged = reply(0x4243, OK, "www.example", &[a("www.example", [6, 6, 6, 6])]);
-    assert_eq!(lookup.on_datagram(S1, PORT, &forged, 5, 1), Step::Wait, "another ID");
-    assert_eq!(lookup.on_datagram(S1, PORT, &[0x42], 5, 1), Step::Wait, "a byte");
+    assert_eq!(lookup.on_datagram(q, S1, PORT, &forged, 5, 1), Step::Wait, "another ID");
+    assert_eq!(lookup.on_datagram(q, S1, PORT, &[0x42], 5, 1), Step::Wait, "a byte");
     let elsewhere = reply(0x4242, OK, "bank.example", &[a("bank.example", [6, 6, 6, 6])]);
-    assert_eq!(lookup.on_datagram(S1, PORT, &elsewhere, 5, 1), Step::Wait, "another question");
-    assert_eq!(lookup.on_datagram(S1, PORT, &good, 5, 1), Step::Done(Ok(vec![[1, 2, 3, 4]])));
+    assert_eq!(lookup.on_datagram(q, S1, PORT, &elsewhere, 5, 1), Step::Wait, "another question");
+    assert_eq!(lookup.on_datagram(q, S1, PORT, &good, 5, 1), Step::Done(Ok(vec![[1, 2, 3, 4]])));
 }
 
 #[test]
 fn a_late_answer_to_an_earlier_query_still_ends_the_lookup() {
-    let (mut lookup, _) = Lookup::start(name("www.example"), &[S1, S2], 0, 1).unwrap();
-    assert_eq!(asked(&lookup.on_time(WAIT_MS, 2)), (S2, 2));
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, 1).unwrap();
+    let (q1, ..) = asked(&first);
+    let second = lookup.on_time(WAIT_MS, 2);
+    assert_eq!(to(&second), (S2, 2));
+    let (q2, ..) = asked(&second);
+    assert_eq!(waiting(&lookup), [q1, q2], "the first query is still answered");
     let late = reply(1, OK, "www.example", &[a("www.example", [1, 2, 3, 4])]);
-    assert_eq!(lookup.on_datagram(S2, PORT, &late, WAIT_MS + 1, 3), Step::Wait, "ID 1 went to the first server");
-    assert_eq!(lookup.on_datagram(S1, PORT, &late, WAIT_MS + 1, 3), Step::Done(Ok(vec![[1, 2, 3, 4]])));
+    assert_eq!(lookup.on_datagram(q1, S2, PORT, &late, WAIT_MS + 1, 3), Step::Wait, "ID 1 went to the first server");
+    assert_eq!(lookup.on_datagram(q2, S1, PORT, &late, WAIT_MS + 1, 3), Step::Wait, "ID 1 left from the first query's port");
+    assert_eq!(lookup.on_datagram(q1, S1, PORT, &late, WAIT_MS + 1, 3), Step::Done(Ok(vec![[1, 2, 3, 4]])));
 }
 
 #[test]
 fn a_server_failure_asks_the_next_server_at_once() {
-    let (mut lookup, _) = Lookup::start(name("www.example"), &[S1, S2], 0, 1).unwrap();
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, 1).unwrap();
+    let (q1, ..) = asked(&first);
     let servfail = reply(1, OK | 2, "www.example", &[]);
-    assert_eq!(asked(&lookup.on_datagram(S1, PORT, &servfail, 10, 2)), (S2, 2));
+    let second = lookup.on_datagram(q1, S1, PORT, &servfail, 10, 2);
+    assert_eq!(to(&second), (S2, 2));
+    let (q2, ..) = asked(&second);
+    assert_eq!(waiting(&lookup), [q2], "the failed query is answered no more");
     assert_eq!(lookup.due(), 10 + WAIT_MS);
     // The same failure again is no longer a query of this lookup's.
-    assert_eq!(lookup.on_datagram(S1, PORT, &servfail, 11, 3), Step::Wait);
+    assert_eq!(lookup.on_datagram(q1, S1, PORT, &servfail, 11, 3), Step::Wait);
     // An older query's failure while the newest still waits asks nobody.
-    assert_eq!(asked(&lookup.on_time(10 + WAIT_MS, 3)), (S1, 3));
+    let third = lookup.on_time(10 + WAIT_MS, 3);
+    assert_eq!(to(&third), (S1, 3));
+    let (q3, ..) = asked(&third);
     let old = reply(2, OK | 5, "www.example", &[]);
-    assert_eq!(lookup.on_datagram(S2, PORT, &old, 10 + WAIT_MS + 1, 4), Step::Wait);
+    assert_eq!(lookup.on_datagram(q2, S2, PORT, &old, 10 + WAIT_MS + 1, 4), Step::Wait);
+    assert_eq!(waiting(&lookup), [q3]);
     let ok = reply(3, OK, "www.example", &[a("www.example", [1, 2, 3, 4])]);
-    assert_eq!(lookup.on_datagram(S1, PORT, &ok, 10 + WAIT_MS + 2, 4), Step::Done(Ok(vec![[1, 2, 3, 4]])));
+    assert_eq!(lookup.on_datagram(q3, S1, PORT, &ok, 10 + WAIT_MS + 2, 4), Step::Done(Ok(vec![[1, 2, 3, 4]])));
 }
 
 #[test]
 fn a_lookup_whose_every_server_failed_says_how() {
-    let (mut lookup, _) = Lookup::start(name("www.example"), &[S1], 0, 0).unwrap();
-    let mut id = 0u16;
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1], 0, 0).unwrap();
+    let (mut q, _, mut id) = asked(&first);
     let mut now = 0;
     for _ in 0..ROUNDS - 1 {
-        let step = lookup.on_datagram(S1, PORT, &reply(id, OK | 2, "www.example", &[]), now, id + 1);
-        assert_eq!(asked(&step), (S1, id + 1));
+        let step = lookup.on_datagram(q, S1, PORT, &reply(id, OK | 2, "www.example", &[]), now, id + 1);
+        assert_eq!(to(&step), (S1, id + 1));
+        q = asked(&step).0;
         id += 1;
         now += 1;
     }
     assert_eq!(
-        lookup.on_datagram(S1, PORT, &reply(id, OK | 2, "www.example", &[]), now, id + 1),
+        lookup.on_datagram(q, S1, PORT, &reply(id, OK | 2, "www.example", &[]), now, id + 1),
         Step::Done(Err(Failure::ServerFailed(2)))
     );
 }
 
+/// The failure a lookup reports is the name it now asks: a server that could
+/// not answer the name given says nothing about the alias it led to, so a
+/// lookup restarted at that alias whose every query then goes unanswered ends
+/// timed out.
+#[test]
+fn a_server_failure_before_an_alias_is_not_the_aliases_failure() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, 1).unwrap();
+    let second = lookup.on_datagram(asked(&first).0, S1, PORT, &reply(1, OK | 2, "www.example", &[]), 10, 2);
+    assert_eq!(to(&second), (S2, 2));
+    let alias = reply(2, OK, "www.example", &[cname("www.example", "cdn.example")]);
+    let restart = lookup.on_datagram(asked(&second).0, S2, PORT, &alias, 20, 3);
+    assert_eq!(to(&restart), (S1, 3), "the alias is asked afresh");
+    let mut now = 20;
+    let ended = loop {
+        now += WAIT_MS;
+        match lookup.on_time(now, 4) {
+            Step::Done(result) => break result,
+            step => {
+                asked(&step);
+            }
+        }
+    };
+    assert_eq!(ended, Err(Failure::TimedOut));
+}
+
 #[test]
 fn a_truncated_reply_ends_the_lookup_by_name() {
-    let (mut lookup, _) = Lookup::start(name("www.example"), &[S1], 0, 9).unwrap();
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1], 0, 9).unwrap();
     let cut = reply(9, OK | TC, "www.example", &[a("www.example", [1, 2, 3, 4])]);
-    assert_eq!(lookup.on_datagram(S1, PORT, &cut, 1, 10), Step::Done(Err(Failure::Truncated)));
+    assert_eq!(lookup.on_datagram(asked(&first).0, S1, PORT, &cut, 1, 10), Step::Done(Err(Failure::Truncated)));
 }
 
 #[test]
 fn rfc2308_nxdomain_and_nodata_end_the_lookup_apart() {
-    let (mut lookup, _) = Lookup::start(name("www.example"), &[S1], 0, 9).unwrap();
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1], 0, 9).unwrap();
     assert_eq!(
-        lookup.on_datagram(S1, PORT, &reply(9, OK | 3, "www.example", &[]), 1, 10),
+        lookup.on_datagram(asked(&first).0, S1, PORT, &reply(9, OK | 3, "www.example", &[]), 1, 10),
         Step::Done(Err(Failure::NoSuchName))
     );
-    let (mut lookup, _) = Lookup::start(name("www.example"), &[S1], 0, 9).unwrap();
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1], 0, 9).unwrap();
     assert_eq!(
-        lookup.on_datagram(S1, PORT, &reply(9, OK, "www.example", &[]), 1, 10),
+        lookup.on_datagram(asked(&first).0, S1, PORT, &reply(9, OK, "www.example", &[]), 1, 10),
         Step::Done(Err(Failure::NoAddress))
     );
 }
 
 #[test]
 fn rfc1034_5_3_3_a_chain_that_ends_without_an_address_is_asked_again_at_its_end() {
-    let (mut lookup, _) = Lookup::start(name("www.example"), &[S1, S2], 0, 1).unwrap();
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, 1).unwrap();
+    let (q1, ..) = asked(&first);
     let alias = reply(1, OK, "www.example", &[cname("www.example", "cdn.example")]);
-    let step = lookup.on_datagram(S1, PORT, &alias, 50, 2);
-    assert_eq!(step, Step::Ask { to: S1, query: query(2, &name("cdn.example")) }, "the first server, afresh");
+    let step = lookup.on_datagram(q1, S1, PORT, &alias, 50, 2);
+    let (q2, ..) = asked(&step);
+    assert_eq!(step, Step::Ask { asked: q2, to: S1, query: query(2, &name("cdn.example")) }, "the first server, afresh");
+    assert_eq!(waiting(&lookup), [q2], "no query for the old name is answered any more");
     assert_eq!(lookup.due(), 50 + WAIT_MS);
-    assert_eq!(lookup.on_datagram(S1, PORT, &alias, 51, 3), Step::Wait, "the old name's query is over");
+    assert_eq!(lookup.on_datagram(q1, S1, PORT, &alias, 51, 3), Step::Wait, "the old name's query is over");
     let done = reply(2, OK, "cdn.example", &[a("cdn.example", [4, 3, 2, 1])]);
-    assert_eq!(lookup.on_datagram(S1, PORT, &done, 52, 3), Step::Done(Ok(vec![[4, 3, 2, 1]])));
+    assert_eq!(lookup.on_datagram(q2, S1, PORT, &done, 52, 3), Step::Done(Ok(vec![[4, 3, 2, 1]])));
 }
 
 #[test]
 fn aliases_are_counted_across_the_names_a_lookup_asks() {
-    let (mut lookup, _) = Lookup::start(name("h0.example"), &[S1], 0, 0).unwrap();
-    let mut id = 0u16;
+    let (mut lookup, first) = Lookup::start(name("h0.example"), &[S1], 0, 0).unwrap();
+    let (mut q, _, mut id) = asked(&first);
     for i in 0..MAX_ALIASES {
         let from = std::format!("h{i}.example");
-        let to = std::format!("h{}.example", i + 1);
-        let step = lookup.on_datagram(S1, PORT, &reply(id, OK, &from, &[cname(&from, &to)]), 0, id + 1);
-        assert_eq!(asked(&step), (S1, id + 1), "alias {i}");
+        let to_name = std::format!("h{}.example", i + 1);
+        let step = lookup.on_datagram(q, S1, PORT, &reply(id, OK, &from, &[cname(&from, &to_name)]), 0, id + 1);
+        assert_eq!(to(&step), (S1, id + 1), "alias {i}");
+        q = asked(&step).0;
         id += 1;
     }
     let last = std::format!("h{MAX_ALIASES}.example");
     let one_more = reply(id, OK, &last, &[cname(&last, "end.example")]);
-    assert_eq!(lookup.on_datagram(S1, PORT, &one_more, 0, id + 1), Step::Done(Err(Failure::TooManyAliases)));
+    assert_eq!(lookup.on_datagram(q, S1, PORT, &one_more, 0, id + 1), Step::Done(Err(Failure::TooManyAliases)));
 }
 
 #[test]

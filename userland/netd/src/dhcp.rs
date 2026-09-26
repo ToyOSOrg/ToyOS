@@ -138,7 +138,7 @@ impl Dhcp {
     /// Apply what the client decided, and answer whether this machine's address
     /// question has just been settled — which is the moment netd has something
     /// to serve with.
-    pub fn pass<C>(&mut self, change: Option<Change>, iface: &mut Interface, resolver: &mut Resolver<C>) -> bool {
+    pub fn pass<C, D: FnMut() -> u16>(&mut self, change: Option<Change>, iface: &mut Interface, resolver: &mut Resolver<C, D>) -> bool {
         if let Some(change) = change {
             let held = match change {
                 Change::Leased { address, router, server, dns } => {
@@ -200,11 +200,11 @@ impl Dhcp {
     /// `None` writes the absence of all three. **One writer, reached by every
     /// change**, so a route left standing over an address that is gone cannot
     /// be arranged without breaking the path every boot takes to its lease.
-    fn write<C>(
+    fn write<C, D: FnMut() -> u16>(
         lease: Option<(Ipv4Cidr, Option<Ipv4Address>)>,
         dns: &[Ipv4Address],
         iface: &mut Interface,
-        resolver: &mut Resolver<C>,
+        resolver: &mut Resolver<C, D>,
     ) {
         iface.update_ip_addrs(|addrs| {
             // Cleared before the push, so a list already holding an address

@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "toyos-abi"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "toyos-manifest"

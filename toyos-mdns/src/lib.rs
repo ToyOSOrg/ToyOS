@@ -25,6 +25,9 @@
 //! it (§8.1) and defending it against another host's (§9). Two machines named
 //! alike both answer, and a resolver may see either.
 //!
+//! A question is read off the wire by `toyos-dns`, the reader a resolver's
+//! reply is read by.
+//!
 //! Pure: `core` and `alloc`, no `unsafe`, no I/O.
 
 #![no_std]
@@ -36,6 +39,8 @@ extern crate alloc;
 extern crate std;
 
 use alloc::vec::Vec;
+
+use toyos_dns::{name_at, u16_at, Name};
 
 /// The port every multicast DNS responder listens on (§3).
 pub const PORT: u16 = 5353;
@@ -72,8 +77,7 @@ const RESPONSE_FLAGS: u16 = 0x8400;
 const OPCODE_MASK: u16 = 0x7800;
 const QR: u16 = 0x8000;
 
-/// The longest name the wire form carries (RFC 1035 §2.3.4), and a label's.
-const MAX_NAME: usize = 255;
+/// The longest label (RFC 1035 §2.3.4).
 const MAX_LABEL: usize = 63;
 
 /// Where an answer goes.
@@ -120,9 +124,12 @@ impl<'a> Host<'a> {
         out.push(0);
     }
 
-    /// Whether `name`, as a question spelled it, is this host's.
-    fn is(&self, name: &[&[u8]]) -> bool {
-        matches!(name, [host, local] if host.eq_ignore_ascii_case(self.0.as_bytes()) && local.eq_ignore_ascii_case(LOCAL))
+    /// Whether `name`, as a question spelled it, is this host's, whatever the
+    /// case of its letters.
+    fn is(&self, name: &Name) -> bool {
+        let mut ours = Vec::with_capacity(self.0.len() + LOCAL.len() + 3);
+        self.put_name(&mut ours);
+        name.wire().eq_ignore_ascii_case(&ours)
     }
 }
 
@@ -228,21 +235,20 @@ impl<'a> Responder<'a> {
             return None;
         }
         let host = self.host;
-        let id = u16_at(query, 0)?;
-        let flags = u16_at(query, 2)?;
+        let id = u16_at(query, 0).ok()?;
+        let flags = u16_at(query, 2).ok()?;
         if flags & (QR | OPCODE_MASK) != 0 {
             return None;
         }
-        let questions = u16_at(query, 4)?;
+        let questions = u16_at(query, 4).ok()?;
         let mut at = 12;
         let mut asked = None;
         for _ in 0..questions {
-            let mut labels: [&[u8]; 8] = [&[]; 8];
-            let (count, after) = name_at(query, at, &mut labels)?;
-            let kind = u16_at(query, after)?;
-            let class = u16_at(query, after + 2)?;
+            let (name, after) = name_at(query, at).ok()?;
+            let kind = u16_at(query, after).ok()?;
+            let class = u16_at(query, after + 2).ok()?;
             at = after + 4;
-            if host.is(&labels[..count])
+            if host.is(&name)
                 && matches!(kind, TYPE_A | TYPE_ANY)
                 && class & !UNICAST_RESPONSE == CLASS_IN
             {
@@ -289,46 +295,6 @@ fn answer_record(out: &mut Vec<u8>, host: Host, addr: [u8; 4], class: u16, ttl: 
     out.extend_from_slice(&ttl.to_be_bytes());
     out.extend_from_slice(&4u16.to_be_bytes());
     out.extend_from_slice(&addr);
-}
-
-fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_be_bytes([*bytes.get(at)?, *bytes.get(at.checked_add(1)?)?]))
-}
-
-/// The name at `at`, its labels into `labels`: how many there are, and where
-/// the bytes after the name begin. Follows compression pointers (RFC 1035
-/// §4.1.4) backwards only, so a loop of pointers cannot hold it; a name with
-/// more labels than `labels` holds is no name this host answers to.
-fn name_at<'a>(bytes: &'a [u8], at: usize, labels: &mut [&'a [u8]]) -> Option<(usize, usize)> {
-    let mut count = 0;
-    let mut here = at;
-    let mut after = None;
-    let mut spelled = 0usize;
-    loop {
-        let len = *bytes.get(here)? as usize;
-        match len {
-            0 => return Some((count, after.unwrap_or(here + 1))),
-            1..=MAX_LABEL => {
-                let label = bytes.get(here + 1..here + 1 + len)?;
-                spelled += len + 1;
-                if spelled > MAX_NAME {
-                    return None;
-                }
-                *labels.get_mut(count)? = label;
-                count += 1;
-                here += 1 + len;
-            }
-            0xC0..=0xFF => {
-                let target = u16_at(bytes, here)? as usize & 0x3FFF;
-                if target >= here {
-                    return None;
-                }
-                after.get_or_insert(here + 2);
-                here = target;
-            }
-            _ => return None,
-        }
-    }
 }
 
 #[cfg(test)]

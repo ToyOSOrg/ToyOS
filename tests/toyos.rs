@@ -862,8 +862,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The netcase boot, whose user network forwards 10.0.2.3 to this host's
     // resolver: `host` resolves a real name to the addresses this host's
     // resolver gives it, and a `.invalid` name to none. The verdict is the
-    // two answers; its clocks are liveness guards.
-    ("dns_resolve", Sched::Parallel, Tier::Fast),
+    // two answers; its clocks are liveness guards. Nightly, because both
+    // answers rest on this host's network, which no change to the tree moves.
+    ("dns_resolve", Sched::Parallel, Tier::Nightly),
+    // Two netcase boots, each frame put on the wire kept: the first DHCP
+    // transaction ID of each differs, because netd seeds smoltcp's random
+    // source from the kernel's. The verdict is two numbers off the wire.
+    ("netd_seeds_its_stack", Sched::Parallel, Tier::Fast),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
     ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
@@ -9432,8 +9437,7 @@ fn netd_udp_any_address(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// A real name, resolved through the guest's user network: QEMU's `10.0.2.3`
 /// forwards each query to this host's own resolver, so what `host` prints in
 /// the guest is judged by what this host's resolver answers for the same name,
-/// a resolver this tree did not write. [`DNS_REAL_NAME`]'s addresses are a
-/// set that does not rotate. A name under `.invalid` has none (RFC 6761 §6.4),
+/// a resolver this tree did not write. A name under `.invalid` has none (RFC 6761 §6.4),
 /// and is answered as none rather than as a timeout.
 fn dns_resolve() -> Result<(), String> {
     use std::collections::BTreeSet;
@@ -9498,8 +9502,6 @@ fn dns_resolve() -> Result<(), String> {
     Ok(())
 }
 
-/// A name whose IPv4 addresses do not rotate: `dns.google`'s are 8.8.8.8 and
-/// 8.8.4.4.
 const DNS_REAL_NAME: &str = "dns.google";
 
 /// A name no resolver can find (RFC 6761 §6.4).
@@ -9509,6 +9511,40 @@ const DNS_NO_NAME: &str = "doesnotexist.invalid";
 /// and so what `host` prints for one: its word, not netd's, and not a
 /// timeout's.
 const DNS_NO_ADDRESS: &str = "no results";
+
+/// Two boots of one image draw different first DHCP transaction IDs, because
+/// netd seeds smoltcp's random source from the kernel's; seeded as smoltcp's
+/// `Config::new` leaves it, every boot draws the same one. Read off the wire
+/// QEMU's user network was handed, where a server reads them.
+fn netd_seeds_its_stack() -> Result<(), String> {
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+    let mut firsts = Vec::new();
+    for boot in 0..2 {
+        let dump = std::env::temp_dir().join(format!("toyos-seed-{}-{boot}.pcap", std::process::id()));
+        let _ = fs::remove_file(&dump);
+        let options =
+            BootOptions { profile: qemu::Profile::Headless, wire_dump: Some(dump.clone()), ..Default::default() };
+        if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+            return Err("this test needs a NIC and the profile has none".to_string());
+        }
+        let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+        let mut console = qemu.boot_log().to_string();
+        await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
+        // QEMU owns the pcap while it runs.
+        drop(qemu);
+        let frames = fs::read(&dump).map_err(|e| format!("{}: {e}", dump.display()))?;
+        let _ = fs::remove_file(&dump);
+        serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+        let ids = toyos_build::lan::dhcp_transaction_ids(&frames)?;
+        let first = *ids.first().ok_or_else(|| format!("boot {boot} put no DHCP frame on the wire"))?;
+        firsts.push(first);
+    }
+    if firsts[0] == firsts[1] {
+        return Err(format!("both boots' first DHCP transaction ID was {:#010x}", firsts[0]));
+    }
+    eprintln!("  [netcase] the two boots' first DHCP transaction IDs: {:#010x} and {:#010x}", firsts[0], firsts[1]);
+    Ok(())
+}
 
 /// Client pipes netd cannot use, or loses under it, end that client's
 /// connection and never netd: the guest's round trip after each case is the
@@ -14807,6 +14843,7 @@ fn run_machine_test(
         "netd_udp_refused" => netd_udp_refused(rust_bins),
         "netd_udp_any_address" => netd_udp_any_address(rust_bins),
         "dns_resolve" => dns_resolve(),
+        "netd_seeds_its_stack" => netd_seeds_its_stack(),
         "netd_hostile_peer" => {
             // The netcase boot again, and for the same reason: netd's `main`
             // returns on a machine with no NIC, so this is the only config

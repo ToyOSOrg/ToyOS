@@ -515,6 +515,21 @@ impl Client {
         self.answered(self.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, encoded));
     }
 
+    /// Whether this client, waiting for its answer, has left. A connection
+    /// carries one request, so hanging up is the one thing it may say while
+    /// it waits; a client that says more is dropped by name.
+    fn gone(&self) -> bool {
+        let mut byte = [0u8; 1];
+        match self.conn.read_nonblock(&mut byte) {
+            Err(toyos_abi::syscall::SyscallError::WouldBlock) => false,
+            Ok(0) | Err(_) => true,
+            Ok(_) => {
+                say!("netd: dropping client {} — it spoke again before its answer", self.conn.as_handle().0);
+                true
+            }
+        }
+    }
+
     /// **The answer goes out in one non-blocking write, and a refusal is not
     /// retried.** `ipc::send` parks in `sys_write` until the client drains,
     /// which is a client deciding when the network stack runs again; and
@@ -569,13 +584,17 @@ const MAX_KEPT_REQUEST: usize = 256;
 /// its rx pipe while that pipe is holding bytes back.
 const POLL_HANDLES_PER_PIPED: u32 = 2;
 
+/// Registrations the lookups make in a batch: each waiting client's
+/// connection, which is how netd hears it hang up.
+const LOOKUP_POLL_HANDLES: u32 = resolve::MAX_LOOKUPS as u32;
+
 /// Hard ceiling on live piped connections, from the poller rather than from
 /// memory: netd registers every connection's pipes in the same batch as the two
-/// fixed registrations and the pending connections, and `Poller::MAX_HANDLES`
-/// is the widest set one poller can carry. The memory budget below is what
-/// binds on any machine with less than 3.5 GiB.
-const MAX_PIPED_SLOTS: u64 =
-    ((Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS) / POLL_HANDLES_PER_PIPED) as u64;
+/// fixed registrations, the pending connections and the lookups' clients, and
+/// `Poller::MAX_HANDLES` is the widest set one poller can carry. The memory
+/// budget below binds first on a machine whose eighth holds fewer connections.
+const MAX_PIPED_SLOTS: u64 = ((Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS - LOOKUP_POLL_HANDLES)
+    / POLL_HANDLES_PER_PIPED) as u64;
 
 /// One client's inbound framing.
 ///
@@ -674,8 +693,20 @@ fn total_memory() -> u64 {
 /// client can name (`issues/isolation/netd-socket-ids-are-ambient.md`).
 fn first_socket_id() -> u32 {
     let mut bytes = [0u8; 4];
-    toyos_abi::syscall::random(&mut bytes);
+    toyos_abi::syscall::random(&mut bytes)
+        .unwrap_or_else(|e| panic!("netd: the kernel's random source refused the first socket id: {e:?}"));
     u32::from_le_bytes(bytes).max(1)
+}
+
+/// smoltcp's one random source, which every TCP connection's initial sequence
+/// number (RFC 6528 asks for one an off-path sender cannot predict) and every
+/// DHCP transaction ID are drawn from. `Config::new` seeds it with 0, which
+/// is the same sequence on every boot of every machine.
+fn smoltcp_seed() -> u64 {
+    let mut bytes = [0u8; 8];
+    toyos_abi::syscall::random(&mut bytes)
+        .unwrap_or_else(|e| panic!("netd: the kernel's random source refused smoltcp's seed: {e:?}"));
+    u64::from_le_bytes(bytes)
 }
 
 struct NetDaemon {
@@ -683,7 +714,7 @@ struct NetDaemon {
     next_id: u32,
     next_local_port: u16,
     pending_udp_recvs: Vec<PendingUdpRecv>,
-    resolver: resolve::Resolver<Client>,
+    resolver: resolve::Resolver<Client, fn() -> u16>,
     piped_connections: Vec<PipedConnection>,
     piped_listeners: HashMap<u32, PipedListener>,
     pending_piped_connects: Vec<PendingPipedConnect>,
@@ -698,7 +729,7 @@ impl NetDaemon {
             next_id: first_socket_id(),
             next_local_port: 49152,
             pending_udp_recvs: Vec::new(),
-            resolver: resolve::Resolver::new(),
+            resolver: resolve::Resolver::new(Instant::now(), resolve::random_u16),
             piped_connections: Vec::new(),
             piped_listeners: HashMap::new(),
             pending_piped_connects: Vec::new(),
@@ -727,10 +758,17 @@ impl NetDaemon {
     /// The socket table's size, as `inspect` reads it: counts, and no
     /// endpoint, because every client holding `netd` can ask.
     ///
-    /// `sockets.stack` is every socket the stack holds, netd's own among them:
-    /// a socket that outlived its table entry moves it and no other count.
+    /// `sockets.untabled` is every socket the stack holds that no table entry
+    /// names, the resolver's left out: netd's own, and any that outlived its
+    /// entry, which moves it and no other count. The resolver's are left out
+    /// because their number is every program's lookups in flight.
     fn inspect(&self, snap: &mut Snapshot, socket_set: &SocketSet<'_>) {
-        snap.put("sockets.stack", socket_set.iter().count());
+        let untabled = socket_set
+            .iter()
+            .count()
+            .checked_sub(self.sockets.len() + self.resolver.sockets())
+            .expect("netd: a table entry or a lookup names a socket the stack does not hold");
+        snap.put("sockets.untabled", untabled);
         let (mut streams, mut listeners, mut udp) = (0u32, 0u32, 0u32);
         for kind in self.sockets.values() {
             match kind {
@@ -1051,12 +1089,8 @@ impl NetDaemon {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        match self.resolver.start(msg.client, name, socket_set, Instant::now()) {
-            Ok(()) => {}
-            // No lease, or a lease that named no resolver: this machine is on
-            // no network that answers names, which clears when one lands.
-            Err((client, resolve::Refused::NoServer)) => client.error(ERR_NOT_CONNECTED),
-            Err((client, resolve::Refused::Full)) => client.error(ERR_RESOURCE_EXHAUSTED),
+        if let Err((client, why)) = self.resolver.start(msg.client, name, socket_set, Instant::now()) {
+            client.error(why.code());
         }
     }
 
@@ -1461,16 +1495,21 @@ impl NetDaemon {
         }
 
         for (client, name, ended) in self.resolver.pass(socket_set, now) {
+            use resolve::Ended;
             use toyos_dns::Failure;
             match ended {
                 Ok(addrs) => answer_lookup(&client, &addrs),
                 // The protocol's one answer for a name with no address,
                 // whether the name or only its address is missing.
-                Err(Failure::NoSuchName | Failure::NoAddress) => answer_lookup(&client, &[]),
-                Err(Failure::TimedOut) => client.error(ERR_TIMED_OUT),
-                Err(why @ (Failure::Truncated | Failure::ServerFailed(_) | Failure::TooManyAliases)) => {
+                Err(Ended::Failed(Failure::NoSuchName | Failure::NoAddress)) => answer_lookup(&client, &[]),
+                Err(Ended::Failed(Failure::TimedOut)) => client.error(ERR_TIMED_OUT),
+                Err(Ended::Failed(why @ (Failure::Truncated | Failure::ServerFailed(_) | Failure::TooManyAliases))) => {
                     say!("netd: a lookup of {name} ended without an answer: {why:?}");
                     client.error(ERR_OTHER);
+                }
+                Err(Ended::NoPort) => {
+                    say!("netd: a lookup of {name} ended with every dynamic port bound, none left for its next query");
+                    client.error(ERR_RESOURCE_EXHAUSTED);
                 }
             }
         }
@@ -1628,7 +1667,8 @@ fn main() {
         "netd: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
-    let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
+    config.random_seed = smoltcp_seed();
     let epoch = Instant::now();
     let now = SmoltcpInstant::from_millis(0);
     let mut iface = Interface::new(config, &mut device, now);
@@ -1648,10 +1688,13 @@ fn main() {
 
     // Sized for the slot ceiling rather than for `max_piped`: the batch
     // between two `wait` calls is the two fixed registrations, at most two per live
-    // piped connection and one per pending connection, and the ceiling is what that
-    // can never exceed.
+    // piped connection, one per pending connection and one per lookup, and the
+    // ceiling is what that can never exceed.
     let poller = Poller::new(
-        FIXED_POLL_HANDLES + POLL_HANDLES_PER_PIPED * MAX_PIPED_SLOTS as u32 + MAX_PENDING_CONNS,
+        FIXED_POLL_HANDLES
+            + POLL_HANDLES_PER_PIPED * MAX_PIPED_SLOTS as u32
+            + MAX_PENDING_CONNS
+            + LOOKUP_POLL_HANDLES,
     );
     const TOKEN_LISTENER: u64 = 0;
     const TOKEN_NIC: u64 = 1;
@@ -1661,6 +1704,8 @@ fn main() {
     // connection's own handle by more than `MAX_HANDLES` (4096,
     // `kernel/src/object/handle.rs`).
     const TOKEN_PENDING_BASE: u64 = 0x1_0000;
+    // Clear of the pending range by the same margin.
+    const TOKEN_LOOKUP_BASE: u64 = 0x2_0000;
 
     let mut pending: Vec<PendingConn> = Vec::new();
 
@@ -1760,6 +1805,12 @@ fn main() {
             poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
         }
 
+        // A client waiting on a lookup hangs up by closing its connection,
+        // which makes it readable.
+        for client in daemon.resolver.clients() {
+            poller.watch(&client.conn, READABLE, TOKEN_LOOKUP_BASE + client.conn.as_handle().0 as u64);
+        }
+
         let timeout = match mdns.wake_in(Instant::now()) {
             Some(left) => timeout.min(left.as_nanos() as u64),
             None => timeout,
@@ -1807,6 +1858,11 @@ fn main() {
             );
         }
         pending.retain(|p| now_wall.duration_since(p.since) < HANDSHAKE_TIMEOUT);
+
+        // A lookup whose client has left ends now, not when its servers are
+        // done with it: its sockets and its slot are another client's.
+        let spoke = |c: &Client| ready.contains(&(TOKEN_LOOKUP_BASE + c.conn.as_handle().0 as u64));
+        daemon.resolver.let_go(&mut socket_set, |c| spoke(c) && c.gone());
 
         // Accept and the request are two events. Nothing is read here: a client
         // that connects and then says nothing costs a slot and a deadline, not

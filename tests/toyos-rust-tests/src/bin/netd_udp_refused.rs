@@ -12,11 +12,17 @@
 //! exactly `ROOM`. A second, ordinary socket must then still get its datagram.
 //!
 //! **The socket that ended is gone whole**: netd's stack holds as many sockets
-//! as before it was bound (`net.sockets.stack`, read through netd's own
-//! `inspect`), its port binds again, and the pipe netd wrote into reads
-//! end-of-file once this program has let go of its own write end, because
-//! netd has let go of the one it was handed. The count is what sees a socket
-//! left in the stack: closing one already frees its port.
+//! no table entry names as before it was bound (`net.sockets.untabled`, read
+//! through netd's own `inspect`), its port binds again, and the pipe netd
+//! wrote into reads end-of-file once this program has let go of its own write
+//! end, because netd has let go of the one it was handed. The count is what
+//! sees a socket left in the stack: closing one already frees its port.
+//!
+//! **A held port is not handed out twice**: binding the ordinary socket's port
+//! by number is refused as in use, and a port-0 bind passes over a port bound
+//! by number where its next pick would have been. smoltcp hands a datagram to
+//! the first socket that takes it, so a second socket on a port receives
+//! nothing, the resolver's among them.
 //!
 //! argv[1] is the port of the harness's host server, which this program does
 //! not use; argv[2] is the port of the harness's UDP echo on `HOST`.
@@ -59,6 +65,19 @@ fn main() {
         .expect("usage: netd_udp_refused <host port> <echo port>");
 
     let healthy = udp_bind(ANY, 0).expect("bind an ordinary socket");
+    assert_eq!(
+        udp_bind(ANY, healthy.bound_port).err(),
+        Some(NetError::AddrInUse),
+        "port {} was bound a second time",
+        healthy.bound_port
+    );
+    // Where netd's next port-0 pick would be, unless another program took a
+    // port since, which leaves this check passing without having tested.
+    let next = if healthy.bound_port == u16::MAX { 49152 } else { healthy.bound_port + 1 };
+    let _by_number = udp_bind(ANY, next).unwrap_or_else(|e| panic!("binding port {next} by number: {e:?}"));
+    let picked = udp_bind(ANY, 0).expect("a port-0 bind");
+    assert_ne!(picked.bound_port, next, "a port-0 bind was handed port {next}, which another socket holds");
+    println!("netd_udp_refused: port {} is refused a second socket, and a port-0 bind passed over {next}", healthy.bound_port);
 
     let (rx, kept) = toyos::pipe_pair().expect("a receive pipe");
     let handed = syscall::dup(kept.as_handle()).expect("a second handle to the receive pipe's write end");
@@ -68,7 +87,7 @@ fn main() {
     let mut room = [0u8; ROOM];
     assert_eq!(rx.read_nonblock(&mut room), Ok(ROOM), "making room in the full pipe");
     let (from_client, tx) = toyos::pipe_pair().expect("a send pipe");
-    let before = stack_sockets();
+    let before = untabled();
     let full: UdpBindResponse = NetdConn::connect()
         .expect("netd is serving")
         .request_with_handles(
@@ -80,7 +99,7 @@ fn main() {
         .response()
         .expect("netd binds");
     let full_id = UdpSocketId(full.socket_id);
-    assert_eq!(stack_sockets(), before + 1, "the count did not see the socket bound");
+    assert_eq!(untabled(), before, "the socket bound is not in netd's table");
     println!("netd_udp_refused: socket {} has {ROOM} bytes of room in a {capacity}-byte pipe", full.socket_id);
 
     send(full_id, &tx, echo, 0xA5);
@@ -94,7 +113,7 @@ fn main() {
         Some(NetError::NotConnected),
         "the socket that could not take a datagram whole is still there",
     );
-    assert_eq!(stack_sockets(), before, "netd's stack still holds the ended socket");
+    assert_eq!(untabled(), before, "netd's stack still holds the ended socket");
     println!("netd_udp_refused: the socket whose pipe would not take a datagram whole is gone");
 
     let again = udp_bind(ANY, full.bound_port)
@@ -133,9 +152,11 @@ fn send(socket: UdpSocketId, tx: &Pipe, echo: u16, byte: u8) {
     assert_eq!(sent as usize, DATAGRAM, "netd sent part of the datagram");
 }
 
-/// How many sockets netd's stack holds, as its own `inspect` answers, within
-/// [`WITHIN`].
-fn stack_sockets() -> u64 {
+/// The sockets netd's stack holds that no table entry names, as its own
+/// `inspect` answers, within [`WITHIN`]. Every program's sockets are in the
+/// table and the resolver's are left out, so only netd's own and one that
+/// outlived its entry move it.
+fn untabled() -> u64 {
     let conn = toyos::endow::service("netd").expect("a connection to netd");
     conn.signal(MSG_INSPECT).expect("netd takes an inspect request");
     let poller = Poller::new(1);
@@ -146,9 +167,9 @@ fn stack_sockets() -> u64 {
             RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len } => {
                 let snap = toyos_inspect::decode(rx.payload(payload_len), toyos_inspect::NET)
                     .unwrap_or_else(|why| panic!("netd's snapshot: {why}"));
-                return match snap.get("net.sockets.stack") {
+                return match snap.get("net.sockets.untabled") {
                     Some(Value::U64(n)) => *n,
-                    other => panic!("netd's snapshot has net.sockets.stack as {other:?}"),
+                    other => panic!("netd's snapshot has net.sockets.untabled as {other:?}"),
                 };
             }
             RxStep::Idle => {}

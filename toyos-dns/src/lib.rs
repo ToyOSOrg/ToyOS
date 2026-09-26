@@ -235,6 +235,20 @@ impl core::fmt::Display for Name {
 
 impl Eq for Name {}
 
+/// The 16-bit field at `at` in `msg` (RFC 1035 §2.3.2), bounds-checked.
+pub fn u16_at(msg: &[u8], at: usize) -> Result<u16, Stray> {
+    Message { bytes: msg }.u16(at)
+}
+
+/// The name at `at` in `msg`, and where the bytes after it begin.
+///
+/// **The tree's one reader of a DNS name off the wire**: the resolver's
+/// replies and `toyos-mdns`'s questions are both read through it, so a rule
+/// fixed here is fixed at both trust boundaries.
+pub fn name_at(msg: &[u8], at: usize) -> Result<(Name, usize), Stray> {
+    Message { bytes: msg }.name(at)
+}
+
 /// Bounds-checked reads of one message.
 struct Message<'a> {
     bytes: &'a [u8],
@@ -422,11 +436,20 @@ pub enum Failure {
     TooManyAliases,
 }
 
+/// One query of a lookup, as the caller tells it from the lookup's others.
+///
+/// The caller sends each query from a port of its own, so that no query waits
+/// behind another's (a query to a server whose link address never resolves
+/// stays queued), and names the query whose port a datagram arrived on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Asked(u32);
+
 /// What the caller does next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Send `query` to port [`PORT`] of `to`, then wait until [`Lookup::due`].
-    Ask { to: [u8; 4], query: Vec<u8> },
+    /// Send `query` to port [`PORT`] of `to` from a port of its own, which
+    /// datagrams for `asked` arrive on, then wait until [`Lookup::due`].
+    Ask { asked: Asked, to: [u8; 4], query: Vec<u8> },
     /// Nothing to send: wait until [`Lookup::due`] or the next datagram.
     Wait,
     /// The lookup is over: the name's addresses, at least one, or why none.
@@ -436,6 +459,7 @@ pub enum Step {
 /// One query sent for the name now asked.
 #[derive(Clone, Copy, Debug)]
 struct Sent {
+    asked: Asked,
     id: u16,
     to: [u8; 4],
 }
@@ -445,7 +469,8 @@ struct Sent {
 /// **Each query carries an ID the caller drew for it**, which the caller takes
 /// from a source an off-path sender cannot predict (RFC 5452 §9.2). A reply to
 /// any query this lookup sent for the name now asked is read, so an answer
-/// late past its query's wait still ends the lookup.
+/// late past its query's wait still ends the lookup; it is read only on the
+/// query's own port, with the query's ID, from the server the query went to.
 #[derive(Debug)]
 pub struct Lookup {
     /// The name now asked: the one given, or the last alias followed.
@@ -454,8 +479,10 @@ pub struct Lookup {
     aliases: usize,
     servers: Vec<[u8; 4]>,
     /// Queries sent for `name`, oldest first; one answered with a server
-    /// failure is taken out.
+    /// failure is taken out. [`Lookup::waiting`] is this list.
     sent: Vec<Sent>,
+    /// The [`Asked`] the next query gets: none is given twice in a lookup.
+    next: u32,
     /// Queries sent for `name`, answered or not.
     asked: usize,
     /// When the newest query is given up on.
@@ -472,8 +499,16 @@ impl Lookup {
         if servers.is_empty() {
             return None;
         }
-        let mut lookup =
-            Self { name, aliases: 0, servers: servers.to_vec(), sent: Vec::new(), asked: 0, due: now, failed: None };
+        let mut lookup = Self {
+            name,
+            aliases: 0,
+            servers: servers.to_vec(),
+            sent: Vec::new(),
+            next: 0,
+            asked: 0,
+            due: now,
+            failed: None,
+        };
         let step = lookup.ask(now, id);
         Some((lookup, step))
     }
@@ -481,6 +516,12 @@ impl Lookup {
     /// When the lookup must be woken if no datagram arrives first.
     pub fn due(&self) -> u64 {
         self.due
+    }
+
+    /// The queries whose answer is still read, oldest first. The port of any
+    /// other query of this lookup can be let go.
+    pub fn waiting(&self) -> impl Iterator<Item = Asked> + '_ {
+        self.sent.iter().map(|s| s.asked)
     }
 
     /// The next query for `name`, or the end where every one has been sent.
@@ -493,9 +534,11 @@ impl Lookup {
         }
         let to = self.servers[self.asked % self.servers.len()];
         self.asked += 1;
-        self.sent.push(Sent { id, to });
+        let asked = Asked(self.next);
+        self.next += 1;
+        self.sent.push(Sent { asked, id, to });
         self.due = now + WAIT_MS;
-        Step::Ask { to, query: query(id, &self.name) }
+        Step::Ask { asked, to, query: query(id, &self.name) }
     }
 
     /// The time is `now`: the newest query has had its [`WAIT_MS`] where it
@@ -507,13 +550,15 @@ impl Lookup {
         self.ask(now, id)
     }
 
-    /// `msg` arrived at `now` from `port` of `from`. `id` is for the query
-    /// this may send.
-    pub fn on_datagram(&mut self, from: [u8; 4], port: u16, msg: &[u8], now: u64, id: u16) -> Step {
+    /// `msg` arrived at `now` from `port` of `from`, on the port `asked` was
+    /// sent from. `id` is for the query this may send.
+    pub fn on_datagram(&mut self, asked: Asked, from: [u8; 4], port: u16, msg: &[u8], now: u64, id: u16) -> Step {
         let Some(carried) = msg.get(..2).map(|b| u16::from_be_bytes([b[0], b[1]])) else {
             return Step::Wait;
         };
-        let Some(which) = self.sent.iter().position(|s| port == PORT && s.to == from && s.id == carried) else {
+        let Some(which) =
+            self.sent.iter().position(|s| s.asked == asked && port == PORT && s.to == from && s.id == carried)
+        else {
             return Step::Wait;
         };
         match read(msg, carried, &self.name, MAX_ALIASES - self.aliases) {
