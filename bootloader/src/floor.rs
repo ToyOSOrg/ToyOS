@@ -65,10 +65,16 @@ pub fn read(system_table: &SystemTable<Boot>, log_guid: &[u8; 16]) -> Result<(Fl
         Err(e) => notes.push(alloc::format!("{HEAD} firmware would not list its variables ({e}), so no stale floor is deleted")),
     }
     let got = rt.get_variable_boxed(&name, &VENDOR);
-    let stored = match &got {
-        Ok((value, attributes)) => Stored::Held { attributes: attributes.bits(), value },
-        Err(e) if e.status() == Status::NOT_FOUND => Stored::Absent,
-        Err(e) => Stored::Unreadable(e.status().0),
+    let stored = Stored::answered(
+        got.as_ref().map(|(value, attributes)| (&value[..], attributes.bits())).map_err(|e| e.status().0),
+    );
+    let refused = |why: floor::Refused| {
+        alloc::format!(
+            "{HEAD} {name}: {why}, so nothing this loader wrote is there, and it is refused rather than read as no \
+             floor. Nothing boots until the variable {name} under vendor {} is deleted, from the firmware's setup or \
+             a UEFI shell",
+            VENDOR.0
+        )
     };
     match floor::judge(stored) {
         Ok(Read::Floor(value)) => {
@@ -76,22 +82,15 @@ pub fn read(system_table: &SystemTable<Boot>, log_guid: &[u8; 16]) -> Result<(Fl
             Ok((Floor { name, value }, notes))
         }
         Ok(Read::RuntimeMade { attributes, len }) => {
-            let deleted = match rt.delete_variable(&name, &VENDOR) {
-                Ok(()) => String::from("deleted"),
-                Err(e) => alloc::format!("not deleted either: firmware refused ({e})"),
-            };
+            let value = floor::deleted(attributes, rt.delete_variable(&name, &VENDOR).map_err(|e| e.status().0))
+                .map_err(refused)?;
             notes.push(alloc::format!(
                 "{HEAD} {name} carries runtime access ({attributes:#x}, {len} bytes), so it was made after a \
-                 handoff and no floor this loader wrote stands behind it; it is {deleted}, and the floor is 0"
+                 handoff and no floor this loader wrote stands behind it; it is deleted, and the floor is {value}"
             ));
-            Ok((Floor { name, value: 0 }, notes))
+            Ok((Floor { name, value }, notes))
         }
-        Err(why) => Err(alloc::format!(
-            "{HEAD} {name}: {why}, so nothing this loader wrote is there, and it is refused rather than read as no \
-             floor. Nothing boots until the variable {name} under vendor {} is deleted, from the firmware's setup or \
-             a UEFI shell",
-            VENDOR.0
-        )),
+        Err(why) => Err(refused(why)),
     }
 }
 

@@ -287,7 +287,8 @@ fn loader_said(guest: &QemuInstance, from: usize, what: &str) -> Result<(), Stri
 
 /// **The exit**: a kernel change reaches the running machine as `ssh … update
 /// < image`, is written to the idle slot, and is the kernel the next boot
-/// runs; and the boot that proved the old image raised the floor.
+/// runs; the boot that proved the old image raised the floor, and the one
+/// that proves the new image raises it past the old one.
 pub fn update_boots_the_new_kernel(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
     let rig = Rig::stage("update-boots")?;
     // The actuator kernel, and no actuator armed: a different kernel binary
@@ -346,6 +347,19 @@ pub fn update_boots_the_new_kernel(_: &Path, _: &[(String, Vec<u8>)], _: &[(Stri
         }
     }
     eprintln!("  [update] a record naming slot B under another digest and version {FORGED} raised nothing");
+
+    // **What anti-rollback is for**: the plain reboot proves slot B's own
+    // image, the floor rises to the update's version, and the slot the machine
+    // updated from is below it.
+    let (from, uart) = rig.reboot_until(&mut guest, &mut console, &format!("{SLOT_RECORD} B, the one the slot table marks"))?;
+    await_machine(&mut guest, &mut console, "slot B's ready marker a third time", |c| c[from..].contains(DEFAULT_READY))?;
+    loader_said(&guest, uart, &format!("Anti-rollback floor: {NEXT}, raised from {BASE} by the boot that proved it"))?;
+    drop(guest);
+    image::restage_table(&rig.image, |t| t.marked = Which::A)?;
+    let (guest, console) = rig.boot()?;
+    loader_said(&guest, 0, &format!("Slot A: REFUSED, its version {BASE} is below {NEXT}, the highest a boot has proven"))?;
+    owed(&console, 0, &format!("{SLOT_RECORD} B, because the marked slot A was refused: version"))?;
+    eprintln!("  [update] the boot of slot B raised the floor to {NEXT}, and slot A at {BASE} is refused under it");
     drop(guest);
     let _ = std::fs::remove_dir_all(&rig.scratch);
     Ok(())
@@ -519,6 +533,37 @@ pub fn update_hang_kills_an_unproven_image(_: &Path, _: &[(String, Vec<u8>)], _:
     Ok(())
 }
 
+/// **The record a pass writes before it has chosen names no booted image**: a
+/// pass whose every slot is refused panics after that first write, and the
+/// record it leaves must not still credit the image the last pass booted —
+/// whose clean end the next pass would take as that image's proof.
+pub fn update_refused_pass_credits_no_image(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let rig = Rig::stage("update-uncredited")?;
+    let handed = rig.launch(bootlog::LOADER_LAST_LINE);
+    said(handed.boot_log(), &[&format!("Slot A: {VERIFIED}")])?;
+    drop(handed);
+    if rig.record()?.booted.map(|b| b.slot) != Some(Which::A) {
+        return Err(format!("the pass that booted slot A wrote down {:?}", rig.record()?.booted));
+    }
+    // A byte of slot A's kernel, and slot B holds no image: every slot is
+    // refused, so the pass panics after its first write and before its second.
+    let mut file = std::fs::File::open(&rig.image).map_err(|e| format!("{}: {e}", rig.image.display()))?;
+    let a = image::slot_table_of(&mut file)?.slot(Which::A).ok_or("no slot A")?;
+    let mut kernel = image::read_file_on(&mut file, a.boot, toyos_update::slots::KERNEL_FILE)?;
+    drop(file);
+    kernel[100] ^= 0x01;
+    image::overwrite_file_on(&rig.image, a.boot, toyos_update::slots::KERNEL_FILE, &kernel)?;
+    let refused = rig.launch("Slots: no slot verifies");
+    said(refused.boot_log(), &["Slot A: REFUSED, its kernel is not the bytes its signed header names", "Slot B: REFUSED"])?;
+    drop(refused);
+    if let Some(booted) = rig.record()?.booted {
+        return Err(format!("a pass that booted nothing left a record naming slot {}'s image", booted.slot.letter()));
+    }
+    eprintln!("  [update] a pass that refused every slot left a record naming no booted image");
+    let _ = std::fs::remove_dir_all(&rig.scratch);
+    Ok(())
+}
+
 /// **init claims nothing the slot table names but an idle slot's partition on
 /// the running disk**: a table naming the ESP, the log partition, or either
 /// of the running slot's partitions as the idle slot's is refused by name,
@@ -596,8 +641,7 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
     let refused = rig.launch(FLOOR_REFUSED);
     said(refused.boot_log(), &[&format!("Anti-rollback floor: {own}: it holds 9 bytes where this loader writes 8")])?;
     drop(refused);
-    eprintln!("  [update] this image's own floor in nine bytes was refused, and nothing booted");
-    let _ = std::fs::remove_dir_all(&rig.scratch);
+    eprintln!("  [update] this image's own floor in nine bytes was refused, and nothing booted");    let _ = std::fs::remove_dir_all(&rig.scratch);
     Ok(())
 }
 

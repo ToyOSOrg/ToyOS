@@ -827,6 +827,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("update_hang_kills_an_unproven_image", Sched::Parallel, Tier::Nightly),
     ("update_grant_refuses_a_stray_partition", Sched::Parallel, Tier::Nightly),
     ("update_floor_is_the_images_own", Sched::Parallel, Tier::Nightly),
+    ("update_refused_pass_credits_no_image", Sched::Parallel, Tier::Nightly),
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
     ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
@@ -1591,6 +1592,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_hang_kills_an_unproven_image", &[]),
     ("update_grant_refuses_a_stray_partition", &[]),
     ("update_floor_is_the_images_own", &[]),
+    ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
@@ -14827,6 +14829,9 @@ fn run_machine_test(
         }
         "update_floor_is_the_images_own" => {
             common::update::update_floor_is_the_images_own(test_config, c_bins, rust_bins)
+        }
+        "update_refused_pass_credits_no_image" => {
+            common::update::update_refused_pass_credits_no_image(test_config, c_bins, rust_bins)
         }
         "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),

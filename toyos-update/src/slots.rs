@@ -223,6 +223,8 @@ pub enum Stray {
     OtherDisk,
     /// Its type is not the one a slot's partition of that kind carries.
     Type,
+    /// Two listed partitions carry its GUID.
+    Duplicate,
 }
 
 impl core::fmt::Display for NoIdle {
@@ -236,6 +238,7 @@ impl core::fmt::Display for NoIdle {
                     Stray::Unlisted => "is no partition this machine lists",
                     Stray::OtherDisk => "is on another disk than the one this boot runs from",
                     Stray::Type => "is not of the type a slot's partition of that kind carries",
+                    Stray::Duplicate => "names a GUID two listed partitions carry",
                 };
                 write!(f, "the idle slot's {part} {why}")
             }
@@ -278,7 +281,7 @@ pub fn grant(table: &Table, running: &Listed, listed: &[Listed], kinds: Kinds) -
             (Some(p), None) if p.type_guid != kind => Some(Stray::Type),
             (Some(_), None) => None,
             // The kernel refuses a claim of a GUID two tables carry; so does this.
-            (Some(_), Some(_)) => Some(Stray::OtherDisk),
+            (Some(_), Some(_)) => Some(Stray::Duplicate),
         };
         if let Some(why) = why {
             return Err(NoIdle::Stray { part, why });
@@ -409,6 +412,6 @@ mod tests {
         assert_eq!(bent([9; 16], [4; 16]), stray("volume", Stray::Unlisted));
         let mut twice = listed.to_vec();
         twice.push(at(1, KINDS.boot, [3; 16]));
-        assert_eq!(grant(&t, &running, &twice, KINDS), stray("volume", Stray::OtherDisk), "a GUID two disks carry");
+        assert_eq!(grant(&t, &running, &twice, KINDS), stray("volume", Stray::Duplicate), "a GUID two disks carry");
     }
 }

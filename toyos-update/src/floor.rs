@@ -28,7 +28,9 @@
 //! eight bytes. One carrying runtime access was made after a handoff, and
 //! UEFI 2.10 §8.2 refuses a runtime `SetVariable` of a name that exists
 //! without runtime access, so no floor this loader wrote stands behind it: it
-//! is deleted and the floor is none. Anything else under the name, and a
+//! is deleted and the floor is none — or refused, where the firmware will not
+//! delete it, since every raise would fail against it. Anything else under
+//! the name, and a
 //! variable the firmware will not read, could only have been written before
 //! a handoff — by this loader broken, or by whatever booted instead of it — and
 //! is refused, never read as no floor.
@@ -148,6 +150,9 @@ pub fn stale(scope: Scope, own: &Name, other: &str) -> bool {
     }
 }
 
+/// `EFI_NOT_FOUND` (UEFI 2.10 Appendix D): the error bit and 14.
+pub const NOT_FOUND: usize = (1 << (usize::BITS - 1)) | 14;
+
 /// What the firmware answered for the floor's name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stored<'a> {
@@ -155,6 +160,19 @@ pub enum Stored<'a> {
     Held { attributes: u32, value: &'a [u8] },
     /// The firmware would not read it, with this status code.
     Unreadable(usize),
+}
+
+impl<'a> Stored<'a> {
+    /// What `GetVariable` answered: the value and its attributes, or its
+    /// status. Only `EFI_NOT_FOUND` is no variable; every other failure is
+    /// one the firmware would not read.
+    pub fn answered(got: Result<(&'a [u8], u32), usize>) -> Self {
+        match got {
+            Ok((value, attributes)) => Self::Held { attributes, value },
+            Err(NOT_FOUND) => Self::Absent,
+            Err(status) => Self::Unreadable(status),
+        }
+    }
 }
 
 /// What a stored floor is worth.
@@ -174,6 +192,9 @@ pub enum Refused {
     /// Attributes this loader never writes, without runtime access.
     Attributes(u32),
     Unreadable(usize),
+    /// Made after a handoff, and the firmware would not delete it: no floor
+    /// this loader writes can take its name.
+    Undeletable { attributes: u32, status: usize },
 }
 
 impl core::fmt::Display for Refused {
@@ -184,7 +205,22 @@ impl core::fmt::Display for Refused {
                 write!(f, "it carries attributes {a:#x} where this loader writes {ATTRIBUTES:#x}")
             }
             Self::Unreadable(status) => write!(f, "the firmware would not read it (status {status:#x})"),
+            Self::Undeletable { attributes, status } => write!(
+                f,
+                "it carries runtime access ({attributes:#x}), so it was made after a handoff, and the firmware \
+                 would not delete it (status {status:#x}), so no floor this loader writes can replace it"
+            ),
         }
+    }
+}
+
+/// The floor once a variable made after a handoff ([`Read::RuntimeMade`]) has
+/// been asked deleted, given the firmware's answer: none if it went, and
+/// refused if it stayed, because every raise would fail against it.
+pub fn deleted(attributes: u32, answer: Result<(), usize>) -> Result<u64, Refused> {
+    match answer {
+        Ok(()) => Ok(0),
+        Err(status) => Err(Refused::Undeletable { attributes, status }),
     }
 }
 
@@ -260,5 +296,30 @@ mod tests {
         let runtime = ATTRIBUTES | RUNTIME_ACCESS;
         assert_eq!(judge(Stored::Held { attributes: runtime, value: &[0; 9] }), Ok(Read::RuntimeMade { attributes: runtime, len: 9 }));
         assert_eq!(judge(Stored::Unreadable(7)), Err(Refused::Unreadable(7)));
+    }
+
+    /// **Only an absent variable is no floor**: every other failure the
+    /// firmware answers a read with is `Unreadable`, which `judge` refuses.
+    #[test]
+    fn only_not_found_is_no_variable() {
+        assert_eq!(Stored::answered(Err(NOT_FOUND)), Stored::Absent);
+        let device_error = (1 << (usize::BITS - 1)) | 7;
+        assert_eq!(Stored::answered(Err(device_error)), Stored::Unreadable(device_error));
+        assert_eq!(judge(Stored::answered(Err(device_error))), Err(Refused::Unreadable(device_error)));
+        let eight = 5u64.to_le_bytes();
+        assert_eq!(Stored::answered(Ok((&eight, ATTRIBUTES))), Stored::Held { attributes: ATTRIBUTES, value: &eight });
+    }
+
+    /// **A variable made after a handoff that the firmware keeps is refused**,
+    /// never read as no floor.
+    #[test]
+    fn a_runtime_variable_that_stays_is_refused() {
+        let runtime = ATTRIBUTES | RUNTIME_ACCESS | 0x20;
+        let security_violation = (1 << (usize::BITS - 1)) | 26;
+        assert_eq!(deleted(runtime, Ok(())), Ok(0));
+        assert_eq!(
+            deleted(runtime, Err(security_violation)),
+            Err(Refused::Undeletable { attributes: runtime, status: security_violation })
+        );
     }
 }
