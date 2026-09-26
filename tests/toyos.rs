@@ -777,6 +777,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // A stop the kernel refuses after logd flushed for it: a line said after
     // it is in `/log`. Lines; no clock.
     ("log_after_a_refused_stop", Sched::Parallel, Tier::Fast),
+    // A child flooding its parent's log ring while logd reads none of it: the
+    // parent's next line is in `/log`. Lines; its clock is a guard.
+    ("log_ring_keeps_the_owners_slots", Sched::Parallel, Tier::Fast),
     // A program's line said after three batches of records, read before them:
     // `/log` carries it after every one. Lines and positions; no clock.
     ("log_program_line_after_its_records", Sched::Parallel, Tier::Fast),
@@ -1667,6 +1670,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
     ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
+    ("log_ring_keeps_the_owners_slots", &["test_rs_log_flood"]),
     ("log_program_flood", &["test_rs_log_flood"]),
     ("log_program_line_after_its_records", &["test_rs_log_hold"]),
     ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
@@ -14717,6 +14721,7 @@ fn run_machine_test(
         "log_program_line" => common::origin::line(c_bins, rust_bins),
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
         "log_after_a_refused_stop" => common::origin::refused_stop(c_bins, rust_bins),
+        "log_ring_keeps_the_owners_slots" => common::origin::keeps_the_owners_slots(rust_bins),
         "log_program_line_after_its_records" => common::origin::after_records(c_bins, rust_bins),
         "log_carrier_forgery" => common::origin::carrier_forgery(c_bins, rust_bins),
         "log_program_flood" => common::origin::flood(c_bins, rust_bins),

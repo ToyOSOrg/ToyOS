@@ -16,7 +16,7 @@ use toyos_build::metaldevices::exit_of;
 
 use super::logstream::{self, VIRTIO};
 use super::qemu::{self, BootOptions, QemuInstance};
-use super::{compile, segment, serial};
+use super::{compile, segment, serial, volumes};
 
 /// What `test_rs_log_origin` says, and the name its line goes in the log under:
 /// it runs as `test-runner`'s child, on `test-runner`'s ring.
@@ -346,6 +346,61 @@ pub fn refused_stop(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)
         return Err(format!("logd never said the stop was refused\n{log}"));
     }
     eprintln!("  [origin] a line said after a refused stop is in /log, after the stop line");
+    Ok(())
+}
+
+/// **A child's flood leaves its parent's slots.** `tests/logkeepcase` has
+/// `logd` read nothing of test-runner's ring while its one job floods it, so
+/// the ring fills and stays full; test-runner's own end-of-job line comes
+/// after that, and only the slots its ring keeps for its owner can take it.
+/// The boot ends itself, `logd` reads the ring again at the stop, and `/log`
+/// carries that line.
+pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    const ENDED: &str = "===TEST_END test_rs_log_flood exit=0===";
+    let config = "tests/logkeepcase";
+    let bins: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| name == "log_flood").cloned().collect();
+    if bins.len() != 1 {
+        return Err(format!("the suite built {} copies of log_flood", bins.len()));
+    }
+    let staged = logstream::stage(config, "log-keep", &[], &bins)?;
+    let case = compile::repo_root().join(config);
+    let mut guest = QemuInstance::boot_with_options(
+        &case,
+        &[],
+        &bins,
+        BootOptions {
+            qmp: true,
+            boot_image: Some(qemu::Staged::Written(staged.image.clone())),
+            // test-runner's `===READY===` is a line of the ring logd leaves
+            // unread; the kernel's record of the job's start is not.
+            ready_marker: "spawn: /system/bin/test_rs_log_flood ",
+            ..Default::default()
+        },
+    );
+    let mut stop = qemu::QmpShutdown::open(guest.qmp_socket(), guest.budget(Duration::from_secs(120)));
+    let reason = stop.reason();
+    let tail = guest.drain_serial(Duration::from_secs(20));
+    drop(guest);
+    serial::Serial::named("the job list's drain", tail.as_str()).must_be_clean()?;
+    if reason.as_deref() != Some("guest-reset") {
+        return Err(format!("the job list did not end the boot ({reason:?})\n{tail}"));
+    }
+    let log = volumes::whole_log(&staged.image, staged.start, staged.len)?.concat();
+    let _ = std::fs::remove_file(&staged.image);
+    let runner = bootlog::lines_of(&log, RUNNER);
+    // Non-vacuity: the flood met a full ring, so the slots were contested.
+    let flooded = runner.lines().filter(|l| l.starts_with("flood ")).count();
+    if flooded == 0 || flooded >= FLOOD_LINES {
+        return Err(format!("{flooded} of {FLOOD_LINES} flood lines reached /log: the ring was never filled by the flood\n{log}"));
+    }
+    if !runner.lines().any(|l| l == ENDED) {
+        return Err(format!(
+            "/log carries no {ENDED:?}: the child's flood took the slots its parent's line needed \
+             ({flooded} flood lines in /log)\n{log}"
+        ));
+    }
+    eprintln!("  [origin] {flooded} flood lines filled the ring, and test-runner's {ENDED:?} is in /log");
     Ok(())
 }
 
