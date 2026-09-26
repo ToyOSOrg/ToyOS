@@ -75,6 +75,7 @@ declare_flags!(pub CARGO_RUN = {
     pub DIAG_BOOT = "--diag-boot", None;
     pub CONSOLE_BOOT = "--console-boot", None;
     pub BOOT_CONFIG = "--boot-config", Next;
+    pub ARCH = "--arch", Next;
     pub REGEN_FONT = "--regen-font", None;
     pub REGEN_WALLPAPER = "--regen-wallpaper", None;
     pub REGEN_SOUNDFONT = "--regen-soundfont", Next;

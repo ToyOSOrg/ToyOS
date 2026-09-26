@@ -137,19 +137,19 @@ pub fn resolve_lib_bind_relocs(
 pub fn apply_tpoff_relocs(
     lib: &LoadedLib,
     lib_base_offset: usize,
-    total_memsz: usize,
+    tls: toyos_elf::tls::Static,
     tls_info: &TlsModuleInfo,
 ) {
     let mut count64 = 0u64;
     for (offset, sym, addend) in lib.typed_entries(RelocKind::Tpoff64, |r| &r.tpoff64) {
-        let tpoff = compute_tpoff(lib, sym, addend, lib_base_offset, total_memsz, tls_info);
+        let tpoff = compute_tpoff(lib, sym, addend, lib_base_offset, tls, tls_info);
         // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<u64>(offset, tpoff as u64) };
         count64 += 1;
     }
     let mut count32 = 0u64;
     for (offset, sym, addend) in lib.typed_entries(RelocKind::Tpoff32, |r| &r.tpoff32) {
-        let tpoff = compute_tpoff(lib, sym, addend, lib_base_offset, total_memsz, tls_info);
+        let tpoff = compute_tpoff(lib, sym, addend, lib_base_offset, tls, tls_info);
         // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<i32>(offset, tpoff as i32) };
         count32 += 1;
@@ -157,7 +157,7 @@ pub fn apply_tpoff_relocs(
     if count64 > 0 || count32 > 0 {
         log!(
             "dlopen: applied {} TPOFF64 + {} TPOFF32 relocs (base_offset={}, total_memsz={})",
-            count64, count32, lib_base_offset, total_memsz
+            count64, count32, lib_base_offset, tls.total_memsz()
         );
     }
 }
@@ -249,20 +249,20 @@ fn compute_tpoff(
     r_sym: u32,
     r_addend: i64,
     lib_base_offset: usize,
-    total_memsz: usize,
+    tls: toyos_elf::tls::Static,
     tls_info: &TlsModuleInfo,
 ) -> i64 {
     if r_sym == 0 {
-        return toyos_elf::tls::tpoff(lib_base_offset as u64, r_addend, total_memsz);
+        return tls.tpoff(lib_base_offset as u64, r_addend);
     }
     let symbols = lib.symbols();
     if let Some(sym) = symbols.get(r_sym as usize).filter(|s| s.is_defined()) {
-        return toyos_elf::tls::tpoff(lib_base_offset as u64 + sym.value, r_addend, total_memsz);
+        return tls.tpoff(lib_base_offset as u64 + sym.value, r_addend);
     }
     let name = symbols.name(r_sym as usize);
     match defining_module(name, tls_info) {
         Some((module, sym_offset)) => {
-            toyos_elf::tls::tpoff(module.base_offset as u64 + sym_offset, r_addend, total_memsz)
+            tls.tpoff(module.base_offset as u64 + sym_offset, r_addend)
         }
         None => {
             log!("tpoff: unresolved TLS symbol: {}", name);

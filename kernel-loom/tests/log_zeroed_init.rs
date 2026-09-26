@@ -43,7 +43,7 @@ fn a_zero_allocated_ap_shard_issues_first_seq_first() {
         "zero must remain the empty-slot state"
     );
 
-    let guard = kernel_loom::arch::LogCommitGuard::close();
+    let guard = kernel_loom::arch::IrqGuard::close();
     // SAFETY: this host thread is the allocation's only producer.
     let first = unsafe { shard.reserve(&guard) };
     assert_eq!(

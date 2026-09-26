@@ -239,29 +239,34 @@ before any aarch64 file exists, with x86 as its only user:
   in its own crate, as `toyos-bootmap` does: it grows a TTBR plan, and
   `toyos-pcid` becomes an ASID/PCID allocator.
 
+## x86 left in generic code
+
+Each is its own issue, owned by the stage that removes it:
+
+- `issues/kernel/the-saved-kernel-context-names-x86-registers.md` (stage 4)
+- `issues/kernel/msi-and-pin-routing-take-an-x86-vector-and-apic-id.md` (stage 4)
+- `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md` (stage 4)
+- `issues/kernel/the-crash-evidence-records-x86-fault-registers.md` (stage 5)
+- `issues/kernel/the-aarch64-kernel-builds-with-dead-code-allowed.md` (stage 7)
+
 ## Stages
 
 Each stage names its exit; "measured" means a number from a run.
 
 0. **Rulings and shared seams, before any aarch64 file exists.** `src/` gains
    an `Arch`, replacing the 57 triple mentions. `arch/syscall/` minus
-   `gate.rs` moves out of `arch/`. `toyos-elf` and `toyos-ld` take a machine:
-   `EM_AARCH64`, `R_AARCH64_RELATIVE`, PE `0xAA64`. The MSI doorbell becomes
+   `gate.rs` moves out of `arch/`. The MSI doorbell becomes
    one arch-provided constant. `IrqGuard`/`LogCommitGuard` become one arch
    primitive. The loom model owed by
    `issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
    lands, and the `Mmio` barrier contract above is written and asserted.
    **Exit**: x86 builds and passes unchanged. `rg 'x86_64-unknown' src/`
-   names one `Arch` table. `toyos-elf` and `toyos-ld` host tests cover an
-   aarch64 PIE with relocations.
+   names one `Arch` table.
 
-1. **`aarch64-unknown-toyos` in the rust fork and `toyos-ld`.** A target
-   spec: `aarch64-unknown-none-elf`, PIC, frame pointers, `toyos-ld` as the
-   linker. Std pal `_start` and TLS for variant I with TLSDESC. `toyos-ld`
-   handles the TLSDESC/TLSLE relocation families and `aarch64` stubs in ELF
-   output. **Exit**: `cargo +toyos build --target aarch64-unknown-toyos`
-   builds `std` plus a hello-world and the whole Rust userland. `toyos-ld`'s
-   output passes `toyos-elf` and `llvm-readobj` with no unknown relocations.
+1. **`aarch64-unknown-toyos` in the rust fork.** A target spec:
+   `aarch64-unknown-none-elf`, PIC, frame pointers. Std pal `_start` and TLS
+   for variant I. **Exit**: `cargo +toyos build --target aarch64-unknown-toyos`
+   builds `std` plus a hello-world and the whole Rust userland.
 
 2. **The UEFI loader on AArch64** (`aarch64-unknown-uefi`, tier 2 upstream,
    no fork work needed). Entry is `extern "C"` rather than `sysv64`.
@@ -288,12 +293,21 @@ Each stage names its exit; "measured" means a number from a run.
    **Exit**: a user process takes a page fault and a syscall on one CPU; the
    timer drives preemption; an interrupt storm test ends with no lost timer
    tick; the longest interrupts-off window is measured against x86's.
+   The entry's EL2 writes of `CNTHCTL_EL2`, `CNTVOFF_EL2` and `CPTR_EL2`
+   (`kernel/src/arch/aarch64/boot.rs`) are untested until here: deleting any
+   one stays green in `virt_el2_drop`, because stage 3 reads no counter and
+   runs no FP. This stage's timer and FP tests run under that EL2 profile too,
+   and each of the three deletions is shown red.
 
 5. **SMP through PSCI.** `CPU_ON` from MADT GICC entries, SGIs as the IPI,
    broadcast TLBI behind the machine-wide invalidation contract. **Exit**:
    `-smp 8` boots all CPUs; every CPU asserts the control-register
    declaration; the shootdown stress test and the loom-checked stop both
    pass; `CPU_OFF`/`SYSTEM_RESET`/`SYSTEM_OFF` replace ACPI reset and PM1a.
+   The TLS-descriptor resolver lands here, in std with its loader half and a
+   `dlopen` test; until it does the kernel refuses `R_AARCH64_TLSDESC` by name
+   (`toyos_elf::rela::ExeRefusal::TlsDescriptor` for an executable,
+   `toyos_elf::RelocError::TlsDescriptor` for a library).
 
 6. **Virtio on `virt`.** virtio-pci (ECAM from MCFG) for blk, net, gpu,
    sound, input and rng. virtio-input replaces the i8042 as the
@@ -301,6 +315,11 @@ Each stage names its exit; "measured" means a number from a run.
    alongside RNDR. SMMUv3 is on `virt` (`-M virt,iommu=smmuv3`), decoded from
    IORT. **Exit**: netd claims its NIC through an SMMUv3 domain; a
    foreign-DMA test faults into a `DMA FAULT` record, not a crash.
+   Stage 0's three DMA-ordering fixes (NVMe's phase before its body, xHCI
+   `TrbRing::put`'s body before its cycle bit, and the event ring's cycle bit
+   before its body) get a test here that reds with `put` written back as one
+   `self.buf.write(off, trb)`; x86's TSO hides all three from every guest
+   test until then.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
    built for `aarch64-unknown-toyos`. C programs stay x86-only per the
