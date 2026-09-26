@@ -142,8 +142,8 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(2);
 /// the volume keeps, so the stream is never the shorter of the two.
 const REPLAY_BYTES: usize = MAX_LOG_FILES * MAX_LOG_BYTES as usize;
 
-/// Program lines the console may fall behind the log by. Past it whole lines
-/// are counted and said, and `/log` has them.
+/// Program lines the console may fall behind the log by. Past it the oldest
+/// whole lines are counted and said, and `/log` has them.
 const CONSOLE_BYTES: usize = 1 << 20;
 
 fn main() {
@@ -560,12 +560,30 @@ impl Log {
     }
 
     /// One rendered program line for the console, held whole until it takes it.
+    ///
+    /// **Past the bound the oldest lines go, never the newest**, as a console
+    /// behind Linux's printk ring skips what the ring overwrote: the newest
+    /// line is the one a watcher waits on — a test runner's end marker after
+    /// a flood — and every line gone is in `/log`. They go down to half the
+    /// bound at once, so a flood moves the held bytes once per half and not
+    /// once per line. The first held line stays: the console may have taken
+    /// its head.
     fn console_line(&mut self, line: &[u8]) {
-        if self.console_held.len() + line.len() > CONSOLE_BYTES {
-            self.console_unshown += 1;
-            return;
+        let held = &mut self.console_held;
+        if held.len() + line.len() > CONSOLE_BYTES {
+            let first = held.iter().position(|&b| b == b'\n').map_or(held.len(), |at| at + 1);
+            let mut cut = first;
+            while cut < held.len() && held.len() - (cut - first) + line.len() > CONSOLE_BYTES / 2 {
+                cut += held[cut..].iter().position(|&b| b == b'\n').expect("held lines are whole") + 1;
+                self.console_unshown += 1;
+            }
+            held.drain(first..cut);
+            if held.len() + line.len() > CONSOLE_BYTES {
+                self.console_unshown += 1;
+                return;
+            }
         }
-        self.console_held.extend_from_slice(line);
+        held.extend_from_slice(line);
     }
 
     /// As many held lines as the console takes now; the rest wait for its room.
