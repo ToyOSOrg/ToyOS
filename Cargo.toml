@@ -78,8 +78,7 @@ exclude = [
     # dependency of `rust/library/std`, so it keeps its own resolution and
     # cannot be a member. It is host-tested all the same — its `lib.rs` is
     # `cfg_attr(not(test), no_std)` and `cargo run -- --ci host` runs
-    # `cargo test` in it against the host triple. Every crate in `exclude` that
-    # has host tests is named in `src/ci.rs`; nothing here reaches them.
+    # `cargo test` in it against the host triple.
     "toyos",
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
     # its own directory. The harness's own integration test lives here too

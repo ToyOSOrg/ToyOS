@@ -363,8 +363,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// The merge queue's whole gate, and the nightly's host lane: every test that
 /// runs on the host and boots no guest. The build system's own tests, every
 /// member of the host workspace, clippy with warnings denied, the concurrency
-/// models' negative controls, every userland crate with a host test, and the
-/// SDK.
+/// models' negative controls, every userland crate with a host test
+/// ([`crate::userlandhost`], which also reds on a userland test none of them
+/// runs), and the SDK.
 ///
 /// Clippy needs none of the ToyOS toolchain the nightly alone builds — the
 /// kernel and the bootloader lint against `x86_64-unknown-none` and
@@ -416,9 +417,13 @@ fn host(root: &Path) -> Vec<Step> {
     for control in CONTROLS {
         steps.push(step(&format!("control `{}`", control.feature), || run_control(root, control)));
     }
-    match userland_host_crates(root) {
-        Ok(names) => {
-            for name in names {
+    match crate::userlandhost::survey(&root.join("userland")) {
+        Ok(survey) => {
+            if !survey.escapes.is_empty() {
+                let why = format!("run nowhere: {}", survey.escapes.join("; "));
+                steps.push(Step { label: "every userland test".into(), verdict: Err(why) });
+            }
+            for name in survey.gated {
                 let manifest = format!("userland/{name}/Cargo.toml");
                 steps.push(step(&format!("userland/{name}"), || {
                     cargo(root, &["test", "--manifest-path", &manifest, "--target", &host_triple])
@@ -433,69 +438,6 @@ fn host(root: &Path) -> Vec<Step> {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
     steps
-}
-
-/// Every crate directly under `userland/` whose `src/` or `tests/` holds a
-/// test, by directory name and sorted: found on disk and never listed, so a
-/// crate's first test gates the merge that adds it. Each is tested against the
-/// host triple because `userland/.cargo/config.toml` cross-compiles by default,
-/// which is also why none can be a host-workspace member.
-fn userland_host_crates(root: &Path) -> Result<Vec<String>, String> {
-    let userland = root.join("userland");
-    let entries =
-        std::fs::read_dir(&userland).map_err(|e| format!("{}: {e}", userland.display()))?;
-    let mut found = Vec::new();
-    for entry in entries {
-        let dir = entry.map_err(|e| format!("{}: {e}", userland.display()))?.path();
-        if !dir.join("Cargo.toml").is_file() {
-            continue;
-        }
-        let mut files = Vec::new();
-        for sub in ["src", "tests"] {
-            rs_files(&dir.join(sub), &mut files)?;
-        }
-        for file in &files {
-            let text =
-                std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
-            if holds_a_test(&text) {
-                found.push(dir.file_name().unwrap_or_default().to_string_lossy().into_owned());
-                break;
-            }
-        }
-    }
-    found.sort();
-    Ok(found)
-}
-
-/// Every `.rs` file under `dir`, which may not exist; `target` and dotted
-/// directories are build output and history.
-fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
-    };
-    for entry in entries {
-        let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        if path.is_dir() {
-            if !name.starts_with('.') && name != "target" {
-                rs_files(&path, out)?;
-            }
-        } else if name.ends_with(".rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// Whether `text` carries an attribute naming `test` as a word: `#[test]`,
-/// `#[cfg(test)]`, `#![cfg(test)]`, `#[tokio::test]`. A `#[cfg(not(test))]` counts too, which
-/// gates a crate that had nothing to run rather than missing one that had.
-fn holds_a_test(text: &str) -> bool {
-    text.lines().map(str::trim_start).filter(|l| l.starts_with("#[") || l.starts_with("#![")).any(|attr| {
-        attr.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(|word| word == "test")
-    })
 }
 
 /// A pull request against `main`, run as its own `ci.yml` job because it reads
@@ -884,56 +826,6 @@ mod tests {
         assert!(judge_control(catches, true, catches.verdicts[0]).is_ok());
         assert!(judge_control(catches, false, catches.verdicts[0]).is_err());
         assert!(judge_control(catches, true, "").is_err());
-    }
-
-    /// **Every userland test gates a merge.** Walked file by file and not crate
-    /// by crate, so a test in a nested crate, a build script or `examples/`
-    /// that [`userland_host_crates`]'s one-level scan of `src/` and `tests/`
-    /// cannot see is a red here rather than a test run nowhere: each file
-    /// holding a test belongs to the nearest directory above it with a
-    /// `Cargo.toml`, and that crate must be one `host` runs.
-    #[test]
-    fn every_userland_test_is_in_the_gate() {
-        let root = repo_root();
-        let userland = root.join("userland");
-        let gated = userland_host_crates(&root).expect("userland is readable");
-        let mut files = Vec::new();
-        rs_files(&userland, &mut files).expect("userland is readable");
-        let mut ungated = Vec::new();
-        let mut tests = 0;
-        for file in files {
-            if !holds_a_test(&std::fs::read_to_string(&file).expect("a readable source")) {
-                continue;
-            }
-            tests += 1;
-            let owner = file
-                .ancestors()
-                .skip(1)
-                .take_while(|dir| *dir != userland)
-                .find(|dir| dir.join("Cargo.toml").is_file())
-                .unwrap_or_else(|| panic!("{} is in no crate", file.display()));
-            let name = owner.strip_prefix(&userland).expect("under userland").to_string_lossy();
-            if !gated.iter().any(|g| *g == name) {
-                ungated.push(format!("{} (crate userland/{name})", file.display()));
-            }
-        }
-        assert!(tests > 0, "no file under userland/ holds a test, so this looked at nothing");
-        assert!(
-            ungated.is_empty(),
-            "these files hold a test and `cargo run -- --ci host` runs none of them, because \
-             userland_host_crates does not find their crate:\n  {}",
-            ungated.join("\n  ")
-        );
-    }
-
-    #[test]
-    fn a_test_attribute_is_a_word_and_not_a_substring() {
-        assert!(holds_a_test("#[test]\nfn f() {}"));
-        assert!(holds_a_test("    #[cfg(test)]\nmod tests;"));
-        assert!(holds_a_test("#![cfg(test)]"));
-        assert!(holds_a_test("#[tokio::test]"));
-        assert!(!holds_a_test("#[cfg(feature = \"latest\")]\n// #[test]\nlet test = 1;"));
-        assert!(!holds_a_test("#[derive(Debug)] struct Contest;"));
     }
 
     /// The rules as `gh api repos/ToyOSOrg/ToyOS/rules/branches/main` answered,

@@ -35,14 +35,15 @@ const STATS_INTERVAL_NANOS: u64 = 2_000_000_000;
 /// it detects.
 const IDLE_WAKES_SAID: u32 = 8;
 
-/// One reporting window, one line.
+/// One reporting window, one line, ending in the newline `say::said` takes: the
+/// mix thread formats it once and hands it over as it is.
 ///
 /// The counters are `toyos_mixer::MixStats`, and what they mean is documented
 /// there beside the decision that fills them; this is the line's shape, which
 /// is soundd's and stays here. `#106`'s status tool reads one shape, so the null
 /// sink prints the same line.
 fn report(stats: &MixStats, clients: usize) -> String {
-    format!("soundd: wakes={} completions={} submitted={} underruns={} drains={} max_wake_lat_us={} max_batch={} clients={} deferred={} starve_max={} worst_irq_late_us={} worst_pickup_us={} worst_empty={} worst_batch={} late_wakes={}",
+    format!("soundd: wakes={} completions={} submitted={} underruns={} drains={} max_wake_lat_us={} max_batch={} clients={} deferred={} starve_max={} worst_irq_late_us={} worst_pickup_us={} worst_empty={} worst_batch={} late_wakes={}\n",
         stats.wakes, stats.completions, stats.submitted, stats.underruns, stats.drains,
         stats.max_wake_lat_ns / 1_000, stats.max_batch, clients, stats.deferred,
         stats.starve_max, stats.worst.irq_late_ns / 1_000, stats.worst.pickup_ns / 1_000,
@@ -53,7 +54,7 @@ fn report(stats: &MixStats, clients: usize) -> String {
 /// start the next, and return the line that says it. The only place a reported
 /// window is reset, so the totals are exactly the sum of what the console said.
 ///
-/// The caller says the line because `say!` needs a voice with a running
+/// The caller says the line because `say::said` needs a voice with a running
 /// writer, which a host test's thread is not.
 #[must_use = "an unsaid window leaves the totals ahead of the console"]
 fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) -> String {
@@ -618,11 +619,11 @@ pub(crate) fn mix_thread(
         // shorter than two windows that tail is most of it.
         let now_ns = syscall::clock_nanos();
         if was_streaming && streams.is_empty() {
-            say!("{}", flush(&mut stats, &mut totals, 0));
+            crate::say::said(flush(&mut stats, &mut totals, 0));
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         } else if now_ns >= next_stats_ns {
             if !streams.is_empty() {
-                say!("{}", flush(&mut stats, &mut totals, streams.len()));
+                crate::say::said(flush(&mut stats, &mut totals, streams.len()));
             }
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         }
@@ -789,12 +790,12 @@ pub(crate) fn null_sink_thread(
         // silent about being discarded (#106's status tool reads one shape).
         let now_ns = syscall::clock_nanos();
         if was_streaming && streams.is_empty() {
-            say!("{}", flush(&mut stats, &mut totals, 0));
+            crate::say::said(flush(&mut stats, &mut totals, 0));
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
             say!("soundd: null sink idle");
         } else if now_ns >= next_stats_ns {
             if !streams.is_empty() {
-                say!("{}", flush(&mut stats, &mut totals, streams.len()));
+                crate::say::said(flush(&mut stats, &mut totals, streams.len()));
             }
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         }
@@ -838,6 +839,9 @@ mod tests {
         let second = flush(&mut stats, &mut totals, 0);
         assert!(first.contains(" submitted=10 underruns=1 drains=2 "), "{first}");
         assert!(second.contains(" submitted=20 underruns=4 drains=5 "), "{second}");
+        // One line each, ending in the newline `say::said` is handed as it is.
+        assert!(first.ends_with(" late_wakes=3\n") && first.matches('\n').count() == 1, "{first:?}");
+        assert!(second.ends_with(" late_wakes=6\n") && second.matches('\n').count() == 1, "{second:?}");
 
         let open = window(7, 8, 9, 10);
         let published = Published::new(State::Running);
