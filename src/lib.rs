@@ -26,6 +26,7 @@ pub mod image;
 pub mod kernelkeys;
 pub mod lan;
 pub mod libc;
+pub mod licence;
 pub mod metal;
 pub mod metaldevices;
 pub mod metalimage;
