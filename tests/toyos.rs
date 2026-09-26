@@ -288,13 +288,15 @@ const RUST_SKIP: &[&str] = &[
     // Needs a NIC in front of netd and a host server behind it.
     // `netd_slow_reader`, `netd_held_open`, `netd_stalled_peer`,
     // `netd_udp_refused`, `netd_udp_any_address` and `netd_refused_pipes` run
-    // them on `tests/netcase`.
+    // them on `tests/netcase`, and `netd_lookup_let_go` on it with its frames
+    // held.
     "netd_slow_reader",
     "netd_held_open",
     "netd_stalled_peer",
     "netd_udp_refused",
     "netd_udp_any_address",
     "netd_refused_pipes",
+    "netd_lookup_let_go",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
@@ -865,6 +867,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // two answers; its clocks are liveness guards. Nightly, because both
     // answers rest on this host's network, which no change to the tree moves.
     ("dns_resolve", Sched::Parallel, Tier::Nightly),
+    // The netcase boot, every frame it sends held once it has its lease:
+    // lookups whose clients hung up or spoke again are let go at once, and
+    // one nobody answers ends when its schedule does. The verdict is netd's
+    // answers; the schedule's end is a bound derived from it.
+    ("netd_lookup_let_go", Sched::Parallel, Tier::Fast),
     // Two netcase boots, each frame put on the wire kept: the first DHCP
     // transaction ID of each differs, because netd seeds smoltcp's random
     // source from the kernel's. The verdict is two numbers off the wire.
@@ -9512,6 +9519,56 @@ const DNS_NO_NAME: &str = "doesnotexist.invalid";
 /// timeout's.
 const DNS_NO_ADDRESS: &str = "no results";
 
+/// netd's loop lets a lookup go the moment its client hangs up or speaks
+/// again, and ends one nobody answers when its schedule does: the netcase boot
+/// once it has its lease, with every frame it sends from then on held by
+/// QEMU, so no query reaches its resolver. The verdict is the guest's, from
+/// netd's answers and their times.
+fn netd_lookup_let_go(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    const NAME: &str = "netd_lookup_let_go";
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+    let bins: Vec<(String, Vec<u8>)> = rust_bins.iter().filter(|(n, _)| n == NAME).cloned().collect();
+    if bins.is_empty() {
+        return Err(format!("{NAME} was not built"));
+    }
+    let options = BootOptions { profile: qemu::Profile::Headless, qmp: true, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+        return Err("this test needs a NIC and the profile has none".to_string());
+    }
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
+    // A lookup before the lease is refused as having no server.
+    await_marker(&mut qemu, &mut console, "netd: DHCP: lease ", "netd's lease")?;
+    // One lookup before the frames are held, whatever it is answered, has
+    // netd learn its resolver's link address. Every query after it leaves and
+    // is lost, so no link-address retry wakes netd's loop, and only the
+    // resolver's own wake carries a lookup to its end.
+    let primed = qemu.run_test(&format!("host {DNS_NO_NAME}"), Duration::from_secs(60));
+    if let Some(err) = &primed.error {
+        return Err(format!("the lookup before the frames were held: {err}\n{}", primed.stdout));
+    }
+    console.push_str(&primed.serial);
+    qemu::QmpDevices::open(qemu.qmp_socket()).hold_outbound("net0");
+    let result = qemu.run_test(&format!("test_rs_{NAME}"), Duration::from_secs(180));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) || !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_lookup_let_go: ok")) {
+        return Err(format!("{NAME} exited {:?}:\n{}{}", result.exit_code, result.stdout, result.serial));
+    }
+    let spoke = "it spoke again before its answer";
+    if !result.serial.contains(spoke) {
+        return Err(format!("netd dropped a client that spoke again without a `{spoke}` line:\n{}", result.serial));
+    }
+    console.push_str(&result.serial);
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    for line in result.stdout.lines().filter(|l| l.contains("netd_lookup_let_go: ")) {
+        eprintln!("  [netcase] {}", line.trim_end());
+    }
+    Ok(())
+}
+
 /// Two boots of one image draw different first DHCP transaction IDs, because
 /// netd seeds smoltcp's random source from the kernel's; seeded as smoltcp's
 /// `Config::new` leaves it, every boot draws the same one. Read off the wire
@@ -14843,6 +14900,7 @@ fn run_machine_test(
         "netd_udp_refused" => netd_udp_refused(rust_bins),
         "netd_udp_any_address" => netd_udp_any_address(rust_bins),
         "dns_resolve" => dns_resolve(),
+        "netd_lookup_let_go" => netd_lookup_let_go(rust_bins),
         "netd_seeds_its_stack" => netd_seeds_its_stack(),
         "netd_hostile_peer" => {
             // The netcase boot again, and for the same reason: netd's `main`
