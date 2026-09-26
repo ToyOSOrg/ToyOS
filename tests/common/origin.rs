@@ -263,7 +263,7 @@ pub fn flood(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> R
     if refused + suppressed == 0 {
         return Err(format!("all {owed} flood lines reached /log, so nothing here was counted"));
     }
-    let done = done.map_or_else(|| "its last line counted, not written".to_string(), |d| d);
+    let done = done.unwrap_or_else(|| "its last line counted, not written".to_string());
     eprintln!(
         "  [origin] {owed} flood lines: {written} in /log in order, {refused} refused a full \
          ring, {suppressed} past the allowance; {done}"
