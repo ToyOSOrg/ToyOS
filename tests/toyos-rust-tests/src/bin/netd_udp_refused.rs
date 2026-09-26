@@ -11,6 +11,10 @@
 //! [`ROOM`] bytes, so netd's write of a [`DATAGRAM`]-byte datagram takes
 //! exactly `ROOM`. A second, ordinary socket must then still get its datagram.
 //!
+//! **The socket that ended is gone whole**: its port binds again, and the pipe
+//! netd wrote into reads end-of-file once this program has let go of its own
+//! write end, because netd has let go of the one it was handed.
+//!
 //! argv[1] is the port of the harness's host server, which this program does
 //! not use; argv[2] is the port of the harness's UDP echo on `HOST`.
 //! `netd_udp_refused: ok` is the only success line.
@@ -27,13 +31,10 @@ use toyos::net::{
     UdpBindResponse, UdpRecvResponse, UdpSocketId,
 };
 use toyos::{AsHandle, Pipe};
-use toyos_abi::syscall;
+use toyos_abi::syscall::{self, SyscallError};
 
-/// The address QEMU's user network leases this guest, which both sockets bind
-/// to rather than `0.0.0.0`: netd's socket bound to the unspecified address
-/// receives no unicast datagram at all
-/// (`issues/design-debt/a-netd-udp-socket-bound-to-any-address-receives-nothing.md`).
-const GUEST: [u8; 4] = [10, 0, 2, 15];
+/// Both sockets bind every address, as an ordinary client's does.
+const ANY: [u8; 4] = [0, 0, 0, 0];
 
 /// Bytes of room left in the full socket's pipe.
 const ROOM: usize = 100;
@@ -41,8 +42,8 @@ const ROOM: usize = 100;
 /// Bytes in each datagram: more than [`ROOM`], less than one Ethernet frame.
 const DATAGRAM: usize = 1000;
 
-/// How long netd may take to answer a receive whose datagram is on its way. A
-/// bound, said by name; not a pace.
+/// How long netd may take to answer a receive. A bound, said by name; not a
+/// pace.
 const WITHIN: Duration = Duration::from_secs(20);
 
 fn main() {
@@ -51,11 +52,13 @@ fn main() {
         .and_then(|p| p.parse().ok())
         .expect("usage: netd_udp_refused <host port> <echo port>");
 
-    let healthy = udp_bind(GUEST, 0).expect("bind an ordinary socket");
+    let healthy = udp_bind(ANY, 0).expect("bind an ordinary socket");
 
     let (rx, kept) = toyos::pipe_pair().expect("a receive pipe");
     let handed = syscall::dup(kept.as_handle()).expect("a second handle to the receive pipe's write end");
     let capacity = fill(&kept);
+    // netd's handle is the pipe's only writer from here on.
+    drop(kept);
     let mut room = [0u8; ROOM];
     assert_eq!(rx.read_nonblock(&mut room), Ok(ROOM), "making room in the full pipe");
     let (from_client, tx) = toyos::pipe_pair().expect("a send pipe");
@@ -64,7 +67,7 @@ fn main() {
         .request_with_handles(
             &[handed, from_client.into_raw()],
             MsgType::UdpBind,
-            &UdpBindRequest { addr: GUEST, port: 0, _pad: 0 },
+            &UdpBindRequest { addr: ANY, port: 0, _pad: 0 },
         )
         .expect("netd takes the request")
         .response()
@@ -79,11 +82,29 @@ fn main() {
         Err(e) => panic!("a {DATAGRAM}-byte datagram into {ROOM} bytes of room was refused {e:?}, not by a reset"),
     }
     assert_eq!(
-        udp_recv_from(full_id, DATAGRAM as u32).err(),
+        recv(full_id).err(),
         Some(NetError::NotConnected),
         "the socket that could not take a datagram whole is still there",
     );
     println!("netd_udp_refused: the socket whose pipe would not take a datagram whole is gone");
+
+    let again = udp_bind(ANY, full.bound_port)
+        .unwrap_or_else(|e| panic!("port {} of the ended socket would not bind again: {e:?}", full.bound_port));
+    assert_eq!(again.bound_port, full.bound_port);
+    let mut drained = 0usize;
+    let mut chunk = vec![0u8; 65536];
+    loop {
+        match rx.read_nonblock(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => drained += n,
+            Err(SyscallError::WouldBlock) => {
+                panic!("netd still holds the ended socket's receive pipe, {drained} bytes read out of it")
+            }
+            Err(e) => panic!("reading the ended socket's receive pipe: {e:?}"),
+        }
+    }
+    assert_eq!(drained, capacity as usize, "the pipe held its fill and the {ROOM} bytes netd wrote");
+    println!("netd_udp_refused: its port binds again and its pipe has no writer left");
 
     send(healthy.socket_id, &healthy.tx, echo, 0x5A);
     let answer = recv(healthy.socket_id).expect("the ordinary socket's datagram");

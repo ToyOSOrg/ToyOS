@@ -1178,6 +1178,10 @@ name = "toyos-dma"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-dns"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-elf"
 version = "0.1.0"
 

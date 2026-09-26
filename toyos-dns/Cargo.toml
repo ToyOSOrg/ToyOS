@@ -1,0 +1,12 @@
+# A member of the host workspace (root `Cargo.toml`): netd resolves with it on
+# the guest, and its tests run on the host. What lives here is every decision a
+# stub resolver makes — the question, which datagram answers it, what the
+# answer says, when to ask again — pure, so each is checked without a network.
+
+[package]
+name = "toyos-dns"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

@@ -287,11 +287,13 @@ const RUST_SKIP: &[&str] = &[
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
     // `netd_slow_reader`, `netd_held_open`, `netd_stalled_peer`,
-    // `netd_udp_refused` and `netd_refused_pipes` run them on `tests/netcase`.
+    // `netd_udp_refused`, `netd_udp_any_address` and `netd_refused_pipes` run
+    // them on `tests/netcase`.
     "netd_slow_reader",
     "netd_held_open",
     "netd_stalled_peer",
     "netd_udp_refused",
+    "netd_udp_any_address",
     "netd_refused_pipes",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
@@ -853,6 +855,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // pipe will not take whole ends that socket by name and no other. The
     // verdict is each socket's answer; its clocks are liveness guards.
     ("netd_udp_refused", Sched::Parallel, Tier::Fast),
+    // The netcase boot again, beside a host UDP echo: a socket bound through
+    // std to 0.0.0.0 receives the echo's unicast reply. The verdict is the
+    // reply's bytes; its clock is a liveness guard.
+    ("netd_udp_any_address", Sched::Parallel, Tier::Fast),
+    // The netcase boot, whose user network forwards 10.0.2.3 to this host's
+    // resolver: `host` resolves a real name to the addresses this host's
+    // resolver gives it, and a `.invalid` name to none. The verdict is the
+    // two answers; its clocks are liveness guards.
+    ("dns_resolve", Sched::Parallel, Tier::Fast),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
     ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
@@ -9402,6 +9413,103 @@ fn netd_udp_refused(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
+/// A socket bound to 0.0.0.0 receives the unicast reply to what it sent: the
+/// guest's comparison of the echo's reply with its datagram is the verdict.
+fn netd_udp_any_address(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let echo = UdpEcho::start()?;
+    let run = netcase_against_host(rust_bins, "netd_udp_any_address", false, &format!(" {}", echo.port));
+    let echoed = echo.finish();
+    let HostRun { result, console, .. } = run.map_err(|e| format!("{e}\nthe UDP echo ended {echoed:?}"))?;
+    let echoed = echoed?;
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_udp_any_address: ok")) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] a socket bound to 0.0.0.0 got the echo's reply ({echoed} echoed)");
+    Ok(())
+}
+
+/// A real name, resolved through the guest's user network: QEMU's `10.0.2.3`
+/// forwards each query to this host's own resolver, so what `host` prints in
+/// the guest is judged by what this host's resolver answers for the same name,
+/// a resolver this tree did not write. [`DNS_REAL_NAME`]'s addresses are a
+/// set that does not rotate. A name under `.invalid` has none (RFC 6761 §6.4),
+/// and is answered as none rather than as a timeout.
+fn dns_resolve() -> Result<(), String> {
+    use std::collections::BTreeSet;
+    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+    let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+        return Err("this test needs a NIC and the profile has none".to_string());
+    }
+    let oracle: BTreeSet<Ipv4Addr> = (DNS_REAL_NAME, 0)
+        .to_socket_addrs()
+        .map_err(|e| format!("this host's resolver would not resolve {DNS_REAL_NAME}: {e}"))?
+        .filter_map(|a| match a.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    if oracle.is_empty() {
+        return Err(format!("this host's resolver has no IPv4 address for {DNS_REAL_NAME}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
+
+    let found = qemu.run_test(&format!("host {DNS_REAL_NAME}"), Duration::from_secs(60));
+    if let Some(err) = &found.error {
+        return Err(format!("{err}\n{}", found.stdout));
+    }
+    if found.exit_code != Some(0) {
+        return Err(format!("host {DNS_REAL_NAME} exited {:?}:\n{}{}", found.exit_code, found.stdout, found.serial));
+    }
+    let said = format!("{DNS_REAL_NAME} has address ");
+    let guest: BTreeSet<Ipv4Addr> = found
+        .stdout
+        .lines()
+        .filter_map(|l| l.trim_end().split_once(&said).and_then(|(_, a)| a.parse().ok()))
+        .collect();
+    if guest != oracle {
+        return Err(format!(
+            "the guest resolved {DNS_REAL_NAME} to {guest:?} and this host to {oracle:?}:\n{}",
+            found.stdout
+        ));
+    }
+
+    let missing = qemu.run_test(&format!("host {DNS_NO_NAME}"), Duration::from_secs(60));
+    if let Some(err) = &missing.error {
+        return Err(format!("{err}\n{}", missing.stdout));
+    }
+    let output = format!("{}{}", missing.stdout, missing.serial);
+    if missing.exit_code != Some(1) || output.contains(" has address ") || !output.contains(DNS_NO_ADDRESS) {
+        return Err(format!(
+            "host {DNS_NO_NAME} exited {:?} and did not say {DNS_NO_ADDRESS:?}:\n{output}",
+            missing.exit_code
+        ));
+    }
+    console.push_str(&found.serial);
+    console.push_str(&missing.serial);
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] {DNS_REAL_NAME} resolved in the guest to {guest:?}, as this host resolves it");
+    eprintln!("  [netcase] {DNS_NO_NAME} resolved to no address, not to a timeout");
+    Ok(())
+}
+
+/// A name whose IPv4 addresses do not rotate: `dns.google`'s are 8.8.8.8 and
+/// 8.8.4.4.
+const DNS_REAL_NAME: &str = "dns.google";
+
+/// A name no resolver can find (RFC 6761 §6.4).
+const DNS_NO_NAME: &str = "doesnotexist.invalid";
+
+/// What std's `lookup_host` says for a name netd answered with no address,
+/// and so what `host` prints for one: its word, not netd's, and not a
+/// timeout's.
+const DNS_NO_ADDRESS: &str = "no results";
+
 /// Client pipes netd cannot use, or loses under it, end that client's
 /// connection and never netd: the guest's round trip after each case is the
 /// verdict that netd survived it. This side carries what the guest cannot
@@ -14697,6 +14805,8 @@ fn run_machine_test(
         "netd_held_open" => netd_held_open(rust_bins),
         "netd_stalled_peer" => netd_stalled_peer(rust_bins),
         "netd_udp_refused" => netd_udp_refused(rust_bins),
+        "netd_udp_any_address" => netd_udp_any_address(rust_bins),
+        "dns_resolve" => dns_resolve(),
         "netd_hostile_peer" => {
             // The netcase boot again, and for the same reason: netd's `main`
             // returns on a machine with no NIC, so this is the only config

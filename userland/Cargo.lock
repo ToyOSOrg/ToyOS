@@ -1449,6 +1449,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "host"
+version = "0.1.0"
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1936,6 +1940,7 @@ dependencies = [
  "smoltcp",
  "toyos 0.11.0",
  "toyos-abi 0.10.0",
+ "toyos-dns",
  "toyos-i219",
  "toyos-inspect",
  "toyos-mdns",
@@ -3770,6 +3775,10 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi 0.10.0",
 ]
+
+[[package]]
+name = "toyos-dns"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-font"
