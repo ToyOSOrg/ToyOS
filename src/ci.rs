@@ -42,8 +42,9 @@ pub(crate) const REQUIRED_CHECKS: &[&str] = &["host", "abi-split"];
 const NIGHTLY_RED: &str = "nightly is red";
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
-  host              every host test: the build system, the host workspace, clippy,
-                    the model controls, userland and the SDK (ci.yml, nightly)
+  host              every host test: the build system, the host workspace, the
+                    licences of what ships, clippy, the model controls, userland
+                    and the SDK (ci.yml, nightly)
   abi-split         the published crates' versions (ci.yml; the name is the required check's)
   gate-stage        what protects main, read back from GitHub (ci.yml)
   toolchain         publish this tree's toolchain if nobody has (nightly)
@@ -413,6 +414,7 @@ fn host(root: &Path) -> Vec<Step> {
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
+        step("the licences of what ships", || crate::licence::judge(root)),
     ];
     steps.push(step("clippy and the bare targets", || {
         for args in [
