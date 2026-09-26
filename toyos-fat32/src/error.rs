@@ -44,13 +44,18 @@ pub enum Error {
     /// The device's implementor refused on *its own* bound
     /// ([`IoError::BudgetExpired`]).
     ///
-    /// **The one variant here that is not a fact about the volume**, and the
-    /// only one a caller may honestly answer by asking again: the refused write
-    /// may have landed, but the call has undone or carried through what it did,
-    /// or queued that for the next call to finish first. Every other variant
-    /// describes something true of the medium or of the request, which will be
-    /// just as true next time.
+    /// **One of the two variants here that are not a fact about the volume**,
+    /// with [`Error::RepairPending`], and so one a caller may honestly answer
+    /// by asking again: the refused write may have landed, but the call has
+    /// undone or carried through what it did, or queued that for the next call
+    /// to finish first. Every other variant describes something true of the
+    /// medium or of the request, which will be just as true next time.
     BudgetExpired,
+    /// The call was not started: an earlier call's refused writes are still
+    /// queued ([`crate::Fat32::pending_repair`]), their re-drive was refused
+    /// again on the device's own bound, and nothing changes this volume until
+    /// they land. Asking again re-drives them first.
+    RepairPending,
 }
 
 impl From<IoError> for Error {
@@ -80,6 +85,9 @@ impl Error {
             Error::TooLarge => "file too large for FAT32",
             Error::LimitExceeded => "limit exceeded",
             Error::BudgetExpired => "the device would not answer in the caller's own budget",
+            Error::RepairPending => {
+                "an earlier call's refused writes are still queued and the device refused them again"
+            }
         }
     }
 }

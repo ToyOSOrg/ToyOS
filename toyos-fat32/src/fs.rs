@@ -10,7 +10,7 @@ use crate::dir::{DirScan, RawEntry, ATTR_ARCHIVE, ATTR_DIRECTORY, ATTR_READ_ONLY
 use crate::error::Error;
 use crate::fat::END_OF_CHAIN;
 use crate::name;
-use crate::repair::Repair;
+use crate::repair::{Repair, MAX_REPAIR_STEPS};
 use crate::time::FatTime;
 
 /// FAT32's file size field is 32 bits wide. Not a policy this crate could
@@ -40,9 +40,15 @@ pub struct Fat32<D: BlockAccess> {
     pub(crate) scratch_at: Option<u64>,
     /// The writes that make the volume consistent from wherever the running
     /// call has reached, re-driven from the end — see [`crate::repair`]. Empty
-    /// between calls unless a repair was itself refused, and then no mutating
-    /// call starts until it lands.
+    /// between calls unless one of its writes was itself refused, and then no
+    /// mutating call starts until it lands. Never past
+    /// [`MAX_REPAIR_STEPS`], and allocated at that capacity once.
     pub(crate) repair: Vec<Repair>,
+    /// A mutating call is running; a second one inside it panics.
+    pub(crate) in_call: bool,
+    /// The running call has passed its commit, so what the repair holds is
+    /// its remaining work rather than its rollback.
+    pub(crate) committed: bool,
 }
 
 /// What a path names, once resolved.
@@ -237,7 +243,16 @@ impl<D: BlockAccess> Fat32<D> {
         let geom = Self::probe(&mut dev)?;
         let mut scratch = vec![0u8; geom.bytes_per_sector as usize];
         let fsinfo = FsInfo::read(&mut dev, &geom, &mut scratch);
-        Ok(Fat32 { dev, geom, fsinfo, scratch, scratch_at: None, repair: Vec::new() })
+        Ok(Fat32 {
+            dev,
+            geom,
+            fsinfo,
+            scratch,
+            scratch_at: None,
+            repair: Vec::with_capacity(MAX_REPAIR_STEPS),
+            in_call: false,
+            committed: false,
+        })
     }
 
     pub fn geometry(&self) -> &Geometry {
@@ -606,7 +621,7 @@ impl<D: BlockAccess> Fat32<D> {
             None => {
                 let c = self.alloc_cluster()?;
                 self.repair.truncate(mark);
-                self.repair.push(Repair::Free { start: c, anchor: None });
+                self.queue(Repair::Free { start: c, anchor: None });
                 grown = Some((None, c));
                 f.first_cluster = Some(c);
                 f.hint = Some((0, c));
@@ -621,9 +636,9 @@ impl<D: BlockAccess> Fat32<D> {
                     let new = self.append_cluster(cluster)?;
                     let (end, head) = *grown.get_or_insert((Some(cluster), new));
                     self.repair.truncate(mark);
-                    self.repair.push(Repair::Free { start: head, anchor: None });
+                    self.queue(Repair::Free { start: head, anchor: None });
                     if let Some(end) = end {
-                        self.repair.push(Repair::Put { cluster: end, value: END_OF_CHAIN });
+                        self.queue(Repair::Put { cluster: end, value: END_OF_CHAIN });
                     }
                     new
                 }
@@ -755,7 +770,9 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     /// Release every cluster past what `len` bytes need, recording `len` in
-    /// the handle once the first write is issued.
+    /// the handle once the repair carries the shrink: a refusal before that
+    /// has written nothing, and the handle's old size is what makes the retry
+    /// shrink again.
     fn shrink_chain(&mut self, f: &mut File, len: u64) -> Result<(), Error> {
         let bpc = self.geom.bytes_per_cluster() as u64;
         let keep = len.div_ceil(bpc);
@@ -774,8 +791,12 @@ impl<D: BlockAccess> Fat32<D> {
             return self.free_chain(first, None);
         }
         let last = self.advance(first, keep - 1)?.ok_or(Error::CorruptChain)?;
+        let tail = self.next_cluster(last)?;
         f.size = len as u32;
-        self.truncate_chain(last)
+        match tail {
+            Some(tail) => self.truncate_chain(last, tail),
+            None => Ok(()),
+        }
     }
 
     /// Record a handle's size, first cluster and modification time in its
@@ -954,9 +975,12 @@ impl<D: BlockAccess> Fat32<D> {
     /// The entry is erased *before* the chain is freed, so a stop between
     /// leaks clusters; the other order leaves a live entry naming freed
     /// clusters, which the next allocation turns into a cross-link. A refusal
-    /// while erasing restores the entry. Once it is erased the delete has
-    /// happened, and an `Err` from the free leaves the rest of it queued for
-    /// the next call to finish, which then answers `NotFound` for this path.
+    /// while erasing restores the entry and answers `Err`. Once it is erased
+    /// the delete has happened and answers `Ok`: a refusal of the free leaves
+    /// the rest of it queued for the next call to finish first. A chain found
+    /// corrupt part way through the free is the one `Err` after the erase —
+    /// the name is gone, what could not be followed leaks, and that answer is
+    /// its only record.
     pub fn remove(&mut self, path: &str) -> Result<(), Error> {
         self.atomic(|fs| {
             let (dir, name) = fs.parent_of(path)?;
@@ -994,15 +1018,15 @@ impl<D: BlockAccess> Fat32<D> {
         })
     }
 
-    /// Erase an entry run, then free the chain it named: undone up to the
-    /// last erase, carried forward from it.
+    /// Erase an entry run, then queue the free of the chain it named: undone
+    /// up to the last erase, carried forward from it by [`Self::atomic`].
     fn erase_committed(&mut self, loc: Loc, chain: Option<Cluster>) -> Result<(), Error> {
         self.erase_entries(loc)?;
-        self.repair.clear();
-        match chain {
-            Some(c) => self.free_chain(c, None),
-            None => Ok(()),
+        self.commit();
+        if let Some(c) = chain {
+            self.queue(Repair::Free { start: c, anchor: None });
         }
+        Ok(())
     }
 
     /// Move a file or directory.
@@ -1115,11 +1139,11 @@ impl<D: BlockAccess> Fat32<D> {
     /// Make every write durable and record the free-cluster hints.
     ///
     /// Finishes a refused call's repair first, and refuses while it cannot:
-    /// a sync is a caller about to rely on the volume as it stands. A count
-    /// the repair made unknown is taken from the FAT rather than written as
+    /// a sync is a caller about to rely on the volume as it stands. A volume
+    /// mounted with no count has it taken from the FAT rather than written as
     /// unknown. FSInfo is written before the flush so the flush covers it.
     pub fn sync(&mut self) -> Result<(), Error> {
-        self.settle()?;
+        self.settle_first()?;
         if self.fsinfo.dirty {
             if self.fsinfo.free_count.is_none() {
                 self.fsinfo.free_count = Some(self.count_free()?);
@@ -1142,7 +1166,7 @@ impl<D: BlockAccess> Fat32<D> {
         let free = match self.fsinfo.free_count {
             Some(n) => n,
             None => {
-                self.settle()?;
+                self.settle_first()?;
                 let n = self.count_free()?;
                 self.fsinfo.free_count = Some(n);
                 self.fsinfo.dirty = true;

@@ -386,7 +386,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// Write a directory entry, queueing what it held as the repair.
     pub(crate) fn write_entry_at(&mut self, offset: u64, entry: &RawEntry) -> Result<(), Error> {
         let raw = self.read_entry_at(offset)?;
-        self.repair.push(Repair::Entry { offset, raw });
+        self.queue(Repair::Entry { offset, raw });
         self.put_entry_at(offset, entry)
     }
 
@@ -421,7 +421,7 @@ impl<D: BlockAccess> Fat32<D> {
             let max_clusters = (MAX_DIR_ENTRIES / per_cluster).max(1) as u64;
             let last = self.chain_last(dir_start, max_clusters)?;
             let new = self.alloc_zeroed_cluster()?;
-            self.repair.push(Repair::Put { cluster: last, value: END_OF_CHAIN });
+            self.queue(Repair::Put { cluster: last, value: END_OF_CHAIN });
             self.set_fat_entry(last, new.raw())?;
             capacity += per_cluster;
         }

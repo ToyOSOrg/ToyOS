@@ -180,11 +180,13 @@ impl<D: BlockAccess> Fat32<D> {
                 if u32::from_le_bytes(bytes) & ENTRY_MASK != 0 {
                     continue;
                 }
-                self.repair.push(Repair::Put { cluster, value: 0 });
-                self.set_fat_entry(cluster, END_OF_CHAIN)?;
+                // Counted before the write: the release this queues counts it
+                // back when it lands, whatever became of the claim.
+                self.queue(Repair::Put { cluster, value: 0 });
                 self.fsinfo.next_free = self.geom.cluster(number.saturating_add(1));
                 self.fsinfo.free_count = self.fsinfo.free_count.map(|n| n.saturating_sub(1));
                 self.fsinfo.dirty = true;
+                self.set_fat_entry(cluster, END_OF_CHAIN)?;
                 return Ok(cluster);
             }
         }
@@ -199,7 +201,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// that runs into free space, which is a filesystem two files can share.
     pub(crate) fn append_cluster(&mut self, last: Cluster) -> Result<Cluster, Error> {
         let new = self.alloc_cluster()?;
-        self.repair.push(Repair::Put { cluster: last, value: END_OF_CHAIN });
+        self.queue(Repair::Put { cluster: last, value: END_OF_CHAIN });
         self.set_fat_entry(last, new.raw())?;
         Ok(new)
     }
@@ -240,19 +242,17 @@ impl<D: BlockAccess> Fat32<D> {
                 Ok(next) => next,
                 Err(Error::CorruptChain) => return Err(Error::CorruptChain),
                 Err(e) => {
-                    self.repair.push(Repair::Free { start: c, anchor });
+                    self.queue(Repair::Free { start: c, anchor });
                     return Err(e);
                 }
             };
             if let Some(n) = next {
-                self.repair.push(Repair::Free { start: n, anchor });
+                self.queue(Repair::Free { start: n, anchor });
             }
-            self.repair.push(Repair::Put { cluster: c, value: 0 });
+            self.queue(Repair::Put { cluster: c, value: 0 });
             self.set_fat_entry(c, 0)?;
             self.repair.truncate(mark);
-            self.fsinfo.free_count = self.fsinfo.free_count.map(|n| n.saturating_add(1));
-            self.fsinfo.dirty = true;
-            self.hint_free(c);
+            self.released(c);
             match next {
                 Some(n) => c = n,
                 None => return Ok(()),
@@ -292,15 +292,15 @@ impl<D: BlockAccess> Fat32<D> {
         Err(Error::CorruptChain)
     }
 
-    /// Drop everything after `cluster`, leaving it as the new end of chain.
+    /// Drop `tail`, the chain after `cluster`, leaving `cluster` as the new end
+    /// of chain.
     ///
     /// A commit from its first write, like [`Self::free_chain`]: a refused
     /// terminator leaves itself and then the tail's free queued.
-    pub(crate) fn truncate_chain(&mut self, cluster: Cluster) -> Result<(), Error> {
-        let Some(tail) = self.next_cluster(cluster)? else { return Ok(()) };
+    pub(crate) fn truncate_chain(&mut self, cluster: Cluster, tail: Cluster) -> Result<(), Error> {
         let mark = self.repair.len();
-        self.repair.push(Repair::Free { start: tail, anchor: Some(cluster) });
-        self.repair.push(Repair::Put { cluster, value: END_OF_CHAIN });
+        self.queue(Repair::Free { start: tail, anchor: Some(cluster) });
+        self.queue(Repair::Put { cluster, value: END_OF_CHAIN });
         self.set_fat_entry(cluster, END_OF_CHAIN)?;
         self.repair.truncate(mark);
         self.free_chain(tail, Some(cluster))

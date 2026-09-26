@@ -246,8 +246,6 @@ impl BlockAccess for FatVolume {
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        // The FAT-write actuators: refused before the write is issued, like a
-        // spent `block::OPERATION`.
         #[cfg(feature = "boot-actuators")]
         if self.role == Role::Log {
             match mirror_refuse::should_refuse(offset, buf.len()) {
@@ -642,6 +640,9 @@ pub struct FatFs {
     /// The one [`FatExtents`] every backing for a name shares; keyed by name
     /// because `open_backing` hands one out without opening a file.
     extents: BTreeMap<String, Weak<FatExtents>>,
+    /// A sync has logged the volume waiting on an unlanded repair, and none
+    /// has succeeded since.
+    repair_named: bool,
 }
 
 /// What to stamp on an entry: reads `clock` directly, in local time as FAT
@@ -663,9 +664,7 @@ fn as_syscall_error(e: Error) -> SyscallError {
         | Error::Truncated
         | Error::CorruptChain
         | Error::CorruptDirectory => SyscallError::Io,
-        // Not `Io`: the volume wasn't touched; `block::OPERATION` (the
-        // caller's bound) expired. Reaches userland as `WouldBlock`.
-        Error::BudgetExpired => SyscallError::WouldBlock,
+        Error::BudgetExpired | Error::RepairPending => SyscallError::WouldBlock,
         // Not `NotFound`: the name resolves; the operation just isn't defined
         // for what it names.
         Error::NotADirectory | Error::IsADirectory | Error::DirectoryNotEmpty => {
@@ -717,6 +716,7 @@ impl FatFs {
             open: HashMap::default(),
             by_name: BTreeMap::new(),
             extents: BTreeMap::new(),
+            repair_named: false,
         }
     }
 
@@ -1044,7 +1044,9 @@ impl FileSystem for FatFs {
     }
 
     /// Error returned, not logged via [`refused`]: a log write here would be
-    /// more pending content for the next sync.
+    /// more pending content for the next sync. The one exception is a volume
+    /// waiting on an unlanded repair, named once until a sync succeeds, since
+    /// otherwise it reads as whatever path synced next failing.
     ///
     /// Every open handle is brought level with its chain first: a sync is a
     /// caller saying the volume may be left as it stands from here, and a
@@ -1054,7 +1056,23 @@ impl FileSystem for FatFs {
         for info in open.values_mut() {
             reconcile(*role, fs, info);
         }
-        self.fs.sync().map_err(as_syscall_error)
+        match self.fs.sync() {
+            Ok(()) => {
+                self.repair_named = false;
+                Ok(())
+            }
+            Err(e) => {
+                if e == Error::RepairPending && !self.repair_named {
+                    self.repair_named = true;
+                    log!(
+                        "{}-volume: sync refused, a repair pending with {} step(s) queued: {e}",
+                        self.role,
+                        self.fs.pending_repair()
+                    );
+                }
+                Err(as_syscall_error(e))
+            }
+        }
     }
 
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
