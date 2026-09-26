@@ -4,9 +4,7 @@
 //! **A program's lines are records in a ring of its own** ([`region`],
 //! [`ring`]): its stdout and stderr, and what it says with [`say!`](crate::say),
 //! [`warn!`](crate::warn) and [`error!`](crate::error), each stamped with its
-//! time, severity and thread as it is written ([`stdio`]). Writing never waits,
-//! allocates or makes a syscall; a full ring drops the record and its reader
-//! counts the drop. Whose lines they are is decided where the ring was made:
+//! time, severity and thread as it is written ([`stdio`]). Whose lines they are is decided where the ring was made:
 //! `/system/bin/init` names each ring to `/system/bin/logd`, and nothing a
 //! program writes can change the name.
 //!

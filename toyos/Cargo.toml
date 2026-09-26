@@ -16,6 +16,11 @@ rustc-dep-of-std = ["core", "toyos-abi/rustc-dep-of-std"]
 #
 # Declared here only so `cfg` checking knows the name; nothing enables it.
 log-ring-publish-relaxed = []
+# Two more controls on the same model, declared for the same reason: the
+# reader's progress store `Relaxed`, and a writer's `tail` and `head` loads
+# swapped.
+log-ring-tail-relaxed = []
+log-ring-loads-swapped = []
 
 [lints.rust]
 # The guest's target: its stream sinks are compiled only for it.

@@ -1,9 +1,6 @@
 //! The 16550 and the virtio-console, and the two locks that serialise them.
 //!
-//! **One writer puts lines on the wire: whoever holds [`WIRE`]**, which is
-//! `klogd` — the kernel's records and the lines console holders queue for it —
-//! and the few drains that stand in for it. It is held for a whole line, so
-//! a line is one writer's, and with interrupts on. [`BackendGuard`] is the
+//! [`BackendGuard`] is the
 //! registers' lock, held with interrupts off for one burst: a FIFO's worth
 //! to a 16550; the submit of a transmit buffer to virtio-console, and each
 //! look for its completion, which the host takes at its own pace; a byte
@@ -252,7 +249,8 @@ pub unsafe fn panic_flush() {
 ///
 /// Bounded on the wire like `panic_flush`, but never bypasses: every CPU is
 /// still live here, and reading the ring unsynchronized is only safe once
-/// nothing else runs. Losing the tail is better than not powering off.
+/// nothing else runs. Losing the tail is better than not powering off, and
+/// the black box says it was lost, since the console cannot.
 pub fn flush_final() {
     for _ in 0..PANIC_LOCK_SPIN_LIMIT {
         if let Some(wire) = try_wire() {
@@ -261,6 +259,13 @@ pub fn flush_final() {
         }
         core::hint::spin_loop();
     }
+    crate::blackbox::append(|lines| {
+        let _ = writeln!(
+            lines,
+            "console: the wire stayed held through the stop's last drain, so this boot's last \
+             records are not on the console"
+        );
+    });
 }
 
 /// Who may put a line on the wire: `klogd`, and the few drains that stand in
@@ -284,6 +289,9 @@ pub fn try_wire() -> Option<SleepGuard<'static, ()>> {
         WIRE.try_lock_untasked()
     }
 }
+
+/// Whether the UART has refused a write, which is said once.
+static UART_REFUSED: AtomicBool = AtomicBool::new(false);
 
 /// A 16550's transmit FIFO: once `LSR.THRE` reads set in FIFO mode the FIFO is
 /// empty, and this many bytes may go in before it is asked again (PC16550D
@@ -323,8 +331,15 @@ fn uart_write_fifo(bytes: &[u8]) {
             drop(burst);
             asked += 1;
             // A UART that never empties its FIFO takes the rest of this write
-            // with it rather than holding the wire for ever.
+            // with it rather than holding the wire for ever, and is said once:
+            // the saying is itself a write it would drop.
             if asked == THRE_SPIN_LIMIT {
+                if !UART_REFUSED.swap(true, Ordering::Relaxed) {
+                    log!(
+                        "console: the UART took no byte in {THRE_SPIN_LIMIT} looks; what it does \
+                         not take is dropped from here on, and the log has it"
+                    );
+                }
                 return;
             }
             core::hint::spin_loop();

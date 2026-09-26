@@ -2768,7 +2768,7 @@ mod tests {
     #[test]
     fn no_shipped_image_serves_the_log_on_the_network() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for config in ["system.toml", "console/system.toml", "diag/system.toml"] {
+        for config in ALL_CONFIGS.iter().filter(|config| !config.starts_with("tests/")) {
             let parsed = parse_config(&root.join(config));
             let logd = parsed.programs.get("logd").expect("every config runs logd");
             assert!(
@@ -2862,6 +2862,7 @@ mod tests {
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
+        "tests/logkeepcase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
         "tests/logstreamcase/system.toml",

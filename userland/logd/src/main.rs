@@ -540,7 +540,7 @@ impl Log {
                 }
                 Kind::Program { tag, owner, said } => {
                     let severity = said.severity;
-                    self.alert_unsynced |= severity >= Severity::Alert;
+                    self.alert_unsynced |= severity >= Severity::Alert || a_panic(&said.text);
                     let tag = Tag::new(tag).expect("an origin's name is a tag");
                     let pid = (said.pid != *owner).then_some(said.pid);
                     let at = stamp(self.boot_local, said.at_ns);
@@ -765,6 +765,15 @@ impl Log {
     }
 }
 
+/// Whether a program's line opens its panic: std's `thread '<name>' ...
+/// panicked at`, which it writes to stderr at `Error`. It is made durable at
+/// once, as an `Alert` is: a kernel panic within the sync interval would
+/// otherwise take it, and the black box holds only the kernel's records.
+fn a_panic(text: &[u8]) -> bool {
+    const PANICKED: &[u8] = b" panicked at ";
+    text.starts_with(b"thread '") && text.windows(PANICKED.len()).any(|w| w == PANICKED)
+}
+
 fn ahead_note(ahead: u64, tag: &str) -> String {
     format!("logd: {ahead} record(s) of {tag}'s were stamped ahead of the clock and are written as read")
 }
@@ -847,6 +856,16 @@ pub(crate) fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// std's panic header, with and without the thread's id, is a panic; a
+    /// line that only mentions one is not.
+    #[test]
+    fn a_panic_is_std_s_header_and_nothing_else() {
+        assert!(super::a_panic(b"thread 'main' (1) panicked at src/bin/x.rs:61:5:"));
+        assert!(super::a_panic(b"thread 'mix' panicked at soundd/src/mix.rs:9:1:"));
+        assert!(!super::a_panic(b"logd: a reader panicked at nothing"));
+        assert!(!super::a_panic(b"thread 'main' exited"));
+    }
+
     /// The `log` port answers a reader and `inspect` on one acceptor, told
     /// apart by the request's frame type alone.
     #[test]

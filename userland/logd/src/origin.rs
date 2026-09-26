@@ -36,8 +36,10 @@ pub const ROUND_RECORDS: usize = 512;
 /// second's are counted instead: the per-program allowance. Generous — a
 /// program printing its whole output at boot fits — and a flood is what it
 /// stops. The process init started and the children it spawned into its own
-/// slots are allowed apart, so a child's flood does not silence its parent
-/// saying the child is done.
+/// slots are allowed apart, so a flooding child does not silence its parent
+/// saying the child is done. The split keys on the pid a record states, which
+/// is the writer's word: it holds against a child that floods, not one that
+/// states its parent's pid.
 pub const ALLOWANCE: u64 = 4096;
 pub const ALLOWANCE_WINDOW_NS: u64 = 1_000_000_000;
 

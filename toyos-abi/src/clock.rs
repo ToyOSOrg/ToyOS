@@ -56,23 +56,31 @@ pub fn nanos_since_boot() -> u64 {
     nanos_between(page.counter_at_boot, page.period_fs, now)
 }
 
-/// The counter the page's two words describe: the time-stamp counter.
+/// The counter the page's two words describe: the time-stamp counter, read
+/// after every earlier load has completed, so a stamp taken after reading
+/// another writer's record cannot be older than that record's.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 fn counter() -> u64 {
-    // SAFETY: `rdtsc` is unprivileged while CR4.TSD is clear, which the
-    // kernel's control-register declaration makes true on every CPU.
-    unsafe { core::arch::x86_64::_rdtsc() }
+    // SAFETY: `lfence` has no operands; `rdtsc` is unprivileged while CR4.TSD
+    // is clear, which the kernel's control-register declaration makes true on
+    // every CPU.
+    unsafe {
+        core::arch::x86_64::_mm_lfence();
+        core::arch::x86_64::_rdtsc()
+    }
 }
 
 /// The counter the page's two words describe: the generic timer's virtual
-/// count, which EL0 may read.
+/// count, which EL0 may read, read after every earlier instruction, as the
+/// x86 arm's is.
 #[cfg(target_arch = "aarch64")]
 #[inline]
 fn counter() -> u64 {
     let now: u64;
-    // SAFETY: a read of `CNTVCT_EL0` into a register; it touches no memory.
-    unsafe { core::arch::asm!("mrs {now}, cntvct_el0", now = out(reg) now, options(nomem, nostack)) };
+    // SAFETY: an `isb` and a read of `CNTVCT_EL0` into a register; neither
+    // touches memory.
+    unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", now = out(reg) now, options(nomem, nostack)) };
     now
 }
 

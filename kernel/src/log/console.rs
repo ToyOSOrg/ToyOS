@@ -4,8 +4,7 @@
 //! **One writer.** `klogd` puts the kernel's records on the wire, and between
 //! them the lines console holders write ([`queue`]) — which on this machine is
 //! `/system/bin/logd` alone, rendering each program's line with its tag.
-//! Nothing else writes the wire but the few drains that stand in for it and
-//! the panic path. It holds the wire ([`serial::wire`]) with interrupts on and
+//! It holds the wire ([`serial::wire`]) with interrupts on and
 //! preemption allowed, and the registers only for one burst at a time.
 //!
 //! `klogd`'s row in `sched::kthread` is [`OnPanic::Halt`]: it is the only
@@ -204,12 +203,6 @@ fn end_the_line(wire: &SleepGuard<'_, ()>) {
     }
 }
 
-/// Lines in [`QUEUE`], readable without its lock for `klogd`'s park test and a
-/// holder's poll. Moved only under the queue's lock, with the length it
-/// mirrors: moved after it, a drain could take a line before the count of it
-/// arrived and wrap the count below zero, which reads as a queue full for good.
-static QUEUED: AtomicU64 = AtomicU64::new(0);
-
 /// Lines refused a full [`QUEUE`] since `klogd` last said so.
 static UNSHOWN: AtomicU64 = AtomicU64::new(0);
 
@@ -228,7 +221,6 @@ pub fn queue(line: &[u8], continues: bool) -> bool {
         queue.lens[at] = line.len() as u16;
         queue.continues[at] = continues;
         queue.len += 1;
-        QUEUED.fetch_add(1, Ordering::SeqCst);
     }
     // The same wake a committed record takes: the store above precedes the
     // fence `signal_after_commit` runs, which `klogd`'s re-scan pairs with.
@@ -246,7 +238,7 @@ pub fn unshown() {
 
 /// Whether a console holder's next line would be taken.
 pub fn has_room() -> bool {
-    QUEUED.load(Ordering::SeqCst) < QUEUED_LINES as u64
+    QUEUE.lock().len < QUEUED_LINES
 }
 
 /// Room in the queue: what a console holder that found it full polls for
@@ -274,7 +266,6 @@ fn drain_queue(wire: &SleepGuard<'_, ()>, budget: usize) -> bool {
             line[..len].copy_from_slice(&queue.lines[at][..len]);
             queue.head = (at + 1) % QUEUED_LINES;
             queue.len -= 1;
-            QUEUED.fetch_sub(1, Ordering::SeqCst);
             (len, queue.continues[at])
         };
         freed = true;
@@ -298,7 +289,6 @@ fn discard_queue() -> bool {
     let mut queue = QUEUE.lock();
     let dropped = queue.len;
     queue.len = 0;
-    QUEUED.fetch_sub(dropped as u64, Ordering::SeqCst);
     dropped > 0
 }
 
@@ -449,7 +439,8 @@ extern "C" fn body(_arg: u64) -> ! {
         let armed = watch::arm(handle.watch(), 0, WaitClass::Other).expect("klogd runs as a task");
         // Safe with no backend because `discard_pending` still advances the position each pass.
         if shard::arm_waiter(shard::log_waiter(), || {
-            DRAINED.any_pending() || QUEUED.load(Ordering::SeqCst) > 0
+            // Under the lock `queue` stores under, ahead of the fence its wake takes.
+            DRAINED.any_pending() || QUEUE.lock().len > 0
         }) {
             continue;
         }

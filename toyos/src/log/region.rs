@@ -68,9 +68,10 @@ const _: () = assert!(LANE_AT + LANES * LANE_BYTES <= SLOT_BYTES);
 /// A claimed lane's owner word: the claim bit, the process and the thread.
 const CLAIMED: u64 = 1 << 63;
 
-/// Shared slots a writer other than the ring's owner leaves free: a child
-/// that fills its parent's ring does not take the parent's own next lines
-/// with it.
+/// Shared slots a writer other than the ring's owner leaves free: a flooding
+/// child does not take its parent's own next lines with it. The owner word
+/// and a record's pid are in memory the child can write, so this holds
+/// against a child that floods, not one that forges.
 pub const CHILD_KEEP: u64 = 64;
 
 /// The writer's line continues in its next record.

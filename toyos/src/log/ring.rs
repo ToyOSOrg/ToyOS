@@ -104,8 +104,7 @@ pub fn push_leaving<S: Shared>(ring: &S, body: &S::Body, keep: u64) -> Pushed {
         // progress, which the reader reached through a position some writer
         // took. Read the other way round, a stale `head` under a fresh `tail`
         // would look like no room.
-        let consumed = ring.tail().load(Ordering::Acquire);
-        let position = ring.head().load(Ordering::Relaxed);
+        let (consumed, position) = tail_then_head(ring);
         if !room(position, consumed, limit) {
             ring.refused().fetch_add(1, Ordering::Relaxed);
             return Pushed::Refused;
@@ -137,6 +136,32 @@ pub fn push_lane<L: Slots>(lane: &L, body: &L::Body) -> Pushed {
     lane.write((position % slots) as usize, body);
     lane.head().store(position + 1, publish_order());
     Pushed::Written
+}
+
+/// The reader's progress, then the writers' `head`, in that order;
+/// `kernel-loom`'s negative control reads them the other way round.
+#[inline(always)]
+fn tail_then_head<S: Slots>(ring: &S) -> (u64, u64) {
+    #[cfg(not(feature = "log-ring-loads-swapped"))]
+    {
+        let consumed = ring.tail().load(Ordering::Acquire);
+        (consumed, ring.head().load(Ordering::Relaxed))
+    }
+    #[cfg(feature = "log-ring-loads-swapped")]
+    {
+        let position = ring.head().load(Ordering::Relaxed);
+        (ring.tail().load(Ordering::Acquire), position)
+    }
+}
+
+/// The reader's progress store. `Release` is what orders its copy of a slot
+/// before a writer reuses it; `kernel-loom`'s negative control weakens it.
+#[inline(always)]
+fn progress_order() -> Ordering {
+    #[cfg(not(feature = "log-ring-tail-relaxed"))]
+    return Ordering::Release;
+    #[cfg(feature = "log-ring-tail-relaxed")]
+    return Ordering::Relaxed;
 }
 
 /// The publication's ordering. `Release` is what makes a reader that sees the
@@ -189,7 +214,7 @@ impl Reader {
     fn consume<L: Slots>(&mut self, slots: &L, slot: usize) -> L::Body {
         let body = slots.read(slot);
         self.next += 1;
-        slots.tail().store(self.next, Ordering::Release);
+        slots.tail().store(self.next, progress_order());
         body
     }
 
