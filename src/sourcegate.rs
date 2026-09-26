@@ -908,6 +908,26 @@ const COMMITTED_FILES: &[(&str, &str, &str)] = &[
         "NOTICE",
     ),
     (
+        "assets/fonts/OpenSans-Bold.ttf",
+        "27da758f4dcac9a65abe914c13b463b42982b9909bc65713424099f4810bd1e6",
+        "NOTICE",
+    ),
+    (
+        "assets/fonts/OpenSans-BoldItalic.ttf",
+        "d672a770037104b6af45e1336b3d3c1729c8aea940f81e010f5a8a7319c29a21",
+        "NOTICE",
+    ),
+    (
+        "assets/fonts/OpenSans-Italic.ttf",
+        "93bc1bb6abf4e6b7c75d7131714061d5b57cc478abcabe4cb3519bb38fb917aa",
+        "NOTICE",
+    ),
+    (
+        "assets/fonts/OpenSans-Regular.ttf",
+        "c53aceea2dcf5b4098099c0c4d0a061d17e178a049317b42a422b1a9f7f8eb59",
+        "NOTICE",
+    ),
+    (
         "assets/icons/arrow-down-right-bold.svg",
         "8e107bfe4c746c762c97a7dbb6472db4669947ccdb5498fa843448ce8f6b69f4",
         "NOTICE",

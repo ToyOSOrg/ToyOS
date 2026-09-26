@@ -1,0 +1,12 @@
+[package]
+name = "slint-hello"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A window with a label and a button, through slint's public API only, on the
+# winit backend and the software renderer slint documents for a machine with
+# no GPU.
+[dependencies]
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }

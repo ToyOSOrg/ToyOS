@@ -2748,6 +2748,7 @@ mod tests {
         "tests/sshdcase/system.toml",
         "tests/swapcase/system.toml",
         "tests/testcases/system.toml",
+        "tests/toolkitcase/system.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {

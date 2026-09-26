@@ -13,8 +13,8 @@ toyos-quiesce = { path = "../../toyos-quiesce" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-inspect = { path = "../../toyos-inspect" }
 toyos-dns = { path = "../../toyos-dns" }
-libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos" }
-cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.2" }
+libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
+cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.13" }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "logging"] }
 rustls-rustcrypto = "0.0.2-alpha"
@@ -28,7 +28,7 @@ sha2 = { version = "0.10", default-features = false }
 [patch.crates-io]
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
-getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2", package = "getrandom" }
+getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
 
 [lints.rust]
 warnings = "deny"

@@ -181,6 +181,19 @@ pub fn note_closed(by: &str, client: RawHandle, remaining: usize) {
     eprintln!("compositor: window closed client={} by {by}, {remaining} left", client.0);
 }
 
+/// The open's own line, and where the client's pixels are on the panel: the one
+/// fact about a window that nobody reading the screen can recover from it.
+pub fn note_opened(client: RawHandle, content: toyos_desktop::Rect, live: usize) {
+    eprintln!(
+        "compositor: window opened client={} content={},{} {}x{}, {live} live",
+        client.0,
+        content.x0,
+        content.y0,
+        content.w(),
+        content.h()
+    );
+}
+
 /// Hand a window a typed frame, or mark it for removal.
 ///
 /// A failure is never retried and never ignored: `TrySendError::Full` can have

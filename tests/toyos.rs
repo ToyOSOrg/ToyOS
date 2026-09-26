@@ -333,6 +333,8 @@ const RUST_SKIP: &[&str] = &[
     // Needs a compositor, a terminal and a shell: `desktop_window_child`
     // launches it from that shell.
     "window_child",
+    // Same again: `toolkit_window_wake` launches it from the toolkit desktop.
+    "window_wake",
     // Its two spawning arms only mean anything when the two processes share a
     // CPU, and the shared boot has two. `fpu_isolation` gives it a machine with
     // one — and a second boot on the kernel that saves nothing, which is the
@@ -1300,6 +1302,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // itself is a fraction of the screen that no amount of load moves.
     ("desktop_typing_damage", Sched::Parallel, Tier::Nightly),
     ("desktop_window_child", Sched::Parallel, Tier::Nightly),
+    // One unmodified app from each Rust GUI toolkit on the desktop, launched
+    // from the shell: the window, its text in the system font, and a clean
+    // exit when the compositor closes it.
+    ("toolkit_iced", Sched::Parallel, Tier::Nightly),
+    ("toolkit_slint", Sched::Parallel, Tier::Nightly),
+    ("toolkit_egui", Sched::Parallel, Tier::Nightly),
+    // The wait all three block in: a wake from another thread ends a wait
+    // that also watches a window.
+    ("toolkit_window_wake", Sched::Parallel, Tier::Nightly),
     // The same desktop with soundd behind it: an audio client spawned by a
     // shell, which is the only place all three of its descriptors are pipes to
     // a surface. Parallel — every verdict is a marker with its own ceiling, and
@@ -1604,6 +1615,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("metal_sim_client_death", METAL_SIM_CLIENTS),
     ("metal_sim_window_drag", &["test_rs_window_drag"]),
     ("desktop_window_child", &["test_rs_window_child"]),
+    ("toolkit_window_wake", &["test_rs_window_wake"]),
     ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
     ("doom_music", &["test_rs_doom_music"]),
     ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
@@ -8688,6 +8700,166 @@ fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
 }
 
+/// Shades of colour a window must show before its text counts as drawn.
+///
+/// An anti-aliased glyph edge covers its pixels by every fraction from 0 to
+/// 255, so one line of text blended over a background leaves dozens of
+/// distinct colours, and three words leave hundreds. What a toolkit draws
+/// without text — a flat background and flat buttons — is one colour each, plus
+/// a shade or two per pixel of a rounded corner, and the pointer, which starts
+/// over the middle of the panel where a new window opens, adds a score
+/// or so. A window with no text in it is far under this.
+const TEXT_SHADES: usize = 64;
+
+/// The client rectangle the compositor names in its `window opened` line, as
+/// `(x, y, width, height)` in panel pixels.
+fn opened_window_content(log: &str) -> Option<(usize, usize, usize, usize)> {
+    let line = log.lines().find(|line| line.contains("compositor: window opened client="))?;
+    let rest = line.split("content=").nth(1)?;
+    let (at, size) = rest.split_once(' ')?;
+    let (x, y) = at.split_once(',')?;
+    let (w, h) = size.trim_end_matches(|c: char| !c.is_ascii_digit()).split_once('x')?;
+    let h = h.split(|c: char| !c.is_ascii_digit()).next()?;
+    Some((x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?))
+}
+
+/// How many distinct colours `rect` of `dump` holds.
+fn shades_in(dump: &screen::Ppm, (x, y, w, h): (usize, usize, usize, usize)) -> usize {
+    let mut seen: BTreeSet<[u8; 3]> = BTreeSet::new();
+    for row in y..(y + h).min(dump.height) {
+        for col in x..(x + w).min(dump.width) {
+            seen.insert(dump.pixels[row * dump.width + col]);
+        }
+    }
+    seen.len()
+}
+
+/// One unmodified toolkit app, launched from the desktop's shell under
+/// `stats`: its window opens, its text is on the panel, and it leaves with code
+/// 0 when the compositor closes the window.
+///
+/// The text is judged off the panel, in the rectangle the compositor says it
+/// put the window's pixels, and no app here carries a font of its own that the
+/// verdict could be reading: iced and slint draw with what fontdb and fontique
+/// find in `/system/share/fonts`, and egui with the fonts its own crate embeds.
+/// `stats` is what reports the app's CPU time and peak memory after it leaves.
+fn toolkit_app(app: &str) -> Result<(), String> {
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toolkitcase");
+    let options = BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        ready_marker: "compositor: ready",
+        // The T14's core count, as the other desktop tests take.
+        smp: 8,
+        // `Drained::Bytes`, the typed line's pacing.
+        kernel_params: &["i8042-trace"],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut log = qemu.boot_log().to_string();
+    let log = &mut log;
+    let ack = Drained::Bytes;
+    shell_answers(&mut qemu, log, &ack)?;
+
+    let launched = log.len();
+    shell_type_line(&mut qemu, &format!("stats {app}"), &ack)?;
+    let by = qemu.budget(Duration::from_secs(60));
+    if !serial_until_new(&mut qemu, log, "compositor: window opened", launched, by) {
+        return Err(format!("{app} never got a window:\n{}", &log[launched..]));
+    }
+    let content = opened_window_content(&log[launched..])
+        .ok_or_else(|| format!("the compositor's window line did not parse:\n{}", &log[launched..]))?;
+
+    let by = qemu.budget(Duration::from_secs(30));
+    let dump = qemu.screendump_while(by, Duration::from_millis(250), |dump| {
+        shades_in(dump, content) >= TEXT_SHADES
+    });
+    let shades = shades_in(&dump, content);
+    if shades < TEXT_SHADES {
+        return Err(format!(
+            "{app}'s window at {content:?} shows {shades} colours, under the {TEXT_SHADES} its \
+             text alone would draw:\n{}",
+            &log[launched..]
+        ));
+    }
+
+    let closing = log.len();
+    if !close_focused_window(&mut qemu, log, closing) {
+        return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));
+    }
+    // `stats` prints the peak last, once the app is gone and waited for.
+    let by = qemu.budget(Duration::from_secs(30));
+    if !serial_until_new(&mut qemu, log, "peak mem", closing, by) {
+        return Err(format!(
+            "{app} did not leave when its window was closed:\n{}",
+            &log[launched..]
+        ));
+    }
+    let after = &log[closing..];
+    let exit = after
+        .lines()
+        .find(|line| line.contains(&format!("exit: {app} pid=")))
+        .ok_or_else(|| format!("no exit record for {app}:\n{after}"))?;
+    if !exit.contains(" code=0 ") {
+        return Err(format!("{app} did not exit cleanly: {exit}\n{after}"));
+    }
+    let cpu = exit.split("cpu=").nth(1).unwrap_or("?");
+    let peak = after
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("peak mem"))
+        .map(str::trim)
+        .unwrap_or("?");
+    eprintln!(
+        "  [toolkit] {app}: window at {content:?} with {shades} colours in it, exit 0, \
+         cpu {cpu}, peak mem {peak}"
+    );
+    Ok(())
+}
+
+/// `window::Waiter`'s claim, which every winit loop here rests on: a wake
+/// raised on another thread ends a wait that is also watching a window.
+///
+/// `test_rs_window_wake` is launched from the desktop's shell, so it holds the
+/// shell's compositor, and says OK only if every one of its rounds was ended by
+/// the wake; a lost one ends its wait on a ten-second ceiling and says so.
+fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let bins: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| name == "window_wake").cloned().collect();
+    if bins.is_empty() {
+        return Err("the window_wake client was not built".to_string());
+    }
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toolkitcase");
+    let options = BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        ready_marker: "compositor: ready",
+        smp: 8,
+        // `Drained::Bytes`, the typed line's pacing.
+        kernel_params: &["i8042-trace"],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+    let mut log = qemu.boot_log().to_string();
+    let log = &mut log;
+    let ack = Drained::Bytes;
+    shell_answers(&mut qemu, log, &ack)?;
+    let launched = log.len();
+    shell_type_line(&mut qemu, "test_rs_window_wake", &ack)?;
+    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
+    while live.working(log) {
+        let said = &log[launched..];
+        if said.contains("WINDOW-WAKE-OK") {
+            eprintln!("  [toolkit] every wake ended a wait that also watched a window");
+            return Ok(());
+        }
+        if said.contains("WINDOW-WAKE-LOST") || said.contains("WINDOW-WAKE-REFUSED") {
+            return Err(format!("a wake did not end the window's wait:\n{said}"));
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    Err(format!("test_rs_window_wake never finished:\n{}", &log[launched..]))
+}
+
 /// What a desktop that stopped answering is asked, in the order that survives
 /// being asked.
 ///
@@ -11443,6 +11615,10 @@ fn run_machine_test(
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
         "desktop_window_child" => desktop_window_child(rust_bins),
+        "toolkit_iced" => toolkit_app("iced-counter"),
+        "toolkit_slint" => toolkit_app("slint-hello"),
+        "toolkit_egui" => toolkit_app("egui-hello"),
+        "toolkit_window_wake" => toolkit_window_wake(rust_bins),
         "desktop_audio_client" => desktop_audio_client(),
         "blocked_dump" => blocked_dump(),
         "xhci_many_devices" => {

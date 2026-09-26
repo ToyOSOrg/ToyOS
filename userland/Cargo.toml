@@ -5,11 +5,13 @@ members = [
     "compositor",
     "console",
     "doom",
+    "egui-hello",
     "editor",
     "filepicker",
     "filepicker-api",
     "files",
     "host",
+    "iced-counter",
     "init",
     "input-test",
     "inspect",
@@ -20,6 +22,7 @@ members = [
     "pkg",
     "proctest",
     "shell",
+    "slint-hello",
     "snake",
     "soundd",
     "sprite",
@@ -46,19 +49,39 @@ toyos = { path = "../toyos" }
 toyos-window = { path = "toyos-window" }
 
 # Ecosystem forks — see forks.toml for upstream base, tier, and PR status.
-getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2", package = "getrandom" }
-getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3", package = "getrandom" }
-getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }
-mio = { git = "https://github.com/ToyOSOrg/mio", branch = "toyos" }
+getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
+getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
+getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4-sdk-0.12", package = "getrandom" }
+mio = { git = "https://github.com/ToyOSOrg/mio", branch = "toyos-sdk-0.13" }
 tokio = { git = "https://github.com/ToyOSOrg/tokio", branch = "toyos" }
 russh = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos" }
 russh-cryptovec = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos" }
-socket2 = { git = "https://github.com/ToyOSOrg/socket2", branch = "toyos" }
+socket2 = { git = "https://github.com/ToyOSOrg/socket2", branch = "toyos-sdk-0.13" }
 raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", branch = "toyos-0.6.2" }
-cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.2" }
-softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8-sdk-0.2" }
-winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.31.0-beta.2-sdk-0.2" }
-libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos" }
+cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.13" }
+softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8-sdk-0.15" }
+winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.31.0-beta.2-sdk-0.15" }
+winit_030 = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13-sdk-0.15", package = "winit" }
+libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
+memmap2 = { git = "https://github.com/ToyOSOrg/memmap2-rs", branch = "toyos-0.9.11" }
+fontdb = { git = "https://github.com/ToyOSOrg/fontdb", branch = "toyos-0.23.0" }
+fontique = { git = "https://github.com/ToyOSOrg/parley", branch = "toyos-0.11.1" }
+wgpu = { git = "https://github.com/ToyOSOrg/wgpu", branch = "toyos-27.0.4" }
+i-slint-backend-winit = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-backend-linuxkms = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-backend-selector = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-backend-testing = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-common = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-compiler = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-core = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-core-macros = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-renderer-skia = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+i-slint-renderer-software = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+slint = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+slint-macros = { git = "https://github.com/ToyOSOrg/slint", branch = "toyos-1.18.1" }
+parlance = { git = "https://github.com/ToyOSOrg/parley", branch = "toyos-0.11.1" }
+parley = { git = "https://github.com/ToyOSOrg/parley", branch = "toyos-0.11.1" }
+parley_data = { git = "https://github.com/ToyOSOrg/parley", branch = "toyos-0.11.1" }
 
 
 # The one profile every guest binary is built with.

@@ -1,0 +1,14 @@
+[package]
+name = "egui-hello"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# egui_software_backend's own `winit_hello` example, its source carried byte
+# for byte from egui_software_backend 0.0.3 (NOTICE names it), with that
+# crate's default features: its winit runner and softbuffer's defaults.
+[dependencies]
+egui = "0.34"
+egui_extras = "0.34"
+egui_software_backend = "0.0.3"

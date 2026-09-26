@@ -26,8 +26,8 @@ use toyos_desktop::{
 use window::Screen;
 
 use crate::client::{
-    announce, deliver, deliver_signal, deliver_with_handles, mark_dead, note_closed, Client,
-    ClientFrame, ClientRx, Dead, DropReason, PendingConn, Win, HANDSHAKE_TIMEOUT,
+    announce, deliver, deliver_signal, deliver_with_handles, mark_dead, note_closed, note_opened,
+    Client, ClientFrame, ClientRx, Dead, DropReason, PendingConn, Win, HANDSHAKE_TIMEOUT,
     MAX_CLIPBOARD_BYTES, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
@@ -942,6 +942,7 @@ impl Session {
             req.flags & window::WINDOW_FLAG_TOPMOST != 0,
             CursorStyle::Default,
         ));
+        note_opened(handle, content, self.stack.len());
 
         self.poller.watch(&self.stack[at].client.conn, READABLE, handle.0 as u64);
         let pixel_format = self.pixel_format();

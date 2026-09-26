@@ -203,7 +203,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.0"
-source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0-sdk-0.2#85a2d8c89a0ab17bd2f89a5722458c52db342325"
+source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0-sdk-0.13#f29e887ecdb01477bdda6fa4be8ed87e8eb5252d"
 dependencies = [
  "alsa",
  "block2",
@@ -224,8 +224,8 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation",
- "toyos 0.2.0",
- "toyos-abi 0.2.0",
+ "toyos",
+ "toyos-abi",
  "web-sys",
  "windows",
  "windows-core",
@@ -462,11 +462,11 @@ dependencies = [
 [[package]]
 name = "getrandom"
 version = "0.2.17"
-source = "git+https://github.com/ToyOSOrg/getrandom?branch=toyos-0.2#465924141d49c57cf5df6ccb6e5fb780ee98e51e"
+source = "git+https://github.com/ToyOSOrg/getrandom?branch=toyos-0.2-sdk-0.12#18e38de3f3cf479eaf32ed552ddb6e2169365532"
 dependencies = [
  "cfg-if",
  "libc",
- "toyos-abi 0.1.0",
+ "toyos-abi",
  "wasi",
 ]
 
@@ -643,10 +643,10 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libloading"
 version = "0.8.9"
-source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos#fa0abe774f6f891a5d8918ac554bc43004232cf2"
+source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#87c4acd521d5ef57a43a86522b5f3c4be84960d9"
 dependencies = [
  "cfg-if",
- "toyos-abi 0.1.0",
+ "toyos-abi",
  "windows-link",
 ]
 
@@ -1433,31 +1433,10 @@ dependencies = [
 
 [[package]]
 name = "toyos"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e0bacea3763413cb3e0cfcf1f1be9b3a449ba9e9ff7124682277099d50e9b3f"
-dependencies = [
- "toyos-abi 0.2.0",
-]
-
-[[package]]
-name = "toyos"
 version = "0.13.0"
 dependencies = [
- "toyos-abi 0.12.0",
+ "toyos-abi",
 ]
-
-[[package]]
-name = "toyos-abi"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fce2965bd320e8da58a50d08e58e90a16438919cf647cf3c8af119b0841e28cd"
-
-[[package]]
-name = "toyos-abi"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec119a115b619cec7ca5e56858e98db6558658d6cc9b400906187e62f2877f48"
 
 [[package]]
 name = "toyos-abi"
@@ -1479,7 +1458,7 @@ version = "0.1.0"
 name = "toyos-inspect"
 version = "0.1.0"
 dependencies = [
- "toyos-abi 0.12.0",
+ "toyos-abi",
 ]
 
 [[package]]
@@ -1500,8 +1479,8 @@ dependencies = [
  "rustls-pki-types",
  "rustls-rustcrypto",
  "sha2",
- "toyos 0.13.0",
- "toyos-abi 0.12.0",
+ "toyos",
+ "toyos-abi",
  "toyos-dns",
  "toyos-i219",
  "toyos-inspect",
@@ -1518,10 +1497,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
- "toyos 0.13.0",
- "toyos-abi 0.12.0",
+ "toyos",
+ "toyos-abi",
  "toyos-font",
  "toyos-keymap",
 ]

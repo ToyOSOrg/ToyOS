@@ -1,0 +1,15 @@
+[package]
+name = "iced-counter"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# iced's own `counter` example, its `src/main.rs` carried byte for byte from
+# iced 0.14.0 (NOTICE names it). Default features: wgpu first, which finds no
+# adapter here and falls back to tiny-skia.
+[dependencies]
+iced = "0.14"
+
+[dev-dependencies]
+iced_test = "0.14"
