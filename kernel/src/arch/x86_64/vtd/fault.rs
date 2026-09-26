@@ -246,7 +246,7 @@ pub fn service() {
         // that would be one process's bug taking the whole machine down, which
         // is the thing moving a driver out was for.
         crate::drivers::panic_console::capture();
-        crate::arch::apic::halt_all_cpus();
+        crate::panic::halt_all_cpus();
     }
     crate::arch::apic::eoi();
 }

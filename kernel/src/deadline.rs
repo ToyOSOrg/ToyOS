@@ -28,7 +28,7 @@
 //!   that can name where the core is standing. Whichever fires takes the
 //!   machine's one seal through [`claim_the_reset`].
 //! - **A panic in progress**, which is not a gap but a stand-down:
-//!   `irqchip::halt_all_cpus` calls [`stand_down`] before it holds the panel, so a
+//!   `panic::halt_all_cpus` calls [`stand_down`] before it holds the panel, so a
 //!   panic report is never replaced by an expiry.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
@@ -72,7 +72,7 @@ pub fn claim_the_reset() -> bool {
 
 /// Stand this bound down for the rest of the machine's life.
 ///
-/// Called from `irqchip::halt_all_cpus` beside [`crate::hardlockup::stand_down`]:
+/// Called from `panic::halt_all_cpus` beside [`crate::hardlockup::stand_down`]:
 /// from there this machine holds a panic report under a bound of its own, and an
 /// expiry would seal a `WEDGED` record over it. Disarms rather than latching a
 /// second flag, so [`poll`] stays one relaxed load.

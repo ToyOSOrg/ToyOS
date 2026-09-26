@@ -541,7 +541,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             // Unlike every other action, this costs the machine, not just the caller's
             // process: one call is already a permanent halt.
-            DA::FATAL_HALT => { log!("{}", FATAL_HALT_NONCE); crate::arch::irqchip::halt_all_cpus(); }
+            DA::FATAL_HALT => { log!("{}", FATAL_HALT_NONCE); crate::panic::halt_all_cpus(); }
             DA::DOUBLE_FAULT => {
                 log!("SYS_DEBUG: provoking a double fault");
                 crate::arch::trap::provoke_double_fault()

@@ -1,31 +1,12 @@
-use crate::arch::{apic, cpu, percpu};
+use crate::arch::{cpu, percpu};
 use crate::syscall;
 use crate::arch::percpu::CpuFaultState;
 use crate::{alert, log, mm, process, scheduler, symbols};
+use crate::symbols::kernel_backtrace;
 
 use toyos_userbound::{blame, Blame, Faulted, Ring};
 
 use super::{Vector, TrapFrame, PF_PRESENT, PF_WRITE, PF_INSTRUCTION_FETCH};
-
-/// Walk RBP chain for kernel backtrace with symbol resolution.
-pub(crate) fn kernel_backtrace(start_rbp: u64, max_frames: usize) {
-    let mut rbp = start_rbp;
-    for _ in 0..max_frames {
-        if rbp == 0 || !rbp.is_multiple_of(8) || !mm::is_kernel_addr(rbp) { break; }
-        // SAFETY: `rbp` is checked non-zero, 8-aligned and a kernel address, so
-        // both reads land in the direct map, mapped for the life of the machine.
-        //
-        // Not `read_volatile` like `safe_read_kernel`, whose double-fault path
-        // reads memory another CPU may still be writing: this walks the
-        // faulting thread's own frame chain from its handler.
-        let saved_rbp = unsafe { *(rbp as *const u64) };
-        // SAFETY: same as above, for the return address one word up.
-        let return_addr = unsafe { *((rbp + 8) as *const u64) };
-        if return_addr == 0 || !mm::is_kernel_addr(return_addr) { break; }
-        symbols::resolve_kernel_return(return_addr);
-        rbp = saved_rbp;
-    }
-}
 
 /// Walk RBP chain for user backtrace through page tables. Takes no pid: this
 /// always backtraces the process running on this CPU.
@@ -367,7 +348,7 @@ pub(crate) fn recover_or_halt(blame: Blame) -> ! {
         }
         // Kernel fault on the thread's behalf — may hold locks, use try_lock path.
         Blame::ProcessThroughKernel => try_recover_from_panic(),
-        Blame::Kernel => apic::halt_all_cpus(),
+        Blame::Kernel => crate::panic::halt_all_cpus(),
     }
 }
 
@@ -471,7 +452,7 @@ pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
         addr += 8;
     }
 
-    apic::halt_all_cpus();
+    crate::panic::halt_all_cpus();
 }
 
 /// #MC halts whichever ring faulted rather than killing a process: there is
@@ -482,7 +463,7 @@ pub(super) fn machine_check_handler(frame: &TrapFrame) -> ! {
     log!("MACHINE CHECK on CPU {}", percpu::cpu_id());
     let ctx = ExceptionContext { frame, cr2: 0 };
     crash_report(&CrashInfo::Exception(&ctx));
-    apic::halt_all_cpus();
+    crate::panic::halt_all_cpus();
 }
 
 /// Returns if the fault was resolved (page mapped in); diverges if fatal.
@@ -576,7 +557,7 @@ fn fatal_exception(ctx: &ExceptionContext) -> ! {
             crate::panic::forget();
             syscall::kill_process(-1);
         }
-        apic::halt_all_cpus();
+        crate::panic::halt_all_cpus();
     }
 
     crash_report(&CrashInfo::Exception(ctx));

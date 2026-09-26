@@ -496,6 +496,11 @@ fn parse_object(obj: &object::File, name: &str) -> Result<ParsedObject, LinkErro
         };
         if symbol.is_undefined() { continue; }
         if symbol.kind() == read::SymbolKind::Section { continue; }
+        // AArch64 ELF mapping symbols (AAELF64 §5.5.1): `$x` and `$d`, with or
+        // without a `.suffix`, mark where code and data begin inside a section.
+        // Local, repeated, never a relocation's target, and nothing this
+        // output carries.
+        if !is_macho && !symbol.is_global() && is_mapping_symbol(&sym_name) { continue; }
         let sec_idx = match symbol.section() {
             read::SymbolSection::Section(idx) => idx,
             _ => continue,
@@ -1518,4 +1523,12 @@ fn coff_arm64_insn_addend(r_type: RelocType, data: &[u8], offset: u64) -> Option
         RelocType::Aarch64Ldst128AbsLo12Nc => imm12(insn()) << 4,
         _ => return None,
     })
+}
+
+/// An AArch64 (or Arm) mapping symbol's name: `$x`, `$d`, `$a` or `$t`,
+/// alone or followed by `.` and anything.
+fn is_mapping_symbol(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('$') else { return false };
+    let mut chars = rest.chars();
+    matches!(chars.next(), Some('x' | 'd' | 'a' | 't')) && matches!(chars.next(), None | Some('.'))
 }

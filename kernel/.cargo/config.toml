@@ -5,5 +5,12 @@ rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes"]
 [target.x86_64-unknown-none]
 linker = "toyos-ld"
 
+# A target's own `rustflags` replace `build.rustflags`, so both flags repeat.
+# `-Adead_code` is the AArch64 port's declared debt: until its stage 7 gives
+# the syscall gate, the interrupt controller and the scheduler a way in, every
+# item only those reach is unreachable there and nowhere else — and an
+# `#[expect(dead_code)]` cannot be met under it, hence the second `-A`. Exit:
+# both go when `issues/kernel/toyos-runs-on-arm64.md`'s stage 7 lands.
 [target.aarch64-unknown-none-softfloat]
 linker = "toyos-ld"
+rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "-Adead_code", "-Aunfulfilled_lint_expectations"]

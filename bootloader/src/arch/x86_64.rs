@@ -5,6 +5,15 @@ use toyos_abi::boot::KernelArgs;
 /// The machine the kernel image must be built for: the loader's own.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::X86_64;
 
+/// How the boot map's entries are encoded.
+pub use toyos_bootmap::x86_64 as encoding;
+
+/// How the boot map types memory: by the MTRRs firmware programmed, beneath
+/// entries that select plain memory.
+pub fn typing(_write_back: &[(u64, u64)]) -> toyos_bootmap::Typing<'_> {
+    toyos_bootmap::Typing::Firmware
+}
+
 /// The time-stamp counter, which counts from reset.
 pub fn counter() -> u64 {
     // SAFETY: RDTSC reads a counter and nothing else; every x86-64 has it.
@@ -79,15 +88,17 @@ pub mod pio {
     }
 }
 
-/// Switch to the loader's page tables at `root` and jump to the kernel at its
-/// high-half `entry`, handing it `args`.
+/// Switch to the boot map at `args.boot_pml4_addr` and jump to the kernel
+/// image's entry through the high half, handing it `args`.
 ///
 /// # Safety
-/// `root` identity-maps the memory this code and its stack run from and maps
-/// the kernel image at `PHYS_OFFSET`; `entry` is that image's entry point
-/// through the high half, and `args` stays where it is until the kernel copies
-/// it.
-pub unsafe fn enter_kernel(root: u64, entry: u64, args: &KernelArgs) -> ! {
+/// The boot map identity-maps the memory this code and its stack run from and
+/// maps the kernel image at `PHYS_OFFSET`; `image` is that relocated image,
+/// `entry_offset` its entry point's offset in it, and `args` stays where it is
+/// until the kernel copies it.
+pub unsafe fn enter_kernel(image: (u64, u64), entry_offset: u64, args: &KernelArgs) -> ! {
+    let root = args.boot_pml4_addr;
+    let entry = crate::PHYS_OFFSET + image.0 + entry_offset;
     // SAFETY: the caller's contract: the switch keeps this code and stack
     // mapped, and the jump lands in the image it mapped.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) root, options(nostack)) };

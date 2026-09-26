@@ -968,7 +968,7 @@ pub fn panic_before_peripherals_reboots(
     // The one thing this branch removed. A guest reaching the other held branch
     // for the other reason must not be read as this one passing.
     boot.must_not_say("decoded no reset register")?;
-    if !held.contains("states no TSC frequency") {
+    if !held.contains("states no counter frequency") {
         return Err(format!(
             "the panel held for a reason this guest was not expected to reach\n{held}"
         ));
@@ -1728,7 +1728,7 @@ const PANIC_OUTLIVES_DEADLINE: &str = "boot-deadline=4000";
 /// page that crosses the reset says which of the two ended the machine.
 ///
 /// **What this cannot judge, stated rather than implied.** Reverting
-/// `deadline::stand_down` alone leaves this green: after `apic::halt_all_cpus`
+/// `deadline::stand_down` alone leaves this green: after `panic::halt_all_cpus`
 /// every CPU is halted or spinning with `IF` clear, so nothing reaches the poll
 /// and an armed deadline cannot expire whether or not it was disarmed. The
 /// window the stand-down closes is the one *before* that — the panicking CPU has
@@ -2495,7 +2495,7 @@ pub fn blackbox_early_panic_sealed_muted(
     Ok(())
 }
 
-/// `kernel/src/arch/x86_64/apic.rs`'s `LOG_DRAIN_EXPIRED`, which a boot that never had
+/// `kernel/src/panic.rs`'s `LOG_DRAIN_EXPIRED`, which a boot that never had
 /// a drainer may not print.
 const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
 

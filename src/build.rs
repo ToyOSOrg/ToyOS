@@ -832,6 +832,14 @@ pub enum Userland {
     Absent,
 }
 
+impl Userland {
+    /// What a plan for `arch` carries unless it asks for less: the programs,
+    /// where the toolchain builds a userland for that architecture at all.
+    pub fn of(arch: Arch) -> Self {
+        if crate::toolchain::USERLAND_ARCHS.contains(&arch) { Self::Built } else { Self::Absent }
+    }
+}
+
 impl Plan {
     pub fn new(arch: Arch, config: &Path, features: &[&str], params: &[&str]) -> Self {
         Self {
@@ -839,7 +847,7 @@ impl Plan {
             config: config.to_path_buf(),
             features: features.iter().map(|f| (*f).to_string()).collect(),
             params: params.iter().map(|p| (*p).to_string()).collect(),
-            userland: Userland::Built,
+            userland: Userland::of(arch),
         }
     }
 
@@ -866,12 +874,13 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
     // anything waits on a lock.
     let features = kernel_features(root, debug, &feature, &param);
     check_params(root, &param);
+    let arch = arch_for(args);
     Plan {
-        arch: arch_for(args),
+        arch,
         config: boot.config.clone(),
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
         params: param,
-        userland: Userland::Built,
+        userland: Userland::of(arch),
     }
 }
 

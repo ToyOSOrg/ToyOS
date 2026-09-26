@@ -46,6 +46,12 @@ actuators! {
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
+    /// Take an undefined-instruction exception right after the architecture's
+    /// console step, where it has one to take there: the earliest fault the
+    /// exception vectors must report. AArch64 installs its vectors in the entry;
+    /// x86-64 loads its IDT later, and panics by name instead.
+    test_early_fault = "test-early-fault";
+
     /// Panic inside `percpu::init_bsp`, one statement after it loads the IDT:
     /// the earliest point a panic is reportable at all, and the window the T14
     /// stops in. What it judges is that the reset register is decoded by then.

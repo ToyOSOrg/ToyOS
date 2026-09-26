@@ -119,5 +119,5 @@ extern "sysv64" fn nested_nmi(rip: u64, rsp: u64) -> ! {
     serial(b" rsp=");
     crate::drivers::serial::panic_raw_hex(rsp);
     serial(b"\n[nmi]   the outer handler's frame is gone; the machine stops here.\n");
-    crate::arch::apic::halt_all_cpus()
+    crate::panic::halt_all_cpus()
 }

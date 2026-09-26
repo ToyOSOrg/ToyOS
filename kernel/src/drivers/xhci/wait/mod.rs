@@ -32,7 +32,7 @@ mod depth_probe {
             crate::arch::percpu::current_tid().map(|t| t.raw())
         );
         // `kernel_backtrace` stops at the first unreadable frame.
-        crate::arch::trap::kernel_backtrace(crate::arch::cpu::frame_pointer(), 20);
+        crate::symbols::kernel_backtrace(crate::arch::cpu::frame_pointer(), 20);
     }
 }
 

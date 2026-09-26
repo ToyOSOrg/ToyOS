@@ -7,7 +7,8 @@
 //! shoots down and waits, and a sibling thread can be spinning on that same
 //! lock with `IF` clear.
 
-use crate::mm::paging::{CachePolicy, Occupancy, Prot};
+use crate::mm::paging::{CachePolicy, Prot};
+use crate::vma::Occupancy;
 use crate::user_ptr::UserBytesMut;
 use crate::UserAddr;
 use crate::{process, vfs};

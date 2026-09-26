@@ -461,10 +461,7 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     // loader hands the scanout over uncacheable; `pat::init` runs before this
     // function so that there is a write-combining entry to point its leaves at.
     let combining = reclaimed.is_none()
-        && mm::paging::boot_map_write_combining(
-            args.gop_framebuffer,
-            align_2m(args.gop_framebuffer_size as usize) as u64,
-        );
+        && mm::paging::boot_map_write_combining(args.gop_framebuffer, args.gop_framebuffer_size);
 
     // **The panel is taken before anything above or below it can fail, and
     // this record is what proves the kernel entered.** A fault in the walk or
@@ -813,7 +810,7 @@ pub mod stall {
             return;
         }
         crate::log!("{HELD}");
-        crate::arch::irqchip::halt_all_cpus();
+        crate::panic::halt_all_cpus();
     }
 }
 
@@ -1334,14 +1331,14 @@ fn write_num(out: &mut [u8], v: usize) -> usize {
 }
 
 /// Whether the first and last framebuffer pages resolve in the *current*
-/// CR3, not `kernel_root()`: a panic in syscall context runs on a user address space.
+/// tables, not `kernel_root()`: a panic in syscall context runs on a user address space.
 /// Proves it rather than assuming it, so broken paging becomes no console, never a fault inside the panic handler.
 fn mapped(fb: &Fb) -> bool {
     let base = fb.ptr as u64;
     let Some(last) = base.checked_add(fb.bytes.saturating_sub(1)) else {
         return false;
     };
-    mm::paging::present_in_current_cr3(base) && mm::paging::present_in_current_cr3(last)
+    mm::paging::present_in_current_tables(base) && mm::paging::present_in_current_tables(last)
 }
 
 /// `pixel_format` is 0 for RGB, 1 for BGR (`bootloader/src/main.rs`).

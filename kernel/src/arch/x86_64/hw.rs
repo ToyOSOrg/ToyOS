@@ -158,15 +158,7 @@ pub fn report_contexts(rsp: u64, subject: Option<u64>) {
             ),
         }
     }
-    if let Some((used, of)) = crate::sched::driver::stack_high_water() {
-        crate::log!("  Task kernel stacks: deepest {used} of {of} bytes");
-    }
-    if let Some((sweeps, records, overflowed)) = crate::mm::sweep_stats() {
-        crate::log!(
-            "  Heap sweeps: {sweeps} run, {records} live bands on the last walk{}",
-            if overflowed { ", and the page table filled — the walk is incomplete" } else { "" },
-        );
-    }
+    crate::mm::report_on_crash();
 }
 
 /// Panics before the wild `ret` would restore register state that makes the failure unnameable.

@@ -19,7 +19,7 @@ pub use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
 use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
 use crate::sync::Lock;
-use crate::vma::{self, Region, RegionKind};
+use crate::vma::{self, Occupancy, Region, RegionKind};
 use crate::MemoryMapEntry;
 
 const PAGE_PRESENT: u64 = 1 << 0;
@@ -370,18 +370,6 @@ pub struct AddressSpace {
     /// Owned for this space's life: dropping the space returns a user tag, so two
     /// live spaces can never share one.
     pcid: PcidHandle,
-}
-
-/// Needed because a *placed* mapping (`sys_mmap`'s FIXED arm) skips
-/// `find_gap`'s implicit check.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Occupancy {
-    /// Nothing is registered over any part of it.
-    Free,
-    /// One region covers it end for end, and that region is all it runs into.
-    Whole,
-    /// Part of a region, several regions, or one that merely starts here.
-    Partial,
 }
 
 fn align_up_2m(v: u64) -> u64 {
@@ -979,7 +967,7 @@ fn has(entry: u64, flag: u64) -> u8 {
 /// The *currently loaded* CR3, not `kernel_root()` (a panic can run on a user
 /// space); lock-free and silent, for the panic path to prove a mapping
 /// before writing through it.
-pub fn present_in_current_cr3(addr: u64) -> bool {
+pub fn present_in_current_tables(addr: u64) -> bool {
     // SAFETY: `Cr3::current().phys()` names the table this CPU runs under
     // right now, so it can't be freed meanwhile. No lock: each entry read is
     // one aligned `u64`, atomic at the hardware level, so no read is torn.
@@ -1045,7 +1033,7 @@ enum Pass {
 /// Whether the current tables hold a 2 MiB leaf for `addr`, and on
 /// [`Pass::Switch`] gives that leaf the write-combining type.
 fn write_combine_leaf(addr: u64, pass: Pass) -> bool {
-    // SAFETY: sound as `present_in_current_cr3`'s walk — `Cr3::current()` names
+    // SAFETY: sound as `present_in_current_tables`'s walk — `Cr3::current()` names
     // the table this CPU runs under and every step is taken through a
     // `PAGE_PRESENT` entry. Exclusive because this runs on the BSP before any
     // AP exists and before `mm::init` publishes a space of its own.
@@ -1077,7 +1065,7 @@ fn write_combine_leaf(addr: u64, pass: Pass) -> bool {
 /// Dump page table entries for an address. Lock-free for crash safety.
 pub fn debug_page_walk(addr: u64) {
     let cr3 = Cr3::current();
-    // SAFETY: same argument as `present_in_current_cr3` above.
+    // SAFETY: same argument as `present_in_current_tables` above.
     let pml4 = unsafe { PageTablePage::from_phys(cr3.phys()) };
     let (pml4_idx, pdpt_idx, pd_idx) = indices(addr);
     let pt_idx = ((addr >> 12) & 0x1FF) as usize;

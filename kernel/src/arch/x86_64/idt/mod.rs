@@ -521,8 +521,6 @@ pub fn enable_interrupts() {
 }
 
 pub(crate) use exceptions::try_recover_from_panic;
-#[cfg(feature = "boot-actuators")]
-pub(crate) use exceptions::kernel_backtrace;
 
 /// The crash report for a panic, from the frame pointer the panic handler stood on.
 pub(crate) fn report_panic(message: &core::panic::PanicInfo, frame: u64) {
@@ -556,3 +554,5 @@ pub(crate) fn provoke_double_fault() -> ! {
 }
 
 pub(crate) use unclaimed::log_vectors as log_unclaimed;
+/// How much of the double-fault stack the crash report used, once the report is out.
+pub(crate) use super::percpu::ist1_report as report_fault_stack;

@@ -2,7 +2,7 @@
 //! `kernel_main` asks of this architecture at the points where one differs
 //! from another.
 
-use toyos_abi::boot::KernelArgs;
+use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
 use super::{apic, control_regs, idt, ioapic, pat, percpu};
 use crate::drivers::acpi::{self, MadtInfo};
@@ -37,12 +37,22 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
 /// through it in which to establish a memory type. The write alone, and it
 /// logs nothing: the read-back is `pat::check`, in [`after_console`], where a
 /// refusal has a channel to reach.
+/// The ACPI tables this architecture decodes: the MADT for its CPUs and I/O
+/// APICs, the FADT for reset, soft-off and the century register, the HPET for
+/// the clock, the MCFG for ECAM and the DMAR for the IOMMU.
+pub const ACPI_TABLES: &[&[u8; 4]] = &[b"APIC", b"FACP", b"HPET", b"MCFG", b"DMAR"];
+
 pub fn before_panel() {
     pat::init();
 }
 
 /// Once the console and the boot parameter exist.
-pub fn after_console() {
+pub fn after_console(_args: &KernelArgs, _maps: &[MemoryMapEntry]) {
+    // The IDT loads inside `interrupts`, much later: a fault here would reach
+    // firmware's handlers, so the actuator is refused by name instead.
+    if crate::actuator::test_early_fault() {
+        panic!("test-early-fault: x86-64 has no vectors of its own this early");
+    }
     // After actuator::init, whose table the `control-regs-bench` probe inside
     // this call reads. `pat::init` restored the `CR0` it found, so a firmware
     // `CD` — which would make every mapping uncacheable whatever the PAT

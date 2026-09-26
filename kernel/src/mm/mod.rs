@@ -21,8 +21,6 @@ pub use alloc::sweep as sweep_heap_bands;
 /// Isolates the sweep's lock hold from the sweep itself, to attribute contention correctly.
 #[cfg(feature = "heap-lockspin")]
 pub use alloc::hold_lock as hold_heap_lock;
-/// Unconditional: `hw::report_contexts` runs on every crash and must build with no sweep present.
-pub use alloc::sweep_stats;
 pub use dma::{Dma, DmaPool, Unaligned};
 pub use mmio::Mmio;
 pub use region::{Allocation, KernelSlice};
@@ -157,4 +155,19 @@ pub fn init(memory_map: &[MemoryMapEntry], reserved: &[Region]) {
     pmm::init(memory_map, reserved);
     paging::init(memory_map);
     alloc::init();
+}
+
+/// The two memory facts every crash report ends its contexts with: how deep
+/// any task's kernel stack went, and what the heap sweep last saw.
+/// Unconditional: it runs on every crash and must build with no sweep present.
+pub fn report_on_crash() {
+    if let Some((used, of)) = crate::sched::driver::stack_high_water() {
+        crate::log!("  Task kernel stacks: deepest {used} of {of} bytes");
+    }
+    if let Some((sweeps, records, overflowed)) = alloc::sweep_stats() {
+        crate::log!(
+            "  Heap sweeps: {sweeps} run, {records} live bands on the last walk{}",
+            if overflowed { ", and the page table filled — the walk is incomplete" } else { "" },
+        );
+    }
 }

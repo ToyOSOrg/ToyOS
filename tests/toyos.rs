@@ -2481,7 +2481,7 @@ const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 ///
 /// `screen_fatal_halt_composited` reads it off the *panel*, because the machine
 /// that wait exists for has no serial port and `/log` is the thing that did not
-/// answer. Kept in sync with `kernel/src/arch/x86_64/apic.rs::LOG_DRAIN_EXPIRED` by
+/// answer. Kept in sync with `kernel/src/panic.rs::LOG_DRAIN_EXPIRED` by
 /// this comment and by that test turning every spent budget into a red if it
 /// drifts.
 const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";

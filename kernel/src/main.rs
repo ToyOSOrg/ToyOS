@@ -114,7 +114,7 @@ mod late_panic {
 use crate::mm::paging::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use arch::{cpu, irqchip, percpu, smp};
+use arch::{cpu, percpu, smp};
 pub(crate) use arch::hw;
 use drivers::{acpi, gop, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
@@ -162,7 +162,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     if prev != percpu::CpuFaultState::Normal {
         // Escalate: reentry depth is zero here, so this landed on a fatal exception or page fault no handler was inside.
         panic::last_words("DOUBLE PANIC", Some(prev), info, true);
-        irqchip::halt_all_cpus();
+        panic::halt_all_cpus();
     }
 
     arch::trap::report_panic(info, cpu::frame_pointer());
@@ -187,7 +187,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         arch::trap::try_recover_from_panic();
     }
 
-    irqchip::halt_all_cpus();
+    panic::halt_all_cpus();
 }
 
 fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
@@ -297,7 +297,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         log::halt_before_the_next_repaint();
     }
 
-    arch::boot::after_console();
+    arch::boot::after_console(&kernel_args, maps);
 
     // percpu, the allocator and our own paging aren't up yet, so a fault here only reaches the early-panic branch.
     if actuator::test_early_panic() {

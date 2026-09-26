@@ -36,7 +36,7 @@ use super::qemu::{is_kernel_line, QemuInstance};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Died {
     /// The kernel itself. Every path that writes one of these words ends at
-    /// `apic::halt_all_cpus` — **unless** the panic handler finds the panic
+    /// `panic::halt_all_cpus` — **unless** the panic handler finds the panic
     /// recoverable, which it does for a `panic!` taken in syscall context
     /// (`kernel/src/main.rs`: the caller is killed and the machine carries on,
     /// which is what `panic_recovery`, `heap_ceiling` and

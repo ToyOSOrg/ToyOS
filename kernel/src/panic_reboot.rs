@@ -4,10 +4,11 @@
 //! how a person at the machine says the panel is being read — and nobody
 //! pressing one inside the bound means nobody is there to read it.
 //!
-//! **The bound is carried in TSC cycles, not nanoseconds.** A panic may land
-//! before `clock::init`, where the calibrated clock reads zero for every
-//! interval; the cycle count comes from the frequency CPUID states instead, and
-//! both phases then compare the same `rdtsc` against the same unit. A machine
+//! **The bound is carried in counter ticks, not nanoseconds** (`cpu::counter`:
+//! the TSC, the generic timer's count). A panic may land before `clock::init`,
+//! where the calibrated clock reads zero for every interval; the tick count
+//! comes from the frequency the CPU states instead (CPUID, `CNTFRQ_EL0`), and
+//! both phases then compare the same counter against the same unit. A machine
 //! that states no frequency and has no calibrated clock cannot time anything,
 //! and the arm line says so instead of resetting on a guess.
 //!
@@ -40,7 +41,7 @@ const FAST_BOUND: Budget = Budget::of(
 /// Whether a reboot is armed on this panic, and when.
 #[derive(Clone, Copy)]
 pub enum Bound {
-    /// Reset the machine at this `rdtsc` reading.
+    /// Reset the machine at this `cpu::counter` reading.
     At(u64),
     /// Hold the panel: somebody is reading it, or nothing here could time a
     /// wait, or this machine has no reset register to write.
@@ -72,14 +73,14 @@ impl Bound {
 #[derive(Clone, Copy)]
 enum Source {
     Calibrated,
-    Cpuid,
+    Stated,
 }
 
 impl Source {
     fn named(self) -> &'static str {
         match self {
             Source::Calibrated => "the calibrated clock",
-            Source::Cpuid => "the TSC frequency CPUID states",
+            Source::Stated => "the counter frequency the CPU states",
         }
     }
 }
@@ -90,7 +91,7 @@ impl Source {
 const ARMED: &str = "panic: rebooting";
 const HELD: &str = "panic: holding this panel";
 
-/// The bound in `rdtsc` cycles from now, and which clock said so.
+/// The bound in counter ticks from now, and which clock said so.
 fn deadline(bound: Budget) -> Option<(u64, Source)> {
     if crate::clock::calibrated() {
         return Some((crate::clock::tsc_deadline(bound.nanos()), Source::Calibrated));
@@ -98,7 +99,7 @@ fn deadline(bound: Budget) -> Option<(u64, Source)> {
     let hz = crate::arch::cpu::stated_counter_hz()?;
     // Nanoseconds first, so a bound under a second is not rounded to nothing.
     let cycles = (u128::from(bound.nanos()) * u128::from(hz) / 1_000_000_000) as u64;
-    Some((cpu::counter().saturating_add(cycles), Source::Cpuid))
+    Some((cpu::counter().saturating_add(cycles), Source::Stated))
 }
 
 /// Arm the reboot and say so in one line — the panel's last, because the panic
@@ -146,7 +147,7 @@ pub fn arm(on_the_record: bool) -> Bound {
         (None, _) => {
             if on_the_record {
                 alert!(
-                    "{HELD}: this CPU states no TSC frequency and none is calibrated, so \
+                    "{HELD}: this CPU states no counter frequency and none is calibrated, so \
                      nothing here can time a wait"
                 );
             } else {

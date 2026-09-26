@@ -34,6 +34,18 @@ fn main() {
 
     match result {
         Ok(output_bytes) => {
+            if let Some(declared) = args.pe_machine {
+                // `link_pe` wrote a PE header whose `e_lfanew` is at 0x3C and
+                // whose `Machine` follows the four-byte signature.
+                let pe_at = u32::from_le_bytes(output_bytes[0x3C..0x40].try_into().unwrap()) as usize;
+                let written = u16::from_le_bytes([output_bytes[pe_at + 4], output_bytes[pe_at + 5]]);
+                if written != declared {
+                    eprintln!(
+                        "toyos-ld: /MACHINE declares {declared:#06x} and the objects are {written:#06x}"
+                    );
+                    process::exit(1);
+                }
+            }
             // Write to a temp file then atomically rename. On macOS, overwriting
             // a signed binary in-place leaves a stale code-signature cache on the
             // old inode, causing the kernel to hang the next launch in _dyld_start.
@@ -169,6 +181,8 @@ struct Args {
     inputs: Vec<PathBuf>,
     lib_paths: Vec<PathBuf>,
     libs: Vec<String>,
+    /// The PE machine `/MACHINE:` declared, checked against the output's.
+    pe_machine: Option<u16>,
 }
 
 fn parse_args() -> Args {
@@ -187,6 +201,7 @@ fn parse_args() -> Args {
     let mut inputs = Vec::new();
     let mut lib_paths = Vec::new();
     let mut libs = Vec::new();
+    let mut pe_machine = None;
     let mut i = 1;
 
     while i < argv.len() {
@@ -232,6 +247,10 @@ fn parse_args() -> Args {
             s if s.to_ascii_uppercase().starts_with("/LIBPATH:") => {
                 lib_paths.push(PathBuf::from(&s[9..]));
             }
+            s if s.to_ascii_uppercase().starts_with("/MACHINE:") => {
+                pe_machine = Some(parse_pe_machine(&s[9..]));
+                pe = true;
+            }
             s if s.starts_with('/') && !s[1..].contains('/') && s.as_bytes().get(1).is_some_and(|c| c.is_ascii_uppercase()) => {
                 // Ignore other MSVC flags (/NOLOGO, /DEBUG, /INCREMENTAL:NO, etc.)
             }
@@ -264,7 +283,21 @@ fn parse_args() -> Args {
         OutputFormat::Pie
     };
 
-    Args { output, entry, format, gc_sections, build_id, map_file, inputs, lib_paths, libs }
+    Args { output, entry, format, gc_sections, build_id, map_file, inputs, lib_paths, libs, pe_machine }
+}
+
+/// `/MACHINE:`'s value as the PE `Machine` field it declares (PE/COFF
+/// specification, "Machine Types"). The output's machine is the objects', and
+/// this is checked against it rather than obeyed.
+fn parse_pe_machine(val: &str) -> u16 {
+    match val.to_ascii_lowercase().as_str() {
+        "x64" => 0x8664,
+        "arm64" => 0xAA64,
+        _ => {
+            eprintln!("toyos-ld: /MACHINE:{val} is not a machine this linker writes");
+            process::exit(1);
+        }
+    }
 }
 
 fn parse_pe_subsystem(val: &str) -> PeSubsystem {

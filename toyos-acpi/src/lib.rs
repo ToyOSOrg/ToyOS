@@ -7,7 +7,7 @@
 //!
 //! Multi-byte fields are composed from bytes, little-endian, so no firmware
 //! byte is transmuted into a type. Field offsets cite ACPI 6.5, except MCFG's
-//! (PCI Firmware Specification) and HPET's (IA-PC HPET Specification).
+//! (PCI Firmware Specification), HPET's (IA-PC HPET Specification) and SPCR's (Microsoft's SPCR specification).
 //!
 //! `no_std`, no allocation, no `unsafe`.
 
@@ -15,17 +15,21 @@
 #![forbid(unsafe_code)]
 
 mod fadt;
+mod gtdt;
 mod madt;
 mod resource;
+mod spcr;
 
 pub use fadt::{
     century_of, dsdt_address, iapc_boot_arch, reset_register, rtc_century, Century, Reset,
     CMOS_RAM, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,
 };
 pub use madt::{
-    madt_entries, IoApicEntry, MadtEntries, MadtEntry, MadtHalt, SourceOverride, MADT_ENTRIES,
+    madt_entries, Gicc, IoApicEntry, MadtEntries, MadtEntry, MadtHalt, SourceOverride, MADT_ENTRIES,
 };
+pub use gtdt::{gtdt, Gtdt, TimerInterrupt, GTDT_NEEDED};
 pub use resource::{memory_windows, ResourceError, Walk, MAX_LIST_BYTES};
+pub use spcr::{spcr, Gas, SerialInterface, Spcr, GAS_SYSTEM_MEMORY, SPCR_NEEDED};
 
 /// Physical memory, as this decoder reads it.
 ///
