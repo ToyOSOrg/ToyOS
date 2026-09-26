@@ -12,6 +12,7 @@ start = ["logd", "compositor", "terminal"]
 syscap = ["logread"]
 
 [programs.compositor]
+service = true
 serves = ["compositor"]
 receives = ["launcher"]
 devices = ["framebuffer", "keyboard", "mouse"]
