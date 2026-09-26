@@ -124,6 +124,13 @@ pub struct KernelArgs {
     /// GPT entry like [`Self::boot_partition_guid`]; zero with no image. The
     /// kernel holds that partition so no claim writes the slot it is running.
     pub root_partition_guid: [u8; 16],
+    /// The time-stamp counter at the loader's entry and at its handoff, and the
+    /// cycles its read of ROOT took (zero with no image). The TSC counts from
+    /// reset, so the first is firmware's time since power-on unless firmware
+    /// wrote the counter; the kernel converts all three at its calibrated rate.
+    pub loader_entry_tsc: u64,
+    pub loader_handoff_tsc: u64,
+    pub root_read_tsc: u64,
 }
 
 /// The boot parameter on which the loader hands the kernel no ROOT image: the
@@ -229,7 +236,10 @@ const _: () = {
     assert!(offset_of!(KernelArgs, root_image_addr) == 1224);
     assert!(offset_of!(KernelArgs, root_image_len) == 1232);
     assert!(offset_of!(KernelArgs, root_partition_guid) == 1240);
-    assert!(size_of::<KernelArgs>() == 1256);
+    assert!(offset_of!(KernelArgs, loader_entry_tsc) == 1256);
+    assert!(offset_of!(KernelArgs, loader_handoff_tsc) == 1264);
+    assert!(offset_of!(KernelArgs, root_read_tsc) == 1272);
+    assert!(size_of::<KernelArgs>() == 1280);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
     assert!(align_of::<RootBridgeWindow>() == 8);
@@ -321,6 +331,9 @@ mod tests {
         root_image_addr: 0,
         root_image_len: 0,
         root_partition_guid: [0; 16],
+        loader_entry_tsc: 0,
+        loader_handoff_tsc: 0,
+        root_read_tsc: 0,
     };
 
     #[test]

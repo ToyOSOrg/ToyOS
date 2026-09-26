@@ -2584,6 +2584,22 @@ pub struct Carried {
     pub rust: Vec<(String, Vec<u8>)>,
 }
 
+impl Carried {
+    /// Each binary's size, by the name [`carrying`] takes.
+    pub fn sizes(&self) -> std::collections::BTreeMap<String, usize> {
+        let c = self.c.iter().map(|(name, data)| (format!("test_c_{name}"), data.len()));
+        let rust = self.rust.iter().map(|(name, data)| {
+            let key = if name.ends_with(".so") { name.clone() } else { format!("test_rs_{name}") };
+            (key, data.len())
+        });
+        c.chain(rust).collect()
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.c.iter().chain(&self.rust).map(|(_, data)| data.len()).sum()
+    }
+}
+
 /// What a boot that runs `names` (`test_rs_<bin>`, `test_c_<case>`) carries.
 ///
 /// **ROOT is held whole in the guest's memory, so a binary on it costs the

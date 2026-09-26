@@ -577,8 +577,30 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
+/// The time-stamp counter, which counts from reset.
+fn tsc() -> u64 {
+    // SAFETY: RDTSC reads a counter and nothing else; every x86-64 has it.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// `IA32_TSC_ADJUST`, where CPUID says the CPU has it: every write to the TSC
+/// since reset is added to it (Intel SDM Vol. 3B, "Time-Stamp Counter
+/// Adjustment"), so zero is a counter firmware never wrote and the TSC is time
+/// since power-on.
+fn tsc_adjust() -> Option<i64> {
+    let max = core::arch::x86_64::__cpuid(0).eax;
+    // Leaf 7 exists when the maximum leaf reaches it.
+    if max < 7 || core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 1) == 0 {
+        return None;
+    }
+    let (lo, hi): (u32, u32);
+    // SAFETY: the loader runs at CPL 0, and CPUID.07H:EBX[1] says the MSR exists.
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x3bu32, out("eax") lo, out("edx") hi, options(nomem, nostack)) };
+    Some(((u64::from(hi) << 32) | u64::from(lo)) as i64)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, root_image: Option<rootimage::RootImage>, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, root_image: Option<rootimage::RootImage>, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
     //
@@ -642,8 +664,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             None => ([0u8; 16], 0, 0, 0),
         };
 
-    let (root_image_addr, root_image_len, root_partition_guid) =
-        root_image.as_ref().map_or((0, 0, [0; 16]), rootimage::RootImage::handoff);
+    let (root_image_addr, root_image_len, root_partition_guid, root_read_tsc) =
+        root_image.as_ref().map_or((0, 0, [0; 16], 0), rootimage::RootImage::handoff);
 
     // Built before the exit so the address the kernel is handed is one this
     // loader can still print and refuse on.
@@ -680,11 +702,24 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         root_image_addr,
         root_image_len,
         root_partition_guid,
+        loader_entry_tsc: entry_tsc,
+        loader_handoff_tsc: 0,
+        root_read_tsc,
     };
     report_reach(
         "Kernel arguments",
         &kernel_args as *const KernelArgs as u64,
         mem::size_of::<KernelArgs>() as u64,
+    );
+
+    kernel_args.loader_handoff_tsc = tsc();
+    println!(
+        "Loader TSC: {entry_tsc} at entry, {} at the handoff; IA32_TSC_ADJUST {}",
+        kernel_args.loader_handoff_tsc,
+        match tsc_adjust() {
+            Some(adjust) => alloc::format!("{adjust}"),
+            None => alloc::string::String::from("not on this CPU"),
+        }
     );
 
     // Last, and after every line above: a console write, a FAT write and a
@@ -800,6 +835,8 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
 
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
+    // First: the TSC counts from reset, so this is what firmware took.
+    let entry_tsc = tsc();
     // The event is kept, not discarded: it is a callback *inside this image*
     // that firmware holds until it is closed, and a pass that returns to the
     // boot manager is a pass whose image the boot manager then unloads. See
@@ -954,5 +991,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, root_image, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, root_image, entry_tsc, system_table);
 }

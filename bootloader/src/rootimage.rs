@@ -64,12 +64,15 @@ pub struct RootImage {
     len: u64,
     /// The partition it was read from, raw as in its GPT entry.
     partition: [u8; 16],
+    /// The TSC cycles the read took.
+    cycles: u64,
 }
 
 impl RootImage {
-    /// Where the kernel is told the image is, and which partition it came from.
-    pub fn handoff(&self) -> (u64, u64, [u8; 16]) {
-        (self.at, self.len, self.partition)
+    /// Where the kernel is told the image is, which partition it came from, and
+    /// the cycles reading it took.
+    pub fn handoff(&self) -> (u64, u64, [u8; 16], u64) {
+        (self.at, self.len, self.partition, self.cycles)
     }
 }
 
@@ -300,7 +303,7 @@ impl<'a> Disk<'a> {
         // Chunks are whole `BLOCK`s from a page-aligned buffer, so each one
         // keeps the `IoAlign` `open` checked against `BLOCK`.
         let chunk = chunk::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
-        let began = tsc();
+        let began = crate::tsc();
         let mut device = Firmware { io: &self.io, media_id: self.media_id };
         let read = chunk::read(&mut device, part.first_lba, self.lba_bytes, chunk, into);
         if let Err(failed) = read {
@@ -312,7 +315,7 @@ impl<'a> Disk<'a> {
                 failed.read
             ));
         }
-        let took = tsc().wrapping_sub(began);
+        let took = crate::tsc().wrapping_sub(began);
         println!(
             "{READ_AT} {at:#x}+{len:#x} from LBA {}+{lbas}, {chunk} bytes a request (optimal granularity: {}), in {took} TSC cycles",
             part.first_lba,
@@ -321,7 +324,7 @@ impl<'a> Disk<'a> {
                 None => alloc::string::String::from("not reported"),
             }
         );
-        RootImage { at, len, partition: part.unique_guid.0 }
+        RootImage { at, len, partition: part.unique_guid.0, cycles: took }
     }
 
     /// `OptimalTransferLengthGranularity`, where the media is revision 3 or
@@ -422,10 +425,4 @@ fn aligned(len: usize) -> &'static mut [u8] {
     assert!(!ptr.is_null(), "a {len}-byte buffer for the boot disk");
     // SAFETY: `ptr` is a fresh allocation of `len` bytes, never freed.
     unsafe { core::slice::from_raw_parts_mut(ptr, len) }
-}
-
-/// The time-stamp counter; the kernel's `TSC:` record converts it.
-fn tsc() -> u64 {
-    // SAFETY: RDTSC reads a counter and nothing else; every x86-64 has it.
-    unsafe { core::arch::x86_64::_rdtsc() }
 }

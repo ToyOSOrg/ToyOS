@@ -224,6 +224,29 @@ fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
 /// are two directories of it and never two volumes.
 const DATA_PATHS: [&str; 2] = ["apps", "home"];
 
+/// The boot from power-on, off the loader's TSC readings and `complete`'s, at
+/// the calibrated rate. The TSC counts from reset, so the first span is
+/// firmware's unless firmware wrote the counter, which the loader's
+/// `IA32_TSC_ADJUST` says where the CPU has one.
+fn report_power_on(args: &KernelArgs, complete: u64) {
+    let (entry, handoff) = (args.loader_entry_tsc, args.loader_handoff_tsc);
+    if handoff < entry || complete < handoff {
+        log!(
+            "boot: the TSC went backwards: {entry} at the loader's entry, {handoff} at its handoff, \
+             {complete} at Boot: complete"
+        );
+        return;
+    }
+    let ms = |ticks: u64| clock::nanos_of_ticks(ticks) / 1_000_000;
+    log!(
+        "boot: power-on to loader {} ms, loader {} ms (ROOT read {} ms), kernel to Boot: complete {} ms",
+        ms(entry),
+        ms(handoff - entry),
+        ms(args.root_read_tsc),
+        ms(complete - handoff),
+    );
+}
+
 /// Says where this boot's log can be read, on the last surface still showing it once userland owns the screen.
 fn report_log_destination() {
     // Kernel-side because panic_console owns the panel; logd reports which file it opened separately.
@@ -681,7 +704,9 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     report_log_destination();
+    let complete_tsc = cpu::rdtsc();
     boot_phase!("complete", 0);
+    report_power_on(&kernel_args, complete_tsc);
 
     // No current task here, so the handler's recovery predicate fails — the one panic no userland process can produce.
     #[cfg(feature = "boot-actuators")]

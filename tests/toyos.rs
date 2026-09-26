@@ -648,6 +648,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // clock in the verdict.
     ("root_from_memory", Sched::Parallel, Tier::Fast),
     ("root_withheld_refused", Sched::Parallel, Tier::Fast),
+    // The boot from power-on, as the kernel converts the loader's TSC readings:
+    // judged against the loader's raw counts and the kernel's own rate, and
+    // bounded above by the host's clock, which is Parallel-safe because load
+    // only widens that bound.
+    ("boot_from_power_on", Sched::Parallel, Tier::Fast),
     ("acpi_table_inventory", Sched::Parallel, Tier::Fast),
     ("timer_calibration", Sched::Parallel, Tier::Fast),
     ("pci_inventory", Sched::Parallel, Tier::Fast),
@@ -12838,6 +12843,13 @@ fn run_machine_test(
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
             root_from_memory(qemu.boot_log())
         }
+        "boot_from_power_on" => {
+            let asked = std::time::Instant::now();
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            let host = asked.elapsed();
+            // The loader speaks on the firmware's serial, the kernel on the console.
+            boot_from_power_on(&format!("{}{}", qemu.uart_log(), qemu.boot_log()), host)
+        }
         "root_withheld_refused" => {
             let qemu = QemuInstance::boot_with_options(
                 test_config,
@@ -18373,6 +18385,43 @@ fn carried_by(names: &[&str], bins: &Bins<'_>) -> qemu::Carried {
     qemu::carrying(bins.c_bins, bins.rust_bins, rows.flat_map(|(_, carries)| carries.iter().copied()))
 }
 
+/// The most test-binary bytes one shared boot carries. The list is run on
+/// boots of one lane in turn, each carrying its own part, so what a shared
+/// guest holds is bounded by this rather than by the list — and a guest's
+/// memory is released between parts. A part costs one boot.
+const SHARED_BOOT_BYTES: usize = 64 << 20;
+
+/// `tests` cut in order into parts whose binaries fit [`SHARED_BOOT_BYTES`],
+/// each with what it carries; a test whose own binaries do not fit is a part
+/// by itself.
+fn shared_boots<'a>(tests: &[&'a TestDef], bins: &Bins<'_>) -> Vec<(Vec<&'a TestDef>, qemu::Carried)> {
+    let mut parts: Vec<Vec<&TestDef>> = Vec::new();
+    let mut held: BTreeMap<String, usize> = BTreeMap::new();
+    for &test in tests {
+        let own = qemu::carrying(bins.c_bins, bins.rust_bins, [test.qemu_name.as_str()]).sizes();
+        let mut with = held.clone();
+        with.extend(own.clone());
+        match parts.last_mut() {
+            Some(part) if with.values().sum::<usize>() <= SHARED_BOOT_BYTES => {
+                part.push(test);
+                held = with;
+            }
+            _ => {
+                parts.push(vec![test]);
+                held = own;
+            }
+        }
+    }
+    parts
+        .into_iter()
+        .map(|part| {
+            let carried =
+                qemu::carrying(bins.c_bins, bins.rust_bins, part.iter().map(|t| t.qemu_name.as_str()));
+            (part, carried)
+        })
+        .collect()
+}
+
 fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Outcome>) {
     // Both clocks, at every test, because what the host did *between* two of
     // them is a different question from what it did during one: a lid closed
@@ -18387,15 +18436,7 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
     };
     match task {
         Task::Shared(tests, features) => {
-            let carried =
-                qemu::carrying(bins.c_bins, bins.rust_bins, tests.iter().map(|t| t.qemu_name.as_str()));
-            let bytes: usize = carried.c.iter().chain(&carried.rust).map(|(_, data)| data.len()).sum();
-            eprintln!(
-                "  [shared] {} test(s) on {features:?}, carrying {} binaries, {} MiB",
-                tests.len(),
-                carried.c.len() + carried.rust.len(),
-                bytes >> 20
-            );
+            let boots = shared_boots(&tests, bins);
             // The boot itself can fail, and it used to take the run with it.
             // Reporting the block's tests against its reason keeps the count
             // honest and says which one it died on.
@@ -18407,73 +18448,83 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                 // produce one are this line and `QemuInstance::shutdown`, and
                 // `shutdown` takes the guest by value.
                 let smp = shared_smp(&tests[0].name);
-                let boot = |_: qemu::LaneFree| {
-                    QemuInstance::boot_with_options(
-                        bins.test_config,
-                        &carried.c,
-                        &carried.rust,
-                        BootOptions { kernel_features: features, smp, ..Default::default() },
-                    )
-                };
-                let mut qemu = boot(qemu::LaneFree::no_guest_yet());
-                let mut reboots = 0usize;
-                for test in &tests {
-                    let start = common::clock::mark();
-                    let mut result = qemu.run_test(&test.qemu_name, test.timeout);
-                    // **A guest that stopped answering is answered with a new
-                    // one.** Its turn came, its whole ceiling passed, and it was
-                    // never announced — so what this measured is the previous
-                    // test's wreckage and not this one. Run `31241099454` is the
-                    // bill: `abuse_gpu_resolution` took the shared boot with it
-                    // and the 150 tests behind it each paid a full ceiling for a
-                    // guest that was gone, 65 minutes of nothing and a job
-                    // cancelled at 90.
-                    //
-                    // A reboot rather than an abandonment because every one of
-                    // those tests still has a verdict owed to it, and the
-                    // alternative is a suite that reports 150 reds it never ran.
-                    // Bounded, because a block whose every member kills the
-                    // guest must not boot one per test.
-                    //
-                    // **The old guest goes before the new one exists.** This
-                    // was `qemu = boot()`, and Rust evaluates the right-hand
-                    // side first: the replacement was launched, and waited on,
-                    // while the instance it replaced still held the lane's
-                    // `test-nvme-*.img` open for write. It exited 1 on QEMU's
-                    // own image lock before saying anything, `wait_for_ready`
-                    // panicked, and that panic escaped this block — so **every
-                    // test still owed a verdict was reported red on it**. 129
-                    // of one run's 131 reds carried that one sentence on
-                    // 2026-08-17, against two real failures. The ordering is
-                    // now the type's: `shutdown` takes the guest by value and
-                    // is the only thing `boot` can be called with.
-                    if result.boot_stopped_answering() && reboots < MAX_SHARED_REBOOTS {
-                        reboots += 1;
-                        eprintln!(
-                            "  ---- the shared boot stopped answering before {}; rebooting \
-                             ({reboots}/{MAX_SHARED_REBOOTS}) ----",
-                            test.name
-                        );
-                        qemu = boot(qemu.shutdown());
-                        result = qemu.run_test(&test.qemu_name, test.timeout);
+                let mut free = qemu::LaneFree::no_guest_yet();
+                for (part, carried) in &boots {
+                    eprintln!(
+                        "  [shared] {} test(s) on {features:?}, carrying {} binaries, {} MiB",
+                        part.len(),
+                        carried.c.len() + carried.rust.len(),
+                        carried.bytes() >> 20
+                    );
+                    let boot = |_: qemu::LaneFree| {
+                        QemuInstance::boot_with_options(
+                            bins.test_config,
+                            &carried.c,
+                            &carried.rust,
+                            BootOptions { kernel_features: features, smp, ..Default::default() },
+                        )
+                    };
+                    let mut qemu = boot(free);
+                    let mut reboots = 0usize;
+                    for test in part {
+                        let start = common::clock::mark();
+                        let mut result = qemu.run_test(&test.qemu_name, test.timeout);
+                        // **A guest that stopped answering is answered with a new
+                        // one.** Its turn came, its whole ceiling passed, and it was
+                        // never announced — so what this measured is the previous
+                        // test's wreckage and not this one. Run `31241099454` is the
+                        // bill: `abuse_gpu_resolution` took the shared boot with it
+                        // and the 150 tests behind it each paid a full ceiling for a
+                        // guest that was gone, 65 minutes of nothing and a job
+                        // cancelled at 90.
+                        //
+                        // A reboot rather than an abandonment because every one of
+                        // those tests still has a verdict owed to it, and the
+                        // alternative is a suite that reports 150 reds it never ran.
+                        // Bounded, because a block whose every member kills the
+                        // guest must not boot one per test.
+                        //
+                        // **The old guest goes before the new one exists.** This
+                        // was `qemu = boot()`, and Rust evaluates the right-hand
+                        // side first: the replacement was launched, and waited on,
+                        // while the instance it replaced still held the lane's
+                        // `test-nvme-*.img` open for write. It exited 1 on QEMU's
+                        // own image lock before saying anything, `wait_for_ready`
+                        // panicked, and that panic escaped this block — so **every
+                        // test still owed a verdict was reported red on it**. 129
+                        // of one run's 131 reds carried that one sentence on
+                        // 2026-08-17, against two real failures. The ordering is
+                        // now the type's: `shutdown` takes the guest by value and
+                        // is the only thing `boot` can be called with.
+                        if result.boot_stopped_answering() && reboots < MAX_SHARED_REBOOTS {
+                            reboots += 1;
+                            eprintln!(
+                                "  ---- the shared boot stopped answering before {}; rebooting \
+                                 ({reboots}/{MAX_SHARED_REBOOTS}) ----",
+                                test.name
+                            );
+                            qemu = boot(qemu.shutdown());
+                            result = qemu.run_test(&test.qemu_name, test.timeout);
+                        }
+                        // Between the test and its check, with the guest still up:
+                        // see [`TestDef::settle`].
+                        (test.settle)(&mut qemu, &mut result);
+                        let reason = (!(test.check)(&result)).then(|| {
+                            result
+                                .error
+                                .as_ref()
+                                .map(ToString::to_string)
+                                // What the guest said rides the reason, as a machine
+                                // test's capture does: a quarantine row quotes the
+                                // assertion, and an exit code is every assertion's.
+                                .unwrap_or_else(|| {
+                                    format!("exit code {:?}\n{}", result.exit_code, result.stdout)
+                                })
+                        });
+                        done += 1;
+                        send(test.name.clone(), reason, start);
                     }
-                    // Between the test and its check, with the guest still up:
-                    // see [`TestDef::settle`].
-                    (test.settle)(&mut qemu, &mut result);
-                    let reason = (!(test.check)(&result)).then(|| {
-                        result
-                            .error
-                            .as_ref()
-                            .map(ToString::to_string)
-                            // What the guest said rides the reason, as a machine
-                            // test's capture does: a quarantine row quotes the
-                            // assertion, and an exit code is every assertion's.
-                            .unwrap_or_else(|| {
-                                format!("exit code {:?}\n{}", result.exit_code, result.stdout)
-                            })
-                    });
-                    done += 1;
-                    send(test.name.clone(), reason, start);
+                    free = qemu.shutdown();
                 }
                 Ok(())
             });
@@ -19800,6 +19851,74 @@ fn root_from_memory(log: &str) -> Result<(), String> {
         }
     }
     eprintln!("  [root] mounted from memory, init spawned with 0 storage commands before it");
+    Ok(())
+}
+
+/// The loader's line: its TSC at entry, at the handoff, and `IA32_TSC_ADJUST`.
+const LOADER_TSC: &str = "Loader TSC: ";
+/// The kernel's line, followed by its four spans in milliseconds.
+const POWER_ON: &str = "boot: power-on to loader ";
+/// The kernel's `TSC:` record, followed by the period it calibrated.
+const TSC_PERIOD: &str = "MHz (period=";
+
+/// **The boot from power-on is the loader's raw counts at the kernel's rate,
+/// and no longer than the host took.** The kernel's first two spans are the
+/// loader's counts converted at the `TSC:` record's period, the ROOT read sits
+/// inside the loader's span, `Boot: complete`'s own count inside the kernel's,
+/// and the sum is bounded by the host's clock from before the image was built
+/// to the guest's ready line — the one reading nothing in the guest took.
+fn boot_from_power_on(log: &str, host: Duration) -> Result<(), String> {
+    let after = |head: &str| -> Result<Vec<u128>, String> {
+        let at = log.find(head).ok_or_else(|| format!("no {head:?} line in the boot log"))?;
+        let line = log[at + head.len()..].lines().next().unwrap_or("");
+        Ok(line
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|word| !word.is_empty())
+            .map(|word| word.parse().expect("a run of digits"))
+            .collect())
+    };
+    let (loader, spans, rate) = (after(LOADER_TSC)?, after(POWER_ON)?, after(TSC_PERIOD)?);
+    let (&[entry, handoff, ..], &[to_loader, in_loader, root_read, to_complete], &[period_fs, ..]) =
+        (&loader[..], &spans[..], &rate[..])
+    else {
+        return Err(format!(
+            "the lines do not carry their numbers: {loader:?} after {LOADER_TSC:?}, {spans:?} after \
+             {POWER_ON:?}, {rate:?} after {TSC_PERIOD:?}"
+        ));
+    };
+    let ms = |ticks: u128| ticks * period_fs / 1_000_000_000_000;
+    if (to_loader, in_loader) != (ms(entry), ms(handoff - entry)) {
+        return Err(format!(
+            "the kernel says {to_loader} ms to the loader and {in_loader} ms in it; the loader's \
+             counts {entry} and {handoff} at {period_fs} fs a tick are {} and {}",
+            ms(entry),
+            ms(handoff - entry)
+        ));
+    }
+    if root_read > in_loader {
+        return Err(format!("the ROOT read took {root_read} ms of a loader that took {in_loader}"));
+    }
+    let complete = after("Boot: complete (")?;
+    if complete.first().is_none_or(|&own| own > to_complete) {
+        return Err(format!(
+            "`Boot: complete` counts {complete:?} ms from its own start, inside a kernel span the \
+             power-on line puts at {to_complete} ms"
+        ));
+    }
+    let total = to_loader + in_loader + to_complete;
+    if total > host.as_millis() {
+        return Err(format!(
+            "power-on to Boot: complete is {total} ms by the TSC, and the host saw the whole boot \
+             in {} ms",
+            host.as_millis()
+        ));
+    }
+    eprintln!(
+        "  [boot] power-on to loader {to_loader} ms, loader {in_loader} ms (ROOT read {root_read} \
+         ms), kernel {to_complete} ms: {total} ms of the host's {} ms; IA32_TSC_ADJUST {}",
+        host.as_millis(),
+        log.split("IA32_TSC_ADJUST ").nth(1).and_then(|rest| rest.lines().next()).unwrap_or("unsaid")
+    );
     Ok(())
 }
 
