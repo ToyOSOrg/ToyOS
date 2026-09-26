@@ -37,3 +37,9 @@ with the same rule; if the readings split by runner model, the gate names
 the model it judges and refuses to judge the rest. Until then, a CI red
 under this name is this file and the redlist row, and the landing it
 dequeues is re-queued once, not re-run until green.
+
+A second signature, which this file's quarantine row does not cover. The fast
+tier on PR #524's branch at `235c5a5b` reds `sched_check_build` on `cpu0: 85
+passes … a 90th percentile needs at least 100 samples behind it and this has
+85`. The host was loaded then by another worktree's spinner at 397% CPU. The
+harness's re-run alone was green.
