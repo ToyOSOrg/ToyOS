@@ -8849,20 +8849,23 @@ fn rendered_text(text: &str, px: f32) -> (usize, usize, Vec<f64>) {
 /// The best normalised cross-correlation of `template`'s coverage with the
 /// luminance under any placement of it inside `rect` of `dump`, as a
 /// magnitude: text is lighter than its button or darker than its background,
-/// and either way it is the text.
+/// and either way it is the text. With it, that placement as
+/// `(x, y, width, height)` in panel pixels.
 ///
 /// A placement whose pixels barely vary is skipped: it correlates with
-/// nothing, and it is most of any window.
+/// nothing, and it is most of any window. So is one that overlaps `taken`,
+/// another word's place.
 fn best_text_match(
     dump: &screen::Ppm,
     (rx, ry, rw, rh): (usize, usize, usize, usize),
     (tw, th, template): &(usize, usize, Vec<f64>),
-) -> f64 {
+    taken: Option<(usize, usize, usize, usize)>,
+) -> (f64, (usize, usize, usize, usize)) {
     let (tw, th) = (*tw, *th);
     let x1 = (rx + rw).min(dump.width);
     let y1 = (ry + rh).min(dump.height);
     if x1 < rx + tw || y1 < ry + th {
-        return 0.0;
+        return (0.0, (rx, ry, tw, th));
     }
     let (w, h) = (x1 - rx, y1 - ry);
     let luminance: Vec<f64> = (ry..y1)
@@ -8893,7 +8896,7 @@ fn best_text_match(
     let mean = template.iter().sum::<f64>() / n;
     let centred: Vec<f64> = template.iter().map(|t| t - mean).collect();
     let template_norm = centred.iter().map(|c| c * c).sum::<f64>().sqrt();
-    let mut best = 0.0f64;
+    let mut best = (0.0f64, (rx, ry, tw, th));
     for y in 0..=(h - th) {
         for x in 0..=(w - tw) {
             let s = area(&sum, x, y);
@@ -8902,13 +8905,22 @@ fn best_text_match(
             if variance < 4.0 * n {
                 continue;
             }
+            if let Some((ox, oy, ow, oh)) = taken {
+                let (px, py) = (rx + x, ry + y);
+                if px < ox + ow && ox < px + tw && py < oy + oh && oy < py + th {
+                    continue;
+                }
+            }
             let mut dot = 0.0;
             for row in 0..th {
                 let line = &luminance[(y + row) * w + x..(y + row) * w + x + tw];
                 let pattern = &centred[row * tw..(row + 1) * tw];
                 dot += line.iter().zip(pattern).map(|(l, c)| l * c).sum::<f64>();
             }
-            best = best.max((dot / (template_norm * variance.sqrt())).abs());
+            let score = (dot / (template_norm * variance.sqrt())).abs();
+            if score > best.0 {
+                best = (score, (rx + x, ry + y, tw, th));
+            }
         }
     }
     best
@@ -8932,28 +8944,8 @@ fn toolkit_iced() -> Result<(), String> {
         COUNTER_LABELS.iter().map(|word| rendered_text(word, COUNTER_LABEL_PX)).collect();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let bins = qemu::build_toyos_bins(&root.join("tests/iced-counter"));
-    if !bins.iter().any(|(name, _)| name == "iced-counter") {
-        return Err("the iced-counter build produced no iced-counter".to_string());
-    }
-    let config = root.join("tests/toolkitcase");
-    let options = BootOptions {
-        profile: qemu::Profile::Metal,
-        qmp: true,
-        ready_marker: "compositor: ready",
-        // The T14's core count, as the other desktop tests take.
-        smp: 8,
-        // `Drained::Bytes`, the typed line's pacing.
-        kernel_params: &["i8042-trace"],
-        ..Default::default()
-    };
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
-    let mut log = qemu.boot_log().to_string();
+    let (mut qemu, mut log, launched) = toolkit_launch(&bins, "iced-counter", &format!("stats {app}"))?;
     let log = &mut log;
-    let ack = Drained::Bytes;
-    shell_answers(&mut qemu, log, &ack)?;
-
-    let launched = log.len();
-    shell_type_line(&mut qemu, &format!("stats {app}"), &ack)?;
     // Its exit ends the wait too: an app that dies before it has a window
     // would otherwise hold the lane for the whole budget.
     let exited = format!("exit: {app} pid=");
@@ -8968,23 +8960,32 @@ fn toolkit_iced() -> Result<(), String> {
         .ok_or_else(|| format!("the compositor's window line did not parse:\n{}", &log[launched..]))?;
 
     let by = qemu.budget(Duration::from_secs(30));
-    let matched = |dump: &screen::Ppm| -> Vec<f64> {
-        labels.iter().map(|label| best_text_match(dump, content, label)).collect()
+    // Two words, so two places: "Decrement" alone carries most of
+    // "Increment"'s ink in its "crement". The word matched best claims its
+    // place, and the other is matched only away from it.
+    let matches = |dump: &screen::Ppm| -> [(f64, (usize, usize, usize, usize)); 2] {
+        let [first, second] = [0, 1].map(|i| best_text_match(dump, content, &labels[i], None));
+        if first.0 >= second.0 {
+            [first, best_text_match(dump, content, &labels[1], Some(first.1))]
+        } else {
+            [best_text_match(dump, content, &labels[0], Some(second.1)), second]
+        }
     };
     let dump = qemu.screendump_while(by, Duration::from_millis(250), |dump| {
-        matched(dump).iter().all(|m| *m >= LABEL_MATCH)
+        matches(dump).iter().all(|(m, _)| *m >= LABEL_MATCH)
     });
-    let matched = matched(&dump);
-    for (word, m) in COUNTER_LABELS.iter().zip(&matched) {
+    let found = matches(&dump);
+    for (word, (m, at)) in COUNTER_LABELS.iter().zip(&found) {
         if *m < LABEL_MATCH {
             return Err(format!(
                 "{app}'s window at {content:?} carries no {word:?} in Open Sans at \
-                 {COUNTER_LABEL_PX}px: its best correlation with the word is {m:.3}, under \
-                 {LABEL_MATCH}:\n{}",
+                 {COUNTER_LABEL_PX}px apart from the other label: its best correlation with the \
+                 word is {m:.3} at {at:?}, under {LABEL_MATCH} ({found:.3?}):\n{}",
                 &log[launched..]
             ));
         }
     }
+    let matched: Vec<f64> = found.iter().map(|(m, _)| *m).collect();
 
     // The rectangle holds the app's pixels only while its window is open, so
     // the close has to be of that same window, by this keystroke: an app that
@@ -9045,14 +9046,15 @@ fn toolkit_iced() -> Result<(), String> {
     Ok(())
 }
 
-/// The toolkit desktop with `bin` carried and launched from its shell, the
-/// launch line's offset in the returned log.
+/// The toolkit desktop with `bin`, one of `built`, carried and `launch` typed
+/// at its shell, the launch line's offset in the returned log.
 fn toolkit_launch(
-    rust_bins: &[(String, Vec<u8>)],
+    built: &[(String, Vec<u8>)],
     bin: &str,
+    launch: &str,
 ) -> Result<(QemuInstance, String, usize), String> {
     let bins: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| name == bin).cloned().collect();
+        built.iter().filter(|(name, _)| name == bin).cloned().collect();
     if bins.is_empty() {
         return Err(format!("the {bin} client was not built"));
     }
@@ -9071,25 +9073,28 @@ fn toolkit_launch(
     let ack = Drained::Bytes;
     shell_answers(&mut qemu, &mut log, &ack)?;
     let launched = log.len();
-    shell_type_line(&mut qemu, &format!("test_rs_{bin}"), &ack)?;
+    shell_type_line(&mut qemu, launch, &ack)?;
     Ok((qemu, log, launched))
 }
 
 /// `window::Waiter`'s claim, which every winit loop here rests on: a wake
 /// raised on another thread ends a wait that also watches windows, more of
-/// them than a new waiter has room for.
+/// them than a new waiter has room for, and more wakes than its pipe holds
+/// are one.
 ///
 /// `test_rs_window_wake` is launched from the desktop's shell, so it holds the
 /// shell's compositor, and says OK only if every one of its rounds was ended by
 /// the wake; a lost one ends its wait on a ten-second ceiling and says so.
 fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "window_wake")?;
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "window_wake", "test_rs_window_wake")?;
     let log = &mut log;
     let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
     while live.working(log) {
         let said = &log[launched..];
         if said.contains("WINDOW-WAKE-OK") {
-            eprintln!("  [toolkit] every wake ended a wait that also watched four windows");
+            for line in said.lines().filter(|l| l.contains("WINDOW-WAKE-OK")) {
+                eprintln!("  [toolkit] {}", line.trim());
+            }
             return Ok(());
         }
         if said.contains("WINDOW-WAKE-LOST")
@@ -9112,7 +9117,7 @@ fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// verdict, and asks the compositor whether every window the app dropped was
 /// closed by that drop.
 fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop")?;
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop", "test_rs_winit_loop")?;
     let log = &mut log;
     // Past the app's own twenty-second ceiling, so a lost wake is its verdict
     // and not this one's.
@@ -9175,7 +9180,7 @@ fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// one before it, so the presents exceed the frame events by at most the one
 /// still on its way when the window closed.
 fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_pace")?;
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_pace", "test_rs_winit_pace")?;
     let log = &mut log;
     let drew = format!("WINIT-PACE drew {PACE_FRAMES} frames");
     let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));

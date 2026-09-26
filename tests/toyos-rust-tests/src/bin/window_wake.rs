@@ -11,11 +11,16 @@
 //! which lands it either just before the wait blocks or while it is blocked —
 //! which of the two is not observed. Every round must end `Ready`, and the wake
 //! must be what ended it.
+//!
+//! Then one wait after more wakes than the wake pipe holds, measured on a
+//! fresh pipe: a wake that finds the pipe full is one already pending, so the
+//! flood raises nothing but that and ends the next wait as one wake does.
 
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use toyos_abi::syscall::SyscallError;
 use window::{Waiter, Window, Woke};
 
 const ROUNDS: u32 = 200;
@@ -73,5 +78,37 @@ fn main() {
     }
     drop(go);
     helper.join().expect("the helper does not panic");
-    println!("WINDOW-WAKE-OK rounds={ROUNDS} windows={WINDOWS}");
+
+    let flood = pipe_capacity() + 1;
+    let waker = waiter.waker();
+    let raising = Instant::now();
+    for _ in 0..flood {
+        waker.wake();
+    }
+    let raised_in = raising.elapsed();
+    if waiter.wait(windows.iter().map(Window::handle), Some(CEILING)) == Woke::TimedOut
+        || !waiter.take_wake()
+    {
+        println!("WINDOW-WAKE-LOST after a flood of {flood} wakes");
+        std::process::exit(1);
+    }
+    if waiter.take_wake() {
+        println!("WINDOW-WAKE-LOST a flood of {flood} wakes was not taken by one take");
+        std::process::exit(1);
+    }
+    println!("WINDOW-WAKE-OK rounds={ROUNDS} windows={WINDOWS} flood={flood} raised in {raised_in:?}");
+}
+
+/// The bytes a fresh pipe holds before a write would block.
+fn pipe_capacity() -> usize {
+    let (_read, write) = toyos::pipe_pair().expect("a pipe to measure");
+    let chunk = [0u8; 64 * 1024];
+    let mut held = 0;
+    loop {
+        match write.write_nonblock(&chunk) {
+            Ok(n) => held += n,
+            Err(SyscallError::WouldBlock) => return held,
+            Err(e) => panic!("measuring a pipe: {e:?}"),
+        }
+    }
 }

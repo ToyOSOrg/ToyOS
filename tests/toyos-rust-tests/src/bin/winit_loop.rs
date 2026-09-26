@@ -55,10 +55,10 @@ const HELPER_ROUNDS: u32 = 20;
 const IDLE_WINDOW: Duration = Duration::from_secs(1);
 
 /// The iterations an idle loop may start in [`IDLE_WINDOW`]: the one that
-/// ends it at its deadline, and one `WaitCancelled` straight after the close,
-/// which winit allows to be spurious. A loop that waits on a closed
-/// connection wakes for as long as the window lasts.
-const IDLE_WAKES: usize = 2;
+/// ends it at its deadline. A loop that waits on a closed connection wakes for
+/// as long as the window lasts, and one the app dropped but the loop still
+/// holds is sent an event by the close.
+const IDLE_WAKES: usize = 1;
 
 enum Ev {
     Ping,
