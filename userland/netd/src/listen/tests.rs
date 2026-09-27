@@ -213,11 +213,19 @@ impl Net {
     }
 
     fn owes_wake(&mut self) -> bool {
-        self.listening.owes_wake(self.sockets.get_mut::<tcp::Socket>(self.listener))
+        self.owes_wake_with(true)
     }
 
-    fn accept(&mut self) -> bool {
-        self.listening.accept(self.sockets.get_mut::<tcp::Socket>(self.listener))
+    fn owes_wake_with(&mut self, room: bool) -> bool {
+        self.listening.owes_wake(self.sockets.get_mut::<tcp::Socket>(self.listener), room)
+    }
+
+    fn accept(&mut self) -> Accept {
+        self.accept_with(true)
+    }
+
+    fn accept_with(&mut self, room: bool) -> Accept {
+        self.listening.accept(self.sockets.get_mut::<tcp::Socket>(self.listener), room)
     }
 }
 
@@ -231,7 +239,7 @@ fn a_finished_handshake_is_owed_one_wake() {
     assert!(net.owes_wake());
     net.listening.woke();
     assert!(!net.owes_wake(), "a connection its owner holds a wake for was announced twice");
-    assert!(net.accept());
+    assert_eq!(net.accept(), Accept::Take);
 }
 
 /// **A peer that sends its FIN with the handshake's last ACK is still a
@@ -245,7 +253,7 @@ fn a_peer_that_closes_with_its_last_ack_is_a_connection() {
     assert_eq!(net.socket().state(), tcp::State::CloseWait, "the premise: both in one pass");
     assert!(net.owes_wake(), "a connection the peer half-closed was never announced");
     net.listening.woke();
-    assert!(net.accept(), "a connection the peer half-closed was not handed over");
+    assert_eq!(net.accept(), Accept::Take, "a connection the peer half-closed was not handed over");
 }
 
 /// A peer that resets before its owner took it frees the port: the next peer
@@ -273,9 +281,27 @@ fn a_wake_spent_on_a_reset_connection_announces_the_next() {
     net.send(5001, TcpControl::Rst, PEER_ISN + 1, Some(isn + 1));
     net.pass();
     assert!(!net.owes_wake(), "a reset connection was announced");
-    assert!(!net.accept(), "an accept took a connection its peer had reset");
+    assert_eq!(net.accept(), Accept::Nothing, "an accept took a connection its peer had reset");
     let isn = net.syn(5002);
     net.send(5002, TcpControl::None, PEER_ISN + 1, Some(isn + 1));
     net.pass();
     assert!(net.owes_wake(), "the connection after a reset one was never announced");
+}
+
+/// An accept refused for room spends the owner's wake, and the connection it
+/// left is announced again once room returns, and not before.
+#[test]
+fn an_accept_refused_for_room_is_woken_again_when_room_returns() {
+    let mut net = Net::new();
+    let isn = net.syn(5001);
+    net.send(5001, TcpControl::None, PEER_ISN + 1, Some(isn + 1));
+    net.pass();
+    assert!(!net.owes_wake_with(false), "the owner was woken for a connection there is no room to take");
+    assert!(net.owes_wake());
+    net.listening.woke();
+    assert_eq!(net.accept_with(false), Accept::NoRoom);
+    assert!(!net.owes_wake_with(false), "an owner refused for room was woken again with room still gone");
+    assert!(net.owes_wake(), "an owner refused for room was never woken again");
+    net.listening.woke();
+    assert_eq!(net.accept(), Accept::Take);
 }

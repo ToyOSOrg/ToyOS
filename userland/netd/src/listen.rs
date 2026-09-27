@@ -4,6 +4,12 @@
 //! accepts**, so the port listens only while that socket is in `Listen`: one
 //! that left it is handed to its owner or listens again, or the port answers
 //! every other peer with a reset for the rest of the boot.
+//!
+//! **An accept spends the owner's wake whatever it answers, a refusal
+//! included, and a wake is owed only for a connection there is room to
+//! take.** An owner refused holds no wake, so the connection it left is
+//! announced again, and an owner refused for room is not woken until room
+//! returns.
 
 use smoltcp::socket::tcp;
 
@@ -12,6 +18,17 @@ use smoltcp::socket::tcp;
 pub struct Listening {
     port: u16,
     woken: bool,
+}
+
+/// What an accept finds.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Accept {
+    /// A connection, to hand over.
+    Take,
+    /// No room for another connection, whether one waits or not.
+    NoRoom,
+    /// No connection.
+    Nothing,
 }
 
 impl Listening {
@@ -23,23 +40,24 @@ impl Listening {
         self.port
     }
 
-    /// Whether the owner is owed a wake for `socket`: a connection waits and
-    /// the owner holds no wake.
-    pub fn owes_wake(&self, socket: &mut tcp::Socket) -> bool {
-        settle(socket, self.port) && !self.woken
+    /// Whether the owner is owed a wake for `socket`: a connection waits,
+    /// there is `room` to take it, and the owner holds no wake.
+    pub fn owes_wake(&self, socket: &mut tcp::Socket, room: bool) -> bool {
+        settle(socket, self.port) && room && !self.woken
     }
 
     pub fn woke(&mut self) {
         self.woken = true;
     }
 
-    /// An accept, which spends the owner's wake whatever it finds: whether
-    /// `socket` holds a connection to hand over. A wake written for a
-    /// connection its peer then reset is spent here, so the next connection
-    /// is announced.
-    pub fn accept(&mut self, socket: &mut tcp::Socket) -> bool {
+    /// An accept, with `room` for another connection or not.
+    pub fn accept(&mut self, socket: &mut tcp::Socket, room: bool) -> Accept {
         self.woken = false;
-        settle(socket, self.port)
+        match (settle(socket, self.port), room) {
+            (_, false) => Accept::NoRoom,
+            (true, true) => Accept::Take,
+            (false, true) => Accept::Nothing,
+        }
     }
 }
 

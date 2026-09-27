@@ -1239,37 +1239,40 @@ impl NetDaemon {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        if !self.piped_room() {
-            say!(
-                "netd: refusing accept, {} piped connections already (max {})",
-                self.piped_live(),
-                self.max_piped_connections,
-            );
-            msg.client.error(ERR_RESOURCE_EXHAUSTED);
-            return;
-        }
-        let Some(pipes) = DataPipes::take(&msg.client) else {
-            msg.client.error(ERR_INVALID_INPUT);
-            return;
-        };
+        let room = self.piped_room();
         let Some(listener) = self.piped_listeners.get_mut(&req.socket_id) else {
             msg.client.error(ERR_NOT_CONNECTED);
             return;
         };
-
-        let socket = socket_set.get_mut::<tcp::Socket>(listener.handle);
-        if !listener.listening.accept(socket) {
-            msg.client.error(ERR_NOT_CONNECTED);
-            return;
+        let (old_handle, local_port) = (listener.handle, listener.listening.port());
+        match listener.listening.accept(socket_set.get_mut::<tcp::Socket>(old_handle), room) {
+            listen::Accept::Take => {}
+            listen::Accept::NoRoom => {
+                say!(
+                    "netd: refusing accept, {} piped connections already (max {})",
+                    self.piped_live(),
+                    self.max_piped_connections,
+                );
+                msg.client.error(ERR_RESOURCE_EXHAUSTED);
+                return;
+            }
+            listen::Accept::Nothing => {
+                msg.client.error(ERR_NOT_CONNECTED);
+                return;
+            }
         }
+        // After the accept: a request refused here has spent its owner's wake
+        // too, so the connection it leaves is announced again.
+        let Some(pipes) = DataPipes::take(&msg.client) else {
+            msg.client.error(ERR_INVALID_INPUT);
+            return;
+        };
 
-        let remote = socket.remote_endpoint().unwrap();
-        let local_port = listener.listening.port();
+        let remote = socket_set.get_mut::<tcp::Socket>(old_handle).remote_endpoint().unwrap();
         let remote_addr = match remote.addr {
             IpAddress::Ipv4(a) => a.octets(),
         };
 
-        let old_handle = listener.handle;
         let stream_id = self.alloc_id();
         self.sockets.insert(stream_id, SocketKind::TcpStream(old_handle));
 
@@ -1429,10 +1432,11 @@ impl NetDaemon {
     /// unread.
     fn serve_piped_listeners(&mut self, socket_set: &mut SocketSet<'_>) {
         use toyos_abi::syscall::SyscallError;
+        let room = self.piped_room();
         let mut dead = Vec::new();
         for (&socket_id, listener) in &mut self.piped_listeners {
             let socket = socket_set.get_mut::<tcp::Socket>(listener.handle);
-            let owed = listener.listening.owes_wake(socket);
+            let owed = listener.listening.owes_wake(socket, room);
             let wake: &[u8] = if owed { &[1] } else { &[] };
             match toyos_abi::syscall::write_nonblock(listener.notify_write.as_handle(), wake) {
                 Ok(_) if owed => listener.listening.woke(),
@@ -1736,9 +1740,11 @@ fn main() {
 
         daemon.bridge_piped(&mut socket_set);
 
-        daemon.serve_piped_listeners(&mut socket_set);
-
         daemon.process_pending(&mut socket_set);
+
+        // After everything in a pass that frees room: a wake is owed only
+        // with room, and nothing after this and before the wait wakes the pass.
+        daemon.serve_piped_listeners(&mut socket_set);
 
         // smoltcp's own next deadline — a retransmit, a persist probe, a
         // delayed ACK — and zero when it has a frame to send now. A piped
