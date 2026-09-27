@@ -51,6 +51,9 @@ above; otherwise it is a NOTE.
   abstraction with one caller, a parameter with one value, dead code. Size is never bought with a
   weaker check: tests are cut only when they test nothing. A compromise the branch found is removed or
   recorded in `issues/` with an owner, evidence and an exit condition.
+  Code is liability: code that does not earn its keep is deleted or simplified, and code kept
+  "just in case", or because nobody knows whether it is needed, is an instant delete. Doubt is
+  not a reason to keep; confidence decides.
 - **Tests.** The refusals and the boundary, not the happy path. Write down the partial fix or
   one-field mutation that would still pass, as a patch the implementer can apply. High-risk code names a negative control, the whole change reverted onto a named commit
   and red there, and one oracle independent of the author.
