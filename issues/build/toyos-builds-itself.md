@@ -16,9 +16,10 @@ AArch64 one step behind, on `issues/kernel/toyos-runs-on-arm64.md`'s track.
 - **M1 — clang cross-built, toyos-cc gone.** The host builds LLVM, clang and
   lld from the fork as part of the toolchain; a C program compiled by that
   clang against libc's C sysroot runs in QEMU, doomgeneric is built by it, and
-  toyos-cc is deleted. *Exit*: `c_hello` and the C corpus green, and nothing
-  names toyos-cc. Left for AArch64: clang's driver already knows
-  `aarch64-unknown-toyos`; no AArch64 C sysroot or C test has been built.
+  toyos-cc is deleted. *Exit*: `c_hello`, `doom_frames` and the C corpus green
+  on clang, and toyos-cc's crate, tests and image row gone. Left for AArch64: clang's driver knows `aarch64-unknown-toyos`,
+  an AArch64 userland build makes its C sysroot and doomgeneric compiles
+  against it; no AArch64 C program has been linked and run.
 - **M2 — clang and lld as a package inside ToyOS; toyos-ld gone.** clang, lld
   and their runtime built *for* ToyOS on the host and installed by
   `/system/bin/pkg`; `clang hello.c && ./a.out` works in the guest. *Exit*:

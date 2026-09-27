@@ -791,8 +791,9 @@ const NOT_YET_BUILT: &[(Arch, &str, &str)] = &[
     (
         Arch::Aarch64,
         "doom",
-        "no AArch64 C sysroot has been built for its C, and softbuffer's toyos fork stops it \
-         first (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)",
+        "softbuffer's toyos fork stops it \
+         (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md); its C compiles for \
+         AArch64 with the toolchain's clang",
     ),
 ];
 

@@ -45,9 +45,9 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   real latent defects on x86 too (`issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
   is one instance).
 - **C on AArch64 goes through clang**, whose driver knows
-  `aarch64-unknown-toyos` (`issues/build/toyos-builds-itself.md`). Doom and the
-  C corpus stay x86-only until userland runs on ARM and an AArch64 C sysroot is
-  built.
+  `aarch64-unknown-toyos` (`issues/build/toyos-builds-itself.md`); doomgeneric
+  compiles for it. Doom and the C corpus stay x86-only until userland runs on
+  ARM.
 - **Randomness** comes from RNDR where the CPU has it, and from virtio-rng
   under QEMU/HVF, behind one `sys_random` source.
 - **TLS**: each architecture uses its ABI's variant (x86-64 keeps variant II;
@@ -322,8 +322,8 @@ Each stage names its exit; "measured" means a number from a run.
    test until then.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
-   built for `aarch64-unknown-toyos`. C programs stay x86-only until an
-   AArch64 C sysroot is built. **Exit**: the desktop comes up on virtio-gpu; `ssh`
+   built for `aarch64-unknown-toyos`. C programs stay x86-only until this
+   stage runs one. **Exit**: the desktop comes up on virtio-gpu; `ssh`
    works from the host; `/log` survives a reboot; the same `system.toml`
    drives both arches.
 
