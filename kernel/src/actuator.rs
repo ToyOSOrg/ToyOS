@@ -334,9 +334,6 @@ actuators! {
     /// Raise a vector no `idt_vectors!` row claims on this CPU once.
     unclaimed_vector_selftest = "unclaimed-vector-selftest";
 
-    /// Hold a flush of `truncate-race.bin` inside its metadata window and say whether a truncate got in.
-    ftruncate_flush_stall = "ftruncate-flush-stall";
-
     /// Deliver the i8042 vector once at arming with no byte behind it — the arming edge, staged.
     i8042_arm_edge = "i8042-arm-edge";
 

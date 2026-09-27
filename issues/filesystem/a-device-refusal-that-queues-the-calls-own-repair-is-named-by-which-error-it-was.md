@@ -11,15 +11,12 @@ opened: 2026-09-26
 `Error::BudgetExpired` — even when the `BudgetExpired` is the call's own write
 and that same write is what queued the repair
 (`toyos-fat32/tests/refused_writes.rs:729`, asserted directly: "its own
-refusal, not a wait"). The kernel adapter's `name_pending`
-(`kernel/src/fat32_adapter.rs`) uses `waits_on` to choose the log line: an
-`Io` in that state logs as "`<op>` of `<name>` refused, a repair pending with
-`N` step(s) queued", while a `BudgetExpired` reaching the volume in the same
-state — a repair now queued by this call's own write — logs as the call's own
-failure, "`<op>` of `<name>`: budget expired". Two device refusals that leave
-the volume in the same state (a repair queued, to be re-driven before the
-next mutating call) are named two different ways depending only on which of
-the two errors the device answered.
+refusal, not a wait"). Two device refusals that leave the volume in the same
+state (a repair queued, to be re-driven before the next mutating call) are
+named two different ways depending only on which of the two errors the device
+answered. No caller reads the difference today: the kernel adapter that chose
+its log line by `waits_on` is gone, and fsd's disks refuse on no clock, so it
+never meets a `BudgetExpired` — the next caller that does inherits it.
 
 ## Owner
 

@@ -8,8 +8,8 @@
 //! - one that climbs and comes back down inside `/home` is followed;
 //! - a client that puts a `..` on the wire itself, past std, is refused
 //!   `InvalidArgument` before anything is looked up;
-//! - `/boot`, which only a `slots` row holds, is ROOT's empty directory for
-//!   this one, and the loader on the boot volume is not there.
+//! - a directory no capability names is nobody's, and nothing under it is
+//!   there.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -87,11 +87,14 @@ fn main() {
         println!("fs_escape: {:?} on the wire refused", core::str::from_utf8(rel).unwrap_or(""));
     }
 
-    // ROOT's own `/boot`, the empty directory a view is mounted over, is all
-    // a program without the capability names there.
-    let listed: Vec<_> = fs::read_dir("/boot").expect("ROOT's /boot").collect();
-    assert!(listed.is_empty(), "/boot listed {} entries for a program whose row holds no slots", listed.len());
-    refused("/boot/EFI/BOOT/BOOTX64.EFI", ErrorKind::NotFound);
+    // A directory this program holds no capability for is not a file
+    // server's: the name is refused by the namespace, and the path goes to
+    // ROOT, which has no such directory.
+    assert!(
+        toyos::endow::namespace().expect("a namespace").open("fs:/fs_escape_nobodys").is_err(),
+        "a capability this program was never given answered"
+    );
+    refused("/fs_escape_nobodys/secret", ErrorKind::NotFound);
 
     for link in ["/home/fs_escape_out", "/home/fs_escape/deeper/out", "/home/fs_escape/deeper/up", "/home/fs_escape/deeper/back"] {
         let _ = fs::remove_file(link);

@@ -1,13 +1,14 @@
-# The blockd boot: `tests/testcases`'s estate, with a second blockd beside the
-# one init runs for DATA. `test_rs_blockd_io` is the second's supervisor as
-# init is a service's: it mints the claim on the machine's second NVMe
-# controller from its capability, starts blockd holding it and a port it made,
-# and is the only thing that can end or restart it. The disks are crafted by
-# `tests/common/blockd.rs`. No soundd: `test_rs_blockd_io dma-pool` claims
+# The blockd boot: `tests/testcases`'s estate, and `/system/bin/blockd` in the
+# image started by nothing. `test_rs_blockd_io` is blockd's supervisor as init
+# is a service's: it mints the claim on the machine's second NVMe controller
+# from its capability, starts blockd holding it and a port it made, and is the
+# only thing that can end or restart it. Nothing drives the first controller,
+# so every command in QEMU's NVMe trace is that blockd's. The disks are crafted
+# by `tests/common/blockd.rs`. No soundd: `test_rs_blockd_io dma-pool` claims
 # virtio-sound itself, to lend the pool its kernel driver keeps.
 
 [boot]
-start = ["logd", "blockd", "fsd", "test-runner"]
+start = ["logd", "fsd", "test-runner"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
@@ -59,19 +60,13 @@ syscap = ["device", "dup", "logread", "power", "roster"]
 # that one certified a path no user takes.
 "bin/tone" = "/system/bin/toybox"
 
-# The block service: the NVMe controller this machine's DATA is on, driven
-# from userland through its claim. Started again when it ends; the claim goes
-# back with the process and is minted again for the next.
+# The NVMe driver, from userland. No row starts it and it holds nothing here:
+# the test that runs it hands it its claim and its port itself.
 [programs.blockd]
-service = true
-restart = true
-serves = ["block"]
-devices = ["pci:1b36:0010"]
 
-# The file servers: DATA, the log and the running slot's volume, one process
-# each, serving every program the directories of its role. Started again when
-# one ends, on the same ports.
+# The file servers: the log and the running slot's volume off the stick, and
+# DATA in memory, since no block service runs. Started again when one ends, on
+# the same ports.
 [programs.fsd]
 restart = true
 roles = ["data", "log", "boot"]
-receives = ["block"]

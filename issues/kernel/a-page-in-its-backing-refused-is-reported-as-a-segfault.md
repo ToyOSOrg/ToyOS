@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-09-26
 ---
 
-# A page-in the device refused is reported as a segfault
+# A page-in its backing refused is reported as a segfault
 
 A demand fault on a file-backed region whose backing's `read_page` fails logs
 one line and leaves the fault unhandled (`kernel/src/process.rs`, the
@@ -22,12 +22,13 @@ subsystem, and nothing ties the two together.
 
 ## Where it is reachable
 
-Not for ROOT: `/system` is served from the image the loader put in memory,
-and `ReadOnlyBacking::read_page` (`kernel/src/file_backing.rs`) fails only on
-a block outside that image, which is a corrupt image rather than a device.
-Every other file a process maps or runs is backed by a device: `NvmeBacking`
-on DATA and the FAT backing on `/boot` and `/log`, so a program or library run
-from `/home` or `/boot`, and any file mapped from them, reaches it.
+No page this kernel faults in is read from a device any more: `/system` is the
+image the loader put in memory, a program or library a file server holds is
+copied into memory at its spawn or `dlopen` (`ImageBacking` in
+`kernel/src/file_backing.rs`), and `/tmp` is memory. What still refuses a
+page is a `/tmp` backing whose file was deleted (`revoke_selftest`), so a
+program that maps a `/tmp` file another deletes reaches it — reported as its
+own wild pointer.
 
 ## Owner
 

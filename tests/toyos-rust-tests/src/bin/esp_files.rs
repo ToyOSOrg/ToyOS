@@ -18,7 +18,8 @@
 //! is the other half of that; this half is the attack.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::toyos::fs::symlink;
 
 use toyos_abi::syscall::{self, OpenFlags};
 
@@ -54,11 +55,10 @@ fn names(dir: &str) -> Vec<String> {
 
 /// The first 64 bytes of the loader; a plain WRITE at offset 0 shows in content, not length.
 fn loader_prefix() -> [u8; 64] {
-    let h = syscall::open(LOADER.as_bytes(), OpenFlags::READ).expect("open the loader for read");
     let mut buf = [0u8; 64];
-    let n = syscall::read(h, &mut buf).expect("read the loader's prefix");
-    syscall::close(h);
-    assert_eq!(n, buf.len(), "short read of the loader's prefix");
+    fs::File::open(LOADER)
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .expect("read the loader's prefix");
     buf
 }
 
@@ -111,10 +111,7 @@ fn boot_refuses_every_way_of_changing_it() {
     fs::remove_file(HOST_NOTE).expect_err("deleting a file on /boot was permitted");
     fs::create_dir("/boot/toyos/newdir").expect_err("mkdir on /boot was permitted");
     fs::rename(HOST_NOTE, "/boot/toyos/moved.txt").expect_err("rename on /boot was permitted");
-    assert!(
-        toyos_abi::syscall::symlink(b"/boot/EFI/BOOT/BOOTx64.EFI", b"/boot/toyos/link").is_err(),
-        "symlink on /boot was permitted"
-    );
+    assert!(symlink("/boot/EFI/BOOT/BOOTx64.EFI", "/boot/toyos/link").is_err(), "symlink on /boot was permitted");
 
     // A read-only open still works, and reads. The refusal is of changes, not
     // of the mount.
@@ -136,12 +133,12 @@ fn boot_refuses_every_way_of_changing_it() {
         "a /tmp symlink opened {LOADER} for writing",
     );
 
-    let reader = syscall::open(LOADER.as_bytes(), OpenFlags::READ).expect("read /boot is allowed");
+    let reader = fs::File::open(LOADER).expect("read /boot is allowed");
     assert!(
         syscall::open(b"/tmp/evil", OpenFlags::WRITE).is_err(),
         "a /tmp symlink opened {LOADER} for writing while a /boot read handle was held",
     );
-    syscall::close(reader);
+    drop(reader);
     assert_eq!(loader_prefix(), before, "a refused symlink write still changed the loader");
     println!("  PASS a /tmp symlink to {LOADER} is refused for writing");
 }
@@ -171,7 +168,7 @@ fn log_takes_writes() {
     // leaving a regular file the caller believes is a link. On a mount that
     // permits writes, so what is being refused is the format and not the
     // policy.
-    let err = toyos_abi::syscall::symlink(b"/log/guest-note.txt", b"/log/link");
+    let err = symlink("/log/guest-note.txt", "/log/link");
     assert!(err.is_err(), "creating a symlink on FAT32 reported success");
     assert!(!names("/log").iter().any(|n| n == "link"), "a refused symlink left a file");
     println!("  PASS a symlink on /log is refused, and leaves nothing behind");

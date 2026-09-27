@@ -8,32 +8,9 @@ opened: 2026-09-03
 
 `kernel/src/elf/cache.rs` now refuses a path whose file changed and a load past
 its byte budget, which closed the record that tracked the cache's lack of both.
-Three things that record carried are not covered by either refusal, and they
+Two things that record carried are not covered by either refusal, and they
 went out of the tracker with it. They are one file because they are one
 residual: what the refusals do **not** reach.
-
-## The identity cannot see a same-size rewrite on a FAT32 mount
-
-`vfs::BackingId` is size plus the mount's mtime. On `/home` (bcachefs) the mtime
-is `nanos_since_boot` at the flush, so two writes are always apart —
-`so_cache_policy`'s `stale-mtime` arm asserts exactly that.
-
-`/log` is FAT32, mounted `UserAccess::ReadWrite` (`kernel/src/main.rs:461`), and
-**FAT stores seconds in units of two**: `toyos-fat32/src/time.rs:5-15` states
-the encoding's three lossy properties, `dir.rs:92` passes 0 for the tenths
-field, and `kernel/src/fat32_adapter.rs:849` stamps whatever `now()` gives. So
-two writes of the same length inside one 2-second bucket carry one mtime, and
-the second load is served the first image — the staleness the refusal exists to
-prevent, on the one writable FAT mount a process can reach.
-
-**Mechanism read off the code; not reproduced.** Planting it needs a same-size
-rewrite of a library inside 2 s on `/log`, and a 1.9 MB write to the
-USB-backed log volume takes about 5.8 s, so the window closes before the second
-write lands.
-
-*Exit condition:* an identity that does not rest on a clock — a content hash, a
-per-file generation the mount bumps on every write, or a `FileId` plus a write
-counter — or a demonstration that no library can be reached on a FAT mount.
 
 ## The budget is a machine-wide, boot-permanent denial
 

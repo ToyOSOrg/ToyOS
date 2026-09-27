@@ -332,8 +332,11 @@ impl<D: Disk> Volume for FatVolume<D> {
         if self.fs.metadata(path).map_err(|e| logged("metadata", path, e))?.is_dir {
             return Err(SyscallError::InvalidArgument);
         }
+        // Asked of the volume first: a delete the device refused leaves every
+        // holder of the file its file.
+        self.fs.remove(path).map_err(|e| logged("unlink", path, e))?;
         self.orphan(path);
-        self.fs.remove(path).map_err(|e| logged("unlink", path, e))
+        Ok(())
     }
 
     fn rename(&mut self, from: &str, to: &str) -> Result<(), SyscallError> {

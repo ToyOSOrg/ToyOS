@@ -143,17 +143,16 @@ under `toyos-abi/src`, `toyos/src` or a published crate changes no identity
 ## Two area notes, carried over from the file this replaced
 
 **`filesystem`** — `toyos-fat32/` is new (host tests: `cargo test` inside it) and
-its kernel adapter is `kernel/src/fat32_adapter.rs`; `boot-media` carries what
-that adapter found. Most of what is filed here is not a defect found later but a
+`userland/fsd/src/fat.rs` serves it; `boot-media` carries what the kernel's
+adapter it replaced found. Most of what is filed here is not a defect found later but a
 residual the crate's own gate identified while it was being written, recorded so
 the adapter's author did not have to rediscover it.
 
-**`boot-media`** — `/boot` and `/log` are both `kernel/src/fat32_adapter.rs` over
-`toyos-fat32`, mounted from `gpt::boot_volume()` and `gpt::log_volume()`;
+**`boot-media`** — `/boot` and `/log` are both served by `/system/bin/fsd` over
+`toyos-fat32`, off the partitions the loader names by unique GUID;
 the kernel writes no log file — `/system/bin/logd` does, an ordinary user process that
 owns "every policy about files — where they go, what they are called, how many
 there are, what happens when the stick stops answering"
 (`userland/logd/src/main.rs:1-10`). Gated by `esp_filesystem`,
-`kernel_log_file`, `log_backing_read_error`,
-`boot_volume_metadata_error`, `log_partition_layout`, `log_partition_identity`
+`kernel_log_file`, `log_partition_layout`, `log_partition_identity`
 and `wall_clock_file`, plus `toybox_cp_volume`.

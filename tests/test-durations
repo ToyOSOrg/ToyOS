@@ -196,7 +196,6 @@ fs_rename_durable 9346
 fs_transactional 85
 fs_truncate_persist 17
 fsync_failed_commit 8386
-ftruncate_flush_race 9452
 futex_wake_counts 1007
 gpu_set_resolution 8610
 gsbase_locked 13091
@@ -427,7 +426,6 @@ wall_clock_zone 9347
 watchdog_fed 23405
 watchdog_resets 9393
 window_refusal 16
-writeback_durability 8888
 writeback_reopen 4886
 writeback_spawn 8820
 xhci_deaf_registers 21244

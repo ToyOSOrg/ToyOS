@@ -1958,18 +1958,10 @@ fn build_namespace(
 /// **Every program sees the whole tree the file servers serve**, which is the
 /// kernel's old view kept whole until each row declares its own
 /// (`issues/isolation/every-program-sees-only-the-files-it-was-given.md`,
-/// stage 2), with two exceptions: `/boot` is the updater's alone, and a
-/// storage row sees none, since a file server resolving a path of its own
-/// through itself waits for ever.
+/// stage 2), with one exception: a storage row sees none, since a file server
+/// resolving a path of its own through itself waits for ever.
 fn in_view(program: &Program, name: &str) -> bool {
-    if is_storage(program) {
-        return false;
-    }
-    match name.strip_prefix(CAPABILITY_PREFIX) {
-        Some("/boot") => program.slots,
-        Some(_) => true,
-        None => false,
-    }
+    !is_storage(program) && name.starts_with(CAPABILITY_PREFIX)
 }
 
 /// [`toyos_swap::PORT`] in a namespace of its own, for a program whose row

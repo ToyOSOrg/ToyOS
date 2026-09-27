@@ -82,10 +82,9 @@ pub fn write() -> Measured {
 
 /// Read [`BYTES`] back off the device and check them, timing only the read.
 ///
-/// **The staged file is closed and left to drain before the clock starts.**
-/// `iod` flushes what the close pinned and drops the file from the cache, so
-/// the timed read is a cache miss the stick has to answer — the same reason
-/// `writeback_durability` waits here.
+/// **The staged file is closed and left to drain before the clock starts**,
+/// though the read is answered from the file server's cache
+/// (`issues/hardware/metalprobes-usb-read-is-answered-from-fsds-cache.md`).
 pub fn read() -> Measured {
     let blob = payload();
     {

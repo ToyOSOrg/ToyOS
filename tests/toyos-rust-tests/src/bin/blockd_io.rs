@@ -13,8 +13,8 @@
 //!   two processes;
 //! - `holder <expect>` — the second process: opens the slot and says what it
 //!   was answered;
-//! - `bench` — the same bytes through the kernel's driver (a partition claim on
-//!   the first controller) and through blockd, timed;
+//! - `bench` — the same bytes through blockd, one request at a time and many,
+//!   timed;
 //! - `reset` — blockd started withholding its second answer: the silence ends
 //!   in a controller reset, the withheld write is answered not done, and the
 //!   write acknowledged before it is on the medium after the next flush;
@@ -60,8 +60,6 @@ const BENCH: &str = "C3E5A7B9-2D4F-4B68-8C1E-F3A5B7D9F1B2";
 const MISALIGNED: &str = "E5A7C9DB-4F6B-4D8A-8E30-B5C7D9FB13D4";
 const MISSTART: &str = "F6B8DAEC-5A7C-4E9B-9F41-C6D8EA0C24E5";
 const ABSENT: &str = "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D";
-/// Mirrored: the kernel's disk, on the first controller.
-const KBENCH: &str = "D4F6B8CA-3E5A-4C79-9D2F-A4B6C8EA02C3";
 /// Mirrored: the idle slot's length in blocks, and what each block holds.
 const TARGET_BLOCKS: u64 = 2048;
 /// Mirrored: what the bench moves each way, each side.
@@ -401,41 +399,11 @@ fn mb_per_s(blocks: u64, took: Duration) -> f64 {
     (blocks * BLOCK_BYTES as u64) as f64 / (1024.0 * 1024.0) / took.as_secs_f64()
 }
 
-/// The same bytes through the kernel's driver and through blockd, the data
-/// built before and checked after what is timed, so each number is the
-/// driver's path and nothing of this binary's.
+/// The same bytes through blockd one request at a time and then as many as
+/// the arena holds, the data built before and checked after what is timed,
+/// so each number is the driver's path and nothing of this binary's.
 fn bench() {
-    // The kernel's driver, through a partition claim on the first controller:
-    // one request at a time, as it moves them.
-    let syscap = capability();
-    let part: toyos::PartitionDev = syscap
-        .claim_partition(PartGuid(guid(KBENCH)))
-        .unwrap_or_else(|e| fail(format!("the kernel's bench partition was refused: {e:?}")));
-    let written = chunks(BENCH_BLOCKS, 0x3C);
-    let blocks: Vec<Vec<[u8; BLOCK_BYTES]>> = written
-        .iter()
-        .map(|c| c.chunks(BLOCK_BYTES).map(|b| b.try_into().expect("a block")).collect())
-        .collect();
-    let started = Instant::now();
-    let mut lba = 0u64;
-    for chunk in &blocks {
-        part.write(lba, chunk).unwrap_or_else(|e| fail(format!("a kernel write: {e:?}")));
-        lba += chunk.len() as u64;
-    }
-    part.sync().unwrap_or_else(|e| fail(format!("the kernel's fsync: {e:?}")));
-    let kernel_write = started.elapsed();
-    let mut read = vec![[0u8; BLOCK_BYTES]; BENCH_BLOCKS as usize];
-    let per = toyos_abi::part::MAX_BLOCKS_PER_CALL;
-    let started = Instant::now();
-    for (i, chunk) in read.chunks_mut(per).enumerate() {
-        part.read((i * per) as u64, chunk).unwrap_or_else(|e| fail(format!("a kernel read: {e:?}")));
-    }
-    let kernel_read = started.elapsed();
-    holds(&read.concat(), &written, "the kernel's bench partition");
-    drop(part);
-
-    // blockd, one request at a time and then as many as the arena holds.
-    let blockd = Blockd::with(syscap, &[]);
+    let blockd = Blockd::with(capability(), &[]);
     let mut s = open(blockd.names(), BENCH);
     let mut runs = Vec::new();
     for (salt, in_flight) in [(0x3D, 1usize), (0x3C, 15)] {
@@ -455,11 +423,8 @@ fn bench() {
         ));
     }
     println!(
-        "blockd_io: bench {} MiB each way: kernel driver write {:.1} MiB/s (its one fsync issues no \
-         Flush) read {:.1} MiB/s; blockd {}; at most {} requests on the wire",
+        "blockd_io: bench {} MiB each way: blockd {}; at most {} requests on the wire",
         BENCH_BLOCKS * BLOCK_BYTES as u64 / (1024 * 1024),
-        mb_per_s(BENCH_BLOCKS, kernel_write),
-        mb_per_s(BENCH_BLOCKS, kernel_read),
         runs.join("; "),
         s.peak_on_the_wire()
     );

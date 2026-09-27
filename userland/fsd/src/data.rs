@@ -581,10 +581,12 @@ impl<D: Disk> Volume for DataVolume<D> {
             None if self.is_dir(path) => return Err(SyscallError::InvalidArgument),
             None => return Err(SyscallError::NotFound),
         }
-        self.orphan(path);
+        // Asked of the volume first: a delete the device refused leaves every
+        // holder of the file its file.
         if !mapped("unlink", path, self.fs.delete(path))? {
             return Err(SyscallError::NotFound);
         }
+        self.orphan(path);
         self.names.remove(path);
         Ok(())
     }

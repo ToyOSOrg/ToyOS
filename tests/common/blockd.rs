@@ -10,9 +10,9 @@
 //! command, completion and flush, which no driver can print on the device's
 //! behalf.
 //!
-//! The machine has two NVMe controllers: the kernel's (QEMU's own ids, first
-//! by enumeration, so the kernel's first-by-class probe takes it) with DATA and
-//! a bench partition, and blockd's (Intel's ids) with the partitions below.
+//! The machine has two NVMe controllers: the first (QEMU's own ids) with a DATA
+//! and a partition nothing names, which no driver runs on this boot, and
+//! blockd's (Intel's ids) with the partitions below.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -29,7 +29,8 @@ const FS: &str = "B2D4F6A8-1C3E-4A57-9B0D-E2F4A6C8E0A1";
 const BENCH: &str = "C3E5A7B9-2D4F-4B68-8C1E-F3A5B7D9F1B2";
 const MISALIGNED: &str = "E5A7C9DB-4F6B-4D8A-8E30-B5C7D9FB13D4";
 const MISSTART: &str = "F6B8DAEC-5A7C-4E9B-9F41-C6D8EA0C24E5";
-/// Mirrored: the kernel's disk.
+/// The first controller's disk: the system's own DATA, which init's blockd
+/// serves, beside a partition nothing names.
 const KBENCH: &str = "D4F6B8CA-3E5A-4C79-9D2F-A4B6C8EA02C3";
 const TARGET_BLOCKS: u64 = 2048;
 const BENCH_BLOCKS: u64 = 8192;
@@ -78,8 +79,8 @@ struct Layout {
 /// and two partitions that are not whole 4 KiB blocks.
 ///
 /// The neighbours are long enough that the volume starts past every byte of
-/// the kernel's disk: QEMU's trace names no controller, so a write is blockd's
-/// by the sector it lands on ([`reissued_after`]).
+/// the first controller's disk: QEMU's trace names no controller, so a write
+/// is blockd's by the sector it lands on ([`reissued_after`]).
 fn craft_blockd_disk(path: &Path) -> Result<Layout, String> {
     const NEIGHBOUR_BYTES: u64 = 64 * MIB;
     const FS_BYTES: u64 = 64 * MIB;
@@ -115,14 +116,14 @@ fn boot(
     params: &'static [&'static str],
 ) -> Result<(QemuInstance, Layout, PathBuf, PathBuf, Vec<u8>), String> {
     let config = super::compile::repo_root().join(CONFIG);
-    let kernel_disk = super::lane::dir().join(format!("{name}-kernel.img"));
-    partclaim::craft_plain_disk(&kernel_disk, &[("kernel bench", BENCH_BLOCKS * BLOCK, KBENCH)], 96 * MIB)?;
+    let first_disk = super::lane::dir().join(format!("{name}-first.img"));
+    partclaim::craft_plain_disk(&first_disk, &[("unnamed", BENCH_BLOCKS * BLOCK, KBENCH)], 96 * MIB)?;
     let blockd_disk = super::lane::dir().join(format!("{name}-blockd.img"));
     let layout = craft_blockd_disk(&blockd_disk)?;
-    let kernel_bytes = std::fs::metadata(&kernel_disk).map_err(|e| format!("the kernel's disk: {e}"))?.len();
-    if kernel_bytes > layout.fs.start {
+    let first_bytes = std::fs::metadata(&first_disk).map_err(|e| format!("the first disk: {e}"))?.len();
+    if first_bytes > layout.fs.start {
         return Err(format!(
-            "the kernel's disk is {kernel_bytes} bytes and blockd's volume starts at {}: a traced write \
+            "the first controller's disk is {first_bytes} bytes and blockd's volume starts at {}: a traced write \
              there could be either controller's",
             layout.fs.start
         ));
@@ -135,7 +136,7 @@ fn boot(
         c_bins,
         rust_bins,
         BootOptions {
-            nvme_image: Some(kernel_disk),
+            nvme_image: Some(first_disk),
             userland_nvme: Some(blockd_disk.clone()),
             nvme_trace: Some(trace.clone()),
             kernel_params: params,
@@ -172,8 +173,8 @@ struct Traced {
     flushes: usize,
     /// Submission queues reads and writes arrived on.
     queues: BTreeSet<u16>,
-    /// The most commands outstanding at once on queues 2 and up — the
-    /// kernel's driver has one I/O queue, so those are blockd's alone.
+    /// The most commands outstanding at once on queues 2 and up — nothing but
+    /// blockd drives a controller on this boot.
     peak: usize,
 }
 
@@ -256,9 +257,10 @@ fn trace_events(trace: &Path) -> Result<Vec<Did>, String> {
 /// again first thing after — read off QEMU's trace alone.
 ///
 /// **A write is blockd's by where it lands**: the trace names no controller,
-/// and every partition blockd writes starts past the last byte of the kernel's
-/// disk ([`boot`] refuses a layout where the volume does not, and the bench
-/// partition lies past it). A lifetime is what follows one controller start —
+/// and every partition blockd writes starts past the last byte of the first
+/// controller's disk ([`boot`] refuses a layout where the volume does not, and
+/// the bench partition lies past it). A lifetime is what follows one
+/// controller start —
 /// blockd's bring-up, or its reset. The one the loss ended is the lifetime
 /// whose writes to `span` did not end in a flush and after which another
 /// lifetime wrote to it; its last write is the one blockd withheld the answer
@@ -268,7 +270,7 @@ fn trace_events(trace: &Path) -> Result<Vec<Did>, String> {
 /// which is what reissue means, and what a client that forgot them cannot do
 /// by accident. Two writes that do not overlap may be in flight together, so
 /// the device's order between them is neither lifetime's to keep. Every Flush
-/// in the trace is blockd's: the kernel's driver issues none.
+/// in the trace is blockd's: nothing else drives a controller.
 fn reissued_after(trace: &Path, span: Span) -> Result<Vec<u64>, String> {
     let mut lives: Vec<Vec<Did>> = Vec::new();
     for did in trace_events(trace)? {
@@ -358,14 +360,13 @@ fn neighbours_untouched(layout: &Layout, before: &[u8], after: &[u8]) -> Result<
     Ok(())
 }
 
-/// The partition claims served by blockd, and blockd against the kernel's
-/// driver.
+/// The partition claims served by blockd, and blockd's rate.
 ///
 /// - Every refusal by name, the idle ROOT slot's 2048 blocks written whole
 ///   through a session and read back, and one holder at a time across two
 ///   processes — the slot a second client is refused while it is held and
 ///   opened once it is not.
-/// - The same bytes through the kernel's driver and through blockd, timed.
+/// - The same bytes through blockd, one request at a time and many, timed.
 /// - Off the image: the slot holds every block the guest wrote, and nothing
 ///   outside the sessions' partitions moved.
 /// - Off QEMU's trace, which no driver writes: blockd's Flush reached the

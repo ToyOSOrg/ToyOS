@@ -432,9 +432,9 @@ const RUST_SKIP: &[&str] = &[
     // measure.
     //
     // `writeback_reopen` and `writeback_spawn` each need their own boot with
-    // `writeback-stall` armed; `writeback_durability` writes `/log` and is judged
-    // host-side off the image after a shutdown. All three run as `MACHINE_TESTS`,
-    // not on the shared boot.
+    // `writeback-stall` armed; `writeback_durability` writes `/log` and
+    // `kernel_log_file` judges it host-side off the image after a shutdown.
+    // All three run in `MACHINE_TESTS`, not on the shared boot.
     "writeback_reopen",
     "writeback_spawn",
     "writeback_durability",
@@ -480,9 +480,6 @@ const RUST_SKIP: &[&str] = &[
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
     "redirty_mid_flush",
-    // Needs `ftruncate-flush-stall` and a boot of its own for the host-side
-    // re-read. `ftruncate_flush_race` runs it.
-    "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
     // Its listings are exact against `tests/layoutcase`, and it takes what that
@@ -1495,13 +1492,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
-    // The write-back queue's three negative controls (wall 4 of
+    // The write-back queue's two negative controls (wall 4 of
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
     // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator
     // boot: one holds the queue open across a *handle* re-open, which the file
     // cache answers, and the other across a *spawn*, which is a device view and
-    // does not. `writeback_durability` is a host-side volume oracle that shuts the
-    // guest down and reads `/log` back with `toyos-fat32-check`.
+    // does not.
     // The watch's lost-wake window, staged: `watch-window` holds every pipe
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
@@ -1512,13 +1508,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("user_copy_races_munmap", Sched::Parallel, Tier::Fast),
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Nightly),
-    ("writeback_durability", Sched::Parallel, Tier::Nightly),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
     ("sysret_ss_reload", Sched::Parallel, Tier::Fast),
-    // The FAT32 read side's revocation gate, and a host-side volume oracle for
-    // the same reason `writeback_durability` is one: whether the clusters the
+    // The FAT32 read side's revocation gate, and a host-side volume oracle: whether the clusters the
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
     ("fat_backing_revoked", Sched::Parallel, Tier::Nightly),
@@ -1528,7 +1522,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("fsync_failed_commit", Sched::Parallel, Tier::Nightly),
     ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
     // A truncate staged inside a flush's metadata window, re-read off the image.
-    ("ftruncate_flush_race", Sched::Parallel, Tier::Nightly),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
@@ -1721,9 +1714,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
     ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
-    ("ftruncate_flush_race", &["test_rs_ftruncate_flush_race", "test_rs_fs_rename_durable"]),
     ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
-    ("writeback_durability", &["test_rs_writeback_durability", "test_rs_fat_backing_revoked"]),
     ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
@@ -11490,7 +11481,6 @@ fn run_machine_test(
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
-        "writeback_durability" => common::volumes::writeback_durability(test_config, c_bins, rust_bins),
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
         "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
@@ -11515,7 +11505,6 @@ fn run_machine_test(
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
-        "ftruncate_flush_race" => common::volumes::ftruncate_flush_race(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
         // The lost-wake canary with the window it guards held open: every pipe
