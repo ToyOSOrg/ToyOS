@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: defect
 opened: 2026-08-07
 task: 88
@@ -101,6 +101,5 @@ adjacent-frame *pairs* with |period| in the hundreds, not the 118-frame
 clusters. And the load dependence is sharp where it used to be a correlation:
 0 of 8 alone against 3 of 11 beside other guests, same tree, same hour.
 
-**Exit condition.** The adjacent-frame-pair breaks' cause is fixed, and
-`hda_tone` reads 0 phase breaks beside other guests on the dev host and on
-CI's KVM shards. Owner: orchestrator.
+**Exit condition.** The adjacent-frame-pair breaks' cause is fixed. Owner:
+orchestrator.

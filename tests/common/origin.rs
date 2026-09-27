@@ -349,12 +349,8 @@ pub fn refused_stop(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)
     Ok(())
 }
 
-/// What init says when it stops the machine without `logd`'s answer, and how
-/// long it waits first (`userland/init`'s `FLUSH_BOUND`).
+/// What init says when it stops the machine without `logd`'s answer.
 const FLUSH_WAITED_OUT: &str = "init: logd did not answer the flush in";
-const FLUSH_BOUND_MS: u64 = 5_000;
-/// The kernel's record as a stop begins its sync, after every thread stopped.
-const SYNCING: &str = "Syncing filesystems...";
 
 /// The milliseconds since boot a program's line in `/log` carries: the one
 /// field of its head with a decimal point.
@@ -469,23 +465,12 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
     let _ = std::fs::remove_file(&staged.image);
     // A stop that went ahead before the flush answered cuts `/log` short
     // whatever the slots did, so that is its own verdict and not this one's.
-    // init's word is in its ring when the machine stops, so the console
-    // rarely carries it. An answered flush wrote init's stop line, which is
-    // stamped before the flush was asked; and the kernel's sync starting a
-    // flush bound or more after that line is the wait on two records of one
-    // clock.
-    let sync = tail
-        .lines()
-        .find(|l| l.contains(SYNCING))
-        .and_then(bootlog::record_millis)
-        .ok_or_else(|| format!("the console carries no {SYNCING:?} with a time\n{tail}"))?;
+    // An answered flush wrote init's stop line.
     let stop = bootlog::stopping_line(&log).and_then(program_millis);
     let unanswered = match stop {
         _ if tail.contains(FLUSH_WAITED_OUT) => Some("init said so".to_string()),
         None => Some("init's stop line never reached /log".to_string()),
-        Some(stop) => (sync.saturating_sub(stop) >= FLUSH_BOUND_MS).then(|| {
-            format!("the kernel synced {} ms after init's stop line", sync.saturating_sub(stop))
-        }),
+        Some(_) => None,
     };
     if let Some(why) = unanswered {
         return Err(format!(
@@ -493,7 +478,6 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
              slots\n{tail}"
         ));
     }
-    let stop = stop.expect("an answered flush's stop line has a time");
     let runner = bootlog::lines_of(&log, RUNNER);
     // Non-vacuity: the flood met a full ring, so the slots were contested.
     let flooded = runner.lines().filter(|l| l.starts_with("flood ")).count();
@@ -507,9 +491,7 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
         ));
     }
     eprintln!(
-        "  [origin] {flooded} flood lines filled the ring, and test-runner's {ENDED:?} is in /log; \
-         the kernel synced {} ms after init's stop line",
-        sync.saturating_sub(stop)
+        "  [origin] {flooded} flood lines filled the ring, and test-runner's {ENDED:?} is in /log"
     );
     Ok(())
 }

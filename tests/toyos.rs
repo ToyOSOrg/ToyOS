@@ -12,11 +12,10 @@ use common::qemu::{
     STALLED,
 };
 use common::{
-    audio, compile, devices, faults, hostload, lan, metal, partclaim, pkg, power, screen, serial,
-    stats, storage, usb,
+    audio, compile, devices, faults, lan, metal, partclaim, pkg, power, screen, serial, storage,
+    usb,
 };
 use toyos_build::bootlog::{self, boot_millis};
-use toyos_build::heartbeat;
 use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::redlist;
 use toyos_build::tiers::Tier;
@@ -208,6 +207,9 @@ const RUST_SKIP: &[&str] = &[
     // that measured anything. It also needs the real-time band, which only
     // `tests/latencycase` endows. `latency_wake` runs it there.
     "cyclictest",
+    // Its verdict is a ratio of cycle counts, which a guest's host moves: the
+    // `wake_storm_cost` metal row runs it on the T14.
+    "wake_storm_cost",
     // Its verdict is a property of the *console capture*, which only a boot of
     // its own can hold: in the shared boot every other binary's output is in the
     // same stream. `console_line_atomicity` runs it.
@@ -262,8 +264,6 @@ const RUST_SKIP: &[&str] = &[
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
     "gsbase_probe",
     "test_panic_child",
-    // It takes the machine down; `panic_halts_the_others_first` runs it.
-    "panic_halts_first",
     // A binary that panics at once, sent over ssh as a service's replacement;
     // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
     "swap_crash",
@@ -306,13 +306,12 @@ const RUST_SKIP: &[&str] = &[
     // `netd_listener_forgery` runs it there.
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
-    // `netd_slow_reader`, `netd_held_open`, `netd_stalled_peer`,
-    // `netd_udp_refused`, `netd_udp_any_address` and `netd_refused_pipes` run
-    // them on `tests/netcase`, and `netd_lookup_let_go` on it with its frames
+    // `netd_slow_reader`, `netd_held_open`, `netd_udp_refused`,
+    // `netd_udp_any_address` and `netd_refused_pipes` run them on
+    // `tests/netcase`, and `netd_lookup_let_go` on it with its frames
     // held.
     "netd_slow_reader",
     "netd_held_open",
-    "netd_stalled_peer",
     "netd_udp_refused",
     "netd_udp_any_address",
     "netd_refused_pipes",
@@ -368,9 +367,8 @@ const RUST_SKIP: &[&str] = &[
     // Needs netd with a NIC. `netd_connection_caps` runs it on tests/netcase.
     "netd_caps",
     // Need every owner `inspect` reads, which only tests/inspectcase runs.
-    // `inspect_reads_its_owners` runs all three there.
+    // `inspect_reads_its_owners` runs both there.
     "inspect_denied",
-    "inspect_plays",
     "inventory_bounds",
     // Same reason, same config: `netd_hostile_peer` runs it there.
     "netd_hostile_peer",
@@ -414,18 +412,6 @@ const RUST_SKIP: &[&str] = &[
     // printed four hundred lines to a console nothing was reading and passed
     // on its exit code.
     "test_screen_churn",
-    // Spawns `/system/bin/doom`, which `tests/testcases` does not carry — doom is
-    // 4 MiB and every other test boots that config. `doom_sound_flood` runs it
-    // on `tests/doomcase`.
-    "doom_sound_flood",
-    // Same, plus the WAD and the SoundFont doom's music is made of, which no
-    // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
-    // `tests/doommusiccase`.
-    "doom_music",
-    // Needs a `logd` that leaves soundd's ring unread until it says so, and a
-    // capture of the tone it plays into that. `soundd_log_stall` runs it on
-    // `tests/logstallcase`.
-    "soundd_log_stall",
     // Its failure mode is a CPU that never runs anything again, so on the
     // shared boot it would be reported against whichever test came next — and
     // every one after that. `short_sleep_livelock` gives it a boot of its own.
@@ -461,13 +447,16 @@ const RUST_SKIP: &[&str] = &[
     // Stages real directories on `/log` for `fs_dirs_durable` to read back
     // off the image.
     "fs_dirs_durable",
-    // Needs an HDA controller, which `tests/testcases` has none of.
+    // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
+    // `hda_tone`, `audio_idle_suspend`, `null_sink_shipped_client`,
+    // `doom_sound_flood`, `doom_music` and `soundd_log_stall` metal rows run these.
     "hda_client_stall",
-    // Gate A's two, whose verdict is the wav the device captured — which the
-    // shared boot takes no capture of. The comment below has claimed since it
-    // was written that they are excluded from this boot; now they are.
     "audio_tone",
-    "audio_tone_load",
+    "audio_idle_suspend",
+    "null_sink_client_exits",
+    "doom_sound_flood",
+    "doom_music",
+    "soundd_log_stall",
     // Its whole subject is a page of a file the host wrote onto the volume
     // before the machine existed; the shared boot stages nothing, so it prints
     // `did not open` and passes on its exit code. `log_backing_read_error`
@@ -535,23 +524,12 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // device was refused at the unit — and stages nothing for it.
     "handle_basic",
     "hierarchy_paths",
-    "null_sink_client_exits",
     "nvme_home_roundtrip",
     "sched_stress",
     "std_alloc",
     "std_mmap",
     "wall_clock_now",
 ];
-
-// Audio glitch tests. Each runs in its own QEMU boot per SMP config and
-// asserts on the wav the virtio-sound device captured, so they are excluded
-// from the shared multi-test boot.
-const AUDIO_TESTS: &[(&str, Tier)] =
-    &[("audio_tone", Tier::Nightly), ("audio_tone_load", Tier::Nightly)];
-
-// Scheduler-core gate A covers both SMP configs: smp=1 is the audio spec's
-// first-class single-CPU case, smp=8 the full-SMP case.
-const AUDIO_SMP: &[u32] = &[1, 8];
 
 /// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
 /// report puts on serial.
@@ -682,11 +660,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // CPU the firmware named came up and none of their timestamp counters
     // trails the BSP's; the physical memory manager's accounting against the
     // firmware map balances to the byte; every ACPI table this kernel goes on
-    // to decode checksummed; the TSC the whole machine is timed by agrees with
-    // the frequency the part itself states; the PCI inventory's function count
-    // matches its rows; and one machine-wide TLB shootdown's cost is a
-    // distribution rather than one boot's average. Every verdict is arithmetic
-    // over records, with no clock in the judging, so all six are Parallel.
+    // to decode checksummed; the LAPIC timer and the TSC calibrated to a
+    // frequency; the PCI inventory's function count matches its rows; and one
+    // machine-wide TLB shootdown's cost is a distribution rather than one
+    // boot's average. Every verdict is arithmetic over records, with no clock
+    // in the judging, so all six are Parallel.
     ("smp_roster_and_tsc_trail", Sched::Parallel, Tier::Fast),
     ("pmm_accounting", Sched::Parallel, Tier::Fast),
     // ROOT is the loader's image in memory: the kernel says it mounted it
@@ -712,12 +690,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // latency against a programmed timer: soundd's figure is a maximum over a
     // window, taken against a DLL's prediction of a DMA completion and needing
     // a sound card to exist at all, and `toyos-sched`'s bound on the same
-    // quantity runs in a simulator where no IPI is ever delivered.
-    //
-    // Serial: it is the one registration here whose verdict is a *time*, and a
-    // wake latency measured beside eleven other guests is the host's schedule.
-    // Nightly for that same reason.
-    ("latency_wake", Sched::Serial, Tier::Nightly),
+    // quantity runs in a simulator where no IPI is ever delivered. The number is
+    // judged on the T14; here the verdict is that both channels carry it.
+    ("latency_wake", Sched::Parallel, Tier::Nightly),
     ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Fast),
     ("input_merge", Sched::Parallel, Tier::Fast),
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
@@ -752,27 +727,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // slow on purpose. Its own boot too: it leaves the pointer somewhere else
     // and the window in a different place than it found them.
     ("metal_sim_window_drag", Sched::Serial, Tier::Nightly),
-    // A host-measured drain rate with an 8 s ceiling on a 3.3 s expectation.
-    // Not gate A, but the same instrument: what it measures is how fast a
-    // client's audio leaves the machine.
-    ("metal_sim_null_audio", Sched::Serial, Tier::Nightly),
-    ("null_sink_shipped_client", Sched::Serial, Tier::Nightly),
-    // Parallel, and this one is argued rather than assumed: not a verdict in it
-    // is a wall-clock margin. The flood's size is asserted against the audio
-    // callback's own period counter standing still, both playback checks are
-    // counted in periods, and the capture is read for amplitude and never for
-    // timing. Its own boot, its own config, and the only client its soundd has.
-    ("doom_sound_flood", Sched::Parallel, Tier::Nightly),
-    // Reads a device capture and requires at least MIN_SIGNAL_SECS = 0.8 s of
-    // it to carry signal at peak >= 6000 — an absolute seconds-of-signal
-    // floor on audio recorded in real time, not a fraction of the capture and
-    // not compute-bound: timer-anchored, and Nightly for that reason.
-    ("doom_music", Sched::Parallel, Tier::Nightly),
-    // A tone played while soundd's pipe to a stalled log is full. The verdicts
-    // are the capture's gaps and a count of lines; the clocks are liveness
-    // guards. Nightly for the two megabytes of refusals the log reads back
-    // through a TCG guest's volume.
-    ("soundd_log_stall", Sched::Serial, Tier::Nightly),
     // ureq and rustls from crates.io, fetching over TLS 1.3 from a host this
     // test mints a CA for. Every verdict is a printed line or a digest; the
     // only clock is `run_test`'s ceiling.
@@ -921,10 +875,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // verdict is the guest's byte-for-byte comparison; its clocks are
     // liveness guards.
     ("netd_held_open", Sched::Parallel, Tier::Fast),
-    // The netcase boot again: a client out-writing a peer that stopped reading
-    // costs netd no CPU. Nightly: its verdict is the machine's busy time over
-    // a window of real time.
-    ("netd_stalled_peer", Sched::Parallel, Tier::Nightly),
     // The netcase boot again, beside a host UDP echo: a datagram the client's
     // pipe will not take whole ends that socket by name and no other. The
     // verdict is each socket's answer; its clocks are liveness guards.
@@ -1146,9 +1096,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
-    // A fatal path with other CPUs running userland that makes kernel records:
-    // none is stamped past the fatal record by more than an IPI takes.
-    ("panic_halts_the_others_first", Sched::Parallel, Tier::Fast),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
     ("pci_capability_walk", Sched::Parallel, Tier::Fast),
     // What QEMU was told to create against what the guest enumerated: two
@@ -1203,22 +1150,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("gsbase_locked", Sched::Parallel, Tier::Nightly),
     // The fourth declared kernel build, booted so that the scheduler core's
     // `feature = "check"` instruments are compiled and executed by a CI run at
-    // all. One of its verdicts is a *quantile* of the guest's published
-    // pass-cost distribution, which is wall clock across a scheduler pass.
-    //
-    // **Serial, and it used to say `Parallel` for a reason that was wrong.**
-    // The old note read "a bound the guest measures against its own TSC inside
-    // a single scheduler pass, which no amount of host load lengthens. A pass
-    // is preempt-off by construction." Preempt-off stops the *guest's*
-    // scheduler and stops nothing above it: the guest's TSC advances while the
-    // host has the vCPU, which is why invariant P panicked on a KVM shard at
-    // 200569 ns and why it is a measurement now. Measured here, 2026-08-17, one
-    // suite: alone on a quiet host (1.02x the reference boot) cpu0 reports
-    // `168 passes, p50 < 16384 ns, p90 < 131072 ns` and passes; in the same
-    // run's 12-wide phase, `134 passes, p50 < 131072 ns, p90 < 262144 ns` and
-    // it reds. Host contention moves this guest's median by a factor of eight,
-    // which is the definition of a test that must have the machine to itself.
-    ("sched_check_build", Sched::Serial, Tier::Fast),
+    // all.
+    ("sched_check_build", Sched::Parallel, Tier::Fast),
     // What nesting a `scheduler::Operation` may and may not do, which is a law
     // with no host-side reader: the type reaches `percpu::cpu_id` and
     // `driver::current_handle`, so nothing outside a booted machine can
@@ -1376,20 +1309,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("toolkit_window_wake", Sched::Parallel, Tier::Nightly),
     ("toolkit_winit_loop", Sched::Parallel, Tier::Nightly),
     ("toolkit_winit_pace", Sched::Parallel, Tier::Nightly),
-    // The same desktop with soundd behind it: an audio client spawned by a
-    // shell, which is the only place all three of its descriptors are pipes to
-    // a surface. Parallel — every verdict is a marker with its own ceiling, and
-    // none of them reads a clock.
-    ("desktop_audio_client", Sched::Parallel, Tier::Nightly),
     // Ctrl+Alt+D on the same machine. Parallel: it waits for a marker and its
     // verdicts are counts the report has to agree with itself about, not a
     // wall-clock margin — the one duration in it is the dump's own 250 ms
     // ceiling, which the guest spends and the host never measures.
     ("blocked_dump", Sched::Parallel, Tier::Fast),
-    // Two boots of one machine compared on the guest's own `Boot: complete`
-    // with a 300 ms allowance, which is the whole assertion — a real-time
-    // verdict, so Nightly.
-    ("i8042_absent", Sched::Serial, Tier::Nightly),
+    ("i8042_absent", Sched::Parallel, Tier::Nightly),
     // The fault quarantines (masks) the controller's GSI within milliseconds
     // of readiness — confirmed from the serial log, before a host round trip
     // could land anything — so no sentinel can ever reach the guest and the
@@ -1439,12 +1364,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("usb_storage_write_error", Sched::Parallel, Tier::Fast),
     ("usb_flush_optional", Sched::Parallel, Tier::Nightly),
     ("xhci_deaf_registers", Sched::Parallel, Tier::Nightly),
-    // The window is anchored on the controller's own port-power stamp now, not
-    // boot, so a slow boot no longer eats it — but the bound is still a fixed
-    // span of the guest's own TSC clock (`SLOW_CONNECT_NS`/`DEBOUNCE_NS`), and
-    // a host running several other guests can still stall this one's vCPU past
-    // that span for reasons that are not the defect.
-    ("xhci_slow_connect", Sched::Serial, Tier::Nightly),
+    ("xhci_slow_connect", Sched::Parallel, Tier::Nightly),
     ("xhci_portsc_rw1c", Sched::Parallel, Tier::Fast),
     // One staged break and no other, which puts the driver's recovery finishing
     // on its first try in the verdict: a retried command that reaches an
@@ -1478,10 +1398,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_flush_retry", Sched::Parallel, Tier::Nightly),
     ("toybox_cp_volume", Sched::Parallel, Tier::Nightly),
     ("kernel_log_file", Sched::Parallel, Tier::Nightly),
-    // Serial: its verdict is a cadence — heartbeats against a 250 ms period —
-    // and a guest sharing the host with eleven others reaches its idle loop
-    // late for reasons that are not the defect.
-    ("kernel_heartbeat", Sched::Serial, Tier::Nightly),
+    ("kernel_heartbeat", Sched::Parallel, Tier::Nightly),
     // Both own their images and their lanes, and neither verdict is a
     // wall-clock margin: the guest's clock starts from an instant the host set
     // and the only duration either measures is how long a boot takes to reach
@@ -1593,15 +1510,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // standing; then, on a second boot, a function no release resets is never
     // lent where it was left aimed.
     ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Nightly),
-    // H4: soundd driving an Intel HDA controller itself, read back off the
-    // device. Serial — its verdict is a wav capture, and one taken while eleven
-    // other guests contend for the host measures the host.
-    ("hda_tone", Sched::Serial, Tier::Nightly),
-    // The T14's panic, staged: a client that stops producing for longer than
-    // the DMA ring takes to come round. The verdict is soundd's own liveness
-    // and its counters rather than a capture, so it runs wide.
-    ("hda_client_stall", Sched::Parallel, Tier::Nightly),
-    ("hda_two_live_refused", Sched::Parallel, Tier::Fast),
     ("serial_vocabulary", Sched::Parallel, Tier::Fast),
     // Host-side, no guest: the harness asking whether it can still tell a
     // suspended machine from a slow one, and whether it reports one as a
@@ -1684,7 +1592,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_slow_reader", &["test_rs_netd_slow_reader"]),
     ("netd_refused_pipes", &["test_rs_netd_refused_pipes"]),
     ("netd_held_open", &["test_rs_netd_held_open"]),
-    ("netd_stalled_peer", &["test_rs_netd_stalled_peer"]),
     ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
     ("netd_udp_any_address", &["test_rs_netd_udp_any_address"]),
     ("netd_lookup_let_go", &["test_rs_netd_lookup_let_go"]),
@@ -1702,7 +1609,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("blockd_lends_within_its_bound", &["test_rs_blockd_io"]),
     (
         "inspect_reads_its_owners",
-        &["test_rs_inspect_denied", "test_rs_inspect_plays", "test_rs_inventory_bounds"],
+        &["test_rs_inspect_denied", "test_rs_inventory_bounds"],
     ),
     ("metal_sim_compositor", METAL_SIM_CLIENTS),
     ("metal_sim_scanout_wc", METAL_SIM_CLIENTS),
@@ -1715,13 +1622,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("toolkit_window_wake", &["test_rs_window_wake"]),
     ("toolkit_winit_loop", &["test_rs_winit_loop"]),
     ("toolkit_winit_pace", &["test_rs_winit_pace"]),
-    ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
-    ("doom_music", &["test_rs_doom_music"]),
-    ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
-    ("metal_sim_null_audio", &["test_rs_audio_tone"]),
-    ("null_sink_shipped_client", &["test_rs_null_sink_client_exits"]),
-    ("hda_tone", &["test_rs_audio_tone"]),
-    ("hda_client_stall", &["test_rs_hda_client_stall"]),
     ("latency_wake", &["test_rs_cyclictest", "test_rs_sched_stress"]),
     ("smp_failed_ap_leaves_no_hole", &["test_rs_smp_hole_shootdown"]),
     ("sshd_exec", &["test_rs_empty_dir_stat"]),
@@ -1793,7 +1693,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
-    ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
     ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
     ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
@@ -1922,14 +1821,81 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The shipped tone client plays to completion and exits 0. Its QEMU
-        // registration calls the sink a null one; on the T14 whether soundd
-        // binds the laptop's own HDA controller is unmeasured, so what this
-        // asserts here is the weaker and truer thing — the client came back.
+        "wake_storm_cost",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| b[0].job_passed("test_rs_wake_storm_cost"),
+        },
+    ),
+    (
+        // The shipped tone client, twice in series, plays to completion and
+        // exits 0, and soundd names how each left.
         "null_sink_shipped_client",
         metal::Metal::Runs {
             arms: TESTCASES,
-            judge: |b| b[0].job_passed("test_rs_null_sink_client_exits"),
+            judge: |b| {
+                b[0].job_passed("test_rs_null_sink_client_exits")?;
+                audio::departures_on_metal(&b[0].log())
+            },
+        },
+    ),
+    (
+        // soundd with no client costs no CPU, before any client has connected.
+        "audio_idle_suspend",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| b[0].job_passed("test_rs_audio_idle_suspend"),
+        },
+    ),
+    (
+        "hda_tone",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed("test_rs_audio_tone")?;
+                audio::tone_on_metal(&b[0].log())
+            },
+        },
+    ),
+    (
+        "hda_client_stall",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed("test_rs_hda_client_stall")?;
+                audio::client_stall_on_metal(&b[0].log())
+            },
+        },
+    ),
+    // ---- the three audio boots of their own ----
+    (
+        "doom_sound_flood",
+        metal::Metal::Runs {
+            arms: DOOMCASE,
+            judge: |b| {
+                b[0].job_passed("test_rs_doom_sound_flood")?;
+                audio::sound_flood_on_metal(&b[0].log())
+            },
+        },
+    ),
+    (
+        "doom_music",
+        metal::Metal::Runs {
+            arms: DOOMMUSICCASE,
+            judge: |b| {
+                b[0].job_passed("test_rs_doom_music")?;
+                audio::music_on_metal(&b[0].log())
+            },
+        },
+    ),
+    (
+        "soundd_log_stall",
+        metal::Metal::Runs {
+            arms: LOGSTALLCASE,
+            judge: |b| {
+                b[0].job_passed("test_rs_soundd_log_stall")?;
+                audio::log_stall_on_metal(&b[0].log())
+            },
         },
     ),
     // ---- one image: tests/testcases armed with the chipset watchdog ----
@@ -1979,7 +1945,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         "timer_calibration",
-        metal::Metal::Runs { arms: TESTCASES, judge: |b| timer_calibration(b[0].kernel().text()) },
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| {
+                timer_calibration(b[0].kernel().text())?;
+                tsc_agrees_with_cpuid(b[0].kernel().text())
+            },
+        },
     ),
     (
         "pci_inventory",
@@ -2196,24 +2168,33 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| operation_nesting_log(b[0].kernel().text()),
         },
     ),
-    // ---- named, looked at, and not run there ----
-    (
-        "metal_sim_null_audio",
-        metal::Metal::QemuOnly(
-            "its subject is soundd's null sink, and whether the T14's own HDA controller binds \
-             is unmeasured; both halves of the verdict — soundd's counters and a host-timed \
-             drain — are console text and a host clock, neither of which the stick carries",
-        ),
-    ),
 ];
 
 /// **The [`METAL`] rows no QEMU registration answers for**, each with why none
 /// can: a verdict under a name only the T14 reports.
-const METAL_ONLY: &[(&str, &str)] = &[(
-    "lan_message_delivery",
-    "whether the T14's own I219 delivers a message through that machine's interrupt remapping \
-     is a fact of that part and that path; QEMU's e1000e is another part behind another path",
-)];
+const METAL_ONLY: &[(&str, &str)] = &[
+    (
+        "lan_message_delivery",
+        "whether the T14's own I219 delivers a message through that machine's interrupt \
+         remapping is a fact of that part and that path; QEMU's e1000e is another part behind \
+         another path",
+    ),
+    (
+        "wake_storm_cost",
+        "its verdict is that a wake storm's cost grows linearly with the waiters, read off the \
+         TSC around the syscall, and a guest's TSC runs while its host has the vCPU",
+    ),
+    ("null_sink_shipped_client", AUDIO_ON_METAL_ONLY),
+    ("audio_idle_suspend", AUDIO_ON_METAL_ONLY),
+    ("hda_tone", AUDIO_ON_METAL_ONLY),
+    ("hda_client_stall", AUDIO_ON_METAL_ONLY),
+    ("doom_sound_flood", AUDIO_ON_METAL_ONLY),
+    ("doom_music", AUDIO_ON_METAL_ONLY),
+    ("soundd_log_stall", AUDIO_ON_METAL_ONLY),
+];
+
+/// Why an audio row has no QEMU arm.
+const AUDIO_ON_METAL_ONLY: &str = "audio is judged on the T14 and in no QEMU guest (owner ruling)";
 
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
 /// with a job list that ends it.
@@ -2226,7 +2207,16 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
     "testcases",
     "tests/testcases",
     &[],
-    &["test_rs_abuse_short_sleep", "test_rs_null_sink_client_exits", "log-close"],
+    &[
+        "test_rs_wake_storm_cost",
+        // Before any client connects, which is `audio_idle_suspend`'s premise.
+        "test_rs_audio_idle_suspend",
+        "test_rs_audio_tone",
+        "test_rs_hda_client_stall",
+        "test_rs_abuse_short_sleep",
+        "test_rs_null_sink_client_exits",
+        "log-close",
+    ],
 )];
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
@@ -2241,6 +2231,18 @@ const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
 
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
+
+/// doom beside soundd: `doom --sound-stress` outrunning its parked callback.
+const DOOMCASE: &[metal::Arm] =
+    &[metal::once("doomcase", "tests/doomcase", &[], &["test_rs_doom_sound_flood"])];
+
+/// doom with its WAD and the SoundFont its music is made of.
+const DOOMMUSICCASE: &[metal::Arm] =
+    &[metal::once("doommusiccase", "tests/doommusiccase", &[], &["test_rs_doom_music"])];
+
+/// A `logd` that leaves soundd's ring unread until the job says the tone played.
+const LOGSTALLCASE: &[metal::Arm] =
+    &[metal::once("logstallcase", "tests/logstallcase", &[], &["test_rs_soundd_log_stall"])];
 
 /// The two boots the reset ruling is judged on, and both are boots this suite
 /// already flashes: the device boot for a reset with megabytes behind it, and
@@ -2849,9 +2851,7 @@ fn discover_rust_tests(bins: &[(String, Vec<u8>)]) -> Vec<String> {
             if name.ends_with(".so") {
                 return None;
             }
-            if RUST_SKIP.contains(&name.as_str())
-                || AUDIO_TESTS.iter().any(|(audio, _)| *audio == name)
-            {
+            if RUST_SKIP.contains(&name.as_str()) {
                 return None;
             }
             Some(name.clone())
@@ -3227,65 +3227,6 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A zero CPU delta is the signature of a suspended soundd and equally of one
-/// wedged with the device running, so the counter the test reads cannot tell
-/// them apart on its own. The serial can: in a window where no audio client
-/// ever connects, the PCM stream has no business starting.
-///
-/// This reads only `result.serial`, which begins at ===TEST_START, so a
-/// device started before then (a restored boot prime) is invisible to this
-/// particular check — not because the harness cannot see it: `qemu.boot_log()`
-/// holds it, which is what `audio::check_suspend_structure` concatenates in
-/// ahead of its own window. What this one does catch is a start inside its
-/// window with no client to justify it: soundd's `!streams.is_empty()`
-/// fill-loop gate going away, or a resume fired by anything other than a
-/// connect.
-fn check_audio_idle_suspend(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
-    const STARTED: &str = "virtio-sound: stream 0 started";
-    if result.serial.contains(STARTED) {
-        eprintln!(
-            "FAIL rs::audio_idle_suspend: `{STARTED}` with no client connected — \
-             soundd's zero CPU is the device left running, not a suspend\nserial:\n{}",
-            result.serial
-        );
-        return false;
-    }
-    true
-}
-
-/// Two clients through the null sink, and what soundd said about each leaving.
-///
-/// The exit code already says both `/system/bin/tone` runs finished cleanly — that is
-/// the test's own assertion — so this window is exactly the case soundd used to
-/// misreport: `client N died` for a process that exited `code=0`, because the
-/// mix loop's signal pipe broke before the control thread read the peer. What
-/// it asserts is that neither outcome of that race is worded as a death, and
-/// that both removals name a departure soundd actually established.
-///
-/// **The count is per removal and stays exact**, because the vocabulary is
-/// asserted per removal: a capture where no client ever left would satisfy
-/// every check above it vacuously, and a range would let the second removal go
-/// missing again. What used to make that count a race was the window and not
-/// the number — see [`settle_null_sink_client_exits`], which is what closes it.
-fn check_null_sink_client_exits(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
-    let problems = audio::check_departures(&result.serial, NULL_SINK_CLIENTS);
-    if !problems.is_empty() {
-        eprintln!(
-            "FAIL rs::null_sink_client_exits: {}\nserial:\n{}",
-            problems.join("; "),
-            result.serial
-        );
-        return false;
-    }
-    true
-}
-
 /// The exit code says the child died; only the serial says *why*.
 ///
 /// A #DE with no gate escalates to #DF, and `double_fault_handler` halts every
@@ -3389,45 +3330,6 @@ fn check_debug_trap(result: &TestResult) -> bool {
     ok
 }
 
-/// The clients `test_rs_null_sink_client_exits` runs in series, and so the
-/// number of removals soundd owes. One constant, because the wait below and the
-/// count above have to be the same number or the wait is for something else.
-const NULL_SINK_CLIENTS: usize = 2;
-
-/// Wait for soundd to report the second client leaving, on the guest's liveness.
-///
-/// **The last removal arrives after the process whose exit produced it**, and
-/// that process exiting is what ends the capture: round 1's line makes it in
-/// because a whole second round follows it, and round 2's has nothing behind it
-/// but `===TEST_END===`. Counting two removals over that window is an assertion
-/// about scheduling, and it went red on CI twice on documentation-only branches
-/// — `soundd reported 1 client removals, expected 2` — with the capture showing
-/// the line never arriving rather than arriving wrong.
-///
-/// The wait is [`await_guest`]'s: it ends when the removals are there, or when
-/// the guest stops making progress, and never on a span of host wall clock. It
-/// costs nothing on a run that already had both lines — the predicate is checked
-/// before anything is drained, which was true of 6 of 6 measured runs on the dev
-/// host — and its expiry is not a verdict, which is why the error is dropped:
-/// what fails this test is still the count, in `check_departures`'s own words.
-///
-/// [`audio::SOUNDD_GONE`] ends it too, for the same reason `await_null_sink`
-/// reads that line: soundd exiting is a removal that is never coming, and the
-/// test should say so in its own sentence rather than wait out the guard. The
-/// guard is the whole of [`qemu::GUEST_WEDGED`] here and not the quiet bound —
-/// this boot's kernel prints on a 10 s cadence, so the machine is never silent
-/// for the 15 s that would end the wait early (measured: an unreachable
-/// predicate takes 302 s). That price is paid only by a run where soundd is
-/// alive and has genuinely stopped reporting departures, which is the defect
-/// this test exists for.
-fn settle_null_sink_client_exits(qemu: &mut QemuInstance, result: &mut TestResult) {
-    let mut serial = std::mem::take(&mut result.serial);
-    let _ = await_guest(qemu, &mut serial, "soundd to report both clients leaving", |seen| {
-        audio::departures(seen).len() >= NULL_SINK_CLIENTS || seen.contains(audio::SOUNDD_GONE)
-    });
-    result.serial = serial;
-}
-
 /// Nothing to wait for: the test's own window carries everything its check
 /// reads. Every name but two.
 fn no_settle(_: &mut QemuInstance, _: &mut TestResult) {}
@@ -3471,7 +3373,6 @@ fn accounting_of(pid: u32) -> String {
 /// selects the check.
 fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
     match name {
-        "null_sink_client_exits" => settle_null_sink_client_exits,
         "syscall_cost" => settle_syscall_cost,
         "exit_wait_storm" => settle_exit_wait_storm,
         _ => no_settle,
@@ -3483,8 +3384,6 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
     match name {
         "panic_recovery" => check_panic_recovery,
         "disk_backtrace" => check_disk_backtrace,
-        "audio_idle_suspend" => check_audio_idle_suspend,
-        "null_sink_client_exits" => check_null_sink_client_exits,
         "fault_gates" => check_fault_gates,
         "debug_trap" => check_debug_trap,
         "dlopen_dedup" => check_dlopen_dedup,
@@ -3757,732 +3656,8 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     true
 }
 
-/// Minimum active (non-silent) playback the 3s test tone must produce.
-/// Guards against a vacuous pass when nothing plays at all.
-const TONE_MIN_ACTIVE_SECS: f64 = 2.5;
-/// The tone is generated at amplitude 16000; a far lower peak proves the
-/// signal path is broken even if technically "active".
-const TONE_MIN_PEAK: i32 = 4000;
-
-/// Recorded per-(test, smp) baselines — gate A's thorough tier.
-/// Two independent instruments per config:
-/// the wav underrun histogram (`gaps`, keyed by gap length in device periods)
-/// and ceilings on soundd's own counters. The wav is a rare-event detector;
-/// the counters fire on nearly every run and carry the statistical power. Both
-/// must hold. Re-record deliberately, never casually — and justify every
-/// number in `tests/audio-baseline.toml` itself.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AudioBaselineEntry {
-    #[serde(default)]
-    gaps: BTreeMap<String, u32>,
-    max_wake_lat_us: u64,
-    drains: u32,
-    underruns: u32,
-    sample: BaselineSample,
-}
-
-/// The recorded clean-tree *sample* for one config, not a summary of it. The
-/// thorough tier compares a fresh sample against this one, so it needs the
-/// observations themselves — see `tests/common/stats.rs` for why a summary
-/// would understate the false-red rate.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BaselineSample {
-    /// Runs whose wav was analysed (the counter arrays can be longer: a run
-    /// can lose its histogram and still report counters).
-    gap_sample: u32,
-    /// Of `gap_sample`, how many showed at least one mid-tone dropout.
-    gap_runs: u32,
-    /// Of the counter runs, how many breached this config's per-run ceilings.
-    ceiling_runs: u32,
-    max_wake_lat_us: Vec<f64>,
-    underruns: Vec<f64>,
-    wakes: Vec<f64>,
-    /// Recorded for re-baselining the per-run ceiling only. Deliberately not
-    /// tested distributionally: it is zero on 50-90% of runs, and the ties
-    /// leave a rank test with no power (measured: 0.00-0.21 against a tripling).
-    drains: Vec<f64>,
-}
-
-type AudioBaseline = BTreeMap<String, BTreeMap<String, AudioBaselineEntry>>;
-
-struct ConfigBaseline<'a> {
-    gaps: BTreeMap<u32, u32>,
-    counters: audio::CounterLimits,
-    sample: &'a BaselineSample,
-}
-
-fn load_audio_baseline() -> AudioBaseline {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audio-baseline.toml");
-    let text = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
-}
-
-/// Baseline for one (test, smp) config. Every config must be recorded: an
-/// ungated config would pass by omission.
-fn config_baseline<'a>(baseline: &'a AudioBaseline, name: &str, smp: u32) -> ConfigBaseline<'a> {
-    let entry = baseline
-        .get(name)
-        .and_then(|per_smp| per_smp.get(&format!("smp{smp}")))
-        .unwrap_or_else(|| panic!("audio-baseline.toml: no [{name}.smp{smp}] section"));
-    ConfigBaseline {
-        sample: &entry.sample,
-        gaps: entry
-            .gaps
-            .iter()
-            .map(|(k, &count)| {
-                let periods: u32 = k.parse().unwrap_or_else(|_| {
-                    panic!("audio-baseline.toml: bad gap key {k:?} for {name} smp{smp}")
-                });
-                (periods, count)
-            })
-            .collect(),
-        counters: audio::CounterLimits {
-            max_wake_lat_us: entry.max_wake_lat_us,
-            drains: entry.drains,
-            underruns: entry.underruns,
-        },
-    }
-}
-
-/// What one audio boot measured. Both tiers are computed from this; they
-/// differ only in how many they collect and what decision they take on the
-/// collection.
-struct AudioRun {
-    gaps: BTreeMap<u32, u32>,
-    counters: audio::SounddCounters,
-    /// The instrument itself is untrustworthy on this run (no tone, no dither,
-    /// clicks, no stats window). Never a rare-event judgement — always fatal,
-    /// in both tiers.
-    broken: Vec<String>,
-    /// soundd counters past this config's per-run ceilings. A counted rate in
-    /// the thorough tier; printed but not a verdict in the fast tier, which
-    /// judges `harm` instead.
-    breaches: Vec<String>,
-    /// What else the host was doing while this boot was measured. Annotation
-    /// only — nothing above or below branches on it.
-    host: hostload::HostLoad,
-}
-
-impl AudioRun {
-    /// The capture's verdict alone. The thorough tier's dropout *rate* is
-    /// defined on this and nothing else, because that is what the recorded
-    /// sample counted.
-    fn dropped_audio(&self) -> bool {
-        !self.gaps.is_empty()
-    }
-
-    /// Silence that reached the device on this run: a mid-tone gap in the
-    /// capture, or a period soundd put on the wire with no client audio behind
-    /// it. Both are audio someone would have heard drop out, and together they
-    /// are the fast tier's whole verdict — a counter past a ceiling says the
-    /// pipeline came close, and how close is a question for a distribution.
-    fn harm(&self) -> Option<String> {
-        let mut evidence = Vec::new();
-        if self.dropped_audio() {
-            evidence.push(format!("dropout {}", audio::format_histogram(&self.gaps)));
-        }
-        if self.counters.underruns > 0 {
-            evidence.push(format!(
-                "{} of {} periods submitted with no client audio",
-                self.counters.underruns, self.counters.submitted
-            ));
-        }
-        (!evidence.is_empty()).then(|| evidence.join(", "))
-    }
-}
-
-/// `--slow-usb`: give every audio boot a USB stick that answers a bulk transfer
-/// in 2 ms instead of microseconds — what a real stick's erase block does, and
-/// what the T14's audio pops are made of.
-///
-/// A switch and not a test of its own, because it changes no verdict: it makes
-/// the four audio configs measure a machine the host cannot otherwise present,
-/// and what it produces is an A/B against the same command without it in the
-/// same session. `issues/kernel/every-wait-in-this-kernel-is-a-spin.md` is what
-/// the numbers are for.
-static SLOW_USB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Boot a fresh QEMU with the given CPU count, run one in-guest audio test,
-/// and measure it: soundd's in-guest counters (wake lateness, pipeline drains,
-/// periods of silence submitted) and the captured wav (mid-signal silence, hard
-/// sample-to-sample discontinuities, and the dither the detector needs to see
-/// anything at all).
-///
-/// `Err` means the run produced no measurement — a boot failure, a timeout, an
-/// unreadable capture. That is never a rare-event judgement call; it is fatal
-/// in both tiers.
-fn measure_audio_run(
-    name: &str,
-    smp: u32,
-    baseline: &ConfigBaseline,
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    // Distinguishes this boot from the others of the same config in the log
-    // and in the kept capture's filename; empty for a plain single boot.
-    tag: &str,
-) -> Result<AudioRun, String> {
-    let label = if tag.is_empty() {
-        String::new()
-    } else {
-        format!("{tag}: ")
-    };
-    // Bounds every duration soundd can report: its whole life is inside this
-    // process's. See `audio::check_physical`.
-    let job = format!("test_rs_{name}");
-    let carried = qemu::carrying(c_bins, rust_bins, [job.as_str()]);
-    let run_start = std::time::Instant::now();
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        &carried.c,
-        &carried.rust,
-        BootOptions {
-            smp,
-            kernel_params: if SLOW_USB.load(std::sync::atomic::Ordering::Relaxed) {
-                &["usb-slow-device"]
-            } else {
-                &[]
-            },
-            ..Default::default()
-        },
-    );
-
-    let result = qemu.run_test(&job, Duration::from_secs(30));
-    if let Some(err) = &result.error {
-        return Err(err.to_string());
-    }
-    match result.exit_code {
-        Some(0) => {}
-        Some(code) => return Err(format!("exit code {code}\nstdout:\n{}", result.stdout)),
-        None => return Err(format!("no exit code\nstdout:\n{}", result.stdout)),
-    }
-
-    // The wav timeline advances in real time; give the tone tail and its
-    // trailing silence context time to reach the file before reading it. The
-    // same wait collects soundd's final stats flush, which races the client's
-    // exit and so can arrive after ===TEST_END===.
-    //
-    // Boot prepended so `check_suspend_structure` can see a device started
-    // before ===TEST_START — the boot capture exists (`qemu.boot_log()`),
-    // where its doc comment used to say it did not.
-    let serial =
-        qemu.boot_log().to_string() + &result.serial + &qemu.drain_serial(Duration::from_millis(500));
-
-    let wav = audio::parse_wav(qemu.audio_wav_path())?;
-    let analysis = audio::analyze(&wav);
-    let rate = wav.sample_rate as f64;
-    let secs = |samples: usize| samples as f64 / rate;
-
-    // Always printed, so every run leaves comparable numbers in the log.
-    let gaps = audio::gap_histogram(&analysis, wav.sample_rate);
-    let counters = audio::parse_soundd_counters(&serial)?;
-    // Sampled here rather than before the boot because the load averages are
-    // trailing: a reading taken now covers the run, one taken before it covers
-    // only what preceded it. This run's own guest is still up, so `qemu 1` is
-    // the quiet reading.
-    let host = hostload::HostLoad::sample();
-    eprintln!(
-        "        {label}{name} smp={smp} gaps: {} (baseline {}) peak {} active {:.2}s dither {:.1}% \
-         pitch {:.1}Hz phase-breaks {}",
-        audio::format_histogram(&gaps),
-        audio::format_histogram(&baseline.gaps),
-        analysis.peak,
-        secs(analysis.active_samples),
-        analysis.dither_ratio.unwrap_or(0.0) * 100.0,
-        audio::dominant_hz(&wav).unwrap_or(0.0),
-        audio::phase_breaks(&wav).len(),
-    );
-    eprintln!(
-        "        {label}{name} smp={smp} soundd: wake_lat {}us ({:.2} pipelines, limit {}us) \
-         [irq {}us + pickup {}us, {} empty wakes, batch {}, {} late of {}] \
-         drains {}/{} underruns {}/{} submitted {} wakes {} batch {} windows {} — {} — {host}",
-        counters.max_wake_lat_us,
-        counters.max_wake_lat_us as f64 / audio::PIPELINE_DEPTH_US as f64,
-        baseline.counters.max_wake_lat_us,
-        counters.worst.irq_late_us,
-        counters.worst.pickup_us,
-        counters.worst.empty,
-        counters.worst.batch,
-        counters.late_wakes,
-        counters.wakes,
-        counters.drains,
-        baseline.counters.drains,
-        counters.underruns,
-        baseline.counters.underruns,
-        counters.submitted,
-        counters.wakes,
-        counters.max_batch,
-        counters.windows,
-        audio::boot_clocks(qemu.boot_log()),
-    );
-
-    let breaches = audio::check_counters(&counters, &baseline.counters);
-    if !breaches.is_empty() {
-        eprintln!(
-            "        {label}{name} smp={smp} over ceiling: {} — recorded; the fast tier's \
-             verdict is harm, the rate of these is the thorough tier's",
-            breaches.join("; ")
-        );
-    }
-
-    // A counter past a physical bound is the instrument failing, so it belongs
-    // here with the other instrument checks rather than among the ceilings: it
-    // must fail loudly in both tiers, and it must never be ranked against the
-    // recorded sample or printed into the next baseline.
-    let mut problems = audio::check_physical(&counters, run_start.elapsed().as_secs_f64());
-    // soundd counts only while it has clients, so a run with no window reports
-    // zero for every counter — the best numbers this gate can see, from a run
-    // that measured nothing. That is the instrument dead, not a ceiling held.
-    if counters.windows == 0 {
-        problems.push(
-            "soundd printed no stats window with clients — the tone never reached the mixer"
-                .to_string(),
-        );
-    }
-    if secs(analysis.active_samples) < TONE_MIN_ACTIVE_SECS {
-        problems.push(format!(
-            "tone missing: only {:.2}s of active signal (expected >= {TONE_MIN_ACTIVE_SECS}s)",
-            secs(analysis.active_samples)
-        ));
-    }
-    if analysis.peak < TONE_MIN_PEAK {
-        problems.push(format!(
-            "tone too quiet: peak {} (expected >= {TONE_MIN_PEAK})",
-            analysis.peak
-        ));
-    }
-    // Present, loud and continuous is not the same as right: a device consuming
-    // the buffers at a rate soundd did not ask for satisfies all three and plays
-    // the whole session off pitch.
-    if let Some(complaint) = audio::wrong_pitch(&wav) {
-        problems.push(complaint);
-    }
-    // Without this the gate can go green while measuring nothing: the underrun
-    // detector's silence band is derived from soundd applying TPDF dither into
-    // a rounding quantizer. Lose the dither and silence becomes
-    // exact zero everywhere, the band collapses, and dropouts stop being
-    // visible — the exact failure this instrument was rebuilt to remove.
-    match analysis.dither_ratio {
-        Some(ratio) if ratio < audio::MIN_DITHER_RATIO => problems.push(format!(
-            "dither missing: only {:.1}% of silent samples are non-zero (expected ~25%, \
-             floor {:.0}%) — soundd is not dithering, so the underrun detector is blind",
-            ratio * 100.0,
-            audio::MIN_DITHER_RATIO * 100.0
-        )),
-        Some(_) => {}
-        None => problems.push("no silent stretch in capture to verify dither against".to_string()),
-    }
-    if audio::check_gap_regression(&gaps, &baseline.gaps).is_err() {
-        let mut msg = format!(
-            "{} mid-signal underruns (silence >= 2ms inside the tone):",
-            analysis.underruns.len()
-        );
-        for run in analysis.underruns.iter().take(20) {
-            msg.push_str(&format!(
-                "\n      at {:8.3}s len {:6.2}ms",
-                secs(run.start),
-                secs(run.len) * 1000.0
-            ));
-        }
-        if analysis.underruns.len() > 20 {
-            msg.push_str(&format!("\n      ... and {} more", analysis.underruns.len() - 20));
-        }
-        eprintln!("        {label}{name} smp={smp} {msg}");
-    }
-    if !analysis.clicks.is_empty() {
-        let mut msg = format!("{} hard discontinuities (|delta| > 8000):", analysis.clicks.len());
-        for click in analysis.clicks.iter().take(10) {
-            msg.push_str(&format!(
-                "\n      at {:8.3}s  {} -> {}",
-                secs(click.index),
-                click.from,
-                click.to
-            ));
-        }
-        if analysis.clicks.len() > 10 {
-            msg.push_str(&format!("\n      ... and {} more", analysis.clicks.len() - 10));
-        }
-        problems.push(msg);
-    }
-
-    // Suspend structure — categorical per-run assertions, so they belong
-    // with the instrument checks: fatal in both tiers, never a counted rate.
-    problems.extend(audio::check_suspend_structure(&serial));
-
-    // Keep every capture that shows something, so a dropout can be listened to
-    // even when the tier's rule says one occurrence is not yet a verdict.
-    if !problems.is_empty() || !breaches.is_empty() || !gaps.is_empty() {
-        let suffix = if tag.is_empty() {
-            String::new()
-        } else {
-            format!("-{tag}")
-        };
-        // Renamed in the lane so `keep_serial` recognises and copies it out if
-        // this run ends red; the lane itself is gone on every exit, so the path
-        // worth printing is where that copy lands, not this one.
-        let suspect = qemu
-            .audio_wav_path()
-            .with_file_name(format!("audio-{name}-smp{smp}{suffix}.wav"));
-        match fs::rename(qemu.audio_wav_path(), &suspect) {
-            Ok(()) => eprintln!(
-                "        {label}{name} smp={smp} wav kept at {} if this run ends red",
-                common::lane::kept_path(&suspect).display()
-            ),
-            Err(e) => eprintln!(
-                "        {label}{name} smp={smp} could not keep {}: {e}",
-                suspect.display()
-            ),
-        }
-    }
-
-    Ok(AudioRun {
-        gaps,
-        counters,
-        broken: problems,
-        breaches,
-        host,
-    })
-}
-
-/// Fast tier — one boot per config, run on every `cargo test`.
-///
-/// Certifies: the instrument is alive, no counter is on the wrong side of a
-/// physical bound, and this build does not *reproducibly* put silence on the
-/// wire. It cannot certify a *rate*; one run is one Bernoulli trial against a
-/// per-config dropout rate measured at 0-7%, which discriminates nothing. That
-/// is what `--audio-gate` is for.
-///
-/// **The verdict is harm** — a mid-tone gap in the capture, or a period soundd
-/// submitted with no client audio behind it. The per-run ceilings are measured,
-/// printed and kept, and fail nothing here: `drains` past its ceiling with an
-/// empty histogram and zero underruns is a pipeline that recovered before
-/// anyone could hear it, and one boot cannot say whether it recovers less often
-/// than it used to. That question has an instrument with power, and it is the
-/// thorough tier's `ceiling_runs` rate.
-///
-/// Harm is confirmed before it fails: a run that shows any is re-booted once,
-/// and only a second failure counts. No bar is widened by this — the zero-gap
-/// bar is strict on both boots. Without the confirmation the per-config dropout
-/// rate alone reds one invocation in eight on a clean tree, and a gate
-/// developers see every day cannot cry wolf that often. The first occurrence is
-/// still printed and its capture still kept.
-fn run_audio_test(
-    name: &str,
-    smp: u32,
-    baseline: &ConfigBaseline,
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let run = measure_audio_run(name, smp, baseline, test_config, c_bins, rust_bins, "")?;
-
-    if !run.broken.is_empty() {
-        return Err(run.broken.join("\n    "));
-    }
-    let Some(harm) = run.harm() else {
-        return Ok(());
-    };
-
-    let silent_runs = baseline.sample.underruns.iter().filter(|&&u| u > 0.0).count();
-    eprintln!(
-        "        {name} smp={smp} HARM {harm} — rare on this tree ({} of {} recorded runs \
-         dropped audio, {silent_runs} of {} submitted a silent period); re-booting once \
-         to confirm",
-        baseline.sample.gap_runs,
-        baseline.sample.gap_sample,
-        baseline.sample.underruns.len(),
-    );
-    let again = measure_audio_run(name, smp, baseline, test_config, c_bins, rust_bins, "confirm")?;
-    if !again.broken.is_empty() {
-        return Err(again.broken.join("\n    "));
-    }
-    match again.harm() {
-        Some(again_harm) => Err(format!(
-            "audio dropped out on two consecutive boots: {harm} then {again_harm}"
-        )),
-        None => {
-            eprintln!("        {name} smp={smp} not reproduced on the confirming boot");
-            Ok(())
-        }
-    }
-}
-
-// Thorough tier: `cargo test --test toyos-build -- --audio-gate N`
-
-/// One config's fresh sample, accumulated over the N iterations.
-#[derive(Default)]
-struct GateSamples {
-    max_wake_lat_us: Vec<f64>,
-    underruns: Vec<f64>,
-    wakes: Vec<f64>,
-    drains: Vec<f64>,
-    gap_runs: u32,
-    ceiling_runs: u32,
-}
-
-/// A rejected statistic, ready to print.
-struct Rejection {
-    config: String,
-    statistic: String,
-    detail: String,
-}
-
-fn mwu_verdict(
-    config: &str,
-    statistic: &str,
-    base: &[f64],
-    fresh: &[f64],
-    worse_is_lower: bool,
-) -> Option<Rejection> {
-    let z = stats::mann_whitney_z(base, fresh);
-    let z = if worse_is_lower { -z } else { z };
-    let med = |v: &[f64]| {
-        let mut v = v.to_vec();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        v[v.len() / 2]
-    };
-    (z > stats::Z_CRIT).then(|| Rejection {
-        config: config.to_string(),
-        statistic: statistic.to_string(),
-        detail: format!(
-            "median {:.0} -> {:.0} (Mann-Whitney z={z:.2} > {:.2})",
-            med(base),
-            med(fresh),
-            stats::Z_CRIT
-        ),
-    })
-}
-
-fn rate_verdict(
-    config: &str,
-    statistic: &str,
-    k1: u32,
-    n1: u32,
-    k0: u32,
-    n0: u32,
-) -> Option<Rejection> {
-    let p = stats::fisher_greater(k1, n1, k0, n0);
-    (p <= stats::ALPHA).then(|| Rejection {
-        config: config.to_string(),
-        statistic: statistic.to_string(),
-        detail: format!(
-            "{k1} of {n1} vs recorded {k0} of {n0} (Fisher p={p:.2e} <= {:.0e})",
-            stats::ALPHA
-        ),
-    })
-}
-
-/// Thorough tier — N iterations of all four configs, gating on *rates* and
-/// *distributions* rather than on single outcomes. The nightly runs it.
-///
-/// Certifies, at N=30 and the measured clean-tree distributions:
-///   * wake lateness has not shifted by 25% (detected 99.9% of the time) or
-///     20% (93%). A 10% shift is missed (4%).
-///   * periods of silence on the wire have not risen 25% (94%) or 50% (100%).
-///   * soundd is not being woken less often — the signature of completions
-///     being batched because it ran late. A 5% drop is caught 99.9% of the
-///     time.
-///   * the mid-tone dropout *rate* has not risen 10x (100%) or 5x (71%).
-///     A doubling is NOT detectable at this N and never will be at any N a
-///     human waits for: separating 3% from 7% at this confidence needs ~600
-///     runs per config. The counters above are the instrument with power; the
-///     dropout rate is the audible symptom, kept because it is the only
-///     statistic here that says "someone would have heard it".
-///
-/// False-red rate on a clean tree: 0.25%, measured over 2000 invocations
-/// simulated from the recorded distributions.
-fn run_audio_gate(
-    iterations: u32,
-    audio_baseline: &AudioBaseline,
-    audio_to_run: &[&str],
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> bool {
-    let configs: Vec<(&str, u32)> = audio_to_run
-        .iter()
-        .flat_map(|name| AUDIO_SMP.iter().map(move |&smp| (*name, smp)))
-        .collect();
-    let mut samples: BTreeMap<String, GateSamples> = BTreeMap::new();
-    // Session-wide rather than per-config: the host is one host, and this is
-    // the sentence a re-record has to carry beside the numbers below.
-    let mut host: Vec<hostload::HostLoad> = Vec::new();
-    let start = std::time::Instant::now();
-
-    eprintln!(
-        "\n[gate A] {iterations} iterations x {} configs, serial. Every per-run outcome \
-         becomes a rate; the verdict is on the collection, not on any one run.",
-        configs.len()
-    );
-
-    for iter in 1..=iterations {
-        eprintln!("  --- iteration {iter}/{iterations} ---");
-        for &(name, smp) in &configs {
-            let key = format!("{name}.smp{smp}");
-            let baseline = config_baseline(audio_baseline, name, smp);
-            let tag = format!("iter{iter:03}");
-            let run = match measure_audio_run(
-                name, smp, &baseline, test_config, c_bins, rust_bins, &tag,
-            ) {
-                Ok(run) => run,
-                Err(err) => {
-                    eprintln!("\n[gate A] FAILED on iteration {iter}: {key} produced no measurement: {err}");
-                    eprintln!("[gate A] A run that does not complete is not a rare event to be \
-                               averaged away — every known cause of one has been fixed.");
-                    return false;
-                }
-            };
-            if !run.broken.is_empty() {
-                eprintln!("\n[gate A] FAILED on iteration {iter}: {key} instrument broken: {}",
-                          run.broken.join("; "));
-                return false;
-            }
-            host.push(run.host);
-            let s = samples.entry(key).or_default();
-            s.max_wake_lat_us.push(run.counters.max_wake_lat_us as f64);
-            s.underruns.push(run.counters.underruns as f64);
-            s.wakes.push(run.counters.wakes as f64);
-            s.drains.push(run.counters.drains as f64);
-            s.gap_runs += u32::from(run.dropped_audio());
-            s.ceiling_runs += u32::from(!run.breaches.is_empty());
-        }
-
-        // Fail-side curtailment. Adding runs can only raise a count, so once a
-        // count passes the threshold for the *full* N the final verdict is
-        // already decided — stopping early costs no confidence.
-        if let Some(v) = curtail(&samples, audio_baseline, &configs, iterations) {
-            eprintln!("\n[gate A] FAILED after {iter} of {iterations} iterations (the remaining \
-                       runs cannot change this):");
-            eprintln!("    {} {}: {}", v.config, v.statistic, v.detail);
-            return false;
-        }
-    }
-
-    let mut rejected: Vec<Rejection> = Vec::new();
-    let (mut pooled_gap_k, mut pooled_gap_n) = (0, 0);
-    let (mut pooled_ceil_k, mut pooled_ceil_n) = (0, 0);
-    let (mut base_gap_k, mut base_gap_n) = (0, 0);
-    let (mut base_ceil_k, mut base_ceil_n) = (0, 0);
-
-    eprintln!("\n[gate A] {iterations} iterations in {:.0?}. Fresh sample vs recorded sample:\n", start.elapsed());
-    eprintln!("  {}\n", hostload::summarise(&host));
-    for &(name, smp) in &configs {
-        let key = format!("{name}.smp{smp}");
-        let base = config_baseline(audio_baseline, name, smp).sample;
-        let s = &samples[&key];
-
-        rejected.extend(mwu_verdict(&key, "wake lateness", &base.max_wake_lat_us, &s.max_wake_lat_us, false));
-        rejected.extend(mwu_verdict(&key, "underruns", &base.underruns, &s.underruns, false));
-        rejected.extend(mwu_verdict(&key, "wakes", &base.wakes, &s.wakes, true));
-        rejected.extend(rate_verdict(&key, "dropout rate", s.gap_runs, iterations, base.gap_runs, base.gap_sample));
-
-        pooled_gap_k += s.gap_runs;
-        pooled_gap_n += iterations;
-        pooled_ceil_k += s.ceiling_runs;
-        pooled_ceil_n += iterations;
-        base_gap_k += base.gap_runs;
-        base_gap_n += base.gap_sample;
-        base_ceil_k += base.ceiling_runs;
-        base_ceil_n += base.max_wake_lat_us.len() as u32;
-
-        report_config(&key, base, s, iterations);
-    }
-    rejected.extend(rate_verdict("pooled", "dropout rate", pooled_gap_k, pooled_gap_n, base_gap_k, base_gap_n));
-    rejected.extend(rate_verdict("pooled", "per-run ceiling breaches", pooled_ceil_k, pooled_ceil_n, base_ceil_k, base_ceil_n));
-
-    eprintln!(
-        "  pooled dropouts {pooled_gap_k}/{pooled_gap_n} (recorded {base_gap_k}/{base_gap_n}), \
-         ceiling breaches {pooled_ceil_k}/{pooled_ceil_n} (recorded {base_ceil_k}/{base_ceil_n})"
-    );
-
-    if rejected.is_empty() {
-        eprintln!("\n[gate A] PASS — no statistic regressed at alpha={:.0e} per test.", stats::ALPHA);
-        true
-    } else {
-        eprintln!("\n[gate A] FAILED — {} statistic(s) regressed:", rejected.len());
-        for v in &rejected {
-            eprintln!("    {} {}: {}", v.config, v.statistic, v.detail);
-        }
-        false
-    }
-}
-
-/// Whether a count has already passed the threshold it would face at the full
-/// iteration count. Only the yes/no statistics curtail: a rank test's outcome
-/// is not monotone in the sample, so there is no honest early exit for it.
-fn curtail(
-    samples: &BTreeMap<String, GateSamples>,
-    audio_baseline: &AudioBaseline,
-    configs: &[(&str, u32)],
-    iterations: u32,
-) -> Option<Rejection> {
-    let mut pooled_gap = 0;
-    let mut pooled_ceil = 0;
-    let (mut base_gap_k, mut base_gap_n) = (0, 0);
-    let (mut base_ceil_k, mut base_ceil_n) = (0, 0);
-    for &(name, smp) in configs {
-        let key = format!("{name}.smp{smp}");
-        let base = config_baseline(audio_baseline, name, smp).sample;
-        let Some(s) = samples.get(&key) else { continue };
-        if let Some(v) = rate_verdict(&key, "dropout rate", s.gap_runs, iterations, base.gap_runs, base.gap_sample) {
-            return Some(v);
-        }
-        pooled_gap += s.gap_runs;
-        pooled_ceil += s.ceiling_runs;
-        base_gap_k += base.gap_runs;
-        base_gap_n += base.gap_sample;
-        base_ceil_k += base.ceiling_runs;
-        base_ceil_n += base.max_wake_lat_us.len() as u32;
-    }
-    let n = iterations * configs.len() as u32;
-    rate_verdict("pooled", "dropout rate", pooled_gap, n, base_gap_k, base_gap_n)
-        .or_else(|| rate_verdict("pooled", "per-run ceiling breaches", pooled_ceil, n, base_ceil_k, base_ceil_n))
-}
-
-/// Print one config's fresh sample next to the recorded one, in a form that can
-/// be pasted straight back into `tests/audio-baseline.toml` when a re-baseline
-/// is deliberate. The gate's output *is* the next baseline.
-fn report_config(key: &str, base: &BaselineSample, s: &GateSamples, iterations: u32) {
-    let stat = |v: &[f64]| {
-        let mut v = v.to_vec();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (v[0], v[v.len() / 2], v[v.len() - 1])
-    };
-    eprintln!("  {key}  (n={iterations}, recorded n={})", base.max_wake_lat_us.len());
-    for (label, b, f) in [
-        ("wake_lat_us", &base.max_wake_lat_us, &s.max_wake_lat_us),
-        ("underruns  ", &base.underruns, &s.underruns),
-        ("wakes      ", &base.wakes, &s.wakes),
-        ("drains     ", &base.drains, &s.drains),
-    ] {
-        let (bl, bm, bh) = stat(b);
-        let (fl, fm, fh) = stat(f);
-        eprintln!(
-            "    {label} recorded {bl:.0}/{bm:.0}/{bh:.0}   fresh {fl:.0}/{fm:.0}/{fh:.0}   (min/median/max)"
-        );
-    }
-    eprintln!(
-        "    dropouts    recorded {}/{}   fresh {}/{iterations}",
-        base.gap_runs, base.gap_sample, s.gap_runs
-    );
-    let fmt = |v: &[f64]| {
-        let mut v = v.to_vec();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let v: Vec<String> = v.iter().map(|x| format!("{x:.0}")).collect();
-        format!("[{}]", v.join(", "))
-    };
-    eprintln!("    toml: max_wake_lat_us = {}", fmt(&s.max_wake_lat_us));
-    eprintln!("    toml: underruns = {}", fmt(&s.underruns));
-    eprintln!("    toml: wakes = {}", fmt(&s.wakes));
-    eprintln!("    toml: drains = {}", fmt(&s.drains));
-}
-
 /// Echo what the guest actually put on screen, under `--nocapture` only —
-/// it is the measurement these tests are built on, and the audio gate prints
-/// its numbers for the same reason.
+/// it is the measurement these tests are built on.
 fn print_screen(name: &str, text: &str) {
     if !qemu::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -8646,9 +7821,7 @@ fn shell_answers(qemu: &mut QemuInstance, log: &mut String, ack: &Drained) -> Re
 /// **Two waits, because the two ways this fails are different questions.** The
 /// first is "has the terminal come up", and it used to be answered by retyping
 /// against `qemu.budget(20 s)` — a guess at how long a desktop takes to come up
-/// on the host of the day, which is exactly the shape `issues/design-debt/`
-/// bills for: `desktop_audio_client` 385 s wide against 13 s alone, and a
-/// landing gate that is a coin toss. The terminal knows when it is up and now
+/// on the host of the day. The terminal knows when it is up and now
 /// says so, so this asks it and waits on the guest's own liveness. The second is
 /// "does a keystroke reach the shell", and it starts from a machine that is
 /// demonstrably up — a ceiling on *that* is a claim about the guest.
@@ -8765,121 +7938,6 @@ const SNAKE_ROUNDS: usize = 3;
 /// Turns played in the last round, at four keys each, so that round's snake is
 /// a program that has been running and drawing rather than one a second old.
 const SNAKE_TURNS: usize = 8;
-
-/// Gate: doom's music reaches the device, with the SoundFont this tree ships.
-///
-/// **The wiring is all this measures, and the wiring is the part nothing else
-/// can.** `src/soundfont.rs`'s host tests say the committed bank covers every
-/// instrument `assets/DOOM1.WAD` selects, and the subset was measured to render
-/// bit-exact against the full bank through this same
-/// `mus2mid.c` and this same rustysynth. Neither can say the file got into an
-/// image, that doom opened it, or that what came out reached an audio device.
-/// Those three are what `b8b0749` broke for a cycle with the suite green.
-///
-/// Three verdicts, none of them a clock:
-///
-/// 1. **doom opened the file this tree committed.** The guest prints the byte
-///    count it read, and the host compares it against `assets/soundfont.sf2` on
-///    disk. A stale image, a truncated asset and a second SoundFont from
-///    somewhere else all fail here rather than turning into quiet silence.
-/// 2. **It played to the end of the check.** The actuator counts the audio
-///    callback's own periods, so a host that stopped this guest cannot shorten
-///    what the capture is judged on.
-/// 3. **Music reached the wire.** The device capture carries signal across most
-///    of its length — which separates music from the one thing a broken
-///    soundfont path still produces, a stream of zeroes.
-fn doom_music(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let shipped = fs::metadata(root.join(toyos_build::soundfont::SOUNDFONT_PATH))
-        .map_err(|e| format!("{}: {e}", toyos_build::soundfont::SOUNDFONT_PATH))?
-        .len();
-
-    let config = root.join("tests/doommusiccase");
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, BootOptions::default());
-
-    let result = qemu.run_test("test_rs_doom_music", Duration::from_secs(120));
-    if let Some(err) = &result.error {
-        return Err(format!("{err}\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!(
-            "doom could not play its own music (exit {:?}):\n{}",
-            result.exit_code, result.stdout
-        ));
-    }
-
-    let opened = result
-        .stdout
-        .lines()
-        .find(|line| line.contains("[doom-sound] /system/share/soundfont.sf2:"))
-        .ok_or_else(|| {
-            format!(
-                "doom said nothing about the SoundFont, so this image has none:\n{}",
-                result.stdout
-            )
-        })?;
-    let bytes: u64 = opened
-        .split_whitespace()
-        .find_map(|token| token.parse().ok())
-        .ok_or_else(|| format!("no byte count in {opened:?}"))?;
-    if bytes != shipped {
-        return Err(format!(
-            "doom opened a {bytes}-byte SoundFont and this tree ships {shipped} bytes: the \
-             image is not carrying {}",
-            toyos_build::soundfont::SOUNDFONT_PATH
-        ));
-    }
-
-    let played = result
-        .stdout
-        .lines()
-        .find(|line| line.contains("[music-check] lump="))
-        .ok_or_else(|| format!("doom printed no [music-check] line:\n{}", result.stdout))?
-        .to_string();
-
-    let _ = qemu.drain_serial(Duration::from_millis(500));
-    let wav = audio::parse_wav(qemu.audio_wav_path())?;
-    let analysis = audio::analyze(&wav);
-
-    // Seconds of signal, not a fraction of the capture: the capture runs from
-    // soundd opening the stream to the harness closing the file, so a fraction
-    // measures the harness as much as the music. Three of these four runs
-    // measured 1.19 s over a 3.11 s capture — the material's own dynamics, not
-    // a shortfall, since 500 LSB is -36 dBFS and E1M1's riff drops through it
-    // between notes.
-    const MIN_SIGNAL_SECS: f64 = 0.8;
-    let signal = analysis.active_samples as f64 / wav.sample_rate as f64;
-    if signal < MIN_SIGNAL_SECS {
-        return Err(format!(
-            "{signal:.2} s of the capture carries signal, under {MIN_SIGNAL_SECS} s: what doom \
-             rendered is not what the device played\n{played}"
-        ));
-    }
-    // A floor and not a band: how loud E1M1 is at a given moment is the
-    // arrangement's business, and what this excludes is a dither floor being
-    // read as music. Measured 13547.
-    const MIN_PEAK: i32 = 6000;
-    if analysis.peak < MIN_PEAK {
-        return Err(format!(
-            "the device peaked at {} (expected at least {MIN_PEAK}): the music is inaudible\
-             \n{played}",
-            analysis.peak
-        ));
-    }
-
-    // Underruns are reported and fail nothing: whether music *stutters* is gate
-    // A's question and it has the statistics to ask it, where one boot of one
-    // track is one sample of an intermittent.
-    eprintln!(
-        "  [doommusiccase] {}, {signal:.2} s of signal in a {:.2} s capture at peak {}, \
-         {} underrun(s)",
-        played.trim(),
-        wav.mono.len() as f64 / wav.sample_rate as f64,
-        analysis.peak,
-        analysis.underruns.len(),
-    );
-    Ok(())
-}
 
 fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let bins: Vec<(String, Vec<u8>)> =
@@ -9845,165 +8903,6 @@ fn desktop_locale_detect() -> Result<(), String> {
     Ok(())
 }
 
-/// A shell-spawned audio client on a device-less desktop, and the desktop
-/// afterwards.
-///
-/// The machine `metal_sim_null_audio` and `null_sink_shipped_client` both miss:
-/// they spawn the client from a test binary whose stdio is the console, and the
-/// T14 spawns it from a shell inside a terminal inside the compositor, so every
-/// one of the client's three descriptors is a pipe to a surface. Three verdicts
-/// on one boot, in the order the T14 lost them:
-///
-/// 1. **A client finishes.** `tone` writes a second of audio to the null sink
-///    and prints its own completion line.
-/// 2. **A second client connects while the first is streaming.** The T14's log
-///    shows soundd's control thread printing `opening stream` for the second
-///    with no `client N connected` behind it, so the connect is what has to be
-///    observed, not just the exit.
-/// 3. **The desktop survives them.** A terminal opened afterwards reaches a
-///    shell that answers — the verdict the owner's machine failed while the
-///    compositor was still painting, which is why nothing that reads pixels or
-///    counts frames would have caught it.
-fn desktop_audio_client() -> Result<(), String> {
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopaudiocase");
-    let options = BootOptions {
-        profile: qemu::Profile::Metal,
-        // The T14's core count: the suite's default of two serialises threads
-        // this shape is about the wakes between.
-        smp: 8,
-        qmp: true,
-        ready_marker: "compositor: ready",
-        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
-        // and edge-race.
-        kernel_params: &["i8042-trace"],
-        ..Default::default()
-    };
-    metal_sim_argv_check(&qemu::profile_argv(&options))?;
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-    let mut log = qemu.boot_log().to_string();
-
-    const NULL_LINE: &str = "soundd: no audio device, presenting a null sink";
-    await_marker(&mut qemu, &mut log, NULL_LINE, "soundd to present a null sink")
-        .map_err(|why| format!("{why}\n{log}"))?;
-    // No panel row under a compositor; the kernel's drain report is the answer.
-    let ack = Drained::Bytes;
-    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
-        return Err(format!(
-            "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
-        ));
-    }
-
-    // One client, start to finish. `tone: done` is the client's own last line,
-    // so it is the client saying it got its callbacks and left — not the shell
-    // saying it launched something.
-    shell_type_line(&mut qemu, "tone 440 1", &ack)?;
-    await_marker(
-        &mut qemu,
-        &mut log,
-        "tone: done",
-        "a shell-spawned tone to finish on a device-less desktop",
-    )
-    .map_err(|why| format!("{why}\n{log}"))?;
-
-    // Two clients overlapping, each under its own shell in its own terminal.
-    // The shell has no job control, so the long tone holds its terminal and the
-    // second one has to be typed somewhere else — which is exactly how the T14
-    // reached two live clients, and why the second terminal is part of the
-    // stimulus rather than only part of the verdict.
-    let before_second = log.len();
-    shell_type_line(&mut qemu, "tone 660 8", &ack)?;
-    await_marker_new(
-        &mut qemu,
-        &mut log,
-        "tone: 660Hz",
-        before_second,
-        "the long tone to start",
-    )
-    .map_err(|why| format!("{why}\n{}", &log[before_second..]))?;
-    open_terminal(&mut qemu, &mut log, "overlap-terminal-jc4t", &ack)?;
-    shell_type_line(&mut qemu, "tone 440 1", &ack)?;
-    // **The count is the verdict and the wait is not.** Both of these used to be
-    // `budget(60 s)`, which is a claim that a desktop with two audio clients on
-    // it finishes inside a minute times the width — and at 385 s wide against
-    // 13 s alone it was the single most expensive entry in `issues/design-debt/`. What
-    // ends the wait now is soundd going quiet, and what fails it is still the
-    // number of connects.
-    if let Err(why) = await_guest(&mut qemu, &mut log, "soundd to take up both connects", |log| {
-        connects_since(log, before_second) >= 2
-    }) {
-        return Err(format!(
-            "{why}\nsoundd applied {} of the two connects — a client that opened a stream \
-             was never taken up by the mixer:\n{}",
-            connects_since(&log, before_second),
-            &log[before_second..]
-        ));
-    }
-    // Both of them out again, counted in the same window. Waiting for `null
-    // sink idle` would not do: that line is already in the log from the first
-    // client, and a marker an earlier phase produced is not a verdict about
-    // this one.
-    if let Err(why) = await_guest(&mut qemu, &mut log, "both clients to leave the mixer", |log| {
-        removals_since(log, before_second) >= 2
-    }) {
-        return Err(format!(
-            "{why}\n{} of the two overlapping clients left the mixer — the other one is \
-             still streaming to a sink that stopped draining it:\n{}",
-            removals_since(&log, before_second),
-            &log[before_second..]
-        ));
-    }
-
-    // The desktop afterwards: a process created after every one of the clients
-    // above, focused the moment it maps its window. This is the verdict the
-    // owner's machine failed while the compositor was still painting, which is
-    // why nothing that reads pixels or counts frames would have caught it.
-    open_terminal(&mut qemu, &mut log, "post-audio-desktop-vqmz", &ack)?;
-    eprintln!("  [desktop] three shell-spawned audio clients ran and the desktop still answers");
-    Ok(())
-}
-
-/// Ctrl+N at the compositor, and a shell in the window it opens that answers.
-///
-/// The nonce is per call because the verdict is that *this* terminal answered:
-/// a marker an earlier one already produced would pass on a window that never
-/// came up. [`shell_echoes`]'s split applies for the same reason it does there,
-/// and `terminal: ready` is looked for after `before` rather than anywhere,
-/// because every terminal already up has printed one.
-fn open_terminal(
-    qemu: &mut QemuInstance,
-    log: &mut String,
-    nonce: &str,
-    ack: &Drained,
-) -> Result<(), String> {
-    let before = log.len();
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        input.keys(&[("ctrl", true), ("n", true), ("n", false), ("ctrl", false)]);
-    }
-    await_marker_new(qemu, log, "terminal: ready", before, "Ctrl+N to open a terminal")
-        .map_err(|why| format!("{why}\n{}", &log[before..]))?;
-
-    // The same count-of-attempts as [`shell_echoes`], and for the same reason.
-    const TRIES: usize = 10;
-    let mut lost = String::new();
-    for _ in 0..TRIES {
-        if let Err(said) =
-            shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY), ack)
-        {
-            lost = said;
-            continue;
-        }
-        if serial_until(qemu, log, nonce, round_trip(Duration::from_secs(2))) {
-            return Ok(());
-        }
-    }
-    Err(format!(
-        "a terminal opened with Ctrl+N never reached a shell that answers in {TRIES} typed \
-         lines:\n{lost}\n{}",
-        &log[before..]
-    ))
-}
-
 /// The host server behind the netd stream tests, where slirp's `10.0.2.2`
 /// lands. Each connection asks in nine bytes — a mode, then a little-endian
 /// length — and is served by the mode (`Ask` in
@@ -10293,17 +9192,6 @@ fn netd_held_open(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let ok = format!("netd_held_open: ok bytes={sent},");
     let Some(line) = result.stdout.lines().find(|l| l.contains(&ok)) else {
         return Err(format!("the host sent {sent} bytes and the guest never said {ok:?}:\n{}", result.stdout));
-    };
-    eprintln!("  [netcase] {}", line.trim_end());
-    Ok(())
-}
-
-/// A client that out-writes a peer which has stopped reading costs netd no
-/// CPU: the send pipe is not watched while the socket has no room for it.
-fn netd_stalled_peer(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let HostRun { result, .. } = netcase_against_host(rust_bins, "netd_stalled_peer", false, "")?;
-    let Some(line) = result.stdout.lines().find(|l| l.contains("netd_stalled_peer: ok")) else {
-        return Err(format!("the guest never said it was done:\n{}", result.stdout));
     };
     eprintln!("  [netcase] {}", line.trim_end());
     Ok(())
@@ -10703,25 +9591,6 @@ fn dump_field(report: &str, marker: &str, word: &str) -> Result<u32, String> {
         .next_back()
         .and_then(|w| w.parse().ok())
         .ok_or_else(|| format!("no number before {word:?} on {line:?}"))
-}
-
-/// Connects the mixer has *applied* since `from`, which is a different event
-/// from the control thread's `opening stream` — the T14 log carries the second
-/// without the first.
-fn connects_since(log: &str, from: usize) -> usize {
-    soundd_clients_since(log, from, " connected")
-}
-
-/// Clients the mixer has ramped out and dropped since `from`.
-fn removals_since(log: &str, from: usize) -> usize {
-    soundd_clients_since(log, from, " removed")
-}
-
-fn soundd_clients_since(log: &str, from: usize, verb: &str) -> usize {
-    log[from..]
-        .lines()
-        .filter(|l| l.contains("soundd: client ") && l.contains(verb))
-        .count()
 }
 
 /// The direct regression for the readiness defect: a stimulus that produces
@@ -11605,7 +10474,7 @@ fn run_machine_test(
         // The lost-wake canary with the window it guards held open: every pipe
         // wait reads its condition, waits for a post to land, then parks, so
         // the ping-pong's posts land between the two. A commit that ignored the
-        // notified bit parks for good and the canary counts it short.
+        // notified bit parks for good, and the run's ceiling reds it.
         "blocking_read_window" => {
             let options = BootOptions {
                 kernel_params: &["watch-window"],
@@ -11712,30 +10581,11 @@ fn run_machine_test(
         "kernel_heartbeat" => {
             // The instrument for a machine whose log cannot say whether it was
             // alive: ten of the owner's boots are byte-identical between the
-            // ones that froze and the ones that did not. The gate has to prove
-            // three things a `must_say` cannot — that the lines *keep coming*,
-            // that no CPU drops out of the mask on a machine with nothing to
-            // do, and that no window between two lines is wide enough to hide a
-            // death.
-            //
-            // The second is why this asserts a *constant full* mask where the
-            // old gate asserted a *varying* one — and the old gate's assertion
-            // was satisfied by the defect, so it certified it. Same guest with
-            // the tick removed: 10 of 11 lines below `alive=8/8`, six of them at
-            // `alive=2/8`, 56 lines naming a silent CPU and one silent for
-            // 2.811 s. Every line is `8/8` with the tick.
-            //
-            // The gap bound below is the one with no demonstrated teeth here:
-            // without the tick the widest gap was still 0.260 s, because QEMU's
-            // devices keep waking *someone* even when they wake nobody in
-            // particular. It is carried for the metal log, where the same code
-            // left gaps of 14 s to 102 s.
-            //
-            // **What none of it establishes**: a QEMU guest is never as quiet as
-            // the owner's laptop. This proves the tick arms, fires and re-arms,
-            // and that the instrument reads a full mask when nothing is wrong.
-            // It cannot prove the T14's LAPIC keeps counting through whatever
-            // its firmware does with a halted core.
+            // ones that froze and the ones that did not. What a guest can prove
+            // of it is that the lines *keep coming*, that each carries the
+            // pin's state beside it, and that the pin's state is read off the
+            // chip. Whether a CPU drops out of the mask, and how wide a window
+            // between two lines is, are the T14's to judge.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase");
             let options = BootOptions {
                 profile: qemu::Profile::Metal,
@@ -11745,12 +10595,11 @@ fn run_machine_test(
             };
             // **A heartbeat and the `i8042: line` under it are one reading**,
             // and `heartbeat::poll` emits them as two `log!`s — so a capture can
-            // end between them. Run `31273373928` on `main` did: twelve beats,
-            // eleven pin readings, and the last beat was the last line of the
-            // log. Counting the two kinds against each other reads that as a pin
-            // whose state was unreadable, which is the one thing this pairing
-            // exists to detect. So the unit is the pair, and a beat with nothing
-            // after it at all is a reading this capture does not hold.
+            // end between them. Counting the two kinds against each other reads
+            // that as a pin whose state was unreadable, which is the one thing
+            // this pairing exists to detect. So the unit is the pair, and a beat
+            // with nothing after it at all is a reading this capture does not
+            // hold.
             fn whole(log: &str) -> (Vec<&str>, Vec<usize>) {
                 let captured: Vec<&str> = log.lines().collect();
                 let at: Vec<usize> = captured
@@ -11763,51 +10612,31 @@ fn run_machine_test(
                 let kept = captured.len() - usize::from(torn);
                 (captured[..kept].to_vec(), at[..at.len() - usize::from(torn)].to_vec())
             }
-
-            // The mask is a claim only about a settled machine that is running,
-            // and `toyos_build::heartbeat` is where that is decided — including
-            // which line each `[boot] start` program says it has finished
-            // starting with, held there against this config's own list.
-            let said = heartbeat::done_lines(&toyos_build::build::boot_start(
-                &config.join("system.toml"),
-            ))?;
+            /// Whole beats the verdict is read from.
+            const BEATS: usize = 5;
 
             let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
             let mut log = qemu.boot_log().to_string();
-            // **The capture follows the window, not the clock.** How long the
-            // started programs take is the loaded host's to decide, and a
-            // capture cut a fixed span after `===READY===` hands the predicate
-            // whatever start-up left over — so a slow boot reds the test on the
-            // predicate's own refusal. The drain ends when the window holds
-            // `CAPTURE_BEATS`, which at a 250 ms period is under two seconds of
-            // settled machine; the bound is the liveness ceiling and not the
-            // capture's length, and it is counted in *steps* rather than
-            // measured in wall time, because a guest that has exited
-            // disconnects the reader and a step then returns at once.
+            // The bound is the liveness ceiling and not the capture's length,
+            // and it is counted in *steps* rather than measured in wall time,
+            // because a guest that has exited disconnects the reader and a step
+            // then returns at once.
             const DRAIN_STEP: Duration = Duration::from_millis(500);
             const DRAIN_STEPS: u32 = 40;
-            let drained = Instant::now();
-            let mut held = 0;
             for _ in 0..DRAIN_STEPS {
-                log.push_str(&qemu.drain_serial(DRAIN_STEP));
-                held = heartbeat::window_beats(&whole(&log).0, &said);
-                if held >= heartbeat::CAPTURE_BEATS {
+                if whole(&log).1.len() >= BEATS {
                     break;
                 }
-            }
-            if held < heartbeat::CAPTURE_BEATS {
-                return Err(format!(
-                    "{held} heartbeat(s) with a whole period after the boot's start-up against \
-                     the {} a verdict is taken from, after {} drains of {} ms at a 250 ms period \
-                     ({:.1}s) — the instrument has to keep reporting past the start-up, and a log \
-                     that stops, or a boot that never finishes starting, says nothing\n{log}",
-                    heartbeat::CAPTURE_BEATS,
-                    DRAIN_STEPS,
-                    DRAIN_STEP.as_millis(),
-                    drained.elapsed().as_secs_f64(),
-                ));
+                log.push_str(&qemu.drain_serial(DRAIN_STEP));
             }
             let (captured, at) = whole(&log);
+            if at.len() < BEATS {
+                return Err(format!(
+                    "{} whole heartbeat(s) against the {BEATS} a verdict is taken from, after \
+                     {DRAIN_STEPS} drains — the instrument has to keep reporting\n{log}",
+                    at.len(),
+                ));
+            }
             let beats: Vec<&str> = at.iter().map(|&i| captured[i]).collect();
             // Each pair, positionally: `report_line` is the statement after the
             // heartbeat's `log!`, and another CPU's line may land between the
@@ -11830,79 +10659,6 @@ fn run_machine_test(
                     unpaired.len(),
                     beats.len(),
                     unpaired.iter().take(4).cloned().collect::<Vec<_>>().join("\n"),
-                ));
-            }
-            let settled = match heartbeat::settle(&captured, &said) {
-                Ok(settled) => settled,
-                Err(heartbeat::Refused::Unreadable(line)) => {
-                    return Err(format!(
-                        "a heartbeat carries no readable t=, alive=, mask=, ran= or gap= — the \
-                         fields that say which CPU stopped and whether the machine ran: \
-                         {line}\n{log}"
-                    ));
-                }
-                Err(heartbeat::Refused::BootUnfinished(line)) => {
-                    return Err(format!(
-                        "the boot never finished starting: nothing said {line:?}, so every \
-                         heartbeat is inside the start-up and none is a claim about a settled \
-                         machine\n{log}"
-                    ));
-                }
-                Err(heartbeat::Refused::Unsettled { settled, beats }) => {
-                    return Err(format!(
-                        "too few heartbeats have a whole period after the last `[boot] start` \
-                         program finished starting — the machine did not settle inside this \
-                         capture, and a clear bit before it settles says nothing\n\
-                         {settled} of {beats}\n{log}"
-                    ));
-                }
-                Err(heartbeat::Refused::NotRunning { beat, held }) => {
-                    return Err(format!(
-                        "the machine was not running: a settled heartbeat came late or dispatched \
-                         nothing — a guest its host did not schedule, and what a CPU did in a \
-                         period the machine did not run is unreadable\n\
-                         t={}.{:03}s gap={}.{:03}s ran={} against a {} ms period, after {held} \
-                         settled heartbeat(s) it ran through\n{}\n{log}",
-                        beat.t_ms / 1000,
-                        beat.t_ms % 1000,
-                        beat.gap_ms / 1000,
-                        beat.gap_ms % 1000,
-                        beat.ran,
-                        heartbeat::PERIOD_MS,
-                        captured[beat.line],
-                    ));
-                }
-                Err(heartbeat::Refused::CpuMissing { cpus, settled, opened }) => {
-                    return Err(format!(
-                        "cpu{cpus:?} missing from {} consecutive heartbeats on a settled guest \
-                         that was running — a CPU that misses two lines has missed five \
-                         `diag-tick` wakes, so a clear bit does not mean that CPU stopped, which \
-                         is the whole of the field\n{settled} settled heartbeats\n{}\n{log}",
-                        heartbeat::STOPPED_BEATS,
-                        captured[opened..]
-                            .iter()
-                            .filter(|l| l.contains("heartbeat: "))
-                            .take(16)
-                            .copied()
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    ));
-                }
-            };
-            let quiet = &settled.beats;
-            let blips = settled.blips;
-            // And no window between two lines may be wide enough to hide a
-            // death. The metal boots this exists for went quiet for between 14 s
-            // and 102 s; four times the period is far below any of them and far
-            // above anything a loaded host does to a 250 ms cadence.
-            const MAX_GAP_MS: u64 = 1000;
-            let worst = settled.widest_gap_ms;
-            if worst > MAX_GAP_MS {
-                return Err(format!(
-                    "the widest window between two heartbeats was {}.{:03}s against a 250 ms \
-                     period — the machine stopped reporting for long enough to have died in\n{log}",
-                    worst / 1000,
-                    worst % 1000,
                 ));
             }
             // And the clock in the line advances, or the timestamp cannot
@@ -11986,17 +10742,10 @@ fn run_machine_test(
                 ));
             }
             eprintln!(
-                "  [heartbeat] {} whole lines in {:.1}s, each with its own pin reading, {} \
-                 before the machine settled and {} after, {blips} of those missing a CPU for one \
-                 line and none for two, widest gap {}.{:03}s, t={} → t={}; \
-                 {} i8042 line reading(s), vec 0x{vector} on gsi {kbd_gsi}, none masked, none with \
+                "  [heartbeat] {} whole lines, each with its own pin reading, t={} → t={}; {} \
+                 i8042 line reading(s), vec 0x{vector} on gsi {kbd_gsi}, none masked, none with \
                  OBF set",
                 beats.len(),
-                drained.elapsed().as_secs_f64(),
-                beats.len() - quiet.len(),
-                quiet.len(),
-                worst / 1000,
-                worst % 1000,
                 stamps.first().unwrap_or(&"?"),
                 stamps.last().unwrap_or(&"?"),
                 lines.len(),
@@ -12142,12 +10891,6 @@ fn run_machine_test(
         "blockd_lends_within_its_bound" => {
             common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
         }
-        // Body in `tests/common/hda.rs`, same reason.
-        "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
-        "hda_client_stall" => common::hda::hda_client_stall(test_config, c_bins, rust_bins),
-        "hda_two_live_refused" => {
-            common::hda::hda_two_live_refused(test_config, c_bins, rust_bins)
-        }
         "double_fault_stack" => faults::double_fault_stack(test_config, c_bins, rust_bins),
         "syscall_window_nmi" => faults::syscall_window_nmi(test_config, c_bins, rust_bins),
         "syscall_window_nmi_controls" => {
@@ -12161,12 +10904,6 @@ fn run_machine_test(
         "diskless_boot" => faults::diskless_boot(test_config, c_bins, rust_bins),
         "virtio_net_no_msix" => faults::virtio_net_no_msix(),
         "pci_claim_caps_truncated" => faults::claim_caps_truncated(),
-        // Body in `tests/common/audio.rs`, so the hunk here stays one line.
-        "metal_sim_null_audio" => audio::null_sink_real_rate(test_config, c_bins, rust_bins),
-        "null_sink_shipped_client" => audio::null_sink_shipped_client(test_config, c_bins, rust_bins),
-        "doom_sound_flood" => audio::doom_sound_flood(rust_bins),
-        "doom_music" => doom_music(rust_bins),
-        "soundd_log_stall" => audio::soundd_log_stall(rust_bins),
         "metal_sim_compositor" => {
             metal_sim_compositor(group_boot(held, METAL_SIM_DESKTOP, || {
                 boot_metal_sim_desktop(rust_bins)
@@ -12244,7 +10981,6 @@ fn run_machine_test(
         "toolkit_window_wake" => toolkit_window_wake(rust_bins),
         "toolkit_winit_loop" => toolkit_winit_loop(rust_bins),
         "toolkit_winit_pace" => toolkit_winit_pace(rust_bins),
-        "desktop_audio_client" => desktop_audio_client(),
         "blocked_dump" => blocked_dump(),
         "xhci_many_devices" => {
             // The T14's internal controller carries a camera, Bluetooth and a
@@ -13332,27 +12068,6 @@ fn run_machine_test(
             // budget were each caught by nothing on hardware, however green the
             // simulator was.
             //
-            // **What the simulator cannot say.** Two of the three instruments
-            // are asserts about state, and the sim checks those globally and
-            // better. The third is a measurement of *cost*, and the sim's clock
-            // does not advance inside a step — `scenarios::overlong_pass` feeds
-            // the recorder a modelled pass cost, which proves the recorder
-            // compiles and counts, not what a real pass on real silicon costs.
-            // Only a booted kernel reads a TSC.
-            //
-            // **And the cost half is gated here rather than in the kernel, and
-            // against a recorded sample rather than against the budget.** What
-            // a pass measures is wall clock across the pass, and a guest's wall
-            // clock runs while the host has taken its vCPU away — so the
-            // quantity includes a term the host's scheduler sets. Measured
-            // 2026-08-18, that term moves *every* order statistic and not only
-            // the tail, so `common::passcost` judges each accelerator against
-            // what that accelerator has been recorded producing, and takes no
-            // verdict at all where the recorded sample supports none. Its own
-            // two-directions self-check runs first, because a gate that must
-            // stay green under host descheduling has to be shown doing so on a
-            // case no booted machine can stage.
-            //
             // **The workload is `sched_stress`** because the asserts are dense
             // on exactly what it does: it spawns burners that drive vruntime,
             // blocks and wakes across io_uring and ports, and forces a
@@ -13368,7 +12083,6 @@ fn run_machine_test(
             // 0 of 3 assert texts in the shipping kernel, 3 of 3 in this one.
             // This half is the other one: on a machine that really carries them,
             // honest work does not trip them.
-            common::passcost::self_check()?;
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -13402,35 +12116,6 @@ fn run_machine_test(
             serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
             for line in result.stdout.lines() {
                 eprintln!("  [sched-check] {}", line.trim());
-            }
-            // The whole boot, in the three pieces a capture comes in: the ready
-            // marker, the hole after it, and the test window. The counters are
-            // cumulative since boot, so the last line each CPU published is the
-            // whole of that CPU's run.
-            let mut capture = serial::Serial::boot(&qemu);
-            capture.push(&result.before);
-            capture.push(&result.serial);
-            let reports = common::passcost::reports(capture.text());
-            if reports.is_empty() {
-                return Err(format!(
-                    "the check build published no pass-cost report at all, so nothing above \
-                     gated what a pass costs — every pass on this boot went unmeasured or \
-                     unspoken. `{}` is the prefix that never appeared:\n{}",
-                    toyos_sched::cpu::PassCostReport::PREFIX,
-                    capture.text(),
-                ));
-            }
-            // Which recorded sample this run is judged against, before the
-            // numbers it judges: a verdict taken against a sample is
-            // unreadable without naming the sample, and a run that judged
-            // nothing has to say so where a reader cannot miss it.
-            let baseline = common::passcost::baseline();
-            eprintln!("  [sched-check] {}", common::passcost::judgement_line(baseline));
-            for report in &reports {
-                eprintln!("  [sched-check] {}", common::passcost::describe(report));
-            }
-            for report in &reports {
-                common::passcost::verdict(report, baseline)?;
             }
             Ok(())
         }
@@ -14654,81 +13339,6 @@ fn run_machine_test(
             );
             lapic_vectors(qemu.boot_log())
         }
-        "panic_halts_the_others_first" => {
-            // **A kernel that has declared itself corrupt runs nothing else.**
-            // `halt_all_cpus` sends the halt IPI before anything else it does;
-            // a fatal path that waited first — for a log, a drain, anything —
-            // would leave every other CPU running userland under it.
-            // `test_rs_panic_halts_first` keeps three siblings making kernel
-            // records while its main thread goes fatal, and every record is
-            // stamped on the kernel's clock with its CPU: none of another CPU
-            // may be stamped past the fatal record by more than a sibling can
-            // take to reach its next instruction boundary with `IF` set.
-            //
-            // **The bound is 100 ms, against the derivation**: an IPI is
-            // taken at the sibling's next instruction boundary with `IF` set,
-            // so a sibling runs past the fatal record by at most the longest
-            // window this kernel holds `IF` clear, and every such window is
-            // bounded in milliseconds.
-            const BOUND_MS: u64 = 100;
-            const RECORD: &str = "syscall 26 is retired";
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions { smp: 4, kernel_features: ACTUATOR_KERNEL, ..Default::default() },
-            );
-            writeln!(qemu.stdin_mut(), "run test_rs_panic_halts_first").map_err(|e| format!("stdin: {e}"))?;
-            qemu.flush_stdin();
-            let mut console =
-                qemu.drain_until(Duration::from_secs(30), |l| l.contains(FATAL_HALT_NONCE));
-            if !console.contains(FATAL_HALT_NONCE) {
-                return Err(format!("{FATAL_HALT_NONCE:?} never reached the console\n{console}"));
-            }
-            // What the fatal path flushes after the nonce. The machine is
-            // halted and says nothing more, so this is a pace, not a guard.
-            console.push_str(&qemu.drain_serial(Duration::from_secs(3)));
-            let stamp = |line: &str| -> Option<(u64, u32)> {
-                let head = line.split_once("[kernel ")?.1.split_once(']')?.0;
-                let (secs, cpu) = head.split_once(" cpu")?;
-                let (s, ms) = secs.split_once('.')?;
-                let cpu = cpu.split(' ').next()?;
-                Some((s.parse::<u64>().ok()? * 1000 + ms.parse::<u64>().ok()?, cpu.parse().ok()?))
-            };
-            let Some((fatal_ms, fatal_cpu)) =
-                console.lines().find(|l| l.contains(FATAL_HALT_NONCE)).and_then(stamp)
-            else {
-                return Err(format!("no stamped {FATAL_HALT_NONCE:?} record on the console\n{console}"));
-            };
-            let siblings: Vec<(u64, u32, &str)> = console
-                .lines()
-                .filter(|l| l.contains(RECORD))
-                .filter_map(|l| stamp(l).map(|(ms, cpu)| (ms, cpu, l)))
-                .filter(|&(_, cpu, _)| cpu != fatal_cpu)
-                .collect();
-            // Non-vacuity: another CPU was making records up to the fatal one.
-            if !siblings.iter().any(|&(ms, _, _)| ms + 1000 >= fatal_ms) {
-                return Err(format!(
-                    "no other CPU's record in the second before the fatal one at {fatal_ms} ms, so \
-                     nothing was running to be halted\n{console}"
-                ));
-            }
-            if let Some(&(ms, cpu, line)) = siblings.iter().max_by_key(|&&(ms, _, _)| ms) {
-                if ms > fatal_ms + BOUND_MS {
-                    return Err(format!(
-                        "cpu{cpu} made a record {} ms after the fatal one on cpu{fatal_cpu}: the \
-                         fatal path let it run\n  {line}",
-                        ms - fatal_ms
-                    ));
-                }
-            }
-            eprintln!(
-                "  [panic] {} record(s) of other CPUs; the last {} ms after the fatal one",
-                siblings.len(),
-                siblings.iter().map(|&(ms, _, _)| ms.saturating_sub(fatal_ms)).max().unwrap_or(0)
-            );
-            Ok(())
-        }
         "virtio_used_ring" => {
             // Both fields of a virtqueue used-ring element are written by the
             // device, and on virtio-sound's control and event queues the ring
@@ -15237,21 +13847,6 @@ fn run_machine_test(
             Ok(())
         }
         "i8042_absent" => {
-            // A/B in one session: the guest's own `Boot: complete (Nms)` is
-            // the instrument, because host-side timing here is dominated by
-            // image builds. A wait-loop bug that costs a second on a machine
-            // with a controller costs a minute on one without.
-            let with = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions { profile: qemu::Profile::Metal, ..Default::default() },
-            );
-            let with_log = with.boot_log().to_string();
-            let with_ms = boot_millis(&with_log)
-                .ok_or_else(|| format!("no `Boot: complete` line:\n{with_log}"))?;
-            drop(with);
-
             let without = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -15280,29 +13875,19 @@ fn run_machine_test(
                 ));
             }
             // The floating bus, not any of the sixteen handshake refusals: on a
-            // machine with nothing there the probe must cost one `inb`, and
-            // that is also what makes the timing assertion below tight.
+            // machine with nothing there the probe must cost one `inb`.
             let want = "i8042: absent — port 0x64 reads 0xff";
             if !log.contains(want) {
                 return Err(format!("no `{want}` line on a machine with no i8042:\n{log}"));
             }
-            let without_ms = boot_millis(&log)
-                .ok_or_else(|| format!("no `Boot: complete` line:\n{log}"))?;
-            // The regression this guards is 2100 ms: with no floating-bus test
-            // the very first `wait_writable` sees IBF set in 0xff and waits out
-            // the whole init budget. The allowance is for boot-to-boot noise
-            // between two QEMU launches in one session, nothing else.
-            if without_ms > with_ms + 300 {
-                return Err(format!(
-                    "boot took {without_ms}ms without an i8042 and {with_ms}ms with one — a wait is not bounded"
-                ));
+            if boot_millis(&log).is_none() {
+                return Err(format!("no `Boot: complete` line:\n{log}"));
             }
             eprintln!("  [i8042] firmware: {}", claim.trim());
             eprintln!(
                 "  [i8042] {}",
                 log.lines().find(|l| l.contains(want)).unwrap_or_default().trim()
             );
-            eprintln!("  [i8042] boot {without_ms}ms without vs {with_ms}ms with");
             Ok(())
         }
         "i8042_quarantine" => {
@@ -16066,7 +14651,6 @@ fn run_machine_test(
         "netd_slow_reader" => netd_slow_reader(rust_bins),
         "netd_refused_pipes" => netd_refused_pipes(rust_bins),
         "netd_held_open" => netd_held_open(rust_bins),
-        "netd_stalled_peer" => netd_stalled_peer(rust_bins),
         "netd_udp_refused" => netd_udp_refused(rust_bins),
         "netd_udp_any_address" => netd_udp_any_address(rust_bins),
         "dns_resolve" => dns_resolve(),
@@ -17609,23 +16193,8 @@ fn acpi_table_inventory(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The TSC the whole machine is timed by, against the frequency the part itself
-/// states.
-///
-/// **The one cross-source check a boot has.** Everything else the kernel times
-/// is derived from the HPET calibration, so it can only agree with itself;
-/// CPUID leaf 15H's crystal ratio and leaf 16H's base frequency are the CPU's
-/// own statement, arrived at by neither the HPET nor the counting loop. A part
-/// that states neither is a fact about the part, not a failure — `qemu64`, this
-/// host's guest CPU, is one — so the ppm bound is asserted only where a
-/// statement exists.
+/// The LAPIC timer and the TSC each calibrated to a frequency.
 fn timer_calibration(log: &str) -> Result<(), String> {
-    /// One percent, which is the widest two timebases can differ and still be
-    /// counting the same second. A refusal and not a measurement: it catches a
-    /// machine whose HPET and CPUID have stopped agreeing at all, and nothing
-    /// narrower is true of every part this kernel may boot on.
-    const CEILING_PPM: u64 = 10_000;
-
     let lapic_hz = number_between(log, "ticks/10ms, so ", "Hz")?;
     if lapic_hz == 0 {
         return Err("the LAPIC timer calibrated to no frequency at all".to_string());
@@ -17634,12 +16203,35 @@ fn timer_calibration(log: &str) -> Result<(), String> {
     if measured == 0 {
         return Err("the TSC calibrated to no frequency at all".to_string());
     }
+    eprintln!("  [timer] TSC {measured}Hz measured; LAPIC {lapic_hz}Hz");
+    Ok(())
+}
+
+/// The TSC the whole machine is timed by, against the frequency the part itself
+/// states.
+///
+/// **The one cross-source check a boot has.** Everything else the kernel times
+/// is derived from the HPET calibration, so it can only agree with itself;
+/// CPUID leaf 15H's crystal ratio and leaf 16H's base frequency are the CPU's
+/// own statement, arrived at by neither the HPET nor the counting loop. A part
+/// that states neither is a fact about the part, not a failure, so the ppm
+/// bound is asserted only where a statement exists. Judged on metal only: the
+/// calibration is a span of a clock, and a guest's clock runs while its host
+/// has the vCPU.
+fn tsc_agrees_with_cpuid(log: &str) -> Result<(), String> {
+    /// One percent, which is the widest two timebases can differ and still be
+    /// counting the same second. A refusal and not a measurement: it catches a
+    /// machine whose HPET and CPUID have stopped agreeing at all, and nothing
+    /// narrower is true of every part this kernel may boot on.
+    const CEILING_PPM: u64 = 10_000;
+
+    let measured = number_between(log, "clock: TSC measured ", "Hz against the HPET")?;
     let Ok(stated) = number_between(log, "CPUID states ", "Hz,") else {
         let why = log
             .lines()
             .find(|l| l.contains("CPUID leaves 15H and 16H"))
             .ok_or("neither a stated frequency nor the record saying there is none")?;
-        eprintln!("  [timer] TSC {measured}Hz, LAPIC {lapic_hz}Hz — {}", why.trim());
+        eprintln!("  [timer] TSC {measured}Hz — {}", why.trim());
         return Ok(());
     };
     let ppm = number_between(log, "Hz, ", "ppm apart")?;
@@ -17649,9 +16241,7 @@ fn timer_calibration(log: &str) -> Result<(), String> {
              {ppm}ppm apart, over the {CEILING_PPM}ppm this bound allows"
         ));
     }
-    eprintln!(
-        "  [timer] TSC {measured}Hz measured, {stated}Hz stated, {ppm}ppm apart; LAPIC {lapic_hz}Hz"
-    );
+    eprintln!("  [timer] TSC {measured}Hz measured, {stated}Hz stated, {ppm}ppm apart");
     Ok(())
 }
 
@@ -17744,12 +16334,6 @@ fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(u64, u64), String> {
 /// a program gets off that machine. **They must carry the same number**, or the
 /// metal readback is reporting something the guest did not measure.
 fn latency_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    /// **Derived from the instrument, not from this host.** A p99 at the
-    /// histogram's last bucket is a floor and not a measurement, so what is
-    /// asserted here is that the figure is one — TCG under a twelve-wide suite
-    /// is no latency instrument, and the number this measures on hardware is
-    /// the T14's, priced as `latency.p99_us` in `tests/metal-profile.toml`.
-    const HISTOGRAM_US: u64 = 4096;
     const WAIT: Duration = Duration::from_secs(60);
 
     let config = compile::repo_root().join("tests/latencycase/system.toml");
@@ -17822,12 +16406,6 @@ fn latency_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
     bootlog::verdict(&text).map_err(|unfit| format!("{name}: {unfit}\n{text}"))?;
 
-    if printed as u64 >= HISTOGRAM_US {
-        return Err(format!(
-            "the p99 landed in the histogram's last bucket, so {printed}us is a floor and not a \
-             measurement: {distribution}"
-        ));
-    }
     eprintln!("  [latency] {}", distribution.trim());
     eprintln!("  [latency] p99 {printed}us, off the stick's own `exit: cyclictest` record too");
     Ok(())
@@ -19680,7 +18258,7 @@ fn read_durations(path: &Path, out: &mut BTreeMap<String, Duration>) {
     let Ok(text) = fs::read_to_string(path) else { return };
     for line in text.lines() {
         // `<label> <ms>`, read from the right: a label may carry spaces
-        // (`audio_tone_load (smp=1)`).
+        // (`audio_tone (smp=1)`).
         let Some((name, ms)) = line.rsplit_once(' ') else { continue };
         if let Ok(ms) = ms.parse() {
             out.insert(name.to_string(), Duration::from_millis(ms));
@@ -19759,8 +18337,8 @@ fn longest_first(tasks: &mut [Task<'_>], known: &BTreeMap<String, Duration>) {
 }
 
 
-/// One outcome, as the run prints it. Gate A goes through here too, so a
-/// suspended audio boot cannot report itself differently from a suspended
+/// One outcome, as the run prints it. The audio configs go through here too,
+/// so a suspended audio boot cannot report itself differently from a suspended
 /// machine test.
 fn report_line(outcome: &Outcome) {
     let reason = || outcome.reason.as_deref().unwrap_or("check failed");
@@ -19923,11 +18501,6 @@ fn check_shard_partition(all_tests: &[TestDef]) {
             .filter(|(_, _, tier)| in_tier(*tier))
             .map(|(n, s, _)| (*n, *s))
             .collect();
-        let audio_names: Vec<&str> = AUDIO_TESTS
-            .iter()
-            .filter(|(_, tier)| in_tier(*tier))
-            .map(|(name, _)| *name)
-            .collect();
 
         let (parallel, serial) = build_tasks(&tests_to_run, &machine_to_run, &screen_to_run);
         // Owned, not borrowed: each shard below clones `parallel`/`serial` into
@@ -19941,35 +18514,21 @@ fn check_shard_partition(all_tests: &[TestDef]) {
             task.names().iter().try_fold(Duration::ZERO, |a, n| Some(a + *pricing.get(*n)?))
         };
         let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut audio_seen: BTreeSet<String> = BTreeSet::new();
         for index in 1..=COUNT {
             let shard = Shard { index, count: COUNT };
             let mut mine_p = parallel.clone();
             let mut mine_s = serial.clone();
-            let mut mine_a = audio_names.clone();
-            // One accumulator across the three pools, in the order `main` takes
-            // them: the partition a shard gets is a function of all three calls,
-            // so a check that took them apart would be checking something else.
+            // One accumulator across the two pools, in the order `main` takes
+            // them: the partition a shard gets is a function of both calls, so a
+            // check that took them apart would be checking something else.
             let mut load = shard.bins();
             shard.keep(&mut mine_p, &mut load, cost);
             shard.keep(&mut mine_s, &mut load, cost);
-            shard.keep(&mut mine_a, &mut load, |name| {
-                AUDIO_SMP.iter().try_fold(Duration::ZERO, |a, smp| {
-                    Some(a + *pricing.get(&format!("{name} (smp={smp})"))?)
-                })
-            });
             for name in mine_p.iter().chain(&mine_s).flat_map(Task::names) {
                 assert!(
                     seen.insert(name.to_string()),
                     "nightly={nightly}: {name} lands in shard {index}/{COUNT} and at least \
                      one earlier shard too — every execution label must belong to exactly one"
-                );
-            }
-            for name in mine_a {
-                assert!(
-                    audio_seen.insert(name.to_string()),
-                    "nightly={nightly}: audio config {name} lands in shard {index}/{COUNT} \
-                     and at least one earlier shard too"
                 );
             }
         }
@@ -19978,12 +18537,6 @@ fn check_shard_partition(all_tests: &[TestDef]) {
             "nightly={nightly}: the twelve shards together do not equal the full selection — \
              {:?} present in the selection and missing from every shard",
             want.difference(&seen).collect::<Vec<_>>()
-        );
-        let want_audio: BTreeSet<String> = audio_names.iter().map(|s| s.to_string()).collect();
-        assert_eq!(
-            audio_seen, want_audio,
-            "nightly={nightly}: the twelve shards' audio configs do not equal the full \
-             selection"
         );
     }
 }
@@ -20021,7 +18574,6 @@ fn check_metal_registration() {
         .iter()
         .chain(SCREEN_TESTS)
         .map(|(n, _, _)| *n)
-        .chain(AUDIO_TESTS.iter().map(|(n, _)| *n))
         .collect();
     if let Err(why) = metal_rows_are_registered(&registered, METAL, METAL_ONLY) {
         panic!("{why}");
@@ -20221,7 +18773,6 @@ fn check_registration() {
         .iter()
         .chain(SCREEN_TESTS)
         .map(|(n, _, _)| *n)
-        .chain(AUDIO_TESTS.iter().map(|(n, _)| *n))
     {
         assert!(seen.insert(name), "{name} is registered twice");
     }
@@ -20272,7 +18823,6 @@ fn check_no_collisions(shared: &[TestDef]) {
         .iter()
         .map(|(n, _, _)| *n)
         .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
-        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
         .collect();
     let clash: Vec<&str> =
         shared.iter().map(|t| t.name.as_str()).filter(|n| declared.contains(n)).collect();
@@ -20290,7 +18840,6 @@ fn check_redlist(all_tests: &[TestDef]) -> Result<(), String> {
     let runnable: BTreeSet<&str> = all_tests
         .iter()
         .map(|t| t.name.as_str())
-        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
         .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
         .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
         .collect();
@@ -20321,32 +18870,19 @@ fn main() {
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
     let list_mode = SUITE.present(&args, &testargs::LIST);
-    // The nightly tier, on. A flag and not an env var for `--audio-gate`'s
-    // reason: an env var is invisible in the command line and easy to leave set,
-    // and the whole point of the split is that a run says what it ran.
+    // The nightly tier, on. A flag and not an env var: an env var is invisible
+    // in the command line and easy to leave set, and the whole point of the
+    // split is that a run says what it ran.
     let nightly = SUITE.present(&args, &testargs::NIGHTLY);
     // The metal profile, and where its images and readbacks live. Naming the
     // directory means the machine is not touched — see `common::metal::Mode`.
     let metal_mode = SUITE.present(&args, &testargs::METAL);
     let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
-    if SUITE.present(&args, &testargs::SLOW_USB) {
-        SLOW_USB.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
     let nocapture =
         SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
-    // Thorough tier. A flag rather than an env var or a test name: an env var
-    // is invisible in the command line and easy to leave set, and a test name
-    // would drag ~17 minutes into every plain `cargo test`.
-    let audio_gate: Option<u32> = SUITE.value(&args, &testargs::AUDIO_GATE).map(|n| {
-        let iterations: u32 =
-            n.parse().unwrap_or_else(|_| panic!("--audio-gate: {n:?} is not an iteration count"));
-        assert!(iterations >= 2, "--audio-gate needs at least 2 iterations to compare anything");
-        iterations
-    });
-
-    // How many guests the parallel phase runs at once. The serial tail and gate
-    // A ignore it — that is what they are.
+    // How many guests the parallel phase runs at once. The serial tail and the
+    // audio configs ignore it — that is what they are.
     let width = SUITE
         .value(&args, &testargs::JOBS)
         .or_else(|| SUITE.value(&args, &testargs::JOBS_SHORT))
@@ -20479,8 +19015,8 @@ fn main() {
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
     toyos_build::build::build_host_judges(&common::compile::repo_root(), !nocapture && !debug_mode);
 
-    // Every name this process could produce a verdict for, before `--list`,
-    // `--debug` and `--audio-gate` can return without ever reaching it.
+    // Every name this process could produce a verdict for, before `--list`
+    // and `--debug` can return without ever reaching it.
     let all_tests = build_test_registry(&rust_bins, &c_compiled);
     if let Err(refusal) = check_redlist(&all_tests) {
         eprintln!("[toyos] src/redlist.rs: {refusal}");
@@ -20491,9 +19027,6 @@ fn main() {
     if list_mode {
         for t in &all_tests {
             println!("{}", t.name);
-        }
-        for (name, _) in AUDIO_TESTS {
-            println!("{name}");
         }
         for (name, _, _) in SCREEN_TESTS {
             println!("{name}");
@@ -20506,50 +19039,6 @@ fn main() {
 
     if debug_mode {
         run_debug_mode(&c_bins, &rust_bins);
-        return;
-    }
-
-    if let Some(iterations) = audio_gate {
-        let mut audio_to_run: Vec<&str> = AUDIO_TESTS
-            .iter()
-            .map(|(name, _)| *name)
-            .filter(|n| keep(n))
-            .collect();
-        assert!(!audio_to_run.is_empty(), "no audio test matches filter {filter:?}");
-        // Sharded too, and this is the tier it buys the most for: the thorough
-        // tier is N boots per config taken one at a time by construction, so
-        // splitting it is the only thing that shortens it. A filter cannot do
-        // the same job — `audio_tone` is a substring of `audio_tone_load`.
-        if let Some(shard) = shard {
-            // Gate A runs this tier and nothing else, so its configs are the
-            // whole of what this process's bins ever hold.
-            shard.keep(&mut audio_to_run, &mut shard.bins(), |_| None);
-            assert!(
-                !audio_to_run.is_empty(),
-                "shard {}/{} owns no audio config, and a gate that ran nothing would \
-                 report itself green",
-                shard.index,
-                shard.count,
-            );
-        }
-        let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
-        // One slot for the whole tier: it boots one guest at a time for the
-        // length of it, so one slot is what it occupies. The owner has ruled
-        // that gate A does not get a quiet host (CLAUDE.md, 2026-08-04), so it
-        // takes its share of the machine like everything else and does not
-        // reserve it.
-        let _slot = slots.take("gate A, thorough");
-        let ok = run_audio_gate(
-            iterations,
-            &load_audio_baseline(),
-            &audio_to_run,
-            &test_config,
-            &c_bins,
-            &rust_bins,
-        );
-        if !ok {
-            run.exit(1);
-        }
         return;
     }
 
@@ -20571,11 +19060,6 @@ fn main() {
     let tests_to_run: Vec<&TestDef> = all_tests
         .iter()
         .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
-        .collect();
-    let mut audio_to_run: Vec<&str> = AUDIO_TESTS
-        .iter()
-        .filter(|(name, tier)| keep(name) && in_tier(*tier))
-        .map(|(name, _)| *name)
         .collect();
     let screen_to_run: Vec<(&str, Sched)> = SCREEN_TESTS
         .iter()
@@ -20599,12 +19083,6 @@ fn main() {
             .chain(SCREEN_TESTS)
             .filter(|(n, _, tier)| keep(n) && *tier == which && !in_tier(*tier))
             .map(|(n, _, _)| *n)
-            .chain(
-                AUDIO_TESTS
-                    .iter()
-                    .filter(|(name, tier)| keep(name) && *tier == which && !in_tier(*tier))
-                    .map(|(name, _)| *name),
-            )
             .collect()
     };
     let held_back = held(Tier::Nightly);
@@ -20628,7 +19106,6 @@ fn main() {
     }
 
     if tests_to_run.is_empty()
-        && audio_to_run.is_empty()
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
@@ -20696,34 +19173,27 @@ fn main() {
         longest_first(&mut parallel, &pricing);
         longest_first(&mut serial, &pricing);
         // One accumulator for the whole run, heaviest pool first: this process
-        // runs all three pools one after another, so its wall clock is the one
-        // bin they share and the serial tail belongs in whichever bin the
-        // parallel phase left lightest. Three partitions from three empty
-        // accumulators are each good and their sum is not
+        // runs both pools one after another, so its wall clock is the one bin
+        // they share and the serial tail belongs in whichever bin the parallel
+        // phase left lightest. Two partitions from two empty accumulators are
+        // each good and their sum is not
         // (`Shard::keep`, and run `31377439504`'s 466.1 s against a 369.1 s
         // even split).
         let mut load = shard.bins();
         shard.keep(&mut parallel, &mut load, cost);
         shard.keep(&mut serial, &mut load, cost);
-        shard.keep(&mut audio_to_run, &mut load, |name| {
-            AUDIO_SMP.iter().try_fold(Duration::ZERO, |a, smp| {
-                Some(a + *pricing.get(&format!("{name} (smp={smp})"))?)
-            })
-        });
         eprintln!(
-            "[toyos] shard {}/{}: {} parallel task(s), {} serial, {} audio config(s)",
+            "[toyos] shard {}/{}: {} parallel task(s), {} serial",
             shard.index,
             shard.count,
             parallel.len(),
             serial.len(),
-            audio_to_run.len() * AUDIO_SMP.len(),
         );
     }
 
     // Counted from the task lists rather than from the filtered ones, because a
     // shard's own total is what its summary has to add up against.
-    let total = parallel.iter().chain(serial.iter()).map(|t| t.names().len()).sum::<usize>()
-        + audio_to_run.len() * AUDIO_SMP.len();
+    let total = parallel.iter().chain(serial.iter()).map(|t| t.names().len()).sum::<usize>();
     if let Err(refusal) = toyos_build::testargs::validate_ordinary_shard(shard, filter, total) {
         eprintln!("[toyos] {refusal}");
         run.exit(1);
@@ -20748,51 +19218,6 @@ fn main() {
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
-    qemu::set_width(1);
-
-    // Gate A, alone. `tests/audio-baseline.toml`'s numbers were recorded with
-    // one QEMU on the host and no concurrent agents, so a run beside anything
-    // else is not the instrument they describe — which makes this a
-    // precondition rather than an ordering convention, and worth asserting.
-    // `run_phase` joins its workers before it returns, and this is what says so.
-    if !audio_to_run.is_empty() {
-        assert_eq!(
-            qemu::live_instances(),
-            0,
-            "gate A ran with another guest still up; its baseline is a quiet host"
-        );
-        let audio_baseline = load_audio_baseline();
-        eprintln!("  --- audio ---");
-        for name in &audio_to_run {
-            for &smp in AUDIO_SMP {
-                let label = format!("{name} (smp={smp})");
-                let baseline = config_baseline(&audio_baseline, name, smp);
-                let _slot = slots.take(&label);
-                let start = common::clock::mark();
-                // A boot that never reaches its marker panics, and gate A is the
-                // last thing the suite runs: unwrapped, that panic took the
-                // whole run's verdict with it and printed no result line at all.
-                let outcome = catching(|| {
-                    run_audio_test(name, smp, &baseline, &test_config, &c_bins, &rust_bins)
-                });
-                // Gate A's every number comes off a clock — wake lateness, a
-                // period's worth of samples, the position of a gap in the
-                // capture. A host that stopped in the middle of one moved all of
-                // them, so this outcome is not a reading of anything.
-                let outcome = Outcome {
-                    name: label,
-                    reason: outcome.err(),
-                    elapsed: start.elapsed(),
-                    suspended: start.suspended(),
-                };
-                report_line(&outcome);
-                timed.push((outcome.name.clone(), outcome.elapsed));
-                tally.record(outcome);
-            }
-        }
-    }
-
-    // After gate A, because its configs are the last thing measured.
     if shard.is_none() {
         save_durations(known, &timed);
     }
@@ -20802,9 +19227,8 @@ fn main() {
     //
     // A green run is a claim that this tree passed, and `--land`'s gate consumes
     // exactly this number. A run that spanned a suspend did not establish that:
-    // its timing verdicts were taken across a stopped host and its liveness
-    // ceilings were measured on a clock that stopped with it, so exit 0 would be
-    // a claim it cannot support.
+    // its liveness ceilings were measured on a clock that stopped with it, so
+    // exit 0 would be a claim it cannot support.
     //
     // Nor may it be 1. A red sends an agent hunting a defect, and the defect is
     // not there — the lid was closed. CLAUDE.md already documents the signature

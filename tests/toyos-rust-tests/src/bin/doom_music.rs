@@ -3,8 +3,7 @@
 //! The playing is `sound::music_check` in `userland/doom`: it opens the shipped
 //! SoundFont, converts one of the WAD's own MUS lumps and pushes the result at
 //! the audio device. Only that binary can reach any of it. This side starts it
-//! and answers the question a serial log cannot — whether it exited or died —
-//! while the verdict on the sound is the host's capture of the device.
+//! and answers the question a log line cannot — whether it exited or died.
 
 use std::process::Command;
 

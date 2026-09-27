@@ -1,9 +1,9 @@
 //! Which run a registered test belongs to.
 //!
 //! **The table is the registration.** Every row of `tests/toyos.rs`'s
-//! `MACHINE_TESTS`, `SCREEN_TESTS` and `AUDIO_TESTS` carries its [`Tier`] or
-//! does not compile, and the shared boot's discovered tests share one. Moving a
-//! test between tiers is editing that one word.
+//! `MACHINE_TESTS` and `SCREEN_TESTS` carries its [`Tier`] or does not compile,
+//! and the shared boot's discovered tests share one. Moving a test between
+//! tiers is editing that one word.
 //!
 //! The fast tier is what every plain `cargo test` runs; the nightly tier is
 //! `--nightly`, run by `.github/workflows/nightly.yml`. No pull request boots a

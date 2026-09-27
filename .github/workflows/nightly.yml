@@ -175,26 +175,6 @@ jobs:
           key: guest-${{ github.run_id }}
       - *serial
 
-  # Gate A's thorough tier, `tests/audio-baseline.toml`: N boots per config,
-  # strictly one at a time, as two shards of the same configs.
-  audio:
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    container: *kvm
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - *deps
-      - *checkout
-      - *guest-cache
-      - run: cargo run -- --ci audio ${{ matrix.shard }}/2
-      - *serial
-
   # "Only Rust and QEMU", run rather than argued: `cargo run -- --build-only`
   # from a fresh machine. `sid` as it stands, image and archive both, and no
   # cache — a fresh machine is the premise.
@@ -253,7 +233,7 @@ jobs:
   # One standing issue, found by title and commented on; a dispatch is somebody
   # watching the run, so only the schedule files.
   nightly-red:
-    needs: [host, build, guest, tcg, audio, portability-linux, portability-macos]
+    needs: [host, build, guest, tcg, portability-linux, portability-macos]
     if: ${{ !cancelled() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:

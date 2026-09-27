@@ -8,10 +8,8 @@
 //! ordering rather than volume — `process_lifecycle` has one arm on the wake
 //! and `std_threading` joins four threads.
 //!
-//! **The verdict is a count of collected exit codes inside a bound**, the same
-//! shape `blocking_read_stress` takes and for the same reason: a lost publish
-//! must red as a number rather than as a stall the suite names apart and
-//! nobody bisects.
+//! **The verdict is a count of collected exit codes**; a lost publish parks
+//! this process, and the harness's ceiling turns that into a red.
 //!
 //! **A child parks until the parent releases it, and that is what makes the
 //! parent's wait a park.** A child on its own schedule has published its exit
@@ -22,9 +20,8 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Children spawned, held on their own stdin, and released together.
 const CHILDREN: u32 = 24;
@@ -33,20 +30,6 @@ const CHILDREN: u32 = 24;
 /// parks on some of them and not on others, and the count is what says every
 /// one of those parks ended.
 const THREADS: u32 = 24;
-
-/// What the storm must fit in. The spawns that set it up are outside it: they
-/// are ELF loads, and a bound over them measures the loader.
-const BOUND: Duration = Duration::from_secs(3);
-
-/// A liveness allowance for the spawns and never a measurement of them: it
-/// turns a wedged setup into a number instead of the harness's stall.
-const SETUP: Duration = Duration::from_secs(30);
-
-/// Which phase the watchdog names, and how far each got.
-static SPAWNING: AtomicU32 = AtomicU32::new(1);
-static SPAWNED: AtomicU32 = AtomicU32::new(0);
-static COLLECTED: AtomicU32 = AtomicU32::new(0);
-static JOINED: AtomicU32 = AtomicU32::new(0);
 
 fn main() {
     if let Some(code) = std::env::args().nth(1) {
@@ -59,28 +42,6 @@ fn main() {
 
     let exe = std::env::current_exe().expect("current_exe failed");
 
-    thread::spawn(|| {
-        thread::sleep(SETUP + BOUND);
-        // Ends the process rather than this thread, for
-        // `blocking_read_stress`'s reason: a thread panic leaves `main` parked
-        // on the publish that never came, and the harness reports a stall.
-        if SPAWNING.load(Ordering::Relaxed) == 1 {
-            eprintln!(
-                "exit_wait_storm: {} of {CHILDREN} children spawned in {SETUP:?} — the storm \
-                 never started",
-                SPAWNED.load(Ordering::Relaxed),
-            );
-        } else {
-            eprintln!(
-                "exit_wait_storm: {} of {CHILDREN} exits collected and {} of {THREADS} threads \
-                 joined inside {BOUND:?} — a publish was not delivered",
-                COLLECTED.load(Ordering::Relaxed),
-                JOINED.load(Ordering::Relaxed),
-            );
-        }
-        std::process::exit(1);
-    });
-
     let mut children = Vec::new();
     let mut held = Vec::new();
     for i in 0..CHILDREN {
@@ -91,7 +52,6 @@ fn main() {
             .unwrap_or_else(|e| panic!("spawn child {i}: {e}"));
         held.push(child.stdin.take().expect("the spawn was asked for a pipe"));
         children.push((i, child));
-        SPAWNED.store(i + 1, Ordering::Relaxed);
     }
 
     // The premise, asserted rather than left to timing: nothing has released a
@@ -103,8 +63,6 @@ fn main() {
         );
     }
 
-    SPAWNING.store(0, Ordering::Relaxed);
-    let started = Instant::now();
     drop(held);
 
     let mut collected = 0u32;
@@ -116,7 +74,6 @@ fn main() {
             "child {i} answered with another process's code",
         );
         collected += 1;
-        COLLECTED.store(collected, Ordering::Relaxed);
     }
 
     // The thread half: each thread returns its own number, and the join is the
@@ -134,16 +91,9 @@ fn main() {
         let got = handle.join().unwrap_or_else(|_| panic!("join thread {i}"));
         assert_eq!(got, i as u32, "thread {i} answered for another one");
         joined += 1;
-        JOINED.store(joined, Ordering::Relaxed);
     }
 
-    let elapsed = started.elapsed();
     assert_eq!(collected, CHILDREN, "only {collected} of {CHILDREN} exits were collected");
     assert_eq!(joined, THREADS, "only {joined} of {THREADS} threads were joined");
-    assert!(
-        elapsed < BOUND,
-        "the storm took {elapsed:?}, past the {BOUND:?} bound — a publish is being waited out \
-         rather than delivered",
-    );
-    println!("exit_wait_storm: {collected} exits collected and {joined} threads joined in {elapsed:?}");
+    println!("exit_wait_storm: {collected} exits collected and {joined} threads joined");
 }

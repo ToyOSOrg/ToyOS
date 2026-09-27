@@ -4,9 +4,7 @@
 # about *samples* — decode, channel conversion, gain, the sum on the shared bus,
 # dither and quantize — and the arithmetic those rest on.
 #
-# It is a crate because a QEMU boot cannot ask any of them. Gate A certifies the
-# device end: that periods reach the wire on time and that a client's audio is
-# not interrupted. Nothing in a guest can say whether the sample the client
+# It is a crate because a QEMU boot cannot ask any of them. Nothing in a guest can say whether the sample the client
 # wrote is the sample the device played, and that is the half a listener hears.
 # `fixtures/mix-corpus.txt` is that answer, captured from
 # `userland/soundd/src/main.rs` before the extraction and asserted byte for byte

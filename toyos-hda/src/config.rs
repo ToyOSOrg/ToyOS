@@ -144,8 +144,7 @@ fn nodes(path: &OutputPath) -> Vec<Node> {
 /// The rate and width this driver asks a converter for, and whether the
 /// converter offers them.
 ///
-/// One rate, because soundd's mixer, its resampler and gate A's recorded
-/// counters are all sized against it, and a converter that cannot play it is a
+/// One rate, because soundd's mixer and its resampler are sized against it, and a converter that cannot play it is a
 /// refusal the driver reports rather than a rate it substitutes. Both machines
 /// in reach offer it: the laptop's converter does 44.1 and 48 kHz at 16/20/24, and
 /// QEMU's does 16 k–96 k at 16.

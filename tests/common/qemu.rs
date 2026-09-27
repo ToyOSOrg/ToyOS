@@ -20,23 +20,9 @@ pub const SUITE_ARCH: Arch = Arch::X86_64;
 pub static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 /// Distinguishes every file one QEMU boot owns from every other boot's within
-/// one test process — the wav capture, the UART log, the QMP socket, the
-/// screendump, and the bootable image itself.
+/// one test process — the UART log, the QMP socket, the screendump, and the
+/// bootable image itself.
 static BOOT_SEQ: AtomicU32 = AtomicU32::new(0);
-
-/// Guests that have been booted and not yet dropped.
-///
-/// Gate A's numbers were recorded with one QEMU on the host and nothing else
-/// (`tests/audio-baseline.toml`), so "the parallel phase has drained" is a
-/// precondition of the audio block rather than a property of where it sits in
-/// `main`. This is what lets it be asserted instead of arranged — see
-/// [`live_instances`].
-static LIVE: AtomicU32 = AtomicU32::new(0);
-
-/// How many guests are up right now, across every thread.
-pub fn live_instances() -> u32 {
-    LIVE.load(Ordering::SeqCst)
-}
 
 /// The NVMe backing files live guests are holding open.
 ///
@@ -196,8 +182,7 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// `kernel/Cargo.toml` has forwarded `sched-check = ["toyos-sched/check"]` since
 /// the check build was written, and nothing in `src/` or `tests/` ever asked for
 /// it, so `cpu::MAX_PASS_NS`, the pass-cost recorder and `invariants::check_cpu`
-/// were compiled by no CI run at all. `sched_check_build` is the test that asks,
-/// and `common::passcost` is what judges the half of it that is a measurement.
+/// were compiled by no CI run at all. `sched_check_build` is the test that asks.
 ///
 /// A fifth entry is that decision again, and it gets this paragraph's argument
 /// made afresh. Interactive debug mode is separate: it builds
@@ -1331,24 +1316,9 @@ pub enum Profile {
     /// 32-bit-destination entry format rather than the 8-bit one.
     IommuEim,
     /// [`Profile::Headless`] with its virtio sound card replaced by an Intel
-    /// HDA controller and one codec — the machine soundd drives itself.
-    ///
-    /// Everything else is held still on purpose. The console is still
-    /// virtio-serial, the NIC is still there, the disks are the same: what
-    /// differs from the machine gate A's four recorded configs run on is the
-    /// sound card, so a difference in the capture is a difference in the audio
-    /// path. It is not the T14's literal shape and does not try to be — this is
-    /// the audio arm, not a PCI-topology one. H0's diagnostic staged that
-    /// comparison and is deleted now that the
-    /// driver above answers every question it was asked for.
+    /// HDA controller and one codec — the machine soundd drives itself, and
+    /// the class-0403 function the IOMMU tests aim.
     Hda,
-    /// [`Profile::Hda`] with a second controller that also has a codec.
-    ///
-    /// Two live links, which the kernel refuses by name rather than binding
-    /// the first: choosing between them means walking their codec graphs, and
-    /// that is the driver's work. The negative control on the whole bind path
-    /// — a first-match kernel would go green on every other HDA test.
-    HdaTwoLive,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, and nothing else — no virtio, NIC, NVMe or
     /// IOMMU. The machine the AArch64 port reaches its console on, and the only
@@ -1399,8 +1369,7 @@ impl Profile {
             | Self::IommuNarrow
             | Self::IommuNoIntremap
             | Self::IommuEim
-            | Self::Hda
-            | Self::HdaTwoLive => Arch::X86_64,
+            | Self::Hda => Arch::X86_64,
         }
     }
 
@@ -1479,22 +1448,10 @@ const XHCI_MSI_ONLY: &str = "nec-usb-xhci,id=xhci1,msix=off";
 const XHCI_NO_IRQ_FIRST: &str = "nec-usb-xhci,id=xhci,msix=off,msi=off";
 const XHCI_NO_IRQ_SECOND: &str = "nec-usb-xhci,id=xhci1,msix=off,msi=off";
 
-/// One controller with one codec: the ordinary machine, and the one an audio
-/// arm needs. `hda-output` because it is a playback-only codec — the driver
+/// One controller with one codec. `hda-output` because it is a playback-only codec — the driver
 /// configures no input path and a duplex codec would only add widgets nothing
 /// walks.
 const HDA_ONE: &[&str] = &["intel-hda,id=hda0", "hda-output,bus=hda0.0,cad=0,audiodev=hdaaud"];
-
-/// Two controllers, each with a codec that answers.
-///
-/// The state the kernel refuses: it can tell which links are alive and cannot
-/// tell which one a human is wired to, so binding either would be a guess.
-const HDA_TWO_LIVE: &[&str] = &[
-    "intel-hda,id=hda0",
-    "hda-output,bus=hda0.0,cad=0,audiodev=hdaaud",
-    "intel-hda,id=hda1",
-    "hda-output,bus=hda1.0,cad=0,audiodev=hdaaud",
-];
 
 /// Whether a machine has the virtio console and sound block. Which NIC it has
 /// is [`Nic`].
@@ -1507,10 +1464,7 @@ enum Virtio {
     ///
     /// Not a lesser [`Virtio::Present`]: soundd claims a kernel-driven card
     /// before it looks for a controller to drive itself, so a machine carrying
-    /// both would exercise the virtio path and nothing else. This is what makes
-    /// an HDA arm of gate A a *different machine* rather than a different flag,
-    /// and it keeps the console, the NIC and the timing of the recorded audio
-    /// configs so the two arms differ in the sound card and not in the machine.
+    /// both would exercise the virtio path and nothing else.
     WithoutSound,
 }
 
@@ -1614,8 +1568,7 @@ struct Shape {
     usb_disks: &'static [UsbDisk],
     /// Every Intel HDA controller on the machine and the codecs behind each,
     /// as `-device` arguments in the order QEMU is to create them. Empty is
-    /// what every profile but [`Profile::Hda`] and [`Profile::HdaTwoLive`]
-    /// declares, and it is the machine this kernel has always booted: audio
+    /// what every profile but [`Profile::Hda`] declares, and it is the machine this kernel has always booted: audio
     /// through virtio-sound or through nothing at all.
     ///
     /// Presence of a class-0403 *function* is the shape dimension, and it is
@@ -2235,12 +2188,6 @@ impl Profile {
                 hda: HDA_ONE,
                 ..Self::Headless.shape()
             },
-            Self::HdaTwoLive => Shape {
-                virtio: Virtio::WithoutSound,
-                nic: Nic::Virtio,
-                hda: HDA_TWO_LIVE,
-                ..Self::Headless.shape()
-            },
         }
     }
 
@@ -2570,7 +2517,7 @@ pub struct TestResult {
     ///
     /// A caller that reads a daemon's startup out of a boot appends this to its
     /// capture. It is separate from `serial` because `serial` means "while this
-    /// test ran" and audio gates count lines in it.
+    /// test ran".
     pub before: String,
     /// Why the run did not finish, when it did not.
     ///
@@ -2641,7 +2588,6 @@ pub struct QemuInstance {
     rx: Receiver<String>,
     console: ConsoleStream,
     _reader_thread: thread::JoinHandle<String>,
-    audio_wav: PathBuf,
     uart_log: PathBuf,
     nvme: NvmeClaim,
     usb_images: Vec<PathBuf>,
@@ -3151,18 +3097,15 @@ impl QemuInstance {
             })
             .collect();
 
-        let audio_wav = test_dir.join(format!("audio-{seq}.wav"));
-        let _ = fs::remove_file(&audio_wav);
-
         let qmp_socket = options.qmp.then(|| test_dir.join(format!("qmp-{seq}.sock")));
         if let Some(path) = &qmp_socket {
             let _ = fs::remove_file(path);
         }
         let screendump = test_dir.join(format!("screen-{seq}.ppm"));
 
-        // Per-instance, not a fixed /tmp path: the audio gate boots dozens of
-        // guests and a screen test waits on this file, so a shared one would
-        // let instances read each other's early boot.
+        // Per-instance, not a fixed /tmp path: a screen test waits on this
+        // file, so a shared one would let instances read each other's early
+        // boot.
         let uart_log = test_dir.join(format!("uart-{seq}.log"));
         let _ = fs::remove_file(&uart_log);
         let console_file = options.console_file.then(|| ConsoleFile::of(&uart_log).made());
@@ -3171,7 +3114,6 @@ impl QemuInstance {
             &boot_image,
             nvme.path(),
             &usb_images,
-            &audio_wav,
             &uart_log,
             qmp_socket.as_deref(),
             &options,
@@ -3181,7 +3123,6 @@ impl QemuInstance {
             &options,
             Files {
                 seq,
-                audio_wav,
                 uart_log,
                 nvme,
                 usb_images,
@@ -3392,16 +3333,10 @@ impl QemuInstance {
         self.i8042_trace
     }
 
-    /// The wav file the virtio-sound device records into for this boot.
-    /// The RIFF size fields stay 0 until QEMU exits cleanly — parse to EOF.
-    pub fn audio_wav_path(&self) -> &Path {
-        &self.audio_wav
-    }
-
     /// Wait for QEMU to exit within `by`: its console closing is the event, and
     /// the process is reaped after it. Answers what the guest said on the way.
-    /// A file QEMU finishes only at its exit, the wav among them, is whole once
-    /// this answers, and is still there until this instance is dropped.
+    /// A file QEMU finishes only at its exit is whole once this answers, and is
+    /// still there until this instance is dropped.
     pub fn await_exit(&mut self, by: Duration) -> Result<String, String> {
         let deadline = Instant::now() + by;
         let mut said = String::new();
@@ -3465,9 +3400,6 @@ impl QemuInstance {
     }
 
     /// Keep collecting serial output for `dur` after a test has returned.
-    /// soundd flushes its final stats window when the last client leaves,
-    /// which races the client process's exit — so the line the audio gate
-    /// reads lands on either side of `===TEST_END===`.
     /// **Not scaled by the width**, and it is the one duration in this file that
     /// is not. Callers use it to *pace* — "let the guest run for 400 ms and tell
     /// me what it said" — so multiplying it does not buy a slow guest more room,
@@ -3800,7 +3732,6 @@ impl Drop for QemuInstance {
         // hopeful is that the process whose descriptors hold QEMU's write lock
         // on the image is gone by the time it happens.
         let _ = self.child.wait();
-        let _ = fs::remove_file(&self.audio_wav);
         // **The 16550's log outlives the guest, because it is the one channel
         // that exists before the console does.** Firmware, the bootloader and
         // the kernel up to the backend switch write here and nowhere else, so a
@@ -3824,7 +3755,6 @@ impl Drop for QemuInstance {
         if let Some(image) = &self.own_boot_image {
             let _ = fs::remove_file(image);
         }
-        LIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -4329,7 +4259,7 @@ impl QmpDevices {
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
     let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
-    qemu_command(p, p, &usb, p, p, None, options)
+    qemu_command(p, p, &usb, p, None, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -4353,7 +4283,6 @@ fn qemu_command(
     boot_image: &Path,
     nvme_image: &Path,
     usb_images: &[PathBuf],
-    audio_wav: &Path,
     uart_log: &Path,
     qmp_socket: Option<&Path>,
     options: &BootOptions,
@@ -4648,26 +4577,9 @@ fn qemu_command(
     }
 
     if !shape.hda.is_empty() {
-        // The same wav backend virtio-sound gets, so gate A's ground truth —
-        // what the *device* received — transfers with no new instrument. A boot
-        // that plays nothing leaves an empty file and costs nothing.
-        //
-        // **`timer-period` is 1000 µs here and 5000 for virtio-sound, and that
-        // is an instrument repair rather than a difference in the audio path.**
-        // At 5000 the capture of a 3 s 440 Hz tone comes back with eight phase
-        // discontinuities, at frames 2703-2705, 2821-2823 and 2939-2940 —
-        // *identical positions across six runs whose audio content differed*,
-        // which is a capture that drops samples on a fixed cadence and not a
-        // guest that plays them wrong. QEMU's `hda-codec` holds its own output
-        // ring and discards what overruns it, and shortening the host's drain
-        // interval is what stops the overrun. Measured on this host, QEMU
-        // 11.0.3: 8 breaks at 5000, 0 at 1000, with the guest's own counters
-        // (1127 periods submitted, no underruns, no drains) identical either
-        // way and identical to the virtio arm's.
-        qemu.arg("-audiodev").arg(format!(
-            "wav,id=hdaaud,path={},timer-period=1000",
-            audio_wav.display()
-        ));
+        // No guest test plays audio: the device is here as a DMA master and a
+        // claim, so its audio goes nowhere.
+        qemu.arg("-audiodev").arg("none,id=hdaaud");
         for dev in shape.hda {
             qemu.arg("-device").arg(*dev);
         }
@@ -4745,14 +4657,10 @@ fn qemu_command(
 
     if shape.virtio.present() {
         if shape.virtio.sound() {
-            // virtio-sound records everything the guest plays into a per-boot
-            // wav for glitch analysis; timer-period matches the interactive
-            // config in src/qemu.rs so test timing represents what users hear.
+            // No guest test plays audio: the device is here as a DMA master and
+            // a claim, so its audio goes nowhere.
             qemu.arg("-audiodev")
-                .arg(format!(
-                    "wav,id=audio0,path={},timer-period=5000",
-                    audio_wav.display()
-                ))
+                .arg("none,id=audio0")
                 .arg("-device")
                 .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
         }
@@ -4801,7 +4709,6 @@ fn qemu_command(
 /// parameter list eight paths long.
 struct Files {
     seq: u32,
-    audio_wav: PathBuf,
     uart_log: PathBuf,
     nvme: NvmeClaim,
     usb_images: Vec<PathBuf>,
@@ -4875,7 +4782,6 @@ impl Read for Followed {
 fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) -> QemuInstance {
     let Files {
         seq,
-        audio_wav,
         uart_log,
         nvme,
         usb_images,
@@ -4966,16 +4872,11 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         wait_for_ready(&mut child, &rx, options, &uart_log)
     };
 
-    // Counted from here rather than from the spawn: every panic inside
-    // `wait_for_ready` kills the child on its way out and never builds a value
-    // to drop, so a guest that failed to come up must not be left on the books.
-    LIVE.fetch_add(1, Ordering::SeqCst);
     QemuInstance {
         child,
         stdin,
         rx,
         _reader_thread: reader_thread,
-        audio_wav,
         uart_log,
         nvme,
         usb_images,

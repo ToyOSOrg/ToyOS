@@ -1,7 +1,6 @@
-//! What the audio gate reads.
+//! What soundd reports about its own streaming.
 //!
-//! The counters are the instrument `tests/audio-baseline.toml` thresholds are
-//! written against, so each has to mean exactly one thing and keep meaning it.
+//! Each counter has to mean exactly one thing and keep meaning it.
 //! Emitting the report is soundd's — one line, one `write` — and everything it
 //! needs is public below.
 //!
@@ -16,8 +15,7 @@
 /// when the first client arrives, flushed when the last one leaves, so no
 /// number here is diluted by the idle path — where soundd waits on raw
 /// completion IRQs with no timer and a batched IRQ is indistinguishable from a
-/// missed deadline. The audio gate reads these (`tests/audio-baseline.toml`),
-/// so each has to mean exactly one thing.
+/// missed deadline. Each has to mean exactly one thing.
 #[derive(Default)]
 pub struct MixStats {
     pub wakes: u32,

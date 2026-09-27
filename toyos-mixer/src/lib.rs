@@ -5,13 +5,11 @@
 //! rides on it and how that gain moves, plus the arithmetic those rest on: the
 //! device shapes a period can be rendered into, the period sizes a client's
 //! rate implies, the delay-locked loop that tracks the device's grid, and the
-//! counters the audio gate reads. No devices, no handles, no shared memory, no
+//! counters soundd reports. No devices, no handles, no shared memory, no
 //! timers — those are `userland/soundd/`'s, and it is the only caller.
 //!
 //! **The split exists because a QEMU boot cannot ask any of these questions.**
-//! Gate A certifies the device end — periods reaching the wire on time, a
-//! stream not interrupted — and there is nothing in a guest that can say
-//! whether the sample a client wrote is the sample the device played. That is
+//! Nothing in a guest can say whether the sample a client wrote is the sample the device played. That is
 //! the half a listener hears, and `corpus`/`fixtures/mix-corpus.txt` is where it
 //! is certified: a transcript of every decision below over the space that
 //! reaches it, captured from `userland/soundd/src/main.rs` before a line of it

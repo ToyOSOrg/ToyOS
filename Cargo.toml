@@ -105,10 +105,9 @@ default-run = "toyos-build"
 fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
-# `statvfs` for `worktree::free_bytes`; `getloadavg` and the libproc pair
-# (`proc_listallpids`/`proc_pidpath`) for gate A's host-conditions line; and the
-# unprivileged ICMP datagram socket `icmp::echo` asks a metal boot over, which
-# is the platform call that replaces a `ping` binary.
+# `statvfs` for `worktree::free_bytes`, and the unprivileged ICMP datagram
+# socket `icmp::echo` asks a metal boot over, which is the platform call that
+# replaces a `ping` binary.
 libc = "0.2"
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
@@ -171,23 +170,13 @@ toyos-userbound = { path = "toyos-userbound" }
 # declaration. Pure and `no_std`, so it compiles for the host as it does for
 # the guest.
 toyos-i219 = { path = "toyos-i219" }
-# The scheduler core, for the one type the check build publishes and the
-# harness judges: `cpu::PassCostReport` is the wire form of the pass-cost
-# distribution, and its `Display`/`parse` pair is what keeps the kernel that
-# writes it and `tests/common/passcost.rs` that reads it on one format.
-#
-# `check` because that is where the type lives, and it lives there because
-# `src/build.rs`'s artifact gate asks the *shipping* kernel to carry none of the
-# check instruments' literals — a linker may keep a string constant no code
-# reaches, so an unconditional `Display` puts the report's prefix in every
-# image. This is a dev-dependency of a host binary and `kernel/` is excluded
-# from this workspace with its own lockfile, so nothing here reaches the kernel's
-# resolution of the same crate.
-toyos-sched = { path = "toyos-sched", features = ["check"] }
-# The root-hub port machine, for the three durations `xhci_slow_connect` derives
-# its bounds from: `DEBOUNCE_NS`, `EMPTY_BUS_NS` and `SLOW_CONNECT_NS` are
-# declared once there and `use`d by the driver, so the window the harness
-# certifies and the one the driver holds cannot drift apart. Also the Bulk-Only
+# The watch's staged window, so the harness judges `blocking_read_window`
+# against the bound the scheduler core declares.
+toyos-sched = { path = "toyos-sched" }
+# The root-hub port machine, for the two durations `xhci_slow_connect` derives
+# its floor from: `DEBOUNCE_NS` and `SLOW_CONNECT_NS` are declared once there
+# and `use`d by the driver, so the window the harness certifies and the one the
+# driver holds cannot drift apart. Also the Bulk-Only
 # phases, so the harness judging a wedge reads the word `toyos_xhci::bot::Phase`
 # declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }

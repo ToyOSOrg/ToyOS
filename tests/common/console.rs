@@ -360,12 +360,12 @@ pub struct Verdict<'a> {
 ///
 /// **The scope boundary, and it is the whole safety argument.** This is the C
 /// family's stdout comparison and nothing else. Every other reader of a
-/// daemon's line — the audio gates counting soundd's stats, `netd_*` waiting on
-/// `netd: ready`, the sshd tests reading its host identity, the log gates —
-/// reads `TestResult::serial` or a boot log, which this never touches. Those
-/// tests *assert on* a daemon's line; this family is the one for which a
-/// daemon's line is by construction not the subject, because the subject is a
-/// C program's own stdout against a file recorded from it.
+/// daemon's line — `netd_*` waiting on `netd: ready`, the sshd tests reading
+/// its host identity, the log gates — reads `TestResult::serial` or a boot log,
+/// which this never touches. Those tests *assert on* a daemon's line; this
+/// family is the one for which a daemon's line is by construction not the
+/// subject, because the subject is a C program's own stdout against a file
+/// recorded from it.
 ///
 /// Which is also why the filter cannot make a broken case pass: a tinycc case's
 /// output is decided by its source, so the only way `soundd: …` appears in one

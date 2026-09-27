@@ -34,15 +34,12 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
-    Disabled { test: "doom_sound_flood", issue: "issues/audio/doom-sound-flood-played-full-scale-once.md" },
     Disabled {
         test: "handle_kill_policy",
         issue: "issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md",
     },
     Disabled { test: "handle_transfer", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
-    Disabled { test: "hda_tone", issue: "issues/audio/hda-tone-phase-check.md" },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
-    Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },
     Disabled {
         test: "quiesce_dump_holds_the_stopped",
         issue: "issues/kernel/quiesce-dump-holds-the-stopped-reds-wide-with-usb-transport-breaks.md",
@@ -50,10 +47,6 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "quiesce_wakes_on_the_last_exit",
         issue: "issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md",
-    },
-    Disabled {
-        test: "sched_check_build",
-        issue: "issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",
     },
     Disabled {
         test: "screen_fatal_halt",

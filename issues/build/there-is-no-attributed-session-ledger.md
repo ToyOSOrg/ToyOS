@@ -4,16 +4,13 @@ kind: track
 opened: 2026-09-01
 ---
 
-# There is no attributed session ledger, so seven flake records cannot name what overlapped them
+# There is no attributed session ledger, so flake records cannot name what overlapped them
 
-Seven open records describe a test that reds beside other work and is green
+Open records describe a test that reds beside other work and is green
 alone, or a cost charged to the wrong artifact. Every one of them is blocked on
 the same missing observation: **no record joins a guest's loss of progress to
-the interval that overlapped it.** They are not seven mechanisms. They are one
-instrument, seven times.
+the interval that overlapped it.** They are one instrument.
 
-- `issues/audio/gate-a-has-no-runner-baseline.md`
-- `issues/audio/thorough-tier-reds-on-unmodified-main.md`
 - `issues/audio/idle-suspend-reds-on-a-loaded-host-and-on-main.md`
 - `issues/boot-media/kernel-log-file-reds-beside-other-guests-and-is-green-alone.md`
 - `issues/boot-media/usb-short-read-reds-beside-other-guests-and-is-green-alone.md`
@@ -32,16 +29,11 @@ image-build spans with their content key and cache hit or miss, QEMU and vCPU
 scheduling intervals where the host exposes them, and the guest progress markers
 the tests already emit. A sighting is then a join, not an inference.
 
-**What exists, and why each is not the thing.** `tests/common/hostload.rs` (180
-lines) records load averages and process counts and is attached to an audio run
-— a *sample*, not an interval, so it cannot say what overlapped a window.
-`src/buildlock.rs` already names holders (`records_holder`, `guest_slot`,
-`build_slot`) but the record is transient: it exists while the guard is held and
-is gone when the question is asked. The audio baseline at `tests/toyos.rs:2107`
-is keyed on `(test, smp)` and nothing else, so it cannot distinguish a CI
-runner's distribution from the developer's — that key has no runner provenance
-at all. The committed shard input is per-test duration only, which is
-why `issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md`
+**What exists, and why each is not the thing.** `src/buildlock.rs` already
+names holders (`records_holder`, `guest_slot`, `build_slot`) but the record is
+transient: it exists while the guard is held and is gone when the question is
+asked. The committed shard input is per-test duration only, which is why
+`issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md`
 charges an image build to whichever test followed it.
 
 **The probe must prove itself inert.** Collection writes files and samples the

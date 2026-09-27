@@ -66,8 +66,7 @@ static RUN: OnceLock<PathBuf> = OnceLock::new();
 /// it, and it is gone when the run is, green or red (`toyos_tmpdir` is the
 /// policy, and what reclaims the directory of a run that was killed).
 ///
-/// A red run's serial logs, and any suspect audio capture already renamed to
-/// keep (`audio-*-smp*.wav`), are the parts of it read afterwards — by an agent
+/// A red run's serial logs are the parts of it read afterwards — by an agent
 /// and by the nightly's artifact — so they are copied to a directory of their
 /// own under [`RED_RUN_SERIAL`] first: megabytes, where the images are
 /// gigabytes. Named for this run's own root — unique across every process a
@@ -125,31 +124,18 @@ fn kept_root(run: &Path) -> Result<PathBuf, String> {
     Ok(super::compile::repo_root().join(RED_RUN_SERIAL).join(name))
 }
 
-/// Where `path`, somewhere under this run's directory, ends up if the run ends
-/// red: mirrored under [`kept_root`], as [`keep_serial`] would copy it there.
-pub fn kept_path(path: &Path) -> PathBuf {
-    let run = RUN.get().expect("`Run::begin` comes before any scratch");
-    let rel = path
-        .strip_prefix(run)
-        .unwrap_or_else(|_| panic!("{} is not under this run's directory {}", path.display(), run.display()));
-    kept_root(run).unwrap_or_else(|e| panic!("{e}")).join(rel)
-}
-
-/// Copy every `uart-*.log` and suspect `audio-*-smp*.wav` under `run` to a
-/// directory of its own under [`RED_RUN_SERIAL`], keeping each one's path
-/// below the run.
+/// Copy every `uart-*.log` under `run` to a directory of its own under
+/// [`RED_RUN_SERIAL`], keeping each one's path below the run.
 fn keep_serial(run: &Path) -> Result<PathBuf, String> {
     let kept = kept_root(run)?;
     copy_serial(run, &kept)?;
     Ok(kept)
 }
 
-/// A serial log, or a suspect audio capture already renamed for keeping
-/// (`tests/toyos.rs`'s `measure_audio_run`) — everything [`keep_serial`]
-/// rescues from a run's scratch before it goes.
+/// A serial log — everything [`keep_serial`] rescues from a run's scratch
+/// before it goes.
 fn worth_keeping(name: &str) -> bool {
-    (name.starts_with("uart-") && name.ends_with(".log"))
-        || (name.starts_with("audio-") && name.contains("-smp") && name.ends_with(".wav"))
+    name.starts_with("uart-") && name.ends_with(".log")
 }
 
 fn copy_serial(dir: &Path, into: &Path) -> Result<(), String> {
