@@ -14,8 +14,8 @@ FAIL swap_crash_rolls_back: 2 finding(s):
   the stream's redial was turned away 64 time(s), its ceiling of 64, and gave up
 ```
 
-`ALONE swap_crash_rolls_back: GREEN` twice. It was not red on the nightlies
-before #527, which changed how `logd` turns readers away across a swap.
+`ALONE swap_crash_rolls_back: GREEN` twice. It was not red on the nightly
+before #527 (run 36285169430).
 `cargo run -- --known-red swap_crash_rolls_back` answers NO.
 
 Not shown: why `logd` was still turning the redial away, 64 times, after the
