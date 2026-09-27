@@ -2440,7 +2440,15 @@ prose.
         assert!(uefi.contains("source: https://static.crates.io/crates/uefi/uefi-"), "{uefi}");
         let std = block("std ");
         assert!(std.contains("source: https://github.com/ToyOSOrg/rust.git at "), "{std}");
-        assert!(text.contains(": COPYRIGHT\n\nShort version for non-lawyers:"), "std carries no fork COPYRIGHT");
+        // std cites the Rust project's COPYRIGHT itself, not merely a notice
+        // where some other package carries a copy of it.
+        let lines: Vec<&str> = text.lines().collect();
+        let copyright: Vec<&str> = lines
+            .windows(3)
+            .filter(|w| w[0].ends_with(": COPYRIGHT") && w[2] == "Short version for non-lawyers:")
+            .filter_map(|w| w[0].split_once(']').map(|(id, _)| id))
+            .collect();
+        assert!(copyright.iter().any(|id| std.contains(&format!("{id}]"))), "std cites no COPYRIGHT: {std}");
         for shipped in ["assets/JetBrainsMono-Regular.ttf", "assets/icons/*.svg", "assets/fonts/OpenSans-*.ttf"] {
             assert!(block(&format!("{shipped} — ")).contains("texts: ["), "{shipped}");
         }
