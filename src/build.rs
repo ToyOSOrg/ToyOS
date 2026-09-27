@@ -169,6 +169,20 @@ fn parse_config(path: &Path) -> SystemConfig {
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()))
 }
 
+/// `config` less every program the licence gate names as a package pending
+/// the owner. A program's key is its package's name
+/// (`the_release_withholds_every_pending_package`); one another row starts or
+/// receives stays named there, and `build_and_assemble` refuses the image.
+fn withhold_pending(config: &mut SystemConfig) {
+    for subject in crate::licence::pending_owner() {
+        if let crate::licence::Subject::Crate(name) = subject {
+            if config.programs.remove(name).is_some() {
+                eprintln!("release: leaving out {name}, whose licence the owner has yet to rule on");
+            }
+        }
+    }
+}
+
 // --- Freshness checking ---
 
 /// Fingerprint all external build dependencies that cargo cannot track: the
@@ -1008,7 +1022,12 @@ pub struct Boot {
     /// yet — `issues/build/two-sequences-build-one-image.md` — and until they
     /// are, this is what keeps each artifact to a single writer.
     case: bool,
+    /// Leave out every program [`crate::licence::pending_owner`] names.
+    public: bool,
 }
+
+/// What [`Boot::release`] writes.
+pub const RELEASE_IMAGE: &str = "target/bootable-release.img";
 
 impl Boot {
     /// **The one naming rule**: the artifact is named after the directory
@@ -1032,7 +1051,16 @@ impl Boot {
             Some(name) => format!("target/bootable-{}.img", name.to_string_lossy()),
             None => "target/bootable.img".to_string(),
         };
-        Ok(Self { config: dir.join(CONFIG), image: PathBuf::from(image), case })
+        Ok(Self { config: dir.join(CONFIG), image: PathBuf::from(image), case, public: false })
+    }
+
+    /// The config this boot builds.
+    fn system(&self) -> SystemConfig {
+        let mut config = parse_config(&self.config);
+        if self.public {
+            withhold_pending(&mut config);
+        }
+        config
     }
 
     /// The image `arch`'s build of this boot writes. x86-64 keeps the name
@@ -1053,6 +1081,14 @@ impl Boot {
 
     pub fn shipped(root: &Path) -> Self {
         Self::mode(root, root)
+    }
+
+    /// The public release: the shipped config less every program whose
+    /// package the licence gate holds pending the owner's ruling, and so less
+    /// the assets only those programs open ([`assets::collect`]). Its own
+    /// artifact, because it is not the shipped image.
+    pub fn release(root: &Path) -> Self {
+        Self { image: PathBuf::from(RELEASE_IMAGE), public: true, ..Self::shipped(root) }
     }
 
     /// The config declares no `devices`, so nothing started there claims the
@@ -1841,7 +1877,7 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
     let sysroot = toolchain::ensure(root, rebuild_toolchain, &mut lock);
 
     let env = GuestEnv::new(&sysroot);
-    let config = parse_config(&boot.config);
+    let config = boot.system();
 
     invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
 
@@ -2360,6 +2396,67 @@ fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending(of: fn(crate::licence::Subject) -> Option<&'static str>) -> Vec<&'static str> {
+        crate::licence::pending_owner().filter_map(of).collect()
+    }
+
+    /// The release leaves out every program whose package the licence gate
+    /// holds pending the owner and keeps every other, and each withheld key is
+    /// its package's name, which is what the rule reads it by.
+    #[test]
+    fn the_release_withholds_every_pending_package() {
+        use crate::licence::Subject;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shipped = Boot::shipped(root).system();
+        let release = Boot::release(root).system();
+        let withheld = pending(|s| match s {
+            Subject::Crate(name) => Some(name),
+            _ => None,
+        });
+        assert!(!withheld.is_empty(), "the gate holds no package pending, so this reads nothing");
+        for name in &withheld {
+            let program = shipped
+                .programs
+                .get(*name)
+                .unwrap_or_else(|| panic!("the shipped config builds no {name}"));
+            let manifest = fs::read_to_string(program.crate_dir(root, name).join("Cargo.toml")).unwrap();
+            let manifest: toml::Value = toml::from_str(&manifest).unwrap();
+            assert_eq!(manifest["package"]["name"].as_str(), Some(*name));
+        }
+        let kept: Vec<&String> =
+            shipped.programs.keys().filter(|key| !withheld.contains(&key.as_str())).collect();
+        assert_eq!(release.programs.keys().collect::<Vec<_>>(), kept);
+        assert_eq!(Boot::release(root).image_for(Arch::X86_64), PathBuf::from(RELEASE_IMAGE));
+        assert_eq!(Boot::release(root).config, Boot::shipped(root).config);
+    }
+
+    /// No file the licence gate holds pending the owner is on the release's
+    /// ROOT, and every one is on the shipped image's.
+    #[test]
+    fn the_release_image_carries_no_pending_file() {
+        use crate::licence::Subject;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let files = |config: &SystemConfig| -> Vec<String> {
+            let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
+            assets::collect(&config.assets, &programs).into_iter().map(|(name, _)| name).collect()
+        };
+        let shipped = files(&Boot::shipped(root).system());
+        let release = files(&Boot::release(root).system());
+        let withheld = pending(|s| match s {
+            Subject::File(path) => Some(path),
+            _ => None,
+        });
+        assert!(!withheld.is_empty(), "the gate holds no file pending, so this reads nothing");
+        for path in withheld {
+            let name = Path::new(path).file_name().unwrap().to_string_lossy().to_lowercase();
+            let on = |root_files: &[String]| {
+                root_files.iter().any(|f| f.rsplit('/').next() == Some(name.as_str()))
+            };
+            assert!(on(&shipped), "the shipped image carries no {name}, so its absence below says nothing");
+            assert!(!on(&release), "the release image carries {name}");
+        }
+    }
 
     /// `console` is reached by `console/system.toml` alone and `init` by no
     /// `[programs]` row, so a reader that drops a mode or init loses one.

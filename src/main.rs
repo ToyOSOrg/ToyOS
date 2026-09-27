@@ -149,6 +149,27 @@ fn main() {
         }
         return;
     }
+    // The release job publishes what this builds, so nothing on the line may
+    // make it another image.
+    let release = asked(&flags::RELEASE_BOOT);
+    if release {
+        for other in [
+            &flags::DIAG_BOOT,
+            &flags::CONSOLE_BOOT,
+            &flags::BOOT_CONFIG,
+            &flags::KERNEL_PARAM,
+            &flags::KERNEL_FEATURE,
+            &flags::DEBUG,
+            &flags::OWNER_KEY,
+            &flags::UPDATE_IMAGE,
+            &flags::ARCH,
+        ] {
+            if asked(other) {
+                eprintln!("Error: --release-boot builds the published image and takes no {}", other.name);
+                std::process::exit(2);
+            }
+        }
+    }
     // Before anything is built, so a missing key is refused before any lock
     // and no image this run writes is signed by two keys.
     let update_image = CARGO_RUN.value(&args, &flags::UPDATE_IMAGE).map(PathBuf::from);
@@ -211,6 +232,7 @@ fn main() {
         }
         (None, true, _) => toyos_build::build::Boot::diag(&root),
         (None, _, true) => toyos_build::build::Boot::console(&root),
+        _ if release => toyos_build::build::Boot::release(&root),
         _ => toyos_build::build::Boot::shipped(&root),
     };
     assert!(

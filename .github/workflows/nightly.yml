@@ -63,7 +63,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: disk and QEMU
+      - &runner-deps
+        name: disk and QEMU
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
                       /usr/local/share/boost /usr/local/.ghcup
@@ -105,7 +106,7 @@ jobs:
           for attempt in 1 2 3; do
             apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates \
-                   zstd xz-utils build-essential qemu-system-x86 >> /tmp/apt.log 2>&1 \
+                   zstd xz-utils build-essential qemu-system-x86 ovmf >> /tmp/apt.log 2>&1 \
               && break
             [ "$attempt" = 3 ] && { cat /tmp/apt.log; exit 1; }
             sleep 20
@@ -249,6 +250,23 @@ jobs:
     steps:
       - *checkout
       - run: cargo build -p toyos-build
+
+  # The disk image a person downloads, of the commit every lane above passed;
+  # `src/imagerelease.rs` says what it carries and how many stay. Bare
+  # `ubuntu-24.04` for `gh`, as `build` is.
+  release:
+    needs: [host, build, guest, tcg, audio, portability-linux, portability-macos]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - *checkout
+      - *runner-deps
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo run -- --ci release
 
   # One standing issue, found by title and commented on; a dispatch is somebody
   # watching the run, so only the schedule files.

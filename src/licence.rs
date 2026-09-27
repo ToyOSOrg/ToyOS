@@ -194,6 +194,15 @@ pub const EXCEPTIONS: &[Exception] = &[
     },
 ];
 
+/// Everything that ships while the owner has yet to rule whether it may, which
+/// is what a public release leaves out (`build::Boot::release`).
+pub fn pending_owner() -> impl Iterator<Item = Subject> {
+    EXCEPTIONS
+        .iter()
+        .filter(|e| matches!(e.standing, Standing::PendingOwner(_)))
+        .map(|e| e.subject)
+}
+
 /// Every committed file whose terms somebody had to establish, with the digest
 /// of what is committed and where the terms are recorded.
 ///
@@ -956,19 +965,24 @@ fn judge_files(ledger: &[Row], tracked: &[String], shipping: &Shipping, report: 
 
 // --- NOTICE ------------------------------------------------------------------
 
-/// One `NOTICE` section: its heading, the path the heading starts with, and the
-/// SPDX lines it carries.
+/// One `NOTICE` section: its heading, the path the heading starts with, the
+/// SPDX lines it carries, and the files its terms are written in.
 #[derive(Debug, PartialEq)]
-struct Section {
+pub(crate) struct Section {
     heading: String,
-    path: String,
+    pub(crate) path: String,
     spdx: Vec<String>,
+    /// The path each `Licence text:` or `Terms:` line starts with.
+    pub(crate) texts: Vec<String>,
 }
 
 const SPDX_TAG: &str = "SPDX-License-Identifier:";
 
+/// What a section names the file its terms are written in with.
+const TEXT_TAGS: [&str; 2] = ["Licence text:", "Terms:"];
+
 /// The `-`-underlined sections of `text`, in order.
-fn sections(text: &str) -> Vec<Section> {
+pub(crate) fn sections(text: &str) -> Vec<Section> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out: Vec<Section> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -980,11 +994,17 @@ fn sections(text: &str) -> Vec<Section> {
                 heading: line.trim().to_string(),
                 path: line.split_whitespace().next().unwrap_or("").to_string(),
                 spdx: Vec::new(),
+                texts: Vec::new(),
             });
-        } else if let (Some(section), Some(expr)) =
-            (out.last_mut(), line.trim().strip_prefix(SPDX_TAG))
-        {
-            section.spdx.push(expr.trim().to_string());
+        } else if let Some(section) = out.last_mut() {
+            let line = line.trim();
+            if let Some(expr) = line.strip_prefix(SPDX_TAG) {
+                section.spdx.push(expr.trim().to_string());
+            }
+            let rest = TEXT_TAGS.iter().find_map(|tag| line.strip_prefix(tag));
+            if let Some(path) = rest.and_then(|rest| rest.split_whitespace().next()) {
+                section.texts.push(path.trim_end_matches(',').to_string());
+            }
         }
     }
     out

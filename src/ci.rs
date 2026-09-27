@@ -7,7 +7,8 @@
 //! [`Job::GateStage`] run as `host`. Every test that boots no guest is in
 //! [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
 //! everything that boots a guest, `host` again to write the cache the merge
-//! queue restores, and portability. `publish.yml` puts a landing's crates on
+//! queue restores, and portability, and publishes `main`'s image once all of
+//! that is green ([`Job::Release`]). `publish.yml` puts a landing's crates on
 //! crates.io.
 //!
 //! A host job runs every step and reds if any failed; a guest job stops at the
@@ -30,7 +31,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::{flags, pr, release, sdkversion};
+use crate::{flags, imagerelease, pr, release, sdkversion};
 
 /// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
 /// a minimum, never an equality, so a name GitHub requires and this does not
@@ -49,6 +50,7 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
   tcg               one test on an emulated CPU (nightly)
   audio <i>/<n>     one shard of gate A (nightly)
+  release           publish main's image once its nightly is green (nightly)
   nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -60,6 +62,7 @@ enum Job {
     Guest(String),
     Tcg,
     Audio(String),
+    Release,
     NightlyRed,
     Publish,
 }
@@ -77,6 +80,7 @@ fn parse(words: &[String]) -> Result<Job, String> {
         Some("guest") => Job::Guest(shard(words.get(1))?),
         Some("tcg") => Job::Tcg,
         Some("audio") => Job::Audio(shard(words.get(1))?),
+        Some("release") => Job::Release,
         Some("nightly-red") => Job::NightlyRed,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
@@ -103,6 +107,13 @@ pub fn dispatch(root: &Path, args: &[String]) {
         }
         Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
         Job::Audio(shard) => guest(root, &suite_args(&["--audio-gate", "30", "--shard", shard])),
+        Job::Release => {
+            let mut steps = vec![step("the toolchain", || release::install(root))];
+            if steps.iter().all(|s| s.verdict.is_ok()) {
+                steps.push(step("the image release", || imagerelease::publish(root)));
+            }
+            steps
+        }
         Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };

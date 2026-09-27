@@ -160,6 +160,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # (`src/fingerprint.rs`). Already resolved here through a dev-dependency, so
 # nothing new is fetched — but `cargo run` did not compile it before this.
 sha2 = "0.10"
+# The image release's compressed asset, which every stock macOS and Linux
+# unpacks (`src/imagerelease.rs`). Already resolved here through `bcachefs`.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
@@ -195,7 +198,6 @@ toyos-xhci = { path = "toyos-xhci" }
 # the guest's volume is compared with a third party's decoding of the committed
 # archive, never with `userland/pkg`'s own. The archive itself is committed
 # under `tests/fixtures` and no test fetches anything.
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 
 [profile.release]

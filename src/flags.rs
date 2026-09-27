@@ -74,6 +74,8 @@ declare_flags!(pub CARGO_RUN = {
     pub KERNEL_FEATURE = "--kernel-feature", Each;
     pub DIAG_BOOT = "--diag-boot", None;
     pub CONSOLE_BOOT = "--console-boot", None;
+    /// Build the image the release job publishes (`build::Boot::release`).
+    pub RELEASE_BOOT = "--release-boot", None;
     pub BOOT_CONFIG = "--boot-config", Next;
     pub ARCH = "--arch", Next;
     pub REGEN_FONT = "--regen-font", None;

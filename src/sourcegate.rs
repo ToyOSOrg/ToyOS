@@ -725,6 +725,12 @@ const CI_PACKAGES: &[Package] = &[
         why: "the version control this repository is, and `REQUIRED` in src/main.rs",
     },
     Package {
+        name: "ovmf",
+        why: "the edk2 firmware Debian's QEMU boots a UEFI guest with: the image release notes' \
+              Linux command line names it, and the guest suite boots that line \
+              (src/imagerelease.rs)",
+    },
+    Package {
         name: "python3",
         why: "the Python standing failure CLAUDE.md:56 declares, wearing a package name — \
               `rust/x` searches for one. issues/build/python-and-cc-are-declared.md is the \

@@ -18,6 +18,7 @@ pub mod hostws;
 pub mod icmp;
 pub mod identity;
 pub mod image;
+pub mod imagerelease;
 pub mod signing;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
 /// but its own tests.
