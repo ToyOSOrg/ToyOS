@@ -362,7 +362,10 @@ fn s_ip_039_atomic_form() {
 
 #[test]
 fn source_routes_cannot_be_built() {
-    assert_eq!((TxOptionKind::new(0x83), TxOptionKind::new(0x89)), (None, None));
+    assert_eq!(
+        [TxOptionKind::new(0), TxOptionKind::new(1), TxOptionKind::new(0x83), TxOptionKind::new(0x89), TxOptionKind::new(0x94)],
+        [None, None, None, None, None]
+    );
     assert!(TxOptionKind::new(0x07).is_some());
 }
 

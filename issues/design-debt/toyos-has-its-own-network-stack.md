@@ -23,6 +23,6 @@ What `toyos-net-wire` does not yet meet:
 - Its builders write front to back, not into prefix room ahead of a payload already in a DMA slot. Exit: netd's transmit path builds its headers into that prefix room.
 - Its structured fuzz runs bounded in the PR gate only. Exit: the nightly runs it long.
 - Its corpus is the specification's vectors alone, so no header layout has an oracle independent of the reader. Exit: frames captured from slirp and the T14 join the corpus.
-- It departs from the wire specification twice. An ICMP quote owes the first 8 payload bytes, or every one when the quoted datagram has fewer, where the specification asks for 8 always; the orchestrator accepted this. RT-06 sweeps frames and datagrams only, because a message-only vector has no length of its own to be cut against. Exit: the specification says both.
+- It departs from the wire specification: RT-06 sweeps frames and datagrams only, because a message-only vector has no length of its own to be cut against. Exit: the specification covers it.
 
 Exit: `rg smoltcp` is empty outside `issues/`.

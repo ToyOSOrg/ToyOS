@@ -92,7 +92,6 @@ fn s_igmp_008_group_and_source_query() {
 fn s_igmp_009_sources_overrun() {
     let bytes = fixed(hex(V_IGMP_QUERY_V3_SRC), |b| b[11] = 3);
     assert_eq!(parse(&bytes), Err(IgmpError::QuerySourcesOverrun));
-    // wire.md §7.2(3) checks the group before the sources, and the length before both.
     let bytes = fixed(bytes, |b| b[4..8].copy_from_slice(&IP_A.octets()));
     assert_eq!(parse(&bytes), Err(IgmpError::QueryGroup));
     assert_eq!(parse(&fixed(bytes[..9].to_vec(), |_| {})), Err(IgmpError::QueryLength));

@@ -2,7 +2,7 @@
 
 use std::net::Ipv4Addr;
 
-use toyos_net_wire::ethernet::{FrameBody, IndividualMac, MacAddr};
+use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Payload, Ipv4Source, OtherProtocol, Protocol, TrafficClass, Ttl};
 use toyos_net_wire::BuildError;
 

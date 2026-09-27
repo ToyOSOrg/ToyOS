@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 
 use common::*;
 use toyos_net_wire::arp::{Arp, ArpError, Operation};
-use toyos_net_wire::ethernet::{EthError, EtherType, Frame, FrameBody, FrameBuilder, IndividualMac, MacAddr, Tags};
+use toyos_net_wire::ethernet::{EthError, EtherType, Frame, FrameBuilder, IndividualMac, MacAddr, Tags, HEADER_LEN, MIN_BODY};
 use toyos_net_wire::icmp::{
     EchoBuilder, EchoKind, HostUnreachable, IcmpError, IcmpMessage, IcmpPacket, UnreachableBuilder, UnreachableCode, MAX_ERROR_LEN,
 };
@@ -142,6 +142,12 @@ impl Header<'_> {
         let Self { source, destination, ttl, traffic_class, options } = *self;
         emit(&Ipv4Builder { source, destination, ttl, traffic_class, options, payload })
     }
+
+    /// Wraps `payload` in the same `Ipv4Builder` `emit` would, and hands it to `outer.emit` — the only path an Ethernet frame's bytes come from.
+    fn frame<P: Ipv4Payload>(&self, payload: P, outer: &FrameBuilder, out: &mut [u8]) -> Result<Vec<u8>, BuildError> {
+        let Self { source, destination, ttl, traffic_class, options } = *self;
+        outer.emit(&Ipv4Builder { source, destination, ttl, traffic_class, options, payload }, out).map(<[u8]>::to_vec)
+    }
 }
 
 fn control_of<'a>(s: &TcpSegment<'_>, sack: &'a [SackBlock]) -> Option<Control<'a>> {
@@ -169,24 +175,31 @@ fn control_of<'a>(s: &TcpSegment<'_>, sack: &'a [SackBlock]) -> Option<Control<'
     })
 }
 
-fn rebuild_ip(bytes: &[u8]) -> Option<Vec<u8>> {
-    let ip = Ipv4Packet::parse(bytes).ok()?;
-    (ip.dont_fragment() && !ip.is_fragment()).then_some(())?;
-    let options = ip
-        .options()
+fn options_of<'a>(ip: &Ipv4Packet<'a>) -> Option<Vec<TxOption<'a>>> {
+    ip.options()
         .iter()
         .map(|option| match option {
             Ipv4Option::RouterAlert(value) => Some(TxOption::RouterAlert(value)),
             Ipv4Option::Other { kind, data } => Some(TxOption::Other { kind: TxOptionKind::new(kind.value())?, data }),
         })
-        .collect::<Option<Vec<_>>>()?;
-    let header = Header {
+        .collect()
+}
+
+fn header_of<'o>(ip: &Ipv4Packet<'_>, options: &'o [TxOption<'o>]) -> Option<Header<'o>> {
+    Some(Header {
         source: Ipv4Source::new(ip.source()).ok()?,
         destination: ip.destination(),
         ttl: Ttl::new(ip.ttl()).ok()?,
         traffic_class: ip.traffic_class(),
-        options: &options,
-    };
+        options,
+    })
+}
+
+fn rebuild_ip(bytes: &[u8]) -> Option<Vec<u8>> {
+    let ip = Ipv4Packet::parse(bytes).ok()?;
+    (ip.dont_fragment() && !ip.is_fragment()).then_some(())?;
+    let options = options_of(&ip)?;
+    let header = header_of(&ip, &options)?;
     let built = match ip.protocol() {
         Protocol::Udp => {
             let u = UdpDatagram::parse(&ip).ok()?;
@@ -237,35 +250,77 @@ fn rebuild_ip(bytes: &[u8]) -> Option<Vec<u8>> {
     built.ok()
 }
 
+/// Mirrors `rebuild_ip`'s match, but hands each rebuilt payload to `outer` through `Header::frame` instead of emitting it alone:
+/// an already-built datagram's bytes never reach an Ethernet frame except through a real `Ipv4Builder`, so no body here is forged.
 fn rebuild_frame(bytes: &[u8]) -> Option<Vec<u8>> {
     let frame = Frame::parse(bytes).ok()?;
     (frame.tags() == Tags::Untagged).then_some(())?;
-    let builder = FrameBuilder { destination: frame.destination(), source: frame.source() };
+    let outer = FrameBuilder { destination: frame.destination(), source: frame.source() };
     let mut out = junk(2000);
     match frame.ether_type() {
-        EtherType::Arp => builder.emit(&Arp::parse(frame.body()).ok()?, &mut out).ok().map(<[u8]>::to_vec),
+        EtherType::Arp => outer.emit(&Arp::parse(frame.body()).ok()?, &mut out).ok().map(<[u8]>::to_vec),
         EtherType::Ipv4 => {
             let ip = Ipv4Packet::parse(frame.body()).ok()?;
-            let rebuilt = rebuild_ip(ip.bytes())?;
-            let body = RawBody(&rebuilt);
-            builder.emit(&body, &mut out).ok().map(<[u8]>::to_vec)
+            (ip.dont_fragment() && !ip.is_fragment()).then_some(())?;
+            let options = options_of(&ip)?;
+            let header = header_of(&ip, &options)?;
+            let built = match ip.protocol() {
+                Protocol::Udp => {
+                    let u = UdpDatagram::parse(&ip).ok()?;
+                    header.frame(UdpBuilder { source: u.source_port()?, destination: u.destination_port(), data: u.payload() }, &outer, &mut out)
+                }
+                Protocol::Tcp => {
+                    let s = TcpSegment::parse(&ip).ok()?;
+                    let sack: Vec<SackBlock> = s.options().sack_blocks().collect();
+                    let control = control_of(&s, &sack)?;
+                    header.frame(
+                        TcpBuilder {
+                            source: s.source_port(),
+                            destination: s.destination_port(),
+                            sequence: s.sequence(),
+                            control,
+                            window: s.window(),
+                            data: s.payload(),
+                        },
+                        &outer,
+                        &mut out,
+                    )
+                }
+                Protocol::Icmp => {
+                    let packet = IcmpPacket::parse(ip.payload()).ok()?;
+                    match packet.message() {
+                        IcmpMessage::EchoRequest(e) => {
+                            header.frame(EchoBuilder { kind: EchoKind::Request, ..EchoBuilder::reply_to(&e) }, &outer, &mut out)
+                        }
+                        IcmpMessage::EchoReply(e) => header.frame(EchoBuilder::reply_to(&e), &outer, &mut out),
+                        IcmpMessage::DestinationUnreachable { code, .. } => {
+                            let code = match code {
+                                UnreachableCode::Protocol => HostUnreachable::Protocol,
+                                UnreachableCode::Port => HostUnreachable::Port,
+                                _ => return None,
+                            };
+                            // Only a whole quote within 576 bytes is what the builder would send.
+                            let quote = &packet.bytes()[8..];
+                            let quoted =
+                                Ipv4Packet::parse(quote).ok().filter(|d| d.bytes().len() == quote.len() && ip.bytes().len() <= MAX_ERROR_LEN)?;
+                            header.frame(UnreachableBuilder { code, datagram: &quoted }, &outer, &mut out)
+                        }
+                        _ => return None,
+                    }
+                }
+                Protocol::Igmp => {
+                    let (kind, group) = match IgmpPacket::parse(ip.payload()).ok()?.message() {
+                        IgmpMessage::V2Report(group) => (V2Kind::Report, group),
+                        IgmpMessage::Leave(group) => (V2Kind::Leave, group),
+                        IgmpMessage::V1Report(_) | IgmpMessage::Query(_) => return None,
+                    };
+                    header.frame(V2Builder { kind, group: ReportGroup::new(group).ok()? }, &outer, &mut out)
+                }
+                Protocol::Other(protocol) => header.frame(RawPayload { protocol, bytes: ip.payload() }, &outer, &mut out),
+            };
+            built.ok()
         }
         EtherType::Other(_) => None,
-    }
-}
-
-struct RawBody<'a>(&'a [u8]);
-
-impl FrameBody for RawBody<'_> {
-    const ETHER_TYPE: toyos_net_wire::ethernet::TxEtherType = toyos_net_wire::ethernet::TxEtherType::Ipv4;
-
-    fn length(&self) -> Result<usize, BuildError> {
-        Ok(self.0.len())
-    }
-
-    fn write(&self, out: &mut [u8]) -> Result<(), BuildError> {
-        out.copy_from_slice(self.0);
-        Ok(())
     }
 }
 
@@ -285,9 +340,9 @@ fn walk_frame(bytes: &[u8]) -> Result<Vec<String>, &'static str> {
 
 fn walk_arp(bytes: &[u8]) -> Result<Vec<String>, &'static str> {
     let arp = Arp::parse(bytes).map_err(|e| e.name())?;
-    let mut out = [0xAA; 28];
-    arp.write(&mut out).unwrap();
-    assert_eq!(out, bytes[..28]);
+    let mut out = [0xAA; HEADER_LEN + MIN_BODY];
+    let built = FrameBuilder { destination: MacAddr::BROADCAST, source: mac_a() }.emit(&arp, &mut out).unwrap();
+    assert_eq!(&built[HEADER_LEN..HEADER_LEN + 28], &bytes[..28]);
     Ok(vec![format!("{arp:?}")])
 }
 

@@ -164,4 +164,47 @@ mod compile_fail {
     /// ```
     #[allow(non_camel_case_types)]
     pub struct raw_payload_takes_no_transport_protocol_and_no_payload_is_forged;
+
+    /// ```
+    /// use toyos_net_wire::arp::Arp;
+    /// use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
+    /// let source = IndividualMac::new(MacAddr([0x02, 0, 0, 0, 0, 1])).unwrap();
+    /// let arp = Arp::probe(source, std::net::Ipv4Addr::new(192, 0, 2, 1));
+    /// let mut out = [0u8; 60];
+    /// FrameBuilder { destination: MacAddr::BROADCAST, source }.emit(&arp, &mut out).unwrap();
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_wire::ethernet::{FrameBody, TxEtherType};
+    /// use toyos_net_wire::BuildError;
+    /// struct Forged;
+    /// impl FrameBody for Forged {
+    ///     const ETHER_TYPE: TxEtherType = TxEtherType::Ipv4;
+    ///     fn length(&self) -> Result<usize, BuildError> {
+    ///         Ok(0)
+    ///     }
+    ///     fn write(&self, _out: &mut [u8]) -> Result<(), BuildError> {
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_wire::ethernet::FrameBody;
+    /// use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
+    /// use toyos_net_wire::udp::UdpBuilder;
+    /// use toyos_net_wire::Port;
+    /// let builder = Ipv4Builder {
+    ///     source: Ipv4Source::new(std::net::Ipv4Addr::new(192, 0, 2, 1)).unwrap(),
+    ///     destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
+    ///     ttl: Ttl::DEFAULT,
+    ///     traffic_class: TrafficClass::ZERO,
+    ///     options: &[],
+    ///     payload: UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" },
+    /// };
+    /// let mut out = [0u8; 100];
+    /// let _ = FrameBody::write(&builder, &mut out);
+    /// ```
+    #[allow(non_camel_case_types)]
+    pub struct frame_body_cannot_be_forged_or_called_directly;
 }

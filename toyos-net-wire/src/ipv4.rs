@@ -435,9 +435,14 @@ pub struct Ipv4Builder<'a, P> {
 
 impl<P: Ipv4Payload> Ipv4Builder<'_, P> {
     pub fn emit<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], BuildError> {
-        let packet = exact(out, self.length()?)?;
+        let packet = exact(out, FrameBody::length(self)?)?;
         self.write(packet)?;
         Ok(packet)
+    }
+
+    /// The exact byte length `emit` writes, so a caller can size its buffer without the crate-private `FrameBody` it cannot forge.
+    pub fn length(&self) -> Result<usize, BuildError> {
+        FrameBody::length(self)
     }
 
     fn header_len(&self) -> Result<usize, BuildError> {
