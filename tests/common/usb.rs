@@ -3911,10 +3911,6 @@ pub fn xhci_flap(
     /// ordinary events, and never the state under test. Measured: the first
     /// shape of this gate walked ports 5, 6, 7, 8 and staged nothing.
     const PORT: &str = "1";
-    /// A pointer's bind, which is what each cycle's edges wait for: a port
-    /// torn down and never looked at again is then a cycle that never binds,
-    /// since no later cycle's event goes in to wake it.
-    const BOUND: &str = "xHCI: pointer on slot ";
     const COLLAPSED: &str = "was unplugged and plugged back in between two looks";
 
     let options = BootOptions {
@@ -3928,6 +3924,7 @@ pub fn xhci_flap(
     let Some((scale_x, scale_y)) = crate::parse_rel_scale(&boot) else {
         return Err(format!("the kernel never said what pointer scale it used:\n{boot}"));
     };
+    let bound = |line: &str| !crate::parse_pointer_sources(line).is_empty();
 
     // Each move waits for the guest to print the one before it.
     let (mut ready, mut binds, mut mev) = (false, 0usize, 0usize);
@@ -3939,7 +3936,7 @@ pub fn xhci_flap(
             qemu::QmpDevices::open(qmp()).add("usb-mouse", "xhci1.0", "flap0", &[("port", PORT)]);
             return;
         }
-        if ready && line.contains(BOUND) {
+        if ready && bound(line) {
             binds += 1;
             if binds <= CYCLES {
                 let cycle = binds - 1;
@@ -3980,7 +3977,7 @@ pub fn xhci_flap(
     // **Every cycle's device bound before the next cycle's edges went in**, so
     // a cycle that never bound is named by the last thing its port did.
     if binds != CYCLES + 1 {
-        let last = log.lines().filter(|l| l.contains("xHCI: port ") || l.contains(BOUND)).last();
+        let last = log.lines().filter(|l| l.contains("xHCI: port ") || bound(l)).last();
         let why = match last {
             _ if binds > CYCLES + 1 => "more binds than plugs",
             Some(line) if line.contains(COLLAPSED) => {
@@ -4000,21 +3997,8 @@ pub fn xhci_flap(
     // the easy case and not the one under test.
     let collapsed = log.matches(COLLAPSED).count();
     if collapsed == 0 {
-        // The two ways this fires read alike and are not alike, so the counts
-        // that tell them apart are in the message. A driver that saw every
-        // cycle as a distinct disconnect enumerated once per cycle; one that
-        // could not see a collapsed replug at all enumerated **once**, left the
-        // slot bound to the device that had gone, and delivered nothing — which
-        // is what the pre-fix driver does here, and a good deal worse than the
-        // slot march the same defect produces when the replugs are slow enough
-        // to be seen.
         return Err(format!(
-            "no replug collapsed inside a debounce, so this run never staged the race. The guest \
-             bound {} pointer(s) across {CYCLES} cycles and delivered {} pointer event(s): one \
-             bind and no events is a dead port, one bind per cycle is a run whose replugs were \
-             all seen as distinct.\n{log}",
-            crate::parse_pointer_sources(log).len(),
-            crate::parse_mouse_events(&result.stdout).len(),
+            "no replug collapsed inside a debounce, so this run never staged the race.\n{log}"
         ));
     }
 
@@ -4049,9 +4033,6 @@ pub fn xhci_flap(
     // **Sources reclaimed.** One pointer is in the port at a time, so every
     // bind must print the same button-table entry. A leak marches 2, 3, 4, 5.
     let sources: Vec<u32> = crate::parse_pointer_sources(log).iter().map(|(_, s)| *s).collect();
-    if sources.is_empty() {
-        return Err(format!("no pointer bound during the flap at all\n{log}"));
-    }
     if sources.iter().any(|s| *s != sources[0]) {
         return Err(format!(
             "pointer sources were {sources:?} — a replugged pointer took a fresh button-table \
