@@ -648,7 +648,7 @@ fn scope_sources(log: &Serial) -> BTreeMap<String, String> {
 /// QEMU keeps a virtio function on `&address_space_memory` — the unit bypassed,
 /// whatever the tables say — unless it is created with `iommu_platform=on`
 /// (`hw/virtio/virtio-bus.c:86-99`, `hw/virtio/virtio-pci.c:1400-1405` at
-/// v11.1.0), and under identity mapping the two are indistinguishable. So the
+/// v11.1.1), and under identity mapping the two are indistinguishable. So the
 /// argv says which functions were created behind a unit and the console says
 /// which negotiated `VIRTIO_F_ACCESS_PLATFORM`. On [`Profile::HeadlessNoIommu`]
 /// the guest reports `n` because QEMU never *offers* the bit
@@ -834,7 +834,7 @@ pub fn armed_on_msix(log: &Serial, claimed: &str) -> Result<(), String> {
 /// declines the feature its host offered gets no device, not a bypassing one.
 /// `virtio_validate_features` returns `-EFAULT` and `virtio_set_status` returns
 /// before it stores the status (`hw/virtio/virtio.c:2270-2276` and `:2292-2299`
-/// at v11.1.0), so `FEATURES_OK` never sticks. The actuator withholds the bit
+/// at v11.1.1), so `FEATURES_OK` never sticks. The actuator withholds the bit
 /// from every virtio device but the console, and each of them is refused for it.
 fn declining_is_not_free(
     test_config: &Path,
@@ -1075,7 +1075,7 @@ const USERDEV_FOREIGN: ForeignArm = ForeignArm {
 
 /// Oracle: VT-d Rev. 4.0 Section 9.8, which [`translate`] implements
 /// independently, and QEMU's `vtd_iova_to_sspte`
-/// (`hw/i386/intel_iommu.c:1146-1210` at v11.1.0). Every moved function's
+/// (`hw/i386/intel_iommu.c:1146-1210` at v11.1.1). Every moved function's
 /// domain is then walked on the three machines that between them carry all
 /// seven, and the page sets are required to be pairwise disjoint.
 pub fn iommu_domain_isolation(
@@ -1117,7 +1117,7 @@ pub fn iommu_domain_isolation(
 }
 
 /// A scanout backing in the xHCI's pool, by its physical address. The device maps a
-/// backing when it is attached (`hw/display/virtio-gpu.c:918-931` at v11.1.0:
+/// backing when it is attached (`hw/display/virtio-gpu.c:918-931` at v11.1.1:
 /// `dma_memory_map` answers NULL for a translation the unit refused, and the
 /// command is answered `VIRTIO_GPU_RESP_ERR_UNSPEC` at `:1010-1014`), so the
 /// blocked access is the mapping's read.
@@ -1140,7 +1140,7 @@ pub fn iommu_gpu_foreign_backing(
 
 /// The HDA stream's buffer descriptor list at that page, and the stream
 /// started: the controller fetches the list the moment `RUN` is set
-/// (`hw/audio/intel-hda.c:480` at v11.1.0, `pci_dma_rw` per entry; the stream
+/// (`hw/audio/intel-hda.c:480` at v11.1.1, `pci_dma_rw` per entry; the stream
 /// data would follow through `:433`).
 pub fn iommu_hda_foreign_bdl(
     test_config: &Path,
@@ -1161,7 +1161,7 @@ pub fn iommu_hda_foreign_bdl(
 
 /// virtio-sound's control-queue answer aimed at that page: the device maps
 /// every buffer of a chain when it pops it (`hw/virtio/virtio.c:1641-1648` at
-/// v11.1.0), and the answer it would have written there is
+/// v11.1.1), and the answer it would have written there is
 /// `hw/audio/virtio-snd.c:723-727`'s.
 pub fn iommu_sound_foreign_dma(
     test_config: &Path,
@@ -1660,7 +1660,7 @@ const XHCI_DCBAAP: u64 = 0x30;
 /// Where QEMU puts an `intel-iommu` on q35, which every profile here is: a
 /// constant on the host side, not a number the guest supplies.
 ///
-/// `Q35_HOST_BRIDGE_IOMMU_ADDR`, `include/hw/i386/intel_iommu.h:35` at v11.1.0,
+/// `Q35_HOST_BRIDGE_IOMMU_ADDR`, `include/hw/i386/intel_iommu.h:35` at v11.1.1,
 /// mapped at `intel_iommu.c:5635`. The DMAR the guest reads is built from that
 /// same constant (`acpi-build.c:1687`), so this is one source agreeing with
 /// itself and not two: what it catches is a guest reporting something else.
