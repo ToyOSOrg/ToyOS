@@ -36,7 +36,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use blockd::nvme::{Controller, Owner};
@@ -133,8 +133,8 @@ struct Blockd {
     acceptor: Acceptor,
     connector: Connector,
     child: Option<Child>,
-    /// Says once the running blockd has withheld a write's answer.
-    withheld: Option<Receiver<()>>,
+    /// Every line the running blockd says.
+    said: Option<Receiver<String>>,
 }
 
 impl Blockd {
@@ -144,7 +144,7 @@ impl Blockd {
 
     fn with(syscap: SysCap, args: &[&str]) -> Self {
         let (acceptor, connector) = port::create().unwrap_or_else(|e| fail(format!("no port: {e:?}")));
-        let mut blockd = Self { syscap, acceptor, connector, child: None, withheld: None };
+        let mut blockd = Self { syscap, acceptor, connector, child: None, said: None };
         blockd.spawn(args, false);
         blockd
     }
@@ -178,7 +178,7 @@ impl Blockd {
         command.endow(&format!("{SERVE_PREFIX}{PORT}"), acceptor.0);
         let mut child = command.spawn().unwrap_or_else(|e| fail(format!("blockd did not start: {e}")));
         let out = child.stdout.take().expect("piped");
-        let (said, heard) = mpsc::channel();
+        let (says, said) = mpsc::channel();
         let mut kill = kill_on_withheld.then(|| {
             toyos_abi::syscall::dup(toyos_abi::RawHandle(child.as_raw_handle()))
                 .unwrap_or_else(|e| fail(format!("blockd's handle would not duplicate: {e:?}")))
@@ -187,16 +187,32 @@ impl Blockd {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 println!("{line}");
                 if line.contains("WITHHELD") {
-                    let _ = said.send(());
                     if let Some(handle) = kill.take() {
                         let _ = toyos_abi::syscall::process_kill(handle);
                         println!("blockd_io: blockd killed with the withheld write done on the device");
                     }
                 }
+                let _ = says.send(line);
             }
         });
         self.child = Some(child);
-        self.withheld = Some(heard);
+        self.said = Some(said);
+    }
+
+    /// Wait, at most `bound`, for the running blockd to say a line holding
+    /// `needle`.
+    fn says(&self, needle: &str, bound: Duration) {
+        let said = self.said.as_ref().expect("spawned");
+        let asked = Instant::now();
+        loop {
+            let left = bound.saturating_sub(asked.elapsed());
+            match said.recv_timeout(left) {
+                Ok(line) if line.contains(needle) => return,
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => fail(format!("blockd did not say {needle:?} in {bound:?}")),
+                Err(RecvTimeoutError::Disconnected) => fail(format!("blockd ended before it said {needle:?}")),
+            }
+        }
     }
 
     /// End the running blockd, if one is, and wait for it to be gone.
@@ -518,7 +534,7 @@ fn reset() {
 /// ring's depth behind the tail blockd published, so the answer finds no room:
 /// blockd ends that session, and serves the next.
 fn hostile_head() {
-    let mut blockd = Blockd::start(&["--silence-write", "1"]);
+    let blockd = Blockd::start(&["--silence-write", "1"]);
     let region = Region::create().unwrap_or_else(|e| fail(format!("a region: {e:?}")));
     let conn = blockd.names().open(PORT).unwrap_or_else(|e| fail(format!("the port: {e:?}")));
     let shared = region.share().unwrap_or_else(|e| fail(format!("a second handle: {e:?}")));
@@ -538,33 +554,13 @@ fn hostile_head() {
     }
     words[SQ_TAIL].store(1, Ordering::Release);
     conn.write_nonblock(&[1]).unwrap_or_else(|e| fail(format!("the doorbell: {e:?}")));
-    let withheld = blockd.withheld.as_ref().expect("spawned");
-    if withheld.recv_timeout(SILENCE_ENDS).is_err() {
-        fail(format!("blockd withheld no write's answer in {SILENCE_ENDS:?}"));
-    }
+    blockd.says("WITHHELD", SILENCE_ENDS);
     let tail = words[CQ_TAIL].load(Ordering::Acquire);
     words[CQ_HEAD].store(tail.wrapping_sub(DEPTH), Ordering::Release);
     conn.write_nonblock(&[1]).unwrap_or_else(|e| fail(format!("the doorbell: {e:?}")));
     println!("blockd_io: with a write on the device, the client moved its completion head {DEPTH} behind the tail");
-    let poller = Poller::new(1);
-    let asked = Instant::now();
-    loop {
-        match conn.read_nonblock(&mut [0u8; 8]) {
-            Ok(0) => break,
-            Err(SyscallError::WouldBlock) => {}
-            Ok(_) => fail("blockd rang a session whose answer had no room".into()),
-            Err(_) => break,
-        }
-        let Some(left) = SILENCE_ENDS.checked_sub(asked.elapsed()) else {
-            fail(format!("blockd did not end the session in {SILENCE_ENDS:?}"));
-        };
-        poller.watch(&conn, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
-    }
-    match blockd.child.as_mut().expect("spawned").try_wait() {
-        Ok(None) => println!("blockd_io: blockd ended the session and runs on"),
-        other => fail(format!("blockd ended with the session: {other:?}")),
-    }
+    blockd.says("closed after", SILENCE_ENDS);
+    println!("blockd_io: blockd ended the session and runs on");
     let mut next = open(blockd.names(), TARGET);
     let block = pattern(0x6B, 0);
     match next.write(0, &block) {
