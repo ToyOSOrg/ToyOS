@@ -34,10 +34,12 @@
 //!
 //! **init never waits on a file server it supervises from its loop alone**:
 //! the loop is also where a server that ended is started again. Its calls into
-//! the file servers run on one worker thread ([`Worker`]), and init waits on
-//! the call and on a service's end together ([`Init::files`]), so a call a
-//! server's end left in the port's queue goes on to the server started in its
-//! place, and one alive and silent costs a bounded wait ([`FILES_BOUND`]).
+//! the file servers run on one worker thread ([`Worker`]) — a launch's files
+//! included, read there before its spawn (`CommandExt::prepare`) — and init
+//! waits on the call and on a service's end together ([`Init::files`]), so a
+//! call a server's end left in the port's queue goes on to the server started
+//! in its place, and one alive and silent costs a bounded wait
+//! ([`FILES_BOUND`]).
 //!
 //! **Every program it starts gets `HOME` from its row** (`Program::home`), over
 //! anything a launching caller carried: a service its own `/state/<name>`, made
@@ -1417,12 +1419,53 @@ impl Init<'_> {
             .map(|(name, handle)| (name, unsafe { Connector::from_raw(handle) }))
             .collect();
 
+        // std joins a relative `current_dir` onto init's own cwd, so passing one
+        // on would start the child in init's `/` — the default this field removes.
+        if !request.cwd.starts_with('/') {
+            say!("init: launcher: refused a working directory that is not absolute");
+            let _ = conn.try_signal(launch::MSG_REFUSED);
+            return;
+        }
+
+        // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
+        // has already established that the two name one binary, so this grants
+        // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
+        // was never told which applet it is.
+        let mut command = Command::new(request.program);
+        // **Carried, not inherited.** A child of the launcher would otherwise get
+        // init's environment and init's working directory, so `cd /tmp && ls` would
+        // list `/`. The launcher is a spawn service, not a session.
+        command.env_clear();
+        for entry in request.env.split(|&b| b == 0).filter(|e| !e.is_empty()) {
+            let Some(eq) = entry.iter().position(|&b| b == b'=') else { continue };
+            if let (Ok(key), Ok(value)) =
+                (std::str::from_utf8(&entry[..eq]), std::str::from_utf8(&entry[eq + 1..]))
+            {
+                command.env(key, value);
+            }
+        }
+        command.current_dir(request.cwd);
+        for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
+            if let Ok(arg) = std::str::from_utf8(arg) {
+                command.arg(arg);
+            }
+        }
+
         let installed;
-        // On the worker: a path under `/apps` is read off its package, and that is
-        // a call into a file server init supervises.
+        // On the worker, every file the launch reads: a path under `/apps` is
+        // read off its package, and the program and its working directory may
+        // be a file server's, which init supervises.
         let (system, path) = (self.system, request.program.to_string());
-        let resolved = match self.files("a launch's path", move || resolve(system, &path)) {
-            Ok(resolved) => resolved,
+        let found = self.files("a launch's files", move || {
+            let resolved = resolve(system, &path);
+            let prepared = match resolved {
+                Resolved::Row(_) | Resolved::Package(_) => command.prepare().map(drop),
+                Resolved::NotDeclared | Resolved::Refused(_) => Ok(()),
+            };
+            (resolved, prepared.map(|()| command))
+        });
+        let (resolved, prepared) = match found {
+            Ok(found) => found,
             Err(why) => {
                 say!("init: launcher: {} was not resolved: {why}", request.program);
                 let _ = conn.try_signal(launch::MSG_REFUSED);
@@ -1450,40 +1493,16 @@ impl Init<'_> {
                 return;
             }
         };
-
-        // std joins a relative `current_dir` onto init's own cwd, so passing one
-        // on would start the child in init's `/` — the default this field removes.
-        if !request.cwd.starts_with('/') {
-            say!("init: launcher: refused a working directory that is not absolute");
-            let _ = conn.try_signal(launch::MSG_REFUSED);
-            return;
-        }
-
-        // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
-        // has already established that the two name one binary, so this grants
-        // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
-        // was never told which applet it is.
-        let mut command = Command::new(request.program);
+        let command = match prepared {
+            Ok(command) => command,
+            Err(e) => {
+                say!("init: launcher: cannot start {}: {e}", program.name);
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
         let caller_slots: Vec<(u32, toyos::RawHandle)> =
             request.slot_numbers().zip(slots.0.iter().copied()).collect();
-        // **Carried, not inherited.** A child of the launcher would otherwise get
-        // init's environment and init's working directory, so `cd /tmp && ls` would
-        // list `/`. The launcher is a spawn service, not a session.
-        command.env_clear();
-        for entry in request.env.split(|&b| b == 0).filter(|e| !e.is_empty()) {
-            let Some(eq) = entry.iter().position(|&b| b == b'=') else { continue };
-            if let (Ok(key), Ok(value)) =
-                (std::str::from_utf8(&entry[..eq]), std::str::from_utf8(&entry[eq + 1..]))
-            {
-                command.env(key, value);
-            }
-        }
-        command.current_dir(request.cwd);
-        for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
-            if let Ok(arg) = std::str::from_utf8(arg) {
-                command.arg(arg);
-            }
-        }
 
         // `inherit_handle` duplicates into the child, so init's own copies go with
         // `slots` when this returns.
