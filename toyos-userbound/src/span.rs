@@ -143,7 +143,6 @@ mod tests {
         ("SchedInfo", 24, 8),
         ("FramebufferInfo", 32, 4),
         ("SpawnArgs", 112, 8),
-        ("ImageRef", 16, 8),
         ("NamespaceBuild", 56, 8),
         ("InboxSetup", 16, 8),
         ("ProcessStats", 128, 8),

@@ -329,12 +329,6 @@ fn dlopen_refused(name: &str, bytes: &[u8]) {
         }
         Err(e) => assert!(!format!("{e}").is_empty(), "{name}: dlopen error message"),
     }
-    // The same bytes handed over by handle, under a name no path holds.
-    let named = format!("/image/{name}");
-    let object = image_object(bytes);
-    if let Ok(handle) = syscall::dl_open_image(named.as_bytes(), toyos::AsHandle::as_handle(&object), bytes.len() as u64) {
-        panic!("{name}: dlopen of the image loaded it as handle {handle}, and the loader must refuse it");
-    }
 }
 
 /// A minimal, honest exe: one PT_LOAD covering the whole file at vaddr 0.

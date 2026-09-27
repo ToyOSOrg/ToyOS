@@ -342,18 +342,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     None => return bad_addr,
                 },
             };
-            // Only named here: `sys_dlopen` answers a name this process holds
-            // before it looks at the object at all.
-            let image = match a4 {
-                0 => None,
-                raw => {
-                    let Some(at) = UserAddr::checked(raw) else { return bad_addr };
-                    let Ok(image) = ctx.copy_in::<ImageRef>(at) else { return bad_addr };
-                    Some(image)
-                }
-            };
             // ctx carries the copy-out: sys_dlopen writes init_out only once the load succeeds.
-            sys_dlopen(&ctx, &path, init_out, image)
+            sys_dlopen(&ctx, &path, init_out)
         }
         SYS_DLSYM => {
             let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };

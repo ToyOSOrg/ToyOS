@@ -81,7 +81,7 @@ impl FileBacking for ReadOnlyBacking {
     }
 }
 
-/// An executable or library a caller read into a shared memory object of its
+/// An executable a caller read into a shared memory object of its
 /// own and handed over by handle: what a program in `/apps` is spawned and
 /// paged from, since no file server's volume is the kernel's.
 ///

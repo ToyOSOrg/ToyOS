@@ -8,8 +8,6 @@
 //! - The object overwritten with `hlt` the moment the spawn returns: the child
 //!   runs what it had copied and faults on the rest, and the machine goes on —
 //!   the next spawn from a fresh object runs.
-//! - `dlopen` of a name this process already holds answers that library and
-//!   never looks at the object: a handle it could not read is not refused.
 
 use toyos::shm::SharedMemory;
 use toyos::AsHandle;
@@ -17,7 +15,6 @@ use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 
 const SELF: &str = "/system/bin/test_rs_spawn_image_object";
-const LIB: &str = "/system/lib/libtls_lib.so";
 const CHILD: &str = "spawned-from-an-object";
 const CWD: &str = "/";
 
@@ -88,15 +85,6 @@ fn main() {
     println!("spawn_image_object: a child whose object was overwritten after the spawn ended ({code})");
     drop(object);
     runs("after the overwrite");
-
-    let (lib, lib_len) = object_of(LIB);
-    let name = b"/image/spawn_image_object/libtls_lib.so";
-    let first = syscall::dl_open_image(name, lib.as_handle(), lib_len).expect("dlopen from an object");
-    let unreadable = syscall::dup_narrowed(lib.as_handle(), Rights::DUP).expect("a duplicate without MAP");
-    let again = syscall::dl_open_image(name, unreadable, lib_len);
-    assert_eq!(again, Ok(first), "a name this process holds was answered from the object, not the name");
-    syscall::close(unreadable);
-    println!("spawn_image_object: a held name's dlopen answered its library without reading the object");
 
     println!("spawn_image_object: PASS");
 }

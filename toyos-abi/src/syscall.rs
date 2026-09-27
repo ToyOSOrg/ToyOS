@@ -409,16 +409,6 @@ pub struct SpawnArgs {
 
 const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 112);
 
-/// A library's bytes in a shared memory object, for `SYS_DLOPEN`'s fourth
-/// word: what [`SpawnArgs::image`] and [`SpawnArgs::image_len`] are to a spawn.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ImageRef {
-    /// A handle to the object, carrying `MAP`.
-    pub handle: u64,
-    pub len: u64,
-}
-
 /// One `(label, handle)` pair of a process's endowment table.
 ///
 /// `label_off`/`label_len` index the label blob that travels beside the
@@ -1917,22 +1907,8 @@ pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
 /// Load a shared library (.so) into the current process.
 /// Runs .init_array constructors after loading.
 pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
-    dl_open_with(path, 0)
-}
-
-/// Load a shared library whose bytes the caller read itself into the first
-/// `len` bytes of the shared memory object `image`, under `name`: a library on
-/// a file server's volume, which the kernel cannot open. The object is taken
-/// as [`SpawnArgs::image`] says; a load under a name this process already
-/// holds answers that library's handle, and the object is not asked about.
-pub fn dl_open_image(name: &[u8], image: RawHandle, len: u64) -> Result<u64, SyscallError> {
-    let image = ImageRef { handle: image.0 as u64, len };
-    dl_open_with(name, &image as *const ImageRef as u64)
-}
-
-fn dl_open_with(path: &[u8], image: u64) -> Result<u64, SyscallError> {
     let mut init_info: [u64; 2] = [0; 2];
-    let handle = check(syscall(SYS_DLOPEN, path.as_ptr() as u64, path.len() as u64, init_info.as_mut_ptr() as u64, image))?;
+    let handle = check(syscall(SYS_DLOPEN, path.as_ptr() as u64, path.len() as u64, init_info.as_mut_ptr() as u64, 0))?;
     // Run .init_array constructors (e.g. EH frame finder registration in cdylib std)
     let init_array_ptr = init_info[0];
     let init_count = init_info[1];
