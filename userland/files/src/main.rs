@@ -65,7 +65,7 @@ impl FileBrowser {
         let folder_icon = Sprite::from_svg_colored(&folder_svg, ICON_SIZE as u32, [0xf0, 0xc8, 0x50]);
         let file_icon = Sprite::from_svg_colored(&file_svg, ICON_SIZE as u32, [0xd0, 0xd0, 0xd8]);
 
-        let current_dir = PathBuf::from("/home/root");
+        let current_dir = std::env::home_dir().expect("files: init starts every program with HOME");
 
         let mut browser = Self {
             window,

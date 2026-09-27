@@ -2,8 +2,8 @@
 //! tarball it ships as, and how a runner installs one.
 //!
 //! **The tag is the content hash of everything the tarball's bytes depend on**
-//! — [`TREES`]: the rust fork, the three trees compiled into the sysroot, the
-//! linker that ships beside them, and this file, which is the packaging. A tree
+//! — [`TREES`]: the rust fork, whose LLVM is also the `rust-lld` it carries, the
+//! three trees compiled into the sysroot, and this file, which is the packaging. A tree
 //! whose toolchain somebody already built finds it published; a tree that moved
 //! any of them asks for a tag nobody has, and `cargo run -- --ci toolchain`
 //! builds it. Publishing is idempotent because the tag *is* the content.
@@ -18,16 +18,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
+use toyos_tmpdir::TempDir;
+
+use crate::toolchain::HOSTED_ARCH;
 
 /// What the tag hashes, as `git rev-parse HEAD:<tree>` names them. The last is
 /// this file.
-pub const TREES: [&str; 7] = [
+pub const TREES: [&str; 5] = [
     "rust",
     "toyos-abi/src",
     "toyos/src",
     "userland/libc/src",
-    "toyos-ld/src",
-    "toyos-ld/Cargo.toml",
     "src/release.rs",
 ];
 
@@ -129,7 +130,8 @@ pub fn install(root: &Path) -> Result<String, String> {
         )
     })?;
     let token = std::env::var("GH_TOKEN").expect("checked above");
-    let tarball = std::env::temp_dir().join(ASSET);
+    let staging = TempDir::new("toolchain-install");
+    let tarball = staging.join(ASSET);
     let into = root.join("rust/build");
     fs::create_dir_all(&into).map_err(|e| format!("{}: {e}", into.display()))?;
     // The retry is on the transfer and the unpack together: a truncated body is
@@ -198,13 +200,13 @@ fn published(root: &Path, tag: &str) -> bool {
 pub fn ensure_published(root: &Path) -> Result<String, String> {
     let tag = tag(root)?;
     println!("this tree's toolchain: {tag}");
-    if !(cfg!(target_os = "linux") && cfg!(target_arch = "x86_64")) {
+    if !(cfg!(target_os = "linux") && crate::arch::Arch::HOST == Some(crate::arch::Arch::X86_64)) {
         return Err(format!(
             "the release is {HOST}'s and this host is not one; a tarball built here would \
              install nowhere"
         ));
     }
-    let tmp = std::env::temp_dir();
+    let tmp = TempDir::new("toolchain-publish");
     let manifest = manifest(root, &tag)?;
     let notes = notes(root, &tag, &manifest)?;
     fs::write(tmp.join("TOOLCHAIN"), &manifest).map_err(|e| e.to_string())?;
@@ -252,13 +254,6 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
             need.0, need.1, GLIBC_FLOOR.0, GLIBC_FLOOR.1
         ));
     }
-
-    // rustc's ToyOS target finds `toyos-ld` on PATH, so the tarball carries one.
-    fs::copy(
-        root.join(format!("target/{HOST}/release/toyos-ld")),
-        stage2.join("bin/toyos-ld"),
-    )
-    .map_err(|e| format!("copying toyos-ld into the release: {e}"))?;
     fs::copy(tmp.join("TOOLCHAIN"), build.join("TOOLCHAIN")).map_err(|e| e.to_string())?;
 
     // `lib/rustlib/<host>` and the sysroot's `bin/cargo` are links into this
@@ -268,11 +263,11 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     let mut tar = Command::new("tar")
         .arg("-C")
         .arg(&build)
-        .arg(format!("--exclude=x86_64-unknown-toyos/stage2/lib/rustlib/{HOST}"))
+        .arg(format!("--exclude={}/stage2/lib/rustlib/{HOST}", HOSTED_ARCH.userland()))
         .arg(format!("--exclude={sysroot}/bin/cargo"))
         .arg(format!("--transform=s,^{sysroot},{HOST}/stage2,"))
-        .args(["-c", &sysroot, "x86_64-unknown-toyos/stage2"])
-        .args(["toyos-sysroot-witness", "toyos-ld-witness", "TOOLCHAIN"])
+        .args(["-c", &sysroot, &format!("{}/stage2", HOSTED_ARCH.userland())])
+        .args(["toyos-sysroot-witness", "TOOLCHAIN"])
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("tar: {e}"))?;
@@ -391,10 +386,9 @@ fn notes(root: &Path, tag: &str, manifest: &str) -> Result<String, String> {
     curl -sSL {url} | tar --zstd -x -C toyos-toolchain
     rustup toolchain link toyos toyos-toolchain/{HOST}/stage2
     ln -s \"$(rustup which cargo)\" toyos-toolchain/{HOST}/stage2/bin/cargo
-    export PATH=\"$PATH:$PWD/toyos-toolchain/{HOST}/stage2/bin\"
     cargo +toyos build --target x86_64-unknown-toyos
 
-rustc's ToyOS target names its linker `toyos-ld` and finds it on `PATH`; the tarball carries one in that same `bin/`, which goes LAST on `PATH`: first, it shadows rustup's `cargo` proxy with the real binary and `+toyos` fails. The `cargo` symlink is not shipped because its path would be the publisher's. Leaving `PATH` alone: `CARGO_TARGET_X86_64_UNKNOWN_TOYOS_LINKER=<that bin>/toyos-ld`.
+rustc's ToyOS target names `rust-lld` as its linker, and the toolchain carries it where rustc looks for it, so nothing goes on `PATH`. The `cargo` symlink is not shipped because its path would be the publisher's.
 
 ## glibc
 

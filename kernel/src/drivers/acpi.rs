@@ -105,10 +105,8 @@ const SDT_OEM_ID: usize = 10;
 /// — so a row here is a table that checksummed, and the line that closes the
 /// list is the machine's answer to how many of them it has.
 pub fn inventory(rsdp_addr: u64) {
-    /// The five this kernel decodes: the MADT for its CPUs and IO APICs, the
-    /// FADT for reset, soft-off and the century register, the HPET for the
-    /// clock, the MCFG for ECAM and the DMAR for the IOMMU.
-    const READ: &[&[u8; 4]] = &[b"APIC", b"FACP", b"HPET", b"MCFG", b"DMAR"];
+    // The tables this architecture decodes.
+    const READ: &[&[u8; 4]] = crate::arch::boot::ACPI_TABLES;
 
     let mut validated = 0usize;
     for signature in READ {
@@ -188,6 +186,10 @@ pub fn init_power(rsdp_addr: u64) {
         return;
     };
     let pm1a = pm1a as u16;
+    if pm1a != 0 && !crate::arch::pio::EXISTS {
+        log!("ACPI: FADT puts PM1a control at port {pm1a:#x}, and this machine has no I/O port space — no soft-off");
+        return;
+    }
 
     // Prefer X_DSDT over DSDT; a revision claiming 2.0 doesn't prove the field is present, so the length is checked rather than trusting the revision alone.
     let dsdt_addr = toyos_acpi::dsdt_address(&fadt.0);
@@ -271,6 +273,9 @@ pub fn init_reset(rsdp_addr: u64) {
         }
     };
     match toyos_acpi::reset_register(&fadt.0) {
+        Reset::Port { port, .. } if !crate::arch::pio::EXISTS => {
+            log!("ACPI: the reset register is SystemIO {port:#x}, and this machine has no I/O port space — no reboot");
+        }
         Reset::Port { port, value } => {
             RESET_PORT.store(port, Ordering::Relaxed);
             RESET_VALUE.store(value, Ordering::Relaxed);
@@ -322,7 +327,7 @@ pub fn reset_now() -> ! {
         crate::arch::cpu::halt();
     }
     // SAFETY: the port is non-zero only where `init_reset` decoded an 8-bit System I/O register, and the value is that register's.
-    unsafe { crate::arch::cpu::outb(port, RESET_VALUE.load(Ordering::Relaxed)) };
+    unsafe { crate::arch::pio::outb(port, RESET_VALUE.load(Ordering::Relaxed)) };
 
     crate::arch::cpu::halt();
 }
@@ -342,7 +347,7 @@ pub fn shutdown() -> ! {
     if pm1a != 0 {
         let val = (slp_typ << 10) | SLP_EN;
         // SAFETY: pm1a and slp_typ come only from the validated FADT parse via PM1A_CNT_PORT/SLP_TYPA, and the zero check above confirms that parse happened.
-        unsafe { crate::arch::cpu::outw(pm1a, val) };
+        unsafe { crate::arch::pio::outw(pm1a, val) };
     }
 
     crate::arch::cpu::halt();
@@ -378,7 +383,13 @@ pub fn parse_madt(rsdp_addr: u64) -> Option<MadtInfo> {
             }
             Ok(MadtEntry::IoApic(entry)) => io_apics.push(entry),
             Ok(MadtEntry::SourceOverride(entry)) => source_overrides.push(entry),
-            Ok(MadtEntry::Other(_)) => {}
+            // A GIC structure on a machine this walk reads APICs from is as
+            // foreign to it as a type it does not know.
+            Ok(MadtEntry::Gicc(_)
+            | MadtEntry::Gicd { .. }
+            | MadtEntry::Gicr { .. }
+            | MadtEntry::Its { .. }
+            | MadtEntry::Other(_)) => {}
             Err(halt) => {
                 log!(
                     "ACPI: MADT entry at +{} declares {} bytes of a {}-byte list — stopping",

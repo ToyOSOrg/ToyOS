@@ -40,9 +40,8 @@ your machine in milliseconds, with no VM and no hardware. Several forbid
 `unsafe` outright. The kernel calls them; it does not contain them. That is
 what makes an OS this size possible to change with confidence.
 
-The north star is **building ToyOS from within ToyOS**: its own compiler, its
-own linker, on its own hardware, with no external toolchain anywhere in the
-chain.
+The north star is **building ToyOS from within ToyOS**: the system rebuilds
+itself on its own hardware and reproduces, byte for byte, what the host built.
 
 ## Milestones
 
@@ -66,7 +65,7 @@ chain.
 
 | | |
 |---|---|
-| ✅ | **Our own linker** — the UEFI bootloader as PE32+, the kernel and all userland as position-independent ELF |
+| ✅ | **One linker, `rust-lld`** — the UEFI bootloader as PE32+, the kernel and all userland as position-independent ELF |
 | ✅ | **Our own C compiler** — preprocessor through codegen, Cranelift instead of LLVM |
 | ✅ | **A real Rust target** with a real `std`: threads, `dlopen`, unwinding, symbolized backtraces |
 | ✅ | The Rust ecosystem, mostly unmodified — crates.io crates compile and run as published |
@@ -74,7 +73,6 @@ chain.
 | 🔨 | Compiling a Rust program *inside* ToyOS |
 | ⬜ | `cargo` inside ToyOS |
 | ⬜ | Building ToyOS from within ToyOS |
-| ⬜ | No LLVM anywhere in the chain, bootstrap included |
 
 ### The kernel
 
@@ -163,11 +161,11 @@ the `/system/bin/doom` in the desktop image. It also takes cases from TinyCC's o
 `tests2` corpus all the way to running ToyOS processes, comparing each one's
 output against TinyCC's expectations.
 
-**Our own linker.** `toyos-ld` links everything that runs on ToyOS, plus
-everything that runs before it: the UEFI bootloader as PE32+, the kernel and
-every userland program as position-independent ELF. No LLVM linker touches
-anything that boots. The largest thing it lays out is the Rust compiler itself,
-built for ToyOS, in a single shared object.
+**LLVM's linker.** `rust-lld`, the one the Rust toolchain carries, links
+everything that runs on ToyOS, plus everything that runs before it: the UEFI
+bootloader as PE32+, the kernel and every userland program as
+position-independent ELF. `toyos-ld`, the linker this project wrote, is frozen:
+it is what `toyos-cc` links through inside ToyOS until LLD runs there.
 
 **A real Rust target.** `x86_64-unknown-toyos` lives in ToyOS's fork of the
 compiler, with a prebuilt `std` in the sysroot. One `rustc` invocation turns an
@@ -232,7 +230,8 @@ script whose whole job is to find a Python to run `bootstrap.py` with — so a
 clean clone needs one, and so does every toolchain change.
 
 Nothing in the OS goes near either. `bootloader/`, `kernel/` and `userland/`
-all link with `toyos-ld`, and no image contains a C toolchain or a Python. On
+all link with the toolchain's `rust-lld`, and no image contains a C toolchain
+or a Python. On
 macOS both arrive with the Xcode Command Line Tools; on Debian and Ubuntu they
 are `build-essential` and `python3`.
 

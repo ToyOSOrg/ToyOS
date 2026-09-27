@@ -34,10 +34,7 @@ machine was down for six minutes. The spawning CPU is `cpu6` in all three.
 
 ## The evidence is bounded by logd, and that is the whole difficulty
 
-**The stick's file is what `logd` flushed, not what the kernel emitted.** In a
-passing boot the records from the reboot binary's spawn through `Rebooting.`
-reach the file only because `quiesce` calls `log::wait_for_durable()` before the
-reset. So a hang anywhere from that spawn through the reset register write
+**The stick's file is what `logd` flushed, not what the kernel emitted.** So a hang anywhere from that spawn through the reset register write
 leaves exactly this tail, with everything after it still in the record ring and
 never on the stick. The window is **[the reboot binary's spawn → the reset
 register write]**, and the candidates in it are all consistent with what the
@@ -51,7 +48,6 @@ file shows:
 - `quiesce`'s `flush_disks` and `hand_back`, which landed at `88841f56` a few
   minutes before the first hang; `hand_back` takes `XHCI` while `logd`'s own
   write to the same stick may still be in flight.
-- `log::wait_for_durable` itself.
 
 Nothing on the stick can separate them, and the black-box page was lost to the
 power cut each time — a warm reset preserves it, a cold one does not.

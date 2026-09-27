@@ -12,6 +12,7 @@ static DEBUG_WAIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBo
 
 pub use mm::{UserAddr, DirectMap, PHYS_OFFSET};
 
+mod invalidation;
 mod shootdown;
 mod sleeplock;
 mod smp_roster;
@@ -45,8 +46,6 @@ mod usb_gate;
 mod nvme_gate;
 #[cfg(feature = "boot-actuators")]
 mod sched_gate;
-#[cfg(feature = "boot-actuators")]
-mod nmi_gate;
 mod block;
 mod durability;
 mod gpt;
@@ -74,7 +73,6 @@ mod process;
 mod loader;
 mod scheduler;
 mod sched;
-mod hw;
 mod iommu;
 mod preempt;
 mod irq_census;
@@ -82,7 +80,6 @@ mod irq_ring;
 mod trace;
 mod time;
 mod clock;
-mod rtc;
 
 mod watch;
 mod iod;
@@ -95,6 +92,7 @@ mod pcidev;
 mod gpu;
 mod user_ptr;
 mod vma;
+mod syscall;
 
 /// Nested generic forces a demangled symbol wider than the console grid,
 /// proving `screen_late_panic`'s renderer really wraps.
@@ -116,8 +114,9 @@ mod late_panic {
 use crate::mm::paging::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use arch::{apic, cpu, idt, pat, percpu, smp, syscall};
-use drivers::{acpi, gop, i8042, ioapic, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
+use arch::{cpu, percpu, smp};
+pub(crate) use arch::hw;
+use drivers::{acpi, gop, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
 #[panic_handler]
@@ -148,7 +147,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         alert!("EARLY PANIC: {}", info);
         // Before the capture, so the arm line is the panel's last one.
         let bound = panic_reboot::arm(true);
-        // Halts directly instead of via halt_all_cpus: idt::init hasn't run yet, so a renderer fault would triple-fault.
+        // Halts directly instead of via halt_all_cpus: the exception table is not loaded yet, so a renderer fault would find firmware's.
         drivers::panic_console::capture();
         // SAFETY: no other writer can be mid-transmission — IF is clear here and every other CPU is about to halt.
         unsafe { drivers::serial::panic_flush(); }
@@ -163,16 +162,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     if prev != percpu::CpuFaultState::Normal {
         // Escalate: reentry depth is zero here, so this landed on a fatal exception or page fault no handler was inside.
         panic::last_words("DOUBLE PANIC", Some(prev), info, true);
-        apic::halt_all_cpus();
+        panic::halt_all_cpus();
     }
 
-    let rbp: u64;
-    // SAFETY: register-to-register mov only (nomem, nostack); -Cforce-frame-pointers=yes makes rbp a real frame pointer.
-    unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack)); }
-
-    arch::idt::exceptions::crash_report(
-        &arch::idt::exceptions::CrashInfo::Panic { message: info, rbp }
-    );
+    arch::trap::report_panic(info, cpu::frame_pointer());
 
     // Captures now: recovery below may re-enter a scheduler this panic left locked, so a later drain isn't guaranteed.
     drivers::panic_console::capture();
@@ -191,38 +184,19 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         depth.store(0, core::sync::atomic::Ordering::SeqCst);
         // Discarded here: a stale capture would blame this panic for the next fatal one.
         drivers::panic_console::discard_capture();
-        arch::idt::exceptions::try_recover_from_panic();
+        arch::trap::try_recover_from_panic();
     }
 
-    apic::halt_all_cpus();
-}
-
-/// Entry point: the bootloader jumps here with `rdi = &KernelArgs`, switches to the kernel's own stack, calls `kernel_main`.
-/// # Safety
-/// Only the bootloader may call this, fresh from firmware, with `rdi` holding a live [`KernelArgs`].
-#[unsafe(naked)]
-#[no_mangle]
-pub unsafe extern "sysv64" fn _start(_kernel_args: &KernelArgs) -> ! {
-    core::arch::naked_asm!(
-        "mov rax, [rdi + 16]",  // kernel_memory_addr
-        "add rax, [rdi + 32]",  // + kernel_stack_addr
-        "add rax, [rdi + 40]",  // + kernel_stack_size
-        "movabs rbx, {phys_offset}",
-        "add rax, rbx",
-        "mov rsp, rax",
-        "call {kernel_main}",
-        phys_offset = const PHYS_OFFSET,
-        kernel_main = sym kernel_main,
-    );
+    panic::halt_all_cpus();
 }
 
 fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
     gpu::register(driver, info);
 }
 
-/// The two names DATA answers to. One filesystem, so `/apps/x` and `/home/x`
-/// are two directories of it and never two volumes.
-const DATA_PATHS: [&str; 2] = ["apps", "home"];
+/// The names DATA answers to. One filesystem, so `/apps/x` and `/home/x` are
+/// two directories of it and never two volumes.
+const DATA_PATHS: [&str; 4] = ["apps", "config", "home", "state"];
 
 /// The boot from power-on, off the loader's TSC readings and `complete`'s, at
 /// the calibrated rate. The TSC counts from reset, so the first span is
@@ -266,7 +240,11 @@ fn report_log_destination() {
     }
 }
 
-unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
+/// The architecture's entry calls this once, on the kernel's own stack, with
+/// the loader's arguments.
+/// # Safety
+/// `kernel_args` is the loader's live [`KernelArgs`], and nothing has run before this.
+pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // Copied onto the kernel stack: the original lives on the UEFI stack, unreachable once mm::init drops the identity map.
     let kernel_args = *kernel_args;
 
@@ -276,13 +254,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         entry_count,
     );
 
-    // **Before the panel and not after it**: the loader maps the scanout
-    // uncacheable, and `panic_console::arm`'s own record is the panel's first
-    // paint, so there is no window between arming the panel and painting
-    // through it in which to establish a memory type. The write alone, and it
-    // logs nothing: the read-back is `pat::check`, below, where a refusal has
-    // a channel to reach.
-    pat::init();
+    arch::boot::before_panel();
 
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
@@ -299,7 +271,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         )
     });
 
-    serial::init();
+    serial::init(kernel_args.rsdp_addr);
 
     // After both channels exist, before the first actuator site.
     // cmdline_len==0 is checked first: an empty bootloader Vec has no backing allocation to point at.
@@ -319,24 +291,13 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     actuator::init(cmdline);
     let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
-    // Armed here so the next record — `PAT:` — reaches the console and the panel keeps the one before it.
+    // Armed here so the next record — the architecture's first — reaches the console and the panel keeps the one before it.
     #[cfg(feature = "boot-actuators")]
     if actuator::test_early_halt() {
         log::halt_before_the_next_repaint();
     }
 
-    // After actuator::init, whose table the `control-regs-bench` probe inside
-    // this call reads. `pat::init` above restored the `CR0` it found, so a
-    // firmware `CD` — which would make every mapping uncacheable whatever the
-    // PAT says — ends here.
-    arch::control_regs::init_cr0(0);
-
-    // The read-back `pat::init` owes, on a boot that now has three channels to
-    // carry a refusal.
-    pat::check();
-
-    log!("PAT: IA32_PAT={:#018x}, entry {} = {}",
-        pat::msr(), pat::WC_ENTRY, pat::entry_name(pat::WC_ENTRY));
+    arch::boot::after_console(&kernel_args, maps);
 
     // percpu, the allocator and our own paging aren't up yet, so a fault here only reaches the early-panic branch.
     if actuator::test_early_panic() {
@@ -380,6 +341,16 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         kernel_args.rtc_utc_offset_minutes, kernel_args.rtc_utc_offset_known,
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
+    // Before `mm::init`, which may hand the parameter's memory out. This record
+    // is how a slot that died or was refused reaches the next boot's `/log`.
+    match params::slot(cmdline) {
+        (Some(slot), None) => log!("{} {slot}, the one the slot table marks", params::SLOT_RECORD),
+        (Some(slot), Some(refused)) => match refused.split_once(':') {
+            Some((marked, why)) => log!("{} {slot}, because the marked slot {marked} was refused: {why}", params::SLOT_RECORD),
+            None => log!("{} {slot}, because the marked slot was refused: {refused}", params::SLOT_RECORD),
+        },
+        (None, _) => log!("{} none: the loader named no slot", params::SLOT_RECORD),
+    }
 
     let kernel_elf = core::slice::from_raw_parts(
         DirectMap::from_phys(kernel_args.kernel_elf_addr).as_ptr::<u8>(),
@@ -391,7 +362,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         mm::Region { start: kernel_args.kernel_memory_addr, end: kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size },
         mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
         mm::Region { start: kernel_args.kernel_stack_addr, end: kernel_args.kernel_stack_addr + kernel_args.kernel_stack_size },
-        mm::Region { start: 0x8000, end: 0x9000 }, // AP trampoline page
+        arch::boot::reserved(),
         // The loader's black-box page, which is ordinary `LoaderData` and so
         // memory the allocator would otherwise hand out. Empty on a boot whose
         // parameter line names none.
@@ -417,39 +388,15 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // reads off a refusal below is which tables the firmware published at all.
     acpi::inventory(kernel_args.rsdp_addr);
 
-    // `init_bsp` loads the IDT partway through, as early as this CPU's `gs:`
-    // allows: a fault in any later phase then diagnoses instead of stopping in
-    // a handler the firmware left behind.
-    let madt = acpi::parse_madt(kernel_args.rsdp_addr).expect("ACPI: MADT not found");
-    // Off the same tables as the MADT, and before the IDT below makes a panic
-    // reportable: a panic that can be reported but not ended leaves the machine
-    // holding its panel for a hand that may not be in the room.
-    acpi::init_reset(kernel_args.rsdp_addr);
-    apic::init();
-    percpu::init_bsp(apic::id());
-    ioapic::init(&madt);
-    idt::enable_interrupts();
-    syscall::init();
+    let platform = arch::boot::interrupts(kernel_args.rsdp_addr);
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     if !kernel_elf.is_empty() {
         symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
     }
 
-    // HPET clock — enables profiling for everything from here on
-    let hpet_base = acpi::find_hpet_base(kernel_args.rsdp_addr)
-        .expect("ACPI: HPET not found");
-    clock::init(hpet_base);
-    // Century register and time zone both come from ACPI/firmware, not the RTC's own registers.
-    let century_reg = match acpi::rtc_century_register(kernel_args.rsdp_addr) {
-        Ok(reg) => reg,
-        Err(e) => {
-            log!("ACPI: the FADT is unreadable ({e:?}), so where the RTC keeps its century is unknown too");
-            None
-        }
-    };
-    clock::init_wall(century_reg, kernel_args.rtc_utc_offset());
+    arch::boot::clock(kernel_args);
     trace::enable();
-    apic::init_timer();
+    arch::boot::timer();
     // After both halves of what it needs: a TSC period to convert its bound
     // with, and a timer whose every tick polls it.
     deadline::start();
@@ -475,17 +422,17 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     iommu::init(kernel_args.rsdp_addr, &pci_devices);
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
-    drivers::watchdog::init(&pci_devices);
+    arch::watchdog::init(&pci_devices);
     file_cache::init();
     gpt::init(kernel_args);
-    i8042::init(kernel_args.rsdp_addr);
+    arch::boot::platform_devices(kernel_args.rsdp_addr);
     acpi::init_power(kernel_args.rsdp_addr);
 
     boot_phase!("peripherals ready", t_periph);
 
     let t_subsys = clock::nanos_since_boot();
 
-    smp::boot_aps(&madt, kernel_args.boot_pml4_addr);
+    arch::boot::start_other_cpus(&platform, kernel_args);
     vfs::init();
     process::init();
     scheduler::init();
@@ -564,30 +511,30 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     fat32_adapter::probe_boot_disks();
     rootfs::hold_source();
 
-    // One filesystem, two paths: `/apps` and `/home` are two directories of
-    // DATA, so one sync settles both and neither can outlive the other.
+    // One filesystem, four paths: each of `DATA_PATHS` is a directory of DATA,
+    // so one sync settles them all and none can outlive the others.
     // tmpfs when there is no DATA volume this kernel may write: persistence is
     // the only difference, so the earlier refusal doesn't cascade. Nothing at
     // all when the volume is ours and did not mount.
     #[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-    let (data_cache, home) = match bcachefs_adapter::open_data() {
+    let data_cache = match bcachefs_adapter::open_data() {
         bcachefs_adapter::Data::Mounted(cache, fs) => {
             let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(&cache));
             vfs::lock().mount(&DATA_PATHS, Box::new(adapter), UserAccess::ReadWrite);
-            (Some(cache), true)
+            Some(cache)
         }
         bcachefs_adapter::Data::Volatile => {
-            log!("storage: /apps and /home are a tmpfs — they will not survive a reboot");
+            log!("storage: /apps, /config, /home and /state are a tmpfs — they will not survive a reboot");
             vfs::lock().mount(
                 &DATA_PATHS,
                 Box::new(crate::tmpfs::TmpFs::new()),
                 UserAccess::ReadWrite,
             );
-            (None, true)
+            None
         }
         bcachefs_adapter::Data::Absent => {
-            log!("storage: /apps and /home are absent this boot — the DATA volume is ours and did not mount");
-            (None, false)
+            log!("storage: /apps, /config, /home and /state are absent this boot — the DATA volume is ours and did not mount");
+            None
         }
     };
 
@@ -606,13 +553,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         }
         // No fallback onto /boot: with no log partition the log stays in the in-memory shards, still reachable via screen and console.
         None => log!("log-volume: not mounted; this boot's kernel log stays in memory"),
-    }
-
-    // Fixed kernel strings well under MAX_PATH: a refusal here is a kernel bug, so this fails fast instead of returning an error.
-    // Not on an absent `/home`: the VFS's own directory set would answer for a directory nothing holds.
-    if home {
-        vfs::lock().create_dir("/home/root").expect("boot: /home/root exceeds MAX_PATH");
-        vfs::lock().create_dir("/home/root/.config").expect("boot: /home/root/.config exceeds MAX_PATH");
     }
 
 
@@ -650,18 +590,11 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     #[cfg(feature = "boot-actuators")]
     if actuator::virtio_used_selftest() {
         drivers::virtio::used_selftest();
-    }
-
-    // Needs interrupts on and the timer already ticking: its last assertion is that the interrupt after the spurious one arrives.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::lapic_spurious_selftest() {
-        arch::idt::spurious::selftest();
+        drivers::virtio::wait_selftest();
     }
 
     #[cfg(feature = "boot-actuators")]
-    if actuator::unclaimed_vector_selftest() {
-        arch::idt::unclaimed::selftest();
-    }
+    arch::boot::interrupt_selftests();
 
     virtio_console::init(&pci_devices);
 
@@ -703,7 +636,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     report_log_destination();
-    let complete_tsc = cpu::rdtsc();
+    let complete_tsc = cpu::counter();
     boot_phase!("complete", 0);
     report_power_on(kernel_args, complete_tsc);
 
@@ -717,8 +650,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Same no-current-task window as above: blame is Kernel, so fatal_exception halts the machine.
     if actuator::test_kernel_fault() {
-        // SAFETY: ud2 reads and writes nothing (nomem, nostack) and raises #UD, caught by the already-installed IDT.
-        unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
+        cpu::undefined_instruction();
     }
 
     // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.

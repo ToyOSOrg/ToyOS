@@ -1,9 +1,12 @@
-//! Safe user memory access via page table walk + kernel direct map.
+//! Safe user memory access via page table walk + kernel direct map. A copy into
+//! user memory lands only where a ring 3 store from the process itself could.
 //!
 //! SMAP stays enabled; access goes through the direct map, never stac/clac.
-//! Values are copied out, never referenced; bulk buffers are a [`UserBytes`]/
-//! [`UserBytesMut`] window that pins every frame it covers for its own life, so
-//! a sibling's `munmap` cannot reissue the backing under a copy across a park.
+//! Values are copied out, never referenced. **Every copy goes through
+//! [`window`]**, which pins every frame it covers under the address-space lock
+//! for the copy's life — a typed value's as much as a [`UserBytes`]/
+//! [`UserBytesMut`] buffer's — so a sibling's `munmap` cannot reissue the
+//! backing between the translation and the copy, nor under a copy across a park.
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
 
@@ -59,36 +62,42 @@ unsafe impl UserSafe for toyos_abi::input::MouseEvent {}
 // SAFETY: `#[repr(C)] Copy`, 88 bytes with no padding (checked by a compile-time size assertion); every field is clamped where it is used, not here.
 unsafe impl UserSafe for toyos_abi::log::LogCursor {}
 
+pub(crate) use toyos_userbound::Access;
+
+fn translate_now(
+    space: &crate::mm::paging::AddressSpace,
+    addr: UserAddr,
+    access: Access,
+) -> Option<crate::mm::DirectMap> {
+    match access {
+        Access::Read => space.translate(addr),
+        Access::Write => space.translate_writable(addr),
+    }
+}
+
 /// Translate a user virtual address to its direct-map address, demand-paging it in if needed; `pub(crate)` because the futex word outlives its syscall.
-pub(crate) fn translate_user(addr: UserAddr) -> Option<crate::mm::DirectMap> {
+pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm::DirectMap> {
     let pt = crate::process::current_address_space();
-    if let Some(dm) = pt.lock().translate(addr) {
+    if let Some(dm) = translate_now(&pt.lock(), addr, access) {
         return Some(dm);
     }
     if !crate::process::handle_page_fault(addr.raw(), 0) {
         return None;
     }
-    let result = pt.lock().translate(addr);
+    let result = translate_now(&pt.lock(), addr, access);
     result
 }
 
-fn translate(user_addr: u64) -> Option<*mut u8> {
-    translate_user(UserAddr::new(user_addr)).map(|dm| dm.as_mut_ptr())
-}
-
-/// The direct-map address of a `T` at `ptr`; `is_user_object` bounds it to one physical page so a copy near the boundary cannot overrun it.
-fn object<T: UserSafe>(ptr: UserAddr) -> Result<*mut u8, SyscallError> {
-    let ok = toyos_userbound::is_user_object(
-        ptr.raw(),
-        core::mem::size_of::<T>() as u64,
-        core::mem::align_of::<T>() as u64,
-    );
-    if !ok {
+/// A `T` at `ptr` as a pinned window; `is_user_object` keeps it aligned and
+/// inside one 2 MiB page.
+fn object<T: UserSafe>(ptr: UserAddr, access: Access) -> Result<(*mut T, FramePin), SyscallError> {
+    let size = core::mem::size_of::<T>();
+    if !toyos_userbound::is_user_object(ptr.raw(), size as u64, core::mem::align_of::<T>() as u64) {
         return Err(SyscallError::BadAddress);
     }
-    translate(ptr.raw()).ok_or(SyscallError::BadAddress)
+    let (kptr, pin) = window(ptr, size, access).ok_or(SyscallError::BadAddress)?;
+    Ok((kptr.cast(), pin))
 }
-
 
 /// Context for a single syscall invocation; the lifetime `'a` keeps validated references from escaping it.
 pub struct SyscallContext<'a> {
@@ -109,7 +118,7 @@ impl<'a> SyscallContext<'a> {
             let kptr = core::ptr::NonNull::<u8>::dangling().as_ptr() as *const u8;
             return Some(UserBytes { kptr, len, _pin: None, _scope: PhantomData });
         }
-        let (kptr, pin) = window(ptr, len)?;
+        let (kptr, pin) = window(ptr, len, Access::Read)?;
         Some(UserBytes { kptr: kptr as *const u8, len, _pin: Some(pin), _scope: PhantomData })
     }
 
@@ -120,7 +129,7 @@ impl<'a> SyscallContext<'a> {
             let kptr = core::ptr::NonNull::<u8>::dangling().as_ptr();
             return Some(UserBytesMut { kptr, len, _pin: None, _scope: PhantomData });
         }
-        let (kptr, pin) = window(ptr, len)?;
+        let (kptr, pin) = window(ptr, len, Access::Write)?;
         Some(UserBytesMut { kptr, len, _pin: Some(pin), _scope: PhantomData })
     }
 
@@ -135,16 +144,19 @@ impl<'a> SyscallContext<'a> {
 
     /// Read a typed value out of user memory, copied rather than borrowed.
     pub fn copy_in<T: UserSafe>(&self, ptr: UserAddr) -> Result<T, SyscallError> {
-        let kptr = object::<T>(ptr)?;
-        // SAFETY: `object::<T>` validated size/align and translated inside one page; `T: UserSafe` makes every bit pattern valid; `read_volatile` guards against a concurrent write from another thread of the same process.
-        Ok(unsafe { (kptr as *const T).read_volatile() })
+        let (kptr, _pin) = object::<T>(ptr, Access::Read)?;
+        // SAFETY: `object::<T>` validated size/align inside one page and pinned the frame until `_pin` drops; `T: UserSafe` makes every bit pattern valid; `read_volatile` guards against a concurrent write from another thread of the same process.
+        Ok(unsafe { kptr.read_volatile() })
     }
 
     /// Write a typed value into user memory.
     pub fn copy_out<T: UserSafe>(&self, ptr: UserAddr, value: &T) -> Result<(), SyscallError> {
-        let kptr = object::<T>(ptr)?;
-        // SAFETY: same validation as `copy_in`; `T: UserSafe` guarantees no uninitialized padding byte is written out.
-        unsafe { (kptr as *mut T).write_volatile(*value) };
+        let (kptr, _pin) = object::<T>(ptr, Access::Write)?;
+        if crate::actuator::copy_meets_a_remap() {
+            remap_race::hold(kptr.cast(), core::mem::size_of::<T>());
+        }
+        // SAFETY: as `copy_in`; `T: UserSafe` guarantees no uninitialized padding byte is written out.
+        unsafe { kptr.write_volatile(*value) };
         Ok(())
     }
 
@@ -324,41 +336,85 @@ impl Drop for FramePin {
 }
 
 /// Validate `[ptr, ptr+len)` as one physically contiguous user window, pin every frame it covers, and return its direct-map address with the pin. The pin is taken under the address-space lock over a translation that still names the frame, so a concurrent `munmap` — which needs that same lock to free the range — cannot reissue a frame between the confirmation and the pin.
-fn window(ptr: UserAddr, len: usize) -> Option<(*mut u8, FramePin)> {
+fn window(ptr: UserAddr, len: usize, access: Access) -> Option<(*mut u8, FramePin)> {
     if !toyos_userbound::in_user_half(ptr.raw(), len as u64) {
         return None;
     }
     let start = ptr.raw();
     let end = start + len as u64;
-    // Fault every page of the range in; contiguity is confirmed under the lock below.
-    translate(start)?;
+    // Fault every page of the range in; what it maps is confirmed under the lock below.
+    translate_user(ptr, access)?;
     let mut boundary = (start & !(crate::mm::PAGE_2M - 1)) + crate::mm::PAGE_2M;
     while boundary < end {
-        translate(boundary)?;
+        translate_user(UserAddr::new(boundary), access)?;
         boundary += crate::mm::PAGE_2M;
     }
     let pt = crate::process::current_address_space();
     let guard = pt.lock();
-    let base = guard.translate(ptr)?;
-    let phys = base.phys();
-    let mut boundary = (start & !(crate::mm::PAGE_2M - 1)) + crate::mm::PAGE_2M;
-    while boundary < end {
-        if guard.translate(UserAddr::new(boundary))?
-            != crate::mm::DirectMap::from_phys(phys + (boundary - start))
-        {
-            return None;
-        }
-        boundary += crate::mm::PAGE_2M;
-    }
-    if len > 1
-        && guard.translate(UserAddr::new(end - 1))?
-            != crate::mm::DirectMap::from_phys(phys + (len as u64 - 1))
-    {
-        return None;
-    }
+    let phys = toyos_userbound::contiguous(start, len as u64, access, |at| {
+        translate_now(&guard, UserAddr::new(at), access).map(|dm| dm.phys())
+    })?;
     if !crate::mm::pmm::pin_range(phys, len) {
         return None;
     }
     drop(guard);
-    Some((base.as_mut_ptr(), FramePin { phys, len }))
+    Some((crate::mm::DirectMap::from_phys(phys).as_mut_ptr(), FramePin { phys, len }))
+}
+
+/// `copy-meets-a-remap`: a sibling's `munmap` and `mmap` staged between a
+/// typed copy's translation and its store. Only a copy whose destination
+/// already holds [`MARK`] in its first word is held, so the test program
+/// chooses the one copy it races.
+pub(crate) mod remap_race {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use crate::time::Duration;
+
+    /// What the racing program leaves in the destination's first word.
+    const MARK: u64 = 0x5eed_c0de_2ace_0001;
+    /// What this writes into the second word once the copy is held: the
+    /// program's cue to unmap and map again.
+    const HELD: u64 = 0x5eed_c0de_2ace_0002;
+    /// How long a held copy waits for the program to map again before it says
+    /// the test staged nothing.
+    const BOUND: Duration = Duration::from_secs(10);
+
+    /// The pid a held copy is waiting on, plus one; zero while none is held.
+    static HOLDER: AtomicU64 = AtomicU64::new(0);
+    /// Maps the holder's process has completed since its copy was held.
+    static MAPS: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn hold(kptr: *mut u8, size: usize) {
+        if size < 16 {
+            return;
+        }
+        let words = kptr.cast::<u64>();
+        // SAFETY: the caller's window covers `size >= 16` bytes at `kptr`, aligned for a `u64`-bearing `UserSafe` type.
+        if unsafe { words.read_volatile() } != MARK {
+            return;
+        }
+        let pid = crate::process::current_process().0 as u64 + 1;
+        HOLDER.store(pid, Ordering::SeqCst);
+        MAPS.store(0, Ordering::SeqCst);
+        // SAFETY: as above; the second word is inside the same window.
+        unsafe { words.add(1).write_volatile(HELD) };
+        let deadline = crate::clock::now() + BOUND;
+        while MAPS.load(Ordering::SeqCst) == 0 {
+            assert!(
+                crate::clock::now() < deadline,
+                "copy-meets-a-remap: pid {} held a copy {BOUND} and never mapped again",
+                pid - 1
+            );
+            // An `IF`-clear spin: the sibling's munmap shoots down this CPU too.
+            crate::arch::tlb::poll();
+            core::hint::spin_loop();
+        }
+        HOLDER.store(0, Ordering::SeqCst);
+    }
+
+    /// `sys_mmap` placed a mapping of its own choosing for the current process.
+    pub(crate) fn mapped() {
+        if HOLDER.load(Ordering::SeqCst) == crate::process::current_process().0 as u64 + 1 {
+            MAPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }

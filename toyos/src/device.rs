@@ -1,7 +1,7 @@
 //! Hardware device access.
 //!
 //! Typed device wrappers, one per class. **None of them opens anything**: a
-//! claim is minted by `/bin/init` alone and arrives in this process's endowment
+//! claim is minted by `init` alone and arrives in this process's endowment
 //! table under `dev:<class>`, so [`crate::endow::device`] is the only way to
 //! get one and a program the manifest gives no device cannot express reaching
 //! hardware.
@@ -155,6 +155,20 @@ impl PciDev {
         let grant = syscall::device_dma_alloc(self.0.as_handle(), bytes)?;
         let memory = crate::shm::SharedMemory::adopt(grant.shm, grant.bytes as usize)?;
         Ok(DmaRegion { memory, device_addr: grant.device_addr })
+    }
+
+    /// Put a region this process holds — typically one a client sent — into
+    /// this function's address space, and answer where the function reaches
+    /// it. The region stays alive while it is mapped; [`Self::dma_unmap`] or
+    /// the claim's end takes it back.
+    pub fn dma_map(&self, region: RawHandle) -> Result<toyos_abi::pci::DmaMapping, SyscallError> {
+        syscall::device_dma_map(self.0.as_handle(), region)
+    }
+
+    /// Take back what [`Self::dma_map`] put at `device_addr`: from here the
+    /// function reaches none of it.
+    pub fn dma_unmap(&self, device_addr: u64) -> Result<(), SyscallError> {
+        syscall::device_dma_unmap(self.0.as_handle(), device_addr)
     }
 
     /// The interrupts since the last read, or `Err(WouldBlock)` for none.

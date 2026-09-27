@@ -17,18 +17,23 @@ fn libc_dir() -> PathBuf {
     repo_root().join("userland/libc")
 }
 
-/// Build and return the toyos libc archive every C test links against.
+/// The toyos libc archive every C test links against, and the linker that
+/// links them: the `rust-lld` of the toolchain that built the archive.
 ///
 /// Cargo decides whether the archive is stale, because it is the only thing
 /// here that can: an existence check cannot see a source change, and an archive
 /// that outlives the libc it was built from links the C tests against a libc
 /// that is not in the tree. Once per process — 156 C tests link this.
-fn libc_archive_toyos() -> PathBuf {
-    static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
+///
+/// A `staticlib`, not the sysroot's `libtoyos_c.a`: a C program has no Rust
+/// crate for rustc to emit the allocator shim `alloc` calls through, and a
+/// `staticlib` carries its own.
+fn libc_archive_toyos() -> (PathBuf, PathBuf) {
+    static ARCHIVE: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
     ARCHIVE
         .get_or_init(|| {
             let libc_dir = libc_dir();
-            let target = "x86_64-unknown-toyos";
+            let target = super::qemu::SUITE_ARCH.userland();
 
             let _slot = toyos_build::buildlock::build_slot(&repo_root(), "the libc archive");
             let mut lock = toyos_build::buildlock::shared(&repo_root(), "toyos-libc archive");
@@ -61,7 +66,7 @@ fn libc_archive_toyos() -> PathBuf {
             );
 
             assert!(archive.exists(), "expected staticlib at {}", archive.display());
-            archive
+            (archive, toyos_build::toolchain::rust_lld(&sysroot.dir))
         })
         .clone()
 }
@@ -85,7 +90,7 @@ pub fn compile_c(name: &str) -> (Vec<u8>, Vec<Vec<u8>>) {
     let opts = toyos_cc::CompileOptions {
         include_paths,
         defines: Vec::new(),
-        target: Some("x86_64-unknown-toyos".to_string()),
+        target: Some(super::qemu::SUITE_ARCH.userland().to_string()),
         opt_level: 0,
         force_includes: Vec::new(),
     };
@@ -112,34 +117,38 @@ pub fn compile_c(name: &str) -> (Vec<u8>, Vec<Vec<u8>>) {
 
 /// Link object bytes as a PIE ELF for ToyOS. Returns the linked binary bytes.
 pub fn link_toyos(obj: &[u8], extra_objs: &[Vec<u8>], name: &str) -> Vec<u8> {
-    let libc_path = libc_archive_toyos();
-    let lib_dir = libc_path.parent().unwrap().to_path_buf();
+    let (libc_path, rust_lld) = libc_archive_toyos();
 
     let obj_path = super::lane::dir().join(format!("{name}.o"));
     fs::write(&obj_path, obj).unwrap();
-
-    let mut inputs: Vec<PathBuf> = vec![obj_path.clone()];
-    let mut extra_paths = Vec::new();
+    let mut inputs: Vec<PathBuf> = vec![obj_path];
     for (i, extra) in extra_objs.iter().enumerate() {
         let p = super::lane::dir().join(format!("{name}-extra{i}.o"));
         fs::write(&p, extra).unwrap();
-        inputs.push(p.clone());
-        extra_paths.push(p);
+        inputs.push(p);
     }
+    let out = super::lane::dir().join(format!("{name}.elf"));
 
-    let objects = toyos_ld::resolve_libs_with_entry(
-        &inputs,
-        &[lib_dir],
-        &["toyos_libc".to_string()],
-        Some("_start"),
-    )
-    .unwrap_or_else(|e| panic!("resolve_libs failed: {e}"));
-
-    let _ = fs::remove_file(&obj_path);
-    for p in &extra_paths {
+    let output = std::process::Command::new(&rust_lld)
+        .args(["-flavor", "gnu"])
+        .args(&inputs)
+        .arg(&libc_path)
+        .args(["--eh-frame-hdr", "-z", "noexecstack", "--gc-sections", "-pie", "-O1"])
+        .args(["-e", "_start", "-o"])
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {}: {e}", rust_lld.display()));
+    for p in &inputs {
         let _ = fs::remove_file(p);
     }
-
-    toyos_ld::link_full(&objects, "_start", true, false)
-        .unwrap_or_else(|e| panic!("toyos-ld link failed: {e}"))
+    // One line: the harness reads a failed link's first line for the symbol a
+    // declared case stops on, and LLD reports each undefined symbol on its own.
+    assert!(
+        output.status.success(),
+        "rust-lld could not link {name}: {}",
+        String::from_utf8_lossy(&output.stderr).lines().collect::<Vec<_>>().join(" | "),
+    );
+    let linked = fs::read(&out).unwrap_or_else(|e| panic!("read {}: {e}", out.display()));
+    let _ = fs::remove_file(&out);
+    linked
 }

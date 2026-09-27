@@ -26,7 +26,7 @@ use crate::time::{Cadence, Deadline, Duration, Tripwire};
 use crate::DirectMap;
 
 pub use crate::sched::driver::{
-    current_address_space, enter_idle_loop, in_pass as in_schedule_self, total_cpu_ns,
+    current_address_space, enter_idle_loop, in_pass as in_schedule_self, started, total_cpu_ns,
     write_stack_canary, Ticket,
 };
 pub use crate::sched::MAX_CPUS;
@@ -651,7 +651,7 @@ pub(crate) fn reap_poisoned() {
 pub fn schedule_no_return() -> ! {
     if in_schedule_self() {
         crate::log!("schedule_no_return: panicked inside a pass, cannot rejoin");
-        crate::arch::apic::halt_all_cpus();
+        crate::panic::halt_all_cpus();
     }
     if percpu::current_tid().is_none() {
         enter_idle_loop();

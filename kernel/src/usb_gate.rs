@@ -458,7 +458,7 @@ pub fn sweep_under_load() {
     // than about this function.
     let interrupts_were_on = crate::arch::cpu::interrupts_enabled();
     crate::preempt::disable();
-    crate::arch::apic::arm_within(toyos_sched::fair::QUANTUM_NS);
+    crate::arch::irqchip::arm_within(toyos_sched::fair::QUANTUM_NS);
     crate::arch::cpu::enable_interrupts();
     let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
     let mut at = first;

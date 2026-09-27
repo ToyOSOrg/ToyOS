@@ -12,8 +12,7 @@
 
 use std::time::Duration;
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::syscap::SysCap;
+use toyos::power::Stop;
 use toyos_quiesce::LAST_THREAD;
 
 /// Longer than any stop's budget: a park the timer ends inside the stop would
@@ -22,10 +21,6 @@ use toyos_quiesce::LAST_THREAD;
 const PARKED_FOR: Duration = Duration::from_secs(3_600);
 
 fn main() {
-    let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
-        eprintln!("quiesce_last: this program was endowed no system capability");
-        std::process::exit(1);
-    };
     for body in [park as fn(), exit] {
         std::thread::Builder::new()
             .name(LAST_THREAD.into())
@@ -34,7 +29,7 @@ fn main() {
     }
 
     // Comes back only refused.
-    let refused = cap.reboot();
+    let refused = toyos::power::stop(Stop::Reboot);
     eprintln!("quiesce_last: the reboot was refused ({refused:?})");
     std::process::exit(1);
 }

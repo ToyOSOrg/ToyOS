@@ -46,6 +46,12 @@ actuators! {
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
+    /// Take an undefined-instruction exception right after the architecture's
+    /// console step, where it has one to take there: the earliest fault the
+    /// exception vectors must report. AArch64 installs its vectors in the entry;
+    /// x86-64 loads its IDT later, and panics by name instead.
+    test_early_fault = "test-early-fault";
+
     /// Panic inside `percpu::init_bsp`, one statement after it loads the IDT:
     /// the earliest point a panic is reportable at all, and the window the T14
     /// stops in. What it judges is that the reset register is decoded by then.
@@ -168,6 +174,18 @@ actuators! {
     /// succeeded, with no write since: a device that leaves then owes nothing.
     /// Judged by `usb_transport_break`.
     usb_transport_break_flushed = "usb-transport-break-flushed";
+
+    /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
+    /// anything is torn down, as a machine with no way to stop refuses it: the
+    /// path on which init tells `logd` the machine runs on. Judged by
+    /// `log_after_a_refused_stop`.
+    power_refused_once = "power-refused-once";
+
+    /// Hold a typed copy into user memory whose destination carries
+    /// `user_ptr::remap_race`'s mark between its translation and its store,
+    /// until its own process has mapped memory again: a sibling's `munmap`
+    /// and `mmap` staged inside the copy. Judged by `user_copy_races_munmap`.
+    copy_meets_a_remap = "copy-meets-a-remap";
 
     /// Stall the bind of a disk that arrives while another is held for its
     /// device, for less than `usb-slow-return` does, and leave every transfer
@@ -431,9 +449,6 @@ actuators! {
     /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
 
-    /// Bypass `ConsoleObject`'s line buffer so writes interleave as they arrive.
-    console_unbuffered = "console-unbuffered";
-
     /// Panic inside `klogd` on its first instruction.
     klogd_panic = "klogd-panic";
 
@@ -466,6 +481,10 @@ actuators! {
 
     /// Point a virtio-sound control answer at that page and submit the chain, so the device writes where it may not.
     iommu_sound_foreign_dma = "iommu-sound-foreign-dma";
+
+    /// Cap every device domain at `vtd::table::NARROW_BYTES` of addresses, so a
+    /// holder that spends addresses runs a domain dry in a short loop.
+    iommu_domain_narrow = "iommu-domain-narrow";
 
     /// Point every device MSI at APIC 1 rather than 0 — the only way to tell the
     /// two remapping-entry destination encodings apart, since 0 encodes alike in both.

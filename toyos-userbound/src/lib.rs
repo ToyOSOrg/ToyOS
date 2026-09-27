@@ -14,8 +14,8 @@
 //!
 //! Pure. No I/O, no allocation, no `unsafe`, nothing read from a device and
 //! nothing named outside this crate. The kernel is the only caller —
-//! `user_ptr.rs`, `mm/`, `arch/syscall/`, `loader/` and
-//! `arch/idt/exceptions.rs` — and this is a crate rather than files inside it so
+//! `user_ptr.rs`, `mm/`, `syscall/`, `loader/` and
+//! `arch/x86_64/idt/exceptions.rs` — and this is a crate rather than files inside it so
 //! that the boundary table below runs on the host in milliseconds instead of in
 //! a boot.
 //!
@@ -31,4 +31,7 @@ pub mod fault;
 pub mod span;
 
 pub use fault::{blame, Blame, Faulted, Ring};
-pub use span::{in_user_half, is_user_addr, is_user_object, rebase_base, PAGE_2M, USER_TOP};
+pub use span::{
+    contiguous, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M, PAGE_4K,
+    USER_TOP,
+};

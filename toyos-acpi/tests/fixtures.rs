@@ -48,6 +48,10 @@ fn the_madt_names_the_two_cpus_that_boot_and_the_chip_that_interrupts_them() {
             MadtEntry::IoApic(e) => io_apics.push(e),
             MadtEntry::SourceOverride(o) => overrides.push(o),
             MadtEntry::Other(_) => {}
+            gic @ (MadtEntry::Gicc(_)
+            | MadtEntry::Gicd { .. }
+            | MadtEntry::Gicr { .. }
+            | MadtEntry::Its { .. }) => panic!("q35 publishes no GIC structure, and the walk found {gic:?}"),
         }
     }
 

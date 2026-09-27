@@ -1,51 +1,31 @@
-//! The 16550 and the virtio-console, and the one lock that serialises them.
-//! Every writer takes [`BackendGuard`] once per whole unit (a record, a
-//! userland `write`, a panic report) and holds it for that whole unit; that
-//! is the only source of line atomicity. Every unit taken under the guard is
-//! bounded, except the panic path's `drain_locked`. Nothing that holds a
-//! kernel lock formats here.
+//! The console UART and the virtio-console, and the two locks that serialise
+//! them. Where the UART is and what it is are the architecture's
+//! (`arch::console_uart`).
+//!
+//! [`BackendGuard`] is the registers' lock, held with interrupts off for one
+//! burst: what the UART's transmitter takes at once; the publish of a
+//! transmit buffer to virtio-console, and each look for its completion, which
+//! the host takes at its own pace; a byte read. The panic path takes the
+//! registers alone, and bypasses them once they stay held. Nothing that holds
+//! a kernel lock formats here.
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::arch::cpu::{inb, outb};
+use crate::arch::IrqGuard;
 use crate::log;
+use super::serial_lock::{BackendLock, Held};
+use crate::scheduler::Parkable;
+use crate::sleeplock::{SleepGuard, SleepLock};
 
-const PORT: u16 = 0x3f8; // COM1
+use crate::arch::console_uart as uart;
 
-// Latched once from `init`'s loopback probe: hardware with no SuperIO
-// reads 0xFF on every access, indistinguishable from a ready UART.
+// Latched once from `init`: the architecture's own answer about whether a UART
+// is there, since one that is not may still read as ready.
 static UART_PRESENT: AtomicBool = AtomicBool::new(false);
 
-// Every register is `PORT + n`; the identity op keeps that pattern uniform
-// across all eight lines instead of special-casing the data register.
-#[allow(clippy::identity_op)]
-pub fn init() {
-    // SAFETY: `outb`/`inb` require the caller to own the port and the byte;
-    // every port here is `PORT + n` for `n` in 0..=4, inside COM1's own
-    // register block, and the writes are the 16550's documented init sequence.
-    // Order matters: DLAB must precede the divisor writes and loopback mode
-    // must precede the probe, or the sequence misprograms the chip.
-    let loopback = unsafe {
-        outb(PORT + 1, 0x00); // Disable all interrupts
-        outb(PORT + 3, 0x80); // Enable DLAB (set baud rate divisor)
-        outb(PORT + 0, 0x03); // Set divisor to 3 (lo byte) 38400 baud
-        outb(PORT + 1, 0x00); //                  (hi byte)
-        outb(PORT + 3, 0x03); // 8 bits, no parity, one stop bit
-        outb(PORT + 2, 0xC7); // Enable FIFO, clear them, with 14-byte threshold
-        outb(PORT + 4, 0x0B); // IRQs enabled, RTS/DSR set
-        outb(PORT + 4, 0x1E); // Set in loopback mode, test the serial chip
-        outb(PORT + 0, 0xAE); // Test serial chip (send byte 0xAE and check if serial returns same byte)
-        let seen = inb(PORT + 0);
-        UART_PRESENT.store(seen == 0xAE, Ordering::Relaxed);
-        outb(PORT + 4, 0x0F); // Normal operation mode
-        seen
-    };
-    // Logs the raw byte, not just the verdict: distinguishes "no SuperIO"
-    // (0xFF) from a wrong response and a right chip at the wrong port.
-    log!(
-        "serial: 16550 loopback read {:#04x} ({})",
-        loopback,
-        if loopback == 0xAE { "present" } else { "absent or wrong port" }
-    );
+/// Find and program the console UART, off the firmware tables at `rsdp_addr`
+/// where the architecture places it by them.
+pub fn init(rsdp_addr: u64) {
+    UART_PRESENT.store(uart::init(rsdp_addr), Ordering::Relaxed);
     console_changed();
 }
 
@@ -63,7 +43,7 @@ pub fn has_console() -> bool {
     !matches!(backend(), Backend::None)
 }
 
-/// Which channel a write goes to right now; virtio-console is preferred over a 16550.
+/// Which channel a write goes to right now; virtio-console is preferred over the UART.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Backend {
@@ -84,64 +64,30 @@ pub fn backend() -> Backend {
 }
 
 
-static BACKEND_LOCKED: AtomicBool = AtomicBool::new(false);
+static BACKEND: BackendLock = BackendLock::new();
 
 /// Exclusive access to the serial backend; interrupts are off for as long as the guard lives.
 /// Same-CPU re-entry from an IRQ handler deadlocks the spin.
 pub struct BackendGuard {
-    rflags: SavedFlags,
-}
-
-/// This CPU's own `RFLAGS`, captured by `pushfq`; the only value `popfq` may be given.
-/// Not `Copy`/`Clone`: one CPU's state at one instant, not to be duplicated.
-pub struct SavedFlags(u64);
-
-impl SavedFlags {
-    /// Restores the flags; `&self` because `Drop` cannot move a field out, and restoring twice is idempotent.
-    #[inline]
-    fn restore(&self) {
-        // SAFETY: `popfq` has no safe spelling; `self.0` came only from this
-        // CPU's own `pushfq` in `save_and_cli`, so no unintended bit reaches RFLAGS.
-        unsafe {
-            core::arch::asm!(
-                "push {}",
-                "popfq",
-                in(reg) self.0,
-                options(nomem),
-            );
-        }
-    }
+    // Fields drop in order: the backend is released before interrupts reopen.
+    _held: Held<'static>,
+    _irq: IrqGuard,
 }
 
 impl BackendGuard {
     pub fn lock() -> Self {
-        let rflags = save_and_cli();
-        while BACKEND_LOCKED
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            while BACKEND_LOCKED.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
-            }
-        }
-        Self { rflags }
+        let irq = IrqGuard::close();
+        Self { _held: BACKEND.lock(), _irq: irq }
     }
 
     /// Non-blocking acquire: `None` if another CPU already holds the backend.
     pub fn try_lock() -> Option<Self> {
-        let rflags = save_and_cli();
-        if BACKEND_LOCKED
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            Some(Self { rflags })
-        } else {
-            rflags.restore();
-            None
-        }
+        let irq = IrqGuard::close();
+        let held = BACKEND.try_lock()?;
+        Some(Self { _held: held, _irq: irq })
     }
 
-    /// Writes raw bytes with no escape stripping; callers must pre-strip via [`write_console`].
+    /// Writes raw bytes with no escape stripping.
     pub fn write_raw(&mut self, bytes: &[u8]) {
         match backend() {
             Backend::Virtio => super::virtio_console::write_bytes_locked(bytes),
@@ -154,45 +100,19 @@ impl BackendGuard {
         if super::virtio_console::is_ready() {
             super::virtio_console::has_data_locked()
         } else {
-            uart_present() && inb(PORT + 5) & 0x01 != 0
+            uart_present() && uart::rx_ready()
         }
     }
 
     pub fn try_read_byte(&mut self) -> Option<u8> {
         if super::virtio_console::is_ready() {
             super::virtio_console::try_read_byte_locked()
-        } else if uart_present() && inb(PORT + 5) & 0x01 != 0 {
-            Some(inb(PORT))
+        } else if uart_present() && uart::rx_ready() {
+            Some(uart::read_byte())
         } else {
             None
         }
     }
-}
-
-impl Drop for BackendGuard {
-    fn drop(&mut self) {
-        BACKEND_LOCKED.store(false, Ordering::Release);
-        self.rflags.restore();
-    }
-}
-
-/// This CPU's `RFLAGS`, captured with interrupts off in one instruction sequence:
-/// the value is stale if anything runs between the read and `cli`.
-#[inline]
-fn save_and_cli() -> SavedFlags {
-    let rflags: u64;
-    // SAFETY: irreducible — `pushfq`/`cli` have no safe spelling; the asm reads
-    // RFLAGS and clears IF only, writes no memory, and touches no other register.
-    unsafe {
-        core::arch::asm!(
-            "pushfq",
-            "pop {}",
-            "cli",
-            out(reg) rflags,
-            options(nomem),
-        );
-    }
-    SavedFlags(rflags)
 }
 
 pub fn has_data() -> bool {
@@ -243,61 +163,188 @@ pub unsafe fn panic_flush() {
 /// Drains the ring before the machine powers off, so the tail of a shutdown
 /// is not lost to `acpi::shutdown()` cutting power with logs still queued.
 ///
-/// Bounded on the lock like `panic_flush`, but never bypasses: every CPU is
+/// Bounded on the wire like `panic_flush`, but never bypasses: every CPU is
 /// still live here, and reading the ring unsynchronized is only safe once
-/// nothing else runs. Losing the tail is better than not powering off.
+/// nothing else runs. Losing the tail is better than not powering off, and
+/// the black box says it was lost, since the console cannot.
 pub fn flush_final() {
     for _ in 0..PANIC_LOCK_SPIN_LIMIT {
-        if let Some(mut g) = BackendGuard::try_lock() {
-            crate::log::console::drain_locked(&mut g);
+        if let Some(wire) = try_wire() {
+            crate::log::console::drain_all(&wire);
             return;
         }
         core::hint::spin_loop();
     }
+    crate::blackbox::append(|lines| {
+        let _ = writeln!(
+            lines,
+            "console: the wire stayed held through the stop's last drain, so this boot's last \
+             records are not on the console"
+        );
+    });
 }
 
-/// A userland `write` to the console, unbuffered and ANSI-stripped.
-pub fn write_console(src: &crate::user_ptr::UserBytes) {
-    let mut line = ConsoleLine::new();
-    line.out.on_newline = false;
-    line.write(src);
-    // Nothing held back: a trailing ESC is the caller's own byte, emitted here too.
-    line.finish();
+/// Who may put a line on the wire: `klogd`, and the few drains that stand in
+/// for it (boot before it runs, the stop, the power-off). **Held with
+/// interrupts on and preemption allowed**, for a whole line, so a line is one
+/// holder's; [`BackendGuard`] is taken inside it once per burst, which is the
+/// only interrupts-off window the console costs.
+static WIRE: SleepLock<()> = SleepLock::new(());
+
+/// The wire, for a task that may park until it is free.
+pub fn wire(parkable: &Parkable) -> SleepGuard<'_, ()> {
+    WIRE.lock(parkable)
+}
+
+/// The wire, if it is free, from any context — the boot before per-CPU state
+/// exists included, which has no task to hold it as.
+pub fn try_wire() -> Option<SleepGuard<'static, ()>> {
+    if crate::log::PERCPU_READY.load(Ordering::Acquire) {
+        WIRE.try_lock()
+    } else {
+        WIRE.try_lock_untasked()
+    }
+}
+
+/// Whether the UART has refused a write, which is said once.
+static UART_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// `bytes` onto the wire the caller holds, in bursts: what the UART's
+/// transmitter takes at once, one transmit buffer's to virtio-console, with interrupts on
+/// between every two looks at the device.
+pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
+    match backend() {
+        Backend::Virtio => {
+            for chunk in bytes.chunks(super::virtio_console::TX_BUF_SIZE) {
+                super::virtio_console::write_burst(chunk);
+            }
+        }
+        Backend::Uart => uart_write_fifo(bytes),
+        Backend::None => {}
+    }
+}
+
+/// The burst writer: each burst waits for the transmitter with interrupts on,
+/// and takes the register lock only to ask it and fill it.
+fn uart_write_fifo(bytes: &[u8]) {
+    for chunk in bytes.chunks(uart::TX_BURST) {
+        let mut asked = 0;
+        loop {
+            let burst = BackendGuard::lock();
+            if uart::tx_ready() {
+                // A chunk is no more than the transmitter takes once ready.
+                for &b in chunk {
+                    uart::write_byte(b);
+                }
+                break;
+            }
+            drop(burst);
+            asked += 1;
+            // A UART that never empties its FIFO takes the rest of this write
+            // with it rather than holding the wire for ever, and is said once:
+            // the saying is itself a write it would drop.
+            if asked == THRE_SPIN_LIMIT {
+                if !UART_REFUSED.swap(true, Ordering::Relaxed) {
+                    log!(
+                        "console: the UART took no byte in {THRE_SPIN_LIMIT} looks; what it does \
+                         not take is dropped from here on, and the log has it"
+                    );
+                }
+                return;
+            }
+            core::hint::spin_loop();
+        }
+    }
 }
 
 /// One console holder's partly-written line. Must live per holder, never
 /// shared: one buffer used by two processes splices their output.
+///
+/// **A console holder does not write the wire.** A whole line goes to
+/// `klogd`'s queue ([`crate::log::console::queue`]), and `klogd` puts it on
+/// the wire between its own records — so the kernel has one console writer,
+/// and a write here never waits on a device. The bytes go as they came: the
+/// only holder that writes is `/system/bin/logd`, which renders every control
+/// byte a program wrote as text before it gets here.
+///
+/// **A write takes the whole lines the queue has room for and no more**, and
+/// says how many bytes that was, so a writer that is ahead of the console is
+/// told so rather than losing lines it cannot see; its poll for `WRITABLE` is
+/// answered when `klogd` frees room.
 pub struct ConsoleLine {
-    out: Stripped,
-    csi: Csi,
+    buf: [u8; MAX_CONSOLE_LINE],
+    len: usize,
+    /// `buf` is a whole piece of a line the queue had no room for, which goes
+    /// before anything after it; the holder still has the rest of the line.
+    held: bool,
 }
 
 impl ConsoleLine {
     pub const fn new() -> Self {
-        Self {
-            out: Stripped { buf: [0; MAX_CONSOLE_LINE], len: 0, on_newline: true },
-            csi: Csi::Text,
-        }
+        Self { buf: [0; MAX_CONSOLE_LINE], len: 0, held: false }
     }
 
-    /// Accumulate a userland write, emitting every whole line it completes.
-    pub fn write(&mut self, src: &crate::user_ptr::UserBytes) {
+    /// Take as much of a userland write as ends in lines the queue has room
+    /// for, and a trailing partial line; answer how many bytes were taken.
+    ///
+    /// **A line that does not fit is not taken**: its bytes in this write go
+    /// back to the holder, which writes them again once it has room. Taken and
+    /// held here, the last line of a holder with nothing more to say would
+    /// wait for a write that never comes.
+    pub fn write(&mut self, src: &crate::user_ptr::UserBytes) -> usize {
+        if self.held && !self.piece() {
+            return 0;
+        }
         let mut chunk = [0u8; STRIP_CHUNK];
         let mut off = 0;
+        // Where this write's part of the line `buf` holds begins.
+        let mut line = 0;
         while off < src.len() {
             let n = chunk.len().min(src.len() - off);
             src.read_at(off, &mut chunk[..n]);
-            self.csi.feed(&mut self.out, &chunk[..n]);
+            for (i, &b) in chunk[..n].iter().enumerate() {
+                let at = off + i;
+                if self.len == MAX_CONSOLE_LINE {
+                    self.held = true;
+                    if !self.piece() {
+                        return at;
+                    }
+                    line = at;
+                }
+                self.buf[self.len] = b;
+                self.len += 1;
+                if b == b'\n' {
+                    if !crate::log::console::queue(&self.buf[..self.len], false) {
+                        self.len -= at + 1 - line;
+                        return line;
+                    }
+                    self.len = 0;
+                    line = at + 1;
+                }
+            }
             off += n;
         }
+        src.len()
     }
 
-    /// Emits whatever is held back, whether or not a newline came; dropping
-    /// it here would lose output the process already wrote.
+    /// Queue the whole piece `buf` holds, which the next goes on from.
+    fn piece(&mut self) -> bool {
+        if !crate::log::console::queue(&self.buf[..self.len], true) {
+            return false;
+        }
+        self.len = 0;
+        self.held = false;
+        true
+    }
+
+    /// Queues whatever is held, whether or not a newline came, as the holder
+    /// goes. With the queue full it is counted unshown: nothing waits here.
     pub fn finish(&mut self) {
-        let csi = core::mem::replace(&mut self.csi, Csi::Text);
-        csi.finish(&mut self.out);
-        self.out.flush();
+        if self.len > 0 && !crate::log::console::queue(&self.buf[..self.len], false) {
+            crate::log::console::unshown();
+        }
+        self.len = 0;
+        self.held = false;
     }
 }
 
@@ -307,74 +354,11 @@ impl Default for ConsoleLine {
     }
 }
 
-/// Size of one copy out of user memory; not the backend's unit — see [`MAX_CONSOLE_LINE`].
+/// Size of one copy out of user memory.
 const STRIP_CHUNK: usize = 256;
 
-/// The most written to the backend under one [`BackendGuard`], bounding a write's interrupts-off window.
-const MAX_CONSOLE_LINE: usize = 1024;
-
-/// Buffers bytes for the backend: a per-byte filter must not become a per-byte device write or lock acquisition.
-/// Holds no guard of its own; interrupts are on between two chunks of one write.
-struct Stripped {
-    buf: [u8; MAX_CONSOLE_LINE],
-    len: usize,
-    /// Whether a newline ends a unit; true for a line buffer, false for [`write_console`]'s unbuffered chunking.
-    on_newline: bool,
-}
-
-impl Stripped {
-    fn push_byte(&mut self, b: u8) {
-        if self.len == MAX_CONSOLE_LINE {
-            self.flush();
-        }
-        self.buf[self.len] = b;
-        self.len += 1;
-        if self.on_newline && b == b'\n' {
-            self.flush();
-        }
-    }
-
-    fn flush(&mut self) {
-        if self.len > 0 {
-            BackendGuard::lock().write_raw(&self.buf[..self.len]);
-            self.len = 0;
-        }
-    }
-}
-
-/// Strips ANSI CSI sequences; a state machine because writes and flushes arrive in different-sized chunks.
-enum Csi {
-    Text,
-    /// An ESC held back: only the start of a sequence if `[` follows.
-    Esc,
-    Body,
-}
-
-impl Csi {
-    fn feed(&mut self, out: &mut Stripped, bytes: &[u8]) {
-        for &b in bytes {
-            match self {
-                Self::Text if b == 0x1B => *self = Self::Esc,
-                Self::Text => out.push_byte(b),
-                Self::Esc if b == b'[' => *self = Self::Body,
-                Self::Esc => {
-                    out.push_byte(0x1B);
-                    *self = Self::Text;
-                    if b == 0x1B { *self = Self::Esc } else { out.push_byte(b) }
-                }
-                Self::Body if (0x40..=0x7E).contains(&b) => *self = Self::Text,
-                Self::Body => {}
-            }
-        }
-    }
-
-    /// A sequence the input ended mid-way: a lone ESC is emitted, a started CSI body is not.
-    fn finish(self, out: &mut Stripped) {
-        if matches!(self, Self::Esc) {
-            out.push_byte(0x1B);
-        }
-    }
-}
+/// The longest piece of a line one queue entry carries.
+pub const MAX_CONSOLE_LINE: usize = 1024;
 
 /// Bounded, not belt-and-braces: a UART wedged with THRE clear would spin
 /// forever here, on `panic_flush`'s bypass path where nothing else can help.
@@ -386,18 +370,16 @@ fn uart_write_bytes(bytes: &[u8]) {
     }
     for &b in bytes {
         for _ in 0..THRE_SPIN_LIMIT {
-            if inb(PORT + 5) & 0x20 != 0 {
+            if uart::tx_ready() {
                 break;
             }
             core::hint::spin_loop();
         }
-        // SAFETY: `outb` requires ownership of the port and the byte; `PORT`
-        // is COM1's own data register, and the byte is console output only.
-        unsafe { outb(PORT, b) };
+        uart::write_byte(b);
     }
 }
 
-/// Writes straight to the 16550, bypassing the ring, the lock and virtio-console: no allocation, bounded per byte.
+/// Writes straight to the UART, bypassing the ring, the lock and virtio-console: no allocation, bounded per byte.
 pub fn panic_raw(bytes: &[u8]) {
     uart_write_bytes(bytes);
 }

@@ -126,7 +126,8 @@ pub enum UserAccess {
 
 /// The entries `/` has, in listing order. `/` is synthesized rather than
 /// mounted: it is no filesystem, and nothing outside this set can be mounted.
-pub const ROOT_ENTRIES: [&str; 7] = ["apps", "boot", "home", "log", "media", "system", "tmp"];
+pub const ROOT_ENTRIES: [&str; 9] =
+    ["apps", "boot", "config", "home", "log", "media", "state", "system", "tmp"];
 
 struct Mount {
     fs: Box<dyn FileSystem>,
@@ -381,6 +382,23 @@ impl Vfs {
                 }
             } else {
                 result.push((String::from(rest), *size));
+            }
+        }
+
+        // A directory the VFS carries is its parent's entry whether or not a
+        // file is under it yet.
+        let parent = format!("{}/", directory(&mount, &subdir));
+        for dir in self.created_dirs.range(parent.clone()..) {
+            let Some(rest) = dir.strip_prefix(parent.as_str()) else { break };
+            let child = rest.split('/').next().unwrap_or(rest);
+            if !child.is_empty() {
+                let dir_name = format!("{child}/");
+                if seen_dirs.insert(dir_name.clone()) {
+                    if result.len() == MAX_LIST_ENTRIES {
+                        return Err(SyscallError::ResourceExhausted);
+                    }
+                    result.push((dir_name, 0));
+                }
             }
         }
 
@@ -660,7 +678,7 @@ impl Vfs {
         self.point(name).is_some()
     }
 
-    /// `/system/bin/logd` publishes `LOG_DURABLE_NS` off this call's result and a panicking kernel waits on that word, so `sync_for_path` must reach the device's write cache, not stop at the page cache.
+    /// `/system/bin/logd` calls a line durable off this call's result, so `sync_for_path` must reach the device's write cache, not stop at the page cache.
     pub fn sync_for_path(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, _) = self.resolve_path("/", path);
         // Nothing mounted is not an error: the write being made durable cannot have happened.

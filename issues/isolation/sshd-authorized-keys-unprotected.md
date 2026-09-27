@@ -6,8 +6,8 @@ opened: 2026-08-06
 
 # Sshd's keys are as protected as any other file, which is not at all
 
-`/home/root/.ssh/host_ed25519` is the machine's SSH private key and
-`/home/root/.ssh/authorized_keys` is the list of who may log in. There is no
+`/state/sshd/host_ed25519` is the machine's SSH private key and
+`/state/sshd/authorized_keys` is the list of who may log in. There is no
 user model and no file permissions, so **any process on the machine can read
 the first and rewrite the second** — the second being the one that matters:
 appending a line to it is a remote login, and nothing stops a process doing it.

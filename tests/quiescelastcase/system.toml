@@ -4,10 +4,10 @@
 start = ["logd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 
-# `power` because the job ends the machine, `dup` because the runner passes a
-# duplicate of what it holds to the binary it spawns.
+# `power` because the job ends the machine, asking init.
 [programs.test-runner]
+receives = ["power"]
 args = ["test_rs_quiesce_last"]
-syscap = ["dup", "power"]

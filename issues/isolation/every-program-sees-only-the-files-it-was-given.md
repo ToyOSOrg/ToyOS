@@ -42,18 +42,25 @@ nameable by every program and make confused-deputy bugs structural.
 
 ## Stages
 
-1. **The resolver.** A per-process view object in the kernel, the resolver
-   confined to it, and `SYS_OPEN`, `SYS_READDIR`, `SYS_DELETE`, `SYS_MKDIR`,
-   `SYS_RMDIR`, `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`, `SYS_SPAWN` and
-   `SYS_DLOPEN` resolving inside it. `SYS_SPAWN`'s working directory is one of
-   those paths: `SpawnArgs` names it, and it must lie in the child's view or the
-   spawn is refused. Today it is judged at spawn time only: the directory can
-   be removed or replaced before the child starts, and the child then holds a
-   path that names nothing — a view-relative cwd has to close that or say so.
-   This lands as an ABI change on its own PR.
+1. **The resolver is the file server's** (amended by the owner's storage
+   ruling of 2026-09-26, `issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`
+   stage 4; it was a per-process view object in the kernel). A view is a set
+   of directory capabilities: init builds each from the program's row as a
+   connector to a file server's port, and tells that server which subtree and
+   which rights the port serves. The server resolves every path relative to the
+   directory the connection is bound to, by node identity, in the one resolver
+   that owns its node table — so `..` at that root, a symlink's target and a
+   rename racing a lookup are refused there. The client library keeps the
+   prefix-to-capability table and the working directory; an absolute symlink
+   is resolved again in the client's own table, so it reaches nothing the
+   client does not hold. The kernel's only part is who holds which connector,
+   which it already enforces. `SYS_SPAWN`'s working directory becomes one of
+   the client's directories, and a spawn names a directory the child is given,
+   never a path judged at spawn time. Built as that track's step 8, over the
+   file servers of its steps 6 and 7.
    **Exit**: an escape suite (every `..`, symlink and rename race the
    literature names) is red on a resolver that walks the global tree and green
-   on this one. A process given an empty view names nothing.
+   on the file server's. A process given an empty view names nothing.
 2. **Every row declares its files.** `system.toml` states each program's view;
    the build refuses a row that names a path no role provides. The shell and
    terminal get the session's view, doom its `/apps` directory, and daemons

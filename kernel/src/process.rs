@@ -49,7 +49,7 @@ pub fn vma_map(
     size: u64,
     prot: Prot,
 ) -> Option<(UserAddr, u64)> {
-    pt.lock().alloc_and_map(phys, size, prot, CachePolicy::DeferToMtrr)
+    pt.lock().alloc_and_map(phys, size, prot, CachePolicy::Normal)
 }
 
 
@@ -436,8 +436,8 @@ impl PageFaultTrace {
 pub struct ElfInfo {
     pub elf_alloc: Option<OwnedAlloc>,
     pub tls_modules: Vec<crate::elf::TlsModule>,
-    pub tls_total_memsz: usize,
-    pub tls_max_align: usize,
+    /// Every static module's TLS, as a thread's block is laid out from it.
+    pub tls: toyos_elf::tls::Static,
     /// Next module ID to assign on dlopen (1-based, exe=1).
     pub next_tls_module_id: u64,
     /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by (Tid, module_id).
@@ -462,8 +462,7 @@ impl ElfInfo {
         Self {
             elf_alloc: None,
             tls_modules: Vec::new(),
-            tls_total_memsz: 0,
-            tls_max_align: 0,
+            tls: toyos_elf::tls::Static::empty(crate::loader::TLS_VARIANT),
             next_tls_module_id: 1,
             dynamic_tls_blocks: alloc::collections::BTreeMap::new(),
             loaded_libs: Vec::new(),
@@ -830,18 +829,18 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
             .expect("spawn_thread: the spawning thread runs in an address space");
         (addr_space, Arc::clone(&proc.process_data))
     };
-    let (tls_modules, tls_total_memsz, tls_max_align) = {
+    let (tls_modules, tls) = {
         let data = process_data_arc.lock();
-        (data.elf.tls_modules.clone(), data.elf.tls_total_memsz, data.elf.tls_max_align)
+        (data.elf.tls_modules.clone(), data.elf.tls)
     };
 
     // Phase 2: allocate TLS outside any lock. An empty module set still gets a DTV+TCB block via `setup_tls(None, 0, ..)`.
     let (tls_alloc, fs_base) = if !tls_modules.is_empty() {
-        setup_combined_tls(&tls_modules, tls_total_memsz, tls_max_align)?
+        setup_combined_tls(&tls_modules, tls)?
     } else {
-        setup_tls(None, 0, tls_max_align)?
+        setup_tls(None, 0, tls.max_align())?
     };
-    let (tls_alloc, fs_base) = {
+    let (tls_alloc, fs_base, tcb_phys) = {
         let addr_space = &parent_addr_space;
         let parent_data = process_data_arc.lock();
         let tls_phys = tls_alloc.phys();
@@ -854,7 +853,8 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
             rebase_block(tls_phys, (fs_base - tls_vaddr.raw()) as usize, fs_base, tls_rebase);
         }
         drop(parent_data);
-        (MappedPages::new(tls_vaddr, tls_alloc), fs_base)
+        let tcb_phys = tls_phys + (fs_base - tls_vaddr.raw());
+        (MappedPages::new(tls_vaddr, tls_alloc), fs_base, tcb_phys)
     };
 
     let (ks_alloc, ks_rsp) = match alloc_kernel_stack(thread_start, entry, stack_ptr, arg) {
@@ -892,6 +892,17 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     // Every thread names the same symbols, so a crash report never asks this table.
     let symbols = Arc::clone(&proc.symbols);
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
+    // Before the thread's first instruction, which is the enqueue below: the
+    // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
+    // SAFETY: `tcb_phys` is this thread's TCB inside the TLS block the table
+    // now owns, which no thread has run on yet; a 4-byte store inside the
+    // TCB the builder reserved.
+    unsafe {
+        core::ptr::write_volatile(
+            crate::DirectMap::from_phys(tcb_phys + toyos_abi::TCB_TID as u64).as_mut_ptr::<u32>(),
+            tid.raw(),
+        );
+    }
 
     // Enqueue while still holding the table lock: this thread is fully visible to the scheduler before any retire sweep can start.
     let (sched, _dst) = scheduler::enqueue_new(
@@ -955,7 +966,7 @@ fn teardown_resources(
     crate::irq_census::log_census();
     // After the irq lines: the tlb conservation check reads deliveries first, issues second.
     crate::arch::tlb::log_census();
-    crate::arch::idt::unclaimed::log_vectors();
+    crate::arch::trap::log_unclaimed();
 
     ops::close_all(&mut data.handles);
     data.elf.elf_alloc.take();
@@ -1194,7 +1205,7 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
     }
     if let Some(proc) = table.get(process_pid) {
         let name = proc.name_str();
-        log!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
+        crate::log_limited!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
     }
 }
 
@@ -1211,7 +1222,7 @@ fn futex_word(addr: UserAddr) -> Option<crate::mm::DirectMap> {
     if !addr.raw().is_multiple_of(4) {
         return None;
     }
-    crate::user_ptr::translate_user(addr)
+    crate::user_ptr::translate_user(addr, crate::user_ptr::Access::Read)
 }
 
 /// Atomically check a user futex word and block if it matches `expected`. Returns 0 if woken/never blocked, 1 if timed out, an error if `addr` names no word this process may have.
@@ -1536,7 +1547,7 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     }
     dump_region("rip", rip);
 
-    let fs_base = crate::arch::cpu::read_fs_base();
+    let fs_base = crate::arch::cpu::thread_pointer();
     if fs_base != 0 {
         log!("  FS base: {:#x}", fs_base);
         if let Some(self_ptr) = read_user(fs_base) {

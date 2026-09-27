@@ -1,4 +1,4 @@
-use core::sync::atomic::{fence, Ordering};
+use crate::arch::barrier;
 
 use toyos_untrusted::{Refused, Untrusted};
 
@@ -376,8 +376,9 @@ impl UsedRingConsumer<'_> {
             if used_idx == self.last_used_idx {
                 return None;
             }
-            // Acquire: pairs with the device's release when it bumps the used idx after writing the element.
-            fence(Ordering::Acquire);
+            // The device writes the element before it bumps the idx (virtio 1.2
+            // §2.7.8), so the element is read after the idx that counts it.
+            barrier::dma_rmb();
             let slot = self.last_used_idx % self.size;
             let id: Untrusted<u32> =
                 Untrusted::new(self.used.read(USED_RING_OFF + slot as usize * USED_ELEM_SIZE));
@@ -532,6 +533,23 @@ impl<'pool> Virtqueue<'pool> {
         notify_multiplier: u32,
         queue_index: u16,
     ) -> u16 {
+        let first_desc = slot.0;
+        self.publish(slot, bufs, notify_mmio, notify_multiplier, queue_index).ring();
+        first_desc
+    }
+
+    /// [`submit`](Self::submit) with the doorbell handed back unrung, for a
+    /// caller that rings it after letting go of a lock: an emulated device
+    /// can serve the doorbell's write synchronously, and that is not work to
+    /// hold a lock across.
+    pub fn publish(
+        &mut self,
+        slot: DescSlot,
+        bufs: &[(u64, u32, BufDir)],
+        notify_mmio: Mmio,
+        notify_multiplier: u32,
+        queue_index: u16,
+    ) -> Doorbell {
         let size = self.size;
         let first_desc = slot.0;
         self.chain_bytes[first_desc as usize] = chain_bytes(bufs);
@@ -554,14 +572,18 @@ impl<'pool> Virtqueue<'pool> {
 
         let avail_idx: u16 = self.avail.read(AVAIL_IDX_OFF);
         self.avail.write(AVAIL_RING_OFF + (avail_idx % size) as usize * 2, first_desc);
-        fence(Ordering::Release);
+        // The descriptors and the ring entry before the idx that publishes them
+        // (virtio 1.2 §2.7.13).
+        barrier::dma_wmb();
         self.avail.write(AVAIL_IDX_OFF, avail_idx.wrapping_add(1));
 
-        fence(Ordering::Release);
-        let notify_off = self.notify_offset as u64 * notify_multiplier as u64;
-        notify_mmio.write_u16(notify_off, queue_index);
+        self.doorbell(notify_mmio, notify_multiplier, queue_index)
+    }
 
-        first_desc
+    /// This queue's doorbell, for a caller that finds a chain published and
+    /// cannot know it was rung: a second ring costs the device one look.
+    pub fn doorbell(&self, notify_mmio: Mmio, notify_multiplier: u32, queue_index: u16) -> Doorbell {
+        Doorbell { mmio: notify_mmio, at: self.notify_bytes(notify_multiplier), queue_index }
     }
 
     /// Check if the device has completed any request.
@@ -581,7 +603,8 @@ impl<'pool> Virtqueue<'pool> {
             if used_idx == self.last_used_idx {
                 return None;
             }
-            fence(Ordering::Acquire);
+            // The element after the idx that counts it, as in `UsedRingConsumer::poll`.
+            barrier::dma_rmb();
             let slot = self.last_used_idx % self.size;
             let id = self.used_ring_id(slot);
             let len = self.used_ring_len(slot);
@@ -637,7 +660,8 @@ impl<'pool> Virtqueue<'pool> {
         let slot = at % self.size;
         self.used.write(self.used_elem_at(slot), id);
         self.used.write(self.used_elem_at(slot) + 4, len);
-        fence(Ordering::Release);
+        // As a device does: the element before the idx.
+        barrier::dma_wmb();
         self.used.write::<u16>(USED_IDX_OFF, at.wrapping_add(1));
     }
 
@@ -650,36 +674,92 @@ impl<'pool> Virtqueue<'pool> {
         notify_multiplier: u32,
         queue_index: u16,
     ) -> DescSlot {
-        // A completion this late from an emulated device never comes; the
-        // panic names the queue where an unbounded spin hung silently.
-        const ANSWERS: crate::time::Tripwire = crate::time::Tripwire::absurd(
-            crate::time::Duration::from_secs(5),
-            "far above any completion a live device delivers",
-        );
-        // Spaced: `nanos_since_boot`'s 128-bit divide is too costly per iteration.
-        const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
         self.submit(slot, bufs, notify_mmio, notify_multiplier, queue_index);
-        let mut spins = 0u32;
-        let mut deadline = None;
-        loop {
-            if let Some((slot, _)) = self.poll_used() {
-                return slot;
-            }
-            core::hint::spin_loop();
-            spins += 1;
-            if spins == SPINS_PER_DEADLINE_CHECK {
-                spins = 0;
-                let now = crate::clock::nanos_since_boot();
-                match deadline {
-                    None => deadline = Some(now.saturating_add(ANSWERS.nanos())),
-                    Some(at) if now >= at => {
-                        panic!("virtio: queue {queue_index} completed nothing in {ANSWERS}")
-                    }
-                    Some(_) => {}
-                }
+        wait_used(queue_index, || self.poll_used().map(|(slot, _)| slot))
+    }
+}
+
+/// A queue's notification, owed for a chain [`Virtqueue::publish`] made
+/// visible and rung once.
+#[must_use = "a published chain the device is never told of is never taken"]
+pub struct Doorbell {
+    mmio: Mmio,
+    at: u64,
+    queue_index: u16,
+}
+
+impl Doorbell {
+    pub fn ring(self) {
+        // The idx before the notification: the notify is an `Mmio` write, which
+        // orders every earlier store before it.
+        self.mmio.write_u16(self.at, self.queue_index);
+    }
+}
+
+/// A completion this late from an emulated device never comes; the panic
+/// names the queue where an unbounded spin hung silently.
+const ANSWERS: crate::time::Tripwire = crate::time::Tripwire::absurd(
+    crate::time::Duration::from_secs(5),
+    "far above any completion a live device delivers",
+);
+
+/// Looks between two readings of the clock: `nanos_since_boot`'s 128-bit
+/// divide is too costly per look.
+const LOOKS_PER_CHECK: u32 = 1024;
+
+/// Spin on `look` until it finds a completion, bounded by [`ANSWERS`]: the one
+/// wait on a used ring. A caller that has to lock around each look does so
+/// inside `look`, so what it holds is held for one look at a time.
+pub fn wait_used<T>(queue_index: u16, look: impl FnMut() -> Option<T>) -> T {
+    let at = crate::clock::nanos_since_boot().saturating_add(ANSWERS.nanos());
+    wait_until(at, crate::clock::nanos_since_boot, look)
+        .unwrap_or_else(|| panic!("virtio: queue {queue_index} completed nothing in {ANSWERS}"))
+}
+
+/// [`wait_used`] on the clock `now`: `None` is a device that completed nothing
+/// by `at`. **Past `at`, `look` is asked once more**: the waiter may have been
+/// off its CPU for the whole bound, and a device that finished meanwhile is
+/// not the one that failed.
+fn wait_until<T>(at: u64, mut now: impl FnMut() -> u64, mut look: impl FnMut() -> Option<T>) -> Option<T> {
+    let mut looks = 0u32;
+    loop {
+        if let Some(done) = look() {
+            return Some(done);
+        }
+        core::hint::spin_loop();
+        looks += 1;
+        if looks == LOOKS_PER_CHECK {
+            looks = 0;
+            if now() >= at {
+                return look();
             }
         }
     }
+}
+
+/// [`wait_until`] on a clock that has already passed its bound, as a waiter
+/// that was off its CPU for all of it finds it: a completion the next look
+/// finds is taken, and one that never comes is `None`.
+#[cfg(feature = "boot-actuators")]
+pub fn wait_selftest() {
+    const CASES: usize = 2;
+    let mut passed = 0usize;
+    let mut looks = 0u32;
+    let late = wait_until(0, || u64::MAX, || {
+        looks += 1;
+        (looks > LOOKS_PER_CHECK).then_some(())
+    });
+    if late.is_some() {
+        passed += 1;
+    } else {
+        log!("virtio: wait selftest FAILED on a completion found after the bound: the wait gave up on it");
+    }
+    if wait_until(0, || u64::MAX, || None::<()>).is_none() {
+        passed += 1;
+    } else {
+        log!("virtio: wait selftest FAILED on a device that never answers");
+    }
+    log!("virtio: wait selftest {passed}/{CASES}");
 }
 
 /// Run [`Virtqueue::poll_used`] over eleven crafted used-ring elements no real device would ever send.

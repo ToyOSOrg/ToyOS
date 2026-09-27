@@ -14,7 +14,7 @@
 use core::cell::UnsafeCell;
 use core::fmt;
 
-use uefi::proto::media::file::{File, FileAttribute, FileMode, RegularFile};
+use uefi::proto::media::file::{Directory, File, FileAttribute, FileMode, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::proto::media::partition::PartitionInfo;
 use uefi::table::boot::{BootServices, OpenProtocolAttributes, OpenProtocolParams, SearchType};
@@ -46,6 +46,8 @@ pub const ENDS_AT_CHAIN: &str =
 pub fn close_without_a_kernel() {
     // SAFETY: [`Sink`]'s contract. Dropping the handle closes it.
     unsafe { *SINK.0.get() = None };
+    // SAFETY: [`Volume`]'s contract.
+    unsafe { *VOLUME.0.get() = None };
 }
 
 const NAME: &CStr16 = cstr16!("loader.log");
@@ -61,6 +63,16 @@ struct Sink(UnsafeCell<Option<RegularFile>>);
 unsafe impl Sync for Sink {}
 
 static SINK: Sink = Sink(UnsafeCell::new(None));
+
+/// The log partition's root, kept open beside [`SINK`] for the same span and
+/// under the same contract: the one way to write another file on the volume
+/// once [`open`] holds it exclusively ([`with_open_volume`]).
+struct Volume(UnsafeCell<Option<Directory>>);
+
+// SAFETY: [`Sink`]'s contract, which this shares.
+unsafe impl Sync for Volume {}
+
+static VOLUME: Volume = Volume(UnsafeCell::new(None));
 
 /// What a pass that appends writes before its own first line, so the boot being
 /// reported on and the pass reporting on it are never read as one.
@@ -119,6 +131,18 @@ pub fn with_volume<T>(
     Ok(visit(&mut root))
 }
 
+/// Hand the log partition's root to `visit`, once [`open`] holds the volume;
+/// `Err` where it does not, which is a pass whose log never opened.
+pub fn with_open_volume<T>(visit: impl FnOnce(&mut Directory) -> T) -> Result<T, alloc::string::String> {
+    // SAFETY: [`Volume`]'s contract: one caller at a time, and no borrow
+    // outlives this call.
+    let volume = unsafe { &mut *VOLUME.0.get() };
+    match volume.as_mut() {
+        Some(root) => Ok(visit(root)),
+        None => Err("the log partition is not open".into()),
+    }
+}
+
 pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
     let bs = system_table.boot_services();
     let handle = match volume_handle(bs, guid) {
@@ -168,6 +192,8 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
     }
     // SAFETY: [`Sink`]'s contract.
     unsafe { *SINK.0.get() = Some(file) };
+    // SAFETY: [`Volume`]'s contract.
+    unsafe { *VOLUME.0.get() = Some(root) };
     if !truncate {
         println!("{SEPARATOR}");
     }
@@ -196,6 +222,8 @@ pub fn close() {
     println!("{ENDS_AT}");
     // SAFETY: [`Sink`]'s contract. Dropping the handle closes it.
     unsafe { *SINK.0.get() = None };
+    // SAFETY: [`Volume`]'s contract.
+    unsafe { *VOLUME.0.get() = None };
 }
 
 /// The unique GUID of the GPT partition `handle` sits on. `None` is a handle

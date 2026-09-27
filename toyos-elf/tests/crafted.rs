@@ -15,37 +15,37 @@ mod common;
 
 use common::*;
 use toyos_elf::header::PROGRAM_HEADER_SIZE;
-use toyos_elf::{Error, Layout, MAX_LOAD_SEGMENTS};
+use toyos_elf::{Error, Layout, Machine, StackedImage, MAX_LOAD_SEGMENTS};
 
 fn refused(bytes: Vec<u8>) -> Error {
-    match Layout::parse(&bytes) {
+    match Layout::parse(&bytes, Machine::X86_64) {
         Ok(_) => panic!("accepted a file that must be refused"),
         Err(e) => e,
     }
 }
 
 fn accepted(bytes: Vec<u8>) -> Layout {
-    Layout::parse(&bytes).expect("refused a file that must be accepted")
+    Layout::parse(&bytes, Machine::X86_64).expect("refused a file that must be accepted")
 }
 
 // ── The bytes before the program headers ────────────────────────────────
 
 #[test]
 fn an_empty_file_is_too_small() {
-    assert_eq!(Layout::parse(&[]).unwrap_err(), Error::TooSmall);
+    assert_eq!(Layout::parse(&[], Machine::X86_64).unwrap_err(), Error::TooSmall);
 }
 
 #[test]
 fn a_header_one_byte_short_is_too_small() {
     let bytes = Elf::honest(0x1000).build();
-    assert_eq!(Layout::parse(&bytes[..63]).unwrap_err(), Error::TooSmall);
+    assert_eq!(Layout::parse(&bytes[..63], Machine::X86_64).unwrap_err(), Error::TooSmall);
 }
 
 #[test]
 fn the_magic_is_checked() {
     let mut bytes = Elf::honest(0x1000).build();
     bytes[1] = b'e';
-    assert_eq!(Layout::parse(&bytes).unwrap_err(), Error::BadMagic);
+    assert_eq!(Layout::parse(&bytes, Machine::X86_64).unwrap_err(), Error::BadMagic);
 }
 
 #[test]
@@ -54,7 +54,16 @@ fn class_endianness_version_type_and_machine_are_each_refused_by_name() {
     assert_eq!(refused(Elf::honest(0x1000).endian(2).build()), Error::NotLittleEndian);
     assert_eq!(refused(Elf::honest(0x1000).version(0).build()), Error::BadVersion);
     assert_eq!(refused(Elf::honest(0x1000).kind(ET_EXEC).build()), Error::NotPie);
-    assert_eq!(refused(Elf::honest(0x1000).machine(EM_AARCH64).build()), Error::WrongMachine);
+    assert_eq!(refused(Elf::honest(0x1000).machine(EM_386).build()), Error::UnknownMachine);
+}
+
+#[test]
+fn an_image_for_the_other_machine_is_refused_and_one_for_this_machine_is_not() {
+    let arm = Elf::honest(0x1000).machine(EM_AARCH64).build();
+    assert_eq!(refused(arm.clone()), Error::WrongMachine);
+    assert!(Layout::parse(&arm, Machine::Aarch64).is_ok());
+    let x86 = Elf::honest(0x1000).build();
+    assert_eq!(Layout::parse(&x86, Machine::Aarch64).unwrap_err(), Error::WrongMachine);
 }
 
 #[test]
@@ -360,4 +369,25 @@ fn segment_flags_survive_the_parse() {
     assert!(text.readable() && text.executable() && !text.writable());
     let data = layout.segments()[1].flags;
     assert!(data.readable() && data.writable() && !data.executable());
+}
+
+/// The stack after a static image starts on a page whatever the image ends
+/// on: an lld kernel can end at `0x410008`, and a stack from there has every
+/// stack pointer the kernel computes off 16 by 8.
+#[test]
+fn the_stack_after_an_image_is_aligned_wherever_the_image_ends() {
+    const STACK: u64 = 8 * 1024 * 1024;
+    assert_eq!(StackedImage::place(0x41_0008, STACK), Some(StackedImage { size: 0xc1_1000, stack: 0x41_1000 }));
+    for end in [1, 0x40_fc30, 0x41_0000, 0x41_0008, 0x41_0ff8, 0x41_0fff] {
+        let placed = StackedImage::place(end, STACK).expect("fits");
+        assert!(placed.stack >= end && placed.stack - end < 4096, "{end:#x}: {placed:?}");
+        assert_eq!(placed.stack % 16, 0, "{end:#x}: the stack's base");
+        assert_eq!(placed.size % 16, 0, "{end:#x}: the stack's top");
+        assert_eq!(placed.size - placed.stack, STACK);
+    }
+    // No address holds it, rounded or with the stack.
+    assert_eq!(StackedImage::place(u64::MAX - 8, STACK), None);
+    assert_eq!(StackedImage::place(u64::MAX - STACK - 0x10, STACK), None);
+    // A stack of part of a page would leave its top wherever it fell.
+    assert_eq!(StackedImage::place(0x41_0000, STACK + 8), None);
 }

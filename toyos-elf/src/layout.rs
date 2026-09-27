@@ -6,7 +6,8 @@
 //! site.
 
 use crate::header::{
-    FileHeader, ProgramHeader, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_LOAD, PT_TLS, SECTION_HEADER_SIZE,
+    FileHeader, Machine, ProgramHeader, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_LOAD, PT_TLS,
+    SECTION_HEADER_SIZE,
 };
 use crate::{Error, MAX_LOAD_SEGMENTS, MAX_TLS_ALIGN};
 
@@ -151,8 +152,12 @@ impl Layout {
     ///
     /// `data` need only reach the end of the program header table; the loader
     /// hands it 4 KiB and never reads a segment's contents to get here.
-    pub fn parse(data: &[u8]) -> Result<Layout, Error> {
+    /// `machine` is the one the caller runs: an image for any other is refused.
+    pub fn parse(data: &[u8], machine: Machine) -> Result<Layout, Error> {
         let ehdr = FileHeader::parse(data)?;
+        if ehdr.machine != machine {
+            return Err(Error::WrongMachine);
+        }
         let phdrs = ehdr.program_headers(data)?;
 
         let mut segments = [Segment {
@@ -384,4 +389,30 @@ fn section_table(ehdr: &FileHeader) -> Option<SectionTableRef> {
         count: ehdr.shnum,
         entry_size: ehdr.shentsize,
     })
+}
+
+/// A static image loaded at its own vaddrs into one allocation with its stack
+/// after it, in offsets from the allocation's base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StackedImage {
+    /// Bytes to allocate: the image, then the stack.
+    pub size: u64,
+    /// Where the stack's lowest byte is; its top is `size`.
+    pub stack: u64,
+}
+
+impl StackedImage {
+    /// The image ending at `vaddr_max` with a `stack_size`-byte stack after it,
+    /// or `None` for one no address holds. The stack starts on the next page:
+    /// where the image ends is the linker's choice, and both ABIs want the
+    /// stack pointer 16-byte aligned, which AArch64's `SCTLR_EL1.SA` enforces on
+    /// every access through it. `stack_size` is whole pages, so the top is too.
+    pub fn place(vaddr_max: u64, stack_size: u64) -> Option<StackedImage> {
+        const PAGE: u64 = 4096;
+        if !stack_size.is_multiple_of(PAGE) {
+            return None;
+        }
+        let stack = vaddr_max.checked_next_multiple_of(PAGE)?;
+        Some(StackedImage { size: stack.checked_add(stack_size)?, stack })
+    }
 }

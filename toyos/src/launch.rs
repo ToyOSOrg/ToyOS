@@ -1,4 +1,4 @@
-//! Asking `/bin/init` to start a declared program.
+//! Asking `init` to start a declared program.
 //!
 //! **`SYS_SPAWN` can only give a child what the caller holds, and that is not
 //! enough.** doom is started from a shell and doom is to hold sound; the shell
@@ -14,7 +14,7 @@
 //! its own manifest row rather than a narrowing of its parent's.
 //!
 //! The wire is a single frame plus one handle batch, and this module is both
-//! halves of it — std's `Command` encodes and `/bin/init` decodes.
+//! halves of it — std's `Command` encodes and `init` decodes.
 
 use crate::ipc::{Connection, IpcError};
 use crate::RawHandle;
@@ -27,6 +27,8 @@ pub const MSG_LAUNCHED: u32 = 2;
 /// No `[programs]` row names that program, so init has nothing to build its
 /// authority from. The caller spawns it directly instead, which gets
 /// inheritance — the right answer for a binary the image did not declare.
+/// The payload is the `HOME` init decides for it, which that spawn carries in
+/// place of the caller's own: a location is init's to hand out, not a parent's.
 pub const MSG_NOT_DECLARED: u32 = 3;
 /// It is declared and did not start: no such file, a full table, a refused
 /// endowment. The reason is in init's log, not in this frame — a caller can do
@@ -55,8 +57,8 @@ const HEADER: usize = 32;
 pub struct Launch<'a> {
     /// The program's path, exactly as the caller resolved it.
     ///
-    /// **Not a `[programs]` key**, because `/bin/ls` is a symlink to
-    /// `/bin/toybox` and the row that says what an applet may hold is
+    /// **Not a `[programs]` key**, because `ls` is a symlink to
+    /// `toybox` and the row that says what an applet may hold is
     /// `toybox`'s. init resolves the path to a key; the caller does not parse
     /// the manifest and there is deliberately no second reader of it.
     pub program: &'a str,
@@ -249,21 +251,27 @@ pub enum LaunchError {
 }
 
 /// What a launch answered.
-pub enum Outcome {
+pub enum Outcome<'a> {
     /// The handle the caller now holds for the child.
     Started(RawHandle),
-    /// Not a `[programs]` key. The caller spawns it directly.
-    NotDeclared,
+    /// Not a `[programs]` key. The caller spawns it directly, with `home` as
+    /// its `HOME`.
+    NotDeclared { home: &'a str },
     /// Declared, and it did not start.
     Refused,
 }
 
-/// Send one launch and read its answer.
+/// Send one launch and read its answer, a `HOME` in `answer`.
 ///
 /// The handles go before the frame that announces them, which is
 /// [`Connection::send_with_handles`]'s whole rule — and the `Process` handle
-/// comes back the same way.
-pub fn launch(conn: &Connection, request: &Launch<'_>) -> Result<Outcome, LaunchError> {
+/// comes back the same way. A `HOME` longer than `answer` or not UTF-8 is a
+/// malformed answer, never a shortened one.
+pub fn launch<'a>(
+    conn: &Connection,
+    request: &Launch<'_>,
+    answer: &'a mut [u8],
+) -> Result<Outcome<'a>, LaunchError> {
     let mut buf = [0u8; crate::ipc::MAX_FRAME_LEN as usize];
     let len = request
         .encode(&mut buf)
@@ -277,7 +285,15 @@ pub fn launch(conn: &Connection, request: &Launch<'_>) -> Result<Outcome, Launch
             Some([process]) => Ok(Outcome::Started(process)),
             None => Err(LaunchError::Sent(IpcError::Malformed)),
         },
-        MSG_NOT_DECLARED => Ok(Outcome::NotDeclared),
+        MSG_NOT_DECLARED => {
+            if header.len() as usize > answer.len() {
+                return Err(LaunchError::Sent(IpcError::Malformed));
+            }
+            let len = conn.recv_bytes(&header, answer).map_err(LaunchError::Sent)?;
+            let home = core::str::from_utf8(&answer[..len])
+                .map_err(|_| LaunchError::Sent(IpcError::Malformed))?;
+            Ok(Outcome::NotDeclared { home })
+        }
         MSG_REFUSED => Ok(Outcome::Refused),
         _ => Err(LaunchError::Sent(IpcError::Malformed)),
     }

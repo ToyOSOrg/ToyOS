@@ -85,9 +85,9 @@ fn disarm() {
 }
 
 fn timed(f: impl FnOnce()) -> u64 {
-    let start = syscall::clock_nanos();
+    let start = toyos_abi::clock::nanos_since_boot();
     f();
-    syscall::clock_nanos() - start
+    toyos_abi::clock::nanos_since_boot() - start
 }
 
 fn map(size: usize) -> *mut u8 {

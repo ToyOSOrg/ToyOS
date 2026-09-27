@@ -3,10 +3,7 @@
 //! CPU back; the release posts to the ticket whose turn it now is. Unlike a
 //! [`crate::sync::Lock`] guard, a [`SleepGuard`] does not raise the preempt
 //! count. Compiled a second time by `kernel-loom`, which drives the real
-//! acquire; `#[allow(dead_code)]` until a kernel static converts to it.
-
-// Unused until a kernel static converts to it — see kernel-loom/tests/sleep_lock.rs.
-#![allow(dead_code)]
+//! acquire. The console's wire (`drivers::serial`) is one.
 
 #[cfg(not(feature = "loom"))]
 use core::cell::UnsafeCell;
@@ -21,7 +18,7 @@ use loom::sync::atomic::{AtomicU64, Ordering};
 use core::ops::{Deref, DerefMut};
 
 use crate::watch::{self, Watch};
-use crate::scheduler::{current_task, Parkable, TaskId};
+use crate::scheduler::{current_task, started, Parkable, TaskId};
 use crate::sync::{AtomicTicket, Ticket};
 
 /// Acquire: orders the previous holder's writes before this read; `sleeplock-acquire-off` flips it to `Relaxed` so `kernel-loom` can prove the gap is real.
@@ -115,6 +112,12 @@ impl<T> SleepLock<T> {
         self.take(word_of(current_task()))
     }
 
+    /// [`Self::try_lock`] for a context that cannot ask which task it is: the
+    /// boot before per-CPU state exists, where there is no task to be.
+    pub fn try_lock_untasked(&self) -> Option<SleepGuard<'_, T>> {
+        self.take(NOT_A_TASK)
+    }
+
     /// Fails whenever anyone is queued, because `ticket` has already moved past `now`.
     fn take(&self, owner: u64) -> Option<SleepGuard<'_, T>> {
         let turn = self.now.load(TURN);
@@ -170,6 +173,10 @@ impl<T> Drop for SleepGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.holder.store(FREE, Ordering::Relaxed);
         let next = self.lock.now.fetch_advance(Ordering::Release).succ();
-        let _ = self.lock.watch.post_n(u64::from(next.raw()), 1);
+        // Before the scheduler exists no task can have queued, and a post
+        // needs the scheduler: the boot's console takes this lock that early.
+        if started() {
+            let _ = self.lock.watch.post_n(u64::from(next.raw()), 1);
+        }
     }
 }

@@ -13,6 +13,7 @@
 
 mod access;
 mod latch;
+mod published;
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -81,14 +82,34 @@ impl Fb {
         height: 0,
         format: 0,
     };
+
+    /// The descriptor as the seqlock's words.
+    fn words(self) -> [u64; published::WORDS] {
+        [
+            self.ptr as u64,
+            self.bytes,
+            u64::from(self.stride_px) << 32 | u64::from(self.width),
+            u64::from(self.height) << 32 | u64::from(self.format),
+        ]
+    }
+
+    fn from_words([ptr, bytes, stride_width, height_format]: [u64; published::WORDS]) -> Self {
+        Self {
+            ptr: ptr as *mut u8,
+            bytes,
+            stride_px: (stride_width >> 32) as u32,
+            width: stride_width as u32,
+            height: (height_format >> 32) as u32,
+            format: height_format as u32,
+        }
+    }
 }
 
 struct FbCell(UnsafeCell<Fb>);
-// SAFETY: the panic path may take no lock; `FB` is published and read only
-// under the `SEQ` seqlock, and `PENDING` has one writer at a time.
+// SAFETY: the panic path may take no lock; `PENDING` has one writer at a time.
 unsafe impl Sync for FbCell {}
 
-/// A screenful-and-then-some of rendered log; which lines came from an `alert!` is a [`Level`] flag, never inferred from the text.
+/// A screenful-and-then-some of rendered log; which lines are red is the record's [`log::Severity`], never inferred from the text.
 struct Rendered {
     text: [u8; SNAPSHOT_CAP],
     /// One bit per line, counted back from the last — the buffer fills from its end.
@@ -157,7 +178,7 @@ impl log::read::RecordSink for Backfill<'_> {
 
         // Counted in newlines, not records: `paint` counts newlines, and a multi-line record (every panic) is more than one row.
         let lines = out.iter().filter(|&&byte| byte == b'\n').count();
-        if record.level() == Some(log::Level::Alert) {
+        if record.severity().is_some_and(|s| s >= log::Severity::Error) {
             for line in self.into.lines..self.into.lines + lines {
                 if let Some(word) = self.into.alert.get_mut(line / 64) {
                     *word |= 1 << (line % 64);
@@ -206,11 +227,10 @@ struct RenderedCell(UnsafeCell<Rendered>);
 // or swap atomically. `PAINTING`, `CAPTURE`, and `CAPTURE_ACCESS` serialise the three cells.
 unsafe impl Sync for RenderedCell {}
 
-/// Seqlock over `FB`; even means stable, odd means a publisher is inside.
+/// The descriptor painters draw through, behind a seqlock (`published`).
 /// Not a `Lock`: its guard drop can dispatch the scheduler, forbidden here.
-/// A publisher that dies mid-update leaves this odd forever, costing the screen and nothing else.
-static SEQ: AtomicU32 = AtomicU32::new(0);
-static FB: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
+/// A publisher that dies mid-update leaves it changing forever, costing the screen and nothing else.
+static FB: published::Published = published::Published::new();
 
 /// Exactly one painter at a time, taken by every painter without exception.
 /// [`render`] and [`seal_wedge`] never release it; every other painter does,
@@ -312,17 +332,10 @@ static PENDING: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 static RAW_PHYS: AtomicU64 = AtomicU64::new(0);
 static RAW_SIZE: AtomicU64 = AtomicU64::new(0);
 
-/// Boot-time and `set_resolution`-window only: publishers never race, so the load-then-store of `SEQ` needs no CAS.
+/// Boot-time and `set_resolution`-window only: publishers never race.
 fn publish(fb: Fb) {
     forget_the_glass();
-    let seq = SEQ.load(Ordering::Relaxed);
-    SEQ.store(seq.wrapping_add(1), Ordering::Relaxed);
-    // The release fence orders the descriptor store between the odd and even markers; a release RMW alone would not.
-    core::sync::atomic::fence(Ordering::Release);
-    // SAFETY: the seqlock's payload store; `SEQ` is odd across this write, so
-    // a concurrent `snapshot` discards what it reads. Publishers never race each other.
-    unsafe { *FB.0.get() = fb };
-    SEQ.store(seq.wrapping_add(2), Ordering::Release);
+    FB.publish(fb.words());
 }
 
 /// Stop painting until the next [`rearm`], for a window where the framebuffer may be freed and reallocated.
@@ -349,24 +362,11 @@ pub fn disable() {
     detach();
 }
 
-/// Torn means unavailable, never a wild pointer: only two descriptors are
-/// ever published, and every torn mixture is caught downstream by the null check or a zero field collapsing draws to no-ops.
-/// A second valid descriptor would break that argument, leaving only the fences.
+/// One publication whole, or nothing: a descriptor still changing is no
+/// screen this instant (`published`, and `kernel-loom`'s `panic_console_publish`).
 fn snapshot() -> Option<Fb> {
-    for _ in 0..4 {
-        let before = SEQ.load(Ordering::Acquire);
-        if before & 1 != 0 {
-            continue;
-        }
-        // SAFETY: the seqlock's payload read, the one place `FB` is read
-        // while a publisher may be inside it — sound on the `SEQ` comparison below, not exclusion.
-        let fb = unsafe { *FB.0.get() };
-        core::sync::atomic::fence(Ordering::Acquire);
-        if SEQ.load(Ordering::Relaxed) == before {
-            return (!fb.ptr.is_null()).then_some(fb);
-        }
-    }
-    None
+    let fb = Fb::from_words(FB.snapshot()?);
+    (!fb.ptr.is_null()).then_some(fb)
 }
 
 /// Reject a descriptor that could turn a panic into a wild write.
@@ -461,10 +461,7 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     // loader hands the scanout over uncacheable; `pat::init` runs before this
     // function so that there is a write-combining entry to point its leaves at.
     let combining = reclaimed.is_none()
-        && mm::paging::boot_map_write_combining(
-            args.gop_framebuffer,
-            align_2m(args.gop_framebuffer_size as usize) as u64,
-        );
+        && mm::paging::boot_map_write_combining(args.gop_framebuffer, args.gop_framebuffer_size);
 
     // **The panel is taken before anything above or below it can fail, and
     // this record is what proves the kernel entered.** A fault in the walk or
@@ -574,9 +571,8 @@ pub fn discard_capture() {
 
 /// Re-freeze the captured report so a line written *after* [`capture`] is
 /// painted; only refreshes a capture that already exists — [`live_tail`] already reads live otherwise.
-/// Both callers are in `apic`, and both are the machine with no serial
-/// fallback: `wait_for_log_file` when its drain budget expires, and
-/// `halt_all_cpus` for the arm line, each after `capture` already ran.
+/// Its one caller is `apic::halt_all_cpus` on a machine with no serial
+/// fallback, for the reboot bound's arm line, after `capture` already ran.
 pub fn refresh_capture() {
     capture_into(true);
 }
@@ -745,9 +741,9 @@ pub fn hold_the_panel(mut bound: Bound) -> ! {
 /// anything that does not skip them. [`i8042::poll_byte`] is an `inb` — no
 /// lock, no MMIO.
 ///
-/// [`i8042::poll_byte`]: crate::drivers::i8042::poll_byte
+/// [`i8042::poll_byte`]: crate::arch::keyboard_controller::poll_byte
 fn read_key(keys: &mut KeyDecoder, bound: &mut Bound) -> Option<KeyOutcome> {
-    let (byte, false) = crate::drivers::i8042::poll_byte()? else {
+    let (byte, false) = crate::arch::keyboard_controller::poll_byte()? else {
         return None;
     };
     let outcome = keys.feed(byte);
@@ -813,7 +809,7 @@ pub mod stall {
             return;
         }
         crate::log!("{HELD}");
-        crate::arch::apic::halt_all_cpus();
+        crate::panic::halt_all_cpus();
     }
 }
 
@@ -1148,7 +1144,7 @@ pub fn log_census() {
 
 /// Charge one paint to the census.
 fn spent(began: u64, pixels: u64) {
-    let ticks = crate::arch::cpu::rdtsc().saturating_sub(began);
+    let ticks = crate::arch::cpu::counter().saturating_sub(began);
     PAINTS.fetch_add(1, Ordering::Relaxed);
     PIXELS.fetch_add(pixels, Ordering::Relaxed);
     TICKS.fetch_add(ticks, Ordering::Relaxed);
@@ -1163,7 +1159,7 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch, stop: impl Fn() -> bo
         return;
     }
     let Some((cols, grid_rows)) = geometry(&fb) else { return };
-    let began = crate::arch::cpu::rdtsc();
+    let began = crate::arch::cpu::counter();
     let mut pixels = 0u64;
     let text = view.text;
     let (total, pages, per) = pagination(text, cols, grid_rows);
@@ -1217,7 +1213,7 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch, stop: impl Fn() -> bo
         want.fill(Cell::GROUND);
         let text_row = if r < draw { row_start.get(r).copied() } else { None };
         if let Some(row) = text_row {
-            // Colour comes from the record's `Level`, so it holds for every display row a wrapped line occupies.
+            // Colour comes from the record's severity, so it holds for every display row a wrapped line occupies.
             let alerted = view.is_alert(row.line as usize);
             for (off, cell) in (row.at as usize..).zip(want.iter_mut()) {
                 let Some(&byte) = text.get(off) else { break };
@@ -1288,10 +1284,9 @@ fn panel_carries_report(fb: &Fb) -> bool {
     })
 }
 
-/// Put every store this module has made on the bus: the scanout is write-combining, and stores can sit in a buffer with nothing to evict them.
+/// Put every store this module has made on the bus.
 fn flush_stores() {
-    // SAFETY: `SFENCE` (SDM Vol. 3A §11.3.1) is the only way to drain a write-combining buffer; it touches no memory or register.
-    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    crate::arch::barrier::scanout_flush();
 }
 
 /// `[page 2/4]` into the bottom row's cells; not decoration — the pager advances on a timer with no key to press.
@@ -1335,14 +1330,14 @@ fn write_num(out: &mut [u8], v: usize) -> usize {
 }
 
 /// Whether the first and last framebuffer pages resolve in the *current*
-/// CR3, not `kernel_cr3()`: a panic in syscall context runs on a user address space.
+/// tables, not `kernel_root()`: a panic in syscall context runs on a user address space.
 /// Proves it rather than assuming it, so broken paging becomes no console, never a fault inside the panic handler.
 fn mapped(fb: &Fb) -> bool {
     let base = fb.ptr as u64;
     let Some(last) = base.checked_add(fb.bytes.saturating_sub(1)) else {
         return false;
     };
-    mm::paging::present_in_current_cr3(base) && mm::paging::present_in_current_cr3(last)
+    mm::paging::present_in_current_tables(base) && mm::paging::present_in_current_tables(last)
 }
 
 /// `pixel_format` is 0 for RGB, 1 for BGR (`bootloader/src/main.rs`).

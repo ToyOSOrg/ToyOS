@@ -86,6 +86,9 @@ pub struct Finding {
     /// True where the chain ends here: the last boot has been accounted for, so
     /// booting the kernel again would start the same loop over.
     pub ends_the_chain: bool,
+    /// How the boot that wrote it ended, as the slots' record takes it: a
+    /// handover on purpose proves its image, and every other state is a death.
+    pub ended: toyos_update::record::Ended,
 }
 
 /// Split a record's text into what a person at the machine reads and what only
@@ -229,7 +232,11 @@ pub fn harvest(
              the boot after this one will report the crash above a second time"
         ));
     }
-    (Some(Finding { lines, filed, ends_the_chain: true }), None)
+    let ended = match state {
+        State::Done => toyos_update::record::Ended::Proven,
+        State::Panic | State::Wedged | State::Armed | State::Fault => toyos_update::record::Ended::Died,
+    };
+    (Some(Finding { lines, filed, ends_the_chain: true, ended }), None)
 }
 
 /// When the boot this record came from was armed, as the loader stamped it.
@@ -245,30 +252,11 @@ fn when(stamp: u64) -> String {
     alloc::format!("{HEAD} the record below is from the boot armed at {}", Civil::from_unix_secs(stamp).stem())
 }
 
-/// Write the page back out of this CPU's caches, and every other CPU's.
-///
-/// The kernel's `blackbox::flush` is the same loop for the same reason; the
-/// instruction is each binary's because `toyos-blackbox` forbids unsafe code,
-/// and `toyos_blackbox::CACHE_LINE` is the one decision they share.
+/// Write the page back out of every CPU's caches, as the kernel's
+/// `blackbox::flush` does and for the same reason: a reset does not write dirty
+/// lines back.
 fn flush(page: Page) {
-    let mut line = 0usize;
-    while line < BYTES {
-        // SAFETY: `CLFLUSH` writes back and invalidates the line containing the
-        // address and touches nothing else; the address is inside the page this
-        // image allocated, and the instruction faults on nothing a canonical
-        // address can be.
-        unsafe {
-            core::arch::asm!(
-                "clflush [{addr}]",
-                addr = in(reg) (page.0 + line as u64) as *const u8,
-                options(nostack, preserves_flags),
-            );
-        }
-        line += toyos_blackbox::CACHE_LINE;
-    }
-    // SAFETY: `SFENCE` orders those writebacks ahead of whatever ends this
-    // machine; it touches no memory or register.
-    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    crate::arch::write_back(page.0, BYTES);
 }
 
 /// A sealed [`toyos_blackbox::Fault`] as lines for the log.

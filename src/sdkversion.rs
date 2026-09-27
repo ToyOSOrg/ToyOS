@@ -5,10 +5,7 @@
 //! `toyos-window` **by version**, because a path escaping a fork's own
 //! repository cannot resolve once cargo checks it out alone. So those and the
 //! two they pull in are published, and the ABI they carry is unstable by
-//! policy — a built program that breaks, breaks. `toyos-ld` is published for a
-//! different reason and carries none of that ABI: the upstream
-//! `x86_64-unknown-toyos` Rust target names it as its linker, and `rustup`
-//! reaches it only through `cargo install toyos-ld`.
+//! policy — a built program that breaks, breaks.
 //!
 //! **That policy is what this gate is for.** None of them is
 //! compatible-by-construction, so a branch that changes what a file under one
@@ -17,6 +14,13 @@
 //! `version` pin with it. A crate *changed* and not republished is worse than
 //! one republished under a taken version, which crates.io refuses: the fork
 //! naming the version still resolves, and silently gets the old code.
+//!
+//! **A fork names them by a range** (`toyos-abi = ">=0.12, <1"`), so the
+//! tree's `[patch.crates-io]` path answers it at whatever version the tree is
+//! on, and a bump here owes no fork a commit. A fork that names one version
+//! instead resolves the published crate beside the tree's, which cargo builds
+//! without a word; so no lockfile in the tree may hold two versions of one of
+//! [`PUBLISHED`], and [`judge`] refuses one that does.
 //!
 //! [`PUBLISHED`]'s order is a dependency order, and it is the order
 //! `cargo run -- --ci publish` takes: a crate cannot go up before the index
@@ -52,7 +56,6 @@ pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-abi", dir: "toyos-abi", depends_on: &[] },
     Crate { name: "toyos-keymap", dir: "toyos-keymap", depends_on: &[] },
     Crate { name: "toyos-font", dir: "userland/toyos-font", depends_on: &[] },
-    Crate { name: "toyos-ld", dir: "toyos-ld", depends_on: &[] },
     Crate { name: "toyos", dir: "toyos", depends_on: &["toyos-abi"] },
     Crate {
         name: "toyos-window",
@@ -135,9 +138,33 @@ fn next_minor(version: &str) -> Option<String> {
     Some(format!("{major}.{}.0", minor + 1))
 }
 
+/// The rule over a merge queue's group at `root`: its tip is one branch merged
+/// onto the group's base — its first parent, which holds `main` and every
+/// branch queued ahead of it — and the branch is judged against that base.
+///
+/// **Not against `main`**: two branches that each take the same next version
+/// both pass as pull requests, git merges their identical bumps without a
+/// conflict, and the second ships a changed crate under the first's version.
+/// Only the base the queue built it on holds the first's bump.
+pub fn judge_queued(root: &Path) -> Result<String, String> {
+    let line = git(root, &["rev-list", "--parents", "-n", "1", "HEAD"])?;
+    let parents = line.split_whitespace().count().saturating_sub(1);
+    if parents != 2 {
+        return Err(format!(
+            "[sdk] the group's tip has {parents} parent(s), and a group is one merge onto its base, \
+             so there is no base to judge it against"
+        ));
+    }
+    judge(root, "HEAD^1")
+}
+
 /// The rule over the branch at `root` against `base`: the one-line verdict, or
 /// the refusal.
 pub fn judge(root: &Path, base: &str) -> Result<String, String> {
+    let split = split_versions(root)?;
+    if !split.is_empty() {
+        return Err(split.join("\n"));
+    }
     let merge_base = git(root, &["merge-base", base, "HEAD"])?;
     if file_at(root, &merge_base, PUBLISHER)?.is_empty() {
         return Ok(format!("{base} does not publish yet, so no version here is taken."));
@@ -236,8 +263,8 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
     }
     refusals.push(
         "[sdk] These are on crates.io — resolved by the forks that name them by \
-         version, toyos-ld by `cargo install` — so a change published under the version it \
-         already had is silently building the old code, resolved or installed. Every change \
+         version — so a change published under the version it already had is silently \
+         building the old code. Every change \
          may break by policy: the bump is the minor, and every in-tree dependent's pin moves \
          with it."
             .to_string(),
@@ -285,6 +312,34 @@ fn file_at(root: &Path, commit: &str, path: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     git(root, &["show", &format!("{commit}:{path}")])
+}
+
+/// A refusal for every lockfile at `HEAD` that holds more than one version of
+/// a crate in [`PUBLISHED`].
+fn split_versions(root: &Path) -> Result<Vec<String>, String> {
+    let mut refusals = Vec::new();
+    for lockfile in tracked_lockfiles(root)? {
+        let text = file_at(root, "HEAD", &lockfile)?;
+        for krate in PUBLISHED {
+            let mut versions: Vec<String> = lock_packages(&text)
+                .into_iter()
+                .filter(|(name, _, _)| name == krate.name)
+                .map(|(_, version, _)| version)
+                .collect();
+            versions.sort();
+            versions.dedup();
+            if versions.len() > 1 {
+                refusals.push(format!(
+                    "[sdk] {lockfile} holds {} at {}: something in its graph names a version the \
+                     tree has moved past and resolves the published crate beside the tree's. A \
+                     fork names an SDK crate by a range (`forks.toml`), never by one version.",
+                    krate.name,
+                    versions.join(" and ")
+                ));
+            }
+        }
+    }
+    Ok(refusals)
 }
 
 fn tracked_lockfiles(root: &Path) -> Result<Vec<String>, String> {
@@ -419,6 +474,52 @@ mod tests {
         assert!(verdict.contains("does not publish yet"), "{verdict}");
     }
 
+    /// **Two branches that take one version**: each passes alone as a pull
+    /// request, git merges their identical bumps cleanly, and only the merge
+    /// queue's judge — the second branch against the base the queue built it
+    /// on — refuses the second. The same branch bumped once more passes there.
+    #[test]
+    fn two_branches_that_take_one_version_are_refused_in_the_queue() {
+        let (_dir, _origin, wt) = repo("sdk-queue-collision");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
+        commit(&wt, "toyos-abi/src/b.rs", "pub struct B;\n", "abi source");
+        publishing(&wt);
+        main_is_here(&wt);
+
+        sh(&wt, &["switch", "-q", "-c", "first", "main"]);
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
+        assert!(judge(&wt, "main").expect("the first alone").contains("toyos-abi 0.1.0 -> 0.2.0"));
+
+        sh(&wt, &["switch", "-q", "-c", "second", "main"]);
+        commit(&wt, "toyos-abi/src/b.rs", "pub struct B(pub u64);\n", "abi: widen B");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
+        assert!(judge(&wt, "main").expect("the second alone").contains("toyos-abi 0.1.0 -> 0.2.0"));
+
+        // The first lands; the queue's group for the second is its merge onto that.
+        sh(&wt, &["switch", "-q", "main"]);
+        sh(&wt, &["merge", "-q", "--no-ff", "first", "-m", "the first lands"]);
+        sh(&wt, &["switch", "-q", "--detach", "main"]);
+        sh(&wt, &["merge", "-q", "--no-ff", "second", "-m", "the queue's group for the second"]);
+        let refusal = judge_queued(&wt).expect_err("the second ships its change under the first's version");
+        assert!(refusal.contains("toyos-abi changed and its version did not"), "{refusal}");
+        assert!(refusal.contains("still says 0.2.0, and the next one is 0.3.0"), "{refusal}");
+
+        // What the second owes: main merged in, and the next version.
+        sh(&wt, &["switch", "-q", "second"]);
+        sh(&wt, &["merge", "-q", "--no-edit", "main"]);
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.3.0", &[]), "abi: 0.3.0");
+        sh(&wt, &["switch", "-q", "--detach", "main"]);
+        sh(&wt, &["merge", "-q", "--no-ff", "second", "-m", "the queue's group, again"]);
+        let verdict = judge_queued(&wt).expect("a bump past the first's");
+        assert!(verdict.contains("toyos-abi 0.2.0 -> 0.3.0"), "{verdict}");
+
+        // A tip that is no merge has no base to be judged against.
+        sh(&wt, &["switch", "-q", "--detach", "first"]);
+        assert!(judge_queued(&wt).unwrap_err().contains("has 1 parent(s)"));
+    }
+
     /// The other half, which a bump alone passes: the dependent's pin.
     #[test]
     fn a_bump_that_leaves_a_dependents_pin_behind_is_refused_by_name() {
@@ -533,6 +634,34 @@ mod tests {
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
         let verdict = judge(&wt, "main").expect("a fork's registry pin is not this rule's business");
         assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
+    }
+
+    /// **The lockfile rule**: a fork that names an SDK crate by one version
+    /// resolves the published crate beside the tree's path one, and the branch
+    /// is refused by name whatever else it changed; one version passes.
+    #[test]
+    fn a_lockfile_holding_two_versions_of_a_published_crate_is_refused_by_name() {
+        let (_dir, _origin, wt) = repo("sdk-split-lock");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi manifest");
+        commit(&wt, "userland/Cargo.lock", &lockfile("toyos-abi", "0.2.0", false), "one version");
+        publishing(&wt);
+        main_is_here(&wt);
+
+        commit(&wt, "kernel/src/lib.rs", "// work\n", "kernel: work");
+        let verdict = judge(&wt, "main").expect("one version of each passes");
+        assert!(verdict.contains("changes none of the published crates"), "{verdict}");
+
+        let split = format!(
+            "{}\n{}",
+            lockfile("toyos-abi", "0.2.0", false),
+            lockfile("toyos-abi", "0.1.0", true).replace("# generated\nversion = 4\n\n", "")
+        );
+        commit(&wt, "userland/Cargo.lock", &split, "a fork pins the old abi");
+        let refusal = judge(&wt, "main").expect_err("two versions of the abi in one lockfile");
+        assert!(
+            refusal.contains("userland/Cargo.lock holds toyos-abi at 0.1.0 and 0.2.0"),
+            "{refusal}"
+        );
     }
 
     /// A branch that touches none of them is every other branch, and the

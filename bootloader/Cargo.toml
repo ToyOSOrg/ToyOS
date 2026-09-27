@@ -26,6 +26,13 @@ toyos-gpt = { path = "../toyos-gpt" }
 toyos-rootimage = { path = "../toyos-rootimage" }
 bcachefs = { path = "../bcachefs", default-features = false }
 toyos-tco = { path = "../toyos-tco" }
+# The signed image, the slot table and the anti-rollback floor: every decision
+# this loader makes about which slot to boot, host-tested there.
+toyos-update = { path = "../toyos-update" }
+# `force-soft`, unified into the SHA-256 and SHA-512 `toyos-update` hashes
+# with: this target is soft-float, and the x86 backend reaches for SSE and
+# SHA-NI registers a UEFI application may not assume are its own.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 # `alloc`: `variable_keys` and `get_variable_boxed`, which are how the boot
 # entry pointing at this image is found among the firmware's own variables.
 uefi = { version = "0.26.0", default-features = false, features = ["alloc"] }

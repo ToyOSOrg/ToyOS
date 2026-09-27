@@ -32,6 +32,9 @@ start = ["logd", "compositor", "soundd", "netd", "filepicker"]
 [apps]
 receives = ["compositor", "soundd", "filepicker"]
 
+# `service = true` makes a row a system service: init starts it with `HOME` at
+# its own `/state/<name>` and makes that directory first. Every other row runs
+# with the session user's home.
 [programs]
 input-test = {}
 proctest = {}
@@ -48,18 +51,18 @@ toyos-cc = { path = "toyos-cc" }
 # `every_boot_config_runs_logd` is what refuses one. It claims no device, and
 # `log` is the port it answers `inspect` on.
 [programs.logd]
+service = true
 syscap = ["logread"]
 serves = ["log"]
-# What lets `logd` serve this boot's log on the network, to whoever connects:
-# without it the log is served on this machine only.
-receives = ["netd"]
 
 [programs.compositor]
+service = true
 serves = ["compositor"]
 receives = ["soundd", "filepicker", "launcher"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
@@ -69,13 +72,28 @@ syscap = ["rt"]
 # Named by vendor and device rather than by slot, so one row finds the card
 # wherever firmware put it.
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
-# `swap` is the authority to replace a running service's binary; the build
-# refuses it to any other program (`src/build.rs`).
+# `launcher` is how a login's program is started holding its own row: `update`
+# and `swap` below are two such programs.
 [programs.sshd]
-receives = ["netd", "launcher", "swap"]
+service = true
+receives = ["netd", "launcher"]
+
+# `swap` is the authority to replace a running service's binary; the build
+# refuses it to any other program (`src/build.rs`). `ssh <machine> swap netd
+# <sha256> <length> < netd` runs it for a login.
+[programs.swap]
+receives = ["swap"]
+
+# The idle slot: the slot table and the idle slot's two partitions, which init
+# claims against the ROOT the kernel holds. The build refuses it to any other
+# program; the owner's signature on the image is the authority to install it.
+# `ssh <machine> update < image` runs it for a login.
+[programs.update]
+slots = true
 
 # A name's addresses, asked of netd's resolver: `netd` is the whole of what it
 # holds.
@@ -90,6 +108,7 @@ receives = ["netd", "soundd", "log", "compositor"]
 syscap = ["inventory"]
 
 [programs.filepicker]
+service = true
 serves = ["filepicker"]
 receives = ["compositor"]
 
@@ -120,19 +139,19 @@ receives = ["compositor", "filepicker"]
 [programs.files]
 receives = ["compositor", "filepicker"]
 
-# `power` is `/system/bin/shutdown`'s and `/system/bin/reboot`'s, `roster` is
-# `/system/bin/ps`'s, and each of those is
-# this binary under another name: init resolves the symlink to this row, so the
-# applets are endowed a `SysCap` carrying `Rights::POWER | Rights::ROSTER` and
-# nothing else in the image is. The row's granularity is the binary, so every
-# other applet is endowed both too — the same shape as `soundd` reaching `ls`,
-# one authority larger.
+# `power` is `/system/bin/shutdown`'s and `/system/bin/reboot`'s: the
+# connector to init's port, which has `logd` make the log whole and then stops
+# the machine with a `SysCap` no program in the image holds. `roster` is
+# `/system/bin/ps`'s. Each of those is this binary under another name: init
+# resolves the symlink to this row, so the applets are endowed both and nothing
+# else in the image is. The row's granularity is the binary, so every other
+# applet is endowed both too — the same shape as `soundd` reaching `ls`.
 #
 # `free` is the same syscall as `ps` and is named by neither: the machine header
 # is ambient and the process roster is not.
 [programs.toybox]
-receives = ["compositor", "soundd", "surface"]
-syscap = ["power", "roster"]
+receives = ["compositor", "soundd", "surface", "power"]
+syscap = ["roster"]
 
 # Symlinks created on ROOT at build time.
 # Keys are ROOT-relative; targets are the guest paths they resolve to.

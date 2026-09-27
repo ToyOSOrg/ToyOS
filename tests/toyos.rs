@@ -198,6 +198,11 @@ const MAX_SHARED_REBOOTS: usize = 3;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // blockd's supervisor and client: every role needs the second NVMe
+    // controller only its own boots carry, and with no role it refuses by name.
+    // `blockd_serves_partitions`, `blockd_survives_its_death`,
+    // `blockd_dma_outside_the_lent` and `blockd_lends_within_its_bound` run it.
+    "blockd_io",
     // **Its exit code is a measurement, not a verdict**, and the shared block
     // judges every member on `exit=0` alone — so it would red on every boot
     // that measured anything. It also needs the real-time band, which only
@@ -218,8 +223,11 @@ const RUST_SKIP: &[&str] = &[
     // The same, and its verdict is the stop record of a boot staged around it.
     // `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_exit` run it.
     "quiesce_last",
+    // The same, and its verdict is the log volume the stop leaves.
+    // `quiesce_leaves_the_volume_whole` runs it.
+    "quiesce_fsync",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
-    // holds, and five megabytes of it. `log_program_flood` runs it.
+    // holds, and megabytes of it. `log_program_flood` runs it.
     "log_flood",
     // It exits 7 on purpose; its verdict is which exit a judge of `/log` reads.
     // `log_program_forgery` runs it.
@@ -228,13 +236,20 @@ const RUST_SKIP: &[&str] = &[
     // console — which only a boot of its own reads back. `log_program_line`
     // and `log_stream` run it.
     "log_origin",
-    // Its verdict is where its line lands among the kernel's records, on a
-    // boot whose `logd` holds the ring until it speaks.
-    // `log_program_line_after_its_records` runs it on `tests/logholdcase`.
+    // Its verdict is where its line lands among the kernel's records, which
+    // every other binary's records would crowd. `log_program_line_after_its_records`
+    // runs it.
     "log_hold",
     // It prints init's word accepting a swap of netd; its verdict is that a
     // `logd` serving the network changed nothing. `log_carrier_forgery` runs it.
     "log_carrier_forger",
+    // It asks for a stop its boot's kernel refuses; its verdict is its line
+    // after that in `/log`. `log_after_a_refused_stop` and
+    // `log_resume_meets_its_flush` run it.
+    "log_refused_stop",
+    // It waits for a cue only a kernel armed with `copy-meets-a-remap` gives.
+    // `user_copy_races_munmap` runs it.
+    "copy_out_races_munmap",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -244,6 +259,8 @@ const RUST_SKIP: &[&str] = &[
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
     "gsbase_probe",
     "test_panic_child",
+    // It takes the machine down; `panic_halts_the_others_first` runs it.
+    "panic_halts_first",
     // A binary that panics at once, sent over ssh as a service's replacement;
     // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
     "swap_crash",
@@ -334,6 +351,11 @@ const RUST_SKIP: &[&str] = &[
     // Needs a compositor, a terminal and a shell: `desktop_window_child`
     // launches it from that shell.
     "window_child",
+    // Same again: the `toolkit_` tests of their names launch them from the
+    // toolkit desktop.
+    "window_wake",
+    "winit_loop",
+    "winit_pace",
     // Its two spawning arms only mean anything when the two processes share a
     // CPU, and the shared boot has two. `fpu_isolation` gives it a machine with
     // one — and a second boot on the kernel that saves nothing, which is the
@@ -398,7 +420,7 @@ const RUST_SKIP: &[&str] = &[
     // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
     // `tests/doommusiccase`.
     "doom_music",
-    // Needs a `logd` that leaves soundd's pipe unread until it says so, and a
+    // Needs a `logd` that leaves soundd's ring unread until it says so, and a
     // capture of the tone it plays into that. `soundd_log_stall` runs it on
     // `tests/logstallcase`.
     "soundd_log_stall",
@@ -481,6 +503,9 @@ const RUST_SKIP: &[&str] = &[
     "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
+    // Its listings are exact against `tests/layoutcase`, and it takes what that
+    // boot wrote as its argv. `layout_fresh_boot` runs it over ssh.
+    "layout_paths",
     // Needs a package installed under `/apps` and a config whose `[apps]` row
     // is what a launch out of it holds; `pkg_install_gbae` gives both, and on
     // any other boot this exits on a launch nothing could satisfy.
@@ -529,6 +554,10 @@ const AUDIO_TESTS: &[(&str, Tier)] =
 // Scheduler-core gate A covers both SMP configs: smp=1 is the audio spec's
 // first-class single-CPU case, smp=8 the full-SMP case.
 const AUDIO_SMP: &[u32] = &[1, 8];
+
+/// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
+/// report puts on serial.
+const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 
 // Tests that read a decoded screendump, which is exactly the set for which
 // the screen is the device under test: the panic console. On a machine with
@@ -592,6 +621,10 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // than through `halt_all_cpus`.
     ("screen_fatal_halt_composited", Sched::Parallel, Tier::Nightly),
     ("screen_pager_keys", Sched::Serial, Tier::Nightly),
+    // AArch64 guests on QEMU `virt`: local, because no CI runner boots one yet.
+    ("virt_early_panic", Sched::Parallel, Tier::Local),
+    ("virt_early_fault", Sched::Parallel, Tier::Local),
+    ("virt_el2_drop", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -599,13 +632,13 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
 /// The command's *output* differs from the command, which is the whole point:
 /// the shell echoes what is typed, so an assertion satisfiable by the echo says
 /// only that the console drew a key, not that anything ran. This is asserted as
-/// a whole trimmed row, so the echoed `/home/root> echo zqjxk` cannot satisfy
+/// a whole trimmed row, so the echoed `/home/toy> echo zqjxk` cannot satisfy
 /// it either.
 const CONSOLE_NONCE: &str = "zqjxk";
 /// `/system/bin/shell` cds to `$HOME` before its first prompt, and prints
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
-const CONSOLE_PROMPT: &str = "/home/root>";
+const CONSOLE_PROMPT: &str = "/home/toy>";
 /// The seed's witness on the panel.
 ///
 /// `/system/bin/console` draws the boot so far, as `logd` serves it, above its
@@ -761,7 +794,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // only machine in reach that runs that driver.
     ("log_stream_e1000e", Sched::Parallel, Tier::Nightly),
     // A reader that never reads, beside a flood: the file and a second reader
-    // are whole regardless. Nightly for the flood's five megabytes.
+    // are whole regardless. Nightly for the flood's megabytes.
     ("log_stream_stalled_reader", Sched::Parallel, Tier::Nightly),
     // A program's line in `/log`, on the served log and on the console, under
     // the name of the pipe it came out of. Lines and a comparison; no clock.
@@ -769,14 +802,23 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // A program writing the kernel's words and another program's head: every
     // judge of `/log` reads the truth. Lines, and the exit judge; no clock.
     ("log_program_forgery", Sched::Parallel, Tier::Fast),
-    // A program's line read while three batches of records written before it
-    // are unread: `/log` carries it after every one. Lines and positions; no clock.
+    // A stop the kernel refuses after logd flushed for it: a line said after
+    // it is in `/log`. Lines; no clock.
+    ("log_after_a_refused_stop", Sched::Parallel, Tier::Fast),
+    // The same stop with logd's flush held until init resumes it: logd runs
+    // the flush, then the resume, and lives. Lines; init's flush bound.
+    ("log_resume_meets_its_flush", Sched::Parallel, Tier::Fast),
+    // A child flooding its parent's log ring while logd reads none of it: the
+    // parent's next line is in `/log`. Lines; its clock is a guard.
+    ("log_ring_keeps_the_owners_slots", Sched::Parallel, Tier::Fast),
+    // A program's line said after three batches of records, read before them:
+    // `/log` carries it after every one. Lines and positions; no clock.
     ("log_program_line_after_its_records", Sched::Parallel, Tier::Fast),
     // A program printing init's word accepting a swap of netd: logd turns
     // nobody away, and a reader after it is admitted. Lines; no clock.
     ("log_carrier_forgery", Sched::Parallel, Tier::Fast),
-    // A flood two and a half times its pipe: every line in `/log`, in order,
-    // once. Nightly for its five megabytes through a TCG guest's volume.
+    // A flood many times its ring: every line in `/log` in order or counted.
+    // Nightly for its megabytes through a TCG guest's volume.
     ("log_program_flood", Sched::Parallel, Tier::Nightly),
     // netd taking this machine's address from the network instead of carrying
     // one written down. The DHCP server it is judged against is QEMU's own, an
@@ -809,6 +851,21 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // guest's own `/log`; every clock is a liveness guard on a guest that
     // stopped talking, and probation is init's.
     ("swap_netd", Sched::Parallel, Tier::Fast),
+    // The machine updates itself: an image over `ssh … update` is written to
+    // the idle slot and is the kernel the next boot runs; every slot the loader
+    // must refuse is refused by name and the other boots; and a slot whose
+    // kernel dies falls back on its own, its death in the next boot's `/log`.
+    // The same machine's floor, grant and hang: a floor is its key's and its
+    // image's, init grants nothing the slot table names but an idle slot's
+    // partition, and a hang of an unproven image is a death. Each is 25 s or
+    // more of boots, past the fast tier's line, so they are nightly.
+    ("update_boots_the_new_kernel", Sched::Parallel, Tier::Nightly),
+    ("update_refusals_boot_the_other_slot", Sched::Parallel, Tier::Nightly),
+    ("update_falls_back_from_a_dying_kernel", Sched::Parallel, Tier::Nightly),
+    ("update_hang_kills_an_unproven_image", Sched::Parallel, Tier::Nightly),
+    ("update_grant_refuses_a_stray_partition", Sched::Parallel, Tier::Nightly),
+    ("update_floor_is_the_images_own", Sched::Parallel, Tier::Nightly),
+    ("update_refused_pass_credits_no_image", Sched::Parallel, Tier::Nightly),
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
     ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
@@ -942,6 +999,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
+    // Its own boot with a blank DATA volume, asked over ssh where everything
+    // it wrote went. Every verdict is a listing or a line; no clock in any.
+    ("layout_fresh_boot", Sched::Parallel, Tier::Fast),
     // One `SSHD_LOGIN` boot for the three, driven by `tests/ssh-client-host`.
     // Adjacent because `group_of` makes adjacency load-bearing, and one tier
     // because one boot cannot be in two. Every verdict is bytes or an exit
@@ -1124,6 +1184,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
+    // A fatal path with other CPUs running userland that makes kernel records:
+    // none is stamped past the fatal record by more than an IPI takes.
+    ("panic_halts_the_others_first", Sched::Parallel, Tier::Fast),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
     ("pci_capability_walk", Sched::Parallel, Tier::Fast),
     // What QEMU was told to create against what the guest enumerated: two
@@ -1342,6 +1405,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // itself is a fraction of the screen that no amount of load moves.
     ("desktop_typing_damage", Sched::Parallel, Tier::Nightly),
     ("desktop_window_child", Sched::Parallel, Tier::Nightly),
+    // An unmodified iced app on the desktop, launched from the shell: the
+    // window, its text in the system font, no redraw it did not ask for, and
+    // a clean exit when the compositor closes it.
+    ("toolkit_iced", Sched::Parallel, Tier::Nightly),
+    // The wait every winit loop blocks in, the loop itself through winit's
+    // API, and an animation held to the compositor's frame events.
+    ("toolkit_window_wake", Sched::Parallel, Tier::Nightly),
+    ("toolkit_winit_loop", Sched::Parallel, Tier::Nightly),
+    ("toolkit_winit_pace", Sched::Parallel, Tier::Nightly),
     // The same desktop with soundd behind it: an audio client spawned by a
     // shell, which is the only place all three of its descriptors are pipes to
     // a surface. Parallel — every verdict is a marker with its own ceiling, and
@@ -1472,19 +1544,16 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
-    // What the loader does with a ROOT set: a bad candidate, an absent name, an
-    // overlapping candidate, a twin on the boot disk, an unreadable superblock
-    // and an unreadable chunk refused by name, a bad primary superblock read
-    // past to its backup, and a twin on another disk never read. Serial, not by
-    // association: each stages a whole boot image, one a second 32 GiB stick
-    // beside it.
+    // What the loader does with a slot's ROOT: bytes its signature does not
+    // cover, a parameter naming another, an overlapping partition and an
+    // unreadable chunk refused by name, and a twin on the boot disk or on
+    // another disk never read. Serial, not by association: each stages a whole
+    // boot image, one a second 32 GiB stick beside it.
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
     ("root_chunk_refused", Sched::Serial, Tier::Fast),
     ("root_candidate_overlaps", Sched::Serial, Tier::Fast),
     ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Fast),
-    ("root_backup_superblock", Sched::Serial, Tier::Fast),
-    ("root_superblock_unreadable", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
@@ -1499,6 +1568,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
     ("blocking_read_window", Sched::Parallel, Tier::Fast),
+    // A sibling's munmap and mmap staged between a typed copy's translation
+    // and its store (`copy-meets-a-remap`): the store never reaches the region
+    // mapped after it.
+    ("user_copy_races_munmap", Sched::Parallel, Tier::Fast),
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Nightly),
     ("writeback_durability", Sched::Parallel, Tier::Nightly),
@@ -1540,6 +1613,21 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // still mapped: the verdict is the first holder's own grant, read in the
     // guest after the second holder wrote its own.
     ("userdev_residue_is_its_own", Sched::Parallel, Tier::Fast),
+    // blockd, the NVMe driver in userland, on a second controller beside the
+    // kernel's: partitions served and timed against the kernel's driver; a
+    // controller reset and its own death, each survived by the client and
+    // judged off the image by the host's readers; and a transfer outside what
+    // its function was lent, which is a fault record. Each boot runs several
+    // blockd lifetimes and one waits out a ten-second silence.
+    ("blockd_serves_partitions", Sched::Parallel, Tier::Nightly),
+    ("blockd_survives_its_death", Sched::Parallel, Tier::Nightly),
+    ("blockd_dma_outside_the_lent", Sched::Parallel, Tier::Nightly),
+    // What a claim may lend: a kernel driver's pool refused, the claim's bound
+    // refusing the next region at the count it leaves room for, and lending and
+    // taking back ten narrowed domains' worth of addresses with the kernel
+    // standing; then, on a second boot, a function no release resets is never
+    // lent where it was left aimed.
+    ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Nightly),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -1569,7 +1657,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("quarantine_exit_status", Sched::Parallel, Tier::Fast),
     ("quarantine_entries", Sched::Parallel, Tier::Fast),
     // Same: the control-register verdict, against the machine this tree
-    // actually booted before `arch/control_regs.rs`.
+    // actually booted before `arch/x86_64/control_regs.rs`.
     ("control_regs_verdict", Sched::Parallel, Tier::Fast),
     // Same: which of the two shared boots each binary belongs on, asked of the
     // binaries rather than of the list that claims to name them.
@@ -1590,7 +1678,17 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// naming this table, and a row naming what the suite did not build panics
 /// before the boot.
 const CARRIES: &[(&str, &[&str])] = &[
+    // Each stages its own machine and carries no test binary: what is under
+    // test is the image itself.
+    ("update_boots_the_new_kernel", &[]),
+    ("update_refusals_boot_the_other_slot", &[]),
+    ("update_falls_back_from_a_dying_kernel", &[]),
+    ("update_hang_kills_an_unproven_image", &[]),
+    ("update_grant_refuses_a_stray_partition", &[]),
+    ("update_floor_is_the_images_own", &[]),
+    ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
+    ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
@@ -1654,6 +1752,10 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
     ("userdev_dma_fault", &["test_rs_handle_basic"]),
     ("userdev_residue_is_its_own", &["test_rs_userdev_residue"]),
+    ("blockd_serves_partitions", &["test_rs_blockd_io"]),
+    ("blockd_survives_its_death", &["test_rs_blockd_io"]),
+    ("blockd_dma_outside_the_lent", &["test_rs_blockd_io"]),
+    ("blockd_lends_within_its_bound", &["test_rs_blockd_io"]),
     (
         "inspect_reads_its_owners",
         &["test_rs_inspect_denied", "test_rs_inspect_plays", "test_rs_inventory_bounds"],
@@ -1666,6 +1768,9 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("metal_sim_client_death", METAL_SIM_CLIENTS),
     ("metal_sim_window_drag", &["test_rs_window_drag"]),
     ("desktop_window_child", &["test_rs_window_child"]),
+    ("toolkit_window_wake", &["test_rs_window_wake"]),
+    ("toolkit_winit_loop", &["test_rs_winit_loop"]),
+    ("toolkit_winit_pace", &["test_rs_winit_pace"]),
     ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
     ("doom_music", &["test_rs_doom_music"]),
     ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
@@ -1682,6 +1787,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("https_tls13_e1000e", &["test_rs_https_fetch"]),
     ("pkg_install_gbae", &["test_rs_pkg_launch_gbae"]),
     ("apps_and_home_are_one_filesystem", &["test_rs_hierarchy_paths"]),
+    ("layout_fresh_boot", &["test_rs_layout_paths"]),
     ("broken_data_volume_is_absent", &["test_rs_home_absent"]),
     ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
     ("home_budget_refusal_retried", &["test_rs_home_fsync_budget"]),
@@ -1710,6 +1816,9 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("partition_claim_departure", &["test_rs_partition_claimant"]),
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
+    ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
+    ("log_resume_meets_its_flush", &["test_rs_log_refused_stop"]),
+    ("log_ring_keeps_the_owners_slots", &["test_rs_log_flood"]),
     ("log_program_flood", &["test_rs_log_flood"]),
     ("log_program_line_after_its_records", &["test_rs_log_hold"]),
     ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
@@ -1723,6 +1832,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
     ("quiesce_wakes_on_the_last_exit", &["test_rs_quiesce_last"]),
     ("quiesce_dump_holds_the_stopped", &["test_rs_quiesce_writers"]),
+    ("quiesce_leaves_the_volume_whole", &["test_rs_quiesce_fsync"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
     ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
@@ -1739,6 +1849,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
+    ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
     ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
     ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
@@ -2525,19 +2636,9 @@ const T14_COLS: usize = 1920 / 8;
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
 /// It exists only on a `test-actuators` kernel — every other action costs the
 /// caller its own process, this one costs the machine. Kept in sync with
-/// `kernel/src/arch/syscall/debug.rs` by this comment and by screen_fatal_halt
+/// `kernel/src/syscall/debug.rs` by this comment and by screen_fatal_halt
 /// failing loudly if it drifts.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
-
-/// What `apic::wait_for_log_file` says when its `LOG_FILE_DRAIN` is spent —
-/// the second, degraded half of the kernel's promise about a fatal report.
-///
-/// `screen_fatal_halt_composited` reads it off the *panel*, because the machine
-/// that wait exists for has no serial port and `/log` is the thing that did not
-/// answer. Kept in sync with `kernel/src/arch/apic.rs::LOG_DRAIN_EXPIRED` by
-/// this comment and by that test turning every spent budget into a red if it
-/// drifts.
-const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
 
 /// How far a corpus case gets before it stops, and what it says when it does.
 ///
@@ -3157,7 +3258,7 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// that held the lock rather than the scheduler that caught it — which is the
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
-/// A whole-buffer `contains("arch/syscall/dispatch.rs")` certifies none of that: the
+/// A whole-buffer `contains("syscall/dispatch.rs")` certifies none of that: the
 /// same boot's `test_syscall_panic` panics in that file too, so the needle is
 /// already present before the tripwire runs. Scope it instead to the window
 /// between this panic's header and its message — `panicked at <location>` is
@@ -3173,7 +3274,7 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
         .rfind(HEADER)
         .ok_or("tripwire message with no panic header before it")?;
     let location = &serial[header_at..msg_at];
-    if !location.contains("arch/syscall/dispatch.rs") {
+    if !location.contains("syscall/dispatch.rs") {
         return Err(format!(
             "expected the tripwire to name the guilty call site, not scheduler.rs; got: {}",
             location.trim()
@@ -3501,7 +3602,7 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         return false;
     }
     // And the workload happened, against a counter this test cannot reach:
-    // `SYS_CLOCK` is 8 in the kernel's per-syscall accounting at process exit.
+    // `SYS_GETPID` is 51 in the kernel's per-syscall accounting at process exit.
     let Some(claimed) = result.stdout.lines().find_map(|l| {
         let (reps, per) = l.split_once(" over ")?.1.split_once('x')?;
         Some(reps.trim().parse::<u64>().ok()? * per.trim().parse::<u64>().ok()?)
@@ -3527,23 +3628,23 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         );
         return false;
     };
-    // Absent `8=` is a process that made no `SYS_CLOCK` calls: a real zero.
+    // Absent `51=` is a process that made no `SYS_GETPID` calls: a real zero.
     let counted = line
-        .split(" 8=")
+        .split(" 51=")
         .nth(1)
         .and_then(|r| r.split_whitespace().next())
         .and_then(|n| n.parse::<u64>().ok())
         .unwrap_or(0);
     if counted < claimed {
         eprintln!(
-            "FAIL rs::syscall_cost: the run claims {claimed} SYS_CLOCK transitions and the \
+            "FAIL rs::syscall_cost: the run claims {claimed} SYS_GETPID transitions and the \
              kernel counted {counted}\nstdout:\n{}{}",
             result.stdout,
             kernel_account(result)
         );
         return false;
     }
-    eprintln!("  [syscall] {cycles} cycles per SYS_CLOCK over {counted} of them, tsc {mhz} MHz");
+    eprintln!("  [syscall] {cycles} cycles per SYS_GETPID over {counted} of them, tsc {mhz} MHz");
     true
 }
 
@@ -3563,18 +3664,23 @@ const STORM_CALLS: [(u64, usize); 3] = [
     (toyos_abi::syscall::SYS_THREAD_JOIN, STORM_CHILDREN),
 ];
 
-/// The parent is the *first* `spawn:` line, since every later one is a child of
-/// it; `spawned_pid` reads the last and would answer with a child.
+/// What the storm's judge reads: the window and the lines before its start
+/// marker. The marker reaches the console through `logd` and the kernel's
+/// records through `klogd`, so the parent's spawn record and its first
+/// children's can arrive ahead of it, and the window then opens at a child's.
+fn storm_log(result: &TestResult) -> String {
+    format!("{}{}", result.before, result.serial)
+}
+
+/// The parent is the lowest pid among the storm's `spawn:` lines: pids are
+/// never reused and it is made before any child. `spawned_pid` reads the last
+/// and would answer with a child.
 fn storm_parent(log: &str) -> Option<u32> {
     let want = format!("/system/bin/test_rs_{STORM} ");
     log.lines()
-        .find(|l| l.contains("spawn: ") && l.contains(&want))?
-        .split("pid=")
-        .nth(1)?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+        .filter(|l| l.contains("spawn: ") && l.contains(&want))
+        .filter_map(|l| l.split("pid=").nth(1)?.split_whitespace().next()?.parse().ok())
+        .min()
 }
 
 /// Wait for the parent's accounting line: every child's and every thread's
@@ -3584,9 +3690,9 @@ fn settle_exit_wait_storm(qemu: &mut QemuInstance, result: &mut TestResult) {
     /// A liveness ceiling and never a verdict.
     const ACCOUNTED: Duration = Duration::from_secs(5);
 
-    let Some(pid) = storm_parent(&result.serial) else { return };
+    let Some(pid) = storm_parent(&storm_log(result)) else { return };
     let want = accounting_of(pid);
-    if result.serial.contains(&want) {
+    if storm_log(result).contains(&want) {
         return;
     }
     let more = qemu.drain_until(ACCOUNTED, |l| l.contains(&want));
@@ -3601,7 +3707,8 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
     }
-    let Some(parent) = storm_parent(&result.serial) else {
+    let log = storm_log(result);
+    let Some(parent) = storm_parent(&log) else {
         eprintln!(
             "FAIL rs::{STORM}: no `spawn: /system/bin/test_rs_{STORM}` line reached the capture, so \
              nothing here says what the kernel saw{}",
@@ -3611,13 +3718,14 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     };
     let died = format!("exit: test_rs_{STORM} pid=");
     let mut codes: Vec<i32> = Vec::new();
-    for line in result.serial.lines() {
+    for line in log.lines() {
         let Some(rest) = line.split(died.as_str()).nth(1) else {
             continue;
         };
         let mut fields = rest.split_whitespace();
         let Some(Ok(pid)) = fields.next().map(str::parse::<u32>) else { continue };
-        if pid == parent {
+        // Its children are the pids made after it.
+        if pid <= parent {
             continue;
         }
         if let Some(Ok(code)) =
@@ -3638,7 +3746,7 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
         return false;
     }
     let want = accounting_of(parent);
-    let Some(line) = result.serial.lines().find(|l| l.contains(want.as_str())) else {
+    let Some(line) = log.lines().find(|l| l.contains(want.as_str())) else {
         eprintln!(
             "FAIL rs::{STORM}: the kernel never accounted the parent — no `{want}` line \
              reached the capture, so nothing here says which calls it made{}",
@@ -4652,16 +4760,29 @@ fn run_screen_test(
                 ));
             }
             let printed = last - query;
+            // The rows those lines take on the firmware's console, whose glyph is
+            // eight pixels wide (UEFI 2.11 §12.9, `EFI_GLYPH_WIDTH`): a line
+            // wider than the mode's columns — the root bridges' descriptor dump
+            // is one — wraps onto a row per width it fills.
+            let columns = lines[query]
+                .split("GOP: mode ")
+                .nth(1)
+                .and_then(|mode| mode.split('x').next())
+                .and_then(|width| width.parse::<usize>().ok())
+                .map(|width| width / 8)
+                .filter(|&columns| columns > 0)
+                .ok_or_else(|| format!("the GOP line names no mode width: {:?}", lines[query]))?;
+            let rows: usize = lines[query + 1..=last].iter().map(|line| line.len().div_ceil(columns).max(1)).sum();
 
             // A range and not an equality: each panel is dumped after its marker
             // reached the console, so a line drawn in between is on the panel
             // and not in the count.
             let grew = after as i64 - before as i64;
-            if !(1..=printed as i64).contains(&grew) {
+            if !(1..=rows as i64).contains(&grew) {
                 return Err(format!(
                     "the panel carried {before} rows at the GOP query and {after} at the loader's \
                      last line, a growth of {grew}, where the loader printed {printed} lines \
-                     between them\n{console}"
+                     between them, {rows} rows at {columns} columns\n{console}"
                 ));
             }
             eprintln!(
@@ -5225,7 +5346,7 @@ fn run_screen_test(
             let after = dump.console_text(&font);
             print_screen(name, &after);
             // A whole trimmed row, because the shell echoes what is typed:
-            // `contains` would be satisfied by `/home/root> echo zqjxk`, which
+            // `contains` would be satisfied by `/home/toy> echo zqjxk`, which
             // says the console drew a keystroke and nothing about anything
             // having run.
             if !dump.console_rows(&font).iter().any(|r| r.trim() == CONSOLE_NONCE) {
@@ -5890,6 +6011,135 @@ fn run_screen_test(
             )?;
             Ok(())
         }
+        "virt_early_panic" => {
+            // The AArch64 port's stage 3, whole: the loader on AAVMF, the entry's
+            // drop and declaration, the PL011 SPCR names, the boot's survey of
+            // the machine, and a panic on both channels, before the kernel
+            // reaches the AArch64 userland its ROOT carries.
+            let started = std::time::Instant::now();
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::Virt,
+                    qmp: true,
+                    kernel_params: &["test-early-panic"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            eprintln!("  [virt] the panel is up {} ms after the boot began", started.elapsed().as_millis());
+            // What stage 3 prints before it panics: every item is a record
+            // only the AArch64 side of the loader or the kernel writes.
+            for want in [
+                "CPU: entered at EL1",
+                "serial: PL011 at",
+                "control registers: SCTLR_EL1=",
+                "as declared; entered at EL",
+                "memory: 0x0000400",
+                "ACPI: MADT GICD at 0x8000000, GIC version 3",
+                "ACPI: MADT GICC uid=0 mpidr=0x0 enabled=true",
+                "ACPI: GTDT timers:",
+                "EARLY PANIC: panicked at",
+                EARLY_PANIC_MESSAGE,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            let text = dump.text();
+            print_screen(name, &text);
+            for want in ["EARLY PANIC:", "test-early-panic: on-screen console check"] {
+                if !text.contains(want) {
+                    return Err(format!("{want:?} not on the ramfb panel\ndecoded screen:\n{text}"));
+                }
+            }
+            check_colors(
+                &dump,
+                FILL_FATAL,
+                &["EARLY PANIC:", "test-early-panic: on-screen console check"],
+                "ACPI: GTDT timers:",
+            )?;
+            Ok(())
+        }
+        "virt_el2_drop" => {
+            // The entry's drop from EL2, which HVF never exercises: `virt` with
+            // EL2 under TCG, where firmware hands the loader the CPU at EL2. A
+            // loader that refuses the CPU says so and stops; a drop that leaves
+            // `HCR_EL2` other than declared halts in a named refusal and says
+            // nothing; one that lands anywhere but EL1 on `SP_EL1` panics in the
+            // declaration's read-back. Each way the line this waits for never
+            // comes.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::VirtEl2,
+                    kernel_params: &["test-early-panic"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            for want in [
+                "CPU: entered at EL2, HCR_EL2.E2H ",
+                "ID_AA64MMFR4_EL1.E2H0 0x0: the kernel's entry writes E2H clear",
+                "as declared; entered at EL2, HCR_EL2 read back as declared",
+                "EARLY PANIC: panicked at",
+                EARLY_PANIC_MESSAGE,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            Ok(())
+        }
+        "virt_early_fault" => {
+            // The vectors, judged by the one thing a broken table cannot do:
+            // report. An undefined instruction right after the console step
+            // reaches `trap::exception`, which says what was taken and panics,
+            // and the panic reaches both channels. A table that is misaligned,
+            // never installed, or whose entry does not reach the handler
+            // leaves the guest silent, and this waits for a line that never
+            // comes.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::Virt,
+                    qmp: true,
+                    kernel_params: &["test-early-fault"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(FAULT_MESSAGE));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            for want in [
+                "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
+                "EARLY PANIC: panicked at",
+                FAULT_MESSAGE,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            let text = dump.text();
+            print_screen(name, &text);
+            if !text.contains("EARLY PANIC:") || !text.contains("undefined instruction") {
+                return Err(format!("the fault's report is not on the ramfb panel\ndecoded screen:\n{text}"));
+            }
+            Ok(())
+        }
         "screen_early_panic" => {
             // The window the console exists for: percpu is not up, mm::init
             // has not run, and on a machine with no UART nothing else can
@@ -6414,33 +6664,15 @@ fn run_screen_test(
                 profile: qemu::Profile::Metal,
                 smp: 8,
                 qmp: true,
-                // The T14's literal shape, and load-bearing rather than
-                // decoration: `halt_all_cpus` waits for the log sink only when
-                // there is no console, because a machine with serial already
-                // has the report off the box and the wait would delay the paint
-                // to buy a duplicate. Muted is therefore the only configuration
-                // in which this gate's second half — the report reaching
-                // `/log` — tests anything at all. The probe is time-based, so
-                // it needs no console to drive it.
+                // The T14's literal shape: no console, so the panel and the
+                // black box are the report's only channels. The probe is
+                // time-based, so it needs no console to drive it.
                 mute: true,
                 kernel_params: &["metal-panic-probe"],
                 ..Default::default()
             };
             metal_sim_argv_check(&qemu::profile_argv(&options))?;
-            // Built here rather than by the boot, because `/log` is read off
-            // the partition afterwards and the image gets a fresh GUID every
-            // time it is built.
-            let image_path = common::lane::dir().join("fatal-composited.img");
-            let image = qemu::build_boot_image(&config, &[], &[], &["metal-panic-probe"]);
-            std::fs::write(&image_path, &image)
-                .map_err(|e| format!("write the boot image: {e}"))?;
-            let (log_start, log_len) = common::volumes::log_extent(&image, &image_path)?;
-            let mut qemu = QemuInstance::boot_with_options(
-                &config,
-                &[],
-                &[],
-                BootOptions { boot_image: Some(qemu::Staged::Written(image_path.clone())), ..options },
-            );
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
 
             // The compositor has the screen *before* anything panics. Asserted
             // on the fill, exactly as `screen_blocked_dump` does: every kernel
@@ -6462,30 +6694,12 @@ fn run_screen_test(
             // The probe fires 5 s after the claim; the poll is for that plus
             // the pager cycling pages.
             const MARKER: &str = "metal-panic-probe";
-            // **Watched for on the way past, not looked for afterwards.**
-            // `halt_all_cpus` paints `Page::Last` and only then does
-            // `page_forever` start cycling, so the expiry line — the newest
-            // record there is — is on the panel from the paint until the
-            // first `PAGE_HOLD` turns. Polling for it once this loop has
-            // finished would be polling a pager that has moved on, and
-            // waiting out a whole cycle to be sure costs every green run
-            // `pages * PAGE_HOLD` to learn nothing.
-            let expired = std::cell::Cell::new(false);
             let dump = qemu.screendump_while(
                 Duration::from_secs(40),
                 Duration::from_millis(100),
-                |d| {
-                    let text = d.text();
-                    if text.contains(LOG_DRAIN_EXPIRED) {
-                        expired.set(true);
-                    }
-                    text.contains(MARKER)
-                },
+                |d| d.text().contains(MARKER),
             );
             let text = dump.text();
-            if text.contains(LOG_DRAIN_EXPIRED) {
-                expired.set(true);
-            }
             print_screen(name, &text);
             if !text.contains(MARKER) {
                 return Err(format!(
@@ -6501,85 +6715,42 @@ fn run_screen_test(
                 ));
             }
 
-            // **And the report reached the stick, not only the panel.** Read
-            // off the boot image's own `/log` partition, so this is the
-            // device's view and not the guest's — the guest is halted and has
-            // no view left. Before `halt_all_cpus` waited for the sink, the
-            // file ended at the last flush *before* the panic and the report
-            // existed solely as a photograph; that is the state this asserts
-            // against, and it is what made three investigations argue from
-            // JPEGs.
-            //
-            // **Asserted as the disjunction the kernel actually promises.**
-            // `apic::LOG_FILE_DRAIN` is a `Budget`, so its expiry is a
-            // *degraded answer* and not a broken one: the kernel gives
-            // `/system/bin/logd` half a second and, when that is spent, says
-            // `LOG_DRAIN_EXPIRED` where the reader of a muted machine is. So
-            // there are three outcomes and only the third is a defect — the
-            // report is on the stick; it is not, and the panel says why; or it
-            // is neither written nor declared, which is a machine that lost its
-            // own last words in silence. Asserting the first alone made a spent
-            // budget a red the kernel never promised to avoid, and it fired 1
-            // in 30 on a dev host with no other guest on it (2026-08-22).
+            // **And the report is sealed where the next boot reads it, not
+            // only on the panel.** A panicking kernel stops every other CPU
+            // first and runs no userland again, so `/log` gets the report from
+            // the next boot's loader, out of the black box: that page, read
+            // here out of the halted guest's memory, is the whole of the
+            // promise. Before this, the panic path kept userland running for
+            // half a second to let `logd` write it, and the stick either had it
+            // or the panel said it did not.
+            let page = qemu.guest_memory(toyos_blackbox::PHYS, toyos_blackbox::BYTES)?;
+            let page: &[u8; toyos_blackbox::BYTES] = page
+                .as_slice()
+                .try_into()
+                .map_err(|_| "pmemsave returned the wrong length".to_string())?;
+            let Some((state, _, _, sealed)) = toyos_blackbox::recover(page) else {
+                return Err(format!(
+                    "the black box carries nothing after a fatal panic\ndecoded screen:\n{text}"
+                ));
+            };
+            let sealed = String::from_utf8_lossy(sealed).into_owned();
+            if state != toyos_blackbox::State::Panic
+                || !sealed.contains("PANIC:")
+                || !sealed.contains(MARKER)
+            {
+                return Err(format!(
+                    "the black box reads {} and {} the banner and {} the marker after a fatal \
+                     panic: the report is on the panel only\n{sealed}",
+                    state.named(),
+                    if sealed.contains("PANIC:") { "carries" } else { "lacks" },
+                    if sealed.contains(MARKER) { "carries" } else { "lacks" },
+                ));
+            }
             drop(qemu);
-            let (name, on_device) =
-                common::volumes::newest_log(&image_path, log_start, log_len)?;
-            let on_device = String::from_utf8_lossy(&on_device).into_owned();
-            if !on_device.contains(MARKER) {
-                return Err(format!(
-                    "/log/{name} stops at {} bytes and never carries {MARKER:?} — this boot wrote \
-                     no log at all, so the drain's own verdict is not what is wrong here",
-                    on_device.len()
-                ));
-            }
-            let on_the_stick = on_device.contains("PANIC:");
-            if !on_the_stick && !expired.get() {
-                // The third outcome, and it carries its evidence: what a red
-                // here needs is where `/system/bin/logd` stopped and whether the
-                // volume it stopped on is intact, and a muted guest has no
-                // console to have said either on.
-                let volume = std::fs::read(&image_path)
-                    .map_err(|e| format!("read the image back: {e}"))?;
-                let complaints = toyos_fat32_check::check(&volume[log_start..log_start + log_len]);
-                let verdict = if complaints.is_empty() {
-                    "the checker is silent on the volume".to_string()
-                } else {
-                    format!(
-                        "the checker has something to say:\n{}",
-                        toyos_fat32_check::describe(&complaints)
-                    )
-                };
-                return Err(format!(
-                    "/log/{name} carries the marker without the panic banner and the panel never \
-                     said {LOG_DRAIN_EXPIRED:?} — the report was neither written nor declared \
-                     lost.\nthe file is {} bytes, ending {:?}\n{verdict}\ndecoded screen:\n{text}",
-                    on_device.len(),
-                    on_device.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
-                ));
-            }
-            let _ = std::fs::remove_file(&image_path);
-            // **Both green outcomes name themselves, because the interesting
-            // number about this gate is which one it took.** A budget that is
-            // spent is not a defect and is also not nothing: `durable` is the
-            // word logd publishes *after* its `fsync` returns, so a spent
-            // budget with the banner on the stick means logd had written past
-            // the banner and had not yet said so.
-            match (on_the_stick, expired.get()) {
-                (true, false) => eprintln!(
-                    "  [panic] the fatal report is on the panel and in /log/{name} ({} bytes)",
-                    on_device.len()
-                ),
-                (true, true) => eprintln!(
-                    "  [panic] BUDGET SPENT, and the banner reached /log/{name} anyway ({} bytes): \
-                     logd wrote past it without publishing `durable` in time",
-                    on_device.len()
-                ),
-                (false, _) => eprintln!(
-                    "  [panic] BUDGET SPENT: the report is on the panel only; /log/{name} is {} \
-                     bytes and the panel carries {LOG_DRAIN_EXPIRED:?}",
-                    on_device.len()
-                ),
-            }
+            eprintln!(
+                "  [panic] the fatal report is on the panel and sealed in the black box ({} bytes)",
+                sealed.len()
+            );
             if dump.fill() != FILL_FATAL {
                 return Err(format!(
                     "the panel still carries {:?} rather than the fatal fill, so the compositor's \
@@ -8754,6 +8925,510 @@ fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(message) => Err(format!("{message}\n{}", freeze_report(&mut qemu, &mut log))),
     }
+}
+
+/// The words on iced's counter's two buttons, and the size iced draws body text
+/// at (`iced::Settings::default_text_size`).
+const COUNTER_LABELS: [&str; 2] = ["Increment", "Decrement"];
+const COUNTER_LABEL_PX: f32 = 16.0;
+
+/// How closely the panel has to carry each of [`COUNTER_LABELS`]' glyph
+/// patterns, as a normalised cross-correlation of its luminance with the
+/// word's coverage.
+///
+/// A region without the word — a flat button, its edges, a gradient — shares
+/// at most a stroke or an edge with the word's nine letters and correlates with
+/// a fraction of it; the word itself, rasterised by another renderer at another
+/// subpixel offset, correlates with most of it.
+const LABEL_MATCH: f64 = 0.6;
+
+/// The presents an iced window makes with nothing happening to it: one, for
+/// the redraw a new window is owed, which the redraw iced asks for on the
+/// resize that sizes it joins in the same iteration. The counter's state never
+/// changes while nothing touches it. A window whose frame events turn into
+/// redraws presents once per frame the compositor composes for as long as it
+/// is open.
+const IDLE_PRESENTS: u64 = 1;
+
+/// Mirrored in `tests/toyos-rust-tests/src/bin/winit_pace.rs`'s `FRAMES`.
+const PACE_FRAMES: u64 = 60;
+
+/// The client and the content rectangle the compositor names in its first
+/// `window opened client=N content=X,Y WxH, …` line in `log`, the rectangle as
+/// `(x, y, width, height)` in panel pixels.
+fn opened_window(log: &str) -> Option<(u32, (usize, usize, usize, usize))> {
+    let line = log.lines().find(|line| line.contains("compositor: window opened client="))?;
+    let rest = line.split("client=").nth(1)?;
+    let (client, rest) = rest.split_once(" content=")?;
+    let (at, rest) = rest.split_once(' ')?;
+    let (x, y) = at.split_once(',')?;
+    let (w, rest) = rest.split_once('x')?;
+    let h = rest.split(',').next()?;
+    let rect = (x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?);
+    Some((client.parse().ok()?, rect))
+}
+
+/// The `presents=P frames=F` the compositor says when it closes `client`'s
+/// window.
+fn closed_counts(log: &str, client: u32) -> Option<(u64, u64)> {
+    let line = log
+        .lines()
+        .find(|line| line.contains(&format!("compositor: window closed client={client} by ")))?;
+    let presents = line.split("presents=").nth(1)?.split_whitespace().next()?.parse().ok()?;
+    let frames = line.split("frames=").nth(1)?.split_whitespace().next()?.parse().ok()?;
+    Some((presents, frames))
+}
+
+/// Each window the compositor opened in `log`, in order, with what had closed
+/// it by the end of `log`. A client's handle is reused once its window is
+/// gone, so a close belongs to the latest open window of its client.
+fn window_lives(log: &str) -> Vec<(u32, Option<String>)> {
+    let mut lives: Vec<(u32, Option<String>)> = Vec::new();
+    for line in log.lines() {
+        if let Some((client, _)) = opened_window(line) {
+            lives.push((client, None));
+        } else if let Some(rest) = line.split("compositor: window closed client=").nth(1) {
+            let (client, rest) = rest.split_once(" by ").unwrap_or_else(|| panic!("close line: {line}"));
+            let client: u32 = client.parse().unwrap_or_else(|_| panic!("close line: {line}"));
+            let by = rest.split(", ").next().unwrap_or_else(|| panic!("close line: {line}"));
+            if let Some(open) = lives.iter_mut().rev().find(|(c, by)| *c == client && by.is_none()) {
+                open.1 = Some(by.to_string());
+            }
+        }
+    }
+    lives
+}
+
+/// `text` in the system font, Open Sans Regular, at `px`, laid out on the
+/// font's own advances and kerning, as coverage from 0 to 1 cropped to its ink:
+/// what the panel has to show wherever that text was drawn, whichever renderer
+/// drew it. `(width, height, coverage)`.
+fn rendered_text(text: &str, px: f32) -> (usize, usize, Vec<f64>) {
+    let path = common::compile::repo_root().join("assets/fonts/OpenSans-Regular.ttf");
+    let bytes = fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
+        .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    let line = font.horizontal_line_metrics(px).expect("Open Sans has horizontal metrics");
+    let ascent = line.ascent.ceil() as i32;
+    let height = (line.ascent - line.descent).ceil() as usize + 2;
+    let mut pen = 1.0f32;
+    let mut previous = None;
+    let mut glyphs = Vec::new();
+    for c in text.chars() {
+        if let Some(p) = previous {
+            pen += font.horizontal_kern(p, c, px).unwrap_or(0.0);
+        }
+        let (metrics, coverage) = font.rasterize(c, px);
+        let x0 = pen.round() as i32 + metrics.xmin;
+        let y0 = ascent - metrics.ymin - metrics.height as i32 + 1;
+        glyphs.push((x0, y0, metrics.width, metrics.height, coverage));
+        pen += metrics.advance_width;
+        previous = Some(c);
+    }
+    let width = pen.ceil() as usize + 2;
+    let mut canvas = vec![0.0f64; width * height];
+    for (x0, y0, w, h, coverage) in glyphs {
+        for row in 0..h {
+            for col in 0..w {
+                let (x, y) = (x0 + col as i32, y0 + row as i32);
+                assert!(
+                    x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height,
+                    "{text:?} at {px}px laid a glyph outside its own line"
+                );
+                let at = y as usize * width + x as usize;
+                canvas[at] = canvas[at].max(f64::from(coverage[row * w + col]) / 255.0);
+            }
+        }
+    }
+    let inked = |i: usize| canvas[i] > 0.0;
+    let cols: Vec<usize> = (0..width).filter(|&x| (0..height).any(|y| inked(y * width + x))).collect();
+    let rows: Vec<usize> = (0..height).filter(|&y| (0..width).any(|x| inked(y * width + x))).collect();
+    let (x0, x1) = (cols[0], cols[cols.len() - 1]);
+    let (y0, y1) = (rows[0], rows[rows.len() - 1]);
+    let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+    let mut cropped = Vec::with_capacity(w * h);
+    for y in y0..=y1 {
+        cropped.extend_from_slice(&canvas[y * width + x0..=y * width + x1]);
+    }
+    (w, h, cropped)
+}
+
+/// The best normalised cross-correlation of `template`'s coverage with the
+/// luminance under any placement of it inside `rect` of `dump`, as a
+/// magnitude: text is lighter than its button or darker than its background,
+/// and either way it is the text. With it, that placement as
+/// `(x, y, width, height)` in panel pixels.
+///
+/// A placement whose pixels barely vary is skipped: it correlates with
+/// nothing, and it is most of any window. So is one that overlaps `taken`,
+/// another word's place.
+fn best_text_match(
+    dump: &screen::Ppm,
+    (rx, ry, rw, rh): (usize, usize, usize, usize),
+    (tw, th, template): &(usize, usize, Vec<f64>),
+    taken: Option<(usize, usize, usize, usize)>,
+) -> (f64, (usize, usize, usize, usize)) {
+    let (tw, th) = (*tw, *th);
+    let x1 = (rx + rw).min(dump.width);
+    let y1 = (ry + rh).min(dump.height);
+    if x1 < rx + tw || y1 < ry + th {
+        return (0.0, (rx, ry, tw, th));
+    }
+    let (w, h) = (x1 - rx, y1 - ry);
+    let luminance: Vec<f64> = (ry..y1)
+        .flat_map(|y| (rx..x1).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let [r, g, b] = dump.pixels[y * dump.width + x];
+            0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b)
+        })
+        .collect();
+    // Summed-area tables of the luminance and its square, one row and column
+    // of zeros ahead, so any placement's mean and variance are four reads.
+    let stride = w + 1;
+    let mut sum = vec![0.0f64; stride * (h + 1)];
+    let mut squares = vec![0.0f64; stride * (h + 1)];
+    for y in 0..h {
+        for x in 0..w {
+            let v = luminance[y * w + x];
+            let at = (y + 1) * stride + x + 1;
+            sum[at] = v + sum[at - 1] + sum[at - stride] - sum[at - stride - 1];
+            squares[at] = v * v + squares[at - 1] + squares[at - stride] - squares[at - stride - 1];
+        }
+    }
+    let area = |table: &[f64], x: usize, y: usize| {
+        table[(y + th) * stride + x + tw] - table[y * stride + x + tw] - table[(y + th) * stride + x]
+            + table[y * stride + x]
+    };
+    let n = (tw * th) as f64;
+    let mean = template.iter().sum::<f64>() / n;
+    let centred: Vec<f64> = template.iter().map(|t| t - mean).collect();
+    let template_norm = centred.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let mut best = (0.0f64, (rx, ry, tw, th));
+    for y in 0..=(h - th) {
+        for x in 0..=(w - tw) {
+            let s = area(&sum, x, y);
+            let variance = area(&squares, x, y) - s * s / n;
+            // Two levels of standard deviation: flat but for noise.
+            if variance < 4.0 * n {
+                continue;
+            }
+            if let Some((ox, oy, ow, oh)) = taken {
+                let (px, py) = (rx + x, ry + y);
+                if px < ox + ow && ox < px + tw && py < oy + oh && oy < py + th {
+                    continue;
+                }
+            }
+            let mut dot = 0.0;
+            for row in 0..th {
+                let line = &luminance[(y + row) * w + x..(y + row) * w + x + tw];
+                let pattern = &centred[row * tw..(row + 1) * tw];
+                dot += line.iter().zip(pattern).map(|(l, c)| l * c).sum::<f64>();
+            }
+            let score = (dot / (template_norm * variance.sqrt())).abs();
+            if score > best.0 {
+                best = (score, (rx + x, ry + y, tw, th));
+            }
+        }
+    }
+    best
+}
+
+/// iced's own counter example, unmodified, built here from `tests/iced-counter`
+/// and launched from the desktop's shell under `stats`: its window opens, both
+/// its buttons' labels are on the panel in the system font, it presents only
+/// what it has to while nothing happens to it, and it leaves with code 0 when
+/// the compositor closes the window.
+///
+/// The labels are judged off the panel, in the rectangle the compositor says
+/// it put the window's pixels, against each word as Open Sans draws it,
+/// rendered here by a second rasteriser: iced carries no font of its own, and
+/// draws with what fontdb finds in `/system/share/fonts`. The presents are the
+/// compositor's count, not the app's. `stats` reports the app's CPU time and
+/// peak memory after it leaves.
+fn toolkit_iced() -> Result<(), String> {
+    let app = "test_rs_iced-counter";
+    let labels: Vec<(usize, usize, Vec<f64>)> =
+        COUNTER_LABELS.iter().map(|word| rendered_text(word, COUNTER_LABEL_PX)).collect();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let bins = qemu::build_toyos_bins(&root.join("tests/iced-counter"));
+    let (mut qemu, mut log, launched) = toolkit_launch(&bins, "iced-counter", &format!("stats {app}"))?;
+    let log = &mut log;
+    // Its exit ends the wait too: an app that dies before it has a window
+    // would otherwise hold the lane for the whole budget.
+    let exited = format!("exit: {app} pid=");
+    let deadline = Instant::now() + qemu.budget(Duration::from_secs(60));
+    while !log[launched..].contains("compositor: window opened") {
+        if log[launched..].contains(&exited) || Instant::now() >= deadline {
+            return Err(format!("{app} never got a window:\n{}", &log[launched..]));
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    let (client, content) = opened_window(&log[launched..])
+        .ok_or_else(|| format!("the compositor's window line did not parse:\n{}", &log[launched..]))?;
+
+    let by = qemu.budget(Duration::from_secs(30));
+    // Two words, so two places: "Decrement" alone carries most of
+    // "Increment"'s ink in its "crement". The word matched best claims its
+    // place, and the other is matched only away from it.
+    let matches = |dump: &screen::Ppm| -> [(f64, (usize, usize, usize, usize)); 2] {
+        let [first, second] = [0, 1].map(|i| best_text_match(dump, content, &labels[i], None));
+        if first.0 >= second.0 {
+            [first, best_text_match(dump, content, &labels[1], Some(first.1))]
+        } else {
+            [best_text_match(dump, content, &labels[0], Some(second.1)), second]
+        }
+    };
+    let dump = qemu.screendump_while(by, Duration::from_millis(250), |dump| {
+        matches(dump).iter().all(|(m, _)| *m >= LABEL_MATCH)
+    });
+    let found = matches(&dump);
+    for (word, (m, at)) in COUNTER_LABELS.iter().zip(&found) {
+        if *m < LABEL_MATCH {
+            return Err(format!(
+                "{app}'s window at {content:?} carries no {word:?} in Open Sans at \
+                 {COUNTER_LABEL_PX}px apart from the other label: its best correlation with the \
+                 word is {m:.3} at {at:?}, under {LABEL_MATCH} ({found:.3?}):\n{}",
+                &log[launched..]
+            ));
+        }
+    }
+    let matched: Vec<f64> = found.iter().map(|(m, _)| *m).collect();
+
+    // The rectangle holds the app's pixels only while its window is open, so
+    // the close has to be of that same window, by this keystroke: an app that
+    // died after it opened leaves the rectangle to whatever is behind it.
+    log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    if log[launched..].contains(&exited) {
+        return Err(format!("{app} left before its window was judged:\n{}", &log[launched..]));
+    }
+    let closing = log.len();
+    if !close_focused_window(&mut qemu, log, closing) {
+        return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));
+    }
+    if !log[closing..].contains(&format!("compositor: window closed client={client} by GUI+Q")) {
+        return Err(format!(
+            "GUI+Q closed some other window than {app}'s (client {client}), so the text was \
+             not its:\n{}",
+            &log[launched..]
+        ));
+    }
+    let (presents, frames) = closed_counts(&log[closing..], client)
+        .ok_or_else(|| format!("the compositor's close line did not parse:\n{}", &log[closing..]))?;
+    if presents > IDLE_PRESENTS {
+        return Err(format!(
+            "{app} presented {presents} times ({frames} frame events back) with nothing \
+             happening to it, over the {IDLE_PRESENTS} a window that draws only when asked \
+             makes:\n{}",
+            &log[launched..]
+        ));
+    }
+    // `stats` prints the peak last, once the app is gone and waited for.
+    let by = qemu.budget(Duration::from_secs(30));
+    if !serial_until_new(&mut qemu, log, "peak mem", closing, by) {
+        return Err(format!(
+            "{app} did not leave when its window was closed:\n{}",
+            &log[launched..]
+        ));
+    }
+    let after = &log[closing..];
+    let exit = after
+        .lines()
+        .find(|line| line.contains(&exited))
+        .ok_or_else(|| format!("no exit record for {app}:\n{after}"))?;
+    if !exit.contains(" code=0 ") {
+        return Err(format!("{app} did not exit cleanly: {exit}\n{after}"));
+    }
+    let cpu = exit
+        .split_once("cpu=")
+        .map(|(_, cpu)| cpu.trim())
+        .ok_or_else(|| format!("{app}'s exit record names no CPU time: {exit}"))?;
+    let peak = after
+        .lines()
+        .find_map(|line| line.split_once("peak mem").map(|(_, peak)| peak.trim()))
+        .ok_or_else(|| format!("`stats` reported no peak for {app}:\n{after}"))?;
+    eprintln!(
+        "  [toolkit] {app}: window at {content:?}, {COUNTER_LABELS:?} matched at {matched:.3?}, \
+         {presents} presents and {frames} frames while idle, exit 0, cpu {cpu}, peak mem {peak}"
+    );
+    Ok(())
+}
+
+/// The toolkit desktop with `bin`, one of `built`, carried and `launch` typed
+/// at its shell, the launch line's offset in the returned log.
+fn toolkit_launch(
+    built: &[(String, Vec<u8>)],
+    bin: &str,
+    launch: &str,
+) -> Result<(QemuInstance, String, usize), String> {
+    let bins: Vec<(String, Vec<u8>)> =
+        built.iter().filter(|(name, _)| name == bin).cloned().collect();
+    if bins.is_empty() {
+        return Err(format!("the {bin} client was not built"));
+    }
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toolkitcase");
+    let options = BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        ready_marker: "compositor: ready",
+        smp: 8,
+        // `Drained::Bytes`, the typed line's pacing.
+        kernel_params: &["i8042-trace"],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+    let mut log = qemu.boot_log().to_string();
+    let ack = Drained::Bytes;
+    shell_answers(&mut qemu, &mut log, &ack)?;
+    let launched = log.len();
+    shell_type_line(&mut qemu, launch, &ack)?;
+    Ok((qemu, log, launched))
+}
+
+/// `window::Waiter`'s claim, which every winit loop here rests on: a wake
+/// raised on another thread ends a wait that also watches windows, more of
+/// them than a new waiter has room for, and more wakes than its pipe holds
+/// are one.
+///
+/// `test_rs_window_wake` is launched from the desktop's shell, so it holds the
+/// shell's compositor, and says OK only if every one of its rounds was ended by
+/// the wake; a lost one ends its wait on a ten-second ceiling and says so.
+fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "window_wake", "test_rs_window_wake")?;
+    let log = &mut log;
+    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
+    while live.working(log) {
+        let said = &log[launched..];
+        if said.contains("WINDOW-WAKE-OK") {
+            for line in said.lines().filter(|l| l.contains("WINDOW-WAKE-OK")) {
+                eprintln!("  [toolkit] {}", line.trim());
+            }
+            return Ok(());
+        }
+        if said.contains("WINDOW-WAKE-LOST")
+            || said.contains("WINDOW-WAKE-REFUSED")
+            || said.contains("panicked")
+        {
+            return Err(format!("a wake did not end the windows' wait:\n{said}"));
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    Err(format!("test_rs_window_wake never finished:\n{}", &log[launched..]))
+}
+
+/// The ToyOS winit backend's loop through winit's own API: user events sent
+/// from `AboutToWait` and from another thread, windows redrawn and dropped on
+/// another thread, a window dropped in the handler that made it, one dropped in
+/// a user event, and a closed window its application keeps.
+/// `tests/toyos-rust-tests/src/bin/winit_loop.rs` asserts what the app is
+/// delivered; this closes the window it asks to have closed, reads its
+/// verdict, and asks the compositor whether every window the app dropped was
+/// closed by that drop.
+fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop", "test_rs_winit_loop")?;
+    let log = &mut log;
+    // Past the app's own twenty-second ceiling, so a lost wake is its verdict
+    // and not this one's.
+    let mut live = qemu::Liveness::new(Duration::from_secs(40), Duration::from_secs(240));
+    let mut closed = false;
+    while live.working(log) {
+        let said = &log[launched..];
+        if said.contains("WINIT-LOOP-OK") {
+            // Up to the kept window's close: a window the app still held is
+            // closed by its exit, which follows that.
+            let Some(gui_q) = said.find(" by GUI+Q, ") else {
+                return Err(format!("the winit loop's kept window was never closed by GUI+Q:\n{said}"));
+            };
+            let upto = said[gui_q..].find('\n').map_or(said.len(), |end| gui_q + end);
+            let lives = window_lives(&said[..upto]);
+            let Some(((_, kept), dropped)) = lives.split_last() else {
+                return Err(format!("the compositor opened no window for the winit loop:\n{said}"));
+            };
+            if kept.as_deref() != Some("GUI+Q") {
+                return Err(format!(
+                    "GUI+Q closed a window other than the one the winit loop opened last:\n{said}"
+                ));
+            }
+            if let Some(at) = dropped.iter().position(|(_, by)| by.as_deref() != Some("the client itself")) {
+                let (client, by) = &dropped[at];
+                return Err(format!(
+                    "window {at} (client {client}) of the {} the winit loop dropped was not closed \
+                     by its drop before the kept one was closed, but by {by:?}:\n{said}",
+                    dropped.len()
+                ));
+            }
+            for line in said.lines().filter(|l| l.contains("WINIT-LOOP stage")) {
+                eprintln!("  [toolkit] {}", line.trim());
+            }
+            eprintln!("  [toolkit] each of the {} dropped windows closed at its drop", dropped.len());
+            return Ok(());
+        }
+        if said.contains("WINIT-LOOP-FAIL") || said.contains("panicked") {
+            return Err(format!("the winit loop failed:\n{said}"));
+        }
+        if !closed && said.contains("WINIT-LOOP CLOSE-ME") {
+            closed = true;
+            let closing = log.len();
+            if !close_focused_window(&mut qemu, log, closing) {
+                return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));
+            }
+            continue;
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    Err(format!("test_rs_winit_loop never finished:\n{}", &log[launched..]))
+}
+
+/// Redraw pacing: an application that asks for its next frame from inside
+/// `RedrawRequested` is held to the compositor's frame events, as a Wayland
+/// client is to its frame callbacks.
+///
+/// The verdict is the compositor's own count on the close line: every one of
+/// [`PACE_FRAMES`] presents arrived, and none outran the frame event of the
+/// one before it, so the presents exceed the frame events by at most the one
+/// still on its way when the window closed.
+fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_pace", "test_rs_winit_pace")?;
+    let log = &mut log;
+    let drew = format!("WINIT-PACE drew {PACE_FRAMES} frames");
+    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
+    while live.working(log) && !log[launched..].contains(&drew) {
+        let said = &log[launched..];
+        if said.contains("WINIT-PACE-FAIL") || said.contains("panicked") {
+            return Err(format!("the animation failed:\n{said}"));
+        }
+        if said.contains("exit: test_rs_winit_pace pid=") {
+            return Err(format!("test_rs_winit_pace left before it finished drawing:\n{said}"));
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    let (client, _) = opened_window(&log[launched..])
+        .ok_or_else(|| format!("the animation never said it was done:\n{}", &log[launched..]))?;
+    let closing = log.len();
+    if !close_focused_window(&mut qemu, log, closing) {
+        return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));
+    }
+    let (presents, frames) = closed_counts(&log[closing..], client).ok_or_else(|| {
+        format!(
+            "GUI+Q closed some other window than the animation's (client {client}):\n{}",
+            &log[launched..]
+        )
+    })?;
+    if presents != PACE_FRAMES {
+        return Err(format!(
+            "the compositor counted {presents} presents of the {PACE_FRAMES} the animation \
+             drew:\n{}",
+            &log[launched..]
+        ));
+    }
+    if presents > frames + 1 {
+        return Err(format!(
+            "{presents} presents against {frames} frame events: the animation drew ahead of the \
+             compositor, unpaced:\n{}",
+            &log[launched..]
+        ));
+    }
+    eprintln!("  [toolkit] an animation presented {presents} times against {frames} frame events");
+    Ok(())
 }
 
 /// What a desktop that stopped answering is asked, in the order that survives
@@ -11181,6 +11856,25 @@ fn run_machine_test(
             }
             window_held(&(boot + &result.before), &result.serial)
         }
+        // Two CPUs: the held copy spins in the kernel while its sibling unmaps
+        // and maps on the other.
+        "user_copy_races_munmap" => {
+            let options = BootOptions {
+                smp: 2,
+                kernel_params: &["copy-meets-a-remap"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let result = qemu.run_test("test_rs_copy_out_races_munmap", Duration::from_secs(30));
+            if !check_rust_result(&result) {
+                return Err(format!(
+                    "user_copy_races_munmap failed:\n{}\nkernel log while it ran:\n{}{}",
+                    result.stdout, result.before, result.serial
+                ));
+            }
+            Ok(())
+        }
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.
@@ -11556,10 +12250,6 @@ fn run_machine_test(
         "root_named_twice_on_the_boot_disk" => {
             common::volumes::root_named_twice_on_the_boot_disk(test_config, c_bins, rust_bins)
         }
-        "root_backup_superblock" => common::volumes::root_backup_superblock(test_config, c_bins, rust_bins),
-        "root_superblock_unreadable" => {
-            common::volumes::root_superblock_unreadable(test_config, c_bins, rust_bins)
-        }
         "root_named_twice" => {
             common::volumes::root_named_twice(test_config, c_bins, rust_bins)
         }
@@ -11648,6 +12338,19 @@ fn run_machine_test(
         }
         "userdev_residue_is_its_own" => {
             common::iommu::userdev_residue_is_its_own(test_config, c_bins, rust_bins)
+        }
+        // Bodies in `tests/common/blockd.rs`.
+        "blockd_serves_partitions" => {
+            common::blockd::blockd_serves_partitions(test_config, c_bins, rust_bins)
+        }
+        "blockd_survives_its_death" => {
+            common::blockd::blockd_survives_its_death(test_config, c_bins, rust_bins)
+        }
+        "blockd_dma_outside_the_lent" => {
+            common::blockd::blockd_dma_outside_the_lent(test_config, c_bins, rust_bins)
+        }
+        "blockd_lends_within_its_bound" => {
+            common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
@@ -11747,6 +12450,10 @@ fn run_machine_test(
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
         "desktop_window_child" => desktop_window_child(rust_bins),
+        "toolkit_iced" => toolkit_iced(),
+        "toolkit_window_wake" => toolkit_window_wake(rust_bins),
+        "toolkit_winit_loop" => toolkit_winit_loop(rust_bins),
+        "toolkit_winit_pace" => toolkit_winit_pace(rust_bins),
         "desktop_audio_client" => desktop_audio_client(),
         "blocked_dump" => blocked_dump(),
         "xhci_many_devices" => {
@@ -13040,9 +13747,9 @@ fn run_machine_test(
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
             // the compiler cannot reach, because the container works. Its other
-            // two are unrepresented here — both CPU models carry `+rdrand`
-            // (`src/lib.rs:73-76`) and QEMU's DRNG always answers — so
-            // `NO_RDRAND` and `NO_ENTROPY` are mutation-measured.
+            // two are unrepresented here — both x86-64 CPU models carry `+rdrand`
+            // (`Arch::cpu`) and QEMU's DRNG always answers — so
+            // the no-source refusal and `NO_ENTROPY` are mutation-measured.
             const UNSEEDED: &str = "kernel hasher: a hash container was built before hasher::seed()";
             let qemu = QemuInstance::boot_with_options(
                 test_config,
@@ -13360,7 +14067,7 @@ fn run_machine_test(
             // touching it. With one CPU there is nowhere else.
             //
             // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `arch/syscall/dispatch.rs`: routes
+            // an ordinary workload is beside them in `syscall/dispatch.rs`: routes
             // past the ceiling do still exist,
             // and each of them holds the VFS lock when it dies, so the
             // machine wedges either way and the allocator's recovery cannot
@@ -14160,6 +14867,81 @@ fn run_machine_test(
             );
             lapic_vectors(qemu.boot_log())
         }
+        "panic_halts_the_others_first" => {
+            // **A kernel that has declared itself corrupt runs nothing else.**
+            // `halt_all_cpus` sends the halt IPI before anything else it does;
+            // a fatal path that waited first — for a log, a drain, anything —
+            // would leave every other CPU running userland under it.
+            // `test_rs_panic_halts_first` keeps three siblings making kernel
+            // records while its main thread goes fatal, and every record is
+            // stamped on the kernel's clock with its CPU: none of another CPU
+            // may be stamped past the fatal record by more than a sibling can
+            // take to reach its next instruction boundary with `IF` set.
+            //
+            // **The bound is 100 ms, against the derivation**: an IPI is
+            // taken at the sibling's next instruction boundary with `IF` set,
+            // so a sibling runs past the fatal record by at most the longest
+            // window this kernel holds `IF` clear, and every such window is
+            // bounded in milliseconds.
+            const BOUND_MS: u64 = 100;
+            const RECORD: &str = "syscall 26 is retired";
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { smp: 4, kernel_features: ACTUATOR_KERNEL, ..Default::default() },
+            );
+            writeln!(qemu.stdin_mut(), "run test_rs_panic_halts_first").map_err(|e| format!("stdin: {e}"))?;
+            qemu.flush_stdin();
+            let mut console =
+                qemu.drain_until(Duration::from_secs(30), |l| l.contains(FATAL_HALT_NONCE));
+            if !console.contains(FATAL_HALT_NONCE) {
+                return Err(format!("{FATAL_HALT_NONCE:?} never reached the console\n{console}"));
+            }
+            // What the fatal path flushes after the nonce. The machine is
+            // halted and says nothing more, so this is a pace, not a guard.
+            console.push_str(&qemu.drain_serial(Duration::from_secs(3)));
+            let stamp = |line: &str| -> Option<(u64, u32)> {
+                let head = line.split_once("[kernel ")?.1.split_once(']')?.0;
+                let (secs, cpu) = head.split_once(" cpu")?;
+                let (s, ms) = secs.split_once('.')?;
+                let cpu = cpu.split(' ').next()?;
+                Some((s.parse::<u64>().ok()? * 1000 + ms.parse::<u64>().ok()?, cpu.parse().ok()?))
+            };
+            let Some((fatal_ms, fatal_cpu)) =
+                console.lines().find(|l| l.contains(FATAL_HALT_NONCE)).and_then(stamp)
+            else {
+                return Err(format!("no stamped {FATAL_HALT_NONCE:?} record on the console\n{console}"));
+            };
+            let siblings: Vec<(u64, u32, &str)> = console
+                .lines()
+                .filter(|l| l.contains(RECORD))
+                .filter_map(|l| stamp(l).map(|(ms, cpu)| (ms, cpu, l)))
+                .filter(|&(_, cpu, _)| cpu != fatal_cpu)
+                .collect();
+            // Non-vacuity: another CPU was making records up to the fatal one.
+            if !siblings.iter().any(|&(ms, _, _)| ms + 1000 >= fatal_ms) {
+                return Err(format!(
+                    "no other CPU's record in the second before the fatal one at {fatal_ms} ms, so \
+                     nothing was running to be halted\n{console}"
+                ));
+            }
+            if let Some(&(ms, cpu, line)) = siblings.iter().max_by_key(|&&(ms, _, _)| ms) {
+                if ms > fatal_ms + BOUND_MS {
+                    return Err(format!(
+                        "cpu{cpu} made a record {} ms after the fatal one on cpu{fatal_cpu}: the \
+                         fatal path let it run\n  {line}",
+                        ms - fatal_ms
+                    ));
+                }
+            }
+            eprintln!(
+                "  [panic] {} record(s) of other CPUs; the last {} ms after the fatal one",
+                siblings.len(),
+                siblings.iter().map(|&(ms, _, _)| ms.saturating_sub(fatal_ms)).max().unwrap_or(0)
+            );
+            Ok(())
+        }
         "virtio_used_ring" => {
             // Both fields of a virtqueue used-ring element are written by the
             // device, and on virtio-sound's control and event queues the ring
@@ -14199,6 +14981,12 @@ fn run_machine_test(
             let ran = log.matches("used-ring selftest").count();
             if ran != 1 {
                 return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
+            }
+            // The one wait on a used ring: a completion found only after the
+            // bound, as a waiter off its CPU for all of it finds one, is
+            // taken, and a device that never answers is not.
+            if !log.lines().any(|l| l.contains("virtio: wait selftest 2/2")) {
+                return Err(format!("the wait's self-test did not pass both cases:\n{log}"));
             }
             eprintln!("  [virtio] {}", verdict.trim());
             Ok(())
@@ -14952,7 +15740,7 @@ fn run_machine_test(
         "sshd_fail_closed" => {
             // sshd with a network under it — the only boot that gets past its
             // bind. What that reaches for the first time is the daemon's own
-            // state on disk: the identity it mints under `/home`, and the file
+            // state on disk: the identity it mints under `/state/sshd`, and the file
             // it authenticates against.
             //
             // The verdict is that it authenticates nobody and says which file
@@ -14971,17 +15759,17 @@ fn run_machine_test(
             let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
             let mut console = qemu.boot_log().to_string();
 
-            // Minting proves `/home/root/.ssh` is creatable and writable from
-            // userland; the fingerprint proves the key it wrote reads back.
+            // Minting proves init made `/state/sshd` and set it as the daemon's
+            // `HOME`; the fingerprint proves the key it wrote reads back.
             //
             // **Both files are named, because either one alone authorizes.**
             // This boot stages neither, so the daemon has to report both as
             // unreadable — a check on only the writable one would pass a
             // machine whose image file was silently never consulted.
             const WANT: [&str; 5] = [
-                "sshd: minted a new host identity at /home/root/.ssh/host_ed25519",
+                "sshd: minted a new host identity at /state/sshd/host_ed25519",
                 "sshd: host identity SHA256:",
-                "sshd: cannot read /home/root/.ssh/authorized_keys",
+                "sshd: cannot read /state/sshd/authorized_keys",
                 "sshd: cannot read /system/etc/ssh_authorized_keys",
                 "sshd: no file names a usable key",
             ];
@@ -15004,9 +15792,72 @@ fn run_machine_test(
                 ));
             }
             eprintln!(
-                "  [sshd] host identity minted under /home, and neither authorized_keys file \
+                "  [sshd] host identity minted under /state/sshd, and neither authorized_keys file \
                  left it refusing to listen at all"
             );
+            Ok(())
+        }
+        "layout_fresh_boot" => {
+            // The layout as ruled, on a boot of its own with a blank DATA
+            // volume, asked over the cable because sshd is the service that
+            // starts programs: a declared shell's `HOME` is init's row answer,
+            // and the judge, declared nowhere, is spawned by sshd directly with
+            // the `HOME` init answered for it. Before the judge, `locale` and
+            // an interactive shell write the two files a session writes.
+            use common::ssh::{self, HOST};
+            const MINTED: &str = "sshd: minted a new host identity at /state/sshd/host_ed25519";
+            const LAYOUT: &str = "de";
+            const TYPED: &str = "echo layout history";
+            let (guest, console) = ssh::boot_case("tests/layoutcase", rust_bins);
+            if !console.contains(MINTED) {
+                return Err(format!("{MINTED:?} never reached the console:\n{console}"));
+            }
+            let identity = ssh::Identity::mint(ssh::KEY)?;
+            let port = guest.ssh_port();
+
+            let home = ssh::ssh_exec(HOST, port, &identity, "shell -c 'echo $HOME'")?;
+            if home.stdout != b"/home/toy\n" || home.status != Some(0) {
+                return Err(format!(
+                    "a launched shell's HOME is {:?} (ended {:?}, stderr {:?}), not /home/toy",
+                    home.stdout_text(),
+                    home.status,
+                    home.stderr_text()
+                ));
+            }
+            let set = ssh::ssh_exec(HOST, port, &identity, &format!("locale {LAYOUT}"))?;
+            if set.status != Some(0) || !set.stdout_text().contains("Keyboard layout set to") {
+                return Err(format!(
+                    "`locale {LAYOUT}` ended {:?} saying {:?} {:?}",
+                    set.status,
+                    set.stdout_text(),
+                    set.stderr_text()
+                ));
+            }
+            let (typed, _) =
+                ssh::ssh_feed(HOST, port, &identity, "shell", format!("{TYPED}\r").as_bytes())?;
+            if typed.status != Some(0) || !typed.stdout_text().contains("layout history") {
+                return Err(format!(
+                    "the interactive shell ended {:?} saying {:?} {:?}",
+                    typed.status,
+                    typed.stdout_text(),
+                    typed.stderr_text()
+                ));
+            }
+            let judge = ssh::ssh_exec(
+                HOST,
+                port,
+                &identity,
+                &format!("test_rs_layout_paths {LAYOUT} '{TYPED}'"),
+            )?;
+            if judge.status != Some(0) {
+                return Err(format!(
+                    "layout_paths ended {:?} over ssh:\n{}\n{}",
+                    judge.status,
+                    judge.stdout_text(),
+                    judge.stderr_text()
+                ));
+            }
+            eprintln!("  [layout] a launched shell's HOME is /home/toy; {}", judge.stdout_text().trim());
             Ok(())
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
@@ -15014,6 +15865,25 @@ fn run_machine_test(
         "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
         "lan_mdns_answer" => common::origin::mdns(c_bins, rust_bins),
         "swap_netd" => common::swap::swap_netd(test_config, c_bins, rust_bins),
+        "update_boots_the_new_kernel" => common::update::update_boots_the_new_kernel(test_config, c_bins, rust_bins),
+        "update_refusals_boot_the_other_slot" => {
+            common::update::update_refusals_boot_the_other_slot(test_config, c_bins, rust_bins)
+        }
+        "update_falls_back_from_a_dying_kernel" => {
+            common::update::update_falls_back_from_a_dying_kernel(test_config, c_bins, rust_bins)
+        }
+        "update_hang_kills_an_unproven_image" => {
+            common::update::update_hang_kills_an_unproven_image(test_config, c_bins, rust_bins)
+        }
+        "update_grant_refuses_a_stray_partition" => {
+            common::update::update_grant_refuses_a_stray_partition(test_config, c_bins, rust_bins)
+        }
+        "update_floor_is_the_images_own" => {
+            common::update::update_floor_is_the_images_own(test_config, c_bins, rust_bins)
+        }
+        "update_refused_pass_credits_no_image" => {
+            common::update::update_refused_pass_credits_no_image(test_config, c_bins, rust_bins)
+        }
         "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
         "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),
@@ -15055,6 +15925,9 @@ fn run_machine_test(
         "log_stream_stalled_reader" => common::logstream::stalled_reader(c_bins, rust_bins),
         "log_program_line" => common::origin::line(c_bins, rust_bins),
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
+        "log_after_a_refused_stop" => common::origin::refused_stop(c_bins, rust_bins),
+        "log_resume_meets_its_flush" => common::origin::resume_meets_its_flush(rust_bins),
+        "log_ring_keeps_the_owners_slots" => common::origin::keeps_the_owners_slots(rust_bins),
         "log_program_line_after_its_records" => common::origin::after_records(c_bins, rust_bins),
         "log_carrier_forgery" => common::origin::carrier_forgery(c_bins, rust_bins),
         "log_program_flood" => common::origin::flood(c_bins, rust_bins),
@@ -16709,8 +17582,8 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         // Vol. 3A §2.5, Vol. 2 `WRGSBASE`), so no Ring 3 thread aims `GS.base`.
         (16, "FSGSBASE", false),
         (18, "OSXSAVE", false),
-        // Not a bit the machine may withhold: `toyos_build::qemu::CPU_KVM` and
-        // `CPU_TCG` are the only two CPUs this repository launches and both name
+        // Not a bit the machine may withhold: `Arch::cpu`'s two x86-64 CPUs
+        // are the only x86-64 CPUs this repository launches and both name
         // `+smep`, so a boot without supervisor-mode execution prevention is a
         // kernel that stopped enabling it or a launcher that stopped asking.
         (20, "SMEP", true),
@@ -17341,7 +18214,7 @@ fn control_regs_negative(
     }
     // Where the host does leave `CD` set, it is demanded, so the arm that *can*
     // see the caching defect does not quietly become the weaker of the two.
-    if !toyos_build::kvm_usable() && !refusal.contains("CD") {
+    if !common::qemu::SUITE_ARCH.accel().is_hardware() && !refusal.contains("CD") {
         return Err(format!(
             "TCG leaves an AP's `CD` set and the refusal does not name it: {refusal}"
         ));
@@ -17930,7 +18803,8 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
 
     let repo = compile::repo_root();
     let kernel_elf = repo.join(format!(
-        "kernel/target/x86_64-unknown-none/{}/kernel",
+        "kernel/target/{}/{}/kernel",
+        common::qemu::SUITE_ARCH.kernel(),
         toyos_build::build::PROFILE
     ));
 
@@ -19812,7 +20686,8 @@ fn build_tasks<'a>(
 fn check_shard_partition(all_tests: &[TestDef]) {
     let pricing = shard_pricing();
     for &nightly in &[false, true] {
-        let in_tier = |tier: Tier| nightly || tier == Tier::Fast;
+        // Sharded, because every run this partition is for is one.
+        let in_tier = |tier: Tier| tier.selected(nightly, true);
         let tests_to_run: Vec<&TestDef> =
             all_tests.iter().filter(|_| in_tier(SHARED_TIER)).collect();
         let machine_to_run: Vec<(&str, Sched)> = MACHINE_TESTS
@@ -20459,7 +21334,7 @@ fn main() {
     // nobody remembers. `cargo test -- desktop_window_child` refuses below and
     // says what to type instead, which is the same information a silent skip
     // would have withheld.
-    let in_tier = |tier: Tier| nightly || tier == Tier::Fast;
+    let in_tier = |tier: Tier| tier.selected(nightly, shard.is_some());
     let tests_to_run: Vec<&TestDef> = all_tests
         .iter()
         .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
@@ -20485,18 +21360,30 @@ fn main() {
     // introduces, so the names are printed rather than counted, and the line
     // carries both the command that runs them and the record that says what each
     // one guarded.
-    let held_back: Vec<&str> = MACHINE_TESTS
-        .iter()
-        .chain(SCREEN_TESTS)
-        .filter(|(n, _, tier)| keep(n) && !in_tier(*tier))
-        .map(|(n, _, _)| *n)
-        .chain(
-            AUDIO_TESTS
-                .iter()
-                .filter(|(name, tier)| keep(name) && !in_tier(*tier))
-                .map(|(name, _)| *name),
-        )
-        .collect();
+    let held = |which: Tier| -> Vec<&str> {
+        MACHINE_TESTS
+            .iter()
+            .chain(SCREEN_TESTS)
+            .filter(|(n, _, tier)| keep(n) && *tier == which && !in_tier(*tier))
+            .map(|(n, _, _)| *n)
+            .chain(
+                AUDIO_TESTS
+                    .iter()
+                    .filter(|(name, tier)| keep(name) && *tier == which && !in_tier(*tier))
+                    .map(|(name, _)| *name),
+            )
+            .collect()
+    };
+    let held_back = held(Tier::Nightly);
+    let held_local = held(Tier::Local);
+    if !held_local.is_empty() {
+        eprintln!(
+            "[toyos] local tier: {} test(s) NOT run, because a sharded run is CI's and no CI \
+             runner boots their architecture yet. An unsharded `cargo test` runs them.",
+            held_local.len(),
+        );
+        eprintln!("[toyos]   {}", held_local.join(", "));
+    }
     if !held_back.is_empty() {
         eprintln!(
             "[toyos] nightly tier: {} test(s) NOT run. \

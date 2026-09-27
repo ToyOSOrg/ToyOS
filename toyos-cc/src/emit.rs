@@ -29,15 +29,5 @@ pub fn create_module(output_name: &str, target: Option<&str>, opt_level: u8) -> 
 }
 
 pub fn finish(module: ObjectModule) -> Vec<u8> {
-    use cranelift_object::object::SectionKind;
-    let mut product = module.finish();
-    // Mark this object as needing the C standard library. toyos-ld checks
-    // for this section and automatically links libtoyos_c when present.
-    let section = product.object.add_section(
-        Vec::new(),
-        b".note.toyos.libc".to_vec(),
-        SectionKind::Note,
-    );
-    product.object.set_section_data(section, vec![0], 1);
-    product.object.write().unwrap()
+    module.finish().object.write().unwrap()
 }

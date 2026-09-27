@@ -1,5 +1,9 @@
 #[allow(dead_code)]
 pub mod audio;
+/// blockd: the NVMe driver in userland, judged off its disk and the device's
+/// own trace.
+#[allow(dead_code)]
+pub mod blockd;
 #[allow(dead_code)]
 pub mod clock;
 #[allow(dead_code)]
@@ -69,6 +73,7 @@ pub mod storage;
 pub mod swap;
 #[allow(dead_code)]
 pub mod toybox;
+pub mod update;
 #[allow(dead_code)]
 pub mod usb;
 #[allow(dead_code)]

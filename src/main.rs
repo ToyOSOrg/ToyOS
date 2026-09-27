@@ -2,6 +2,7 @@ mod qemu;
 
 use std::env;
 use std::path::{Path, PathBuf};
+use toyos_build::arch::Arch;
 use toyos_build::flags::{self, CARGO_RUN};
 
 /// One prerequisite: any of `any` satisfies it, and `why` is what reaches it.
@@ -14,12 +15,11 @@ struct Tool {
 ///
 /// `cc` is here and is not ours: `rustc` drives every *host* link through it
 /// and `rustup` does not install it. Nothing that boots goes near it —
-/// `bootloader/`, `kernel/` and `userland/` all set `linker = "toyos-ld"` —
-/// which is the distinction "ToyOS needs a C compiler" would destroy.
+/// `bootloader/`, `kernel/` and `userland/` all link through the toolchain's
+/// `rust-lld` — which is the distinction "ToyOS needs a C compiler" would destroy.
 const REQUIRED: &[Tool] = &[
     Tool { any: &["git"], why: "every build; the image ships what git says is tracked" },
     Tool { any: &["rustup"], why: "the toolchain — install from https://rustup.rs" },
-    Tool { any: &["qemu-system-x86_64"], why: "every boot — install QEMU" },
     Tool { any: &["cc"], why: "rustc links every host binary through it; no guest binary" },
 ];
 
@@ -51,7 +51,7 @@ fn executable_on_path(name: &str) -> bool {
     })
 }
 
-fn check_prerequisites(root: &Path) {
+fn check_prerequisites(root: &Path, arch: Arch) {
     fn absent(tools: &'static [Tool]) -> Vec<&'static Tool> {
         tools.iter().filter(|t| !t.any.iter().any(|n| executable_on_path(n))).collect()
     }
@@ -60,11 +60,15 @@ fn check_prerequisites(root: &Path) {
         eprintln!("Note: no {} — {}", tool.any.join(" or "), tool.why);
     }
 
-    let missing = absent(REQUIRED);
+    let mut missing: Vec<String> =
+        absent(REQUIRED).iter().map(|t| format!("{} ({})", t.any.join(" or "), t.why)).collect();
+    if !executable_on_path(arch.qemu()) {
+        missing.push(format!("{} (every {} boot — install QEMU)", arch.qemu(), arch.name()));
+    }
     if !missing.is_empty() {
         eprintln!("Error: missing required tools:");
         for tool in &missing {
-            eprintln!("  - {} ({})", tool.any.join(" or "), tool.why);
+            eprintln!("  - {tool}");
         }
         std::process::exit(1);
     }
@@ -72,7 +76,7 @@ fn check_prerequisites(root: &Path) {
     // The one prerequisite whose *version* decides verdicts rather than whether
     // anything runs at all, so a scan of `PATH` cannot ask it.
     // `toyos_build::ci` carries why this is a note here and a red in CI.
-    if let Some(note) = toyos_build::ci::qemu_version_note(root) {
+    if let Some(note) = toyos_build::ci::qemu_version_note(root, arch) {
         eprintln!("{note}");
     }
 }
@@ -134,8 +138,32 @@ fn main() {
         toyos_build::forkcheck::dispatch_callers(&root, &args);
         return;
     }
+    // Writes one file outside the checkout and builds nothing.
+    if asked(&flags::SIGNING_KEY_NEW) {
+        match toyos_build::signing::mint_owner_key() {
+            Ok((path, fingerprint)) => println!("The owner's image-signing key is at {} ({fingerprint}).", path.display()),
+            Err(why) => {
+                eprintln!("Error: {why}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    // Before anything is built, so a missing key is refused before any lock
+    // and no image this run writes is signed by two keys.
+    let update_image = CARGO_RUN.value(&args, &flags::UPDATE_IMAGE).map(PathBuf::from);
+    if asked(&flags::OWNER_KEY) || update_image.is_some() {
+        match toyos_build::signing::use_owner() {
+            Ok(key) => println!("Signing with the owner's key {}.", key.fingerprint()),
+            Err(why) => {
+                eprintln!("Error: {why}");
+                std::process::exit(1);
+            }
+        }
+    }
 
-    check_prerequisites(&root);
+    let arch = toyos_build::build::arch_for(&args);
+    check_prerequisites(&root, arch);
     env::set_current_dir(&root).expect("Failed to cd to project root");
 
     let debug = asked(&flags::DEBUG);
@@ -231,12 +259,17 @@ fn main() {
     // Toolchain included: `build` holds the build lock across both, so no other
     // agent's clean or bootstrap can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
+    if let Some(out) = update_image {
+        toyos_build::build::build_update(&root, &boot, rebuild_toolchain, &plan, &out);
+        println!("Update image: {} (ssh <machine> update < it)", out.display());
+        return;
+    }
     let image = toyos_build::build::build(&root, boot, rebuild_toolchain, &plan);
     println!("Build finished.");
     println!("Boot image: {}", image.display());
 
     if !build_only {
-        qemu::launch(&qemu::Options { debug, dump_audio, profile, smp, mute, image });
+        qemu::launch(&qemu::Options { arch: plan.arch, debug, dump_audio, profile, smp, mute, image });
     }
 }
 

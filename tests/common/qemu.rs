@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -9,6 +9,12 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use super::compile;
+use toyos_build::arch::{Accel, Arch};
+
+/// The architecture every machine this suite builds and boots is: the suite's
+/// q35 shapes, i8042 and VT-d are x86-64's, and the aarch64 bring-up boots
+/// through its own launcher ([`boot_bringup`]).
+pub const SUITE_ARCH: Arch = Arch::X86_64;
 
 /// When true, serial output is printed to stderr as it arrives.
 pub static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -1368,6 +1374,69 @@ pub enum Profile {
     /// that is the driver's work. The negative control on the whole bind path
     /// — a first-match kernel would go green on every other HDA test.
     HdaTwoLive,
+    /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
+    /// stick on an xHCI, the PL011, and nothing else — no virtio, NIC, NVMe or
+    /// IOMMU. The machine the AArch64 port reaches its console on, and the only
+    /// profile that is not a q35.
+    Virt,
+    /// [`Profile::Virt`] with EL2 (`virtualization=on`), emulated on `-cpu max`:
+    /// firmware then hands the loader the CPU at EL2, and the kernel's entry
+    /// has to drop from it. HVF gives a guest EL1 only.
+    VirtEl2,
+}
+
+impl Profile {
+    /// The architecture this machine is.
+    pub fn arch(self) -> Arch {
+        match self {
+            Self::Virt | Self::VirtEl2 => Arch::Aarch64,
+            Self::Headless
+            | Self::HeadlessNoIommu
+            | Self::VirtioNetNoMsix
+            | Self::E1000e
+            | Self::E1000eNoServer
+            | Self::E1000eBesideIgb
+            | Self::Gop
+            | Self::VirtioGpu
+            | Self::Metal
+            | Self::MetalNoUsb
+            | Self::InternalDisk
+            | Self::MetalUsb
+            | Self::MetalDisk
+            | Self::Diskless
+            | Self::NvmeWideSector
+            | Self::UsbDisk
+            | Self::UsbDisk4k
+            | Self::UsbDiskHuge
+            | Self::UsbDiskReadOnly
+            | Self::NvmeBootUsbDisk
+            | Self::UsbDiskRefusedFirst
+            | Self::UsbDiskCrowd
+            | Self::MetalFullSpeed
+            | Self::MetalXhciSecond
+            | Self::MetalXhciBoth
+            | Self::MetalXhciMsi
+            | Self::MetalXhciNoIrq
+            | Self::MetalXhciDeaf
+            | Self::MetalHotplug
+            | Self::NoIommu
+            | Self::IommuNarrow
+            | Self::IommuNoIntremap
+            | Self::IommuEim
+            | Self::Hda
+            | Self::HdaTwoLive => Arch::X86_64,
+        }
+    }
+
+    /// How this host provides the machine: [`Profile::VirtEl2`] emulated,
+    /// since only emulation gives a guest EL2; every other as its
+    /// architecture's own.
+    pub fn accel(self) -> Accel {
+        match self {
+            Self::VirtEl2 => Accel::Tcg,
+            _ => self.arch().accel(),
+        }
+    }
 }
 
 /// The vIOMMU a profile puts on the machine.
@@ -1691,6 +1760,22 @@ pub const NVME_T14_BLOCKS: u64 = NVME_T14_BYTES / 4096;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
+            Self::VirtEl2 => Self::Virt.shape(),
+            Self::Virt => Shape {
+                vga: "std",
+                panel: None,
+                gpu: None,
+                virtio: Virtio::Absent,
+                nic: Nic::Absent,
+                xhci: &[XHCI_DEFAULT],
+                storage_bus: "xhci.0",
+                usb: &[],
+                nvme_bytes: 0,
+                nvme_lba_bytes: NVME_LBA_DEFAULT,
+                usb_disks: &[],
+                hda: &[],
+                iommu: None,
+            },
             Self::Headless => Shape {
                 vga: "none",
                 panel: None,
@@ -2294,6 +2379,12 @@ pub struct BootOptions {
     /// that the boot *after* a reset is this loader again, reading what the boot
     /// before it left — and a guest with it set runs until the harness kills it.
     pub takes_the_reset: bool,
+    /// Keep the firmware's variables in this file, writable, instead of the
+    /// shared read-only template: a copy the test made, so what one boot's
+    /// loader writes — the anti-rollback floor, `BootNext` — is what the next
+    /// boot of the same machine reads. `None` is every other boot, whose
+    /// variables live in firmware memory and die with the guest.
+    pub firmware_vars: Option<PathBuf>,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
     /// expected outcome rather than a boot failure -- the early-panic screen
@@ -2357,6 +2448,12 @@ pub struct BootOptions {
     /// Forward this host port to the guest's TCP [`toyos_logstream::PORT`],
     /// where `logd` serves the boot's log.
     pub log_port: Option<u16>,
+    /// The virtio console's output into a regular file the harness follows,
+    /// and its input through a FIFO, instead of QEMU's stdio. QEMU's
+    /// `virtconsole` drops what a full non-blocking stdout refuses, and a
+    /// regular file refuses no write: for a test whose verdict is a line after
+    /// megabytes of console (`issues/build/qemu-drops-console-output-the-harness-is-slow-to-read.md`).
+    pub console_file: bool,
     /// Put the host on the guest's own segment (`super::segment`): frames
     /// it writes reach the NIC as if off the cable, and it sees every frame the
     /// guest sends. Refused by name on a profile with no NIC.
@@ -2379,6 +2476,22 @@ pub struct BootOptions {
     /// pcap. **The only way to read what the guest asked for**: a request the
     /// server ignores reaches no log on either side.
     pub wire_dump: Option<PathBuf>,
+    /// A second NVMe controller, for a driver in userland, backed by this file.
+    ///
+    /// QEMU's NVMe under Intel's ids (`use-intel-id`, `8086:5845`), so a claim
+    /// names it apart from the one the kernel drives; its MSI-X table in a BAR
+    /// of its own (`msix-exclusive-bar`), because a claim never maps the BAR
+    /// holding the table and NVMe keeps its registers in BAR 0; and its
+    /// namespace's write cache on, so the controller has a volatile cache a
+    /// flush has to issue Flush for. Emitted after the kernel's controller, so
+    /// the kernel's first-by-class probe takes that one, and refused on a
+    /// profile with none — the kernel would take this one.
+    pub userland_nvme: Option<PathBuf>,
+    /// Have QEMU record every NVMe command it is sent, every completion it
+    /// posts, every write with its sectors, every flush it runs and every
+    /// controller start into this file: the device's own account
+    /// of what reached it, which no line a driver prints can be.
+    pub nvme_trace: Option<PathBuf>,
 }
 
 /// Where the guest sees the host under QEMU's user-mode networking, and where
@@ -2443,6 +2556,7 @@ impl Default for BootOptions {
             i8042: true,
             mute: false,
             takes_the_reset: false,
+            firmware_vars: None,
             ready_marker: DEFAULT_READY,
             nvme_image: None,
             boot_image: None,
@@ -2452,11 +2566,14 @@ impl Default for BootOptions {
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
+            console_file: false,
             segment: None,
             middlebox: None,
             slow_transmit: false,
             ssh_port: None,
             wire_dump: None,
+            userland_nvme: None,
+            nvme_trace: None,
         }
     }
 }
@@ -2554,7 +2671,7 @@ impl ConsoleStream {
 
 pub struct QemuInstance {
     child: Child,
-    stdin: BufWriter<ChildStdin>,
+    stdin: BufWriter<Box<dyn Write + Send>>,
     rx: Receiver<String>,
     console: ConsoleStream,
     _reader_thread: thread::JoinHandle<String>,
@@ -2721,7 +2838,7 @@ pub fn build_boot_image_carrying(
         } else {
             toyos_build::build::TEST_KERNEL
         };
-    build_boot_image_with(test_crate, c_tests, rust_tests, staged, kernel, kernel_params, false)
+    build_boot_image_with(SUITE_ARCH, test_crate, c_tests, rust_tests, staged, kernel, kernel_params, false)
 }
 
 /// Refuse a staged [`BootOptions::boot_image`] that is not the image this
@@ -2803,7 +2920,10 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     toyos_build::build::TEST_KERNEL.to_vec()
 }
 
+// Eight, because an image is its architecture as much as its files and its kernel.
+#[allow(clippy::too_many_arguments)]
 fn build_boot_image_with(
+    arch: Arch,
     test_crate: &Path,
     c_tests: &[(String, Vec<u8>)],
     rust_tests: &[(String, Vec<u8>)],
@@ -2852,6 +2972,14 @@ fn build_boot_image_with(
         toyos_build::build::DEBUG_KERNEL_BUILD,
     );
     KERNELS.lock().expect("the kernel census").insert(joined);
+    // The suite's programs are built for one architecture, and a ROOT of
+    // another carries none of them.
+    assert!(
+        arch == SUITE_ARCH || (c_tests.is_empty() && rust_tests.is_empty()),
+        "a {} image was handed programs built for {}",
+        arch.name(),
+        SUITE_ARCH.name()
+    );
     let mut extra_files: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, data) in c_tests {
         extra_files.push((format!("bin/test_c_{name}"), data.clone()));
@@ -2873,7 +3001,7 @@ fn build_boot_image_with(
     );
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let plan = toyos_build::build::Plan::new(&config_path, kernel_features, kernel_params);
+    let plan = toyos_build::build::Plan::new(arch, &config_path, kernel_features, kernel_params);
     toyos_build::build::build_test_image(&compile::repo_root(), &plan, quiet, &extra_files)
 }
 
@@ -2881,41 +3009,36 @@ fn build_boot_image_with(
 pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
     let repo = compile::repo_root();
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    toyos_build::build::build_toyos_bins(&repo, crate_path, quiet)
+    toyos_build::build::build_toyos_bins(&repo, SUITE_ARCH, crate_path, quiet)
 }
 
-/// All kernel serial output goes through log!() which prepends "[kernel ...]".
-/// User program output goes through serial::write directly with no prefix.
+/// A kernel record's console line: `klogd` renders every one with this head,
+/// and nothing else writes it — a program's line reaches the console only
+/// through `logd`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
     line.starts_with("[kernel ")
 }
 
-/// File the userland half of one captured console line under `stdout`.
-///
-/// The kernel drains its own records straight to the backend rather than
-/// through any process's line buffer, so a record can follow bytes a program
-/// left unterminated and the host's splitter joins the two. Splitting the
-/// record back off is what has always let a `printf` with no newline reach a
-/// capture at all — and it is why `71_macro_empty_arg` passes most runs and
-/// not all: when the next writer is *userland* rather than the kernel there is
-/// no `[kernel ` to cut at. That half is `common::console`'s, on the boot
-/// config's own list of who else may speak; this is only the kernel's.
+/// A console line's text as its program wrote it: a program's line without
+/// the head `logd` gives it (`toyos_logstream::program_line`), and any other
+/// line as it is.
+pub fn user_text(line: &str) -> &str {
+    toyos_logstream::program_line(line).map_or(line, |said| said.text)
+}
+
+/// File the userland half of one captured console line under `stdout`: a
+/// program's text, and nothing of the kernel's. Every console line is one
+/// writer's whole — `klogd` is the wire's one writer — so a line is one or
+/// the other.
 fn push_user_half(line: &str, stdout: &mut String) {
     if is_kernel_line(line) {
         return;
     }
-    match line.find("[kernel ") {
-        Some(idx) => stdout.push_str(&line[..idx]),
-        None => stdout.push_str(line),
-    }
+    stdout.push_str(user_text(line));
     stdout.push('\n');
 }
 
-/// The in-guest runner's end-of-test marker. Matched anywhere in the line, not
-/// as a prefix: the virtio-console is shared and not line-atomic, so a daemon
-/// mid-`println!` pushes the marker into the middle of its line. Anchoring on
-/// the prefix made the harness miss the marker and time out — measured at 1 in
-/// 120 audio boots, where it looked like a guest hang rather than a lost line.
+/// The in-guest runner's end-of-test marker, which opens its line's text.
 const END_MARKER: &str = "===TEST_END ";
 
 impl QemuInstance {
@@ -2968,6 +3091,7 @@ impl QemuInstance {
             let params = options.params();
             let params: Vec<&str> = params.iter().map(String::as_str).collect();
             build_boot_image_with(
+                options.profile.arch(),
                 test_crate,
                 c_tests,
                 rust_tests,
@@ -3075,6 +3199,7 @@ impl QemuInstance {
         // let instances read each other's early boot.
         let uart_log = test_dir.join(format!("uart-{seq}.log"));
         let _ = fs::remove_file(&uart_log);
+        let console_file = options.console_file.then(|| ConsoleFile::of(&uart_log).made());
 
         let qemu = qemu_command(
             &boot_image,
@@ -3098,6 +3223,7 @@ impl QemuInstance {
                 screendump,
                 own_boot_image,
                 carried,
+                console_file,
             },
         )
     }
@@ -3364,7 +3490,7 @@ impl QemuInstance {
         &self.usb_images
     }
 
-    pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
+    pub fn stdin_mut(&mut self) -> &mut BufWriter<Box<dyn Write + Send>> {
         &mut self.stdin
     }
 
@@ -3619,8 +3745,7 @@ impl QemuInstance {
                                 push_user_half(early, &mut stdout);
                             }
                         }
-                    } else if let Some(at) = line.find(END_MARKER) {
-                        let rest = &line[at + END_MARKER.len()..];
+                    } else if let Some(rest) = user_text(&line).strip_prefix(END_MARKER) {
                         let rest = rest.split_once("===").map_or(rest, |(head, _)| head);
                         let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                         // **A marker naming another test is the previous one's**,
@@ -3635,30 +3760,6 @@ impl QemuInstance {
                             window.push_str(&line);
                             window.push('\n');
                             continue;
-                        }
-                        // Everything before the marker is what some console
-                        // writer had said without a newline when the runner
-                        // printed; it is still real output and the audio gate
-                        // reads soundd's stats out of it.
-                        //
-                        // **And it goes to `stdout` as well, because the writer
-                        // is usually the test's own child.** A program whose
-                        // output does not end in a newline — `printf("%d", …)`
-                        // and nothing after it — has its last bytes flushed by
-                        // `ConsoleObject::drop` with no terminator, so the
-                        // runner's `===TEST_END` lands on the same line the
-                        // host's splitter builds. Filing that head under
-                        // `serial` alone is how `71_macro_empty_arg` came back
-                        // with an *empty* capture against an expected `17` —
-                        // the half no filter over whole lines reaches, and
-                        // `common::console` has the rest of it. Nothing is
-                        // dropped either way; this only stops the capture from
-                        // losing its own tail.
-                        if at > 0 && in_test {
-                            let head = &line[..at];
-                            serial.push_str(head);
-                            serial.push('\n');
-                            push_user_half(head, &mut stdout);
                         }
                         let (exit_code, error) = if parts.len() > 1 {
                             if let Some(code_str) = parts[1].strip_prefix("exit=") {
@@ -3948,6 +4049,52 @@ impl QmpResets {
                 Ok(n) => qmp.pending.extend_from_slice(&buf[..n]),
             }
         }
+    }
+}
+
+/// A machine that takes its own resets, held at the next one: the guest's
+/// reset pauses it with its memory — the black box — as the reset left it, so
+/// a test can change what the next pass reads off the disk after the kernel's
+/// last write and before the loader's first read, and then let it go.
+pub struct QmpHold(Qmp);
+
+impl QmpHold {
+    /// The guest's next reset pauses the machine instead.
+    pub fn arm(socket: &Path) -> Self {
+        let mut qmp = Qmp::connect(socket);
+        qmp.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"shutdown\",\"shutdown\":\"pause\"}}");
+        Self(qmp)
+    }
+
+    /// Wait up to `budget` for the machine to stop at its reset.
+    pub fn held(&mut self, budget: Duration) -> Result<(), String> {
+        use std::io::Read;
+        let qmp = &mut self.0;
+        qmp.stream.set_read_timeout(Some(budget)).map_err(|e| format!("qmp: the hold's budget: {e}"))?;
+        let began = Instant::now();
+        loop {
+            if qmp.pending.windows(6).any(|w| w == b"\"STOP\"") {
+                return Ok(());
+            }
+            let mut buf = [0u8; 4096];
+            match qmp.stream.read(&mut buf) {
+                Ok(n) if n > 0 && began.elapsed() < budget => qmp.pending.extend_from_slice(&buf[..n]),
+                _ => {
+                    return Err(format!(
+                        "the machine did not stop at a reset within {} s: {}",
+                        budget.as_secs(),
+                        String::from_utf8_lossy(&qmp.pending)
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Take the held reset and run on, taking every later reset as before.
+    pub fn release(mut self) {
+        self.0.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\",\"shutdown\":\"poweroff\"}}");
+        self.0.execute("{\"execute\":\"system_reset\"}");
+        self.0.execute("{\"execute\":\"cont\"}");
     }
 }
 
@@ -4246,19 +4393,28 @@ fn qemu_command(
     options: &BootOptions,
 ) -> Command {
     let shape = options.profile.shape();
+    let console_file = options.console_file.then(|| ConsoleFile::of(uart_log));
     assert!(
         !options.mute || !shape.virtio.present(),
         "mute removes the only console a virtio profile has"
     );
+    assert!(
+        console_file.is_none() || shape.virtio.present(),
+        "console_file is the virtio console's, and this profile has none"
+    );
 
+    let arch = options.profile.arch();
     let repo = compile::repo_root();
-    let ovmf_dir = repo.join("ovmf");
+    let [firmware_code, firmware_vars] = arch.pflash(&repo);
 
-    let mut qemu = Command::new("qemu-system-x86_64");
+    let mut qemu = Command::new(arch.qemu());
+    if let Some(boot) = arch.boot() {
+        qemu.arg("-boot").arg(boot);
+    }
 
-    let kvm = toyos_build::kvm_usable();
-    if kvm {
-        qemu.arg("-accel").arg("kvm");
+    let accel = options.profile.accel();
+    if accel.is_hardware() {
+        qemu.arg("-accel").arg(accel.name());
     }
 
     // Without this QEMU runs its default-device pass whenever no network
@@ -4274,7 +4430,18 @@ fn qemu_command(
     // `kernel-irqchip=split` only when there is a unit: interrupt remapping
     // needs the userspace half of the irqchip, and a machine with no unit has
     // no reason to be built differently from the one it has always been.
-    let mut machine = String::from("q35");
+    let mut machine = match arch {
+        Arch::X86_64 => String::from("q35"),
+        Arch::Aarch64 => {
+            // `virt` has no i8042 to take away, and the unit a profile declares
+            // is VT-d, which it has none of either.
+            assert!(options.i8042 && shape.iommu.is_none(), "`virt` has neither an i8042 nor VT-d");
+            String::from(match options.profile {
+                Profile::VirtEl2 => "virt,gic-version=3,virtualization=on",
+                _ => "virt,gic-version=3",
+            })
+        }
+    };
     if !options.i8042 {
         machine.push_str(",i8042=off");
     }
@@ -4286,24 +4453,28 @@ fn qemu_command(
         qemu.arg("-rtc").arg(format!("base={base}"));
     }
 
+    // `virt` puts RAM at 1 GiB and AAVMF allocates from its top, so with 4 GiB
+    // the loader's allocations land past the 4 GiB its boot map reaches and it
+    // refuses the boot: issues/boot-media/the-boot-map-reaches-4-gib-and-firmware-decides-what-lands-in-it.md.
+    let memory = match arch {
+        Arch::X86_64 => "4G",
+        Arch::Aarch64 => "2G",
+    };
     qemu.arg("-machine")
         .arg(&machine)
         .arg("-cpu")
-        .arg(if kvm { toyos_build::CPU_KVM } else { toyos_build::CPU_TCG })
+        .arg(arch.cpu(accel))
         .arg("-smp")
         .arg(options.smp.to_string())
         .arg("-m")
-        .arg("4G")
+        .arg(memory)
         .arg("-drive")
-        .arg(format!(
-            "if=pflash,format=raw,unit=0,file={},readonly=on",
-            ovmf_dir.join("OVMF_CODE-pure-efi.fd").display()
-        ))
+        .arg(firmware_code)
         .arg("-drive")
-        .arg(format!(
-            "if=pflash,format=raw,unit=1,file={},readonly=on",
-            ovmf_dir.join("OVMF_VARS-pure-efi.fd").display()
-        ))
+        .arg(match &options.firmware_vars {
+            Some(vars) => format!("if=pflash,format=raw,unit=1,file={},readonly=off", vars.display()),
+            None => firmware_vars,
+        })
         .arg("-drive")
         .arg(format!(
             "if=none,id=stick,{}{}",
@@ -4417,11 +4588,24 @@ fn qemu_command(
         );
         qemu.arg("-device").arg(format!("{gpu}{platform}"));
     }
-    qemu.arg("-vga").arg(shape.vga).arg("-display").arg("none");
+    match (arch, shape.vga) {
+        (Arch::X86_64, vga) => {
+            qemu.arg("-vga").arg(vga);
+        }
+        // `virt` has no VGA: a GOP there is firmware's over `ramfb`, a
+        // framebuffer in guest memory that needs no driver after it.
+        (Arch::Aarch64, "std") => {
+            qemu.arg("-device").arg("ramfb");
+        }
+        (Arch::Aarch64, "none") => {}
+        (Arch::Aarch64, other) => panic!("`virt` has no `-vga {other}`"),
+    }
+    qemu.arg("-display").arg("none");
     if !options.takes_the_reset {
         qemu.arg("-no-reboot");
     }
     if let Some((w, h)) = shape.panel {
+        assert_eq!(arch, Arch::X86_64, "a panel is declared through VGA's EDID, and `virt` has no VGA");
         // A panel on a machine with no VGA adapter is a declaration nothing
         // emits, which is the silently-inert field this suite refuses by name.
         assert_eq!(
@@ -4454,6 +4638,33 @@ fn qemu_command(
                 "nvme-ns,drive=nvme0,bus=nvme0ctl,logical_block_size={0},physical_block_size={0}",
                 shape.nvme_lba_bytes
             ));
+    }
+    if let Some(image) = &options.userland_nvme {
+        assert!(
+            shape.nvme_bytes != 0,
+            "a userland NVMe on a machine whose kernel drives none is the one the kernel takes"
+        );
+        qemu.arg("-drive")
+            .arg(format!("if=none,id=nvme1,format=raw,file={}", image.display()))
+            .arg("-device")
+            .arg("nvme,serial=userland,id=nvme1ctl,use-intel-id=on,msix-exclusive-bar=on")
+            .arg("-device")
+            .arg(
+                "nvme-ns,drive=nvme1,bus=nvme1ctl,logical_block_size=512,physical_block_size=512,\
+                 write-cache=on",
+            );
+    }
+    if let Some(trace) = &options.nvme_trace {
+        for event in [
+            "pci_nvme_io_cmd",
+            "pci_nvme_enqueue_req_completion",
+            "pci_nvme_flush_ns",
+            "pci_nvme_write",
+            "pci_nvme_mmio_start_success",
+        ] {
+            qemu.arg("-trace").arg(event);
+        }
+        qemu.arg("-D").arg(trace);
     }
 
     // The mass-storage devices beside the boot stick, and the only ones a test
@@ -4598,7 +4809,10 @@ fn qemu_command(
             .arg("-serial")
             .arg(format!("file:{}", uart_log.display()))
             .arg("-chardev")
-            .arg("stdio,id=cs0,signal=off")
+            .arg(match &console_file {
+                Some(file) => format!("file,id=cs0,path={},input-path={}", file.out.display(), file.input.display()),
+                None => "stdio,id=cs0,signal=off".to_string(),
+            })
             .arg("-device")
             .arg(format!(
                 "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
@@ -4641,6 +4855,67 @@ struct Files {
     screendump: PathBuf,
     own_boot_image: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
+    console_file: Option<ConsoleFile>,
+}
+
+/// [`BootOptions::console_file`]'s two paths, beside the boot's UART log: the
+/// file QEMU writes the console into, and the FIFO it reads its input from.
+struct ConsoleFile {
+    out: PathBuf,
+    input: PathBuf,
+}
+
+impl ConsoleFile {
+    fn of(uart_log: &Path) -> Self {
+        Self { out: uart_log.with_extension("console"), input: uart_log.with_extension("in") }
+    }
+
+    /// The two made: the file, so the follower can open it before QEMU does,
+    /// and the FIFO.
+    fn made(self) -> Self {
+        fs::File::create(&self.out).unwrap_or_else(|e| panic!("create {}: {e}", self.out.display()));
+        let _ = fs::remove_file(&self.input);
+        let c = std::ffi::CString::new(self.input.as_os_str().as_encoded_bytes()).expect("a path holds no NUL");
+        // SAFETY: a NUL-terminated path this call owns.
+        if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+            panic!("mkfifo {}: {}", self.input.display(), std::io::Error::last_os_error());
+        }
+        self
+    }
+}
+
+/// The console file read as a stream. At its end a read waits for more on the
+/// one event QEMU gives: its stdout, which it never writes with a file
+/// console, ending when it exits. A regular file has no readiness of its own
+/// on either host, so between those the file is asked again every
+/// [`Self::PERIOD_MS`].
+struct Followed {
+    file: fs::File,
+    exit: std::process::ChildStdout,
+    gone: bool,
+}
+
+impl Followed {
+    const PERIOD_MS: i32 = 2;
+}
+
+impl Read for Followed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        loop {
+            let n = self.file.read(buf)?;
+            if n > 0 || self.gone {
+                return Ok(n);
+            }
+            let mut fd = libc::pollfd { fd: self.exit.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one `pollfd` this call owns, for the one entry it holds.
+            if unsafe { libc::poll(&mut fd, 1, Self::PERIOD_MS) } > 0 {
+                let mut stray = [0u8; 256];
+                // Its end, after which the file is read once more for what QEMU wrote last.
+                self.gone = self.exit.read(&mut stray)? == 0;
+            }
+        }
+    }
 }
 
 fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) -> QemuInstance {
@@ -4654,19 +4929,39 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         screendump,
         own_boot_image,
         carried,
+        console_file,
     } = files;
 
     qemu.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
+    // Read and write, so QEMU's read-only open finds a writer and does not block.
+    let input = console_file.as_ref().map(|f| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&f.input)
+            .unwrap_or_else(|e| panic!("open {}: {e}", f.input.display()))
+    });
     if VERBOSE.load(Ordering::Relaxed) {
         eprintln!("[qemu {seq}] Launching QEMU...");
     }
     let mut child = qemu.spawn().expect("Failed to launch QEMU");
 
-    let stdin = BufWriter::new(child.stdin.take().unwrap());
-    let stdout = child.stdout.take().unwrap();
+    let stdin: Box<dyn Write + Send> = match input {
+        Some(fifo) => Box::new(fifo),
+        None => Box::new(child.stdin.take().unwrap()),
+    };
+    let stdin = BufWriter::new(stdin);
+    let stdout: Box<dyn Read + Send> = match &console_file {
+        Some(f) => Box::new(Followed {
+            file: fs::File::open(&f.out).unwrap_or_else(|e| panic!("open {}: {e}", f.out.display())),
+            exit: child.stdout.take().unwrap(),
+            gone: false,
+        }),
+        None => Box::new(child.stdout.take().unwrap()),
+    };
 
     let (tx, rx) = mpsc::channel::<String>();
     let console = ConsoleStream::new();

@@ -25,7 +25,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::arch::{apic, cpu, percpu, smp};
+use crate::arch::{irqchip, cpu, percpu, smp};
 
 /// What the staged CPU says before it stops answering, and the witness a sealed
 /// record carries in its tail: a `WEDGED` page whose text does not hold this
@@ -112,9 +112,9 @@ fn hold_and_sample(victim: usize) -> ! {
         SEND_EVERY_NS / 1_000_000,
     );
     loop {
-        apic::send_nmi(victim as u32);
+        irqchip::send_nmi(victim as u32);
         let until = crate::clock::tsc_deadline(SEND_EVERY_NS);
-        while cpu::rdtsc() < until {
+        while cpu::counter() < until {
             core::hint::spin_loop();
         }
     }
@@ -136,7 +136,7 @@ fn go_deaf(me: usize, bound_ms: u64) -> ! {
     STAGE.store(DEAF, Ordering::Release);
     // Not an `IrqGuard`: nothing here re-enables them, which is the point.
     cpu::disable_interrupts();
-    while cpu::rdtsc() < until {
+    while cpu::counter() < until {
         core::hint::spin_loop();
     }
     // Never acquires. The detector's NMI is what ends this CPU, and its `rip`

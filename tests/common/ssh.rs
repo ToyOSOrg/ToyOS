@@ -109,6 +109,21 @@ pub fn ssh_exec(
     collected(&said, &out, &err)
 }
 
+/// Run `command` with the file `stdin` on its input and nothing asked
+/// before it: `ssh <machine> update < image`, as a test asks it.
+pub fn ssh_pipe(host: &str, port: u16, identity: &Identity, command: &str, stdin: &Path) -> Result<Exec, String> {
+    let (out, err, port) = capture(identity, port)?;
+    let said = client(&["pipe", host, &port, str(&identity.private), str(&out), str(&err), str(stdin), command])?;
+    collected(&said, &out, &err)
+}
+
+/// Ask for `command` and answer the guest's reply to the request, without
+/// waiting for the program: `reboot`, whose status no client can collect.
+pub fn ssh_fire(host: &str, port: u16, identity: &Identity, command: &str) -> Result<String, String> {
+    let said = client(&["fire", host, &port.to_string(), str(&identity.private), command])?;
+    Ok(said.lines().last().unwrap_or("").to_string())
+}
+
 /// Run `command` with `stdin` on its input, after asking the guest to set an
 /// environment variable. `Ok`'s second half is what it answered that request.
 pub fn ssh_feed(
@@ -319,6 +334,12 @@ const GUEST_TEST: &str = "test_rs_empty_dir_stat";
 const MISSING: &str = "/tmp/no_such_file_for_the_stderr_arm";
 
 /// `tests/sshdcase` with a key in its image and a forward into its port 22.
+pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> super::qemu::QemuInstance {
+    boot_case("tests/sshdcase", rust_bins).0
+}
+
+/// `case` with a key in its image and a forward into its port 22, and its
+/// console up to sshd's listening line.
 ///
 /// **The key is staged rather than installed**: `/home` on this machine may be
 /// a tmpfs, so a key that had to be put there after the boot is a key nobody
@@ -328,7 +349,10 @@ const MISSING: &str = "/tmp/no_such_file_for_the_stderr_arm";
 /// profile with no NIC, an argv with no forward, and a daemon that never opened
 /// its port are each a machine the gate cannot run on at all, which is the same
 /// class as a guest that never printed its ready marker.
-pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> super::qemu::QemuInstance {
+pub fn boot_case(
+    case: &str,
+    rust_bins: &[(String, Vec<u8>)],
+) -> (super::qemu::QemuInstance, String) {
     let identity = Identity::mint(KEY).unwrap_or_else(|why| panic!("[sshd] {why}"));
     let options = super::qemu::BootOptions {
         profile: super::qemu::Profile::Headless,
@@ -354,7 +378,7 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> super::qemu::QemuInstance {
         "[sshd] the argv carries no {forward}, so nothing on this host can reach the guest"
     );
 
-    let config = compile::repo_root().join("tests/sshdcase");
+    let config = compile::repo_root().join(case);
     let mut guest =
         super::qemu::QemuInstance::boot_with_options(&config, &[], rust_bins, options);
     let mut console = guest.boot_log().to_string();
@@ -366,7 +390,7 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> super::qemu::QemuInstance {
     ) {
         panic!("[sshd] never listened, so no exchange below would mean anything: {why}\n{console}");
     }
-    guest
+    (guest, console)
 }
 
 /// What `exec` is for: run this program, and tell me how it ended.

@@ -1,7 +1,7 @@
 //! What a transition out of Ring 3 preserves.
 //!
 //! Three arms, all positive assertions, and each one fails on the tree that
-//! came before the bracket in `kernel/src/arch/entry.rs`:
+//! came before the bracket in `kernel/src/arch/x86_64/entry.rs`:
 //!
 //! 1. **Leak.** One process pins a distinctive FP state and exits without
 //!    restoring it; the next asserts the *declared* state at its own entry.
@@ -26,7 +26,7 @@ use std::sync::Arc;
 use core::mem::offset_of;
 
 use toyos_abi::syscall::{
-    mmap, nanosleep, thread_join, thread_spawn, MmapFlags, MmapProt, SYS_CLOCK, SYS_EXIT,
+    mmap, nanosleep, thread_join, thread_spawn, MmapFlags, MmapProt, SYS_EXIT, SYS_GETPID,
     SYS_THREAD_EXIT,
 };
 
@@ -101,13 +101,12 @@ const PAGE_2M: usize = 2 * 1024 * 1024;
 /// is a page of its own and each is a `#PF`.
 const FAULT_TOUCHES: u64 = 2;
 
-/// The page-fault workload, and the only kind of demand-paged memory a userland
-/// program on this kernel can reach.
+/// The page-fault workload.
 ///
 /// Not `mmap`: `sys_mmap` allocates and maps its whole region up front, so the
-/// first touch of a fresh mapping faults nothing. Not `.bss` either: `toyos-ld`
-/// writes it into the file, so a `PT_LOAD`'s `filesz` equals its `memsz` and
-/// the loader's `Anonymous` tail is empty. What is left is a *writable
+/// first touch of a fresh mapping faults nothing. Not `.bss` either: that is the
+/// loader's `Anonymous` tail of a `PT_LOAD`, and the path measured here is the
+/// file-backed one. What is used is a *writable
 /// file-backed* page — non-zero so it lands in `.data`, and named by nothing
 /// else so no relocation has touched it — which faults on first write and takes
 /// the allocate-and-copy path. Four megabytes of test image is what two faults
@@ -406,7 +405,7 @@ fn preservation_arm() -> Result<(), String> {
             // `syscall` that clobbers every caller-saved one.
             "mov r13, {nsys}",
             "2:",
-            "mov rdi, {clock}",
+            "mov rdi, {getpid}",
             "syscall",
             "dec r13",
             "jnz 2b",
@@ -440,7 +439,7 @@ fn preservation_arm() -> Result<(), String> {
             npages = const FAULT_TOUCHES,
             nsys = const SYSCALLS,
             spin = const SPIN,
-            clock = const SYS_CLOCK,
+            getpid = const SYS_GETPID,
             out("r13") _,
             out("r14") _,
             clobber_abi("sysv64"),

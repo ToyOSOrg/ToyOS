@@ -9,9 +9,10 @@
 //!
 //! So a metal image is a committed boot config with that one field derived onto
 //! it. The derivation is here, pure, because what it changes about the config
-//! is what the T14 sees and nothing else may drift from it: the two authorities
-//! a `reboot` job needs (`dup` to hand the applet a duplicate, `power` for the
-//! reset), the applet itself, and the name that reaches it.
+//! is what the T14 sees and nothing else may drift from it: the one authority a
+//! `reboot` job needs (the `power` connector, which the applet inherits with the
+//! runner's namespace and asks init through), the applet itself, and the name
+//! that reaches it.
 
 #![forbid(unsafe_code)]
 
@@ -24,10 +25,9 @@ const TOYBOX: &str = "toybox";
 const REBOOT_LINK: &str = "bin/reboot";
 const TOYBOX_PATH: &str = "/system/bin/toybox";
 
-/// The two rights the last job needs. `power` is the reset; `dup` is what lets
-/// the runner hand a duplicate down to the applet, which is not a `[programs]`
-/// key and so has no row of its own.
-const RUNNER_SYSCAP: [&str; 2] = ["dup", "power"];
+/// The connector the last job needs: init's `power` port, which has `logd`
+/// make the log whole and then resets the machine.
+const POWER: &str = "power";
 
 /// Why a committed boot config cannot become a metal image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,15 +95,13 @@ pub fn derive(
     args.push(Value::String(REBOOT.to_string()));
     runner.insert("args".to_string(), Value::Array(args));
 
-    let syscap = runner
-        .entry("syscap")
+    let receives = runner
+        .entry("receives")
         .or_insert_with(|| Value::Array(Vec::new()))
         .as_array_mut()
-        .ok_or_else(|| Underived::Toml(format!("`programs.{RUNNER}.syscap` is not a list")))?;
-    for right in RUNNER_SYSCAP {
-        if !syscap.iter().any(|v| v.as_str() == Some(right)) {
-            syscap.push(Value::String(right.to_string()));
-        }
+        .ok_or_else(|| Underived::Toml(format!("`programs.{RUNNER}.receives` is not a list")))?;
+    if !receives.iter().any(|v| v.as_str() == Some(POWER)) {
+        receives.push(Value::String(POWER.to_string()));
     }
 
     let symlinks = table
@@ -144,7 +142,7 @@ mod tests {
     }
 
     /// The whole point of the derivation, on every config it is asked of: the
-    /// runner ends the boot, and it holds the two rights the last job needs.
+    /// runner ends the boot, and it holds the connector the last job needs.
     #[test]
     fn every_derived_config_ends_its_own_boot() {
         for dir in CONFIGS {
@@ -154,15 +152,13 @@ mod tests {
             let args: Vec<&str> =
                 runner["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
             assert_eq!(args, ["test_rs_mkdir_cap", REBOOT], "{dir}");
-            let syscap: Vec<&str> = runner["syscap"]
+            let receives: Vec<&str> = runner["receives"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .map(|v| v.as_str().unwrap())
                 .collect();
-            for right in RUNNER_SYSCAP {
-                assert!(syscap.contains(&right), "{dir}: {syscap:?} lacks {right}");
-            }
+            assert!(receives.contains(&POWER), "{dir}: {receives:?} lacks {POWER}");
             assert_eq!(parsed["symlinks"][REBOOT_LINK].as_str(), Some(TOYBOX_PATH), "{dir}");
             assert!(parsed["programs"].get(TOYBOX).is_some(), "{dir} builds no {TOYBOX}");
         }
@@ -180,8 +176,8 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        // `tests/testcases` declares all five; the derivation adds neither a
-        // sixth spelling of the two it needs nor takes the other three away.
+        // `tests/testcases` declares all five, and the derivation takes none
+        // away and spells none twice; nor the connector it needs, declared too.
         for right in ["device", "dup", "logread", "power", "roster"] {
             assert_eq!(
                 syscap.iter().filter(|r| **r == right).count(),
@@ -189,6 +185,8 @@ mod tests {
                 "{right} in {syscap:?}"
             );
         }
+        let receives = parsed["programs"][RUNNER]["receives"].as_array().unwrap();
+        assert_eq!(receives.iter().filter(|r| r.as_str() == Some(POWER)).count(), 1);
         assert_eq!(parsed["symlinks"]["bin/echo"].as_str(), Some(TOYBOX_PATH));
         assert!(parsed["programs"].get("soundd").is_some());
     }
