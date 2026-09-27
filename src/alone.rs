@@ -1,5 +1,9 @@
-//! Whether two failure sentences are the same failure — the one decision behind
-//! the suite's `ALONE:` line.
+//! Whether a run re-runs its reds alone, and whether two failure sentences are
+//! the same failure — the two decisions behind the suite's `ALONE:` line.
+//!
+//! Only a run wider than one re-runs: a red that had the host to itself
+//! already ran alone, so a re-run of it samples the same host and binary again
+//! and cannot find the one thing it exists for, a red only beside other guests.
 //!
 //! What differs between two readings of one assertion is a measurement; what
 //! differs between two failures is an identity. So a sentence is compared with
@@ -23,6 +27,11 @@
 /// The units that make digits a reading, each one a spelling an assertion in
 /// this tree prints; the test names the site per unit.
 const UNITS: &[&str] = &["ns", "us", "ms", "s", "KiB", "MiB", "GiB", "MB", "GB", "B"];
+
+/// Whether a run `width` guests wide re-runs its reds alone.
+pub fn reruns(width: usize) -> bool {
+    width > 1
+}
 
 /// Whether `one` and `other` are the same assertion firing, at possibly
 /// different readings.
@@ -140,6 +149,12 @@ mod tests {
                          outgrown the injection window: widen SLOW_CONNECT_NS, not this gate";
 
     #[test]
+    fn only_a_run_wider_than_one_reruns() {
+        assert!(!reruns(1));
+        assert!(reruns(2) && reruns(12));
+    }
+
+    #[test]
     fn one_assertion_at_two_measurements_is_one_failure() {
         assert_ne!(WIDE, ALONE, "the two runs did write different sentences");
         assert!(same_failure(WIDE, ALONE), "one assertion at two readings read as two");
@@ -188,8 +203,7 @@ mod tests {
     /// separated from it — because two of them are two objects.
     ///
     /// Each pair is a whole line this tree writes, at two indices: the
-    /// transport break of `kernel/src/drivers/xhci/wait/msc.rs` (the one
-    /// `src/redlist.rs` quotes off CI), the durability check of
+    /// transport break of `kernel/src/drivers/xhci/wait/msc.rs`, the durability check of
     /// `tests/common/volumes.rs`, and the stall line of
     /// `kernel/src/heartbeat.rs`.
     #[test]

@@ -1,6 +1,6 @@
 # Tests
 
-The mechanics live where the work is: profiles and shapes in `tests/common/`, registration and tiers in `tests/toyos.rs`, known reds in `src/redlist.rs`'s `QUARANTINE`, the fast tier's line in `src/tiers.rs` — read those, not this file, for how the harness works.
+The mechanics live where the work is: profiles and shapes in `tests/common/`, registration and tiers in `tests/toyos.rs`, disabled tests in `src/redlist.rs`'s `DISABLED`, the fast tier's line in `src/tiers.rs` — read those, not this file, for how the harness works.
 
 ## Caveats that bite every agent
 
@@ -21,7 +21,7 @@ The mechanics live where the work is: profiles and shapes in `tests/common/`, re
 - **A liveness ceiling scales by two host facts** — boot-derived host speed *and* the guest's own `vcpus/cores` oversubscription. Widen a *liveness* guard for this, never a correctness bound.
 - **A wedge verdict needs both the budget spent and the guest gone quiet** — a healthy idle guest can be silent for minutes, and a guest still talking past its budget is slow, not stuck; only a far backstop stands behind a guest that keeps talking.
 - **A measured bound is asserted against the derivation, never against the measurement** — a bound that has to be widened to pass is a finding. A test asserting a kernel `Budget` never expires asserts a bound the kernel does not promise; the red is only the outcome that is neither the answer nor the declared degradation.
-- **A test named as evidence may itself be quarantined** — ask `cargo run -- --known-red <name>` before quoting it; a row's `says` matches a *message*, not a cause, so read the capture, never the row.
+- **A test named as evidence may be disabled, and then it proved nothing** — ask `cargo run -- --known-red <name>` before quoting it.
 - **A crafted-input test asserts the harm before the return value, and never Debug-prints a refused value** — an unrefused one is as large as the input asked for.
 - **A stimulus sent through a channel that can silently lose it is verified before its effect is asserted** — QEMU's PS/2 queue drops the seventeenth byte, so typed input paces against the guest's report (`shell_type_once`); a guest's console reaches the host as whole lines only, so a partial line exists on no channel.
 - **A harness field that can be silently inert is this suite's worst defect class** — where two options can describe the same guest they refuse each other by name, and an image is asked what it is armed with.

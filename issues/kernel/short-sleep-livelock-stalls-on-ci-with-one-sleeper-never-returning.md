@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-06
 ---

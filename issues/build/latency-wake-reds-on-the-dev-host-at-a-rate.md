@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: finding
 opened: 2026-09-07
 ---

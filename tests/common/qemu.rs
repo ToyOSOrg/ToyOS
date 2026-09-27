@@ -552,8 +552,8 @@ fn without_stamp(line: &str) -> &str {
 
 /// The sentence a wait gives when what stopped the guest is on the console.
 ///
-/// **One wording for all three waits**, so a summary line, a redlist row and an
-/// issue file quote the same words wherever the wait was — and so that nothing
+/// **One wording for all three waits**, so a summary line and an issue file
+/// quote the same words wherever the wait was — and so that nothing
 /// in it is a measurement of the host. The silence that proved the panic was
 /// fatal is deliberately not in the sentence: it differs by a poll interval
 /// between two runs of one panic, and `alone_line` compares those two sentences
@@ -568,8 +568,8 @@ fn kernel_died_here(line: &str) -> String {
 
 /// The heading a verdict puts the guest's own account under.
 ///
-/// One spelling, so an issue file, a redlist row and a CI log all quote the
-/// same words when they quote a report.
+/// One spelling, so an issue file and a CI log both quote the same words when
+/// they quote a report.
 pub const DIED_SAYING: &str = "--- what the kernel said as it died ---";
 
 /// The heading a verdict puts a never-announced test's window under.

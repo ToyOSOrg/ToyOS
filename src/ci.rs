@@ -667,8 +667,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
 }
 
 /// The suite's own count line and every line naming a verdict worth reading
-/// without the log: a failure, whether it survived being run alone, and a
-/// quarantined name that failed for something else.
+/// without the log: a failure, and whether it survived being run alone.
 fn verdicts(log: &str) -> String {
     let total = log
         .lines()
@@ -678,10 +677,8 @@ fn verdicts(log: &str) -> String {
         .lines()
         .filter(|l| {
             l.starts_with("FAIL ")
-                || l.starts_with("XFAIL ")
                 || (l.starts_with(' ')
                     && ["STALL ", "INVL ", "ALONE "].iter().any(|v| l.trim_start().starts_with(v)))
-                || l.contains("is quarantined for something else")
         })
         .collect();
     if named.is_empty() {
