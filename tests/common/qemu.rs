@@ -425,10 +425,7 @@ pub fn host_scale_self_check() -> Result<(), String> {
 /// is the part of "how fast is the host today" the harness knows. It does not
 /// know the rest, and a retry loop bounded by elapsed time has that ceiling for
 /// a *verdict* the moment the rest moves: a guest that is merely late reports
-/// exactly what a wedged one reports. `issues/design-debt/` is the bill —
-/// `desktop_audio_client` 385 s wide against 13 s alone, a landing gate that is
-/// a coin toss, and six reds in four suites every one of which was
-/// `ALONE: GREEN`.
+/// exactly what a wedged one reports.
 ///
 /// The two are distinguishable and the console is what distinguishes them: a
 /// guest still printing is a guest still working. So the ceiling here is time in
