@@ -4,6 +4,8 @@
 //! decoded ([`Run::decode`]) and this side's is cut ([`Geometry::run`]). The
 //! adapter reaches a run's bytes only through its [`Span`].
 
+use core::fmt;
+
 use crate::{Untrusted, Violation};
 
 /// Bytes `offset..offset + len` of the region.
@@ -51,11 +53,18 @@ impl Geometry {
 }
 
 /// Slots of the arena, bounded by its geometry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Run {
     first: u32,
     count: u32,
     span: Span,
+}
+
+/// Its slots alone: the span follows from them.
+impl fmt::Debug for Run {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Run").field("first", &self.first).field("count", &self.count).finish()
+    }
 }
 
 impl Run {

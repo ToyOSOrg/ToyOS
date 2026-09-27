@@ -120,14 +120,14 @@ type ServerEnds = (Consumer<SQE_WORDS, DEPTH, WORDS>, Producer<CQE_WORDS, DEPTH,
 struct Queues {
     sq: VecDeque<Request>,
     cq: VecDeque<Completion>,
-    page: Box<[Shared; WORDS]>,
+    page: [Shared; WORDS],
     client: ClientEnds,
     server: ServerEnds,
 }
 
 impl Queues {
     fn new() -> Self {
-        let page = Box::new(core::array::from_fn(|_| Shared(Cell::new(0))));
+        let page = core::array::from_fn(|_| Shared(Cell::new(0)));
         let (client, server) = Self::ends(&page);
         Self { sq: VecDeque::new(), cq: VecDeque::new(), page, client, server }
     }
