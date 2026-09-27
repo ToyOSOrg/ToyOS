@@ -167,7 +167,7 @@ pub fn stop() -> Record {
     let armed = watch::arm(&PROGRESS, 0, WaitClass::Other)
         .expect("quiesce::stop: the caller holds no task to park");
     // The kick is the timer vector, whose return to Ring 3 is the gate.
-    crate::arch::apic::kick_all_but_self();
+    crate::arch::irqchip::kick_all_but_self();
     let cpus = crate::arch::smp::cpu_count();
 
     let began = crate::clock::now();

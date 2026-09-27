@@ -150,7 +150,7 @@ impl Shard {
     /// Take the next sequence number, on the CPU that owns this shard.
     /// # Safety
     /// Caller must be the owning CPU, and `guard` must stay live through the matching [`Shard::commit`].
-    pub unsafe fn reserve(&self, guard: &crate::arch::LogCommitGuard) -> u64 {
+    pub unsafe fn reserve(&self, guard: &crate::arch::IrqGuard) -> u64 {
         crate::arch::percpu_fetch_add(&self.head, guard)
     }
 
@@ -161,7 +161,7 @@ impl Shard {
         &self,
         seq: u64,
         record: &LogRecord,
-        _guard: &crate::arch::LogCommitGuard,
+        _guard: &crate::arch::IrqGuard,
     ) {
         debug_assert!(
             self.head().saturating_sub(seq) < SHARD_RECORDS as u64,

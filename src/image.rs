@@ -4,6 +4,8 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use bcachefs::{BlockBuf, Formatted, FsUuid, Superblock, VecBlockIO};
+
+use crate::arch::Arch;
 use sha2::{Digest, Sha256};
 use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
 
@@ -173,6 +175,7 @@ pub fn update_image(kernel: &[u8], root: &[u8], params: &str, signing: Signing<'
 /// table, the log partition — third, where the metal loop finds it — and then
 /// slot A's FAT and ROOT, marked, and slot B's where `second` asks for one.
 pub fn create_boot_image(
+    arch: Arch,
     kernel_bytes: &[u8],
     bl_bytes: &[u8],
     root_bytes: &[u8],
@@ -206,7 +209,7 @@ pub fn create_boot_image(
     table_volume[..toyos_update::slots::BLOCK].copy_from_slice(&table.encode());
 
     let mut parts = vec![
-        Part::full("ESP", "EFI System", gpt::partition_types::EFI, esp_guid, create_esp_volume(bl_bytes, log_guid), Some(Volume::Fat32)),
+        Part::full("ESP", "EFI System", gpt::partition_types::EFI, esp_guid, create_esp_volume(arch, bl_bytes, log_guid), Some(Volume::Fat32)),
         Part::full("slot table", "ToyOS slots", TOYOS_SLOTS, table_guid, table_volume, None),
         // Microsoft Basic Data, and that type is the whole reason this is a
         // partition of its own: macOS never auto-mounts an EFI-typed partition
@@ -657,14 +660,14 @@ fn populate(volume: &mut [u8], label: &str, files: &[(&str, &[u8])]) {
 /// partition the kernel's log goes on. The kernel and its parameter are a
 /// slot's (`create_slot_volume`), because the loader is the one part of the
 /// machine that is not slotted.
-fn create_esp_volume(bootloader: &[u8], log_guid: uuid::Uuid) -> Vec<u8> {
+fn create_esp_volume(arch: Arch, bootloader: &[u8], log_guid: uuid::Uuid) -> Vec<u8> {
     let total_size = round_up_sectors(((bootloader.len() + ESP_FREE_BYTES) * 64 / 63).max(FAT32_MIN_BYTES));
     let mut volume = format_fat32(total_size, "TOYOS-BOOT");
     populate(
         &mut volume,
         "TOYOS-BOOT",
         &[
-            ("EFI/BOOT/BOOTx64.EFI", bootloader),
+            (arch.removable_loader(), bootloader),
             // Mirrored in `bootloader/src/main.rs` as `\toyos\log.guid`, which
             // reads it beside itself and refuses the volume if it is not there.
             // The sixteen bytes are the GPT entry's own, in the entry's own
@@ -1139,7 +1142,7 @@ mod tests {
         let key = key();
         let s = sections(b"kernel", &tiny_root(), "", signing(&key));
         for (what, volume) in [
-            ("ESP", create_esp_volume(b"bootloader", uuid::Uuid::new_v4())),
+            ("ESP", create_esp_volume(Arch::X86_64, b"bootloader", uuid::Uuid::new_v4())),
             ("slot volume", create_slot_volume(Some(&s), FAT32_MIN_BYTES)),
             ("empty slot volume", create_slot_volume(None, FAT32_MIN_BYTES)),
             ("log volume", create_log_volume()),
@@ -1169,7 +1172,7 @@ mod tests {
     fn a_damaged_image_is_refused_by_the_reader_that_caught_it() {
         let root_image = tiny_root();
         let key = key();
-        let disk = create_boot_image(b"kernel", b"bootloader", &root_image, "", signing(&key), None);
+        let disk = create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root_image, "", signing(&key), None);
         let log = only(&disk, toyos_gpt::Guid::MICROSOFT_BASIC);
         let root = root_partition_guid_of(&disk);
         let parts =
@@ -1230,7 +1233,7 @@ mod tests {
     #[test]
     fn the_esp_and_a_slot_carry_what_the_bootloader_looks_for() {
         assert_eq!(
-            files_of(create_esp_volume(b"bootloader", uuid::Uuid::new_v4())),
+            files_of(create_esp_volume(Arch::X86_64, b"bootloader", uuid::Uuid::new_v4())),
             ["EFI/BOOT/BOOTx64.EFI", "toyos/log.guid"]
         );
         let key = key();
@@ -1254,7 +1257,7 @@ mod tests {
         let root = tiny_root();
         let dir = toyos_tmpdir::TempDir::new("image-slot");
         let path = dir.join("slotted.img");
-        let disk = create_boot_image(b"\x7fELF kernel", b"bootloader", &root, "sched-fast-health", signing(&key), Some(SecondSlot { root_bytes: 8 << 20 }));
+        let disk = create_boot_image(Arch::X86_64, b"\x7fELF kernel", b"bootloader", &root, "sched-fast-health", signing(&key), Some(SecondSlot { root_bytes: 8 << 20 }));
         std::fs::write(&path, &disk).expect("write the image");
         let mut file = std::fs::File::open(&path).expect("open the image");
         let table = slot_table_of(&mut file).expect("the slot table");
@@ -1301,7 +1304,7 @@ mod tests {
         let root_image = tiny_root();
         let write = |name: &str, params: &str| {
             let path = dir.join(name);
-            std::fs::write(&path, create_boot_image(b"kernel", b"bootloader", &root_image, params, signing(&key()), None))
+            std::fs::write(&path, create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root_image, params, signing(&key()), None))
                 .expect("write an image");
             path
         };
@@ -1414,7 +1417,7 @@ mod tests {
 
         let root_image = create_root_image(&files, &symlinks, true);
         let key = key();
-        let disk = create_boot_image(b"kernel", b"bootloader", &root_image, "", signing(&key), None);
+        let disk = create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root_image, "", signing(&key), None);
 
         // Located by *type*, through the parser the kernel uses, at the offset
         // the table gives — never at the one the writer computed.
@@ -1513,6 +1516,7 @@ mod tests {
         files.push((toyos_manifest::PATH.to_string(), manifest.clone()));
 
         let disk = create_boot_image(
+            Arch::X86_64,
             b"kernel",
             b"bootloader",
             &create_root_image(&files, &symlinks, true),

@@ -4,7 +4,7 @@
 //! one running past the list ends the walk with a [`MadtHalt`]: neither can be
 //! resynchronised, and a walk that tried would not terminate.
 
-use crate::{u16le, u32le, Phys, Table, SDT_HEADER_LEN};
+use crate::{u16le, u32le, u64le, Phys, Table, SDT_HEADER_LEN};
 
 /// ACPI 6.5 Table 5.19: `Local Interrupt Controller Address` (4) and `Flags`
 /// (4) follow the header; the interrupt controller structures start here.
@@ -38,8 +38,27 @@ pub enum MadtEntry {
     LocalApic { apic_id: u32, enabled: bool },
     IoApic(IoApicEntry),
     SourceOverride(SourceOverride),
+    /// Type 0xB (Table 5.37): one CPU's GIC CPU interface; `enabled` is flags bit 0.
+    Gicc(Gicc),
+    /// Type 0xC (Table 5.39): the GIC distributor.
+    Gicd { base: u64, version: u8 },
+    /// Type 0xE (Table 5.43): a range holding GICv3 redistributors.
+    Gicr { base: u64, length: u32 },
+    /// Type 0xF (Table 5.44): a GICv3 Interrupt Translation Service.
+    Its { id: u32, base: u64 },
     /// A type this kernel does not act on, or one too short to hold its own fields.
     Other(u8),
+}
+
+/// MADT type 0xB, the fields a GICv3 kernel reads: which CPU it is
+/// (`MPIDR`), whether it may be started, and where its redistributor is when
+/// firmware names one per CPU rather than as a range.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Gicc {
+    pub uid: u32,
+    pub enabled: bool,
+    pub gicr_base: u64,
+    pub mpidr: u64,
 }
 
 /// The entry whose declared length the list cannot hold; the last item a walk yields.
@@ -116,6 +135,20 @@ impl<P: Phys> Iterator for MadtEntries<P> {
                 apic_id: u32le(phys, base + 4),
                 enabled: u32le(phys, base + 8) & 1 != 0,
             },
+            // Table 5.37: ACPI Processor UID (8..12), Flags (12..16), GICR Base
+            // Address (60..68), MPIDR (68..76). 76 bytes is ACPI 5.1's length.
+            (0xB, 76..) => MadtEntry::Gicc(Gicc {
+                uid: u32le(phys, base + 8),
+                enabled: u32le(phys, base + 12) & 1 != 0,
+                gicr_base: u64le(phys, base + 60),
+                mpidr: u64le(phys, base + 68),
+            }),
+            // Table 5.39: Physical Base Address (8..16), GIC Version (20).
+            (0xC, 24..) => MadtEntry::Gicd { base: u64le(phys, base + 8), version: phys.byte(base + 20) },
+            // Table 5.43: Discovery Range Base Address (4..12), Length (12..16).
+            (0xE, 16..) => MadtEntry::Gicr { base: u64le(phys, base + 4), length: u32le(phys, base + 12) },
+            // Table 5.44: GIC ITS ID (4..8), Physical Base Address (8..16).
+            (0xF, 20..) => MadtEntry::Its { id: u32le(phys, base + 4), base: u64le(phys, base + 8) },
             _ => MadtEntry::Other(entry_type),
         }))
     }

@@ -59,8 +59,8 @@ pub const DECLARED: &[Declared] = &[
         keys: "`IdKey`, which no integer implements: every key is an id this kernel issued",
     },
     Declared {
-        file: "kernel/src/mm/paging.rs",
-        ty: "HashMap<u64, super::pmm::PhysPage>",
+        file: "kernel/src/arch/x86_64/paging.rs",
+        ty: "HashMap<u64, crate::mm::pmm::PhysPage>",
         keys: "a physical address the page allocator returned",
     },
     Declared {

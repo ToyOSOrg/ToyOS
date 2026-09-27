@@ -1,7 +1,7 @@
 //! VirtIO console: single-port (no MULTIPORT), replacing the 16550 UART as
 //! the kernel log channel after init. Uses queues 0 (RX) and 1 (TX).
 //!
-//! RX is poll-driven: no UART IRQ handler is wired (see `arch/idt/mod.rs`).
+//! RX is poll-driven: no UART IRQ handler is wired (see `arch/x86_64/idt/mod.rs`).
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;

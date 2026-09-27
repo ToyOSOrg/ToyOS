@@ -7,6 +7,7 @@
 use alloc::vec::Vec;
 
 use crate::mm::{KernelSlice, MAX_HEAP_ALLOC};
+use toyos_elf::rela::ExeRefusal;
 use toyos_elf::{Rela, RelaCounts, RelaTable, RelocKind};
 
 /// Relocation entries the loader needs, grouped by what it does with them.
@@ -39,26 +40,23 @@ impl ParsedRelaEntries {
     }
 }
 
-/// Groups both relocation tables, returning `None` when any one group would not fit a single kernel allocation.
-pub fn parse_rela_entries(rela_data: &[u8], jmprel_data: &[u8]) -> Option<ParsedRelaEntries> {
+/// Groups both relocation tables, reserved exactly from what
+/// `RelaCounts::for_executable` allows, or its refusal.
+pub fn parse_rela_entries(rela_data: &[u8], jmprel_data: &[u8]) -> Result<ParsedRelaEntries, ExeRefusal> {
     let entries = || {
-        RelaTable::new(rela_data)
+        RelaTable::new(rela_data, crate::arch::ELF_MACHINE)
             .iter()
-            .chain(RelaTable::new(jmprel_data).iter())
+            .chain(RelaTable::new(jmprel_data, crate::arch::ELF_MACHINE).iter())
     };
     let counts = RelaCounts::of(entries());
     // Ceiling assumes the widest record type, since any one group could be the whole table.
     let widest = core::mem::size_of::<(u64, u32, i64)>();
-    let kept = [RelocKind::Relative, RelocKind::GlobDat, RelocKind::Tpoff64, RelocKind::Tpoff32];
-    if counts.max_of(&kept).checked_mul(widest).is_none_or(|b| b > MAX_HEAP_ALLOC) {
-        log!("ELF: {:?} will not fit one allocation", counts);
-        return None;
-    }
+    let reserve = counts.for_executable(widest, MAX_HEAP_ALLOC).inspect_err(|_| log!("ELF: {:?} refused", counts))?;
     let mut out = ParsedRelaEntries {
-        relative: Vec::with_capacity(counts.relative),
-        glob_dat: Vec::with_capacity(counts.bind),
-        tpoff64: Vec::with_capacity(counts.tpoff64),
-        tpoff32: Vec::with_capacity(counts.tpoff32),
+        relative: Vec::with_capacity(reserve.relative),
+        glob_dat: Vec::with_capacity(reserve.bind),
+        tpoff64: Vec::with_capacity(reserve.tpoff64),
+        tpoff32: Vec::with_capacity(reserve.tpoff32),
     };
     for r in entries() {
         match r.kind {
@@ -71,7 +69,7 @@ pub fn parse_rela_entries(rela_data: &[u8], jmprel_data: &[u8]) -> Option<Parsed
             _ => {}
         }
     }
-    Some(out)
+    Ok(out)
 }
 
 /// Pre-computed writes, sorted by offset so a page's share is one binary search away.

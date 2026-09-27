@@ -232,7 +232,7 @@ pub const TCG: Baseline = Baseline {
 
 /// The recorded sample for the accelerator this run is actually using.
 pub fn baseline() -> &'static Baseline {
-    if toyos_build::kvm_usable() {
+    if super::qemu::SUITE_ARCH.accel().is_hardware() {
         &KVM
     } else {
         &TCG

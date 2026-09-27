@@ -1,5 +1,5 @@
 //! The `BuildHasher` every kernel hash container is built on, seeded from
-//! `RDRAND` before any container exists — `kernel/Cargo.toml` takes hashbrown
+//! the CPU's own random source before any container exists — `kernel/Cargo.toml` takes hashbrown
 //! without `default-hasher`, so a container must name a hasher.
 //!
 //! **A container built before [`seed`], or on a constant, is the wrong answer
@@ -12,7 +12,7 @@
 use core::hash::{BuildHasher, Hasher};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::cpu;
+use crate::arch::entropy;
 
 /// `0` until [`seed`] runs, and a value it refuses to draw.
 static SEED: AtomicU64 = AtomicU64::new(0);
@@ -24,19 +24,18 @@ pub const UNSEEDED: &str =
 /// Two seeds in one boot means a container was built against the first.
 const RESEEDED: &str = "kernel hasher: seed() ran twice in one boot";
 
-pub const NO_RDRAND: &str =
-    "kernel hasher: CPUID.01H:ECX[30] is clear, so this CPU has no RDRAND and the seed has no \
-     source";
-
 pub const NO_ENTROPY: &str =
-    "kernel hasher: RDRAND gave no usable value, so the seed would be a constant on every boot";
+    "kernel hasher: the CPU's random source gave no usable value, so the seed would be a \
+     constant on every boot";
 
 /// Called once, before any container. `0` and all-ones are what a failing
-/// `RDRAND` leaves behind, so neither may become a seed.
+/// source leaves behind, so neither may become a seed.
 pub fn seed() {
-    assert!(cpu::has_rdrand(), "{NO_RDRAND}");
-    let drawn = (0..cpu::RDRAND_ATTEMPTS)
-        .filter_map(|_| cpu::rdrand())
+    if let Err(why) = entropy::available() {
+        panic!("kernel hasher: {why}, and the seed has no other source");
+    }
+    let drawn = (0..entropy::ATTEMPTS)
+        .filter_map(|_| entropy::draw())
         .find(|&v| v != 0 && v != u64::MAX)
         .unwrap_or_else(|| panic!("{NO_ENTROPY}"));
     assert_eq!(SEED.swap(drawn, Ordering::Release), 0, "{RESEEDED}");

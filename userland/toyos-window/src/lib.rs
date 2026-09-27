@@ -1,3 +1,4 @@
+mod arch;
 pub mod framebuffer;
 pub mod wait;
 

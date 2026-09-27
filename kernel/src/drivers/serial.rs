@@ -1,55 +1,31 @@
-//! The 16550 and the virtio-console, and the two locks that serialise them.
+//! The console UART and the virtio-console, and the two locks that serialise
+//! them. Where the UART is and what it is are the architecture's
+//! (`arch::console_uart`).
 //!
-//! [`BackendGuard`] is the
-//! registers' lock, held with interrupts off for one burst: a FIFO's worth
-//! to a 16550; the submit of a transmit buffer to virtio-console, and each
-//! look for its completion, which the host takes at its own pace; a byte
-//! read. The panic path takes the registers alone, and bypasses them once
-//! they stay held. Nothing that holds a kernel lock formats here.
+//! [`BackendGuard`] is the registers' lock, held with interrupts off for one
+//! burst: what the UART's transmitter takes at once; the publish of a
+//! transmit buffer to virtio-console, and each look for its completion, which
+//! the host takes at its own pace; a byte read. The panic path takes the
+//! registers alone, and bypasses them once they stay held. Nothing that holds
+//! a kernel lock formats here.
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::arch::cpu::{inb, outb};
+use crate::arch::IrqGuard;
 use crate::log;
+use super::serial_lock::{BackendLock, Held};
 use crate::scheduler::Parkable;
 use crate::sleeplock::{SleepGuard, SleepLock};
 
-const PORT: u16 = 0x3f8; // COM1
+use crate::arch::console_uart as uart;
 
-// Latched once from `init`'s loopback probe: hardware with no SuperIO
-// reads 0xFF on every access, indistinguishable from a ready UART.
+// Latched once from `init`: the architecture's own answer about whether a UART
+// is there, since one that is not may still read as ready.
 static UART_PRESENT: AtomicBool = AtomicBool::new(false);
 
-// Every register is `PORT + n`; the identity op keeps that pattern uniform
-// across all eight lines instead of special-casing the data register.
-#[allow(clippy::identity_op)]
-pub fn init() {
-    // SAFETY: `outb`/`inb` require the caller to own the port and the byte;
-    // every port here is `PORT + n` for `n` in 0..=4, inside COM1's own
-    // register block, and the writes are the 16550's documented init sequence.
-    // Order matters: DLAB must precede the divisor writes and loopback mode
-    // must precede the probe, or the sequence misprograms the chip.
-    let loopback = unsafe {
-        outb(PORT + 1, 0x00); // Disable all interrupts
-        outb(PORT + 3, 0x80); // Enable DLAB (set baud rate divisor)
-        outb(PORT + 0, 0x03); // Set divisor to 3 (lo byte) 38400 baud
-        outb(PORT + 1, 0x00); //                  (hi byte)
-        outb(PORT + 3, 0x03); // 8 bits, no parity, one stop bit
-        outb(PORT + 2, 0xC7); // Enable FIFO, clear them, with 14-byte threshold
-        outb(PORT + 4, 0x0B); // IRQs enabled, RTS/DSR set
-        outb(PORT + 4, 0x1E); // Set in loopback mode, test the serial chip
-        outb(PORT + 0, 0xAE); // Test serial chip (send byte 0xAE and check if serial returns same byte)
-        let seen = inb(PORT + 0);
-        UART_PRESENT.store(seen == 0xAE, Ordering::Relaxed);
-        outb(PORT + 4, 0x0F); // Normal operation mode
-        seen
-    };
-    // Logs the raw byte, not just the verdict: distinguishes "no SuperIO"
-    // (0xFF) from a wrong response and a right chip at the wrong port.
-    log!(
-        "serial: 16550 loopback read {:#04x} ({})",
-        loopback,
-        if loopback == 0xAE { "present" } else { "absent or wrong port" }
-    );
+/// Find and program the console UART, off the firmware tables at `rsdp_addr`
+/// where the architecture places it by them.
+pub fn init(rsdp_addr: u64) {
+    UART_PRESENT.store(uart::init(rsdp_addr), Ordering::Relaxed);
     console_changed();
 }
 
@@ -67,7 +43,7 @@ pub fn has_console() -> bool {
     !matches!(backend(), Backend::None)
 }
 
-/// Which channel a write goes to right now; virtio-console is preferred over a 16550.
+/// Which channel a write goes to right now; virtio-console is preferred over the UART.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Backend {
@@ -88,61 +64,27 @@ pub fn backend() -> Backend {
 }
 
 
-static BACKEND_LOCKED: AtomicBool = AtomicBool::new(false);
+static BACKEND: BackendLock = BackendLock::new();
 
 /// Exclusive access to the serial backend; interrupts are off for as long as the guard lives.
 /// Same-CPU re-entry from an IRQ handler deadlocks the spin.
 pub struct BackendGuard {
-    rflags: SavedFlags,
-}
-
-/// This CPU's own `RFLAGS`, captured by `pushfq`; the only value `popfq` may be given.
-/// Not `Copy`/`Clone`: one CPU's state at one instant, not to be duplicated.
-pub struct SavedFlags(u64);
-
-impl SavedFlags {
-    /// Restores the flags; `&self` because `Drop` cannot move a field out, and restoring twice is idempotent.
-    #[inline]
-    fn restore(&self) {
-        // SAFETY: `popfq` has no safe spelling; `self.0` came only from this
-        // CPU's own `pushfq` in `save_and_cli`, so no unintended bit reaches RFLAGS.
-        unsafe {
-            core::arch::asm!(
-                "push {}",
-                "popfq",
-                in(reg) self.0,
-                options(nomem),
-            );
-        }
-    }
+    // Fields drop in order: the backend is released before interrupts reopen.
+    _held: Held<'static>,
+    _irq: IrqGuard,
 }
 
 impl BackendGuard {
     pub fn lock() -> Self {
-        let rflags = save_and_cli();
-        while BACKEND_LOCKED
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            while BACKEND_LOCKED.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
-            }
-        }
-        Self { rflags }
+        let irq = IrqGuard::close();
+        Self { _held: BACKEND.lock(), _irq: irq }
     }
 
     /// Non-blocking acquire: `None` if another CPU already holds the backend.
     pub fn try_lock() -> Option<Self> {
-        let rflags = save_and_cli();
-        if BACKEND_LOCKED
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            Some(Self { rflags })
-        } else {
-            rflags.restore();
-            None
-        }
+        let irq = IrqGuard::close();
+        let held = BACKEND.try_lock()?;
+        Some(Self { _held: held, _irq: irq })
     }
 
     /// Writes raw bytes with no escape stripping.
@@ -158,45 +100,19 @@ impl BackendGuard {
         if super::virtio_console::is_ready() {
             super::virtio_console::has_data_locked()
         } else {
-            uart_present() && inb(PORT + 5) & 0x01 != 0
+            uart_present() && uart::rx_ready()
         }
     }
 
     pub fn try_read_byte(&mut self) -> Option<u8> {
         if super::virtio_console::is_ready() {
             super::virtio_console::try_read_byte_locked()
-        } else if uart_present() && inb(PORT + 5) & 0x01 != 0 {
-            Some(inb(PORT))
+        } else if uart_present() && uart::rx_ready() {
+            Some(uart::read_byte())
         } else {
             None
         }
     }
-}
-
-impl Drop for BackendGuard {
-    fn drop(&mut self) {
-        BACKEND_LOCKED.store(false, Ordering::Release);
-        self.rflags.restore();
-    }
-}
-
-/// This CPU's `RFLAGS`, captured with interrupts off in one instruction sequence:
-/// the value is stale if anything runs between the read and `cli`.
-#[inline]
-fn save_and_cli() -> SavedFlags {
-    let rflags: u64;
-    // SAFETY: irreducible — `pushfq`/`cli` have no safe spelling; the asm reads
-    // RFLAGS and clears IF only, writes no memory, and touches no other register.
-    unsafe {
-        core::arch::asm!(
-            "pushfq",
-            "pop {}",
-            "cli",
-            out(reg) rflags,
-            options(nomem),
-        );
-    }
-    SavedFlags(rflags)
 }
 
 pub fn has_data() -> bool {
@@ -293,13 +209,8 @@ pub fn try_wire() -> Option<SleepGuard<'static, ()>> {
 /// Whether the UART has refused a write, which is said once.
 static UART_REFUSED: AtomicBool = AtomicBool::new(false);
 
-/// A 16550's transmit FIFO: once `LSR.THRE` reads set in FIFO mode the FIFO is
-/// empty, and this many bytes may go in before it is asked again (PC16550D
-/// data sheet, FIFO mode; `init` enables the FIFO).
-const UART_FIFO: usize = 16;
-
-/// `bytes` onto the wire the caller holds, in bursts: one FIFO's worth to a
-/// 16550, one transmit buffer's to virtio-console, with interrupts on
+/// `bytes` onto the wire the caller holds, in bursts: what the UART's
+/// transmitter takes at once, one transmit buffer's to virtio-console, with interrupts on
 /// between every two looks at the device.
 pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
     match backend() {
@@ -313,18 +224,17 @@ pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
     }
 }
 
-/// The FIFO burst writer: each burst waits for `THRE` with interrupts on, and
-/// takes the register lock only to test the flag and fill the FIFO.
+/// The burst writer: each burst waits for the transmitter with interrupts on,
+/// and takes the register lock only to ask it and fill it.
 fn uart_write_fifo(bytes: &[u8]) {
-    for chunk in bytes.chunks(UART_FIFO) {
+    for chunk in bytes.chunks(uart::TX_BURST) {
         let mut asked = 0;
         loop {
             let burst = BackendGuard::lock();
-            if inb(PORT + 5) & 0x20 != 0 {
+            if uart::tx_ready() {
+                // A chunk is no more than the transmitter takes once ready.
                 for &b in chunk {
-                    // SAFETY: COM1's own data register; the FIFO is empty and
-                    // takes `UART_FIFO` bytes, and a chunk is no more.
-                    unsafe { outb(PORT, b) };
+                    uart::write_byte(b);
                 }
                 break;
             }
@@ -460,18 +370,16 @@ fn uart_write_bytes(bytes: &[u8]) {
     }
     for &b in bytes {
         for _ in 0..THRE_SPIN_LIMIT {
-            if inb(PORT + 5) & 0x20 != 0 {
+            if uart::tx_ready() {
                 break;
             }
             core::hint::spin_loop();
         }
-        // SAFETY: `outb` requires ownership of the port and the byte; `PORT`
-        // is COM1's own data register, and the byte is console output only.
-        unsafe { outb(PORT, b) };
+        uart::write_byte(b);
     }
 }
 
-/// Writes straight to the 16550, bypassing the ring, the lock and virtio-console: no allocation, bounded per byte.
+/// Writes straight to the UART, bypassing the ring, the lock and virtio-console: no allocation, bounded per byte.
 pub fn panic_raw(bytes: &[u8]) {
     uart_write_bytes(bytes);
 }

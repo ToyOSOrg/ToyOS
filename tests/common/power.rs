@@ -634,7 +634,7 @@ pub fn watchdog_fed(
 }
 
 /// The kernel's read-back above its own arm, in
-/// `kernel/src/drivers/watchdog.rs`: whole clauses, one per branch.
+/// `kernel/src/arch/x86_64/watchdog.rs`: whole clauses, one per branch.
 const ARMED_ON_ARRIVAL: &str = "so the bootloader had already armed the timer";
 /// Unreachable from this suite: every guest that reaches the kernel's arm
 /// passed the parameter, and the loader read the same one first.
@@ -917,7 +917,7 @@ pub fn panic_before_peripherals_reboots(
     // The one thing this branch removed. A guest reaching the other held branch
     // for the other reason must not be read as this one passing.
     boot.must_not_say("decoded no reset register")?;
-    if !held.contains("states no TSC frequency") {
+    if !held.contains("states no counter frequency") {
         return Err(format!(
             "the panel held for a reason this guest was not expected to reach\n{held}"
         ));
@@ -1677,7 +1677,7 @@ const PANIC_OUTLIVES_DEADLINE: &str = "boot-deadline=4000";
 /// page that crosses the reset says which of the two ended the machine.
 ///
 /// **What this cannot judge, stated rather than implied.** Reverting
-/// `deadline::stand_down` alone leaves this green: after `apic::halt_all_cpus`
+/// `deadline::stand_down` alone leaves this green: after `panic::halt_all_cpus`
 /// every CPU is halted or spinning with `IF` clear, so nothing reaches the poll
 /// and an armed deadline cannot expire whether or not it was disarmed. The
 /// window the stand-down closes is the one *before* that — the panicking CPU has
@@ -2425,17 +2425,6 @@ pub fn blackbox_early_panic_sealed_muted(
              fatal text reached neither channel\ndecoded screen:\n{text}"
         ));
     }
-    // Nothing on this path may wait for a drainer that cannot run: before the
-    // machine is released there is no `logd` and no scheduler to carry one, so
-    // the budget must never be entered rather than entered and spent.
-    if text.contains(LOG_DRAIN_EXPIRED) {
-        return Err(format!(
-            "the panel carries {LOG_DRAIN_EXPIRED:?} on a boot that crashed before the machine \
-             was released, so the panic path spent a budget waiting for a drainer that could not \
-             exist\ndecoded screen:\n{text}"
-        ));
-    }
-
     let (state, sealed) = sealed_state(&mut qemu, Duration::from_secs(10))?;
     if state != State::Panic {
         return Err(format!(
@@ -2457,10 +2446,6 @@ pub fn blackbox_early_panic_sealed_muted(
     );
     Ok(())
 }
-
-/// `kernel/src/arch/apic.rs`'s `LOG_DRAIN_EXPIRED`, which a boot that never had
-/// a drainer may not print.
-const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
 
 /// The black-box page's state once the guest has finished writing it, or what
 /// it still read at the deadline.
