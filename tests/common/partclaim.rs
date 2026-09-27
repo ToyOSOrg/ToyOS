@@ -760,7 +760,7 @@ pub(super) fn craft_plain_disk(
 
 /// A USB stick of `bytes` carrying `parts`, each a name, a length and its
 /// unique GUID; their spans.
-fn craft_stick(
+pub(super) fn craft_stick(
     path: &Path,
     bytes: u64,
     parts: &[(&'static str, u64, &'static str)],

@@ -21,7 +21,7 @@ use alloc::alloc::Layout;
 use alloc::string::String;
 use core::num::NonZeroU64;
 
-use toyos_gpt::{Guid, Partition, Sectors};
+use toyos_gpt::{Guid, Located, Sectors};
 use toyos_rootimage::chunk;
 use toyos_update::slots::{self, Table};
 use uefi::prelude::*;
@@ -178,9 +178,8 @@ impl<'a> Disk<'a> {
 
     /// The partition `guid` names on this disk, checked against the table as
     /// `toyos_gpt::locate` checks every one.
-    pub fn locate(&mut self, guid: [u8; 16]) -> Result<Partition, String> {
+    pub fn locate(&mut self, guid: [u8; 16]) -> Result<Located, String> {
         toyos_gpt::locate(self, Guid(guid))
-            .map(|located| located.partition())
             .map_err(|e| alloc::format!("partition {} on the boot disk: {e:?}", Guid(guid)))
     }
 
@@ -196,7 +195,7 @@ impl<'a> Disk<'a> {
             }
             (n, _) => return Err(alloc::format!("the boot disk carries {n} slot tables, and a machine has one")),
         };
-        let part = self.locate(listed.unique_guid().0)?;
+        let part = self.locate(listed.unique_guid().0)?.partition();
         let lbas = BLOCK as u64 / u64::from(self.lba_bytes);
         if part.lba_count().get() < slots::COPIES * lbas {
             return Err(alloc::format!("the slot table's partition is {} blocks, short of its two copies", part.lba_count()));
@@ -223,7 +222,8 @@ impl<'a> Disk<'a> {
     /// resets the machine, if the firmware honours it. What shows where it
     /// stopped is the slot's line before the read and the attempt count the
     /// next pass reads.
-    pub fn read_root(&mut self, bs: &BootServices, part: &Partition, len: u64) -> Result<RootImage, String> {
+    pub fn read_root(&mut self, bs: &BootServices, part: &Located, len: u64) -> Result<RootImage, String> {
+        let part = part.partition();
         let capacity = part.lba_count().get().saturating_mul(u64::from(self.lba_bytes));
         if len > capacity || !len.is_multiple_of(BLOCK as u64) {
             return Err(alloc::format!("{len} bytes of ROOT do not fit whole in its {capacity}-byte partition"));

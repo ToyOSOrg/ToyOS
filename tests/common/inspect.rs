@@ -6,7 +6,7 @@
 //! matches too much is a path in the answer this file did not name, and one
 //! that matches too little is a named path missing from it. Values are judged
 //! where the machine fixes them — QEMU's user network leases `10.0.2.15/24`,
-//! nothing plays audio until `inspect_plays` does, and the NVMe disk this file
+//! nothing plays audio until `inspect_plays` does, and the USB stick this file
 //! crafts has one partition free and one init grants — and read only for shape
 //! elsewhere.
 
@@ -59,17 +59,13 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
     if bins.len() != 3 {
         return Err(format!("{DENIED}, {PLAYS} and {BOUNDS} were not all built"));
     }
-    let nvme = super::lane::dir().join("inspect-disk.img");
+    let stick = super::lane::dir().join("inspect-stick.img");
     let mib = 1024 * 1024;
-    super::partclaim::craft_plain_disk(
-        &nvme,
-        &[("free", mib, FREE), ("granted", mib, GRANTED)],
-        96 * mib,
-    )?;
-    state_backwards(&nvme)?;
+    super::partclaim::craft_stick(&stick, 8 * mib, &[("free", mib, FREE), ("granted", mib, GRANTED)])?;
+    state_backwards(&stick)?;
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG);
     let options =
-        BootOptions { profile: qemu::Profile::Gop, nvme_image: Some(nvme), ..Default::default() };
+        BootOptions { profile: qemu::Profile::GopUsbDisk, usb_images: vec![stick], ..Default::default() };
     let argv = qemu::profile_argv(&options);
     if !argv.iter().any(|a| a.contains("virtio-net")) || !argv.iter().any(|a| a.contains("virtio-sound")) {
         return Err("this test needs a virtio NIC and a virtio sound card".to_string());
@@ -83,36 +79,22 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
     Ok(qemu)
 }
 
-/// Write [`BACKWARDS`] into the first free entry of both copies of the table of
-/// the 512-byte-block disk at `path`, both CRCs of each resealed.
+/// Write [`BACKWARDS`] into the first free entry of the table of the disk at
+/// `path`, both copies resealed.
 fn state_backwards(path: &Path) -> Result<(), String> {
-    use std::io::{Read, Seek, SeekFrom, Write};
     let guid = |text: &str| uuid::Uuid::parse_str(text).map(|u| u.to_bytes_le()).map_err(|e| format!("{text}: {e}"));
     let (ty, unique) = (guid(super::partclaim::PLAIN_TYPE)?, guid(BACKWARDS)?);
-    let mut disk = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("open: {e}"))?;
-    let lbas = disk.metadata().map_err(|e| format!("stat: {e}"))?.len() / 512;
-    let seek = |disk: &mut std::fs::File, lba: u64| disk.seek(SeekFrom::Start(lba * 512)).map(drop);
-    for header_lba in [1, lbas - 1] {
-        let mut header = [0u8; 512];
-        seek(&mut disk, header_lba).and_then(|()| disk.read_exact(&mut header)).map_err(|e| format!("read: {e}"))?;
-        let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().expect("four bytes"));
-        let array_lba = u64::from_le_bytes(header[72..80].try_into().expect("eight bytes"));
-        let (entry_bytes, header_bytes) = (word(84) as usize, word(12) as usize);
-        let mut array = vec![0u8; word(80) as usize * entry_bytes];
-        seek(&mut disk, array_lba).and_then(|()| disk.read_exact(&mut array)).map_err(|e| format!("read: {e}"))?;
-        let free = array.chunks_mut(entry_bytes).find(|e| e[..16] == [0; 16]).ok_or("the table has no free entry")?;
+    let mut image = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let len = image.len();
+    super::volumes::rewrite_gpt(&mut image, len, |entries, entry_bytes| {
+        let free = entries.chunks_mut(entry_bytes).find(|e| e[..16] == [0; 16]).ok_or("the table has no free entry")?;
         free[..16].copy_from_slice(&ty);
         free[16..32].copy_from_slice(&unique);
         free[32..40].copy_from_slice(&500u64.to_le_bytes());
         free[40..48].copy_from_slice(&400u64.to_le_bytes());
-        header[88..92].copy_from_slice(&toyos_gpt::crc32(&array).to_le_bytes());
-        header[16..20].fill(0);
-        let crc = toyos_gpt::crc32(&header[..header_bytes]);
-        header[16..20].copy_from_slice(&crc.to_le_bytes());
-        seek(&mut disk, array_lba).and_then(|()| disk.write_all(&array)).map_err(|e| format!("write: {e}"))?;
-        seek(&mut disk, header_lba).and_then(|()| disk.write_all(&header)).map_err(|e| format!("write: {e}"))?;
-    }
-    disk.sync_all().map_err(|e| format!("sync: {e}"))
+        Ok(())
+    })?;
+    std::fs::write(path, image).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// The `path = value` lines of a job's output, and nothing else the console

@@ -66,9 +66,8 @@ static DATA: Lock<Vec<Candidate>> = Lock::new(Vec::new());
 /// partition claim is looked for on. Taken alone.
 static DISKS: Lock<Vec<(Handle, u32)>> = Lock::new(Vec::new());
 
-/// Every entry each disk's table stated when [`probe`] read it, for the
-/// inventory: a table is outside every partition, so nothing a holder writes
-/// changes it, and nothing here reads a disk again to answer.
+/// A table is outside every partition, so nothing a holder writes changes it,
+/// and nothing here reads a disk again to answer.
 static LISTED: Lock<Vec<Listed>> = Lock::new(Vec::new());
 
 /// One disk's entries, as [`probe`] listed them.
@@ -83,9 +82,8 @@ struct Listed {
 /// when it is probed.
 const MAX_LISTED: usize = 128;
 
-/// Every GPT entry on every disk [`probe`] read, and who holds exactly its
-/// span now, from the block layer's holds. A partition that is not whole
-/// blocks is held by nothing, since no view can be made of it.
+/// A partition that is not whole blocks is held by nothing, since no view can
+/// be made of it.
 pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
     let listed: Vec<(Handle, u32, Vec<Partition>)> = LISTED
         .lock()
@@ -112,11 +110,10 @@ fn list(sectors: &mut DeviceSectors<'_>, handle: &Handle, lba_bytes: u32) {
     // A disk with no table this kernel parses carries no partition, and
     // `collect` says so, naming the refusal.
     let Ok(scan) = toyos_gpt::list(sectors, &mut found) else { return };
-    if scan.matched as usize > scan.listed {
+    if scan.matched as usize > MAX_LISTED {
         log!(
-            "gpt: device {id} carries {} partitions and the inventory lists {}",
-            scan.matched,
-            scan.listed
+            "gpt: device {id} carries {} partitions and the inventory lists {MAX_LISTED}",
+            scan.matched
         );
     }
     let mut parts = Vec::new();
@@ -304,27 +301,14 @@ fn collect(
             return;
         }
     };
-    if scan.matched as usize > scan.listed {
+    if scan.matched as usize > MAX_PER_DEVICE {
         log!(
-            "gpt: device {id} carries {} {what} partitions and this kernel looks at {}",
-            scan.matched,
-            scan.listed
+            "gpt: device {id} carries {} {what} partitions and this kernel looks at {MAX_PER_DEVICE}",
+            scan.matched
         );
     }
-    for entry in found.iter().flatten() {
-        let candidate = match entry {
-            Ok(candidate) => candidate,
-            Err(unplaced) => {
-                log!(
-                    "gpt: device {id} names a {what} {} at LBA {}..={}, whose blocks are no \
-                     partition on it",
-                    unplaced.unique_guid,
-                    unplaced.first,
-                    unplaced.last
-                );
-                continue;
-            }
-        };
+    // An entry whose blocks are no partition was logged once, by `list`.
+    for candidate in found.iter().flatten().flatten() {
         let checked = match toyos_gpt::locate(sectors, candidate.unique_guid()) {
             Ok(located) => located.partition(),
             Err(e) => {

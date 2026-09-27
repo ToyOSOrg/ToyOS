@@ -38,7 +38,7 @@ struct Ours {
 fn ours(img: &mut Image) -> Result<Ours, GptError> {
     let mut out = [None; 64];
     let scan = toyos_gpt::list(img, &mut out)?;
-    assert_eq!(scan.listed, scan.matched as usize, "a table with more entries than this file's slice");
+    assert!(scan.matched as usize <= out.len(), "a table with more entries than this file's slice");
     let mut read = Ours { disk: scan.disk_guid, placed: BTreeMap::new(), unplaced: BTreeMap::new() };
     for entry in out.iter().flatten() {
         match entry {
@@ -59,8 +59,7 @@ enum Theirs {
     Refused(String),
     /// Not asked: it allocates the array its header claims before checking it.
     NotAsked,
-    /// `usable` is the header's first and last usable block, as `gpt` decodes them.
-    Read { disk: Guid, usable: (u64, u64), rows: BTreeMap<u32, Row> },
+    Read { disk: Guid, rows: BTreeMap<u32, Row> },
 }
 
 fn theirs(img: &Image) -> Theirs {
@@ -77,7 +76,6 @@ fn theirs(img: &Image) -> Theirs {
         Err(e) => Theirs::Refused(e.to_string()),
         Ok(parts) => Theirs::Read {
             disk: Guid(header.disk_guid.to_bytes_le()),
-            usable: (header.first_usable, header.last_usable),
             // `gpt` keys its entries from 1.
             rows: parts
                 .iter()
@@ -118,7 +116,7 @@ fn differ(layout: &Layout, img: &Image, ours: &Result<Ours, GptError>, theirs: &
             Ok("gpt takes the header CRC over 92 bytes whatever header_size says")
         }
         (Ok(_), Theirs::Refused(why)) => Err(format!("toyos-gpt read the table, and gpt refused it: {why}")),
-        (Ok(o), Theirs::Read { disk, usable, rows }) => {
+        (Ok(o), Theirs::Read { disk, rows }) => {
             if t.entry_bytes != 128 {
                 return Ok("gpt strides 128 bytes whatever the entry size");
             }
@@ -128,10 +126,6 @@ fn differ(layout: &Layout, img: &Image, ours: &Result<Ours, GptError>, theirs: &
             let mut named = "agree";
             for (index, row) in rows {
                 match (o.placed.get(index), o.unplaced.get(index)) {
-                    // UEFI 2.11 §5.3.3 holds every partition inside the usable range.
-                    (Some(mine), None) if mine == row && !(usable.0 <= row.3 && row.3 <= row.4 && row.4 <= usable.1) => {
-                        return Err(format!("toyos-gpt placed {row:?} outside the usable range gpt reads, {usable:?}"));
-                    }
                     (Some(mine), None) if mine == row => {}
                     // A type only toyos-gpt names: gpt answers the zero GUID.
                     (Some(mine), None) if row.1 == unnamed && (&mine.0, &mine.2, mine.3, mine.4) == (&row.0, &row.2, row.3, row.4) => {

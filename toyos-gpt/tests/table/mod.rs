@@ -72,6 +72,14 @@ pub struct Table {
     pub entries: Vec<RawEntry>,
 }
 
+impl Table {
+    /// This copy as the backup of a disk of `lba_count` blocks of `lba_bytes` states it.
+    pub fn mirror(&self, lba_bytes: u32, lba_count: u64) -> Table {
+        let array_lbas = (u64::from(self.entry_count) * u64::from(self.entry_bytes)).div_ceil(u64::from(lba_bytes));
+        Table { my_lba: lba_count - 1, entry_array_lba: lba_count - 1 - array_lbas, ..self.clone() }
+    }
+}
+
 /// A disk: its geometry, the primary copy, and the backup where it has one.
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -144,11 +152,7 @@ pub fn valid(rng: &mut Rng, shape: &Shape<'_>) -> Layout {
         entry_bytes,
         entries,
     };
-    let backup = (shape.backup && !rng.one_in(3)).then(|| Table {
-        my_lba: lba_count - 1,
-        entry_array_lba: lba_count - 1 - array_lbas,
-        ..primary.clone()
-    });
+    let backup = (shape.backup && !rng.one_in(3)).then(|| primary.mirror(lba_bytes, lba_count));
     let granularity = if shape.floored && lba_bytes == 512 && rng.one_in(4) { 8 } else { 1 };
     Layout {
         lba_bytes,
@@ -313,6 +317,7 @@ pub fn image(layout: &Layout) -> Image {
         lba_count: layout.reported_lba_count,
         granularity: layout.granularity,
         bytes: disk,
+        fail_at: None,
     }
 }
 
@@ -321,6 +326,8 @@ pub struct Image {
     pub lba_count: u64,
     pub granularity: u64,
     pub bytes: Vec<u8>,
+    /// The one block whose read does not happen.
+    pub fail_at: Option<u64>,
 }
 
 impl Sectors for Image {
@@ -334,6 +341,9 @@ impl Sectors for Image {
         core::num::NonZeroU64::new(self.granularity).expect("1 or 8")
     }
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
+        if self.fail_at == Some(lba) {
+            return false;
+        }
         let at = (lba as usize).checked_mul(self.lba_bytes as usize);
         match at.and_then(|at| self.bytes.get(at..at.checked_add(buf.len())?)) {
             Some(src) => {

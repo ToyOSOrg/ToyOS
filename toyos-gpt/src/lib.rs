@@ -41,17 +41,6 @@ use core::num::NonZeroU64;
 pub use crc32::{crc32, Crc32};
 pub use guid::Guid;
 
-/// The block sizes this crate will parse a GPT out of.
-///
-/// The floor is the smallest logical block any device has ever reported and
-/// the value every GPT in the wild is laid out in; the ceiling is 4Kn, and is
-/// also what the rest of this kernel is written in. It matches the NVMe
-/// driver's own accepted range, which is not a coincidence: above 4096 the
-/// block no longer divides the kernel's 4 KiB block, and below 512 the GPT
-/// header does not fit in one.
-pub const MIN_LBA_BYTES: u32 = 512;
-pub const MAX_LBA_BYTES: u32 = 4096;
-
 /// The largest partition entry array this crate will walk, in bytes.
 ///
 /// Policy, not physics, and generous: UEFI requires the array to be at least
@@ -167,7 +156,7 @@ impl GptError {
     }
 }
 
-/// One partition entry, after it has been checked against the disk it is on.
+/// One partition entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Partition {
     index: u32,
@@ -180,23 +169,16 @@ pub struct Partition {
 
 impl Partition {
     /// `stated`, if its blocks are a partition inside `header`'s usable range.
-    fn place(stated: &Stated, header: &Header) -> Result<Self, Unplaced> {
-        let unplaced = Unplaced {
-            index: stated.index,
-            type_guid: stated.type_guid,
-            unique_guid: stated.unique_guid,
-            first: stated.first,
-            last: stated.last,
-        };
+    fn place(stated: Stated, header: &Header) -> Result<Self, Stated> {
         if stated.first < header.first_usable_lba || stated.last > header.last_usable_lba {
-            return Err(unplaced);
+            return Err(stated);
         }
         let lba_count = stated
             .last
             .checked_sub(stated.first)
             .and_then(|span| span.checked_add(1))
             .and_then(NonZeroU64::new)
-            .ok_or(unplaced)?;
+            .ok_or(stated)?;
         Ok(Self {
             index: stated.index,
             type_guid: stated.type_guid,
@@ -240,9 +222,10 @@ impl Partition {
     }
 }
 
-/// An entry that exists and whose blocks are no partition on its disk.
+/// One used entry as the table states it, before anything is proven of its
+/// blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Unplaced {
+pub struct Stated {
     pub index: u32,
     pub type_guid: Guid,
     pub unique_guid: Guid,
@@ -250,8 +233,9 @@ pub struct Unplaced {
     pub last: u64,
 }
 
-/// One used entry a scan hands back.
-pub type Entry = Result<Partition, Unplaced>;
+/// One used entry a scan hands back: `Err` where its blocks are no partition
+/// on its disk.
+pub type Entry = Result<Partition, Stated>;
 
 /// A located partition plus what the table around it looked like.
 ///
@@ -299,17 +283,6 @@ struct Header {
     /// divisor of the block.
     entry_len: usize,
     entry_array_crc: u32,
-}
-
-/// One used entry as the table states it, before anything is proven of its
-/// blocks.
-#[derive(Debug, Clone, Copy)]
-struct Stated {
-    index: u32,
-    type_guid: Guid,
-    unique_guid: Guid,
-    first: u64,
-    last: u64,
 }
 
 /// Find the partition carrying `target` on `dev`.
@@ -374,12 +347,10 @@ fn scan(
     }
 }
 
-/// What [`locate_type`] found: `matched` is how many entries carried the type,
-/// `listed` how many of those fit the caller's slice.
+/// What [`locate_type`] found: `matched` is how many entries carried the type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeScan {
     pub matched: u32,
-    pub listed: usize,
     pub disk_guid: Guid,
     /// Entries with a non-zero type GUID, i.e. partitions that exist.
     pub used_entries: u32,
@@ -395,6 +366,13 @@ struct Disk {
 
 /// A logical block size this crate parses, so one block is a fixed prefix of
 /// a [`Block`].
+///
+/// The floor is the smallest logical block any device has ever reported and
+/// the value every GPT in the wild is laid out in; the ceiling is 4Kn, and is
+/// also what the rest of this kernel is written in. It matches the NVMe
+/// driver's own accepted range, which is not a coincidence: above 4096 the
+/// block no longer divides the kernel's 4 KiB block, and below 512 the GPT
+/// header does not fit in one.
 #[derive(Clone, Copy)]
 enum LbaSize {
     B512,
@@ -467,7 +445,6 @@ fn scan_type_at(
     out: &mut [Option<Entry>],
 ) -> Result<TypeScan, GptError> {
     out.fill(None);
-    let capacity = out.len();
     let mut block: Block = [0; 4096];
     let block = disk.lba.of_block(&mut block);
 
@@ -485,12 +462,11 @@ fn scan_type_at(
         }
         matched = matched.saturating_add(1);
         if let Some(slot) = slots.next() {
-            *slot = Some(Partition::place(&stated, &header));
+            *slot = Some(Partition::place(stated, &header));
         }
     })?;
-    let listed = usize::try_from(matched).map_or(capacity, |matched| matched.min(capacity));
 
-    Ok(TypeScan { matched, listed, disk_guid: header.disk_guid, used_entries })
+    Ok(TypeScan { matched, disk_guid: header.disk_guid, used_entries })
 }
 
 /// `locate`'s work against one header, primary or backup — read it, check it,
@@ -511,8 +487,8 @@ fn locate_at(
     let Some(stated) = found else {
         return Err(GptError::NotFound { used_entries });
     };
-    let partition = Partition::place(&stated, &header)
-        .map_err(|unplaced| GptError::PartitionRange { first: unplaced.first, last: unplaced.last })?;
+    let partition = Partition::place(stated, &header)
+        .map_err(|stated| GptError::PartitionRange { first: stated.first, last: stated.last })?;
     check_no_overlap(dev, &header, &partition, disk.lba)?;
 
     Ok(Located { partition, disk_guid: header.disk_guid, used_entries })
@@ -827,16 +803,15 @@ fn le_u64(buf: &[u8], at: usize) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// The public bounds and the sizes [`LbaSize`] admits are one range.
+    /// The sizes [`LbaSize`] admits are one range.
     #[test]
     fn the_block_sizes_parsed_are_the_declared_range() {
         let parsed: [u32; 4] = [512, 1024, 2048, 4096];
-        for bytes in 0..=2 * MAX_LBA_BYTES {
+        for bytes in 0..=8192 {
             let admitted = LbaSize::of(bytes).map(LbaSize::bytes);
             assert_eq!(admitted.is_some(), parsed.contains(&bytes), "{bytes}");
             assert_eq!(admitted.unwrap_or(bytes), bytes);
         }
-        assert_eq!((parsed[0], parsed[3]), (MIN_LBA_BYTES, MAX_LBA_BYTES));
         let mut block: Block = [0; 4096];
         for lba in [LbaSize::B512, LbaSize::B1024, LbaSize::B2048, LbaSize::B4096] {
             assert_eq!(lba.of_block(&mut block).len() as u32, lba.bytes());

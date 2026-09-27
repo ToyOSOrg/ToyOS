@@ -3427,7 +3427,7 @@ fn entry_lba(entry: &[u8], at: usize) -> u64 {
 /// the backup array and header moved to the new end, the primary's pointers to
 /// them and its last usable LBA, both arrays' and both headers' CRCs, and the
 /// protective MBR's size. `edit` gets the array and one entry's length.
-fn rewrite_gpt(
+pub(super) fn rewrite_gpt(
     image: &mut Vec<u8>,
     len: usize,
     edit: impl FnOnce(&mut [u8], usize) -> Result<(), String>,

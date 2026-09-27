@@ -8,6 +8,25 @@
 
 const POLY: u32 = 0xEDB8_8320;
 
+/// The CRC of each byte value, built by a `split_first_mut` walk so nothing is indexed.
+const TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut rest: &mut [u32] = &mut table;
+    let mut byte = 0u32;
+    while let Some((slot, tail)) = rest.split_first_mut() {
+        let mut crc = byte;
+        let mut bit = 0u32;
+        while bit < 8 {
+            crc = if crc & 1 == 0 { crc.wrapping_shr(1) } else { crc.wrapping_shr(1) ^ POLY };
+            bit = bit.wrapping_add(1);
+        }
+        *slot = crc;
+        rest = tail;
+        byte = byte.wrapping_add(1);
+    }
+    table
+};
+
 /// A CRC-32 taken over pieces. The partition entry array is read a block at a
 /// time and never held whole, and the header's own CRC is taken over the
 /// header with four bytes of itself zeroed — neither is one contiguous slice.
@@ -21,12 +40,10 @@ impl Crc32 {
 
     pub fn update(&mut self, data: &[u8]) {
         for &byte in data {
-            let mut crc = self.0 ^ u32::from(byte);
-            for _ in 0..8 {
-                // `POLY` where the bit shifted out is set, zero where it is not.
-                crc = crc.wrapping_shr(1) ^ (POLY & (crc & 1).wrapping_neg());
-            }
-            self.0 = crc;
+            let [low, ..] = (self.0 ^ u32::from(byte)).to_le_bytes();
+            // A `u8` is below 256: `get` is never `None`.
+            let entry = TABLE.get(usize::from(low)).copied().unwrap_or(0);
+            self.0 = self.0.wrapping_shr(8) ^ entry;
         }
     }
 

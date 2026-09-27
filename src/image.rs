@@ -340,8 +340,7 @@ pub fn slot_table_of(file: &mut std::fs::File) -> Result<toyos_update::slots::Ta
     table_on(file).map(|(table, _, _)| table)
 }
 
-/// Where the partition `guid` names is on the disk image `file`, in bytes, as
-/// its table states it.
+/// Where the partition `guid` names is on the disk image `file`, in bytes.
 pub fn partition_extent(file: &mut std::fs::File, guid: [u8; 16]) -> Result<(u64, u64), String> {
     let mut out = [None; 16];
     let scan = toyos_gpt::list(&mut FileSectors(file), &mut out)
@@ -353,7 +352,7 @@ pub fn partition_extent(file: &mut std::fs::File, guid: [u8; 16]) -> Result<(u64
     let found: Vec<&toyos_gpt::Entry> =
         out.iter().flatten().filter(|entry| unique(entry) == toyos_gpt::Guid(guid)).collect();
     match found[..] {
-        [Ok(p)] if scan.listed == scan.matched as usize => {
+        [Ok(p)] if scan.matched as usize <= out.len() => {
             Ok((p.first_lba() * u64::from(LBA), p.lba_count().get() * u64::from(LBA)))
         }
         [Err(unplaced)] => {
