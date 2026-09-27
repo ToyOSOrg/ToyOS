@@ -65,7 +65,6 @@ declare_flags!(pub CARGO_RUN = {
     pub BUILD_ONLY = "--build-only", None;
     pub DUMP_AUDIO = "--dump-audio", None;
     pub REBUILD_TOOLCHAIN = "--rebuild-toolchain", None;
-    pub HOST_BUILDS = "--host-builds", Next;
     pub SMP = "--smp", Next;
     pub GOP = "--gop", None;
     pub METAL_SIM = "--metal-sim", None;
@@ -340,6 +339,8 @@ mod tests {
             let message = refusal(&words);
             assert!(message.contains(bad), "{words:?}: {message}");
         }
+        let deleted = refusal(&["--host-builds", "4"]);
+        assert!(deleted.contains("--host-builds"), "a deleted flag given its value: {deleted}");
     }
 
     #[test]

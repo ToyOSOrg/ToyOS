@@ -11,7 +11,7 @@ An operating system built from scratch in Rust, held to a production-grade engin
 | `kernel/CLAUDE.md` | the caveats that bite kernel work |
 | `userland/CLAUDE.md` | the server doctrine, and the caveats that bite userland work |
 | `tests/CLAUDE.md` | the caveats that bite the harness |
-| `src/CLAUDE.md` | boot modes, the locks and slots, worktrees — the operational file |
+| `src/CLAUDE.md` | boot modes, the locks, worktrees — the operational file |
 | `issues/README.md` | the issue tracker: one file per issue, typed by kind; `ls` is the index |
 | `.claude/agents/reviewer.md` | the review prompt the orchestrator spawns a reviewer with |
 
@@ -69,7 +69,7 @@ The bar is not yet the tree. The standing failures are declared rather than remo
 The testing rules live where they are enforced: known reds in `src/redlist.rs`, tiers in `src/tiers.rs`, the PR gate and the nightly in `.github/workflows/`. Operationally:
 
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo test --workspace --exclude toyos-build` runs every host-crate suite.
-- **Agents verify through `cargo test`, never `cargo run`** — the run path opens a QEMU window on the owner's desktop by design; the harness runs headless.
+- **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time, and an agent reports only once nothing it started is still running.
 - **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost. A full boot is under a second; incremental builds finish in seconds.
 
 ## Repository layout
