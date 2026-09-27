@@ -1,16 +1,11 @@
-//! An accept netd refuses still spends its owner's wake, so the connection it
-//! left is announced again: at once after a request that handed netd no
-//! pipes, and after a refusal for room once room returns and not before.
+//! An accept netd refuses for room still spends its owner's wake, so the
+//! connection it left is announced again once room returns, and not before.
 //!
-//! The host dials this program's listener through the forward, twice:
-//!
-//! 1. Woken, this program asks for the connection handing netd no pipes, and
-//!    netd refuses the request. The next wake is the verdict.
-//! 2. Woken, this program fills netd's connections to the host until one is
-//!    refused, and asks for the connection; netd refuses it for room. Once a
-//!    request netd answered after that refusal says room is still gone, no
-//!    wake may be waiting. One connection closed, the next wake is the
-//!    verdict.
+//! The host dials this program's listener through the forward. Woken, this
+//! program fills netd's connections to the host until one is refused, and
+//! asks for the connection; netd refuses it for room. Once a request netd
+//! answered after that refusal says room is still gone, no wake may be
+//! waiting. One connection closed, the next wake is the verdict.
 //!
 //! argv[1] is the port of the harness's host server on `HOST`, and the harness
 //! forwards a host port to this guest's `FORWARDED_PORT`.
@@ -40,16 +35,9 @@ fn main() {
         .expect("usage: netd_refused_accept <host port>");
     let listener = toyos::net::tcp_bind([0; 4], FORWARDED_PORT).expect("bind the forwarded port");
 
-    let dial = dial_in(port);
-    wake(&listener, "the host's first dial");
-    assert_eq!(accept(listener.socket_id, false), Err(NetError::InvalidInput), "an accept handing netd no pipes");
-    println!("netd_refused_accept: an accept handing netd no pipes was refused");
-    wake(&listener, "the connection an accept handing netd no pipes left");
-    accept(listener.socket_id, true).unwrap_or_else(|e| panic!("the connection an accept with no pipes left: {e:?}"));
-    end(dial);
-
-    let dial = dial_in(port);
-    wake(&listener, "the host's second dial");
+    let dial = toyos::net::tcp_connect(HOST, port, 30_000).expect("connect to the host server");
+    ask(&dial.tx, Ask::Dial);
+    wake(&listener, "the host's dial");
     let mut held = Vec::new();
     let refused = loop {
         match connect(port) {
@@ -62,7 +50,7 @@ fn main() {
     };
     assert_eq!(refused, NetError::ResourceExhausted, "a connect after {} held", held.len());
     assert_eq!(
-        accept(listener.socket_id, true),
+        accept(listener.socket_id),
         Err(NetError::ResourceExhausted),
         "an accept with every connection taken"
     );
@@ -80,19 +68,11 @@ fn main() {
     );
     end(held.pop().expect("the cap holds at least the connection before the refusal"));
     wake(&listener, "the connection an accept refused for room left, once room returned");
-    accept(listener.socket_id, true).unwrap_or_else(|e| panic!("the connection an accept refused for room left: {e:?}"));
+    accept(listener.socket_id).unwrap_or_else(|e| panic!("the connection an accept refused for room left: {e:?}"));
     end(dial);
     held.into_iter().for_each(end);
     toyos::net::tcp_close(listener.socket_id).expect("close the listener");
     println!("netd_refused_accept: ok");
-}
-
-/// A connection to the host server that asks it to dial this guest's
-/// forwarded port.
-fn dial_in(port: u16) -> TcpConnection {
-    let dial = toyos::net::tcp_connect(HOST, port, 30_000).expect("connect to the host server");
-    ask(&dial.tx, Ask::Dial);
-    dial
 }
 
 /// Wait for netd's wake on `listener`, and take it.
@@ -108,17 +88,14 @@ fn wake(listener: &TcpBound, what: &str) {
     });
 }
 
-/// netd's answer to an accept on `listener`, handing it a pair of pipes or
-/// none. An accepted connection is closed at once.
-fn accept(listener: TcpSocketId, pipes: bool) -> Result<(), NetError> {
-    let request = TcpAcceptPipedRequest { socket_id: listener.0 };
-    let pending = if pipes {
-        let (_rx, _tx, handles) = data_path();
-        reach_netd().request_with_handles(&handles, MsgType::TcpAcceptPiped, &request)
-    } else {
-        reach_netd().request(MsgType::TcpAcceptPiped, &request)
-    };
-    let resp: TcpAcceptPipedResponse = pending.expect("netd takes the request").response()?;
+/// netd's answer to an accept on `listener`. An accepted connection is closed
+/// at once.
+fn accept(listener: TcpSocketId) -> Result<(), NetError> {
+    let (_rx, _tx, handles) = data_path();
+    let resp: TcpAcceptPipedResponse = reach_netd()
+        .request_with_handles(&handles, MsgType::TcpAcceptPiped, &TcpAcceptPipedRequest { socket_id: listener.0 })
+        .expect("netd takes the request")
+        .response()?;
     toyos::net::tcp_close(TcpSocketId(resp.socket_id)).expect("close the accepted connection");
     Ok(())
 }

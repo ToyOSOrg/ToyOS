@@ -1239,14 +1239,18 @@ impl NetDaemon {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let room = self.piped_room();
+        let (room, pipes) = (self.piped_room(), DataPipes::take(&msg.client));
         let Some(listener) = self.piped_listeners.get_mut(&req.socket_id) else {
             msg.client.error(ERR_NOT_CONNECTED);
             return;
         };
         let (old_handle, local_port) = (listener.handle, listener.listening.port());
-        match listener.listening.accept(socket_set.get_mut::<tcp::Socket>(old_handle), room) {
-            listen::Accept::Take => {}
+        let pipes = match listener.listening.accept(socket_set.get_mut::<tcp::Socket>(old_handle), room, pipes) {
+            listen::Accept::Take(pipes) => pipes,
+            listen::Accept::NoPipes => {
+                msg.client.error(ERR_INVALID_INPUT);
+                return;
+            }
             listen::Accept::NoRoom => {
                 say!(
                     "netd: refusing accept, {} piped connections already (max {})",
@@ -1260,12 +1264,6 @@ impl NetDaemon {
                 msg.client.error(ERR_NOT_CONNECTED);
                 return;
             }
-        }
-        // After the accept: a request refused here has spent its owner's wake
-        // too, so the connection it leaves is announced again.
-        let Some(pipes) = DataPipes::take(&msg.client) else {
-            msg.client.error(ERR_INVALID_INPUT);
-            return;
         };
 
         let remote = socket_set.get_mut::<tcp::Socket>(old_handle).remote_endpoint().unwrap();
@@ -1430,18 +1428,14 @@ impl NetDaemon {
     /// is what tells it instead — its notify pipe reads EOF. A full pipe is
     /// that refusal too: it is an owner that has left a whole pipe of wakes
     /// unread.
-    fn serve_piped_listeners(&mut self, socket_set: &mut SocketSet<'_>) {
+    fn serve_piped_listeners(&mut self, socket_set: &mut SocketSet<'_>, room: bool) {
         use toyos_abi::syscall::SyscallError;
-        let room = self.piped_room();
         let mut dead = Vec::new();
         for (&socket_id, listener) in &mut self.piped_listeners {
-            let socket = socket_set.get_mut::<tcp::Socket>(listener.handle);
-            let owed = listener.listening.owes_wake(socket, room);
-            let wake: &[u8] = if owed { &[1] } else { &[] };
+            let wake = listener.listening.wake(socket_set.get_mut::<tcp::Socket>(listener.handle), room);
             match toyos_abi::syscall::write_nonblock(listener.notify_write.as_handle(), wake) {
-                Ok(_) if owed => listener.listening.woke(),
                 Ok(_) => {}
-                Err(SyscallError::WouldBlock) if !owed => {}
+                Err(SyscallError::WouldBlock) if wake.is_empty() => {}
                 // Its owner has gone, which is the ordinary end of a listener.
                 Err(SyscallError::Gone) => dead.push(socket_id),
                 Err(e) => {
@@ -1462,8 +1456,9 @@ impl NetDaemon {
         }
     }
 
-    /// Process pending async operations (UDP recvs, lookups, piped connects).
-    fn process_pending(&mut self, socket_set: &mut SocketSet<'_>) {
+    /// Process pending async operations (UDP recvs, lookups, piped connects),
+    /// and say whether there is room for another piped connection after them.
+    fn process_pending(&mut self, socket_set: &mut SocketSet<'_>) -> bool {
         let now = Instant::now();
 
         for pr in std::mem::take(&mut self.pending_udp_recvs) {
@@ -1528,6 +1523,7 @@ impl NetDaemon {
             }
             i += 1;
         }
+        self.piped_room()
     }
 }
 
@@ -1740,11 +1736,8 @@ fn main() {
 
         daemon.bridge_piped(&mut socket_set);
 
-        daemon.process_pending(&mut socket_set);
-
-        // After everything in a pass that frees room: a wake is owed only
-        // with room, and nothing after this and before the wait wakes the pass.
-        daemon.serve_piped_listeners(&mut socket_set);
+        let room = daemon.process_pending(&mut socket_set);
+        daemon.serve_piped_listeners(&mut socket_set, room);
 
         // smoltcp's own next deadline — a retransmit, a persist probe, a
         // delayed ACK — and zero when it has a frame to send now. A piped

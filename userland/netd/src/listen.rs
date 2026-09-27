@@ -20,12 +20,14 @@ pub struct Listening {
     woken: bool,
 }
 
-/// What an accept finds.
+/// What an accept finds, handed the pipes `P` its request carried.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Accept {
-    /// A connection, to hand over.
-    Take,
-    /// No room for another connection, whether one waits or not.
+pub enum Accept<P> {
+    /// A connection, to hand over on the pipes.
+    Take(P),
+    /// A request that carried no pipes, whatever waits.
+    NoPipes,
+    /// A connection, and no room to take it.
     NoRoom,
     /// No connection.
     Nothing,
@@ -40,23 +42,25 @@ impl Listening {
         self.port
     }
 
-    /// Whether the owner is owed a wake for `socket`: a connection waits,
-    /// there is `room` to take it, and the owner holds no wake.
-    pub fn owes_wake(&self, socket: &mut tcp::Socket, room: bool) -> bool {
-        settle(socket, self.port) && room && !self.woken
+    /// The bytes to write the owner for `socket`: one wake if a connection
+    /// waits, there is `room` to take it, and the owner holds no wake, and
+    /// none otherwise. The wake is held from here on, so the caller ends the
+    /// listener if the owner is not handed it.
+    pub fn wake(&mut self, socket: &mut tcp::Socket, room: bool) -> &'static [u8] {
+        let owed = settle(socket, self.port) && room && !self.woken;
+        self.woken |= owed;
+        if owed { &[1] } else { &[] }
     }
 
-    pub fn woke(&mut self) {
-        self.woken = true;
-    }
-
-    /// An accept, with `room` for another connection or not.
-    pub fn accept(&mut self, socket: &mut tcp::Socket, room: bool) -> Accept {
+    /// An accept, with `room` for another connection or not, and the pipes
+    /// its request carried.
+    pub fn accept<P>(&mut self, socket: &mut tcp::Socket, room: bool, pipes: Option<P>) -> Accept<P> {
         self.woken = false;
-        match (settle(socket, self.port), room) {
-            (_, false) => Accept::NoRoom,
-            (true, true) => Accept::Take,
-            (false, true) => Accept::Nothing,
+        match (settle(socket, self.port), room, pipes) {
+            (_, _, None) => Accept::NoPipes,
+            (false, _, Some(_)) => Accept::Nothing,
+            (true, false, Some(_)) => Accept::NoRoom,
+            (true, true, Some(pipes)) => Accept::Take(pipes),
         }
     }
 }
