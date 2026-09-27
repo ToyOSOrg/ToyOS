@@ -440,8 +440,7 @@ fn settle_commands(said: &mut dyn fmt::Write) {
 
 /// Entered once for the machine's life.
 ///
-/// **A panic inside this path would otherwise reach it a second time**: the
-/// panic path ends in `acpi::reboot`, which is the very site that calls this.
+/// **A panic inside this path would otherwise reach it a second time.**
 static STOPPING: AtomicBool = AtomicBool::new(false);
 
 /// Record a controller this kernel drives, so a reset can stop it without the
