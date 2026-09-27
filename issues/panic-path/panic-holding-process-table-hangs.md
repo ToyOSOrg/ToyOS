@@ -20,3 +20,11 @@ process was killed and the harness still got its end marker, because the test
 runner's report path does not touch the VFS. That particular route is bounded
 now (`issues/isolation/`), but the class is not: any panic under `vfs::lock()` still strands it,
 and the allocator was only the worst instance because every context allocates.
+
+**`sys_mmap` was another instance.** A `PROT_NONE` mmap of a length near
+`u64::MAX` passed the old size guard, then overflowed under both the
+process-data lock and the address-space lock. Reverting #543's fix onto
+16d2e645 and running `mmap_prot` reproduces it: `DEADLOCK at
+src/process.rs:807:25: 500M spins, ticket=19 now=18`, both locks stranded by
+the one panic. #543 moves the check ahead of both locks; the class this issue
+tracks is unchanged.
