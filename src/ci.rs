@@ -245,9 +245,6 @@ pub(crate) const CONTROLS: &[Control] = &[
         "a_lost_try_lock_leaves_the_lock_held ... FAILED",
         "two_writers_never_overlap ... FAILED",
     ]),
-    red(KERNEL_LOOM, "poison-overwrite", Some("poison_set"), &[
-        "a_second_death_banks_beside_the_first ... FAILED",
-    ]),
     red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
         "a_claim_sees_the_enrolled_work ... FAILED",
     ]),

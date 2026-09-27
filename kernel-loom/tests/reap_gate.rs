@@ -26,7 +26,7 @@
 //!
 //! makes `reap_gate.rs`'s `raise` store relaxed and this file must red, at
 //! [`a_claim_sees_the_enrolled_work`] — *a claimed gate handed the reaper an
-//! empty poison slot*, which is the defect stated exactly. Verified 2026-08-17,
+//! unpublished exit*, which is the defect stated exactly. Verified 2026-08-17,
 //! both ways round.
 
 use kernel_loom::reap_gate::ReapGate;
@@ -68,24 +68,23 @@ fn a_raise_is_never_dropped() {
 
         assert!(
             claimed || gate.take(),
-            "the raise was dropped: nobody claimed it and the flag is down, so a poisoned \
-             thread's waiter would wait for ever",
+            "the raise was dropped: nobody claimed it and the flag is down, so a finished \
+             process's entry is never collected",
         );
     });
 }
 
 /// A claimer sees the work the raise was about.
 ///
-/// `poison_tid` writes its slot and *then* raises; `publish_exit` stores
-/// `finished` and *then* raises. The reaper reads both with the process table
-/// held and nothing else ordering it against the raiser, so the gate's own
+/// `publish_exit` stores `finished` and *then* raises. The reaper reads it with
+/// the process table held and nothing else ordering it against the raiser, so the gate's own
 /// release/acquire pair is the whole edge. Weaken `raise` to `Relaxed` and this
 /// is the model that reds.
 #[test]
 fn a_claim_sees_the_enrolled_work() {
     loom::model(|| {
         let gate = Arc::new(ReapGate::new());
-        // Stands for the poison slot, or for the object's `finished` flag.
+        // Stands for the object's `finished` flag.
         let work = Arc::new(AtomicUsize::new(0));
 
         let raiser = {
@@ -100,7 +99,7 @@ fn a_claim_sees_the_enrolled_work() {
             assert_eq!(
                 work.load(Ordering::Relaxed),
                 1,
-                "a claimed gate handed the reaper an empty poison slot — the raise did not \
+                "a claimed gate handed the reaper an unpublished exit — the raise did not \
                  carry the work it was raised for",
             );
         }

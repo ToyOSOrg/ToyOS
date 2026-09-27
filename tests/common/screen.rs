@@ -232,8 +232,7 @@ impl Ppm {
         self.rows().iter().position(|r| r.contains(needle))
     }
 
-    /// Whether every pixel matches `other`. The C6b negative test's whole
-    /// assertion: a recoverable panic must leave the display untouched.
+    /// Whether every pixel matches `other`.
     pub fn identical_to(&self, other: &Ppm) -> bool {
         self.width == other.width && self.height == other.height && self.pixels == other.pixels
     }

@@ -66,10 +66,6 @@ pub fn idle_stack_high_water() -> usize {
     owed!("per-CPU state", "stage 4")
 }
 
-pub fn in_syscall() -> bool {
-    owed!("per-CPU state", "stage 4")
-}
-
 pub fn syscall_num() -> u64 {
     owed!("per-CPU state", "stage 4")
 }

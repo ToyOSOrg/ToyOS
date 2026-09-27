@@ -152,10 +152,6 @@ const SHARED_BLOCK: Sched = Sched::Parallel;
 /// second of guest time between its members, and what these need is a syscall
 /// number the other 150 must not have.
 const ACTUATOR_TESTS: &[&str] = &[
-    // Actions 0, 1 and 2: a kernel `panic!`, a null read in kernel context, and
-    // a spinlock held across a scheduler entry. Each kills the caller and the
-    // machine has to survive it, which is the whole verdict.
-    "panic_recovery",
     // Actions 10 and 11: the address of sixteen bytes of kernel memory and
     // whether they still hold what the kernel put there. A guest cannot read the
     // kernel's address space, so without them a kernel that still made the write
@@ -325,8 +321,7 @@ const RUST_SKIP: &[&str] = &[
     // and the runner's bound is the fallback. `lan_swap` rides it.
     "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
-    // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
-    // which is also what makes its claim about *the recovered CPU* precise.
+    // `heap_ceiling_bounds` boots the `test-actuators` kernel for it.
     "heap_ceiling",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
@@ -598,11 +593,6 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // the desktop's next repaint — which only where that wait lands decides,
     // so it is timer-anchored despite being a screendump-content check.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
-    ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
-    // The other half of the recovery branch: the test above reads the screen
-    // either side of a survived panic, which holds whether or not the discard
-    // did anything.
-    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
     ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
@@ -1233,6 +1223,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("klogd_hosted", Sched::Parallel, Tier::Fast),
     ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
     ("klogd_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("lock_across_switch_halts", Sched::Parallel, Tier::Nightly),
+    ("heap_over_ceiling_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
     // over two boots measured 12 s twelve-wide on the dev host**, against
@@ -1557,7 +1551,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
     ("fs_dirs_durable", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
-    ("heap_ceiling_recovery", Sched::Parallel, Tier::Nightly),
+    ("heap_ceiling_bounds", Sched::Parallel, Tier::Nightly),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
@@ -1666,7 +1660,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("gsbase_locked", &["test_rs_gsbase_locked"]),
     ("sched_check_build", &["test_rs_sched_stress"]),
     ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
-    ("heap_ceiling_recovery", &["test_rs_heap_ceiling"]),
+    ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("cache_eviction", &["test_rs_cache_eviction"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
     ("i8042_health_cadence", &["test_rs_i8042_keyboard"]),
@@ -1753,6 +1747,10 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
+    ("syscall_panic_halts", &["test_rs_test_panic_child"]),
+    ("syscall_fault_halts", &["test_rs_test_panic_child"]),
+    ("lock_across_switch_halts", &["test_rs_test_panic_child"]),
+    ("heap_over_ceiling_halts", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
     ("dump_nmi_probe", &["test_rs_dump_stage_load"]),
     ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
@@ -1796,8 +1794,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
-    ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
-    ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
 
 /// The clients every `tests/metalcase` desktop boot carries: the group shares
@@ -3102,18 +3098,14 @@ fn check_rust_result(result: &TestResult) -> bool {
     }
 }
 
-/// Checks both exit code and serial diagnostics for panic recovery.
+/// Checks both exit code and the segfault's crash report.
 fn check_panic_recovery(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
     }
 
     let checks: &[(&str, &str)] = &[
-        ("PANIC:", "expected PANIC header"),
-        ("SYS_DEBUG", "expected SYS_DEBUG in panic message"),
-        ("Syscall: num=92", "expected syscall context in panic report"),
-        ("User backtrace:", "expected user backtrace in panic report"),
-        ("Registers:", "expected register dump from kernel fault"),
+        ("Registers:", "expected register dump from the fault"),
         ("SEGFAULT tid=", "expected SEGFAULT header"),
         ("deliberate_null_deref", "expected deliberate_null_deref in segfault backtrace"),
         ("+0x", "expected symbolized backtraces"),
@@ -3125,10 +3117,6 @@ fn check_panic_recovery(result: &TestResult) -> bool {
             eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
             ok = false;
         }
-    }
-    if let Err(msg) = check_tripwire_attribution(&result.serial) {
-        eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-        ok = false;
     }
     ok & check_symbols_were_read("panic_recovery", &result.serial)
 }
@@ -3205,11 +3193,9 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
 /// A whole-buffer `contains("syscall/dispatch.rs")` certifies none of that: the
-/// same boot's `test_syscall_panic` panics in that file too, so the needle is
-/// already present before the tripwire runs. Scope it instead to the window
-/// between this panic's header and its message — `panicked at <location>` is
-/// the only thing in there, and the backtrace that names every frame comes
-/// after the message, so it cannot supply the answer either.
+/// backtrace names every frame, that file's included. Scope it instead to the
+/// window between this panic's header and its message — `panicked at
+/// <location>` is the only thing in there.
 fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
     const MSG: &str = "scheduler entered while a lock is held";
     const HEADER: &str = "PANIC:";
@@ -6850,143 +6836,6 @@ fn run_screen_test(
                  desktop repainted: {}",
                 back.rows()[row].trim()
             );
-            Ok(())
-        }
-        "screen_recoverable_untouched" => {
-            // The negative of screen_fatal_halt: a panic the kernel recovers
-            // from must not paint its report over a live display. Action 0
-            // panics in syscall context, which the handler recovers from, so it
-            // never reaches halt_all_cpus. **Every screen across the recovery,
-            // not two endpoints**: a report painted and then painted over is
-            // gone by any endpoint — the fatal fill is looked for on each dump
-            // from the command until well after the child is reaped.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    // Action 0 is a `SYS_DEBUG` arm, and a kernel that ships
-                    // has none: the child would be answered `InvalidArgument`
-                    // and exit 0, which is this test's own red for a reason
-                    // that is not about the screen at all.
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            let before = qemu.screendump();
-            let from = qemu.console_stream().mark();
-            writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child").map_err(|e| format!("{e}"))?;
-            qemu.flush_stdin();
-            const ENDED: &str = "===TEST_END test_rs_test_panic_child exit=";
-            // Past the child's end by this much: a paint the recovery made late
-            // is still looked for.
-            const AFTER_END: Duration = Duration::from_millis(1500);
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(15));
-            let mut ended_at: Option<Instant> = None;
-            let mut dumps = 0usize;
-            loop {
-                let dump = qemu.screendump();
-                dumps += 1;
-                if dump.fill() == FILL_FATAL {
-                    return Err(format!(
-                        "recovering panic painted its report over the display, on dump {dumps} \
-                         across the recovery\ndecoded screen:\n{}",
-                        dump.text()
-                    ));
-                }
-                if ended_at.is_none() && qemu.console_stream().since(from).contains(ENDED) {
-                    ended_at = Some(Instant::now());
-                }
-                if ended_at.is_some_and(|at| at.elapsed() >= AFTER_END) {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "the recoverable panic never completed\nserial:\n{}",
-                        qemu.console_stream().since(from)
-                    ));
-                }
-            }
-            // The premise, not a formality: a child that never panicked leaves
-            // every dump boot-filled and this test green.
-            let said = qemu.console_stream().since(from);
-            if !said.contains("SYS_DEBUG: kernel panic triggered by userspace") {
-                return Err(format!("no kernel panic in the child's output\nserial:\n{said}"));
-            }
-            if said.contains(&format!("{ENDED}0===")) {
-                return Err("recoverable panic did not kill the child".to_string());
-            }
-            // A screen that was blank to begin with would pass the fill for
-            // the wrong reason.
-            let text = before.text();
-            print_screen(name, &format!("{dumps} dumps across the recovery, none fatal\n{text}"));
-            if !text.contains("Boot: complete") {
-                return Err(format!("nothing on screen to preserve\ndecoded screen:\n{text}"));
-            }
-            Ok(())
-        }
-        "screen_survived_panic_not_blamed" => {
-            // `discard_capture` told from a no-op: `capture` freezes a report on
-            // every panic and the recovery branch drops it, so two deaths in one
-            // boot and the panel must name the second. Action 0 panics in
-            // syscall context, which the handler recovers from.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
-            let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
-            if let Some(err) = &survived.error {
-                return Err(format!("the survivable panic never completed: {err}"));
-            }
-            if survived.exit_code == Some(0) {
-                return Err("the survivable panic did not kill the child".to_string());
-            }
-            if !survived.serial.contains(USERSPACE_PANIC) {
-                return Err(format!(
-                    "no kernel panic in the child's output, so there is no capture to \
-                     discard and the rest of this test would pass vacuously\nserial:\n{}",
-                    survived.serial
-                ));
-            }
-            // The machine walked away from it: that is what makes this a second death.
-            if !qemu.command_until(
-                "run test_rs_test_panic_child 3",
-                FATAL_HALT_NONCE,
-                Duration::from_secs(15),
-            ) {
-                return Err(format!(
-                    "{FATAL_HALT_NONCE:?} never reached the console, so the guest did not \
-                     survive the first panic and there is no second death to read"
-                ));
-            }
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            // The nonce is logged after the first panic's snapshot was frozen,
-            // so a snapshot the discard failed to drop cannot carry it.
-            if !text.contains(FATAL_HALT_NONCE) {
-                return Err(format!(
-                    "the panel does not name the fatal halt: the survived panic's frozen \
-                     report was painted as the cause of death, so `discard_capture` did not \
-                     drop it\ndecoded screen:\n{text}"
-                ));
-            }
-            if dump.fill() != FILL_FATAL {
-                return Err(format!(
-                    "the report is on screen but the fill is {:?}, not the fatal {FILL_FATAL:?}",
-                    dump.fill()
-                ));
-            }
             Ok(())
         }
         other => Err(format!("unknown screen test {other}")),
@@ -13406,6 +13255,35 @@ fn run_machine_test(
             &["klogd-fault", "panic-reboot-fast"],
             &["KERNEL PANIC: read unmapped address at 0x0", "console::body"],
         ),
+        "syscall_panic_halts" | "syscall_fault_halts" | "lock_across_switch_halts"
+        | "heap_over_ceiling_halts" => {
+            use toyos_abi::syscall::{debug_action as da, SYS_DEBUG};
+            let syscall = format!("Syscall: num={SYS_DEBUG}");
+            let syscall = syscall.as_str();
+            let (action, said): (u64, &[&str]) = match name {
+                "syscall_panic_halts" => (
+                    da::PANIC,
+                    &["SYS_DEBUG: kernel panic triggered by userspace", syscall, "User backtrace:"],
+                ),
+                // A Ring 0 read of a user address is the kernel's, inside a syscall too.
+                "syscall_fault_halts" => (
+                    da::NULL_READ,
+                    &["KERNEL PANIC: read unmapped address at 0x0", syscall, "User backtrace:"],
+                ),
+                "lock_across_switch_halts" => (da::LOCK_ACROSS_SWITCH, &[syscall]),
+                // The message, not `mm/alloc.rs`: it names the ceiling rather
+                // than the page source's own request.
+                "heap_over_ceiling_halts" => {
+                    (da::HEAP_OVER_CEILING, &["exceeds MAX_HEAP_ALLOC", syscall])
+                }
+                other => unreachable!("{other} is not a syscall-death row"),
+            };
+            let said = power::syscall_death_resets(test_config, c_bins, rust_bins, action, said)?;
+            if name == "lock_across_switch_halts" {
+                check_tripwire_attribution(&said)?;
+            }
+            Ok(())
+        }
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
             // the compiler cannot reach, because the container works. Its other
@@ -13715,57 +13593,19 @@ fn run_machine_test(
             eprintln!("  [sleep] {}", result.stdout.lines().last().unwrap_or("").trim());
             Ok(())
         }
-        "heap_ceiling_recovery" => {
-            // A panic inside the kernel allocator's own lock left the heap
-            // locked for the rest of the boot: the panicking thread never
-            // unwinds, so `now` never advances, and the CPU that recovered
-            // spun `Lock::lock` to its 500M-spin deadline on its next `alloc`
-            // or `free` — then panicked again, forever. The fix moved the
-            // ceiling check to `KernelAllocator::alloc`, before the lock.
-            //
-            // `smp: 1` is what makes the claim precise. The property is that
-            // *the recovered CPU* survives its next allocation; on a wider
-            // machine `/system/bin/echo` could run somewhere else and pass without
-            // touching it. With one CPU there is nowhere else.
-            //
-            // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `syscall/dispatch.rs`: routes
-            // past the ceiling do still exist,
-            // and each of them holds the VFS lock when it dies, so the
-            // machine wedges either way and the allocator's recovery cannot
-            // be observed on its own.
-            let options = BootOptions {
-                smp: 1,
-                kernel_features: ACTUATOR_KERNEL,
-                ..Default::default()
-            };
+        "heap_ceiling_bounds" => {
+            // Its own boot: `LOWER_SYSINFO_BOUND` stays lowered for the rest of it.
+            let options = BootOptions { kernel_features: ACTUATOR_KERNEL, ..Default::default() };
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             serial::Serial::boot(&qemu).must_be_clean()?;
 
             let result = qemu.run_test("test_rs_heap_ceiling", Duration::from_secs(30));
             if let Some(err) = &result.error {
-                // The wedge's signature. Before the fix this is where the test
-                // ends: the child's panic strands the allocator, the guest
-                // stops answering, and `run_test` runs out of window.
-                return Err(format!(
-                    "the guest stopped answering after the over-ceiling panic: {err}\n\
-                     serial:\n{}",
-                    result.serial
-                ));
+                return Err(format!("heap_ceiling did not finish: {err}\nserial:\n{}", result.serial));
             }
             if !check_rust_result(&result) {
                 return Err(format!("heap_ceiling failed:\n{}", result.stdout));
             }
-
-            // The panic must be the one this test asked for, and it must have
-            // fired where the fix put it. `mm/alloc.rs` appears in the report
-            // either way — the old assert was in the same file — so the needle
-            // is the message, which names the ceiling rather than the page
-            // source's own request.
-            let serial = serial::Serial::named("test serial", result.serial.as_str());
-            serial.must_say("PANIC:")?;
-            let line = serial.must_say("exceeds MAX_HEAP_ALLOC")?;
-            eprintln!("  [heap] {}", line.trim());
             Ok(())
         }
         "cache_eviction" => {
@@ -19561,10 +19401,7 @@ fn one_vocabulary() -> Result<(), String> {
 /// What the declaration itself has to be, before any of it means anything.
 /// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
 ///
-/// A name reaches the syscall directly, or through a child it spawns —
-/// `panic_recovery`'s three actions are all `test_panic_child`'s, and a rule
-/// that only read the test's own source would miss the one test in the list
-/// whose whole subject is the syscall.
+/// A name reaches the syscall directly, or through a child it spawns.
 fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<String> {
     // The fourth spelling is the argument-taking form: every action that
     // carries a payload (TLB_ACK_DELAY_ARM, CENSUS_KIND, LOWER_SYSINFO_BOUND,
@@ -19597,14 +19434,12 @@ fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<
 /// `SYS_DEBUG`, and the binaries are what is asked.
 ///
 /// **What this does not cover, stated because the hole is real:** a machine or
-/// screen test that *drives* one of those binaries on a boot of its own.
-/// `screen_recoverable_untouched` was the instance — it runs
-/// `test_rs_test_panic_child` on a featureless kernel, where action 0 is answered
-/// `InvalidArgument` and the child exits 0 — and no static rule here can say
-/// which `BootOptions` a `run_test` call belongs to. What answers it instead is
-/// the guest: `test_panic_child` names `InvalidArgument` as *this kernel carries
-/// no actuators* rather than reporting a kernel that failed to kill anybody, so
-/// the red says what is wrong wherever it happens.
+/// screen test that *drives* one of those binaries on a boot of its own. No
+/// static rule here can say which `BootOptions` a `run_test` call belongs to.
+/// What answers it instead is the guest: `test_panic_child` names
+/// `InvalidArgument` as *this kernel carries no actuators* rather than reporting
+/// a kernel that failed to stop, so the red says what is wrong wherever it
+/// happens.
 ///
 /// **Both directions are the point.** A binary that gains a `debug()` call and
 /// no entry would run on the shipping kernel, where the syscall answers

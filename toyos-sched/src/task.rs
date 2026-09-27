@@ -273,10 +273,7 @@ fn legal(from: TaskState, to: TaskState) -> bool {
         // Dispositions of the running task; the home CPU never changes here.
         (Running(a), Ready(b)) | (Running(a), Committing(b, _)) => a == b,
         (Running(_), Dead) => true,
-        // Pick and migrate. `Ready → Dead` is not a reap any more: since the
-        // cancellable kill nothing converts a ready task to a dead one, and
-        // the edge survives for the *panic* path, where `schedule_no_return`
-        // buries a context that cannot be resumed.
+        // Pick and migrate.
         (Ready(a), Running(b)) => a == b,
         (Ready(_), InTransit(_)) | (Ready(_), Dead) => true,
         // The two-phase wait handshake.
@@ -676,8 +673,7 @@ impl<M> TaskShared<M> {
         prev & RETIRE_QUEUED == 0
     }
 
-    /// Mark the task killed without queuing a retire — the panic-recovery
-    /// path, which abandons the task instead of retiring it.
+    /// Mark the task killed without queuing a retire.
     pub fn mark_kill(&self) {
         self.state.fetch_or(KILL, Ordering::AcqRel);
     }

@@ -1,10 +1,10 @@
 use crate::arch::{cpu, percpu};
 use crate::syscall;
 use crate::arch::percpu::CpuFaultState;
-use crate::{alert, log, mm, process, scheduler, symbols};
+use crate::{alert, log, mm, process, symbols};
 use crate::symbols::kernel_backtrace;
 
-use toyos_userbound::{blame, Blame, Faulted, Ring};
+use toyos_userbound::Ring;
 
 use super::{Vector, TrapFrame, PF_PRESENT, PF_WRITE, PF_INSTRUCTION_FETCH};
 
@@ -103,20 +103,6 @@ impl ExceptionContext<'_> {
     fn ring(&self) -> Ring {
         Ring::of_cs(self.frame.cs)
     }
-
-    /// CR2 is meaningful on a #PF and stale on every other vector.
-    fn faulted(&self) -> Faulted {
-        if self.vector() == Vector::PageFault {
-            Faulted::Address(self.cr2)
-        } else {
-            Faulted::Nothing
-        }
-    }
-
-    /// Whose fault it was. See `toyos_userbound::fault`.
-    fn blame(&self) -> Blame {
-        blame(self.ring(), self.frame.rip, self.faulted(), percpu::in_syscall())
-    }
 }
 
 // DESIGN RULE: crash_report and everything it calls must stay panic-free — no
@@ -168,10 +154,6 @@ pub(crate) fn crash_report(info: &CrashInfo) {
 }
 
 fn crash_report_exception(ctx: &ExceptionContext) {
-    // `theirs` (who is blamed) and `ring3` (which report format) are separate
-    // questions: a syscall fault is the process's fault even though the frame
-    // is Ring 0, with a kernel `rip` and a kernel-stack `rbp`.
-    let theirs = ctx.blame() != Blame::Kernel;
     let ring3 = ctx.ring().is_user();
     let tid = percpu::current_tid().unwrap_or(crate::process::Tid(0));
     let pid = percpu::current_pid();
@@ -190,7 +172,7 @@ fn crash_report_exception(ctx: &ExceptionContext) {
 
     let name = vector_name(ctx.vector());
 
-    if theirs {
+    if ring3 {
         match ctx.vector() {
             Vector::PageFault => log!("SEGFAULT tid={}: {} {} at {:#x}", tid, pf_action, pf_cause, ctx.cr2),
             Vector::InvalidOpcode => log!("SIGILL tid={}: illegal instruction", tid),
@@ -243,7 +225,7 @@ fn crash_report_exception(ctx: &ExceptionContext) {
     //
     // Only for kernel faults — a Ring 3 segfault says nothing about which CPU
     // is on which kernel stack, and would bury the report about the process.
-    if !theirs {
+    if !ring3 {
         crate::hw::report_contexts(ctx.frame.rsp, None);
     }
 
@@ -278,7 +260,7 @@ fn crash_report_exception(ctx: &ExceptionContext) {
         }
     }
 
-    if theirs {
+    if ring3 {
         let crash_addr = if ctx.vector() == Vector::PageFault { ctx.cr2 } else { 0 };
         process::dump_crash_diagnostics(crash_addr, ctx.frame.rip);
     }
@@ -334,40 +316,6 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
             user_backtrace(percpu::syscall_rbp(), pml4, 20);
         }
     }
-}
-
-/// Terminate after a fatal fault, by [`Blame`] — its three states are
-/// exhaustive; there is no fourth case to write.
-pub(crate) fn recover_or_halt(blame: Blame) -> ! {
-    match blame {
-        // True user-mode fault — no kernel locks held, safe to use normal exit.
-        Blame::Process => {
-            percpu::set_fault_state(CpuFaultState::Normal);
-            crate::panic::forget();
-            syscall::kill_process(-1);
-        }
-        // Kernel fault on the thread's behalf — may hold locks, use try_lock path.
-        Blame::ProcessThroughKernel => try_recover_from_panic(),
-        Blame::Kernel => crate::panic::halt_all_cpus(),
-    }
-}
-
-/// Recovers from a panic in syscall context: poisons the faulted thread for
-/// the idle loop to reap, then rejoins the scheduler lock-free.
-// Never touches the process table: the faulted thread may hold its lock, so
-// only the poison set (read by the idle loop) is safe to use here.
-pub(crate) fn try_recover_from_panic() -> ! {
-    if let Some(tid) = percpu::current_tid() {
-        let pid = percpu::current_pid().unwrap_or(crate::process::Pid(u32::MAX));
-        scheduler::poison_tid(scheduler::TaskId(pid, tid));
-    }
-    percpu::set_fault_state(CpuFaultState::Normal);
-    // Clears this CPU's captured fault, the same evidence
-    // `panic_console::discard_capture` clears on the panic path: left
-    // standing, the next DOUBLE PANIC here would misname an already-survived
-    // crash.
-    crate::panic::forget();
-    scheduler::schedule_no_return();
 }
 
 
@@ -494,17 +442,14 @@ pub(super) fn page_fault_handler(frame: &TrapFrame) {
     // Only handle not-present faults — protection violations are always fatal
     if frame.error_code & PF_PRESENT == 0 {
         let is_user = Ring::of_cs(frame.cs).is_user();
-        if is_user || percpu::current_tid().is_some() {
-            if process::handle_page_fault(fault_addr, frame.error_code) {
-                percpu::set_fault_state(percpu::CpuFaultState::Normal);
-                return;
-            }
-            log!("#PF UNHANDLED: cr2={:#x} rip={:#x} err={:#x} user={} tid={:?}",
-                fault_addr, frame.rip, frame.error_code, is_user, percpu::current_tid());
-        } else {
-            log!("#PF SKIP: cr2={:#x} rip={:#x} err={:#x} (no tid, not user)",
-                fault_addr, frame.rip, frame.error_code);
+        // Ring 3 only: a Ring 0 fault is a kernel bug, and it halts below
+        // before anything is mapped into whichever process is current.
+        if is_user && process::handle_page_fault(fault_addr, frame.error_code) {
+            percpu::set_fault_state(percpu::CpuFaultState::Normal);
+            return;
         }
+        log!("#PF UNHANDLED: cr2={:#x} rip={:#x} err={:#x} user={} tid={:?}",
+            fault_addr, frame.rip, frame.error_code, is_user, percpu::current_tid());
     } else {
         log!("#PF PRESENT: cr2={:#x} rip={:#x} err={:#x} cs={:#x}",
             fault_addr, frame.rip, frame.error_code, frame.cs);
@@ -524,7 +469,6 @@ pub(super) fn exception_handler(frame: &TrapFrame) -> ! {
 
 /// Core fatal exception logic. Prints diagnostics, then kills process or halts all CPUs.
 fn fatal_exception(ctx: &ExceptionContext) -> ! {
-    let blame = ctx.blame();
     let prev = percpu::swap_fault_state(CpuFaultState::Fatal);
     let recursive = prev == CpuFaultState::Fatal || prev == CpuFaultState::Panic;
 
@@ -549,17 +493,18 @@ fn fatal_exception(ctx: &ExceptionContext) -> ! {
             ctx.frame.rip, ctx.cr2, ctx.frame.error_code, cpu::read_cr3(), ctx.frame.rsp, tid_raw);
     }
 
-    // Recursive fault: no second report. Even ProcessThroughKernel can't
-    // survive `try_recover_from_panic`'s rejoin here, so end the process or halt.
+    // Recursive fault: no second report.
     if recursive {
-        if blame != Blame::Kernel {
-            percpu::set_fault_state(CpuFaultState::Normal);
-            crate::panic::forget();
-            syscall::kill_process(-1);
-        }
         crate::panic::halt_all_cpus();
     }
 
     crash_report(&CrashInfo::Exception(ctx));
-    recover_or_halt(blame);
+    // A Ring 3 fault holds no kernel lock, so the ordinary exit ends its
+    // process; every Ring 0 fault is the kernel's, whatever thread is current.
+    if ctx.ring().is_user() {
+        percpu::set_fault_state(CpuFaultState::Normal);
+        crate::panic::forget();
+        syscall::kill_process(-1);
+    }
+    crate::panic::halt_all_cpus();
 }

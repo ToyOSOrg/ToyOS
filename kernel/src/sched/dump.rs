@@ -384,8 +384,7 @@ pub(super) fn deaf_window() {
             // `rdtsc`, not `nanos_since_boot`: the latter calls into
             // `compiler_builtins`, which would misname where a stuck CPU is.
             let until = crate::clock::tsc_deadline(DEAF_NS);
-            // Not an `IrqGuard`: this must unconditionally set IF on exit, and
-            // panic recovery may already have left IF clear.
+            // Not an `IrqGuard`: this must unconditionally set IF on exit.
             crate::arch::cpu::disable_interrupts();
             while crate::arch::cpu::counter() < until {
                 core::hint::spin_loop();

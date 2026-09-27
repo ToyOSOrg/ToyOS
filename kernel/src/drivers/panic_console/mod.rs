@@ -3,9 +3,8 @@
 //! Renders log records as an 8x16 text grid onto the UEFI GOP framebuffer,
 //! through `LogRecord`'s `Display`, so no second formatter can drift from
 //! `logd`. [`capture`] freezes the report before `panic_flush` drains it;
-//! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. A
-//! recovered panic must call [`discard_capture`]. virtio-gpu is
-//! unsupported: its scanout needs the unbounded-poll wedge this module avoids.
+//! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. virtio-gpu
+//! is unsupported: its scanout needs the unbounded-poll wedge this module avoids.
 //!
 //! The two holds this module ends a panic in — [`page_forever`] and
 //! [`hold_the_panel`] — are also where `crate::panic_reboot`'s bound is
@@ -553,19 +552,6 @@ fn captor_token() -> u32 {
         crate::arch::percpu::cpu_id().wrapping_add(2)
     } else {
         EARLY_CAPTOR
-    }
-}
-
-/// Drop the captured report: this panic was survived. Called only on the recovery branch.
-///
-/// A refused discard leaves the latch owned and the report standing, so a
-/// survived panic can still be painted as the cause of death: `CAPTURE_ACCESS`
-/// refuses only under a fatal reader, and admitting a fresh captor beneath that
-/// reader's live borrow is the worse of the two.
-pub fn discard_capture() {
-    let token = captor_token();
-    if CAPTURE.owned_by(token) && CAPTURE_ACCESS.discard() {
-        let _ = CAPTURE.release(token);
     }
 }
 

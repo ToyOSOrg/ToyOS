@@ -924,18 +924,54 @@ pub fn klogd_death_resets(
     let options =
         BootOptions { kernel_params, ready_marker: "kthread: klogd pid=", ..panicked() };
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-    let mut dead = serial::Serial::boot(&qemu);
-    let (budget, tail) = resets_inside_the_bound(
-        &mut qemu,
-        "QEMU never reported stopping: klogd died and the machine carried on without it",
-    )?;
+    let dead = serial::Serial::boot(&qemu);
+    let never = "QEMU never reported stopping: klogd died and the machine carried on without it";
+    died_and_reset(&mut qemu, dead, never, said).map(drop)
+}
+
+/// `SYS_DEBUG` `action` ends the kernel inside its caller's syscall, and the
+/// machine is what dies, never only the caller. The verdict is QEMU's reset, as
+/// [`klogd_death_resets`]'s is; what the guest said is returned for the caller
+/// to read further.
+pub fn syscall_death_resets(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    action: u64,
+    said: &[&str],
+) -> Result<String, String> {
+    let options = BootOptions {
+        kernel_params: &["panic-reboot-fast"],
+        kernel_features: toyos_build::build::TEST_KERNEL,
+        ready_marker: qemu::DEFAULT_READY,
+        ..panicked()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let dead = serial::Serial::boot(&qemu);
+    writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child {action}")
+        .expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let never = "QEMU never reported stopping: the kernel died inside a syscall and the machine \
+                 carried on without its caller";
+    died_and_reset(&mut qemu, dead, never, said)
+}
+
+/// QEMU's reset inside the bound, then what the dead guest said, `said` and the
+/// arm line among it.
+fn died_and_reset(
+    qemu: &mut QemuInstance,
+    mut dead: serial::Serial,
+    never: &str,
+    said: &[&str],
+) -> Result<String, String> {
+    let (budget, tail) = resets_inside_the_bound(qemu, never)?;
     dead.push(&tail);
     for want in said {
         dead.must_say(want)?;
     }
     dead.must_say(&panic_armed())?;
-    eprintln!("  [klogd] {kernel_params:?}: QEMU reset the machine inside {budget:?}");
-    Ok(())
+    eprintln!("  [power] {:?}: QEMU reset the machine inside {budget:?}", said.first());
+    Ok(dead.text().to_string())
 }
 
 /// A panic inside `percpu::init_bsp`, one statement after it loads the IDT,

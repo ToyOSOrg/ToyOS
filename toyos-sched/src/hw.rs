@@ -104,8 +104,7 @@ pub trait Machine: Kicker + 'static {
     /// Has no caller in either world, and does **not** fit the site it looks
     /// like it should — the idle loop's cli / final recheck / sti;hlt: both exits
     /// from that recheck must *set* IF unconditionally — the halt exit because
-    /// `sti;hlt` is one atom, the stay-awake exit because panic recovery
-    /// enters the idle loop with IF already 0 — and an RAII guard restores
+    /// `sti;hlt` is one atom — and an RAII guard restores
     /// the caller's flags instead.
     fn irq_guard(&self) -> Self::IrqGuard;
 
