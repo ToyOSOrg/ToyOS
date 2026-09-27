@@ -9,8 +9,8 @@ use core::sync::atomic::AtomicU32;
 
 use toyos::shm::SharedMemory;
 use toyos_abi::syscall::SyscallError;
-use toyos_blockring::layout::{arena_byte, ARENA_BLOCKS, RING_WORDS, SESSION_BYTES};
-use toyos_blockring::BLOCK_BYTES;
+use toyos_blockring::layout::{RING_WORDS, SESSION_BYTES};
+use toyos_blockring::Run;
 
 use toyos::volatile::Window;
 
@@ -31,7 +31,7 @@ impl Region {
     }
 
     /// The ring words, as the rings take them.
-    pub fn words(&self) -> &[AtomicU32] {
+    pub fn words(&self) -> &[AtomicU32; RING_WORDS] {
         let base = self.memory.as_ptr();
         assert!(base as usize % align_of::<AtomicU32>() == 0);
         // SAFETY: the mapping is `SESSION_BYTES` long and lives as long as
@@ -39,19 +39,15 @@ impl Region {
         // `RING_WORDS` words of it are inside it (`layout`'s own assertion);
         // the base is 2 MiB aligned; and an atomic is the one type that may
         // alias memory another process writes.
-        unsafe { core::slice::from_raw_parts(base as *const AtomicU32, RING_WORDS) }
+        unsafe { &*(base as *const [AtomicU32; RING_WORDS]) }
     }
 
-    /// Arena blocks `first..first + blocks`.
-    pub fn arena(&self, first: u32, blocks: u32) -> Window {
-        assert!(
-            first.checked_add(blocks).is_some_and(|end| end <= ARENA_BLOCKS),
-            "blockd: arena blocks {first}+{blocks} past the arena"
-        );
+    /// The arena blocks of `run`.
+    pub fn arena(&self, run: &Run) -> Window {
         // SAFETY: `SESSION_BYTES` mapped for as long as `self.memory`, and
         // every window over it is used while the region is held.
         let whole = unsafe { Window::new(self.memory.as_ptr(), SESSION_BYTES) };
-        whole.sub(arena_byte(first), blocks as usize * BLOCK_BYTES)
+        whole.sub(run.span().offset, run.span().len)
     }
 
     /// A second handle to the region, for a send.
