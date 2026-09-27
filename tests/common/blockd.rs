@@ -575,6 +575,7 @@ pub fn blockd_dma_outside_the_lent(
         let result = role(&mut qemu, name, Duration::from_secs(120))?;
         if name == "dma-inside" {
             said(&result, "a register window, and a region already lent, are refused with InvalidArgument")?;
+            said(&result, "a spawn from a register window is refused with InvalidArgument, and one from a region reaches its argv")?;
         }
         if let Some(line) = result.stdout.lines().find(|l| l.contains("aiming the device at ")) {
             let at = line
@@ -614,6 +615,24 @@ pub fn blockd_dma_outside_the_lent(
          taken back were each one fault record at that address and left the region untouched; the \
          function answered again on its next claim"
     );
+    Ok(())
+}
+
+/// blockd started holding no claim answers each first frame on the loop and
+/// the handshake it serves a controller on: a listing with a payload and an
+/// open with no region or a short GUID `Malformed`, a listing empty, an open
+/// `NotFound`. The guest's own account; no disk is crafted, since this blockd
+/// drives none.
+pub fn blockd_serves_nothing(
+    _test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join(CONFIG);
+    let mut qemu = QemuInstance::boot_with_options(&config, c_bins, rust_bins, BootOptions::default());
+    partclaim::no_panic("booting", qemu.boot_log())?;
+    role(&mut qemu, "nothing", Duration::from_secs(60))?;
+    eprintln!("  [blockd] with no controller, every first frame answered as the controller's loop answers it");
     Ok(())
 }
 

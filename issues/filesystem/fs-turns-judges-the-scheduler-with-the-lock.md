@@ -7,11 +7,11 @@ opened: 2026-09-27
 # `fs_turns` judges the scheduler with the lock
 
 `tests/toyos-rust-tests/src/bin/fs_turns.rs` asserts that every writer sharing
-one directory's connection made at least 16 passes while the first made 32. A
+one directory's connection made more than one pass while the first made 32. A
 writer the scheduler — or the host, under TCG — keeps off-CPU between its reply
 and its next request holds no ticket in that time, and the others pass it with
-no lock at fault, so the floor reds on a slow schedule as well as on a lock that
-lets its releaser take it straight back.
+no lock at fault, so the floor reds on a thread kept off for 31 of the first's
+turns as well as on a lock that lets its releaser take it straight back.
 
 ## Exit condition
 

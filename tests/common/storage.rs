@@ -702,6 +702,55 @@ pub fn fsd_restart(
     Ok(())
 }
 
+/// DATA's first file server ending before it accepts a connection that init's
+/// own file worker is waiting on costs init nothing: it starts the server
+/// again, the waiting call goes on to it, and the boot reaches the ready
+/// marker with the session home made. `tests/fsdmountcase` arms the end
+/// (`--end-at-mount data`); the home is judged off the image by the host's own
+/// bcachefs reader once the machine is down.
+pub fn fsd_end_at_mount(
+    _test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const ENDED: &str = "fsd: --end-at-mount: ending with a connection waiting and unaccepted";
+    let config = super::compile::repo_root().join("tests/fsdmountcase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::Metal, ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    let image = qemu.nvme_image().to_path_buf();
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    let log = format!("{boot}\n{tail}");
+    let ended = log.matches(ENDED).count();
+    if ended != 1 {
+        return Err(format!("fsd said {ENDED:?} {ended} times, not once:\n{log}"));
+    }
+    let restarted = log.lines().filter(|l| l.contains("init: fsd data (pid ") && l.contains("ended; started again")).count();
+    if restarted != 1 {
+        return Err(format!("init started DATA's server again {restarted} times, not once:\n{log}"));
+    }
+    let console = super::serial::Serial::named("fsd_end_at_mount", log.as_str());
+    console.must_not_say("session home")?;
+    console.must_be_clean()?;
+
+    let home = toyos_manifest::session_home();
+    let home = home.trim_start_matches('/');
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(FileBlocks::open(&image)?)
+        .map_err(|e| format!("the DATA partition does not mount on the host: {e:?}"))?;
+    if !fs.is_dir(home).map_err(|e| format!("asking the image for {home}: {e:?}"))? {
+        return Err(format!("{home} is not on the DATA volume: init made no session home\n{log}"));
+    }
+    eprintln!("  [fsd] DATA's first server ended under init's waiting call; init started it again and {home} is on the image");
+    Ok(())
+}
+
 /// `/apps` and `/home` are two paths into one filesystem, judged off the device.
 ///
 /// The guest writes one file under each and shuts down; the host then finds

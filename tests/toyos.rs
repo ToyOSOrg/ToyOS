@@ -983,6 +983,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // clients reopen, the fourth end closes /home to Gone, and the flushed
     // files read back off the image. Body in `tests/common/storage.rs`.
     ("fsd_restart", Sched::Parallel, Tier::Fast),
+    // DATA's first file server ended before it accepts init's own waiting call:
+    // init starts it again and the boot reaches ready with the session home.
+    // Body in `tests/common/storage.rs`.
+    ("fsd_end_at_mount", Sched::Parallel, Tier::Fast),
     // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
     ("home_overwrite_reads_back", Sched::Parallel, Tier::Fast),
     // One filesystem under two paths: the guest writes under each of /apps and
@@ -1548,6 +1552,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // standing; then, on a second boot, a function no release resets is never
     // lent where it was left aimed.
     ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Nightly),
+    // blockd holding no controller: each first frame answered on the loop and
+    // the handshake a controller is served on, the malformed refused as such.
+    ("blockd_serves_nothing", Sched::Parallel, Tier::Fast),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -1658,6 +1665,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("blockd_survives_its_death", &["test_rs_blockd_io"]),
     ("blockd_dma_outside_the_lent", &["test_rs_blockd_io"]),
     ("blockd_lends_within_its_bound", &["test_rs_blockd_io"]),
+    ("blockd_serves_nothing", &["test_rs_blockd_io"]),
     (
         "inspect_reads_its_owners",
         &["test_rs_inspect_denied", "test_rs_inspect_plays", "test_rs_inventory_bounds"],
@@ -11387,6 +11395,7 @@ fn run_machine_test(
         }
         "so_cache_refusals" => storage::so_cache_refusals(test_config, c_bins, rust_bins),
         "fsd_restart" => storage::fsd_restart(test_config, c_bins, rust_bins),
+        "fsd_end_at_mount" => storage::fsd_end_at_mount(test_config, c_bins, rust_bins),
         "home_overwrite_reads_back" => {
             storage::home_overwrite_reads_back(test_config, c_bins, rust_bins)
         }
@@ -11954,6 +11963,7 @@ fn run_machine_test(
             common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/hda.rs`, same reason.
+        "blockd_serves_nothing" => common::blockd::blockd_serves_nothing(test_config, c_bins, rust_bins),
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
         "hda_client_stall" => common::hda::hda_client_stall(test_config, c_bins, rust_bins),
         "hda_two_live_refused" => {
@@ -12726,7 +12736,7 @@ fn run_machine_test(
 
             // Then shut down, which has init ask fsd to sync every dirty block
             // the format left — ~1900 of them on a device this size against 8
-            // on the small one, so the write-back runs at scale only here.
+            // on the small one.
             //
             // The kernel's own shutdown lines are observable now: the ring
             // is drained in `acpi::shutdown()` before it cuts the power.
@@ -12738,8 +12748,9 @@ fn run_machine_test(
             qemu.flush_stdin();
             let tail = qemu.drain_serial(Duration::from_secs(20));
 
-            for line in ["Syncing filesystems...", "Shutting down."] {
-                if !tail.contains(line) {
+            let recorded = tail.lines().any(|line| toyos_quiesce::Record::parse(line).is_some());
+            for (line, said) in [("the stop's record", recorded), ("Shutting down.", tail.contains("Shutting down."))] {
+                if !said {
                     return Err(format!(
                         "{line:?} never reached the host — the ring was still \
                          holding it when the power was cut:\n{tail}"
@@ -12776,10 +12787,7 @@ fn run_machine_test(
                     ));
                 }
                 if !sb.is_clean() {
-                    return Err(format!(
-                        "the {name} superblock is not marked clean — the write-back at \
-                         shutdown did not reach the device"
-                    ));
+                    return Err(format!("the {name} superblock is not marked clean"));
                 }
             }
 

@@ -270,6 +270,14 @@ impl<D: Disk> DataVolume<D> {
         Ok(())
     }
 
+    /// Forget a node nobody holds and whose entry is written.
+    fn release(&mut self, node: Node) {
+        let open = self.open.remove(&node).expect("an open node");
+        if self.by_path.get(&open.path) == Some(&node) {
+            self.by_path.remove(&open.path);
+        }
+    }
+
     /// Hand every open file at `path` its end: its blocks go with the name.
     fn orphan(&mut self, path: &str) {
         if let Some(node) = self.by_path.remove(path) {
@@ -392,26 +400,26 @@ impl<D: Disk> Volume for DataVolume<D> {
         self.open.get_mut(&node).expect("just found or made").holders += 1;
         if how.truncate {
             if let Err(e) = self.truncate(node, 0) {
-                self.close(node);
+                // A refused close is said, and its node kept for the next sync.
+                let _ = self.close(node);
                 return Err(e);
             }
         }
         Ok(node)
     }
 
-    fn close(&mut self, node: Node) {
-        let Some(open) = self.open.get_mut(&node) else { return };
+    fn close(&mut self, node: Node) -> Result<(), SyscallError> {
+        let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         open.holders -= 1;
         if open.holders > 0 {
-            return;
+            return Ok(());
         }
         if let Err(e) = self.persist(node) {
-            println!("fsd: node {node}'s entry was not written at its last close: {e:?}");
+            println!("fsd: node {node}'s entry was not written at its last close ({e:?}); the next sync writes it");
+            return Err(e);
         }
-        let open = self.open.remove(&node).expect("present above");
-        if self.by_path.get(&open.path) == Some(&node) {
-            self.by_path.remove(&open.path);
-        }
+        self.release(node);
+        Ok(())
     }
 
     fn hold(&mut self, node: Node) {
@@ -475,6 +483,30 @@ impl<D: Disk> Volume for DataVolume<D> {
         if open.gone {
             return Err(SyscallError::Gone);
         }
+        // Every page past the extents is allocated before a byte is written,
+        // so a write the file's one entry could not name is refused whole.
+        let covered: u64 = open.extents.iter().map(|e| e.block_count as u64).sum();
+        for page in (offset / BLOCK as u64).max(covered)..end.div_ceil(BLOCK as u64) {
+            let grown = u32::try_from(page)
+                .map_err(|_| SyscallError::ResourceExhausted)
+                .and_then(|p| mapped("an allocation", &open.path, self.fs.resolve_or_alloc_block(&mut open.extents, p)))
+                .and_then(|_| match bcachefs::file_entry_fits(&open.path, &open.extents) {
+                    true => Ok(()),
+                    false => {
+                        println!(
+                            "fsd: a write to '{}' is refused: its entry would name {} runs of blocks, more than it holds",
+                            open.path,
+                            open.extents.len()
+                        );
+                        Err(SyscallError::ResourceExhausted)
+                    }
+                });
+            if let Err(e) = grown {
+                let dropped = keep_blocks(&mut open.extents, covered);
+                mapped("a refused write's free", &open.path, self.fs.free_extents(&dropped))?;
+                return Err(e);
+            }
+        }
         let mut done = 0;
         let mut page_buf = vec![0u8; BLOCK];
         while done < data.len() {
@@ -482,22 +514,16 @@ impl<D: Disk> Volume for DataVolume<D> {
             let page = at / BLOCK as u64;
             let within = (at % BLOCK as u64) as usize;
             let take = (BLOCK - within).min(data.len() - done);
-            let existed = block_for(&open.extents, page);
-            let block = match existed {
-                Some(block) => block,
-                None => {
-                    let page_idx = u32::try_from(page).map_err(|_| SyscallError::ResourceExhausted)?;
-                    mapped("an allocation", &open.path, self.fs.resolve_or_alloc_block(&mut open.extents, page_idx))?
-                }
-            };
+            let block = block_for(&open.extents, page).expect("allocated above");
             if take == BLOCK {
                 cache.write(block, &data[done..done + BLOCK]).map_err(disk_word)?;
             } else {
                 // A page written in part keeps the rest of what it held, which
                 // for a page the file never reached is zeros.
-                match existed {
-                    Some(_) if page * (BLOCK as u64) < open.size => cache.read(block, &mut page_buf).map_err(disk_word)?,
-                    _ => page_buf.fill(0),
+                if page < covered && page * (BLOCK as u64) < open.size {
+                    cache.read(block, &mut page_buf).map_err(disk_word)?;
+                } else {
+                    page_buf.fill(0);
                 }
                 page_buf[within..within + take].copy_from_slice(&data[done..done + take]);
                 cache.write(block, &page_buf).map_err(disk_word)?;
@@ -675,12 +701,18 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(())
     }
 
-    fn sync(&mut self) -> Result<(), SyscallError> {
+    fn sync(&mut self) -> Result<Vec<(Node, SyscallError)>, SyscallError> {
+        let mut unwritten = Vec::new();
         let nodes: Vec<Node> = self.open.keys().copied().collect();
         for node in nodes {
-            self.persist(node)?;
+            match self.persist(node) {
+                Err(e) => unwritten.push((node, e)),
+                Ok(()) if self.open[&node].holders == 0 => self.release(node),
+                Ok(()) => {}
+            }
         }
-        mapped("sync", "", self.fs.sync())
+        mapped("sync", "", self.fs.sync())?;
+        Ok(unwritten)
     }
 
     fn describe(&self) -> String {
@@ -735,12 +767,9 @@ mod tests {
         v.mkdir("home/toy").unwrap();
         let n = v.open("home/toy/x", CREATE).unwrap();
         v.write(n, 0, &[7; 5000]).unwrap();
-        v.close(n);
+        v.close(n).unwrap();
         v.sync().unwrap();
-        let DataVolume { fs, cache, .. } = v;
-        drop(fs);
-        let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
-        let Probed::Mounted(mut again) = DataVolume::probe(disk, &["home"], clock) else { panic!("remount") };
+        let mut again = remount(v);
         assert_eq!(again.lstat("home/toy/x").unwrap().size, 5000);
         assert_eq!(again.lstat("home/toy").unwrap().kind, Kind::Dir, "an empty directory outlives the mount");
         let n = again.open("home/toy/x", PLAIN).unwrap();
@@ -776,13 +805,13 @@ mod tests {
     fn directories_are_listed_and_refuse_what_posix_refuses() {
         let mut v = vol();
         let f = v.open("home/nodir/a", CREATE).unwrap();
-        v.close(f);
+        v.close(f).unwrap();
         assert_eq!(v.lstat("home/nodir").unwrap().kind, Kind::Dir, "a create makes its directories");
         assert_eq!(v.open("home/nodir/a/b", CREATE), Err(SyscallError::NotFound), "never under a file");
         v.mkdir("home/d").unwrap();
         assert_eq!(v.mkdir("home/d"), Err(SyscallError::AlreadyExists));
         let n = v.open("home/d/f", CREATE).unwrap();
-        v.close(n);
+        v.close(n).unwrap();
         assert_eq!(v.rmdir("home/d"), Err(SyscallError::InvalidArgument), "not empty");
         let names: Vec<String> = v.list("home").unwrap().into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["d", "nodir"]);
@@ -803,11 +832,120 @@ mod tests {
         let mut out = [0u8; 5];
         v.read(n, 0, &mut Buf(&mut out)).unwrap();
         assert_eq!(&out, b"hello");
-        v.close(n);
+        v.close(n).unwrap();
         let m = v.open("home/b/g", CREATE).unwrap();
-        v.close(m);
+        v.close(m).unwrap();
         v.rename("home/b/g", "home/b/f").unwrap();
         assert_eq!(v.lstat("home/b/f").unwrap().size, 0, "replaced");
+    }
+
+    fn remount(v: DataVolume<Ram>) -> DataVolume<Ram> {
+        let DataVolume { fs, cache, .. } = v;
+        drop(fs);
+        let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
+        let Probed::Mounted(again) = DataVolume::probe(disk, &["home"], clock) else { panic!("remount") };
+        again
+    }
+
+    /// A full volume of one-page files, every other one then deleted: no two
+    /// free blocks are adjacent, so every run a file is given is one block.
+    fn fragmented() -> DataVolume<Ram> {
+        let mut v = DataVolume::format(Ram::new(1024), &["home"], clock).unwrap();
+        let mut made = 0;
+        while let Ok(n) = v.open(&format!("home/fill/{made}"), CREATE) {
+            let written = v.write(n, 0, &[9; BLOCK]);
+            v.close(n).unwrap();
+            if written.is_err() {
+                break;
+            }
+            made += 1;
+        }
+        for i in (0..made).step_by(2) {
+            v.unlink(&format!("home/fill/{i}")).unwrap();
+        }
+        v
+    }
+
+    fn page_count(v: &mut DataVolume<Ram>, path: &str) -> u64 {
+        v.lstat(path).unwrap().size / BLOCK as u64
+    }
+
+    /// Two files that grow a page at a time in turn each keep their runs, so
+    /// neither's entry fills with one extent per page.
+    #[test]
+    fn two_files_written_in_turn_keep_every_accepted_write() {
+        let mut v = vol();
+        let a = v.open("home/a", CREATE).unwrap();
+        let b = v.open("home/b", CREATE).unwrap();
+        for page in 0..300u64 {
+            v.write(a, page * BLOCK as u64, &[1; BLOCK]).unwrap();
+            v.write(b, page * BLOCK as u64, &[2; BLOCK]).unwrap();
+        }
+        let c = v.open("home/c", CREATE).unwrap();
+        v.write(c, 0, b"c").unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        for n in [a, b, c] {
+            v.close(n).unwrap();
+        }
+        let mut v = remount(v);
+        assert_eq!(page_count(&mut v, "home/a"), 300);
+        assert_eq!(page_count(&mut v, "home/b"), 300);
+    }
+
+    /// On a volume whose free blocks are all apart, a file's entry fills: the
+    /// write that would take it past what one entry names is refused whole,
+    /// and every write before it reaches the volume.
+    #[test]
+    fn a_write_its_entry_could_not_name_is_refused_and_every_accepted_one_kept() {
+        let mut v = fragmented();
+        let a = v.open("home/a", CREATE).unwrap();
+        let mut pages = 0u64;
+        let refused = loop {
+            match v.write(a, pages * BLOCK as u64, &[3; BLOCK]) {
+                Ok(()) => pages += 1,
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(refused, SyscallError::ResourceExhausted);
+        // One block a run: (4064 − 24 − 19 − "home/a".len()) / 16 runs is
+        // what the one entry holding `home/a` names.
+        assert_eq!(pages, 250, "the entry filled, not the volume");
+        assert_eq!(page_count(&mut v, "home/a"), pages, "the refused write changed nothing");
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        v.close(a).unwrap();
+        let mut v = remount(v);
+        assert_eq!(page_count(&mut v, "home/a"), pages);
+        let a = v.open("home/a", PLAIN).unwrap();
+        let mut out = vec![0u8; pages as usize * BLOCK];
+        v.read(a, 0, &mut Buf(&mut out)).unwrap();
+        assert!(out.iter().all(|&b| b == 3));
+    }
+
+    /// One file whose entry is refused leaves every other file's sync whole,
+    /// its own close refused, and its writes kept until a sync writes them.
+    #[test]
+    fn an_entry_refused_costs_only_its_own_file() {
+        let mut v = vol();
+        let a = v.open("home/a", CREATE).unwrap();
+        let b = v.open("home/b", CREATE).unwrap();
+        v.write(a, 0, &[1; BLOCK]).unwrap();
+        v.write(b, 0, &[2; 3 * BLOCK]).unwrap();
+        // More runs than the entry names, as no write can give it.
+        let real = v.open[&a].extents.clone();
+        let too_many = vec![real[0]; 300];
+        v.open.get_mut(&a).unwrap().extents = too_many.clone();
+
+        assert_eq!(v.sync(), Ok(vec![(a, SyscallError::ResourceExhausted)]));
+        v.close(b).unwrap();
+        assert_eq!(v.close(a), Err(SyscallError::ResourceExhausted), "a close that lost the writes is refused");
+        assert_eq!(page_count(&mut v, "home/a"), 1, "the refused file is still what its writes made it");
+
+        v.open.get_mut(&a).unwrap().extents = real;
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert!(v.open.is_empty(), "written, the unheld node goes");
+        let mut v = remount(v);
+        assert_eq!(page_count(&mut v, "home/a"), 1);
+        assert_eq!(page_count(&mut v, "home/b"), 3);
     }
 
     /// A rename over an open, unsynced file that the format refuses leaves
@@ -816,14 +954,10 @@ mod tests {
     /// extents fit its own short name and not `to`'s long one.
     #[test]
     fn a_refused_rename_over_an_open_file_keeps_its_unsynced_writes() {
-        let mut v = vol();
+        let mut v = fragmented();
         let from = v.open("home/f", CREATE).unwrap();
-        let spacer = v.open("home/spacer", CREATE).unwrap();
-        // Alternating allocations, so no two of `from`'s blocks are adjacent
-        // and each is an extent of its own.
         for page in 0..240u64 {
             v.write(from, page * BLOCK as u64, &[1; BLOCK]).unwrap();
-            v.write(spacer, page * BLOCK as u64, &[2; BLOCK]).unwrap();
         }
         let to_path = format!("home/{}", "t".repeat(300));
         let to = v.open(&to_path, CREATE).unwrap();
@@ -834,8 +968,8 @@ mod tests {
         let mut back = [0u8; 22];
         assert_eq!(v.read(to, 0, &mut Buf(&mut back)), Ok(22), "the holder of `to` still reads it");
         assert_eq!(&back, b"written and not synced");
-        v.sync().unwrap();
-        v.close(to);
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        v.close(to).unwrap();
         assert_eq!(v.lstat(&to_path).unwrap().size, 22, "`to`'s length reached the volume");
     }
 }

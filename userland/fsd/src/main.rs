@@ -7,7 +7,7 @@
 //! nothing else of the machine. Argv is the role, and for LOG and BOOT the
 //! unique GUID of the partition the loader named for it when no claim on it
 //! was minted; then the row's own arguments, which are tests' actuators
-//! ([`END_ON`], [`END_AT_READ`]).
+//! ([`END_ON`], [`END_AT_READ`], [`END_AT_MOUNT`]).
 //!
 //! **A connection is bound to the directory whose port it came in on**, and
 //! every path on it is resolved there (`fsd::resolve`); a write on a read-only
@@ -92,6 +92,16 @@ const END_ON: &str = "--end-on";
 /// path, across restarts: the kernel's `/tmp` keeps the mark. Armed by nothing
 /// but a boot config's `args`.
 const END_AT_READ: &str = "--end-at-read";
+
+/// `--end-at-mount <role>`: that role's first server this boot, its volume
+/// mounted, waits for a connection and ends without accepting it — a server
+/// gone before its first answer, under a client already waiting on it, as a
+/// test stages one. Once a boot, as [`END_AT_READ`] is. Armed by nothing but a
+/// boot config's `args`.
+const END_AT_MOUNT: &str = "--end-at-mount";
+
+/// How long [`END_AT_MOUNT`] waits for the connection it ends under.
+const END_AT_MOUNT_WAIT: Duration = Duration::from_secs(60);
 
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
@@ -178,13 +188,18 @@ fn main() {
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
         panic!("fsd: started with {args:?}; the first argument is a role: data, log or boot")
     });
-    let (mut guid, mut end_on, mut end_at_read) = (None, None, Vec::new());
+    let (mut guid, mut end_on, mut end_at_read, mut end_at_mount) = (None, None, Vec::new(), None);
     let mut rest = args.iter().skip(2);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             END_ON => end_on = Some(rest.next().unwrap_or_else(|| panic!("fsd: {END_ON} takes a path")).clone()),
             END_AT_READ => {
                 end_at_read.push(rest.next().unwrap_or_else(|| panic!("fsd: {END_AT_READ} takes a path")).clone())
+            }
+            END_AT_MOUNT => {
+                end_at_mount = Some(
+                    rest.next().and_then(|r| Role::parse(r)).unwrap_or_else(|| panic!("fsd: {END_AT_MOUNT} takes a role")),
+                )
             }
             flag if flag.starts_with("--") => panic!("fsd: {flag} is no argument of this server"),
             named if guid.is_none() => guid = Some(named),
@@ -200,6 +215,9 @@ fn main() {
         caps.iter().map(|c| c.dir.as_str()).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
+    if end_at_mount == Some(role) && first_this_boot(&format!("end-at-mount-{role:?}")) {
+        end_under_a_waiting_connection(&caps);
+    }
     let caps_len = caps.len() as u32;
     Server {
         volume,
@@ -385,22 +403,36 @@ fn stat_reply(meta: Meta) -> Reply {
     Reply { kind: meta.kind.wire(), value2: meta.size, mtime: meta.mtime, ..Reply::ok() }
 }
 
-/// Whether this is [`END_AT_READ`]'s first firing this boot for `path`: its
-/// mark is made once in the kernel's `/tmp`, which outlives this process and
-/// not the boot. Looked for and then made, not made exclusively — the std
-/// fork's `create_new` on a kernel path is not exclusive — which one server
-/// of a role at a time makes safe. A mark that can be neither found nor made
-/// is an actuator that cannot do its one job.
-fn first_read_this_boot(path: &str) -> bool {
-    let mark = format!("/tmp/fsd-end-at-read-{}", path.replace('/', "-"));
+/// Whether this is an actuator's first firing this boot for `what`: its mark
+/// is made once in the kernel's `/tmp`, which outlives this process and not
+/// the boot. Looked for and then made, not made exclusively — the std fork's
+/// `create_new` on a kernel path is not exclusive — which one server of a role
+/// at a time makes safe. A mark that can be neither found nor made is an
+/// actuator that cannot do its one job.
+fn first_this_boot(what: &str) -> bool {
+    let mark = format!("/tmp/fsd-{}", what.replace('/', "-"));
     match std::fs::metadata(&mark) {
         Ok(_) => false,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::write(&mark, b"").unwrap_or_else(|e| panic!("fsd: {END_AT_READ}: its mark {mark}: {e}"));
+            std::fs::write(&mark, b"").unwrap_or_else(|e| panic!("fsd: an actuator's mark {mark}: {e}"));
             true
         }
-        Err(e) => panic!("fsd: {END_AT_READ}: its mark {mark} would not be looked up: {e}"),
+        Err(e) => panic!("fsd: an actuator's mark {mark} would not be looked up: {e}"),
     }
+}
+
+/// [`END_AT_MOUNT`]'s end: once a connection waits on one of `caps`' ports,
+/// and before it is taken.
+fn end_under_a_waiting_connection(caps: &[Capability]) -> ! {
+    let poller = Poller::new(caps.len() as u32);
+    for (i, cap) in caps.iter().enumerate() {
+        poller.watch(&cap.acceptor, READABLE, i as u64);
+    }
+    let mut waiting = false;
+    poller.wait(1, END_AT_MOUNT_WAIT.as_nanos() as u64, |_| waiting = true);
+    assert!(waiting, "fsd: {END_AT_MOUNT}: no connection came in {} s", END_AT_MOUNT_WAIT.as_secs());
+    println!("fsd: {END_AT_MOUNT}: ending with a connection waiting and unaccepted");
+    std::process::exit(1);
 }
 
 fn window_of(w: &SharedMemory) -> Window {
@@ -475,10 +507,10 @@ impl Server {
                 self.drop_client(id, "it never lent its window");
             }
             if self.dirty_since.is_some_and(|at| now.duration_since(at) >= WRITEBACK) {
-                if let Err(e) = self.volume.sync() {
+                self.dirty_since = None;
+                if let Err(e) = self.sync(None) {
                     println!("fsd: the write-back sync failed: {e:?}");
                 }
-                self.dirty_since = None;
             }
         }
     }
@@ -524,7 +556,9 @@ impl Server {
             println!("fsd: dropping client {id} of {}: {why}", self.caps[client.cap].dir);
         }
         for fid in client.fids.values() {
-            self.volume.close(fid.node);
+            // Nobody is left to answer: a refused close is said, and its node
+            // kept for the next sync.
+            let _ = self.volume.close(fid.node);
         }
     }
 
@@ -672,7 +706,7 @@ impl Server {
                     Resolved::Path(p) => p,
                 };
                 let reads_only = r.flags & (O_WRITE | O_APPEND | O_CREATE | O_TRUNCATE | O_CREATE_NEW) == 0;
-                if reads_only && self.end_at_read.contains(&path) && first_read_this_boot(&path) {
+                if reads_only && self.end_at_read.contains(&path) && first_this_boot(&format!("end-at-read-{path}")) {
                     println!("fsd: {END_AT_READ}: ending before the first read of {path} is answered");
                     std::process::exit(1);
                 }
@@ -688,7 +722,7 @@ impl Server {
                 let meta = match self.volume.node_meta(node) {
                     Ok(meta) => meta,
                     Err(e) => {
-                        self.volume.close(node);
+                        let _ = self.volume.close(node);
                         return Err(e);
                     }
                 };
@@ -708,7 +742,7 @@ impl Server {
             CLOSE => {
                 let client = self.clients.get_mut(&id).expect("pumped");
                 let fid = client.fids.remove(&r.fid).ok_or(SyscallError::InvalidArgument)?;
-                self.volume.close(fid.node);
+                self.volume.close(fid.node)?;
                 Ok(Answer::Reply(Reply::ok()))
             }
             READ => {
@@ -766,10 +800,10 @@ impl Server {
                 Ok(Answer::Reply(Reply::ok()))
             }
             FSYNC => {
-                self.fid(id, r.fid)?;
-                self.sync()
+                let node = self.fid(id, r.fid)?.node;
+                self.sync(Some(node))
             }
-            SYNC => self.sync(),
+            SYNC => self.sync(None),
             STREAM => {
                 let f = self.fid(id, r.fid)?;
                 if !f.write {
@@ -881,10 +915,16 @@ impl Server {
         }
     }
 
-    fn sync(&mut self) -> Result<Answer, SyscallError> {
-        self.volume.sync()?;
-        self.dirty_since = None;
-        Ok(Answer::Reply(Reply::ok()))
+    /// The volume synced, answered as `node`'s file fared, or with none as
+    /// every file did. A file whose entry was refused keeps the write-back
+    /// due, so the next one tries it again.
+    fn sync(&mut self, node: Option<Node>) -> Result<Answer, SyscallError> {
+        let unwritten = self.volume.sync()?;
+        self.dirty_since = (!unwritten.is_empty()).then(Instant::now);
+        match unwritten.into_iter().find(|&(n, _)| node.is_none_or(|node| n == node)) {
+            Some((_, e)) => Err(e),
+            None => Ok(Answer::Reply(Reply::ok())),
+        }
     }
 
     fn link(&self, id: u64, path: &str) -> Answer {
@@ -928,7 +968,9 @@ impl Server {
             println!("fsd: a stream is ended: {why}");
         }
         if let Some(stream) = self.streams.remove(&sid) {
-            self.volume.close(stream.node);
+            // Nobody is left to answer: a refused close is said, and its node
+            // kept for the next sync.
+            let _ = self.volume.close(stream.node);
         }
     }
 }

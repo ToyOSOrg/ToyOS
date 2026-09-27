@@ -88,8 +88,10 @@ pub trait Volume {
 
     fn open(&mut self, path: &str, how: OpenHow) -> Result<Node, SyscallError>;
 
-    /// One holder gone; the node goes with its last.
-    fn close(&mut self, node: Node);
+    /// One holder gone; the node goes with its last, once its entry is
+    /// written. `Err` is that entry refused: the node stays, unheld, for the
+    /// next sync to write, and the refusal is the last holder's answer.
+    fn close(&mut self, node: Node) -> Result<(), SyscallError>;
 
     /// Hold the node once more, for a second file id or a stream.
     fn hold(&mut self, node: Node);
@@ -116,8 +118,11 @@ pub trait Volume {
 
     fn symlink(&mut self, path: &str, target: &str) -> Result<(), SyscallError>;
 
-    /// Everything written, and every open file's length, durable.
-    fn sync(&mut self) -> Result<(), SyscallError>;
+    /// Everything written, and every open file's length, durable, but for the
+    /// files the answer names: each is one whose entry was refused, with why,
+    /// and no refusal keeps any other file from the device. `Err` is the
+    /// volume's own flush refused.
+    fn sync(&mut self) -> Result<Vec<(Node, SyscallError)>, SyscallError>;
 
     /// One line of what the volume and its cache have done, for a log.
     fn describe(&self) -> String;

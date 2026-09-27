@@ -1050,8 +1050,7 @@ fn failed_flush_stops_once(
     const PROBES: usize = 12;
     /// A per-failure line, and the thing that has to stay bounded. Before the
     /// fix it is emitted by every pass of the idle loop for the life of the
-    /// boot. After it: one by the write that gives up, and one per mount by the
-    /// shutdown's `sync_all`, which is the last caller left.
+    /// boot. After it: one by the write that gives up.
     ///
     /// **This is the number that caught the retry**, and it is worth saying what
     /// it caught. A logd that retried inside `LOG_WRITE_BUDGET` measured

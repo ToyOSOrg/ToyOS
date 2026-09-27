@@ -63,9 +63,7 @@
 //!
 //! **A round's lines are written and the volume made durable before the next
 //! round**, and again when init asks before the machine stops
-//! ([`toyos_logstream::FLUSH`]). A sync the kernel declined to start is owed
-//! and asked again each round until it is made. The kernel waits on none of
-//! it: a panicking kernel's report is in its black box, and so are the stop's
+//! ([`toyos_logstream::FLUSH`]). The kernel waits on none of it: a panicking kernel's report is in its black box, and so are the stop's
 //! own last records.
 //! **A line after that flush reaches the console and is held back from the
 //! file**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still open,
@@ -73,14 +71,6 @@
 //! served log is handed what the file holds and no more. A stop the kernel
 //! refused is init's [`toyos_logstream::RESUME`], and what was held is written
 //! then.
-//!
-//! `SYS_FSYNC` reaches the device's own cache flush. **A flush that would block
-//! is not a flush that failed**: `io::ErrorKind::WouldBlock` from `sync_all` is
-//! `kernel/src/block.rs`'s `BlockError::BudgetExpired`, which means the kernel
-//! declined to *start* the operation on the caller's own clock — nothing was
-//! issued, the device is untouched, and the bytes are still in the file waiting
-//! for the next flush. `policy::fate` is the whole decision, and `policy`'s own
-//! header is the argument.
 
 mod inspect;
 mod origin;
@@ -198,7 +188,6 @@ fn main() {
         waiting: Vec::new(),
         volume,
         owed: false,
-        retrying_since: None,
         degraded: false,
         boot_local,
         hub,
@@ -226,10 +215,8 @@ struct Log {
     /// round merges.
     waiting: Vec<Line>,
     volume: Option<Volume>,
-    /// Lines the volume took and has not made durable: its sync was declined.
+    /// Lines the volume took and has not made durable.
     owed: bool,
-    /// When the current run of consecutive refused rounds began.
-    retrying_since: Option<Instant>,
     /// Whether the volume answers, slower than `LOG_WRITE_BUDGET` a round.
     degraded: bool,
     boot_local: Option<u64>,
@@ -272,11 +259,10 @@ impl Log {
         // Programs whose end a watch reported, until a round has swept them.
         let mut ended: Vec<usize> = Vec::new();
         loop {
-            let state = match (&self.volume, self.retrying_since, self.degraded) {
-                (None, _, _) => inspect::State::ConsoleOnly,
-                (Some(_), Some(_), _) => inspect::State::Retrying,
-                (Some(_), None, true) => inspect::State::Degraded,
-                (Some(_), None, false) => inspect::State::Writing,
+            let state = match (&self.volume, self.degraded) {
+                (None, _) => inspect::State::ConsoleOnly,
+                (Some(_), true) => inspect::State::Degraded,
+                (Some(_), false) => inspect::State::Writing,
             };
             published.publish(self.volume.as_ref(), state, self.tail.lost());
 
@@ -637,7 +623,7 @@ impl Log {
     fn to_volume(&mut self, text: &[u8], sync: bool) {
         let Some(v) = self.volume.as_mut() else { return };
         let began = Instant::now();
-        let mut refused = v.write(text).err().map(|e| (Step::Append, e.kind(), e.to_string()));
+        let mut refused = v.write(text).err().map(|e| (Step::Append, e.to_string()));
         if refused.is_none() {
             self.owed = true;
             if sync {
@@ -646,36 +632,31 @@ impl Log {
         }
         // A volume that answered, and took longer than a log is worth doing it.
         if refused.is_none() && began.elapsed() > LOG_WRITE_BUDGET {
-            refused =
-                Some((Step::TooSlow, std::io::ErrorKind::Other, format!("it took {:?}", began.elapsed())));
+            refused = Some((Step::TooSlow, format!("it took {:?}", began.elapsed())));
         }
-        self.answered(began, refused);
+        self.answered(refused);
     }
 
-    /// Ask again for a sync the volume declined, whether or not this round
-    /// wrote anything.
     fn sync_owed(&mut self) {
         if self.owed {
-            let began = Instant::now();
             let refused = self.sync().err();
-            self.answered(began, refused);
+            self.answered(refused);
         }
     }
 
     /// Make the volume durable now.
-    fn sync(&mut self) -> Result<(), (Step, std::io::ErrorKind, String)> {
+    fn sync(&mut self) -> Result<(), (Step, String)> {
         let Some(v) = self.volume.as_mut() else { return Ok(()) };
-        v.sync().map_err(|e| (Step::Flush, e.kind(), e.to_string()))?;
+        v.sync().map_err(|e| (Step::Flush, e.to_string()))?;
         self.owed = false;
         Ok(())
     }
 
     /// What a round's write came to: rotation after a clean one, and the
     /// give-up policy after a refused one.
-    fn answered(&mut self, began: Instant, refused: Option<(Step, std::io::ErrorKind, String)>) {
+    fn answered(&mut self, refused: Option<(Step, String)>) {
         let Some(path) = self.volume.as_ref().map(Volume::path) else { return };
-        let Some((step, kind, why)) = refused else {
-            self.retrying_since = None;
+        let Some((step, why)) = refused else {
             if self.degraded {
                 self.degraded = false;
                 say!("logd: {DIR} answers at pace again - {path}");
@@ -683,11 +664,7 @@ impl Log {
             self.rotate_if_full();
             return;
         };
-        // The run of consecutive retries, which is what `LOG_WRITE_BUDGET`
-        // bounds, from when its first round began.
-        let first = self.retrying_since.is_none();
-        let since = *self.retrying_since.get_or_insert(began);
-        match fate(step, kind, since.elapsed()) {
+        match fate(step) {
             // Stop feeding the volume, say so once, and keep running.
             Fate::GiveUp => {
                 toyos::error!(
@@ -697,20 +674,8 @@ impl Log {
                 );
                 self.volume = None;
             }
-            // Nothing is durable, so the next round's flush covers these bytes
-            // as well as its own; one line per run.
-            Fate::Retry => {
-                if first {
-                    toyos::warn!(
-                        "logd: {DIR} would not start ({}: {why}) - nothing was lost, so {path} is \
-                         still this boot's log and the next round is a retry",
-                        step.as_str()
-                    );
-                }
-            }
             // Every call answered, slowly: the round is durable.
             Fate::Degraded => {
-                self.retrying_since = None;
                 self.owed = false;
                 if !self.degraded {
                     self.degraded = true;
@@ -740,7 +705,7 @@ impl Log {
     /// written by now, so the volume is made durable, and init is told.
     fn flushed(&mut self) {
         let refused = self.sync().err();
-        self.answered(Instant::now(), refused);
+        self.answered(refused);
         self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
         self.feed_console();
         if let Err(e) = self.from_init.signal(FLUSHED) {

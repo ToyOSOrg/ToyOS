@@ -478,7 +478,7 @@ actuators! {
     /// Run the leak-rollback controls (device mint, FAT reopen) after mount.
     leak_rollback_selftest = "leak-rollback-selftest";
 
-    /// Run the revoked-backing controls (`/tmp` and `/home`) after mount.
+    /// Run the revoked-backing controls after mount.
     revoked_backing_selftest = "revoked-backing-selftest";
 
     /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.

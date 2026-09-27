@@ -407,17 +407,17 @@ pub fn quiesce_dump_holds_the_stopped(
     )?;
     let lines: Vec<&str> = whole.lines().collect();
     let at = |needle: &str| lines.iter().position(|line| line.contains(needle));
-    let (Some(began), Some(ended), Some(synced)) = (
+    let (Some(began), Some(ended), Some(recorded)) = (
         at("=== blocked-task dump:"),
         at("=== end of dump ==="),
-        at("Syncing filesystems..."),
+        lines.iter().position(|line| toyos_quiesce::Record::parse(line).is_some()),
     ) else {
-        return Err(format!("no whole dump and sync in this boot\n{whole}"));
+        return Err(format!("no whole dump and stop record in this boot\n{whole}"));
     };
-    if !(began < ended && ended < synced) {
+    if !(began < ended && ended < recorded) {
         return Err(format!(
-            "the dump (lines {began} to {ended}) did not finish inside the stop, which ends at \
-             line {synced}\n{whole}"
+            "the dump (lines {began} to {ended}) did not finish inside the stop, whose record is \
+             line {recorded}\n{whole}"
         ));
     }
     let report = &lines[began..=ended];
@@ -479,7 +479,6 @@ pub fn quiesce_refuses_a_second_shutdown(
 ) -> Result<(), String> {
     const WAITS: &str = "quiesce-last-park: the stop waits for";
     const SECOND_CALLER: &str = "power: this machine is already stopping";
-    const SYNCING: &str = "Syncing filesystems...";
     let held = format!(
         "quiesce-last-park: {} is held until the stop waits on it alone",
         toyos_quiesce::LAST_THREAD
@@ -496,12 +495,17 @@ pub fn quiesce_refuses_a_second_shutdown(
     };
 
     // **The harm, first**: a second caller let in runs a second stop over the
-    // first, and either way this line is written twice.
-    let syncs = at(SYNCING);
-    if syncs.len() != 1 {
+    // first, and either way the stop's record is written twice.
+    let records: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| toyos_quiesce::Record::parse(l).is_some())
+        .map(|(i, _)| i)
+        .collect();
+    if records.len() != 1 {
         return Err(format!(
             "this boot ran {} shutdowns, not one: the second caller was let in\n{whole}",
-            syncs.len()
+            records.len()
         ));
     }
     let once = |needle: &str| -> Result<usize, String> {
@@ -514,12 +518,12 @@ pub fn quiesce_refuses_a_second_shutdown(
     // it waits, before the thread it waits for was held — which the job starts
     // only on reading `AlreadyExists`, so the held line is the refusal having
     // reached Ring 3 as that word.
-    let (waits, second, held, synced) = (once(WAITS)?, once(SECOND_CALLER)?, once(&held)?, syncs[0]);
-    if !(waits < second && second < held && held < synced) {
+    let (waits, second, held, recorded) = (once(WAITS)?, once(SECOND_CALLER)?, once(&held)?, records[0]);
+    if !(waits < second && second < held && held < recorded) {
         return Err(format!(
-            "the first call's wait, the second call's refusal, the held thread and the sync are \
-             at console lines {waits}, {second}, {held} and {synced}: the refusal was not made \
-             in the window the first call held\n{whole}"
+            "the first call's wait, the second call's refusal, the held thread and the stop's \
+             record are at console lines {waits}, {second}, {held} and {recorded}: the refusal was \
+             not made in the window the first call held\n{whole}"
         ));
     }
     eprintln!(

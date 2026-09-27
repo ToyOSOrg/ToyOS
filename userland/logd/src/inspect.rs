@@ -48,10 +48,8 @@ pub enum State {
     Writing = 0,
     /// Every round answered, and slower than a log is worth.
     Degraded = 1,
-    /// A round the volume would not start, carried into the next.
-    Retrying = 2,
     /// No volume, or one given up on: the log is on the console only.
-    ConsoleOnly = 3,
+    ConsoleOnly = 2,
 }
 
 impl State {
@@ -59,8 +57,7 @@ impl State {
         match raw {
             0 => "writing",
             1 => "degraded",
-            2 => "retrying",
-            3 => "console-only",
+            2 => "console-only",
             other => unreachable!("logd: volume state {other} was never published"),
         }
     }

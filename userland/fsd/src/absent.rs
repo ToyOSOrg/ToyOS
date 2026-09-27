@@ -49,7 +49,9 @@ impl Volume for Absent {
         Err(SyscallError::NotFound)
     }
 
-    fn close(&mut self, _node: Node) {}
+    fn close(&mut self, _node: Node) -> Result<(), SyscallError> {
+        Ok(())
+    }
 
     fn hold(&mut self, _node: Node) {}
 
@@ -89,8 +91,8 @@ impl Volume for Absent {
         Err(SyscallError::NotFound)
     }
 
-    fn sync(&mut self) -> Result<(), SyscallError> {
-        Ok(())
+    fn sync(&mut self) -> Result<Vec<(Node, SyscallError)>, SyscallError> {
+        Ok(Vec::new())
     }
 
     fn describe(&self) -> String {

@@ -129,9 +129,18 @@ pub struct Entry {
 impl Entry {
     /// Total size on disk: key header + value, padded to 8-byte alignment.
     pub fn disk_size(&self) -> usize {
-        let raw = KEY_HEADER_SIZE + self.value.len();
-        (raw + 7) & !7
+        disk_size(self.value.len())
     }
+}
+
+fn disk_size(value_len: usize) -> usize {
+    (KEY_HEADER_SIZE + value_len + 7) & !7
+}
+
+/// Whether an entry whose value is `value_len` bytes passes
+/// [`check_entry_fits`], asked before the value is built.
+pub fn value_fits(value_len: usize) -> bool {
+    disk_size(value_len) <= MAX_ENTRY_SIZE
 }
 
 /// A child pointer: the minimum key of the subtree, and the block it lives in.
@@ -501,7 +510,7 @@ pub fn insert(
 
     match insert_recursive(io, alloc, root, Depth::ROOT, entry)? {
         InsertResult::Done => Ok(root),
-        InsertResult::Split { new_block, split_key } => {
+        InsertResult::Split(siblings) => {
             let level = Node::read(io, root)?
                 .level()
                 .checked_add(1)
@@ -509,14 +518,9 @@ pub fn insert(
             let old_min_key = min_key(io, root, Depth::ROOT)?;
             let new_root_block = alloc.alloc_block(io)?;
 
-            let new_root = Node::Interior {
-                level,
-                children: alloc::vec![
-                    Child { key: old_min_key, block: root },
-                    Child { key: split_key, block: new_block },
-                ],
-            };
-            new_root.write(io, new_root_block)?;
+            let mut children = alloc::vec![Child { key: old_min_key, block: root }];
+            children.extend(siblings);
+            Node::Interior { level, children }.write(io, new_root_block)?;
 
             Ok(new_root_block)
         }
@@ -525,10 +529,8 @@ pub fn insert(
 
 enum InsertResult {
     Done,
-    Split {
-        new_block: BlockNum,
-        split_key: Key,
-    },
+    /// The node split: these follow it, in key order.
+    Split(Vec<Child>),
 }
 
 fn insert_recursive(
@@ -560,13 +562,15 @@ fn insert_recursive(
 
             match insert_recursive(io, alloc, child_block, deeper, entry)? {
                 InsertResult::Done => Ok(InsertResult::Done),
-                InsertResult::Split { new_block, split_key } => {
+                InsertResult::Split(siblings) => {
                     let mut children = children;
-                    let pos = match children.binary_search_by(|c| c.key.cmp(&split_key)) {
-                        Ok(i) => i + 1,
-                        Err(i) => i,
-                    };
-                    children.insert(pos, Child { key: split_key, block: new_block });
+                    for sibling in siblings {
+                        let pos = match children.binary_search_by(|c| c.key.cmp(&sibling.key)) {
+                            Ok(i) => i + 1,
+                            Err(i) => i,
+                        };
+                        children.insert(pos, sibling);
+                    }
                     write_or_split(io, alloc, block, Node::Interior { level, children })
                 }
             }
@@ -594,7 +598,7 @@ fn split_node(
     node: Node,
 ) -> Result<InsertResult, FsError> {
     match node {
-        Node::Leaf(mut entries) => {
+        Node::Leaf(entries) => {
             // One entry is not a split problem. Halving by *count* used to
             // produce `mid == 0` here, which drained every entry into the right
             // node and left an empty one behind — and the right node was still
@@ -604,37 +608,30 @@ fn split_node(
                 return Err(FsError::EntryTooLarge { size, max: MAX_ENTRY_SIZE });
             }
 
-            // By size, not by count: leaf entries are variable-length (a file's
-            // extent list lives inline), so half the entries can be far more
-            // than half the bytes.
-            let mid = split_point(&entries);
-
-            // Both halves are checked before either is written. A split that
-            // has already replaced the left node on disk and then fails is a
-            // corrupt tree; a split that fails before writing is an error the
-            // caller can return.
-            if leaf_size(&entries[..mid]) > BLOCK_SIZE || leaf_size(&entries[mid..]) > BLOCK_SIZE {
-                // Unreachable while every entry is <= MAX_ENTRY_SIZE and the
-                // node was legal before this insert, except for one shape: a
-                // node of large entries where the new one lands in the middle.
-                // Splitting three ways is what would fix it; extent merging is
-                // what stops values getting near that size in the first place.
-                return Err(FsError::NodeOverfull {
-                    used: leaf_size(&entries) - NODE_HEADER_SIZE,
-                    max: MAX_PAYLOAD,
-                });
+            let mut nodes = pack(entries);
+            let first = nodes.remove(0);
+            let mut blocks = Vec::with_capacity(nodes.len());
+            for _ in &nodes {
+                match alloc.alloc_block(io) {
+                    Ok(sibling) => blocks.push(sibling),
+                    Err(e) => {
+                        for taken in blocks {
+                            alloc.free_range(io, taken, 1)?;
+                        }
+                        return Err(e);
+                    }
+                }
             }
+            // The siblings first: a failure before `block` is replaced leaves
+            // the tree as it was and blocks nothing names.
+            let mut children = Vec::with_capacity(nodes.len());
+            for (node, sibling) in nodes.into_iter().zip(blocks) {
+                children.push(Child { key: node[0].key, block: sibling });
+                Node::Leaf(node).write(io, sibling)?;
+            }
+            Node::Leaf(first).write(io, block)?;
 
-            let right: Vec<Entry> = entries.drain(mid..).collect();
-            let Some(split_key) = right.first().map(|e| e.key) else {
-                return Err(FsError::CorruptedNode(block));
-            };
-
-            let right_block = alloc.alloc_block(io)?;
-            Node::Leaf(entries).write(io, block)?;
-            Node::Leaf(right).write(io, right_block)?;
-
-            Ok(InsertResult::Split { new_block: right_block, split_key })
+            Ok(InsertResult::Split(children))
         }
         Node::Interior { level, mut children } => {
             if children.len() < 2 {
@@ -652,25 +649,27 @@ fn split_node(
             Node::Interior { level, children }.write(io, block)?;
             Node::Interior { level, children: right }.write(io, right_block)?;
 
-            Ok(InsertResult::Split { new_block: right_block, split_key })
+            Ok(InsertResult::Split(alloc::vec![Child { key: split_key, block: right_block }]))
         }
     }
 }
 
-/// The largest prefix of `entries` that still fits in a node, clamped so both
-/// sides of the split get at least one entry. Caller guarantees `len >= 2`.
-fn split_point(entries: &[Entry]) -> usize {
-    let mut used = NODE_HEADER_SIZE;
-    let mut n = 0;
+/// `entries` in order, each node filled before the next is begun. Every entry
+/// fits a node alone ([`check_entry_fits`]), so a large entry that lands
+/// between small ones takes a node of its own: a split in two has no point
+/// that leaves both sides within a block for that shape.
+fn pack(entries: Vec<Entry>) -> Vec<Vec<Entry>> {
+    let mut nodes: Vec<Vec<Entry>> = Vec::new();
+    let mut used = BLOCK_SIZE;
     for entry in entries {
-        let next = used + entry.disk_size();
-        if next > BLOCK_SIZE {
-            break;
+        if used + entry.disk_size() > BLOCK_SIZE {
+            nodes.push(Vec::new());
+            used = NODE_HEADER_SIZE;
         }
-        used = next;
-        n += 1;
+        used += entry.disk_size();
+        nodes.last_mut().expect("a node was begun").push(entry);
     }
-    n.clamp(1, entries.len() - 1)
+    nodes
 }
 
 /// Find the minimum key in a subtree.
@@ -715,37 +714,24 @@ mod tests {
         buf
     }
 
-    #[test]
-    fn split_point_is_the_largest_prefix_that_fits() {
-        // Two entries that only fit apart: the rule has to put one on each
-        // side, which halving by count also gets right.
-        let two = [entry(3000), entry(3000)];
-        assert_eq!(split_point(&two), 1);
-
-        // And the shape it does not: a small entry ahead of two large ones.
-        // Halving by count gives mid=1, leaving 6048 bytes of entries in the
-        // right node and a block that cannot hold them.
-        let skewed = [entry(1000), entry(3000), entry(3000)];
-        let mid = split_point(&skewed);
-        assert_eq!(mid, 2);
-        assert!(leaf_size(&skewed[..mid]) <= BLOCK_SIZE, "left half does not fit");
-        assert!(leaf_size(&skewed[mid..]) <= BLOCK_SIZE, "right half does not fit");
-        assert!(leaf_size(&skewed[..2]) > BLOCK_SIZE / 2, "the shape under test is not skewed");
+    fn counts(nodes: &[Vec<Entry>]) -> Vec<usize> {
+        nodes.iter().map(Vec::len).collect()
     }
 
     #[test]
-    fn split_point_always_leaves_both_sides_a_entry() {
-        // The clamp matters at both ends. One entry so large that no prefix
-        // fits must still yield 1, not 0 — a 0 drains every entry into the
-        // right node and writes an empty one back.
-        let huge_first = [entry(MAX_ENTRY_SIZE), entry(16)];
-        assert_eq!(split_point(&huge_first), 1);
-
-        // And a node of entries that all fit must still give the right side
-        // something, or the split makes no progress.
-        let tiny = [entry(8), entry(8), entry(8)];
-        let mid = split_point(&tiny);
-        assert!((1..=2).contains(&mid), "mid={mid} leaves a side empty");
+    fn pack_fills_each_node_in_order_and_none_past_a_block() {
+        // Two entries that only fit apart.
+        assert_eq!(counts(&pack(vec![entry(3000), entry(3000)])), [1, 1]);
+        // A small entry ahead of two large ones, which halving by count
+        // leaves 6048 bytes in one node.
+        assert_eq!(counts(&pack(vec![entry(1000), entry(3000), entry(3000)])), [2, 1]);
+        // The largest entry between small ones, which no split in two fits:
+        // a leaf of names where one file's entry has grown.
+        let mut middle: Vec<Entry> = (0..40).map(|_| entry(72)).collect();
+        middle.insert(20, entry(MAX_ENTRY_SIZE - KEY_HEADER_SIZE));
+        let nodes = pack(middle);
+        assert_eq!(counts(&nodes), [20, 1, 20]);
+        assert!(nodes.iter().all(|n| leaf_size(n) <= BLOCK_SIZE));
     }
 
     #[test]

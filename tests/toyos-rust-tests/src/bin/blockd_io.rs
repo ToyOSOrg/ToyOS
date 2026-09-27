@@ -28,6 +28,8 @@
 //!   back until ten domains' worth of addresses went by;
 //! - `dma-residue` — on a boot where no release resets the function, three
 //!   claims in turn, and none lends where the first one did.
+//! - `nothing` — blockd started holding no claim: each first frame, malformed
+//!   and well-formed, answered as `serve` answers it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
@@ -44,7 +46,7 @@ use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::part::PartGuid;
-use toyos_abi::syscall::{DeviceType, PciId, SyscallError, DEV_PREFIX, SERVE_PREFIX, SYSCAP_LABEL};
+use toyos_abi::syscall::{self, DeviceType, PciId, SpawnArgs, SyscallError, DEV_PREFIX, SERVE_PREFIX, SYSCAP_LABEL};
 use toyos_blockring::wire::{self, Refusal};
 use toyos_blockring::{BLOCK_BYTES, MAX_REQUEST_BLOCKS, PORT};
 
@@ -637,6 +639,30 @@ fn aim() -> (Controller, SharedMemory) {
     (ctrl, region)
 }
 
+/// A spawn from `image`'s first `len` bytes, with an argv no process can read.
+fn spawn_unreadable_argv(image: toyos::RawHandle, len: u64) -> Result<toyos::RawHandle, SyscallError> {
+    // SAFETY: argv names the null page, which the kernel refuses to read, and
+    // every other pointer is null with a zero length.
+    unsafe {
+        syscall::spawn(&SpawnArgs {
+            argv_ptr: 8,
+            argv_len: 8,
+            slot_map_ptr: 0,
+            slot_map_count: 0,
+            env_ptr: 0,
+            env_len: 0,
+            endow_ptr: 0,
+            endow_count: 0,
+            labels_ptr: 0,
+            labels_len: 0,
+            cwd_ptr: 0,
+            cwd_len: 0,
+            image: image.0 as u64,
+            image_len: len,
+        })
+    }
+}
+
 /// Device block 0, the disk's protective MBR, ends 0x55 0xAA.
 fn is_block_zero(bytes: &[u8]) -> bool {
     bytes[510] == 0x55 && bytes[511] == 0xAA
@@ -669,6 +695,18 @@ fn dma(role: &str) {
                 other => fail(format!("lending the region a second time was answered {other:?}")),
             }
             println!("blockd_io: a register window, and a region already lent, are refused with InvalidArgument");
+            // Nor is a register window a program: the spawn refuses it before
+            // it reads anything else, where a region's is taken and the spawn
+            // goes on to refuse the argv.
+            match spawn_unreadable_argv(bar.as_handle(), 4096) {
+                Err(SyscallError::InvalidArgument) => {}
+                other => fail(format!("a spawn from the register window was answered {other:?}")),
+            }
+            match spawn_unreadable_argv(region.as_handle(), 4096) {
+                Err(SyscallError::BadAddress) => {}
+                other => fail(format!("a spawn from the region with an unreadable argv was answered {other:?}")),
+            }
+            println!("blockd_io: a spawn from a register window is refused with InvalidArgument, and one from a region reaches its argv");
         }
         "dma-outside" => {
             let past = mapping.device_addr + mapping.bytes;
@@ -923,9 +961,49 @@ fn dma_residue() {
     println!("blockd_io: PASS dma-residue");
 }
 
+/// blockd started holding no controller answers a connection's first frame as
+/// it answers every other: the malformed refused as such, a listing empty and
+/// an open `NotFound`.
+fn nothing() {
+    let (acceptor, connector) = port::create().unwrap_or_else(|e| fail(format!("no port: {e:?}")));
+    let mut command = Command::new("/system/bin/blockd");
+    command.endow(&format!("{SERVE_PREFIX}{PORT}"), acceptor.into_raw().0);
+    let mut child = command.spawn().unwrap_or_else(|e| fail(format!("blockd did not start: {e}")));
+    let names =
+        namespace::build().add(PORT, &connector).finish().unwrap_or_else(|e| fail(format!("no namespace: {e:?}")));
+    let region = || {
+        let region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
+        vec![region.share().unwrap_or_else(|e| fail(format!("a second handle: {e:?}")))]
+    };
+    let absent = guid(ABSENT);
+    let malformed = Some(Refusal::Malformed);
+    for (what, msg_type, payload, handles, answered, refusal) in [
+        ("a listing that carries a payload", wire::MSG_LIST, &[0u8; 4][..], vec![], wire::MSG_REFUSED, malformed),
+        ("an open with no region", wire::MSG_OPEN, &absent[..], vec![], wire::MSG_REFUSED, malformed),
+        ("an open whose GUID is short", wire::MSG_OPEN, &absent[..8], region(), wire::MSG_REFUSED, malformed),
+        ("a listing", wire::MSG_LIST, &[][..], vec![], wire::MSG_LISTED, None),
+        ("an open", wire::MSG_OPEN, &absent[..], region(), wire::MSG_REFUSED, Some(Refusal::NotFound)),
+    ] {
+        let conn = names.open(PORT).unwrap_or_else(|e| fail(format!("the port: {e:?}")));
+        conn.send_bytes_with_handles(&handles, msg_type, payload).unwrap_or_else(|e| fail(format!("{what}: {e:?}")));
+        let header = conn.recv_header().unwrap_or_else(|e| fail(format!("{what}'s answer: {e:?}")));
+        let mut answer = [0u8; 64];
+        let len = conn.recv_bytes(&header, &mut answer).unwrap_or_else(|e| fail(format!("{what}'s answer: {e:?}")));
+        let got = Refusal::decode(&answer[..len]);
+        if header.msg_type != answered || got != refusal || (refusal.is_none() && len != 0) {
+            fail(format!("{what} was answered {} {got:?} in {len} bytes, not {answered} {refusal:?}", header.msg_type));
+        }
+        println!("blockd_io: with no controller, {what} was answered {answered} {refusal:?}");
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    println!("blockd_io: PASS nothing");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("nothing") => nothing(),
         Some("claims") => claims(),
         Some("holder") => holder_role(args.get(2).map_or("", String::as_str)),
         Some("bench") => bench(),

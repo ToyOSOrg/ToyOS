@@ -177,6 +177,14 @@ impl<D: Disk> FatVolume<D> {
         Ok(())
     }
 
+    /// Forget a node nobody holds and whose entry is level.
+    fn release(&mut self, node: Node) {
+        let open = self.open.remove(&node).expect("an open node");
+        if self.by_path.get(&open.path) == Some(&node) {
+            self.by_path.remove(&open.path);
+        }
+    }
+
     fn orphan(&mut self, path: &str) {
         if let Some(node) = self.by_path.remove(path) {
             if let Some(open) = self.open.get_mut(&node) {
@@ -262,28 +270,28 @@ impl<D: Disk> Volume for FatVolume<D> {
         self.open.get_mut(&node).expect("just found or made").holders += 1;
         if how.truncate {
             if let Err(e) = self.truncate(node, 0) {
-                self.close(node);
+                // A refused close is said, and its node kept for the next sync.
+                let _ = self.close(node);
                 return Err(e);
             }
         }
         Ok(node)
     }
 
-    fn close(&mut self, node: Node) {
-        let Some(open) = self.open.get_mut(&node) else { return };
+    fn close(&mut self, node: Node) -> Result<(), SyscallError> {
+        let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         open.holders -= 1;
         if open.holders > 0 {
-            return;
+            return Ok(());
         }
         if self.writable {
             if let Err(e) = self.level(node) {
-                println!("fsd: node {node} was not brought level at its last close: {e:?}");
+                println!("fsd: node {node} was not brought level at its last close ({e:?}); the next sync does it");
+                return Err(e);
             }
         }
-        let open = self.open.remove(&node).expect("present above");
-        if self.by_path.get(&open.path) == Some(&node) {
-            self.by_path.remove(&open.path);
-        }
+        self.release(node);
+        Ok(())
     }
 
     fn hold(&mut self, node: Node) {
@@ -385,15 +393,21 @@ impl<D: Disk> Volume for FatVolume<D> {
         Err(SyscallError::NotSupported)
     }
 
-    fn sync(&mut self) -> Result<(), SyscallError> {
+    fn sync(&mut self) -> Result<Vec<(Node, SyscallError)>, SyscallError> {
+        let mut unlevel = Vec::new();
         if !self.writable {
-            return Ok(());
+            return Ok(unlevel);
         }
         let nodes: Vec<Node> = self.open.keys().copied().collect();
         for node in nodes {
-            self.level(node)?;
+            match self.level(node) {
+                Err(e) => unlevel.push((node, e)),
+                Ok(()) if self.open[&node].holders == 0 => self.release(node),
+                Ok(()) => {}
+            }
         }
-        self.fs.sync().map_err(|e| logged("sync", "", e))
+        self.fs.sync().map_err(|e| logged("sync", "", e))?;
+        Ok(unlevel)
     }
 
     fn describe(&self) -> String {
