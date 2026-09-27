@@ -470,23 +470,30 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
     // A stop that went ahead before the flush answered cuts `/log` short
     // whatever the slots did, so that is its own verdict and not this one's.
     // init's word is in its ring when the machine stops, so the console
-    // rarely carries it; the kernel's sync starting a flush bound or more
-    // after init's stop line is the same fact on two records of one clock.
-    let stop = bootlog::stopping_line(&log)
-        .and_then(program_millis)
-        .ok_or_else(|| format!("/log carries no stop line with a time\n{log}"))?;
+    // rarely carries it. An answered flush wrote init's stop line, which is
+    // stamped before the flush was asked; and the kernel's sync starting a
+    // flush bound or more after that line is the wait on two records of one
+    // clock.
     let sync = tail
         .lines()
         .find(|l| l.contains(SYNCING))
         .and_then(bootlog::record_millis)
         .ok_or_else(|| format!("the console carries no {SYNCING:?} with a time\n{tail}"))?;
-    if tail.contains(FLUSH_WAITED_OUT) || sync.saturating_sub(stop) >= FLUSH_BOUND_MS {
+    let stop = bootlog::stopping_line(&log).and_then(program_millis);
+    let unanswered = match stop {
+        _ if tail.contains(FLUSH_WAITED_OUT) => Some("init said so".to_string()),
+        None => Some("init's stop line never reached /log".to_string()),
+        Some(stop) => (sync.saturating_sub(stop) >= FLUSH_BOUND_MS).then(|| {
+            format!("the kernel synced {} ms after init's stop line", sync.saturating_sub(stop))
+        }),
+    };
+    if let Some(why) = unanswered {
         return Err(format!(
-            "the stop's flush was waited out ({} ms from init's stop line to the kernel's sync), \
-             so /log says nothing of the slots\n{tail}",
-            sync.saturating_sub(stop)
+            "the stop went ahead without the flush's answer ({why}), so /log says nothing of the \
+             slots\n{tail}"
         ));
     }
+    let stop = stop.expect("an answered flush's stop line has a time");
     let runner = bootlog::lines_of(&log, RUNNER);
     // Non-vacuity: the flood met a full ring, so the slots were contested.
     let flooded = runner.lines().filter(|l| l.starts_with("flood ")).count();
