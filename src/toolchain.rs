@@ -783,13 +783,20 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    let build = rust_dir.join(format!("build/{host}"));
     let userland: String = Arch::ALL
         .iter()
         .map(|arch| {
             // rust-lld by name: rustc finds it in the sysroot of the stage that
             // links, which `lld = true` puts it in. It takes no `-Wl,` rpath,
             // and a guest std has no host library path to record.
-            let linker = if with_hosted_rustc && *arch == HOSTED_ARCH {
+            let linker = if with_hosted_rustc {
+                // `lld = false` here, so no stage's sysroot carries `rust-lld`.
+                format!("linker = \"{}\"", build.join("lld/bin/lld").display())
+            } else {
+                "linker = \"rust-lld\"".to_string()
+            };
+            let hosted = if with_hosted_rustc && *arch == HOSTED_ARCH {
                 // Cranelift because no LLVM is built for a ToyOS host yet, and
                 // only for that reason: the hosted rustc carries LLVM once clang
                 // and libc++ run on ToyOS, and Cranelift is not where the
@@ -799,16 +806,14 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
                 // C built for this target (blake3's assembly), and a host `ar`
                 // that indexes only its own object format, as macOS's does,
                 // leaves those ELF members out of the index lld pulls from.
-                let build = rust_dir.join(format!("build/{host}"));
                 format!(
-                    "linker = \"{}\"\nar = \"{}\"\ncodegen-backends = [\"cranelift\"]",
-                    build.join("lld/bin/lld").display(),
+                    "\nar = \"{}\"\ncodegen-backends = [\"cranelift\"]",
                     build.join("llvm/bin/llvm-ar").display(),
                 )
             } else {
-                "linker = \"rust-lld\"".to_string()
+                String::new()
             };
-            format!("[target.{}]\n{linker}\nrpath = false\n\n", arch.userland())
+            format!("[target.{}]\n{linker}{hosted}\nrpath = false\n\n", arch.userland())
         })
         .collect();
     let config = format!(
@@ -960,6 +965,18 @@ mod tests {
             .expect_err("a toolchain with no clang is refused");
         let said = refused.downcast_ref::<String>().expect("a formatted refusal");
         assert!(said.contains("clang") && !said.contains("rust-lld,"), "the refusal names clang alone: {said}");
+    }
+
+    /// The hosted rustc's build, which has no `rust-lld`, names none.
+    #[test]
+    fn the_hosted_build_names_no_rust_lld() {
+        let rust_dir = TempDir::new("hosted-config");
+        write_config(&rust_dir, "h", true);
+        let hosted = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
+        assert!(hosted.contains("lld = false") && !hosted.contains("\"rust-lld\""), "{hosted}");
+        write_config(&rust_dir, "h", false);
+        let host_only = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
+        assert!(host_only.contains("lld = true") && host_only.contains("linker = \"rust-lld\""), "{host_only}");
     }
 
     /// The negative control is the defect itself: this is verbatim what cargo
