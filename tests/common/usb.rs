@@ -2149,7 +2149,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             let mut want = left.to_vec();
             want.extend(back.iter().cloned());
             want.push(OWED.to_string());
-            want.push(log_told.clone());
+            want.push(log_told);
             in_order(&want)?;
             for never in [" did not come back within ", "disk 1 ready", " is not disk 0 come back"] {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {

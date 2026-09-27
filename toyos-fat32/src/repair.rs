@@ -99,7 +99,7 @@ impl<D: BlockAccess> Fat32<D> {
         let result = op(self);
         self.in_call = false;
         let committed = core::mem::take(&mut self.committed);
-        let answer = match result {
+        match result {
             // What the repair holds past a commit is the call's own remaining
             // work, driven twice like a call and its re-drive; a step the
             // device still refuses stays queued for the next call to finish
@@ -122,8 +122,7 @@ impl<D: BlockAccess> Fat32<D> {
             // An unlanded re-drive is what the volume is waiting on, so it is
             // the answer rather than the error that started the rollback.
             Err(e) => self.settle().map_or_else(Err, |()| Err(e)),
-        };
-        answer
+        }
     }
 
     /// Mark the call committed: its rollback is discarded, and what it queues

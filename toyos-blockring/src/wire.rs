@@ -73,10 +73,11 @@ impl Listed {
 
     /// Every entry of a listing, or `None` for one that is not whole entries.
     pub fn decode_all(bytes: &[u8]) -> Option<impl Iterator<Item = Self> + '_> {
-        if bytes.len() % Self::BYTES != 0 {
+        if !bytes.len().is_multiple_of(Self::BYTES) {
             return None;
         }
-        Some(bytes.chunks_exact(Self::BYTES).map(|c| Self {
+        let (chunks, _) = bytes.as_chunks::<{ Self::BYTES }>();
+        Some(chunks.iter().map(|c| Self {
             unique: c[..GUID_BYTES].try_into().expect("sixteen bytes"),
             kind: c[GUID_BYTES..].try_into().expect("sixteen bytes"),
         }))

@@ -190,9 +190,7 @@ const STDIN_RIGHTS: Rights =
 /// it runs, and a child it spawns may write before init has it.
 fn new_ring() -> SharedMemory {
     let region = SharedMemory::create(RING_BYTES).expect("init: no memory for a log ring");
-    let ring = view(&region);
-    ring.lay_out();
-    ring.own(toyos_abi::Pid::MAX.0);
+    view(&region).lay_out_with_placeholder_owner();
     region
 }
 

@@ -16416,15 +16416,14 @@ fn process_reopen(log: &str) -> Result<(), String> {
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn read_fault_probes(log: &str) -> Result<(), String> {
-        for probe in ["revoke-selftest: /tmp/revoke_probe"] {
-            let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-                return Err(format!("{probe} never ran:\n{log}"));
-            };
-            if !verdict.contains("PASS") {
-                return Err(format!("{}\n{log}", verdict.trim()));
-            }
-            eprintln!("  [read-fault] {}", verdict.trim());
+        let probe = "revoke-selftest: /tmp/revoke_probe";
+        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+            return Err(format!("{probe} never ran:\n{log}"));
+        };
+        if !verdict.contains("PASS") {
+            return Err(format!("{}\n{log}", verdict.trim()));
         }
+        eprintln!("  [read-fault] {}", verdict.trim());
         Ok(())
 }
 
@@ -16433,15 +16432,14 @@ fn read_fault_probes(log: &str) -> Result<(), String> {
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn leak_rollback(log: &str) -> Result<(), String> {
-        for probe in ["leak-selftest: device-mint"] {
-            let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-                return Err(format!("{probe} never ran:\n{log}"));
-            };
-            if !verdict.contains("PASS") {
-                return Err(format!("{}\n{log}", verdict.trim()));
-            }
-            eprintln!("  [leak] {}", verdict.trim());
+        let probe = "leak-selftest: device-mint";
+        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+            return Err(format!("{probe} never ran:\n{log}"));
+        };
+        if !verdict.contains("PASS") {
+            return Err(format!("{}\n{log}", verdict.trim()));
         }
+        eprintln!("  [leak] {}", verdict.trim());
         Ok(())
 }
 
