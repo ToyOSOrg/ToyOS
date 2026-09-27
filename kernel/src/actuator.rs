@@ -113,12 +113,6 @@ actuators! {
     /// Serve a blocked-task dump from the shutdown once its first stage has stopped the machine: the report Ctrl+Alt+D gives on a shutdown stuck in its stop.
     quiesce_dump = "quiesce-dump";
 
-    /// Take the page a shrink has just read off the device, in the window between that read and the lock that spends it — one other CPU's CLOCK sweep, which needs no VFS lock and so runs there.
-    resize_evict_window = "resize-evict-window";
-
-    /// Refuse the device read a shrink makes for the page its new end falls inside, for one staged length only; the one failure on that path QEMU will not produce.
-    resize_fault_refuse = "resize-fault-refuse";
-
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
 
@@ -440,7 +434,7 @@ actuators! {
     /// Give it a present context entry naming an empty second-level table, distinct from an absent context: passthrough would fault identically to the row above.
     iommu_empty_domain = "iommu-empty-domain";
 
-    /// Answer a claimed function's first DMA grant with the physical bytes NVMe's admin completion queue page ends with — an address in another driver's pool, which the claimed function's own domain does not map.
+    /// Answer a claimed function's first DMA grant with an address in another driver's pool, which the claimed function's own domain does not map.
     iommu_userdev_foreign_dma = "iommu-userdev-foreign-dma";
 
     /// Point a scanout backing at that same page, which the display's own domain does not map.

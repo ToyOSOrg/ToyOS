@@ -164,6 +164,7 @@ pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {
 }
 
 pub fn attach(stream: StreamId, id: DomainId) {
+    #[cfg(feature = "boot-actuators")]
     if super::staged(stream) {
         log!("iommu: {stream} keeps the context an actuator staged, over its move to domain {}", id.raw());
         return;

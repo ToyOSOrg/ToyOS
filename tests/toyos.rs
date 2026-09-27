@@ -432,13 +432,11 @@ const RUST_SKIP: &[&str] = &[
     // measure.
     //
     // `writeback_reopen` and `writeback_spawn` each need their own boot with
-    // `writeback-stall` armed; `writeback_durability` writes `/log` and
-    // `kernel_log_file` judges it host-side off the image after a shutdown.
-    // All three run in `MACHINE_TESTS`, not on the shared boot.
+    // `writeback-stall` armed, and run in `MACHINE_TESTS`, not on the shared
+    // boot.
     "writeback_reopen",
     "writeback_spawn",
-    "writeback_durability",
-    // Same shape as `writeback_durability`: what it stages on `/log` — a file
+    // What it stages on `/log` — a file
     // unlinked out from under a held descriptor, its clusters handed to the next
     // writer — is only half the claim, and the other half is the volume read
     // back off the image after a shutdown by a FAT implementation that is not
@@ -1496,8 +1494,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
     // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator
     // boot: one holds the queue open across a *handle* re-open, which the file
-    // cache answers, and the other across a *spawn*, which is a device view and
-    // does not.
+    // cache answers, and the other across a *spawn*, whose view of the file
+    // drains the queue itself.
     // The watch's lost-wake window, staged: `watch-window` holds every pipe
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
@@ -1715,7 +1713,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
     ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
-    ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
@@ -11357,6 +11354,10 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
     Ok(())
 }
 
+/// What `iod` says when `writeback-stall` parks it: a write-back test's proof
+/// that the queue it stages was held (`kernel/src/iod.rs`).
+const WRITEBACK_STALLED: &str = "iod: writeback-stall: parked for the boot";
+
 /// Run one machine-shape test. Like `run_screen_test`, each of these owns its
 /// QEMU — the machine shape *is* the test — except for the runs of adjacent
 /// names that share one through `held` (see [`group_boot`]).
@@ -11550,7 +11551,7 @@ fn run_machine_test(
         }
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
-        // reads the pinned pages and not the NVMe `/home` device.
+        // reads the pinned pages.
         "writeback_reopen" => {
             let options = BootOptions {
                 kernel_params: &["writeback-stall"],
@@ -11559,7 +11560,9 @@ fn run_machine_test(
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             let boot = qemu.boot_log().to_string();
-            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+            let console = serial::Serial::named("boot console", boot.as_str());
+            console.must_be_clean()?;
+            console.must_say(WRITEBACK_STALLED)?;
             let result = qemu.run_test("test_rs_writeback_reopen", Duration::from_secs(30));
             if !check_rust_result(&result) {
                 return Err(format!(
@@ -11570,10 +11573,9 @@ fn run_machine_test(
             Ok(())
         }
         // The other half of the same stall, on the path the file cache does not
-        // answer: a spawn reads a *device* view (`Vfs::open_backing`), so a
-        // binary written and closed with the write-back still owed used to load
-        // as `ELF: fewer bytes than a file header`. Same actuator, and the same
-        // reason it needs its own boot.
+        // answer: a spawn takes a view of the file (`Vfs::open_backing`), which
+        // runs the teardown `iod` owes before it reads. Same actuator, and the
+        // same reason it needs its own boot.
         "writeback_spawn" => {
             let options = BootOptions {
                 kernel_params: &["writeback-stall"],
@@ -11582,7 +11584,9 @@ fn run_machine_test(
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             let boot = qemu.boot_log().to_string();
-            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+            let console = serial::Serial::named("boot console", boot.as_str());
+            console.must_be_clean()?;
+            console.must_say(WRITEBACK_STALLED)?;
             let result = qemu.run_test("test_rs_writeback_spawn", Duration::from_secs(30));
             if !check_rust_result(&result) {
                 return Err(format!(

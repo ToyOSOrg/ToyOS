@@ -35,12 +35,15 @@ extern "C" fn body(_arg: u64) -> ! {
         WaitClass::Io,
     )
     .expect("a kernel thread is a task and can arm");
-    loop {
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::writeback_stall() {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::writeback_stall() {
+        // Said once, so a test can hold that the queue it stages was held.
+        crate::log!("iod: writeback-stall: parked for the boot; the write-back queue is not drained");
+        loop {
             let _ = watch::wait(&parkable, &armed, Deadline::never());
-            continue;
         }
+    }
+    loop {
         // drain_all_iod, not drain_all: this thread already holds the WORK arm; drain's backoff parks on it instead of arming a second.
         crate::writeback::drain_all_iod(&parkable, &armed);
         // No deadline: only a push should end this wait; a periodic wake would need audio sign-off.

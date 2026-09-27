@@ -21,7 +21,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::toyos::fs::symlink;
 
-use toyos_abi::syscall::{self, OpenFlags};
 
 /// Mirrored in `tests/common/volumes.rs`. Two halves of one fixture; a change
 /// to either without the other shows up as a mismatch here, not as a silent
@@ -124,23 +123,30 @@ fn boot_refuses_every_way_of_changing_it() {
     }
     println!("  PASS create, delete, mkdir, rename and symlink are all refused on /boot");
 
-    // The path checked must be the path opened, and plain WRITE is the hole: CREATE/TRUNCATE unlink the link.
+    // The path checked must be the path opened, and plain WRITE is the hole:
+    // CREATE/TRUNCATE unlink the link. A link on a writable served directory
+    // to the loader: an absolute one is handed back and resolved again in this
+    // process's own table, where `/boot`'s server refuses the write; one that
+    // climbs out is refused by the server it lies on.
     let before = loader_prefix();
     assert_eq!(&before[..2], b"MZ", "the loader is not a PE image before the symlink attack");
-    syscall::symlink(b"../boot/EFI/BOOT/BOOTx64.EFI", b"/tmp/evil").expect("a /tmp symlink is allowed");
-    assert!(
-        syscall::open(b"/tmp/evil", OpenFlags::WRITE).is_err(),
-        "a /tmp symlink opened {LOADER} for writing",
-    );
-
-    let reader = fs::File::open(LOADER).expect("read /boot is allowed");
-    assert!(
-        syscall::open(b"/tmp/evil", OpenFlags::WRITE).is_err(),
-        "a /tmp symlink opened {LOADER} for writing while a /boot read handle was held",
-    );
-    drop(reader);
+    for (link, target) in
+        [("/home/esp_evil", "/boot/EFI/BOOT/BOOTx64.EFI"), ("/home/esp_evil_up", "../boot/EFI/BOOT/BOOTx64.EFI")]
+    {
+        let _ = fs::remove_file(link);
+        symlink(target, link).unwrap_or_else(|e| panic!("a link on /home is allowed: {link}: {e}"));
+        let write = || fs::OpenOptions::new().write(true).open(link);
+        match write() {
+            Err(e) => println!("  {link} -> {target} refused for writing: {e}"),
+            Ok(_) => panic!("{link} -> {target} opened {LOADER} for writing"),
+        }
+        let reader = fs::File::open(LOADER).expect("read /boot is allowed");
+        assert!(write().is_err(), "{link} -> {target} opened {LOADER} for writing while a /boot read handle was held");
+        drop(reader);
+        fs::remove_file(link).unwrap_or_else(|e| panic!("remove {link}: {e}"));
+    }
     assert_eq!(loader_prefix(), before, "a refused symlink write still changed the loader");
-    println!("  PASS a /tmp symlink to {LOADER} is refused for writing");
+    println!("  PASS a link on /home to {LOADER}, absolute or climbing, is refused for writing");
 }
 
 /// The write direction, on the volume userland is allowed to have.

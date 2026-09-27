@@ -587,8 +587,6 @@ mod tests {
         assert!(syscap_rights(&["sysinfo".into()]).is_err());
     }
 
-    /// A class name reaches init through this file, so a `devices` entry the
-    /// ABI does not know is a config that renders and cannot boot.
     /// A file server's roles reach init as records, and a name that is no
     /// role is refused where it is written: init would start a server for
     /// directories nobody named.
