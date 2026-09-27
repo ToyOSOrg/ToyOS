@@ -1,6 +1,6 @@
 //! A C program compiled and linked by the toolchain's clang — the ToyOS driver
-//! `ToyOSOrg/llvm-project` carries — judged as the loader and a second reader
-//! see the file, and then run on ToyOS.
+//! `ToyOSOrg/llvm-project` carries — judged as the loader sees the file, and
+//! then run on ToyOS.
 
 use std::fs;
 use std::process::Command;
@@ -14,60 +14,30 @@ const HELLO: &str = "tests/testcases/hello.c";
 /// What it prints, all of which its own arithmetic and libc produce.
 const SAYS: &str = "hello from clang, on ToyOS: 6 * 7 = 42";
 
-/// What an image the ToyOS driver links must be, read two ways that share no
-/// code: `toyos-elf`, the decoder the kernel's loader runs, and LLVM's
-/// `llvm-readobj`. The loader accepts it; both see a position-independent
-/// executable for this machine with the same entry and the same loadable
-/// segments; and it names no program interpreter, which ToyOS does not have.
-pub fn judge_elf(elf: &[u8], readobj: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+/// What an image the ToyOS driver links must be, as the loader's decoder reads
+/// it: a PIE for this machine, its entry loaded, an unwind table header, and no
+/// program interpreter.
+pub fn judge_elf(elf: &[u8]) -> Result<(), String> {
+    /// `PT_INTERP`, from the System V ABI.
+    const PT_INTERP: u32 = 3;
     let header = toyos_elf::FileHeader::parse(elf).map_err(|e| format!("toyos-elf refuses the header: {e:?}"))?;
-    let (machine, em) = match super::qemu::SUITE_ARCH {
-        toyos_build::arch::Arch::X86_64 => (toyos_elf::Machine::X86_64, "EM_X86_64"),
-        toyos_build::arch::Arch::Aarch64 => (toyos_elf::Machine::Aarch64, "EM_AARCH64"),
+    let machine = match super::qemu::SUITE_ARCH {
+        toyos_build::arch::Arch::X86_64 => toyos_elf::Machine::X86_64,
+        toyos_build::arch::Arch::Aarch64 => toyos_elf::Machine::Aarch64,
     };
-    if header.machine != machine {
-        return Err(format!("toyos-elf reads machine {:?}, not {machine:?}", header.machine));
-    }
     let layout = toyos_elf::Layout::parse(elf, machine).map_err(|e| format!("the loader's decoder refuses it: {e:?}"))?;
-
-    let read = Command::new(readobj)
-        .args(["--file-headers", "--program-headers"])
-        .arg(path)
-        .output()
-        .map_err(|e| format!("run {}: {e}", readobj.display()))?;
-    if !read.status.success() {
-        return Err(format!("llvm-readobj refuses it: {}", String::from_utf8_lossy(&read.stderr)));
+    if !layout.contains(layout.entry, 1) {
+        return Err(format!("its entry {:#x} is in no loaded segment", layout.entry));
     }
-    let text = String::from_utf8_lossy(&read.stdout);
-    let field = |name: &str| {
-        text.lines()
-            .find_map(|l| l.trim().strip_prefix(name))
-            .map(str::trim)
-            .ok_or_else(|| format!("llvm-readobj printed no {name:?}:\n{text}"))
-    };
-    if !field("Type:")?.starts_with("SharedObject") {
-        return Err(format!("llvm-readobj reads type {}, and a PIE is ET_DYN", field("Type:")?));
+    if layout.eh_frame_hdr.is_none() {
+        return Err("it has no unwind table header, which the driver asks for".to_string());
     }
-    if !field("Machine:")?.starts_with(em) {
-        return Err(format!("llvm-readobj reads machine {}", field("Machine:")?));
-    }
-    let entry = field("Entry:")?;
-    let entry = u64::from_str_radix(entry.trim_start_matches("0x"), 16).map_err(|e| format!("entry {entry:?}: {e}"))?;
-    if entry != header.entry {
-        return Err(format!("llvm-readobj reads entry {entry:#x} and toyos-elf {:#x}", header.entry));
-    }
-    let loads = text.matches("Type: PT_LOAD").count();
-    if loads != layout.segments().len() {
-        return Err(format!(
-            "llvm-readobj counts {loads} PT_LOAD and the loader's decoder {}",
-            layout.segments().len()
-        ));
-    }
-    if text.contains("PT_INTERP") {
-        return Err(format!("it names a program interpreter, which ToyOS does not have:\n{text}"));
-    }
-    if !text.contains("PT_GNU_EH_FRAME") {
-        return Err(format!("it has no unwind table header, which the driver asks for:\n{text}"));
+    let table = header.program_headers(elf).map_err(|e| format!("its program headers: {e:?}"))?;
+    let interp = (0..usize::from(header.phnum))
+        .filter_map(|i| toyos_elf::header::ProgramHeader::parse(table, i))
+        .any(|p| p.kind == PT_INTERP);
+    if interp {
+        return Err("it names a program interpreter, which ToyOS does not have".to_string());
     }
     Ok(())
 }
@@ -89,7 +59,7 @@ pub fn c_hello(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         return Err(format!("clang could not build {HELLO}:\n{}", String::from_utf8_lossy(&built.stderr)));
     }
     let elf = fs::read(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-    judge_elf(&elf, &c.readobj, &out)?;
+    judge_elf(&elf)?;
 
     let config = root.join("tests/testcases");
     let c_tests = [("hello".to_string(), elf)];

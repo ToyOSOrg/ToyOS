@@ -5,8 +5,7 @@
 //! toolchain directory — a compiler of a worktree's own, a sysroot, the
 //! published release — carries whole. Bootstrap puts LLVM's tools there
 //! already, `llvm-ar` — the archiver `cc` builds a C library with, where the
-//! host's may not index ELF at all — and `llvm-readobj`, the ELF reader the
-//! harness judges a linked C program by, among them. This adds the rest:
+//! host's may not index ELF at all — among them. This adds the rest:
 //!
 //! - `clang`, the driver whose ToyOS toolchain (`src/llvm-project`'s
 //!   `clang/lib/Driver/ToolChains/ToyOS.cpp`) names `ld.lld`, the sysroot and
@@ -39,9 +38,8 @@ pub(crate) const LLVM_CONFIG: &str = "download-ci-llvm = false\n\
                                       targets = \"AArch64;X86\"\n\
                                       experimental-targets = \"\"";
 
-/// What a toolchain directory's `bin` must hold for C: bootstrap's two, then
-/// the two [`provision`] adds.
-const TOOLS: [&str; 4] = ["llvm-ar", "llvm-readobj", "clang", "ld.lld"];
+/// What a toolchain directory's `bin` must hold for C.
+const TOOLS: [&str; 3] = ["llvm-ar", "clang", "ld.lld"];
 
 /// `lib/rustlib/<host>/bin` of `toolchain`, where `rust-lld` is.
 fn bin(toolchain: &Path) -> PathBuf {
@@ -57,8 +55,6 @@ pub struct CSysroot {
     pub clang: PathBuf,
     /// That toolchain's archiver.
     pub ar: PathBuf,
-    /// That toolchain's ELF reader.
-    pub readobj: PathBuf,
     /// The guest target, as clang's `--target` spells it.
     pub target: &'static str,
 }
@@ -71,7 +67,6 @@ impl CSysroot {
             dir: toolchain.join("lib/rustlib").join(target).join("c"),
             clang: bin(toolchain).join("clang"),
             ar: bin(toolchain).join("llvm-ar"),
-            readobj: bin(toolchain).join("llvm-readobj"),
             target,
         }
     }
@@ -204,7 +199,6 @@ mod tests {
         // What bootstrap's own assemble leaves beside `rust-lld`.
         let stage2 = base.join("stage2");
         write(&bin(&stage2).join("rust-lld"), "lld");
-        write(&bin(&stage2).join("llvm-readobj"), "the reader");
         write(&bin(&stage2).join("llvm-ar"), "the archiver");
 
         assert!(missing(&stage2));
@@ -218,7 +212,6 @@ mod tests {
         assert!(!fs::symlink_metadata(bin(&stage2).join("clang")).unwrap().file_type().is_symlink(), "clang is a copy, not the link");
         assert_eq!(fs::read_link(bin(&stage2).join("ld.lld")).unwrap(), Path::new("rust-lld"));
         assert_eq!(fs::read_to_string(bin(&stage2).join("ld.lld")).unwrap(), "lld");
-        assert_eq!(fs::read_to_string(bin(&stage2).join("llvm-readobj")).unwrap(), "the reader");
         assert_eq!(fs::read_to_string(bin(&stage2).join("llvm-ar")).unwrap(), "the archiver");
         let stddef = resource_parent(&stage2).join("22/include/stddef.h");
         assert_eq!(fs::read_to_string(stddef).unwrap(), "typedef long ptrdiff_t;");
@@ -230,7 +223,7 @@ mod tests {
         assert!(!resource_parent(&stage2).join("22").exists(), "the old headers stayed beside the new");
         assert_eq!(fs::read_to_string(resource_parent(&stage2).join("23/include/stddef.h")).unwrap(), "v23");
 
-        fs::remove_file(bin(&stage2).join("llvm-readobj")).unwrap();
-        assert!(missing(&stage2), "a missing llvm-readobj went unnoticed");
+        fs::remove_file(bin(&stage2).join("llvm-ar")).unwrap();
+        assert!(missing(&stage2), "a missing llvm-ar went unnoticed");
     }
 }

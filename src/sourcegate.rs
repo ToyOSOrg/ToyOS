@@ -645,12 +645,6 @@ const HOST_SPAWNS: &[Spawn] = &[
               linking the C programs the harness runs",
     },
     Spawn {
-        arg: "readobj",
-        sites: &[("tests/common/clang.rs", 1)],
-        why: "the toolchain's own `llvm-readobj`, the second reader a linked C program is \
-              judged by beside the loader's decoder",
-    },
-    Spawn {
         arg: "toyos_build::build::https_fetch_host(&compile::repo_root())",
         sites: &[("tests/common/https.rs", 1)],
         why: "the guest's own TLS client compiled for the host, which is the differential \

@@ -771,8 +771,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // floor on audio recorded in real time, not a fraction of the capture and
     // not compute-bound: timer-anchored, and Nightly for that reason.
     ("doom_music", Sched::Parallel, Tier::Nightly),
-    // One C program through the toolchain's clang, read by the loader's decoder
-    // and by llvm-readobj, and one boot to run it.
+    // One C program through the toolchain's clang, read by the loader's decoder,
+    // and one boot to run it.
     ("c_hello", Sched::Parallel, Tier::Fast),
     // One boot and one number, with no clock in the verdict: the frames are
     // counted in game tics, whatever the host's speed. Fast, because it is the

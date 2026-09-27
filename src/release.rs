@@ -486,8 +486,8 @@ mod tests {
         let mut before = tag(&repo).unwrap();
 
         let clang = fs::read_to_string(here.join(crate::clang::SOURCE)).unwrap();
-        let tools = r#"const TOOLS: [&str; 4] = ["llvm-ar", "llvm-readobj", "clang", "ld.lld"];"#;
-        let objdump = r#"const TOOLS: [&str; 5] = ["llvm-ar", "llvm-readobj", "clang", "ld.lld", "llvm-objdump"];"#;
+        let tools = r#"const TOOLS: [&str; 3] = ["llvm-ar", "clang", "ld.lld"];"#;
+        let objdump = r#"const TOOLS: [&str; 4] = ["llvm-ar", "clang", "ld.lld", "llvm-objdump"];"#;
         let targets = r#"targets = \"AArch64;X86\""#;
         let riscv = r#"targets = \"AArch64;RISCV;X86\""#;
         assert!(clang.contains(tools) && clang.contains(targets), "src/clang.rs no longer declares what this mutates");
