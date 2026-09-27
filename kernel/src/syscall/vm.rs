@@ -4,11 +4,9 @@
 //! Exhausting address space is an error return, never an `.expect`.
 //!
 //! **A length from userland is refused before any arithmetic touches it, and
-//! before any lock.** The non-FIXED arm goes through `vma::window().span`,
-//! the bound `find_gap` places in: one no placement window could hold is
+//! before any lock.** Every arm goes through `vma::window().span`, the bound
+//! `find_gap` places in: one no placement window could hold is
 //! `InvalidArgument`, one that could but finds no room is `ResourceExhausted`.
-//! FIXED places at the caller's own address and never searches a gap, so it
-//! rounds with the checked sum alone, uncapped by the window's guard.
 //!
 //! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
 //! shoots down and waits, and a sibling thread can be spinning on that same
@@ -43,12 +41,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     // arm below: this is the one condition that decides which placement runs.
     let places_at_req_addr = flags.contains(MmapFlags::FIXED) && req_addr != 0;
     // Refused here, before either lock is taken.
-    let Some(aligned) = (if places_at_req_addr {
-        (size != 0).then_some(size).and_then(toyos_userbound::align_2m_checked)
-    } else {
-        crate::vma::window().span(size).map(|span| span.bytes())
-    })
-    .map(|aligned| aligned as usize) else {
+    let Some(aligned) = crate::vma::window().span(size).map(|span| span.bytes() as usize) else {
         return SyscallError::InvalidArgument.to_u64();
     };
     // Anonymous memory is never executable: `MmapProt` has no bit for it and

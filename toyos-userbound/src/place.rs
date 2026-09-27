@@ -215,19 +215,6 @@ mod tests {
         let _ = Window::new(FLOOR, USER_TOP + PAGE_2M, PAGE_2M);
     }
 
-    /// `sys_mmap`'s FIXED arm places at the caller's own address and never
-    /// searches a gap, so it rounds with `align_2m_checked` alone rather than
-    /// `Window::span`: a length past the window's placeable room must still
-    /// round, since `Window::span`'s refusal here is about finding a gap, not
-    /// about the rounding.
-    #[test]
-    fn a_length_past_the_window_still_rounds_for_a_fixed_placement() {
-        for size in [ROOM + 1, CEILING - FLOOR] {
-            assert_eq!(WINDOW.span(size), None, "{size:#x}");
-            assert_eq!(align_2m_checked(size), Some(CEILING - FLOOR), "{size:#x}");
-        }
-    }
-
     /// `find_gap` no longer pre-filters by the ceiling; `gap` is the one
     /// reader of it, so a region registered at or above it must bound nothing.
     #[test]
