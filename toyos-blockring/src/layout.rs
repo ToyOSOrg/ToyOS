@@ -3,7 +3,7 @@
 //! The four ring indices sit on cache lines of their own, so the client's
 //! stores to its two and the server's to its two never share a line.
 
-use toyos_transport::{Consumer, Cursors, Geometry, Place, Producer, Violation, Word};
+use toyos_transport::{Consumer, Geometry, Place, Producer, Word};
 
 /// A session's whole region: the one size shared memory comes in.
 pub const SESSION_BYTES: usize = Geometry::BYTES as usize;
@@ -44,10 +44,8 @@ pub const CQ_BASE: usize = SQ_BASE + DEPTH as usize * SQE_WORDS;
 pub const RING_WORDS: usize = CQ_BASE + DEPTH as usize * CQE_WORDS;
 
 /// The request ring and the completion ring.
-pub const REQUESTS: Place =
-    Place { cursors: Cursors { head: SQ_HEAD, tail: SQ_TAIL }, entries: SQ_BASE };
-pub const COMPLETIONS: Place =
-    Place { cursors: Cursors { head: CQ_HEAD, tail: CQ_TAIL }, entries: CQ_BASE };
+pub const REQUESTS: Place<SQE_WORDS, DEPTH, RING_WORDS> = Place::new::<SQ_HEAD, SQ_TAIL, SQ_BASE>();
+pub const COMPLETIONS: Place<CQE_WORDS, DEPTH, RING_WORDS> = Place::new::<CQ_HEAD, CQ_TAIL, CQ_BASE>();
 
 /// A client's two ends: requests out, completions in.
 pub type ClientRings = (Producer<SQE_WORDS, DEPTH, RING_WORDS>, Consumer<CQE_WORDS, DEPTH, RING_WORDS>);
@@ -58,14 +56,14 @@ pub type ServerRings = (Consumer<SQE_WORDS, DEPTH, RING_WORDS>, Producer<CQE_WOR
 /// The client's ends of a session page, every word it owns set to 0. Done
 /// before the page is sent to a server, and again before it is sent to the
 /// next one.
-pub fn client<W: Word>(page: &[W; RING_WORDS]) -> Result<ClientRings, Violation> {
-    Ok((Producer::new(page, REQUESTS)?, Consumer::new(page, COMPLETIONS)?))
+pub fn client<W: Word>(page: &[W; RING_WORDS]) -> ClientRings {
+    (Producer::new(page, REQUESTS), Consumer::new(page, COMPLETIONS))
 }
 
 /// The server's ends of a session page it was sent, every word it owns set to
 /// 0. Whatever the client left in its own is bounded when first looked at.
-pub fn server<W: Word>(page: &[W; RING_WORDS]) -> Result<ServerRings, Violation> {
-    Ok((Consumer::new(page, REQUESTS)?, Producer::new(page, COMPLETIONS)?))
+pub fn server<W: Word>(page: &[W; RING_WORDS]) -> ServerRings {
+    (Consumer::new(page, REQUESTS), Producer::new(page, COMPLETIONS))
 }
 
 const _: () = assert!(RING_WORDS * 4 <= Geometry::HEADER_BYTES as usize);

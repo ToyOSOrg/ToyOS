@@ -35,7 +35,7 @@ use core::sync::atomic::Ordering;
 use std::collections::HashSet;
 
 use toyos_blockhold::Holds;
-use toyos_transport::{Consumer, Cursors, Place, Producer, Untrusted, Word};
+use toyos_transport::{Consumer, Place, Producer, Untrusted, Word};
 
 use crate::client::{Client, Outcome, Ticket, MAX_ATTEMPTS};
 use crate::entry::{Completion, Op, Request};
@@ -103,10 +103,11 @@ impl Word for Shared {
 /// How deep the model's rings are: shallow enough that a script fills and
 /// wraps each.
 const DEPTH: u32 = 4;
-const SQ: Place = Place { cursors: Cursors { head: 0, tail: 1 }, entries: 4 };
-const CQ: Place = Place { cursors: Cursors { head: 2, tail: 3 }, entries: SQ.entries + DEPTH as usize * SQE_WORDS };
-const WORDS: usize = CQ.entries + DEPTH as usize * CQE_WORDS;
-const RING: &str = "the page holds every ring word";
+const SQ_BASE: usize = 4;
+const CQ_BASE: usize = SQ_BASE + DEPTH as usize * SQE_WORDS;
+const WORDS: usize = CQ_BASE + DEPTH as usize * CQE_WORDS;
+const SQ: Place<SQE_WORDS, DEPTH, WORDS> = Place::new::<0, 1, SQ_BASE>();
+const CQ: Place<CQE_WORDS, DEPTH, WORDS> = Place::new::<2, 3, CQ_BASE>();
 
 type ClientEnds = (Producer<SQE_WORDS, DEPTH, WORDS>, Consumer<CQE_WORDS, DEPTH, WORDS>);
 type ServerEnds = (Consumer<SQE_WORDS, DEPTH, WORDS>, Producer<CQE_WORDS, DEPTH, WORDS>);
@@ -134,8 +135,7 @@ impl Queues {
 
     /// Both ends over `page`, every cursor stored 0.
     fn ends(page: &[Shared; WORDS]) -> (ClientEnds, ServerEnds) {
-        let client = (Producer::new(page, SQ).expect(RING), Consumer::new(page, CQ).expect(RING));
-        (client, (Consumer::new(page, SQ).expect(RING), Producer::new(page, CQ).expect(RING)))
+        ((Producer::new(page, SQ), Consumer::new(page, CQ)), (Consumer::new(page, SQ), Producer::new(page, CQ)))
     }
 
     /// The session is over: what either queue held is gone, and the next
@@ -235,6 +235,22 @@ struct Run<'a> {
 
 /// Explore `script` against at most `failures`.
 pub fn explore(script: &[Step], failures: Failures) -> Explored {
+    let mut run = Run {
+        script,
+        seen: HashSet::new(),
+        broken: None,
+        ends: 0,
+        given_up: 0,
+        filled: [false; 2],
+        may_give_up: failures.total() > MAX_ATTEMPTS,
+        path: Vec::new(),
+    };
+    dfs(&mut run, start(failures));
+    Explored { broken: run.broken, ends: run.ends, given_up: run.given_up, filled: run.filled }
+}
+
+/// The client connected to a fresh server, with nothing asked yet.
+fn start(failures: Failures) -> World {
     let mut world = World {
         client: Client::new(),
         next: 0,
@@ -251,19 +267,7 @@ pub fn explore(script: &[Step], failures: Failures) -> Explored {
         left: failures,
     };
     connect(&mut world);
-    let may_give_up = failures.total() > MAX_ATTEMPTS;
-    let mut run = Run {
-        script,
-        seen: HashSet::new(),
-        broken: None,
-        ends: 0,
-        given_up: 0,
-        filled: [false; 2],
-        may_give_up,
-        path: Vec::new(),
-    };
-    dfs(&mut run, world);
-    Explored { broken: run.broken, ends: run.ends, given_up: run.given_up, filled: run.filled }
+    world
 }
 
 fn connect(world: &mut World) {
@@ -276,8 +280,7 @@ fn connect(world: &mut World) {
     pump(world);
 }
 
-/// What the glue does after every event: every request the client will send
-/// goes onto the ring.
+/// Every request the client will send goes onto the ring.
 fn pump(world: &mut World) {
     while let Some(request) = world.client.next_request() {
         world.queues.send(request);
@@ -296,9 +299,9 @@ fn write_of(script: &[Step], ticket: Ticket) -> Option<(u64, u8)> {
 /// the cache onto the medium.
 fn apply(script: &[Step], cache: &mut [Option<u8>; BLOCKS], media: &mut [u8; BLOCKS], request: Request) {
     match request.op {
-        Op::Write(run) => {
+        Op::Write { run, lba } => {
             let (_, value) = write_of(script, u64::from(run.first())).expect("a write's arena block is its ticket");
-            cache[request.lba as usize] = Some(value);
+            cache[lba as usize] = Some(value);
         }
         Op::Flush => {
             for (b, slot) in cache.iter_mut().enumerate() {
@@ -307,7 +310,7 @@ fn apply(script: &[Step], cache: &mut [Option<u8>; BLOCKS], media: &mut [u8; BLO
                 }
             }
         }
-        Op::Read(_) => {}
+        Op::Read { .. } => {}
     }
 }
 
@@ -351,56 +354,44 @@ fn fail(run: &mut Run, law: Law, why: String) {
     }
 }
 
-fn go(run: &mut Run, step: String, world: World) {
-    run.path.push(step);
-    dfs(run, world);
-    run.path.pop();
-}
-
-/// Take the client's answers and hold each against the laws.
-fn collect(run: &mut Run, world: &mut World) {
+/// What the glue does after every event: take the client's answers, hold each
+/// against the laws, and pump.
+fn settle(script: &[Step], world: &mut World) -> Result<(), (Law, String)> {
     let answers: Vec<_> = world.client.take_answers().collect();
     let _ = world.client.take_released().count();
     for (ticket, outcome) in answers {
         let had = world.answers.entry(ticket).or_default();
         had.push(outcome);
         if had.len() > 1 {
-            let had = had.clone();
-            fail(run, Law::Answers, format!("ticket {ticket} answered twice: {had:?}"));
-            return;
+            return Err((Law::Answers, format!("ticket {ticket} answered twice: {had:?}")));
         }
         if outcome == Outcome::Durable {
-            durable(run, world, ticket);
+            durable(script, world, ticket).map_err(|why| (Law::Durable, why))?;
         }
     }
     pump(world);
+    Ok(())
 }
 
 /// What the flush `ticket`, just answered durable, promised is on the medium.
-fn durable(run: &mut Run, world: &World, flush: Ticket) {
+fn durable(script: &[Step], world: &World, flush: Ticket) -> Result<(), String> {
     let before = &world.acked_before[&flush];
     for block in 0..BLOCKS as u64 {
-        let on_block = |t: &Ticket| write_of(run.script, *t).is_some_and(|(b, _)| b == block);
+        let on_block = |t: &Ticket| write_of(script, *t).is_some_and(|(b, _)| b == block);
         let Some(last) = before.iter().copied().filter(on_block).max() else { continue };
-        let (_, want) = write_of(run.script, last).expect("a write");
+        let (_, want) = write_of(script, last).expect("a write");
         let allowed: Vec<u8> = core::iter::once(want)
-            .chain((last + 1..run.script.len() as u64).filter(on_block).filter_map(|t| {
-                write_of(run.script, t).map(|(_, v)| v)
-            }))
+            .chain((last + 1..script.len() as u64).filter(on_block).filter_map(|t| write_of(script, t).map(|(_, v)| v)))
             .collect();
         let on = world.media[block as usize];
         if !allowed.contains(&on) {
-            fail(
-                run,
-                Law::Durable,
-                format!(
-                    "flush {flush} was answered durable with block {block} holding {on}, not the \
-                     {want} acknowledged before it (or a later one of {allowed:?})"
-                ),
-            );
-            return;
+            return Err(format!(
+                "flush {flush} was answered durable with block {block} holding {on}, not the \
+                 {want} acknowledged before it (or a later one of {allowed:?})"
+            ));
         }
     }
+    Ok(())
 }
 
 /// Nothing more can happen: every ticket was answered, and every flush said
@@ -443,9 +434,7 @@ impl Names {
 
 /// A state's name in the search: everything it holds, with every tag renamed
 /// by first appearance, the client's first in slot order, and the client's
-/// table rendered by its filled slots. A fresh tag equals none present, so
-/// states named alike differ only in their tags' numbers, which the protocol
-/// compares for equality and orders only in a reset's answers.
+/// table rendered by its filled slots.
 fn key(world: &World) -> String {
     let mut names = Names::default();
     let wire: Vec<u32> = world.client.on_the_wire().map(|t| names.of(t)).collect();
@@ -479,8 +468,30 @@ fn dfs(run: &mut Run, mut world: World) {
     }
     run.filled[0] |= world.queues.sq.len() == DEPTH as usize;
     run.filled[1] |= world.queues.cq.len() == DEPTH as usize;
-    let mut moved = false;
-    let script = run.script;
+    let next = next(run.script, &world);
+    if next.is_empty() {
+        run.ends += 1;
+        end(run, &world);
+    }
+    for (step, after) in next {
+        run.path.push(step);
+        match after {
+            Ok(world) => dfs(run, world),
+            Err((law, why)) => fail(run, law, why),
+        }
+        run.path.pop();
+    }
+}
+
+/// The world after an event, or the law it broke.
+type After = Result<World, (Law, String)>;
+
+/// Every event that can happen next, named, and what it leads to.
+fn next(script: &[Step], world: &World) -> Vec<(String, After)> {
+    let mut next = Vec::new();
+    let mut after = |step: String, after: After| {
+        next.push((step, after.and_then(|mut w| settle(script, &mut w).map(|()| w))));
+    };
 
     // The caller asks for its next step, never a write to a block with a write
     // still unanswered: two writes in flight to one block are unordered.
@@ -496,7 +507,7 @@ fn dfs(run: &mut Run, mut world: World) {
             match script[world.next] {
                 Step::Write { block, .. } => {
                     let run = ARENA.run(ticket as u32, 1).expect("a script's ticket is an arena block");
-                    w.client.submit(ticket, Op::Write(run), block);
+                    w.client.submit(ticket, Op::Write { run, lba: block });
                 }
                 Step::Flush => {
                     let acked = w
@@ -506,13 +517,11 @@ fn dfs(run: &mut Run, mut world: World) {
                         .map(|(t, _)| *t)
                         .collect();
                     w.acked_before.insert(ticket, acked);
-                    w.client.submit(ticket, Op::Flush, 0);
+                    w.client.submit(ticket, Op::Flush);
                 }
             }
             w.next += 1;
-            pump(&mut w);
-            moved = true;
-            go(run, format!("ask {}", world.next), w);
+            after(format!("ask {}", world.next), Ok(w));
         }
     }
 
@@ -531,8 +540,7 @@ fn dfs(run: &mut Run, mut world: World) {
                 format!("refuse #{}", c.tag)
             }
         };
-        moved = true;
-        go(run, step, w);
+        after(step, Ok(w));
     }
 
     // The device completes any one command it holds.
@@ -546,8 +554,7 @@ fn dfs(run: &mut Run, mut world: World) {
                 w.queues.post(c);
             }
         }
-        moved = true;
-        go(run, format!("done {:?}#{tag}", request.op), w);
+        after(format!("done {:?}#{tag}", request.op), Ok(w));
     }
 
     // The device fails any one command it holds: not done, and answered so.
@@ -562,8 +569,7 @@ fn dfs(run: &mut Run, mut world: World) {
                     w.queues.post(c);
                 }
             }
-            moved = true;
-            go(run, format!("fail {:?}#{tag}", request.op), w);
+            after(format!("fail {:?}#{tag}", request.op), Ok(w));
         }
     }
 
@@ -571,13 +577,10 @@ fn dfs(run: &mut Run, mut world: World) {
     if world.client.up() && !world.queues.cq.is_empty() {
         let mut w = world.clone();
         let c = w.queues.read().expect("just seen");
-        if w.client.complete(c).is_err() {
-            fail(run, Law::Answers, format!("the client met a second completion for tag {}", c.tag));
-            return;
-        }
-        collect(run, &mut w);
-        moved = true;
-        go(run, format!("read #{} {:?}", c.tag, c.status), w);
+        let read = w.client.complete(c).map(|()| w).map_err(|_| {
+            (Law::Answers, format!("the client met a second completion for tag {}", c.tag))
+        });
+        after(format!("read #{} {:?}", c.tag, c.status), read);
     }
 
     // The server reads a completion the device posted before it was reset:
@@ -590,13 +593,12 @@ fn dfs(run: &mut Run, mut world: World) {
         if let Some(c) = server.session.complete(tag, true, &mut server.holds, losses) {
             w.queues.post(c);
         }
-        moved = true;
-        go(run, format!("posted #{tag}"), w);
+        after(format!("posted #{tag}"), Ok(w));
     }
 
     // The device is reset under everything in flight.
     if world.left.resets > 0 && world.alive {
-        for (posted, cache, media) in fates(script, &world, true) {
+        for (posted, cache, media) in fates(script, world, true) {
             let mut w = world.clone();
             w.left.resets -= 1;
             w.device.clear();
@@ -608,14 +610,13 @@ fn dfs(run: &mut Run, mut world: World) {
             for c in server.session.abort_all() {
                 w.queues.post(c);
             }
-            moved = true;
-            go(run, format!("reset({posted:?} {cache:?} {media:?})"), w);
+            after(format!("reset({posted:?} {cache:?} {media:?})"), Ok(w));
         }
     }
 
     // The server dies.
     if world.left.crashes > 0 && world.alive {
-        for (_, cache, media) in fates(script, &world, false) {
+        for (_, cache, media) in fates(script, world, false) {
             let mut w = world.clone();
             w.left.crashes -= 1;
             w.device.clear();
@@ -624,8 +625,7 @@ fn dfs(run: &mut Run, mut world: World) {
             w.media = media;
             w.server = None;
             w.alive = false;
-            moved = true;
-            go(run, format!("crash({cache:?} {media:?})"), w);
+            after(format!("crash({cache:?} {media:?})"), Ok(w));
         }
     }
 
@@ -634,23 +634,17 @@ fn dfs(run: &mut Run, mut world: World) {
         let mut w = world.clone();
         w.client.session_ended();
         w.queues.reset();
-        collect(run, &mut w);
-        moved = true;
-        go(run, "notice".into(), w);
+        after("notice".into(), Ok(w));
     }
 
     // It reconnects to the server started in its place.
     if !world.alive && !world.client.up() {
         let mut w = world.clone();
         connect(&mut w);
-        moved = true;
-        go(run, "reconnect".into(), w);
+        after("reconnect".into(), Ok(w));
     }
 
-    if !moved {
-        run.ends += 1;
-        end(run, &world);
-    }
+    next
 }
 
 #[cfg(test)]
@@ -664,6 +658,7 @@ mod tests {
         Step::Write { block: 0, value: 3 },
         Step::Flush,
     ];
+    const _: () = assert!(SCRIPT.len() > DEPTH as usize, "a ring never wraps");
 
     const fn at_most(resets: u8, crashes: u8, errors: u8) -> Failures {
         Failures { resets, crashes, errors }
@@ -750,7 +745,6 @@ mod tests {
         assert_eq!(explored.broken, None);
         assert!(explored.ends >= 1);
         assert_eq!(explored.filled, [true, true], "a ring never held its depth");
-        assert!(SCRIPT.len() > DEPTH as usize, "a ring never wraps");
     }
 
     /// Nor is the give-up path out of its reach: past [`MAX_ATTEMPTS`] failures
@@ -761,5 +755,34 @@ mod tests {
         let explored = verdict(&GIVE_UP, at_most(0, 1, MAX_ATTEMPTS as u8 + 1));
         assert_eq!(explored.broken, None);
         assert!(explored.given_up > 0, "no run gave a write up");
+    }
+
+    /// The world after each event in turn, each the first whose name starts with
+    /// the word given.
+    fn walk(mut world: World, events: &[&str]) -> World {
+        for event in events {
+            let (_, after) = next(&SCRIPT, &world)
+                .into_iter()
+                .find(|(step, _)| step.starts_with(event))
+                .unwrap_or_else(|| panic!("no {event} after {}", key(&world)));
+            world = after.expect("no law is broken on the way");
+        }
+        world
+    }
+
+    /// Two states a key that orders tags by value merges, though a reset parts
+    /// them: F2 on the device and slot 1 free, reached with W1 asked after W0
+    /// was answered, and with the two in flight together. Named alike, they act
+    /// alike: with W3 taken and the device reset, they are still named alike.
+    #[test]
+    fn states_named_alike_act_alike() {
+        let fresh = start(at_most(1, 0, 0));
+        let answered_first =
+            walk(fresh.clone(), &["ask", "take", "done", "read", "ask", "take", "done", "read", "ask", "take"]);
+        let together = walk(fresh, &["ask", "ask", "take", "done", "read", "take", "done", "read", "ask", "take"]);
+        assert_ne!(answered_first.device, together.device, "the flush on the device has one tag in both");
+        assert_eq!(key(&answered_first), key(&together), "the search tells the two apart");
+        let [answered_first, together] = [answered_first, together].map(|w| walk(w, &["ask", "take", "reset"]));
+        assert_eq!(key(&answered_first), key(&together), "a reset answered the two in different orders");
     }
 }

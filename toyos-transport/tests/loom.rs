@@ -13,7 +13,7 @@ use core::sync::atomic::Ordering;
 
 use loom::sync::atomic::AtomicU32;
 use loom::sync::Arc;
-use toyos_transport::{Consumer, Cursors, Place, Producer, Untrusted, Violation, Word};
+use toyos_transport::{Consumer, Place, Producer, Untrusted, Violation, Word};
 
 /// A loom atomic as a region word: the trait is this crate's and the type is
 /// loom's, so the two meet through a wrapper.
@@ -30,15 +30,15 @@ impl Word for Shared {
 
 const E: usize = 2;
 const D: u32 = 2;
-const PLACE: Place = Place { cursors: Cursors { head: 0, tail: 1 }, entries: 2 };
 const WORDS: usize = 2 + E * D as usize;
+const PLACE: Place<E, D, WORDS> = Place::new::<0, 1, 2>();
 
 fn page() -> Arc<[Shared; WORDS]> {
     Arc::new(core::array::from_fn(|_| Shared(AtomicU32::new(0))))
 }
 
 fn ends(page: &[Shared; WORDS]) -> (Producer<E, D, WORDS>, Consumer<E, D, WORDS>) {
-    (Producer::new(page, PLACE).unwrap(), Consumer::new(page, PLACE).unwrap())
+    (Producer::new(page, PLACE), Consumer::new(page, PLACE))
 }
 
 fn entry(n: u32) -> [u32; E] {

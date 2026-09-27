@@ -135,7 +135,7 @@ impl Session {
     /// `names` calls `service`.
     pub fn open(names: Namespace, service: &str, guid: [u8; wire::GUID_BYTES]) -> Result<Self, Error> {
         let region = Region::create().map_err(Error::Kernel)?;
-        let rings = layout::client(region.words()).expect("blockd: the region holds every ring word");
+        let rings = layout::client(region.words());
         let (conn, opened) = handshake(&names, service, guid, &region)?;
         let mut client = Client::new();
         client.session_started();
@@ -187,7 +187,7 @@ impl Session {
         let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
         self.region.arena(&run).copy_in(0, data);
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Write(run), lba);
+        self.client.submit(ticket, Op::Write { run, lba });
         self.pending.insert(ticket, Pending::Write);
         Ok(ticket)
     }
@@ -200,7 +200,7 @@ impl Session {
         }
         let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Read(run), lba);
+        self.client.submit(ticket, Op::Read { run, lba });
         self.pending.insert(ticket, Pending::Read { run });
         Ok(ticket)
     }
@@ -211,7 +211,7 @@ impl Session {
             return Err(Unsent::Ended);
         }
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Flush, 0);
+        self.client.submit(ticket, Op::Flush);
         self.pending.insert(ticket, Pending::Flush);
         Ok(ticket)
     }
@@ -356,7 +356,7 @@ impl Session {
         assert!(self.conn.is_none(), "blockd: reconnect while a session is open");
         // Before the region goes to the new server: it must find this end's
         // two indices at zero, as it will set its own.
-        self.rings = layout::client(self.region.words()).expect("blockd: the region holds every ring word");
+        self.rings = layout::client(self.region.words());
         let (conn, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
         if opened != self.opened {
             return Err(Error::Protocol);

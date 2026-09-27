@@ -245,7 +245,7 @@ impl Service {
     fn admit(&mut self, opening: Opening, conn: Connection) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let rings = layout::server(opening.region.words()).expect("blockd: the region holds every ring word");
+        let rings = layout::server(opening.region.words());
         self.sessions.insert(
             id,
             Served {
@@ -333,12 +333,12 @@ impl Service {
             match s.state.take(words) {
                 Taken::Answer(c) => Self::post(s, c),
                 Taken::Issue(req) => {
-                    let write = matches!(req.op, Op::Write(_));
+                    let write = matches!(req.op, Op::Write { .. });
                     let owner = Owner::Session { session: id, tag: req.tag, write };
                     match req.op {
-                        Op::Read(run) | Op::Write(run) => {
+                        Op::Read { run, lba } | Op::Write { run, lba } => {
                             let at = s.device_addr + run.span().offset as u64;
-                            let block = s.state.first() + req.lba;
+                            let block = s.state.first() + lba;
                             self.ctrl.submit_io(write, block, run.count(), at, owner);
                         }
                         Op::Flush if self.ctrl.vwc => self.ctrl.submit_flush(owner),

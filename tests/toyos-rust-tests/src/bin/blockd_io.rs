@@ -549,7 +549,7 @@ fn hostile_head() {
     // words a client puts on the request ring, published and rung.
     let words = region.words();
     let run = ARENA.run(0, 1).unwrap_or_else(|| fail("arena block 0 is no run".into()));
-    let write = Request { op: Op::Write(run), tag: 1, lba: 0 };
+    let write = Request { op: Op::Write { run, lba: 0 }, tag: 1 };
     for (at, word) in write.encode().into_iter().enumerate() {
         words[SQ_BASE + at].store(word, Ordering::Relaxed);
     }

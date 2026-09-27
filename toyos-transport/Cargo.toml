@@ -32,7 +32,6 @@ end-keeps-inflight = []
 toyos-untrusted = { path = "../toyos-untrusted" }
 
 [dev-dependencies]
-# Already resolved in this workspace for `kernel-loom` and `toyos-sched/loom`.
 loom = "0.7"
 
 [lints.rust]

@@ -53,8 +53,8 @@ impl Word for AtomicU32 {
     }
 }
 
-/// The peer wrote what no peer of the protocol writes, or the region is not
-/// one this session can use. The session is over; the variant is its name.
+/// The peer wrote what no peer of the protocol writes. The session is over;
+/// the variant is its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Violation {
     /// A producer's tail more than the ring holds past what was released.
@@ -68,47 +68,4 @@ pub enum Violation {
     Run,
     /// A tag nothing is in flight under.
     Tag,
-    /// A place outside the words given.
-    Region,
-}
-
-/// Where a ring's two cursors are, in words. The producer stores `tail`, the
-/// consumer `head`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Cursors {
-    pub head: usize,
-    pub tail: usize,
-}
-
-#[cfg(not(feature = "publish-relaxed"))]
-const PUBLISH: Ordering = Ordering::Release;
-#[cfg(feature = "publish-relaxed")]
-const PUBLISH: Ordering = Ordering::Relaxed;
-
-/// Word `at` of an end's words, and the one index into them: every `at` an end
-/// forms is below `N`, because its place was held to `N` when the end was
-/// made and a ring position is masked below the depth.
-#[allow(clippy::indexing_slicing)]
-fn word<W, const N: usize>(page: &[W; N], at: usize) -> &W {
-    &page[at]
-}
-
-/// A distance the peer's cursor claims, believed only up to `cap`.
-fn clamp(claimed: Untrusted<u32>, cap: u32, broken: Violation) -> Result<u32, Violation> {
-    let cap = if cfg!(feature = "no-clamp") { u32::MAX } else { cap };
-    claimed.at_most(u64::from(cap)).ok().and_then(|n| u32::try_from(n).ok()).ok_or(broken)
-}
-
-impl Cursors {
-    /// How far past `released` the producer's tail is: at most `cap`.
-    fn published<W: Word, const N: usize>(&self, page: &[W; N], released: u32, cap: u32) -> Result<u32, Violation> {
-        let tail = word(page, self.tail).load(Ordering::Acquire);
-        clamp(Untrusted::new(tail).map(|t| t.wrapping_sub(released)), cap, Violation::TailPastDepth)
-    }
-
-    /// How far behind `published` the consumer's head is: at most `cap`.
-    fn unreleased<W: Word, const N: usize>(&self, page: &[W; N], published: u32, cap: u32) -> Result<u32, Violation> {
-        let head = word(page, self.head).load(Ordering::Acquire);
-        clamp(Untrusted::new(head).map(|h| published.wrapping_sub(h)), cap, Violation::HeadPastTail)
-    }
 }

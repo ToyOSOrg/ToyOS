@@ -102,7 +102,6 @@ enum Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Queued {
     op: Op,
-    lba: u64,
     kind: Kind,
 }
 
@@ -144,13 +143,13 @@ impl<const D: usize> Client<D> {
         Self::default()
     }
 
-    /// Ask for a read or write at `lba`, or for a flush.
-    pub fn submit(&mut self, ticket: Ticket, op: Op, lba: u64) {
+    /// Ask for a read, a write or a flush.
+    pub fn submit(&mut self, ticket: Ticket, op: Op) {
         let kind = match op {
             Op::Flush => Kind::Flush(ticket),
-            Op::Read(_) | Op::Write(_) => Kind::User(ticket),
+            Op::Read { .. } | Op::Write { .. } => Kind::User(ticket),
         };
-        self.outbox.push_back(Queued { op, lba, kind });
+        self.outbox.push_back(Queued { op, kind });
     }
 
     fn reissuing(&self) -> bool {
@@ -173,8 +172,7 @@ impl<const D: usize> Client<D> {
             // later one of the caller's.
             Kind::Reissue(acked) => {
                 let blocked = self.wire.values().any(|sent| {
-                    let q = sent.queued;
-                    matches!(q.op, Op::Write(run) if acked.overlaps_range(q.lba, run.count()))
+                    matches!(sent.queued.op, Op::Write { run, lba } if acked.overlaps_range(lba, run.count()))
                 });
                 if blocked {
                     return None;
@@ -191,7 +189,7 @@ impl<const D: usize> Client<D> {
         if matches!(front.kind, Kind::Reissue(_)) {
             self.reissued += 1;
         }
-        Some(Request { op: front.op, tag, lba: front.lba })
+        Some(Request { op: front.op, tag })
     }
 
     /// What the server answered.
@@ -201,9 +199,9 @@ impl<const D: usize> Client<D> {
         match (q.kind, completion.status) {
             (Kind::User(ticket), Status::Ok) => {
                 match q.op {
-                    Op::Write(run) => {
+                    Op::Write { run, lba } => {
                         let seq = self.bump();
-                        let acked = Acked { lba: q.lba, run, first: seq, seq, attempts: 0 };
+                        let acked = Acked { lba, run, first: seq, seq, attempts: 0 };
                         // Sent before a loss it did not see: the device may
                         // have taken it and lost it, and an earlier write it
                         // overlaps is being issued again — so it is issued
@@ -214,13 +212,13 @@ impl<const D: usize> Client<D> {
                             self.acked.push_back(acked);
                         }
                     }
-                    Op::Read(run) => self.released.push_back(run),
+                    Op::Read { run, .. } => self.released.push_back(run),
                     Op::Flush => return Err(Violation::Entry),
                 }
                 self.answers.push_back((ticket, Outcome::Done));
             }
             (Kind::User(ticket), status) => {
-                if let Op::Read(run) | Op::Write(run) = q.op {
+                if let Op::Read { run, .. } | Op::Write { run, .. } = q.op {
                     self.released.push_back(run);
                 }
                 let outcome = match status {
@@ -295,7 +293,7 @@ impl<const D: usize> Client<D> {
                 Kind::User(ticket) => {
                     #[cfg(not(feature = "mutate-session-end-forgets"))]
                     {
-                        if let Op::Read(run) | Op::Write(run) = q.op {
+                        if let Op::Read { run, .. } | Op::Write { run, .. } = q.op {
                             self.released.push_back(run);
                         }
                         self.answers.push_back((ticket, Outcome::Refused));
@@ -371,7 +369,7 @@ impl<const D: usize> Client<D> {
                 Kind::User(_) | Kind::Flush(_) => true,
             })
             .unwrap_or(self.outbox.len());
-        self.outbox.insert(at, Queued { op: Op::Write(acked.run), lba: acked.lba, kind: Kind::Reissue(acked) });
+        self.outbox.insert(at, Queued { op: Op::Write { run: acked.run, lba: acked.lba }, kind: Kind::Reissue(acked) });
     }
 
     /// Ask the flush `ticket` again, once every write being issued again is
@@ -382,7 +380,7 @@ impl<const D: usize> Client<D> {
             .iter()
             .position(|q| !matches!(q.kind, Kind::Reissue(_) | Kind::Flush(_)))
             .unwrap_or(self.outbox.len());
-        self.outbox.insert(at, Queued { op: Op::Flush, lba: 0, kind: Kind::Flush(ticket) });
+        self.outbox.insert(at, Queued { op: Op::Flush, kind: Kind::Flush(ticket) });
     }
 
     /// The device may no longer hold any write acknowledged and not covered:
@@ -431,7 +429,7 @@ mod tests {
     #[test]
     fn nothing_goes_out_before_a_session() {
         let mut client: Client = Client::new();
-        client.submit(1, Op::Read(run(0, 1)), 0);
+        client.submit(1, Op::Read { run: run(0, 1), lba: 0 });
         assert_eq!(client.next_request(), None);
         client.session_started();
         assert!(client.next_request().is_some());
@@ -441,7 +439,7 @@ mod tests {
     fn a_second_answer_for_one_tag_is_a_violation() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Read(run(0, 1)), 0);
+        client.submit(1, Op::Read { run: run(0, 1), lba: 0 });
         let r = client.next_request().unwrap();
         answer(&mut client, r, Status::Ok);
         assert_eq!(client.complete(Completion { tag: r.tag, status: Status::Ok }), Err(Violation::Tag));
@@ -454,14 +452,14 @@ mod tests {
     fn a_lost_flush_reissues_then_asks_again() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write(run(3, 2)), 5);
+        client.submit(1, Op::Write { run: run(3, 2), lba: 5 });
         let w = client.next_request().unwrap();
         answer(&mut client, w, Status::Ok);
-        client.submit(2, Op::Flush, 0);
+        client.submit(2, Op::Flush);
         let f = client.next_request().unwrap();
         answer(&mut client, f, Status::Lost);
         let again = client.next_request().unwrap();
-        assert_eq!((again.op, again.lba), (Op::Write(run(3, 2)), 5));
+        assert_eq!(again.op, Op::Write { run: run(3, 2), lba: 5 });
         assert_eq!(client.next_request(), None, "the flush waits for the write");
         answer(&mut client, again, Status::Ok);
         let f2 = client.next_request().unwrap();
@@ -479,20 +477,20 @@ mod tests {
     fn overlapping_writes_go_out_again_in_order() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write(run(0, 2)), 0);
+        client.submit(1, Op::Write { run: run(0, 2), lba: 0 });
         let a = client.next_request().unwrap();
         answer(&mut client, a, Status::Ok);
-        client.submit(2, Op::Write(run(2, 1)), 1);
+        client.submit(2, Op::Write { run: run(2, 1), lba: 1 });
         let b = client.next_request().unwrap();
         answer(&mut client, b, Status::Ok);
         client.session_ended();
         client.session_started();
         let first = client.next_request().unwrap();
-        assert_eq!((first.op, first.lba), (Op::Write(run(0, 2)), 0));
+        assert_eq!(first.op, Op::Write { run: run(0, 2), lba: 0 });
         assert_eq!(client.next_request(), None, "the overlapping one waits");
         answer(&mut client, first, Status::Ok);
         let second = client.next_request().unwrap();
-        assert_eq!((second.op, second.lba), (Op::Write(run(2, 1)), 1));
+        assert_eq!(second.op, Op::Write { run: run(2, 1), lba: 1 });
     }
 
     /// A write the device refused on every reissue is gone, and its caller was
@@ -502,22 +500,22 @@ mod tests {
     fn a_write_given_up_poisons_every_later_flush() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write(run(0, 1)), 0);
+        client.submit(1, Op::Write { run: run(0, 1), lba: 0 });
         let w = client.next_request().unwrap();
         answer(&mut client, w, Status::Ok);
         client.session_ended();
         for _ in 0..=MAX_ATTEMPTS {
             client.session_started();
             let again = client.next_request().unwrap();
-            assert_eq!((again.op, again.lba), (Op::Write(run(0, 1)), 0));
+            assert_eq!(again.op, Op::Write { run: run(0, 1), lba: 0 });
             answer(&mut client, again, Status::Device);
         }
-        client.submit(2, Op::Flush, 0);
+        client.submit(2, Op::Flush);
         let f = client.next_request().unwrap();
         assert_eq!(f.op, Op::Flush);
         answer(&mut client, f, Status::Ok);
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Done), (2, Outcome::Device)]);
-        client.submit(3, Op::Flush, 0);
+        client.submit(3, Op::Flush);
         let f = client.next_request().unwrap();
         answer(&mut client, f, Status::Ok);
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(3, Outcome::Device)]);
@@ -527,14 +525,14 @@ mod tests {
     fn what_was_on_the_wire_at_the_end_is_refused_and_what_was_not_waits() {
         let mut client: Client = Client::new();
         client.session_started();
-        client.submit(1, Op::Write(run(0, 1)), 0);
-        client.submit(2, Op::Read(run(1, 1)), 4);
+        client.submit(1, Op::Write { run: run(0, 1), lba: 0 });
+        client.submit(2, Op::Read { run: run(1, 1), lba: 4 });
         let _ = client.next_request().unwrap();
         client.session_ended();
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Refused)]);
         assert_eq!(client.take_released().collect::<Vec<_>>(), [run(0, 1)]);
         client.session_started();
         let r = client.next_request().unwrap();
-        assert_eq!((r.op, r.lba), (Op::Read(run(1, 1)), 4));
+        assert_eq!(r.op, Op::Read { run: run(1, 1), lba: 4 });
     }
 }

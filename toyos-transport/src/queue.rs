@@ -8,22 +8,73 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::{word, Cursors, Untrusted, Violation, Word, PUBLISH};
+use crate::{Untrusted, Violation, Word};
 
-/// Where one queue is in a region, in words: its cursors, and its first entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Place {
-    pub cursors: Cursors,
-    pub entries: usize,
+#[cfg(not(feature = "publish-relaxed"))]
+const PUBLISH: Ordering = Ordering::Release;
+#[cfg(feature = "publish-relaxed")]
+const PUBLISH: Ordering = Ordering::Relaxed;
+
+/// Word `at` of an end's words, and the one index into them: every `at` an end
+/// forms is below `N`, because its [`Place`] is and a ring position is masked
+/// below the depth.
+#[allow(clippy::indexing_slicing)]
+fn word<W, const N: usize>(page: &[W; N], at: usize) -> &W {
+    &page[at]
 }
 
-impl Place {
+/// A distance the peer's cursor claims, believed only up to `cap`.
+fn clamp(claimed: Untrusted<u32>, cap: u32, broken: Violation) -> Result<u32, Violation> {
+    let cap = if cfg!(feature = "no-clamp") { u32::MAX } else { cap };
+    claimed.at_most(u64::from(cap)).ok().and_then(|n| u32::try_from(n).ok()).ok_or(broken)
+}
+
+/// Where a queue of `E`-word entries, `D` deep, is among `N` words: the word
+/// its consumer stores its head in, the word its producer stores its tail in,
+/// and its first entry.
+///
+/// ```
+/// use toyos_transport::Place;
+/// const QUEUE: Place<2, 4, 10> = Place::new::<0, 1, 2>();
+/// ```
+///
+/// A place with a word at `N` or past it does not compile:
+///
+/// ```compile_fail,E0080
+/// use toyos_transport::Place;
+/// const QUEUE: Place<2, 4, 10> = Place::new::<0, 1, 3>();
+/// ```
+///
+/// ```compile_fail,E0080
+/// use toyos_transport::Place;
+/// const QUEUE: Place<2, 4, 10> = Place::new::<10, 1, 2>();
+/// ```
+///
+/// ```compile_fail,E0080
+/// use toyos_transport::Place;
+/// const QUEUE: Place<2, 4, 10> = Place::new::<0, 10, 2>();
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Place<const E: usize, const D: u32, const N: usize> {
+    head: usize,
+    tail: usize,
+    entries: usize,
+}
+
+impl<const E: usize, const D: u32, const N: usize> Place<E, D, N> {
+    pub const fn new<const HEAD: usize, const TAIL: usize, const ENTRIES: usize>() -> Self {
+        const {
+            assert!(D.is_power_of_two() && E > 0, "a queue is a power of two deep, of entries of a word or more");
+            assert!(usize::BITS >= u32::BITS, "a ring position is a u32");
+            #[allow(clippy::as_conversions)]
+            let entries_end = ENTRIES + D as usize * E;
+            assert!(HEAD < N && TAIL < N && entries_end <= N, "a place names a word past its words");
+        }
+        Self { head: HEAD, tail: TAIL, entries: ENTRIES }
+    }
+
     /// The words of the entry at ring position `at`.
-    fn entry<'a, W, const E: usize, const D: u32, const N: usize>(
-        &self,
-        page: &'a [W; N],
-        at: u32,
-    ) -> impl Iterator<Item = &'a W> {
+    fn entry<'a, W>(&self, page: &'a [W; N], at: u32) -> impl Iterator<Item = &'a W> {
         // `usize` holds every `u32`, so the slot is exact.
         #[allow(clippy::as_conversions)]
         let slot = (at & D.wrapping_sub(1)) as usize;
@@ -31,16 +82,16 @@ impl Place {
         (0..E).map(move |k| word(page, first.wrapping_add(k)))
     }
 
-    /// Every word the queue uses is below `N`.
-    fn check<const E: usize, const D: u32, const N: usize>(&self) -> Result<(), Violation> {
-        const { assert!(D.is_power_of_two() && E > 0, "a queue is a power of two deep, of entries of a word or more") };
-        const { assert!(usize::BITS >= u32::BITS, "a ring position is a u32") };
-        let entries_end =
-            usize::try_from(D).ok().and_then(|d| d.checked_mul(E)).and_then(|words| words.checked_add(self.entries));
-        match entries_end {
-            Some(end) if end <= N && self.cursors.head < N && self.cursors.tail < N => Ok(()),
-            _ => Err(Violation::Region),
-        }
+    /// How far past `released` the producer's tail is: at most `D`.
+    fn published<W: Word>(&self, page: &[W; N], released: u32) -> Result<u32, Violation> {
+        let tail = word(page, self.tail).load(Ordering::Acquire);
+        clamp(Untrusted::new(tail).map(|t| t.wrapping_sub(released)), D, Violation::TailPastDepth)
+    }
+
+    /// How far behind `published` the consumer's head is: at most `D`.
+    fn unreleased<W: Word>(&self, page: &[W; N], published: u32) -> Result<u32, Violation> {
+        let head = word(page, self.head).load(Ordering::Acquire);
+        clamp(Untrusted::new(head).map(|h| published.wrapping_sub(h)), D, Violation::HeadPastTail)
     }
 }
 
@@ -48,7 +99,7 @@ impl Place {
 /// region; every call is given the region's words.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Producer<const E: usize, const D: u32, const N: usize> {
-    place: Place,
+    place: Place<E, D, N>,
     local: u32,
     published: u32,
     /// Entries that may be pushed before the head is looked at again.
@@ -57,15 +108,14 @@ pub struct Producer<const E: usize, const D: u32, const N: usize> {
 
 impl<const E: usize, const D: u32, const N: usize> Producer<E, D, N> {
     /// This end of the queue at `place`, its tail stored 0.
-    pub fn new<W: Word>(page: &[W; N], place: Place) -> Result<Self, Violation> {
-        place.check::<E, D, N>()?;
-        word(page, place.cursors.tail).store(0, Ordering::Release);
-        Ok(Self { place, local: 0, published: 0, room: D })
+    pub fn new<W: Word>(page: &[W; N], place: Place<E, D, N>) -> Self {
+        word(page, place.tail).store(0, Ordering::Release);
+        Self { place, local: 0, published: 0, room: D }
     }
 
     /// How many entries may be pushed before the consumer frees more.
     pub fn space<W: Word>(&mut self, page: &[W; N]) -> Result<u32, Violation> {
-        let unreleased = self.place.cursors.unreleased(page, self.published, D)?;
+        let unreleased = self.place.unreleased(page, self.published)?;
         let pending = self.local.wrapping_sub(self.published);
         self.room = D.saturating_sub(pending.saturating_add(unreleased));
         Ok(self.room)
@@ -77,7 +127,7 @@ impl<const E: usize, const D: u32, const N: usize> Producer<E, D, N> {
         if self.room == 0 && self.space(page)? == 0 {
             return Ok(false);
         }
-        for (shared, value) in self.place.entry::<W, E, D, N>(page, self.local).zip(words) {
+        for (shared, value) in self.place.entry(page, self.local).zip(words) {
             shared.store(value, Ordering::Relaxed);
         }
         self.local = self.local.wrapping_add(1);
@@ -90,7 +140,7 @@ impl<const E: usize, const D: u32, const N: usize> Producer<E, D, N> {
         if self.published == self.local {
             return false;
         }
-        word(page, self.place.cursors.tail).store(self.local, PUBLISH);
+        word(page, self.place.tail).store(self.local, PUBLISH);
         self.published = self.local;
         true
     }
@@ -100,7 +150,7 @@ impl<const E: usize, const D: u32, const N: usize> Producer<E, D, N> {
 /// and is given the region's words.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Consumer<const E: usize, const D: u32, const N: usize> {
-    place: Place,
+    place: Place<E, D, N>,
     local: u32,
     released: u32,
     /// Entries published and not yet popped, as last seen.
@@ -109,23 +159,22 @@ pub struct Consumer<const E: usize, const D: u32, const N: usize> {
 
 impl<const E: usize, const D: u32, const N: usize> Consumer<E, D, N> {
     /// This end of the queue at `place`, its head stored 0.
-    pub fn new<W: Word>(page: &[W; N], place: Place) -> Result<Self, Violation> {
-        place.check::<E, D, N>()?;
-        word(page, place.cursors.head).store(0, Ordering::Release);
-        Ok(Self { place, local: 0, released: 0, ready: 0 })
+    pub fn new<W: Word>(page: &[W; N], place: Place<E, D, N>) -> Self {
+        word(page, place.head).store(0, Ordering::Release);
+        Self { place, local: 0, released: 0, ready: 0 }
     }
 
     /// The next published entry, or `None` for none.
     pub fn pop<W: Word>(&mut self, page: &[W; N]) -> Result<Option<[Untrusted<u32>; E]>, Violation> {
         if self.ready == 0 {
-            let published = self.place.cursors.published(page, self.released, D)?;
+            let published = self.place.published(page, self.released)?;
             self.ready = published.saturating_sub(self.local.wrapping_sub(self.released));
             if self.ready == 0 {
                 return Ok(None);
             }
         }
         let mut words = [Untrusted::new(0); E];
-        for (out, shared) in words.iter_mut().zip(self.place.entry::<W, E, D, N>(page, self.local)) {
+        for (out, shared) in words.iter_mut().zip(self.place.entry(page, self.local)) {
             *out = Untrusted::new(shared.load(Ordering::Relaxed));
         }
         self.local = self.local.wrapping_add(1);
@@ -136,7 +185,7 @@ impl<const E: usize, const D: u32, const N: usize> Consumer<E, D, N> {
     /// Give every entry popped so far back to the producer.
     pub fn release<W: Word>(&mut self, page: &[W; N]) {
         if self.released != self.local {
-            word(page, self.place.cursors.head).store(self.local, Ordering::Release);
+            word(page, self.place.head).store(self.local, Ordering::Release);
             self.released = self.local;
         }
     }
@@ -148,15 +197,15 @@ mod tests {
     use core::sync::atomic::AtomicU32;
 
     const D: u32 = 8;
-    const PLACE: Place = Place { cursors: Cursors { head: 0, tail: 16 }, entries: 32 };
     const WORDS: usize = 32 + 2 * D as usize;
+    const PLACE: Place<2, D, WORDS> = Place::new::<0, 16, 32>();
 
     fn page() -> [AtomicU32; WORDS] {
         core::array::from_fn(|_| AtomicU32::new(0))
     }
 
     fn ends(page: &[AtomicU32; WORDS]) -> (Producer<2, D, WORDS>, Consumer<2, D, WORDS>) {
-        (Producer::new(page, PLACE).unwrap(), Consumer::new(page, PLACE).unwrap())
+        (Producer::new(page, PLACE), Consumer::new(page, PLACE))
     }
 
     fn plain(words: Option<[Untrusted<u32>; 2]>) -> Option<[u32; 2]> {
@@ -256,18 +305,5 @@ mod tests {
             assert!(pushed <= D, "pushed {pushed} into a ring of {D} with none published");
         };
         assert_eq!((pushed, refused), (D, Violation::HeadPastTail));
-    }
-
-    #[test]
-    fn a_place_outside_the_words_is_refused() {
-        let page = page();
-        for place in [
-            Place { entries: 33, ..PLACE },
-            Place { cursors: Cursors { head: WORDS, tail: 16 }, ..PLACE },
-            Place { cursors: Cursors { head: 0, tail: WORDS }, ..PLACE },
-        ] {
-            assert_eq!(Producer::<2, D, WORDS>::new(&page, place).err(), Some(Violation::Region));
-            assert_eq!(Consumer::<2, D, WORDS>::new(&page, place).err(), Some(Violation::Region));
-        }
     }
 }
