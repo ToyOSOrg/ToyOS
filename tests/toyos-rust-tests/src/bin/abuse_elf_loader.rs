@@ -547,12 +547,12 @@ fn main() {
     // 14. A cross-module initial-exec TLS reference resolves to `S + A - tp`.
     f13_cross_module_addend_is_kept();
 
-    // 19. The apply-time TLS refusals, each named by its reason in the log.
-    tls_apply_time_refusals_are_reached();
-
-    // 20. A relocation naming a symbol the executable's short-read `.dynsym` does
+    // 19. A relocation naming a symbol the executable's short-read `.dynsym` does
     //     not hold is refused by name.
     globdat_past_short_dynsym();
+
+    // 20. The apply-time TLS refusals, each named by its reason in the log.
+    tls_apply_time_refusals_are_reached();
 
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.
@@ -865,14 +865,10 @@ fn tls_apply_time_refusals_are_reached() {
     drop(lib_defs);
 
     // `S + A` (8 + `i64::MAX`) inside a `PT_TLS` declared past 2^63 bytes: only
-    // `S + A - tp` leaves an `i64`. A dlopen, then an executable needing the
-    // defining library at startup.
+    // `S + A - tp` leaves an `i64`. An executable needing the defining library
+    // at startup, then a dlopen. The spawn goes first: a block that size is
+    // refused later for another reason, which only the harness's log check sees.
     const PAST_I64: u64 = 0x8000_0000_0000_0010;
-    let defs = write_file("tpoff_overflow_defs.so", &tls_defs_so(b"vtls", PAST_I64));
-    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen tpoff_overflow_defs.so");
-    dlopen_refused("tpoff_overflow.so", &tls_refs_so(b"vtls", i64::MAX));
-    drop(lib_defs);
-
     let dep = "tpoff_overflow_dep.so";
     write_file(dep, &tls_defs_so(b"wtls", PAST_I64));
     // `.dynstr` at 0x1800 holds "wtls\0<dep>\0".
@@ -881,6 +877,11 @@ fn tls_apply_time_refusals_are_reached() {
         .poke(0x1801, b"wtls\0")
         .poke(0x1806, dep.as_bytes());
     spawn_refused("tpoff_overflow_spawn", &exe.build());
+
+    let defs = write_file("tpoff_overflow_defs.so", &tls_defs_so(b"vtls", PAST_I64));
+    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen tpoff_overflow_defs.so");
+    dlopen_refused("tpoff_overflow.so", &tls_refs_so(b"vtls", i64::MAX));
+    drop(lib_defs);
 }
 
 /// An executable needing a library, whose `.gnu.hash` counts 1000 symbols
