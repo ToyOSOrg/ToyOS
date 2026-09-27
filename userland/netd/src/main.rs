@@ -9,6 +9,7 @@ use toyos::say;
 mod device;
 mod dhcp;
 mod i219;
+mod listen;
 mod mdns;
 mod report;
 mod resolve;
@@ -399,7 +400,7 @@ impl PipedConnection {
 struct PipedListener {
     handle: SocketHandle,
     notify_write: Pipe,
-    notified: bool,
+    listening: listen::Listening,
 }
 
 struct PendingPipedConnect {
@@ -1223,7 +1224,7 @@ impl NetDaemon {
         self.piped_listeners.insert(socket_id, PipedListener {
             handle,
             notify_write,
-            notified: false,
+            listening: listen::Listening::new(port),
         });
 
         msg.client.result(&TcpBindResponse {
@@ -1251,21 +1252,19 @@ impl NetDaemon {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let Some(listener) = self.piped_listeners.get(&req.socket_id) else {
+        let Some(listener) = self.piped_listeners.get_mut(&req.socket_id) else {
             msg.client.error(ERR_NOT_CONNECTED);
             return;
         };
 
         let socket = socket_set.get_mut::<tcp::Socket>(listener.handle);
-        // Not `is_active`: that is already true in SynReceived, where
-        // `remote_endpoint()` is still None.
-        if socket.state() != tcp::State::Established {
+        if !listener.listening.accept(socket) {
             msg.client.error(ERR_NOT_CONNECTED);
             return;
         }
 
         let remote = socket.remote_endpoint().unwrap();
-        let local_port = socket.local_endpoint().unwrap().port;
+        let local_port = listener.listening.port();
         let remote_addr = match remote.addr {
             IpAddress::Ipv4(a) => a.octets(),
         };
@@ -1290,7 +1289,6 @@ impl NetDaemon {
 
         if let Some(pl) = self.piped_listeners.get_mut(&req.socket_id) {
             pl.handle = new_handle;
-            pl.notified = false;
         }
 
         msg.client.result(&TcpAcceptPipedResponse {
@@ -1434,12 +1432,11 @@ impl NetDaemon {
         let mut dead = Vec::new();
         for (&socket_id, listener) in &mut self.piped_listeners {
             let socket = socket_set.get_mut::<tcp::Socket>(listener.handle);
-            // Not `is_active`: that is already true in SynReceived, before the
-            // three-way handshake completes.
-            let owed = socket.state() == tcp::State::Established && !listener.notified;
+            let owed = listener.listening.owes_wake(socket);
             let wake: &[u8] = if owed { &[1] } else { &[] };
             match toyos_abi::syscall::write_nonblock(listener.notify_write.as_handle(), wake) {
-                Ok(_) => listener.notified |= owed,
+                Ok(_) if owed => listener.listening.woke(),
+                Ok(_) => {}
                 Err(SyscallError::WouldBlock) if !owed => {}
                 // Its owner has gone, which is the ordinary end of a listener.
                 Err(SyscallError::Gone) => dead.push(socket_id),
