@@ -18,8 +18,7 @@ FAIL swap_crash_rolls_back: 2 finding(s):
 before #527 (run 36285169430).
 `cargo run -- --known-red swap_crash_rolls_back` answers NO.
 
-Not shown: why `logd` was still turning the redial away, 64 times, after the
-old netd was gone.
+Not shown: what turned the redial away 64 times, and why.
 
 **Exit**: a cause for a redial turned away to its ceiling on a swap that
 rolled back, or a rate with enough runs to call it gone.
