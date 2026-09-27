@@ -82,13 +82,13 @@ impl SharedMemObject {
         }
         // `SYS_SHM_CREATE`'s length, straight from a register: the rounding
         // itself is the checked sum.
-        let aligned = align_2m_checked(size as usize).ok_or(SyscallError::InvalidArgument)?;
-        let pages = pmm::alloc_contiguous(aligned / PAGE_2M as usize, pmm::Category::SharedMemory)
+        let aligned = align_2m_checked(size).ok_or(SyscallError::InvalidArgument)?;
+        let pages = pmm::alloc_contiguous((aligned / PAGE_2M) as usize, pmm::Category::SharedMemory)
             .ok_or(SyscallError::ResourceExhausted)?;
         let phys = DirectMap::from_phys(pages[0].direct_map().phys());
         Ok(Self::over(Region {
             phys,
-            size: aligned as u64,
+            size: aligned,
             cache: CachePolicy::Normal,
             pages: Some(Arc::new(Pages(pages))),
         }))

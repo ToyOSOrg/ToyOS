@@ -598,17 +598,12 @@ impl AddressSpace {
     /// Where `span` goes, top-down and never below the floor: a region the
     /// kernel placed under it, the clock page, bounds no gap.
     fn find_gap(&self, span: PageSpan) -> Option<UserAddr> {
-        let taken = self
-            .regions
-            .range(..UserAddr::new(vma::ALLOC_CEILING))
-            .rev()
-            .map(|(start, region)| (start.raw(), region.size));
+        let taken = self.regions.iter().rev().map(|(start, region)| (start.raw(), region.size));
         vma::window().gap(span, taken).map(UserAddr::new)
     }
 
     /// Allocate a virtual address range and register the region. `size` is
-    /// made a [`PageSpan`] before anything is summed on it, since some callers'
-    /// lengths came from a register.
+    /// made a [`PageSpan`] before anything is summed on it.
     pub fn alloc_region(&mut self, size: u64, kind: RegionKind) -> Option<UserAddr> {
         let span = vma::window().span(size)?;
         let addr = self.find_gap(span)?;

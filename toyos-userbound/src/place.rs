@@ -12,13 +12,12 @@
 //! the length — the caller's argument is wrong, which is `InvalidArgument`.
 //! [`Window::gap`] is the placement: `None` when a span that could fit does not
 //! fit the space as it stands — the machine's answer, which is
-//! `ResourceExhausted`. The same two answers Linux gives an oversized `mmap`
-//! length (`EINVAL`, `ENOMEM`).
+//! `ResourceExhausted`.
 //!
 //! What a region already registered says about itself is the kernel's own
 //! ledger and is not re-checked: a wrap there is a kernel bug and traps.
 
-use crate::span::{PAGE_2M, USER_TOP};
+use crate::span::{align_2m_checked, PAGE_2M, USER_TOP};
 
 /// The part of the user half anonymous ranges are placed in, and the guard
 /// left above each. Built in a `const`, so a window that breaks
@@ -70,22 +69,25 @@ impl Window {
         if size == 0 {
             return None;
         }
-        let span = size.checked_add(PAGE_2M - 1)? & !(PAGE_2M - 1);
+        let span = align_2m_checked(size)?;
         (span <= self.ceiling - self.floor - self.guard).then_some(PageSpan(span))
     }
 
     /// The lowest address of the highest free run that holds `span` plus the
     /// guard above it, or `None` when no run is long enough.
     ///
-    /// `taken` is every registered region starting below the ceiling, as
-    /// `(start, size)`, highest start first. Nothing is placed below the floor,
-    /// and nothing registered below it bounds a run.
+    /// `taken` is every registered region, as `(start, size)`, highest start
+    /// first; one at or above the ceiling is skipped. Nothing is placed below
+    /// the floor, and nothing registered below it bounds a run.
     pub fn gap(&self, span: PageSpan, taken: impl IntoIterator<Item = (u64, u64)>) -> Option<u64> {
         // A span is at most a window and every window is inside the user half,
         // so neither this nor `floor + total` below can wrap.
         let total = span.0 + self.guard;
         let mut top = self.ceiling;
         for (start, len) in taken {
+            if start >= self.ceiling {
+                continue;
+            }
             let end = (start + len).next_multiple_of(PAGE_2M);
             if end > top {
                 top = start;
@@ -196,6 +198,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "whole 2 MiB pages")]
+    fn a_window_not_2_mib_aligned_is_a_kernel_bug() {
+        let _ = Window::new(FLOOR + 4096, CEILING, PAGE_2M);
+    }
+
+    #[test]
     #[should_panic(expected = "holds its guard")]
     fn a_window_without_room_for_its_guard_is_a_kernel_bug() {
         let _ = Window::new(FLOOR, FLOOR + PAGE_2M, 2 * PAGE_2M);
@@ -205,5 +213,26 @@ mod tests {
     #[should_panic(expected = "inside the user half")]
     fn a_window_past_the_user_half_is_a_kernel_bug() {
         let _ = Window::new(FLOOR, USER_TOP + PAGE_2M, PAGE_2M);
+    }
+
+    /// `sys_mmap`'s FIXED arm places at the caller's own address and never
+    /// searches a gap, so it rounds with `align_2m_checked` alone rather than
+    /// `Window::span`: a length past the window's placeable room must still
+    /// round, since `Window::span`'s refusal here is about finding a gap, not
+    /// about the rounding.
+    #[test]
+    fn a_length_past_the_window_still_rounds_for_a_fixed_placement() {
+        for size in [ROOM + 1, CEILING - FLOOR] {
+            assert_eq!(WINDOW.span(size), None, "{size:#x}");
+            assert_eq!(align_2m_checked(size), Some(CEILING - FLOOR), "{size:#x}");
+        }
+    }
+
+    /// `find_gap` no longer pre-filters by the ceiling; `gap` is the one
+    /// reader of it, so a region registered at or above it must bound nothing.
+    #[test]
+    fn a_region_at_or_above_the_ceiling_bounds_nothing() {
+        let taken = [(CEILING, PAGE_2M), (CEILING + PAGE_2M, PAGE_2M)];
+        assert_eq!(WINDOW.gap(span(PAGE_2M), taken), Some(CEILING - 2 * PAGE_2M));
     }
 }

@@ -169,11 +169,7 @@ fn mmap_raw(size: usize, prot: MmapProt, flags: MmapFlags) -> u64 {
     ret
 }
 
-/// Lengths past every placement window. The first two round to the last whole
-/// 2 MiB page below 2^64, which a second rounding or the guard carries past
-/// it: the first is the one a sum `size + PAGE_2M` accepts and a placement
-/// under the locks then wraps, the second the largest whose rounding fits.
-/// Then `u64::MAX`, whose rounding wraps, and the whole user half.
+/// Lengths past every placement window.
 const UNPLACEABLE: [u64; 4] =
     [u64::MAX - PAGE_2M, u64::MAX - (PAGE_2M - 1), u64::MAX, 1 << 47];
 const PAGE_2M: u64 = 2 * 1024 * 1024;

@@ -1,7 +1,6 @@
 //! `SYS_SHM_CREATE`'s length is refused, never summed unchecked: one whose
 //! 2 MiB rounding wraps `u64` is `InvalidArgument`, and one whose rounding
-//! fits but no memory could back is `ResourceExhausted` — Linux's `EINVAL` and
-//! `ENOMEM` for an oversized length.
+//! fits but no memory could back is `ResourceExhausted`.
 //!
 //! The verdict is that this process reaches its last line: a trap in the
 //! kernel's rounding ends the caller before its refusal can be read.
@@ -10,10 +9,11 @@ use toyos_abi::syscall::{self, SyscallError};
 
 const PAGE_2M: u64 = 2 * 1024 * 1024;
 
-/// The largest length whose rounding fits `u64`, which a rounding that sums
-/// `size + PAGE_2M` before subtracting one wraps on; then the first and last
-/// lengths whose rounding wraps.
-const LENGTHS: [(u64, SyscallError); 3] = [
+/// Zero, refused before any rounding; the largest length whose rounding fits
+/// `u64`, which a rounding that sums `size + PAGE_2M` before subtracting one
+/// wraps on; then the first and last lengths whose rounding wraps.
+const LENGTHS: [(u64, SyscallError); 4] = [
+    (0, SyscallError::InvalidArgument),
     (u64::MAX - (PAGE_2M - 1), SyscallError::ResourceExhausted),
     (u64::MAX - (PAGE_2M - 2), SyscallError::InvalidArgument),
     (u64::MAX, SyscallError::InvalidArgument),

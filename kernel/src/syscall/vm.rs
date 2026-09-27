@@ -3,11 +3,14 @@
 //! thread's per-module TLS block, `SYS_QUERY_MODULES` reports what is loaded.
 //! Exhausting address space is an error return, never an `.expect`.
 //!
-//! **A length from userland is refused by `vma::window().span` before any
-//! arithmetic touches it**: one no placement window could hold is
+//! **A length from userland is refused before any arithmetic touches it, and
+//! before any lock.** The non-FIXED arm goes through `vma::window().span`,
+//! the bound `find_gap` places in: one no placement window could hold is
 //! `InvalidArgument`, one that could but finds no room is `ResourceExhausted`.
-//! A sum that traps here traps under the process-data and address-space
-//! locks, and a recovered syscall panic never releases either.
+//! FIXED places at the caller's own address and never searches a gap, so it
+//! rounds with the checked sum alone, uncapped by the window's guard. A sum
+//! that traps under either arm traps under the process-data and
+//! address-space locks, and a recovered syscall panic never releases either.
 //!
 //! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
 //! shoots down and waits, and a sibling thread can be spinning on that same
@@ -38,13 +41,20 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     if prot.0 & !MMAP_PROT_KNOWN != 0 || flags.0 & !MMAP_FLAGS_KNOWN != 0 {
         return SyscallError::InvalidArgument.to_u64();
     }
-    // Before any sum on `size` and before any lock: the window is the one
+    // `FIXED` with a null `req_addr` places anywhere, same as the non-FIXED
+    // arm below: this is the one condition that decides which placement runs.
+    let places_at_req_addr = flags.contains(MmapFlags::FIXED) && req_addr != 0;
+    // It needs no gap search and so no guard headroom; it rounds with the
+    // checked sum alone. Every other request goes through the window
     // `find_gap` places in, so what passes here can never overflow there.
-    let Some(span) = crate::vma::window().span(size) else {
+    let Some(aligned) = (if places_at_req_addr {
+        (size != 0).then_some(size).and_then(toyos_userbound::align_2m_checked)
+    } else {
+        crate::vma::window().span(size).map(|span| span.bytes())
+    })
+    .map(|aligned| aligned as usize) else {
         return SyscallError::InvalidArgument.to_u64();
     };
-    let aligned = span.bytes() as usize;
-    let fixed = flags.contains(MmapFlags::FIXED);
     // Anonymous memory is never executable: `MmapProt` has no bit for it and
     // there is no `mprotect` to add one later.
     let mapping_prot = if prot.contains(MmapProt::WRITE) { Prot::ReadWrite } else { Prot::Read };
@@ -52,12 +62,13 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     // A misaligned or kernel-half `req_addr` is refused, not rounded or
     // clamped: `ensure_table` would OR `PAGE_USER` onto the shared kernel PML4
     // entry, opening a user-writable window in every process's page tables.
-    let fixed_start = if fixed && req_addr != 0 {
+    // The floor guards against NULL-ish addresses below it.
+    let fixed_start = if places_at_req_addr {
         let Some(end) = req_addr.checked_add(aligned as u64) else {
             return SyscallError::InvalidArgument.to_u64();
         };
         if req_addr & (crate::mm::PAGE_2M - 1) != 0
-            || req_addr < crate::vma::alloc_floor()
+            || req_addr < crate::vma::window().floor()
             || end > crate::vma::ALLOC_CEILING
             || !toyos_userbound::in_user_half(req_addr, aligned as u64)
         {

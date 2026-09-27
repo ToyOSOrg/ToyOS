@@ -1,6 +1,6 @@
 //! Every decision the kernel makes about the user/kernel boundary.
 //!
-//! Three questions and one line between them. **Before a dereference**: is this
+//! **Before a dereference**: is this
 //! address userland's, is the object at it aligned for the type being read, and
 //! does it lie wholly inside one mapping? **Before a placement**: can a length
 //! userland asked for be placed at all, and where does it go? **After a trap**:
@@ -36,6 +36,6 @@ pub mod span;
 pub use fault::{blame, Blame, Faulted, Ring};
 pub use place::{PageSpan, Window};
 pub use span::{
-    contiguous, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M, PAGE_4K,
-    USER_TOP,
+    align_2m_checked, contiguous, in_user_half, is_user_addr, is_user_object, rebase_base, Access,
+    PAGE_2M, PAGE_4K, USER_TOP,
 };

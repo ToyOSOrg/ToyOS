@@ -8,16 +8,11 @@ use toyos_userbound::Window;
 /// The stack extends upward to the PIE base, so no usable VA space exists above it.
 pub const ALLOC_CEILING: u64 = STACK_BASE;
 
-/// Guards against NULL-ish addresses below this floor.
-pub fn alloc_floor() -> u64 {
-    window().floor()
-}
-
 /// RSP starts at this address plus `USER_STACK_SIZE`.
 pub const STACK_BASE: u64 = 0x00FF_FF80_0000;
 
 /// Guard page between allocations.
-pub const GUARD_SIZE: u64 = PAGE_2M;
+const GUARD_SIZE: u64 = PAGE_2M;
 
 /// The floor at 8 GB.
 const WINDOW: Window = Window::new(0x0002_0000_0000, ALLOC_CEILING, GUARD_SIZE);
