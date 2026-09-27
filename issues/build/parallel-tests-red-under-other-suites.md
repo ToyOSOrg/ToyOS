@@ -77,8 +77,7 @@ changes.
 - **`dump_nmi_probe`** — retired 2026-09-04, green 3 of 3 beside a full fast
   tier. `4ad8875` made it `Sched::Serial`,
   which shows what serialising buys and what it does not: within one run the
-  phase is quiet, across runs nothing but `buildlock::guest_slot` spans
-  worktrees and twelve slots is not one guest.
+  phase is quiet.
 - **`blocked_dump`** — retired 2026-09-04, green 3 of 3 beside a full fast
   tier.
 - **`screen_console_scroll`** — retired 2026-09-04, green 3 of 3 beside a full

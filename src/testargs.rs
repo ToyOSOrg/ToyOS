@@ -13,8 +13,7 @@ use std::time::Duration;
 /// A shard is a *host*, never a lane. `--jobs` divides one machine's cores
 /// between guests that contend for them; this divides the work between machines
 /// that share nothing, which is the only lever CI has and the one the dev host
-/// does not have at all. The two compose: four shards at width 4 is sixteen
-/// guests, no two on one host.
+/// does not have at all.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Shard {
     /// One-based, as it is written on the command line and in a job matrix.

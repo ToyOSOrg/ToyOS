@@ -602,7 +602,6 @@ fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 
 // --- The guest jobs ------------------------------------------------------------
 
-/// The harness's arguments for a CI lane.
 fn suite_args(args: &[&str]) -> Vec<String> {
     let mut all = vec!["test", "--test", "toyos-build", "--"];
     all.extend(args);

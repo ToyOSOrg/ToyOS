@@ -334,6 +334,7 @@ mod tests {
             vec!["-h"],
             vec!["buildonly"],
             vec!["--build-only", "target/bootable.img"],
+            vec!["--host-builds"],
         ] {
             let bad = words.last().expect("a command line to refuse");
             let message = refusal(&words);
