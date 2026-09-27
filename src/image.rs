@@ -253,6 +253,7 @@ pub fn create_boot_image(
         sequence: 1,
         marked: toyos_update::slots::Which::A,
         slots: [Some(slot(a, signing.version)), b.map(|(boot, root, _)| slot((boot, root), 0))],
+        request: toyos_update::slots::Request::NONE,
     };
     let mut table_volume = vec![0u8; PARTITION_ALIGN];
     table_volume[..toyos_update::slots::BLOCK].copy_from_slice(&table.encode());
@@ -379,6 +380,73 @@ pub fn read_file_on(file: &mut std::fs::File, guid: [u8; 16], name: &str) -> Res
     let mut bytes = vec![0u8; usize::try_from(found.len()).unwrap_or(usize::MAX)];
     fs.read(&mut found, 0, &mut bytes).map_err(|e| format!("reading {name}: {e}"))?;
     Ok(bytes)
+}
+
+/// The update a disk image's marked slot is, as `ssh <machine> update` takes
+/// it on its input, and what names it.
+pub struct UpdateOf {
+    pub bytes: Vec<u8>,
+    pub version: u64,
+    /// The SHA-256 of its signed header, which the loader prints of the slot
+    /// it verified: what ties a pass's lines to this image.
+    pub digest: toyos_update::Digest,
+    /// Its ROOT's filesystem UUID, which the kernel names as it mounts it:
+    /// what ties a boot's log to this image.
+    pub root: String,
+    /// The SHA-256 of the loader on its ESP, which no update installs: what
+    /// the loader a machine runs is held to before this is delivered to it.
+    pub loader: toyos_update::Digest,
+}
+
+/// **The same bytes the disk image boots, sent rather than flashed**: the
+/// marked slot's signed header, kernel and boot parameter off its volume, and
+/// ROOT off its partition for exactly the length the header names — each held
+/// to the header's hash here, so a disk image whose slot does not verify is
+/// refused on this host rather than by the machine's loader.
+pub fn update_of(path: &Path) -> Result<UpdateOf, String> {
+    use toyos_update::image::{Header, SIGNED_BYTES};
+    let mut file = std::fs::File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let table = slot_table_of(&mut file)?;
+    let slot = table.slot(table.marked).expect("a table marks a slot it carries");
+    let signed = read_file_on(&mut file, slot.boot, toyos_update::slots::SIGNED_FILE)?;
+    let header = Header::parse(&signed).map_err(|why| format!("the marked slot's signed header: {why}"))?;
+    if signed.len() != SIGNED_BYTES {
+        return Err(format!("the marked slot's signed header is {} bytes, where {SIGNED_BYTES} are one", signed.len()));
+    }
+    let kernel = read_file_on(&mut file, slot.boot, toyos_update::slots::KERNEL_FILE)?;
+    let cmdline = read_file_on(&mut file, slot.boot, toyos_update::slots::CMDLINE_FILE)?;
+    let (at, len) = partition_extent(&mut file, slot.root)?;
+    let root_len = header.root().len;
+    if root_len > len {
+        return Err(format!("the header names {root_len} bytes of ROOT and its partition holds {len}"));
+    }
+    let mut root = vec![0u8; usize::try_from(root_len).map_err(|_| format!("a {root_len}-byte ROOT"))?];
+    file.seek(SeekFrom::Start(at))
+        .and_then(|_| file.read_exact(&mut root))
+        .map_err(|e| format!("reading ROOT at byte {at}: {e}"))?;
+    for (section, bytes, want) in [
+        ("kernel", &kernel, header.kernel()),
+        ("cmdline", &cmdline, header.cmdline()),
+        ("ROOT", &root, header.root()),
+    ] {
+        if bytes.len() as u64 != want.len || toyos_update::sha256(bytes) != want.sha256 {
+            return Err(format!("the marked slot's {section} is not the bytes its signed header names"));
+        }
+    }
+    let text = String::from_utf8(cmdline.clone()).map_err(|e| format!("the boot parameter is not text: {e}"))?;
+    let named = text
+        .split(',')
+        .find_map(|word| word.strip_prefix("root="))
+        .ok_or_else(|| format!("the boot parameter {text:?} names no ROOT"))?
+        .to_string();
+    let esp = unique_guid_of(&mut file, toyos_gpt::Guid::EFI_SYSTEM)?;
+    let loader = toyos_update::sha256(&read_file_on(&mut file, esp, Arch::X86_64.removable_loader())?);
+    let digest = toyos_update::sha256(&signed);
+    let mut bytes = signed;
+    bytes.extend_from_slice(&kernel);
+    bytes.extend_from_slice(&cmdline);
+    bytes.extend_from_slice(&root);
+    Ok(UpdateOf { bytes, version: header.version, digest, root: named, loader })
 }
 
 /// Put `update`'s sections into slot `which` of the disk image at `path` and

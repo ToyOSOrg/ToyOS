@@ -1,0 +1,43 @@
+# The bench: the T14 running ToyOS and nothing else, in the slot its table
+# marks, between the boots `toyos-metal` delivers to it. sshd authorizes the
+# runner key the image is built with (`cargo run -- --bench-image <key>`), and
+# each judged boot arrives as `update --once`, runs once, and hands the
+# machine back to this image, whose sshd the loop reads that boot's files
+# through. `tests/benchvirtiocase` is the same bench in front of QEMU's
+# virtio-net; the two differ by the one `devices` row.
+#
+# `logd` serves no stream: the stream a talking or swapping boot serves is
+# asked for under the machine's own name, and a bench answering it would be
+# answering for a boot it is not.
+
+[boot]
+start = ["logd", "netd", "sshd"]
+
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+[programs.netd]
+service = true
+serves = ["netd"]
+devices = ["pci:8086:15fc"]
+
+[programs.sshd]
+service = true
+receives = ["netd", "launcher"]
+
+# The idle slot, which init claims against the ROOT the kernel holds; the
+# signature on the image is the authority to install it, and `--once` boots
+# it once and never marks it.
+[programs.update]
+slots = true
+
+# `reboot` hands the machine to the boot `update` asked for; `echo` is how the
+# loop asks the bench to answer; `date` is its clock.
+[programs.toybox]
+receives = ["power"]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"
+"bin/date" = "/system/bin/toybox"

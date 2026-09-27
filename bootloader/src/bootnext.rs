@@ -20,19 +20,10 @@ use uefi::proto::device_path::media::PartitionSignature;
 use uefi::proto::device_path::{DevicePath, DeviceSubType, DeviceType};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::table::runtime::{VariableAttributes, VariableVendor};
-use uefi::CStr16;
+use toyos_update::entry;
 
 /// The head of every line this module writes.
 const HEAD: &str = "Boot chain:";
-
-/// What a `Boot####` variable's name is after the four hex digits are taken off.
-const ENTRY_PREFIX: &str = "Boot";
-const ENTRY_DIGITS: usize = 4;
-
-/// `EFI_LOAD_OPTION`'s fixed head: a `UINT32` of attributes and a `UINT16`
-/// device-path length, then a null-terminated `CHAR16` description, then the
-/// device path itself (UEFI 2.10 §3.1.3).
-const LOAD_OPTION_HEAD: usize = 6;
 
 /// Set `BootNext` to this image's own entry, or say by name why it could not be.
 ///
@@ -71,7 +62,7 @@ pub fn point_at_us(handle: Handle, system_table: &SystemTable<Boot>) {
 }
 
 /// The GPT partition GUID of the volume firmware loaded this image from.
-fn our_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<[u8; 16]> {
+pub(crate) fn our_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<[u8; 16]> {
     let bs = system_table.boot_services();
     let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
@@ -98,6 +89,12 @@ fn hard_drive_guid<'a>(nodes: impl Iterator<Item = &'a uefi::proto::device_path:
 ///
 /// Every entry is read rather than only those in `BootOrder`: an entry the owner
 /// has moved out of the order is still ours and still the one to come back to.
+/// The number of the `Boot####` entry whose device path names `ours`.
+///
+/// Every entry is read rather than only those in `BootOrder`: an entry the owner
+/// has moved out of the order is still ours and still the one to come back to.
+/// Its bytes are whatever a vendor's NVRAM holds, and `toyos_update::entry`
+/// walks them bounded by the slice.
 fn entry_for(system_table: &SystemTable<Boot>, ours: &[u8; 16]) -> Option<u16> {
     let rt = system_table.runtime_services();
     let keys = rt.variable_keys().ok()?;
@@ -107,9 +104,9 @@ fn entry_for(system_table: &SystemTable<Boot>, ours: &[u8; 16]) -> Option<u16> {
             continue;
         }
         let Ok(name) = key.name() else { continue };
-        let Some(number) = entry_number(name) else { continue };
+        let Some(number) = entry::number(&alloc::format!("{name}")) else { continue };
         let Ok((bytes, _)) = rt.get_variable_boxed(name, &key.vendor) else { continue };
-        if !load_option_names(&bytes, ours) {
+        if !entry::names(&bytes, ours) {
             continue;
         }
         // The lowest, so a machine carrying two entries for one partition is
@@ -117,76 +114,4 @@ fn entry_for(system_table: &SystemTable<Boot>, ours: &[u8; 16]) -> Option<u16> {
         found = Some(found.map_or(number, |seen: u16| seen.min(number)));
     }
     found
-}
-
-/// `Boot0003` is entry 3; anything else here is some other global variable.
-fn entry_number(name: &CStr16) -> Option<u16> {
-    let mut chars = name.iter().map(|c| char::from(*c));
-    for want in ENTRY_PREFIX.chars() {
-        if chars.next()? != want {
-            return None;
-        }
-    }
-    let mut value: u16 = 0;
-    let mut digits = 0;
-    for ch in chars {
-        value = value.checked_mul(16)?.checked_add(ch.to_digit(16)? as u16)?;
-        digits += 1;
-    }
-    (digits == ENTRY_DIGITS).then_some(value)
-}
-
-/// Whether an `EFI_LOAD_OPTION`'s device path carries `ours`.
-///
-/// **Walked as bytes, bounded by the slice, and never handed to a pointer
-/// iterator.** These bytes are whatever a vendor's NVRAM holds: a node claiming
-/// a length of zero is an endless walk and one claiming a length past the
-/// variable is a read off the end of it, so both are refused here rather than
-/// trusted to a walker that follows the lengths it is given.
-fn load_option_names(option: &[u8], ours: &[u8; 16]) -> bool {
-    let Some(head) = option.get(..LOAD_OPTION_HEAD) else { return false };
-    let path_len = u16::from_le_bytes([head[4], head[5]]) as usize;
-    // The description is `CHAR16` and null-terminated, so the path starts after
-    // the first pair of zero bytes on an even offset from the head.
-    let mut at = LOAD_OPTION_HEAD;
-    loop {
-        let Some(pair) = option.get(at..at + 2) else { return false };
-        at += 2;
-        if pair == [0, 0] {
-            break;
-        }
-    }
-    let Some(mut path) = option.get(at..at.saturating_add(path_len)) else { return false };
-    while let Some(node) = path.get(..NODE_HEADER) {
-        let len = u16::from_le_bytes([node[2], node[3]]) as usize;
-        // A node shorter than its own header, or longer than what is left, ends
-        // the walk: neither can be stepped over.
-        let Some(this) = path.get(..len).filter(|_| len >= NODE_HEADER) else { return false };
-        if this[0] == MEDIA_HARD_DRIVE.0 && this[1] == MEDIA_HARD_DRIVE.1 {
-            if let Some(guid) = gpt_signature(this) {
-                return guid == *ours;
-            }
-        }
-        path = path.get(len..).unwrap_or(&[]);
-    }
-    false
-}
-
-/// A device path node's type, subtype and length (UEFI 2.10 §10.2).
-const NODE_HEADER: usize = 4;
-
-/// The MEDIA/HARD_DRIVE node this looks for, as the two bytes it is on the wire.
-const MEDIA_HARD_DRIVE: (u8, u8) = (4, 1);
-
-/// A HARD_DRIVE node's GPT signature, or `None` where it names an MBR one or
-/// the node is short (UEFI 2.10 §10.3.6: the signature is sixteen bytes at
-/// offset 24, and `SignatureType` 2 is the GPT one).
-fn gpt_signature(node: &[u8]) -> Option<[u8; 16]> {
-    const SIGNATURE: usize = 24;
-    const SIGNATURE_TYPE: usize = 41;
-    const GPT: u8 = 2;
-    if node.get(SIGNATURE_TYPE) != Some(&GPT) {
-        return None;
-    }
-    node.get(SIGNATURE..SIGNATURE + 16)?.try_into().ok()
 }

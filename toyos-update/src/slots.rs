@@ -1,4 +1,5 @@
-//! The slot table: which partitions make each slot, and which slot is marked.
+//! The slot table: which partitions make each slot, which slot is marked, and
+//! what the running system asks of the loader's next pass.
 //!
 //! It lives on its own partition of type `toyos_gpt::Guid::TOYOS_SLOTS`, in two copies at
 //! blocks 0 and 1, and **a writer writes the copy that is not the current
@@ -10,13 +11,22 @@
 //! ```text
 //! magic "TOYOSLOT" | format u32 | marked u32 | sequence u64
 //! then per slot: present u32 | 0 u32 | boot guid [16] | root guid [16] | version u64
+//! then the request: next u32 (0 none, 1 a slot, 2 an ESP) | slot u32 | esp guid [16]
+//!                   | first u32 (0 or 1)
 //! then crc32 u32 over everything before it                   (TABLE_BYTES)
 //! ```
 //!
 //! The version a slot records is what its writer installed, and is the
 //! updater's to compare against; the loader trusts nothing here but which
-//! partitions to read and which slot is marked, and judges each slot by its
-//! own signed header.
+//! partitions to read, which slot is marked and what the request asks, and
+//! judges each slot by its own signed header.
+//!
+//! **The request is how the running system reaches the firmware's boot
+//! variables**, which nothing after `ExitBootServices` here writes: the kernel
+//! never maps the runtime services, so the loader, which runs with boot
+//! services, writes them for it ([`Request`]). A field that is not the one
+//! value a writer leaves there is refused rather than read, so a table either
+//! asks exactly one thing or is no table.
 
 /// The unit the table's copies are written in.
 pub const BLOCK: usize = 4096;
@@ -25,9 +35,11 @@ pub const BLOCK: usize = 4096;
 pub const COPIES: u64 = 2;
 
 const MAGIC: [u8; 8] = *b"TOYOSLOT";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 const SLOT_BYTES: usize = 4 + 4 + 16 + 16 + 8;
-const BODY_BYTES: usize = 8 + 4 + 4 + 8 + 2 * SLOT_BYTES;
+const REQUEST_AT: usize = 8 + 4 + 4 + 8 + 2 * SLOT_BYTES;
+const REQUEST_BYTES: usize = 4 + 4 + 16 + 4;
+const BODY_BYTES: usize = REQUEST_AT + REQUEST_BYTES;
 /// A copy's bytes, checksum included; the rest of its block is zero.
 pub const TABLE_BYTES: usize = BODY_BYTES + 4;
 
@@ -84,6 +96,40 @@ impl Which {
     }
 }
 
+/// What to boot once, at the next pass that boots anything, and never again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// One of this disk's slots, whether or not it is the marked one: the
+    /// bench's trial of an image the machine does not keep.
+    Slot(Which),
+    /// The EFI system partition with this unique GUID, on any disk the
+    /// firmware sees, by its removable-media path: the firmware's `BootNext`,
+    /// which is how the owner reaches another stick without a keyboard.
+    Esp([u8; 16]),
+}
+
+/// What the running system asks of the loader's next pass.
+///
+/// **Each field is acted on once**: the pass that acts on it writes the table
+/// again without it before it acts, so a pass that dies after the write has
+/// lost the request rather than repeating it, and a pass that cannot write
+/// the table acts on nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Request {
+    pub next: Option<Next>,
+    /// Put this loader's own entry first in the firmware's `BootOrder`,
+    /// making it where the firmware has none: how a machine is taken over.
+    pub first: bool,
+}
+
+impl Request {
+    pub const NONE: Self = Self { next: None, first: false };
+
+    pub const fn is_empty(&self) -> bool {
+        self.next.is_none() && !self.first
+    }
+}
+
 /// One copy of the table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Table {
@@ -91,6 +137,7 @@ pub struct Table {
     pub marked: Which,
     /// Slot `A` then slot `B`; `None` for a machine built with one slot.
     pub slots: [Option<Slot>; 2],
+    pub request: Request,
 }
 
 /// Why a copy is not a table.
@@ -101,6 +148,9 @@ pub enum Unreadable {
     Checksum,
     /// It marks a slot it does not carry, or a mark that is no slot.
     Mark(u32),
+    /// Its request is none a writer makes: an unknown kind, a slot it does
+    /// not carry, or a field that is not the one value its kind leaves.
+    Request(&'static str),
 }
 
 impl core::fmt::Display for Unreadable {
@@ -110,9 +160,14 @@ impl core::fmt::Display for Unreadable {
             Self::Format(n) => write!(f, "a slot table of format {n}, and this reads {FORMAT}"),
             Self::Checksum => write!(f, "a slot table whose checksum does not hold, which is a torn write"),
             Self::Mark(n) => write!(f, "a slot table marking slot {n}, which it does not carry"),
+            Self::Request(why) => write!(f, "a slot table whose request {why}"),
         }
     }
 }
+
+const NEXT_NONE: u32 = 0;
+const NEXT_SLOT: u32 = 1;
+const NEXT_ESP: u32 = 2;
 
 impl Table {
     pub fn slot(&self, which: Which) -> Option<Slot> {
@@ -134,6 +189,19 @@ impl Table {
                 out[at + 40..at + 48].copy_from_slice(&slot.version.to_le_bytes());
             }
         }
+        let at = REQUEST_AT;
+        match self.request.next {
+            None => {}
+            Some(Next::Slot(which)) => {
+                out[at..at + 4].copy_from_slice(&NEXT_SLOT.to_le_bytes());
+                out[at + 4..at + 8].copy_from_slice(&(which.index() as u32).to_le_bytes());
+            }
+            Some(Next::Esp(guid)) => {
+                out[at..at + 4].copy_from_slice(&NEXT_ESP.to_le_bytes());
+                out[at + 8..at + 24].copy_from_slice(&guid);
+            }
+        }
+        out[at + 24..at + 28].copy_from_slice(&u32::from(self.request.first).to_le_bytes());
         let crc = crc32(&out[..BODY_BYTES]);
         out[BODY_BYTES..TABLE_BYTES].copy_from_slice(&crc.to_le_bytes());
         out
@@ -168,7 +236,37 @@ impl Table {
             other => return Err(Unreadable::Mark(other)),
         };
         let sequence = u64::from_le_bytes(block[16..24].try_into().expect("eight bytes"));
-        Ok(Self { sequence, marked, slots })
+        let request = Self::request(block, &slots)?;
+        Ok(Self { sequence, marked, slots, request })
+    }
+
+    /// The request a copy carries, each field held to the one value its kind
+    /// leaves there.
+    fn request(block: &[u8; BLOCK], slots: &[Option<Slot>; 2]) -> Result<Request, Unreadable> {
+        let at = REQUEST_AT;
+        let word = |at: usize| u32::from_le_bytes(block[at..at + 4].try_into().expect("four bytes"));
+        let guid: [u8; 16] = block[at + 8..at + 24].try_into().expect("sixteen bytes");
+        let (kind, slot) = (word(at), word(at + 4));
+        let next = match kind {
+            NEXT_NONE if slot == 0 && guid == [0; 16] => None,
+            NEXT_NONE => return Err(Unreadable::Request("asks nothing next and names something to boot")),
+            NEXT_SLOT if guid != [0; 16] => return Err(Unreadable::Request("names a slot and an ESP at once")),
+            NEXT_SLOT => match slot {
+                0 if slots[0].is_some() => Some(Next::Slot(Which::A)),
+                1 if slots[1].is_some() => Some(Next::Slot(Which::B)),
+                _ => return Err(Unreadable::Request("names a slot the table does not carry")),
+            },
+            NEXT_ESP if slot != 0 => return Err(Unreadable::Request("names an ESP and a slot at once")),
+            NEXT_ESP if guid == [0; 16] => return Err(Unreadable::Request("names an ESP by no GUID")),
+            NEXT_ESP => Some(Next::Esp(guid)),
+            _ => return Err(Unreadable::Request("asks for a kind of boot there is none of")),
+        };
+        let first = match word(at + 24) {
+            0 => false,
+            1 => true,
+            _ => return Err(Unreadable::Request("asks for the boot order with a word that is neither 0 nor 1")),
+        };
+        Ok(Request { next, first })
     }
 }
 
@@ -321,7 +419,51 @@ mod tests {
 
     fn table(marked: Which, sequence: u64) -> Table {
         let slot = |n: u8| Some(Slot { boot: [n; 16], root: [n + 1; 16], version: u64::from(n) });
-        Table { sequence, marked, slots: [slot(1), slot(3)] }
+        Table { sequence, marked, slots: [slot(1), slot(3)], request: Request::NONE }
+    }
+
+    /// `block` with its checksum made to hold again, so a test bends one field
+    /// and the refusal is that field's rather than the checksum's.
+    fn resealed(mut block: [u8; BLOCK]) -> [u8; BLOCK] {
+        let crc = crc32(&block[..BODY_BYTES]);
+        block[BODY_BYTES..TABLE_BYTES].copy_from_slice(&crc.to_le_bytes());
+        block
+    }
+
+    /// **A request reads back as it was asked, and a request no writer makes
+    /// is no table**: an unknown kind, a slot the table does not carry, a slot
+    /// and an ESP at once, an ESP of no GUID, and a boot-order word that is
+    /// neither 0 nor 1.
+    #[test]
+    fn a_request_reads_back_and_one_no_writer_makes_is_refused() {
+        let t = table(Which::A, 2);
+        for request in [
+            Request::NONE,
+            Request { next: Some(Next::Slot(Which::B)), first: false },
+            Request { next: Some(Next::Slot(Which::A)), first: true },
+            Request { next: Some(Next::Esp([0x5A; 16])), first: false },
+            Request { next: None, first: true },
+        ] {
+            let asked = Table { request, ..t };
+            assert_eq!(Table::decode(&asked.encode()), Ok(asked), "{request:?}");
+        }
+        let at = REQUEST_AT;
+        let bent = |bend: &dyn Fn(&mut [u8; BLOCK])| {
+            let mut block = Table { request: Request { next: Some(Next::Slot(Which::B)), first: false }, ..t }.encode();
+            bend(&mut block);
+            Table::decode(&resealed(block))
+        };
+        let refused = |why| Err(Unreadable::Request(why));
+        assert_eq!(bent(&|b| b[at] = 3), refused("asks for a kind of boot there is none of"));
+        assert_eq!(bent(&|b| b[at + 4] = 2), refused("names a slot the table does not carry"));
+        assert_eq!(bent(&|b| b[at + 8] = 1), refused("names a slot and an ESP at once"));
+        assert_eq!(bent(&|b| b[at + 24] = 2), refused("asks for the boot order with a word that is neither 0 nor 1"));
+        assert_eq!(bent(&|b| b[at] = 0), refused("asks nothing next and names something to boot"));
+        assert_eq!(bent(&|b| { b[at] = 2; b[at + 4] = 0 }), refused("names an ESP by no GUID"));
+        let one = Table { slots: [t.slots[0], None], request: Request { next: Some(Next::Slot(Which::A)), first: false }, ..t };
+        let mut names_absent = one.encode();
+        names_absent[at + 4] = 1;
+        assert_eq!(Table::decode(&resealed(names_absent)), refused("names a slot the table does not carry"));
     }
 
     /// The check value every CRC-32 is held to.

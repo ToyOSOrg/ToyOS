@@ -1723,6 +1723,11 @@ pub const BOOT_STICK_ID: &str = "bootstick";
 /// what a test moving it has to be able to say is not so.
 pub const BOOT_STICK_SERIAL: &str = "TOYOS0BOOTSTICK1";
 
+/// [`BootOptions::recovery_stick`]'s device id and serial number, stated for
+/// the boot stick's reasons.
+pub const RECOVERY_STICK_ID: &str = "recoverystick";
+pub const RECOVERY_STICK_SERIAL: &str = "TOYOS0RECOVERY01";
+
 /// The serial number of [`Profile::NvmeBootUsbDisk`]'s stick, for the same
 /// reason the boot stick states one.
 pub const DATA_STICK_SERIAL: &str = "TOYOS0DATASTICK1";
@@ -2385,6 +2390,12 @@ pub struct BootOptions {
     /// boot of the same machine reads. `None` is every other boot, whose
     /// variables live in firmware memory and die with the guest.
     pub firmware_vars: Option<PathBuf>,
+    /// A second bootable stick behind the boot stick, `bootindex=1`, so the
+    /// firmware's `BootOrder` names it after the boot stick: the machine's
+    /// recovery entry, or another ESP a request names. Written by the guest
+    /// like the boot stick, so a boot of it is the same machine's. Refused
+    /// by name on a profile whose storage is not on USB.
+    pub recovery_stick: Option<PathBuf>,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
     /// expected outcome rather than a boot failure -- the early-panic screen
@@ -2548,6 +2559,7 @@ impl Default for BootOptions {
             mute: false,
             takes_the_reset: false,
             firmware_vars: None,
+            recovery_stick: None,
             ready_marker: DEFAULT_READY,
             nvme_image: None,
             boot_image: None,
@@ -4569,6 +4581,20 @@ fn qemu_command(
              bootindex=0",
             shape.storage_bus
         ));
+    }
+    if let Some(stick) = &options.recovery_stick {
+        assert!(
+            !shape.storage_bus.is_empty(),
+            "a recovery stick rides the USB storage bus, and this profile's storage is not on USB"
+        );
+        qemu.arg("-drive")
+            .arg(format!("if=none,id=recovery,format=raw,file={}", stick.display()))
+            .arg("-device")
+            .arg(format!(
+                "usb-storage,bus={},drive=recovery,id={RECOVERY_STICK_ID},serial={RECOVERY_STICK_SERIAL},\
+                 bootindex=1",
+                shape.storage_bus
+            ));
     }
     if let Some(gpu) = shape.gpu {
         assert_eq!(

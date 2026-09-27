@@ -36,22 +36,39 @@ stdin — and the machine installs nothing the owner did not sign.
   (`--owner-key`, `--update-image`, minted by `--signing-key-new`) for an image
   installed on the owner's machine, whose loader keeps the machine's floor.
 
-## Stage 2 — the T14 installs ToyOS on its NVMe and updates without Ubuntu
+## Stage 2 — the T14 updates without Ubuntu, and installs ToyOS on its NVMe
 
-What `toyos-metal` still runs Ubuntu for, each of which this stage replaces:
+**Built, and proven in QEMU on an emulated stick:**
 
-1. **Writing the image** — `wipefs` and `dd of=/dev/sda` under a sudoers rule.
-   Replaced by the machine booting the stick and installing onto its own NVMe,
-   then `ssh t14 update < image` for every change after.
-2. **Choosing the next boot** — `efibootmgr --create-only`, `--delete-bootnum`,
-   `--bootnext`. The loader already points `BootNext` at itself; an install
-   writes its own entry once.
-3. **Reading a boot's verdict** — `dd if=/dev/sda3` and `mount -o ro` of the log
-   partition. Replaced by `logd`'s record stream and `ssh … cat`.
-4. **Reboots and liveness** — `reboot`, `true`, `date -u +%s`, the `/sys`
-   identity reads of the stick, and the loop's wait for Ubuntu's sshd to come
-   back after every ToyOS boot.
-5. **The runner key and `ssh t14`** themselves reach Ubuntu's sshd, not ToyOS's.
+- **The loader writes the firmware's boot variables** on a request the running
+  system leaves in the slot table, since nothing after `ExitBootServices`
+  writes one: `update --boot-first` puts its own entry first in `BootOrder`,
+  `update --boot-next <esp guid>` boots another ESP once, and `update --once
+  < image` boots the idle slot once and never marks it. Each is taken off the
+  table before it is acted on.
+- **A machine with no slot to boot falls to the entry after its own** in
+  `BootOrder` — its recovery stick.
+- **The bench**: `toyos-metal` delivers each boot to a T14 running ToyOS alone
+  (`tests/benchcase`, `cargo run -- --bench-image <runner key>`) with `update
+  --once`, reboots it over ssh, and reads the boot back over the bench's sshd
+  — the loader's passes of it and its `logd` files — for the same judges.
+  `--via-ubuntu` is the old path, beside it until the installer.
+
+**Owed:**
+
+1. **The T14 switched over**: the bench handed the machine through Ubuntu once
+   (`toyos-metal --via-ubuntu --resident --image target/bench.img`), and every
+   metal boot after it delivered to the bench.
+2. **The installer**: ToyOS onto the T14's NVMe, blocked on userland storage
+   file servers (#536), since the kernel owns the only NVMe controller today.
+   `--via-ubuntu` goes with it.
+3. **The owner's last resort**, where no slot and no entry behind it boots: a
+   stick written on the Mac by this tree's own tooling — `cargo run --
+   --write-stick /dev/diskN`, which unmounts the stick's volumes through
+   DiskArbitration, refuses an internal disk or one of an unexpected size by
+   name, writes the image and reads it back. Never `dd` or `diskutil`. Not
+   built; until it is, the last resort is the firmware's boot menu and the
+   Ubuntu still on the NVMe.
 
 **Exit**: a kernel change reaches the T14 and boots with Ubuntu never started;
 a slot with a flipped byte, no signature or a lower version is refused and the

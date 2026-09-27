@@ -4,9 +4,11 @@
 //! here too, written and flushed before the loader goes on.
 //!
 //! The file is `loader.log` at the root of the partition
-//! `KernelArgs::log_partition_guid` names, truncated at each boot. One file
-//! under a fixed name and never one of `logd`'s timestamped ones, so a reader
-//! looking for the kernel's log on this volume never picks this up.
+//! `KernelArgs::log_partition_guid` names, started again at each boot with the
+//! one it replaces kept as `loader-previous.log` — on a machine that boots
+//! itself again after a boot, the one place that boot's passes are left for a
+//! host to read. Fixed names and never one of `logd`'s timestamped ones, so a
+//! reader looking for the kernel's log on this volume never picks these up.
 //!
 //! A partition this cannot open or write is refused by name on the console and
 //! the boot continues: the loader's job is the kernel.
@@ -51,6 +53,65 @@ pub fn close_without_a_kernel() {
 }
 
 const NAME: &CStr16 = cstr16!("loader.log");
+
+/// The file the last chain's `loader.log` is kept under when a pass starts a
+/// new one: what a machine that boots itself again after a boot — rather than
+/// handing it to another operating system that reads the stick — still has
+/// of that boot's passes, for a host to read over ssh.
+const PREVIOUS: &CStr16 = cstr16!("loader-previous.log");
+
+/// The most of the last chain's file that is kept. A report pass writes the
+/// black box's tail, which is bounded; a file past this is not one this loader
+/// wrote, and is left behind rather than copied.
+const PREVIOUS_BYTES: usize = 4 << 20;
+
+/// Copy `loader.log` to [`PREVIOUS`], replacing it, before the file is cut:
+/// the chain that file holds is over, and this keeps exactly one of them.
+///
+/// Said on the console only, as [`refused`] is, where it cannot: the new file
+/// is not open yet.
+fn keep_previous(root: &mut Directory) {
+    let file = match root.open(NAME, FileMode::Read, FileAttribute::empty()) {
+        Ok(file) => file,
+        Err(e) if e.status() == Status::NOT_FOUND => return,
+        Err(e) => return refused_previous(format_args!("{NAME} would not open ({e})")),
+    };
+    let Some(mut file) = file.into_regular_file() else {
+        return refused_previous(format_args!("{NAME} is a directory"));
+    };
+    let mut bytes = alloc::vec![0u8; PREVIOUS_BYTES + 1];
+    let read = match file.read(&mut bytes) {
+        Ok(n) => n,
+        Err(e) => return refused_previous(format_args!("{NAME} would not read ({e})")),
+    };
+    if read > PREVIOUS_BYTES {
+        return refused_previous(format_args!("{NAME} is past {PREVIOUS_BYTES} bytes"));
+    }
+    match root.open(PREVIOUS, FileMode::ReadWrite, FileAttribute::empty()) {
+        Ok(stale) => {
+            if let Err(e) = stale.delete() {
+                return refused_previous(format_args!("{PREVIOUS} would not delete ({e})"));
+            }
+        }
+        Err(e) if e.status() == Status::NOT_FOUND => {}
+        Err(e) => return refused_previous(format_args!("{PREVIOUS} would not open ({e})")),
+    }
+    let kept = match root.open(PREVIOUS, FileMode::CreateReadWrite, FileAttribute::empty()) {
+        Ok(kept) => kept,
+        Err(e) => return refused_previous(format_args!("{PREVIOUS} would not be created ({e})")),
+    };
+    let Some(mut kept) = kept.into_regular_file() else {
+        return refused_previous(format_args!("{PREVIOUS} is a directory"));
+    };
+    let written = kept.write(&bytes[..read]).map_err(|e| e.status()).and_then(|()| kept.flush().map_err(|e| e.status()));
+    if let Err(status) = written {
+        refused_previous(format_args!("{PREVIOUS} would not write ({status:?})"));
+    }
+}
+
+fn refused_previous(why: fmt::Arguments) {
+    uefi_services::println!("Loader log: the last chain's file is not kept: {why}");
+}
 
 /// The open file, from [`open`] until [`close`].
 ///
@@ -161,6 +222,7 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
     // offset zero without truncating it, so a shorter boot than the last would
     // end in the last one's tail.
     if truncate {
+        keep_previous(&mut root);
         match root.open(NAME, FileMode::ReadWrite, FileAttribute::empty()) {
             Ok(stale) => {
                 if let Err(e) = stale.delete() {

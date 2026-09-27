@@ -2002,6 +2002,46 @@ pub fn build_test_image(
     )
 }
 
+/// The bench's config: the T14 running ToyOS between the boots the metal loop
+/// delivers to it ([`crate::metalbench`]).
+pub const BENCH_CONFIG: &str = "tests/benchcase";
+
+/// Where on ROOT sshd reads the keys an image authorizes before any login has
+/// installed one — `/system/etc/ssh_authorized_keys` in the guest.
+pub const AUTHORIZED_ON_ROOT: &str = "etc/ssh_authorized_keys";
+
+/// The room the bench's idle slot has for a delivered image's ROOT: past the
+/// largest metal image's, and a small part of a stick. A larger ROOT is
+/// refused by `update` by name, so this is a bound that says so and never one
+/// that cuts.
+pub const BENCH_ROOT_ROOM: u64 = 1 << 30;
+
+/// **The bench image**: `config` built as a test image is, signed with this
+/// checkout's key at `version`, with `room` bytes in the idle slot for a
+/// delivered ROOT — [`BENCH_ROOT_ROOM`] on the T14 — and its sshd authorizing
+/// exactly the key lines in `authorized`.
+///
+/// **Why a key on ROOT and not one installed later.** The bench's `/state` is
+/// a tmpfs on the stick — the image has no DATA partition — so a key
+/// installed after a boot does not outlive it; and a key the owner's signed
+/// update installed would be one every image the owner signs carries. On
+/// ROOT, the key is under the image's signature like every other byte of it,
+/// and only an image built with this — by the one host that holds the runner
+/// key's other half — carries any: no image anything publishes does.
+pub fn bench_image(root: &Path, config: &Path, authorized: &str, version: u64, room: u64, quiet: bool) -> Result<Vec<u8>, String> {
+    let lines: Vec<&str> = authorized.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() || lines.iter().any(|l| !l.starts_with("ssh-ed25519 ")) {
+        return Err(format!(
+            "a bench authorizes ed25519 public keys and nothing else, one per line, and {authorized:?} is not that"
+        ));
+    }
+    let mut plan = Plan::new(crate::arch::Arch::X86_64, &config.join("system.toml"), &[], &[]);
+    plan.version = version;
+    plan.second = Some(image::SecondSlot { root_bytes: room });
+    let staged = [(AUTHORIZED_ON_ROOT.to_string(), format!("{}\n", lines.join("\n")).into_bytes())];
+    Ok(build_test_image(root, &plan, quiet, &staged))
+}
+
 /// The image `ssh … update` takes, built from a plan as a test image is and
 /// signed with this process's key at the plan's version.
 pub fn build_update_image(root: &Path, plan: &Plan, quiet: bool, extra_files: &[(String, Vec<u8>)]) -> Vec<u8> {

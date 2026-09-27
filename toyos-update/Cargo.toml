@@ -15,6 +15,10 @@ publish = false
 # so no binary on the machine carries a path that makes a signature.
 sign = []
 
+[dev-dependencies]
+# The GPT crate's own spelling of a GUID, which `entry::parse_guid` reads.
+toyos-gpt = { path = "../toyos-gpt" }
+
 [dependencies]
 # **The one verifier, and why this one.** `ed25519-dalek` is the Ed25519 the
 # Rust ecosystem ships (RustCrypto's `ssh-key` and `russh`, which this tree's

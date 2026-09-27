@@ -89,6 +89,10 @@ declare_flags!(pub CARGO_RUN = {
     /// Write the image `ssh <machine> update` takes to this path, signed with
     /// the owner's key.
     pub UPDATE_IMAGE = "--update-image", Next;
+    /// Build the bench — `tests/benchcase`, the T14 running ToyOS between the
+    /// metal loop's boots — to `target/bench.img`, its sshd authorizing the
+    /// public keys in this file.
+    pub BENCH_IMAGE = "--bench-image", Next;
 });
 
 /// What became of a command line, checked before anything else in `main` runs.

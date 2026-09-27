@@ -865,6 +865,17 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("update_grant_refuses_a_stray_partition", Sched::Parallel, Tier::Nightly),
     ("update_floor_is_the_images_own", Sched::Parallel, Tier::Nightly),
     ("update_refused_pass_credits_no_image", Sched::Parallel, Tier::Nightly),
+    // The loader writes the firmware's boot variables on the running system's
+    // request: a boot of another stick once, its own entry first, and the
+    // recovery stick behind it where no slot verifies. Boots of two sticks,
+    // nightly like the rest of the machine's.
+    ("update_boot_next_boots_the_entry_once", Sched::Parallel, Tier::Nightly),
+    ("update_boot_first_puts_the_loader_first", Sched::Parallel, Tier::Nightly),
+    ("update_no_slot_boots_the_recovery_stick", Sched::Parallel, Tier::Nightly),
+    // The bench: `toyos-metal` delivers a staged boot to a machine running
+    // ToyOS alone with `update --once`, swaps its netd, hands it back and
+    // judges what the bench reads back over ssh — a minute and more of boots.
+    ("bench_loop_drives_a_toyos_machine", Sched::Parallel, Tier::Nightly),
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
     ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
@@ -1649,6 +1660,12 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_grant_refuses_a_stray_partition", &[]),
     ("update_floor_is_the_images_own", &[]),
     ("update_refused_pass_credits_no_image", &[]),
+    ("update_boot_next_boots_the_entry_once", &[]),
+    ("update_boot_first_puts_the_loader_first", &[]),
+    ("update_no_slot_boots_the_recovery_stick", &[]),
+    // The boot it delivers is staged as the metal profile stages it, with the
+    // swap rehearsal's hold job on it.
+    ("bench_loop_drives_a_toyos_machine", &["test_rs_lan_swap_hold"]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
@@ -15617,6 +15634,18 @@ fn run_machine_test(
         "update_refused_pass_credits_no_image" => {
             common::update::update_refused_pass_credits_no_image(test_config, c_bins, rust_bins)
         }
+        "update_boot_next_boots_the_entry_once" => {
+            common::update::update_boot_next_boots_the_entry_once(test_config, c_bins, rust_bins)
+        }
+        "update_boot_first_puts_the_loader_first" => {
+            common::update::update_boot_first_puts_the_loader_first(test_config, c_bins, rust_bins)
+        }
+        "update_no_slot_boots_the_recovery_stick" => {
+            common::update::update_no_slot_boots_the_recovery_stick(test_config, c_bins, rust_bins)
+        }
+        "bench_loop_drives_a_toyos_machine" => {
+            common::bench::bench_loop_drives_a_toyos_machine(test_config, c_bins, rust_bins)
+        }
         "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
         "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),
@@ -20812,6 +20841,7 @@ fn main() {
     // directory means the machine is not touched — see `common::metal::Mode`.
     let metal_mode = SUITE.present(&args, &testargs::METAL);
     let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
+    let metal_reach = if SUITE.present(&args, &testargs::METAL_VIA_UBUNTU) { metal::Reach::ViaUbuntu } else { metal::Reach::Bench };
     if SUITE.present(&args, &testargs::SLOW_USB) {
         SLOW_USB.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -20924,6 +20954,7 @@ fn main() {
         run.exit(
             match metal::run(
                 mode,
+                metal_reach,
                 &dir,
                 &selected,
 &{

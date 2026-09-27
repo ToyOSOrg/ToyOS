@@ -1,5 +1,14 @@
 //! `/system/bin/update`: a signed image on standard input, installed into the
-//! slot this machine is not running, and marked to boot next.
+//! slot this machine is not running, and marked to boot next — or booted once
+//! and not marked; and the requests the running system makes of the loader's
+//! next pass, which reach the firmware's boot variables.
+//!
+//! ```text
+//! update                 < image   install into the idle slot and mark it
+//! update --once          < image   install into the idle slot and boot it once
+//! update --boot-first               put this loader's entry first in BootOrder
+//! update --boot-next <esp guid>     boot that EFI system partition once
+//! ```
 //!
 //! **It does not care how the image arrived**: `ssh <machine> update < image`
 //! today, a pull from a release server tomorrow, a file on a local shell — the
@@ -20,12 +29,18 @@
 //!    volume, each held to its hash before it is written;
 //! 4. an fsync of each claim, which answers for these writes and no other
 //!    process's;
-//! 5. the slot table, marking the idle slot — the copy that is not current,
-//!    so a torn write leaves the old mark — and its fsync.
+//! 5. the slot table, marking the idle slot — or, `--once`, asking the loader
+//!    to boot it once and leaving the mark where it is — the copy that is not
+//!    current, so a torn write leaves the old table, and its fsync.
 //!
-//! A refusal at any step leaves the mark where it was, so the machine boots
+//! A refusal at any step leaves the table as it was, so the machine boots
 //! what it booted before. The loader checks every byte again at the next boot
 //! and refuses the slot by name if anything here was wrong.
+//!
+//! **A request is the table's too** (`toyos_update::slots::Request`): the
+//! loader acts on it once at its next pass, and writes it away as it does.
+//! It asks for no more than an entry for an EFI system partition the loader
+//! finds itself, first in the order or next once.
 
 use std::io::Read;
 use std::time::Instant;
@@ -34,7 +49,7 @@ use toyos::endow::Endowments;
 use toyos::PartitionDev;
 use toyos_abi::part::{Block, BLOCK_BYTES, MAX_BLOCKS_PER_CALL};
 use toyos_update::image::{Header, HEADER_BYTES, SIGNED_BYTES};
-use toyos_update::slots::{self, Table, Which};
+use toyos_update::slots::{self, Next, Table, Which};
 use toyos_fat32::BlockAccess as _;
 use toyos_update::{policy, sig};
 
@@ -44,9 +59,34 @@ const KEY: [u8; 32] = sig::key_from_hex(env!("TOYOS_IMAGE_KEY"));
 /// The line an install ends on, which the host reads.
 const INSTALLED: &str = "update: installed";
 
+/// What this run was asked for.
+enum Asked {
+    /// An image on standard input, marked, or booted `once`.
+    Install { once: bool },
+    BootFirst,
+    BootNext([u8; 16]),
+}
+
+fn asked() -> Result<Asked, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    match words[..] {
+        [] => Ok(Asked::Install { once: false }),
+        ["--once"] => Ok(Asked::Install { once: true }),
+        ["--boot-first"] => Ok(Asked::BootFirst),
+        ["--boot-next", guid] => toyos_update::entry::parse_guid(guid)
+            .map(Asked::BootNext)
+            .ok_or_else(|| format!("{guid:?} is no partition GUID; --boot-next wants one as the GPT tools print it")),
+        _ => Err(format!(
+            "{words:?} is no ask this takes: `update`, `update --once` (each with an image on its input), \
+             `update --boot-first` or `update --boot-next <esp guid>`"
+        )),
+    }
+}
+
 fn main() {
     let began = Instant::now();
-    match run(began) {
+    match asked().and_then(|asked| run(asked, began)) {
         Ok(line) => println!("{line}"),
         Err(why) => {
             println!("update: refused: {why}");
@@ -54,7 +94,6 @@ fn main() {
         }
     }
 }
-
 /// The three claims init endowed, or why this process holds none.
 fn grant() -> Result<(PartitionDev, PartitionDev, PartitionDev), String> {
     let take = |label: &str| {
@@ -65,9 +104,27 @@ fn grant() -> Result<(PartitionDev, PartitionDev, PartitionDev), String> {
     Ok((take(slots::TABLE_LABEL)?, take(slots::BOOT_LABEL)?, take(slots::ROOT_LABEL)?))
 }
 
-fn run(began: Instant) -> Result<String, String> {
+fn run(asked: Asked, began: Instant) -> Result<String, String> {
     let (table_claim, boot, root) = grant()?;
     let (table, current) = read_table(&table_claim)?;
+    let once = match asked {
+        Asked::Install { once } => once,
+        Asked::BootFirst => {
+            let request = slots::Request { first: true, ..table.request };
+            write_table(&table_claim, (table, current), Table { request, ..table })?;
+            return Ok(String::from(
+                "update: the loader puts its own entry first in the firmware's BootOrder at its next pass",
+            ));
+        }
+        Asked::BootNext(guid) => {
+            let request = slots::Request { next: Some(Next::Esp(guid)), ..table.request };
+            write_table(&table_claim, (table, current), Table { request, ..table })?;
+            return Ok(format!(
+                "update: the loader boots EFI system partition {} once, at its next pass, and the order after it",
+                toyos_update::entry::GuidText(guid)
+            ));
+        }
+    };
     let boot_guid = boot.describe().map_err(|e| format!("the idle volume's claim: {e:?}"))?.unique_guid;
     let root_info = root.describe().map_err(|e| format!("the idle ROOT's claim: {e:?}"))?;
     let idle = [Which::A, Which::B]
@@ -117,23 +174,36 @@ fn run(began: Instant) -> Result<String, String> {
     boot.sync().map_err(|e| format!("slot {}'s volume is not durable: {e:?}", idle.letter()))?;
 
     let mut next = table;
-    next.marked = idle;
     let mut slot = table.slot(idle).expect("the idle slot is in the table");
     slot.version = header.version;
     next.slots[idle.index()] = Some(slot);
-    let (copy, block) = slots::next_write((table, current), next);
-    table_claim
-        .write(copy as u64, &[block])
-        .map_err(|e| format!("the slot table's copy {copy} would not write: {e:?}"))?;
-    table_claim.sync().map_err(|e| format!("the slot table is not durable: {e:?}"))?;
+    // A slot asked for once before this install is answered by it: the idle
+    // slot is marked now, or is the one asked for.
+    next.request.next = next.request.next.filter(|n| matches!(n, Next::Esp(_)));
+    let when = if once {
+        next.request.next = Some(Next::Slot(idle));
+        format!("it boots once at the next reboot, and slot {} at every boot after", table.marked.letter())
+    } else {
+        next.marked = idle;
+        String::from("it boots at the next reboot")
+    };
+    write_table(&table_claim, (table, current), next)?;
 
     Ok(format!(
-        "{INSTALLED} version {} in slot {} ({} bytes of ROOT in {root_ms} ms, {} ms in all); it boots at the next reboot",
+        "{INSTALLED} version {} in slot {} ({} bytes of ROOT in {root_ms} ms, {} ms in all); {when}",
         header.version,
         idle.letter(),
         header.root().len,
         began.elapsed().as_millis()
     ))
+}
+
+/// Make `next` the slot table, as every writer does (`slots::next_write`), and
+/// make it durable before this answers.
+fn write_table(claim: &PartitionDev, current: (Table, usize), next: Table) -> Result<(), String> {
+    let (copy, block) = slots::next_write(current, next);
+    claim.write(copy as u64, &[block]).map_err(|e| format!("the slot table's copy {copy} would not write: {e:?}"))?;
+    claim.sync().map_err(|e| format!("the slot table is not durable: {e:?}"))
 }
 
 /// The slot table and which copy of it is current.

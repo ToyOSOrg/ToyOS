@@ -45,6 +45,13 @@ pub fn claims(token: &str) -> bool {
 /// The head of the record naming the slot this boot came from.
 pub const SLOT_RECORD: &str = "boot: slot";
 
+/// The word the loader puts where a refusal goes when the slot it booted is one
+/// the running system asked for once (`slot-refused=<marked>:once`): why the
+/// marked slot is not this boot's, and no refusal of it. The loader's own
+/// spelling is `toyos_update::policy::ONCE`, which `toyos_build::bootlog`
+/// holds this one to.
+pub const ONCE: &str = "once";
+
 /// The slot the loader booted, and the marked slot it refused and why, as the
 /// loader wrote them: the last of each, because the loader appends its words
 /// after the slot's own parameter and so has the last one.

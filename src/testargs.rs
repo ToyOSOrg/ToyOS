@@ -165,6 +165,11 @@ declare_flags!(pub SUITE = {
     /// machine is not touched**: the run builds the images and writes down what
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
+    /// Drive the machine the old way: flash its stick through Ubuntu and read
+    /// the log partition off it (`toyos-metal --via-ubuntu`). Absent, each boot
+    /// is delivered to the bench — a T14 running ToyOS — with `update --once`
+    /// and read back over its sshd. Goes with `--via-ubuntu`.
+    pub METAL_VIA_UBUNTU = "--metal-via-ubuntu", None;
 });
 
 /// Validate the harness's argv and return the run's filter.
@@ -204,6 +209,13 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
         return Err(
             "--jobs and -j are two spellings of one width, and the run would read one of \
              them and drop the other in silence; write one"
+                .to_string(),
+        );
+    }
+    if has(&METAL_VIA_UBUNTU) && !has(&METAL) {
+        return Err(
+            "--metal-via-ubuntu says which way the metal profile reaches the machine and decides \
+             nothing on its own; add --metal"
                 .to_string(),
         );
     }

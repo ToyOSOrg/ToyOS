@@ -90,12 +90,21 @@ pub fn admits(floor: u64, version: u64) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// The slots a boot tries, in order: the marked one, then the other where the
-/// table carries it.
-pub fn order(table: &Table) -> [Option<Which>; 2] {
-    let other = table.marked.other();
-    [Some(table.marked), table.slot(other).map(|_| other)]
+/// The slots a boot tries, in order: the one asked for `once` where the table
+/// carries it, else the marked one; then the other where the table carries it
+/// — so a slot tried once and refused falls back to the marked one.
+pub fn order(table: &Table, once: Option<Which>) -> [Option<Which>; 2] {
+    let first = once.filter(|w| table.slot(*w).is_some()).unwrap_or(table.marked);
+    let other = first.other();
+    [Some(first), table.slot(other).map(|_| other)]
 }
+
+/// The word the loader hands the kernel for a slot booted once, where the
+/// refusal words go (`slot-refused=<marked>:once`): why the marked slot is not
+/// the one this boot runs, which is no refusal of it. The kernel spells it
+/// itself (`kernel/src/params.rs`'s `ONCE`), held to this one by
+/// `toyos_build::bootlog`'s gate.
+pub const ONCE: &str = "once";
 
 /// The floor after a boot proved `proven`: it only rises.
 pub fn raised(floor: u64, proven: u64) -> u64 {
@@ -145,10 +154,15 @@ mod tests {
     #[test]
     fn a_boot_tries_the_marked_slot_first_and_the_other_only_if_there_is_one() {
         let slot = Some(Slot { boot: [1; 16], root: [2; 16], version: 1 });
-        let both = Table { sequence: 1, marked: Which::B, slots: [slot, slot] };
-        assert_eq!(order(&both), [Some(Which::B), Some(Which::A)]);
-        let one = Table { sequence: 1, marked: Which::A, slots: [slot, None] };
-        assert_eq!(order(&one), [Some(Which::A), None]);
+        let request = crate::slots::Request::NONE;
+        let both = Table { sequence: 1, marked: Which::B, slots: [slot, slot], request };
+        assert_eq!(order(&both, None), [Some(Which::B), Some(Which::A)]);
+        let one = Table { sequence: 1, marked: Which::A, slots: [slot, None], request };
+        assert_eq!(order(&one, None), [Some(Which::A), None]);
+        // Once: the slot asked for first, and the marked one behind it.
+        assert_eq!(order(&both, Some(Which::A)), [Some(Which::A), Some(Which::B)]);
+        assert_eq!(order(&both, Some(Which::B)), [Some(Which::B), Some(Which::A)]);
+        assert_eq!(order(&one, Some(Which::B)), [Some(Which::A), None], "a slot the table does not carry is none to try");
     }
 
     /// Each word is one token of a comma-separated boot parameter.

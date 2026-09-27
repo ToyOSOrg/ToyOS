@@ -15,7 +15,7 @@
 //! machine has run well for an older one.
 //!
 //! ```text
-//! partition guid [16] | count u8 | booted u8 ('A', 'B' or 0) | 0 [6]
+//! partition guid [16] | count u8 | booted u8 ('A', 'B' or 0) | once u8 (0 or 1) | 0 [5]
 //! | version u64 | signed-header sha256 [32] | dead A [32] | dead B [32]
 //! ```
 //!
@@ -24,6 +24,11 @@
 //! **never to a version read here**: the file is on a partition the running
 //! system writes, so what it names is only which slot's signed header the
 //! loader verifies again, and the digest that header must hash to.
+//!
+//! **A slot booted once proves nothing to the floor** ([`Booted::once`]): the
+//! bench tries an image the machine does not keep, and a floor raised to it
+//! would refuse the image the machine does keep at the next boot. Its death
+//! is still a death.
 
 use crate::slots::Which;
 use crate::Digest;
@@ -38,6 +43,9 @@ pub struct Booted {
     pub version: u64,
     /// The SHA-256 of its signed header, which names the image exactly.
     pub digest: Digest,
+    /// It was booted once, on the running system's request, rather than as
+    /// the slot the table marks or the one that stood in for it.
+    pub once: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -78,14 +86,21 @@ pub struct Accounted {
     pub proven: Option<Booted>,
     /// The slot whose image died, now recorded dead.
     pub died: Option<Which>,
+    /// The image the last boot ran once and handed back on purpose: proven to
+    /// have run, and no reason to raise the floor.
+    pub tried: Option<Booted>,
 }
 
 /// Fold how the last boot ended into the record, given the anti-rollback
 /// `floor` a boot has proven: an image at or below it has run well before.
 pub fn account(record: Record, ended: Ended, floor: u64) -> Accounted {
-    let mut out = Accounted { record: Record { booted: None, ..record }, proven: None, died: None };
+    let mut out = Accounted { record: Record { booted: None, ..record }, proven: None, died: None, tried: None };
     let Some(booted) = record.booted else { return out };
     let dies = match ended {
+        Ended::Proven if booted.once => {
+            out.tried = Some(booted);
+            false
+        }
         Ended::Proven => {
             out.proven = Some(booted);
             false
@@ -114,6 +129,7 @@ impl Record {
         out[16] = self.count;
         if let Some(booted) = self.booted {
             out[17] = booted.slot.letter() as u8;
+            out[18] = u8::from(booted.once);
             out[24..32].copy_from_slice(&booted.version.to_le_bytes());
             out[32..64].copy_from_slice(&booted.digest);
         }
@@ -141,6 +157,11 @@ impl Record {
                 slot: Which::from_letter(letter as char).ok_or(Foreign::Slot(letter))?,
                 version: u64::from_le_bytes(bytes[24..32].try_into().expect("eight bytes")),
                 digest: digest(32).ok_or(Foreign::Slot(letter))?,
+                once: match bytes[18] {
+                    0 => false,
+                    1 => true,
+                    other => return Err(Foreign::Once(other)),
+                },
             }),
         };
         Ok(Self { count: bytes[16], booted, dead: [digest(64), digest(96)] })
@@ -155,6 +176,8 @@ pub enum Foreign {
     Partition([u8; 16]),
     /// It names a booted slot that is none, or one with no image.
     Slot(u8),
+    /// Its word for a slot booted once is neither 0 nor 1.
+    Once(u8),
 }
 
 impl core::fmt::Display for Foreign {
@@ -163,6 +186,7 @@ impl core::fmt::Display for Foreign {
             Self::Length(n) => write!(f, "holds {n} bytes, wanted {BYTES}"),
             Self::Partition(g) => write!(f, "counts for {g:02x?}, another partition"),
             Self::Slot(b) => write!(f, "names slot {b:#04x}, which is no slot it booted"),
+            Self::Once(b) => write!(f, "says {b:#04x} of whether its slot was booted once, which is neither 0 nor 1"),
         }
     }
 }
@@ -174,7 +198,7 @@ mod tests {
     const GUID: [u8; 16] = [7; 16];
 
     fn booted(slot: Which) -> Record {
-        Record { count: 1, booted: Some(Booted { slot, version: 42, digest: [9; 32] }), dead: [None, Some([3; 32])] }
+        Record { count: 1, booted: Some(Booted { slot, version: 42, digest: [9; 32], once: false }), dead: [None, Some([3; 32])] }
     }
 
     #[test]
@@ -232,5 +256,24 @@ mod tests {
         assert_eq!(account(last, Ended::Hung, 41).died, Some(Which::B), "version 42 over a floor of 41");
         assert_eq!(account(last, Ended::Hung, 42).died, None, "version 42 at a floor of 42");
         assert_eq!(account(last, Ended::Died, 100).died, Some(Which::B), "a panic is a death whatever the floor");
+    }
+
+    /// **A slot booted once proves nothing to the floor**: its clean end is a
+    /// trial that ran, never the image the floor rises to, and its death is a
+    /// death like any other. The word survives the file, and a word that is
+    /// neither 0 nor 1 is not this file.
+    #[test]
+    fn a_slot_booted_once_raises_nothing_and_still_dies() {
+        let mut last = booted(Which::B);
+        let tried = Booted { once: true, ..last.booted.expect("booted") };
+        last.booted = Some(tried);
+        assert_eq!(Record::decode(&last.encode(&GUID), &GUID), Ok(last));
+        let clean = account(last, Ended::Proven, 0);
+        assert_eq!((clean.proven, clean.tried, clean.died), (None, Some(tried), None));
+        assert_eq!(account(last, Ended::Died, 0).died, Some(Which::B));
+        assert_eq!(account(last, Ended::Hung, 0).died, Some(Which::B), "a hang of an unproven trial is a death");
+        let mut bent = last.encode(&GUID);
+        bent[18] = 2;
+        assert_eq!(Record::decode(&bent, &GUID), Err(Foreign::Once(2)));
     }
 }

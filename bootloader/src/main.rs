@@ -42,9 +42,11 @@ mod arch;
 mod attempt;
 mod blackbox;
 mod bootnext;
+mod bootvars;
 mod floor;
 mod gcd;
 mod loaderlog;
+mod request;
 mod rootbridge;
 mod rootimage;
 mod slot;
@@ -133,6 +135,40 @@ fn load_file_bytes(handle: Handle, system_table: &SystemTable<Boot>, path: &CStr
     assert_eq!(read, size, "short read: {read} of {size} bytes");
 
     bytes
+}
+
+/// The line naming this loader by the SHA-256 of its file; held to the host's
+/// spelling by `toyos_build::bootlog`'s gate.
+const LOADER_IS: &str = "Loader: the file firmware loaded hashes to";
+
+/// This loader's own file, at the removable-media path of the volume firmware
+/// loaded it from — where every ToyOS image puts it — or why it would not read.
+/// Not [`load_file_bytes`], which dies on a missing file: a loader that cannot
+/// name itself still boots.
+fn own_file(handle: Handle, system_table: &SystemTable<Boot>) -> Result<vec::Vec<u8>, alloc::string::String> {
+    let mut fs = system_table
+        .boot_services()
+        .get_image_file_system(handle)
+        .map_err(|e| alloc::format!("its volume ({e})"))?;
+    let path = uefi::CString16::try_from(arch::REMOVABLE_PATH).expect("the removable path is ASCII");
+    let mut file = fs
+        .open_volume()
+        .map_err(|e| alloc::format!("its volume ({e})"))?
+        .open(&path, FileMode::Read, FileAttribute::default())
+        .map_err(|e| alloc::format!("{} ({e})", arch::REMOVABLE_PATH))?
+        .into_regular_file()
+        .ok_or_else(|| alloc::format!("{} is a directory", arch::REMOVABLE_PATH))?;
+    let info = file.get_boxed_info::<FileInfo>().map_err(|e| alloc::format!("its size ({e})"))?;
+    let size = info.file_size();
+    if size > MAX_ESP_FILE {
+        return Err(alloc::format!("{size} bytes, past the {MAX_ESP_FILE}-byte bound"));
+    }
+    let mut bytes = alloc_uninit(size as usize);
+    let read = file.read(&mut bytes).map_err(|e| alloc::format!("{} ({e})", arch::REMOVABLE_PATH))?;
+    if read != bytes.len() {
+        return Err(alloc::format!("a short read: {read} of {size} bytes"));
+    }
+    Ok(bytes)
 }
 
 /// A buffer to be filled by a read, allocated *without* zeroing it first.
@@ -846,6 +882,33 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
     system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS, None)
 }
 
+/// End a pass whose every slot was refused by handing the machine to the entry
+/// the firmware would have tried after this one — `BootNext`, then the reset
+/// [`end_this_pass`] makes — which on a machine with a recovery stick behind
+/// it in `BootOrder` is that stick. Where there is none, the pass dies with
+/// `why` as it always did.
+///
+/// **Not a return to the boot manager**, which would try the next entry itself:
+/// a pass that returns leaves its exit-boot-services callback registered, as
+/// [`end_this_pass`] says.
+fn fall_through(system_table: &SystemTable<Boot>, ours: Option<&[u8; 16]>, why: &str, exit_event: Option<Event>) -> ! {
+    let rt = system_table.runtime_services();
+    match bootvars::after_this_one(rt, ours) {
+        Ok((current, Some(next))) => match bootvars::boot_next(rt, next) {
+            Ok(()) => {
+                println!(
+                    "{} no slot boots, so BootNext=Boot{next:04X}, the entry after Boot{current:04X} in BootOrder",
+                    bootvars::HEAD
+                );
+                end_this_pass(system_table, exit_event)
+            }
+            Err(no) => panic!("Slots: {why}; and {no}"),
+        },
+        Ok((current, None)) => panic!("Slots: {why}; and BootOrder holds no entry after Boot{current:04X} to fall to"),
+        Err(no) => panic!("Slots: {why}; and no entry to fall to: {no}"),
+    }
+}
+
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // First: the TSC counts from reset, so this is what firmware took.
@@ -953,6 +1016,27 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             Err(why) => println!("Anti-rollback floor: not raised, because the proven image is not verified: {why}"),
         }
     }
+    if let Some(tried) = accounted.tried {
+        println!(
+            "Anti-rollback floor: not raised, because slot {}'s image was booted once and is not the one the machine keeps",
+            tried.slot.letter()
+        );
+    }
+    // Which loader this is, by its file's bytes: the one part of a machine no
+    // update installs, so a host delivering an image holds the image's loader
+    // to this one.
+    match own_file(handle, &system_table) {
+        Ok(bytes) => {
+            let mut hex = [0u8; 64];
+            println!("{LOADER_IS} {}", toyos_update::hex(&toyos_update::sha256(&bytes), &mut hex));
+        }
+        Err(why) => println!("{LOADER_IS} unknown: {why}"),
+    }
+    // Before either end of the chain below: a request the running system left
+    // is due at the next pass, and a report pass is that pass as often as not.
+    println!("{}", bootvars::state(system_table.runtime_services()));
+    let ours = bootnext::our_partition(handle, &system_table);
+    let fired = request::firmware(handle, &system_table, ours.as_ref());
     if retry {
         // **The hang, and the only bound there is on one.** The last boot of
         // this image was handed the machine and never reported — no panic, no
@@ -977,6 +1061,11 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             // The last boot is accounted for, so this pass boots no kernel.
             end_this_pass(&system_table, exit_event);
         }
+    }
+    if let request::Fired::Next = fired {
+        // The firmware boots the entry the running system asked for at this
+        // reset, and deletes `BootNext` as it does.
+        end_this_pass(&system_table, exit_event);
     }
     match firmware_watchdog {
         Ok(()) => println!(
@@ -1012,9 +1101,20 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // is one the chosen slot's signed header names. ROOT is read before the
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.
-    let chosen = slot::choose(handle, &system_table, image_floor.value, &record)
-        .unwrap_or_else(|why| panic!("Slots: {why}"));
-    record.booted = Some(Booted { slot: chosen.which, version: chosen.version, digest: chosen.digest });
+    let once = request::once(handle, &system_table);
+    let chosen = match slot::choose(handle, &system_table, image_floor.value, &record, once) {
+        Ok(chosen) => chosen,
+        Err(why) => {
+            println!("Slots: {why}");
+            fall_through(&system_table, ours.as_ref(), &why, exit_event)
+        }
+    };
+    record.booted = Some(Booted {
+        slot: chosen.which,
+        version: chosen.version,
+        digest: chosen.digest,
+        once: chosen.once.is_some(),
+    });
     match attempt::write_chosen(&log_guid, &record) {
         Ok(()) => println!("{ATTEMPTS} slot {}'s image is written down as the one this pass boots", chosen.which.letter()),
         Err(why) => println!(
@@ -1038,6 +1138,9 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     append(&alloc::format!("{}{}", toyos_abi::boot::SLOT_PARAM, chosen.which.letter()));
     if let Some((refused, why)) = chosen.refused {
         append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, refused.letter(), why.word()));
+    }
+    if let Some(marked) = chosen.once {
+        append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, marked.letter(), policy::ONCE));
     }
     if let Some(word) = blackbox::param(page) {
         append(&word);

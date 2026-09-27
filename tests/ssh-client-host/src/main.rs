@@ -21,9 +21,12 @@
 //! toyos_ssh abandon <host> <port> <key> <command…>       → ok <bytes>
 //! toyos_ssh fire    <host> <port> <key> <command…>
 //!                                                → accepted | refused | closed | silent
+//! toyos_ssh probe   <host> <port> <key> <secs>     → authenticated, within <secs>
 //! toyos_ssh put     <host> <port> <key> <local> <remote> → ok <bytes>
 //! toyos_ssh get     <host> <port> <key> <remote> <local> → ok <bytes>
 //! toyos_ssh list    <host> <port> <key> <remote> → entry <name> <size>…, ok <n>
+//! toyos_ssh fetch   <host> <port> <key> <remote> <local> → entry <name> <size>…, ok <n>
+//!                                                  (every file of <remote>, into <local>)
 //! toyos_ssh swap    <host> <port> <key> <service> <binary> <sha256>
 //!                                                → accepted <path> | refused <why>
 //!                                                | unasked <why> | unanswered <what>
@@ -62,6 +65,25 @@ use tokio::io::AsyncWriteExt;
 /// verdict, which says only that a test did not finish.
 const BOUND: Duration = Duration::from_secs(120);
 
+/// What a `pipe` adds to [`BOUND`] per byte it sends: a mebibyte a second,
+/// which a link that carries an image at all beats many times over. An
+/// image is the one input here whose size decides how long its exchange takes,
+/// and a fixed bound would cut a large one on a slow link as a hang.
+const PIPE_BYTES_PER_SEC: u64 = 1 << 20;
+
+/// The bound a run is held to: [`BOUND`], a `pipe`'s input at
+/// [`PIPE_BYTES_PER_SEC`] beside it, and a `probe`'s own.
+fn bound(words: &[String]) -> Duration {
+    match words {
+        [cmd, _, _, _, _, _, stdin, ..] if cmd == "pipe" => {
+            let bytes = std::fs::metadata(stdin).map_or(0, |m| m.len());
+            BOUND + Duration::from_secs(bytes / PIPE_BYTES_PER_SEC)
+        }
+        [cmd, _, _, _, secs] if cmd == "probe" => secs.parse().map_or(BOUND, Duration::from_secs),
+        _ => BOUND,
+    }
+}
+
 /// The user this client authenticates as. The guest has no user model, so the
 /// name is a string its daemon prints and nothing keys on.
 const USER: &str = "root";
@@ -72,10 +94,11 @@ fn main() -> ExitCode {
         Ok(runtime) => runtime,
         Err(e) => return fail(&format!("no tokio runtime: {e}")),
     };
-    match runtime.block_on(async { tokio::time::timeout(BOUND, run(&args)).await }) {
+    let bound = bound(&args);
+    match runtime.block_on(async { tokio::time::timeout(bound, run(&args)).await }) {
         Ok(Ok(())) => ExitCode::SUCCESS,
         Ok(Err(why)) => fail(&why),
-        Err(_) => fail(&format!("nothing answered in {}s", BOUND.as_secs())),
+        Err(_) => fail(&format!("nothing answered in {}s", bound.as_secs())),
     }
 }
 
@@ -102,9 +125,11 @@ async fn run(args: &[String]) -> Result<(), String> {
             abandon(host, port, key, &command.join(" ")).await
         }
         ["fire", host, port, key, command @ ..] => fire(host, port, key, &command.join(" ")).await,
+        ["probe", host, port, key, _secs] => probe(host, port, key).await,
         ["put", host, port, key, local, remote] => put(host, port, key, local, remote).await,
         ["get", host, port, key, remote, local] => get(host, port, key, remote, local).await,
         ["list", host, port, key, remote] => list(host, port, key, remote).await,
+        ["fetch", host, port, key, remote, local] => fetch(host, port, key, remote, local).await,
         ["swap", host, port, key, service, binary, digest] => {
             swap(host, port, key, service, binary, digest).await
         }
@@ -195,6 +220,17 @@ async fn auth(host: &str, port: &str, key: &str) -> Result<(), String> {
         Err(NoSignature::Asked) => println!("asked to sign"),
         Err(NoSignature::Send(e)) => return Err(format!("offering a key: {e}")),
     }
+    let _ = session.disconnect(Disconnect::ByApplication, "", "en").await;
+    Ok(())
+}
+
+/// Whether the machine at `host` takes this key, within the bound the caller
+/// named: `authenticated`, or the failure — a machine not up, one whose sshd
+/// is not up, and one that does not authorize this key are all one answer to
+/// a caller waiting for a machine that does.
+async fn probe(host: &str, port: &str, key: &str) -> Result<(), String> {
+    let session = connect(host, port, key).await?;
+    println!("authenticated");
     let _ = session.disconnect(Disconnect::ByApplication, "", "en").await;
     Ok(())
 }
@@ -465,6 +501,32 @@ async fn list(host: &str, port: &str, key: &str, remote: &str) -> Result<(), Str
         println!("{name}");
     }
     println!("ok {}", names.len());
+    finish(sftp, session).await;
+    Ok(())
+}
+
+/// Every file in the guest's directory `remote`, onto this host under `local`,
+/// over one session: what a reader of a whole directory owes a machine whose
+/// listener resets a connect that lands between two of its accepts
+/// (`issues/hardware/a-connect-between-two-accepts-is-reset.md`) — one
+/// connection, not one per file.
+async fn fetch(host: &str, port: &str, key: &str, remote: &str, local: &str) -> Result<(), String> {
+    let (session, sftp) = sftp(host, port, key).await?;
+    let entries =
+        sftp.read_dir(remote).await.map_err(|e| format!("listing {remote} on the guest: {e}"))?;
+    let mut files: Vec<(String, u64)> = entries
+        .filter(|entry| !entry.file_type().is_dir() && entry.file_name() != "." && entry.file_name() != "..")
+        .map(|entry| (entry.file_name(), entry.metadata().size.unwrap_or(0)))
+        .collect();
+    files.sort();
+    std::fs::create_dir_all(local).map_err(|e| format!("making {local}: {e}"))?;
+    for (name, _) in &files {
+        let at = format!("{remote}/{name}");
+        let bytes = sftp.read(&at).await.map_err(|e| format!("reading {at} off the guest: {e}"))?;
+        write(&format!("{local}/{name}"), &bytes)?;
+        println!("entry {name} {}", bytes.len());
+    }
+    println!("ok {}", files.len());
     finish(sftp, session).await;
     Ok(())
 }

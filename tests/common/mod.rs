@@ -38,6 +38,7 @@ pub mod lan;
 pub mod logread;
 #[allow(dead_code)]
 pub mod logstream;
+pub mod bench;
 pub mod metal;
 #[allow(dead_code)]
 pub mod origin;

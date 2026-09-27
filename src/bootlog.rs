@@ -119,6 +119,20 @@ pub const HANDED_BACK: &str = "the last boot read DONE";
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
+/// Where a pass that starts a new `loader.log` keeps the last one: on a
+/// machine that boots itself again after a boot, the one file that still
+/// holds that boot's passes when a host can next ask.
+pub const LOADER_PREVIOUS_LOG: &str = "loader-previous.log";
+
+/// The kernel's record of the ROOT it mounted, which names that ROOT's
+/// filesystem: what ties a `logd` file to the image whose boot wrote it.
+pub const MOUNTED_FROM_MEMORY: &str = "root: mounted read-only from memory at";
+
+/// The loader's line naming itself by the SHA-256 of its file: the one part of
+/// a machine no update installs, which a bench's host holds a delivered
+/// image's loader to.
+pub const LOADER_IS: &str = "Loader: the file firmware loaded hashes to";
+
 /// That file's first line and its last.
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
 pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so this file ends here";
@@ -564,6 +578,10 @@ mod tests {
     fn the_loader_writes_the_lines_the_host_reads() {
         let wanted = [
             ("bootloader/src/loaderlog.rs", format!("cstr16!(\"{LOADER_LOG}\")")),
+            ("bootloader/src/loaderlog.rs", format!("cstr16!(\"{LOADER_PREVIOUS_LOG}\")")),
+            ("kernel/src/params.rs", format!("\"{}\"", toyos_update::policy::ONCE)),
+            ("kernel/src/rootfs.rs", format!("\"{MOUNTED_FROM_MEMORY}\"")),
+            ("bootloader/src/main.rs", format!("\"{LOADER_IS}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_FIRST_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_LAST_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),

@@ -67,6 +67,9 @@ struct Rig {
     port: u16,
     /// The base image's parts, for what the loader is held to.
     base_kernel: usize,
+    /// A second stick behind the machine's in `BootOrder`, where the test
+    /// stages one ([`Rig::with_recovery`]).
+    recovery: Option<PathBuf>,
 }
 
 /// The plan for this config's image: `features` is the kernel build, `params`
@@ -111,7 +114,62 @@ impl Rig {
         let vars = scratch.join("OVMF_VARS.fd");
         std::fs::copy(root.join("ovmf/OVMF_VARS-pure-efi.fd"), &vars)
             .map_err(|e| format!("copy the firmware's variable store: {e}"))?;
-        Ok(Self { scratch, image, vars, identity, port: qemu::free_host_port(), base_kernel: parts.kernel.len() })
+        Ok(Self { scratch, image, vars, identity, port: qemu::free_host_port(), base_kernel: parts.kernel.len(), recovery: None })
+    }
+
+    /// This machine with a second stick behind its own in `BootOrder`: another
+    /// image of the same config, one slot, its own GUIDs — the recovery stick
+    /// a machine falls to, and the ESP a request names.
+    fn with_recovery(mut self) -> Result<Self, String> {
+        let root = super::compile::repo_root();
+        let parts = build::build_test_parts(&root, &plan(&[], &[], BASE, None), true, &staged(&self.identity));
+        let disk = image::create_boot_image(
+            toyos_build::arch::Arch::X86_64,
+            &parts.kernel,
+            &parts.bootloader,
+            &parts.root,
+            "",
+            Signing { key: signing::key(), version: BASE },
+            None,
+        );
+        let path = self.scratch.join("recovery.img");
+        std::fs::write(&path, disk).map_err(|e| format!("write {}: {e}", path.display()))?;
+        self.recovery = Some(path);
+        Ok(self)
+    }
+
+    /// The recovery stick's image, which [`Rig::with_recovery`] staged.
+    fn recovery(&self) -> Result<&Path, String> {
+        self.recovery.as_deref().ok_or_else(|| "this rig stages no recovery stick".to_string())
+    }
+
+    /// The unique GUID of the one partition of type `kind` on the image at `path`.
+    fn guid_on(path: &Path, kind: toyos_gpt::Guid) -> Result<[u8; 16], String> {
+        let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        image::unique_guid_of(&mut file, kind)
+    }
+
+    /// The line the loader says of the log partition the image at `path` names,
+    /// which tells one stick's passes from the other's on the one 16550.
+    fn loader_of(path: &Path) -> Result<String, String> {
+        Ok(format!("Log partition: signature {:02x?}", Self::guid_on(path, toyos_gpt::Guid::MICROSOFT_BASIC)?))
+    }
+
+    /// The kernel's line naming the log partition of the image at `path`, which
+    /// tells one stick's kernels from the other's on the one console.
+    fn kernel_of(path: &Path) -> Result<String, String> {
+        Ok(format!("boot: log partition guid {:02x?}", Self::guid_on(path, toyos_gpt::Guid::MICROSOFT_BASIC)?))
+    }
+
+    /// Run `command` over ssh and hold it to status 0 and `owed` on its output.
+    fn asks(&self, command: &str, owed: &str) -> Result<String, String> {
+        let exec = ssh::ssh_exec(HOST, self.port, &self.identity, command)?;
+        let said = format!("{}{}", exec.stdout_text(), exec.stderr_text());
+        eprintln!("  [update] `{command}` ended {:?}: {}", exec.status, said.trim());
+        if exec.status != Some(0) || !said.contains(owed) {
+            return Err(format!("`{command}` ended {:?} saying {said:?}, where {owed:?} is owed", exec.status));
+        }
+        Ok(said)
     }
 
     /// An update for this machine, written to a file: `features` and `params`
@@ -134,6 +192,7 @@ impl Rig {
             ssh_port: Some(self.port),
             takes_the_reset: true,
             firmware_vars: Some(self.vars.clone()),
+            recovery_stick: self.recovery.clone(),
             qmp: true,
             ..Default::default()
         };
@@ -153,6 +212,7 @@ impl Rig {
             boot_image: Some(Staged::Written(self.image.clone())),
             takes_the_reset: true,
             firmware_vars: Some(self.vars.clone()),
+            recovery_stick: self.recovery.clone(),
             ready_marker: marker,
             ..Default::default()
         };
@@ -646,6 +706,122 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
     Ok(())
 }
 
+/// The `BootNext` a request asks for: the one line the loader writes it on.
+const BOOT_NEXT_SET: &str = "(written now): the firmware boots it once, at the reset this pass ends with";
+
+/// **A request for another ESP boots that ESP once, and the order resumes**:
+/// the machine asks for its recovery stick with `update --boot-next`; the pass
+/// after the reboot takes the request off the slot table, writes an entry for
+/// that stick and points `BootNext` at it; the recovery stick's kernel boots;
+/// its reboot hands the machine to the firmware's order, which is the
+/// machine's own stick; and the machine's next reboot is its own again.
+pub fn update_boot_next_boots_the_entry_once(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let rig = Rig::stage("update-boot-next")?.with_recovery()?;
+    let recovery = rig.recovery()?.to_path_buf();
+    let esp = toyos_gpt::Guid(Rig::guid_on(&recovery, toyos_gpt::Guid::EFI_SYSTEM)?);
+    let (ours, theirs) = (Rig::kernel_of(&rig.image)?, Rig::kernel_of(&recovery)?);
+    let (mut guest, mut console) = rig.boot()?;
+    owed(&console, 0, &ours)?;
+    rig.asks(&format!("update --boot-next {esp}"), &format!("the loader boots EFI system partition {esp} once"))?;
+
+    let (from, uart) = rig.reboot_until(&mut guest, &mut console, &theirs)?;
+    loader_said(&guest, uart, "Request: a boot of another ESP is taken off the slot table before it is acted on")?;
+    loader_said(&guest, uart, &format!("ESP {esp} {BOOT_NEXT_SET}"))?;
+    await_machine(&mut guest, &mut console, "the recovery stick's sshd", |c| c[from..].contains(SSHD_LISTENING))?;
+    eprintln!("  [update] `update --boot-next {esp}` booted the recovery stick at the next reboot");
+
+    let (from, _) = rig.reboot_until(&mut guest, &mut console, &ours)?;
+    await_machine(&mut guest, &mut console, "the machine's sshd after the recovery stick", |c| c[from..].contains(SSHD_LISTENING))?;
+    let (from, uart) = rig.reboot_until(&mut guest, &mut console, &ours)?;
+    await_machine(&mut guest, &mut console, "the machine's sshd a third time", |c| c[from..].contains(SSHD_LISTENING))?;
+    let since = guest.uart_log()[uart..].to_string();
+    if since.contains("Request:") {
+        return Err(format!("the pass after the order resumed still read a request:\n{since}"));
+    }
+    let booted = console.matches(&theirs).count();
+    if booted != 1 {
+        return Err(format!("the recovery stick's kernel booted {booted} times, where the request asked for once"));
+    }
+    eprintln!("  [update] the recovery stick booted once, and the machine's own stick at every boot after");
+    drop(guest);
+    let _ = std::fs::remove_dir_all(&rig.scratch);
+    Ok(())
+}
+
+/// What sshd says once it serves, on every image here.
+const SSHD_LISTENING: &str = "sshd: listening on port 22";
+
+/// **`update --boot-first` makes this loader's entry the firmware's first**:
+/// the pass after the reboot writes an entry for its own ESP and puts it at
+/// the head of `BootOrder`; the firmware boots by it at every reset after —
+/// the pass after that was booted as that entry — and the variable store,
+/// read by EDK2's layout and not by the loader's, holds the order and an
+/// entry naming this image's ESP by `HD(…)/\EFI\BOOT\BOOTX64.EFI`.
+pub fn update_boot_first_puts_the_loader_first(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let rig = Rig::stage("update-boot-first")?;
+    let esp = Rig::guid_on(&rig.image, toyos_gpt::Guid::EFI_SYSTEM)?;
+    let (mut guest, mut console) = rig.boot()?;
+    rig.asks("update --boot-first", "first in the firmware's BootOrder")?;
+    let (_, uart) = rig.reboot_until(&mut guest, &mut console, DEFAULT_READY)?;
+    loader_said(&guest, uart, "Request: the boot order is taken off the slot table before it is acted on")?;
+    let since = guest.uart_log()[uart..].to_string();
+    let line = since
+        .lines()
+        .find(|l| l.contains("this loader's ESP (written now), is first"))
+        .ok_or_else(|| format!("the loader never put its entry first:\n{since}"))?;
+    eprintln!("  [update] {line}");
+    let number = line
+        .split("Boot entries: Boot")
+        .nth(1)
+        .and_then(|rest| rest.get(..4))
+        .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| format!("no entry number in {line:?}"))?;
+    let (_, uart) = rig.reboot_until(&mut guest, &mut console, DEFAULT_READY)?;
+    loader_said(&guest, uart, &format!("this pass was booted as Boot{number:04X}"))?;
+    drop(guest);
+
+    let order = vars::global(&rig.vars, "BootOrder")?;
+    let first = order.get(..2).map(|w| u16::from_le_bytes([w[0], w[1]]));
+    if first != Some(number) {
+        return Err(format!("the variable store's BootOrder is {order:02x?}, whose head is not Boot{number:04X}"));
+    }
+    let option = vars::global(&rig.vars, &format!("Boot{number:04X}"))?;
+    let (guid, path) = vars::load_option(&option)?;
+    if guid != esp || path != r"\EFI\BOOT\BOOTX64.EFI" {
+        return Err(format!("Boot{number:04X} names partition {guid:02x?} and {path:?}, where {esp:02x?} and the removable path are owed"));
+    }
+    eprintln!("  [update] BootOrder begins Boot{number:04X}, which names this image's ESP, and the firmware booted by it");
+    let _ = std::fs::remove_dir_all(&rig.scratch);
+    Ok(())
+}
+
+/// **A machine whose every slot is refused boots its recovery stick**: slot
+/// A's kernel carries a flipped byte and slot B holds no image, so no slot
+/// verifies; the loader sets `BootNext` to the entry after its own in
+/// `BootOrder` and resets, and the recovery stick behind it boots.
+pub fn update_no_slot_boots_the_recovery_stick(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let rig = Rig::stage("update-recovery")?.with_recovery()?;
+    let mut file = std::fs::File::open(&rig.image).map_err(|e| format!("{}: {e}", rig.image.display()))?;
+    let a = image::slot_table_of(&mut file)?.slot(Which::A).ok_or("no slot A")?;
+    let mut kernel = image::read_file_on(&mut file, a.boot, toyos_update::slots::KERNEL_FILE)?;
+    drop(file);
+    kernel[100] ^= 0x01;
+    image::overwrite_file_on(&rig.image, a.boot, toyos_update::slots::KERNEL_FILE, &kernel)?;
+    // The recovery stick's own loader, naming its log partition: the pass
+    // that follows the fall.
+    let theirs: &'static str = Box::leak(Rig::loader_of(rig.recovery()?)?.into_boxed_str());
+    let fell = rig.launch(theirs);
+    said(
+        fell.boot_log(),
+        &["Slot A: REFUSED, its kernel is not the bytes its signed header names", "Slots: no slot verifies", "no slot boots, so BootNext=Boot"],
+    )?;
+    let line = fell.boot_log().lines().find(|l| l.contains("no slot boots")).unwrap_or_default().to_string();
+    eprintln!("  [update] {line}; the recovery stick's loader took the machine");
+    drop(fell);
+    let _ = std::fs::remove_dir_all(&rig.scratch);
+    Ok(())
+}
+
 /// The firmware's variable store, as OVMF keeps it in its `VARS` file: a
 /// firmware volume holding an authenticated variable store, read and written
 /// by the layout EDK2 declares for it (`MdeModulePkg/Include/Guid/
@@ -726,6 +902,56 @@ mod vars {
             .filter(|found| found.vendor == VENDOR && (found.state == VAR_ADDED || found.state == IN_TRANSITION))
             .map(|found| found.var)
             .collect())
+    }
+
+    /// `EFI_GLOBAL_VARIABLE`, `8BE4DF61-93CA-11D2-AA0D-00E098032B8C`, in the
+    /// byte order `EFI_GUID` stores: `BootOrder`'s and every `Boot####`'s.
+    const GLOBAL: [u8; 16] = [0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11, 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c];
+
+    /// The one live global variable called `name`: the one the store added
+    /// last, since a rewrite adds a copy before it retires the old.
+    pub fn global(path: &Path, name: &str) -> Result<Vec<u8>, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        walk(&bytes)?
+            .0
+            .into_iter()
+            .filter(|found| found.vendor == GLOBAL && found.state == VAR_ADDED && found.var.name == name)
+            .last()
+            .map(|found| found.var.data)
+            .ok_or_else(|| format!("the variable store holds no live {name}"))
+    }
+
+    /// What an `EFI_LOAD_OPTION` boots: the GPT signature of its HARDDRIVE
+    /// node and the path of its FILE_PATH node — read by the tables of UEFI
+    /// 2.10 §3.1.3 and §10.3.6 here, and not by `toyos_update::entry`, which
+    /// wrote it.
+    pub fn load_option(option: &[u8]) -> Result<([u8; 16], String), String> {
+        let path_len = u16::from_le_bytes([option[4], option[5]]) as usize;
+        let mut at = 6;
+        while option.get(at..at + 2).ok_or("the description runs off the option")? != [0, 0] {
+            at += 2;
+        }
+        at += 2;
+        let mut path = option.get(at..at + path_len).ok_or("the device path runs off the option")?;
+        let (mut guid, mut file) = (None, None);
+        while path.len() >= 4 {
+            let len = u16::from_le_bytes([path[2], path[3]]) as usize;
+            let node = path.get(..len).filter(|_| len >= 4).ok_or("a node that cannot be stepped over")?;
+            match (node[0], node[1]) {
+                (4, 1) if node.len() == 42 && node[40] == 2 && node[41] == 2 => {
+                    guid = Some(<[u8; 16]>::try_from(&node[24..40]).expect("sixteen bytes"))
+                }
+                (4, 4) => {
+                    let units: Vec<u16> =
+                        node[4..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+                    file = Some(String::from_utf16_lossy(&units));
+                }
+                (0x7f, 0xff) => break,
+                _ => {}
+            }
+            path = &path[len..];
+        }
+        Ok((guid.ok_or("no GPT HARDDRIVE node")?, file.ok_or("no FILE_PATH node")?))
     }
 
     /// Add `name` under the floor's vendor with `attributes` and `data`, as

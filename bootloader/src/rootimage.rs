@@ -126,7 +126,7 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
     }
 }
 
-fn try_get_protocol<P: uefi::proto::ProtocolPointer + ?Sized>(
+pub(crate) fn try_get_protocol<P: uefi::proto::ProtocolPointer + ?Sized>(
     bs: &BootServices,
     handle: Handle,
 ) -> uefi::Result<ScopedProtocol<'_, P>> {
@@ -143,6 +143,13 @@ fn try_get_protocol<P: uefi::proto::ProtocolPointer + ?Sized>(
             OpenProtocolAttributes::GetProtocol,
         )
     }
+}
+
+/// The slot table as read, and where its current copy is.
+pub struct TableAt {
+    pub table: Table,
+    copy: usize,
+    first_lba: u64,
 }
 
 /// The boot disk, read through the firmware's block I/O.
@@ -186,6 +193,12 @@ impl<'a> Disk<'a> {
 
     /// The slot table on this disk's one TOYOS-SLOTS partition.
     pub fn slot_table(&mut self) -> Result<Table, String> {
+        self.table_at().map(|at| at.table)
+    }
+
+    /// The slot table, and where its current copy is: what a writer of the
+    /// next copy needs.
+    pub fn table_at(&mut self) -> Result<TableAt, String> {
         let blank = Partition { index: 0, type_guid: Guid::ZERO, unique_guid: Guid::ZERO, first_lba: 0, last_lba: 0 };
         let mut found = [blank; 2];
         let scan = toyos_gpt::locate_type(self, Guid::TOYOS_SLOTS, &mut found)
@@ -207,8 +220,21 @@ impl<'a> Disk<'a> {
             copy.copy_from_slice(self.scratch);
         }
         slots::current([&copies[0], &copies[1]])
-            .map(|(table, _)| table)
+            .map(|(table, copy)| TableAt { table, copy, first_lba: part.first_lba })
             .map_err(|why| alloc::format!("the slot table's partition holds {why}"))
+    }
+
+    /// Make `next` the table, as every writer does (`slots::next_write`): the
+    /// copy that is not current, one sequence past it, flushed before this
+    /// answers — a request consumed is consumed only once it is on the disk.
+    pub fn write_table(&mut self, at: &TableAt, next: Table) -> Result<(), String> {
+        let (copy, block) = slots::next_write((at.table, at.copy), next);
+        let lbas = BLOCK as u64 / u64::from(self.lba_bytes);
+        self.scratch.copy_from_slice(&block);
+        self.io
+            .write_blocks(self.media_id, at.first_lba + copy as u64 * lbas, self.scratch)
+            .map_err(|e| alloc::format!("the slot table's copy {copy} would not write: {:?}", e.status()))?;
+        self.io.flush_blocks().map_err(|e| alloc::format!("the slot table's copy {copy} would not flush: {:?}", e.status()))
     }
 
     /// The first `len` bytes of `part`, in chunks of at most [`CHUNK_BOUND`],

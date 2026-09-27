@@ -30,7 +30,7 @@ syscap = ["logread"]
 
 # `reboot` is how the host hands the machine to the slot `update` marked.
 [programs.toybox]
-syscap = ["power"]
+receives = ["power"]
 
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"

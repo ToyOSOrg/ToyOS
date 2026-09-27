@@ -1,0 +1,42 @@
+# The bench of `tests/benchcase`, in front of QEMU's virtio-net: the machine
+# `tests/common/bench.rs` drives `toyos-metal` against. `test-runner` is here
+# only so the harness has a ready marker to wait on; it runs no job.
+#
+# `logd` serves no stream: the stream a talking or swapping boot serves is
+# asked for at the machine, and a bench answering it would be answering for a
+# boot it is not.
+
+[boot]
+start = ["logd", "netd", "sshd", "test-runner"]
+
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+[programs.netd]
+service = true
+serves = ["netd"]
+devices = ["pci:1af4:1041"]
+
+[programs.sshd]
+service = true
+receives = ["netd", "launcher"]
+
+# The idle slot, which init claims against the ROOT the kernel holds; the
+# signature on the image is the authority to install it, and `--once` boots
+# it once and never marks it.
+[programs.update]
+slots = true
+
+# `reboot` hands the machine to the boot `update` asked for; `echo` is how the
+# loop asks the bench to answer; `date` is its clock.
+[programs.test-runner]
+syscap = ["logread"]
+
+[programs.toybox]
+receives = ["power"]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"
+"bin/date" = "/system/bin/toybox"
