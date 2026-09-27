@@ -274,8 +274,9 @@ pub mod last {
     }
 
     /// How long either side waits for the other before the boot dies by name.
+    // The thread is held before init prepares the stop, so its wait covers that too.
     const STAGED: Budget = Budget::of(
-        Duration::from_secs(10),
+        Duration::from_millis(toyos_quiesce::FLUSH_MS + toyos_quiesce::SYNC_MS + 10_000),
         "the boot panics naming the side of the staging that never arrived",
     );
 

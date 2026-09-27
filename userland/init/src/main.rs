@@ -153,7 +153,7 @@ const TOKEN_PENDING_BASE: u64 = 5;
 /// device flush, and a stick that takes longer than this is one whose
 /// last lines this boot gives up on rather than the stop it was asked for.
 /// Past it the stop goes ahead, and the lines are on the console.
-const FLUSH_BOUND: Duration = Duration::from_secs(5);
+const FLUSH_BOUND: Duration = Duration::from_millis(toyos_quiesce::FLUSH_MS);
 
 /// The connection init hands `logd` every program's ring on, and the rest of
 /// what init owns of the log.
@@ -1203,12 +1203,13 @@ impl<'a> Init<'a> {
         let _ = conn.try_send_bytes(power::MSG_REFUSED, &refused.to_u64().to_le_bytes());
     }
 
-    /// Have every writable file server make its volume durable, each bounded
-    /// by [`FLUSH_BOUND`]: the kernel's stop waits for no process, so what a
-    /// server holds and has not written is lost unless it is asked first.
-    /// After `logd`'s flush, so the log's server writes what logd wrote last.
+    /// Have every writable file server make its volume durable: the kernel's
+    /// stop waits for no process, so what a server holds and has not written
+    /// is lost unless it is asked first. After `logd`'s flush, so the log's
+    /// server writes what logd wrote last.
     fn sync_files(&self) {
         let roles = self.system.programs.iter().flat_map(|p| p.roles.iter());
+        let mut syncing = Vec::new();
         for role in roles.filter(|r| *r != "boot") {
             let Some(dir) = toyos_manifest::role_dirs(role).and_then(|dirs| dirs.first()) else { continue };
             let name = format!("{CAPABILITY_PREFIX}{dir}");
@@ -1224,11 +1225,14 @@ impl<'a> Init<'a> {
                     });
                 let _ = done_tx.send(answer);
             });
-            let Ok(syncer) = spawned else {
-                say!("init: power: no thread to sync {name}; its unsynced writes are lost with the stop");
-                continue;
-            };
-            let answered = done_rx.recv_timeout(FLUSH_BOUND);
+            match spawned {
+                Ok(syncer) => syncing.push((name, done_rx, syncer)),
+                Err(_) => say!("init: power: no thread to sync {name}; its unsynced writes are lost with the stop"),
+            }
+        }
+        let until = Instant::now() + Duration::from_millis(toyos_quiesce::SYNC_MS);
+        for (name, done_rx, syncer) in syncing {
+            let answered = done_rx.recv_timeout(until.saturating_duration_since(Instant::now()));
             // Joined once it has answered, so the stop never counts a thread
             // that was on its way out.
             if answered.is_ok() {
@@ -1239,7 +1243,7 @@ impl<'a> Init<'a> {
                 Ok(Err(e)) => say!("init: power: {name}'s server would not sync ({e:?})"),
                 Err(_) => say!(
                     "init: power: {name}'s server did not sync in {} ms; stopping without it",
-                    FLUSH_BOUND.as_millis()
+                    toyos_quiesce::SYNC_MS
                 ),
             }
         }

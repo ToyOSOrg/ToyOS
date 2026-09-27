@@ -67,6 +67,13 @@ impl Sweep {
     }
 }
 
+/// A policy number: how long init waits for `logd`'s flush before a stop.
+pub const FLUSH_MS: u64 = 5_000;
+
+/// A policy number: how long init waits for every file server's sync, run
+/// together after the flush, before a stop.
+pub const SYNC_MS: u64 = 5_000;
+
 /// The thread the kernel's `quiesce-last-park` and `quiesce-last-exit`
 /// actuators hold, by the name its program gives it: held in its syscall
 /// until it is the one thread the stop still waits on, so the transition it

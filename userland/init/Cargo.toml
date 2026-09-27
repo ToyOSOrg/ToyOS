@@ -16,3 +16,5 @@ toyos-update = { path = "../../toyos-update" }
 toyos-gpt = { path = "../../toyos-gpt" }
 # The block service's port name, which marks a storage row.
 toyos-blockring = { path = "../../toyos-blockring" }
+# How long a stop is prepared before the kernel is asked for it.
+toyos-quiesce = { path = "../../toyos-quiesce" }
