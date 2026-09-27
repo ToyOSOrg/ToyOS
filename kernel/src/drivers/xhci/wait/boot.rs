@@ -2,7 +2,6 @@
 //! happens before there is a scheduler; every wait here runs in place.
 
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
 
 use crate::log;
 use crate::time::{Budget, Cadence, Duration};
@@ -21,7 +20,7 @@ use super::super::{IR0_ERDP, IR0_ERSTBA, IR0_ERSTSZ, IR0_IMAN, IR0_IMOD};
 use super::super::{OFF_CMD_RING, OFF_DCBAA, OFF_ERST, OFF_EVT_RING};
 use super::super::{OP_CONFIG, OP_CRCR, OP_DCBAAP, OP_PAGESIZE, OP_PORT_BASE, OP_USBCMD, OP_USBSTS};
 use super::super::{USBCMD_HCRST, USBCMD_RS, USBSTS_CNR, USBSTS_HCH};
-use super::super::{PORTSC_PP, PORT_REG_SIZE, PORT_WORK_AT, XHCI};
+use super::super::{PORTSC_PP, PORT_REG_SIZE, XHCI};
 use super::super::{controller_answers, PORT_DEBOUNCE_NS};
 use super::settles;
 use toyos_xhci::port::{self, GaveUp, Reset, ResetOutcome};
@@ -140,10 +139,6 @@ pub fn init(devices: &[PciDevice]) {
         }
         return;
     }
-    // A port the scan bound is outstanding until the first pass reads it: the scan's acknowledge spent its edge.
-    let due = controllers.iter().any(|c| port::due(false, &c.ports));
-    let at = if due { crate::clock::nanos_since_boot().max(1) } else { 0 };
-    PORT_WORK_AT.store(at, Ordering::Relaxed);
     let hid: usize = controllers.iter().map(|c| c.devices.len()).sum();
     log!("xHCI: {} controller(s), {} HID device(s)", controllers.len(), hid);
     log!("usb-storage: {} device(s)", storage_count());

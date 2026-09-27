@@ -217,6 +217,33 @@ fn a_device_pulled_during_the_warm_retrain_is_not_enumerated() {
     assert!(!driver.attached(), "the port is attached with nothing in it: {:?}", driver.did);
 }
 
+/// The same retrain, with the device **pulled after the step that saw it
+/// complete and before the enumeration's first read**. The retrain's connect
+/// flag is still set, so the pull raises no event; the enumeration's
+/// acknowledge clears it and finds the port disabled. The refusal is what has
+/// the port read again.
+#[test]
+fn a_device_pulled_as_its_enumeration_begins_is_torn_down() {
+    let mut port = FakePort::occupied(ResetBehaviour::FailsTheBusReset { warm_works: true });
+    let mut driver = Driver::new().speaking(Protocol::Usb3).pulled_as_it_enumerates();
+    driver
+        .run_to(&mut port, 0, 4 * DEBOUNCE_NS + RESET_DEADLINE_NS, PASS)
+        .unwrap();
+
+    assert_eq!(
+        driver.did,
+        [
+            Did::Reset(Reset::Hot),
+            Did::Reset(Reset::Warm),
+            Did::Enumerated { slot: None, trained: false },
+            Did::ToreDown(Gone::Disconnected),
+        ],
+        "the pull was not refused before Enable Slot and then taken down"
+    );
+    assert!(driver.acts.is_empty(), "a command was spent on a port that read disabled: {:?}", driver.acts);
+    assert!(!driver.attached(), "the port is attached with nothing in it: {:?}", driver.did);
+}
+
 /// The same failure on a link that will not come back warm either: refused by
 /// the name the warm-reset dead end already has.
 #[test]

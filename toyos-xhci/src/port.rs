@@ -397,9 +397,8 @@ impl PortState {
         self.believe(true, slot);
     }
 
-    /// **The one place the driver's belief about a port is set, and it leaves
-    /// the port [`Self::outstanding`] until a look has read the register
-    /// against it.** Every caller has just ended an effect or given up on one,
+    /// **Leaves the port [`Self::outstanding`] until a look has read the
+    /// register against it.** Every caller has just ended an effect or given up on one,
     /// and the device in the port may have changed meanwhile with no change
     /// bit going 0→1 again — the only edge xHCI raises an event for — because
     /// an effect's own acknowledge spent it.

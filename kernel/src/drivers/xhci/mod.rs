@@ -1316,8 +1316,7 @@ impl XhciController {
                         log!("xHCI: port {} connected, link already trained", port_idx + 1);
                     }
                     device::begin(self, port_idx, after);
-                    // Either enumeration is under way and the port waits, or it refused before spending a command.
-                    return self.outstanding.wake_at();
+                    // No return: a `begin` that refused before Enable Slot left the port to be read, and a begun one is caught above as working.
                 }
             }
         }

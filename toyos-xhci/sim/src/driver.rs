@@ -125,6 +125,9 @@ pub struct Driver {
     /// an enumeration would do. The enumeration drains the event ring, so this
     /// is reachable rather than hypothetical.
     reenter: bool,
+    /// Pull the device between the step that says enumerate and the
+    /// enumeration's first read of the port.
+    pull_as_it_enumerates: bool,
     /// Enumerate and tear down without asking whether the controller still owes
     /// an answer, which is the negative gate for the deferral.
     never_defers: bool,
@@ -182,6 +185,7 @@ impl Driver {
             slot: Some(1),
             spent: None,
             reenter: false,
+            pull_as_it_enumerates: false,
             never_defers: false,
             never_cancels: false,
             function: enumerate::Function::BootHid,
@@ -237,6 +241,13 @@ impl Driver {
     /// Stage a caller that re-enters the machine from inside an effect.
     pub fn reentrant(mut self) -> Self {
         self.reenter = true;
+        self
+    }
+
+    /// Stage a device pulled between the step that says enumerate and the
+    /// enumeration's first read of the port.
+    pub fn pulled_as_it_enumerates(mut self) -> Self {
+        self.pull_as_it_enumerates = true;
         self
     }
 
@@ -402,6 +413,9 @@ impl Driver {
                             return Err(Stuck::Broke(bad));
                         }
                     }
+                    if core::mem::take(&mut self.pull_as_it_enumerates) {
+                        port.detach();
+                    }
                     if self.outstanding.busy() {
                         return Err(Stuck::Order(Broke::ActedWithAnAnswerOutstanding));
                     }
@@ -417,6 +431,12 @@ impl Driver {
                         return Err(Stuck::Broke(bad));
                     }
                     port.write(ack.raw(), now);
+                    // `device::begin`'s refusal of a port its acknowledge left
+                    // disabled: no command is spent, and the port is read again.
+                    if !port.read().enabled() {
+                        self.enumerated(after.is_none());
+                        continue;
+                    }
                     // Submitted and left, exactly as the teardown is: the port
                     // stays inside the effect until the last act is answered,
                     // and the check above catches a step taken meanwhile.
