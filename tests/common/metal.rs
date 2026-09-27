@@ -807,7 +807,7 @@ fn build(
     // host is in it: the loop finds the machine by its name.
     if batch.talk || batch.swap.is_some() {
         let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
-        extra.push((super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
+        extra.push((toyos_build::build::AUTHORIZED_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
     }
     let plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);

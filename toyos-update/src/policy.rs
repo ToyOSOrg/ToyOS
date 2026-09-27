@@ -99,13 +99,6 @@ pub fn order(table: &Table, once: Option<Which>) -> [Option<Which>; 2] {
     [Some(first), table.slot(other).map(|_| other)]
 }
 
-/// The word the loader hands the kernel for a slot booted once, where the
-/// refusal words go (`slot-refused=<marked>:once`): why the marked slot is not
-/// the one this boot runs, which is no refusal of it. The kernel spells it
-/// itself (`kernel/src/params.rs`'s `ONCE`), held to this one by
-/// `toyos_build::bootlog`'s gate.
-pub const ONCE: &str = "once";
-
 /// The floor after a boot proved `proven`: it only rises.
 pub fn raised(floor: u64, proven: u64) -> u64 {
     floor.max(proven)

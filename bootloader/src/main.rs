@@ -137,9 +137,14 @@ fn load_file_bytes(handle: Handle, system_table: &SystemTable<Boot>, path: &CStr
     bytes
 }
 
-/// The line naming this loader by the SHA-256 of its file; held to the host's
-/// spelling by `toyos_build::bootlog`'s gate.
-const LOADER_IS: &str = "Loader: the file firmware loaded hashes to";
+/// The line naming the file every ToyOS image boots by, this ESP's
+/// removable-media loader, by its SHA-256; held to the host's spelling by
+/// `toyos_build::bootlog`'s gate.
+const LOADER_IS: &str = "Loader: the removable-media file on this ESP hashes to";
+
+/// The line naming the boot parameter the kernel is handed, `root=` among
+/// it; held to the host's spelling by `toyos_build::bootlog`'s gate.
+const BOOT_PARAMETER: &str = "Boot parameter:";
 
 /// This loader's own file, at the removable-media path of the volume firmware
 /// loaded it from — where every ToyOS image puts it — or why it would not read.
@@ -867,9 +872,8 @@ fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
 /// a pass that does not hand off leaves nothing registered in the firmware — and
 /// the reset is what makes that invariant not have to be complete: the next
 /// operating system comes up on firmware this image has never run on, for one
-/// reboot. `BootNext` was consumed by this pass and this pass sets none, so the
-/// firmware's own order takes the machine, and the page was cleared as it was
-/// read, so a boot that does come back here boots normally.
+/// reboot. The page was cleared as it was read, so a boot that does come back
+/// here boots normally.
 fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
     println!("{}", loaderlog::ENDS_AT_CHAIN);
     loaderlog::close_without_a_kernel();
@@ -882,31 +886,45 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
     system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS, None)
 }
 
-/// End a pass whose every slot was refused by handing the machine to the entry
-/// the firmware would have tried after this one — `BootNext`, then the reset
-/// [`end_this_pass`] makes — which on a machine with a recovery stick behind
-/// it in `BootOrder` is that stick. Where there is none, the pass dies with
-/// `why` as it always did.
+/// **A pass that fails hands the machine on**: a panic of this loader — no
+/// slot verifying, a floor refused, anything it cannot go on without — sets
+/// `BootNext` to the entry the firmware would have tried after this one
+/// ([`bootvars::after_this_one`]) and resets, so a machine whose stick heads
+/// `BootOrder` still reaches what stands behind it. Where nothing does, the
+/// machine powers off rather than reset into the same failure.
 ///
 /// **Not a return to the boot manager**, which would try the next entry itself:
 /// a pass that returns leaves its exit-boot-services callback registered, as
-/// [`end_this_pass`] says.
-fn fall_through(system_table: &SystemTable<Boot>, ours: Option<&[u8; 16]>, why: &str, exit_event: Option<Event>) -> ! {
-    let rt = system_table.runtime_services();
-    match bootvars::after_this_one(rt, ours) {
-        Ok((current, Some(next))) => match bootvars::boot_next(rt, next) {
-            Ok(()) => {
-                println!(
-                    "{} no slot boots, so BootNext=Boot{next:04X}, the entry after Boot{current:04X} in BootOrder",
-                    bootvars::HEAD
-                );
-                end_this_pass(system_table, exit_event)
-            }
-            Err(no) => panic!("Slots: {why}; and {no}"),
-        },
-        Ok((current, None)) => panic!("Slots: {why}; and BootOrder holds no entry after Boot{current:04X} to fall to"),
-        Err(no) => panic!("Slots: {why}; and no entry to fall to: {no}"),
+/// [`end_this_pass`] says. A panic inside this one, or after boot services
+/// are gone, stops here.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    static PANICKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if PANICKED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        loop {
+            core::hint::spin_loop();
+        }
     }
+    println!("[PANIC]: {info}");
+    let system_table = uefi_services::system_table();
+    let rt = system_table.runtime_services();
+    let ours = bootnext::our_partition(system_table.boot_services().image_handle(), &system_table);
+    let fell = bootvars::after_this_one(rt, ours.as_ref()).and_then(|(current, next)| {
+        let next = next.ok_or_else(|| alloc::format!("BootOrder holds no entry after Boot{current:04X}"))?;
+        bootvars::boot_next(rt, next).map(|()| (current, next))
+    });
+    let reset = match fell {
+        Ok((current, next)) => {
+            println!("{} this pass failed, so BootNext=Boot{next:04X}, the entry after Boot{current:04X} in BootOrder", bootvars::HEAD);
+            ResetType::WARM
+        }
+        Err(why) => {
+            println!("{} this pass failed, and there is no entry to fall to, so the machine powers off: {why}", bootvars::HEAD);
+            ResetType::SHUTDOWN
+        }
+    };
+    loaderlog::close_without_a_kernel();
+    rt.reset(reset, Status::ABORTED, None)
 }
 
 #[entry]
@@ -1102,13 +1120,8 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.
     let once = request::once(handle, &system_table);
-    let chosen = match slot::choose(handle, &system_table, image_floor.value, &record, once) {
-        Ok(chosen) => chosen,
-        Err(why) => {
-            println!("Slots: {why}");
-            fall_through(&system_table, ours.as_ref(), &why, exit_event)
-        }
-    };
+    let chosen = slot::choose(handle, &system_table, image_floor.value, &record, once)
+        .unwrap_or_else(|why| panic!("Slots: {why}"));
     record.booted = Some(Booted {
         slot: chosen.which,
         version: chosen.version,
@@ -1140,14 +1153,14 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, refused.letter(), why.word()));
     }
     if let Some(marked) = chosen.once {
-        append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, marked.letter(), policy::ONCE));
+        append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, marked.letter(), toyos_abi::boot::SLOT_ONCE));
     }
     if let Some(word) = blackbox::param(page) {
         append(&word);
     }
     let params = core::str::from_utf8(&cmdline)
         .unwrap_or_else(|e| panic!("slot {}'s cmdline is not UTF-8: {e}", chosen.which.letter()));
-    println!("Boot parameter: {params:?}");
+    println!("{BOOT_PARAMETER} {params:?}");
 
     let root_image = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WITHHOLD_ROOT_PARAM) {
         println!("ROOT: withheld on {}; the kernel is handed no image", toyos_abi::boot::WITHHOLD_ROOT_PARAM);

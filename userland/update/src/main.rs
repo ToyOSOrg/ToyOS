@@ -40,7 +40,9 @@
 //! **A request is the table's too** (`toyos_update::slots::Request`): the
 //! loader acts on it once at its next pass, and writes it away as it does.
 //! It asks for no more than an entry for an EFI system partition the loader
-//! finds itself, first in the order or next once.
+//! finds itself, first in the order or next once. Neither ask is signed: whoever
+//! holds the grant — on the bench, the runner key — can reorder the firmware's
+//! boot entries or boot any ESP the firmware sees, once.
 
 use std::io::Read;
 use std::time::Instant;
@@ -74,8 +76,8 @@ fn asked() -> Result<Asked, String> {
         [] => Ok(Asked::Install { once: false }),
         ["--once"] => Ok(Asked::Install { once: true }),
         ["--boot-first"] => Ok(Asked::BootFirst),
-        ["--boot-next", guid] => toyos_update::entry::parse_guid(guid)
-            .map(Asked::BootNext)
+        ["--boot-next", guid] => toyos_gpt::Guid::parse(guid)
+            .map(|guid| Asked::BootNext(guid.0))
             .ok_or_else(|| format!("{guid:?} is no partition GUID; --boot-next wants one as the GPT tools print it")),
         _ => Err(format!(
             "{words:?} is no ask this takes: `update`, `update --once` (each with an image on its input), \
@@ -121,7 +123,7 @@ fn run(asked: Asked, began: Instant) -> Result<String, String> {
             write_table(&table_claim, (table, current), Table { request, ..table })?;
             return Ok(format!(
                 "update: the loader boots EFI system partition {} once, at its next pass, and the order after it",
-                toyos_update::entry::GuidText(guid)
+                toyos_gpt::Guid(guid)
             ));
         }
     };

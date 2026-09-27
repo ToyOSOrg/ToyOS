@@ -112,26 +112,27 @@ fn entries(rt: &RuntimeServices) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
-/// The entry that boots `esp`: the lowest active one already naming it —
-/// whatever file it boots there, the owner's own entry among them — or one
-/// written here for its removable-media loader, at the lowest free number.
-/// Its number, and whether it was written.
+/// The entry that boots the GPT partition `guid` ([`entry::naming`]), if any.
+pub fn naming(rt: &RuntimeServices, guid: &[u8; 16]) -> Result<Option<u16>, String> {
+    Ok(entry::naming(&entries(rt)?, guid))
+}
+
+/// The entry that boots `esp` ([`entry::naming`]), or one written here for
+/// its removable-media loader at the lowest free number; its number, and
+/// whether it was written.
 pub fn entry_for(rt: &RuntimeServices, esp: &Esp) -> Result<(u16, bool), String> {
     let part = &esp.part;
     let held = entries(rt)?;
-    if let Some(number) =
-        held.iter().filter(|(_, o)| entry::active(o) && entry::names(o, &part.guid)).map(|(n, _)| *n).min()
-    {
+    if let Some(number) = entry::naming(&held, &part.guid) {
         return Ok((number, false));
     }
     if let Err(why) = &esp.removable {
         return Err(alloc::format!("no entry names it, and {why}"));
     }
-    let used: Vec<u16> = held.iter().map(|(n, _)| *n).collect();
-    let number = entry::free(&used).ok_or("every Boot#### number is taken")?;
+    let order = words(rt, cstr16!("BootOrder"))?.unwrap_or_default();
+    let number = entry::free(&held, &order).ok_or("every Boot#### number is taken")?;
     let mut option = [0u8; OPTION_BYTES];
-    let len = entry::load_option(DESCRIPTION, part, crate::arch::REMOVABLE_PATH, &mut option)
-        .map_err(|why| alloc::format!("the entry would not encode: {why}"))?;
+    let len = entry::load_option(DESCRIPTION, part, crate::arch::REMOVABLE_PATH, &mut option);
     let name = CString16::try_from(alloc::format!("Boot{number:04X}").as_str()).expect("an ASCII name");
     rt.set_variable(&name, &VariableVendor::GLOBAL_VARIABLE, ATTRIBUTES, &option[..len])
         .map_err(|e| alloc::format!("firmware refused Boot{number:04X} ({e})"))?;
@@ -153,8 +154,10 @@ fn words(rt: &RuntimeServices, name: &CStr16) -> Result<Option<Vec<u16>>, String
 /// `BootOrder` with `number` first; the order it was and the order it is.
 pub fn put_first(rt: &RuntimeServices, number: u16) -> Result<(Vec<u16>, Vec<u16>), String> {
     let was = words(rt, cstr16!("BootOrder"))?.unwrap_or_default();
-    let mut now = [0u16; MAX_ORDER + 1];
-    let n = entry::first(&was, number, &mut now);
+    let mut now = [0u16; MAX_ORDER];
+    let n = entry::first(&was, number, &mut now).ok_or_else(|| {
+        alloc::format!("BootOrder holds {} entries, and one more is past the {MAX_ORDER} this loader reads", was.len())
+    })?;
     let bytes: Vec<u8> = now[..n].iter().flat_map(|w| w.to_le_bytes()).collect();
     rt.set_variable(cstr16!("BootOrder"), &VariableVendor::GLOBAL_VARIABLE, ATTRIBUTES, &bytes)
         .map_err(|e| alloc::format!("firmware refused BootOrder ({e})"))?;
@@ -169,19 +172,14 @@ pub fn boot_next(rt: &RuntimeServices, number: u16) -> Result<(), String> {
 }
 
 /// The entry the firmware would have tried after the one that booted this
-/// pass, skipping an inactive entry and every entry naming `ours` — this
-/// loader's own partition, which has just refused every slot it has.
+/// pass ([`entry::after`]), passing over every entry naming `ours` — this
+/// loader's own partition, whose pass has just failed.
 pub fn after_this_one(rt: &RuntimeServices, ours: Option<&[u8; 16]>) -> Result<(u16, Option<u16>), String> {
     let current = words(rt, cstr16!("BootCurrent"))?
         .and_then(|w| w.first().copied())
         .ok_or("firmware names no BootCurrent")?;
     let order = words(rt, cstr16!("BootOrder"))?.ok_or("firmware holds no BootOrder")?;
-    let held = entries(rt)?;
-    let skip = |number: u16| match held.iter().find(|(n, _)| *n == number) {
-        None => true,
-        Some((_, option)) => !entry::active(option) || ours.is_some_and(|guid| entry::names(option, guid)),
-    };
-    Ok((current, entry::after(&order, current, skip)))
+    Ok((current, entry::after(&order, current, &entries(rt)?, ours)))
 }
 
 /// A list of entry numbers as firmware's menu spells them.

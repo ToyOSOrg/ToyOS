@@ -107,15 +107,11 @@ pub fn bench_loop_drives_a_toyos_machine(
     eprintln!("  [bench] a kernel byte flipped under its signature: {}", said.trim());
 
     // **The clock the loop reads a `--nic` boot's cable against**, from the
-    // bench itself: `date -u +%s` answers a second, and no other form is here.
+    // bench itself: `date -u +%s` answers a second.
     let clock = ssh::ssh_exec(HOST, ssh_port, &runner, "date -u +%s")?;
     let said = clock.stdout_text();
     if clock.status != Some(0) || said.trim().parse::<u64>().is_err() {
         return Err(format!("`date -u +%s` ended {:?} saying {said:?}", clock.status));
-    }
-    let other = ssh::ssh_exec(HOST, ssh_port, &runner, "date")?;
-    if other.status != Some(2) {
-        return Err(format!("a bare `date` ended {:?}, where the one form is refused as 2", other.status));
     }
     eprintln!("  [bench] the bench's clock reads {}", said.trim());
 
@@ -164,10 +160,18 @@ pub fn bench_loop_drives_a_toyos_machine(
         return Err(format!("the boot's own log never says {ONCE_RECORD:?}"));
     }
     let loader = std::fs::read_to_string(readback.join(metal::READBACK_LOADER)).map_err(|e| format!("loader.log: {e}"))?;
-    for owed in ["Slot B: asked for once; the table marks A", "Request: a boot of slot B once is taken off the slot table"] {
+    for owed in [
+        "Slot B: asked for once; the table marks A",
+        "Request: a boot of slot B once is taken off the slot table",
+        "Anti-rollback floor: not raised, because slot B's image was booted once",
+    ] {
         if !loader.contains(owed) {
             return Err(format!("the boot's loader passes never say {owed:?}"));
         }
+    }
+    let raised = format!("Anti-rollback floor: {}, raised", update.version);
+    if loader.contains(&raised) {
+        return Err(format!("a boot of slot B once raised the floor: {raised:?}"));
     }
     let swapped = std::fs::read_to_string(readback.join(metal::READBACK_SWAP)).map_err(|e| format!("swap.txt: {e}"))?;
     eprintln!("  [bench] swap.txt: {}", swapped.lines().next().unwrap_or_default());

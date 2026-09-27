@@ -148,6 +148,12 @@ pub const SLOT_PARAM: &str = "boot-slot=";
 /// log.
 pub const SLOT_REFUSED_PARAM: &str = "slot-refused=";
 
+/// The word the loader puts where [`SLOT_REFUSED_PARAM`]'s refusal goes when
+/// the slot it booted is one the running system asked for once
+/// (`slot-refused=<marked>:once`): why the marked slot is not this boot's, and
+/// no refusal of it.
+pub const SLOT_ONCE: &str = "once";
+
 /// The most windows the loader will carry.
 pub const MAX_ROOT_BRIDGE_WINDOWS: usize = 64;
 

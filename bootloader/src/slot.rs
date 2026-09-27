@@ -90,23 +90,22 @@ pub fn choose(
             table.marked.letter()
         );
     }
+    // What the kernel is told of the slot chosen, whichever loop chose it.
+    let told = |mut chosen: Chosen, refused: Option<(Which, Refusal)>| {
+        match once {
+            Some(trial) if chosen.which == trial => chosen.once = Some(table.marked),
+            // The trial was refused and this is the marked slot: an ordinary
+            // boot, and the kernel is told nothing was refused.
+            Some(_) => {}
+            None if chosen.which != table.marked => chosen.refused = refused,
+            None => {}
+        }
+        chosen
+    };
     for which in policy::order(&table, once).into_iter().flatten() {
         let slot = table.slot(which).expect("`order` names only slots the table carries");
         match verify(bs, &mut disk, which, slot, floor, Some(record)) {
-            Ok(mut chosen) if once == Some(which) => {
-                chosen.once = Some(table.marked);
-                return Ok(chosen);
-            }
-            Ok(mut chosen) if once.is_some() => {
-                // The trial was refused and this is the marked slot: an
-                // ordinary boot, and the kernel is told nothing was refused.
-                chosen.refused = None;
-                return Ok(chosen);
-            }
-            Ok(mut chosen) => {
-                chosen.refused = refused;
-                return Ok(chosen);
-            }
+            Ok(chosen) => return Ok(told(chosen, refused)),
             Err(why) => {
                 println!("{HEAD} {}: REFUSED, {why}", which.letter());
                 if why == Refusal::Died {
@@ -122,12 +121,7 @@ pub fn choose(
         let slot = table.slot(which).expect("a slot `order` named");
         println!("{HEAD} {}: no slot verifies but this one, whose image died on its last boot; it boots again", which.letter());
         match verify(bs, &mut disk, which, slot, floor, None) {
-            Ok(mut chosen) => {
-                if which != table.marked {
-                    chosen.refused = refused;
-                }
-                return Ok(chosen);
-            }
+            Ok(chosen) => return Ok(told(chosen, refused)),
             Err(why) => println!("{HEAD} {}: REFUSED, {why}", which.letter()),
         }
     }

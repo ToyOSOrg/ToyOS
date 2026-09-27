@@ -111,6 +111,27 @@ impl Guid {
     }
 }
 
+impl Guid {
+    /// The text [`Display`](fmt::Display) prints, read back: the 36 characters
+    /// `C12A7328-F81F-11D2-BA4B-00A0C93EC93B`, in either case, and nothing else.
+    pub fn parse(text: &str) -> Option<Self> {
+        const DASHES: [usize; 4] = [8, 13, 18, 23];
+        let bytes = text.as_bytes();
+        if bytes.len() != 36 || DASHES.iter().any(|&at| bytes[at] != b'-') {
+            return None;
+        }
+        let mut digits = bytes.iter().enumerate().filter(|(at, _)| !DASHES.contains(at)).map(|(_, b)| *b);
+        let mut hex = [0u8; 16];
+        for out in hex.iter_mut() {
+            let high = (digits.next()? as char).to_digit(16)?;
+            let low = (digits.next()? as char).to_digit(16)?;
+            *out = (high * 16 + low) as u8;
+        }
+        let h = hex;
+        Some(Self([h[3], h[2], h[1], h[0], h[5], h[4], h[7], h[6], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]]))
+    }
+}
+
 impl fmt::Display for Guid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let b = &self.0;
@@ -162,6 +183,25 @@ mod tests {
         let text = heapless_format(Guid::TOYOS_BOOT);
         assert_eq!(&text[..], Guid::TOYOS_BOOT_TEXT.as_bytes());
         assert_ne!(Guid::TOYOS_ROOT, Guid::TOYOS_DATA);
+    }
+
+    /// Every spelling [`Guid`]'s Display prints reads back as the bytes it
+    /// printed, in either case; a missing dash, a short text and a non-digit
+    /// read as nothing.
+    #[test]
+    fn the_text_it_prints_parses_back() {
+        for guid in [Guid::EFI_SYSTEM, Guid::TOYOS_SLOTS, Guid([0xA5; 16])] {
+            let text = heapless_format(guid);
+            let text = core::str::from_utf8(&text).unwrap();
+            assert_eq!(Guid::parse(text), Some(guid), "{text}");
+            let mut lower = [0u8; 36];
+            lower.copy_from_slice(text.as_bytes());
+            lower.make_ascii_lowercase();
+            assert_eq!(Guid::parse(core::str::from_utf8(&lower).unwrap()), Some(guid), "{text}");
+        }
+        assert_eq!(Guid::parse("C12A7328F81F-11D2-BA4B-00A0C93EC93B0"), None);
+        assert_eq!(Guid::parse("C12A7328-F81F-11D2-BA4B-00A0C93EC93"), None);
+        assert_eq!(Guid::parse("G12A7328-F81F-11D2-BA4B-00A0C93EC93B"), None);
     }
 
     #[test]

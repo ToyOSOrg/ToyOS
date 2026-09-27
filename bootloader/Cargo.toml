@@ -36,7 +36,9 @@ sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 # `alloc`: `variable_keys` and `get_variable_boxed`, which are how the boot
 # entry pointing at this image is found among the firmware's own variables.
 uefi = { version = "0.26.0", default-features = false, features = ["alloc"] }
-uefi-services = { version = "0.23.0", features = ["panic_handler", "logger"] }
+# No `panic_handler`: the loader's own hands the machine to the next entry
+# (`main.rs`'s `panic`).
+uefi-services = { version = "0.23.0", default-features = false, features = ["logger"] }
 
 # The one profile every guest binary is built with. Optimised, because an
 # unoptimised guest mismeasures everything under TCG;

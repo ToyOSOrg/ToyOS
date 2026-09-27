@@ -84,7 +84,7 @@ fn plan(features: &[&str], params: &[&str], version: u64, second: Option<SecondS
 /// What every image here carries on ROOT beside the config's own: the key the
 /// host logs in with.
 fn staged(identity: &Identity) -> Vec<(String, Vec<u8>)> {
-    vec![(ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())]
+    vec![(toyos_build::build::AUTHORIZED_ON_ROOT.to_string(), identity.authorized_line().into_bytes())]
 }
 
 impl Rig {
@@ -261,6 +261,22 @@ impl Rig {
         hold.release();
         await_machine(guest, console, &format!("{marker:?} after the forged reboot"), |c| c[from.min(c.len())..].contains(marker))?;
         Ok((from, uart))
+    }
+
+    /// The slots' record as a clean hand-back leaves it — no boot counted and
+    /// none written down — for a machine the test powered off while it ran,
+    /// whose next pass would otherwise be the retry of a hang.
+    fn powered_off_cleanly(&self) -> Result<(), String> {
+        let guid = self.log_guid()?;
+        let record = Record { count: 0, booted: None, ..self.record()? };
+        image::overwrite_file_on(&self.image, guid, RECORD_FILE, &record.encode(&guid))
+    }
+
+    /// Slot `which`'s signed header, off its volume.
+    fn signed_header(&self, which: Which) -> Result<Vec<u8>, String> {
+        let mut file = std::fs::File::open(&self.image).map_err(|e| format!("{}: {e}", self.image.display()))?;
+        let slot = image::slot_table_of(&mut file)?.slot(which).ok_or_else(|| format!("no slot {}", which.letter()))?;
+        image::read_file_on(&mut file, slot.boot, toyos_update::slots::SIGNED_FILE)
     }
 
     /// The name of the floor this machine's loader keeps.
@@ -710,25 +726,45 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
 const BOOT_NEXT_SET: &str = "(written now): the firmware boots it once, at the reset this pass ends with";
 
 /// **A request for another ESP boots that ESP once, and the order resumes**:
-/// the machine asks for its recovery stick with `update --boot-next`; the pass
-/// after the reboot takes the request off the slot table, writes an entry for
-/// that stick and points `BootNext` at it; the recovery stick's kernel boots;
-/// its reboot hands the machine to the firmware's order, which is the
-/// machine's own stick; and the machine's next reboot is its own again.
+/// the machine asks for its recovery stick with `update --boot-next`; a pass
+/// that cannot take the request off the slot table — the stick read-only —
+/// sets no `BootNext`; the next pass takes it off, writes an entry for that
+/// stick and points `BootNext` at it; the recovery stick's kernel boots; its
+/// reboot hands the machine to the firmware's order, which is the machine's
+/// own stick; and the machine's next reboot is its own again.
 pub fn update_boot_next_boots_the_entry_once(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
     let rig = Rig::stage("update-boot-next")?.with_recovery()?;
     let recovery = rig.recovery()?.to_path_buf();
     let esp = toyos_gpt::Guid(Rig::guid_on(&recovery, toyos_gpt::Guid::EFI_SYSTEM)?);
     let (ours, theirs) = (Rig::kernel_of(&rig.image)?, Rig::kernel_of(&recovery)?);
-    let (mut guest, mut console) = rig.boot()?;
+    let (guest, console) = rig.boot()?;
     owed(&console, 0, &ours)?;
     rig.asks(&format!("update --boot-next {esp}"), &format!("the loader boots EFI system partition {esp} once"))?;
+    drop(guest);
+    rig.powered_off_cleanly()?;
 
-    let (from, uart) = rig.reboot_until(&mut guest, &mut console, &theirs)?;
-    loader_said(&guest, uart, "Request: a boot of another ESP is taken off the slot table before it is acted on")?;
-    loader_said(&guest, uart, &format!("ESP {esp} {BOOT_NEXT_SET}"))?;
-    await_machine(&mut guest, &mut console, "the recovery stick's sshd", |c| c[from..].contains(SSHD_LISTENING))?;
-    eprintln!("  [update] `update --boot-next {esp}` booted the recovery stick at the next reboot");
+    // **Consumed before it is acted on**: the pass whose write of the table
+    // fails has set nothing when it says so, and never will.
+    let unwritable = BootOptions {
+        profile: qemu::Profile::Metal,
+        boot_image: Some(Staged::Written(rig.image.clone())),
+        stick_readonly: true,
+        firmware_vars: Some(rig.vars.clone()),
+        recovery_stick: rig.recovery.clone(),
+        ready_marker: "Request: a boot of another ESP stands, and is not acted on, because taking it off the slot table failed",
+        ..Default::default()
+    };
+    drop(QemuInstance::boot_with_options(&super::compile::repo_root().join(CONFIG), &[], &[], unwritable));
+    if let Ok(next) = vars::global(&rig.vars, "BootNext") {
+        return Err(format!("a pass that could not take the request off the slot table set BootNext {next:02x?}"));
+    }
+    eprintln!("  [update] a pass that could not write the slot table set no BootNext");
+
+    let (mut guest, mut console) = rig.boot()?;
+    owed(&console, 0, &theirs)?;
+    loader_said(&guest, 0, "Request: a boot of another ESP is taken off the slot table")?;
+    loader_said(&guest, 0, &format!("ESP {esp} {BOOT_NEXT_SET}"))?;
+    eprintln!("  [update] `update --boot-next {esp}` booted the recovery stick at the next boot");
 
     // Twice more, each until the machine's own kernel or the recovery stick's
     // a second time: a request never taken away boots the recovery stick at
@@ -759,6 +795,63 @@ pub fn update_boot_next_boots_the_entry_once(_: &Path, _: &[(String, Vec<u8>)], 
     Ok(())
 }
 
+/// **A trial writes nothing of the image the machine keeps**: `update --once`
+/// puts an image in slot B for one boot; on that boot slot A — the image the
+/// machine keeps — is the idle slot, init grants nothing, `update` is refused
+/// and slot A's signed header is the one it was; the reboot after is slot A's,
+/// and takes the trial off the table. And a trial the loader refuses boots
+/// slot A as the ordinary boot it is: the kernel is told of no refusal of a
+/// marked slot.
+pub fn update_trial_writes_nothing_of_the_kept_slot(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let rig = Rig::stage("update-trial")?;
+    let (next, _) = rig.update("next", &[], &[], NEXT, signing::key())?;
+    let kept = rig.signed_header(Which::A)?;
+    let (mut guest, mut console) = rig.boot()?;
+    let asked = ssh::ssh_pipe(HOST, rig.port, &rig.identity, "update --once", &next)?;
+    let said = format!("{}{}", asked.stdout_text(), asked.stderr_text());
+    if asked.status != Some(0) || !said.contains(&format!("update: installed version {NEXT} in slot B")) {
+        return Err(format!("`update --once` ended {:?} saying {said:?}", asked.status));
+    }
+    let trial = format!("{SLOT_RECORD} B, once, as the running system asked; the slot table marks A");
+    let (from, _) = rig.reboot_until(&mut guest, &mut console, &trial)?;
+    await_machine(&mut guest, &mut console, "the trial's sshd", |c| c[from..].contains(SSHD_LISTENING))?;
+
+    let (status, said) = rig.install(&next)?;
+    if status != Some(1) || !said.contains("this process holds no `slots:table`") {
+        return Err(format!("on the trial, `update` ended {status:?} saying {said:?}"));
+    }
+    let refused = "init: update: no slot to grant: slot B runs on trial, and the idle slot is A, the image the machine keeps";
+    await_machine(&mut guest, &mut console, "init to refuse the trial a grant", |c| c[from..].contains(refused))?;
+    let (_, uart) = rig.reboot_until(&mut guest, &mut console, &format!("{SLOT_RECORD} A, the one the slot table marks"))?;
+    loader_said(&guest, uart, "Request: slot B's trial, which is over, is taken off the slot table")?;
+    drop(guest);
+    rig.powered_off_cleanly()?;
+    if rig.signed_header(Which::A)? != kept {
+        return Err("slot A's signed header changed under a trial".to_string());
+    }
+    let mut file = std::fs::File::open(&rig.image).map_err(|e| format!("{}: {e}", rig.image.display()))?;
+    let table = image::slot_table_of(&mut file)?;
+    if table.marked != Which::A || !table.request.is_empty() {
+        return Err(format!("after the trial the slot table is {table:?}: slot A marked and nothing asked is owed"));
+    }
+    eprintln!("  [update] the trial held no grant, slot A kept its image, and the boot after was slot A's");
+
+    // A trial the loader refuses: slot B's kernel bent, and asked for once.
+    let b = table.slot(Which::B).ok_or("no slot B")?;
+    let mut kernel = image::read_file_on(&mut file, b.boot, toyos_update::slots::KERNEL_FILE)?;
+    drop(file);
+    kernel[100] ^= 0x01;
+    image::overwrite_file_on(&rig.image, b.boot, toyos_update::slots::KERNEL_FILE, &kernel)?;
+    image::restage_table(&rig.image, |t| t.request.next = Some(toyos_update::slots::Next::Slot(Which::B)))?;
+    let (guest, console) = rig.boot()?;
+    loader_said(&guest, 0, "Slot B: REFUSED, its kernel is not the bytes its signed header names")?;
+    owed(&console, 0, &format!("{SLOT_RECORD} A, the one the slot table marks"))?;
+    eprintln!("  [update] a refused trial booted slot A as marked, with no refusal told");
+    drop(guest);
+    let _ = std::fs::remove_dir_all(&rig.scratch);
+    Ok(())
+}
+
 /// What sshd says once it serves, on every image here.
 const SSHD_LISTENING: &str = "sshd: listening on port 22";
 
@@ -774,7 +867,7 @@ pub fn update_boot_first_puts_the_loader_first(_: &Path, _: &[(String, Vec<u8>)]
     let (mut guest, mut console) = rig.boot()?;
     rig.asks("update --boot-first", "first in the firmware's BootOrder")?;
     let (_, uart) = rig.reboot_until(&mut guest, &mut console, DEFAULT_READY)?;
-    loader_said(&guest, uart, "Request: the boot order is taken off the slot table before it is acted on")?;
+    loader_said(&guest, uart, "Request: the boot order is taken off the slot table")?;
     let since = guest.uart_log()[uart..].to_string();
     let line = since
         .lines()
@@ -789,6 +882,12 @@ pub fn update_boot_first_puts_the_loader_first(_: &Path, _: &[(String, Vec<u8>)]
         .ok_or_else(|| format!("no entry number in {line:?}"))?;
     let (_, uart) = rig.reboot_until(&mut guest, &mut console, DEFAULT_READY)?;
     loader_said(&guest, uart, &format!("this pass was booted as Boot{number:04X}"))?;
+    // **Asked once, written once**: no pass after the one that wrote the
+    // order reads the request again or writes the order again.
+    let since = guest.uart_log()[uart..].to_string();
+    if let Some(again) = since.lines().find(|l| l.contains("Request:") || l.contains("is first:")) {
+        return Err(format!("a pass after the one that wrote the order said {again:?}"));
+    }
     drop(guest);
 
     let order = vars::global(&rig.vars, "BootOrder")?;
@@ -824,9 +923,9 @@ pub fn update_no_slot_boots_the_recovery_stick(_: &Path, _: &[(String, Vec<u8>)]
     let fell = rig.launch(theirs);
     said(
         fell.boot_log(),
-        &["Slot A: REFUSED, its kernel is not the bytes its signed header names", "Slots: no slot verifies", "no slot boots, so BootNext=Boot"],
+        &["Slot A: REFUSED, its kernel is not the bytes its signed header names", "Slots: no slot verifies", "this pass failed, so BootNext=Boot"],
     )?;
-    let line = fell.boot_log().lines().find(|l| l.contains("no slot boots")).unwrap_or_default().to_string();
+    let line = fell.boot_log().lines().find(|l| l.contains("this pass failed")).unwrap_or_default().to_string();
     eprintln!("  [update] {line}; the recovery stick's loader took the machine");
     drop(fell);
     let _ = std::fs::remove_dir_all(&rig.scratch);

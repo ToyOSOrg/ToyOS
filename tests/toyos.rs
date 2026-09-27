@@ -872,9 +872,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("update_boot_next_boots_the_entry_once", Sched::Parallel, Tier::Nightly),
     ("update_boot_first_puts_the_loader_first", Sched::Parallel, Tier::Nightly),
     ("update_no_slot_boots_the_recovery_stick", Sched::Parallel, Tier::Nightly),
+    ("update_trial_writes_nothing_of_the_kept_slot", Sched::Parallel, Tier::Nightly),
     // The bench: `toyos-metal` delivers a staged boot to a machine running
     // ToyOS alone with `update --once`, swaps its netd, hands it back and
-    // judges what the bench reads back over ssh — a minute and more of boots.
+    // judges what the bench reads back over ssh.
     ("bench_loop_drives_a_toyos_machine", Sched::Parallel, Tier::Nightly),
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
@@ -1664,6 +1665,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_boot_next_boots_the_entry_once", &[]),
     ("update_boot_first_puts_the_loader_first", &[]),
     ("update_no_slot_boots_the_recovery_stick", &[]),
+    ("update_trial_writes_nothing_of_the_kept_slot", &[]),
     // The boot it delivers is staged as the metal profile stages it, with the
     // swap rehearsal's hold job on it.
     ("bench_loop_drives_a_toyos_machine", &["test_rs_lan_swap_hold"]),
@@ -15643,6 +15645,9 @@ fn run_machine_test(
         }
         "update_no_slot_boots_the_recovery_stick" => {
             common::update::update_no_slot_boots_the_recovery_stick(test_config, c_bins, rust_bins)
+        }
+        "update_trial_writes_nothing_of_the_kept_slot" => {
+            common::update::update_trial_writes_nothing_of_the_kept_slot(test_config, c_bins, rust_bins)
         }
         "bench_loop_drives_a_toyos_machine" => {
             common::bench::bench_loop_drives_a_toyos_machine(test_config, c_bins, rust_bins)

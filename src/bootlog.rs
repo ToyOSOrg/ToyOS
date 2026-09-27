@@ -128,10 +128,14 @@ pub const LOADER_PREVIOUS_LOG: &str = "loader-previous.log";
 /// filesystem: what ties a `logd` file to the image whose boot wrote it.
 pub const MOUNTED_FROM_MEMORY: &str = "root: mounted read-only from memory at";
 
-/// The loader's line naming itself by the SHA-256 of its file: the one part of
-/// a machine no update installs, which a bench's host holds a delivered
-/// image's loader to.
-pub const LOADER_IS: &str = "Loader: the file firmware loaded hashes to";
+/// The loader's line naming its ESP's removable-media loader by its SHA-256:
+/// the one part of a machine no update installs, which a bench's host holds a
+/// delivered image's loader to.
+pub const LOADER_IS: &str = "Loader: the removable-media file on this ESP hashes to";
+
+/// The loader's line naming the boot parameter it hands the kernel, whose
+/// `root=` names the ROOT that boot mounts.
+pub const BOOT_PARAMETER: &str = "Boot parameter:";
 
 /// That file's first line and its last.
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
@@ -635,9 +639,9 @@ mod tests {
         let wanted = [
             ("bootloader/src/loaderlog.rs", format!("cstr16!(\"{LOADER_LOG}\")")),
             ("bootloader/src/loaderlog.rs", format!("cstr16!(\"{LOADER_PREVIOUS_LOG}\")")),
-            ("kernel/src/params.rs", format!("\"{}\"", toyos_update::policy::ONCE)),
             ("kernel/src/rootfs.rs", format!("\"{MOUNTED_FROM_MEMORY}\"")),
             ("bootloader/src/main.rs", format!("\"{LOADER_IS}\"")),
+            ("bootloader/src/main.rs", format!("\"{BOOT_PARAMETER}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_FIRST_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_LAST_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),

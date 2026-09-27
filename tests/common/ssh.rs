@@ -325,10 +325,6 @@ pub const KEY: &str = "sshdcase";
 /// well-formed offer from a key no file names.
 pub const STRANGER_KEY: &str = "sshdcase-stranger";
 
-/// Where the image's `authorized_keys` file lands, ROOT-relative — the guest
-/// reads it at `/system/etc/ssh_authorized_keys`, which `userland/sshd`'s
-/// `AUTHORIZED_KEYS` is the other half of.
-pub const KEYS_ON_ROOT: &str = "etc/ssh_authorized_keys";
 const KEYS_IN_GUEST: &str = "/system/etc/ssh_authorized_keys";
 
 /// The guest test binary run over `exec`. Self-contained — `/tmp` and syscalls,
@@ -363,7 +359,7 @@ pub fn boot_case(
     let options = super::qemu::BootOptions {
         profile: super::qemu::Profile::Headless,
         extra_root_files: vec![(
-            KEYS_ON_ROOT.to_string(),
+            toyos_build::build::AUTHORIZED_ON_ROOT.to_string(),
             identity.authorized_line().into_bytes(),
         )],
         ssh_port: Some(super::qemu::free_host_port()),

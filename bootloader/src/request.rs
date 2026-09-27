@@ -13,7 +13,9 @@
 //! variables ([`firmware`]) in whichever pass comes next, the report pass
 //! after a handover included; a slot to boot once ([`once`]) only in a pass
 //! that goes on to boot a slot, so the report pass that ends a chain leaves it
-//! for the pass after.
+//! for the pass after. The slot booted once is left on the table as a trial
+//! (`Next::Trial`), which keeps the slot the table marks from any grant while
+//! it runs, and the next pass that chooses a slot takes the trial away.
 
 use toyos_update::slots::{Next, Request, Table, Which};
 use uefi::prelude::*;
@@ -46,11 +48,11 @@ fn table(handle: Handle, system_table: &SystemTable<Boot>) -> Result<(Disk<'_>, 
 fn consume(disk: &mut Disk<'_>, at: &TableAt, next: Table, what: &str) -> bool {
     match disk.write_table(at, next) {
         Ok(()) => {
-            println!("{HEAD} {what} is taken off the slot table before it is acted on");
+            println!("{HEAD} {what} is taken off the slot table");
             true
         }
         Err(why) => {
-            println!("{HEAD} {what} stands unacted on, because taking it off the slot table failed: {why}");
+            println!("{HEAD} {what} stands, and is not acted on, because taking it off the slot table failed: {why}");
             false
         }
     }
@@ -74,7 +76,7 @@ pub fn firmware(handle: Handle, system_table: &SystemTable<Boot>, ours: Option<&
     if !asked.first && esp.is_none() {
         return Fired::Nothing;
     }
-    let left = Request { first: false, next: asked.next.filter(|n| matches!(n, Next::Slot(_))) };
+    let left = Request { first: false, next: asked.next.filter(|n| !matches!(n, Next::Esp(_))) };
     let what = match (asked.first, esp) {
         (true, Some(_)) => "the boot order and a boot of another ESP",
         (true, None) => "the boot order",
@@ -128,17 +130,21 @@ pub fn firmware(handle: Handle, system_table: &SystemTable<Boot>, ours: Option<&
     }
 }
 
-/// The slot the running system asked to boot once, taken off the table; or
-/// `None` where it asked none, or where taking it off failed — a trial that
-/// could not be made a trial is not booted at all.
+/// The slot the running system asked to boot once, left on the table as its
+/// trial; or `None` where it asked none, or where the table would not take
+/// the trial — a trial that could not be made a trial is not booted at all.
+/// A trial the last boot ran is over, and is taken away here.
 pub fn once(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Which> {
     let (mut disk, at) = match table(handle, system_table) {
         Ok(read) => read,
         // `slot::choose` reads the same table next and refuses by name.
         Err(_) => return None,
     };
-    let Some(Next::Slot(which)) = at.table.request.next else { return None };
-    let left = Request { next: None, ..at.table.request };
-    let what = alloc::format!("a boot of slot {} once", which.letter());
-    consume(&mut disk, &at, Table { request: left, ..at.table }, &what).then_some(which)
+    let (left, what, boots) = match at.table.request.next {
+        Some(Next::Slot(which)) => (Some(Next::Trial(which)), alloc::format!("a boot of slot {} once", which.letter()), Some(which)),
+        Some(Next::Trial(which)) => (None, alloc::format!("slot {}'s trial, which is over,", which.letter()), None),
+        _ => return None,
+    };
+    let left = Table { request: Request { next: left, ..at.table.request }, ..at.table };
+    consume(&mut disk, &at, left, &what).then_some(boots).flatten()
 }

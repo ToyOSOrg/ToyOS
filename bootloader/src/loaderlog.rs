@@ -60,33 +60,15 @@ const NAME: &CStr16 = cstr16!("loader.log");
 /// of that boot's passes, for a host to read over ssh.
 const PREVIOUS: &CStr16 = cstr16!("loader-previous.log");
 
-/// The most of the last chain's file that is kept. A report pass writes the
-/// black box's tail, which is bounded; a file past this is not one this loader
-/// wrote, and is left behind rather than copied.
-const PREVIOUS_BYTES: usize = 4 << 20;
-
 /// Copy `loader.log` to [`PREVIOUS`], replacing it, before the file is cut:
 /// the chain that file holds is over, and this keeps exactly one of them.
+///
+/// **The old [`PREVIOUS`] goes first**, so a copy refused at any step leaves
+/// no file at all rather than a chain before the one that just ended.
 ///
 /// Said on the console only, as [`refused`] is, where it cannot: the new file
 /// is not open yet.
 fn keep_previous(root: &mut Directory) {
-    let file = match root.open(NAME, FileMode::Read, FileAttribute::empty()) {
-        Ok(file) => file,
-        Err(e) if e.status() == Status::NOT_FOUND => return,
-        Err(e) => return refused_previous(format_args!("{NAME} would not open ({e})")),
-    };
-    let Some(mut file) = file.into_regular_file() else {
-        return refused_previous(format_args!("{NAME} is a directory"));
-    };
-    let mut bytes = alloc::vec![0u8; PREVIOUS_BYTES + 1];
-    let read = match file.read(&mut bytes) {
-        Ok(n) => n,
-        Err(e) => return refused_previous(format_args!("{NAME} would not read ({e})")),
-    };
-    if read > PREVIOUS_BYTES {
-        return refused_previous(format_args!("{NAME} is past {PREVIOUS_BYTES} bytes"));
-    }
     match root.open(PREVIOUS, FileMode::ReadWrite, FileAttribute::empty()) {
         Ok(stale) => {
             if let Err(e) = stale.delete() {
@@ -96,6 +78,14 @@ fn keep_previous(root: &mut Directory) {
         Err(e) if e.status() == Status::NOT_FOUND => {}
         Err(e) => return refused_previous(format_args!("{PREVIOUS} would not open ({e})")),
     }
+    let file = match root.open(NAME, FileMode::Read, FileAttribute::empty()) {
+        Ok(file) => file,
+        Err(e) if e.status() == Status::NOT_FOUND => return,
+        Err(e) => return refused_previous(format_args!("{NAME} would not open ({e})")),
+    };
+    let Some(mut file) = file.into_regular_file() else {
+        return refused_previous(format_args!("{NAME} is a directory"));
+    };
     let kept = match root.open(PREVIOUS, FileMode::CreateReadWrite, FileAttribute::empty()) {
         Ok(kept) => kept,
         Err(e) => return refused_previous(format_args!("{PREVIOUS} would not be created ({e})")),
@@ -103,9 +93,19 @@ fn keep_previous(root: &mut Directory) {
     let Some(mut kept) = kept.into_regular_file() else {
         return refused_previous(format_args!("{PREVIOUS} is a directory"));
     };
-    let written = kept.write(&bytes[..read]).map_err(|e| e.status()).and_then(|()| kept.flush().map_err(|e| e.status()));
-    if let Err(status) = written {
-        refused_previous(format_args!("{PREVIOUS} would not write ({status:?})"));
+    let mut chunk = alloc::vec![0u8; 64 << 10];
+    loop {
+        let read = match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return refused_previous(format_args!("{NAME} would not read ({e})")),
+        };
+        if let Err(e) = kept.write(&chunk[..read]) {
+            return refused_previous(format_args!("{PREVIOUS} would not write ({:?})", e.status()));
+        }
+    }
+    if let Err(e) = kept.flush() {
+        refused_previous(format_args!("{PREVIOUS} would not flush ({e})"));
     }
 }
 

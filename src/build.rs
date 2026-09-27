@@ -2010,10 +2010,9 @@ pub const BENCH_CONFIG: &str = "tests/benchcase";
 /// installed one — `/system/etc/ssh_authorized_keys` in the guest.
 pub const AUTHORIZED_ON_ROOT: &str = "etc/ssh_authorized_keys";
 
-/// The room the bench's idle slot has for a delivered image's ROOT: past the
-/// largest metal image's, and a small part of a stick. A larger ROOT is
-/// refused by `update` by name, so this is a bound that says so and never one
-/// that cuts.
+/// The room the bench's idle slot has for a delivered image's ROOT: a small
+/// part of a stick. A larger ROOT is refused by `update` by name, so this is a
+/// bound that says so and never one that cuts.
 pub const BENCH_ROOT_ROOM: u64 = 1 << 30;
 
 /// **The bench image**: `config` built as a test image is, signed with this
@@ -2029,17 +2028,31 @@ pub const BENCH_ROOT_ROOM: u64 = 1 << 30;
 /// and only an image built with this — by the one host that holds the runner
 /// key's other half — carries any: no image anything publishes does.
 pub fn bench_image(root: &Path, config: &Path, authorized: &str, version: u64, room: u64, quiet: bool) -> Result<Vec<u8>, String> {
+    let keys = bench_keys(authorized, crate::signing::key().whose())?;
+    let mut plan = Plan::new(crate::arch::Arch::X86_64, &config.join("system.toml"), &[], &[]);
+    plan.version = version;
+    plan.second = Some(image::SecondSlot { root_bytes: room });
+    Ok(build_test_image(root, &plan, quiet, &[(AUTHORIZED_ON_ROOT.to_string(), keys.into_bytes())]))
+}
+
+/// The bench's `authorized_keys` file, or why there is none: ed25519 public
+/// keys and nothing else, one per line — and **never under the owner's key**,
+/// which would make the bench a valid update for every owner machine, and the
+/// runner key authorized there.
+fn bench_keys(authorized: &str, signer: &crate::signing::Whose) -> Result<String, String> {
+    if let crate::signing::Whose::Owner(path) = signer {
+        return Err(format!(
+            "a bench is signed with this checkout's throwaway key, and this run signs with the owner's ({})",
+            path.display()
+        ));
+    }
     let lines: Vec<&str> = authorized.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.is_empty() || lines.iter().any(|l| !l.starts_with("ssh-ed25519 ")) {
         return Err(format!(
             "a bench authorizes ed25519 public keys and nothing else, one per line, and {authorized:?} is not that"
         ));
     }
-    let mut plan = Plan::new(crate::arch::Arch::X86_64, &config.join("system.toml"), &[], &[]);
-    plan.version = version;
-    plan.second = Some(image::SecondSlot { root_bytes: room });
-    let staged = [(AUTHORIZED_ON_ROOT.to_string(), format!("{}\n", lines.join("\n")).into_bytes())];
-    Ok(build_test_image(root, &plan, quiet, &staged))
+    Ok(format!("{}\n", lines.join("\n")))
 }
 
 /// The image `ssh … update` takes, built from a plan as a test image is and
@@ -3759,5 +3772,20 @@ mod tests {
     #[test]
     fn a_kernel_of_any_other_feature_set_is_not_judged() {
         assert_eq!(judge_entry_window(&SCHED_CHECK_KERNEL.join(","), b"not an ELF"), Ok(()));
+    }
+
+    /// **No bench under the owner's key**: `--owner-key` or `--update-image`
+    /// beside `--bench-image` would sign a valid update for every owner
+    /// machine that authorizes the runner key, and is refused; so is a key
+    /// file holding anything but ed25519 public keys.
+    #[test]
+    fn a_bench_is_throwaway_signed_and_authorizes_ed25519_keys_alone() {
+        use crate::signing::Whose;
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA runner\n\n";
+        assert_eq!(bench_keys(key, &Whose::Throwaway), Ok("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA runner\n".to_string()));
+        let owner = bench_keys(key, &Whose::Owner(PathBuf::from("/o/key"))).unwrap_err();
+        assert!(owner.contains("owner") && owner.contains("/o/key"), "{owner}");
+        assert!(bench_keys("ssh-rsa AAAA runner\n", &Whose::Throwaway).is_err());
+        assert!(bench_keys("\n", &Whose::Throwaway).is_err());
     }
 }

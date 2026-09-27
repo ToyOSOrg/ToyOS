@@ -11,7 +11,7 @@
 //! ```text
 //! magic "TOYOSLOT" | format u32 | marked u32 | sequence u64
 //! then per slot: present u32 | 0 u32 | boot guid [16] | root guid [16] | version u64
-//! then the request: next u32 (0 none, 1 a slot, 2 an ESP) | slot u32 | esp guid [16]
+//! then the request: next u32 (0 none, 1 a slot, 2 an ESP, 3 a slot on trial) | slot u32 | esp guid [16]
 //!                   | first u32 (0 or 1)
 //! then crc32 u32 over everything before it                   (TABLE_BYTES)
 //! ```
@@ -96,12 +96,19 @@ impl Which {
     }
 }
 
-/// What to boot once, at the next pass that boots anything, and never again.
+/// What to boot once, at the next pass that boots anything, and never again;
+/// or the slot the pass before booted so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Next {
     /// One of this disk's slots, whether or not it is the marked one: the
     /// bench's trial of an image the machine does not keep.
     Slot(Which),
+    /// The slot the pass before booted once, on the running system's request:
+    /// booted by no pass, and **while it stands the slot the table marks is
+    /// granted to nobody** ([`grant`]) — the image the machine keeps is not a
+    /// trial's to overwrite. The first pass that chooses a slot after it takes
+    /// it away.
+    Trial(Which),
     /// The EFI system partition with this unique GUID, on any disk the
     /// firmware sees, by its removable-media path: the firmware's `BootNext`,
     /// which is how the owner reaches another stick without a keyboard.
@@ -168,6 +175,7 @@ impl core::fmt::Display for Unreadable {
 const NEXT_NONE: u32 = 0;
 const NEXT_SLOT: u32 = 1;
 const NEXT_ESP: u32 = 2;
+const NEXT_TRIAL: u32 = 3;
 
 impl Table {
     pub fn slot(&self, which: Which) -> Option<Slot> {
@@ -190,17 +198,15 @@ impl Table {
             }
         }
         let at = REQUEST_AT;
-        match self.request.next {
-            None => {}
-            Some(Next::Slot(which)) => {
-                out[at..at + 4].copy_from_slice(&NEXT_SLOT.to_le_bytes());
-                out[at + 4..at + 8].copy_from_slice(&(which.index() as u32).to_le_bytes());
-            }
-            Some(Next::Esp(guid)) => {
-                out[at..at + 4].copy_from_slice(&NEXT_ESP.to_le_bytes());
-                out[at + 8..at + 24].copy_from_slice(&guid);
-            }
-        }
+        let (kind, slot, guid) = match self.request.next {
+            None => (NEXT_NONE, 0, [0; 16]),
+            Some(Next::Slot(which)) => (NEXT_SLOT, which.index() as u32, [0; 16]),
+            Some(Next::Trial(which)) => (NEXT_TRIAL, which.index() as u32, [0; 16]),
+            Some(Next::Esp(guid)) => (NEXT_ESP, 0, guid),
+        };
+        out[at..at + 4].copy_from_slice(&kind.to_le_bytes());
+        out[at + 4..at + 8].copy_from_slice(&slot.to_le_bytes());
+        out[at + 8..at + 24].copy_from_slice(&guid);
         out[at + 24..at + 28].copy_from_slice(&u32::from(self.request.first).to_le_bytes());
         let crc = crc32(&out[..BODY_BYTES]);
         out[BODY_BYTES..TABLE_BYTES].copy_from_slice(&crc.to_le_bytes());
@@ -250,12 +256,15 @@ impl Table {
         let next = match kind {
             NEXT_NONE if slot == 0 && guid == [0; 16] => None,
             NEXT_NONE => return Err(Unreadable::Request("asks nothing next and names something to boot")),
-            NEXT_SLOT if guid != [0; 16] => return Err(Unreadable::Request("names a slot and an ESP at once")),
-            NEXT_SLOT => match slot {
-                0 if slots[0].is_some() => Some(Next::Slot(Which::A)),
-                1 if slots[1].is_some() => Some(Next::Slot(Which::B)),
-                _ => return Err(Unreadable::Request("names a slot the table does not carry")),
-            },
+            NEXT_SLOT | NEXT_TRIAL if guid != [0; 16] => return Err(Unreadable::Request("names a slot and an ESP at once")),
+            NEXT_SLOT | NEXT_TRIAL => {
+                let which = match slot {
+                    0 if slots[0].is_some() => Which::A,
+                    1 if slots[1].is_some() => Which::B,
+                    _ => return Err(Unreadable::Request("names a slot the table does not carry")),
+                };
+                Some(if kind == NEXT_SLOT { Next::Slot(which) } else { Next::Trial(which) })
+            }
             NEXT_ESP if slot != 0 => return Err(Unreadable::Request("names an ESP and a slot at once")),
             NEXT_ESP if guid == [0; 16] => return Err(Unreadable::Request("names an ESP by no GUID")),
             NEXT_ESP => Some(Next::Esp(guid)),
@@ -308,6 +317,9 @@ pub enum NoIdle {
     NotThisBoot,
     /// The idle slot names a partition that is no idle slot's.
     Stray { part: &'static str, why: Stray },
+    /// The machine runs `running` on trial, and the idle slot is the one the
+    /// table marks: the image the machine keeps.
+    Trial { running: Which, kept: Which },
 }
 
 /// Why a partition the idle slot names is not one a grant may claim.
@@ -330,6 +342,13 @@ impl core::fmt::Display for NoIdle {
         match self {
             Self::OneSlot => write!(f, "the slot table carries one slot, and the machine runs it"),
             Self::NotThisBoot => write!(f, "neither slot's ROOT is the one this boot runs"),
+            Self::Trial { running, kept } => write!(
+                f,
+                "slot {} runs on trial, and the idle slot is {}, the image the machine keeps: nothing writes it until {} runs",
+                running.letter(),
+                kept.letter(),
+                kept.letter()
+            ),
             Self::Stray { part, why } => {
                 let why = match why {
                     Stray::Running => "is one of the running slot's",
@@ -366,9 +385,13 @@ pub struct Kinds {
 /// **The table is the grantee's to write**, so nothing it names is taken on
 /// its word: each of the idle slot's two partitions must be on the running
 /// ROOT's disk, of its kind's type, and neither of the running slot's — else
-/// the holder of one grant could name its next one anywhere.
+/// the holder of one grant could name its next one anywhere. And nothing is granted while
+/// the running slot is on trial ([`Next::Trial`]).
 pub fn grant(table: &Table, running: &Listed, listed: &[Listed], kinds: Kinds) -> Result<(Which, Slot), NoIdle> {
     let (idle, slot) = idle(table, &running.unique_guid)?;
+    if table.request.next == Some(Next::Trial(idle.other())) {
+        return Err(NoIdle::Trial { running: idle.other(), kept: idle });
+    }
     let runs = table.slot(idle.other()).expect("`idle` found the running slot in the table");
     for (part, guid, kind) in [("volume", slot.boot, kinds.boot), ("ROOT", slot.root, kinds.root)] {
         let mut named = listed.iter().filter(|p| p.unique_guid == guid);
@@ -442,6 +465,7 @@ mod tests {
             Request { next: Some(Next::Slot(Which::B)), first: false },
             Request { next: Some(Next::Slot(Which::A)), first: true },
             Request { next: Some(Next::Esp([0x5A; 16])), first: false },
+            Request { next: Some(Next::Trial(Which::B)), first: true },
             Request { next: None, first: true },
         ] {
             let asked = Table { request, ..t };
@@ -454,7 +478,7 @@ mod tests {
             Table::decode(&resealed(block))
         };
         let refused = |why| Err(Unreadable::Request(why));
-        assert_eq!(bent(&|b| b[at] = 3), refused("asks for a kind of boot there is none of"));
+        assert_eq!(bent(&|b| b[at] = 4), refused("asks for a kind of boot there is none of"));
         assert_eq!(bent(&|b| b[at + 4] = 2), refused("names a slot the table does not carry"));
         assert_eq!(bent(&|b| b[at + 8] = 1), refused("names a slot and an ESP at once"));
         assert_eq!(bent(&|b| b[at + 24] = 2), refused("asks for the boot order with a word that is neither 0 nor 1"));
@@ -555,5 +579,10 @@ mod tests {
         let mut twice = listed.to_vec();
         twice.push(at(1, KINDS.boot, [3; 16]));
         assert_eq!(grant(&t, &running, &twice, KINDS), stray("volume", Stray::Duplicate), "a GUID two disks carry");
+        // **A trial writes nothing**: while the running slot is on trial, the
+        // idle one is the image the machine keeps; a trial of the other is over.
+        let trial = |which| Table { request: Request { next: Some(Next::Trial(which)), first: false }, ..t };
+        assert_eq!(grant(&trial(Which::A), &running, &listed, KINDS), Err(NoIdle::Trial { running: Which::A, kept: Which::B }));
+        assert_eq!(grant(&trial(Which::B), &running, &listed, KINDS).map(|(w, _)| w), Ok(Which::B));
     }
 }

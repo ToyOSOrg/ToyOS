@@ -8,25 +8,18 @@
 //! boots at the next reboot and never again (`toyos_update::slots::Request`);
 //! the boot runs its job list and hands the machine back, and the machine
 //! comes back as the bench, from which the boot's files are read over the
-//! same sshd. So every Ubuntu step of [`crate::metal`]'s old path has a ToyOS
-//! one here:
-//!
-//! | Ubuntu                                  | here                                          |
-//! |-----------------------------------------|-----------------------------------------------|
-//! | `wipefs` and `dd` of the stick           | `update --once` of the marked slot's sections |
-//! | `efibootmgr --bootnext`                  | the loader's own once, asked by `update`      |
-//! | `dd` and `mount` of the log partition    | `/log` fetched over sftp in one session       |
-//! | `reboot`, `true`, `date -u +%s`          | `reboot`, the runner key taken, `date -u +%s` |
-//! | the stick's `/sys` identity              | `update`'s grant — the idle slot of the disk  |
-//! |                                          | the machine runs from — and its loader's hash |
-//! | waiting for Ubuntu's sshd                | waiting for `/log` to come back over the key  |
+//! same sshd.
 //!
 //! **The judges are the old path's, over the same two texts**: the loader's
 //! passes of this boot — kept by the pass after them as `loader-previous.log`,
 //! because the bench's own pass starts a new `loader.log` — and every `logd`
 //! file of this boot, told from the bench's own by the ROOT this image mounts.
 //! Each is held to this image before it is judged: the loader's by the signed
-//! header's digest it verified, the kernel's by the ROOT UUID it names. A
+//! header's digest it verified, the kernel's by the ROOT UUID it names and by
+//! no name `/log` held before the delivery. **The machine is back only once
+//! its `loader.log` is not the one fetched before the reboot**: every pass
+//! starts that file or appends to it, so the same text is the bench that was
+//! asked to reboot and has not yet. A
 //! volume's raw bytes are the one thing not read: the bench has the log
 //! partition mounted, so no read of it here is a quiescent volume, and
 //! `--fat32-check` is the old path's alone
@@ -53,9 +46,6 @@ const PROBE_SECS: u64 = 10;
 
 /// Between two asks of a machine this loop is waiting on.
 const ASK_EVERY: Duration = Duration::from_secs(2);
-
-/// What `update` says of an image it wrote to be booted once.
-const ONCE: &str = "it boots once at the next reboot";
 
 /// Where the machine's files are, on the machine.
 const LOG_DIR: &str = "/log";
@@ -160,13 +150,14 @@ impl Bench {
         Err(Refusal::Silent { what, secs })
     }
 
-    /// Wait until the machine's `/log` comes back over this key, within
-    /// `secs`: the bench taking the runner key and the boot's files, in the
-    /// one session. How long it took, and the files.
-    fn wait_for_the_log(&self, secs: u64, what: &'static str, into: &Path) -> Result<(u64, Logs), Refusal> {
+    /// Wait until the machine's `/log` comes back over this key with a
+    /// `loader.log` that is not `before`, within `secs`: the bench taking the
+    /// runner key and the boot's files, in the one session. How long it took,
+    /// and the files.
+    fn wait_for_the_log(&self, secs: u64, what: &'static str, into: &Path, before: &str) -> Result<(u64, Logs), Refusal> {
         let began = std::time::Instant::now();
         while began.elapsed().as_secs() < secs {
-            if let Ok(logs) = self.fetch(into) {
+            if let Some(logs) = self.fetch(into).ok().filter(|logs| rebooted(logs, before)) {
                 return Ok((began.elapsed().as_secs(), logs));
             }
             std::thread::sleep(ASK_EVERY);
@@ -211,13 +202,20 @@ fn wire(bench: &Bench, logs: &Logs, nic: &str) -> Result<Wire, Refusal> {
     let std::net::IpAddr::V4(addr) = at.ip() else {
         return Err(bad(format!("the bench answers at {at}, which is no IPv4 address")));
     };
-    let newest = *logs.logd().last().ok_or_else(|| bad("the bench's /log holds no file of logd's".to_string()))?;
-    let netd = crate::lan::netd_records(&logs.read(newest)?);
+    // The bench's own boot by the ROOT its pass handed the kernel, never by
+    // a name: a name is the bench's clock, which can step back.
+    let own = logs.read(bootlog::LOADER_LOG)?;
+    let root = own
+        .lines()
+        .find_map(|l| l.split(bootlog::BOOT_PARAMETER).nth(1))
+        .and_then(|param| toyos_abi::boot::root_uuid(param.trim().trim_matches('"')))
+        .ok_or_else(|| bad(format!("the bench's {} names no ROOT", bootlog::LOADER_LOG)))?;
+    let netd = crate::lan::netd_records(&kernel_log(logs, root, &[])?);
     let mac = netd
         .lines()
         .find_map(|line| line.split(crate::lan::MAC).nth(1))
         .map(|rest| rest.split_whitespace().next().unwrap_or_default().to_ascii_lowercase())
-        .ok_or_else(|| bad(format!("the bench's {newest} carries no {:?} record of netd's", crate::lan::MAC)))?;
+        .ok_or_else(|| bad(format!("the bench's own log carries no {:?} record of netd's", crate::lan::MAC)))?;
     let before = metal::unix_now();
     let said = bench.exec("reading the machine's own clock", "date -u +%s").map_err(|e| bad(e.to_string()))?;
     let skew = metal::clock_skew(before, &said, metal::unix_now()).map_err(bad)?;
@@ -230,14 +228,19 @@ fn wire(bench: &Bench, logs: &Logs, nic: &str) -> Result<Wire, Refusal> {
 /// **Told from the bench's own by the ROOT it mounted.** Every boot's first
 /// part names its ROOT's filesystem (`kernel/src/rootfs.rs`), and an image's
 /// ROOT UUID is its own, so a file is this boot's by its content, never by
-/// being the one before the newest.
-fn kernel_log(logs: &Logs, root: &str) -> Result<String, Refusal> {
+/// being the one before the newest. **A boot any of whose names `/log` held
+/// `before` the delivery is an earlier one**: an earlier delivery of the same
+/// image names the same ROOT.
+fn kernel_log(logs: &Logs, root: &str, before: &[String]) -> Result<String, Refusal> {
     let mounted = format!("filesystem {root},");
     let logd = logs.logd();
     let mut stems: Vec<&str> = logd.iter().map(|name| stem(name)).collect();
     stems.dedup();
     for boot in stems.iter().rev() {
         let parts: Vec<&str> = logd.iter().copied().filter(|name| stem(name) == *boot).collect();
+        if parts.iter().any(|part| before.iter().any(|name| name == part)) {
+            continue;
+        }
         let first = logs.read(parts[0])?;
         if !first.lines().any(|l| l.contains(bootlog::MOUNTED_FROM_MEMORY) && l.contains(&mounted)) {
             continue;
@@ -258,6 +261,12 @@ fn stem(name: &str) -> &str {
         Some((stem, part)) if part.len() == 4 && part.bytes().all(|b| b.is_ascii_digit()) => stem,
         _ => bare,
     }
+}
+
+/// Whether a pass has run since `before` was fetched: every pass starts a new
+/// `loader.log` or appends to it.
+fn rebooted(logs: &Logs, before: &str) -> bool {
+    logs.read(bootlog::LOADER_LOG).is_ok_and(|now| now != before)
 }
 
 /// The loader's passes of this boot: the file the bench's own pass kept of
@@ -329,6 +338,7 @@ pub fn run(args: &Args, image: &Path, dir: &Path) -> Result<Option<u64>, Refusal
         stderr: why,
     })?;
     same_loader(&before, &update.loader)?;
+    let before_loader = before.read(bootlog::LOADER_LOG)?;
     let wire = match &args.nic {
         Some(nic) => {
             let wire = wire(&bench, &before, nic)?;
@@ -354,7 +364,7 @@ pub fn run(args: &Args, image: &Path, dir: &Path) -> Result<Option<u64>, Refusal
     let delivered = delivered.map_err(|why| Refusal::Undelivered(format!("`update --once` was not answered: {why}")))?;
     let said = String::from_utf8_lossy(&delivered.stdout).to_string();
     let installed = format!("update: installed version {} in slot", update.version);
-    if delivered.status != Some(0) || !said.contains(&installed) || !said.contains(ONCE) {
+    if delivered.status != Some(0) || !said.contains(&installed) {
         return Err(Refusal::Undelivered(format!("`update --once` ended {:?} saying {}", delivered.status, said.trim())));
     }
     print!("  {said}");
@@ -395,7 +405,7 @@ pub fn run(args: &Args, image: &Path, dir: &Path) -> Result<Option<u64>, Refusal
                 }
             })
         });
-        let back = bench.wait_for_the_log(args.wait_secs, "come back", &after);
+        let back = bench.wait_for_the_log(args.wait_secs, "come back", &after, &before_loader);
         let reached = reaching.map(|thread| {
             thread.join().unwrap_or_else(|_| Err(Refusal::Cable("the thread asking the boot panicked".to_string())))
         });
@@ -427,7 +437,7 @@ pub fn run(args: &Args, image: &Path, dir: &Path) -> Result<Option<u64>, Refusal
     println!("the bench gave back its /log over the runner key {back} s after it went down");
 
     let loader = loader_log(&logs, &update.digest)?;
-    let log = kernel_log(&logs, &update.root)?;
+    let log = kernel_log(&logs, &update.root, &before.names)?;
     print!("{loader}{log}");
     // The stick is the disk the bench booted from, so it was there before the
     // bench could answer: zero, by construction and not by a reading.
@@ -448,7 +458,8 @@ pub fn run(args: &Args, image: &Path, dir: &Path) -> Result<Option<u64>, Refusal
 pub fn take_the_machine(key: &Path, machine: &Machine, wait_secs: u64, scratch: &Path) -> Result<(), Refusal> {
     let bench = Bench::prepare(key, machine, scratch)?;
     println!("waiting for the bench to take the runner key");
-    bench.wait(wait_secs, "come up as the bench", true)?;
+    let (_, before) = bench.wait_for_the_log(wait_secs, "come up as the bench", &scratch.join("before"), "")?;
+    let before = before.read(bootlog::LOADER_LOG)?;
     let said = bench.exec("asking the loader for the boot order", "update --boot-first")?;
     print!("  {said}");
     let at = bench.at()?;
@@ -459,7 +470,7 @@ pub fn take_the_machine(key: &Path, machine: &Machine, wait_secs: u64, scratch: 
     })?;
     println!("  `{}` at {at} answered {asked}", crate::metaltalk::REBOOT);
     bench.wait(metal::GOING_DOWN_SECS, "go down", false)?;
-    let (_, logs) = bench.wait_for_the_log(wait_secs, "come back", &scratch.join("log"))?;
+    let (_, logs) = bench.wait_for_the_log(wait_secs, "come back", &scratch.join("log"), &before)?;
     // The pass that wrote the order ended a chain, so the bench's own pass
     // kept it; the file the bench runs under is the one the order booted.
     let kept = logs.read(bootlog::LOADER_PREVIOUS_LOG)?;
@@ -506,10 +517,36 @@ mod tests {
         let mut names: Vec<String> = files.iter().map(|(n, _)| (*n).to_string()).collect();
         names.push("loader.log".to_string());
         let logs = Logs { dir, names };
-        let text = kernel_log(&logs, "bbbb").expect("a read");
+        let text = kernel_log(&logs, "bbbb", &[]).expect("a read");
         assert!(text.contains("filesystem bbbb,") && text.ends_with("the boot's second part\n"), "{text}");
-        assert_eq!(kernel_log(&logs, "dddd").expect("a read"), "", "a boot that reached no logd");
+        assert_eq!(kernel_log(&logs, "dddd", &[]).expect("a read"), "", "a boot that reached no logd");
         assert!(matches!(logs.read("loader-previous.log"), Err(Refusal::NotThisBoot(_))));
+        // **A name /log held before the delivery is an earlier boot**, even of
+        // this image: a rerun of one image names one ROOT.
+        let before = vec!["2026-09-27-110000_0002.log".to_string()];
+        assert_eq!(kernel_log(&logs, "bbbb", &before).expect("a read"), "", "an earlier delivery's boot");
+    }
+
+    /// **The machine is back only as a machine that ran a pass since**, and
+    /// the passes it kept are this image's only where they name its header:
+    /// the bench still up after `reboot` was asked, and a kept file of an
+    /// earlier boot, are neither.
+    #[test]
+    fn a_readback_is_of_a_pass_since_and_of_this_image() {
+        let scratch = toyos_tmpdir::TempDir::new("back");
+        let dir = scratch.to_path_buf();
+        let digest = [0x5Au8; 32];
+        let mut hex = [0u8; 64];
+        let ours = format!("Slot B: signed header {} verifies\n", toyos_update::hex(&digest, &mut hex));
+        std::fs::write(dir.join(bootlog::LOADER_LOG), "the bench's own pass\n").expect("a staged file");
+        std::fs::write(dir.join(bootlog::LOADER_PREVIOUS_LOG), &ours).expect("a staged file");
+        let names = vec![bootlog::LOADER_LOG.to_string(), bootlog::LOADER_PREVIOUS_LOG.to_string()];
+        let logs = Logs { dir: dir.clone(), names };
+        assert!(!rebooted(&logs, "the bench's own pass\n"), "the same loader.log is the bench not yet rebooted");
+        assert!(rebooted(&logs, "the pass before\n"));
+        assert!(!rebooted(&Logs { dir, names: Vec::new() }, ""), "no loader.log at all");
+        assert_eq!(loader_log(&logs, &digest).expect("this image's passes"), ours);
+        assert!(matches!(loader_log(&logs, &[0x5B; 32]), Err(Refusal::NotThisBoot(_))), "an earlier boot's passes");
     }
 
     /// **A bench under another loader takes no image**: the line its pass

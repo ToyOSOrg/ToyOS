@@ -6,8 +6,7 @@
 //! bench — and each boot is delivered to it and read back over its own sshd
 //! ([`crate::metalbench`]). `--via-ubuntu` is the old path this file carries
 //! the rest of, until the installer puts ToyOS on the NVMe: Ubuntu flashes
-//! the stick and reads the log partition off it. A run takes the path it
-//! names and refuses every flag the other alone can carry out.
+//! the stick and reads the log partition off it.
 //!
 //! The old path runs on the development host and reaches Ubuntu over `ssh`.
 //! [`Target::words`] is the one place a root command line is written — the
@@ -1563,10 +1562,6 @@ declare_flags!(METAL = {
     RESIDENT = "--resident", None;
 });
 
-/// The flags that reach the machine through Ubuntu, and nothing else can mean
-/// anything: each is refused without [`VIA_UBUNTU`] rather than ignored.
-const UBUNTUS: &[&Flag] = &[&INSTALL_SUDOERS, &FAT32_CHECK, &DEVICE, &HOST, &RESIDENT];
-
 /// The flags a swap of a running machine's service refuses beside it: each
 /// describes a boot the swap does not judge. `--image` is not among them: on
 /// the bench a swapping boot is delivered and judged like any other, and the
@@ -1637,8 +1632,7 @@ pub struct Args {
     /// **The old path, named**: flash the stick through Ubuntu, choose the
     /// next boot with `efibootmgr` and read the log partition off the stick.
     /// Absent is the machine running ToyOS and nothing else
-    /// ([`crate::metalbench`]). One flag and no fallback: a run takes the path
-    /// it names or refuses, and this flag goes when the T14 has no Ubuntu.
+    /// ([`crate::metalbench`]). This flag goes when the T14 has no Ubuntu.
     pub via_ubuntu: bool,
     /// **Flash a bench image and hand the machine to it** (`--via-ubuntu`
     /// only): the image is armed with nothing, boots once through Ubuntu's
@@ -1694,38 +1688,6 @@ impl Args {
             resident: METAL.present(args, &RESIDENT),
             machine: Machine::t14(),
         };
-        // **One path per run, named.** A flag that only Ubuntu can carry out,
-        // on a run that reaches a ToyOS machine, is refused rather than
-        // dropped.
-        if !out.via_ubuntu {
-            let ubuntus: Vec<&str> = line
-                .seen
-                .iter()
-                .map(|seen| seen.flag.name)
-                .filter(|name| UBUNTUS.iter().any(|flag| flag.name == *name))
-                .collect();
-            if !ubuntus.is_empty() {
-                return Err(Refusal::Usage(format!(
-                    "{} reach the machine through Ubuntu, and this run reaches a machine that runs \
-                     ToyOS; name --via-ubuntu for the old path",
-                    ubuntus.join(" and ")
-                )));
-            }
-        }
-        if out.via_ubuntu && out.swap.is_some() {
-            return Err(Refusal::Usage(
-                "--swap asks a running ToyOS over its own sshd, and --via-ubuntu names the path that \
-                 flashes through Ubuntu; a swap has no Ubuntu half"
-                    .to_string(),
-            ));
-        }
-        if out.resident && (out.readback.is_some() || out.talk.is_some() || out.nic.is_some()) {
-            return Err(Refusal::Usage(
-                "--resident hands the machine to a bench image and judges no boot, so --readback, \
-                 --talk and --nic describe a boot it will not judge"
-                    .to_string(),
-            ));
-        }
         if let Some(host) = value(&HOST) {
             let (user, machine) = host.split_once('@').ok_or_else(|| {
                 Refusal::Usage(format!("--host wants <user>@<machine>, not {host:?}"))
@@ -2747,7 +2709,7 @@ mod tests {
     /// with no job list and no bound.
     #[test]
     fn installing_the_rule_is_not_also_a_boot() {
-        let alone = ["--via-ubuntu", "--install-sudoers", "/tmp/pw"].map(String::from);
+        let alone = ["--install-sudoers", "/tmp/pw"].map(String::from);
         let args = Args::parse(&alone).expect("installing the rule alone");
         assert!(args.install_sudoers.is_some());
         assert!(args.about_a_boot.is_empty());
@@ -2761,7 +2723,7 @@ mod tests {
             vec!["--nic", "0000:00:1f.6"],
             vec!["--talk", "/tmp/k"],
         ] {
-            let mut words = vec!["--via-ubuntu".to_string(), "--install-sudoers".to_string(), "/tmp/pw".to_string()];
+            let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
             words.extend(flag.iter().map(|w| (*w).to_string()));
             let refusal = Args::parse(&words).unwrap_err();
             let said = refusal.to_string();
@@ -2773,7 +2735,7 @@ mod tests {
 
         // The flags that say *which machine* are not a boot, and the rule needs
         // them: an install against another host or key is still an install.
-        let hosted = ["--via-ubuntu", "--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
+        let hosted = ["--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
             .map(String::from);
         assert!(Args::parse(&hosted).is_ok());
     }
@@ -2834,41 +2796,6 @@ mod tests {
         assert!(Args::parse(&bent).unwrap_err().to_string().contains("no service"));
     }
 
-    /// **The old path is one flag and nothing falls back to it**: every flag
-    /// only Ubuntu can carry out is refused by name on a run that reaches a
-    /// machine running ToyOS, a swap has no Ubuntu half, a bench is handed the
-    /// machine by nothing but the old path and judged by nothing, and a boot of
-    /// a machine running ToyOS is read into a readback or not run.
-    #[test]
-    fn the_ubuntu_path_is_named_and_nothing_falls_back_to_it() {
-        for flag in [
-            vec!["--install-sudoers", "/tmp/pw"],
-            vec!["--fat32-check"],
-            vec!["--device", "/dev/sdb"],
-            vec!["--host", "t14@t14"],
-            vec!["--resident"],
-        ] {
-            let words: Vec<String> = flag.iter().map(|w| (*w).to_string()).collect();
-            let said = Args::parse(&words).unwrap_err().to_string();
-            assert!(said.contains(flag[0]) && said.contains("--via-ubuntu"), "{said}");
-            let mut named = vec!["--via-ubuntu".to_string()];
-            named.extend(words);
-            assert!(Args::parse(&named).is_ok(), "{flag:?} beside --via-ubuntu");
-        }
-        let swap = ["--via-ubuntu", "--swap", "netd", "--binary", "n", "--talk", "/tmp/k", "--readback", "/tmp/r"]
-            .map(String::from);
-        assert!(Args::parse(&swap).unwrap_err().to_string().contains("no Ubuntu half"));
-        for beside in [vec!["--readback", "/tmp/r"], vec!["--nic", "0000:00:1f.6"]] {
-            let mut words = vec!["--via-ubuntu", "--resident", "--image", "b.img"];
-            words.extend(beside.iter().copied());
-            let words: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();
-            assert!(Args::parse(&words).unwrap_err().to_string().contains("judges no boot"), "{beside:?}");
-        }
-        let unread = ["--image", "x.img"].map(String::from);
-        let refusal = run(&Args::parse(&unread).expect("a boot of the bench")).unwrap_err();
-        assert!(refusal.to_string().contains("--readback"), "{refusal}");
-        assert!(!refusal.about_the_boot());
-    }
 
     /// **There is nothing to fall through to.** A default image was what let the
     /// fall-through reach a disk at all; a command line that names none is
@@ -3431,7 +3358,7 @@ mod tests {
         assert_eq!(args.wait_secs, return_secs());
         assert!(!args.dry_run);
 
-        let words: Vec<String> = ["--via-ubuntu", "--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
+        let words: Vec<String> = ["--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
             .iter()
             .map(|w| (*w).to_string())
             .collect();
@@ -3441,9 +3368,9 @@ mod tests {
         assert_eq!(args.target.user, "runner");
         assert_eq!(args.target.host, "box");
 
-        let nvme = ["--via-ubuntu", "--device", "/dev/nvme0n1"].map(String::from);
+        let nvme = ["--device".to_string(), "/dev/nvme0n1".to_string()];
         assert_eq!(Args::parse(&nvme).unwrap().target.node.whole(), "/dev/nvme0n1");
-        let part = ["--via-ubuntu", "--device", "/dev/nvme0n1p2"].map(String::from);
+        let part = ["--device".to_string(), "/dev/nvme0n1p2".to_string()];
         assert_eq!(Args::parse(&part), Err(Refusal::Node("/dev/nvme0n1p2".to_string())));
         assert!(matches!(Args::parse(&["--image".to_string()]), Err(Refusal::Usage(_))));
         assert!(matches!(Args::parse(&["--flash".to_string()]), Err(Refusal::Usage(_))));

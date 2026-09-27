@@ -2439,6 +2439,9 @@ pub struct BootOptions {
     /// sector, through QEMU's `blkdebug` under the stick's raw format: a disk
     /// error at a place the test chose, which no well-formed image can stage.
     pub stick_read_error: Option<u64>,
+    /// The boot stick attached read-only: every write the guest makes to it
+    /// fails, the loader's among them.
+    pub stick_readonly: bool,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.
     ///
@@ -2566,6 +2569,7 @@ impl Default for BootOptions {
             usb_images: Vec::new(),
             usb_pcap: None,
             stick_read_error: None,
+            stick_readonly: false,
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
@@ -4485,8 +4489,9 @@ fn qemu_command(
             // exits, so the staged image is never written and the boot after it
             // starts where this one did. A copy of the image would do the same
             // and costs 180 MB of disk per boot; this costs nothing.
-            match &options.boot_image {
-                Some(Staged::Pristine(_)) => ",snapshot=on",
+            match (&options.boot_image, options.stick_readonly) {
+                (_, true) => ",readonly=on",
+                (Some(Staged::Pristine(_)), false) => ",snapshot=on",
                 _ => "",
             }
         ));

@@ -9,6 +9,8 @@ toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
 # The format, the verifier and the slot table the loader reads the same way.
 toyos-update = { path = "../../toyos-update" }
+# The GUID `--boot-next` names, read as the GPT tools print it.
+toyos-gpt = { path = "../../toyos-gpt" }
 # A slot's volume is FAT, written with the driver the kernel mounts FAT with.
 toyos-fat32 = { path = "../../toyos-fat32" }
 # ROOT is hashed as it streams onto its partition, never held whole.
