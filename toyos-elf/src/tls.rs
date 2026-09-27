@@ -126,14 +126,17 @@ impl Static {
     }
 
     /// A static-TLS datum's initial-exec offset from the thread pointer: psABI
-    /// `S + A - tp`, where `module_addr` is `S` (its module's `base_offset`
-    /// plus the datum's offset) from `tls_start`. Every `TPOFF` branch passes
-    /// the addend here, so none can drop `A`.
-    pub fn tpoff(self, module_addr: u64, addend: i64) -> i64 {
-        let from_start = module_addr as i64 + addend;
+    /// `S + A - tp`, for the datum `at` (`S + A`, already inside its module's
+    /// segment) in the module placed `base_offset` bytes past `tls_start`.
+    ///
+    /// `None` for a sum no `i64` holds: every input is a file's number or a
+    /// sum of them, and the answer is a refusal of the image, never a wrap.
+    pub fn tpoff(self, base_offset: usize, at: TlsOffset) -> Option<i64> {
+        let from_start = u64::try_from(base_offset).ok()?.checked_add(at.get())?;
+        let from_start = i64::try_from(from_start).ok()?;
         match self.variant {
-            Variant::II => from_start - self.total_memsz as i64,
-            Variant::I => from_start + self.gap() as i64,
+            Variant::II => from_start.checked_sub(i64::try_from(self.total_memsz).ok()?),
+            Variant::I => from_start.checked_add(i64::try_from(self.gap()).ok()?),
         }
     }
 
@@ -141,6 +144,27 @@ impl Static {
     /// data: `align_up(16, p_align)` of that module, the linker's own.
     fn gap(self) -> usize {
         self.first_align.max(16)
+    }
+}
+
+/// `S + A` inside one module's TLS segment, `0..=p_memsz`: made only by
+/// [`TlsOffset::of`].
+///
+/// The end is inclusive for the reason [`crate::Extent::offset`]'s is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TlsOffset(u64);
+
+impl TlsOffset {
+    /// `value + addend`, when it lies inside a segment of `memsz` bytes.
+    pub const fn of(value: u64, addend: i64, memsz: u64) -> Option<TlsOffset> {
+        match value.checked_add_signed(addend) {
+            Some(at) if at <= memsz => Some(TlsOffset(at)),
+            _ => None,
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
     }
 }
 

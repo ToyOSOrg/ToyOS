@@ -1,11 +1,14 @@
-//! A thread's TLS block, in this machine's psABI variant with the DTV in front of it, built
-//! holding physical addresses that `rebase_block` shifts once the block is mapped. The layout
+//! A thread's TLS block, in this machine's psABI variant with the DTV in front of it. The layout
 //! arithmetic is `toyos_elf::tls`; this is the allocation, the template copies, the TCB and the DTV.
+//!
+//! A block is built in frames no user mapping reaches ([`crate::process::Unpublished`]), holding
+//! physical addresses, and rebased to the address it is given inside the one call that maps it:
+//! a process's other threads never see a pointer the kernel has yet to fix, and the kernel never
+//! reads the block once they can write it.
 
 use crate::elf::TlsModule;
-use crate::mm::KernelSlice;
-use crate::process::{OwnedAlloc, PageAlloc};
-use crate::DirectMap;
+use crate::process::{MappedPages, OwnedAlloc, PageAlloc, PageTables, Unpublished};
+use crate::UserAddr;
 use toyos_elf::tls::{Static, Variant};
 use toyos_elf::Layout;
 
@@ -22,30 +25,46 @@ const DTV_BYTES: usize = DTV_HEADER_SIZE + DTV_INITIAL_CAPACITY * 8;
 /// A DTV slot for a module whose block has not been allocated yet.
 const DTV_UNALLOCATED: u64 = !0u64;
 
-/// One module's TLS area, for a thread that has only the executable's.
-pub fn setup_tls(
-    tls_template: Option<KernelSlice>,
-    tls_memsz: usize,
-    tls_align: usize,
-) -> Option<(PageAlloc, u64)> {
-    let tls = Static::new(VARIANT, tls_memsz, tls_align, tls_align)?;
-    setup_combined_tls(
-        &[TlsModule {
-            template: tls_template,
-            memsz: tls_memsz,
-            base_offset: 0,
-            module_id: 1,
-            is_static: true,
-        }],
-        tls,
-    )
+/// One thread's TLS block, built and not yet mapped.
+pub struct TlsBlock {
+    frames: Unpublished,
+    /// Where the thread pointer goes, from the block's first byte.
+    tp_offset: usize,
 }
 
-/// One thread's TLS block for every static module; `None` when no allocation holds the layout.
-pub fn setup_combined_tls(modules: &[TlsModule], tls: Static) -> Option<(PageAlloc, u64)> {
+impl TlsBlock {
+    /// The block for every static module in `modules`, laid out by `tls`; a
+    /// DTV and TCB alone when there is none. `None` when no allocation holds
+    /// the layout.
+    pub fn build(modules: &[TlsModule], tls: Static) -> Option<TlsBlock> {
+        if modules.is_empty() {
+            let alone = Static::new(VARIANT, 0, tls.max_align(), tls.max_align())?;
+            return build_combined(&[TlsModule { template: None, memsz: 0, base_offset: 0, module_id: 1, is_static: true }], alone);
+        }
+        build_combined(modules, tls)
+    }
+
+    /// Map the block into `pt`, returning its mapping, the thread pointer, and
+    /// where that pointer lies in the block. `None`, with the frames freed,
+    /// when `pt` has no room.
+    pub fn publish(self, pt: &PageTables) -> Option<(MappedPages, u64, usize)> {
+        let tp_offset = self.tp_offset;
+        let pages = self.frames.publish(pt, crate::mm::paging::Prot::ReadWrite, |frames, at| {
+            // SAFETY: `frames` is the block `build_combined` wrote, reachable
+            // by no mapping until `publish` maps it after this returns.
+            unsafe { rebase(frames, tp_offset, at) }
+        })?;
+        let fs_base = (pages.vaddr() + tp_offset as u64).raw();
+        Some((pages, fs_base, tp_offset))
+    }
+}
+
+/// Every static module's template copied in, and the TCB and DTV pointing at
+/// the block's physical address, which [`rebase`] moves once it has another.
+fn build_combined(modules: &[TlsModule], tls: Static) -> Option<TlsBlock> {
     let plan = tls.plan(TCB_SIZE, DTV_BYTES, crate::mm::PAGE_2M as usize)?;
-    let page_alloc = PageAlloc::new(plan.alloc_size, crate::mm::pmm::Category::InitTls)?;
-    let block = page_alloc.ptr();
+    let frames = Unpublished::new(PageAlloc::new(plan.alloc_size, crate::mm::pmm::Category::InitTls)?);
+    let block = frames.ptr();
 
     // SAFETY: `block` is the fresh, unpublished `plan.alloc_size`-byte allocation above.
     unsafe {
@@ -65,8 +84,8 @@ pub fn setup_combined_tls(modules: &[TlsModule], tls: Static) -> Option<(PageAll
         }
     }
 
-    let block_phys = DirectMap::from_ptr(block).phys();
-    let tp_user = block_phys + plan.tp_offset as u64;
+    let block_phys = frames.phys();
+    let tp_phys = block_phys + plan.tp_offset as u64;
     // SAFETY: the plan reserves `TCB_SIZE` bytes at `tp_offset` inside `alloc_size`.
     let tp_kernel = unsafe { block.add(plan.tp_offset) } as *mut u64;
     // The thread's id (`toyos_abi::TCB_TID`) is TP+16 on variant II and TP+8 on
@@ -78,7 +97,7 @@ pub fn setup_combined_tls(modules: &[TlsModule], tls: Static) -> Option<(PageAll
         match VARIANT {
             // TP+0 the psABI self-pointer, TP+8 the DTV pointer.
             Variant::II => {
-                *tp_kernel = tp_user;
+                *tp_kernel = tp_phys;
                 *tp_kernel.add(1) = block_phys;
             }
             // TP+0 the DTV pointer, TP+8 the implementation's word, the tid (zeroed above).
@@ -103,31 +122,38 @@ pub fn setup_combined_tls(modules: &[TlsModule], tls: Static) -> Option<(PageAll
         }
     }
 
-    Some((page_alloc, tp_user))
+    Some(TlsBlock { frames, tp_offset: plan.tp_offset })
 }
 
-/// Rebase a fresh TLS block's self-referential pointers from physical to virtual, in place.
-/// No Rust type expresses a DTV whose entries point into itself; this models the psABI layout directly, the same untyped-by-nature work `elf::reloc` does one level down.
+/// Move the block's self-referential pointers from its physical address to
+/// `at`, in place.
+///
+/// No Rust type expresses a DTV whose entries point into itself; this models the psABI layout
+/// directly. The walk is `DTV_INITIAL_CAPACITY` entries, the builder's own constant: the DTV's
+/// length word is the process's to rewrite once the block is mapped, and is never read here.
+///
 /// # Safety
-/// `phys`/`tp_offset` name the block `setup_combined_tls` just built; nothing else touches it until this returns.
-pub(crate) unsafe fn rebase_block(phys: u64, tp_offset: usize, fs_base: u64, rebase: i64) {
-    // SAFETY: the caller's contract; word 1's DTV length is the builders' own, never userland's.
+/// `frames` is a block [`build_combined`] wrote with its thread pointer at `tp_offset`, and no
+/// mapping reaches it.
+unsafe fn rebase(frames: &Unpublished, tp_offset: usize, at: UserAddr) {
+    let phys = frames.phys();
+    let moved = |p: u64| (at + (p - phys)).raw();
+    // SAFETY: the caller's contract; every access is inside the TCB and DTV the builder reserved.
     unsafe {
-        let block = DirectMap::from_phys(phys).as_mut_ptr::<u8>();
+        let block = frames.ptr();
         let tp = block.add(tp_offset) as *mut u64;
         match VARIANT {
             Variant::II => {
-                *tp = fs_base;
-                *tp.add(1) = (*tp.add(1) as i64 + rebase) as u64;
+                *tp = moved(*tp);
+                *tp.add(1) = moved(*tp.add(1));
             }
-            Variant::I => *tp = (*tp as i64 + rebase) as u64,
+            Variant::I => *tp = moved(*tp),
         }
         let dtv = block as *mut u64;
-        let dtv_len = *dtv.add(1) as usize;
-        for i in 0..dtv_len {
+        for i in 0..DTV_INITIAL_CAPACITY {
             let entry = *dtv.add(2 + i);
-            if entry != DTV_UNALLOCATED && entry != 0 {
-                *dtv.add(2 + i) = (entry as i64 + rebase) as u64;
+            if entry != DTV_UNALLOCATED {
+                *dtv.add(2 + i) = moved(entry);
             }
         }
     }
@@ -135,26 +161,12 @@ pub(crate) unsafe fn rebase_block(phys: u64, tp_offset: usize, fs_base: u64, reb
 
 /// Build one thread's TLS block and map it into the child address space; `None` when either fails.
 pub fn map_block(
-    child_pt: &crate::process::PageTables,
+    child_pt: &PageTables,
     modules: &[TlsModule],
     tls: Static,
-) -> Option<(crate::process::MappedPages, u64)> {
-    let (alloc, fs_base) = if tls.total_memsz() > 0 {
-        setup_combined_tls(modules, tls)?
-    } else {
-        setup_tls(None, 0, 1)?
-    };
-
-    let phys = alloc.phys();
-    let (vaddr, _) = crate::process::vma_map(child_pt, phys, alloc.size() as u64,
-        crate::mm::paging::Prot::ReadWrite)?;
-    let rebase = vaddr.raw() as i64 - phys as i64;
-    let fs_base = (fs_base as i64 + rebase) as u64;
-    // SAFETY: nothing runs in the unscheduled child yet, and `fs_base - vaddr` is the `tp_offset` the builder bounded.
-    unsafe {
-        rebase_block(phys, (fs_base - vaddr.raw()) as usize, fs_base, rebase);
-    }
-    Some((crate::process::MappedPages::new(vaddr, alloc), fs_base))
+) -> Option<(MappedPages, u64)> {
+    let (pages, fs_base, _) = TlsBlock::build(modules, tls)?.publish(child_pt)?;
+    Some((pages, fs_base))
 }
 
 /// One combined block for every startup module; `None` when they do not fit, since a missing module would mean relocations resolving against a block that is not there.
@@ -167,17 +179,17 @@ pub fn build_tls_layout(
 ) -> Option<(alloc::vec::Vec<TlsModule>, Static, u64)> {
     // (template, memsz, placed bytes, align, module id). Module id 1 is the executable's;
     // libraries start at 2.
-    let exe = match layout.tls.filter(|t| t.memsz > 0) {
+    let exe = match layout.tls().filter(|t| t.memsz() > 0) {
         None => None,
         Some(tls) => {
-            let (memsz, align) = (tls.memsz as usize, tls.align as usize);
+            let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);
             // Variant II's executable ends at the thread pointer at its extent, not its `memsz`:
             // its linker fixed every local-exec offset against the rounded size.
             let placed = match VARIANT {
                 Variant::II => toyos_elf::tls::exe_extent(memsz, align)?,
                 Variant::I => memsz,
             };
-            Some((exe_tls_template.map(|buf| buf.slice(tls.filesz as usize)), memsz, placed, align, 1))
+            Some((exe_tls_template.map(|buf| buf.slice(tls.template().len() as usize)), memsz, placed, align, 1))
         }
     };
     let libs = loaded_libs

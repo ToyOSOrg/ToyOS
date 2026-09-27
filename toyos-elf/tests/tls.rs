@@ -5,11 +5,16 @@
 //! kernel-bug assert reached from a crafted `PT_TLS`. The property is proved
 //! here instead, which is what lets the assert go.
 
-use toyos_elf::tls::{self, Static, Variant};
+use toyos_elf::tls::{self, Static, TlsOffset, Variant};
 
 const TCB: usize = 64;
 const DTV: usize = 16 + 64 * 8;
 const GRANULE: usize = 2 * 1024 * 1024;
+
+/// A datum `off` bytes into a segment no offset here leaves.
+fn datum(off: u64) -> TlsOffset {
+    TlsOffset::of(off, 0, u64::MAX).unwrap()
+}
 
 #[test]
 fn the_dtv_is_never_overwritten_by_tls_data() {
@@ -105,14 +110,39 @@ fn tpoff_carries_the_addend() {
     let two = Static::new(Variant::II, total, 64, 64).unwrap();
     let one = Static::new(Variant::I, total, 64, 64).unwrap();
     for &module_addr in &[0u64, 8, 0x40, 0x1F0] {
-        assert_eq!(two.tpoff(module_addr, 0), module_addr as i64 - total as i64);
-        assert_eq!(one.tpoff(module_addr, 0), module_addr as i64 + 64);
+        assert_eq!(two.tpoff(0, datum(module_addr)), Some(module_addr as i64 - total as i64));
+        assert_eq!(one.tpoff(0, datum(module_addr)), Some(module_addr as i64 + 64));
         for &addend in &[0i64, 8, -8, 0x100, -0x100] {
+            // `S + A` below the segment's start names nothing in it.
+            let Some(sum) = TlsOffset::of(module_addr, addend, u64::MAX) else {
+                assert!(addend < 0 && addend.unsigned_abs() > module_addr);
+                continue;
+            };
             for s in [one, two] {
-                assert_eq!(s.tpoff(module_addr, addend) - s.tpoff(module_addr, 0), addend, "{s:?}");
+                assert_eq!(s.tpoff(0, sum).unwrap() - s.tpoff(0, datum(module_addr)).unwrap(), addend, "{s:?}");
             }
         }
     }
+}
+
+/// The audit's two crafted `TPOFF` values: an addend of `i64::MIN` against a
+/// 16-byte segment, and `i64::MAX` past a datum 16 bytes in. Each was a kernel
+/// overflow panic; each is now no offset at all, or no thread-pointer offset.
+#[test]
+fn a_tpoff_no_segment_or_word_holds_is_refused() {
+    let s = Static::new(Variant::II, 16, 8, 8).unwrap();
+    assert_eq!(TlsOffset::of(0, i64::MIN, 16), None);
+    assert_eq!(TlsOffset::of(16, i64::MAX, 16), None);
+    // A segment as large as a file can declare: the offset exists, the
+    // thread-pointer offset does not.
+    let huge = TlsOffset::of(16, i64::MAX, u64::MAX).unwrap();
+    assert_eq!(s.tpoff(0, huge), None);
+    assert_eq!(s.tpoff(usize::MAX, datum(1)), None);
+    let wide = Static::new(Variant::II, usize::MAX, 8, 8).unwrap();
+    assert_eq!(wide.tpoff(0, datum(0)), None);
+    // The inclusive end is a datum: one past the segment's last byte.
+    assert_eq!(TlsOffset::of(8, 8, 16).map(TlsOffset::get), Some(16));
+    assert_eq!(TlsOffset::of(8, 9, 16), None);
 }
 
 /// Variant I, as lld resolves an AArch64 executable's own local-exec access
@@ -132,7 +162,7 @@ fn variant_i_puts_the_first_module_where_its_linker_put_it() {
                 let gap = 16usize.max(first);
                 let at = format!("memsz {memsz} first {first} max {max}: {plan:?}");
                 assert_eq!(plan.tls_start - plan.tp_offset, gap, "{at}");
-                assert_eq!(s.tpoff(0, 0), gap as i64, "{at}");
+                assert_eq!(s.tpoff(0, datum(0)), Some(gap as i64), "{at}");
                 assert!(plan.tp_offset >= DTV, "{at}: the TCB overlaps the DTV");
                 assert_eq!(plan.tp_offset % 16, 0, "{at}");
                 assert_eq!(plan.tls_start % max.max(16), 0, "{at}");
@@ -149,8 +179,8 @@ fn variant_i_puts_the_first_module_where_its_linker_put_it() {
 #[test]
 fn variant_i_agrees_with_what_lld_linked() {
     let s = Static::new(Variant::I, 0xb0, 64, 64).unwrap();
-    assert_eq!(s.tpoff(0, 0), 0x40);
-    assert_eq!(s.tpoff(0x40, 0), 0x80);
+    assert_eq!(s.tpoff(0, datum(0)), Some(0x40));
+    assert_eq!(s.tpoff(0x40, datum(0)), Some(0x80));
 }
 
 /// The machine names the variant: x86-64's psABI is variant II, AArch64's
@@ -179,6 +209,6 @@ fn the_executables_extent_is_its_size_rounded_to_its_alignment() {
     let extent = tls::exe_extent(0xa8, 0x40).unwrap();
     let (exe_base, total) = tls::place_module(cursor, extent, 0x40).unwrap();
     let s = Static::new(Variant::II, total, 0x40, 8).unwrap();
-    assert_eq!(s.tpoff(exe_base as u64, 0), -0xc0);
+    assert_eq!(s.tpoff(exe_base, datum(0)), Some(-0xc0));
     assert_eq!(exe_base % 0x40, 0);
 }

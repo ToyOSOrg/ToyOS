@@ -257,11 +257,10 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         if matches!(lib.memory, crate::elf::LibMemory::Shared { .. }) {
             crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Dlopen);
         }
-        let delta = vaddr.raw() as i64 - lib.user_base.raw() as i64;
-        if delta != 0 {
-            crate::elf::rebase_relative_relocs(&lib, delta);
+        if vaddr != lib.user_base {
+            lib.user_base = vaddr;
+            crate::elf::rebase_relative_relocs(&lib);
         }
-        lib.user_base = vaddr;
         Ok::<UserAddr, SyscallError>(vaddr)
     });
     let base = match mapped {
@@ -288,19 +287,30 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         let data = data_arc.lock();
         crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
 
-        if data.elf.tls.total_memsz() > 0 {
-            let tls_info = crate::elf::TlsModuleInfo {
-                libs: &data.elf.loaded_libs,
-                modules: &data.elf.tls_modules,
-            };
-            crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls, &tls_info);
+        // Every TLS value is resolved here, before the point of no return: a
+        // reference that leaves its module's segment refuses the whole load,
+        // and the mapping guard takes the module back down.
+        let tls_info = crate::elf::TlsModuleInfo {
+            libs: &data.elf.loaded_libs,
+            modules: &data.elf.tls_modules,
+        };
+        let refused = if data.elf.tls.total_memsz() > 0 {
+            crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls, &tls_info).err()
+        } else {
+            None
+        };
+        let refused = refused.or_else(|| {
+            lib_has_tls.then(|| crate::elf::apply_dtpoff_relocs(&lib, &tls_info).err()).flatten()
+        });
+        if let Some(refused) = refused {
+            log!("dlopen: {}: {}", resolved, refused.as_str());
+            return SyscallError::InvalidArgument.to_u64();
         }
 
-        // init_info layout: [init_array_vaddr, init_array_count], vaddr rebased to user_base.
-        [
-            if lib.init_array_vaddr != 0 { lib.user_base.raw() + lib.init_array_vaddr } else { 0 },
-            lib.init_array_size / 8,
-        ]
+        // init_info layout: [init_array address, init_array count].
+        lib.init_array.map_or([0, 0], |array| {
+            [(lib.user_base + array.range().start().get()).raw(), array.count()]
+        })
     };
 
     // The point of no return: copy the init info out first, then register. A
@@ -469,11 +479,11 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
         // packed after it in module order.
         let mut path_offset = (module_count * info_size) as u32;
 
-        let (eh_vaddr, eh_size) = (data.elf.exe_eh_frame_hdr_vaddr, data.elf.exe_eh_frame_hdr_size);
+        let (eh_addr, eh_size) = data.elf.exe_eh_frame_hdr;
         let exe_info = ModuleInfo {
             base: data.elf.elf_base.raw(),
             text_end: data.elf.exe_vaddr_max,
-            eh_frame_hdr: if eh_vaddr != 0 { data.elf.elf_base.raw() + eh_vaddr } else { 0 },
+            eh_frame_hdr: eh_addr,
             eh_frame_hdr_size: eh_size,
             path_offset,
             path_len: exe_path_bytes.len() as u32,
@@ -491,10 +501,8 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
             let lib_info = ModuleInfo {
                 base: lib.user_base.raw(),
                 text_end: lib.user_end(),
-                eh_frame_hdr: if lib.eh_frame_hdr_vaddr != 0 {
-                    lib.user_base.raw() + lib.eh_frame_hdr_vaddr
-                } else { 0 },
-                eh_frame_hdr_size: lib.eh_frame_hdr_size,
+                eh_frame_hdr: lib.eh_frame_hdr.map_or(0, |r| (lib.user_base + r.start().get()).raw()),
+                eh_frame_hdr_size: lib.eh_frame_hdr.map_or(0, |r| r.len()),
                 path_offset,
                 path_len: lib_path_bytes.len() as u32,
             };

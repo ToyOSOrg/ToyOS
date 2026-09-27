@@ -20,25 +20,28 @@ use crate::process::PageAlloc;
 use crate::sync::Lock;
 use crate::vfs::BackingId;
 use crate::UserAddr;
-use toyos_elf::{RelaCounts, RelocKind};
+use toyos_elf::dynamic::InitArray;
+use toyos_elf::rela::Rules;
+use toyos_elf::{ImageRange, Op, RelaCounts, RelocKind, SymIndex, TlsRef};
 
-/// A module's non-`RELATIVE` relocations, extracted once at cache time.
+/// A module's non-`RELATIVE` relocations, parsed and extracted once at cache
+/// time, each as `(r_offset, what it names)`.
 #[derive(Clone)]
 pub struct CachedRelocs {
-    /// `GLOB_DAT` and `JUMP_SLOT`: (offset, symbol).
-    pub bind: Vec<(u64, u32)>,
-    pub tpoff64: Vec<(u64, u32, i64)>,
-    pub tpoff32: Vec<(u64, u32, i64)>,
-    /// The kernel writes a module id here.
-    pub dtpmod64: Vec<(u64, u32, i64)>,
+    /// `GLOB_DAT` and `JUMP_SLOT`.
+    pub bind: Vec<(u64, SymIndex)>,
+    pub tpoff64: Vec<(u64, TlsRef)>,
+    pub tpoff32: Vec<(u64, TlsRef)>,
+    /// The kernel writes a module id here; `None` names the module itself.
+    pub dtpmod64: Vec<(u64, Option<SymIndex>)>,
     /// The kernel writes a TLS offset within the module here.
-    pub dtpoff64: Vec<(u64, u32, i64)>,
+    pub dtpoff64: Vec<(u64, TlsRef)>,
 }
 
 // Extracts every non-`RELATIVE` entry, or `None` if it would not fit one kernel allocation.
 fn prescan_relocs(lib: &LoadedLib) -> Option<CachedRelocs> {
-    let counts = RelaCounts::of(lib.relocations());
-    let widest = core::mem::size_of::<(u64, u32, i64)>();
+    let counts = RelaCounts::of(lib.raw_relocations());
+    let widest = core::mem::size_of::<(u64, TlsRef)>().max(core::mem::size_of::<(u64, Option<SymIndex>)>());
     // Excludes `Relative`: bounding on it would refuse to cache nearly every library.
     let kept = [RelocKind::GlobDat, RelocKind::Tpoff64, RelocKind::Tpoff32,
         RelocKind::DtpMod64, RelocKind::DtpOff64];
@@ -55,13 +58,13 @@ fn prescan_relocs(lib: &LoadedLib) -> Option<CachedRelocs> {
         dtpoff64: Vec::with_capacity(counts.dtpoff64),
     };
     for r in lib.relocations() {
-        match r.kind {
-            RelocKind::GlobDat | RelocKind::JumpSlot => relocs.bind.push((r.offset, r.sym)),
-            RelocKind::Tpoff64 => relocs.tpoff64.push((r.offset, r.sym, r.addend)),
-            RelocKind::Tpoff32 => relocs.tpoff32.push((r.offset, r.sym, r.addend)),
-            RelocKind::DtpMod64 => relocs.dtpmod64.push((r.offset, r.sym, r.addend)),
-            RelocKind::DtpOff64 => relocs.dtpoff64.push((r.offset, r.sym, r.addend)),
-            _ => {}
+        match r.op() {
+            Op::Bind(sym) => relocs.bind.push((r.offset(), sym)),
+            Op::Tpoff64(t) => relocs.tpoff64.push((r.offset(), t)),
+            Op::Tpoff32(t) => relocs.tpoff32.push((r.offset(), t)),
+            Op::DtpMod64(sym) => relocs.dtpmod64.push((r.offset(), sym)),
+            Op::DtpOff64(t) => relocs.dtpoff64.push((r.offset(), t)),
+            Op::Relative(_) => {}
         }
     }
     Some(relocs)
@@ -79,10 +82,9 @@ struct Snapshot {
     rela: Option<KernelSlice>,
     jmprel: Option<KernelSlice>,
     gnu_hash: Option<KernelSlice>,
-    eh_frame_hdr_vaddr: u64,
-    eh_frame_hdr_size: u64,
-    init_array_vaddr: u64,
-    init_array_size: u64,
+    rules: Rules,
+    eh_frame_hdr: Option<ImageRange>,
+    init_array: Option<InitArray>,
     span: u64,
     rw_lo: u64,
     rw_hi: u64,
@@ -100,10 +102,9 @@ impl Snapshot {
             rela: lib.rela,
             jmprel: lib.jmprel,
             gnu_hash: lib.gnu_hash,
-            eh_frame_hdr_vaddr: lib.eh_frame_hdr_vaddr,
-            eh_frame_hdr_size: lib.eh_frame_hdr_size,
-            init_array_vaddr: lib.init_array_vaddr,
-            init_array_size: lib.init_array_size,
+            rules: lib.rules,
+            eh_frame_hdr: lib.eh_frame_hdr,
+            init_array: lib.init_array,
             span: lib.span,
             rw_lo: lib.rw_lo,
             rw_hi: lib.rw_hi,
@@ -130,10 +131,9 @@ impl Snapshot {
             jmprel: self.jmprel,
             gnu_hash: self.gnu_hash,
             cached_relocs,
-            eh_frame_hdr_vaddr: self.eh_frame_hdr_vaddr,
-            eh_frame_hdr_size: self.eh_frame_hdr_size,
-            init_array_vaddr: self.init_array_vaddr,
-            init_array_size: self.init_array_size,
+            rules: self.rules,
+            eh_frame_hdr: self.eh_frame_hdr,
+            init_array: self.init_array,
             span: self.span,
             rw_lo: self.rw_lo,
             rw_hi: self.rw_hi,

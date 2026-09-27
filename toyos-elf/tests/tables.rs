@@ -15,10 +15,29 @@ mod common;
 use common::*;
 use toyos_elf::dynamic::{self, Dynamic};
 use toyos_elf::gnu_hash::{self, GnuHash};
-use toyos_elf::rela::{self, RelaCounts, RelaTable, RelocError, RelocKind};
+use toyos_elf::rela::{self, FillLattice, Op, Rela, RelaCounts, RelaTable, RelocError, RelocKind, Rules};
 use toyos_elf::section::{SectionTable, Unapplied, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_RELR, SHT_SYMTAB};
 use toyos_elf::sym::SymTab;
-use toyos_elf::Machine;
+use toyos_elf::{Extent, Machine};
+
+/// Every entry through [`rela::parse`], in an image spanning all of memory with
+/// a TLS segment no offset leaves: the window, fill page and symbol count are
+/// the only bounds left to decide.
+fn validate(
+    mut entries: impl Iterator<Item = Rela>,
+    window: (u64, u64),
+    sym_count: usize,
+    fill: Option<FillLattice>,
+) -> Result<(), RelocError> {
+    let rules = Rules {
+        extent: Extent::new(0, u64::MAX).unwrap(),
+        window,
+        sym_count,
+        fill,
+        tls_memsz: Some(u64::MAX),
+    };
+    entries.try_for_each(|r| rela::parse(r, &rules).map(|_| ()))
+}
 
 /// `st_info` for a global `STT_FUNC`, and for the data object it is told apart
 /// from.
@@ -93,12 +112,6 @@ fn relocation_types_map_to_the_width_the_writers_use() {
     assert_eq!(RelocKind::from_raw(Machine::X86_64, 23).write_width(), Some(4));
     assert_eq!(RelocKind::from_raw(Machine::X86_64, 0).write_width(), None);
     assert_eq!(RelocKind::from_raw(Machine::X86_64, 42).write_width(), None);
-    // RELATIVE is the one written type that resolves no symbol, so it is the
-    // one whose `r_sym` needs no bound.
-    assert!(!RelocKind::Relative.needs_symbol());
-    for raw in [6u32, 7, 16, 17, 18, 23] {
-        assert!(RelocKind::from_raw(Machine::X86_64, raw).needs_symbol(), "type {raw}");
-    }
 }
 
 #[test]
@@ -107,25 +120,25 @@ fn validation_refuses_a_write_outside_the_window_by_name() {
 
     let overflowing = [rela(u64::MAX - 3, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&overflowing, Machine::X86_64).iter(), window, 4, None),
+        validate(RelaTable::new(&overflowing, Machine::X86_64).iter(), window, 4, None),
         Err(RelocError::OffsetOverflows),
     );
 
     let below = [rela(0xFF8, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&below, Machine::X86_64).iter(), window, 4, None),
+        validate(RelaTable::new(&below, Machine::X86_64).iter(), window, 4, None),
         Err(RelocError::OutsideWindow),
     );
 
     // One byte of an eight-byte write past the end.
     let straddling = [rela(0x1FF9, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&straddling, Machine::X86_64).iter(), window, 4, None),
+        validate(RelaTable::new(&straddling, Machine::X86_64).iter(), window, 4, None),
         Err(RelocError::OutsideWindow),
     );
 
     let fits = [rela(0x1FF8, 0, 8, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&fits, Machine::X86_64).iter(), window, 4, None), Ok(()));
+    assert_eq!(validate(RelaTable::new(&fits, Machine::X86_64).iter(), window, 4, None), Ok(()));
 }
 
 /// A table the loader reads while it writes must not lie inside the range it
@@ -142,28 +155,28 @@ fn a_read_table_inside_the_write_window_is_refused_by_name() {
     let rounded = (0u64, 0x200000u64);
 
     let shell = rela::ReadTables { rela: (0x166490, 0x1664f0), ..Default::default() };
-    assert_eq!(rela::tables_outside_window(&shell, exact), Ok(()));
+    assert_eq!(rela::tables_outside_window(&shell, exact, 4096), Ok(()));
     assert_eq!(
-        rela::tables_outside_window(&shell, rounded),
-        Err("ELF: .rela.dyn lies inside the module's writable window"),
+        rela::tables_outside_window(&shell, rounded, 4096),
+        Err("ELF: .rela.dyn lies on a page of the module's writable window"),
         "the rounded-down window is what covered a conforming image's own tables"
     );
 
     for (tables, refusal) in [
         (
             rela::ReadTables { dynsym: (0x146000, 0x146030), ..Default::default() },
-            "ELF: .dynsym lies inside the module's writable window",
+            "ELF: .dynsym lies on a page of the module's writable window",
         ),
         (
             rela::ReadTables { dynstr: (0x144ff0, 0x145010), ..Default::default() },
-            "ELF: .dynstr lies inside the module's writable window",
+            "ELF: .dynstr lies on a page of the module's writable window",
         ),
         (
             rela::ReadTables { jmprel: (0x154ff8, 0x155018), ..Default::default() },
-            "ELF: .rela.plt lies inside the module's writable window",
+            "ELF: .rela.plt lies on a page of the module's writable window",
         ),
     ] {
-        assert_eq!(rela::tables_outside_window(&tables, exact), Err(refusal));
+        assert_eq!(rela::tables_outside_window(&tables, exact, 4096), Err(refusal));
     }
 
     // Touching at an edge is not overlapping; an absent table is an empty range
@@ -173,9 +186,31 @@ fn a_read_table_inside_the_write_window_is_refused_by_name() {
         dynstr: (0x155000, 0x156000),
         ..Default::default()
     };
-    assert_eq!(rela::tables_outside_window(&abutting, exact), Ok(()));
-    assert_eq!(rela::tables_outside_window(&rela::ReadTables::default(), exact), Ok(()));
-    assert_eq!(rela::tables_outside_window(&shell, (0x145000, 0x145000)), Ok(()));
+    assert_eq!(rela::tables_outside_window(&abutting, exact, 4096), Ok(()));
+    assert_eq!(rela::tables_outside_window(&rela::ReadTables::default(), exact, 4096), Ok(()));
+    assert_eq!(rela::tables_outside_window(&shell, (0x145000, 0x145000), 4096), Ok(()));
+    // An empty window is not rounded out into a page that holds a table.
+    assert_eq!(rela::tables_outside_window(&shell, (0x166400, 0x166400), 4096), Ok(()));
+}
+
+/// The pages a mapping protects are whole: a table that shares the writable
+/// window's last page, though no byte of it is in the window, sits in memory
+/// the process can write — and the loader parses its tables again after the
+/// image is mapped. The exact bound accepted this image.
+#[test]
+fn a_read_table_on_a_page_of_the_write_window_is_refused() {
+    let window = (0x145000u64, 0x154ff0u64);
+    let tail = rela::ReadTables { rela: (0x154ff8, 0x155000), ..Default::default() };
+    assert_eq!(
+        rela::tables_outside_window(&tail, window, 4096),
+        Err("ELF: .rela.dyn lies on a page of the module's writable window"),
+    );
+    assert_eq!(rela::tables_outside_window(&tail, window, 1), Ok(()), "the exact bound");
+    let head = rela::ReadTables { dynsym: (0x145000, 0x145008), ..Default::default() };
+    assert_eq!(
+        rela::tables_outside_window(&head, (0x145008, 0x146000), 4096),
+        Err("ELF: .dynsym lies on a page of the module's writable window"),
+    );
 }
 
 /// psABI oracle: every entry is applied or the object rejected. An 8-byte write
@@ -183,17 +218,17 @@ fn a_read_table_inside_the_write_window_is_refused_by_name() {
 #[test]
 fn a_relocation_crossing_a_fill_page_is_refused_only_for_a_chunked_writer() {
     let window = (0u64, 0x1_0000u64);
-    let lattice = rela::FillLattice { base: 0, granule: 4096 };
+    let lattice = FillLattice { base: 0, granule: 4096 };
 
     for off in 0xFF9u64..=0xFFF {
         let straddles = [rela(off, 0, 8, 0)].concat();
         assert_eq!(
-            rela::validate(RelaTable::new(&straddles, Machine::X86_64).iter(), window, 4, Some(lattice)),
+            validate(RelaTable::new(&straddles, Machine::X86_64).iter(), window, 4, Some(lattice)),
             Err(RelocError::StraddlesFillPage),
             "offset {off:#x} straddles the page but was accepted",
         );
         assert_eq!(
-            rela::validate(RelaTable::new(&straddles, Machine::X86_64).iter(), window, 4, None),
+            validate(RelaTable::new(&straddles, Machine::X86_64).iter(), window, 4, None),
             Ok(()),
             "offset {off:#x} refused for a contiguous writer",
         );
@@ -201,17 +236,17 @@ fn a_relocation_crossing_a_fill_page_is_refused_only_for_a_chunked_writer() {
 
     // A write ending at the boundary fits; a 4-byte TPOFF32 fits in the last 4.
     assert_eq!(
-        rela::validate(RelaTable::new(&[rela(0xFF8, 0, 8, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(lattice)),
+        validate(RelaTable::new(&[rela(0xFF8, 0, 8, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(lattice)),
         Ok(()),
     );
     assert_eq!(
-        rela::validate(RelaTable::new(&[rela(0xFFC, 0, 23, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(lattice)),
+        validate(RelaTable::new(&[rela(0xFFC, 0, 23, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(lattice)),
         Ok(()),
     );
 
-    let shifted = rela::FillLattice { base: 3, granule: 4096 };
+    let shifted = FillLattice { base: 3, granule: 4096 };
     assert_eq!(
-        rela::validate(RelaTable::new(&[rela(0x1000, 0, 8, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(shifted)),
+        validate(RelaTable::new(&[rela(0x1000, 0, 8, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(shifted)),
         Err(RelocError::StraddlesFillPage),
     );
 }
@@ -225,14 +260,14 @@ fn every_written_type_is_validated_and_no_other_is() {
     for raw in [6u32, 7, 8, 16, 17, 18, 23] {
         let bytes = [rela(0x1000, 0, raw, 0)].concat();
         assert_eq!(
-            rela::validate(RelaTable::new(&bytes, Machine::X86_64).iter(), window, 4, None),
+            validate(RelaTable::new(&bytes, Machine::X86_64).iter(), window, 4, None),
             Err(RelocError::OutsideWindow),
             "type {raw} was not validated",
         );
     }
     // A type nobody patches may name any offset at all.
     let ignored = [rela(u64::MAX, 0, 42, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&ignored, Machine::X86_64).iter(), window, 0, None), Ok(()));
+    assert_eq!(validate(RelaTable::new(&ignored, Machine::X86_64).iter(), window, 0, None), Ok(()));
 }
 
 /// A TLS descriptor is filled by a resolver this loader does not have, so an
@@ -244,11 +279,11 @@ fn an_aarch64_tls_descriptor_is_refused_by_name() {
     let desc = [rela(0x10, 1, 1031, 0)].concat();
     assert_eq!(RelocKind::from_raw(Machine::Aarch64, 1031), RelocKind::TlsDesc);
     assert_eq!(
-        rela::validate(RelaTable::new(&desc, Machine::Aarch64).iter(), window, 4, None),
+        validate(RelaTable::new(&desc, Machine::Aarch64).iter(), window, 4, None),
         Err(RelocError::TlsDescriptor),
     );
     assert!(RelocError::TlsDescriptor.as_str().contains("R_AARCH64_TLSDESC"));
-    assert_eq!(rela::validate(RelaTable::new(&desc, Machine::X86_64).iter(), window, 4, None), Ok(()));
+    assert_eq!(validate(RelaTable::new(&desc, Machine::X86_64).iter(), window, 4, None), Ok(()));
     let counts = RelaCounts::of(RelaTable::new(&desc, Machine::Aarch64).iter());
     assert_eq!(counts.count_of(RelocKind::TlsDesc), 1);
 }
@@ -279,15 +314,20 @@ fn an_executable_s_reservation_is_had_only_through_its_refusals() {
 fn a_symbol_index_past_the_table_is_refused_except_for_relative() {
     let window = (0u64, 0x100u64);
 
-    let bind = [rela(0x10, 4, 6, 0)].concat();
-    assert_eq!(
-        rela::validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 4, None),
-        Err(RelocError::SymbolPastTable),
-    );
-    assert_eq!(rela::validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 5, None), Ok(()));
+    // Every type that resolves a symbol, TLS ones included once `r_sym` is not
+    // the null entry.
+    for raw in [6u32, 7, 16, 17, 18, 23] {
+        let bind = [rela(0x10, 4, raw, 0)].concat();
+        assert_eq!(
+            validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 4, None),
+            Err(RelocError::SymbolPastTable),
+            "type {raw}",
+        );
+        assert_eq!(validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 5, None), Ok(()));
+    }
 
     let relative = [rela(0x10, u32::MAX, 8, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&relative, Machine::X86_64).iter(), window, 0, None), Ok(()));
+    assert_eq!(validate(RelaTable::new(&relative, Machine::X86_64).iter(), window, 0, None), Ok(()));
 }
 
 #[test]
@@ -364,7 +404,8 @@ fn lookups_skip_undefined_symbols_and_the_null_entry() {
     ]
     .concat();
     let table = SymTab::new(&syms, b"\0tls_var\0");
-    assert_eq!(table.find_tls("tls_var"), Some(0x40));
+    let tls_var = table.find_tls("tls_var").and_then(|s| s.tls_offset(0, 0x100));
+    assert_eq!(tls_var.map(|o| o.get()), Some(0x40));
     assert_eq!(table.find("tls_var").map(|(i, _)| i), Some(2));
     assert_eq!(table.defined().count(), 1);
 }
@@ -691,5 +732,14 @@ fn each_machine_reads_its_own_relocation_numbers() {
 
     let bytes = rela(0x10, 0, 1027, 4);
     let entry = RelaTable::new(&bytes, Machine::Aarch64).get(0).unwrap();
-    assert_eq!((entry.kind, entry.addend), (RelocKind::Relative, 4));
+    assert_eq!(entry.kind(), RelocKind::Relative);
+    let rules = Rules {
+        extent: Extent::new(0, 0x100).unwrap(),
+        window: (0, 0x100),
+        sym_count: 0,
+        fill: None,
+        tls_memsz: None,
+    };
+    let parsed = rela::parse(entry, &rules).unwrap().unwrap();
+    assert_eq!((parsed.offset(), parsed.op()), (0x10, Op::Relative(rules.extent.offset(4).unwrap())));
 }
