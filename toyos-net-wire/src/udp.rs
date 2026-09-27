@@ -1,8 +1,8 @@
 //! UDP datagrams (RFC 768).
 
 use crate::checksum::{Checksum, PseudoHeader};
-use crate::emit::{be16x2, put, put_slice, BuildError};
-use crate::ipv4::{Ipv4Packet, Ipv4Payload, Protocol};
+use crate::emit::{be16x2, BuildError};
+use crate::ipv4::{sealed, Ipv4Packet, Ipv4Payload, Protocol};
 use crate::Port;
 
 pub const HEADER_LEN: usize = 8;
@@ -42,14 +42,6 @@ impl UdpChecksum {
             },
         }
     }
-
-    #[must_use]
-    pub fn replace(self, old: [u8; 2], new: [u8; 2]) -> Self {
-        match self {
-            Self::Absent => Self::Absent,
-            Self::Present(checksum) => Self::Present(checksum.replace(old, new)),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,8 +61,9 @@ impl<'a> UdpDatagram<'a> {
             return Err(UdpError::LengthBelowHeader);
         }
         let (datagram, _) = bytes.split_at_checked(usize::from(length)).ok_or(UdpError::LengthOverrun)?;
+        let pseudo = PseudoHeader { source: ip.source(), destination: ip.destination(), protocol: Protocol::Udp, length };
         if UdpChecksum::from_field(u16::from_be_bytes([c0, c1])) != UdpChecksum::Absent
-            && !ip.pseudo_header(length).accumulator().feed(datagram).sum().verifies()
+            && !pseudo.accumulator().feed(datagram).sum().verifies()
         {
             return Err(UdpError::Checksum);
         }
@@ -107,12 +100,14 @@ pub struct UdpBuilder<'a> {
     pub data: &'a [u8],
 }
 
+impl sealed::Sealed for UdpBuilder<'_> {}
+
 impl Ipv4Payload for UdpBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Udp
     }
 
-    fn length(&self, _room: usize) -> Result<usize, BuildError> {
+    fn length(&self, _header_len: usize) -> Result<usize, BuildError> {
         match self.data.len().checked_add(HEADER_LEN) {
             Some(len) if len <= MAX_LEN => Ok(len),
             _ => Err(BuildError::UdpTooLong),
@@ -122,12 +117,11 @@ impl Ipv4Payload for UdpBuilder<'_> {
     fn write(&self, pseudo: &PseudoHeader, out: &mut [u8]) -> Result<(), BuildError> {
         let length = u16::try_from(out.len()).map_err(|_| BuildError::UdpTooLong)?;
         let (header, data) = out.split_first_chunk_mut::<HEADER_LEN>().ok_or(BuildError::BufferTooSmall)?;
-        put_slice(data, self.data)?;
         let [a, b, c, d] = be16x2(self.source.get(), self.destination.get());
         let [l0, l1] = length.to_be_bytes();
-        let unsummed = [a, b, c, d, l0, l1, 0, 0];
-        let checksum = UdpChecksum::Present(pseudo.accumulator().feed(&unsummed).feed(self.data).sum().checksum());
-        let [c0, c1] = checksum.field().to_be_bytes();
-        put(header, [a, b, c, d, l0, l1, c0, c1]).map(|_| ())
+        let sum = pseudo.accumulator().feed(&[a, b, c, d, l0, l1]).copy(data, self.data)?.sum();
+        let [c0, c1] = UdpChecksum::Present(sum.checksum()).field().to_be_bytes();
+        *header = [a, b, c, d, l0, l1, c0, c1];
+        Ok(())
     }
 }

@@ -1,10 +1,10 @@
-//! IGMP (RFC 2236, RFC 9776): every query and the version 1 and 2 messages parsed, the version 2 messages and the version 3 report built.
+//! IGMP (RFC 2236, RFC 9776).
 
 use core::net::Ipv4Addr;
 
 use crate::checksum::{Accumulator, PseudoHeader, Sum};
 use crate::emit::{be16x2, put, BuildError};
-use crate::ipv4::{Form, Ipv4Builder, Ipv4Payload, Ipv4Source, MulticastAddr, Protocol, TrafficClass, Ttl, ROUTER_ALERT};
+use crate::ipv4::{sealed, Ipv4Builder, Ipv4Payload, Ipv4Source, MulticastAddr, Protocol, TrafficClass, Ttl, ROUTER_ALERT};
 
 pub const HEADER_LEN: usize = 8;
 
@@ -91,10 +91,20 @@ impl<'a> IgmpPacket<'a> {
         let reported = || MulticastAddr::new(group).ok_or(IgmpError::Group);
         let message = match kind {
             0x11 => {
-                let (version, max_response) = match (rest, rest.split_first_chunk::<4>()) {
-                    ([], _) if code == 0 => (QueryVersion::V1, Deciseconds(100)),
-                    ([], _) => (QueryVersion::V2, Deciseconds(u16::from(code))),
-                    (_, Some((&[flags, interval_code, n0, n1], sources))) => {
+                let v3 = match (rest, rest.split_first_chunk::<4>()) {
+                    ([], _) => None,
+                    (_, Some(v3)) => Some(v3),
+                    (_, None) => return Err(IgmpError::QueryLength),
+                };
+                let group = match MulticastAddr::new(group) {
+                    Some(group) => QueryGroup::Specific(group),
+                    None if group.is_unspecified() => QueryGroup::General,
+                    None => return Err(IgmpError::QueryGroup),
+                };
+                let (version, max_response) = match v3 {
+                    None if code == 0 => (QueryVersion::V1, Deciseconds(100)),
+                    None => (QueryVersion::V2, Deciseconds(u16::from(code))),
+                    Some((&[flags, interval_code, n0, n1], sources)) => {
                         let count = usize::from(u16::from_be_bytes([n0, n1]));
                         let sources = sources.as_chunks::<4>().0.get(..count).ok_or(IgmpError::QuerySourcesOverrun)?;
                         let query = V3Query {
@@ -105,12 +115,6 @@ impl<'a> IgmpPacket<'a> {
                         };
                         (QueryVersion::V3(query), v3_max_response(code))
                     }
-                    (_, None) => return Err(IgmpError::QueryLength),
-                };
-                let group = match MulticastAddr::new(group) {
-                    Some(group) => QueryGroup::Specific(group),
-                    None if group.is_unspecified() => QueryGroup::General,
-                    None => return Err(IgmpError::QueryGroup),
                 };
                 IgmpMessage::Query(Query { group, max_response, version })
             }
@@ -159,7 +163,6 @@ pub fn datagram<M: IgmpBody>(source: Ipv4Source, traffic_class: TrafficClass, me
         destination: message.destination().get(),
         ttl: Ttl::LINK,
         traffic_class,
-        form: Form::Atomic,
         options: ROUTER_ALERT,
         payload: message,
     }
@@ -168,7 +171,6 @@ pub fn datagram<M: IgmpBody>(source: Ipv4Source, traffic_class: TrafficClass, me
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V2Kind {
     Report,
-    V1Report,
     Leave,
 }
 
@@ -178,19 +180,20 @@ pub struct V2Builder {
     pub group: ReportGroup,
 }
 
+impl sealed::Sealed for V2Builder {}
+
 impl Ipv4Payload for V2Builder {
     fn protocol(&self) -> Protocol {
         Protocol::Igmp
     }
 
-    fn length(&self, _room: usize) -> Result<usize, BuildError> {
+    fn length(&self, _header_len: usize) -> Result<usize, BuildError> {
         Ok(HEADER_LEN)
     }
 
     fn write(&self, _pseudo: &PseudoHeader, out: &mut [u8]) -> Result<(), BuildError> {
         let kind = match self.kind {
             V2Kind::Report => 0x16,
-            V2Kind::V1Report => 0x12,
             V2Kind::Leave => 0x17,
         };
         let [g0, g1, g2, g3] = self.group.0.get().octets();
@@ -202,50 +205,39 @@ impl Ipv4Payload for V2Builder {
 impl IgmpBody for V2Builder {
     fn destination(&self) -> MulticastAddr {
         match self.kind {
-            V2Kind::Report | V2Kind::V1Report => self.group.0,
+            V2Kind::Report => self.group.0,
             V2Kind::Leave => MulticastAddr::ALL_ROUTERS,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecordType<'a> {
-    IsInclude(&'a [Ipv4Addr]),
+pub enum RecordType {
     IsExclude,
     ToInclude,
     ToExclude,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GroupRecord<'a> {
+pub struct GroupRecord {
     pub group: ReportGroup,
-    pub record: RecordType<'a>,
-}
-
-impl GroupRecord<'_> {
-    const fn sources(&self) -> &[Ipv4Addr] {
-        match self.record {
-            RecordType::IsInclude(sources) => sources,
-            RecordType::IsExclude | RecordType::ToInclude | RecordType::ToExclude => &[],
-        }
-    }
+    pub record: RecordType,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V3ReportBuilder<'a> {
-    pub records: &'a [GroupRecord<'a>],
+    pub records: &'a [GroupRecord],
 }
+
+impl sealed::Sealed for V3ReportBuilder<'_> {}
 
 impl Ipv4Payload for V3ReportBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Igmp
     }
 
-    fn length(&self, room: usize) -> Result<usize, BuildError> {
-        let length = self.records.iter().try_fold(HEADER_LEN, |length, record| {
-            record.sources().len().checked_mul(4)?.checked_add(8)?.checked_add(length)
-        });
-        length.filter(|&length| length <= room).ok_or(BuildError::IpTooLong)
+    fn length(&self, _header_len: usize) -> Result<usize, BuildError> {
+        Ok(HEADER_LEN.saturating_add(self.records.len().saturating_mul(8)))
     }
 
     fn write(&self, _pseudo: &PseudoHeader, out: &mut [u8]) -> Result<(), BuildError> {
@@ -254,21 +246,14 @@ impl Ipv4Payload for V3ReportBuilder<'_> {
         let mut sum = Accumulator::new();
         for record in self.records {
             let kind = match record.record {
-                RecordType::IsInclude(_) => 1,
                 RecordType::IsExclude => 2,
                 RecordType::ToInclude => 3,
                 RecordType::ToExclude => 4,
             };
-            let sources = u16::try_from(record.sources().len()).map_err(|_| BuildError::IpTooLong)?;
-            let [n0, n1] = sources.to_be_bytes();
             let [g0, g1, g2, g3] = record.group.0.get().octets();
-            let fixed = [kind, 0, n0, n1, g0, g1, g2, g3];
+            let fixed = [kind, 0, 0, 0, g0, g1, g2, g3];
             sum = sum.feed(&fixed);
             rest = put(rest, fixed)?;
-            for source in record.sources() {
-                sum = sum.feed(&source.octets());
-                rest = put(rest, source.octets())?;
-            }
         }
         let [a, b, n0, n1] = be16x2(0x2200, count);
         let [c0, c1] = sum.feed(&[a, b, 0, 0, 0, 0, n0, n1]).sum().checksum().to_be_bytes();

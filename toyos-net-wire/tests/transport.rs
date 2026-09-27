@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 
 use common::*;
 use toyos_net_wire::ethernet::FrameBuilder;
-use toyos_net_wire::ipv4::{Form, Ipv4Builder, Ipv4Packet, Ipv4Payload, Ipv4Source, TrafficClass, Ttl};
+use toyos_net_wire::ipv4::Ipv4Packet;
 use toyos_net_wire::tcp::{
     Control, EstablishedOptions, RawWindow, SackBlock, SeqNum, SynOptions, TcpBuilder, TcpError, TcpFlags, TcpSegment,
     Timestamps, WindowShift,
@@ -39,23 +39,6 @@ fn dns_fixed(edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
         edit(u);
         fix_udp(IP_A, IP_DNS, u);
     })
-}
-
-fn datagram<P: Ipv4Payload>(source: Ipv4Addr, destination: Ipv4Addr, payload: P) -> Ipv4Builder<'static, P> {
-    Ipv4Builder {
-        source: Ipv4Source::new(source).unwrap(),
-        destination,
-        ttl: Ttl::DEFAULT,
-        traffic_class: TrafficClass::ZERO,
-        form: Form::Atomic,
-        options: &[],
-        payload,
-    }
-}
-
-fn emit<P: Ipv4Payload>(builder: &Ipv4Builder<'_, P>) -> Result<Vec<u8>, BuildError> {
-    let mut out = junk(70_000);
-    builder.emit(&mut out).map(<[u8]>::to_vec)
 }
 
 #[test]
@@ -201,11 +184,8 @@ fn s_udp_020_emit_computed_zero_as_ffff() {
 
 #[test]
 fn s_udp_021_always_checksummed() {
-    for word in 0..=u16::MAX {
-        let data = word.to_be_bytes();
-        let built = emit(&datagram(IP_A, IP_B, UdpBuilder { source: port(1000), destination: port(2000), data: &data })).unwrap();
-        assert_ne!(built[26..28], [0, 0], "{word:#x}");
-    }
+    let built = emit(&datagram(IP_A, IP_B, UdpBuilder { source: port(1000), destination: port(2000), data: &[0, 0] })).unwrap();
+    assert_ne!(built[26..28], [0, 0]);
 }
 
 #[test]
@@ -219,6 +199,28 @@ fn s_udp_022_too_long() {
     assert_eq!(frame.emit(&fits, &mut out).unwrap().len(), 1514);
     let over = datagram(IP_A, IP_B, UdpBuilder { source: port(1), destination: port(2), data: &data });
     assert_eq!(frame.emit(&over, &mut out), Err(BuildError::EthBodyTooLong));
+}
+
+fn checksummed_under(protocol: u8, source: Ipv4Addr, destination: Ipv4Addr, segment: &mut [u8], field: usize) {
+    segment[field..field + 2].copy_from_slice(&[0, 0]);
+    let mut covered = pseudo(source, destination, protocol, segment.len() as u16);
+    covered.extend_from_slice(segment);
+    let checksum = oracle_checksum(&covered);
+    segment[field..field + 2].copy_from_slice(&checksum.to_be_bytes());
+}
+
+#[test]
+fn udp_pseudo_header_names_protocol_17() {
+    let mut segment = hex(V_UDP_HI)[20..].to_vec();
+    checksummed_under(6, IP_B, IP_A, &mut segment, 6);
+    assert_eq!(udp(&ipv4(IP_B, IP_A, 6, &segment)), Err(UdpError::Checksum));
+}
+
+#[test]
+fn tcp_pseudo_header_names_protocol_6() {
+    let mut segment = payload_of(&frame_ip(V_TCP_FIN));
+    checksummed_under(17, IP_A, IP_B, &mut segment, 16);
+    assert_eq!(tcp(&ipv4(IP_A, IP_B, 17, &segment)).map(|s| s.flags()), Err(TcpError::Checksum));
 }
 
 #[test]

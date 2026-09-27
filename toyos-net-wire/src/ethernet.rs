@@ -165,9 +165,6 @@ impl<'a> Frame<'a> {
         let mut field = u16::from_be_bytes(*field);
         let mut tags = Tags::Untagged;
         while let Some(protocol) = TagProtocol::from_field(field) {
-            if matches!(tags, Tags::Double { .. }) {
-                return Err(EthError::TooManyTags);
-            }
             let (tag, after) = rest.split_first_chunk::<4>().ok_or(EthError::TruncatedTag)?;
             let [c0, c1, t0, t1] = *tag;
             let tag = VlanTag { protocol, control: u16::from_be_bytes([c0, c1]) };
@@ -222,7 +219,8 @@ impl<'a> Frame<'a> {
     }
 }
 
-pub trait FrameBody {
+/// Crate-private: nothing outside can implement its own body or call `length`/`write` directly, so a frame's bytes and their length always come from `emit`'s own exact-length write.
+pub(crate) trait FrameBody {
     const ETHER_TYPE: TxEtherType;
 
     fn length(&self) -> Result<usize, BuildError>;
@@ -237,6 +235,7 @@ pub struct FrameBuilder {
 }
 
 impl FrameBuilder {
+    #[allow(private_bounds, reason = "FrameBody is crate-private on purpose: only this crate's own builders may name it")]
     pub fn emit<'b, B: FrameBody>(&self, body: &B, out: &'b mut [u8]) -> Result<&'b [u8], BuildError> {
         let body_len = body.length()?;
         if body_len > MAX_BODY {

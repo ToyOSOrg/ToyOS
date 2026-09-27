@@ -5,8 +5,8 @@ use std::net::Ipv4Addr;
 use common::*;
 use toyos_net_wire::igmp::{self, ReportGroup, V2Builder, V2Kind};
 use toyos_net_wire::ipv4::{
-    Ecn, Form, FragmentOffset, Ipv4Builder, Ipv4Error, Ipv4Option, Ipv4Packet, Ipv4Payload, Ipv4Source, MulticastAddr,
-    OptionKind, Protocol, RawPayload, TrafficClass, Ttl, ROUTER_ALERT,
+    Ecn, Ipv4Builder, Ipv4Error, Ipv4Option, Ipv4Packet, Ipv4Source, MulticastAddr, Protocol, RawPayload, TrafficClass,
+    Ttl, TxOption, TxOptionKind, ROUTER_ALERT,
 };
 use toyos_net_wire::udp::{UdpBuilder, UdpDatagram, UdpError};
 use toyos_net_wire::{BuildError, Port};
@@ -15,7 +15,7 @@ fn parse(bytes: &[u8]) -> Result<Ipv4Packet<'_>, Ipv4Error> {
     Ipv4Packet::parse(bytes)
 }
 
-fn fixed(vector: &str, edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
+fn ip_fixed(vector: &str, edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
     let mut bytes = hex(vector);
     edit(&mut bytes);
     fix_ip(&mut bytes);
@@ -42,29 +42,12 @@ fn options_of(bytes: &[u8]) -> Result<Vec<Ipv4Option<'_>>, Ipv4Error> {
     parse(bytes).map(|ip| ip.options().iter().collect())
 }
 
-fn builder<P: Ipv4Payload>(source: Ipv4Addr, destination: Ipv4Addr, payload: P) -> Ipv4Builder<'static, P> {
-    Ipv4Builder {
-        source: Ipv4Source::new(source).unwrap(),
-        destination,
-        ttl: Ttl::DEFAULT,
-        traffic_class: TrafficClass::ZERO,
-        form: Form::Atomic,
-        options: &[],
-        payload,
-    }
-}
-
 fn raw(bytes: &[u8]) -> RawPayload<'_> {
-    RawPayload { protocol: Protocol::from_number(253), bytes }
+    RawPayload { protocol: unassigned(253), bytes }
 }
 
 fn udp_hi() -> UdpBuilder<'static> {
     UdpBuilder { source: Port::new(5000).unwrap(), destination: Port::new(5001).unwrap(), data: b"hi" }
-}
-
-fn emit<P: Ipv4Payload>(builder: &Ipv4Builder<'_, P>) -> Result<Vec<u8>, BuildError> {
-    let mut out = junk(70_000);
-    builder.emit(&mut out).map(<[u8]>::to_vec)
 }
 
 #[test]
@@ -76,7 +59,7 @@ fn s_ip_001_udp_datagram_fields() {
     assert_eq!(ip.total_length(), 57);
     assert_eq!(ip.identification(), 0);
     assert!(ip.dont_fragment() && !ip.more_fragments());
-    assert_eq!(ip.fragment_offset(), FragmentOffset::ZERO);
+    assert_eq!(ip.fragment_offset().units(), 0);
     assert_eq!(ip.ttl(), 64);
     assert_eq!(ip.protocol(), Protocol::Udp);
     assert_eq!((ip.source(), ip.destination()), (IP_A, IP_DNS));
@@ -100,12 +83,12 @@ fn s_ip_003_nineteen_bytes() {
 
 #[test]
 fn s_ip_004_version_6() {
-    assert_eq!(parse(&fixed(V_IP_MIN, |b| b[0] = 0x65)), Err(Ipv4Error::Version));
+    assert_eq!(parse(&ip_fixed(V_IP_MIN, |b| b[0] = 0x65)), Err(Ipv4Error::Version));
 }
 
 #[test]
 fn s_ip_005_version_5() {
-    assert_eq!(parse(&fixed(V_IP_MIN, |b| b[0] = 0x55)), Err(Ipv4Error::Version));
+    assert_eq!(parse(&ip_fixed(V_IP_MIN, |b| b[0] = 0x55)), Err(Ipv4Error::Version));
 }
 
 #[test]
@@ -132,17 +115,17 @@ fn s_ip_007_header_overrun() {
 
 #[test]
 fn s_ip_008_total_below_header() {
-    assert_eq!(parse(&fixed(V_IP_MIN, |b| set_total(b, 19))), Err(Ipv4Error::TotalLengthBelowHeader));
+    assert_eq!(parse(&ip_fixed(V_IP_MIN, |b| set_total(b, 19))), Err(Ipv4Error::TotalLengthBelowHeader));
 }
 
 #[test]
 fn s_ip_009_total_zero() {
-    assert_eq!(parse(&fixed(V_IP_MIN, |b| set_total(b, 0))), Err(Ipv4Error::TotalLengthBelowHeader));
+    assert_eq!(parse(&ip_fixed(V_IP_MIN, |b| set_total(b, 0))), Err(Ipv4Error::TotalLengthBelowHeader));
 }
 
 #[test]
 fn s_ip_010_total_inside_options() {
-    assert_eq!(parse(&fixed(V_IP_RR, |b| set_total(b, 24))), Err(Ipv4Error::TotalLengthBelowHeader));
+    assert_eq!(parse(&ip_fixed(V_IP_RR, |b| set_total(b, 24))), Err(Ipv4Error::TotalLengthBelowHeader));
 }
 
 fn udp_dns_ip_with(edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
@@ -217,7 +200,7 @@ fn s_ip_018_payload_is_not_covered() {
 
 #[test]
 fn s_ip_019_reserved_flag_is_kept() {
-    let bytes = fixed(V_UDP_HI, |b| b[6] = 0xC0);
+    let bytes = ip_fixed(V_UDP_HI, |b| b[6] = 0xC0);
     let ip = parse(&bytes).unwrap();
     assert!(ip.dont_fragment());
     assert!(!ip.is_fragment());
@@ -227,7 +210,7 @@ fn s_ip_019_reserved_flag_is_kept() {
 
 #[test]
 fn s_ip_020_df_and_mf() {
-    let bytes = fixed(V_UDP_HI, |b| b[6] = 0x60);
+    let bytes = ip_fixed(V_UDP_HI, |b| b[6] = 0x60);
     let ip = parse(&bytes).unwrap();
     assert!(ip.dont_fragment() && ip.more_fragments() && ip.is_fragment());
 }
@@ -253,7 +236,7 @@ fn s_ip_022_last_fragment() {
 
 #[test]
 fn s_ip_023_largest_offset() {
-    let bytes = fixed(V_UDP_HI, |b| b[6..8].copy_from_slice(&[0x1F, 0xFF]));
+    let bytes = ip_fixed(V_UDP_HI, |b| b[6..8].copy_from_slice(&[0x1F, 0xFF]));
     let ip = parse(&bytes).unwrap();
     assert_eq!(ip.fragment_offset().units(), 8191);
     assert!(!ip.more_fragments() && ip.is_fragment());
@@ -268,7 +251,7 @@ fn s_ip_024_dscp_and_ecn() {
 
 #[test]
 fn s_ip_027_identification_of_atomic_datagram() {
-    let bytes = fixed(V_UDP_HI, |b| b[4..6].copy_from_slice(&[0x12, 0x34]));
+    let bytes = ip_fixed(V_UDP_HI, |b| b[4..6].copy_from_slice(&[0x12, 0x34]));
     let ip = parse(&bytes).unwrap();
     assert_eq!(ip.identification(), 0x1234);
     assert_eq!(UdpDatagram::parse(&ip).unwrap().payload(), b"hi");
@@ -287,11 +270,11 @@ fn s_ip_028_largest_datagram() {
 fn s_ip_029_protocol_numbers() {
     let typed = [(1, Protocol::Icmp), (2, Protocol::Igmp), (6, Protocol::Tcp), (17, Protocol::Udp)];
     for (number, protocol) in typed {
-        let bytes = fixed(V_IP_MIN, |b| b[9] = number);
+        let bytes = ip_fixed(V_IP_MIN, |b| b[9] = number);
         assert_eq!(parse(&bytes).unwrap().protocol(), protocol);
     }
     for number in [0, 41, 50, 132, 253, 255] {
-        let bytes = fixed(V_IP_MIN, |b| b[9] = number);
+        let bytes = ip_fixed(V_IP_MIN, |b| b[9] = number);
         let protocol = parse(&bytes).unwrap().protocol();
         assert!(matches!(protocol, Protocol::Other(other) if other.value() == number), "{number}");
         assert_eq!(protocol.number(), number);
@@ -302,50 +285,50 @@ fn s_ip_029_protocol_numbers() {
 fn s_ip_030_emit_udp_datagram() {
     let frame = hex(V_UDP_DNS);
     let udp = UdpBuilder { source: Port::new(49152).unwrap(), destination: Port::new(53).unwrap(), data: &frame[42..] };
-    assert_eq!(emit(&builder(IP_A, IP_DNS, udp)).unwrap(), ip_of(&frame));
+    assert_eq!(emit(&datagram(IP_A, IP_DNS, udp)).unwrap(), ip_of(&frame));
 }
 
 #[test]
 fn s_ip_031_emit_router_alert() {
     let group = MulticastAddr::new(Ipv4Addr::new(224, 0, 0, 251)).unwrap();
     let report = V2Builder { kind: V2Kind::Report, group: ReportGroup::new(group).unwrap() };
-    let datagram = Ipv4Builder { ttl: Ttl::LINK, options: ROUTER_ALERT, ..builder(IP_A, group.get(), report) };
+    let datagram = Ipv4Builder { ttl: Ttl::LINK, options: ROUTER_ALERT, ..datagram(IP_A, group.get(), report) };
     let built = emit(&datagram).unwrap();
     assert_eq!(built, ip_of(&hex(V_IGMP_REPORT)));
     assert_eq!(built[0], 0x46);
     assert_eq!(emit(&igmp::datagram(Ipv4Source::new(IP_A).unwrap(), TrafficClass::ZERO, report)).unwrap(), built);
 }
 
-fn with_built_options(options: &[Ipv4Option<'_>]) -> Result<Vec<u8>, BuildError> {
-    emit(&Ipv4Builder { options, ..builder(IP_B, IP_A, udp_hi()) })
+fn with_built_options(options: &[TxOption<'_>]) -> Result<Vec<u8>, BuildError> {
+    emit(&Ipv4Builder { options, ..datagram(IP_B, IP_A, udp_hi()) })
 }
 
 #[test]
 fn s_ip_032_option_padding() {
-    let record = [Ipv4Option::Other { kind: OptionKind::new(7).unwrap(), data: &[4] }];
-    let built = with_built_options(&record).unwrap();
+    let built = with_built_options(&[TxOption::Other { kind: TxOptionKind::new(7).unwrap(), data: &[4] }]).unwrap();
     assert_eq!(built[0], 0x46);
     assert_eq!(built[20..24], [0x07, 0x03, 0x04, 0x00]);
-    let ip = parse(&built).unwrap();
-    assert_eq!(ip.options().iter().collect::<Vec<_>>(), record);
+    let options = options_of(&built).unwrap();
+    let [Ipv4Option::Other { kind, data }] = options[..] else { panic!("{options:?}") };
+    assert_eq!((kind.value(), data), (7, &[4][..]));
 }
 
 #[test]
 fn s_ip_033_forty_option_bytes() {
-    let kind = OptionKind::new(68).unwrap();
-    let built = with_built_options(&[Ipv4Option::Other { kind, data: &[0; 38] }]).unwrap();
+    let kind = TxOptionKind::new(68).unwrap();
+    let built = with_built_options(&[TxOption::Other { kind, data: &[0; 38] }]).unwrap();
     assert_eq!(built[0], 0x4F);
     assert_eq!(
-        with_built_options(&[Ipv4Option::Other { kind, data: &[0; 38] }, Ipv4Option::Other { kind, data: &[] }]),
+        with_built_options(&[TxOption::Other { kind, data: &[0; 38] }, TxOption::Other { kind, data: &[] }]),
         Err(BuildError::IpOptionsTooLong)
     );
-    assert_eq!(with_built_options(&[Ipv4Option::Other { kind, data: &[0; 39] }]), Err(BuildError::IpOptionsTooLong));
+    assert_eq!(with_built_options(&[TxOption::Other { kind, data: &[0; 39] }]), Err(BuildError::IpOptionsTooLong));
 }
 
 #[test]
 fn s_ip_034_largest_total_length() {
-    assert_eq!(emit(&builder(IP_B, IP_A, raw(&[0; 65_515]))).unwrap().len(), 65_535);
-    assert_eq!(emit(&builder(IP_B, IP_A, raw(&[0; 65_516]))), Err(BuildError::IpTooLong));
+    assert_eq!(emit(&datagram(IP_B, IP_A, raw(&[0; 65_515]))).unwrap().len(), 65_535);
+    assert_eq!(emit(&datagram(IP_B, IP_A, raw(&[0; 65_516]))), Err(BuildError::IpTooLong));
 }
 
 #[test]
@@ -368,25 +351,28 @@ fn s_ip_038_emit_over_junk() {
     let frame = hex(V_UDP_DNS);
     let udp = UdpBuilder { source: Port::new(49152).unwrap(), destination: Port::new(53).unwrap(), data: &frame[42..] };
     let mut out = junk(200);
-    assert_eq!(builder(IP_A, IP_DNS, udp).emit(&mut out).unwrap(), ip_of(&frame));
+    assert_eq!(datagram(IP_A, IP_DNS, udp).emit(&mut out).unwrap(), ip_of(&frame));
 }
 
 #[test]
-fn s_ip_039_atomic_and_fragment_forms() {
-    let atomic = emit(&builder(IP_B, IP_A, udp_hi())).unwrap();
+fn s_ip_039_atomic_form() {
+    let atomic = emit(&datagram(IP_B, IP_A, udp_hi())).unwrap();
     assert_eq!(atomic[4..8], [0, 0, 0x40, 0]);
-    let form = Form::Fragmentable { identification: 0x4D2F, more_fragments: true, offset: FragmentOffset::ZERO };
-    assert_eq!(emit(&Ipv4Builder { form, ..builder(IP_B, IP_A, udp_hi()) }).unwrap(), hex(V_IP_FRAG_FIRST));
-    let form = Form::Fragmentable { identification: 0x4D2F, more_fragments: false, offset: FragmentOffset::new(185).unwrap() };
-    let last = RawPayload { protocol: Protocol::Udp, bytes: b"tail" };
-    assert_eq!(emit(&Ipv4Builder { form, ..builder(IP_B, IP_A, last) }).unwrap(), hex(V_IP_FRAG_LAST));
-    assert_eq!(FragmentOffset::new(8192), None);
+}
+
+#[test]
+fn source_routes_cannot_be_built() {
+    assert_eq!(
+        [TxOptionKind::new(0), TxOptionKind::new(1), TxOptionKind::new(0x83), TxOptionKind::new(0x89), TxOptionKind::new(0x94)],
+        [None, None, None, None, None]
+    );
+    assert!(TxOptionKind::new(0x07).is_some());
 }
 
 #[test]
 fn s_ip_040_emit_dscp_and_ecn() {
     let traffic_class = TrafficClass::new(46, Ecn::Ce).unwrap();
-    assert_eq!(emit(&Ipv4Builder { traffic_class, ..builder(IP_B, IP_A, udp_hi()) }).unwrap(), hex(V_IP_DSCP));
+    assert_eq!(emit(&Ipv4Builder { traffic_class, ..datagram(IP_B, IP_A, udp_hi()) }).unwrap(), hex(V_IP_DSCP));
     assert_eq!(TrafficClass::new(64, Ecn::NotEct), None);
 }
 
@@ -486,7 +472,8 @@ fn s_ipo_015_stream_id_exposed() {
     let bytes = with_options(&hex("88 04 00 01"));
     let ip = parse(&bytes).unwrap();
     let options: Vec<_> = ip.options().iter().collect();
-    assert_eq!(options, [Ipv4Option::Other { kind: OptionKind::new(0x88).unwrap(), data: &[0, 1] }]);
+    let [Ipv4Option::Other { kind, data }] = options[..] else { panic!("{options:?}") };
+    assert_eq!((kind.value(), data), (0x88, &[0, 1][..]));
     assert_eq!(UdpDatagram::parse(&ip).unwrap().payload(), b"hi");
 }
 

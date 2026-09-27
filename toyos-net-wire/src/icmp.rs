@@ -4,21 +4,23 @@ use core::net::Ipv4Addr;
 use core::num::NonZeroU16;
 
 use crate::checksum::{Accumulator, PseudoHeader, Sum};
-use crate::emit::{be16x2, put, put_slice, BuildError};
-use crate::ipv4::{FragmentOffset, Ipv4Packet, Ipv4Payload, Protocol};
+use crate::emit::{be16x2, BuildError};
+use crate::ipv4::{sealed, FragmentOffset, Ipv4Packet, Ipv4Payload, Protocol};
 
 pub const HEADER_LEN: usize = 8;
-/// 576 bytes (RFC 1812 §4.3.2.3) less a 20-byte header without options and the ICMP header.
-pub const MAX_QUOTE: usize = 548;
+/// RFC 1812 §4.3.2.3: an error ToyOS sends, IPv4 header included, quotes no more than fits.
+pub const MAX_ERROR_LEN: usize = 576;
 
 reasons! {
     IcmpError {
         Truncated = "icmp.truncated", Malformed;
         Checksum = "icmp.checksum", Malformed;
         Code = "icmp.code", Malformed;
-        TimestampLength = "icmp.timestamp-length", Malformed;
         QuoteTruncated = "icmp.quote-truncated", Malformed;
         QuoteNotIpv4 = "icmp.quote-not-ipv4", Malformed;
+        QuoteTotalLengthBelowHeader = "icmp.quote-total-length-below-header", Malformed;
+        TimestampRequest = "icmp.timestamp-request", Unsupported;
+        TimestampReply = "icmp.timestamp-reply", Unsupported;
         SourceQuench = "icmp.source-quench", Unsupported;
         RouterDiscovery = "icmp.router-discovery", Unsupported;
         DeprecatedType = "icmp.deprecated-type", Unsupported;
@@ -121,12 +123,14 @@ impl<'a> Quote<'a> {
         let header_len = usize::from(header[0] & 0x0F) << 2;
         let (full_header, after) = body.split_at_checked(header_len).ok_or(IcmpError::QuoteTruncated)?;
         let (_, options) = full_header.split_first_chunk::<20>().ok_or(IcmpError::QuoteTruncated)?;
-        let within = usize::from(u16::from_be_bytes([header[2], header[3]])).checked_sub(header_len);
+        let within = usize::from(u16::from_be_bytes([header[2], header[3]]))
+            .checked_sub(header_len)
+            .ok_or(IcmpError::QuoteTotalLengthBelowHeader)?;
         // The first 8 payload bytes are owed, or every one when the datagram has fewer.
-        if after.len() < within.map_or(8, |payload| payload.min(8)) {
+        if after.len() < within.min(8) {
             return Err(IcmpError::QuoteTruncated);
         }
-        let (payload, beyond) = after.split_at_checked(within.unwrap_or(0).min(after.len())).ok_or(IcmpError::QuoteTruncated)?;
+        let (payload, beyond) = after.split_at(within.min(after.len()));
         Ok(Self { header, options, payload, beyond })
     }
 
@@ -179,15 +183,6 @@ pub struct Echo<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Timestamp {
-    pub identifier: u16,
-    pub sequence: u16,
-    pub originate: u32,
-    pub receive: u32,
-    pub transmit: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IcmpMessage<'a> {
     EchoRequest(Echo<'a>),
     EchoReply(Echo<'a>),
@@ -199,8 +194,6 @@ pub enum IcmpMessage<'a> {
     Redirect { code: RedirectCode, gateway: Ipv4Addr, quote: Quote<'a> },
     TimeExceeded { code: TimeExceededCode, quote: Quote<'a> },
     ParameterProblem { code: ParameterProblemCode, pointer: u8, quote: Quote<'a> },
-    TimestampRequest(Timestamp),
-    TimestampReply(Timestamp),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,25 +251,8 @@ impl<'a> IcmpPacket<'a> {
                 };
                 IcmpMessage::ParameterProblem { code, pointer: r0, quote: Quote::parse(body)? }
             }
-            13 | 14 => {
-                let &[_, _, _, _, _, _, _, _, o0, o1, o2, o3, v0, v1, v2, v3, t0, t1, t2, t3] =
-                    <&[u8; 20]>::try_from(bytes).map_err(|_| IcmpError::TimestampLength)?;
-                if code != 0 {
-                    return Err(IcmpError::Code);
-                }
-                let timestamp = Timestamp {
-                    identifier: u16::from_be_bytes([r0, r1]),
-                    sequence: u16::from_be_bytes([r2, r3]),
-                    originate: u32::from_be_bytes([o0, o1, o2, o3]),
-                    receive: u32::from_be_bytes([v0, v1, v2, v3]),
-                    transmit: u32::from_be_bytes([t0, t1, t2, t3]),
-                };
-                if kind == 13 {
-                    IcmpMessage::TimestampRequest(timestamp)
-                } else {
-                    IcmpMessage::TimestampReply(timestamp)
-                }
-            }
+            13 => return Err(IcmpError::TimestampRequest),
+            14 => return Err(IcmpError::TimestampReply),
             4 => return Err(IcmpError::SourceQuench),
             9 | 10 => return Err(IcmpError::RouterDiscovery),
             6 | 15..=18 | 30..=39 => return Err(IcmpError::DeprecatedType),
@@ -296,11 +272,10 @@ impl<'a> IcmpPacket<'a> {
 
 fn write_message(out: &mut [u8], kind: u8, code: u8, word: [u8; 4], body: &[u8]) -> Result<(), BuildError> {
     let (header, rest) = out.split_first_chunk_mut::<HEADER_LEN>().ok_or(BuildError::BufferTooSmall)?;
-    put_slice(rest, body)?;
     let [w0, w1, w2, w3] = word;
-    let unsummed = [kind, code, 0, 0, w0, w1, w2, w3];
-    let [c0, c1] = Accumulator::new().feed(&unsummed).feed(body).sum().checksum().to_be_bytes();
-    put(header, [kind, code, c0, c1, w0, w1, w2, w3]).map(|_| ())
+    let [c0, c1] = Accumulator::new().feed(&[kind, code, 0, 0, w0, w1, w2, w3]).copy(rest, body)?.sum().checksum().to_be_bytes();
+    *header = [kind, code, c0, c1, w0, w1, w2, w3];
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,12 +298,14 @@ impl<'a> EchoBuilder<'a> {
     }
 }
 
+impl sealed::Sealed for EchoBuilder<'_> {}
+
 impl Ipv4Payload for EchoBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Icmp
     }
 
-    fn length(&self, _room: usize) -> Result<usize, BuildError> {
+    fn length(&self, _header_len: usize) -> Result<usize, BuildError> {
         Ok(HEADER_LEN.saturating_add(self.data.len()))
     }
 
@@ -353,20 +330,16 @@ pub struct UnreachableBuilder<'a> {
     pub datagram: &'a Ipv4Packet<'a>,
 }
 
-impl UnreachableBuilder<'_> {
-    fn quote(&self) -> &[u8] {
-        let bytes = self.datagram.bytes();
-        bytes.get(..MAX_QUOTE).unwrap_or(bytes)
-    }
-}
+impl sealed::Sealed for UnreachableBuilder<'_> {}
 
 impl Ipv4Payload for UnreachableBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Icmp
     }
 
-    fn length(&self, _room: usize) -> Result<usize, BuildError> {
-        Ok(HEADER_LEN.saturating_add(self.quote().len()))
+    fn length(&self, header_len: usize) -> Result<usize, BuildError> {
+        let room = MAX_ERROR_LEN.saturating_sub(header_len).saturating_sub(HEADER_LEN);
+        Ok(HEADER_LEN.saturating_add(self.datagram.bytes().len().min(room)))
     }
 
     fn write(&self, _pseudo: &PseudoHeader, out: &mut [u8]) -> Result<(), BuildError> {
@@ -374,6 +347,7 @@ impl Ipv4Payload for UnreachableBuilder<'_> {
             HostUnreachable::Protocol => 2,
             HostUnreachable::Port => 3,
         };
-        write_message(out, 3, code, [0; 4], self.quote())
+        let quote = self.datagram.bytes().get(..out.len().saturating_sub(HEADER_LEN)).ok_or(BuildError::BufferTooSmall)?;
+        write_message(out, 3, code, [0; 4], quote)
     }
 }

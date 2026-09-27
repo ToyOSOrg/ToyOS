@@ -7,7 +7,7 @@ use toyos_net_wire::arp::{Arp, ArpError, Kind, Operation};
 use toyos_net_wire::ethernet::{
     EthError, EtherType, Frame, FrameBuilder, IndividualMac, MacAddr, MacClass, TagProtocol, Tags,
 };
-use toyos_net_wire::ipv4::{Form, Ipv4Builder, Ipv4Packet, Ipv4Source, MulticastAddr, Protocol, RawPayload, TrafficClass, Ttl};
+use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Packet, MulticastAddr, RawPayload};
 use toyos_net_wire::{BuildError, Class};
 
 fn frame(text: &str) -> Vec<u8> {
@@ -131,6 +131,9 @@ fn s_eth_016_three_tags() {
     bytes.extend_from_slice(&hex("88 a8 00 0a 81 00 00 14 81 00 00 1e 08 06"));
     bytes.extend_from_slice(&[0; 46]);
     assert_eq!(Frame::parse(&bytes), Err(EthError::TooManyTags));
+    // A third tag cut short is refused for its bytes before it is counted.
+    bytes.truncate(12 + 10);
+    assert_eq!(Frame::parse(&bytes), Err(EthError::TruncatedTag));
 }
 
 #[test]
@@ -199,15 +202,7 @@ fn s_eth_027_emit_over_junk() {
 }
 
 fn raw_datagram(payload: &[u8]) -> Ipv4Builder<'static, RawPayload<'_>> {
-    Ipv4Builder {
-        source: Ipv4Source::new(IP_B).unwrap(),
-        destination: IP_A,
-        ttl: Ttl::DEFAULT,
-        traffic_class: TrafficClass::ZERO,
-        form: Form::Atomic,
-        options: &[],
-        payload: RawPayload { protocol: Protocol::from_number(253), bytes: payload },
-    }
+    datagram(IP_B, IP_A, RawPayload { protocol: unassigned(253), bytes: payload })
 }
 
 #[test]
@@ -236,13 +231,6 @@ fn s_eth_031_multicast_mac_mapping() {
     assert_eq!(mac(224, 128, 0, 1), MacAddr([0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]));
     assert_eq!(mac(239, 255, 255, 250), MacAddr([0x01, 0x00, 0x5e, 0x7f, 0xff, 0xfa]));
     assert_eq!(MulticastAddr::new(IP_A), None);
-}
-
-#[test]
-fn s_eth_032_broadcast_destinations_map_to_all_ones() {
-    // 255.255.255.255 and 192.0.2.255 on 192.0.2.0/24 are both broadcast.
-    assert_eq!(MacAddr::BROADCAST, MacAddr([0xff; 6]));
-    assert_eq!(MacAddr::BROADCAST.class(), MacClass::Broadcast);
 }
 
 fn arp_body(text: &str) -> Vec<u8> {

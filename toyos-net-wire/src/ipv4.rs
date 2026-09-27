@@ -12,6 +12,8 @@ pub const MAX_OPTIONS_LEN: usize = 40;
 pub const MAX_LEN: usize = 65535;
 
 const ROUTER_ALERT_KIND: u8 = 0x94;
+const LOOSE_SOURCE_ROUTE_KIND: u8 = 0x83;
+const STRICT_SOURCE_ROUTE_KIND: u8 = 0x89;
 
 reasons! {
     Ipv4Error {
@@ -153,10 +155,6 @@ impl TrafficClass {
         Some(Self(dscp << 2 | ecn))
     }
 
-    pub const fn from_byte(byte: u8) -> Self {
-        Self(byte)
-    }
-
     pub const fn byte(self) -> u8 {
         self.0
     }
@@ -179,16 +177,6 @@ impl TrafficClass {
 pub struct FragmentOffset(u16);
 
 impl FragmentOffset {
-    pub const ZERO: Self = Self(0);
-
-    pub const fn new(units: u16) -> Option<Self> {
-        if units < 0x2000 {
-            Some(Self(units))
-        } else {
-            None
-        }
-    }
-
     pub(crate) const fn from_field(field: u16) -> Self {
         Self(field & 0x1FFF)
     }
@@ -196,20 +184,12 @@ impl FragmentOffset {
     pub const fn units(self) -> u16 {
         self.0
     }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OptionKind(u8);
 
 impl OptionKind {
-    pub const fn new(kind: u8) -> Option<Self> {
-        match kind {
-            0 | 1 | ROUTER_ALERT_KIND => None,
-            kind => Some(Self(kind)),
-        }
-    }
-
     pub const fn value(self) -> u8 {
         self.0
     }
@@ -233,7 +213,75 @@ pub enum Ipv4Option<'a> {
     Other { kind: OptionKind, data: &'a [u8] },
 }
 
-impl Ipv4Option<'_> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ipv4Options<'a>(&'a [u8]);
+
+impl<'a> Ipv4Options<'a> {
+    fn parse(area: &'a [u8]) -> Result<Self, Ipv4Error> {
+        let mut rest = area;
+        loop {
+            match rest {
+                [] | [0, ..] => return Ok(Self(area)),
+                [1, after @ ..] => rest = after,
+                [_] => return Err(Ipv4Error::OptionOverrun),
+                [kind, length, ..] => {
+                    if *length < 2 {
+                        return Err(Ipv4Error::OptionLength);
+                    }
+                    let (option, after) = rest.split_at_checked(usize::from(*length)).ok_or(Ipv4Error::OptionOverrun)?;
+                    if *kind == ROUTER_ALERT_KIND && option.len() != 4 {
+                        return Err(Ipv4Error::RouterAlertLength);
+                    }
+                    rest = after;
+                }
+            }
+        }
+    }
+
+    /// Walks an area `parse` accepted, so it checks nothing.
+    pub fn iter(&self) -> impl Iterator<Item = Ipv4Option<'a>> {
+        let mut rest = self.0;
+        core::iter::from_fn(move || loop {
+            match rest {
+                [1, after @ ..] => rest = after,
+                [kind, length, after @ ..] if *kind != 0 => {
+                    let (data, next) = after.split_at_checked(usize::from(*length).saturating_sub(2))?;
+                    rest = next;
+                    return Some(match (*kind, data) {
+                        (ROUTER_ALERT_KIND, &[a, b]) => Ipv4Option::RouterAlert(u16::from_be_bytes([a, b])),
+                        (kind, data) => Ipv4Option::Other { kind: OptionKind(kind), data },
+                    });
+                }
+                _ => return None,
+            }
+        })
+    }
+
+    pub const fn bytes(&self) -> &'a [u8] {
+        self.0
+    }
+}
+
+/// A kind a builder may write: not EOL, NOP or Router Alert, and never a source route, which ToyOS refuses (RFC 7126 §4.3.5, §4.4.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TxOptionKind(u8);
+
+impl TxOptionKind {
+    pub const fn new(kind: u8) -> Option<Self> {
+        match kind {
+            0 | 1 | ROUTER_ALERT_KIND | LOOSE_SOURCE_ROUTE_KIND | STRICT_SOURCE_ROUTE_KIND => None,
+            kind => Some(Self(kind)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxOption<'a> {
+    RouterAlert(u16),
+    Other { kind: TxOptionKind, data: &'a [u8] },
+}
+
+impl TxOption<'_> {
     const fn len(&self) -> usize {
         match self {
             Self::RouterAlert(_) => 4,
@@ -242,61 +290,7 @@ impl Ipv4Option<'_> {
     }
 }
 
-pub const ROUTER_ALERT: &[Ipv4Option<'static>] = &[Ipv4Option::RouterAlert(0)];
-
-fn next_option(mut area: &[u8]) -> Result<Option<(Ipv4Option<'_>, &[u8])>, Ipv4Error> {
-    loop {
-        let Some((&kind, rest)) = area.split_first() else {
-            return Ok(None);
-        };
-        match kind {
-            0 => return Ok(None),
-            1 => area = rest,
-            _ => {
-                let &length = rest.first().ok_or(Ipv4Error::OptionOverrun)?;
-                if length < 2 {
-                    return Err(Ipv4Error::OptionLength);
-                }
-                let (option, after) = area.split_at_checked(usize::from(length)).ok_or(Ipv4Error::OptionOverrun)?;
-                let (_, data) = option.split_first_chunk::<2>().ok_or(Ipv4Error::OptionLength)?;
-                let option = match OptionKind::new(kind) {
-                    Some(kind) => Ipv4Option::Other { kind, data },
-                    None => {
-                        let &[a, b] = <&[u8; 2]>::try_from(data).map_err(|_| Ipv4Error::RouterAlertLength)?;
-                        Ipv4Option::RouterAlert(u16::from_be_bytes([a, b]))
-                    }
-                };
-                return Ok(Some((option, after)));
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Ipv4Options<'a>(&'a [u8]);
-
-impl<'a> Ipv4Options<'a> {
-    fn parse(area: &'a [u8]) -> Result<Self, Ipv4Error> {
-        let mut rest = area;
-        while let Some((_, after)) = next_option(rest)? {
-            rest = after;
-        }
-        Ok(Self(area))
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = Ipv4Option<'a>> {
-        let mut rest = self.0;
-        core::iter::from_fn(move || {
-            let (option, after) = next_option(rest).ok().flatten()?;
-            rest = after;
-            Some(option)
-        })
-    }
-
-    pub const fn bytes(&self) -> &'a [u8] {
-        self.0
-    }
-}
+pub const ROUTER_ALERT: &[TxOption<'static>] = &[TxOption::RouterAlert(0)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ipv4Packet<'a> {
@@ -391,33 +385,35 @@ impl<'a> Ipv4Packet<'a> {
     pub const fn bytes(&self) -> &'a [u8] {
         self.datagram
     }
-
-    pub(crate) fn pseudo_header(&self, length: u16) -> PseudoHeader {
-        PseudoHeader { source: self.source(), destination: self.destination(), protocol: self.protocol(), length }
-    }
 }
 
-pub trait Ipv4Payload {
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
+/// Sealed: every payload names its own protocol and computes its own lengths and checksum.
+pub trait Ipv4Payload: sealed::Sealed {
     fn protocol(&self) -> Protocol;
 
-    fn length(&self, room: usize) -> Result<usize, BuildError>;
+    fn length(&self, header_len: usize) -> Result<usize, BuildError>;
 
     fn write(&self, pseudo: &PseudoHeader, out: &mut [u8]) -> Result<(), BuildError>;
 }
 
-/// Bytes already in their protocol's form: an unassigned protocol's, or a fragment's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RawPayload<'a> {
-    pub protocol: Protocol,
+    pub protocol: OtherProtocol,
     pub bytes: &'a [u8],
 }
 
+impl sealed::Sealed for RawPayload<'_> {}
+
 impl Ipv4Payload for RawPayload<'_> {
     fn protocol(&self) -> Protocol {
-        self.protocol
+        Protocol::Other(self.protocol)
     }
 
-    fn length(&self, _room: usize) -> Result<usize, BuildError> {
+    fn length(&self, _header_len: usize) -> Result<usize, BuildError> {
         Ok(self.bytes.len())
     }
 
@@ -426,29 +422,27 @@ impl Ipv4Payload for RawPayload<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Form {
-    /// Identification 0: RFC 6864 §4.1 gives it no meaning, and zero leaks no counter.
-    Atomic,
-    Fragmentable { identification: u16, more_fragments: bool, offset: FragmentOffset },
-}
-
+/// Always atomic: DF set, identification 0, which RFC 6864 §4.1 gives no meaning and which leaks no counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ipv4Builder<'a, P> {
     pub source: Ipv4Source,
     pub destination: Ipv4Addr,
     pub ttl: Ttl,
     pub traffic_class: TrafficClass,
-    pub form: Form,
-    pub options: &'a [Ipv4Option<'a>],
+    pub options: &'a [TxOption<'a>],
     pub payload: P,
 }
 
 impl<P: Ipv4Payload> Ipv4Builder<'_, P> {
     pub fn emit<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], BuildError> {
-        let packet = exact(out, self.length()?)?;
+        let packet = exact(out, FrameBody::length(self)?)?;
         self.write(packet)?;
         Ok(packet)
+    }
+
+    /// The exact byte length `emit` writes, so a caller can size its buffer without the crate-private `FrameBody` it cannot forge.
+    pub fn length(&self) -> Result<usize, BuildError> {
+        FrameBody::length(self)
     }
 
     fn header_len(&self) -> Result<usize, BuildError> {
@@ -465,12 +459,10 @@ impl<P: Ipv4Payload> FrameBody for Ipv4Builder<'_, P> {
 
     fn length(&self) -> Result<usize, BuildError> {
         let header_len = self.header_len()?;
-        let room = MAX_LEN.saturating_sub(header_len);
-        let payload = self.payload.length(room)?;
-        if payload > room {
-            return Err(BuildError::IpTooLong);
+        match header_len.checked_add(self.payload.length(header_len)?) {
+            Some(total) if total <= MAX_LEN => Ok(total),
+            _ => Err(BuildError::IpTooLong),
         }
-        Ok(header_len.saturating_add(payload))
     }
 
     fn write(&self, out: &mut [u8]) -> Result<(), BuildError> {
@@ -480,27 +472,19 @@ impl<P: Ipv4Payload> FrameBody for Ipv4Builder<'_, P> {
         let (_, mut options) = header.split_first_chunk_mut::<MIN_HEADER_LEN>().ok_or(BuildError::BufferTooSmall)?;
         for option in self.options {
             options = match option {
-                Ipv4Option::RouterAlert(value) => {
+                TxOption::RouterAlert(value) => {
                     let [v0, v1] = value.to_be_bytes();
                     put(options, [ROUTER_ALERT_KIND, 4, v0, v1])?
                 }
-                Ipv4Option::Other { kind, data } => {
+                TxOption::Other { kind, data } => {
                     let len = u8::try_from(option.len()).map_err(|_| BuildError::IpOptionsTooLong)?;
                     put_slice(put(options, [kind.0, len])?, data)?
                 }
             };
         }
         options.fill(0);
-        let (identification, flags) = match self.form {
-            Form::Atomic => (0, 0x4000),
-            Form::Fragmentable { identification, more_fragments, offset } => {
-                (identification, if more_fragments { 0x2000 | offset.0 } else { offset.0 })
-            }
-        };
         let ihl = u8::try_from(header_len >> 2).map_err(|_| BuildError::IpOptionsTooLong)?;
         let [t0, t1] = total.to_be_bytes();
-        let [i0, i1] = u16::to_be_bytes(identification);
-        let [f0, f1] = u16::to_be_bytes(flags);
         let [s0, s1, s2, s3] = self.source.0.octets();
         let [d0, d1, d2, d3] = self.destination.octets();
         let protocol = self.payload.protocol();
@@ -509,10 +493,10 @@ impl<P: Ipv4Payload> FrameBody for Ipv4Builder<'_, P> {
             self.traffic_class.0,
             t0,
             t1,
-            i0,
-            i1,
-            f0,
-            f1,
+            0,
+            0,
+            0x40,
+            0,
             self.ttl.get(),
             protocol.number(),
             0,
