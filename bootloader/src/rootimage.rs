@@ -23,9 +23,10 @@ use core::num::NonZeroU64;
 
 use toyos_gpt::{Guid, Located, Sectors};
 use toyos_rootimage::chunk;
+use toyos_update::entry;
 use toyos_update::slots::{self, Table};
 use uefi::prelude::*;
-use uefi::proto::device_path::{DevicePath, DevicePathNode, DeviceSubType, DeviceType};
+use uefi::proto::device_path::DevicePath;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::block::{BlockIO, BlockIoProtocol};
 use uefi::table::boot::{AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
@@ -89,8 +90,8 @@ impl RootImage {
 }
 
 /// The whole-disk block device carrying the partition firmware loaded this
-/// image from: the one handle whose device path is the partition's without
-/// its last node, the HARDDRIVE one.
+/// image from: the one handle whose device path is the disk
+/// `toyos_update::entry::partition` cuts from the partition's.
 pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
     let image = bs
         .open_protocol_exclusive::<LoadedImage>(handle)
@@ -98,13 +99,8 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
     let device = image.device().ok_or("firmware names no device this image was loaded from")?;
     let path = try_get_protocol::<DevicePath>(bs, device)
         .map_err(|e| alloc::format!("the boot device's path: {e:?}"))?;
-    let nodes: alloc::vec::Vec<&DevicePathNode> = path.node_iter().collect();
-    let Some((last, disk_nodes)) = nodes.split_last() else {
-        return Err("the boot device's path is empty".into());
-    };
-    if last.full_type() != (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE) {
-        return Err("the boot device is not a partition, so there is no disk to find the slots on".into());
-    }
+    let (disk_path, _) = entry::partition(path.as_bytes())
+        .map_err(|why| alloc::format!("the boot device's path: {why}, so there is no disk to find the slots on"))?;
 
     let handles = bs
         .find_handles::<BlockIO>()
@@ -117,7 +113,7 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
         .filter(|&candidate| candidate != device)
         .filter(|&candidate| {
             let Ok(path) = try_get_protocol::<DevicePath>(bs, candidate) else { return false };
-            path.node_iter().eq(disk_nodes.iter().copied())
+            path.as_bytes().strip_suffix(&entry::END_NODE) == Some(disk_path)
         })
         .collect();
     match disks[..] {

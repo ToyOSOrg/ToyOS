@@ -64,7 +64,7 @@ pub fn esp(bs: &BootServices, guid: &[u8; 16]) -> Result<Esp, String> {
     }
     let path = crate::rootimage::try_get_protocol::<DevicePath>(bs, handle)
         .map_err(|e| alloc::format!("the partition's device path ({e:?})"))?;
-    let part = entry::partition(path.as_bytes()).map_err(|why| alloc::format!("the partition: {why}"))?;
+    let (_, part) = entry::partition(path.as_bytes()).map_err(|why| alloc::format!("the partition: {why}"))?;
     if part.guid != *guid {
         return Err(String::from("the partition's HARDDRIVE node names another partition"));
     }

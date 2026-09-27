@@ -57,5 +57,5 @@ pub(crate) fn our_partition(handle: Handle, system_table: &SystemTable<Boot>) ->
     let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
     let path = bs.open_protocol_exclusive::<DevicePath>(device).ok()?;
-    toyos_update::entry::partition(path.as_bytes()).ok().map(|part| part.guid)
+    toyos_update::entry::partition(path.as_bytes()).ok().map(|(_, part)| part.guid)
 }

@@ -37,8 +37,9 @@ const SIGNATURE_GUID: u8 = 0x02;
 /// MEDIA/FILE_PATH (UEFI 2.10 §10.3.6.4): a null-terminated `CHAR16` path.
 const FILE_PATH: (u8, u8) = (0x04, 0x04);
 
-/// END_ENTIRE_DEVICE_PATH (UEFI 2.10 §10.3.1).
+/// END_ENTIRE_DEVICE_PATH (UEFI 2.10 §10.3.1), and the whole node.
 const END: (u8, u8) = (0x7F, 0xFF);
+pub const END_NODE: [u8; NODE_HEADER] = [END.0, END.1, NODE_HEADER as u8, 0];
 
 /// A GPT partition as a HARDDRIVE node names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,9 +90,7 @@ pub fn load_option(description: &str, part: &Partition, path: &str, out: &mut [u
     out[file_at + 1] = FILE_PATH.1;
     out[file_at + 2..file_at + 4].copy_from_slice(&node_len(end_at - file_at));
 
-    out[end_at] = END.0;
-    out[end_at + 1] = END.1;
-    out[end_at + 2..end_at + 4].copy_from_slice(&node_len(NODE_HEADER));
+    out[end_at..end_at + NODE_HEADER].copy_from_slice(&END_NODE);
     let len = end_at + NODE_HEADER;
     out[4..6].copy_from_slice(&node_len(len - path_at));
     len
@@ -115,24 +114,27 @@ fn device_path(option: &[u8]) -> Option<&[u8]> {
     option.get(at..at.checked_add(path_len)?)
 }
 
-/// The GPT partition a device path names by its one HARDDRIVE node, or why it
-/// names none. Exactly one node: a path with two describes a partition inside
-/// a partition, and taking either is guessing which one the path means.
-pub fn partition(mut path: &[u8]) -> Result<Partition, &'static str> {
+/// The GPT partition a device path names by its one HARDDRIVE node, and the
+/// path of the disk it is on: the nodes before that one, whose own device path
+/// is those bytes and [`END_NODE`]. Exactly one node: a path with two describes
+/// a partition inside a partition, and taking either is guessing which one the
+/// path means.
+pub fn partition(path: &[u8]) -> Result<(&[u8], Partition), &'static str> {
+    let mut rest = path;
     let mut found = None;
     loop {
-        let node = path.get(..NODE_HEADER).ok_or("the device path runs off with no end node")?;
+        let node = rest.get(..NODE_HEADER).ok_or("the device path runs off with no end node")?;
         let len = usize::from(u16::from_le_bytes([node[2], node[3]]));
-        let this = path.get(..len).filter(|_| len >= NODE_HEADER).ok_or("a device-path node cannot be stepped over")?;
+        let this = rest.get(..len).filter(|_| len >= NODE_HEADER).ok_or("a device-path node cannot be stepped over")?;
         match (this[0], this[1]) {
             END => break,
             HARD_DRIVE if found.is_some() => return Err("the device path has more than one HARDDRIVE node"),
-            HARD_DRIVE => found = Some(this),
+            HARD_DRIVE => found = Some((&path[..path.len() - rest.len()], this)),
             _ => {}
         }
-        path = &path[len..];
+        rest = &rest[len..];
     }
-    let hd = found.ok_or("the device path carries no HARDDRIVE node")?;
+    let (disk, hd) = found.ok_or("the device path carries no HARDDRIVE node")?;
     if hd.len() != HARD_DRIVE_BYTES {
         return Err("the HARDDRIVE node is malformed");
     }
@@ -143,17 +145,18 @@ pub fn partition(mut path: &[u8]) -> Result<Partition, &'static str> {
         return Err("the HARDDRIVE node names the partition with no GUID signature");
     }
     let field = |at: usize| u64::from_le_bytes(hd[at..at + 8].try_into().expect("eight bytes"));
-    Ok(Partition {
+    let part = Partition {
         number: u32::from_le_bytes(hd[4..8].try_into().expect("four bytes")),
         start: field(8),
         size: field(16),
         guid: hd[24..40].try_into().expect("sixteen bytes"),
-    })
+    };
+    Ok((disk, part))
 }
 
 /// Whether an option boots off the GPT partition `guid`.
 fn names(option: &[u8], guid: &[u8; 16]) -> bool {
-    device_path(option).is_some_and(|path| partition(path).is_ok_and(|found| found.guid == *guid))
+    device_path(option).is_some_and(|path| partition(path).is_ok_and(|(_, found)| found.guid == *guid))
 }
 
 /// Whether an option is active: the boot manager skips one that is not.
@@ -293,7 +296,7 @@ mod tests {
     fn a_path_names_the_partition_of_its_one_hard_drive_node() {
         let option = by_hand();
         let path = device_path(&option).expect("the option's path");
-        assert_eq!(partition(path), Ok(PART));
+        assert_eq!(partition(path), Ok((&[][..], PART)));
         let (hd, rest) = path.split_at(HARD_DRIVE_BYTES);
         let mut other = hd.to_vec();
         other[24..40].copy_from_slice(&[0xE6; 16]);
@@ -302,6 +305,24 @@ mod tests {
         }
         assert_eq!(partition(rest), Err("the device path carries no HARDDRIVE node"));
         assert_eq!(partition(&path[..path.len() - NODE_HEADER]), Err("the device path runs off with no end node"));
+    }
+
+    /// **The disk is the path before the one HARDDRIVE node**, whatever follows
+    /// it, and a path whose last node is a second HARDDRIVE one has no disk.
+    #[test]
+    fn a_partitions_disk_is_the_path_before_its_hard_drive_node() {
+        let option = by_hand();
+        let path = device_path(&option).expect("the option's path");
+        let (hd, file) = path.split_at(HARD_DRIVE_BYTES);
+        // ACPI(PNP0A03,0), UEFI 2.10 §10.3.3.
+        let disk = [0x02, 0x01, 12, 0, 0xD0, 0x41, 0x03, 0x0A, 0, 0, 0, 0];
+        for (after, what) in [(&END_NODE[..], "a partition's own path"), (file, "a node after the HARDDRIVE one")] {
+            assert_eq!(partition(&[&disk[..], hd, after].concat()), Ok((&disk[..], PART)), "{what}");
+        }
+        let mut other = hd.to_vec();
+        other[24..40].copy_from_slice(&[0xE6; 16]);
+        let nested = [&disk[..], &other, hd, &END_NODE].concat();
+        assert_eq!(partition(&nested), Err("the device path has more than one HARDDRIVE node"));
     }
 
     #[test]
