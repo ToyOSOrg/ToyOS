@@ -10,6 +10,7 @@ use std::{fs, thread};
 
 use super::compile;
 use toyos_build::arch::{Accel, Arch};
+use toyos_build::tether::Tether;
 
 /// The architecture every machine this suite builds and boots is: the suite's
 /// q35 shapes, i8042 and VT-d are x86-64's, and the aarch64 bring-up boots
@@ -2637,6 +2638,8 @@ impl ConsoleStream {
 
 pub struct QemuInstance {
     child: Child,
+    /// What ends QEMU when this process dies without dropping this.
+    _tether: Tether,
     stdin: BufWriter<Box<dyn Write + Send>>,
     rx: Receiver<String>,
     console: ConsoleStream,
@@ -3354,6 +3357,11 @@ impl QemuInstance {
             }
             thread::sleep(interval);
         }
+    }
+
+    /// The QEMU process's pid.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Every console line the guest printed before the ready marker.
@@ -4901,7 +4909,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     if VERBOSE.load(Ordering::Relaxed) {
         eprintln!("[qemu {seq}] Launching QEMU...");
     }
-    let mut child = qemu.spawn().expect("Failed to launch QEMU");
+    let (mut child, tether) = toyos_build::tether::spawn(qemu).expect("Failed to launch QEMU");
 
     let stdin: Box<dyn Write + Send> = match input {
         Some(fifo) => Box::new(fifo),
@@ -4972,6 +4980,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     LIVE.fetch_add(1, Ordering::SeqCst);
     QemuInstance {
         child,
+        _tether: tether,
         stdin,
         rx,
         _reader_thread: reader_thread,

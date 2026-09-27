@@ -630,9 +630,15 @@ const HOST_SPAWNS: &[Spawn] = &[
     },
     Spawn {
         arg: "std::env::current_exe().unwrap()",
-        sites: &[("src/buildlock.rs", 2), ("toyos-tmpdir/tests/reclaim.rs", 1)],
-        why: "a test binary re-running itself: the build system under the lock, and a \
-              scratch holder whose death is what is judged",
+        sites: &[
+            ("src/buildlock.rs", 2),
+            ("src/tether.rs", 1),
+            ("tests/common/orphan.rs", 1),
+            ("toyos-tmpdir/tests/reclaim.rs", 1),
+        ],
+        why: "a test binary re-running itself: the build system under the lock, and an \
+              owner whose death is what is judged — of its scratch, its tethered child and \
+              its guest",
     },
     Spawn {
         arg: "env!(\"CARGO_BIN_EXE_toyos-cc\")",

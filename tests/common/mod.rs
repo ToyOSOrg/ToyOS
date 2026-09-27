@@ -41,6 +41,7 @@ pub mod logstream;
 pub mod metal;
 #[allow(dead_code)]
 pub mod origin;
+pub mod orphan;
 #[allow(dead_code)]
 pub mod partclaim;
 #[allow(dead_code)]
