@@ -489,6 +489,11 @@ fn s_prop_008_nothing_happens_before_a_deadline() {
 }
 
 #[test]
+fn s_mod_004_prop_urgent_is_never_sent() {
+    runs(0x3c6e_f371, |p| p.loss = 5, false);
+}
+
+#[test]
 fn s_rx_026_prop_sacked_bytes_are_delivered() {
     for seed in 0..RUNS {
         let mut pair = Pair::new(0x2545_f491 ^ seed);
