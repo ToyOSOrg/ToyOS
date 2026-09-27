@@ -329,7 +329,7 @@ Each stage names its exit; "measured" means a number from a run.
 
 8. **An aarch64 tier in the harness.** `tests/common/qemu.rs` takes an
    `Arch`: `virt`, edk2-aarch64, HVF on Apple hosts (TCG otherwise).
-   `src/tiers.rs` gains the arch axis. `src/redlist.rs` quarantines per arch.
+   `src/tiers.rs` gains the arch axis.
    The CI runner is picked here, after measuring hosted `macos-latest`
    (whether HVF is usable inside the runner VM) and hosted
    `ubuntu-24.04-arm` (whether `/dev/kvm` exists there). **Exit**: the fast

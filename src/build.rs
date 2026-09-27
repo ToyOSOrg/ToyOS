@@ -1582,16 +1582,21 @@ fn syscall_entry_bytes(kernel: &[u8]) -> Result<&[u8], String> {
         ));
     };
     let header = toyos_elf::FileHeader::parse(kernel).map_err(|e| format!("{e:?}"))?;
+    let extent = toyos_elf::Layout::parse(kernel, header.machine).map_err(|e| format!("{e}"))?.extent();
+    let value = entry
+        .address(extent)
+        .map(|at| extent.min() + at.get())
+        .ok_or("the kernel's `syscall_entry` lies outside its own image")?;
     let segments = header.program_headers(kernel).map_err(|e| format!("{e:?}"))?;
     (0..header.phnum as usize)
         .filter_map(|i| ProgramHeader::parse(segments, i))
         .filter(|segment| segment.kind == PT_LOAD)
         .find_map(|segment| {
-            let within = entry.value.checked_sub(segment.vaddr)?;
+            let within = value.checked_sub(segment.vaddr)?;
             let left = segment.filesz.checked_sub(within).filter(|&left| left != 0)?;
             toyos_symbols::file_range(kernel, segment.offset.checked_add(within)?, left)
         })
-        .ok_or_else(|| format!("no `PT_LOAD` holds `syscall_entry` at {:#x} in the file", entry.value))
+        .ok_or_else(|| format!("no `PT_LOAD` holds `syscall_entry` at {value:#x} in the file"))
 }
 
 /// Whether an entry switches to the kernel's `rsp` in the instruction after it

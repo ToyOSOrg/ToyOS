@@ -139,7 +139,7 @@ impl<'a> SectionTable<'a> {
             {
                 continue;
             }
-            if first_entry(sh.offset).is_some_and(|r| r.kind == crate::rela::RelocKind::Relative) {
+            if first_entry(sh.offset).is_some_and(|r| r.kind() == crate::rela::RelocKind::Relative) {
                 return Some((sh.offset, sh.size));
             }
         }

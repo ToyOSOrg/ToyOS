@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-01
 ---
@@ -58,8 +58,7 @@ controller" from "the console stopped reading the kernel's queue", and it needs
   denominator**: the same STALL sentence, **891 s**, `ALONE: GREEN — it fails
   only beside other guests`, in **1 of 6** full `cargo test` fast tiers run in
   one worktree that day, each with single-test runs of the same suite beside
-  it. Green in the three nightly `ci` runs of the same week. `src/redlist.rs`
-  carries it as this name's first `DevHostLoaded` row.
+  it. Green in the three nightly `ci` runs of the same week.
 
 The two do not reconcile at a common rate: at the 2-of-5 arm's own p = 0.4,
 P(0 of 20) is 3.66e-05. **The tree is not the difference** — the branch's
@@ -72,9 +71,9 @@ available on a wedged boot, and the reported `drained 0` *while bytes were
 still being injected* is the ISR side having stopped taking them off the
 controller — not the console having stopped reading the kernel's queue.
 
-Exit: reproduce a wedge with the counter visible and read whether `RX_BYTES` is
-still rising while the panel is frozen. One number decides it, and it is
-already within reach of the armed arm rather than blocked on a new instrument.
+**Exit condition.** The input path is fixed so that no PS/2 overflow stops
+it, the staging above takes every line after the first on twenty boots, and
+`console_locale_detect` is green beside other guests. Owner: orchestrator.
 
 Not a reason to leave `shell_type_once` unpaced: pacing keeps the harness from
 provoking this, and the tracker keeps the defect.

@@ -53,11 +53,6 @@ nothing could see an idle wake when this was filed. The 2026-08-29 section
 below is that instrument existing; a red taken since then decides the split by
 itself.
 
-Not on `src/redlist.rs` — `cargo run -- --known-red audio_idle_suspend` answers
-`NOT ON THE LIST`. Adjudicating it there needs the rate above and a decision
-about whether the row records a soundd defect or a `Sched::Parallel`
-misclassification, and those are not the same row.
-
 Gate A is unaffected and green throughout: `audio_tone` and `audio_tone_load` at
 smp=1 and smp=8 all pass on `cf72c3dc` with 440.0 Hz, phase-breaks 0, gaps none,
 0 underruns and 0 drains.
