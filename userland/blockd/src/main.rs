@@ -125,37 +125,34 @@ impl toyos_gpt::Sectors for Sectors<'_> {
 fn read_table(ctrl: &mut Controller) -> Vec<Part> {
     let per = BLOCK_BYTES as u64 / ctrl.lba_bytes as u64;
     let mut sectors = Sectors { ctrl, block: vec![0u8; BLOCK_BYTES] };
-    const BLANK: toyos_gpt::Partition = toyos_gpt::Partition {
-        index: 0,
-        type_guid: toyos_gpt::Guid([0; 16]),
-        unique_guid: toyos_gpt::Guid([0; 16]),
-        first_lba: 0,
-        last_lba: 0,
-    };
-    let mut found = [BLANK; 128];
-    let scan = match toyos_gpt::list(&mut sectors, &mut found) {
-        Ok(scan) => scan,
-        Err(why) => {
-            println!("blockd: the disk carries no partition table this driver reads: {why:?}");
-            return Vec::new();
-        }
-    };
+    let mut found = [None; 128];
+    if let Err(why) = toyos_gpt::list(&mut sectors, &mut found) {
+        println!("blockd: the disk carries no partition table this driver reads: {why:?}");
+        return Vec::new();
+    }
     let mut parts = Vec::new();
-    for listed in &found[..scan.listed] {
-        let unique = listed.unique_guid.0;
-        let span = match toyos_gpt::locate(&mut sectors, listed.unique_guid) {
+    for entry in found.iter().flatten() {
+        let listed = match entry {
+            Ok(listed) => listed,
+            Err(unplaced) => {
+                let span = Err(format!("its blocks are no partition on this disk: {unplaced:?}"));
+                parts.push(Part { unique: unplaced.unique_guid.0, span });
+                continue;
+            }
+        };
+        let unique = listed.unique_guid().0;
+        let span = match toyos_gpt::locate(&mut sectors, listed.unique_guid()) {
             Err(why) => Err(format!("its own table refuses it: {why:?}")),
             Ok(located) => {
-                let p = located.partition;
-                if p.first_lba % per != 0 || p.lba_count() % per != 0 {
+                let p = located.partition();
+                let (first, count) = (p.first_lba(), p.lba_count().get());
+                if first % per != 0 || count % per != 0 {
                     Err(format!(
-                        "LBA {}+{} is not whole 4 KiB blocks of {}-byte sectors",
-                        p.first_lba,
-                        p.lba_count(),
+                        "LBA {first}+{count} is not whole 4 KiB blocks of {}-byte sectors",
                         sectors.ctrl.lba_bytes
                     ))
                 } else {
-                    Ok((p.first_lba / per, p.lba_count() / per))
+                    Ok((first / per, count / per))
                 }
             }
         };
