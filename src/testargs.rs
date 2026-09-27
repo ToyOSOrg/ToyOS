@@ -14,7 +14,7 @@ use std::time::Duration;
 /// between guests that contend for them; this divides the work between machines
 /// that share nothing, which is the only lever CI has and the one the dev host
 /// does not have at all. The two compose: four shards at width 4 is sixteen
-/// guests that no `HostSlots` has to count, because no two are on one host.
+/// guests, no two on one host.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Shard {
     /// One-based, as it is written on the command line and in a job matrix.
@@ -153,8 +153,6 @@ declare_flags!(pub SUITE = {
     pub AUDIO_GATE = "--audio-gate", Next;
     pub JOBS = "--jobs", Next;
     pub JOBS_SHORT = "-j", Next;
-    pub HOST_SLOTS = "--host-slots", Next;
-    pub HOST_BUILDS = "--host-builds", Next;
     pub SHARD = "--shard", Next;
     pub SLOW_USB = "--slow-usb", None;
     pub NIGHTLY = "--nightly", None;
@@ -246,9 +244,13 @@ mod tests {
 
     #[test]
     fn a_deleted_flag_is_refused_rather_than_becoming_the_filter() {
-        let refusal = parse_owned(&["--skip", "desktop_window_child"]).unwrap_err();
-        assert!(refusal.starts_with("--skip:"), "{refusal}");
-        assert!(refusal.contains("--jobs <value>"), "{refusal}");
+        for (flag, value) in
+            [("--skip", "desktop_window_child"), ("--host-slots", "0"), ("--host-builds", "0")]
+        {
+            let refusal = parse_owned(&[flag, value]).unwrap_err();
+            assert!(refusal.starts_with(&format!("{flag}:")), "{refusal}");
+            assert!(refusal.contains("--jobs <value>"), "{refusal}");
+        }
     }
 
     #[test]
@@ -256,8 +258,6 @@ mod tests {
         assert_eq!(parse_owned(&["--jobs", "4"]).unwrap(), None);
         assert_eq!(parse_owned(&["-j", "4"]).unwrap(), None);
         assert_eq!(parse_owned(&["--audio-gate", "30"]).unwrap(), None);
-        assert_eq!(parse_owned(&["--host-slots", "0"]).unwrap(), None);
-        assert_eq!(parse_owned(&["--host-builds", "0"]).unwrap(), None);
     }
 
     #[test]
@@ -430,8 +430,7 @@ mod tests {
     }
 
     /// Every `None` here is a default the run then takes in silence: `--jobs`
-    /// the built-in width, `--audio-gate` the thorough tier off, `--host-slots`
-    /// the host's own budget, `--host-builds` no budget at all.
+    /// the built-in width, `--audio-gate` the thorough tier off.
     #[test]
     fn a_flag_left_without_its_value_is_refused_by_name() {
         for flag in SUITE.0.iter().filter(|f| !matches!(f.value, Value::None | Value::Optional)) {
@@ -485,8 +484,6 @@ mod tests {
             vec!["--list"],
             vec!["--audio-gate", "30"],
             vec!["--jobs", "4"],
-            vec!["--host-slots", "0"],
-            vec!["--host-builds", "0"],
             vec!["--shard", "2/4"],
             vec!["--nightly"],
             vec!["--debug"],
