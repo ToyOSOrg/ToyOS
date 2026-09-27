@@ -23,11 +23,10 @@ pub enum Class {
 }
 
 macro_rules! reasons {
-    ($(#[$meta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident = $text:literal, $class:ident;)* }) => {
-        $(#[$meta])*
+    ($name:ident { $($variant:ident = $text:literal, $class:ident;)* }) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum $name {
-            $($(#[$vmeta])* $variant,)*
+            $($variant,)*
         }
 
         impl $name {

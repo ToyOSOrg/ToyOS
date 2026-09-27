@@ -5,8 +5,8 @@ use std::net::Ipv4Addr;
 use common::*;
 use toyos_net_wire::igmp::{self, ReportGroup, V2Builder, V2Kind};
 use toyos_net_wire::ipv4::{
-    Dscp, Ecn, Form, FragmentOffset, Ipv4Builder, Ipv4Error, Ipv4Option, Ipv4Packet, Ipv4Payload, Ipv4Source, MulticastAddr,
-    OptionKind, OtherProtocol, Protocol, RawPayload, TrafficClass, Ttl, ROUTER_ALERT,
+    Ecn, Form, FragmentOffset, Ipv4Builder, Ipv4Error, Ipv4Option, Ipv4Packet, Ipv4Payload, Ipv4Source, MulticastAddr,
+    OptionKind, Protocol, RawPayload, TrafficClass, Ttl, ROUTER_ALERT,
 };
 use toyos_net_wire::udp::{UdpBuilder, UdpDatagram, UdpError};
 use toyos_net_wire::{BuildError, Port};
@@ -90,7 +90,7 @@ fn s_ip_002_minimal_datagram() {
     let ip = parse(&bytes).unwrap();
     assert_eq!(ip.total_length(), 20);
     assert!(ip.payload().is_empty());
-    assert_eq!(ip.protocol(), Protocol::Other(OtherProtocol::new(253).unwrap()));
+    assert_eq!(ip.protocol(), Protocol::from_number(253));
 }
 
 #[test]
@@ -247,7 +247,7 @@ fn s_ip_022_last_fragment() {
     let bytes = hex(V_IP_FRAG_LAST);
     let ip = parse(&bytes).unwrap();
     assert_eq!(ip.fragment_offset().units(), 185);
-    assert_eq!(ip.fragment_offset().bytes(), 1480);
+    assert_eq!(usize::from(ip.fragment_offset().units()) * 8, 1480);
     assert!(!ip.more_fragments() && ip.is_fragment());
 }
 
@@ -263,7 +263,7 @@ fn s_ip_023_largest_offset() {
 fn s_ip_024_dscp_and_ecn() {
     let bytes = hex(V_IP_DSCP);
     let class = parse(&bytes).unwrap().traffic_class();
-    assert_eq!((class.dscp().value(), class.ecn()), (46, Ecn::Ce));
+    assert_eq!((class.dscp(), class.ecn()), (46, Ecn::Ce));
 }
 
 #[test]
@@ -289,7 +289,6 @@ fn s_ip_029_protocol_numbers() {
     for (number, protocol) in typed {
         let bytes = fixed(V_IP_MIN, |b| b[9] = number);
         assert_eq!(parse(&bytes).unwrap().protocol(), protocol);
-        assert_eq!(OtherProtocol::new(number), None);
     }
     for number in [0, 41, 50, 132, 253, 255] {
         let bytes = fixed(V_IP_MIN, |b| b[9] = number);
@@ -386,9 +385,9 @@ fn s_ip_039_atomic_and_fragment_forms() {
 
 #[test]
 fn s_ip_040_emit_dscp_and_ecn() {
-    let traffic_class = TrafficClass::new(Dscp::new(46).unwrap(), Ecn::Ce);
+    let traffic_class = TrafficClass::new(46, Ecn::Ce).unwrap();
     assert_eq!(emit(&Ipv4Builder { traffic_class, ..builder(IP_B, IP_A, udp_hi()) }).unwrap(), hex(V_IP_DSCP));
-    assert_eq!(Dscp::new(64), None);
+    assert_eq!(TrafficClass::new(64, Ecn::NotEct), None);
 }
 
 #[test]

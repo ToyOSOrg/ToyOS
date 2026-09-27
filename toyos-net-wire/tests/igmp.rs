@@ -8,7 +8,7 @@ use toyos_net_wire::igmp::{
     self, Deciseconds, GroupRecord, IgmpError, IgmpMessage, IgmpPacket, Query, QueryGroup, QueryVersion, RecordType,
     ReportGroup, V2Builder, V2Kind, V3ReportBuilder,
 };
-use toyos_net_wire::ipv4::{Dscp, Ecn, Ipv4Option, Ipv4Packet, Ipv4Source, MulticastAddr, TrafficClass};
+use toyos_net_wire::ipv4::{Ecn, Ipv4Option, Ipv4Packet, Ipv4Source, MulticastAddr, TrafficClass};
 use toyos_net_wire::BuildError;
 
 fn parse(bytes: &[u8]) -> Result<IgmpMessage<'_>, IgmpError> {
@@ -233,7 +233,7 @@ fn s_igmp_030_emitted_max_response_is_zero() {
 }
 
 fn network_control() -> TrafficClass {
-    TrafficClass::new(Dscp::new(48).unwrap(), Ecn::NotEct)
+    TrafficClass::new(48, Ecn::NotEct).unwrap()
 }
 
 fn emit_v3(source: Ipv4Addr, records: &[GroupRecord<'_>]) -> Vec<u8> {

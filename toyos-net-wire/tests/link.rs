@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use common::*;
 use toyos_net_wire::arp::{Arp, ArpError, Kind, Operation};
 use toyos_net_wire::ethernet::{
-    EthError, EtherType, Frame, FrameBuilder, GroupDestination, IndividualMac, MacAddr, MacClass, TagProtocol, Tags,
+    EthError, EtherType, Frame, FrameBuilder, IndividualMac, MacAddr, MacClass, TagProtocol, Tags,
 };
 use toyos_net_wire::ipv4::{Form, Ipv4Builder, Ipv4Packet, Ipv4Source, MulticastAddr, Protocol, RawPayload, TrafficClass, Ttl};
 use toyos_net_wire::{BuildError, Class};
@@ -241,8 +241,8 @@ fn s_eth_031_multicast_mac_mapping() {
 #[test]
 fn s_eth_032_broadcast_destinations_map_to_all_ones() {
     // 255.255.255.255 and 192.0.2.255 on 192.0.2.0/24 are both broadcast.
-    assert_eq!(GroupDestination::Broadcast.mac(), MacAddr::BROADCAST);
     assert_eq!(MacAddr::BROADCAST, MacAddr([0xff; 6]));
+    assert_eq!(MacAddr::BROADCAST.class(), MacClass::Broadcast);
 }
 
 fn arp_body(text: &str) -> Vec<u8> {

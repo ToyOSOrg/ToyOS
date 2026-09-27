@@ -3,7 +3,7 @@
 use core::net::Ipv4Addr;
 use core::num::NonZeroU16;
 
-use crate::checksum::{Accumulator, Checksum, PseudoHeader, Sum};
+use crate::checksum::{Accumulator, PseudoHeader, Sum};
 use crate::emit::{be16x2, put, put_slice, BuildError};
 use crate::ipv4::{FragmentOffset, Ipv4Packet, Ipv4Payload, Protocol};
 
@@ -206,13 +206,12 @@ pub enum IcmpMessage<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IcmpPacket<'a> {
     bytes: &'a [u8],
-    checksum: Checksum,
     message: IcmpMessage<'a>,
 }
 
 impl<'a> IcmpPacket<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, IcmpError> {
-        let (&[kind, code, c0, c1, r0, r1, r2, r3], body) = bytes.split_first_chunk::<HEADER_LEN>().ok_or(IcmpError::Truncated)?;
+        let (&[kind, code, _, _, r0, r1, r2, r3], body) = bytes.split_first_chunk::<HEADER_LEN>().ok_or(IcmpError::Truncated)?;
         if !Sum::of(bytes).verifies() {
             return Err(IcmpError::Checksum);
         }
@@ -283,15 +282,11 @@ impl<'a> IcmpPacket<'a> {
             6 | 15..=18 | 30..=39 => return Err(IcmpError::DeprecatedType),
             _ => return Err(IcmpError::UnknownType),
         };
-        Ok(Self { bytes, checksum: Checksum::from_field(u16::from_be_bytes([c0, c1])), message })
+        Ok(Self { bytes, message })
     }
 
     pub const fn message(&self) -> IcmpMessage<'a> {
         self.message
-    }
-
-    pub const fn checksum(&self) -> Checksum {
-        self.checksum
     }
 
     pub const fn bytes(&self) -> &'a [u8] {

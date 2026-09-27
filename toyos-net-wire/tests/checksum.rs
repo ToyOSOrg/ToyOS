@@ -110,7 +110,7 @@ fn s_ck_013_incremental_same_value_is_unchanged() {
 fn s_ck_014_incremental_address() {
     incremental_equals_scratch(
         |h| h[19] = 54,
-        |c| c.replace_address(IP_DNS, std::net::Ipv4Addr::new(192, 0, 2, 54)),
+        |c| c.replace([0xC0, 0], [0xC0, 0]).replace([2, 53], [2, 54]),
     );
 }
 

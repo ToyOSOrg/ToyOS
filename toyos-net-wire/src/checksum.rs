@@ -112,12 +112,6 @@ impl Checksum {
         Self(!add16(add16(!self.0, !m), m_new))
     }
 
-    #[must_use]
-    pub fn replace_address(self, old: Ipv4Addr, new: Ipv4Addr) -> Self {
-        let [a, b, c, d] = old.octets();
-        let [e, f, g, h] = new.octets();
-        self.replace([a, b], [e, f]).replace([c, d], [g, h])
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

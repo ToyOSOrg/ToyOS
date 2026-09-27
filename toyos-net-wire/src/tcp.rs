@@ -1,6 +1,6 @@
 //! TCP segments and their options (RFC 9293 §3.1).
 
-use crate::checksum::{Checksum, PseudoHeader};
+use crate::checksum::PseudoHeader;
 use crate::emit::{be16x2, put, put_slice, BuildError};
 use crate::ipv4::{Ipv4Packet, Ipv4Payload, Protocol};
 use crate::Port;
@@ -52,10 +52,6 @@ impl TcpFlags {
     pub const URG: Self = Self(0x20);
     pub const ECE: Self = Self(0x40);
     pub const CWR: Self = Self(0x80);
-
-    pub const fn from_bits(bits: u8) -> Self {
-        Self(bits)
-    }
 
     pub const fn bits(self) -> u8 {
         self.0
@@ -277,10 +273,6 @@ impl<'a> TcpSegment<'a> {
 
     pub const fn window(&self) -> RawWindow {
         RawWindow(u16::from_be_bytes([self.header[14], self.header[15]]))
-    }
-
-    pub const fn checksum(&self) -> Checksum {
-        Checksum::from_field(u16::from_be_bytes([self.header[16], self.header[17]]))
     }
 
     pub const fn urgent_pointer(&self) -> Option<u16> {

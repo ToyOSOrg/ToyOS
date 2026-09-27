@@ -3,7 +3,7 @@
 use core::net::Ipv4Addr;
 use core::num::NonZeroU8;
 
-use crate::checksum::{Accumulator, Checksum, PseudoHeader, Sum};
+use crate::checksum::{Accumulator, PseudoHeader, Sum};
 use crate::emit::{exact, put, put_slice, BuildError};
 use crate::ethernet::{FrameBody, TxEtherType};
 
@@ -32,13 +32,6 @@ reasons! {
 pub struct OtherProtocol(u8);
 
 impl OtherProtocol {
-    pub const fn new(number: u8) -> Option<Self> {
-        match Protocol::from_number(number) {
-            Protocol::Other(other) => Some(other),
-            Protocol::Icmp | Protocol::Igmp | Protocol::Tcp | Protocol::Udp => None,
-        }
-    }
-
     pub const fn value(self) -> u8 {
         self.0
     }
@@ -134,23 +127,6 @@ impl Ttl {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Dscp(u8);
-
-impl Dscp {
-    pub const fn new(dscp: u8) -> Option<Self> {
-        if dscp < 64 {
-            Some(Self(dscp))
-        } else {
-            None
-        }
-    }
-
-    pub const fn value(self) -> u8 {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ecn {
     NotEct,
     Ect1,
@@ -164,14 +140,17 @@ pub struct TrafficClass(u8);
 impl TrafficClass {
     pub const ZERO: Self = Self(0);
 
-    pub const fn new(dscp: Dscp, ecn: Ecn) -> Self {
+    pub const fn new(dscp: u8, ecn: Ecn) -> Option<Self> {
+        if dscp > 63 {
+            return None;
+        }
         let ecn = match ecn {
             Ecn::NotEct => 0,
             Ecn::Ect1 => 1,
             Ecn::Ect0 => 2,
             Ecn::Ce => 3,
         };
-        Self(dscp.0 << 2 | ecn)
+        Some(Self(dscp << 2 | ecn))
     }
 
     pub const fn from_byte(byte: u8) -> Self {
@@ -182,8 +161,8 @@ impl TrafficClass {
         self.0
     }
 
-    pub const fn dscp(self) -> Dscp {
-        Dscp(self.0 >> 2)
+    pub const fn dscp(self) -> u8 {
+        self.0 >> 2
     }
 
     pub const fn ecn(self) -> Ecn {
@@ -218,9 +197,6 @@ impl FragmentOffset {
         self.0
     }
 
-    pub fn bytes(self) -> u32 {
-        u32::from(self.0) << 3
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -394,10 +370,6 @@ impl<'a> Ipv4Packet<'a> {
 
     pub const fn protocol(&self) -> Protocol {
         Protocol::from_number(self.header[9])
-    }
-
-    pub const fn checksum(&self) -> Checksum {
-        Checksum::from_field(u16::from_be_bytes([self.header[10], self.header[11]]))
     }
 
     pub const fn source(&self) -> Ipv4Addr {

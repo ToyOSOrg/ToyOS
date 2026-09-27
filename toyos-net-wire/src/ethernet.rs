@@ -66,22 +66,6 @@ impl IndividualMac {
     }
 }
 
-/// A unicast destination has none: ARP resolves it (RFC 1122 §3.3.6).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GroupDestination {
-    Broadcast,
-    Multicast(MulticastAddr),
-}
-
-impl GroupDestination {
-    pub const fn mac(self) -> MacAddr {
-        match self {
-            Self::Broadcast => MacAddr::BROADCAST,
-            Self::Multicast(group) => MacAddr::multicast(group),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OtherEtherType(u16);
 
