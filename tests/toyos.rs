@@ -1002,8 +1002,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the neighbours and the target judged off the image. Body in
     // `tests/common/partclaim.rs`, as are the two below.
     ("partition_claim", Sched::Parallel, Tier::Fast),
-    // Two boots: a disk that does not answer a read of its table, and every
-    // attempt refused until the deadman.
+    // Three boots: a disk that does not answer a read of its table, every
+    // attempt refused until the deadman, and ROOT's source withheld from every
+    // claim once its disk did not answer the boot's hold.
     ("partition_claim_gives_up", Sched::Parallel, Tier::Fast),
     // Three boots, a USB stick's device leaving owing one claim's write and
     // coming back on another port each time: each partition's fsync answers
