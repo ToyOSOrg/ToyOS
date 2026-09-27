@@ -32,6 +32,8 @@ pub const BOUNDS: &str = "inventory_bounds";
 const FREE: &str = "9D1E2F30-4A5B-4C6D-8E7F-0A1B2C3D4E5F";
 /// The one init grants test-runner; mirrored in the config.
 const GRANTED: &str = "B4C5D6E7-F809-4A1B-8C2D-3E4F5A6B7C8D";
+/// An entry whose first block is after its last, which no inventory lists.
+const BACKWARDS: &str = "0D5C4B3A-2918-4F7E-8D6C-5B4A39281706";
 
 /// Every path the reader answers for netd on a virtio NIC with a lease.
 const NET: &[&str] = &[
@@ -64,6 +66,7 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
         &[("free", mib, FREE), ("granted", mib, GRANTED)],
         96 * mib,
     )?;
+    state_backwards(&nvme)?;
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG);
     let options =
         BootOptions { profile: qemu::Profile::Gop, nvme_image: Some(nvme), ..Default::default() };
@@ -78,6 +81,30 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
     await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
     await_marker(&mut qemu, &mut console, "compositor: ready", "the compositor to come up")?;
     Ok(qemu)
+}
+
+/// Add [`BACKWARDS`] to the table of the disk at `path`, both CRCs resealed.
+fn state_backwards(path: &Path) -> Result<(), String> {
+    let mut disk = gpt::GptConfig::new()
+        .writable(true)
+        .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
+        .open(path)
+        .map_err(|e| format!("open the crafted disk: {e}"))?;
+    let mut parts = disk.partitions().clone();
+    parts.insert(disk.find_next_partition_id(), gpt::partition::Partition {
+        part_type_guid: gpt::partition_types::Type {
+            guid: super::partclaim::PLAIN_TYPE,
+            os: gpt::partition_types::OperatingSystem::None,
+        },
+        part_guid: uuid::Uuid::parse_str(BACKWARDS).map_err(|e| format!("{BACKWARDS}: {e}"))?,
+        first_lba: 500,
+        last_lba: 400,
+        flags: 0,
+        name: "backwards".into(),
+    });
+    disk.update_partitions(parts).map_err(|e| format!("state the backwards entry: {e}"))?;
+    disk.write().map_err(|e| format!("write the table: {e}"))?;
+    Ok(())
 }
 
 /// The `path = value` lines of a job's output, and nothing else the console
@@ -373,6 +400,13 @@ fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
     expect(line, &got, &format!("{granted}.state"), "claimed")?;
     if holders(&got, granted) != ["test-runner"] {
         return Err(format!("`{line}`: {granted} is held by {:?}, not test-runner", holders(&got, granted)));
+    }
+    if got.values().any(|v| *v == BACKWARDS.to_ascii_lowercase()) {
+        return Err(format!("`{line}` lists {BACKWARDS}, whose first block is after its last"));
+    }
+    let refused = format!("({BACKWARDS}) at LBA 500..=400, whose blocks are no partition on it");
+    if !format!("{}{}", qemu.uart_log(), qemu.boot_log()).contains(&refused) {
+        return Err(format!("the kernel did not say it refused {BACKWARDS}"));
     }
     Ok(())
 }
