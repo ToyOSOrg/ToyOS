@@ -6,6 +6,7 @@
 
 [package]
 name = "toyos-gpt"
+description = "GPT parser that finds the partition firmware booted from (no_std, no alloc, forbid(unsafe_code))."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

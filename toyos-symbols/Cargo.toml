@@ -10,6 +10,7 @@
 
 [package]
 name = "toyos-symbols"
+description = "Backtrace symbol lookup: locating an ELF's symbol tables and budgeting the demangled name (no_std, no alloc, forbid(unsafe_code))."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
