@@ -11551,14 +11551,13 @@ fn run_machine_test(
             };
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // A liveness ceiling, not a pace: a loaded shard once took past a
-            // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
-            // The T14's readback needs no drain at all — the whole boot's records
-            // are on the stick — so the wait is here and the predicate is shared.
-            let log = qemu.boot_log().to_string()
-                + &qemu.drain_until(Duration::from_secs(10), |l| {
-                    l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
-                });
+            // iod's probe reports on either side of the ready marker and the
+            // drain reads only lines after it, so the boot log is asked first;
+            // the drain's ceiling is a liveness bound on a report still owed.
+            let mut log = qemu.boot_log().to_string();
+            if !log.lines().any(sysret_ss_reported) {
+                log += &qemu.drain_until(Duration::from_secs(10), sysret_ss_reported);
+            }
             sysret_ss(&log)
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
@@ -17004,11 +17003,24 @@ fn window_held(before: &str, during: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `kernel/src/arch/x86_64/hw.rs`'s probe, when it could not run.
+const SYSRET_SS_UNARMED: &str = "sysret-ss: probe could not arm";
+
+/// Whether `line` is the probe's last word: each of its three outcomes.
+fn sysret_ss_reported(line: &str) -> bool {
+    ["sysret-ss: reloaded", "sysret-ss: NOT reloaded", SYSRET_SS_UNARMED]
+        .iter()
+        .any(|end| line.contains(end))
+}
+
 /// The context switch reloads SS from null before a `sysretq` can see it.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn sysret_ss(log: &str) -> Result<(), String> {
+        if log.contains(SYSRET_SS_UNARMED) {
+            return Err(format!("the SS-reload probe could not arm, so it measured nothing:\n{log}"));
+        }
         if log.contains("sysret-ss: NOT reloaded") {
             return Err(format!(
                 "the switch did not reload SS — a sysretq here would hand userland an \
@@ -19865,7 +19877,7 @@ fn quarantine_entries() -> Result<(), String> {
 
 /// The task that would run `name` again, by itself.
 ///
-/// **Every red from the parallel phase is re-run alone**, and the two possible
+/// **Every red of a run wider than one is re-run alone**, and the two possible
 /// answers are both findings. Same verdict: the defect is real and the width had
 /// nothing to do with it. Green: the test is red only when it shares the host,
 /// which makes its [`Sched::Parallel`] wrong — a bug in this file, not in the
@@ -21270,7 +21282,15 @@ fn main() {
     }
     qemu::set_width(1);
 
-    if !reds.is_empty() {
+    // A one-wide run's reds each had the host to itself already, so a rerun
+    // cannot reach the classification finding and only samples the same host
+    // and binary twice; whether a red on a one-wide nightly lane reproduces is
+    // the nightly history's to say (`src/ci.rs`'s red streak).
+    if width == 1 {
+        for (name, _, _) in &reds {
+            eprintln!("  ALONE {name}: not re-run — the run is one wide, so it already ran alone");
+        }
+    } else if !reds.is_empty() {
         eprintln!("  --- re-running {} failure(s) alone ---", reds.len());
         for (name, shared_the_host, wide) in &reds {
             let Some(task) = retry_task(name, &tests_to_run) else {
