@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: closed
 kind: defect
 opened: 2026-09-27
 ---
@@ -72,3 +72,5 @@ that every collapsed teardown is enumerated before the next cycle's edges is
 another. `xhci_flap` is disabled in `src/redlist.rs` until then, and the change
 that meets this deletes its row. Owner: the xHCI driver's port stepping
 (`kernel/src/drivers/xhci/mod.rs`); held by the orchestrator.
+
+Closed: `PortState::torn_down` (`toyos-xhci/src/port.rs`) leaves the port `Unread`, which `PortState::outstanding` reports, so the next `XhciController::poll` reads it without waiting for an event.

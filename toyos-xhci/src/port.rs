@@ -263,6 +263,10 @@ enum Work {
     Resetting { until: Nanos, kind: Reset },
     /// The caller is inside an effect and has not reported it.
     Working(Effect),
+    /// A teardown moved the driver's belief and nothing has read the register
+    /// against it since. Outstanding, so the next pass looks: a device left in
+    /// the port has already spent the change event that would have said so.
+    Unread,
 }
 
 /// A deliberate defect, compiled only for the negative gates.
@@ -365,12 +369,12 @@ impl PortState {
     }
 
     /// The teardown finished. The port is empty as far as the driver is
-    /// concerned, whatever the register says, so the next look runs the
-    /// ordinary fresh-connect path.
+    /// concerned, whatever the register says, and [`Self::outstanding`] until
+    /// the next look, which runs the ordinary fresh-connect path.
     pub fn torn_down(&mut self) {
         self.attached = false;
         self.slot = None;
-        self.work = Work::Settled;
+        self.work = Work::Unread;
     }
 
     /// Adopt a port the boot scan enumerated, so the hot-plug machine starts
@@ -494,8 +498,9 @@ impl PortState {
         }
 
         let held = match self.work {
-            Work::Settled => {
+            Work::Settled | Work::Unread => {
                 if connected == self.attached {
+                    self.work = Work::Settled;
                     return Step::Idle;
                 }
                 self.work = Work::Debouncing { at: now };
@@ -584,6 +589,23 @@ mod tests {
         assert_eq!(inherited(Some(Protocol::Usb3), connected(false, 6)), Reset::Warm);
         assert_eq!(inherited(Some(Protocol::Usb2), connected(true, 0)), Reset::Hot);
         assert_eq!(inherited(None, trained), Reset::Hot);
+    }
+
+    /// A device still in a torn-down port raises no further change event, so
+    /// the teardown itself is what has the port read again.
+    #[test]
+    fn a_torn_down_port_is_outstanding_until_it_is_read() {
+        let mut port = PortState::EMPTY;
+        port.adopt(NonZeroU8::new(1));
+        assert!(!port.outstanding());
+        port.torn_down();
+        assert!(port.outstanding(), "nothing would read a port the device is still in");
+        assert!(matches!(port.step(connected(true, 0), 0), Step::Wait(DEBOUNCE_NS)));
+
+        port.torn_down();
+        assert!(port.outstanding());
+        assert!(matches!(port.step(Portsc::from_raw(1 << 9), 0), Step::Idle));
+        assert!(!port.outstanding(), "an empty port read once is at rest");
     }
 
     #[test]

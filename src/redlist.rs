@@ -71,10 +71,6 @@ pub const DISABLED: &[Disabled] = &[
         test: "usb_disk_index_stable",
         issue: "issues/hardware/usb-disk-index-stable-nothing-enumerates-on-the-first-controller.md",
     },
-    Disabled {
-        test: "xhci_flap",
-        issue: "issues/hardware/a-collapsed-replug-is-enumerated-only-when-another-port-event-arrives.md",
-    },
 ];
 
 /// The row of `rows` that disables `test`, matched by the whole name.
