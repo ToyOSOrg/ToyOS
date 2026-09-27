@@ -14,6 +14,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod arch;
 pub mod audio;
 pub mod boot;
 pub mod clock;
@@ -139,43 +140,4 @@ pub mod tcb {
     const _: () = assert!(AARCH64_BYTES == 16, "AArch64's psABI TCB is two words");
 }
 
-/// Where a thread finds its own [`Tid`]: the kernel writes it into the thread
-/// control block at `TP + TCB_TID` before the thread's first instruction. The
-/// word is the thread's own memory, so what it says is the thread's word about
-/// itself and nothing more.
-#[cfg(target_arch = "x86_64")]
-pub const TCB_TID: usize = tcb::X86_64_TID;
-#[cfg(target_arch = "aarch64")]
-pub const TCB_TID: usize = tcb::AARCH64_TID;
-
-/// The calling thread's id, read off its control block without a syscall.
-#[cfg(target_arch = "x86_64")]
-#[inline]
-pub fn current_tid() -> Tid {
-    let tid: u32;
-    // SAFETY: `fs` is this thread's TP, set by the kernel at the thread's
-    // start, and `TP + TCB_TID` lies inside the 64-byte TCB the kernel
-    // reserves there; a 4-byte load of it touches nothing else.
-    unsafe {
-        core::arch::asm!(
-            "mov {tid:e}, dword ptr fs:[{at}]",
-            tid = out(reg) tid,
-            at = const TCB_TID,
-            options(nostack, readonly, preserves_flags),
-        );
-    }
-    Tid(tid)
-}
-
-/// The calling thread's id, read off its control block without a syscall.
-#[cfg(target_arch = "aarch64")]
-#[inline]
-pub fn current_tid() -> Tid {
-    let tp: u64;
-    // SAFETY: a read of `TPIDR_EL0`, the thread pointer, into a register.
-    unsafe { core::arch::asm!("mrs {tp}, tpidr_el0", tp = out(reg) tp, options(nomem, nostack)) };
-    // SAFETY: `TP + TCB_TID` lies inside the psABI's TCB at TP, below the
-    // first TLS block (`tcb::AARCH64_BYTES`).
-    Tid(unsafe { core::ptr::read_volatile((tp as usize + TCB_TID) as *const u32) })
-}
-
+pub use arch::{current_tid, TCB_TID};

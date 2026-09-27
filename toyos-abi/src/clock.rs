@@ -52,36 +52,8 @@ pub fn nanos_since_boot() -> u64 {
     // again, so a volatile copy of the whole value is a read of constants.
     let page = unsafe { core::ptr::read_volatile(CLOCK_PAGE as *const ClockPage) };
     assert!(page.magic == CLOCK_MAGIC, "the clock page at {CLOCK_PAGE:#x} carries no clock");
-    let now = counter();
+    let now = crate::arch::counter();
     nanos_between(page.counter_at_boot, page.period_fs, now)
-}
-
-/// The counter the page's two words describe: the time-stamp counter, read
-/// after every earlier load has completed, so a stamp taken after reading
-/// another writer's record cannot be older than that record's.
-#[cfg(target_arch = "x86_64")]
-#[inline]
-fn counter() -> u64 {
-    // SAFETY: `lfence` has no operands; `rdtsc` is unprivileged while CR4.TSD
-    // is clear, which the kernel's control-register declaration makes true on
-    // every CPU.
-    unsafe {
-        core::arch::x86_64::_mm_lfence();
-        core::arch::x86_64::_rdtsc()
-    }
-}
-
-/// The counter the page's two words describe: the generic timer's virtual
-/// count, which EL0 may read, read after every earlier instruction, as the
-/// x86 arm's is.
-#[cfg(target_arch = "aarch64")]
-#[inline]
-fn counter() -> u64 {
-    let now: u64;
-    // SAFETY: an `isb` and a read of `CNTVCT_EL0` into a register; neither
-    // touches memory.
-    unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", now = out(reg) now, options(nomem, nostack)) };
-    now
 }
 
 #[cfg(test)]
