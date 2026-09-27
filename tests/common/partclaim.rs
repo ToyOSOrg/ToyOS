@@ -347,15 +347,19 @@ pub fn partition_claim_departure(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    const TOLD: &str = "writes a process's partition claim made before its disk came back owing \
-        a flush may not have survived";
+    const TOLD: &str = "writes a process's claim of partition ";
     const FLUSHED: &str = "usb-quiesce: disk 0 SYNCHRONIZE CACHE ok";
     const UNTOLD: &str = "no writer's flush has said so; the disk is not counted flushed";
+    let departing = format!(
+        "{TOLD}{DEPARTING} made before its disk came back owing a flush may not have survived"
+    );
     for (role, told) in [("departure", 1), ("silent", 1), ("untold", 0)] {
         let (kernel, tail, spans) = departed(test_config, c_bins, rust_bins, role, told)?;
         let count = kernel.matches(TOLD).count();
-        if count != told {
-            return Err(format!("{role}: {count} flushes were told of the loss, not {told}:\n{kernel}"));
+        if count != told || kernel.matches(departing.as_str()).count() != told {
+            return Err(format!(
+                "{role}: {count} flushes were told of the loss, not {told}, each {DEPARTING}'s:\n{kernel}"
+            ));
         }
         // The untold line begins as the flushed one does, so a flushed disk is
         // a flushed line without it.
