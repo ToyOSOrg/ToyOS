@@ -7,11 +7,12 @@
 //! ([`SYSROOT_SOURCES`]), the std fork's `library/` and `src/bootstrap/` in the
 //! checkout that builds it, and the compiler that builds it. `rust/build/
 //! sysroots/<key>/` is a whole toolchain — the compiler's files cloned from its
-//! `stage2`, the guest targets' libraries built from this key's sources — and
-//! nothing writes it after its [`SOURCES`] file exists. A build compiles against
-//! the directory its own key names, so two worktrees with different ABIs or
-//! different compilers never refuse or wait for each other, and main and every
-//! branch matching it share one copy.
+//! `stage2`, this machine's cargo, the guest targets' libraries built from this
+//! key's sources — and nothing writes it after its [`SOURCES`] file exists; one
+//! that has it and is not whole is not [`finished`], and is made again. A build
+//! compiles against the directory its own key names, so two worktrees with
+//! different ABIs or different compilers never refuse or wait for each other,
+//! and main and every branch matching it share one copy.
 //!
 //! **Each worktree builds std in its own fork checkout, and nothing but the
 //! primary's own sync moves the primary's.** The primary builds in its `rust/`;
@@ -298,9 +299,11 @@ pub fn recorded_key(root: &Path) -> Option<String> {
     fs::read_to_string(root.join(RECORD)).ok().map(|k| k.trim().to_string())
 }
 
-/// Whether `dir` is a finished sysroot.
+/// Whether `dir` is a finished sysroot: its [`SOURCES`] written, and a whole
+/// toolchain (`toolchain::toolchain_defect`). One that carries the first and not
+/// the second is made again rather than trusted.
 fn finished(dir: &Path) -> bool {
-    dir.join(SOURCES).is_file()
+    dir.join(SOURCES).is_file() && toolchain::toolchain_defect(dir).is_none()
 }
 
 /// The sysroot this worktree's sources name, made if nobody has made it, and
@@ -314,19 +317,24 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     fs::create_dir_all(record.parent().expect("a file under target/")).ok();
     fs::write(&record, &key).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
 
-    let using = lock.without_shared(|| loop {
-        let using = buildlock::keyed_using(root, Keyed::Sysroot, &key);
-        if finished(&dir) {
-            break using;
+    let using = lock.without_shared(|| held(root, &key, &dir, || build(root, &compiler, &fork, &key, &dir)));
+    Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
+}
+
+/// The sysroot `key` names at `dir`, held in use, [`finished`] — by `make`,
+/// under the key's lock, if nobody has finished it.
+fn held(root: &Path, key: &str, dir: &Path, make: impl Fn()) -> Guard {
+    loop {
+        let using = buildlock::keyed_using(root, Keyed::Sysroot, key);
+        if finished(dir) {
+            return using;
         }
         drop(using);
-        let _building = buildlock::keyed_building(root, Keyed::Sysroot, &key);
-        if !finished(&dir) {
-            build(root, &compiler, &fork, &key, &dir);
+        let _building = buildlock::keyed_building(root, Keyed::Sysroot, key);
+        if !finished(dir) {
+            make();
         }
-    });
-    toolchain::assert_toolchain_is_honest(&dir);
-    Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
+    }
 }
 
 /// Make the sysroot `key` names at `dir`, from `root`'s sources and the std fork
@@ -340,32 +348,48 @@ fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
     eprintln!("Building sysroot {key}: std from {}, the compiler {}", fork.display(), compiler.stage2.display());
 
     let built = build_std(root, compiler, fork);
+    publish(&compiler.stage2, dir, |partial| {
+        for target in GUEST_TARGETS {
+            place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
+        }
+        let libc_target = dir.with_extension("libc-target");
+        for arch in Arch::ALL {
+            crate::libc::build(root, partial, &libc_target, arch);
+        }
+        let _ = fs::remove_dir_all(&libc_target);
+
+        // The sources the key named are the ones built, or this is not that key's.
+        let again = self::key(root, compiler, fork);
+        assert!(
+            again == key,
+            "the sources moved while sysroot {key} was being built (they are now {again}); \
+             nothing was kept, and the next build makes the one they name"
+        );
+        format!("{key}\nfork {}\n{}\n", fork.display(), witness(root))
+    });
+}
+
+/// Put at `dir` a whole toolchain: `stage2`'s files, this machine's cargo, and
+/// what `fill` adds to them, then the [`SOURCES`] `fill` returns, last. A `dir`
+/// already there is one [`finished`] refused, and it is replaced.
+///
+/// **The cargo is this step's, never `stage2`'s**: bootstrap recreates
+/// `stage2/bin` without one, and a clone carries whatever `bin/` held when it
+/// was taken.
+fn publish(stage2: &Path, dir: &Path, fill: impl FnOnce(&Path) -> String) {
     let partial = dir.with_extension("partial");
     if partial.exists() {
         fs::remove_dir_all(&partial).unwrap_or_else(|e| panic!("remove {}: {e}", partial.display()));
     }
-    clone_tree(&compiler.stage2, &partial);
-    for target in GUEST_TARGETS {
-        place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
+    clone_tree(stage2, &partial);
+    toolchain::provision_toolchain_cargo(&partial);
+    let sources = fill(&partial);
+    toolchain::assert_toolchain_is_honest(&partial);
+    fs::write(partial.join(SOURCES), sources)
+        .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCES).display()));
+    if dir.exists() {
+        fs::remove_dir_all(dir).unwrap_or_else(|e| panic!("remove {}: {e}", dir.display()));
     }
-    let libc_target = dir.with_extension("libc-target");
-    for arch in Arch::ALL {
-        crate::libc::build(root, &partial, &libc_target, arch);
-    }
-    let _ = fs::remove_dir_all(&libc_target);
-
-    // The sources the key named are the ones built, or this is not that key's.
-    let again = self::key(root, compiler, fork);
-    assert!(
-        again == key,
-        "the sources moved while sysroot {key} was being built (they are now {again}); \
-         nothing was kept, and the next build makes the one they name"
-    );
-    fs::write(
-        partial.join(SOURCES),
-        format!("{key}\nfork {}\n{}\n", fork.display(), witness(root)),
-    )
-    .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCES).display()));
     fs::rename(&partial, dir)
         .unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
 }
@@ -784,6 +808,48 @@ mod tests {
             .expect_err("a fork checkout with local changes was moved out from under them");
         let message = refused.downcast::<String>().expect("a formatted refusal");
         assert!(message.contains(&c1) && message.contains(&c2), "{message}");
+    }
+
+    /// **A sysroot is whole, or it is made again**: one published from a
+    /// `stage2` whose `bin/` has no cargo — what bootstrap leaves until the
+    /// primary finishes it — has its cargo all the same, and one found with its
+    /// `SOURCES` and without its cargo, as `5dc157f7fac727be` was, is rebuilt
+    /// rather than trusted, once.
+    #[test]
+    fn a_sysroot_is_whole_or_it_is_made_again() {
+        let base = TempDir::new("whole");
+        git(&base, &["init", "-q"]);
+        let stage2 = base.join("stage2");
+        write(&stage2.join("bin/rustc"), "rustc");
+        write(&toolchain::rust_lld(&stage2), "lld");
+        let dir = sysroots_dir(&base.join("rust")).join("5dc157f7fac727be");
+        let made = std::cell::Cell::new(0);
+        let make = |dir: &Path| {
+            made.set(made.get() + 1);
+            publish(&stage2, dir, |partial| {
+                write(&partial.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib"), "std");
+                "5dc157f7fac727be\n".to_string()
+            })
+        };
+
+        let fresh = sysroots_dir(&base.join("rust")).join("fresh");
+        drop(held(&base, "fresh", &fresh, || make(&fresh)));
+        assert_eq!(
+            toolchain::toolchain_defect(&fresh),
+            None,
+            "a sysroot was published without its cargo, cloned from a stage2 that had none"
+        );
+
+        clone_tree(&stage2, &dir);
+        write(&dir.join(SOURCES), "5dc157f7fac727be\n");
+        let before = made.get();
+        let using = held(&base, "5dc157f7fac727be", &dir, || make(&dir));
+        assert_eq!(made.get(), before + 1, "a sysroot without its cargo was trusted because it has SOURCES");
+        assert_eq!(toolchain::toolchain_defect(&dir), None);
+        assert!(dir.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib").is_file());
+        drop(using);
+        drop(held(&base, "5dc157f7fac727be", &dir, || make(&dir)));
+        assert_eq!(made.get(), before + 1, "a whole sysroot was made again");
     }
 
     /// A key no registered worktree records goes, and so does a half-built one;

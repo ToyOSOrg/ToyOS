@@ -3,9 +3,11 @@
 //!
 //! **Every worktree builds with the compiler its own fork checkout names.** The
 //! primary's `stage2` is built from what the primary's `rust/compiler/` holds,
-//! and [`record`] writes which that is. A linked worktree whose fork checkout
-//! holds the same `compiler/` ([`source`]) compiles with that one. One whose
-//! `compiler/` differs — a new target spec, a codegen change — gets its own:
+//! and [`record`] writes which that is; the primary bootstraps exactly when its
+//! `compiler/` is no longer that ([`primary_is_current`]). A linked worktree
+//! whose fork checkout holds the same `compiler/` ([`source`]) compiles with
+//! that one. One whose `compiler/` differs — a new target spec, a codegen
+//! change — gets its own:
 //! built by bootstrap in its own fork checkout, under that checkout's
 //! `build/toyos-compiler/`, and placed at `rust/build/compilers/<key>/`, where
 //! the key ([`key`]) is the identity (`src/identity.rs`) of the checkout's
@@ -138,13 +140,32 @@ pub fn source(checkout: &Path) -> String {
 }
 
 /// Record which compiler the primary's `stage2` is. The primary calls this
-/// after a toolchain build, and when the record is missing — its compiler stamp
-/// has just said `stage2` is built from what its `rust/` holds.
+/// after a toolchain build, and nowhere else.
 pub fn record(rust_dir: &Path) {
     let at = primary_record(rust_dir);
     let want = source(rust_dir);
     if fs::read_to_string(&at).ok().as_deref() != Some(want.as_str()) {
         fs::write(&at, &want).unwrap_or_else(|e| panic!("write {}: {e}", at.display()));
+    }
+}
+
+/// Whether the primary's `stage2` is the compiler `checkout`'s `compiler/`
+/// names — `Err` when nothing records which compiler that is.
+///
+/// **The source's content, never its files' times**: a checkout that rewrites a
+/// file with the bytes it had is no new compiler, and a bootstrap it set off
+/// recreated `stage2/bin` for nothing.
+fn primary_is(rust_dir: &Path, checkout: &Path) -> Result<bool, std::io::Error> {
+    Ok(fs::read_to_string(primary_record(rust_dir))?.trim() == source(checkout))
+}
+
+/// Whether the primary's `stage2` is built from what its own `rust/compiler/`
+/// holds: false until a bootstrap has finished and [`record`]ed it.
+pub fn primary_is_current(rust_dir: &Path) -> bool {
+    match primary_is(rust_dir, rust_dir) {
+        Ok(current) => current,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!("read {}: {e}", primary_record(rust_dir).display()),
     }
 }
 
@@ -185,16 +206,15 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     if fork == rust_dir {
         return Compiler::primary(rust_dir);
     }
-    let record = primary_record(rust_dir);
-    let built_from = fs::read_to_string(&record).unwrap_or_else(|e| {
+    let names_primary = primary_is(rust_dir, fork).unwrap_or_else(|e| {
         panic!(
             "{} cannot be read ({e}), so nothing says which compiler the primary's stage2 is, \
              and no worktree can know whether it names that one.\n\
              The primary checkout writes it: run `cargo run -- --build-only` there once.",
-            record.display(),
+            primary_record(rust_dir).display(),
         )
     });
-    if built_from.trim() == source(fork) {
+    if names_primary {
         let _ = fs::remove_file(&recorded);
         return Compiler::primary(rust_dir);
     }
@@ -529,6 +549,50 @@ mod tests {
         let why = why.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(why.contains("toyos-compiler cannot be read"), "{why}");
         assert_eq!(builds.get(), 0, "a missing record built a compiler");
+    }
+
+    /// **The primary bootstraps when its `compiler/` holds other content, and
+    /// never because its files' times moved**: every file rewritten with its own
+    /// bytes is the compiler just recorded.
+    #[test]
+    fn only_the_compiler_s_content_makes_the_primary_bootstrap() {
+        let scratch = TempDir::new("compiler-current");
+        let (_primary, rust_dir, _) = estate(&scratch);
+        assert!(primary_is_current(&rust_dir), "the compiler just recorded is not current");
+
+        let mut files = Vec::new();
+        let mut stack = vec![rust_dir.join("compiler")];
+        while let Some(at) = stack.pop() {
+            for entry in fs::read_dir(&at).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() { stack.push(path) } else { files.push(path) }
+            }
+        }
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        for file in &files {
+            fs::write(file, fs::read(file).unwrap()).unwrap();
+            fs::File::options().write(true).open(file).unwrap().set_modified(later).unwrap();
+            assert_eq!(fs::metadata(file).unwrap().modified().unwrap(), later);
+        }
+        assert!(!files.is_empty());
+        assert!(
+            primary_is_current(&rust_dir),
+            "every file of compiler/ was rewritten with its own bytes, and the primary would bootstrap"
+        );
+
+        let spec = rust_dir.join("compiler/rustc_target/src/lib.rs");
+        let held = fs::read(&spec).unwrap();
+        write(&spec, "pub fn targets() { riscv() }\n");
+        assert!(!primary_is_current(&rust_dir), "a change to compiler/ kept the old stage2");
+        fs::write(&spec, held).unwrap();
+        assert!(primary_is_current(&rust_dir), "compiler/ put back is not the compiler recorded");
+
+        write(&rust_dir.join("compiler/rustc_target/src/new_target.rs"), "pub fn t() {}\n");
+        assert!(!primary_is_current(&rust_dir), "an untracked file in compiler/ kept the old stage2");
+        fs::remove_file(rust_dir.join("compiler/rustc_target/src/new_target.rs")).unwrap();
+
+        fs::remove_file(primary_record(&rust_dir)).unwrap();
+        assert!(!primary_is_current(&rust_dir), "a stage2 nothing recorded was taken for current");
     }
 
     /// Every source a compiler is built from moves its key: LLVM by commit,

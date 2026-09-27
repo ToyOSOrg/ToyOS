@@ -286,15 +286,6 @@ fn cargo_link_stale(stage2: &Path) -> bool {
 
 /// Put a `cargo` beside the toolchain's `rustc`.
 ///
-/// **The one step that provisions it, and every path that can produce a
-/// toolchain directory goes through it**: the primary's bootstrap and its
-/// staleness rebuild (both upstream of [`ensure`]'s call), a linked worktree
-/// adopting the shared one, and a runner that unpacked the published artifact.
-/// The fix this replaces was made once, by hand, in a step the rebuild path does
-/// not run — so the 2026-08-14 sysroot rebuild recreated `bin/` without it and
-/// nothing noticed, and CI, which links its toolchain fresh from the artifact
-/// every run, never had it at all.
-///
 /// **A symlink, and what survives the artifact round-trip is this step rather
 /// than the link.** `src/release.rs` excludes it from the tarball for the reason
 /// it excludes `lib/rustlib/<host>`: it names a path only the publishing runner
@@ -309,33 +300,84 @@ pub(crate) fn provision_toolchain_cargo(stage2: &Path) {
     });
 }
 
-/// Refuse a toolchain layout that would make rustup narrate, or that has no
-/// linker for the guest targets.
+/// Why the toolchain at `stage2` is not whole, if it is not: a binary rustup
+/// would narrate a fallback for, or no linker for the guest targets.
+///
+/// The one definition of whole: [`assert_toolchain_is_honest`] refuses by it,
+/// and a sysroot is finished only by it (`src/sysroot.rs`).
+pub(crate) fn toolchain_defect(stage2: &Path) -> Option<String> {
+    let bin = stage2.join("bin");
+    let narrated = narrated_binaries(&bin);
+    if !narrated.is_empty() {
+        return Some(format!(
+            "the toyos toolchain at {} is missing {}, so rustup answers for {} by falling back to \
+             another toolchain and narrating it on every invocation.\n\
+             provision_toolchain_cargo is the step that puts them there, and it did not.",
+            bin.display(),
+            narrated.join(" and "),
+            if narrated.len() == 1 { "it" } else { "them" },
+        ));
+    }
+    // Every guest target names `rust-lld` and rustc looks for it here, so a
+    // toolchain without it is refused here, by name, rather than at the first link.
+    let lld = rust_lld(stage2);
+    (!lld.is_file()).then(|| {
+        format!(
+            "the toyos toolchain at {} carries no {}, the linker every guest target names: \
+             bootstrap puts it there when `write_config` says `lld = true`, and it did not",
+            stage2.display(),
+            lld.display(),
+        )
+    })
+}
+
+/// Refuse a toolchain that is not whole ([`toolchain_defect`]).
 ///
 /// Unconditional and after the step that provisions, because the defect being
 /// gated is a provisioning step that silently stopped running: a check that only
 /// runs when the step runs asserts nothing about the build that skipped it.
 pub(crate) fn assert_toolchain_is_honest(stage2: &Path) {
-    let bin = stage2.join("bin");
-    let narrated = narrated_binaries(&bin);
-    assert!(
-        narrated.is_empty(),
-        "the toyos toolchain at {} is missing {}, so rustup answers for {} by falling back to \
-         another toolchain and narrating it on every invocation.\n\
-         provision_toolchain_cargo is the step that puts them there, and it did not.",
-        bin.display(),
-        narrated.join(" and "),
-        if narrated.len() == 1 { "it" } else { "them" },
-    );
-    // Every guest target names `rust-lld` and rustc looks for it here, so a
-    // toolchain without it is refused here, by name, rather than at the first link.
-    let lld = rust_lld(stage2);
-    assert!(
-        lld.is_file(),
-        "the toyos toolchain at {} carries no {}, the linker every guest target names: \
-         bootstrap puts it there when `write_config` says `lld = true`, and it did not",
-        stage2.display(),
-        lld.display(),
+    if let Some(defect) = toolchain_defect(stage2) {
+        panic!("{defect}");
+    }
+}
+
+/// Whether the primary's toolchain lacks what bootstrap does not put there:
+/// `stage2`'s cargo, or the host target in the hosted rustc's sysroot.
+fn incomplete(rust_dir: &Path) -> bool {
+    cargo_link_stale(&stage2(rust_dir)) || host_target_missing(rust_dir)
+}
+
+/// Give the primary's toolchain what [`incomplete`] finds missing.
+fn complete(rust_dir: &Path) {
+    if cargo_link_stale(&stage2(rust_dir)) {
+        provision_toolchain_cargo(&stage2(rust_dir));
+    }
+    if host_target_missing(rust_dir) {
+        link_host_target(rust_dir);
+    }
+}
+
+/// Run `bootstrap` in the primary's `rust/`, then [`complete`] what it
+/// reassembled. Called inside the act that holds the global lock exclusively.
+///
+/// **In the same hold, because bootstrap recreates `stage2/bin` without its
+/// cargo**: a completion under a hold of its own queues behind every sysroot
+/// build that takes the lock shared in between, and those last minutes.
+fn reassemble(rust_dir: &Path, bootstrap: impl FnOnce()) {
+    bootstrap();
+    complete(rust_dir);
+}
+
+/// Complete a toolchain whose bootstrap was stopped before [`reassemble`]
+/// finished it. Every other build decides there is nothing to do, and takes no
+/// lock.
+fn complete_toolchain(lock: &mut buildlock::Held, rust_dir: &Path) {
+    lock.act_if(
+        Scope::Global,
+        "complete the toyos toolchain",
+        || incomplete(rust_dir).then_some(()),
+        |()| complete(rust_dir),
     );
 }
 
@@ -417,12 +459,14 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         Owner::Us => {}
     }
 
-    let compiler_stamp = stamps_dir.join("compiler.stamp");
     let hosted_stamp = stamps_dir.join("hosted-rustc.stamp");
     lock.act_if(
         Scope::Global,
         "build the rust toolchain",
         || {
+            if force_rebuild || !crate::compiler::primary_is_current(&rust_dir) {
+                return Some(Bootstrap { invalidate_hosted: true });
+            }
             let toolchain_exists = Command::new("rustup")
                 .args(["run", "toyos", "rustc", "--version"])
                 .stdout(std::process::Stdio::null())
@@ -430,31 +474,16 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            if stamps::dir_changed(&rust_dir.join("compiler"), &compiler_stamp) || force_rebuild {
-                Some(Bootstrap { invalidate_hosted: true })
-            } else if !toolchain_exists {
-                Some(Bootstrap { invalidate_hosted: false })
-            } else {
-                None
-            }
+            (!toolchain_exists).then_some(Bootstrap { invalidate_hosted: false })
         },
         |kind| {
             eprintln!("Building full toolchain (this takes a while on first run)...");
-            full_bootstrap(root, &rust_dir);
-            stamps::write_dir_stamp(&rust_dir.join("compiler"), &compiler_stamp);
+            reassemble(&rust_dir, || full_bootstrap(root, &rust_dir));
             crate::compiler::record(&rust_dir);
             if kind.invalidate_hosted {
                 let _ = fs::remove_file(&hosted_stamp);
             }
         },
-    );
-    // The compiler stamp above has just said `stage2` is built from what `rust/`
-    // holds, so a missing record is written from it.
-    lock.act_if(
-        Scope::Global,
-        "record which compiler the toolchain is",
-        || (!rust_dir.join("build/toyos-compiler").exists()).then_some(()),
-        |()| crate::compiler::record(&rust_dir),
     );
 
     let hosted_rustc = rust_dir.join(format!("build/{}/stage2/bin/rustc", HOSTED_ARCH.userland()));
@@ -463,7 +492,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         "build the ToyOS-hosted rustc",
         || (!hosted_stamp.exists() || !hosted_rustc.exists()).then_some(()),
         |()| {
-            build_hosted_rustc(&rust_dir);
+            reassemble(&rust_dir, || build_hosted_rustc(&rust_dir));
             assert!(hosted_rustc.exists(), "Failed to build hosted rustc");
             fs::write(&hosted_stamp, "").unwrap();
         },
@@ -483,25 +512,8 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         },
     );
 
-    // After both bootstrap steps above, because either of them recreates `bin/`
-    // and a fix that lives upstream of a rebuild is a fix that rots. Every
-    // sysroot clones this `bin/`, so it is where the cargo is provisioned.
-    lock.act_if(
-        Scope::Global,
-        "give the toyos toolchain its own cargo",
-        || cargo_link_stale(&stage2).then_some(()),
-        |()| provision_toolchain_cargo(&stage2),
-    );
+    complete_toolchain(lock, &rust_dir);
     assert_toolchain_is_honest(&stage2);
-
-    // The hosted rustc's own sysroot needs the host target proc-macros compile
-    // against.
-    lock.act_if(
-        Scope::Global,
-        "add the host target to the ToyOS sysroot",
-        || host_target_missing(&rust_dir).then_some(()),
-        |()| link_host_target(&rust_dir),
-    );
 
     sysroot::ensure(root, &rust_dir, lock)
 }
@@ -537,12 +549,7 @@ fn check_installed_toolchain(root: &Path, rust_dir: &Path, force_rebuild: bool) 
     // This is CI's whole share of the cargo provisioning — it links its
     // toolchain fresh from the published artifact on every run, so nothing
     // upstream of the download can have put one there.
-    if host_target_missing(rust_dir) {
-        link_host_target(rust_dir);
-    }
-    if cargo_link_stale(&stage2) {
-        provision_toolchain_cargo(&stage2);
-    }
+    complete(rust_dir);
     assert_toolchain_is_honest(&stage2);
 
     let want = sysroot::witness(root);
@@ -981,6 +988,53 @@ mod tests {
         fs::write(&lld, b"").unwrap();
         assert_toolchain_is_honest(&stage2);
     }
+
+    /// **A bootstrap leaves the primary nothing that waits on another
+    /// worktree's sysroot build**: the act that recreates `stage2/bin` gives it
+    /// its cargo before the exclusive lock goes, so the step after it, run while
+    /// a sysroot build holds the lock shared, decides it has nothing to do.
+    #[test]
+    fn a_bootstrap_leaves_nothing_to_wait_on_a_sysroot_build_for() {
+        let root = TempDir::new("no-wait");
+        let git = Command::new("git").args(["init", "-q"]).current_dir(&*root).status().unwrap();
+        assert!(git.success());
+        let rust_dir = root.join("rust");
+        let bin = stage2(&rust_dir).join("bin");
+        let lld = rust_lld(&stage2(&rust_dir));
+        fs::create_dir_all(lld.parent().unwrap()).unwrap();
+        fs::write(&lld, b"").unwrap();
+
+        let mut lock = buildlock::shared(&root, "the primary's build");
+        lock.act_if(Scope::Global, "build the rust toolchain", || Some(()), |()| {
+            reassemble(&rust_dir, || {
+                // What bootstrap leaves: `bin/` made again, holding `rustc` alone.
+                let _ = fs::remove_dir_all(&bin);
+                fs::create_dir_all(&bin).unwrap();
+                fs::write(bin.join("rustc"), b"").unwrap();
+            })
+        });
+        let left = toolchain_defect(&stage2(&rust_dir));
+
+        let sysroot_build = buildlock::compiler_shared(&root, "building sysroot 5dc157f7fac727be");
+        let (done, finished) = std::sync::mpsc::channel();
+        let rest = rust_dir.clone();
+        std::thread::spawn(move || {
+            complete_toolchain(&mut lock, &rest);
+            done.send(()).unwrap();
+        });
+        let waited = finished.recv_timeout(NO_WAIT);
+        drop(sysroot_build);
+        assert!(
+            waited.is_ok(),
+            "the primary's build queued for the global lock behind a sysroot build after a \
+             bootstrap had finished: it needed a global change the bootstrap left undone"
+        );
+        assert_eq!(left, None, "the bootstrap let the global lock go with stage2 not whole");
+    }
+
+    /// Longer than deciding from a symlink and two directories takes, and
+    /// shorter than any sysroot build holds the lock.
+    const NO_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// The negative control is the defect itself: this is verbatim what cargo
     /// wrote for a worktree build before the override existed.
