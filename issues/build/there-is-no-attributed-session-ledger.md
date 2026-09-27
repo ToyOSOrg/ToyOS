@@ -23,15 +23,15 @@ is the only one a sighting can be joined against.
 
 **What to build.** An append-only host-side ledger, one file per session,
 recording *intervals* rather than samples: monotonic start and end, host
-identity, process and job identity, build-lock and guest-slot holder intervals,
+identity, process and job identity, build-lock holder intervals,
 image-build spans with their content key and cache hit or miss, QEMU and vCPU
 scheduling intervals where the host exposes them, and the guest progress markers
 the tests already emit. A sighting is then a join, not an inference.
 
 **What exists, and why each is not the thing.** `src/buildlock.rs` already
-names holders (`records_holder`, `guest_slot`, `build_slot`) but the record is
-transient: it exists while the guard is held and is gone when the question is
-asked. The committed shard input is per-test duration only, which is why
+names holders (`records_holder`) but the record is transient: it exists while
+the guard is held and is gone when the question is asked. The committed shard
+input is per-test duration only, which is why
 `issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md`
 charges an image build to whichever test followed it.
 

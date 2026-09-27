@@ -1,5 +1,6 @@
 [package]
 name = "toyos-cc"
+description = "Minimal C compiler: it exists to bootstrap tinycc and compile doomgeneric, not to grow."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

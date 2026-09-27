@@ -5,6 +5,7 @@
 
 [package]
 name = "toyos-dns"
+description = "A stub DNS resolver's decisions (RFC 1035): the question, which datagram answers it, what it says and when to ask again, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

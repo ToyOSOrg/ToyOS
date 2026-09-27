@@ -598,14 +598,9 @@ fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 
 // --- The guest jobs ------------------------------------------------------------
 
-/// The harness's arguments for a CI lane: a runner is a whole host with one
-/// suite on it, so the host's guest slots arbitrate nothing there.
 fn suite_args(args: &[&str]) -> Vec<String> {
     let mut all = vec!["test", "--test", "toyos-build", "--"];
     all.extend(args);
-    if on_runner() {
-        all.extend(["--host-slots", "0"]);
-    }
     all.into_iter().map(String::from).collect()
 }
 

@@ -4,7 +4,7 @@ use toyos_untrusted::{Refused, Untrusted};
 
 use crate::mm::Mmio;
 use super::pci::PciDevice;
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use crate::log;
 
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;

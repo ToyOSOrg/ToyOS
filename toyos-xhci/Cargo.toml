@@ -5,6 +5,7 @@
 
 [package]
 name = "toyos-xhci"
+description = "The xHCI root-hub port machine, as a decision separated from its effects."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

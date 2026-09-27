@@ -316,10 +316,14 @@ pub(crate) const AFTER_BREAK: toyos_xhci::call::Bounds = toyos_xhci::call::AFTER
 const _: () = assert!(AFTER_BREAK.wait == USB_TIMEOUT_NS);
 
 /// Everything one disk call may spin for from the start of the wait its transport broke on.
-pub(crate) const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of(
+const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of(
     crate::time::Duration::from_nanos(AFTER_BREAK.whole()),
     "every wait is clipped to where the rungs still ahead of it begin, so the last rung runs whatever was spent before it and the call ends here",
 );
+
+// A disk call spins with interrupts off, so one that outlasted this tripwire
+// would panic another CPU over a device.
+const _: () = assert!(CALL_AFTER_BREAK.nanos() < crate::time::DEAF_CPU.nanos());
 
 
 // A disk whose device left under the port rung's reset is waited for no longer than the rungs from that reset on were given to spend on it.

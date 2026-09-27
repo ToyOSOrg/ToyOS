@@ -8,7 +8,7 @@ opened: 2026-09-26
 
 Every `SYS_DEVICE_DMA_ALLOC` grant of a claim is placed at a fresh address of
 its slot's domain (`kernel/src/pcidev/mod.rs`, `dma_alloc`), and the domain
-never hands an address out twice (`kernel/src/iommu/vtd/table.rs`,
+never hands an address out twice (`kernel/src/arch/x86_64/vtd/table.rs`,
 `Domain::reserve`). A holder bounded to `MAX_GRANT_TOTAL` per claim can still
 claim, allocate and die over and over — a service a supervisor restarts does
 exactly this — and each claim spends up to that much of the slot's addresses
@@ -16,7 +16,7 @@ and the remapping tables under them, which are never freed. The domain running
 dry is a refusal (`ResourceExhausted`) and not a crash, but the slot is then
 dead for the rest of the boot, and the tables are memory nothing returns.
 Nor is running dry always a refusal: every table under a fresh address comes
-from `Tables::alloc` (`kernel/src/iommu/vtd/table.rs`), whose
+from `Tables::alloc` (`kernel/src/arch/x86_64/vtd/table.rs`), whose
 `expect("no physical memory for a remapping table")` panics the kernel when
 physical memory runs out first, and no second-level table a claim made is
 ever freed.

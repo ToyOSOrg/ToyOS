@@ -23,7 +23,7 @@ every `tid=` in the T14 boot logs then committed: **738 `tid=0` against 49
 `tid=1`** — the value the formatter drops is the one almost every line carries.
 
 The kernel's own sentinel is a third value again: `PerCpu::current_tid` is
-`u32::MAX` when no thread is running (`kernel/src/arch/percpu.rs:85`), which the
+`u32::MAX` when no thread is running (`kernel/src/arch/x86_64/percpu.rs:85`), which the
 formatter would render as `tid=4294967295` on every line a kernel thread logs.
 
 ## What is in the tree now

@@ -70,46 +70,11 @@ enum Sched {
 /// *waiting* — for a marker, for a debounce, for a device — which is why this is
 /// a measurement and not a division.
 ///
-/// **Twelve is the number for one suite on this host**, and [`HostSlots`] is
-/// what stops four agents at twelve being 48 guests on 14 cores.
+/// **Twelve is the number for one suite on this host.**
 /// An earlier table said eight; it was taken while `drain_serial` was still
 /// width-scaled and
 /// `metal_sim_pointer_churn`'s twenty-four paced drains *were* the phase.
 const DEFAULT_WIDTH: usize = 12;
-
-/// This run's claim on the host's guest budget.
-///
-/// [`DEFAULT_WIDTH`] is a number for *one* suite, and nothing was handing out
-/// the cores that two suites both spend.
-/// A second suite on this machine is not a slower first suite, it
-/// is a wrong one: `screen_fatal_halt` red at 11 s against 3.3 s alone, and an
-/// agent's hour spent chasing that as a regression.
-///
-/// **One slot per task, never per boot.** A worker holds at most one and never
-/// waits for a second while holding one, which is what makes the semaphore
-/// deadlock-free rather than lucky: several tests hold two guests at once, and a
-/// slot each would let twelve workers each hold one and each wait for another.
-///
-/// The wait sits outside the task, so it lands in the phase's wall clock and in
-/// no test's duration — a `PASS` time, and the profile [`longest_first`] orders
-/// on, both stay measurements of the test rather than of the queue.
-struct HostSlots {
-    root: std::path::PathBuf,
-    /// The name this run answers to in another run's waiting message. A pid
-    /// alone is not enough to act on: an agent needs to know which worktree.
-    label: String,
-    /// Zero is the semaphore off. It is the only way to measure a suite against
-    /// one that has it, which is what `--host-slots 0` is for.
-    budget: usize,
-}
-
-impl HostSlots {
-    fn take(&self, what: &str) -> Option<toyos_build::buildlock::Guard> {
-        let budget = self.budget;
-        (budget > 0)
-            .then(|| toyos_build::buildlock::guest_slot(&self.root, budget, &format!("{}: {what}", self.label)))
-    }
-}
 
 /// Which tier the shared boot's discovered members are in: one boot, so one
 /// tier. Declared beside [`SHARED_BLOCK`] rather than assumed, for the same
@@ -17882,7 +17847,6 @@ fn run_phase(
     tasks: Vec<Task<'_>>,
     width: usize,
     bins: &Bins<'_>,
-    slots: &HostSlots,
 ) -> Vec<Outcome> {
     if tasks.is_empty() {
         return Vec::new();
@@ -17902,7 +17866,6 @@ fn run_phase(
                     let next =
                         queue.lock().expect("a worker panicked holding the queue").pop_front();
                     let Some(task) = next else { return };
-                    let _slot = slots.take(&task.names().join(" "));
                     run_task(task, bins, &tx);
                 }
             });
@@ -18413,33 +18376,6 @@ fn main() {
     // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
-    // How many guests may be up on the *host* at once, across every worktree.
-    // `--jobs` is this run's demand; this is what the machine will supply, and
-    // zero turns it off.
-    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or(
-        toyos_build::buildlock::HOST_GUESTS,
-        |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
-    );
-
-    // And how many of this host's *compiles* may run at once, across every
-    // worktree. A worker holds a guest slot from the moment it takes a task and
-    // spends the first part of it building a kernel variant, so twelve workers
-    // are twelve concurrent `cargo build`s and no guest at all.
-    if let Some(n) = SUITE.value(&args, &testargs::HOST_BUILDS) {
-        toyos_build::buildlock::set_host_builds(
-            n.parse().unwrap_or_else(|_| panic!("--host-builds: {n:?} is not a budget")),
-        );
-    }
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-
-    let slots = HostSlots {
-        label: repo_root
-            .file_name()
-            .map_or_else(|| "this worktree".to_string(), |n| n.to_string_lossy().into_owned()),
-        root: repo_root,
-        budget: host_budget,
-    };
-
     check_registration();
 
     if nocapture || debug_mode {
@@ -18713,7 +18649,7 @@ fn main() {
         longest_first(&mut parallel, &known);
         eprintln!("  --- parallel, {width} wide ---");
         let started = std::time::Instant::now();
-        let outcomes = run_phase(parallel, width, &bins, &slots);
+        let outcomes = run_phase(parallel, width, &bins);
         eprintln!("  --- parallel done in {:.1?} ---", started.elapsed());
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
@@ -18721,7 +18657,7 @@ fn main() {
     if !serial.is_empty() {
         eprintln!("  --- serial ---");
         let started = std::time::Instant::now();
-        let outcomes = run_phase(serial, 1, &bins, &slots);
+        let outcomes = run_phase(serial, 1, &bins);
         eprintln!("  --- serial done in {:.1?} ---", started.elapsed());
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));

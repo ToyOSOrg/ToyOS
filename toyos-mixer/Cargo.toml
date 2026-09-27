@@ -16,6 +16,7 @@
 
 [package]
 name = "toyos-mixer"
+description = "The mixer's decisions (samples, gain, dither, quantize), pure and corpus-certified."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

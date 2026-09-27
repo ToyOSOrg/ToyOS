@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 use crate::arch::percpu;
-use crate::mm::paging::{CachePolicy, Prot, WindowProt};
+use crate::mm::policy::{CachePolicy, Prot, WindowProt};
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::object::{ops, HandleTable};
 use crate::sync::Lock;
@@ -635,7 +635,7 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
         });
     }
     // Outside the block: it waits, and a sibling can be spinning on this lock with IF clear.
-    crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Pipe);
+    crate::arch::tlb::shootdown(crate::invalidation::Origin::Pipe);
 }
 
 /// One live `mmap` and its physical pages; the range's registration in the address space's `regions` is separate (placement search, `munmap`).

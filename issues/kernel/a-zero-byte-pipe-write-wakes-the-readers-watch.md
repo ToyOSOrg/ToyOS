@@ -6,9 +6,9 @@ opened: 2026-09-26
 
 # A zero-byte pipe write wakes the reader's watch
 
-`sys_write_nonblock` (`kernel/src/arch/syscall/io.rs`) wakes the pipe's
+`sys_write_nonblock` (`kernel/src/syscall/io.rs`) wakes the pipe's
 readers after every write that returns `Ok(n)`, `n == 0` included, and
-`complete_pending_for_event` (`kernel/src/inbox.rs`) completes a pending
+`complete_pending_for_event` (`kernel/src/inbox/mod.rs`) completes a pending
 `READABLE` watch on that wake as ready without looking at the ring. So a
 zero-byte write, which moves nothing, completes the reader's watch as
 readable while the reader's `read` still answers `WouldBlock`.
