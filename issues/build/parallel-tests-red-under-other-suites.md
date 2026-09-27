@@ -77,8 +77,7 @@ changes.
 - **`dump_nmi_probe`** — retired 2026-09-04, green 3 of 3 beside a full fast
   tier. `4ad8875` made it `Sched::Serial`,
   which shows what serialising buys and what it does not: within one run the
-  phase is quiet, across runs nothing but `buildlock::guest_slot` spans
-  worktrees and twelve slots is not one guest.
+  phase is quiet.
 - **`blocked_dump`** — retired 2026-09-04, green 3 of 3 beside a full fast
   tier.
 - **`screen_console_scroll`** — retired 2026-09-04, green 3 of 3 beside a full
@@ -185,8 +184,7 @@ changes.
   answers `NOT ON THE LIST`. The two runs are the measurement: the red one was
   the branch's *first* suite after a full rebuild and its parallel phase took
   103.9 s, the green one minutes later on a warm tree took 32.0 s — so the phase
-  that failed was carrying this worktree's own twelve kernel builds, which is
-  the load `build_slot` bounds and the section below describes. The branch's
+  that failed was carrying this worktree's own twelve kernel builds. The branch's
   kernel delta in `drivers/xhci/` is two comment blocks, two `#[allow]`
   attributes and two pairs of parentheses that spell out the precedence Rust
   already applied (`+` and `*` bind tighter than `|`), so no instruction in that
@@ -377,46 +375,11 @@ changes.
   `arch/tlb.rs:171` (`issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md`).
   None investigated.
 
-**The eight-landing regime, and what it does to the paragraph above.** That
-paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
-twelve guests across every worktree. It recurred on 2026-08-07: **eight
-`toyos-build --land` processes were queued on the integration lock at once**, and
-one branch's two consecutive landing gates died on two *different* tests from
-this list — `blocked_dump`, then `screen_early_panic` — each `ALONE … GREEN`,
-neither related to a branch that touched only `tests/`. The semaphore is not
-wrong; it counts the thing it says it counts. But a landing gate is a full build
-plus a suite, and **the build half is bounded by nothing** — eight of them is
-eight cargo trees compiling on 14 cores, which reaches every liveness margin in
-the wide phase without a thirteenth guest ever existing. The gate's own audio
-lines recorded the host at seven `toyos-build` processes throughout.
-
-So the closing claim needs the qualifier: guest slots bound *guests*, and a
-landing storm is not made of guests. Whether the integration lock should also
-gate the gate's build, or whether these tests belong in the serial tail, is a
-decision for whoever owns the harness; what is established here is that a branch
-can be unable to land for reasons that have nothing to do with it.
-
-**Bounded the same day, and the count was closer to home than a landing storm.**
-A worker takes a guest slot and then *compiles its kernel variant*, so twelve
-workers in one suite are twelve concurrent `cargo build`s before any of them
-boots — which is the load 49.9 with twelve rustc/cargo processes and exactly one
-guest live that was measured while this was being written, on a host where the
-semaphore was doing precisely what it says. `buildlock::build_slot` is the
-second count: four across every worktree, its own directory so a suite holding
-every guest slot can still compile, `--host-builds N` to override and `0` to turn
-off. It bounds the build half of a landing gate
-by construction, since a gate's builds are these builds. What it does **not**
-bound is anything that never enters `src/build.rs` — a `toyos-sched-sim measure`,
-a hand-run `cargo build` in a fork clone, the primary's `./x.py`.
-
 What none of
 them should get is a widened bound — a gate that tolerates one lost byte
 tolerates the defect it was written for. The two fixes above are the two shapes
 that are legitimate: make the verdict independent of the rate, or scale a
-liveness ceiling with the phase. The global QEMU-slot semaphore this section
-used to name as the closing move now exists (`buildlock::guest_slot`): the host
-admits twelve guests across every
-worktree, so the four-suite regime these were observed in cannot recur. A looser
+liveness ceiling with the phase. A looser
 assertion is still not the answer.
 
 **But `ALONE … red again — the defect is real` is not evidence.**

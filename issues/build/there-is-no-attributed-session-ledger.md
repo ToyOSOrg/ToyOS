@@ -27,7 +27,7 @@ is the only one a sighting can be joined against.
 
 **What to build.** An append-only host-side ledger, one file per session,
 recording *intervals* rather than samples: monotonic start and end, host
-identity, process and job identity, build-lock and guest-slot holder intervals,
+identity, process and job identity, build-lock holder intervals,
 image-build spans with their content key and cache hit or miss, QEMU and vCPU
 scheduling intervals where the host exposes them, and the guest progress markers
 the tests already emit. A sighting is then a join, not an inference.
@@ -35,8 +35,8 @@ the tests already emit. A sighting is then a join, not an inference.
 **What exists, and why each is not the thing.** `tests/common/hostload.rs` (180
 lines) records load averages and process counts and is attached to an audio run
 — a *sample*, not an interval, so it cannot say what overlapped a window.
-`src/buildlock.rs` already names holders (`records_holder`, `guest_slot`,
-`build_slot`) but the record is transient: it exists while the guard is held and
+`src/buildlock.rs` already names holders (`records_holder`)
+but the record is transient: it exists while the guard is held and
 is gone when the question is asked. The audio baseline at `tests/toyos.rs:2107`
 is keyed on `(test, smp)` and nothing else, so it cannot distinguish a CI
 runner's distribution from the developer's — that key has no runner provenance
