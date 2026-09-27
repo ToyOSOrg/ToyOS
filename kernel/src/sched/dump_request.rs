@@ -1,6 +1,7 @@
 //! Ctrl+Alt+D's request and the report it asks for, as one word: what is pending, and whether a report runs.
 //! Every transition is one atomic update of that word, so a request is announced once and taken once, no
 //! report begins inside another, and a request filed during a report is taken by that report's end.
+//! [`Entered`] is which pass may take a request.
 //! No `crate::` references: `kernel-loom` compiles this file directly under `feature = "loom"`.
 
 #[cfg(not(feature = "loom"))]
@@ -113,5 +114,31 @@ impl DumpRequest {
         });
         let (Ok(was) | Err(was)) = ended;
         was & PENDING != NONE
+    }
+}
+
+/// How the pass that met a request was entered: the whole of what decides whether it may serve.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Entered {
+    /// `driver::pass`, by the preempt depth it was entered at, before it raised its own level.
+    Pass { depth: u32 },
+    /// `driver::pass_block`, inside a wait ticket's registration window at every depth.
+    Blocking,
+}
+
+impl Entered {
+    /// Only a pass entered at depth zero has nothing under it; a syscall's pass has its trap frame and a
+    /// blocking pass its wait ticket, and a report served inside either panics on its own depth assertion.
+    pub fn may_serve(self) -> bool {
+        matches!(self, Self::Pass { depth: 0 })
+    }
+}
+
+impl core::fmt::Display for Entered {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Blocking => write!(f, "a blocking pass"),
+            Self::Pass { depth } => write!(f, "a pass entered at preempt depth {depth}"),
+        }
     }
 }

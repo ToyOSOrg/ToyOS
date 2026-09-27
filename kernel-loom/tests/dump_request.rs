@@ -13,7 +13,7 @@
 //! ```
 #![cfg(feature = "loom")]
 
-use kernel_loom::dump_request::{DumpRequest, Left};
+use kernel_loom::dump_request::{DumpRequest, Entered, Left};
 use loom::cell::UnsafeCell;
 use loom::sync::Arc;
 
@@ -185,4 +185,16 @@ fn a_request_left_during_a_report_is_still_taken_by_its_end() {
         assert!(!machine.request.end_report());
         assert_eq!(machine.reports(), 2);
     });
+}
+
+/// Only a pass entered at depth zero takes the request. A syscall's pass — `yield_now`, `exit_current` —
+/// is entered above zero and a blocking pass is inside a wait ticket, and `dump::request` asserts it runs
+/// with neither under it: a report served from one of them is a kernel panic. Not an interleaving question,
+/// so no model.
+#[test]
+fn only_a_pass_entered_at_depth_zero_takes_the_request() {
+    assert!(Entered::Pass { depth: 0 }.may_serve());
+    for entered in [Entered::Blocking, Entered::Pass { depth: 1 }, Entered::Pass { depth: 2 }] {
+        assert!(!entered.may_serve(), "{entered} took the request, and its report runs above a bare pass");
+    }
 }

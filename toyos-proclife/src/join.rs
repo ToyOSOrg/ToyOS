@@ -48,6 +48,25 @@ pub fn collect_zombie<T: Processes>(
     }
 }
 
+/// One join's answer, kept from the ask that settled it.
+///
+/// Collecting takes the zombie out of the table, so an ask after the one that
+/// collected finds [`JoinRefused::NoSuchThread`]: a join whose wait asks again
+/// after every wake answers with its first settled ask, never its last.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Join(Option<Result<i32, JoinRefused>>);
+
+impl Join {
+    /// Ask the table, unless an earlier ask settled; `None` is still waiting.
+    #[must_use = "a settled join is the answer the syscall returns"]
+    pub fn ask<T: Processes>(&mut self, table: &mut T, pid: Pid, tid: Tid) -> Option<Result<i32, JoinRefused>> {
+        if self.0.is_none() {
+            self.0 = collect_zombie(table, pid, tid).transpose();
+        }
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +90,27 @@ mod tests {
         world.set_location(pid, t1, ThreadLocation::Zombie(11));
         assert_eq!(collect_zombie(&mut world, pid, t1), Ok(Some(11)));
         assert_eq!(collect_zombie(&mut world, pid, t1), Err(JoinRefused::NoSuchThread));
+    }
+
+    /// The wait's predicate collects the zombie, and the syscall asks again once
+    /// the wait returns: the second ask is the answer the caller gets.
+    #[test]
+    fn a_join_asked_after_it_collected_keeps_its_answer() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let t1 = world.spawn_thread(pid);
+        let mut join = Join::default();
+        assert_eq!(join.ask(&mut world, pid, t1), None);
+        world.set_location(pid, t1, ThreadLocation::Zombie(11));
+        assert_eq!(join.ask(&mut world, pid, t1), Some(Ok(11)));
+        assert_eq!(
+            join.ask(&mut world, pid, t1),
+            Some(Ok(11)),
+            "a join that collected its thread answered the ask after it with no such thread",
+        );
+        let mut refused = Join::default();
+        assert_eq!(refused.ask(&mut world, pid, Tid(9)), Some(Err(JoinRefused::NoSuchThread)));
+        assert_eq!(refused.ask(&mut world, pid, Tid(9)), Some(Err(JoinRefused::NoSuchThread)));
     }
 
     #[test]

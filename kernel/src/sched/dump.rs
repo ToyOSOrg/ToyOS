@@ -15,6 +15,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+pub use super::dump_request::Entered;
 use super::dump_request::{DumpRequest, Left};
 
 use crate::arch::{irqchip, percpu, smp};
@@ -142,27 +143,9 @@ fn online_cpus() -> usize {
     (smp::cpu_count() as usize).min(MAX_CPUS)
 }
 
-/// How the pass that met a request was entered: the whole of what decides whether it may serve.
-#[derive(Clone, Copy)]
-pub enum Entered {
-    /// `driver::pass`, by the preempt depth it was entered at, before it raised its own level.
-    Pass { depth: u32 },
-    /// `driver::pass_block`, inside a wait ticket's registration window at every depth.
-    Blocking,
-}
-
 impl Entered {
     fn under_nothing(self) -> Option<UnderNothing> {
-        matches!(self, Self::Pass { depth: 0 }).then_some(UnderNothing(()))
-    }
-}
-
-impl core::fmt::Display for Entered {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Blocking => write!(f, "a blocking pass"),
-            Self::Pass { depth } => write!(f, "a pass entered at preempt depth {depth}"),
-        }
+        self.may_serve().then_some(UnderNothing(()))
     }
 }
 
