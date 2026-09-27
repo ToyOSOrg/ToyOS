@@ -18,8 +18,7 @@ Stages, in order:
 
 1. **Done.** `toyos-abi`, `toyos-keymap`, `toyos-font`, `toyos` and
    `toyos-window` carry a description and a repository, and are published by
-   `.github/workflows/publish.yml`, each changed one under the next minor
-   `src/sdkversion.rs` assigns it.
+   `.github/workflows/publish.yml`.
 2. **The owner's.** `CARGO_REGISTRY_TOKEN` as a repository secret, then the
    first publish. Until it is there the publish job fails by name on every
    landing, which is the intended noise.

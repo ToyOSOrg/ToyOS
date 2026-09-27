@@ -4,10 +4,8 @@
 //!
 //! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
 //! the merge queue and boots no guest: [`Job::Host`] and then
-//! [`Job::GateStage`] run as `host`, only in the merge queue. A required check
-//! a workflow skips on the other event still reports, and a skip counts as
-//! passing — that is how a pull request enters the queue. Every test that
-//! boots no guest is in [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
+//! [`Job::GateStage`] run as `host`. Every test that boots no guest is in
+//! [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
 //! everything that boots a guest, `host` again to write the cache the merge
 //! queue restores, and portability. `publish.yml` puts a landing's crates on
 //! crates.io.
@@ -32,7 +30,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::{flags, release, sdkversion};
+use crate::{flags, pr, release, sdkversion};
 
 /// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
 /// a minimum, never an equality, so a name GitHub requires and this does not
@@ -812,10 +810,10 @@ fn nightly_red() -> Result<String, String> {
     Ok(format!("reported {}", failed.join(" ")))
 }
 
-/// Each SDK crate whose tree crates.io does not hold yet, under the version
-/// [`sdkversion::plan`] assigns it, in dependency order, waiting for each to be
-/// readable before the next resolves it. Only a push to `main` publishes, on a
-/// runner whose checkout the rewritten manifests are thrown away with.
+/// Each SDK crate, under the version [`sdkversion::plan`] assigns it, in
+/// dependency order, waiting for each to be readable before the next resolves
+/// it. Only a push to `main` publishes, on a runner whose checkout the
+/// rewritten manifests are thrown away with.
 fn publish(root: &Path) -> Result<String, String> {
     if !on_runner() || std::env::var("GITHUB_REF").ok().as_deref() != Some("refs/heads/main") {
         return Err("only a push to main publishes".into());
@@ -827,6 +825,8 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
+    let tip = pr::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
+    at_tip(&tip, &pr::git(root, &["rev-parse", "HEAD"])?)?;
     let plan = sdkversion::plan(root)?;
     sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();
@@ -840,7 +840,7 @@ fn publish(root: &Path) -> Result<String, String> {
         cargo(root, &["publish", "--allow-dirty", "--manifest-path", &manifest])?;
         let mut seen = false;
         for _ in 0..60 {
-            if indexed(&sdkversion::index(name)?, version) {
+            if sdkversion::assign(&sdkversion::index(name)?, &release.key)? == (version.clone(), false) {
                 seen = true;
                 break;
             }
@@ -854,12 +854,16 @@ fn publish(root: &Path) -> Result<String, String> {
     Ok(said.join(", "))
 }
 
-/// Whether one crate's index file holds `version`, unyanked: one JSON object a
-/// line.
-fn indexed(body: &str, version: &str) -> bool {
-    body.lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .any(|v| v["vers"] == version && v["yanked"] != true)
+/// Whether `HEAD` is `main`'s tip as `git ls-remote` printed it: a re-run of an
+/// older push would put older code up under a newer minor.
+fn at_tip(ls_remote: &str, head: &str) -> Result<(), String> {
+    match ls_remote.split_whitespace().next() {
+        Some(tip) if tip == head => Ok(()),
+        tip => Err(format!(
+            "HEAD {head} is not main's tip {tip:?}; a red publish is run again by \
+             workflow_dispatch at the tip"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -974,13 +978,14 @@ mod tests {
         assert_eq!(verdicts(""), "no suite result line");
     }
 
+    /// Only `main`'s tip publishes: a re-run of an older push is refused.
     #[test]
-    fn the_index_holds_a_version_only_unyanked() {
-        let body = "{\"name\":\"toyos-abi\",\"vers\":\"0.7.0\",\"yanked\":false}\n\
-                    {\"name\":\"toyos-abi\",\"vers\":\"0.8.0\",\"yanked\":true}\n";
-        assert!(indexed(body, "0.7.0"));
-        assert!(!indexed(body, "0.8.0"));
-        assert!(!indexed(body, "0.9.0"));
+    fn only_mains_tip_publishes() {
+        let tip = "0123456789abcdef0123456789abcdef01234567";
+        assert!(at_tip(&format!("{tip}\trefs/heads/main"), tip).is_ok());
+        let refusal = at_tip(&format!("{tip}\trefs/heads/main"), &tip.replace('0', "f")).unwrap_err();
+        assert!(refusal.contains("workflow_dispatch"), "{refusal}");
+        assert!(at_tip("", tip).is_err());
     }
 
     /// Every name `gate-stage` holds the ruleset to is a job `ci.yml` runs on a

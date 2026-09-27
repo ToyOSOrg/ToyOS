@@ -1,19 +1,15 @@
 //! The crates ToyOS publishes, and the version each goes up under.
 //!
-//! Forks name `toyos-abi`, `toyos` and `toyos-window` from crates.io by a range
-//! (`">=0.12, <1"`), which the tree's `[patch.crates-io]` answers from the path
-//! at the manifest's `version`. That version is never bumped: it is only what
-//! the patch answers with. crates.io's is assigned by [`plan`] when `main`
-//! publishes, and recorded nowhere but there: `0.N.0+<key>`, the key hashing
-//! the crate's git tree and the keys of the published crates it depends on. A
-//! crate whose key is not its newest published version's takes the next minor,
-//! so a change never goes up under a taken version, and a dependent moves with
-//! every dependency that did.
+//! crates.io's is assigned by [`plan`] when `main` publishes, and recorded
+//! nowhere but there: `0.N.0+<key>`, the key hashing the crate's git tree and
+//! the version assigned to each published crate it depends on. A crate whose
+//! key is not its newest published version's takes the next minor, so a change
+//! never goes up under a taken version, and a crate keeps its newest only when
+//! the manifest going up is the one already up.
 //!
 //! [`PUBLISHED`]'s order is a dependency order: a crate cannot go up before
 //! the index holds every version it names.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -33,45 +29,65 @@ pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-window", dir: "userland/toyos-window" },
 ];
 
-/// One crate at this tree: the version crates.io has or is owed, and whether
-/// it is owed.
+/// One crate at this tree: the version crates.io has or is owed, whether it is
+/// owed, and the manifest it goes up with.
 pub struct Release {
     pub krate: &'static Crate,
+    pub key: String,
     pub version: String,
     pub publish: bool,
+    pub manifest: String,
 }
 
 /// Each of [`PUBLISHED`] at `root`'s `HEAD`, against the crates.io index.
 pub fn plan(root: &Path) -> Result<Vec<Release>, String> {
-    keys(root, PUBLISHED)?
-        .into_iter()
-        .map(|(krate, key)| {
-            let (version, publish) = assign(&index(krate.name)?, &key)?;
-            Ok(Release { krate, version, publish })
-        })
-        .collect()
+    plan_of(PUBLISHED, |krate| source(root, krate), index)
 }
 
-/// Each crate's key, in `crates`' order: its `HEAD` tree and the keys of the
-/// published crates it depends on.
-fn keys<'a>(root: &Path, crates: &'a [Crate]) -> Result<Vec<(&'a Crate, String)>, String> {
-    let mut keys: Vec<(&Crate, String)> = Vec::new();
+/// A crate's `HEAD` tree and its manifest.
+fn source(root: &Path, krate: &Crate) -> Result<(String, String), String> {
+    let tree = crate::pr::git(root, &["rev-parse", &format!("HEAD:{}", krate.dir)])?;
+    Ok((tree, manifest(root, krate)?))
+}
+
+/// Each of `crates` in order: its manifest rewritten with its version and each
+/// published dependency's, and the version for its key in its index file.
+fn plan_of(
+    crates: &'static [Crate],
+    source: impl Fn(&Crate) -> Result<(String, String), String>,
+    index: impl Fn(&str) -> Result<String, String>,
+) -> Result<Vec<Release>, String> {
+    let mut plan: Vec<Release> = Vec::new();
     for krate in crates {
-        let mut hashed = crate::pr::git(root, &["rev-parse", &format!("HEAD:{}", krate.dir)])?;
-        for dep in published_deps(&manifest(root, krate)?)? {
-            let Some((_, key)) = keys.iter().find(|(k, _)| k.name == dep) else {
-                return Err(format!("{} names {dep}, which is not published before it", krate.name));
+        let (mut hashed, text) = source(krate)?;
+        let mut manifest: toml::Table =
+            text.parse().map_err(|e| format!("{}'s manifest: {e}", krate.name))?;
+        let deps = manifest.get_mut("dependencies").and_then(|d| d.as_table_mut());
+        for (name, spec) in deps.into_iter().flatten() {
+            if !crates.iter().any(|k| k.name == name.as_str()) {
+                continue;
+            }
+            let Some(dep) = plan.iter().find(|r| r.krate.name == name.as_str()) else {
+                return Err(format!("{} names {name}, which is not published before it", krate.name));
             };
-            hashed.push_str(key);
+            hashed.push_str(&dep.version);
+            let spec = spec.as_table_mut().ok_or_else(|| format!("{name} is not a path dependency"))?;
+            // A requirement's build metadata is ignored, and cargo warns of it.
+            spec.insert("version".into(), dep.version.split('+').next().unwrap_or(&dep.version).into());
         }
-        keys.push((krate, crate::release::sha256_hex(hashed.as_bytes())[..16].to_string()));
+        let key = crate::release::sha256_hex(hashed.as_bytes())[..16].to_string();
+        let (version, publish) = assign(&index(krate.name)?, &key)?;
+        let package = manifest.get_mut("package").and_then(|p| p.as_table_mut()).ok_or("no [package]")?;
+        package.insert("version".into(), version.clone().into());
+        let manifest = toml::to_string(&manifest).map_err(|e| e.to_string())?;
+        plan.push(Release { krate, key, version, publish, manifest });
     }
-    Ok(keys)
+    Ok(plan)
 }
 
 /// The version for `key` given the crate's index file: the newest published
 /// one if it carries `key` and is not yanked, else the minor after it.
-fn assign(index: &str, key: &str) -> Result<(String, bool), String> {
+pub(crate) fn assign(index: &str, key: &str) -> Result<(String, bool), String> {
     let mut newest: Option<((u64, u64, u64), String, bool)> = None;
     for line in index.lines() {
         let entry: serde_json::Value =
@@ -114,32 +130,11 @@ pub fn index(name: &str) -> Result<String, String> {
 /// Every crate's manifest under `root` rewritten as it goes up: its version,
 /// and each published dependency's beside its `path`.
 pub fn write_published_manifests(root: &Path, plan: &[Release]) -> Result<(), String> {
-    let versions: BTreeMap<&str, &str> = plan.iter().map(|r| (r.krate.name, &*r.version)).collect();
     for release in plan {
-        let text = published_manifest(&manifest(root, release.krate)?, &release.version, &versions)?;
         let path = root.join(release.krate.dir).join("Cargo.toml");
-        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        std::fs::write(&path, &release.manifest).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(())
-}
-
-fn published_manifest(
-    text: &str,
-    version: &str,
-    versions: &BTreeMap<&str, &str>,
-) -> Result<String, String> {
-    let mut manifest: toml::Table = text.parse().map_err(|e| format!("a manifest: {e}"))?;
-    let package = manifest.get_mut("package").and_then(|p| p.as_table_mut()).ok_or("no [package]")?;
-    package.insert("version".into(), version.into());
-    if let Some(deps) = manifest.get_mut("dependencies").and_then(|d| d.as_table_mut()) {
-        for (name, spec) in deps.iter_mut() {
-            let Some(at) = versions.get(name.as_str()) else { continue };
-            let spec = spec.as_table_mut().ok_or_else(|| format!("{name} is not a path dependency"))?;
-            // A requirement's build metadata is ignored, and cargo warns of it.
-            spec.insert("version".into(), at.split('+').next().unwrap_or(at).into());
-        }
-    }
-    toml::to_string(&manifest).map_err(|e| e.to_string())
 }
 
 fn manifest(root: &Path, krate: &Crate) -> Result<String, String> {
@@ -147,22 +142,18 @@ fn manifest(root: &Path, krate: &Crate) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// The published crates `text`'s `[dependencies]` names.
-fn published_deps(text: &str) -> Result<Vec<&'static str>, String> {
-    let manifest: toml::Table = text.parse().map_err(|e| format!("a manifest: {e}"))?;
-    let deps = manifest.get("dependencies").and_then(|d| d.as_table());
-    Ok(PUBLISHED
-        .iter()
-        .map(|k| k.name)
-        .filter(|name| deps.is_some_and(|d| d.contains_key(*name)))
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pr::tests::{commit, repo};
+    use std::collections::BTreeMap;
     use toyos_tmpdir::TempDir;
+
+    const TWO: &[Crate] =
+        &[Crate { name: "toyos-abi", dir: "toyos-abi" }, Crate { name: "toyos", dir: "toyos" }];
+    const ABI: &str = "[package]\nname = \"toyos-abi\"\n";
+    const TOYOS: &str =
+        "[package]\nname = \"toyos\"\n\n[dependencies]\ntoyos-abi = { path = \"../toyos-abi\" }\n";
 
     fn index_of(lines: &[(&str, bool)]) -> String {
         lines.iter().map(|(v, yanked)| format!("{{\"vers\":\"{v}\",\"yanked\":{yanked}}}\n")).collect()
@@ -189,13 +180,13 @@ mod tests {
     /// it depends on, and with nothing else.
     #[test]
     fn a_key_moves_with_the_crate_and_its_published_dependencies() {
-        const TWO: &[Crate] =
-            &[Crate { name: "toyos-abi", dir: "toyos-abi" }, Crate { name: "toyos", dir: "toyos" }];
         let (_dir, _origin, wt) = repo("sdk-keys");
-        commit(&wt, "toyos-abi/Cargo.toml", "[package]\nname = \"toyos-abi\"\n", "abi");
-        let toyos = "[package]\nname = \"toyos\"\n\n[dependencies]\ntoyos-abi = { path = \"../toyos-abi\" }\n";
-        commit(&wt, "toyos/Cargo.toml", toyos, "sdk");
-        let now = || -> Vec<String> { keys(&wt, TWO).unwrap().into_iter().map(|(_, k)| k).collect() };
+        commit(&wt, "toyos-abi/Cargo.toml", ABI, "abi");
+        commit(&wt, "toyos/Cargo.toml", TOYOS, "sdk");
+        let now = || -> Vec<String> {
+            let plan = plan_of(TWO, |k| source(&wt, k), |_| Ok(String::new())).unwrap();
+            plan.into_iter().map(|r| r.key).collect()
+        };
 
         let base = now();
         commit(&wt, "kernel/src/lib.rs", "// work\n", "elsewhere");
@@ -208,6 +199,38 @@ mod tests {
         assert!(abi[0] != sdk[0] && abi[1] != sdk[1], "{abi:?} against {sdk:?}");
     }
 
+    /// A dependent goes up again when its newest names another version of a
+    /// dependency than the one going up: abi went up as B, the run died before
+    /// `toyos`, and the next landing put abi back to A.
+    #[test]
+    fn a_dependent_whose_newest_names_a_stale_dependency_goes_up_again() {
+        let mut index = BTreeMap::from([("toyos-abi", String::new()), ("toyos", String::new())]);
+        let plan = |abi: &str, index: &BTreeMap<&str, String>| {
+            let source = |k: &Crate| {
+                let (tree, text) = if k.name == "toyos" { ("T", TOYOS) } else { (abi, ABI) };
+                Ok((tree.to_string(), text.to_string()))
+            };
+            plan_of(TWO, source, |name| Ok(index[name].clone())).unwrap()
+        };
+        let up = |index: &mut BTreeMap<&str, String>, r: &Release| {
+            index.get_mut(r.krate.name).unwrap().push_str(&index_of(&[(&r.version, false)]))
+        };
+        let first = plan("A", &index);
+        up(&mut index, &first[0]);
+        up(&mut index, &first[1]);
+        let second = plan("B", &index);
+        up(&mut index, &second[0]);
+
+        let again = plan("A", &index);
+        let (abi, toyos) = (&again[0], &again[1]);
+        assert!(abi.publish && toyos.publish, "toyos {} names abi {}", first[1].version, first[0].version);
+        let going: toml::Table = toyos.manifest.parse().unwrap();
+        assert_eq!(going["dependencies"]["toyos-abi"]["version"].as_str(), abi.version.split('+').next());
+        up(&mut index, &again[0]);
+        up(&mut index, &again[1]);
+        assert!(plan("A", &index).iter().all(|r| !r.publish));
+    }
+
     /// **cargo is the judge**: the tree's manifests as they go up after every
     /// crate changed, served as crates.io would serve them, resolved offline
     /// with no registry at all by a consumer naming the three as the forks do.
@@ -217,17 +240,18 @@ mod tests {
     fn the_published_manifests_resolve_as_the_forks_name_them() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let tmp = TempDir::new("sdk-resolve");
-        let mut plan = Vec::new();
-        for krate in PUBLISHED {
-            let text = manifest(root, krate).unwrap();
-            let table: toml::Table = text.parse().unwrap();
-            let at = table["package"]["version"].as_str().unwrap();
-            let (version, publish) = assign(&index_of(&[(at, false)]), "fedcba9876543210").unwrap();
-            assert!(publish && version != at, "{} changed and kept {at}", krate.name);
-            plan.push(Release { krate, version, publish });
-            std::fs::create_dir_all(tmp.join(krate.dir).join("src")).unwrap();
-            std::fs::write(tmp.join(krate.dir).join("Cargo.toml"), text).unwrap();
-            std::fs::write(tmp.join(krate.dir).join("src/lib.rs"), "").unwrap();
+        let at = |name: &str| -> String {
+            let krate = PUBLISHED.iter().find(|k| k.name == name).unwrap();
+            let table: toml::Table = manifest(root, krate).unwrap().parse().unwrap();
+            table["package"]["version"].as_str().unwrap().to_string()
+        };
+        let source = |k: &Crate| Ok(("fedcba9876543210".to_string(), manifest(root, k)?));
+        let plan = plan_of(PUBLISHED, source, |name| Ok(index_of(&[(&at(name), false)]))).unwrap();
+        for release in &plan {
+            let name = release.krate.name;
+            assert!(release.publish && release.version != at(name), "{name} kept its version");
+            std::fs::create_dir_all(tmp.join(release.krate.dir).join("src")).unwrap();
+            std::fs::write(tmp.join(release.krate.dir).join("src/lib.rs"), "").unwrap();
         }
         write_published_manifests(&tmp, &plan).unwrap();
         // As crates.io serves it: `cargo publish` drops every `path`.
@@ -294,17 +318,13 @@ mod tests {
     #[test]
     fn every_row_is_a_crate_the_tree_holds_in_dependency_order() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for (n, krate) in PUBLISHED.iter().enumerate() {
-            let text = manifest(root, krate).unwrap();
-            let table: toml::Table = text.parse().unwrap();
+        plan_of(PUBLISHED, |k| Ok((String::new(), manifest(root, k)?)), |_| Ok(String::new())).unwrap();
+        for krate in PUBLISHED {
+            let table: toml::Table = manifest(root, krate).unwrap().parse().unwrap();
             let package = table["package"].as_table().unwrap();
             assert_eq!(package["name"].as_str(), Some(krate.name));
             for field in ["version", "description", "repository", "license"] {
                 assert!(package.contains_key(field), "{} carries no {field}", krate.dir);
-            }
-            for dep in published_deps(&text).unwrap() {
-                let at = PUBLISHED.iter().position(|k| k.name == dep).unwrap();
-                assert!(at < n, "{} names {dep}, which is not published before it", krate.name);
             }
         }
     }

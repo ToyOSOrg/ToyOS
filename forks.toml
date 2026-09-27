@@ -32,10 +32,8 @@
 # last pointed to — a frozen snapshot standing in for the monorepo's copy rather
 # than a build error.
 #
-# `.github/workflows/publish.yml` is what unblocks them: on every landing it
-# publishes each of the five whose tree changed, under the version
-# `src/sdkversion.rs` assigns. The token is a repository secret and the
-# five are on crates.io, so what is left is the `owed` edits below, one per fork.
+# The token is a repository secret and the five are on crates.io, so what is
+# left is the `owed` edits below, one per fork.
 #
 # A fork being sendable is not the same as it being *worth* sending. See memmap2
 # below: purely additive, unblocked, and still a bad PR.

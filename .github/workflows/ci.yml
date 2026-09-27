@@ -3,14 +3,11 @@ name: ci
 # A pull request and the merge queue: the host tests, and no guest. Each step
 # is `cargo run -- --ci <job>` (src/ci.rs), which runs the same on a dev host;
 # nightly.yml boots the guests.
-#
-# `host` runs only in the merge queue, the one place every queued branch meets
-# before `main` moves; on the pull request it is skipped, which a required
-# check counts as passing.
 
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
 
 concurrency:
@@ -21,7 +18,7 @@ jobs:
   # macOS, because `toyos-fat32`'s fixtures are formatted with `newfs_msdos`
   # and `hdiutil`.
   host:
-    if: github.event_name == 'merge_group'
+    if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
     runs-on: macos-latest
     timeout-minutes: 45
     steps:

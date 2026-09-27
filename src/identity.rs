@@ -1,10 +1,9 @@
 //! What a source file is to a build: its token stream, not its text.
 //!
 //! **One definition, read by every question of the form "did this source
-//! change what gets built"**: the key a sysroot is filed under
-//! (`src/sysroot.rs`). A comment — a doc comment included — and the whitespace
-//! around tokens change no item, no layout and no code, so a change made only
-//! of them is no new sysroot.
+//! change what gets built"**: the key a sysroot is filed under. A comment
+//! — a doc comment included — and the whitespace around tokens change no item,
+//! no layout and no code, so a change made only of them is no new sysroot.
 //!
 //! A `.rs` file is lexed just far enough to find its comments: every string,
 //! raw string and character literal is kept byte for byte, every comment and

@@ -353,21 +353,15 @@ fn glibc_named(bytes: &[u8]) -> (u32, u32) {
 fn manifest(root: &Path, tag: &str) -> Result<String, String> {
     let head = |rev: &str| crate::pr::git(root, &["rev-parse", rev]);
     let toyos = std::env::var("GITHUB_SHA").or_else(|_| head("HEAD"))?;
-    let mut text = format!(
+    Ok(format!(
         "toolchain {tag}\ntoyos {toyos}\nrust {}\nhost {HOST}\nglibc {}.{}\n",
         head("HEAD:rust")?,
         GLIBC_FLOOR.0,
         GLIBC_FLOOR.1
-    );
-    for release in crate::sdkversion::plan(root)? {
-        let version = if release.publish { "unpublished" } else { &release.version };
-        text.push_str(&format!("{} {version} {}/Cargo.toml\n", release.krate.name, release.krate.dir));
-    }
-    Ok(text)
+    ))
 }
 
-/// The release notes: how to install it, what glibc it needs, and the SDK
-/// crates that go with it.
+/// The release notes: how to install it, what glibc it needs.
 fn notes(root: &Path, tag: &str, manifest: &str) -> Result<String, String> {
     let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_else(|_| "ToyOSOrg/ToyOS".into());
     let url = format!("https://github.com/{repo}/releases/download/{tag}/{ASSET}");
@@ -395,10 +389,10 @@ rustc's ToyOS target names `rust-lld` as its linker, and the toolchain carries i
 
 The host binaries name **GLIBC_{major}.{minor}** at most, so any distribution with glibc {major}.{minor} or newer runs them. A build that needed more is refused rather than published.
 
-## What this is, and the SDK crates that go with it
+## What this is
 
 {indented}
-The crate versions are the ones on crates.io this toolchain's std was built from, `unpublished` where crates.io holds none; `sdk-<toyos-abi's version, less its build metadata>` is the release tag that names them. The same lines are the file `TOOLCHAIN` inside the tarball.
+The same lines are the file `TOOLCHAIN` inside the tarball.
 
 ## raw-window-handle
 
@@ -414,16 +408,19 @@ Until [rust-windowing/raw-window-handle#223](https://github.com/rust-windowing/r
 /// the name a consumer pins, moved onto this tree's toolchain. A second release
 /// carrying only the manifest, because GitHub hangs an asset off one release id.
 fn alias(root: &Path, manifest: &str, tmp: &Path) -> Result<String, String> {
-    let abi = manifest
-        .lines()
-        .find_map(|l| l.strip_prefix("toyos-abi "))
-        .and_then(|rest| rest.split_whitespace().next())
-        .filter(|v| *v != "unpublished")
-        .and_then(|v| v.split('+').next())
-        .ok_or("crates.io holds no toyos-abi of this tree, so no sdk alias can name it")?;
+    let plan = crate::sdkversion::plan(root)?;
+    if let Some(owed) = plan.iter().find(|r| r.publish) {
+        let name = owed.krate.name;
+        return Err(format!("crates.io holds no {name} of this tree, so no sdk alias can name it"));
+    }
+    let abi = plan.iter().find(|r| r.krate.name == "toyos-abi").ok_or("toyos-abi is not published")?;
+    let abi = abi.version.split('+').next().unwrap_or(&abi.version);
     let alias = format!("toolchain-linux-x86_64-sdk-{abi}");
     let notes = tmp.join("notes.md");
     let toolchain = tmp.join("TOOLCHAIN");
+    // The tarball's copy names no crates.io version, so it never depends on crates.io.
+    let sdk: String = plan.iter().map(|r| format!("{} {}\n", r.krate.name, r.version)).collect();
+    fs::write(&toolchain, format!("{manifest}{sdk}")).map_err(|e| e.to_string())?;
     let gh = |args: &[&str], files: &[&Path]| {
         Command::new("gh").args(args).args(files).current_dir(root).status().is_ok_and(|s| s.success())
     };
