@@ -37,14 +37,22 @@ pub struct MadtInfo {
     pub source_overrides: Vec<SourceOverride>,
 }
 
-/// Firmware's physical addresses, read through the direct map; one it does not
-/// reach is refused, never read.
+/// Firmware's physical addresses, read through the direct map as far as it
+/// reached when this reader was made; one past that is refused, never read.
 #[derive(Clone, Copy)]
-pub struct DirectPhys;
+pub struct DirectPhys {
+    end: u64,
+}
+
+impl DirectPhys {
+    pub fn now() -> Self {
+        Self { end: crate::mm::direct_map_end() }
+    }
+}
 
 impl Phys for DirectPhys {
     fn readable(self, phys: u64, len: usize) -> bool {
-        phys != 0 && DirectMap::reaches(phys, len as u64)
+        phys != 0 && toyos_bootmap::reaches(self.end, phys, len as u64)
     }
 
     fn byte(self, phys: u64) -> u8 {
@@ -59,7 +67,7 @@ pub struct Table(toyos_acpi::Table<DirectPhys>);
 
 impl Table {
     pub fn open(base: u64, signature: &[u8; 4], needed: usize) -> Result<Table, TableError> {
-        toyos_acpi::Table::open(DirectPhys, base, signature, needed).map(Table)
+        toyos_acpi::Table::open(DirectPhys::now(), base, signature, needed).map(Table)
     }
 
     /// The declared length, already bounded by [`Table::open`].
@@ -87,7 +95,7 @@ impl Table {
 
 /// The first table in the XSDT with this signature, validated for `needed` bytes.
 pub fn find_table(rsdp_addr: u64, signature: &[u8; 4], needed: usize) -> Result<Table, TableError> {
-    toyos_acpi::find_table(DirectPhys, rsdp_addr, signature, needed).map(Table)
+    toyos_acpi::find_table(DirectPhys::now(), rsdp_addr, signature, needed).map(Table)
 }
 
 /// ACPI 6.5 §5.2.6, Table 5.4: OEM ID is six bytes at offset 10 of every table header.
@@ -148,7 +156,7 @@ fn refuse<T>(what: &str, error: TableError) -> Option<T> {
 /// base address and the PCI segment group it serves.
 pub fn find_ecam_base(rsdp_addr: u64) -> Option<(u64, u16)> {
     log!("ACPI: RSDP at {rsdp_addr:#x}");
-    let (mcfg, base) = match toyos_acpi::ecam_base(DirectPhys, rsdp_addr) {
+    let (mcfg, base) = match toyos_acpi::ecam_base(DirectPhys::now(), rsdp_addr) {
         Ok(found) => found,
         Err(e) => return refuse("MCFG", e),
     };
@@ -223,13 +231,13 @@ pub fn init_power(rsdp_addr: u64) {
 /// FADT revision and the IA-PC boot architecture flags.
 // `Err` is not "absent" and must not be treated as one by the caller.
 pub fn iapc_boot_arch(rsdp_addr: u64) -> Result<(u8, u16), TableError> {
-    toyos_acpi::iapc_boot_arch(DirectPhys, rsdp_addr)
+    toyos_acpi::iapc_boot_arch(DirectPhys::now(), rsdp_addr)
 }
 
 /// Which CMOS register holds the RTC's century, as the FADT names it.
 // `Ok(None)` is "no century register", distinct from `Err`, which the caller must not treat as one.
 pub fn rtc_century_register(rsdp_addr: u64) -> Result<Option<u8>, TableError> {
-    let named = toyos_acpi::rtc_century(DirectPhys, rsdp_addr)?;
+    let named = toyos_acpi::rtc_century(DirectPhys::now(), rsdp_addr)?;
     // The host can't vary what QEMU's FADT declares, so the actuator override forces "no century register" here.
     let named = if crate::actuator::rtc_no_century() { Century::Absent } else { named };
 
@@ -352,7 +360,7 @@ pub fn shutdown() -> ! {
 
 /// Given the RSDP address, parse XSDT -> HPET table -> return HPET MMIO base address.
 pub fn find_hpet_base(rsdp_addr: u64) -> Option<u64> {
-    let base = match toyos_acpi::hpet_base(DirectPhys, rsdp_addr) {
+    let base = match toyos_acpi::hpet_base(DirectPhys::now(), rsdp_addr) {
         Ok(base) => base,
         Err(e) => return refuse("HPET", e),
     };
@@ -362,7 +370,7 @@ pub fn find_hpet_base(rsdp_addr: u64) -> Option<u64> {
 
 /// Parse MADT (signature "APIC") to discover per-CPU APIC IDs.
 pub fn parse_madt(rsdp_addr: u64) -> Option<MadtInfo> {
-    let madt = match toyos_acpi::find_table(DirectPhys, rsdp_addr, b"APIC", MADT_ENTRIES) {
+    let madt = match toyos_acpi::find_table(DirectPhys::now(), rsdp_addr, b"APIC", MADT_ENTRIES) {
         Ok(table) => table,
         Err(e) => return refuse("MADT", e),
     };

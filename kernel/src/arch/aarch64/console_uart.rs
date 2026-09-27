@@ -35,7 +35,7 @@ fn regs() -> Mmio {
 
 /// Find the UART SPCR names and answer whether it is one this file drives.
 pub fn init(rsdp_addr: u64) -> bool {
-    let spcr = match toyos_acpi::spcr(DirectPhys, rsdp_addr) {
+    let spcr = match toyos_acpi::spcr(DirectPhys::now(), rsdp_addr) {
         Ok(spcr) => spcr,
         Err(e) => {
             log!("serial: no console UART, because the SPCR is unusable: {e:?}");

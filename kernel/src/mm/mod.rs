@@ -134,11 +134,11 @@ impl DirectMap {
     pub fn phys_of<T>(ptr: *const T) -> u64 {
         ptr as u64 - PHYS_OFFSET
     }
+}
 
-    /// Whether every byte of `phys..phys + len` lies inside the direct map.
-    pub fn reaches(phys: u64, len: u64) -> bool {
-        toyos_bootmap::reaches(DIRECT_MAP_END.load(core::sync::atomic::Ordering::Acquire), phys, len)
-    }
+/// One past the direct map's last byte now.
+pub fn direct_map_end() -> u64 {
+    DIRECT_MAP_END.load(core::sync::atomic::Ordering::Acquire)
 }
 
 impl core::fmt::Display for DirectMap {

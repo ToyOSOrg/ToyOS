@@ -179,7 +179,7 @@ pub fn after_console(args: &KernelArgs, maps: &[MemoryMapEntry]) {
 /// The MADT's GIC structures and the GTDT's timers, decoded and said: what
 /// the interrupt controller and the timer of stage 4 are built from.
 fn survey(rsdp_addr: u64) {
-    match toyos_acpi::find_table(DirectPhys, rsdp_addr, b"APIC", toyos_acpi::MADT_ENTRIES) {
+    match toyos_acpi::find_table(DirectPhys::now(), rsdp_addr, b"APIC", toyos_acpi::MADT_ENTRIES) {
         Ok(madt) => {
             let (mut cpus, mut enabled) = (0u32, 0u32);
             for item in toyos_acpi::madt_entries(&madt) {
@@ -221,7 +221,7 @@ fn survey(rsdp_addr: u64) {
         }
         Err(e) => log!("ACPI: MADT unusable: {e:?}"),
     }
-    match toyos_acpi::gtdt(DirectPhys, rsdp_addr) {
+    match toyos_acpi::gtdt(DirectPhys::now(), rsdp_addr) {
         Ok(gtdt) => log!(
             "ACPI: GTDT timers: EL1 physical GSIV {}, EL1 virtual GSIV {}, EL2 GSIV {} ({})",
             gtdt.non_secure_el1.gsiv,
