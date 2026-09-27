@@ -72,28 +72,12 @@ beside it. The teardown is not a regression from the deadline fix (`add6aeb`,
 exits, and is not a descendant of it.
 
 **What this does *not* settle is the freeze**, and the entry stays. It stays
-`Sched::Parallel` for the same reason as before, `EXPECTED_FAILURES` keeps its
-declaration to its review date, and a green run still proves nothing — the
-signature at the top of this entry is a guest that goes *silent*, and none of
-the eleven boots in this session produced one. What has changed is that the
-test can now reach the snake rounds where the freeze was seen, which it could
-not before. Judge the next occurrence by the signature, never by a run.
-
-**Landing while it is red** needs nothing special: `desktop_window_child` is
-declared in `EXPECTED_FAILURES` (`tests/toyos.rs`) and the gate is the ordinary
-one. The declaration reports it by name on every run, is red
-if the test *passes* where the entry says a pass is proof, and is red on
-`2026-09-06` regardless — this entry is intermittent, so its own expiry is a
-date rather than a green run. The `--skip` flag that used to be the answer is
-deleted: an exclusion nobody reviews cannot expire, and this one has to.
-
-**What the declaration will and will not absorb.** Its `says` list covers the
-six of this test's messages whose failure is *the desktop ceasing to answer
-after a window closed*. The other five red the run — the client binary missing,
-the desktop never coming up, a window never being created, and the client
-leaving on its own deadline. That pins which assertion failed and not why, so
-the log-tail discriminator above is still a human's to apply; the run prints the
-pointer to this section beside every `XFAIL` line for exactly that reason.
+`Sched::Parallel` for the same reason as before, and a green run still proves
+nothing — the signature at the top of this entry is a guest that goes
+*silent*, and none of the eleven boots in this session produced one. What has
+changed is that the test can now reach the snake rounds where the freeze was
+seen, which it could not before. Judge the next occurrence by the signature,
+never by a run.
 
 **One thing #156's capture leaned on is closed, and it is not this.** The
 deadline was stored twice — `ParkedEntry.deadline` and `DeadlineHeap` — and
@@ -168,8 +152,7 @@ above is the measured one and not the whole of it.
 
 The test stopped at its **first** probe: the windowed child asked for a window,
 was answered `NotEndowed`, and printed `WINDOW-CHILD-REFUSED this program was
-given no compositor` — while `EXPECTED_FAILURES`'s `the windowed child never
-reported leaving` absorbed it, so no run said so. The client is a harness
+given no compositor`. The client is a harness
 binary, no `[programs]` row can name one, and `/system/bin/init` endows a name the
 manifest does not carry with nothing.
 
@@ -186,3 +169,12 @@ left both ways and the shell kept its prompt — which is the outcome this entry
 calls "#156 did not fire this run, which proves nothing". What changed is that a
 red now means the desktop stopped answering, which is what the declaration was
 written about.
+
+**Exit condition and owner.** Re-enabled when #156 is fixed and a `sched::dump`
+NMI probe taken on a reproduction confirms no CPU stopped taking scheduler
+passes during the freeze — nothing short of that instrument distinguishes this
+signature from a green run, which this entry has already shown proves nothing
+either way. Owner: `toyos-sched`, the placement track that closed the
+CPU-selection half of this family (`CpuHandle::answering`,
+`toyos-sched/src/cpu.rs`) and is nearest the remaining half; held by the
+orchestrator.

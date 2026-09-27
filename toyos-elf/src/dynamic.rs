@@ -5,7 +5,8 @@
 //! and the loader has to tell "the file did not say" from "the file said
 //! zero", because those two get different treatment at every use site.
 
-use crate::read;
+use crate::layout::{Extent, ImageRange};
+use crate::{read, Error};
 
 /// A table named by a (location, size) pair of tags.
 ///
@@ -91,6 +92,38 @@ impl Dynamic {
     /// an allocation sized by untrusted input.
     pub fn needed(data: &[u8]) -> impl Iterator<Item = u64> + '_ {
         Entries::new(data).filter_map(|(tag, val)| (tag == DT_NEEDED).then_some(val))
+    }
+}
+
+/// Bytes in one `.init_array` entry, an ELF64 address.
+const POINTER_SIZE: u64 = 8;
+
+/// `DT_INIT_ARRAY` and `DT_INIT_ARRAYSZ`: a whole number of pointers, every
+/// one of them inside the image. Made only by [`InitArray::parse`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitArray {
+    range: ImageRange,
+}
+
+impl InitArray {
+    /// The array `table` names, placed in the image `extent` describes, or why
+    /// it is no array of this image's pointers. No table is no array.
+    pub fn parse(table: Option<Table>, extent: Extent) -> Result<Option<InitArray>, Error> {
+        let Some(table) = table else { return Ok(None) };
+        if !table.size.is_multiple_of(POINTER_SIZE) {
+            return Err(Error::InitArrayNotWholePointers);
+        }
+        let range = extent.range(table.vaddr, table.size).ok_or(Error::InitArrayOutsideImage)?;
+        Ok(Some(InitArray { range }))
+    }
+
+    pub const fn range(self) -> ImageRange {
+        self.range
+    }
+
+    /// How many constructors the array holds.
+    pub const fn count(self) -> u64 {
+        self.range.len() / POINTER_SIZE
     }
 }
 

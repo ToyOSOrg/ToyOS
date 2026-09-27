@@ -126,7 +126,7 @@ fn main() {
         return;
     }
     // Reads one table and prints. Here for the same reason again, and for one
-    // more: the question it answers — "is this red quarantined?" — is asked
+    // more: the question it answers — "is this test disabled?" — is asked
     // while a build is broken as often as while one works.
     if asked(&flags::KNOWN_RED) {
         toyos_build::redlist::dispatch(&args);

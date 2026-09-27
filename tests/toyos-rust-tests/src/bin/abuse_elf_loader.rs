@@ -66,6 +66,7 @@ const DT_GNU_HASH: i64 = 0x6fff_fef5u32 as i32 as i64;
 
 const SHT_DYNSYM: u32 = 11;
 
+const R_X86_64_GLOB_DAT: u64 = 6;
 const R_X86_64_RELATIVE: u64 = 8;
 const R_X86_64_DTPMOD64: u64 = 16;
 const R_X86_64_TPOFF64: u64 = 18;
@@ -539,8 +540,19 @@ fn main() {
     //     `.dynsym`, inside the borrow, inside a `ReadExec` page.
     dlopen_refused("vaddr_min_shift.so", &so_with_non_zero_vaddr_min());
 
+    // 18. The values a file writes, not the places: each of these was an
+    //     overflow panic in the kernel, reached by writing the file to /tmp.
+    values_are_bounded_by_the_image();
+
     // 14. A cross-module initial-exec TLS reference resolves to `S + A - tp`.
     f13_cross_module_addend_is_kept();
+
+    // 19. A relocation naming a symbol the executable's short-read `.dynsym` does
+    //     not hold is refused by name.
+    globdat_past_short_dynsym();
+
+    // 20. The apply-time TLS refusals, each named by its reason in the log.
+    tls_apply_time_refusals_are_reached();
 
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.
@@ -668,6 +680,119 @@ fn so_with_non_zero_vaddr_min() -> Vec<u8> {
         .build()
 }
 
+/// Every file-chosen value the loader turns into an address or a thread-pointer
+/// offset, set to one no image holds: a `RELATIVE` addend, a TPOFF addend, a
+/// symbol's `st_value`, `DT_INIT_ARRAY`. Each is refused; the kernel living
+/// through them is what the checks at the end of `main` assert.
+fn values_are_bounded_by_the_image() {
+    // RELATIVE `B + A` with `A = i64::MAX`: `USER_VM_BASE + A` overflowed.
+    spawn_refused(
+        "relative_addend_past_image",
+        &exe_with(&[], &[(0x2000, R_X86_64_RELATIVE, i64::MAX)], None).build(),
+    );
+    // TPOFF64 against the executable's own 16-byte PT_TLS, `A = i64::MIN`:
+    // `tls::Static::tpoff` subtracted with overflow.
+    spawn_refused(
+        "tpoff_addend_past_tls",
+        &exe_with(&[], &[(0x2000, R_X86_64_TPOFF64, i64::MIN)], Some(16)).build(),
+    );
+    // An export at `0xFFFF_FFFF_FFFF_F000` in an executable that needs a
+    // library: the loader builds a map of the exe's exports for the library's
+    // slots to bind against, and that map added the value to the load base. The
+    // dependency is written beside the exe, where `DT_NEEDED` resolves first.
+    {
+        let dep = "export_dep.so";
+        write_file(dep, &so_with(&[], &[], None));
+        // `.dynstr` at 0x1800 holds "far\0<dep>\0"; the export names the first.
+        let name_at = 1 + FAR.len() as u64 + 1;
+        let exe = exe_with(&[(DT_NEEDED, name_at)], &[], None)
+            .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_FUNC, 1, FAR_VALUE)
+            .poke(0x1801, FAR.as_bytes())
+            .poke(0x1800 + name_at as usize, dep.as_bytes());
+        spawn_refused("export_past_image", &exe.build());
+    }
+
+    dlopen_refused("so_relative_addend_past_image.so", &so_with(&[], &[(0x1400, 0, R_X86_64_RELATIVE, i64::MAX)], None));
+    dlopen_refused("so_tpoff_addend_past_tls.so", &so_with(&[], &[(0x1400, 0, R_X86_64_TPOFF64, i64::MIN)], Some(16)));
+    dlopen_refused(
+        "so_init_array_past_image.so",
+        &so_with(&[(DT_INIT_ARRAY, u64::MAX), (DT_INIT_ARRAYSZ, 8)], &[], None),
+    );
+    let far = so_with(&[], &[], None);
+    let far = patch_sym(far, 0x218, 1, (STB_GLOBAL << 4) | STT_FUNC, 1, FAR_VALUE);
+    let path = write_file("so_export_past_image.so", &far);
+    if let Ok(lib) = unsafe { libloading::Library::new(&path) } {
+        let found = unsafe { lib.get::<*const u8>(FAR.as_bytes()) }.is_ok();
+        panic!("so_export_past_image.so: dlopen loaded it (dlsym found {FAR}: {found})");
+    }
+}
+
+const FAR: &str = "far";
+const FAR_VALUE: u64 = 0xFFFF_FFFF_FFFF_F000;
+const DT_INIT_ARRAY: i64 = 25;
+const DT_INIT_ARRAYSZ: i64 = 27;
+const STT_FUNC: u8 = 2;
+
+
+/// An executable spanning `[0, 0x4000)` writable, `PT_DYNAMIC` at 0x1000, its
+/// relocations at 0x1200, `.dynsym` at 0x1400 and `.dynstr` after it at 0x1800 — and a
+/// 16-byte-aligned `PT_TLS` of `tls` bytes when asked.
+fn exe_with(tags: &[(i64, u64)], relas: &[(u64, u64, i64)], tls: Option<u64>) -> Elf {
+    let mut all = vec![(DT_SYMTAB, 0x1400), (DT_STRTAB, 0x1800), (DT_STRSZ, 0x100)];
+    if !relas.is_empty() {
+        all.extend([(DT_RELA, 0x1200), (DT_RELASZ, 24 * relas.len() as u64)]);
+    }
+    all.extend_from_slice(tags);
+    let mut elf = Elf::new(0x4000)
+        .ph(Phdr::load(0, 0, 0x4000, 0x4000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
+        .entry(0)
+        .dynamic(0x1000, &all);
+    if let Some(memsz) = tls {
+        elf = elf.ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x3000, vaddr: 0x3000, filesz: 0, memsz, align: 16 });
+    }
+    for (i, &(offset, r_type, addend)) in relas.iter().enumerate() {
+        elf = elf.rela(0x1200 + 24 * i, offset, r_type, addend);
+    }
+    elf
+}
+
+/// A library laid out as [`so_with_reloc_below_writable`] is — text and every
+/// table in `[0, 0x1000)`, writable data at `[0x1000, 0x5000)` — with these
+/// extra dynamic tags, relocations `(r_offset, r_sym, type, addend)`, and a
+/// `PT_TLS` of `tls` bytes when asked.
+fn so_with(tags: &[(i64, u64)], relas: &[(u64, u32, u64, i64)], tls: Option<u64>) -> Vec<u8> {
+    let mut all = vec![(DT_SYMTAB, 0x200), (DT_STRTAB, 0x300), (DT_STRSZ, 0x100)];
+    if !relas.is_empty() {
+        all.extend([(DT_RELA, 0x800), (DT_RELASZ, 24 * relas.len() as u64)]);
+    }
+    all.extend_from_slice(tags);
+    let mut elf = Elf::new(0x5000)
+        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
+        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x600, filesz: 0x200, memsz: 0x200, align: 8 })
+        .sections(0x900, 1, 64)
+        .dynamic(0x600, &all)
+        .poke(0x301, FAR.as_bytes())
+        .shdr(0x900, SHT_DYNSYM, 0x200, 48, 24);
+    if let Some(memsz) = tls {
+        elf = elf.ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz, align: 16 });
+    }
+    for (i, &(offset, sym, r_type, addend)) in relas.iter().enumerate() {
+        elf = elf.rela(0x800 + 24 * i, offset, ((sym as u64) << 32) | r_type, addend);
+    }
+    elf.build()
+}
+
+/// One `Elf64_Sym` written into built bytes.
+fn patch_sym(mut bytes: Vec<u8>, off: usize, st_name: u32, st_info: u8, st_shndx: u16, st_value: u64) -> Vec<u8> {
+    bytes[off..off + 4].copy_from_slice(&st_name.to_le_bytes());
+    bytes[off + 4] = st_info;
+    bytes[off + 6..off + 8].copy_from_slice(&st_shndx.to_le_bytes());
+    bytes[off + 8..off + 16].copy_from_slice(&st_value.to_le_bytes());
+    bytes
+}
+
 thread_local! {
     // A non-empty static TLS block, so `dlopen` runs the TPOFF pass at all.
     static F13_KEEP_TLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -681,8 +806,8 @@ fn f13_cross_module_addend_is_kept() {
     F13_KEEP_TLS.with(|c| c.set(c.get()));
 
     // `defs` loads first so it resolves `refs`'s TPOFF; both held to the read.
-    let defs = write_file("f13_defs.so", &tls_defs_so());
-    let refs = write_file("f13_refs.so", &tls_refs_so(ADDEND));
+    let defs = write_file("f13_defs.so", &tls_defs_so(b"xtls", 0x200));
+    let refs = write_file("f13_refs.so", &tls_refs_so(b"xtls", ADDEND));
     let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen f13_defs.so");
     let lib_refs = unsafe { libloading::Library::new(&refs) }.expect("dlopen f13_refs.so");
 
@@ -703,24 +828,125 @@ fn f13_cross_module_addend_is_kept() {
     drop(lib_defs);
 }
 
-/// Defines `xtls` (`STT_TLS`, offset 8) for a cross-module `TPOFF64`.
-fn tls_defs_so() -> Vec<u8> {
+/// Defines `name` (`STT_TLS`, offset 8) for a cross-module `TPOFF64`, in a
+/// `memsz`-byte `PT_TLS`.
+fn tls_defs_so(name: &[u8; 4], memsz: u64) -> Vec<u8> {
     Elf::new(0x2000)
         .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
-        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz: 0x20, align: 8 })
+        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz, align: 8 })
         .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
         .sections(0x1C00, 1, 64)
         .dynamic(0x1000, &[(DT_SYMTAB, 0x1200), (DT_STRTAB, 0x1400), (DT_STRSZ, 0x40)])
-        // sym[1] xtls: defined (st_shndx == 1), STT_TLS, offset 8 in the block.
+        // sym[1] `name`: defined (st_shndx == 1), STT_TLS, offset 8 in the block.
         .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
-        .poke(0x1401, b"xtls\0")
+        .poke(0x1401, name)
         .shdr(0x1C00, SHT_DYNSYM, 0x1200, 48, 24)
         .build()
 }
 
-/// Two `TPOFF64` relocations against the undefined `xtls`, addends 0 and
+/// The apply-time TLS refusals, which no `r_sym == 0` case reaches because
+/// `rela::parse` refuses those before either apply pass runs. Each refuses a
+/// *resolved* `S + A` outside the defining module's `PT_TLS`, named
+/// `TLS_OUTSIDE_SEGMENT` beside the file in the kernel log the harness checks.
+fn tls_apply_time_refusals_are_reached() {
+    // dlopen, the module's own symbol: `apply_tpoff_relocs` refuses, and the
+    // mapping guard takes the library back down.
+    dlopen_refused("tls_apply_refs.so", &so_tls_ref_past_segment());
+
+    // spawn, the executable's own symbol: `apply_tls_relocs` refuses.
+    spawn_refused("tls_apply_spawn", &exe_tls_ref_past_segment());
+
+    // dlopen, another module's symbol: `S + A` (8 + 0x140) leaves the defining
+    // module's 0x20-byte `PT_TLS`. Named apart from f13's `xtls`, which stays
+    // loaded (`dlclose` unloads nothing) and would be the module resolved.
+    let defs = write_file("f13_defs_small.so", &tls_defs_so(b"ytls", 0x20));
+    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen f13_defs_small.so");
+    dlopen_refused("f13_refs_past.so", &tls_refs_so(b"ytls", 0x140));
+    drop(lib_defs);
+
+    // `S + A` (8 + `i64::MAX`) inside a `PT_TLS` declared past 2^63 bytes: only
+    // `S + A - tp` leaves an `i64`.
+    const PAST_I64: u64 = 0x8000_0000_0000_0010;
+    let dep = "tpoff_overflow_dep.so";
+    write_file(dep, &tls_defs_so(b"wtls", PAST_I64));
+    // `.dynstr` at 0x1800 holds "wtls\0<dep>\0".
+    let exe = exe_with(&[(DT_NEEDED, 6)], &[(0x2000, (1u64 << 32) | R_X86_64_TPOFF64, i64::MAX)], None)
+        .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
+        .poke(0x1801, b"wtls\0")
+        .poke(0x1806, dep.as_bytes());
+    spawn_refused("tpoff_overflow_spawn", &exe.build());
+
+    let defs = write_file("tpoff_overflow_defs.so", &tls_defs_so(b"vtls", PAST_I64));
+    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen tpoff_overflow_defs.so");
+    dlopen_refused("tpoff_overflow.so", &tls_refs_so(b"vtls", i64::MAX));
+    drop(lib_defs);
+}
+
+/// An executable needing a library, whose `.gnu.hash` counts 1000 symbols
+/// while the file ends 469 entries and 8 bytes into `.dynsym`, with a
+/// `GLOB_DAT` naming symbol 469, the first index past the whole entries.
+fn globdat_past_short_dynsym() {
+    let dep = "globdat_dep.so";
+    write_file(dep, &so_with(&[], &[], None));
+    // nbuckets 1, symoffset 1000, bloom_size 1, bloom_shift 0, the bloom word
+    // and bucket 0: a bucket below `symoffset` makes `symoffset` the count.
+    let mut gnu_hash = Vec::new();
+    for word in [1u32, 1000, 1, 0, 0, 0, 0] {
+        gnu_hash.extend_from_slice(&word.to_le_bytes());
+    }
+    let exe = exe_with(
+        &[(DT_NEEDED, 1), (DT_GNU_HASH, 0x3000)],
+        &[(0x2000, (469u64 << 32) | R_X86_64_GLOB_DAT, 0)],
+        None,
+    )
+    .poke(0x1801, dep.as_bytes())
+    .poke(0x3000, &gnu_hash);
+    spawn_refused("globdat_past_dynsym", &exe.build());
+}
+
+/// A shared object defining its own `xtls` (`STT_TLS`, offset 8) in a 0x20-byte
+/// `PT_TLS`, with a `TPOFF64` against it whose `S + A` (0x148) leaves it.
+fn so_tls_ref_past_segment() -> Vec<u8> {
+    Elf::new(0x5000)
+        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
+        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x600, filesz: 0x200, memsz: 0x200, align: 8 })
+        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz: 0x20, align: 16 })
+        .sections(0x900, 1, 64)
+        .dynamic(0x600, &[
+            (DT_SYMTAB, 0x200), (DT_STRTAB, 0x300), (DT_STRSZ, 0x100),
+            (DT_RELA, 0x800), (DT_RELASZ, 24),
+        ])
+        // sym[1] xtls: defined STT_TLS, offset 8 in the block.
+        .sym(0x218, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
+        .poke(0x301, b"xtls\0")
+        .rela(0x800, 0x1000, (1u64 << 32) | R_X86_64_TPOFF64, 0x140)
+        .shdr(0x900, SHT_DYNSYM, 0x200, 48, 24)
+        .build()
+}
+
+/// An executable defining `xtls` (`STT_TLS`, offset 8) in a 0x20-byte `PT_TLS`,
+/// with a `TPOFF64` against it whose `S + A` (0x148) leaves the segment.
+fn exe_tls_ref_past_segment() -> Vec<u8> {
+    Elf::new(0x4000)
+        .ph(Phdr::load(0, 0, 0x4000, 0x4000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
+        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x3000, vaddr: 0x3000, filesz: 0, memsz: 0x20, align: 16 })
+        .entry(0)
+        .dynamic(0x1000, &[
+            (DT_SYMTAB, 0x1400), (DT_STRTAB, 0x1800), (DT_STRSZ, 0x100),
+            (DT_RELA, 0x1200), (DT_RELASZ, 24),
+        ])
+        // sym[1] xtls: defined STT_TLS, offset 8 in the block.
+        .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
+        .poke(0x1801, b"xtls\0")
+        .rela(0x1200, 0x2000, (1u64 << 32) | R_X86_64_TPOFF64, 0x140)
+        .build()
+}
+
+/// Two `TPOFF64` relocations against the undefined `name`, addends 0 and
 /// `addend`, patching exported data `probe0`/`probeN` a reader can difference.
-fn tls_refs_so(addend: i64) -> Vec<u8> {
+fn tls_refs_so(name: &[u8; 4], addend: i64) -> Vec<u8> {
     Elf::new(0x4000)
         .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
         .ph(Phdr::load(0x2000, 0x2000, 0x2000, 0x2000, PF_R | PF_W))
@@ -730,11 +956,12 @@ fn tls_refs_so(addend: i64) -> Vec<u8> {
             (DT_SYMTAB, 0x1200), (DT_STRTAB, 0x1400), (DT_STRSZ, 0x40),
             (DT_RELA, 0x1600), (DT_RELASZ, 48),
         ])
-        // sym[1] xtls undefined (shndx 0) → cross-module; sym[2]/[3] the probes.
+        // sym[1] `name` undefined (shndx 0) → cross-module; sym[2]/[3] the probes.
         .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
         .sym(0x1230, 6, STB_GLOBAL << 4, 2, 0x2000)
         .sym(0x1248, 13, STB_GLOBAL << 4, 2, 0x2008)
-        .poke(0x1401, b"xtls\0probe0\0probeN\0")
+        .poke(0x1401, name)
+        .poke(0x1406, b"probe0\0probeN\0")
         .rela(0x1600, 0x2000, (1u64 << 32) | R_X86_64_TPOFF64, 0)
         .rela(0x1618, 0x2008, (1u64 << 32) | R_X86_64_TPOFF64, addend)
         .shdr(0x1C00, SHT_DYNSYM, 0x1200, 96, 24)
