@@ -128,8 +128,11 @@ impl Surface {
 }
 
 fn spawn_locale(args: &[&str], surface: &Connector) -> Child {
-    // The whole of what the wizard is given: one connector, to this surface.
+    // The whole of what the wizard is given: one connector, to this surface,
+    // and the directory its layout is written to.
+    let names = toyos::endow::namespace().expect("locale_gate: this program was endowed a namespace");
     let child_ns = namespace::build()
+        .keep(names, &["fs:/config"])
         .add(surface::SERVICE, surface)
         .finish()
         .expect("locale_gate: the kernel refused a namespace for the wizard");

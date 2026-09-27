@@ -4059,14 +4059,14 @@ dependencies = [
 
 [[package]]
 name = "toyos"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "toyos-abi",
 ]
 
 [[package]]
 name = "toyos-abi"
-version = "0.16.0"
+version = "0.17.0"
 
 [[package]]
 name = "toyos-blockhold"
@@ -4183,7 +4183,7 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "toyos",
  "toyos-abi",
