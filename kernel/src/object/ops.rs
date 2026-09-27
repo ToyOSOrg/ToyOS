@@ -625,7 +625,7 @@ pub fn fsync(object: &KObjectRef) -> u64 {
     // A refused attempt can leave the two FATs split, and the park between two attempts is where the machine's stop would find this thread.
     let _update = crate::block::begin_update();
     // A refused attempt discards nothing — an unsettled debt needs no restoring.
-    let run = until_answered(Run::Fsync(file_id), || {
+    let run = until_answered(|| Run::Fsync(file_id), || {
         // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
         // Flush and sync share one acquisition so this file cannot be unmounted between them.
         let mut vfs = crate::vfs::lock();
@@ -700,10 +700,10 @@ pub(crate) enum ClaimOp {
 /// per run, so a writer whose every flush leaves records to flush (`logd`)
 /// is refused once and not on every flush it will ever make.
 #[cfg(feature = "boot-actuators")]
-fn staged_spent(run: Run) -> bool {
+fn staged_spent(run: impl Fn() -> Run) -> bool {
     static REFUSED: crate::sync::Lock<alloc::collections::BTreeSet<Run>> =
         crate::sync::Lock::new(alloc::collections::BTreeSet::new());
-    crate::actuator::fsync_budget_spent() && REFUSED.lock().insert(run)
+    crate::actuator::fsync_budget_spent() && REFUSED.lock().insert(run())
 }
 
 /// `attempt` run until it answers anything but `WouldBlock` — a budget that
@@ -714,7 +714,7 @@ fn staged_spent(run: Run) -> bool {
 /// be held across the wait, so no disk wait here is under one.
 #[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
 pub(crate) fn until_answered(
-    run: Run,
+    run: impl Fn() -> Run,
     mut attempt: impl FnMut() -> Result<(), SyscallError>,
 ) -> Answered {
     let began = crate::clock::now();
@@ -728,7 +728,7 @@ pub(crate) fn until_answered(
         let answer = {
             // Stages a first attempt with its budget already spent, exercising the shipped refusal itself.
             #[cfg(feature = "boot-actuators")]
-            let _spent = (attempts == 1 && staged_spent(run))
+            let _spent = (attempts == 1 && staged_spent(&run))
                 .then(|| crate::scheduler::Operation::begin(Deadline::passed()));
             attempt()
         };
@@ -771,7 +771,7 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
             return SyscallError::PermissionDenied.to_u64();
         }
     }
-    let whose = Run::Claim(claim.partition_on(), ClaimOp::Flush);
+    let whose = || Run::Claim(claim.partition_on(), ClaimOp::Flush);
     let run = until_answered(whose, || match claim.partition_view() {
         Some(view) => view.flush().map_err(block_word),
         None => Err(SyscallError::Gone),

@@ -529,6 +529,12 @@ actuators! {
     /// `partition_claim_gives_up`.
     partclaim_table_unanswered = "partclaim-table-unanswered";
 
+    /// Refuse every read of device block 0 of each NVMe disk across
+    /// `rootfs::hold_source` alone, so ROOT's hold finds the disk carrying it
+    /// silent and withholds its GUID, and the disk answers every read after.
+    /// Judged by `partition_claim_gives_up`.
+    partclaim_root_withheld = "partclaim-root-withheld";
+
     /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 

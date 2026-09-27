@@ -2742,8 +2742,15 @@ fn transport_gives_up(
     let Some(held) = boot.lines().find(|l| l.contains("root: holding ")) else {
         return Err(format!("the boot never held the partition ROOT was read from\n{log}"));
     };
-    if held.ends_with("disks that did not answer: []") {
-        return Err(format!("{held:?}: the disk the gate left offline answered ROOT's hold\n{log}"));
+    let Some(gate) = boot.lines().find_map(|l| {
+        l.split_once("usb-gate: disk ")?.1.split_once(" designated")?.0.parse::<u32>().ok()
+    }) else {
+        return Err(format!("the gate never said which disk it designated\n{log}"));
+    };
+    // A USB disk's `DeviceId` is 16 past its index (`drivers/usb_storage.rs`).
+    let silent = format!("disks that did not answer: [{}]", 16 + gate);
+    if !held.ends_with(&silent) {
+        return Err(format!("{held:?}: ROOT's hold did not name the gate's disk alone, {silent:?}\n{log}"));
     }
 
     // The budget is the kernel's declaration, read off the gate's own line.

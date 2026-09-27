@@ -2678,7 +2678,7 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
              a controller's registers without settling the command a device was inside"
         ));
     }
-    nothing_after_the_last_word(after.text()).map_err(|why| format!("{path}: {why}"))?;
+    bootlog::nothing_after_the_last_word(after.text()).map_err(|why| format!("{path}: {why}"))?;
     ended_in_a_reset(&mut resets).map_err(|why| format!("{path}: {why}"))?;
 
     // And the machine comes back on the same device. The pass after the chain's
@@ -2689,45 +2689,6 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
     drop(qemu);
     eprintln!("  [power] {path}: {account:?}, and the stick enumerated again");
     Ok(())
-}
-
-/// **`Rebooting.` is the last record, and nothing this boot still holds may
-/// write one after it.**
-///
-/// The runner's deadline kills the job it is watching, which releases the `wait`
-/// its own job loop is inside, and that loop can spawn the next job into the
-/// window between the boot's last word and the reset.
-///
-/// A boot with no such word — a panic — is not asked: it correctly writes none.
-/// The window ends at the next loader pass, because everything that pass prints
-/// is after the reset by construction.
-///
-/// **A spawn record and not every record**, because those are the two different
-/// claims. `quiesce` writes after its own last word by construction — an idle
-/// CPU's `sched:` report can land there — and nothing is left running to take
-/// it anywhere but the console. A *spawn* is a process that was still on a run
-/// queue after the stop said it had stopped every one.
-///
-/// **The boot's own word, not the next pass's copy of it**: that pass prints
-/// the boot's newest records under [`bootlog::LOG_TAIL`], newest first, so the
-/// copy of the last word heads records that were written before it.
-fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(at) = lines
-        .iter()
-        .rposition(|line| line.contains(REBOOTING) && !line.contains(bootlog::LOG_TAIL))
-    else {
-        return Ok(());
-    };
-    let mut window =
-        lines[at + 1..].iter().take_while(|line| !line.contains(bootlog::LOADER_FIRST_LINE));
-    match window.find(|line| line.contains(bootlog::SPAWN)) {
-        None => Ok(()),
-        Some(line) => Err(format!(
-            "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
-             metal boot is judged on: {line:?}"
-        )),
-    }
 }
 
 /// The T14's judge for [`usb_reset_hands_devices_back`].

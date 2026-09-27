@@ -508,7 +508,15 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     // After xhci::init, not beside the NVMe probe: a USB-booted disk doesn't exist until the controller binds it.
     fat32_adapter::probe_boot_disks();
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_root_withheld() {
+        page_cache::refuse_table_reads();
+    }
     rootfs::hold_source();
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_root_withheld() {
+        page_cache::answer_table_reads();
+    }
 
     // One filesystem, four paths: each of `DATA_PATHS` is a directory of DATA,
     // so one sync settles them all and none can outlive the others.

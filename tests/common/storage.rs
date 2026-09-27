@@ -601,8 +601,9 @@ pub fn home_budget_refusal_retried(
     // And the refusal was one per file, not one per flush: `logd` flushes every
     // round it wrote a line in, and a refused flush is lines of its own, so a
     // refusal on every flush keeps `/log` retrying for as long as the machine
-    // runs and rotates the boot's own log away. An absence, so it is judged
-    // over a window with nothing left to flush in it.
+    // runs and rotates the boot's own log away. An absence has no event to wait
+    // on, so it is judged over a fixed window: the storm retries there without
+    // pause, the once-per-file refusal never.
     let after = qemu.drain_serial(Duration::from_secs(2));
     let again: Vec<&str> =
         after.lines().filter(|l| l.contains("fsync: ") && l.contains("durable on attempt")).collect();

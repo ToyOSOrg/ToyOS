@@ -18,7 +18,7 @@ use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
 use crate::block::{BlockError, Holder, Partition};
-use crate::device::ClaimError;
+use crate::gpt::Unnamed;
 use crate::mm::{DirectMap, Region};
 use crate::sync::Lock;
 
@@ -173,14 +173,9 @@ pub fn hold_source() {
     let sought = crate::gpt::seek(guid);
     let found = match sought.found {
         Ok(Some(found)) => found,
-        Ok(None) | Err(ClaimError::Absent) => {
-            return withhold(guid, "it is on no disk that answered", &sought.silent)
-        }
-        Err(ClaimError::Ambiguous) => return withhold(guid, "it is carried twice", &sought.silent),
-        Err(ClaimError::Unusable) => return withhold(guid, "its table refuses it", &sought.silent),
-        Err(e @ (ClaimError::Owned | ClaimError::KernelDriven | ClaimError::Exhausted)) => {
-            panic!("rootfs: gpt::seek answered {e:?}, which no table read makes")
-        }
+        Ok(None) => return withhold(guid, "it is on no disk that answered", &sought.silent),
+        Err(Unnamed::Ambiguous) => return withhold(guid, "it is carried twice", &sought.silent),
+        Err(Unnamed::Unusable) => return withhold(guid, "its table refuses it", &sought.silent),
     };
     let volume = found.volume;
     let view = crate::block::open(volume.device)

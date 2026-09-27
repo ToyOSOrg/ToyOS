@@ -346,11 +346,29 @@ pub fn withhold(guid: PartGuid) {
 /// Where one partition is on the disks that answered, and which did not.
 pub struct Sought {
     /// The one partition carrying the GUID, `None` where no table that
-    /// answered carries it, or the refusal a table's answer makes.
-    pub found: Result<Option<Claimable>, ClaimError>,
+    /// answered carries it, or why the tables that answered name no one.
+    pub found: Result<Option<Claimable>, Unnamed>,
     /// The disks that did not answer a read of their table, of which neither
     /// "none" nor "one" is known.
     pub silent: Vec<DeviceId>,
+}
+
+/// Why the tables that answered name no one partition for a GUID.
+#[derive(Clone, Copy, Debug)]
+pub enum Unnamed {
+    /// Carried twice, on one disk or across two.
+    Ambiguous,
+    /// Named by a table that refuses it.
+    Unusable,
+}
+
+impl From<Unnamed> for ClaimError {
+    fn from(unnamed: Unnamed) -> Self {
+        match unnamed {
+            Unnamed::Ambiguous => ClaimError::Ambiguous,
+            Unnamed::Unusable => ClaimError::Unusable,
+        }
+    }
 }
 
 /// The one partition on this machine whose unique GUID is `guid`, past the
@@ -385,7 +403,7 @@ pub fn seek(guid: PartGuid) -> Sought {
     let target = Guid(guid.0);
     let mut silent = Vec::new();
     if target.is_zero() {
-        return Sought { found: Err(ClaimError::Absent), silent };
+        return Sought { found: Ok(None), silent };
     }
     let disks = DISKS.lock().clone();
     let mut found: Option<Claimable> = None;
@@ -408,7 +426,7 @@ pub fn seek(guid: PartGuid) -> Sought {
                  partition",
                 first.volume.device
             );
-            return Sought { found: Err(ClaimError::Ambiguous), silent };
+            return Sought { found: Err(Unnamed::Ambiguous), silent };
         }
         found = Some(Claimable {
             volume: Volume {
@@ -433,7 +451,7 @@ enum Unread {
 
 /// What a table's refusal means for a claim: a disk that does not carry the
 /// partition, one that did not answer, or the claim's refusal.
-fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<Unread, ClaimError> {
+fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<Unread, Unnamed> {
     match e {
         GptError::NotFound { .. } => Ok(Unread::Lacks),
         GptError::ReadFailed(lba) => {
@@ -442,11 +460,11 @@ fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<Unread, Clai
         }
         GptError::DuplicateUniqueGuid { first, second } => {
             log!("partclaim: device {id} carries {target} in entries {first} and {second}");
-            Err(ClaimError::Ambiguous)
+            Err(Unnamed::Ambiguous)
         }
         GptError::PartitionRange { .. } | GptError::PartitionOverlap { .. } => {
             log!("partclaim: device {id} names {target} and its own table refuses it: {e:?}");
-            Err(ClaimError::Unusable)
+            Err(Unnamed::Unusable)
         }
         // No table this kernel parses: a disk that carries no partition, which
         // is what `probe` concluded of it too.

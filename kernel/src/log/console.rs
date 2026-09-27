@@ -107,17 +107,17 @@ pub fn drain_all(wire: &SleepGuard<'_, ()>) {
     drain_queue(wire, usize::MAX);
 }
 
-/// Every record and queued line onto the wire, for the stop once it has
-/// stopped every console holder: nothing can add to the queue any more, so
-/// what a holder queued before it was stopped goes on the wire under the
-/// boot's last word and never after it.
+/// Every queued line onto the wire, for the stop once it has stopped every
+/// console holder: what a holder queued before it was stopped goes on the wire
+/// under the boot's last word and never after it. The record backlog stays
+/// `klogd`'s, so the sync behind this is not spent behind a slow wire.
 pub fn drain_for_the_stop() {
     if !serial::has_console() {
         return;
     }
     let parkable = scheduler::Parkable::at_entry();
     let wire = serial::wire(&parkable);
-    drain_all(&wire);
+    drain_queue(&wire, usize::MAX);
 }
 
 /// Records and queued lines `klogd` takes per hold of the wire, so a console

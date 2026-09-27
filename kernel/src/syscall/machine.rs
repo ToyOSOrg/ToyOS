@@ -100,8 +100,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
         let queued = crate::log::console::queue(QUEUED_AT_THE_STOP.as_bytes(), false);
         assert!(queued, "console-queue-at-the-stop: the queue had no room for its one line");
     }
-    // Every console holder is stopped, so the queue only shrinks from here:
-    // what they queued goes on the wire now, above the boot's last word.
     crate::log::console::drain_for_the_stop();
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::quiesce_dump() {

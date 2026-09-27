@@ -26,11 +26,6 @@ stop stops every userland thread and writes its last word as a record, which
 queue then goes after it, inside `quiesce-late-word`'s window. `main` has no
 queue — a holder wrote the wire itself — so this is the branch's.
 
-The likely fix is a drain of the queue on the wire between the stop of every
-holder and the last word, where nothing can add to it. No deterministic
-stimulus exists yet: the red needs the queue non-empty at the last word, which
-only a `klogd` slower than `logd` gives.
-
 ## Exit condition
 
 No holder's line can follow the last word by construction, and a test that
