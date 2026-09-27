@@ -2733,6 +2733,15 @@ fn transport_gives_up(
     }
     gate_ran(&boot, 2)?;
     check_geometry(&boot, bytes, lba)?;
+    // The gate leaves its disk offline and still registered, so ROOT's hold
+    // reads a table that does not answer: it holds ROOT off the boot stick and
+    // names that disk, rather than refusing the boot over it.
+    let Some(held) = boot.lines().find(|l| l.contains("root: holding ")) else {
+        return Err(format!("the boot never held the partition ROOT was read from\n{log}"));
+    };
+    if held.ends_with("disks that did not answer: []") {
+        return Err(format!("{held:?}: the disk the gate left offline answered ROOT's hold\n{log}"));
+    }
 
     // The budget is the kernel's declaration, read off the gate's own line.
     let Some(budget) = boot

@@ -8,8 +8,8 @@
 //! `mm::init` keeps out of the allocator. [`mount`] refuses the boot by name on
 //! a handoff with no image, and on an image whose superblock is not the one
 //! `root=` names. [`hold_source`] holds the partition the image came from once
-//! the disks are up, so no claim writes the slot this boot runs, and refuses
-//! the boot when it cannot say that no claim will. The image's bytes crossed a
+//! the disks are up, so no claim writes the slot this boot runs, and withholds
+//! its GUID from every claim when it cannot hold it. The image's bytes crossed a
 //! trust boundary like any disk's, so every read of it is bounds-checked and a
 //! block outside it is a refused read, never a panic.
 
@@ -161,20 +161,26 @@ pub fn mount() -> Mounted<MemoryImage, ReadOnly> {
 /// Hold the partition ROOT was read from, so no process's claim writes the
 /// slot this boot is running. Runs once the disks are probed.
 ///
-/// A partition on no disk this kernel drives is one no claim can write either,
-/// and one carried twice is one every claim is refused as carried twice, since
-/// the disks a claim looks on only grow and no claim holds a table. Every other
-/// answer leaves a later claim free to find the partition, so it refuses the
-/// boot.
+/// Found on the disks that answered, its span is held: a disk that did not
+/// answer and later does either lacks it, or carries it again and makes every
+/// claim of it `Ambiguous`. Anywhere else — on no disk that answered, carried
+/// twice, refused by its own table, or no span a view can hold — its GUID is
+/// withheld from every claim instead, so no disk's answer, now or later, can
+/// hand it out. Neither path refuses the boot: a disk is a device, and a device
+/// never crashes this kernel.
 pub fn hold_source() {
-    let guid = toyos_gpt::Guid(BOOT.lock().source);
-    let found = match crate::gpt::claimable(toyos_abi::part::PartGuid(guid.0)) {
-        Ok(found) => found,
-        Err(e @ (ClaimError::Absent | ClaimError::Ambiguous)) => {
-            log!("root: the partition ROOT was read from, {guid}, is claimable by no one ({e:?})");
-            return;
+    let guid = toyos_abi::part::PartGuid(BOOT.lock().source);
+    let sought = crate::gpt::seek(guid);
+    let found = match sought.found {
+        Ok(Some(found)) => found,
+        Ok(None) | Err(ClaimError::Absent) => {
+            return withhold(guid, "it is on no disk that answered", &sought.silent)
         }
-        Err(e) => panic!("boot: the partition ROOT was read from, {guid}, cannot be held: {e:?}"),
+        Err(ClaimError::Ambiguous) => return withhold(guid, "it is carried twice", &sought.silent),
+        Err(ClaimError::Unusable) => return withhold(guid, "its table refuses it", &sought.silent),
+        Err(e @ (ClaimError::Owned | ClaimError::KernelDriven | ClaimError::Exhausted)) => {
+            panic!("rootfs: gpt::seek answered {e:?}, which no table read makes")
+        }
     };
     let volume = found.volume;
     let view = crate::block::open(volume.device)
@@ -187,14 +193,23 @@ pub fn hold_source() {
         });
     match view {
         Ok(view) => {
-            log!("root: holding {}, the partition ROOT was read from, on device {}", found.unique, volume.device);
+            log!(
+                "root: holding {}, the partition ROOT was read from, on device {}; disks that did \
+                 not answer: {:?}",
+                found.unique, volume.device, sought.silent
+            );
             *SOURCE.lock() = Some(view);
         }
-        // The same refusals a claim of it meets in `device::partition_view`,
-        // so a partition this cannot hold is one no claim can take either.
-        Err(()) => log!(
-            "root: the partition ROOT was read from, {}, is on device {} and is no span a view can hold",
-            found.unique, volume.device
-        ),
+        Err(()) => withhold(guid, "it is no span a view can hold", &sought.silent),
     }
+}
+
+/// Refuse every claim of ROOT's source, saying why it was not held.
+fn withhold(guid: toyos_abi::part::PartGuid, why: &str, silent: &[crate::block::DeviceId]) {
+    log!(
+        "root: the partition ROOT was read from, {}, is not held because {why}; every claim of it \
+         is refused; disks that did not answer: {silent:?}",
+        toyos_gpt::Guid(guid.0)
+    );
+    crate::gpt::withhold(guid);
 }
