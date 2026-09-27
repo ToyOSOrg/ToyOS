@@ -2,13 +2,14 @@
 //!
 //! Booted by `common::storage::fsd_restart` on `tests/fsdrestartcase`, whose
 //! file servers end the moment they take a write through a file opened to
-//! append at `/home/fsd_end` and before they answer it, and at the first hello
+//! append at `/home/fsd_end` and before they answer it, and at the first request
 //! on `/apps` this boot:
 //!
-//! - a launch of an `/apps` path is answered though DATA's server ends while
-//!   init resolves it: init makes that call on its file worker and starts the
-//!   server again while it waits, where a call from its loop would wait for
-//!   ever on a server only its loop could start;
+//! - a launch of an `/apps` path is answered though DATA's server ends under
+//!   init's request resolving it: init's retry connects again and waits in the
+//!   port's queue, on its file worker, and init starts the server again while
+//!   it waits — a call from its loop would wait for ever on a server only its
+//!   loop could start;
 //! - a file written and `fsync`ed before an end — acknowledged and flushed —
 //!   reads back through a handle held across it, and a handle written across
 //!   it goes on writing where it was;
@@ -38,7 +39,7 @@ const REPLACING: &[u8] = b"renamed over the file a handle held across the end";
 /// `--end-on`'s path, in `tests/fsdrestartcase/system.toml`.
 const END: &str = "/home/fsd_end";
 
-/// A path under `--end-at-hello`'s directory: no package answers for it.
+/// A path under `--end-at-request`'s directory: no package answers for it.
 const LAUNCHED: &str = "/apps/fs_restart/nothing";
 
 /// Mirrored: what `KEPT` holds.
@@ -63,7 +64,7 @@ fn end_the_server(n: u32) {
 }
 
 fn main() {
-    // End 1: the first hello on `/apps` is init's, resolving this launch.
+    // End 1: the first request on `/apps` is init's, resolving this launch.
     match Command::new(LAUNCHED).status() {
         Err(e) => println!("fs_restart: end 1: the launch of {LAUNCHED} was answered, refused ({e})"),
         Ok(status) => panic!("{LAUNCHED}, which no package answers for, ran and exited {status}"),

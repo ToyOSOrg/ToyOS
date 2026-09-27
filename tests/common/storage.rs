@@ -610,8 +610,8 @@ pub fn home_overwrite_reads_back(
 /// budget, its directories answer `Gone`. Judged off the device.
 ///
 /// `tests/fsdrestartcase` arms every file server to end under a write to
-/// `/home/fsd_end` (`--end-on`) and at the first hello on `/apps`
-/// (`--end-at-hello`), and `test_rs_fs_restart` ends DATA's four times, the
+/// `/home/fsd_end` (`--end-on`) and at the first request on `/apps`
+/// (`--end-at-request`), and `test_rs_fs_restart` ends DATA's four times, the
 /// first under init's own resolution of a launch: the guest asserts what a
 /// client sees, init's and fsd's own lines say who ended and who started
 /// again, and with the machine down the DATA partition is read by this
@@ -659,9 +659,9 @@ pub fn fsd_restart(
     if ended != 3 {
         return Err(format!("fsd said it ended under a write {ended} times, not the guest's 3:\n{log}"));
     }
-    let at_hello = log.matches("fsd: --end-at-hello: ending before /apps's first hello is answered").count();
-    if at_hello != 1 {
-        return Err(format!("fsd said it ended at a hello {at_hello} times, not the launch's 1:\n{log}"));
+    let at_request = log.matches("fsd: --end-at-request: ending before /apps's first request is answered").count();
+    if at_request != 1 {
+        return Err(format!("fsd said it ended under a request {at_request} times, not the launch's 1:\n{log}"));
     }
     let restarted = log.lines().filter(|l| l.contains("init: fsd data (pid ") && l.contains("ended; started again")).count();
     if restarted != 3 {
