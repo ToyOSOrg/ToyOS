@@ -4,7 +4,7 @@
 # each judged boot arrives as `update --once`, runs once, and hands the
 # machine back to this image, whose sshd the loop reads that boot's files
 # through. `tests/benchvirtiocase` is the same bench in front of QEMU's
-# virtio-net; the two differ by the one `devices` row.
+# virtio-net.
 #
 # `logd` serves no stream: the stream a talking or swapping boot serves is
 # asked for under the machine's own name, and a bench answering it would be
@@ -32,12 +32,10 @@ receives = ["netd", "launcher"]
 [programs.update]
 slots = true
 
-# `reboot` hands the machine to the boot `update` asked for; `echo` is how the
-# loop asks the bench to answer; `date` is its clock.
+# `reboot` hands the machine to the boot `update` asked for; `date` is its clock.
 [programs.toybox]
 receives = ["power"]
 
 [symlinks]
-"bin/echo" = "/system/bin/toybox"
 "bin/reboot" = "/system/bin/toybox"
 "bin/date" = "/system/bin/toybox"

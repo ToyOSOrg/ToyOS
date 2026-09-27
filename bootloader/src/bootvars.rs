@@ -18,7 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use toyos_update::entry::{self, Partition};
 use uefi::prelude::*;
-use uefi::proto::device_path::media::PartitionSignature;
+use uefi::proto::device_path::media::{HardDrive, PartitionFormat, PartitionSignature};
 use uefi::proto::device_path::{DevicePath, DeviceSubType, DeviceType};
 use uefi::proto::media::file::{File, FileAttribute, FileMode};
 use uefi::proto::media::fs::SimpleFileSystem;
@@ -54,6 +54,27 @@ pub struct Esp {
     removable: Result<(), String>,
 }
 
+/// The HARDDRIVE node by which `path` names a GPT partition, and that
+/// partition's unique GUID; or why it names none. Exactly one node: a path
+/// with two describes a partition inside a partition, and taking either is
+/// guessing which one the path means.
+pub fn hard_drive(path: &DevicePath) -> Result<(&HardDrive, [u8; 16]), &'static str> {
+    let mut nodes =
+        path.node_iter().filter(|node| node.full_type() == (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE));
+    let node = nodes.next().ok_or("the device path carries no HARDDRIVE node")?;
+    if nodes.next().is_some() {
+        return Err("the device path has more than one HARDDRIVE node");
+    }
+    let hd = <&HardDrive>::try_from(node).map_err(|_| "the HARDDRIVE node is malformed")?;
+    if hd.partition_format() != PartitionFormat::GPT {
+        return Err("firmware says this is not a GPT partition");
+    }
+    let PartitionSignature::Guid(guid) = hd.partition_signature() else {
+        return Err("firmware named the partition with no GUID signature");
+    };
+    Ok((hd, guid.to_bytes()))
+}
+
 /// The EFI system partition `guid` names, or which of those it is not.
 pub fn esp(bs: &BootServices, guid: &[u8; 16]) -> Result<Esp, String> {
     let handle = crate::loaderlog::volume_handle(bs, guid)?;
@@ -65,17 +86,8 @@ pub fn esp(bs: &BootServices, guid: &[u8; 16]) -> Result<Esp, String> {
     }
     let path = crate::rootimage::try_get_protocol::<DevicePath>(bs, handle)
         .map_err(|e| alloc::format!("the partition's device path ({e:?})"))?;
-    let node = path
-        .node_iter()
-        .filter(|node| node.full_type() == (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE))
-        .last()
-        .ok_or("the partition's device path carries no HARDDRIVE node")?;
-    let hd = <&uefi::proto::device_path::media::HardDrive>::try_from(node)
-        .map_err(|e| alloc::format!("the partition's HARDDRIVE node ({e:?})"))?;
-    let PartitionSignature::Guid(signature) = hd.partition_signature() else {
-        return Err(String::from("the partition's HARDDRIVE node names it by no GUID"));
-    };
-    if signature.to_bytes() != *guid {
+    let (hd, signature) = hard_drive(&path).map_err(|why| alloc::format!("the partition: {why}"))?;
+    if signature != *guid {
         return Err(String::from("the partition's HARDDRIVE node names another partition"));
     }
     let part = Partition { number: hd.partition_number(), start: hd.partition_start(), size: hd.partition_size(), guid: *guid };

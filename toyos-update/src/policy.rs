@@ -99,6 +99,25 @@ pub fn order(table: &Table, once: Option<Which>) -> [Option<Which>; 2] {
     [Some(first), table.slot(other).map(|_| other)]
 }
 
+/// What the kernel is told of `chosen`, whichever of a pass's tries chose it:
+/// the slot the table marks where `chosen` is the trial asked for `once`
+/// (never the marked slot), and `refused` where `chosen` is neither that
+/// trial nor the marked slot. A refused trial leaves the marked slot an
+/// ordinary boot.
+pub fn told(
+    marked: Which,
+    once: Option<Which>,
+    chosen: Which,
+    refused: Option<(Which, Refusal)>,
+) -> (Option<Which>, Option<(Which, Refusal)>) {
+    match once {
+        Some(trial) if chosen == trial => (Some(marked), None),
+        Some(_) => (None, None),
+        None if chosen != marked => (None, refused),
+        None => (None, None),
+    }
+}
+
 /// The floor after a boot proved `proven`: it only rises.
 pub fn raised(floor: u64, proven: u64) -> u64 {
     floor.max(proven)
@@ -156,6 +175,20 @@ mod tests {
         assert_eq!(order(&both, Some(Which::A)), [Some(Which::A), Some(Which::B)]);
         assert_eq!(order(&both, Some(Which::B)), [Some(Which::B), Some(Which::A)]);
         assert_eq!(order(&one, Some(Which::B)), [Some(Which::A), None], "a slot the table does not carry is none to try");
+    }
+
+    /// **A trial is told as once from whichever try booted it**: the marked
+    /// slot's name goes with it, also where both slots died and the second
+    /// try, the one that boots the dead, chose it.
+    #[test]
+    fn a_trial_is_told_once_and_a_fall_back_is_told_its_refusal() {
+        let died = Some((Which::B, Refusal::Died));
+        assert_eq!(told(Which::A, Some(Which::B), Which::B, died), (Some(Which::A), None), "the dead trial");
+        assert_eq!(told(Which::A, Some(Which::B), Which::B, None), (Some(Which::A), None));
+        assert_eq!(told(Which::A, Some(Which::B), Which::A, died), (None, None), "a refused trial");
+        let refused = Some((Which::A, Refusal::Signature));
+        assert_eq!(told(Which::A, None, Which::B, refused), (None, refused), "the fall back");
+        assert_eq!(told(Which::A, None, Which::A, None), (None, None));
     }
 
     /// Each word is one token of a comma-separated boot parameter.

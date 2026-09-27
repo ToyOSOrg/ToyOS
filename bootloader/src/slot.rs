@@ -90,17 +90,9 @@ pub fn choose(
             table.marked.letter()
         );
     }
-    // What the kernel is told of the slot chosen, whichever loop chose it.
-    let told = |mut chosen: Chosen, refused: Option<(Which, Refusal)>| {
-        match once {
-            Some(trial) if chosen.which == trial => chosen.once = Some(table.marked),
-            // The trial was refused and this is the marked slot: an ordinary
-            // boot, and the kernel is told nothing was refused.
-            Some(_) => {}
-            None if chosen.which != table.marked => chosen.refused = refused,
-            None => {}
-        }
-        chosen
+    let told = |chosen: Chosen, refused: Option<(Which, Refusal)>| {
+        let (once, refused) = policy::told(table.marked, once, chosen.which, refused);
+        Chosen { once, refused, ..chosen }
     };
     for which in policy::order(&table, once).into_iter().flatten() {
         let slot = table.slot(which).expect("`order` names only slots the table carries");

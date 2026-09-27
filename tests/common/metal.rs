@@ -570,6 +570,21 @@ struct Batch {
 }
 
 impl Batch {
+    /// The boot `arm` rides, with no job on it yet.
+    fn of(arm: &Arm) -> Self {
+        Batch {
+            config: arm.config,
+            params: arm.params.to_vec(),
+            features: arm.features,
+            jobs: Vec::new(),
+            files: Vec::new(),
+            links: Vec::new(),
+            nic: arm.nic,
+            talk: arm.talk,
+            swap: arm.swap,
+        }
+    }
+
     fn add(&mut self, jobs: impl IntoIterator<Item = String>) {
         for job in jobs {
             if !self.jobs.contains(&job) {
@@ -623,17 +638,7 @@ fn batches(
     for (name, decl) in tests {
         let Metal::Runs { arms, .. } = decl else { continue };
         for arm in *arms {
-            let batch = out.entry(arm.boot.to_string()).or_insert_with(|| Batch {
-                config: arm.config,
-                params: arm.params.to_vec(),
-                features: arm.features,
-                jobs: Vec::new(),
-                files: Vec::new(),
-                links: Vec::new(),
-                nic: arm.nic,
-                talk: arm.talk,
-                swap: arm.swap,
-            });
+            let batch = out.entry(arm.boot.to_string()).or_insert_with(|| Batch::of(arm));
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
@@ -835,17 +840,8 @@ fn fingerprint(text: &str) -> u64 {
 /// swapping boot authorizes.
 pub fn stage(dir: &Path, arm: &Arm, rust_bins: &[(String, Vec<u8>)]) -> Result<(PathBuf, Option<PathBuf>), String> {
     let root = super::compile::repo_root();
-    let batch = Batch {
-        config: arm.config,
-        params: arm.params.to_vec(),
-        features: arm.features,
-        jobs: arm.jobs.iter().map(|j| (*j).to_string()).collect(),
-        files: Vec::new(),
-        links: Vec::new(),
-        nic: arm.nic,
-        talk: arm.talk,
-        swap: arm.swap,
-    };
+    let mut batch = Batch::of(arm);
+    batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
     let image = build(&root, dir, arm.boot, &batch, rust_bins, &[], true)?;
     let key = (arm.talk || arm.swap.is_some()).then(|| talk_home(&at(dir, arm.boot)).join("id_ed25519"));
     Ok((image, key))

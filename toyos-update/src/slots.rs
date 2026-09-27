@@ -130,6 +130,15 @@ impl Request {
     pub const fn is_empty(&self) -> bool {
         self.next.is_none() && !self.first
     }
+
+    /// This request with a boot of the ESP `guid` once, or the slot whose
+    /// once it would drop: an install's trial is never replaced unbooted.
+    pub fn boot_next(self, guid: [u8; 16]) -> Result<Self, Which> {
+        match self.next {
+            Some(Next::Slot(which) | Next::Trial(which)) => Err(which),
+            Some(Next::Esp(_)) | None => Ok(Self { next: Some(Next::Esp(guid)), ..self }),
+        }
+    }
 }
 
 /// One copy of the table.
@@ -482,6 +491,17 @@ mod tests {
         let mut names_absent = one.encode();
         names_absent[at + 4] = 1;
         assert_eq!(Table::decode(&resealed(names_absent)), refused("names a slot the table does not carry"));
+    }
+
+    #[test]
+    fn a_boot_next_replaces_an_esp_and_never_a_slot_asked_once() {
+        let esp = |guid| Some(Next::Esp(guid));
+        let asked = Request { next: esp([1; 16]), first: true };
+        assert_eq!(asked.boot_next([2; 16]), Ok(Request { next: esp([2; 16]), first: true }));
+        assert_eq!(Request::NONE.boot_next([2; 16]), Ok(Request { next: esp([2; 16]), first: false }));
+        for (next, which) in [(Next::Slot(Which::B), Which::B), (Next::Trial(Which::A), Which::A)] {
+            assert_eq!(Request { next: Some(next), first: false }.boot_next([2; 16]), Err(which));
+        }
     }
 
     /// The check value every CRC-32 is held to.

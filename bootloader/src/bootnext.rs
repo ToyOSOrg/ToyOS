@@ -14,8 +14,7 @@
 //! all and must be told so rather than have one guessed at.
 
 use uefi::prelude::*;
-use uefi::proto::device_path::media::PartitionSignature;
-use uefi::proto::device_path::{DevicePath, DeviceSubType, DeviceType};
+use uefi::proto::device_path::DevicePath;
 use uefi::proto::loaded_image::LoadedImage;
 
 use crate::bootvars;
@@ -58,20 +57,5 @@ pub(crate) fn our_partition(handle: Handle, system_table: &SystemTable<Boot>) ->
     let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
     let path = bs.open_protocol_exclusive::<DevicePath>(device).ok()?;
-    hard_drive_guid(path.node_iter())
-}
-
-/// The GPT signature of the first HARDDRIVE node in a device path, or `None`
-/// where the path has none — a network boot, or a disk with no GPT.
-fn hard_drive_guid<'a>(nodes: impl Iterator<Item = &'a uefi::proto::device_path::DevicePathNode>) -> Option<[u8; 16]> {
-    for node in nodes {
-        if node.full_type() != (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE) {
-            continue;
-        }
-        let hd = <&uefi::proto::device_path::media::HardDrive>::try_from(node).ok()?;
-        if let PartitionSignature::Guid(guid) = hd.partition_signature() {
-            return Some(guid.to_bytes());
-        }
-    }
-    None
+    bootvars::hard_drive(&path).ok().map(|(_, guid)| guid)
 }

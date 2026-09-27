@@ -585,6 +585,34 @@ pub fn overwrite_file_on(path: &Path, guid: [u8; 16], name: &str, bytes: &[u8]) 
     file.sync_all().map_err(|e| format!("syncing {}: {e}", path.display()))
 }
 
+/// Create the file `name` holding `bytes` on the FAT partition `guid` of the
+/// disk image at `path`, which no guest may be running on.
+pub fn create_file_on(path: &Path, guid: [u8; 16], name: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let (start, len) = partition_extent(&mut file, guid)?;
+    let mut volume = vec![0u8; usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?];
+    file.seek(SeekFrom::Start(start))
+        .and_then(|_| file.read_exact(&mut volume))
+        .map_err(|e| format!("reading the volume at byte {start}: {e}"))?;
+    {
+        let time = build_time();
+        let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("the volume does not mount: {e}"))?;
+        let mut created = fs.create(name, time).map_err(|e| format!("creating {name}: {e}"))?;
+        fs.write(&mut created, 0, bytes).map_err(|e| format!("writing {name}: {e}"))?;
+        fs.flush_meta(&mut created, time).map_err(|e| format!("recording {name}: {e}"))?;
+        fs.sync().map_err(|e| format!("syncing the volume: {e}"))?;
+    }
+    file.seek(SeekFrom::Start(start))
+        .and_then(|_| file.write_all(&volume))
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("writing the volume back to {}: {e}", path.display()))
+}
+
 /// The slot table on the disk image `file`, which copy is current, and where
 /// its partition starts.
 fn table_on(file: &mut std::fs::File) -> Result<(toyos_update::slots::Table, usize, u64), String> {

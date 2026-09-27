@@ -46,10 +46,6 @@ const ASK_EVERY: Duration = Duration::from_secs(2);
 /// Where the machine's files are, on the machine.
 const LOG_DIR: &str = "/log";
 
-/// Where what the bench said about itself before the boot is written, beside
-/// the stick's files.
-pub const READBACK_MACHINE: &str = "machine.txt";
-
 /// One machine reached with one key: the client, the key, and where.
 pub struct Bench {
     ssh: Ssh,
@@ -143,7 +139,7 @@ impl Bench {
             }
             std::thread::sleep(ASK_EVERY);
         }
-        Err(Refusal::Silent { what, secs })
+        Err(Refusal::Silent { what, secs, last: None })
     }
 
     /// Wait until the machine's `/log` comes back over this key, within
@@ -151,14 +147,16 @@ impl Bench {
     /// one session. How long it took, and the files.
     fn wait_for_the_log(&self, secs: u64, what: &'static str, into: &Path, before: &str) -> Result<(u64, Logs), Refusal> {
         let began = std::time::Instant::now();
+        let mut last = None;
         while began.elapsed().as_secs() < secs {
-            // The same loader.log is the bench not yet rebooted.
-            if let Some(logs) = self.fetch(into).ok().filter(|logs| rebooted(logs, before)) {
-                return Ok((began.elapsed().as_secs(), logs));
+            match self.fetch(into) {
+                Ok(logs) if rebooted(&logs, before) => return Ok((began.elapsed().as_secs(), logs)),
+                Ok(_) => last = Some(format!("its {} is the one fetched before the reboot", bootlog::LOADER_LOG)),
+                Err(why) => last = Some(why),
             }
             std::thread::sleep(ASK_EVERY);
         }
-        Err(Refusal::Silent { what, secs })
+        Err(Refusal::Silent { what, secs, last })
     }
 }
 
@@ -340,8 +338,6 @@ pub fn run(args: &Args, image: &Path, dir: &Path) -> Result<Option<u64>, Refusal
         }
         None => None,
     };
-    std::fs::write(dir.join(READBACK_MACHINE), format!("bench_at {at}\n"))
-        .map_err(|e| Refusal::File { path: dir.join(READBACK_MACHINE).display().to_string(), why: e.to_string() })?;
 
     let sent = dir.join("image.update");
     std::fs::write(&sent, &update.bytes)
@@ -534,6 +530,24 @@ mod tests {
         assert!(!rebooted(&Logs { dir, names: Vec::new() }, ""), "no loader.log at all");
         assert_eq!(loader_log(&logs, &digest).expect("this image's passes"), ours);
         assert!(matches!(loader_log(&logs, &[0x5B; 32]), Err(Refusal::NotThisBoot(_))), "an earlier boot's passes");
+    }
+
+    #[test]
+    fn a_machine_that_never_gives_back_its_log_is_refused_with_the_last_ask() {
+        let scratch = toyos_tmpdir::TempDir::new("silent");
+        let root = scratch.to_path_buf();
+        let client = crate::build::ssh_client_host(&root);
+        std::fs::create_dir_all(client.parent().expect("a directory")).expect("the client's directory");
+        std::fs::write(&client, b"").expect("a staged client");
+        std::fs::write(root.join("key"), b"").expect("a staged key");
+        let log = crate::metaltalk::Peer::Named { host: String::new(), port: 1 };
+        let bench = Bench {
+            ssh: Ssh::at(&root, root.join("key")).expect("a client and a key"),
+            machine: Machine { log, ssh: None },
+            scratch: root.clone(),
+        };
+        let refused = bench.wait_for_the_log(1, "come back", &root.join("log"), "").err().expect("no machine");
+        assert!(refused.to_string().contains("the last ask of it:  did not resolve"), "{refused}");
     }
 
     /// **A bench under another loader takes no image**: the line its pass

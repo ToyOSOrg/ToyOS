@@ -13,7 +13,7 @@ use uefi::{
     prelude::*,
     CStr16,
     proto::console::gop::{GraphicsOutput, PixelFormat},
-    proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
+    proto::device_path::DevicePath,
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
     table::{boot::{MemoryAttribute, MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
@@ -227,34 +227,13 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
     let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
     let path = bs.open_protocol_exclusive::<DevicePath>(device).ok()?;
-
-    let is_hard_drive = |node: &&DevicePathNode| {
-        node.full_type() == (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE)
-    };
-    // Exactly one, not the last one. A path with two HARDDRIVE nodes describes
-    // a partition inside a partition, and picking either is guessing which of
-    // the two the kernel's block device will be looking at.
-    let mut nodes = path.node_iter().filter(is_hard_drive);
-    let node = nodes.next()?;
-    if nodes.next().is_some() {
-        println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
-        return None;
+    match bootvars::hard_drive(&path) {
+        Ok((hd, guid)) => Some(BootPartition { guid, start_lba: hd.partition_start(), blocks: hd.partition_size() }),
+        Err(why) => {
+            println!("Boot partition: {why}, so it is ignored");
+            None
+        }
     }
-
-    let hd: &uefi::proto::device_path::media::HardDrive = node.try_into().ok()?;
-    if hd.partition_format() != PartitionFormat::GPT {
-        println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
-        return None;
-    }
-    let PartitionSignature::Guid(guid) = hd.partition_signature() else {
-        println!("Boot partition: firmware named it with no GUID signature, so it is ignored");
-        return None;
-    };
-    Some(BootPartition {
-        guid: guid.to_bytes(),
-        start_lba: hd.partition_start(),
-        blocks: hd.partition_size(),
-    })
 }
 
 /// Name the partition the kernel's log goes on, without reading it.

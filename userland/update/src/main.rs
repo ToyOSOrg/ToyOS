@@ -117,7 +117,9 @@ fn run(asked: Asked, began: Instant) -> Result<String, String> {
             ));
         }
         Asked::BootNext(guid) => {
-            let request = slots::Request { next: Some(Next::Esp(guid)), ..table.request };
+            let request = table.request.boot_next(guid).map_err(|which| {
+                format!("slot {} is asked for once, and --boot-next would drop that boot unmade", which.letter())
+            })?;
             write_table(&table_claim, (table, current), Table { request, ..table })?;
             return Ok(format!(
                 "update: the loader boots EFI system partition {} once, at its next pass, and the order after it",

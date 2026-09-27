@@ -43,6 +43,9 @@ const SWAPPING: super::metal::Arm = super::metal::Arm {
 /// The kernel's record of a slot booted once (`kernel/src/main.rs`).
 const ONCE_RECORD: &str = "boot: slot B, once, as the running system asked; the slot table marks A";
 
+/// The last line of the `loader-previous.log` staged before the bench boots.
+const STALE_CHAIN: &str = "the staged chain's last line\n";
+
 /// **The exit**: the loop drives the whole bench cycle against a machine
 /// running ToyOS alone, and a tampered upload is refused before it.
 pub fn bench_loop_drives_a_toyos_machine(
@@ -70,6 +73,15 @@ pub fn bench_loop_drives_a_toyos_machine(
     )?;
     let disk = scratch.join("bench.img");
     std::fs::write(&disk, bench).map_err(|e| format!("write {}: {e}", disk.display()))?;
+    // An earlier chain's file, longer than any chain and ending in a line no
+    // pass writes: a pass that writes over it rather than deleting it first
+    // leaves that tail in every readback after.
+    let mut file = std::fs::File::open(&disk).map_err(|e| format!("{}: {e}", disk.display()))?;
+    let log_guid = toyos_build::image::unique_guid_of(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC)?;
+    drop(file);
+    let mut stale = "an earlier chain's line\n".repeat(16 << 10).into_bytes();
+    stale.extend_from_slice(STALE_CHAIN.as_bytes());
+    toyos_build::image::create_file_on(&disk, log_guid, toyos_build::bootlog::LOADER_PREVIOUS_LOG, &stale)?;
     let vars = scratch.join("OVMF_VARS.fd");
     std::fs::copy(root.join("ovmf/OVMF_VARS-pure-efi.fd"), &vars).map_err(|e| format!("the variable store: {e}"))?;
     let data = scratch.join("data.img");
@@ -112,6 +124,10 @@ pub fn bench_loop_drives_a_toyos_machine(
     let said = clock.stdout_text();
     if clock.status != Some(0) || said.trim().parse::<u64>().is_err() {
         return Err(format!("`date -u +%s` ended {:?} saying {said:?}", clock.status));
+    }
+    let other = ssh::ssh_exec(HOST, ssh_port, &runner, "date +%Y")?;
+    if other.status != Some(2) {
+        return Err(format!("`date +%Y` ended {:?} saying {:?}, where every other form is refused as 2", other.status, other.stdout_text()));
     }
     eprintln!("  [bench] the bench's clock reads {}", said.trim());
 
@@ -168,6 +184,9 @@ pub fn bench_loop_drives_a_toyos_machine(
         if !loader.contains(owed) {
             return Err(format!("the boot's loader passes never say {owed:?}"));
         }
+    }
+    if loader.contains(STALE_CHAIN) {
+        return Err(format!("the boot's loader passes carry {STALE_CHAIN:?}, the tail of a file staged before the bench's first pass"));
     }
     let raised = format!("Anti-rollback floor: {}, raised", update.version);
     if loader.contains(&raised) {
