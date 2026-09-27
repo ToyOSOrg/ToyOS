@@ -26,6 +26,16 @@ pub const USER_TOP: u64 = 0x0000_8000_0000_0000;
 /// translation answers at.
 pub const PAGE_2M: u64 = 2 * 1024 * 1024;
 
+/// Rounds `size` up to the next 2 MiB page, or `None` when the sum wraps
+/// rather than silently rounding to an undersized allocation: for a size that
+/// crossed a trust boundary, not one the kernel computed itself.
+pub const fn align_2m_checked(size: u64) -> Option<u64> {
+    match size.checked_add(PAGE_2M - 1) {
+        Some(sum) => Some(sum & !(PAGE_2M - 1)),
+        None => None,
+    }
+}
+
 pub fn is_user_addr(addr: u64) -> bool {
     addr < USER_TOP
 }
