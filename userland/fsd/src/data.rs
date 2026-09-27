@@ -610,8 +610,10 @@ impl<D: Disk> Volume for DataVolume<D> {
                 if let Some(node) = self.by_path.get(from).copied() {
                     self.persist(node)?;
                 }
-                self.orphan(to);
+                // Orphaned only once the format has taken the rename: a refused
+                // one leaves `to` naming its file, holders and unsynced length whole.
                 mapped("rename", from, self.fs.rename(from, to))?;
+                self.orphan(to);
                 self.names.remove(from);
                 self.names.insert(to.to_string(), kind);
                 if let Some(node) = self.by_path.remove(from) {
@@ -806,5 +808,34 @@ mod tests {
         v.close(m);
         v.rename("home/b/g", "home/b/f").unwrap();
         assert_eq!(v.lstat("home/b/f").unwrap().size, 0, "replaced");
+    }
+
+    /// A rename over an open, unsynced file that the format refuses leaves
+    /// that file whole: readable through its holder, and its length reaching
+    /// the volume at the next sync. The refusal is `EntryTooLarge`: `from`'s
+    /// extents fit its own short name and not `to`'s long one.
+    #[test]
+    fn a_refused_rename_over_an_open_file_keeps_its_unsynced_writes() {
+        let mut v = vol();
+        let from = v.open("home/f", CREATE).unwrap();
+        let spacer = v.open("home/spacer", CREATE).unwrap();
+        // Alternating allocations, so no two of `from`'s blocks are adjacent
+        // and each is an extent of its own.
+        for page in 0..240u64 {
+            v.write(from, page * BLOCK as u64, &[1; BLOCK]).unwrap();
+            v.write(spacer, page * BLOCK as u64, &[2; BLOCK]).unwrap();
+        }
+        let to_path = format!("home/{}", "t".repeat(300));
+        let to = v.open(&to_path, CREATE).unwrap();
+        v.write(to, 0, b"written and not synced").unwrap();
+
+        assert_eq!(v.rename("home/f", &to_path), Err(SyscallError::ResourceExhausted));
+
+        let mut back = [0u8; 22];
+        assert_eq!(v.read(to, 0, &mut back), Ok(22), "the holder of `to` still reads it");
+        assert_eq!(&back, b"written and not synced");
+        v.sync().unwrap();
+        v.close(to);
+        assert_eq!(v.lstat(&to_path).unwrap().size, 22, "`to`'s length reached the volume");
     }
 }
