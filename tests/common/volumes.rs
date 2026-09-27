@@ -2461,22 +2461,15 @@ pub fn log_partition_layout(
         (toyos_gpt::Guid::TOYOS_SLOTS, toyos_gpt::Guid::TOYOS_SLOTS_TEXT, "the slot table", slots),
         (toyos_gpt::Guid::TOYOS_BOOT, toyos_gpt::Guid::TOYOS_BOOT_TEXT, "slot A's volume", volume),
     ] {
-        let mut found = [toyos_gpt::Partition {
-            index: 0,
-            type_guid: toyos_gpt::Guid::ZERO,
-            unique_guid: toyos_gpt::Guid::ZERO,
-            first_lba: 0,
-            last_lba: 0,
-        }; 4];
-        let scan = toyos_gpt::locate_type(&mut ImageSectors { bytes: &image }, kind, &mut found)
-            .map_err(|e| format!("the kernel's own GPT parser cannot read this table: {e:?}"))?;
-        if (scan.matched, scan.listed) != (1, 1) {
-            return Err(format!("the built image carries {} partitions typed {text}, wanted one", scan.matched));
-        }
-        if found[0].first_lba != entry.first_lba || found[0].last_lba != entry.last_lba {
+        let found = toyos_build::image::only_partition(&mut ImageSectors { bytes: &image }, kind)
+            .map_err(|why| format!("the kernel's own GPT parser, on the partitions typed {text}: {why}"))?;
+        if found.first_lba() != entry.first_lba || found.last_lba() != entry.last_lba {
             return Err(format!(
                 "the kernel's parser puts {what} at LBA {}..{} and the table says {}..{}",
-                found[0].first_lba, found[0].last_lba, entry.first_lba, entry.last_lba
+                found.first_lba(),
+                found.last_lba(),
+                entry.first_lba,
+                entry.last_lba
             ));
         }
     }
@@ -2555,12 +2548,14 @@ pub fn log_partition_layout(
     // given the GUID exactly as the file carries it.
     let located = toyos_gpt::locate(&mut ImageSectors { bytes: &image }, toyos_gpt::Guid(named))
         .map_err(|e| format!("the kernel's own GPT parser cannot find the log partition: {e:?}"))?;
-    if located.partition.first_lba != log.first_lba
-        || located.partition.last_lba != log.last_lba
-    {
+    let found = located.partition();
+    if found.first_lba() != log.first_lba || found.last_lba() != log.last_lba {
         return Err(format!(
             "the kernel's parser puts the log partition at LBA {}..{} and the table says {}..{}",
-            located.partition.first_lba, located.partition.last_lba, log.first_lba, log.last_lba
+            found.first_lba(),
+            found.last_lba(),
+            log.first_lba,
+            log.last_lba
         ));
     }
 
@@ -3092,21 +3087,9 @@ pub fn log_flush_retry(
 
 /// Where ROOT is on `image`, found by the parser the kernel uses.
 fn root_extent(image: &[u8]) -> Result<(usize, usize), String> {
-    let mut found = [toyos_gpt::Partition {
-        index: 0,
-        type_guid: toyos_gpt::Guid::ZERO,
-        unique_guid: toyos_gpt::Guid::ZERO,
-        first_lba: 0,
-        last_lba: 0,
-    }; 4];
-    let scan =
-        toyos_gpt::locate_type(&mut ImageSectors { bytes: image }, toyos_gpt::Guid::TOYOS_ROOT, &mut found)
-            .map_err(|e| format!("this image has no readable partition table: {e:?}"))?;
-    if (scan.matched, scan.listed) != (1, 1) {
-        return Err(format!("this image carries {} ROOT partitions, wanted one", scan.matched));
-    }
-    let at = found[0].first_lba as usize * 512;
-    Ok((at, found[0].lba_count() as usize * 512))
+    let root = toyos_build::image::only_partition(&mut ImageSectors { bytes: image }, toyos_gpt::Guid::TOYOS_ROOT)
+        .map_err(|why| format!("this image's ROOT: {why}"))?;
+    Ok((root.first_lba() as usize * 512, root.lba_count().get() as usize * 512))
 }
 
 /// A second USB disk carrying a copy of `image`, `mutate`d after the copy.
@@ -3444,7 +3427,7 @@ fn entry_lba(entry: &[u8], at: usize) -> u64 {
 /// the backup array and header moved to the new end, the primary's pointers to
 /// them and its last usable LBA, both arrays' and both headers' CRCs, and the
 /// protective MBR's size. `edit` gets the array and one entry's length.
-fn rewrite_gpt(
+pub(super) fn rewrite_gpt(
     image: &mut Vec<u8>,
     len: usize,
     edit: impl FnOnce(&mut [u8], usize) -> Result<(), String>,

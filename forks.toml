@@ -32,10 +32,8 @@
 # last pointed to — a frozen snapshot standing in for the monorepo's copy rather
 # than a build error.
 #
-# `.github/workflows/publish.yml` is what unblocks them: it publishes the five
-# on every landing that moves a version, and `src/sdkversion.rs` is the rule
-# that keeps those versions moving. The token is a repository secret and the
-# five are on crates.io, so what is left is the `owed` edits below, one per fork.
+# The token is a repository secret and the five are on crates.io, so what is
+# left is the `owed` edits below, one per fork.
 #
 # A fork being sendable is not the same as it being *worth* sending. See memmap2
 # below: purely additive, unblocked, and still a bad PR.
@@ -62,11 +60,12 @@
 # had one base; a fix or a repin is a commit appended to it, never a new
 # branch, and every lockfile pins a commit, so appending moves nothing already
 # built. A fork names `toyos-abi`, `toyos` and `toyos-window` by a range
-# (`">=0.12, <1"`): the tree's `[patch.crates-io]` path then answers it at
-# whatever minor the tree is on, so an SDK bump owes no fork a commit, and an
-# API a fork relied on that went away is a compile error. A fork that names
-# one version resolves the published crate beside the tree's instead, and
-# `src/sdkversion.rs` refuses any lockfile holding two versions of one.
+# (`">=0.12, <1"`): the tree's `[patch.crates-io]` path then answers it at the
+# manifest's never-bumped version, and crates.io at whatever minor it is on, so
+# no publish owes a fork a commit, and an API a fork relied on that went away
+# is a compile error. A fork that names one version resolves the published
+# crate beside the tree's instead, and `src/sdkversion.rs` refuses any lockfile
+# that takes one of the five from a registry.
 
 [meta]
 owner = "ToyOSOrg"

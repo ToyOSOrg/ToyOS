@@ -1,16 +1,16 @@
 [package]
 name = "toyos-window"
-version = "0.21.0"
+version = "0.20.0" # never bumped; crates.io's is assigned on publish (src/sdkversion.rs)
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Client library for ToyOS windows: create one, draw into it, read its events."
 repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [dependencies]
-toyos-font = { path = "../toyos-font", version = "0.2.0" }
-toyos-abi = { path = "../../toyos-abi", version = "0.17.0" }
-toyos-keymap = { path = "../../toyos-keymap", version = "0.1.0" }
-toyos = { path = "../../toyos", version = "0.19.0" }
+toyos-font = { path = "../toyos-font" }
+toyos-abi = { path = "../../toyos-abi" }
+toyos-keymap = { path = "../../toyos-keymap" }
+toyos = { path = "../../toyos" }
 
 # `window` is taken on crates.io, so the package is `toyos-window`; the lib
 # target keeps the name every caller spells, `toyos/src`'s citations included.

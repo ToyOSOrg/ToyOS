@@ -6,22 +6,23 @@
 //! every table on earth. The two implementations look identical apart from one
 //! constant, which is exactly why this file says so.
 
+const POLY: u32 = 0xEDB8_8320;
+
+/// The CRC of each byte value, built by a `split_first_mut` walk so nothing is indexed.
 const TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
-    let mut i = 0u32;
-    while i < 256 {
-        let mut crc = i;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-            j += 1;
+    let mut rest: &mut [u32] = &mut table;
+    let mut byte = 0u32;
+    while let Some((slot, tail)) = rest.split_first_mut() {
+        let mut crc = byte;
+        let mut bit = 0u32;
+        while bit < 8 {
+            crc = if crc & 1 == 0 { crc.wrapping_shr(1) } else { crc.wrapping_shr(1) ^ POLY };
+            bit = bit.wrapping_add(1);
         }
-        table[i as usize] = crc;
-        i += 1;
+        *slot = crc;
+        rest = tail;
+        byte = byte.wrapping_add(1);
     }
     table
 };
@@ -39,8 +40,10 @@ impl Crc32 {
 
     pub fn update(&mut self, data: &[u8]) {
         for &byte in data {
-            let idx = ((self.0 ^ byte as u32) & 0xFF) as usize;
-            self.0 = (self.0 >> 8) ^ TABLE[idx];
+            let [low, ..] = (self.0 ^ u32::from(byte)).to_le_bytes();
+            // A `u8` is below 256: `get` is never `None`.
+            let entry = TABLE.get(usize::from(low)).copied().unwrap_or(0);
+            self.0 = self.0.wrapping_shr(8) ^ entry;
         }
     }
 
