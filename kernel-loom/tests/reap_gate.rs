@@ -26,8 +26,7 @@
 //!
 //! makes `reap_gate.rs`'s `raise` store relaxed and this file must red, at
 //! [`a_claim_sees_the_enrolled_work`] — *a claimed gate handed the reaper an
-//! unpublished exit*, which is the defect stated exactly. Verified 2026-08-17,
-//! both ways round.
+//! unpublished exit*, which is the defect stated exactly.
 
 use kernel_loom::reap_gate::ReapGate;
 use loom::sync::atomic::{AtomicUsize, Ordering};

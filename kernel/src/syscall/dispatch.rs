@@ -533,9 +533,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         #[cfg(feature = "test-actuators")]
         SYS_DEBUG => match a1 {
             DA::PANIC => panic!("SYS_DEBUG: kernel panic triggered by userspace"),
-            // SAFETY: unsound by design — a staged null read in Ring 0, gated behind test-actuators.
-            // Volatile: a plain read could be optimized to unreachable, leaving nothing to fault.
-            DA::NULL_READ => { unsafe { core::ptr::read_volatile(core::ptr::null::<u64>()); } 0 }
+            // A record and not the caller's own line: the panic path drains records, and a
+            // program's line is still in userland when the read below ends the machine.
+            DA::NULL_READ => {
+                log!("SYS_DEBUG: a Ring 0 read of {a2:#x}");
+                // SAFETY: unsound by design — a staged Ring 0 read of the caller's address, gated behind test-actuators.
+                // Volatile: a plain read could be optimized to unreachable, leaving nothing to fault.
+                unsafe { core::ptr::read_volatile(a2 as *const u64) };
+                0
+            }
             DA::LOCK_ACROSS_SWITCH => {
                 let _held = LOCK_ACROSS_SWITCH.lock();
                 crate::scheduler::yield_now();

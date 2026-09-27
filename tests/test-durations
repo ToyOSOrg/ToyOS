@@ -311,7 +311,6 @@ page_cache_partition_offset 6984
 panic_before_peripherals_reboots 3227
 panic_key_holds 42033
 panic_reboots 9768
-panic_recovery 130
 pci_capability_walk 5775
 pci_claim_caps_truncated 2583
 pci_inventory 4529

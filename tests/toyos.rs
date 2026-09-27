@@ -252,7 +252,6 @@ const RUST_SKIP: &[&str] = &[
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
-    "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
@@ -3094,34 +3093,9 @@ fn check_rust_result(result: &TestResult) -> bool {
     }
 }
 
-/// Checks both exit code and the segfault's crash report.
-fn check_panic_recovery(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
-
-    let checks: &[(&str, &str)] = &[
-        ("Registers:", "expected register dump from the fault"),
-        ("SEGFAULT tid=", "expected SEGFAULT header"),
-        ("deliberate_null_deref", "expected deliberate_null_deref in segfault backtrace"),
-        ("+0x", "expected symbolized backtraces"),
-    ];
-
-    let mut ok = true;
-    for (needle, msg) in checks {
-        if !result.serial.contains(needle) {
-            eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-            ok = false;
-        }
-    }
-    ok & check_symbols_were_read("panic_recovery", &result.serial)
-}
-
 /// The kernel names the frames of a process it loaded off a **disk**.
 ///
-/// `null_deref_run_from_disk` is this child's alone, so a `contains` over the
-/// capture window cannot be satisfied by `segfault_child` running in the same
-/// boot.
+/// `null_deref_run_from_disk` is this child's alone.
 fn check_disk_backtrace(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
@@ -3211,6 +3185,25 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The kernel's Ring 0 read of the address `test_panic_child` named halted on
+/// that address as **unmapped**. A read that demand paging filled for the
+/// caller re-executes into SMAP's protection fault instead, so the word is what
+/// says nothing was mapped into the current process.
+fn check_ring0_read_unmapped(serial: &str) -> Result<(), String> {
+    const READ_OF: &str = "SYS_DEBUG: a Ring 0 read of ";
+    let at = serial.find(READ_OF).ok_or("expected the kernel to name the address it read")?;
+    let named = serial[at + READ_OF.len()..].split_whitespace().next().unwrap_or_default();
+    let addr = named
+        .strip_prefix("0x")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| format!("the address the kernel read is not a number: {named:?}"))?;
+    let want = format!("KERNEL PANIC: read unmapped address at {addr:#x}");
+    if !serial.contains(&want) {
+        return Err(format!("expected `{want}`: the read did not fault as unmapped at {addr:#x}"));
+    }
+    Ok(())
+}
+
 /// A zero CPU delta is the signature of a suspended soundd and equally of one
 /// wedged with the device running, so the counter the test reads cannot tell
 /// them apart on its own. The serial can: in a window where no audio client
@@ -3289,6 +3282,8 @@ fn check_fault_gates(result: &TestResult) -> bool {
             "fault_gate_child::divide_by_zero",
             "expected the faulting function in the #DE backtrace",
         ),
+        ("SEGFAULT tid=", "expected a SEGFAULT header for the null read"),
+        ("fault_gate_child::read_null", "expected the faulting function in the #PF backtrace"),
     ];
 
     let mut ok = true;
@@ -3465,7 +3460,6 @@ fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
 /// Select check function by test name convention.
 fn check_for(name: &str) -> fn(&TestResult) -> bool {
     match name {
-        "panic_recovery" => check_panic_recovery,
         "disk_backtrace" => check_disk_backtrace,
         "audio_idle_suspend" => check_audio_idle_suspend,
         "null_sink_client_exits" => check_null_sink_client_exits,
@@ -13319,10 +13313,7 @@ fn run_machine_test(
                     &["SYS_DEBUG: kernel panic triggered by userspace", syscall, "User backtrace:"],
                 ),
                 // A Ring 0 read of a user address is the kernel's, inside a syscall too.
-                "syscall_fault_halts" => (
-                    da::NULL_READ,
-                    &["KERNEL PANIC: read unmapped address at 0x0", syscall, "User backtrace:"],
-                ),
+                "syscall_fault_halts" => (da::NULL_READ, &[syscall, "User backtrace:"]),
                 "lock_across_switch_halts" => (da::LOCK_ACROSS_SWITCH, &[syscall]),
                 // The message, not `mm/alloc.rs`: it names the ceiling rather
                 // than the page source's own request.
@@ -13332,10 +13323,11 @@ fn run_machine_test(
                 other => unreachable!("{other} is not a syscall-death row"),
             };
             let said = power::syscall_death_resets(test_config, c_bins, rust_bins, action, said)?;
-            if name == "lock_across_switch_halts" {
-                check_tripwire_attribution(&said)?;
+            match name {
+                "lock_across_switch_halts" => check_tripwire_attribution(&said),
+                "syscall_fault_halts" => check_ring0_read_unmapped(&said),
+                _ => Ok(()),
             }
-            Ok(())
         }
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
@@ -18287,7 +18279,6 @@ fn build_test_registry(
 
     for name in discover_rust_tests(rust_bins) {
         let timeout = match name.as_str() {
-            "panic_recovery" => Duration::from_secs(10),
             // Writes the child's whole image through bcachefs before it can run
             // it, which is the only thing here that is not a spawn.
             "disk_backtrace" => Duration::from_secs(15),

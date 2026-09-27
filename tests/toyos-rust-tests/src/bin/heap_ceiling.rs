@@ -111,9 +111,7 @@ fn at_ceiling_is_servable() {
 ///
 /// `memalign` pads by the alignment before it asks for backing, so this request
 /// satisfies `MAX_HEAP_ALLOC` and still reaches the page source
-/// asking for 2,162,688 bytes. Measured against the old code: it panicked
-/// inside `Dlmalloc::malloc`, with the allocator lock held, and the guest went
-/// silent — so no bound at the entry could ever have closed it.
+/// asking for 2,162,688 bytes.
 fn aligned_at_ceiling_is_refused_not_fatal() {
     let rc = toyos_abi::syscall::debug(HEAP_AT_CEILING_PAGE_ALIGNED);
     assert_eq!(

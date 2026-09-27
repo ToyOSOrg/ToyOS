@@ -258,7 +258,7 @@ static EARLY: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
 static CAPTURE_ACCESS: access::CaptureAccess = access::CaptureAccess::new();
 
-/// `SNAPSHOT`'s writer owner until recovery; the owner may refresh and every other CPU is refused.
+/// `SNAPSHOT`'s writer owner; the owner may refresh and every other CPU is refused.
 static CAPTURE: latch::CaptureLatch = latch::CaptureLatch::new();
 
 /// The early branch's token: percpu is not up there, and exactly one CPU exists.
@@ -289,7 +289,7 @@ static CLAIMED_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 const PROBE_DELAY_NS: u64 = 5_000_000_000;
 
 /// Whether the `metal-panic-probe` boot should panic now. Called from the
-/// idle loop, whose fall-through skips recovery — the only path that never paints.
+/// idle loop.
 #[cfg(feature = "boot-actuators")]
 pub fn probe_due() -> bool {
     if !crate::actuator::metal_panic_probe() {

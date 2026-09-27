@@ -17,7 +17,7 @@ the kernel needs.
 
 So an interrupt or exception taken from a Ring 3 thread that set `AC` runs its
 handler with SMAP off: a kernel bug there that touches a user address reads or
-writes it silently instead of faulting into `blame`.
+writes it silently.
 
 **Evidence:** read from the code and the SDM; no test stages it.
 

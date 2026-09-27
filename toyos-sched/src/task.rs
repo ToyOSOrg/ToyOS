@@ -275,7 +275,7 @@ fn legal(from: TaskState, to: TaskState) -> bool {
         (Running(_), Dead) => true,
         // Pick and migrate.
         (Ready(a), Running(b)) => a == b,
-        (Ready(_), InTransit(_)) | (Ready(_), Dead) => true,
+        (Ready(_), InTransit(_)) => true,
         // The two-phase wait handshake.
         (Committing(a, _), Running(b))
         | (Committing(a, _), Blocked(b))

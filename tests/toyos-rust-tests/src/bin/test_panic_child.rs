@@ -5,15 +5,34 @@
 //! `InvalidArgument` is the kernel saying it has no debug syscall: the boot
 //! needs `test-actuators` and asked for nothing, which is a harness mistake and
 //! not a kernel that failed to stop.
+//!
+//! `NULL_READ` is given an address inside a live anonymous region this process
+//! never touched: a page demand paging fills for Ring 3 and must not for Ring 0.
 
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{self, debug_action, MmapFlags, MmapProt, SyscallError};
+
+const PAGE_2M: usize = 2 << 20;
 
 fn main() {
     let action: u64 = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .expect("usage: test_panic_child <SYS_DEBUG action>");
-    let rc = toyos_abi::syscall::debug(action);
+    let rc = if action == debug_action::NULL_READ {
+        // SAFETY: a fresh anonymous region this process never dereferences.
+        let base = unsafe {
+            syscall::mmap(
+                core::ptr::null_mut(),
+                2 * PAGE_2M,
+                MmapProt::READ | MmapProt::WRITE,
+                MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
+            )
+        };
+        assert!(!base.is_null(), "mmap of {} bytes failed", 2 * PAGE_2M);
+        syscall::debug_with(action, base as u64 + PAGE_2M as u64)
+    } else {
+        syscall::debug(action)
+    };
     if rc == SyscallError::InvalidArgument.to_u64() {
         eprintln!(
             "ERROR: SYS_DEBUG {action} answered InvalidArgument — this kernel carries no \

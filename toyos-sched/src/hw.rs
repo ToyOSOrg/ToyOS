@@ -101,11 +101,7 @@ pub trait Machine: Kicker + 'static {
 
     /// Kernel: cli/sti RAII. Sim: gates event delivery for this vcpu.
     ///
-    /// Has no caller in either world, and does **not** fit the site it looks
-    /// like it should — the idle loop's cli / final recheck / sti;hlt: both exits
-    /// from that recheck must *set* IF unconditionally — the halt exit because
-    /// `sti;hlt` is one atom — and an RAII guard restores
-    /// the caller's flags instead.
+    /// Has no caller in either world.
     fn irq_guard(&self) -> Self::IrqGuard;
 
     /// Enable interrupts and halt, atomically — on x86 the `sti;hlt` pair and
