@@ -732,8 +732,8 @@ const CI_PACKAGES: &[Package] = &[
     Package {
         name: "ovmf",
         why: "the edk2 firmware Debian's QEMU boots a UEFI guest with: the image release notes' \
-              Linux command line names it, and the release job and `release_command_boots` \
-              boot that line (src/imagerelease.rs)",
+              Linux command line names it, and the release job boots that line \
+              (src/imagerelease.rs)",
     },
     Package {
         name: "python3",

@@ -54,14 +54,14 @@ pub const NOTES_ASSET: &str = "README.md";
 pub const LICENCES_ASSET: &str = "licences.txt";
 
 /// Every asset, in upload order.
-pub const ASSETS: [&str; 4] = [IMAGE_ASSET, SUMS_ASSET, NOTES_ASSET, LICENCES_ASSET];
+const ASSETS: [&str; 4] = [IMAGE_ASSET, SUMS_ASSET, NOTES_ASSET, LICENCES_ASSET];
 
 /// Where [`release`] stages the assets and [`publish`] reads them: the
 /// directory the nightly's artifact carries between the two jobs.
-pub const STAGED: &str = "target/image-release";
+const STAGED: &str = "target/image-release";
 
 /// What the publish job is handed the release job's [`digest`] in.
-pub const DIGEST_VAR: &str = "IMAGE_RELEASE_DIGEST";
+const DIGEST_VAR: &str = "IMAGE_RELEASE_DIGEST";
 
 /// The defect behind the one disk the notes say a boot may write though it
 /// was not given it.
@@ -401,7 +401,7 @@ pub fn write_assets(
 /// The SHA-256 of every asset's own, one `sha256sum` line each in upload
 /// order: what the release job answers and the publish job recomputes.
 /// Refused while `dir` holds anything but the four assets.
-pub fn digest(dir: &Path) -> Result<String, String> {
+fn digest(dir: &Path) -> Result<String, String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut held = entries
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
