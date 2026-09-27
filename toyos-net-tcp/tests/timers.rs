@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::*;
@@ -182,4 +183,26 @@ fn s_gu_006_a_confirmation_after_a_reverify_is_kept() {
     h.arrive(seg(5001).ack(3921));
     let events: Vec<Event> = h.tcp.drain_events().collect();
     assert_eq!(events, [Event::Reachable(B), Event::Reverify(B), Event::Reachable(B)]);
+}
+
+/// [ip] reads each address's own advice: B's repeated confirmation never crowds out C's, and a
+/// stale confirmation for B already pending is not repeated once C's is newer.
+#[test]
+fn s_gu_006_b_advice_is_kept_per_address() {
+    const C: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 3);
+    let mut h = fixture_e();
+    h.send(0, 300);
+
+    let now = h.now();
+    let conn_c = h.tcp.connect(now, A, Some(port(49153)), ep(C, 80)).unwrap();
+    h.transmit();
+    h.input(0, seg(5000).ack(1001).syn().wnd(65_535).mss(1460).from(C, 80).to(A, 49153));
+    h.tcp.send(h.now(), conn_c, &[0u8; 300]).unwrap();
+    h.transmit();
+
+    h.arrive(seg(5001).ack(1101));
+    h.arrive(seg(5001).ack(1101).from(C, 80).to(A, 49153));
+    h.arrive(seg(5001).ack(1201));
+    let events: Vec<Event> = h.tcp.drain_events().collect();
+    assert_eq!(events, [Event::Reachable(B), Event::Reachable(C)]);
 }

@@ -404,8 +404,8 @@ impl Tcp {
                 conn.state = Tcb::Ended(Ended { failure, rx });
             }
             User::Orphan => self.free(index),
-            User::Child { listener } => {
-                if failure.is_some() && value(&mut self.listeners, listener).is_some_and(|l| l.ready.contains(&index)) {
+            User::Child { .. } => {
+                if failure.is_some() {
                     self.log.count(Counter::AcceptResetDropped);
                 }
                 self.free(index);

@@ -225,8 +225,7 @@ fn s_div_003_rst_at_snd_nxt_inside_the_window() {
     expect(&outs, &["SEQ=1101 ACK=5001 CTL=RST,ACK"]);
 }
 
-/// AC-20's second half with B's out-of-order segment offering `wnd`: its ACK 1001 fails the
-/// SND.WL1 test at SND.UNA 2461, so the window B offered still counts from 1001.
+/// AC-20's second half with B's out-of-order segment offering `wnd`.
 fn window_behind_snd_una(wnd: u16) -> H {
     let mut h = fixture_e();
     h.input(0, seg(5001).ack(1001).wnd(2920));
