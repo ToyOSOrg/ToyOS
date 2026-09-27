@@ -457,10 +457,12 @@ fn claim() -> Option<toyos::PciDev> {
     Some(Endowments::get().take(&label).expect("blockd: the claim its label names"))
 }
 
-/// Serve a machine with no controller: every listing empty, every open
-/// `NotFound`, so a file server finds no partition here rather than waiting on
-/// one. A connection says one frame and is answered, or is let go.
-fn serve_nothing(acceptor: &toyos::port::Acceptor) -> ! {
+/// Serve no partition: a machine with no controller answers every listing
+/// empty and every open `NotFound`, and one whose controller is `unusable`
+/// answers both `Unusable`, so a file server says the disk failed rather than
+/// that there is none, and waits on neither. A connection says one frame and
+/// is answered, or is let go.
+fn serve_nothing(acceptor: &toyos::port::Acceptor, unusable: bool) -> ! {
     let poller = Poller::new(2 + MAX_PENDING as u32);
     let mut pending: Vec<Pending> = Vec::new();
     let mut ready: Vec<u64> = Vec::new();
@@ -508,9 +510,10 @@ fn serve_nothing(acceptor: &toyos::port::Acceptor) -> ! {
                     if let Some(handles) = p.conn.recv_handles_exact::<1>() {
                         toyos_abi::syscall::close(handles[0]);
                     }
-                    let _ = match msg_type {
-                        wire::MSG_LIST => p.conn.try_send_bytes(wire::MSG_LISTED, &[]),
-                        _ => p.conn.try_send_bytes(wire::MSG_REFUSED, &Refusal::NotFound.encode()),
+                    let _ = match (msg_type, unusable) {
+                        (_, true) => p.conn.try_send_bytes(wire::MSG_REFUSED, &Refusal::Unusable.encode()),
+                        (wire::MSG_LIST, false) => p.conn.try_send_bytes(wire::MSG_LISTED, &[]),
+                        (_, false) => p.conn.try_send_bytes(wire::MSG_REFUSED, &Refusal::NotFound.encode()),
                     };
                 }
             }
@@ -535,7 +538,7 @@ fn main() {
     let acceptor = endow::acceptor(PORT).unwrap_or_else(|| panic!("blockd: started serving no `{PORT}` port"));
     let Some(dev) = claim() else {
         println!("blockd: no NVMe controller this row names is on this machine; serving no partition");
-        serve_nothing(&acceptor);
+        serve_nothing(&acceptor, false);
     };
     // A controller this service cannot use is a machine without one, said by
     // name: restarting would meet the same device and the same refusal.
@@ -543,7 +546,7 @@ fn main() {
         Ok(ctrl) => ctrl,
         Err(why) => {
             println!("blockd: NOT SERVING — {why}; serving no partition");
-            serve_nothing(&acceptor);
+            serve_nothing(&acceptor, true);
         }
     };
     println!(

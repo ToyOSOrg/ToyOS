@@ -37,7 +37,7 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::cache::{Cache, Shared};
 use crate::disk::{Disk, DiskError, BLOCK};
-use crate::volume::{join, parent, Kind, Meta, Node, OpenHow, Volume};
+use crate::volume::{identity, join, parent, Kind, Meta, Node, OpenHow, Out, Volume};
 
 /// The longest symlink target read back: the wire's path bound.
 const MAX_LINK: u64 = toyos::fs::MAX_PATH as u64;
@@ -425,7 +425,18 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(Meta { kind: Kind::File, size: open.size, mtime: open.mtime })
     }
 
-    fn read(&mut self, node: Node, offset: u64, out: &mut [u8]) -> Result<usize, SyscallError> {
+    fn ident(&mut self, node: Node) -> Result<u64, SyscallError> {
+        let open = self.entry(node)?;
+        // The first block is this file's alone among the live ones, and the
+        // length and mtime move with every write; a file with no block yet is
+        // told from another by nothing the format records.
+        Ok(match open.extents.first() {
+            Some(first) => identity(&[first.start_block, open.size, open.mtime]),
+            None => 0,
+        })
+    }
+
+    fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {
         let cache = Rc::clone(&self.cache);
         let open = self.entry(node)?;
         if offset >= open.size {
@@ -433,7 +444,6 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
         let n = out.len().min((open.size - offset) as usize);
         let mut done = 0;
-        let mut page_buf = vec![0u8; BLOCK];
         while done < n {
             let at = offset + done as u64;
             let page = at / BLOCK as u64;
@@ -448,8 +458,8 @@ impl<D: Disk> Volume for DataVolume<D> {
                     {
                         run += 1;
                     }
-                    let span = &mut out[done..done + run as usize * BLOCK];
-                    cache.read(first, span).map_err(disk_word)?;
+                    let base = done;
+                    cache.visit(first, run as usize, |k, block| out.put(base + k * BLOCK, block)).map_err(disk_word)?;
                     done += run as usize * BLOCK;
                     continue;
                 }
@@ -457,11 +467,11 @@ impl<D: Disk> Volume for DataVolume<D> {
             let take = (BLOCK - within).min(n - done);
             match block_for(&open.extents, page) {
                 Some(block) => {
-                    cache.read(block, &mut page_buf).map_err(disk_word)?;
-                    out[done..done + take].copy_from_slice(&page_buf[within..within + take]);
+                    let base = done;
+                    cache.visit(block, 1, |_, b| out.put(base, &b[within..within + take])).map_err(disk_word)?;
                 }
                 // Past the extents: a hole, whose bytes are zeros.
-                None => out[done..done + take].fill(0),
+                None => out.zero(done, take),
             }
             done += take;
         }
@@ -702,6 +712,7 @@ impl<D: Disk> Volume for DataVolume<D> {
 mod tests {
     use super::*;
     use crate::disk::Ram;
+    use crate::volume::Buf;
 
     fn clock() -> u64 {
         1_000_000_000
@@ -722,7 +733,7 @@ mod tests {
         v.write(n, 100, &data).unwrap();
         v.write(n, 20_000, b"tail").unwrap();
         let mut out = vec![0xFFu8; 20_004];
-        assert_eq!(v.read(n, 0, &mut out).unwrap(), 20_004);
+        assert_eq!(v.read(n, 0, &mut Buf(&mut out)).unwrap(), 20_004);
         assert!(out[..100].iter().all(|&b| b == 0));
         assert_eq!(&out[100..10_100], &data[..]);
         assert!(out[10_100..20_000].iter().all(|&b| b == 0), "a hole reads zeros");
@@ -745,8 +756,46 @@ mod tests {
         assert_eq!(again.lstat("home/toy").unwrap().kind, Kind::Dir, "an empty directory outlives the mount");
         let n = again.open("home/toy/x", PLAIN).unwrap();
         let mut out = vec![0u8; 5000];
-        again.read(n, 0, &mut out).unwrap();
+        again.read(n, 0, &mut Buf(&mut out)).unwrap();
         assert_eq!(out, vec![7; 5000]);
+    }
+
+    /// What a holder re-opening by path after a restart compares: the same
+    /// file unchanged states the same identity off the device, and the file
+    /// renamed over it, or a write to it, does not. A file with no block is
+    /// told from another by nothing, and says so.
+    #[test]
+    fn an_identity_survives_a_remount_and_tells_a_replacement_apart() {
+        let remount = |v: DataVolume<Ram>| {
+            let DataVolume { fs, cache, .. } = v;
+            drop(fs);
+            let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
+            let Probed::Mounted(again) = DataVolume::probe(disk, &["home"], clock) else { panic!("remount") };
+            again
+        };
+        let mut v = vol();
+        let n = v.open("home/x", CREATE).unwrap();
+        assert_eq!(v.ident(n), Ok(0), "no block yet: nothing tells it from another");
+        v.write(n, 0, &[7; 5000]).unwrap();
+        let held = v.ident(n).unwrap();
+        assert_ne!(held, 0);
+        v.sync().unwrap();
+
+        let mut v = remount(v);
+        let n = v.open("home/x", PLAIN).unwrap();
+        assert_eq!(v.ident(n), Ok(held), "the same file, unchanged, off the device");
+        v.write(n, 5000, b"more").unwrap();
+        assert_ne!(v.ident(n).unwrap(), held, "a write changes it");
+        v.close(n);
+
+        let y = v.open("home/y", CREATE).unwrap();
+        v.write(y, 0, &[9; 5000]).unwrap();
+        v.close(y);
+        v.rename("home/y", "home/x").unwrap();
+        v.sync().unwrap();
+        let mut v = remount(v);
+        let n = v.open("home/x", PLAIN).unwrap();
+        assert_ne!(v.ident(n).unwrap(), held, "the file renamed over it is another");
     }
 
     #[test]
@@ -755,7 +804,7 @@ mod tests {
         let n = v.open("home/a", CREATE).unwrap();
         v.write(n, 0, b"x").unwrap();
         v.unlink("home/a").unwrap();
-        assert_eq!(v.read(n, 0, &mut [0u8; 1]), Err(SyscallError::Gone));
+        assert_eq!(v.read(n, 0, &mut Buf(&mut [0u8; 1])), Err(SyscallError::Gone));
         assert_eq!(v.lstat("home/a"), Err(SyscallError::NotFound));
     }
 
@@ -767,7 +816,7 @@ mod tests {
         v.truncate(n, 10).unwrap();
         v.truncate(n, 8192).unwrap();
         let mut out = vec![0xFFu8; 8192];
-        v.read(n, 0, &mut out).unwrap();
+        v.read(n, 0, &mut Buf(&mut out)).unwrap();
         assert_eq!(&out[..10], &[9; 10]);
         assert!(out[10..].iter().all(|&b| b == 0));
     }
@@ -801,7 +850,7 @@ mod tests {
         v.rename("home/a", "home/b").unwrap();
         assert_eq!(v.lstat("home/b/f").unwrap().size, 5);
         let mut out = [0u8; 5];
-        v.read(n, 0, &mut out).unwrap();
+        v.read(n, 0, &mut Buf(&mut out)).unwrap();
         assert_eq!(&out, b"hello");
         v.close(n);
         let m = v.open("home/b/g", CREATE).unwrap();
@@ -832,7 +881,7 @@ mod tests {
         assert_eq!(v.rename("home/f", &to_path), Err(SyscallError::ResourceExhausted));
 
         let mut back = [0u8; 22];
-        assert_eq!(v.read(to, 0, &mut back), Ok(22), "the holder of `to` still reads it");
+        assert_eq!(v.read(to, 0, &mut Buf(&mut back)), Ok(22), "the holder of `to` still reads it");
         assert_eq!(&back, b"written and not synced");
         v.sync().unwrap();
         v.close(to);

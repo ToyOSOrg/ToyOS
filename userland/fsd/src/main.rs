@@ -6,13 +6,12 @@
 //! disk the kernel drives, or blockd's `block` connector in its namespace; and
 //! nothing else of the machine. Argv is the role, and for LOG and BOOT the
 //! unique GUID of the partition the loader named for it when no claim on it
-//! was minted; then the row's own arguments, of which there is one, a test's
-//! actuator ([`END_ON`]).
+//! was minted; then the row's own arguments, which are tests' actuators
+//! ([`END_ON`], [`END_AT_HELLO`]).
 //!
 //! **A connection is bound to the directory whose port it came in on**, and
-//! every path on it is resolved there (`fsd::resolve`); a write on a port
-//! whose directory is read-only, or on a volume that is, is refused before the
-//! volume sees it.
+//! every path on it is resolved there (`fsd::resolve`); a write on a read-only
+//! volume is refused before the volume sees it.
 //!
 //! **A server never blocks on a client.** Accept and the first frame are two
 //! events; a request is buffered until whole; every reply is one `try_send`,
@@ -33,7 +32,7 @@ use fsd::data::{DataVolume, Probed};
 use fsd::disk::{Claimed, Disk, Ram, Served};
 use fsd::fat::FatVolume;
 use fsd::resolve::{self, Found, Refusal as Escape, Resolved};
-use fsd::volume::{Kind, Meta, Node, OpenHow, Volume};
+use fsd::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
 use toyos::endow::{self, Endowments};
 use toyos::fs::*;
 use toyos::ipc::{self, Connection, RxStep};
@@ -48,14 +47,27 @@ use toyos_abi::syscall::{SyscallError, DEV_PREFIX, SERVE_PREFIX};
 /// write-back drained a closed file's pages on its next pass.
 const WRITEBACK: Duration = Duration::from_secs(2);
 
-/// Clients held at once; the next waits in the port's queue.
-const MAX_CLIENTS: usize = 128;
+/// Clients served at once, machine-wide: one connection per directory per
+/// process. The next is answered `ResourceExhausted` at its hello and let go,
+/// by name.
+const MAX_SERVED: usize = 128;
+
+/// Connections taken and not yet answered at their hello. While this many
+/// wait, the next waits in its port's queue — for at most
+/// [`HANDSHAKE_TIMEOUT`], by which each of these is answered or let go.
+const MAX_HANDSHAKES: usize = 32;
 
 /// Files one client holds open at once.
 const MAX_FIDS: usize = 1024;
 
 /// Streams served at once, machine-wide.
 const MAX_STREAMS: usize = 64;
+
+/// Directories one server serves: DATA's four, with room.
+const MAX_DIRS: usize = 32;
+
+// One wait watches every acceptor, connection and stream at once.
+const _: () = assert!(MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS + MAX_DIRS <= Poller::MAX_HANDLES as usize);
 
 /// How long an accepted connection may take to lend its window.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -69,6 +81,12 @@ const RAM_BLOCKS: u64 = 1 << 18;
 /// answered — a server killed with a write done and unanswered, as a test
 /// stages one. Armed by nothing but a boot config's `args`.
 const END_ON: &str = "--end-on";
+
+/// `--end-at-hello <dir>`: the first hello on `dir`'s port this boot ends this
+/// process before it is answered — a server killed while its first client
+/// waits, as a test stages one. Once a boot, across restarts: the kernel's
+/// `/tmp` keeps the mark. Armed by nothing but a boot config's `args`.
+const END_AT_HELLO: &str = "--end-at-hello";
 
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
@@ -97,7 +115,6 @@ struct Capability {
     dir: String,
     /// Where it is on the volume.
     root: String,
-    writable: bool,
     acceptor: Acceptor,
 }
 
@@ -156,11 +173,15 @@ fn main() {
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
         panic!("fsd: started with {args:?}; the first argument is a role: data, log or boot")
     });
-    let (mut guid, mut end_on) = (None, None);
+    let (mut guid, mut end_on, mut end_at_hello) = (None, None, None);
     let mut rest = args.iter().skip(2);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             END_ON => end_on = Some(rest.next().unwrap_or_else(|| panic!("fsd: {END_ON} takes a path")).clone()),
+            END_AT_HELLO => {
+                end_at_hello =
+                    Some(rest.next().unwrap_or_else(|| panic!("fsd: {END_AT_HELLO} takes a directory")).clone())
+            }
             flag if flag.starts_with("--") => panic!("fsd: {flag} is no argument of this server"),
             named if guid.is_none() => guid = Some(named),
             extra => panic!("fsd: a second partition, {extra}, after {guid:?}"),
@@ -185,7 +206,9 @@ fn main() {
         next_stream: 0,
         dirty_since: None,
         end_on,
+        end_at_hello,
         probe: Poller::new(caps_len),
+        scratch: Vec::new(),
     }
     .serve()
 }
@@ -203,9 +226,10 @@ fn capabilities(role: Role) -> Vec<Capability> {
             Role::Data => dir.trim_start_matches('/').to_string(),
             Role::Log | Role::Boot => String::new(),
         };
-        caps.push(Capability { dir, root, writable: role != Role::Boot, acceptor });
+        caps.push(Capability { dir, root, acceptor });
     }
     assert!(!caps.is_empty(), "fsd: started serving no directory");
+    assert!(caps.len() <= MAX_DIRS, "fsd: started serving {} directories, past {MAX_DIRS}", caps.len());
     caps
 }
 
@@ -237,17 +261,17 @@ fn served(guid: [u8; 16]) -> Option<Served> {
     }
 }
 
-/// The TOYOS-DATA partitions blockd serves.
-fn data_partitions() -> Vec<[u8; 16]> {
-    let Some(names) = endow::namespace() else { return Vec::new() };
+/// The TOYOS-DATA partitions blockd serves, or why it would not say: a disk
+/// that failed is not a machine without one, and is never answered with memory.
+fn data_partitions() -> Result<Vec<[u8; 16]>, String> {
+    let Some(names) = endow::namespace() else { return Ok(Vec::new()) };
     match blockd::list(names, toyos_blockring::PORT) {
-        Ok(listed) => listed.into_iter().filter(|l| l.kind == toyos_gpt::Guid::TOYOS_DATA.0).map(|l| l.unique).collect(),
-        // No block service in this image: the namespace has no `block`.
-        Err(blockd::Error::Kernel(SyscallError::NotFound)) => Vec::new(),
-        Err(why) => {
-            println!("fsd: blockd would not list its partitions: {why:?}");
-            Vec::new()
+        Ok(listed) => {
+            Ok(listed.into_iter().filter(|l| l.kind == toyos_gpt::Guid::TOYOS_DATA.0).map(|l| l.unique).collect())
         }
+        // No block service in this image: the namespace has no `block`.
+        Err(blockd::Error::Kernel(SyscallError::NotFound)) => Ok(Vec::new()),
+        Err(why) => Err(format!("the block service would not list its partitions ({why:?})")),
     }
 }
 
@@ -257,13 +281,17 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume
             if let Some(disk) = claimed() {
                 return data_on(disk, roots);
             }
-            match data_partitions().as_slice() {
-                [one] => match served(*one) {
+            match data_partitions().as_deref() {
+                Ok([one]) => match served(*one) {
                     Some(disk) => data_on(disk, roots),
                     None => Box::new(Absent::new(roots, "the DATA partition would not open".into())),
                 },
-                [] => ram(roots, "this machine has no DATA partition"),
-                many => ram(roots, &format!("this machine has {} DATA partitions, and a volume is one", many.len())),
+                Ok([]) => ram(roots, "this machine has no DATA partition"),
+                Ok(many) => ram(roots, &format!("this machine has {} DATA partitions, and a volume is one", many.len())),
+                Err(why) => {
+                    println!("fsd: {why}; DATA is absent this boot");
+                    Box::new(Absent::new(roots, why.clone()))
+                }
             }
         }
         Role::Log | Role::Boot => {
@@ -325,9 +353,15 @@ struct Server {
     dirty_since: Option<Instant>,
     /// [`END_ON`]'s path on the volume.
     end_on: Option<String>,
+    /// [`END_AT_HELLO`]'s directory.
+    end_at_hello: Option<String>,
     /// Asks an acceptor whether a connection waits, before [`Server::accept`]
     /// takes it.
     probe: Poller,
+    /// A write's bytes, copied out of the client's window into this process's
+    /// own memory before the volume sees them. Kept, so a write allocates
+    /// nothing.
+    scratch: Vec<u8>,
 }
 
 /// What one request is answered.
@@ -339,10 +373,25 @@ enum Answer {
     WithHandle(Reply, toyos::RawHandle),
     /// The client broke the protocol and is let go.
     Drop(&'static str),
+    /// The client is answered this refusal and let go, for this reason.
+    Refuse(SyscallError, String),
 }
 
 fn stat_reply(meta: Meta) -> Reply {
-    Reply { status: 0, kind: meta.kind.wire(), value: 0, value2: meta.size, mtime: meta.mtime }
+    Reply { kind: meta.kind.wire(), value2: meta.size, mtime: meta.mtime, ..Reply::ok() }
+}
+
+/// Whether this is [`END_AT_HELLO`]'s first firing this boot for `dir`: its
+/// mark is made once in the kernel's `/tmp`, which outlives this process and
+/// not the boot. A mark that can be neither made nor found is an actuator
+/// that cannot do its one job.
+fn first_hello_this_boot(dir: &str) -> bool {
+    let mark = format!("/tmp/fsd-end-at-hello{}", dir.replace('/', "-"));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&mark) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => panic!("fsd: {END_AT_HELLO}: its mark {mark} would not be made: {e}"),
+    }
 }
 
 fn window_of(w: &SharedMemory) -> Window {
@@ -351,12 +400,30 @@ fn window_of(w: &SharedMemory) -> Window {
     unsafe { Window::new(w.as_ptr(), WINDOW_BYTES) }
 }
 
+/// A read's destination: the first bytes of a client's window, which the
+/// volume copies its cache's blocks into once and never holds a reference to.
+struct WindowOut(Window);
+
+impl Out for WindowOut {
+    fn len(&self) -> usize {
+        self.0.bytes()
+    }
+
+    fn put(&mut self, at: usize, bytes: &[u8]) {
+        window_put(self.0, at, bytes);
+    }
+
+    fn zero(&mut self, at: usize, len: usize) {
+        self.0.sub(at, len).zero();
+    }
+}
+
 impl Server {
     fn serve(mut self) -> ! {
         let poller = Poller::new(Poller::MAX_HANDLES);
         let mut ready = Vec::new();
         loop {
-            if self.clients.len() < MAX_CLIENTS {
+            if self.clients.values().filter(|c| c.window.is_none()).count() < MAX_HANDSHAKES {
                 for (i, cap) in self.caps.iter().enumerate() {
                     poller.watch(&cap.acceptor, READABLE, i as u64);
                 }
@@ -482,6 +549,11 @@ impl Server {
             Answer::Link(len) => client.conn.try_send(LINK, &Reply { value: len as u64, ..Reply::ok() }),
             Answer::WithHandle(reply, handle) => client.conn.try_send_with_handles(&[handle], REPLY, &reply),
             Answer::Drop(why) => return self.drop_client(id, why),
+            Answer::Refuse(e, why) => {
+                // Let go whether or not the refusal went: either way it is said.
+                let _ = client.conn.try_send(REPLY, &Reply::refused(e));
+                return self.drop_client(id, &why);
+            }
         };
         if let Err(why) = sent {
             self.drop_client(id, &format!("its connection would not take a reply ({why:?})"));
@@ -526,15 +598,16 @@ impl Server {
         window_put(window_of(window), 0, bytes);
     }
 
-    fn writable(&self, id: u64) -> bool {
-        self.caps[self.clients[&id].cap].writable && self.volume.writable()
-    }
-
     fn answer(&mut self, id: u64, op: u32, r: Request) -> Answer {
         if op == HELLO {
+            let served = self.clients.values().filter(|c| c.window.is_some()).count();
             let client = self.clients.get_mut(&id).expect("pumped");
             if client.window.is_some() {
                 return Answer::Drop("it lent a second window");
+            }
+            if served >= MAX_SERVED {
+                let why = format!("it is refused, since {MAX_SERVED} clients are served already");
+                return Answer::Refuse(SyscallError::ResourceExhausted, why);
             }
             let Some([lent]) = client.conn.recv_handles_exact::<1>() else {
                 return Answer::Drop("its hello carried no window");
@@ -543,7 +616,12 @@ impl Server {
                 Ok(window) => client.window = Some(window),
                 Err(_) => return Answer::Drop("its window would not map"),
             }
-            let rights = if self.writable(id) { RIGHT_WRITE } else { 0 };
+            let dir = &self.caps[self.clients[&id].cap].dir;
+            if self.end_at_hello.as_ref() == Some(dir) && first_hello_this_boot(dir) {
+                println!("fsd: {END_AT_HELLO}: ending before {dir}'s first hello is answered");
+                std::process::exit(1);
+            }
+            let rights = if self.volume.writable() { RIGHT_WRITE } else { 0 };
             return Answer::Reply(Reply { value: rights, ..Reply::ok() });
         }
         if self.clients[&id].window.is_none() {
@@ -576,7 +654,7 @@ impl Server {
     fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, SyscallError> {
         let changes = matches!(op, WRITE | TRUNCATE | MKDIR | RMDIR | UNLINK | RENAME | SYMLINK | STREAM)
             || (op == OPEN && r.flags & (O_WRITE | O_APPEND | O_CREATE | O_TRUNCATE | O_CREATE_NEW) != 0);
-        if changes && !self.writable(id) {
+        if changes && !self.volume.writable() {
             return Err(SyscallError::PermissionDenied);
         }
         match op {
@@ -598,8 +676,9 @@ impl Server {
                     truncate: r.flags & O_TRUNCATE != 0,
                 };
                 let node = self.volume.open(&path, how)?;
-                let meta = match self.volume.node_meta(node) {
-                    Ok(meta) => meta,
+                let stated = self.volume.node_meta(node).and_then(|meta| self.volume.ident(node).map(|ident| (meta, ident)));
+                let (meta, ident) = match stated {
+                    Ok(stated) => stated,
                     Err(e) => {
                         self.volume.close(node);
                         return Err(e);
@@ -616,7 +695,7 @@ impl Server {
                 let ends = append && self.end_on.as_deref() == Some(path.as_str());
                 let client = self.clients.get_mut(&id).expect("pumped");
                 client.fids.insert(fid, Fid { node, write, append, ends });
-                Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta) }))
+                Ok(Answer::Reply(Reply { value: fid, ident, ..stat_reply(meta) }))
             }
             CLOSE => {
                 let client = self.clients.get_mut(&id).expect("pumped");
@@ -627,9 +706,8 @@ impl Server {
             READ => {
                 let node = self.fid(id, r.fid)?.node;
                 let len = (r.len as usize).min(WINDOW_BYTES);
-                let mut buf = vec![0u8; len];
-                let n = self.volume.read(node, r.offset, &mut buf)?;
-                self.put(id, &buf[..n]);
+                let window = window_of(self.clients[&id].window.as_ref().expect("lent")).sub(0, len);
+                let n = self.volume.read(node, r.offset, &mut WindowOut(window))?;
                 Ok(Answer::Reply(Reply { value: n as u64, ..Reply::ok() }))
             }
             WRITE => {
@@ -644,23 +722,28 @@ impl Server {
                 if len > WINDOW_BYTES {
                     return Err(SyscallError::InvalidArgument);
                 }
-                let mut data = vec![0u8; len];
-                window_take(window_of(self.clients[&id].window.as_ref().expect("lent")), 0, &mut data);
+                if self.scratch.len() < len {
+                    self.scratch.resize(len, 0);
+                }
+                let window = window_of(self.clients[&id].window.as_ref().expect("lent"));
+                window_take(window, 0, &mut self.scratch[..len]);
                 let at = if append { self.volume.node_meta(node)?.size } else { r.offset };
                 if at.checked_add(len as u64).is_none_or(|end| end > MAX_FILE_BYTES) {
                     return Err(SyscallError::InvalidArgument);
                 }
-                self.volume.write(node, at, &data)?;
+                self.volume.write(node, at, &self.scratch[..len])?;
                 if ends {
                     println!("fsd: {END_ON}: ending with a write done and unanswered");
                     std::process::exit(1);
                 }
                 self.dirtied();
-                Ok(Answer::Reply(Reply { value: len as u64, value2: at + len as u64, ..Reply::ok() }))
+                let ident = self.volume.ident(node)?;
+                Ok(Answer::Reply(Reply { value: len as u64, value2: at + len as u64, ident, ..Reply::ok() }))
             }
             FSTAT => {
                 let node = self.fid(id, r.fid)?.node;
-                Ok(Answer::Reply(stat_reply(self.volume.node_meta(node)?)))
+                let meta = self.volume.node_meta(node)?;
+                Ok(Answer::Reply(Reply { ident: self.volume.ident(node)?, ..stat_reply(meta) }))
             }
             TRUNCATE => {
                 let f = self.fid(id, r.fid)?;
@@ -673,7 +756,7 @@ impl Server {
                 }
                 self.volume.truncate(node, r.offset)?;
                 self.dirtied();
-                Ok(Answer::Reply(Reply::ok()))
+                Ok(Answer::Reply(Reply { ident: self.volume.ident(node)?, ..Reply::ok() }))
             }
             FSYNC => {
                 self.fid(id, r.fid)?;
@@ -684,6 +767,11 @@ impl Server {
                 let f = self.fid(id, r.fid)?;
                 if !f.write {
                     return Err(SyscallError::PermissionDenied);
+                }
+                // Every client number this server keeps is bounded where it is
+                // kept: a stream's offset grows by what it drains.
+                if r.offset > MAX_FILE_BYTES {
+                    return Err(SyscallError::InvalidArgument);
                 }
                 let node = f.node;
                 if self.streams.len() >= MAX_STREAMS {
@@ -800,28 +888,35 @@ impl Server {
         Answer::Link(path.len())
     }
 
-    /// What a stream's writer has put in the pipe, appended to its file.
+    /// One read of what a stream's writer has put in the pipe, appended to
+    /// its file, and no more: a pipe with more waiting fires at the next
+    /// wait, after every other client that was ready — [`Self::pump`]'s rule.
     fn drain(&mut self, sid: u64) {
         let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let Some(stream) = self.streams.get_mut(&sid) else { return };
-            match stream.pipe.read_nonblock(&mut buf) {
-                Ok(0) | Err(SyscallError::Gone) => break,
-                Ok(n) => {
-                    let (node, at) = (stream.node, stream.offset);
-                    stream.offset += n as u64;
-                    if let Err(e) = self.volume.write(node, at, &buf[..n]) {
-                        println!("fsd: a stream's write failed ({e:?}); the stream is ended");
-                        break;
+        let Some(stream) = self.streams.get_mut(&sid) else { return };
+        let ended = match stream.pipe.read_nonblock(&mut buf) {
+            Err(SyscallError::WouldBlock) => return,
+            Ok(0) | Err(SyscallError::Gone) => None,
+            Err(e) => Some(format!("its pipe would not read ({e:?})")),
+            Ok(n) => {
+                let (node, at) = (stream.node, stream.offset);
+                match at.checked_add(n as u64).filter(|&end| end <= MAX_FILE_BYTES) {
+                    None => Some("it reached the largest offset a file has".to_string()),
+                    Some(end) => {
+                        stream.offset = end;
+                        match self.volume.write(node, at, &buf[..n]) {
+                            Ok(()) => {
+                                self.dirtied();
+                                return;
+                            }
+                            Err(e) => Some(format!("its write failed ({e:?})")),
+                        }
                     }
-                    self.dirtied();
-                }
-                Err(SyscallError::WouldBlock) => return,
-                Err(e) => {
-                    println!("fsd: a stream's pipe would not read ({e:?}); the stream is ended");
-                    break;
                 }
             }
+        };
+        if let Some(why) = ended {
+            println!("fsd: a stream is ended: {why}");
         }
         if let Some(stream) = self.streams.remove(&sid) {
             self.volume.close(stream.node);

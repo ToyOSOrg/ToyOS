@@ -25,9 +25,11 @@
 //! again through the same connector — init keeps a file server's ports open
 //! across its restart — and counts its connections in a generation. A file id
 //! from an earlier generation names nothing on the new connection; the holder
-//! of a file opens it again by its path, and a file whose path no longer names
-//! it answers [`SyscallError::Gone`]. Nothing here keeps a write the server
-//! acknowledged and never made durable: that is what `Fsync` is for.
+//! of a file opens it again by its path and keeps it only when the server
+//! answers the [`Stat::ident`] it last saw. Any other answer — another file at
+//! the path, this one changed by a write the restart lost, or a volume that
+//! cannot tell — is [`SyscallError::Gone`]. Nothing here keeps a write the
+//! server acknowledged and never made durable: that is what `Fsync` is for.
 
 use toyos_abi::syscall::{SyscallError, MAX_SERVICE_NAME};
 
@@ -109,13 +111,15 @@ ipc_payload! {
         pub flags: u64,
     }
 
-    /// Every reply's words. `status` is 0 or a [`SyscallError`]'s wire value.
+    /// Every reply's words. `status` is 0 or a [`SyscallError`]'s wire value;
+    /// `ident` is a file's [`Stat::ident`], on every reply about an open file.
     pub struct Reply {
         pub status: u64,
         pub kind: u64,
         pub value: u64,
         pub value2: u64,
         pub mtime: u64,
+        pub ident: u64,
     }
 }
 
@@ -127,11 +131,11 @@ impl Request {
 
 impl Reply {
     pub const fn ok() -> Self {
-        Self { status: 0, kind: 0, value: 0, value2: 0, mtime: 0 }
+        Self { status: 0, kind: 0, value: 0, value2: 0, mtime: 0, ident: 0 }
     }
 
     pub const fn refused(e: SyscallError) -> Self {
-        Self { status: e.to_u64(), kind: 0, value: 0, value2: 0, mtime: 0 }
+        Self { status: e.to_u64(), kind: 0, value: 0, value2: 0, mtime: 0, ident: 0 }
     }
 
     fn result(self) -> Result<Self, SyscallError> {
@@ -150,39 +154,29 @@ pub fn canonical(path: &str) -> bool {
         && (path.is_empty() || path.split('/').all(|c| !c.is_empty() && c != "." && c != ".."))
 }
 
-/// Copy `data` into `window` at `offset`, word-wise where it can.
+// **Who owns the window when.** The server, from the moment a request is sent
+// until its reply is received; the client, from then until it sends the next.
+// The send and the receive are syscalls, which order the two sides, so honest
+// peers never touch the window at once. A dishonest one races only bytes it
+// could have written anyway: each side copies what it reads out of the window
+// once, into memory of its own, and acts on that copy alone. Nothing here polls
+// the window or waits on it, so it is copied as plain bytes — one fetch of each,
+// as a volatile loop would be, and no reference is ever formed over it.
+
+/// Copy `data` into `window` at `offset`.
 pub fn window_put(window: Window, offset: usize, data: &[u8]) {
     let target = window.sub(offset, data.len());
-    let head = (8 - target.as_ptr() as usize % 8) % 8;
-    let head = head.min(data.len());
-    for (i, byte) in data[..head].iter().enumerate() {
-        target.write::<u8>(i, *byte);
-    }
-    let words = (data.len() - head) / 8 * 8;
-    if words > 0 {
-        target.sub(head, words).copy_in(0, &data[head..head + words]);
-    }
-    for (i, byte) in data[head + words..].iter().enumerate() {
-        target.write::<u8>(head + words + i, *byte);
-    }
+    // SAFETY: `sub` bounded `offset + data.len()` inside the window, which its
+    // constructor's contract says is mapped; `data` is this process's own
+    // memory and never the window, so the two do not overlap.
+    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), target.as_ptr(), data.len()) }
 }
 
-/// Copy `out.len()` bytes out of `window` at `offset`, word-wise where it can.
+/// Copy `out.len()` bytes out of `window` at `offset`.
 pub fn window_take(window: Window, offset: usize, out: &mut [u8]) {
     let source = window.sub(offset, out.len());
-    let head = (8 - source.as_ptr() as usize % 8) % 8;
-    let head = head.min(out.len());
-    for (i, byte) in out[..head].iter_mut().enumerate() {
-        *byte = source.read::<u8>(i);
-    }
-    let words = (out.len() - head) / 8 * 8;
-    if words > 0 {
-        source.sub(head, words).copy_out(0, &mut out[head..head + words]);
-    }
-    let tail = head + words;
-    for (i, byte) in out[tail..].iter_mut().enumerate() {
-        *byte = source.read::<u8>(tail + i);
-    }
+    // SAFETY: as in `window_put`, with the two sides swapped.
+    unsafe { core::ptr::copy_nonoverlapping(source.as_ptr(), out.as_mut_ptr(), out.len()) }
 }
 
 /// What a file or directory is.
@@ -191,6 +185,22 @@ pub struct Stat {
     pub kind: u64,
     pub size: u64,
     pub mtime: u64,
+    /// For an open file: the server's token for this file as it stands, the
+    /// same across a restart of the server for the same file unchanged and
+    /// different for any other file at the path or any change to this one;
+    /// 0 where the volume cannot tell one file from another, and for a path.
+    pub ident: u64,
+}
+
+/// A write answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Written {
+    /// How many bytes it took.
+    pub len: usize,
+    /// The offset after them: for a file opened to append, the file's end.
+    pub offset: u64,
+    /// The file's [`Stat::ident`] after it.
+    pub ident: u64,
 }
 
 /// An open answered.
@@ -371,22 +381,20 @@ impl Dir {
 
     /// Write at most the window of `data` at `offset`, or at the end for a file
     /// opened to append. Answers how much, and the offset after it.
-    pub fn write(&mut self, fid: u64, generation: u64, offset: u64, data: &[u8]) -> Result<(usize, u64), SyscallError> {
+    pub fn write(&mut self, fid: u64, generation: u64, offset: u64, data: &[u8]) -> Result<Written, SyscallError> {
         let len = data.len().min(WINDOW_BYTES);
-        if generation != self.generation {
-            return Err(SyscallError::Gone);
-        }
         window_put(self.window(), 0, &data[..len]);
         let reply = self.fid_call(WRITE, generation, &Request { fid, offset, len: len as u64, ..Request::new() })?;
-        Ok(((reply.value as usize).min(len), reply.value2))
+        Ok(Written { len: (reply.value as usize).min(len), offset: reply.value2, ident: reply.ident })
     }
 
     pub fn fstat(&mut self, fid: u64, generation: u64) -> Result<Stat, SyscallError> {
         self.fid_call(FSTAT, generation, &Request { fid, ..Request::new() }).map(|r| stat_of(&r))
     }
 
-    pub fn truncate(&mut self, fid: u64, generation: u64, size: u64) -> Result<(), SyscallError> {
-        self.fid_call(TRUNCATE, generation, &Request { fid, offset: size, ..Request::new() }).map(drop)
+    /// Answers the file's [`Stat::ident`] after it.
+    pub fn truncate(&mut self, fid: u64, generation: u64, size: u64) -> Result<u64, SyscallError> {
+        self.fid_call(TRUNCATE, generation, &Request { fid, offset: size, ..Request::new() }).map(|r| r.ident)
     }
 
     /// Make what this file was written durable on the volume.
@@ -502,7 +510,7 @@ pub fn encode_entry(out: &mut [u8], kind: u64, size: u64, name: &str) -> Option<
 }
 
 fn stat_of(reply: &Reply) -> Stat {
-    Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime }
+    Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime, ident: reply.ident }
 }
 
 fn receive(conn: &Connection) -> Result<Reply, SyscallError> {

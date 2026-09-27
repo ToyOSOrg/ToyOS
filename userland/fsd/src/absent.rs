@@ -5,7 +5,7 @@
 
 use toyos_abi::syscall::SyscallError;
 
-use crate::volume::{Kind, Meta, Node, OpenHow, Volume};
+use crate::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
 
 pub struct Absent {
     roots: Vec<String>,
@@ -57,7 +57,11 @@ impl Volume for Absent {
         Err(SyscallError::NotFound)
     }
 
-    fn read(&mut self, _node: Node, _offset: u64, _out: &mut [u8]) -> Result<usize, SyscallError> {
+    fn ident(&mut self, _node: Node) -> Result<u64, SyscallError> {
+        Err(SyscallError::NotFound)
+    }
+
+    fn read(&mut self, _node: Node, _offset: u64, _out: &mut dyn Out) -> Result<usize, SyscallError> {
         Err(SyscallError::NotFound)
     }
 

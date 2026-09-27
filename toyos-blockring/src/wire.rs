@@ -92,7 +92,8 @@ pub enum Refusal {
     /// A session holds it already.
     Held,
     /// The partition is there and cannot be served: its range is not whole
-    /// blocks, its GUID is on two entries, or its table did not read.
+    /// blocks, its GUID is on two entries, its table did not read, or its
+    /// controller would not open — the answer to a listing then too.
     Unusable,
     /// The frame, its handles or its region are not what this protocol sends.
     Malformed,

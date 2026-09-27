@@ -610,12 +610,15 @@ pub fn home_overwrite_reads_back(
 /// budget, its directories answer `Gone`. Judged off the device.
 ///
 /// `tests/fsdrestartcase` arms every file server to end under a write to
-/// `/home/fsd_end` (`--end-on`), and `test_rs_fs_restart` ends DATA's four
-/// times: the guest asserts what a client sees, init's and fsd's own lines
-/// say who ended and who started again, and with the machine down the DATA
-/// partition is read by this crate's own build of the `bcachefs` reader over
-/// a plain seek-and-read of the image — nothing the guest executed. The
-/// flushed file and the one flushed across the end hold their bytes there.
+/// `/home/fsd_end` (`--end-on`) and at the first hello on `/apps`
+/// (`--end-at-hello`), and `test_rs_fs_restart` ends DATA's four times, the
+/// first under init's own resolution of a launch: the guest asserts what a
+/// client sees, init's and fsd's own lines say who ended and who started
+/// again, and with the machine down the DATA partition is read by this
+/// crate's own build of the `bcachefs` reader over a plain seek-and-read of
+/// the image — nothing the guest executed. The flushed file holds its bytes
+/// there, and the file a held handle wrote across an end holds the bytes of
+/// the file renamed over it and nothing that handle wrote after the next.
 pub fn fsd_restart(
     _test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -626,8 +629,7 @@ pub fn fsd_restart(
     const KEPT: &str = "home/fs_restart/kept";
     const ACROSS: &str = "home/fs_restart/across";
     const KEPT_LEN: usize = 64 * 1024 + 13;
-    const ACROSS_BYTES: &[u8] = b"written and flushed before the server ended; written through the same \
-        handle after it came back";
+    const ACROSS_BYTES: &[u8] = b"renamed over the file a handle held across the end";
     let kept: Vec<u8> = (0..KEPT_LEN).map(|i| (i.wrapping_mul(37) ^ 0xC3) as u8).collect();
 
     let config = super::compile::repo_root().join("tests/fsdrestartcase");
@@ -654,8 +656,12 @@ pub fn fsd_restart(
     }
     let console = super::serial::Serial::named("fsd_restart", log.as_str());
     let ended = log.matches("fsd: --end-on: ending with a write done and unanswered").count();
-    if ended != 4 {
-        return Err(format!("fsd said it ended {ended} times, not the guest's 4:\n{log}"));
+    if ended != 3 {
+        return Err(format!("fsd said it ended under a write {ended} times, not the guest's 3:\n{log}"));
+    }
+    let at_hello = log.matches("fsd: --end-at-hello: ending before /apps's first hello is answered").count();
+    if at_hello != 1 {
+        return Err(format!("fsd said it ended at a hello {at_hello} times, not the launch's 1:\n{log}"));
     }
     let restarted = log.lines().filter(|l| l.contains("init: fsd data (pid ") && l.contains("ended; started again")).count();
     if restarted != 3 {
@@ -679,9 +685,10 @@ pub fn fsd_restart(
         }
     }
     eprintln!(
-        "  [fsd] DATA's server ended four times under an unanswered write; started again three, \
-         its clients reopened, the fourth closed /home to Gone; {KEPT} and {ACROSS} read back off \
-         the image by the host's own bcachefs reader"
+        "  [fsd] DATA's server ended four times, the first under init's resolution of a launch that \
+         was answered; started again three, its clients reopened, a handle on a file renamed over \
+         answered Gone, the fourth closed /home to Gone; {KEPT} and {ACROSS} read back off the \
+         image by the host's own bcachefs reader"
     );
     Ok(())
 }

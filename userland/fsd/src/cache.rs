@@ -90,14 +90,20 @@ impl<D: Disk> Cache<D> {
     /// is there and in runs from the disk where it is not.
     pub fn read(&self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
         assert!(out.len() % BLOCK == 0, "fsd: a cache read of {} bytes", out.len());
-        let count = out.len() / BLOCK;
+        self.visit(first, out.len() / BLOCK, |k, block| out[k * BLOCK..(k + 1) * BLOCK].copy_from_slice(block))
+    }
+
+    /// Blocks `first..first + count`, each handed to `put` with its index from
+    /// `first`, out of the cache itself: a block that is not there is fetched
+    /// into it first, in runs, so a read of cached blocks copies each once.
+    pub fn visit(&self, first: u64, count: usize, mut put: impl FnMut(usize, &[u8; BLOCK])) -> Result<(), DiskError> {
         let mut inner = self.inner.borrow_mut();
         let mut i = 0;
         while i < count {
             let block = first + i as u64;
             inner.reads += 1;
             if let Some(slot) = inner.slots.get(&block) {
-                out[i * BLOCK..(i + 1) * BLOCK].copy_from_slice(&slot.data[..]);
+                put(i, &slot.data);
                 inner.hits += 1;
                 i += 1;
                 continue;
@@ -107,11 +113,12 @@ impl<D: Disk> Cache<D> {
             while i + run < count && run < RUN && !inner.slots.contains_key(&(block + run as u64)) {
                 run += 1;
             }
-            let span = &mut out[i * BLOCK..(i + run) * BLOCK];
-            inner.disk.read(block, span)?;
+            let mut span = vec![0u8; run * BLOCK];
+            inner.disk.read(block, &mut span)?;
             for (k, chunk) in span.chunks_exact(BLOCK).enumerate() {
                 let mut data = Box::new([0u8; BLOCK]);
                 data.copy_from_slice(chunk);
+                put(i + k, &data);
                 inner.slots.insert(block + k as u64, Slot { data, dirty: false });
                 inner.order.push_back(block + k as u64);
             }

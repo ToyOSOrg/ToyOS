@@ -25,7 +25,7 @@ use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError};
 
 use crate::cache::Cache;
 use crate::disk::{Disk, BLOCK};
-use crate::volume::{parent, Kind, Meta, Node, OpenHow, Volume};
+use crate::volume::{identity, parent, Kind, Meta, Node, OpenHow, Out, Volume};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
@@ -95,6 +95,10 @@ pub struct FatVolume<D: Disk> {
     next: Node,
     /// Local seconds since the epoch, which is the zone FAT stamps in.
     clock: fn() -> u64,
+    /// Where a read lands before it goes out: `toyos-fat32` reads into a
+    /// slice, and a client's window is never one. Kept, so a read allocates
+    /// nothing.
+    scratch: Vec<u8>,
 }
 
 fn word(e: Error) -> SyscallError {
@@ -138,7 +142,16 @@ impl<D: Disk> FatVolume<D> {
             geom.bytes_per_sector,
             geom.bytes_per_cluster()
         );
-        Ok(Self { fs, cache, writable, open: BTreeMap::new(), by_path: BTreeMap::new(), next: 1, clock })
+        Ok(Self {
+            fs,
+            cache,
+            writable,
+            open: BTreeMap::new(),
+            by_path: BTreeMap::new(),
+            next: 1,
+            clock,
+            scratch: Vec::new(),
+        })
     }
 
     fn time(&self) -> FatTime {
@@ -289,12 +302,28 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(Meta { kind: Kind::File, size, mtime: mtime * 1_000_000_000 })
     }
 
-    fn read(&mut self, node: Node, offset: u64, out: &mut [u8]) -> Result<usize, SyscallError> {
+    fn ident(&mut self, node: Node) -> Result<u64, SyscallError> {
+        let open = self.entry(node)?;
+        let (entry, cluster) = open.file.identity();
+        if cluster == 0 {
+            return Ok(0);
+        }
+        let half = |at: usize| u64::from_le_bytes(entry[at..at + 8].try_into().expect("eight bytes"));
+        Ok(identity(&[half(0), half(8), cluster as u64, open.file.len()]))
+    }
+
+    fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {
         let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
         if open.gone {
             return Err(SyscallError::Gone);
         }
-        self.fs.read(&mut open.file, offset, out).map_err(|e| logged("read", &open.path, e))
+        if self.scratch.len() < out.len() {
+            self.scratch.resize(out.len(), 0);
+        }
+        let buf = &mut self.scratch[..out.len()];
+        let n = self.fs.read(&mut open.file, offset, buf).map_err(|e| logged("read", &open.path, e))?;
+        out.put(0, &buf[..n]);
+        Ok(n)
     }
 
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), SyscallError> {

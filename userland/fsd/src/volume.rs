@@ -45,6 +45,34 @@ pub struct OpenHow {
 /// An open file, while any client holds it.
 pub type Node = u64;
 
+/// Where a read's bytes go, `len()` of them at most: the client's window, which
+/// is shared with the client and so is written through a copy and never
+/// through a reference, or a buffer of this process's own.
+pub trait Out {
+    fn len(&self) -> usize;
+    /// `bytes` at `at`, inside `len()`.
+    fn put(&mut self, at: usize, bytes: &[u8]);
+    /// `len` zeros at `at`, inside `len()`: a hole's bytes.
+    fn zero(&mut self, at: usize, len: usize);
+}
+
+/// A buffer of this process's own as a read's destination.
+pub struct Buf<'a>(pub &'a mut [u8]);
+
+impl Out for Buf<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn put(&mut self, at: usize, bytes: &[u8]) {
+        self.0[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+
+    fn zero(&mut self, at: usize, len: usize) {
+        self.0[at..at + len].fill(0);
+    }
+}
+
 pub trait Volume {
     /// Whether anything here may be changed.
     fn writable(&self) -> bool;
@@ -68,8 +96,15 @@ pub trait Volume {
 
     fn node_meta(&mut self, node: Node) -> Result<Meta, SyscallError>;
 
-    /// Up to `out.len()` bytes at `offset`; 0 at or past the end.
-    fn read(&mut self, node: Node, offset: u64, out: &mut [u8]) -> Result<usize, SyscallError>;
+    /// The file as it stands, as `toyos::fs::Stat::ident` states it: what
+    /// the volume itself records of it, so the same after a restart for the
+    /// same file unchanged; 0 where the volume records nothing that tells
+    /// this file from another.
+    fn ident(&mut self, node: Node) -> Result<u64, SyscallError>;
+
+    /// Up to `out.len()` bytes at `offset`, from the start of `out`; 0 at or
+    /// past the end.
+    fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError>;
 
     fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), SyscallError>;
 
@@ -92,6 +127,20 @@ pub trait Volume {
 
     /// One line of what the volume and its cache have done, for a log.
     fn describe(&self) -> String;
+}
+
+/// One token for `words`, never 0: 0 is a volume saying it cannot tell. Two
+/// different lists meet on one token as two 64-bit hashes do.
+pub fn identity(words: &[u64]) -> u64 {
+    // splitmix64's finaliser, chained over the words.
+    let mut h = 0x243F_6A88_85A3_08D3u64;
+    for &w in words {
+        let mut z = (h ^ w).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        h = z ^ (z >> 31);
+    }
+    h.max(1)
 }
 
 /// The parent of `path`, `""` for a name at the root.
