@@ -35,4 +35,4 @@ Loads when you read a file under `src/` — the root cargo project, package name
 
 - **Every CI lane is GitHub-hosted and no workflow may name a self-hosted label** — a `runs-on:` naming one queues until it times out rather than failing, so `src/ci.rs`'s `workflows_run_against_main_on_hosted_runners` refuses it; a measurement owed on hardware goes to the metal loop, not to a runner.
 - **A workflow job that runs in a container adds `safe.directory` itself** — `actions/checkout` sets it into a temporary global config it discards when its step ends, so the first git command a container step runs after checkout dies on a dubiously-owned repository.
-- **A red build may be the build system — re-run in isolation before believing any single red.** A `stage1-std/<target>/dist/deps` temp-dir error means a concurrent build, never a broken checkout; never repair or force-rebuild the toolchain.
+- **A `stage1-std/<target>/dist/deps` temp-dir error means a concurrent build**, never a broken checkout; never repair or force-rebuild the toolchain.

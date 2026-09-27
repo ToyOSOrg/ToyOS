@@ -3,6 +3,11 @@
 //! thread's per-module TLS block, `SYS_QUERY_MODULES` reports what is loaded.
 //! Exhausting address space is an error return, never an `.expect`.
 //!
+//! **A length from userland is refused before any arithmetic touches it, and
+//! before any lock.** Every arm goes through `vma::window().span`, the bound
+//! `find_gap` places in: one no placement window could hold is
+//! `InvalidArgument`, one that could but finds no room is `ResourceExhausted`.
+//!
 //! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
 //! shoots down and waits, and a sibling thread can be spinning on that same
 //! lock with `IF` clear.
@@ -32,14 +37,13 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     if prot.0 & !MMAP_PROT_KNOWN != 0 || flags.0 & !MMAP_FLAGS_KNOWN != 0 {
         return SyscallError::InvalidArgument.to_u64();
     }
-    // `size` crossed the trust boundary: zero, and a size whose 2 MiB rounding
-    // would wrap, are refused rather than silently turned into a small request.
-    // No cap beyond that: the PMM's own `free_count` check is the physical limit.
-    if size == 0 || (size as usize).checked_add(crate::mm::PAGE_2M as usize - 1).is_none() {
+    // `FIXED` with a null `req_addr` places anywhere, same as the non-FIXED
+    // arm below: this is the one condition that decides which placement runs.
+    let places_at_req_addr = flags.contains(MmapFlags::FIXED) && req_addr != 0;
+    // Refused here, before either lock is taken.
+    let Some(aligned) = crate::vma::window().span(size).map(|span| span.bytes() as usize) else {
         return SyscallError::InvalidArgument.to_u64();
-    }
-    let aligned = crate::mm::align_2m(size as usize);
-    let fixed = flags.contains(MmapFlags::FIXED);
+    };
     // Anonymous memory is never executable: `MmapProt` has no bit for it and
     // there is no `mprotect` to add one later.
     let mapping_prot = if prot.contains(MmapProt::WRITE) { Prot::ReadWrite } else { Prot::Read };
@@ -47,12 +51,13 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     // A misaligned or kernel-half `req_addr` is refused, not rounded or
     // clamped: `ensure_table` would OR `PAGE_USER` onto the shared kernel PML4
     // entry, opening a user-writable window in every process's page tables.
-    let fixed_start = if fixed && req_addr != 0 {
+    // The floor guards against NULL-ish addresses below it.
+    let fixed_start = if places_at_req_addr {
         let Some(end) = req_addr.checked_add(aligned as u64) else {
             return SyscallError::InvalidArgument.to_u64();
         };
         if req_addr & (crate::mm::PAGE_2M - 1) != 0
-            || req_addr < crate::vma::alloc_floor()
+            || req_addr < crate::vma::window().floor()
             || end > crate::vma::ALLOC_CEILING
             || !toyos_userbound::in_user_half(req_addr, aligned as u64)
         {
@@ -257,11 +262,10 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         if matches!(lib.memory, crate::elf::LibMemory::Shared { .. }) {
             crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen);
         }
-        let delta = vaddr.raw() as i64 - lib.user_base.raw() as i64;
-        if delta != 0 {
-            crate::elf::rebase_relative_relocs(&lib, delta);
+        if vaddr != lib.user_base {
+            lib.user_base = vaddr;
+            crate::elf::rebase_relative_relocs(&lib);
         }
-        lib.user_base = vaddr;
         Ok::<UserAddr, SyscallError>(vaddr)
     });
     let base = match mapped {
@@ -282,25 +286,36 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen);
     });
 
-    let lib_has_tls = lib.tls_memsz > 0;
+    let lib_tls = lib.tls().and_then(toyos_elf::TlsSegment::occupied);
     let data_arc = process::process_data();
     let init_info = {
         let data = data_arc.lock();
         crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
 
-        if data.elf.tls.total_memsz() > 0 {
-            let tls_info = crate::elf::TlsModuleInfo {
-                libs: &data.elf.loaded_libs,
-                modules: &data.elf.tls_modules,
-            };
-            crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls, &tls_info);
+        // Every TLS value is resolved here, before the point of no return: a
+        // reference that leaves its module's segment refuses the whole load,
+        // and the mapping guard takes the module back down.
+        let tls_info = crate::elf::TlsModuleInfo {
+            libs: &data.elf.loaded_libs,
+            modules: &data.elf.tls_modules,
+        };
+        let refused = if data.elf.tls.total_memsz() > 0 {
+            crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls, &tls_info).err()
+        } else {
+            None
+        };
+        let refused = refused.or_else(|| {
+            lib_tls.and_then(|_| crate::elf::apply_dtpoff_relocs(&lib, &tls_info).err())
+        });
+        if let Some(refused) = refused {
+            log!("dlopen: {}: {}", resolved, refused.as_str());
+            return SyscallError::InvalidArgument.to_u64();
         }
 
-        // init_info layout: [init_array_vaddr, init_array_count], vaddr rebased to user_base.
-        [
-            if lib.init_array_vaddr != 0 { lib.user_base.raw() + lib.init_array_vaddr } else { 0 },
-            lib.init_array_size / 8,
-        ]
+        // init_info layout: [init_array address, init_array count].
+        lib.init_array.map_or([0, 0], |array| {
+            [(lib.user_base + array.range().start().get()).raw(), array.count()]
+        })
     };
 
     // The point of no return: copy the init info out first, then register. A
@@ -331,7 +346,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     // Taken and bumped under the guard that registers, so two names loading at
     // once are two modules: the id a library's `DTPMOD64` relocations carry is
     // no other library's, and `dynamic_tls_blocks` is keyed on it.
-    if lib_has_tls {
+    if let Some(lib_tls) = lib_tls {
         let module_id = data.elf.next_tls_module_id;
         data.elf.next_tls_module_id = module_id + 1;
         let tls_info = crate::elf::TlsModuleInfo {
@@ -341,7 +356,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
         data.elf.tls_modules.push(crate::elf::TlsModule {
             template: lib.tls_template,
-            memsz: lib.tls_memsz,
+            memsz: lib_tls.memsz() as usize,
             base_offset: 0,
             module_id,
             is_static: false,
@@ -419,8 +434,7 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
 
     // Found through the thread's own kernel-side TLS allocation, never by
     // chasing a pointer out of the FS base, which addresses user-writable
-    // memory. Every thread gets an allocation from `setup_tls`/
-    // `setup_combined_tls`; its absence here is a kernel bug.
+    // memory.
     process::with_current_data(|data| {
         let tls = data.tls_pages.as_ref().expect("sys_tls_alloc_block: thread has no TLS allocation");
         let dtv_kern = tls.ptr() as *mut u64;
@@ -469,11 +483,11 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
         // packed after it in module order.
         let mut path_offset = (module_count * info_size) as u32;
 
-        let (eh_vaddr, eh_size) = (data.elf.exe_eh_frame_hdr_vaddr, data.elf.exe_eh_frame_hdr_size);
+        let (eh_addr, eh_size) = data.elf.exe_eh_frame_hdr;
         let exe_info = ModuleInfo {
             base: data.elf.elf_base.raw(),
             text_end: data.elf.exe_vaddr_max,
-            eh_frame_hdr: if eh_vaddr != 0 { data.elf.elf_base.raw() + eh_vaddr } else { 0 },
+            eh_frame_hdr: eh_addr,
             eh_frame_hdr_size: eh_size,
             path_offset,
             path_len: exe_path_bytes.len() as u32,
@@ -491,10 +505,8 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
             let lib_info = ModuleInfo {
                 base: lib.user_base.raw(),
                 text_end: lib.user_end(),
-                eh_frame_hdr: if lib.eh_frame_hdr_vaddr != 0 {
-                    lib.user_base.raw() + lib.eh_frame_hdr_vaddr
-                } else { 0 },
-                eh_frame_hdr_size: lib.eh_frame_hdr_size,
+                eh_frame_hdr: lib.eh_frame_hdr.map_or(0, |r| (lib.user_base + r.start().get()).raw()),
+                eh_frame_hdr_size: lib.eh_frame_hdr.map_or(0, |r| r.len()),
                 path_offset,
                 path_len: lib_path_bytes.len() as u32,
             };

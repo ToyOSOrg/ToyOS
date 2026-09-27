@@ -116,6 +116,12 @@ pub fn claim_the_shutdown() -> bool {
 
 static CLAIMED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a stop has been claimed, for `console-queue-at-the-stop`'s `klogd`.
+#[cfg(feature = "boot-actuators")]
+pub fn claimed() -> bool {
+    CLAIMED.load(core::sync::atomic::Ordering::Acquire)
+}
+
 /// What the stop's caller parks on between two sweeps.
 static PROGRESS: Watch = Watch::new();
 

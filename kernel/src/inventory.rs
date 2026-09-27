@@ -3,9 +3,8 @@
 //!
 //! **Assembled from what each subsystem already keeps**: the PCI functions and
 //! their identities are `pcidev`'s from enumeration, the USB devices are the
-//! ones the xHCI driver bound, the block devices are the ones registered, and
-//! the partitions are what each disk's table stated when `gpt::probe` listed
-//! it. A partition's state is the block layer's hold on exactly its span, the
+//! ones the xHCI driver bound, and the block devices are the ones registered.
+//! A partition's state is the block layer's hold on exactly its span, the
 //! record every view is refused against.
 //!
 //! **A holder is found where its handle is**: every process's table is walked
@@ -33,11 +32,11 @@ pub fn collect() -> Vec<Record> {
     for (device, part, holder) in crate::gpt::inventory() {
         out.push(Record::Partition(Partition {
             device,
-            index: part.index,
-            type_guid: part.type_guid.0,
-            unique_guid: part.unique_guid.0,
-            first_lba: part.first_lba,
-            lbas: part.lba_count(),
+            index: part.index(),
+            type_guid: part.type_guid().0,
+            unique_guid: part.unique_guid().0,
+            first_lba: part.first_lba(),
+            lbas: part.lba_count().get(),
             state: match holder {
                 None => PartState::Free,
                 Some(crate::block::Holder::Kernel(_)) => PartState::Kernel,

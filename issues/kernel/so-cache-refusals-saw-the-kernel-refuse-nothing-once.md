@@ -13,5 +13,7 @@ alone both times` in the same job.
 The verdict: no "byte budget; refused" line — the kernel refused nothing:
 twelve 2 MiB images entered a cache whose test budget refuses at the second.
 
-Owed: a mechanism. Nobody has one. `src/redlist.rs` quarantines the name until
-then.
+Owed: a mechanism. Nobody has one.
+
+**Exit condition.** The cause of the missing refusal is fixed, and
+`so_cache_refusals` green on CI's KVM `guest` shards. Owner: orchestrator.

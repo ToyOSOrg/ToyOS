@@ -66,9 +66,8 @@ static DATA: Lock<Vec<Candidate>> = Lock::new(Vec::new());
 /// partition claim is looked for on. Taken alone.
 static DISKS: Lock<Vec<(Handle, u32)>> = Lock::new(Vec::new());
 
-/// Every entry each disk's table stated when [`probe`] read it, for the
-/// inventory: a table is outside every partition, so nothing a holder writes
-/// changes it, and nothing here reads a disk again to answer.
+/// A table is outside every partition, so nothing a holder writes changes it,
+/// and nothing here reads a disk again to answer.
 static LISTED: Lock<Vec<Listed>> = Lock::new(Vec::new());
 
 /// One disk's entries, as [`probe`] listed them.
@@ -83,9 +82,8 @@ struct Listed {
 /// when it is probed.
 const MAX_LISTED: usize = 128;
 
-/// Every GPT entry on every disk [`probe`] read, and who holds exactly its
-/// span now, from the block layer's holds. A partition that is not whole
-/// blocks is held by nothing, since no view can be made of it.
+/// A partition that is not whole blocks is held by nothing, since no view can
+/// be made of it.
 pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
     let listed: Vec<(Handle, u32, Vec<Partition>)> = LISTED
         .lock()
@@ -95,7 +93,7 @@ pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
     let mut out = Vec::new();
     for (handle, lba_bytes, parts) in listed {
         for part in parts {
-            let holder = match crate::block::span_blocks(part.first_lba, part.lba_count(), lba_bytes) {
+            let holder = match crate::block::span_blocks(part.first_lba(), part.lba_count().get(), lba_bytes) {
                 Ok((first_block, blocks)) => handle.holder(first_block, first_block + blocks),
                 Err(_) => None,
             };
@@ -108,19 +106,31 @@ pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
 /// List `handle`'s table into [`LISTED`], once per disk.
 fn list(sectors: &mut DeviceSectors<'_>, handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
-    let mut found = alloc::vec![BLANK; MAX_LISTED];
+    let mut found = alloc::vec![None; MAX_LISTED];
     // A disk with no table this kernel parses carries no partition, and
     // `collect` says so, naming the refusal.
     let Ok(scan) = toyos_gpt::list(sectors, &mut found) else { return };
-    if scan.matched as usize > scan.listed {
+    if scan.matched as usize > MAX_LISTED {
         log!(
-            "gpt: device {id} carries {} partitions and the inventory lists {}",
-            scan.matched,
-            scan.listed
+            "gpt: device {id} carries {} partitions and the inventory lists {MAX_LISTED}",
+            scan.matched
         );
     }
-    found.truncate(scan.listed);
-    LISTED.lock().push(Listed { handle: handle.clone(), lba_bytes, parts: found });
+    let mut parts = Vec::new();
+    for entry in found.into_iter().flatten() {
+        match entry {
+            Ok(part) => parts.push(part),
+            Err(unplaced) => log!(
+                "gpt: device {id} states entry {} ({}) at LBA {}..={}, whose blocks are no \
+                 partition on it, and the inventory does not list it",
+                unplaced.index,
+                unplaced.unique_guid,
+                unplaced.first,
+                unplaced.last
+            ),
+        }
+    }
+    LISTED.lock().push(Listed { handle: handle.clone(), lba_bytes, parts });
 }
 
 /// How many partitions of one ToyOS type one device may offer this kernel.
@@ -216,13 +226,13 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
     };
 
     // Firmware's and the table's accounts must agree; a mismatch refuses, never repairs.
-    let part = found.partition;
-    if part.first_lba != firmware.start_lba || part.lba_count() != firmware.blocks {
+    let part = found.partition();
+    if part.first_lba() != firmware.start_lba || part.lba_count().get() != firmware.blocks {
         log!(
             "gpt: device {id} puts {} at LBA {}+{} but firmware said {}+{} — not treating it as \
              the boot volume",
-            part.unique_guid,
-            part.first_lba,
+            part.unique_guid(),
+            part.first_lba(),
             part.lba_count(),
             firmware.start_lba,
             firmware.blocks
@@ -233,8 +243,8 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
     let volume = Volume {
         device: id,
         lba_bytes,
-        start_lba: part.first_lba,
-        blocks: part.lba_count(),
+        start_lba: part.first_lba(),
+        blocks: part.lba_count().get(),
     };
 
     let mut resolved = RESOLVED.lock();
@@ -248,9 +258,9 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
                 volume.start_lba,
                 volume.blocks,
                 lba_bytes,
-                part.index,
-                found.used_entries,
-                found.disk_guid,
+                part.index(),
+                found.used_entries(),
+                found.disk_guid(),
                 if part.is_efi_system() { "" } else { " — and its type is not ESP" }
             );
             *resolved = Resolution::Found { boot: volume, log };
@@ -283,7 +293,7 @@ fn collect(
     ty: Guid,
     into: &Lock<Vec<Candidate>>,
 ) {
-    let mut found = [BLANK; MAX_PER_DEVICE];
+    let mut found = [None; MAX_PER_DEVICE];
     let scan = match toyos_gpt::locate_type(sectors, ty, &mut found) {
         Ok(scan) => scan,
         Err(e) => {
@@ -291,38 +301,38 @@ fn collect(
             return;
         }
     };
-    if scan.matched as usize > scan.listed {
+    if scan.matched as usize > MAX_PER_DEVICE {
         log!(
-            "gpt: device {id} carries {} {what} partitions and this kernel looks at {}",
-            scan.matched,
-            scan.listed
+            "gpt: device {id} carries {} {what} partitions and this kernel looks at {MAX_PER_DEVICE}",
+            scan.matched
         );
     }
-    for candidate in &found[..scan.listed] {
-        let checked = match toyos_gpt::locate(sectors, candidate.unique_guid) {
-            Ok(located) => located.partition,
+    // An entry whose blocks are no partition was logged once, by `list`.
+    for candidate in found.iter().flatten().flatten() {
+        let checked = match toyos_gpt::locate(sectors, candidate.unique_guid()) {
+            Ok(located) => located.partition(),
             Err(e) => {
                 log!(
                     "gpt: device {id} names a {what} {} its own table then refuses: {e:?}",
-                    candidate.unique_guid
+                    candidate.unique_guid()
                 );
                 continue;
             }
         };
         log!(
             "gpt: device {id} carries the {what} candidate {} at LBA {}+{}",
-            checked.unique_guid,
-            checked.first_lba,
+            checked.unique_guid(),
+            checked.first_lba(),
             checked.lba_count()
         );
         into.lock().push(Candidate {
             volume: Volume {
                 device: id,
                 lba_bytes,
-                start_lba: checked.first_lba,
-                blocks: checked.lba_count(),
+                start_lba: checked.first_lba(),
+                blocks: checked.lba_count().get(),
             },
-            guid: checked.unique_guid,
+            guid: checked.unique_guid(),
         });
     }
 }
@@ -334,6 +344,43 @@ pub struct Claimable {
     pub unique: Guid,
 }
 
+/// Partitions no claim may take whatever a table says: ROOT's source, when
+/// the boot could not hold its span (`rootfs::hold_source`).
+static WITHHELD: Lock<Vec<Guid>> = Lock::new(Vec::new());
+
+/// Refuse every claim of `guid` for the machine's life, as the kernel's.
+pub fn withhold(guid: PartGuid) {
+    WITHHELD.lock().push(Guid(guid.0));
+}
+
+/// Where one partition is on the disks that answered, and which did not.
+pub struct Sought {
+    /// The one partition carrying the GUID, `None` where no table that
+    /// answered carries it, or why the tables that answered name no one.
+    pub found: Result<Option<Claimable>, Unnamed>,
+    /// The disks that did not answer a read of their table, of which neither
+    /// "none" nor "one" is known.
+    pub silent: Vec<DeviceId>,
+}
+
+/// Why the tables that answered name no one partition for a GUID.
+#[derive(Clone, Copy, Debug)]
+pub enum Unnamed {
+    /// Carried twice, on one disk or across two.
+    Ambiguous,
+    /// Named by a table that refuses it.
+    Unusable,
+}
+
+impl From<Unnamed> for ClaimError {
+    fn from(unnamed: Unnamed) -> Self {
+        match unnamed {
+            Unnamed::Ambiguous => ClaimError::Ambiguous,
+            Unnamed::Unusable => ClaimError::Unusable,
+        }
+    }
+}
+
 /// The one partition on this machine whose unique GUID is `guid`, past the
 /// range and overlap checks `toyos_gpt::locate` makes (UEFI 2.10 §5.3.3).
 ///
@@ -341,20 +388,45 @@ pub struct Claimable {
 /// partition, so no claim can write one. `Absent` for a GUID no table carries
 /// and for the zero GUID, which GPT gives every unused entry; `Ambiguous` for
 /// one carried twice, on one disk or across two; `Unusable` for a disk that
-/// did not answer, since then neither "none" nor "one" is known.
+/// did not answer, since then neither "none" nor "one" is known;
+/// `KernelDriven` for a GUID [`withhold`] named.
 pub fn claimable(guid: PartGuid) -> Result<Claimable, ClaimError> {
     let target = Guid(guid.0);
     if target.is_zero() {
         return Err(ClaimError::Absent);
+    }
+    if WITHHELD.lock().contains(&target) {
+        log!("partclaim: {target} is where ROOT was read from, and the kernel withholds it");
+        return Err(ClaimError::KernelDriven);
+    }
+    let sought = seek(guid);
+    let found = sought.found?;
+    if !sought.silent.is_empty() {
+        return Err(ClaimError::Unusable);
+    }
+    found.ok_or(ClaimError::Absent)
+}
+
+/// Look for `guid` on every disk [`probe`] read, reading past a disk that does
+/// not answer and naming it.
+pub fn seek(guid: PartGuid) -> Sought {
+    let target = Guid(guid.0);
+    let mut silent = Vec::new();
+    if target.is_zero() {
+        return Sought { found: Ok(None), silent };
     }
     let disks = DISKS.lock().clone();
     let mut found: Option<Claimable> = None;
     for (handle, lba_bytes) in &disks {
         let id = handle.device_id();
         let part = match toyos_gpt::locate(&mut DeviceSectors::new(handle, *lba_bytes), target) {
-            Ok(located) => located.partition,
+            Ok(located) => located.partition(),
             Err(e) => {
-                table_refused(id, target, e)?;
+                match table_refused(id, target, e) {
+                    Ok(Unread::Lacks) => {}
+                    Ok(Unread::Silent) => silent.push(id),
+                    Err(refused) => return Sought { found: Err(refused), silent },
+                }
                 continue;
             }
         };
@@ -364,37 +436,45 @@ pub fn claimable(guid: PartGuid) -> Result<Claimable, ClaimError> {
                  partition",
                 first.volume.device
             );
-            return Err(ClaimError::Ambiguous);
+            return Sought { found: Err(Unnamed::Ambiguous), silent };
         }
         found = Some(Claimable {
             volume: Volume {
                 device: id,
                 lba_bytes: *lba_bytes,
-                start_lba: part.first_lba,
-                blocks: part.lba_count(),
+                start_lba: part.first_lba(),
+                blocks: part.lba_count().get(),
             },
-            unique: part.unique_guid,
+            unique: part.unique_guid(),
         });
     }
-    found.ok_or(ClaimError::Absent)
+    Sought { found: Ok(found), silent }
 }
 
-/// What a table's refusal means for a claim: `Ok` for a disk that does not
-/// carry the partition, or the claim's refusal.
-fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<(), ClaimError> {
+/// A disk whose table gave no partition for a GUID, and no refusal.
+enum Unread {
+    /// Its table does not carry the GUID.
+    Lacks,
+    /// It did not answer a read of its table.
+    Silent,
+}
+
+/// What a table's refusal means for a claim: a disk that does not carry the
+/// partition, one that did not answer, or the claim's refusal.
+fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<Unread, Unnamed> {
     match e {
-        GptError::NotFound { .. } => Ok(()),
+        GptError::NotFound { .. } => Ok(Unread::Lacks),
         GptError::ReadFailed(lba) => {
             log!("partclaim: device {id} did not answer a read of LBA {lba} while looking for {target}");
-            Err(ClaimError::Unusable)
+            Ok(Unread::Silent)
         }
         GptError::DuplicateUniqueGuid { first, second } => {
             log!("partclaim: device {id} carries {target} in entries {first} and {second}");
-            Err(ClaimError::Ambiguous)
+            Err(Unnamed::Ambiguous)
         }
         GptError::PartitionRange { .. } | GptError::PartitionOverlap { .. } => {
             log!("partclaim: device {id} names {target} and its own table refuses it: {e:?}");
-            Err(ClaimError::Unusable)
+            Err(Unnamed::Unusable)
         }
         // No table this kernel parses: a disk that carries no partition, which
         // is what `probe` concluded of it too.
@@ -412,37 +492,28 @@ fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<(), ClaimErr
         | GptError::EntryArrayTooBig { .. }
         | GptError::EntryArrayMisplaced { .. }
         | GptError::EntryArrayCrc { .. }
-        | GptError::UsableRangeCoversBackup { .. } => Ok(()),
+        | GptError::UsableRangeCoversBackup { .. } => Ok(Unread::Lacks),
     }
 }
-
-/// A slot [`toyos_gpt::locate_type`] has not filled in.
-const BLANK: Partition = Partition {
-    index: 0,
-    type_guid: Guid::ZERO,
-    unique_guid: Guid::ZERO,
-    first_lba: 0,
-    last_lba: 0,
-};
 
 /// The log partition on the device already proven to carry the boot partition, or `None`.
 fn locate_log(sectors: &mut DeviceSectors<'_>, id: DeviceId, lba_bytes: u32) -> Option<Volume> {
     let target = LOG_GUID.lock().expect("gpt::init runs before any device is probed");
     match toyos_gpt::locate(sectors, target) {
         Ok(found) => {
-            let part = found.partition;
+            let part = found.partition();
             log!(
                 "gpt: device {id} carries the log partition {target} at LBA {}+{}, entry {} of {}",
-                part.first_lba,
+                part.first_lba(),
                 part.lba_count(),
-                part.index,
-                found.used_entries
+                part.index(),
+                found.used_entries()
             );
             Some(Volume {
                 device: id,
                 lba_bytes,
-                start_lba: part.first_lba,
-                blocks: part.lba_count(),
+                start_lba: part.first_lba(),
+                blocks: part.lba_count().get(),
             })
         }
         Err(e) => {

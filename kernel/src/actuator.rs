@@ -187,6 +187,13 @@ actuators! {
     /// and `mmap` staged inside the copy. Judged by `user_copy_races_munmap`.
     copy_meets_a_remap = "copy-meets-a-remap";
 
+    /// Hold a thread spawn whose argument carries `loader::rebase_window`'s
+    /// mark between its TLS block being given an address and the block's
+    /// pointers being rebased to it: where the process can already reach the
+    /// block, until a sibling has stored into its DTV; where it cannot, it
+    /// says so. Judged by `tls_rebase_window`.
+    tls_rebase_window = "tls-rebase-window";
+
     /// Stall the bind of a disk that arrives while another is held for its
     /// device, for less than `usb-slow-return` does, and leave every transfer
     /// of the operation the held call sends again on it unanswered, once, each
@@ -244,9 +251,9 @@ actuators! {
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
-    /// Run the first attempt of every block operation `object::ops::until_answered`
-    /// retries — `SYS_FSYNC`, a partition transfer — under an operation that is
-    /// already over.
+    /// Run the first attempt of each run `object::ops::until_answered` retries —
+    /// a file's `SYS_FSYNC`, a claimed partition's read, write or flush — under an
+    /// operation that is already over, once per file and per partition and kind.
     fsync_budget_spent = "fsync-budget-spent";
 
     /// Make the deadman of every run `object::ops::until_answered` makes already
@@ -395,6 +402,12 @@ actuators! {
     /// stop did not stop.
     quiesce_late_word = "quiesce-late-word";
 
+    /// Queue one console holder's line once the stop has stopped every holder,
+    /// and keep `klogd` off the queue from the stop's claim on: a line still queued
+    /// at the stop with `klogd` behind it, which otherwise only a `klogd` slower
+    /// than `logd` stages. Judged by `quiesce_stops_the_machine`.
+    console_queue_at_the_stop = "console-queue-at-the-stop";
+
     /// Make the shutdown's bounded acquisitions of the xHCI controller lock
     /// find it busy for their whole bound — the negative control on "no
     /// shutdown path may fail to reset". A boot armed with it must still hand
@@ -522,6 +535,12 @@ actuators! {
     /// claim meets a disk that does not answer a read of its table. Judged by
     /// `partition_claim_gives_up`.
     partclaim_table_unanswered = "partclaim-table-unanswered";
+
+    /// Refuse every read of device block 0 of each NVMe disk across
+    /// `rootfs::hold_source` alone, so ROOT's hold finds the disk carrying it
+    /// silent and withholds its GUID, and the disk answers every read after.
+    /// Judged by `partition_claim_gives_up`.
+    partclaim_root_withheld = "partclaim-root-withheld";
 
     /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";

@@ -15,23 +15,11 @@ FAIL hda_tone: 1 mid-tone silences in the capture: total 1 [1p×1]
         the entry covers ["the captured tone is not one sine"]
 ```
 
-The `EXPECTED_FAILURES` entry does what it is supposed to: it pins the assertion
-rather than the test, so a *second* defect in the same test still reds the run
-and says which. What is red is the mid-tone-silence assertion — a gap in the
-capture, which is gate A's harm verdict — and not #88's spectral one. The entry
-still says so at the site: it names only `"the captured tone is not one sine"`,
-beside a comment listing "no mid-tone silence" among the things that red the run
-"because each of those is the milestone rather than the open question".
+**What has changed since, and what has not.** `hda_tone` is `Tier::Nightly` for
+`Why::TimerAnchored` (`src/tiers.rs`), so a plain `cargo test` no longer runs
+it and a landing whose gate is `cargo test` no longer meets this red at all.
 
-**What has changed since, and what has not.** Two things narrow the harm this
-was filed for. `hda_tone` is `Tier::Nightly` for `Why::TimerAnchored`
-(`src/tiers.rs`), so a plain `cargo test` no longer runs it and a landing whose
-gate is `cargo test` no longer meets this red at all; and `src/redlist.rs`
-carries rows for the name — the dev-host-alone one sourced here retired on
-3 of 3 green alone on 2026-09-04, and one at 4 of 5 on CI — so an agent who
-does meet it is told whose it is rather than reading it as theirs.
-
-Neither touches the verdict, and the verdict was owed a fresh sample: every
+That doesn't touch the verdict, and the verdict was owed a fresh sample: every
 capture behind it had gone through QEMU's 48000→44100 resampler, since removed.
 
 **Re-judged 2026-08-29, and it stands.** On the current instrument (QEMU

@@ -26,9 +26,6 @@
 //! breach, and the eased-law interlude between the two regimes are in the
 //! history; `--pr` remains the local half either way.
 //!
-//! One rule gates a branch here and in `cargo run -- --ci abi-split` alike: the
-//! published crates' versions (`crate::sdkversion`).
-//!
 //! Nothing here rewrites history and nothing pushes `main`.
 
 use std::fs;
@@ -113,8 +110,6 @@ fn report(outcome: Result<String, String>) {
 fn prepare(root: &Path) -> Result<Prepared, String> {
     let branch = preflight(root)?;
     let mut lines = vec![sync(root)?];
-
-    lines.push(crate::sdkversion::judge(root, "origin/main")?);
 
     let (merged, line) = merge_base_into_branch(root, &branch)?;
     lines.push(line);

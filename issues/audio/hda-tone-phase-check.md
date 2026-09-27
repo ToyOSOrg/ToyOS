@@ -7,13 +7,10 @@ task: 88
 
 # HDA: the captured tone is not one sine
 
-**This is the write-up `tests/toyos.rs`'s `EXPECTED_FAILURES` names for `hda_tone`.** Do not delete it without moving that pointer.
-
 `hda_tone` plays the same 3.0 s 440 Hz tone the virtio arm plays, out of an
 `intel-hda` controller soundd drives itself, and the capture comes back with
-**8 to 16 phase discontinuities** where the virtio arm has none. Declared in
-`EXPECTED_FAILURES` against the message "the captured tone is not one sine";
-every other assertion that test makes still reds the run.
+**8 to 16 phase discontinuities** where the virtio arm has none. Every other
+assertion that test makes still reds the run.
 
 What is *not* wrong, measured on this host (QEMU 11.0.3, 2026-08-07): the tone
 is present at full amplitude, there is **no mid-tone silence at all** (`gaps
@@ -103,3 +100,7 @@ fresh one holds 139,253-142,325 of the 144,256 submitted frames, so the
 adjacent-frame *pairs* with |period| in the hundreds, not the 118-frame
 clusters. And the load dependence is sharp where it used to be a correlation:
 0 of 8 alone against 3 of 11 beside other guests, same tree, same hour.
+
+**Exit condition.** The adjacent-frame-pair breaks' cause is fixed, and
+`hda_tone` reads 0 phase breaks beside other guests on the dev host and on
+CI's KVM shards. Owner: orchestrator.

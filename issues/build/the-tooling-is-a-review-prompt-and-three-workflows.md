@@ -16,5 +16,5 @@ and the gates that held them go.
   directory per hash, never mutated; then the sysroot claim, `src/buildlock.rs`
   and `src/worktree.rs` go.
 - The nine workflows become three — `pr`, `nightly`, `publish`; then
-  `a5b25a75^:src/mergehealth.rs`, `landing.yml`'s `abi-split` and `gate-stage` go, and the
-  ABI-lands-alone rule moves into the review prompt.
+  `a5b25a75^:src/mergehealth.rs` and `gate-stage` go, and the ABI-lands-alone
+  rule moves into the review prompt.

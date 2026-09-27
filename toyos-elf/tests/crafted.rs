@@ -205,7 +205,7 @@ fn an_entry_point_outside_the_image_is_refused() {
     assert_eq!(refused(wild), Error::EntryOutsideImage);
 
     let last_byte = Elf::honest(0x1000).entry(0xFFF).build();
-    assert_eq!(accepted(last_byte).entry, 0xFFF);
+    assert_eq!(accepted(last_byte).entry().get(), 0xFFF);
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn a_header_naming_a_vaddr_outside_the_image_is_refused_by_name() {
 #[test]
 fn tls_bss_may_extend_past_the_image() {
     let bytes = Elf::honest(0x1000).ph(Phdr::tls(0xF00, 0x100, 0x9000, 8)).build();
-    assert_eq!(accepted(bytes).tls.unwrap().memsz, 0x9000);
+    assert_eq!(accepted(bytes).tls().unwrap().memsz(), 0x9000);
 }
 
 #[test]
@@ -240,18 +240,21 @@ fn tls_alignment_is_a_power_of_two_within_a_page_or_it_is_refused() {
     }
     for align in [0u64, 1, 8, 64, 2 * 1024 * 1024] {
         let bytes = Elf::honest(0x1000).ph(Phdr::tls(0, 0, 8, align)).build();
-        assert_eq!(accepted(bytes).tls.unwrap().align, align, "p_align {align:#x}");
+        assert_eq!(accepted(bytes).tls().unwrap().align(), align, "p_align {align:#x}");
     }
 }
 
-/// Absent TLS is `None`, never a zero `memsz`: a module with a `PT_TLS` of zero
-/// size still gets a DTV slot, and telling the two apart is what the sentinel
-/// could not do.
 #[test]
 fn a_zero_size_tls_segment_is_present_not_absent() {
     let with = Elf::honest(0x1000).ph(Phdr::tls(0, 0, 0, 8)).build();
-    assert!(accepted(with).tls.is_some());
-    assert!(accepted(Elf::honest(0x1000).build()).tls.is_none());
+    assert!(accepted(with).tls().is_some());
+    assert!(accepted(Elf::honest(0x1000).build()).tls().is_none());
+}
+
+#[test]
+fn only_a_tls_segment_with_bytes_is_occupied() {
+    assert_eq!(tls_segment(0).occupied(), None);
+    assert_eq!(tls_segment(1).occupied(), Some(tls_segment(1)));
 }
 
 // ── The section header table, which is optional ─────────────────────────
@@ -260,13 +263,13 @@ fn a_zero_size_tls_segment_is_present_not_absent() {
 fn a_section_table_the_loader_cannot_index_is_dropped_not_refused() {
     for entsize in [0u16, 32, 63, 65, 128] {
         let layout = accepted(Elf::honest(0x1000).sections(0x100, 4, entsize).build());
-        assert!(layout.section_headers.is_none(), "e_shentsize {entsize}");
+        assert!(layout.section_headers().is_none(), "e_shentsize {entsize}");
     }
-    assert!(accepted(Elf::honest(0x1000).sections(0, 4, 64).build()).section_headers.is_none());
-    assert!(accepted(Elf::honest(0x1000).sections(0x100, 0, 64).build()).section_headers.is_none());
+    assert!(accepted(Elf::honest(0x1000).sections(0, 4, 64).build()).section_headers().is_none());
+    assert!(accepted(Elf::honest(0x1000).sections(0x100, 0, 64).build()).section_headers().is_none());
 
     let good = accepted(Elf::honest(0x1000).sections(0x100, 4, 64).build());
-    assert_eq!(good.section_headers.unwrap().byte_len(), 256);
+    assert_eq!(good.section_headers().unwrap().byte_len(), 256);
 }
 
 // ── Derived answers about a valid layout ────────────────────────────────
@@ -365,9 +368,9 @@ fn segment_flags_survive_the_parse() {
             .ph(Phdr::load(0x1000, 0x1000, 0x1000, 0x1000, PF_R | PF_W))
             .build(),
     );
-    let text = layout.segments()[0].flags;
+    let text = layout.segments()[0].flags();
     assert!(text.readable() && text.executable() && !text.writable());
-    let data = layout.segments()[1].flags;
+    let data = layout.segments()[1].flags();
     assert!(data.readable() && data.writable() && !data.executable());
 }
 

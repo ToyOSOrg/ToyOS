@@ -3,24 +3,28 @@ use alloc::sync::Arc;
 use crate::file_backing::FileBacking;
 use crate::mm::policy::Prot;
 use crate::mm::PAGE_2M;
+use toyos_userbound::Window;
 
 /// The stack extends upward to the PIE base, so no usable VA space exists above it.
 pub const ALLOC_CEILING: u64 = STACK_BASE;
-
-/// Guards against NULL-ish addresses below this floor.
-pub fn alloc_floor() -> u64 {
-    if crate::actuator::test_tiny_va() {
-        ALLOC_CEILING - 256 * 1024 * 1024
-    } else {
-        0x0002_0000_0000 // 8 GB
-    }
-}
 
 /// RSP starts at this address plus `USER_STACK_SIZE`.
 pub const STACK_BASE: u64 = 0x00FF_FF80_0000;
 
 /// Guard page between allocations.
-pub const GUARD_SIZE: u64 = PAGE_2M;
+const GUARD_SIZE: u64 = PAGE_2M;
+
+/// The floor at 8 GB.
+const WINDOW: Window = Window::new(0x0002_0000_0000, ALLOC_CEILING, GUARD_SIZE);
+/// The `test-tiny-va` actuator's: 256 MiB under the ceiling, so a process can
+/// run out of address space before it runs out of memory.
+const TINY_WINDOW: Window = Window::new(ALLOC_CEILING - 256 * 1024 * 1024, ALLOC_CEILING, GUARD_SIZE);
+
+/// Where `find_gap` places, and the bound every length from userland is
+/// refused against before any sum is taken on it.
+pub fn window() -> Window {
+    if crate::actuator::test_tiny_va() { TINY_WINDOW } else { WINDOW }
+}
 
 
 /// `Mapped` has no `prot`: its pages are already installed, so nothing reads one.

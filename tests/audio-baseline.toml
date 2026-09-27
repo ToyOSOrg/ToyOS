@@ -40,6 +40,19 @@
 #                     the count site in soundd for the two conditions.
 #   underruns         Periods submitted with no client audio behind them.
 #
+# VOID AS A TIMING SAMPLE UNDER QEMU 11.1.1. `.github/qemu-version` declares
+# 11.1.1 and the sample below was measured on 11.1.0, so every comparison of a
+# fresh `max_wake_lat_us` or `wakes` against it is cross-instrument and decides
+# nothing, on the dev host and on CI alike. No re-record is taken for the move:
+# timing verdicts belong on metal, and the dev host is not a quiet instrument.
+# The harm statistics are the exception, because what they compare against is
+# a sample of zeros — no dropout, no underrun — which is the quality bar on any
+# instrument, so a harm red still counts. CI's `audio` shards neither re-sample
+# nor skip: they compare a fresh KVM sample against this one, as they already
+# did across the host and the accelerator
+# (`issues/audio/gate-a-has-no-runner-baseline.md`), and now across the QEMU
+# version as well; a timing red from them is read against this paragraph.
+#
 # RE-RECORDED 2026-08-15 on tree 4c7d809, justified by an instrument change:
 # the dev host's QEMU moved 11.0.3 -> 11.1.0 (owner-approved upgrade; CI's
 # runner had already moved and `.github/qemu-version` declares 11.1.0), and the

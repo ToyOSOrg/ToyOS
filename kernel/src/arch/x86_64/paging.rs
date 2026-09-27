@@ -20,6 +20,7 @@ use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
 use crate::sync::Lock;
 use crate::vma::{self, Occupancy, Region, RegionKind};
+use toyos_userbound::PageSpan;
 use crate::MemoryMapEntry;
 
 const PAGE_PRESENT: u64 = 1 << 0;
@@ -372,10 +373,6 @@ pub struct AddressSpace {
     pcid: PcidHandle,
 }
 
-fn align_up_2m(v: u64) -> u64 {
-    (v + PAGE_2M - 1) & !(PAGE_2M - 1)
-}
-
 impl AddressSpace {
     /// Create a new user address space with kernel entries shallow-copied, or
     /// `None` when every user PCID is held by a live space.
@@ -598,45 +595,19 @@ impl AddressSpace {
         Some((crate::mm::DirectMap::from_phys(page_phys + offset), rights))
     }
 
-    /// Find a free gap of at least `size` bytes (2MB-aligned), searching
-    /// top-down and never below the floor: a region the kernel placed under
-    /// it, the clock page, bounds no gap.
-    fn find_gap(&self, size: u64) -> Option<UserAddr> {
-        let aligned = align_up_2m(size);
-        let total = aligned + vma::GUARD_SIZE;
-        let floor = vma::alloc_floor();
-
-        let mut top = vma::ALLOC_CEILING;
-        for (&start, region) in self
-            .regions
-            .range(..UserAddr::new(vma::ALLOC_CEILING))
-            .rev()
-        {
-            let region_end = align_up_2m(start.raw() + region.size);
-            if region_end > top {
-                top = start.raw();
-                continue;
-            }
-            if top.saturating_sub(region_end.max(floor)) >= total {
-                return Some(UserAddr::new(top - total));
-            }
-            top = start.raw();
-            if top <= floor {
-                return None;
-            }
-        }
-        // Gap below all regions
-        if top >= total + floor {
-            return Some(UserAddr::new(top - total));
-        }
-        None
+    /// Where `span` goes, top-down and never below the floor: a region the
+    /// kernel placed under it, the clock page, bounds no gap.
+    fn find_gap(&self, span: PageSpan) -> Option<UserAddr> {
+        let taken = self.regions.iter().rev().map(|(start, region)| (start.raw(), region.size));
+        vma::window().gap(span, taken).map(UserAddr::new)
     }
 
-    /// Allocate a virtual address range and register the region.
+    /// Allocate a virtual address range and register the region. `size` is
+    /// made a [`PageSpan`] before anything is summed on it.
     pub fn alloc_region(&mut self, size: u64, kind: RegionKind) -> Option<UserAddr> {
-        let aligned = align_up_2m(size);
-        let addr = self.find_gap(aligned)?;
-        self.regions.insert(addr, Region { size: aligned, kind });
+        let span = vma::window().span(size)?;
+        let addr = self.find_gap(span)?;
+        self.regions.insert(addr, Region { size: span.bytes(), kind });
         Some(addr)
     }
 
@@ -648,12 +619,13 @@ impl AddressSpace {
         prot: Prot,
         cache: CachePolicy,
     ) -> Option<(UserAddr, u64)> {
-        let aligned = align_up_2m(size);
         assert!(
             phys & (PAGE_2M - 1) == 0,
             "alloc_and_map: phys {phys:#x} not 2MB-aligned"
         );
-        let addr = self.find_gap(aligned)?;
+        let span = vma::window().span(size)?;
+        let addr = self.find_gap(span)?;
+        let aligned = span.bytes();
         self.regions.insert(
             addr,
             Region {
