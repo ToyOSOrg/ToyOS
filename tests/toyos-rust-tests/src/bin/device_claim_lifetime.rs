@@ -215,7 +215,7 @@ fn spawn_with_slot_map(handle: toyos_abi::RawHandle) -> Result<toyos_abi::RawHan
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image_ptr: 0,
+            image: 0,
             image_len: 0,
         })
     };

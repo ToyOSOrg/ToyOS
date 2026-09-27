@@ -134,9 +134,14 @@ fn spawn_err(name: &str, bytes: &[u8]) -> SyscallError {
     by_path
 }
 
-/// A raw spawn of `path`, handing `image` over whole when it is not empty.
+/// A raw spawn of `path`, handing `image` over in a memory object of this
+/// process's own when it is not empty.
 fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
     let argv = format!("{path}\0");
+    let object = toyos::shm::SharedMemory::create(image.len().max(1)).expect("a memory object for the image");
+    // SAFETY: the region is at least `image.len()` long, mapped here, and this
+    // process's alone; `image` is not in it.
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), object.as_ptr(), image.len()) };
     unsafe {
         syscall::spawn(&SpawnArgs {
             argv_ptr: argv.as_ptr() as u64,
@@ -151,7 +156,7 @@ fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image_ptr: image.as_ptr() as u64,
+            image: toyos::AsHandle::as_handle(&object).0 as u64,
             image_len: image.len() as u64,
         })
     }

@@ -50,7 +50,7 @@ use super::proc::{
     sys_endowments, sys_exit, sys_nanosleep, sys_process_open, sys_process_stats,
     sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
-use super::vm::{sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
+use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
 
 /// A number a deleted syscall used is retired, never reused.
 macro_rules! retired_syscalls {
@@ -185,6 +185,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_PIPE => sys_pipe(),
         SYS_SPAWN => {
             let Ok(args) = ctx.copy_in::<SpawnArgs>(UserAddr::new(a1)) else { return bad_addr };
+            // First, and nothing copied: the image is the caller's object, and
+            // an endowment below may move the caller's own handle to it.
+            let image = match args.image_len {
+                0 => None,
+                len => match shared_image(args.image, len) {
+                    Ok(image) => Some(alloc::sync::Arc::new(image) as alloc::sync::Arc<dyn crate::file_backing::FileBacking>),
+                    Err(refused) => return refused,
+                },
+            };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
                 Ok(cwd) => cwd,
@@ -229,15 +238,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 }
             } else {
                 alloc::vec::Vec::new()
-            };
-            // Last, because it is the one copy that can be large: every refusal
-            // above costs the caller nothing it must hand over again.
-            let image = match args.image_len {
-                0 => None,
-                len => match crate::file_backing::ImageBacking::copy_in(&ctx, UserAddr::new(args.image_ptr), len) {
-                    Ok(image) => Some(alloc::sync::Arc::new(image) as alloc::sync::Arc<dyn crate::file_backing::FileBacking>),
-                    Err(e) => return e.to_u64(),
-                },
             };
             let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
             sys_spawn(&argv, pending, cwd, env, image)
@@ -342,15 +342,14 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     None => return bad_addr,
                 },
             };
+            // Only named here: `sys_dlopen` answers a name this process holds
+            // before it looks at the object at all.
             let image = match a4 {
                 0 => None,
                 raw => {
                     let Some(at) = UserAddr::checked(raw) else { return bad_addr };
                     let Ok(image) = ctx.copy_in::<ImageRef>(at) else { return bad_addr };
-                    match crate::file_backing::ImageBacking::copy_in(&ctx, UserAddr::new(image.ptr), image.len) {
-                        Ok(image) => Some(image),
-                        Err(e) => return e.to_u64(),
-                    }
+                    Some(image)
                 }
             };
             // ctx carries the copy-out: sys_dlopen writes init_out only once the load succeeds.

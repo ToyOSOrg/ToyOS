@@ -140,7 +140,7 @@ fn spawn_in(cwd: &str) -> Result<i32, SyscallError> {
         labels_len: 0,
         cwd_ptr: cwd.as_ptr() as u64,
         cwd_len: cwd.len() as u64,
-        image_ptr: 0,
+        image: 0,
         image_len: 0,
     };
     // SAFETY: every pointer names a live local for the length beside it.

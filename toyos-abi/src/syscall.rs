@@ -393,22 +393,29 @@ pub struct SpawnArgs {
     /// statement**: the kernel never substitutes the caller's own.
     pub cwd_ptr: u64,
     pub cwd_len: u64,
-    /// The program's bytes, read whole by the caller, or `image_len` 0 for a
-    /// program the kernel opens at `argv[0]` itself. An image is copied at the
-    /// call and the child is paged from the copy; `argv[0]` names it and is
-    /// opened by nobody, and its libraries are found in `/system/lib` alone.
-    pub image_ptr: u64,
+    /// The program's bytes, in a shared memory object the caller made and
+    /// read the program into: `image` is a handle to it carrying `MAP`, and
+    /// `image_len` how many of its first bytes the program is — or 0, for a
+    /// program the kernel opens at `argv[0]` itself. `PermissionDenied` for a
+    /// handle without `MAP`; `InvalidArgument` for a length the object does not
+    /// hold, or an object that is no memory the kernel allocated. The object
+    /// stays the caller's: what the kernel reads of it, and when, is
+    /// `kernel/src/file_backing.rs`'s (`SharedImage`). `argv[0]` names the
+    /// program and is opened by nobody, and its libraries are found in
+    /// `/system/lib` alone.
+    pub image: u64,
     pub image_len: u64,
 }
 
 const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 112);
 
-/// A library's bytes, read whole by the caller, for `SYS_DLOPEN`'s fourth word:
-/// what [`SpawnArgs::image_ptr`] is to a spawn.
+/// A library's bytes in a shared memory object, for `SYS_DLOPEN`'s fourth
+/// word: what [`SpawnArgs::image`] and [`SpawnArgs::image_len`] are to a spawn.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ImageRef {
-    pub ptr: u64,
+    /// A handle to the object, carrying `MAP`.
+    pub handle: u64,
     pub len: u64,
 }
 
@@ -1913,12 +1920,13 @@ pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
     dl_open_with(path, 0)
 }
 
-/// Load a shared library whose bytes the caller read itself, under `name`: a
-/// library on a file server's volume, which the kernel cannot open. The kernel
-/// copies `image` at the call; a second load under the same name in this
-/// process answers the first's handle, as a path load does.
-pub fn dl_open_image(name: &[u8], image: &[u8]) -> Result<u64, SyscallError> {
-    let image = ImageRef { ptr: image.as_ptr() as u64, len: image.len() as u64 };
+/// Load a shared library whose bytes the caller read itself into the first
+/// `len` bytes of the shared memory object `image`, under `name`: a library on
+/// a file server's volume, which the kernel cannot open. The object is taken
+/// as [`SpawnArgs::image`] says; a load under a name this process already
+/// holds answers that library's handle, and the object is not asked about.
+pub fn dl_open_image(name: &[u8], image: RawHandle, len: u64) -> Result<u64, SyscallError> {
+    let image = ImageRef { handle: image.0 as u64, len };
     dl_open_with(name, &image as *const ImageRef as u64)
 }
 

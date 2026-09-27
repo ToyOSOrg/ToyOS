@@ -24,7 +24,7 @@ subsystem, and nothing ties the two together.
 
 No page this kernel faults in is read from a device any more: `/system` is the
 image the loader put in memory, a program or library a file server holds is
-copied into memory at its spawn or `dlopen` (`ImageBacking` in
+paged from the memory object its caller read it into (`SharedImage` in
 `kernel/src/file_backing.rs`), and `/tmp` is memory. What still refuses a
 page is a `/tmp` backing whose file was deleted (`revoke_selftest`), so a
 program that maps a `/tmp` file another deletes reaches it — reported as its

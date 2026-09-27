@@ -193,6 +193,20 @@ pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
     0
 }
 
+/// The first `len` bytes of the shared memory object `handle` names, as a
+/// program or library image; `Err` is the syscall's answer.
+pub(super) fn shared_image(handle: u64, len: u64) -> Result<crate::file_backing::SharedImage, u64> {
+    let Ok(raw) = u32::try_from(handle) else { return Err(SyscallError::InvalidArgument.to_u64()) };
+    let object = process::with_process_data(|data| {
+        data.handles.get::<crate::object::shm::SharedMemObject>(
+            toyos_abi::handle::RawHandle(raw),
+            toyos_abi::handle::Rights::MAP,
+        )
+    })
+    .map_err(|e| e.refuse())?;
+    crate::file_backing::SharedImage::over(object, len).map_err(|e| e.to_u64())
+}
+
 /// `image` is the library's bytes when the caller read them itself, and `path`
 /// then only names it: an image is loaded afresh and kept out of the shared
 /// cache, which answers for what a path holds and an image is no path's.
@@ -200,7 +214,7 @@ pub(super) fn sys_dlopen(
     ctx: &crate::user_ptr::SyscallContext,
     path: &str,
     init_out: Option<UserAddr>,
-    image: Option<crate::file_backing::ImageBacking>,
+    image: Option<ImageRef>,
 ) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
     let resolved = vfs::lock().resolve_absolute(&cwd, path);
@@ -220,13 +234,19 @@ pub(super) fn sys_dlopen(
     }
 
     let loaded = match image {
-        Some(image) => match crate::elf::load_shared_lib(&image) {
-            Ok((lib, _, _)) => Ok(lib),
-            Err(msg) => {
-                log!("dlopen: {}: {}", resolved, msg);
-                return SyscallError::Unknown.to_u64();
+        Some(image) => {
+            let image = match shared_image(image.handle, image.len) {
+                Ok(image) => image,
+                Err(refused) => return refused,
+            };
+            match crate::elf::load_shared_lib(&image) {
+                Ok((lib, _, _)) => Ok(lib),
+                Err(msg) => {
+                    log!("dlopen: {}: {}", resolved, msg);
+                    return SyscallError::Unknown.to_u64();
+                }
             }
-        },
+        }
         None => Err(()),
     };
     let lib = match loaded {

@@ -241,7 +241,7 @@ fn spawn_path(path: &str) -> Result<u64, SyscallError> {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image_ptr: 0,
+            image: 0,
             image_len: 0,
         })
     }
@@ -264,10 +264,21 @@ fn refused(name: &str, outcome: Result<u64, SyscallError>) {
     }
 }
 
-/// The same bytes handed to the kernel whole, as a spawn from a file server's
-/// volume hands them: the image route to the same loader.
+/// `bytes` in a memory object of this process's own, as a spawn from a file
+/// server's volume reads a program into one.
+fn image_object(bytes: &[u8]) -> toyos::shm::SharedMemory {
+    let object = toyos::shm::SharedMemory::create(bytes.len().max(1)).expect("a memory object for the image");
+    // SAFETY: the region is at least `bytes.len()` long, mapped here, and this
+    // process's alone; `bytes` is not in it.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), object.as_ptr(), bytes.len()) };
+    object
+}
+
+/// The same bytes handed to the kernel by handle, as a spawn from a file
+/// server's volume hands them: the image route to the same loader.
 fn spawn_image(path: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
     let argv = format!("{path}\0");
+    let object = image_object(bytes);
     unsafe {
         syscall::spawn(&SpawnArgs {
             argv_ptr: argv.as_ptr() as u64,
@@ -282,7 +293,7 @@ fn spawn_image(path: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image_ptr: bytes.as_ptr() as u64,
+            image: toyos::AsHandle::as_handle(&object).0 as u64,
             image_len: bytes.len() as u64,
         })
     }
@@ -318,9 +329,10 @@ fn dlopen_refused(name: &str, bytes: &[u8]) {
         }
         Err(e) => assert!(!format!("{e}").is_empty(), "{name}: dlopen error message"),
     }
-    // The same bytes handed over whole, under a name no path holds.
+    // The same bytes handed over by handle, under a name no path holds.
     let named = format!("/image/{name}");
-    if let Ok(handle) = syscall::dl_open_image(named.as_bytes(), bytes) {
+    let object = image_object(bytes);
+    if let Ok(handle) = syscall::dl_open_image(named.as_bytes(), toyos::AsHandle::as_handle(&object), bytes.len() as u64) {
         panic!("{name}: dlopen of the image loaded it as handle {handle}, and the loader must refuse it");
     }
 }

@@ -1,8 +1,11 @@
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bcachefs::Extent;
 use crate::block::BlockResult;
+use crate::object::shm::SharedMemObject;
 use crate::rootfs::MemoryImage;
+use toyos_abi::syscall::SyscallError;
 
 /// `mm::PAGE_SIZE`: `usize` for buffer sizing, `u64` for file offsets.
 const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
@@ -78,79 +81,51 @@ impl FileBacking for ReadOnlyBacking {
     }
 }
 
-/// An executable or library userland read and handed over whole: the bytes are
-/// copied into pages of the kernel's own at the call, so nothing its sender
-/// writes afterwards reaches a page this serves. What a program in `/apps` is
-/// spawned and paged from, since no file server's volume is the kernel's.
-pub struct ImageBacking {
-    pages: Vec<crate::mm::pmm::PhysPage>,
+/// An executable or library a caller read into a shared memory object of its
+/// own and handed over by handle: what a program in `/apps` is spawned and
+/// paged from, since no file server's volume is the kernel's.
+///
+/// **Nothing is copied at the call, and every page is copied once when it is
+/// read.** The object is the caller's memory, charged to it and alive while
+/// any process pages from it; its bytes stay the caller's to change. So each
+/// read takes one copy of the page into the reader's own buffer and what the
+/// loader keeps is that copy: a change after the hand-off reaches only pages
+/// not yet read, which is the caller changing its own child's program, and
+/// never a value the kernel checked and then read again.
+pub struct SharedImage {
+    object: Arc<SharedMemObject>,
     size: u64,
 }
 
-/// The most bytes one image may carry: the copy is kernel memory for the life
-/// of every process paged from it, and nothing charges that to the sender.
-pub const MAX_IMAGE_BYTES: u64 = 256 << 20;
-
-impl ImageBacking {
-    /// Copy `len` bytes of the caller's memory at `ptr`, a 2 MiB page's run at
-    /// a time, which is the most one user window maps contiguously.
-    pub fn copy_in(
-        ctx: &crate::user_ptr::SyscallContext,
-        ptr: crate::UserAddr,
-        len: u64,
-    ) -> Result<Self, toyos_abi::syscall::SyscallError> {
-        use toyos_abi::syscall::SyscallError;
-        const PAGE: u64 = crate::mm::PAGE_2M;
-        if len == 0 || len > MAX_IMAGE_BYTES {
+impl SharedImage {
+    /// The first `len` bytes of `object`. Refused unless they are ordinary
+    /// memory the kernel allocated — a device aperture is no program, and a
+    /// read of one is a device access — and the object holds them all.
+    pub fn over(object: Arc<SharedMemObject>, len: u64) -> Result<Self, SyscallError> {
+        if len == 0 || len > object.size() || object.ram().is_none() {
             return Err(SyscallError::InvalidArgument);
         }
-        let mut pages = Vec::new();
-        pages.try_reserve_exact(len.div_ceil(PAGE) as usize).map_err(|_| SyscallError::ResourceExhausted)?;
-        for _ in 0..len.div_ceil(PAGE) {
-            let page = crate::mm::pmm::alloc_page(crate::mm::pmm::Category::Elf)
-                .ok_or(SyscallError::ResourceExhausted)?;
-            pages.push(page);
-        }
-        let mut done = 0u64;
-        while done < len {
-            let at = ptr.raw().checked_add(done).ok_or(SyscallError::BadAddress)?;
-            // A run ends at the sender's page boundary or the image's own, whichever is first.
-            let run = (PAGE - at % PAGE).min(PAGE - done % PAGE).min(len - done);
-            let window = ctx.user_bytes(crate::UserAddr::new(at), run).ok_or(SyscallError::BadAddress)?;
-            let page = &pages[(done / PAGE) as usize];
-            // SAFETY: the page is this backing's own and 2 MiB long; `done % PAGE + run <= PAGE` by the `min` above.
-            let dst = unsafe {
-                core::slice::from_raw_parts_mut(
-                    page.direct_map().as_mut_ptr::<u8>().add((done % PAGE) as usize),
-                    run as usize,
-                )
-            };
-            window.read_at(0, dst);
-            done += run;
-        }
-        Ok(Self { pages, size: len })
+        Ok(Self { object, size: len })
     }
 }
 
-impl FileBacking for ImageBacking {
+impl FileBacking for SharedImage {
     fn read_page(&self, file_offset: u64, buf: &mut [u8; BLOCK_SIZE]) -> BlockResult {
         buf.fill(0);
         if file_offset >= self.size {
             return Ok(());
         }
-        const PAGE: u64 = crate::mm::PAGE_2M;
-        // Every backing is read a page at a time, and a 4 KiB-aligned page never crosses a 2 MiB one.
-        assert!(file_offset % BLOCK_SIZE_U64 == 0, "an image read at {file_offset:#x} is not page-aligned");
         let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
-        let page = &self.pages[(file_offset / PAGE) as usize];
-        // SAFETY: the page is this backing's, immutable since `copy_in`, and `file_offset % PAGE + valid <= PAGE`.
-        let src = unsafe {
-            core::slice::from_raw_parts(
-                page.direct_map().as_ptr::<u8>().add((file_offset % PAGE) as usize),
-                valid,
-            )
-        };
-        buf[..valid].copy_from_slice(src);
+        // SAFETY: `over` held `size` inside the object, which is one physically
+        // contiguous run the kernel allocated (`ram`) and keeps while `object`
+        // lives, so `file_offset + valid <= size` bytes from its direct-map
+        // address are mapped; `buf` is the reader's own and never the object.
+        // No reference is formed over the object's bytes, which its holders
+        // may be writing: this is the one fetch of each.
+        unsafe {
+            let from = self.object.phys().as_ptr::<u8>().add(file_offset as usize);
+            core::ptr::copy_nonoverlapping(from, buf.as_mut_ptr(), valid);
+        }
         Ok(())
     }
 
