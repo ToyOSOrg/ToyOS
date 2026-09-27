@@ -84,16 +84,14 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         .unwrap_or_else(|e| panic!("Failed to write {}: {e}", dest.display()));
 }
 
-/// Build toyos-libc as the `staticlib` a C program links, against the toolchain
-/// at `toolchain`, in `target_dir`, and lay out `arch`'s C sysroot there beside
-/// the Rust one (`clang::CSysroot`): [`CRATE`]'s headers as `include/`, the
-/// archive as `lib/libtoyos_c.a`.
+/// Lay out `arch`'s C sysroot in `toolchain` (`clang::CSysroot`).
 ///
-/// Not [`build`]'s archive of the same name, which is libc with [`FEATURES`],
+/// **Its `libtoyos_c.a` is libc's `staticlib`, and not the Rust sysroot's
+/// archive of the same name.** That one ([`build`]) is libc with `std-runtime`,
 /// linked into std, and carries no entry, allocator or panic handler because
 /// std brings its own. A C program has no Rust crate to bring them, and the
-/// `staticlib` carries all three — `_start` among them, which is why the
-/// driver names no start file — and the compiler's runtime builtins with them.
+/// `staticlib` carries all three — `_start` among them, which is why the driver
+/// needs no start file — and the compiler's runtime builtins with them.
 pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     let target = arch.userland();
     let output = Command::new("cargo")
@@ -104,9 +102,7 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         .env("RUSTUP_TOOLCHAIN", toolchain)
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
-        // Not from `userland/`, whose `-Dwarnings` refuses the warning libc
-        // without `std-runtime` carries
-        // (`issues/build/libc-without-std-runtime-warns.md`).
+        // Not `userland/`, whose `-Dwarnings` refuses libc-without-std-runtime-warns.
         .current_dir(root)
         .output()
         .unwrap_or_else(|e| panic!("run cargo for toyos-libc's staticlib: {e}"));

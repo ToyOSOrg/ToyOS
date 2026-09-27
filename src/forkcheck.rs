@@ -404,8 +404,7 @@ fn submodule_pins(rust: &Path) -> Vec<(String, String, String, String)> {
     let Some(branches) = git(&["config", "--file", ".gitmodules", "--get-regexp", r"^submodule\..*\.branch$"]) else {
         return Vec::new();
     };
-    // An entry that names a branch and cannot be read whole is refused by name:
-    // skipping it would report its fork as checked.
+    // Refused by name: a skipped entry would report its fork as checked.
     let mut out = Vec::new();
     for line in branches.lines() {
         let (key, branch) = line.split_once(' ').unwrap_or_else(|| panic!("{GITMODULES}: {line:?} is no `key value`"));

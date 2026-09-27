@@ -843,7 +843,7 @@ fn build_programs(
     let ws_target = userland_dir.join(format!("target/{target}/{PROFILE}"));
 
     // Every userland crate that compiles C compiles it with the toolchain's
-    // clang against the C sysroot beside the Rust one (`src/clang.rs`).
+    // clang against libc's C sysroot.
     let cc_env = crate::clang::CSysroot::of(&env.toolchain, arch).cc_env();
     let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 

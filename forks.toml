@@ -394,7 +394,7 @@ a PIE with no interpreter, the sysroot's `include/` and `lib/`, `-ltoyos_c` —
 with a Triple unit test and a driver lit test.
 """
 pr = "none — no upstream PRs for now (owner). Written to upstream quality; its destination is llvm/llvm-project, not rust-lang's mirror of it."
-pr_note = "Not yet a series to send: 9481b7db puts crt0.o in the link, d03e5f68 takes it out, and 39ec544b fixes 9481b7db's test. The branch is what rust/'s gitlink pins, so it is not rewritten; the series is folded, one commit per change, when it is proposed."
+pr_note = "9481b7db adds crt0.o, d03e5f68 removes it and 39ec544b fixes 9481b7db's test: folded when proposed, since rust/'s gitlink pins this branch."
 
 # Not a crate fork: rust/ is a submodule of Japabu/rust (compiler + std with
 # ToyOS as a target). Its own upstream sync is tracked separately.

@@ -1,15 +1,10 @@
 //! The toolchain release: the tag a tree's toolchain is published under, the
 //! tarball it ships as, and how a runner installs one.
 //!
-//! **The tag is the content hash of everything the tarball's bytes depend on**
-//! — [`trees`]: the rust fork, whose `src/llvm-project` is built from source into
-//! rustc's LLVM and the `rust-lld` and clang the tarball carries, every source
-//! and manifest compiled into the sysroot, `src/clang.rs`, which declares the C
-//! toolchain and the LLVM it is built with, and this file, which is the
-//! packaging. A tree whose toolchain somebody already built finds it
-//! published; a tree that moved any of them asks for a tag nobody has, and
-//! `cargo run -- --ci toolchain` builds it. Publishing is idempotent because
-//! the tag *is* the content.
+//! **The tag is the content hash of [`trees`].** A tree
+//! whose toolchain somebody already built finds it published; a tree that moved
+//! any of them asks for a tag nobody has, and `cargo run -- --ci toolchain`
+//! builds it. Publishing is idempotent because the tag *is* the content.
 //!
 //! The release is `x86_64-unknown-linux-gnu`'s and is built on a GitHub-hosted
 //! `ubuntu-24.04`; any other host is refused rather than publishing a tarball
@@ -467,10 +462,7 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
-    /// **A commit that changes the C toolchain the tarball carries moves the
-    /// tag**: another tool it must hold, another LLVM target it is built for,
-    /// another header in its C sysroot — each committed in a repository holding
-    /// what the tag hashes, `src/clang.rs` as this tree has it.
+    /// A commit to the C toolchain's declarations or headers moves the tag.
     #[test]
     fn the_tag_moves_with_the_c_toolchain() {
         let repo = TempDir::new("release-tag");
@@ -488,7 +480,6 @@ mod tests {
                 dir => write(&format!("{dir}/placeholder"), "x"),
             }
         }
-        // What an uninitialised submodule leaves, so `commit -a` keeps the gitlink.
         fs::create_dir_all(repo.join("rust")).unwrap();
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-qm", "the tree"]);

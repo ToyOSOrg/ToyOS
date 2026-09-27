@@ -7,8 +7,7 @@
 //! ([`SYSROOT_SOURCES`]), the std fork's `library/` and `src/bootstrap/` in the
 //! checkout that builds it, and the compiler that builds it. `rust/build/
 //! sysroots/<key>/` is a whole toolchain — the compiler's files cloned from its
-//! `stage2`, the guest targets' libraries built from this key's sources, and
-//! each guest target's C sysroot (`src/clang.rs`) — and
+//! `stage2`, the guest targets' libraries built from this key's sources — and
 //! nothing writes it after its [`SOURCES`] file exists. A build compiles against
 //! the directory its own key names, so two worktrees with different ABIs or
 //! different compilers never refuse or wait for each other, and main and every
@@ -50,8 +49,7 @@ use crate::identity;
 use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
-/// and `toyos`, both `libtoyos_c.a` are `userland/libc`, and the C sysroot
-/// carries its headers.
+/// and `toyos`, and `libtoyos_c.a` is `userland/libc`.
 pub const SYSROOT_SOURCES: [&str; 4] =
     ["toyos-abi/src", "toyos/src", "userland/libc/src", "userland/libc/include"];
 

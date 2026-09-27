@@ -14,12 +14,7 @@
 //! and two worktrees naming the same compiler share one copy.
 //!
 //! **LLVM is built from `src/llvm-project`, and only when its commit moves.**
-//! A compiler's [`source`] names that commit beside its `compiler/`, so a
-//! worktree pinning another LLVM builds a compiler of its own even where its
-//! `compiler/` is the primary's. That build compiles LLVM and clang in its own
-//! fork checkout: once, and after that only when the commit moves. Every
-//! toolchain directory carries the clang of the LLVM its rustc links
-//! (`src/clang.rs`).
+//! [`source`] names that commit, so another LLVM is another compiler.
 //!
 //! **A compiler of a worktree's own never touches what the others build with**:
 //! not the primary's `stage2`, not its record, not the machine-global rustup
@@ -125,15 +120,14 @@ pub fn compilers_dir(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/compilers")
 }
 
-/// What `checkout`'s compiler is built from: its `compiler/` — its commit's
-/// tree, and whatever the working tree changes in it, an edit or a file git
-/// does not track yet, which is what a new target spec is before its commit —
-/// and the LLVM commit it links.
+/// [`compiler_source`] and the LLVM commit it links.
 pub fn source(checkout: &Path) -> String {
     format!("{} llvm {}", compiler_source(checkout), llvm_commit(checkout))
 }
 
-/// [`source`]'s `compiler/` half.
+/// What `checkout`'s `compiler/` is: its commit's tree, and whatever the working
+/// tree changes in it — an edit, or a file git does not track yet, which is
+/// what a new target spec is before its commit.
 fn compiler_source(checkout: &Path) -> String {
     let tree = git_out(checkout, &["rev-parse", "HEAD:compiler"]);
     let mut local = git_bytes(checkout, &["diff", "HEAD", "--", "compiler"]);
@@ -171,9 +165,8 @@ pub fn key(fork: &Path) -> String {
 }
 
 /// The LLVM commit `fork` builds against: the one its `HEAD` records, which is
-/// the one bootstrap checks out. An LLVM change is a commit there and a gitlink
-/// here; an edit the submodule holds uncommitted would be built into a compiler
-/// whose key does not name it, so it is refused.
+/// the one bootstrap checks out and builds whatever the submodule holds. An
+/// LLVM change is a commit there and a gitlink here.
 fn llvm_commit(fork: &Path) -> String {
     let checkout = fork.join(LLVM);
     let edited = checkout.join(".git").exists()
@@ -572,8 +565,7 @@ mod tests {
         assert_eq!(builds.get(), 0, "a missing record built a compiler");
     }
 
-    /// **An LLVM edit no commit holds is refused**, never built into a
-    /// compiler whose key names only the commit.
+    /// An LLVM edit no commit holds is refused.
     #[test]
     fn an_uncommitted_llvm_edit_is_refused() {
         let scratch = TempDir::new("compiler-llvm-edit");
@@ -611,10 +603,7 @@ mod tests {
         assert_ne!(key(&fork), tools, "another LLVM commit did not move the key");
     }
 
-    /// **A worktree whose `compiler/` is the primary's and whose LLVM is not
-    /// gets a compiler of its own**, because the primary's rustc links another
-    /// LLVM — and so does every worktree while the primary's record predates
-    /// the LLVM it names.
+    /// A primary record naming another LLVM, or none, is another compiler.
     #[test]
     fn another_llvm_is_another_compiler() {
         let scratch = TempDir::new("compiler-llvm");

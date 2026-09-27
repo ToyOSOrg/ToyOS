@@ -532,10 +532,8 @@ struct Spawn {
 /// which `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md` carries.
 /// A binary a third-party crate runs for us: `userland/doom/build.rs` drives
 /// `cc::Build`, which compiles and archives with the toolchain's clang and
-/// `llvm-ar`: `src/build.rs` names them in `cc`'s own variables, and the build
-/// script refuses to run without them rather than let `cc` find a host's. And
-/// an alias no one line spells, which the not-`Command` record carries under
-/// its own heading. A workflow or a
+/// `llvm-ar` because `src/build.rs` names them in `cc`'s own variables. And an alias no one line spells, which the
+/// not-`Command` record carries under its own heading. A workflow or a
 /// container image is [`CI_PACKAGES`] and [`CI_ACTIONS`], not this.
 const HOST_SPAWNS: &[Spawn] = &[
     Spawn {

@@ -19,14 +19,6 @@
 //! Bootstrap removes `stage2` on every assemble, so these are put back after
 //! every build that makes one, and a toolchain directory without all of it is
 //! refused rather than left to fail at the first C compile.
-//!
-//! **The C sysroot a guest target's clang reads is in the Rust sysroot**, at
-//! `lib/rustlib/<target>/c/` ([`CSysroot`]): made with it (`libc::build_c`),
-//! keyed with it, and published with it.
-//!
-//! What this file declares — [`LLVM_CONFIG`], [`TOOLS`], [`provision`] — is what
-//! the published toolchain's C half is, so the release tag hashes it
-//! (`src/release.rs`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,13 +27,13 @@ use crate::arch::Arch;
 use crate::sysroot::clone_tree;
 use crate::toolchain::host_triple;
 
-/// This file, as the release tag names it.
+/// This file, which the release tag hashes.
 pub(crate) const SOURCE: &str = file!();
 
-/// The `[llvm]` of every `bootstrap.toml` that builds a host compiler: LLVM
-/// built from `src/llvm-project` — the fork that knows the ToyOS target — with
-/// clang beside it, for the two architectures ToyOS runs on and the hosts it is
-/// built on. Bootstrap rebuilds it only when that commit moves.
+/// The LLVM every host compiler links, in every `bootstrap.toml` that builds
+/// one: built from `src/llvm-project` — the fork that knows the ToyOS target —
+/// with clang beside it, for the host and the two architectures ToyOS runs on.
+/// Bootstrap rebuilds it only when that commit moves.
 pub(crate) const LLVM_CONFIG: &str = "download-ci-llvm = false\n\
                                       clang = true\n\
                                       targets = \"AArch64;X86\"\n\
@@ -56,22 +48,23 @@ fn bin(toolchain: &Path) -> PathBuf {
     toolchain.join("lib/rustlib").join(host_triple()).join("bin")
 }
 
-/// A guest target's C toolchain in a sysroot: its C sysroot, and the clang,
-/// archiver and ELF reader that sysroot's toolchain carries.
+/// A C sysroot, and the clang that reads it.
 #[derive(Clone, Debug)]
 pub struct CSysroot {
-    /// What `--sysroot` names: `include/`, libc's headers, and
-    /// `lib/libtoyos_c.a`, its `staticlib`.
+    /// What `--sysroot` names: `include/` and `lib/`.
     pub dir: PathBuf,
+    /// The clang of the toolchain the archive was built with.
     pub clang: PathBuf,
+    /// That toolchain's archiver.
     pub ar: PathBuf,
+    /// That toolchain's ELF reader.
     pub readobj: PathBuf,
     /// The guest target, as clang's `--target` spells it.
     pub target: &'static str,
 }
 
 impl CSysroot {
-    /// `arch`'s, in the sysroot at `toolchain`.
+    /// `arch`'s, in the sysroot at `toolchain`: `lib/rustlib/<target>/c`.
     pub fn of(toolchain: &Path, arch: Arch) -> Self {
         let target = arch.userland();
         Self {
@@ -89,8 +82,9 @@ impl CSysroot {
     }
 
     /// What names this C toolchain to the `cc` crate for this target, as the
-    /// variables it reads: so a crate that compiles C for ToyOS builds it with
-    /// this clang against this sysroot and archives it with this `llvm-ar`.
+    /// variables it reads: so a crate that compiles C for ToyOS — doom's
+    /// doomgeneric, and any other — builds it with this clang against this
+    /// sysroot and archives it with this `llvm-ar`, and never with the host's.
     pub fn cc_env(&self) -> Vec<(String, String)> {
         let suffix = self.target.replace('-', "_");
         vec![
@@ -158,8 +152,7 @@ fn resource_version(llvm: &Path) -> PathBuf {
     }
 }
 
-/// Give the `stage2` bootstrap assembled the C toolchain of the LLVM it
-/// installed beside it, `../llvm`, replacing whatever it carried.
+/// Give `stage2` the C toolchain of the LLVM bootstrap installed beside it.
 pub(crate) fn provision(stage2: &Path) {
     let llvm = &stage2.parent().expect("stage2 is under a build directory").join("llvm");
     let bin = bin(stage2);
@@ -191,7 +184,7 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// An LLVM install as bootstrap leaves one beside `stage2`: `clang` a link to the
+    /// An LLVM install as bootstrap leaves one: `clang` a link to the
     /// versioned binary, the resource headers under `lib/clang/<version>`.
     fn llvm(base: &Path) -> PathBuf {
         let llvm = base.join("llvm");

@@ -3040,9 +3040,7 @@ fn check_c_result(result: &TestResult) -> bool {
         Some(0) => {
             let expect_file = compile::testcases_dir().join(format!("{test_name}.expect"));
             if expect_file.exists() {
-                // TinyCC's runner captures its compiler's warnings about the
-                // case with the program's output; they are no part of what the
-                // program prints.
+                // TinyCC's runner captured its warnings about the case with its output.
                 let warned = format!("{test_name}.c:");
                 let expected: String = fs::read_to_string(&expect_file)
                     .unwrap()
@@ -8745,7 +8743,7 @@ const SNAKE_ROUNDS: usize = 3;
 const SNAKE_TURNS: usize = 8;
 
 /// What doom's renderer draws over `demo1`'s first `TICS` tics, as
-/// `userland/doom/src/frames.rs` hashes them: the frames doom drew before clang
+/// `userland/doom/src/frames.rs` hashes it: the frames doom drew before clang
 /// built its C, which a compiler that builds doom correctly draws again.
 const DOOM_FRAMES: &str = "874685cf6fd3dfa5";
 
