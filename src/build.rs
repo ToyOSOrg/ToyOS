@@ -173,8 +173,9 @@ fn parse_config(path: &Path) -> SystemConfig {
 
 /// Fingerprint all external build dependencies that cargo cannot track: the
 /// sysroot `toolchain` is — by where it is, which names its key, and by its
-/// libraries — and the linker.
-fn external_fingerprint(root: &Path, toolchain: &Path) -> String {
+/// libraries. The linker is the sysroot's own `rust-lld`, which that key names
+/// with the compiler it came with.
+fn external_fingerprint(toolchain: &Path) -> String {
     let sysroot = toolchain.join("lib/rustlib");
     let mut entries = vec![format!("sysroot:{}", toolchain.display())];
 
@@ -205,23 +206,6 @@ fn external_fingerprint(root: &Path, toolchain: &Path) -> String {
         }
     }
 
-    // Content, not `len:mtime`: `toyos-ld` relinks every CI job because a fresh
-    // `actions/checkout` gives its sources a mtime cargo's own path-dependency
-    // fingerprint has never seen, and the relink is a few MB — hashing it is
-    // milliseconds against the `cargo clean` a changed mtime used to trigger on
-    // every crate this fingerprint gates, `tests/toyos-rust-tests/tls-cranelift`
-    // among them at 570 MiB. The sysroot rlibs above stay on `len:mtime`: CI
-    // unpacks a byte-identical toolchain artifact with `tar`, which restores
-    // mtimes, so their triple is already stable across jobs of one toolchain
-    // tag and hashing every rlib would cost what the clean does today.
-    let linker = toolchain::toyos_ld_binary(root);
-    if let Ok(data) = fs::read(&linker) {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        data.hash(&mut h);
-        entries.push(format!("toyos-ld:{:016x}", h.finish()));
-    }
-
     entries.sort();
     entries.join("\n")
 }
@@ -231,7 +215,7 @@ fn external_fingerprint(root: &Path, toolchain: &Path) -> String {
 enum Clean {
     All,
     /// Crates with explicit paths (toyos-ld, toyos-cc) also have host builds
-    /// that must survive: the host toyos-ld *is* the cross linker. Both are
+    /// that must survive: the host toyos-cc compiles doom's C. Both are
     /// host-workspace members, so the directory this empties is the
     /// workspace's `target/<userland triple>` for every architecture — the
     /// guest halves of the two, and nothing the host builds.
@@ -299,7 +283,7 @@ fn invalidate_stale(
         buildlock::Scope::Worktree,
         "clean crate targets against changed external deps",
         || {
-            let fp = external_fingerprint(root, toolchain);
+            let fp = external_fingerprint(toolchain);
             let work: Vec<(PathBuf, Clean)> = targets
                 .iter()
                 .filter(|(dir, _)| stale(root, dir, &fp))
@@ -424,15 +408,14 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
 pub const PROFILE: &str = "toyos";
 
 /// What every guest `cargo` and `rustc` here runs with: the toolchain directory
-/// of the sysroot this checkout's sources name, as `RUSTUP_TOOLCHAIN`, and
-/// `toyos-ld` on `PATH`. Never the `toyos` rustup name, which is the primary's.
+/// of the sysroot this checkout's sources name, as `RUSTUP_TOOLCHAIN`, which
+/// carries the linker too. Never the `toyos` rustup name, which is the primary's.
 #[derive(Clone)]
 struct GuestEnv {
     toolchain: PathBuf,
     /// Whether that sysroot's compiler is the primary's, the one the hosted
     /// rustc is built from (`src/compiler.rs`).
     primary_compiler: bool,
-    path: String,
     /// The public key the loader and `/system/bin/update` embed
     /// (`signing::KEY_ENV`): every guest build carries it, so no crate that
     /// names it can be built without it.
@@ -442,11 +425,10 @@ struct GuestEnv {
 }
 
 impl GuestEnv {
-    fn new(root: &Path, sysroot: &crate::sysroot::Sysroot) -> Self {
+    fn new(sysroot: &crate::sysroot::Sysroot) -> Self {
         Self {
             toolchain: sysroot.dir.clone(),
             primary_compiler: sysroot.primary_compiler,
-            path: toolchain::path_with_toyos_ld(root),
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
         }
@@ -471,7 +453,6 @@ fn cargo_build(
         .current_dir(crate_dir)
         .env("RUSTUP_TOOLCHAIN", &env.toolchain)
         .env_remove("RUSTFLAGS")
-        .env("PATH", &env.path)
         .env(crate::signing::KEY_ENV, &env.image_key)
         .env(crate::signing::FLOOR_ENV, env.floor_scope)
         .env_remove("RUSTC");
@@ -596,7 +577,6 @@ fn assert_kernel_is_softfloat(env: &GuestEnv, arch: Arch) {
     let out = Command::new("rustc")
         .args(["--print", "cfg", "--target", arch.kernel()])
         .env("RUSTUP_TOOLCHAIN", &env.toolchain)
-        .env("PATH", &env.path)
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
         .output()
@@ -1543,7 +1523,7 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
 }
 
 /// The labels `arch::syscall` defines inside `syscall_entry` for
-/// `nmi_gate`, which `toyos-ld` carries into `.strtab`.
+/// `nmi_gate`, which the linker carries into `.strtab`.
 const ENTRY_LABELS: [&str; 3] =
     ["syscall_entry_hold_spin", "syscall_entry_hold_end", "syscall_entry_end"];
 
@@ -1855,7 +1835,7 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
     let mut lock = buildlock::shared(root, "build");
     let sysroot = toolchain::ensure(root, rebuild_toolchain, &mut lock);
 
-    let env = GuestEnv::new(root, &sysroot);
+    let env = GuestEnv::new(&sysroot);
     let config = parse_config(&boot.config);
 
     invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
@@ -2097,7 +2077,7 @@ pub fn build_test_parts(
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
     let sysroot = crate::toolchain::ensure(root, false, &mut lock);
-    let env = GuestEnv::new(root, &sysroot);
+    let env = GuestEnv::new(&sysroot);
 
     invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
 
@@ -2214,7 +2194,7 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
     let _slot = buildlock::build_slot(root, "the test binaries");
     let mut lock = buildlock::shared(root, "test binaries");
     let sysroot = crate::toolchain::ensure(root, false, &mut lock);
-    let env = GuestEnv::new(root, &sysroot);
+    let env = GuestEnv::new(&sysroot);
 
     let mut targets = vec![(crate_path.to_path_buf(), Clean::All)];
     for entry in fs::read_dir(crate_path).into_iter().flatten().flatten() {

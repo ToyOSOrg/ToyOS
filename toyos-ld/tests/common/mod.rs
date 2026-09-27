@@ -150,6 +150,11 @@ impl ObjBuilder {
         self.obj.symbol(id).value
     }
 
+    /// The object being built, for a section the helpers above do not make.
+    pub fn object(&mut self) -> &mut Object<'static> {
+        &mut self.obj
+    }
+
     pub fn finish(self) -> Vec<u8> {
         self.obj.write().unwrap()
     }

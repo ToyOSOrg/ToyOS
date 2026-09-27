@@ -63,7 +63,7 @@ const SOURCES: &str = "SOURCES";
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, \
-                      libtoyos_c merged, libraries from the stamp; 2";
+                      libtoyos_c merged, libraries from the stamp, linked by rust-lld; 3";
 
 /// Where each build records the key it compiled against, for [`sweep`].
 const RECORD: &str = "target/toyos-sysroot-key";
@@ -383,7 +383,7 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
         let _ = fs::remove_dir_all(build_dir.join(&host).join("stage0-std").join(target));
     }
     let config = build_dir.join("bootstrap.toml");
-    fs::write(&config, std_config(&compiler.stage2, &build_dir, &host, &toolchain::toyos_ld_binary(root)))
+    fs::write(&config, std_config(&compiler.stage2, &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
     // Bootstrap re-locks `library/Cargo.lock` to this worktree's `toyos-abi` and
@@ -452,19 +452,15 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// `local-rebuild` is what lets stage 0 compile the library for a target the
 /// stage-0 compiler has none for, and `profile = "compiler"` is the primary's,
 /// so these libraries are built with the options `stage2`'s own were.
-fn std_config(compiler: &Path, build_dir: &Path, host: &str, toyos_ld: &Path) -> String {
+/// The linker is the compiler's own `rust-lld`, named by path so that which sysroot
+/// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
+/// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
+fn std_config(compiler: &Path, build_dir: &Path, host: &str) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
-    let linker = toyos_ld.display();
+    let linker = toolchain::rust_lld(compiler);
     let userland: String = Arch::ALL
         .iter()
-        .map(|arch| {
-            let linker = if arch.links_through_toyos_ld() {
-                format!("linker = \"{linker}\"")
-            } else {
-                format!("linker = \"{}\"\nrpath = false", toolchain::rust_lld(compiler).display())
-            };
-            format!("\n[target.{}]\n{linker}\n", arch.userland())
-        })
+        .map(|arch| format!("\n[target.{}]\nlinker = \"{}\"\nrpath = false\n", arch.userland(), linker.display()))
         .collect();
     format!(
         r#"change-id = "ignore"

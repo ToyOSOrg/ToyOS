@@ -9,15 +9,16 @@
 //!                                    ^ thread pointer, tls_start - gap
 //! ```
 //!
-//! Variant II: the linker computes `TPOFF = sym_offset - memsz` raw, so the
-//! thread pointer sits at `tls_start + memsz`. Variant I: the linker computes
-//! `TPOFF = align_up(16, p_align) + sym_offset` from the executable's own
-//! `PT_TLS`, so the executable's block is the first one, `gap` above the
-//! thread pointer. Either way `tls_start` carries the largest alignment any
-//! module asked for. Every input is a sum of numbers a file declared, which is
-//! why every step here is checked and the whole thing is a pure function:
-//! `dtv_bytes <= tls_start` is the property, and it used to be an assertion in
-//! the kernel reached from a crafted `PT_TLS`.
+//! Variant II: the linker computes the executable's `TPOFF = sym_offset -
+//! round(memsz, p_align)` ([`exe_extent`]), so the executable's module, so
+//! rounded, ends at the thread pointer, `tls_start + total_memsz`. Variant I:
+//! the linker computes `TPOFF = align_up(16, p_align) + sym_offset` from the
+//! executable's own `PT_TLS`, so the executable's block is the first one,
+//! `gap` above the thread pointer. Either way `tls_start` carries the largest
+//! alignment any module asked for. Every input is a sum of numbers a file
+//! declared, which is why every step here is checked and the whole thing is a
+//! pure function: `dtv_bytes <= tls_start` is the property, and it used to be
+//! an assertion in the kernel reached from a crafted `PT_TLS`.
 
 use crate::header::Machine;
 
@@ -152,6 +153,14 @@ pub fn place_module(cursor: usize, memsz: usize, align: usize) -> Option<(usize,
     let align = align.max(16);
     let base = if cursor > 0 { align_up(cursor, align)? } else { 0 };
     Some((base, base.checked_add(memsz)?))
+}
+
+/// The bytes variant II's executable module takes below the thread pointer: its
+/// `p_memsz` rounded up to its `p_align`, the psABI's `tlsoffset1 =
+/// round(tlssize1, align1)`, which a linker bakes into every local-exec access
+/// and the loader can only honour. `None` is a size the rounding overflows.
+pub fn exe_extent(memsz: usize, align: usize) -> Option<usize> {
+    align_up(memsz, align.max(1))
 }
 
 /// `align`, with "no constraint" as 8; `None` for one that is not a power of two.
