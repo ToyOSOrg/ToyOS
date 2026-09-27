@@ -129,7 +129,6 @@ pub fn note_progress() {
     }
 }
 
-
 /// Stop every userland thread but the caller, and answer with what it took.
 ///
 /// Returns when the machine is stopped or when [`PARK`] is spent, never

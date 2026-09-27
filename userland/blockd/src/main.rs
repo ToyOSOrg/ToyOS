@@ -537,7 +537,15 @@ fn main() {
         println!("blockd: no NVMe controller this row names is on this machine; serving no partition");
         serve_nothing(&acceptor);
     };
-    let mut ctrl = Controller::open(dev, silence).unwrap_or_else(|why| panic!("blockd: NOT SERVING — {why}"));
+    // A controller this service cannot use is a machine without one, said by
+    // name: restarting would meet the same device and the same refusal.
+    let mut ctrl = match Controller::open(dev, silence) {
+        Ok(ctrl) => ctrl,
+        Err(why) => {
+            println!("blockd: NOT SERVING — {why}; serving no partition");
+            serve_nothing(&acceptor);
+        }
+    };
     println!(
         "blockd: NVMe up: {} I/O queues of {} commands, volatile write cache {}, {}-byte sectors, \
          {} sectors",

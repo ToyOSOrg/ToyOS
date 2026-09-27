@@ -164,6 +164,10 @@ pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {
 }
 
 pub fn attach(stream: StreamId, id: DomainId) {
+    if super::staged(stream) {
+        log!("iommu: {stream} keeps the context an actuator staged, over its move to domain {}", id.raw());
+        return;
+    }
     let mut domains = DOMAINS.lock();
     let domain = *domains.at(id);
     let mut units = UNITS.lock();

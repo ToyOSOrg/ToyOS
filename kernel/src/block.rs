@@ -232,6 +232,9 @@ static DEVICES: Lock<BTreeMap<DeviceId, Handle>> = Lock::new(BTreeMap::new());
 /// cache, which a plain insert here would arrange in silence.
 #[must_use = "a refused registration leaves the device unreachable"]
 pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
+    #[cfg(feature = "boot-actuators")]
+    let dev: Box<dyn BlockDevice> =
+        if crate::actuator::partclaim_table_unanswered() { Box::new(unanswered::Table(dev)) } else { dev };
     let id = dev.device_id();
     let blocks = dev.block_count();
     let mut devices = DEVICES.lock();
@@ -249,6 +252,58 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
     devices.insert(id, handle.clone());
     log!("block: device {id} registered, {blocks} blocks");
     Some(handle)
+}
+
+/// `partclaim-table-unanswered`: a registered disk that refuses every read of
+/// its device block 0 — its protective MBR and GPT header — once
+/// [`unanswered::refuse`] has been called.
+#[cfg(feature = "boot-actuators")]
+pub mod unanswered {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use alloc::boxed::Box;
+
+    use super::{BlockDevice, BlockError, BlockResult, DeviceId};
+
+    static REFUSING: AtomicBool = AtomicBool::new(false);
+
+    pub(super) struct Table(pub(super) Box<dyn BlockDevice>);
+
+    impl BlockDevice for Table {
+        fn device_id(&self) -> DeviceId {
+            self.0.device_id()
+        }
+
+        fn block_count(&self) -> u64 {
+            self.0.block_count()
+        }
+
+        fn read_blocks(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
+            if lba == 0 && count > 0 && REFUSING.load(Ordering::Relaxed) {
+                return Err(BlockError::Device);
+            }
+            self.0.read_blocks(lba, count, buf)
+        }
+
+        fn write_blocks(&mut self, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
+            self.0.write_blocks(lba, count, buf)
+        }
+
+        fn flush(&mut self) -> BlockResult {
+            self.0.flush()
+        }
+
+        fn losses(&self) -> u64 {
+            self.0.losses()
+        }
+    }
+
+    /// Every disk registered from here on, and before, refuses reads of its
+    /// block 0. Called once the boot's own table reads are done.
+    pub fn refuse() {
+        REFUSING.store(true, Ordering::Relaxed);
+        log!("partclaim-table-unanswered: device block 0 of every disk refuses reads from now on");
+    }
 }
 
 pub fn open(id: DeviceId) -> Option<Handle> {

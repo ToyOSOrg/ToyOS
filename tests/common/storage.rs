@@ -605,6 +605,87 @@ pub fn home_overwrite_reads_back(
     Ok(())
 }
 
+/// A file server killed with a write done and unanswered loses nothing a
+/// client was told was flushed, and its clients go on; ended past init's
+/// budget, its directories answer `Gone`. Judged off the device.
+///
+/// `tests/fsdrestartcase` arms every file server to end under a write to
+/// `/home/fsd_end` (`--end-on`), and `test_rs_fs_restart` ends DATA's four
+/// times: the guest asserts what a client sees, init's and fsd's own lines
+/// say who ended and who started again, and with the machine down the DATA
+/// partition is read by this crate's own build of the `bcachefs` reader over
+/// a plain seek-and-read of the image — nothing the guest executed. The
+/// flushed file and the one flushed across the end hold their bytes there.
+pub fn fsd_restart(
+    _test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/fs_restart.rs`, without the
+    /// mount point.
+    const KEPT: &str = "home/fs_restart/kept";
+    const ACROSS: &str = "home/fs_restart/across";
+    const KEPT_LEN: usize = 64 * 1024 + 13;
+    const ACROSS_BYTES: &[u8] = b"written and flushed before the server ended; written through the same \
+        handle after it came back";
+    let kept: Vec<u8> = (0..KEPT_LEN).map(|i| (i.wrapping_mul(37) ^ 0xC3) as u8).collect();
+
+    let config = super::compile::repo_root().join("tests/fsdrestartcase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::Metal, ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    if !boot.contains(MOUNTED) && !boot.contains("formatting it") {
+        return Err(format!("fsd served DATA from no partition, so nothing here reaches a device:\n{boot}"));
+    }
+    let result = qemu.run_test("test_rs_fs_restart", Duration::from_secs(120));
+    let image = qemu.nvme_image().to_path_buf();
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    // The console once: `stdout` is the same lines again, unprefixed.
+    let log = format!("{boot}\n{}{}{tail}", result.before, result.serial);
+    if result.exit_code != Some(0) || !result.stdout.contains("fs_restart: PASS") {
+        return Err(format!("fs_restart guest failed:\n{}\nconsole:\n{log}", result.stdout));
+    }
+    let console = super::serial::Serial::named("fsd_restart", log.as_str());
+    let ended = log.matches("fsd: --end-on: ending with a write done and unanswered").count();
+    if ended != 4 {
+        return Err(format!("fsd said it ended {ended} times, not the guest's 4:\n{log}"));
+    }
+    let restarted = log.lines().filter(|l| l.contains("init: fsd data (pid ") && l.contains("ended; started again")).count();
+    if restarted != 3 {
+        return Err(format!("init started DATA's server again {restarted} times, not 3:\n{log}"));
+    }
+    console.must_say("init: fsd data ended 4 times in 10 s; its ports are closed")?;
+    console.must_be_clean()?;
+
+    let io = FileBlocks::open(&image)?;
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
+        .map_err(|e| format!("the DATA partition does not mount on the host: {e:?}"))?;
+    for (name, want) in [(KEPT, &kept[..]), (ACROSS, ACROSS_BYTES)] {
+        let got = fs.read_file(name).map_err(|e| format!("reading {name} off the image: {e:?}"))?;
+        if got != want {
+            let at = got.iter().zip(want).position(|(a, b)| a != b);
+            return Err(format!(
+                "{name} on the device is {} bytes, first differing at {at:?}: a write the guest \
+                 was told was flushed is not what the device holds",
+                got.len()
+            ));
+        }
+    }
+    eprintln!(
+        "  [fsd] DATA's server ended four times under an unanswered write; started again three, \
+         its clients reopened, the fourth closed /home to Gone; {KEPT} and {ACROSS} read back off \
+         the image by the host's own bcachefs reader"
+    );
+    Ok(())
+}
+
 /// `/apps` and `/home` are two paths into one filesystem, judged off the device.
 ///
 /// The guest writes one file under each and shuts down; the host then finds
@@ -751,7 +832,7 @@ pub fn internal_disk_boot(
     }
 
     // This machine has no USB, so a volume fsd serves came through blockd.
-    for said in ["fsd: Boot serving /boot — FAT32 read-only", "fsd: Log serving /log — FAT32,"] {
+    for said in [super::volumes::BOOT_SERVED, super::volumes::LOG_SERVED] {
         if !boot.contains(said) {
             return Err(format!(
                 "the boot never said {said:?} — a machine booting off its internal disk got \

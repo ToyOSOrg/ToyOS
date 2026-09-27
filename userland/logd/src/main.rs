@@ -179,7 +179,7 @@ fn main() {
     }
 
     let hub = Arc::new(serve::Hub::start(REPLAY_BYTES, boot_local));
-    let published = Arc::new(inspect::Published::new(hub.network()));
+    let published = Arc::new(inspect::Published::new());
     if let Some(acceptor) = endow::acceptor(SERVICE) {
         inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
     }

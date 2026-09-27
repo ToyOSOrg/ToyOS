@@ -104,6 +104,34 @@ pub fn loaded() -> Vec<(Role, Guid)> {
     LOADED.lock().clone()
 }
 
+/// Where the log partition the loader named is, as far as this kernel sees.
+pub enum LogPlace {
+    /// The loader named none.
+    Unnamed,
+    /// On a disk this kernel drives, where its file server claims it.
+    Driven,
+    /// Not on the disk this kernel booted from and drives, which is where an
+    /// image carries it: this machine has no log partition.
+    Absent,
+    /// The boot disk is one this kernel does not drive, so whether the log
+    /// partition is on it is its file server's to say.
+    Undriven,
+}
+
+/// [`LogPlace`], once [`probe_usb_disks`] has read every disk it will.
+pub fn log_place() -> LogPlace {
+    let Some(guid) = LOADED.lock().iter().find(|(role, _)| *role == Role::Log).map(|(_, g)| *g) else {
+        return LogPlace::Unnamed;
+    };
+    if LISTED.lock().iter().any(|disk| disk.parts.iter().any(|p| p.unique_guid == guid)) {
+        return LogPlace::Driven;
+    }
+    match *RESOLVED.lock() {
+        Resolution::Found { .. } => LogPlace::Absent,
+        Resolution::Unknown | Resolution::Ambiguous => LogPlace::Undriven,
+    }
+}
+
 /// List `handle`'s table into [`LISTED`], once per disk.
 fn list(sectors: &mut DeviceSectors<'_>, handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();

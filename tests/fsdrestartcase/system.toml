@@ -1,0 +1,41 @@
+# The boot `fsd_restart` judges: the test estate's shape, with every file
+# server armed to end the moment it has taken a write through a file opened to
+# append at `/home/fsd_end` and before it answers it — `test_rs_fs_restart`
+# ends DATA's four times, and init restarts it three.
+
+[boot]
+start = ["logd", "blockd", "fsd", "test-runner"]
+
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+# `power` because `run shutdown` asks init through the `power` connector, and
+# the host reads the DATA partition back once the machine is down.
+[programs.test-runner]
+receives = ["power"]
+syscap = ["dup", "logread", "power"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/shutdown" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports. `--end-on` is the test's actuator: a path on
+# the DATA volume, which neither other role's volume carries.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]
+args = ["--end-on", "home/fsd_end"]

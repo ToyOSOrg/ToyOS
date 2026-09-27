@@ -5,7 +5,9 @@
 //! by init under `serve:fs:<dir>`; for its volume, a claim on a partition of a
 //! disk the kernel drives, or blockd's `block` connector in its namespace; and
 //! nothing else of the machine. Argv is the role, and for LOG and BOOT the
-//! unique GUID of the partition the loader named for it.
+//! unique GUID of the partition the loader named for it when no claim on it
+//! was minted; then the row's own arguments, of which there is one, a test's
+//! actuator ([`END_ON`]).
 //!
 //! **A connection is bound to the directory whose port it came in on**, and
 //! every path on it is resolved there (`fsd::resolve`); a write on a port
@@ -62,6 +64,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// blocks, of which only what is written costs anything.
 const RAM_BLOCKS: u64 = 1 << 18;
 
+/// `--end-on <path>`: a write through a file opened to append at `path` on the
+/// volume ends this process once the volume has taken it and before it is
+/// answered — a server killed with a write done and unanswered, as a test
+/// stages one. Armed by nothing but a boot config's `args`.
+const END_ON: &str = "--end-on";
+
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
 
@@ -98,6 +106,8 @@ struct Fid {
     node: Node,
     write: bool,
     append: bool,
+    /// Opened to append at [`END_ON`]'s path.
+    ends: bool,
 }
 
 struct Client {
@@ -146,15 +156,26 @@ fn main() {
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
         panic!("fsd: started with {args:?}; the first argument is a role: data, log or boot")
     });
+    let (mut guid, mut end_on) = (None, None);
+    let mut rest = args.iter().skip(2);
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            END_ON => end_on = Some(rest.next().unwrap_or_else(|| panic!("fsd: {END_ON} takes a path")).clone()),
+            flag if flag.starts_with("--") => panic!("fsd: {flag} is no argument of this server"),
+            named if guid.is_none() => guid = Some(named),
+            extra => panic!("fsd: a second partition, {extra}, after {guid:?}"),
+        }
+    }
     let caps = capabilities(role);
     let roots: Vec<String> = caps.iter().map(|c| c.root.clone()).collect();
     let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
-    let volume = open_volume(role, args.get(2).map(String::as_str), &roots);
+    let volume = open_volume(role, guid, &roots);
     println!(
         "fsd: {role:?} serving {} — {}",
         caps.iter().map(|c| c.dir.as_str()).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
+    let caps_len = caps.len() as u32;
     Server {
         volume,
         caps,
@@ -163,6 +184,8 @@ fn main() {
         streams: BTreeMap::new(),
         next_stream: 0,
         dirty_since: None,
+        end_on,
+        probe: Poller::new(caps_len),
     }
     .serve()
 }
@@ -256,7 +279,13 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume
                     println!("fsd: the {role:?} partition does not mount: {why}");
                     Box::new(Absent::new(roots, why))
                 }
-                None => Box::new(Absent::new(roots, format!("no {role:?} partition on a disk this server reaches"))),
+                None => Box::new(Absent::new(
+                    roots,
+                    match guid {
+                        Some(guid) => format!("the {role:?} partition {guid} is on no disk this server reaches"),
+                        None => format!("the loader named no {role:?} partition"),
+                    },
+                )),
             }
         }
     }
@@ -294,6 +323,11 @@ struct Server {
     next_stream: u64,
     /// When a write first went unsynced.
     dirty_since: Option<Instant>,
+    /// [`END_ON`]'s path on the volume.
+    end_on: Option<String>,
+    /// Asks an acceptor whether a connection waits, before [`Server::accept`]
+    /// takes it.
+    probe: Poller,
 }
 
 /// What one request is answered.
@@ -373,7 +407,23 @@ impl Server {
         }
     }
 
+    /// Take a connection that waits on `cap`'s port, if one does.
+    ///
+    /// **Asked first, because `accept` parks and a completion is a hint**: a
+    /// watch replaced while a connection arrives can answer beside the watch
+    /// that replaced it, so two completions name one connection, and the
+    /// second `accept` would park this server for good. This process is the
+    /// port's one acceptor, so a connection the probe sees is still there to
+    /// take. The probe's ring is drained whole each time and a completion is
+    /// read by its port's token, so what counts is an arrival on this port
+    /// since its last probe, none of them taken.
     fn accept(&mut self, cap: usize) {
+        self.probe.watch(&self.caps[cap].acceptor, READABLE, cap as u64);
+        let mut waiting = false;
+        self.probe.wait(0, 0, |token| waiting |= token == cap as u64);
+        if !waiting {
+            return;
+        }
         let conn = match self.caps[cap].acceptor.accept() {
             Ok(conn) => conn,
             Err(why) => panic!("fsd: its own acceptor refused an accept: {why:?}"),
@@ -402,44 +452,40 @@ impl Server {
         }
     }
 
-    /// Everything one client has sent, a whole request at a time.
+    /// One request of one client, and no more: a client whose next request
+    /// is already queued is answered at the next wait, after every other
+    /// client that was ready, since a watch on a connection with a frame
+    /// queued fires at once, and `FrameRx` reads no byte past the frame. A
+    /// loop until the client went quiet would let one that asks as fast as it
+    /// is answered hold every other off for as long as it kept asking.
     fn pump(&mut self, id: u64) {
-        loop {
-            let Some(client) = self.clients.get_mut(&id) else { return };
-            match client.rx.pump(&client.conn) {
-                RxStep::Idle => return,
-                RxStep::Eof => return self.drop_client(id, ""),
-                RxStep::Malformed => return self.drop_client(id, "it sent a frame this protocol cannot describe"),
-                RxStep::Frame { msg_type, payload_len } => {
-                    let Ok(request) = ipc::decode_payload::<Request>(client.rx.payload(payload_len)) else {
-                        return self.drop_client(id, "its request was short");
-                    };
-                    let answer = self.answer(id, msg_type, request);
-                    if !self.reply(id, answer) {
-                        return;
-                    }
-                }
+        let Some(client) = self.clients.get_mut(&id) else { return };
+        match client.rx.pump(&client.conn) {
+            RxStep::Idle => {}
+            RxStep::Eof => self.drop_client(id, ""),
+            RxStep::Malformed => self.drop_client(id, "it sent a frame this protocol cannot describe"),
+            RxStep::Frame { msg_type, payload_len } => {
+                let Ok(request) = ipc::decode_payload::<Request>(client.rx.payload(payload_len)) else {
+                    return self.drop_client(id, "its request was short");
+                };
+                let answer = self.answer(id, msg_type, request);
+                self.reply(id, answer);
             }
         }
     }
 
-    /// Send `answer`; `false` once the client is gone.
-    fn reply(&mut self, id: u64, answer: Answer) -> bool {
-        let Some(client) = self.clients.get(&id) else { return false };
+    /// Send `answer`, or let the client go when it will not take it.
+    fn reply(&mut self, id: u64, answer: Answer) {
+        let Some(client) = self.clients.get(&id) else { return };
         let sent = match answer {
             Answer::Reply(reply) => client.conn.try_send(REPLY, &reply),
             Answer::Link(len) => client.conn.try_send(LINK, &Reply { value: len as u64, ..Reply::ok() }),
             Answer::WithHandle(reply, handle) => client.conn.try_send_with_handles(&[handle], REPLY, &reply),
-            Answer::Drop(why) => {
-                self.drop_client(id, why);
-                return false;
-            }
+            Answer::Drop(why) => return self.drop_client(id, why),
         };
         if let Err(why) = sent {
             self.drop_client(id, &format!("its connection would not take a reply ({why:?})"));
-            return false;
         }
-        true
     }
 
     /// A path from the window: `len` bytes at `at`, UTF-8.
@@ -566,7 +612,10 @@ impl Server {
                 let fid = client.next_fid;
                 client.next_fid += 1;
                 let write = r.flags & (O_WRITE | O_APPEND) != 0;
-                client.fids.insert(fid, Fid { node, write, append: r.flags & O_APPEND != 0 });
+                let append = r.flags & O_APPEND != 0;
+                let ends = append && self.end_on.as_deref() == Some(path.as_str());
+                let client = self.clients.get_mut(&id).expect("pumped");
+                client.fids.insert(fid, Fid { node, write, append, ends });
                 Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta) }))
             }
             CLOSE => {
@@ -584,9 +633,9 @@ impl Server {
                 Ok(Answer::Reply(Reply { value: n as u64, ..Reply::ok() }))
             }
             WRITE => {
-                let (node, write, append) = {
+                let (node, write, append, ends) = {
                     let f = self.fid(id, r.fid)?;
-                    (f.node, f.write, f.append)
+                    (f.node, f.write, f.append, f.ends)
                 };
                 if !write {
                     return Err(SyscallError::PermissionDenied);
@@ -602,6 +651,10 @@ impl Server {
                     return Err(SyscallError::InvalidArgument);
                 }
                 self.volume.write(node, at, &data)?;
+                if ends {
+                    println!("fsd: {END_ON}: ending with a write done and unanswered");
+                    std::process::exit(1);
+                }
                 self.dirtied();
                 Ok(Answer::Reply(Reply { value: len as u64, value2: at + len as u64, ..Reply::ok() }))
             }

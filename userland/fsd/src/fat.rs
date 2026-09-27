@@ -390,3 +390,80 @@ impl<D: Disk> Volume for FatVolume<D> {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::disk::{DiskError, Ram};
+
+    /// A disk that refuses every read of one block, after the fixture's own
+    /// bytes are on it.
+    struct Refusing {
+        ram: Ram,
+        refused: u64,
+    }
+
+    impl Disk for Refusing {
+        fn blocks(&self) -> u64 {
+            self.ram.blocks()
+        }
+        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
+            let count = (out.len() / BLOCK) as u64;
+            if (first..first + count).contains(&self.refused) {
+                return Err(DiskError::Device);
+            }
+            self.ram.read(first, out)
+        }
+        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
+            self.ram.write(first, data)
+        }
+        fn flush(&mut self) -> Result<(), DiskError> {
+            self.ram.flush()
+        }
+    }
+
+    /// Four blocks holding `0x5A`, the second of which refuses every read.
+    fn bytes() -> Bytes<Refusing> {
+        let mut ram = Ram::new(4);
+        ram.write(0, &[0x5A; 4 * BLOCK]).unwrap();
+        let cache = Rc::new(Cache::new(Refusing { ram, refused: 1 }));
+        Bytes { cache, len: 4 * BLOCK as u64 }
+    }
+
+    /// A read the device refused is the device's word to the caller, never a
+    /// buffer of zeros: a caller that took zeros for data merges its bytes
+    /// into them and writes the result over what the medium held.
+    #[test]
+    fn a_refused_read_is_an_error_and_never_zeros() {
+        let mut b = bytes();
+        let mut buf = [0xEEu8; 100];
+        assert_eq!(b.read_at(BLOCK as u64 + 10, &mut buf), Err(IoError::Device));
+        let mut fine = [0u8; 100];
+        b.read_at(10, &mut fine).unwrap();
+        assert!(fine.iter().all(|&x| x == 0x5A), "the readable block reads as written");
+    }
+
+    /// A write that covers part of a block reads the rest of it first; when
+    /// that read is refused the write is refused whole, and nothing reaches
+    /// the block — the rest of it is another file's, or the table's.
+    #[test]
+    fn a_partial_write_over_an_unreadable_block_writes_nothing() {
+        let mut b = bytes();
+        assert_eq!(b.write_at(BLOCK as u64 + 10, &[1, 2, 3]), Err(IoError::Device));
+        b.flush().unwrap();
+        let cache = Rc::try_unwrap(b.cache).ok().expect("the one holder");
+        let mut disk = cache.into_disk();
+        disk.refused = u64::MAX;
+        let mut block = [0u8; BLOCK];
+        disk.read(1, &mut block).unwrap();
+        assert!(block.iter().all(|&x| x == 0x5A), "the unreadable block was written over");
+    }
+
+    /// What the driver says of a volume that stopped answering is `Io`, which
+    /// no caller takes for a name that is not there.
+    #[test]
+    fn a_device_error_is_io_and_not_not_found() {
+        assert_eq!(word(Error::Io), SyscallError::Io);
+        assert_eq!(word(Error::NotFound), SyscallError::NotFound);
+    }
+}

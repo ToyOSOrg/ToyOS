@@ -154,9 +154,7 @@ blocked_dump 3400
 blocking_read_stress 41
 boot_deadline_ends_a_wedge 19295
 boot_partition_identity 5519
-boot_volume_metadata_error 4968
 c_capture_ignores_daemon_lines 4578
-cache_eviction 8165
 connect_before_serve 23
 console_line_atomicity 8925
 console_locale_detect 3922
@@ -264,7 +262,6 @@ leak_rollback_selftest 5423
 loader_watchdog_arms 10064
 locale_detect 9959
 locale_detect_unrecognized 160
-log_backing_read_error 4887
 log_conservation_smp1 4686
 log_conservation_smp4 8248
 log_conservation_smp8 5112

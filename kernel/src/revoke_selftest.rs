@@ -1,7 +1,6 @@
-//! Revoked-backing controls, behind `revoked-backing-selftest`: on each writable
-//! mount, a `FileBacking` read after the file's deletion must fail rather than
-//! fault in zeros. `/tmp`'s `TmpfsBacking` and `/home`'s `NvmeBacking` are
-//! separate implementations of the one contract, and must answer alike.
+//! The revoked-backing control, behind `revoked-backing-selftest`: on the
+//! kernel's one writable mount, `/tmp`, a `FileBacking` read after the file's
+//! deletion must fail rather than fault in zeros.
 
 use crate::file_cache;
 use crate::mm::PAGE_BYTES;
@@ -11,7 +10,6 @@ const FILL: u8 = 0xA7;
 
 pub fn run() {
     probe("/tmp/revoke_probe");
-    probe("/home/revoke_probe");
 }
 
 /// FAIL names the step so the verdict line carries the mechanism, not just the arm.

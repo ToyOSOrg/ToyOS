@@ -431,14 +431,9 @@ pub fn refused_claim(log: &Serial, claims: &str, why: &str) -> Result<(), String
     Ok(())
 }
 
-/// A machine with no NVMe controller must boot.
-///
-/// `.expect("NVMe: no controller found")` killed it at 0.08 s — before
-/// storage, before a console on the target laptop, and with the screen still
-/// showing whatever the last checkpoint painted. It is the same class M1
-/// closed for xHCI, on a different controller, and the same class the
-/// designation stamp closed one layer up: absence of storage is a
-/// configuration, not a failure.
+/// A machine with no NVMe controller must boot, and its block service and
+/// file servers serve what they have: absence of storage is a configuration,
+/// not a failure.
 pub fn diskless_boot(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -468,7 +463,8 @@ pub fn diskless_boot(
     // scan is a claim about nothing again.
     log.must_be_clean()?;
     log.must_not_say("no controller found")?;
-    log.must_say("NVMe: no controller on this machine")?;
+    log.must_say("blockd: no NVMe controller this row names is on this machine; serving no partition")?;
+    log.must_say("fsd: this machine has no DATA partition;")?;
     log.must_say("Boot: complete")?;
     Ok(())
 }

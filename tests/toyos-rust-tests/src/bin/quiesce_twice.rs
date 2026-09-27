@@ -1,7 +1,7 @@
 //! Two callers of the stop, and the one that is refused.
 //!
-//! init makes the first call, asked through its `power` port, after a closed
-//! file's flush is left owed. `quiesce-last-park` holds that call once it has
+//! init makes the first call, asked through its `power` port.
+//! `quiesce-last-park` holds that call once it has
 //! claimed the stop and before it stops anything, until a thread named
 //! [`LAST_THREAD`] parks: the window in which every other thread still runs.
 //! This process reads the kernel's log until the kernel says it waits there,
@@ -12,8 +12,6 @@
 //! Nothing here asserts: `common::power::quiesce_refuses_a_second_shutdown` is
 //! the judge, and its doc is the scenario.
 
-use std::fs::File;
-use std::io::Write;
 use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
@@ -27,11 +25,6 @@ use toyos_quiesce::LAST_THREAD;
 /// What the kernel says once the first call has claimed the stop and waits
 /// for the held thread.
 const WAITS: &str = "quiesce-last-park: the stop waits for";
-
-/// Bytes the owed file carries: enough clusters that its flush writes the
-/// FAT, whose mirror half `quiesce-drain-refuse` refuses the stop's own drain.
-const CHUNK: usize = 8192;
-const CHUNKS: usize = 8;
 
 /// Records per read; above the shard count, which the call refuses.
 const BATCH: usize = 4 * MAX_LOG_SHARDS as usize;
@@ -52,19 +45,6 @@ fn main() {
         eprintln!("quiesce_twice: this program was endowed no system capability");
         std::process::exit(1);
     };
-    {
-        let mut f = File::create("/log/quiesce-owed.bin").unwrap_or_else(|e| {
-            eprintln!("quiesce_twice: could not create the owed file: {e}");
-            std::process::exit(1);
-        });
-        for _ in 0..CHUNKS {
-            f.write_all(&[b'o'; CHUNK]).unwrap_or_else(|e| {
-                eprintln!("quiesce_twice: could not write the owed file: {e}");
-                std::process::exit(1);
-            });
-        }
-    }
-
     // The first call, from init. Comes back only refused.
     std::thread::spawn(|| {
         let refused = toyos::power::stop(Stop::Reboot);

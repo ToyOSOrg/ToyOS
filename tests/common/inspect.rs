@@ -6,9 +6,9 @@
 //! matches too much is a path in the answer this file did not name, and one
 //! that matches too little is a named path missing from it. Values are judged
 //! where the machine fixes them — QEMU's user network leases `10.0.2.15/24`,
-//! nothing plays audio until `inspect_plays` does, and the NVMe disk this file
-//! crafts has one partition free and one init grants — and read only for shape
-//! elsewhere.
+//! nothing plays audio until `inspect_plays` does, and the boot stick carries
+//! one partition the kernel holds, two file servers hold and one nobody does
+//! — and read only for shape elsewhere.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -27,11 +27,6 @@ pub const DENIED: &str = "inspect_denied";
 pub const PLAYS: &str = "inspect_plays";
 /// The guest binary that sends `SYS_DEVICE_INVENTORY` its edges.
 pub const BOUNDS: &str = "inventory_bounds";
-
-/// The crafted disk's partition nobody holds.
-const FREE: &str = "9D1E2F30-4A5B-4C6D-8E7F-0A1B2C3D4E5F";
-/// The one init grants test-runner; mirrored in the config.
-const GRANTED: &str = "B4C5D6E7-F809-4A1B-8C2D-3E4F5A6B7C8D";
 
 /// Every path the reader answers for netd on a virtio NIC with a lease.
 const NET: &[&str] = &[
@@ -57,16 +52,8 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
     if bins.len() != 3 {
         return Err(format!("{DENIED}, {PLAYS} and {BOUNDS} were not all built"));
     }
-    let nvme = super::lane::dir().join("inspect-disk.img");
-    let mib = 1024 * 1024;
-    super::partclaim::craft_plain_disk(
-        &nvme,
-        &[("free", mib, FREE), ("granted", mib, GRANTED)],
-        96 * mib,
-    )?;
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG);
-    let options =
-        BootOptions { profile: qemu::Profile::Gop, nvme_image: Some(nvme), ..Default::default() };
+    let options = BootOptions { profile: qemu::Profile::Gop, ..Default::default() };
     let argv = qemu::profile_argv(&options);
     if !argv.iter().any(|a| a.contains("virtio-net")) || !argv.iter().any(|a| a.contains("virtio-sound")) {
         return Err("this test needs a virtio NIC and a virtio sound card".to_string());
@@ -304,26 +291,12 @@ fn holders<'a>(got: &'a BTreeMap<String, String>, at: &str) -> Vec<&'a str> {
     got.iter().filter(|(p, _)| p.starts_with(&under)).map(|(_, v)| v.as_str()).collect()
 }
 
-/// The `dev.disk.<id>.part<index>` whose unique GUID is `unique`.
-fn partition<'a>(line: &str, got: &'a BTreeMap<String, String>, unique: &str) -> Result<&'a str, String> {
-    let unique = unique.to_ascii_lowercase();
-    let found: Vec<&str> = got
-        .iter()
-        .filter(|(p, v)| p.starts_with("dev.disk.") && p.ends_with(".unique") && **v == unique)
-        .map(|(p, _)| p.trim_end_matches(".unique"))
-        .collect();
-    match found.as_slice() {
-        [one] => Ok(one),
-        _ => Err(format!("`{line}`: {} partitions are {unique}, not one", found.len())),
-    }
-}
-
 /// `inspect dev.*`: the kernel's inventory, judged where QEMU fixes it. The
 /// virtio NIC is `1af4:1041` and netd holds it; the virtio sound card and the
 /// framebuffer are classes soundd and the compositor hold; the Gop profile's
-/// USB keyboard is on the xHCI; the boot stick carries partitions this kernel
-/// mounted; and of the crafted disk's two, one is free and test-runner holds
-/// the other.
+/// USB keyboard is on the xHCI; and the boot stick carries ROOT, which this
+/// kernel holds, the ESP and the log partition, which file servers hold, and
+/// the idle slot, which nobody does.
 fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
     let line = "inspect dev.*";
     let got = answer(&job(qemu, line, 0)?);
@@ -364,15 +337,18 @@ fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
     if !got.iter().any(|(p, v)| p.starts_with("dev.disk.") && p.ends_with(".state") && v == "kernel") {
         return Err(format!("`{line}`: no partition is held by the kernel"));
     }
-    let free = partition(line, &got, FREE)?;
-    expect(line, &got, &format!("{free}.state"), "free")?;
-    if !holders(&got, free).is_empty() {
-        return Err(format!("`{line}`: {free} is free and held by {:?}", holders(&got, free)));
+    let parts: Vec<&str> = got
+        .keys()
+        .filter(|p| p.starts_with("dev.disk.") && p.ends_with(".state"))
+        .map(|p| p.trim_end_matches(".state"))
+        .collect();
+    let state = |part: &str| got.get(&format!("{part}.state")).map(String::as_str);
+    if !parts.iter().any(|p| state(p) == Some("free") && holders(&got, p).is_empty()) {
+        return Err(format!("`{line}`: no partition is free and held by nobody"));
     }
-    let granted = partition(line, &got, GRANTED)?;
-    expect(line, &got, &format!("{granted}.state"), "claimed")?;
-    if holders(&got, granted) != ["test-runner"] {
-        return Err(format!("`{line}`: {granted} is held by {:?}, not test-runner", holders(&got, granted)));
+    let by_fsd = parts.iter().filter(|p| state(p) == Some("claimed") && holders(&got, p) == ["fsd"]).count();
+    if by_fsd != 2 {
+        return Err(format!("`{line}`: {by_fsd} partitions are claimed by fsd, not the ESP and the log partition"));
     }
     Ok(())
 }

@@ -472,19 +472,21 @@ fn enable(
             // it; both are answered on the device's first *read*, since a
             // first-write access would cache write permission and never fault.
             if crate::actuator::iommu_context_absent()
-                && device.matches_class(NVME_CLASS, NVME_SUBCLASS, None)
+                && device.matches_class(XHCI_CLASS, XHCI_SUBCLASS, Some(XHCI_PROG_IF))
             {
                 log!("iommu: unit{index} leaves {stream} out of the root table (actuator)");
+                STAGED.store(u32::from(stream.requester()), core::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             // A present context entry naming an empty domain, distinct from a
             // missing entry: passthrough would fault identically either way.
             if crate::actuator::iommu_empty_domain()
-                && device.matches_class(NVME_CLASS, NVME_SUBCLASS, None)
+                && device.matches_class(XHCI_CLASS, XHCI_SUBCLASS, Some(XHCI_PROG_IF))
             {
                 let empty = tables.alloc();
                 log!("iommu: unit{index} gives {stream} a domain with no mappings (actuator)");
                 table::bind_identity(&mut tables, root, stream, empty, width);
+                STAGED.store(u32::from(stream.requester()), core::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             table::bind_identity(&mut tables, root, stream, domain, width);
@@ -556,11 +558,23 @@ fn enable(
     );
 }
 
-/// Device class the actuators target, not a bus/device/function: QEMU's slot
+/// Device class the actuators target — the xHCI controller, which this kernel
+/// drives by DMA from boot — not a bus/device/function: QEMU's slot
 /// choice is not this kernel's business, and the harness reads the same
 /// class independently out of `pci::enumerate`.
-const NVME_CLASS: u8 = 0x01;
-const NVME_SUBCLASS: u8 = 0x08;
+/// The requester id `iommu-context-absent` or `iommu-empty-domain` staged, so
+/// its driver's move to a domain of its own leaves the staging in place;
+/// `u32::MAX`, which no requester id is, when neither is armed.
+static STAGED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// Whether `stream` is the one an actuator left without a working context.
+pub(super) fn staged(stream: StreamId) -> bool {
+    STAGED.load(core::sync::atomic::Ordering::Relaxed) == u32::from(stream.requester())
+}
+
+const XHCI_CLASS: u8 = 0x0C;
+const XHCI_SUBCLASS: u8 = 0x03;
+const XHCI_PROG_IF: u8 = 0x30;
 
 /// Slot of the per-width domain cache; exhaustive match so a new `AddressWidth` fails to compile here.
 fn domain_slot(width: AddressWidth) -> usize {

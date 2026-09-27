@@ -213,13 +213,21 @@ fn report_power_on(args: &KernelArgs, complete: u64) {
 }
 
 /// Says where this boot's log can be read, on the last surface still showing it once userland owns the screen.
-fn report_log_destination(args: &KernelArgs) {
+fn report_log_destination() {
     // Kernel-side because panic_console owns the panel; logd reports which file it opened separately.
-    // Whether the loader named a log partition, not whether its file server mounted it: that
-    // server says so itself, and this kernel mounts nothing but ROOT.
-    let has_log = args.log_partition_guid != [0; 16];
+    // Whether the partition is on a disk this kernel reads, not whether its file server mounted it:
+    // that server says so itself, and this kernel mounts nothing but ROOT.
+    let console = drivers::serial::has_console();
+    let has_log = match gpt::log_place() {
+        gpt::LogPlace::Driven => true,
+        gpt::LogPlace::Unnamed | gpt::LogPlace::Absent => false,
+        gpt::LogPlace::Undriven => {
+            log!("log: /log is on a disk this kernel does not drive; its file server says whether it mounted");
+            return;
+        }
+    };
     // ASCII only: the panel's font renders anything outside 0x20..=0x7E as a dot.
-    match (drivers::serial::has_console(), has_log) {
+    match (console, has_log) {
         (true, true) => log!("log: this boot is on the console and on /log"),
         (false, true) => log!("log: no serial console - this boot is on /log and on the screen"),
         // alert! reddens the panel's Level for exactly the two states that leave no account of this boot anywhere.
@@ -478,6 +486,10 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // After xhci::init: a USB-booted disk doesn't exist until the controller binds it.
     gpt::probe_usb_disks();
     rootfs::hold_source();
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_table_unanswered() {
+        block::unanswered::refuse();
+    }
 
     #[cfg(feature = "boot-actuators")]
     if actuator::leak_rollback_selftest() {
@@ -546,7 +558,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         pre_idle_wedge();
     }
 
-    report_log_destination(kernel_args);
+    report_log_destination();
     let complete_tsc = cpu::counter();
     boot_phase!("complete", 0);
     report_power_on(kernel_args, complete_tsc);

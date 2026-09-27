@@ -3,15 +3,15 @@
 //! The parser's own reasoning is host-tested inside `toyos-gpt/`, over crafted
 //! tables and every hostile field, and none of that needs a guest. What only a
 //! guest can answer is whether the *identity* survives the trip — OVMF's
-//! device path, the bootloader, `KernelArgs`, the kernel's NVMe driver — and
-//! whether the parser finds that identity on a table it did not author.
+//! device path, the bootloader, `KernelArgs`, the kernel's USB storage driver
+//! — and whether the parser finds that identity on a table it did not author.
 //!
 //! Ground truth is the disk image, read on the host by the `gpt` crate, which
 //! is a different implementation from the one under test. The guest's own
 //! account of the partition it booted from is exactly what is in question, so
 //! it cannot also be the reference.
 //!
-//! The table on the NVMe disk is built to be adversarial in the two ways that
+//! The table on a second USB disk is built to be adversarial in the two ways that
 //! matter. Its *first* entry is an ESP by type — so a matcher keying on the
 //! type GUID, or taking the first partition, or taking the first ESP, gets a
 //! different span than the one asserted. And the second boot moves the
@@ -50,7 +50,7 @@ pub fn boot_partition_identity(
     let config = repo.join("tests/metalcase/system.toml");
     let dir = super::lane::dir();
 
-    // Built here rather than by `boot_with_options`, because the crafted NVMe
+    // Built here rather than by `boot_with_options`, because the crafted
     // table below has to carry this image's partition GUID and the image does
     // not exist until it is built. `create_gpt_disk` draws a fresh random GUID
     // every time, so there is no second build that would agree with this one.
@@ -74,8 +74,9 @@ pub fn boot_partition_identity(
 
     // Positive: the matching entry is third, behind an ESP-typed decoy, and
     // sits exactly where firmware says it does.
-    let agreeing = dir.join("gpt-nvme-agree.img");
+    let agreeing = dir.join("gpt-decoy-agree.img");
     craft_decoy_disk(&agreeing, &esp, 0)?;
+    let untouched = toyos_build::fingerprint::whole_device(&agreeing);
     let log = boot(&config, &boot_image, &agreeing)?;
 
     let firmware = format!(
@@ -94,26 +95,24 @@ pub fn boot_partition_identity(
     // Entry 2 of 3 is the whole assertion: the decoy at entry 0 is an ESP too,
     // so an index or a type would both have answered 0.
     let carries = format!(
-        "gpt: device 1 carries the boot partition at LBA {}+{} (512-byte blocks), entry 2 of 3",
+        "carries the boot partition at LBA {}+{} (512-byte blocks), entry 2 of 3",
         esp.first_lba,
         esp.blocks()
     );
-    if !log.contains(&carries) {
+    let Some(decoy) = device_saying(&log, &carries) else {
         return Err(format!(
             "the kernel did not find the boot partition where the table put it.\nwanted: \
              {carries}\n{}",
             gpt_lines(&log)
         ));
-    }
+    };
 
     // And then the arm nothing else reaches. The stick this guest booted from
     // is on the bus and carries the same partition — it is the real one, and
-    // the crafted NVMe entry above is a clone of it. Two devices claiming one
+    // the crafted entry above is a clone of it. Two devices claiming one
     // unique partition GUID is the state `Resolution::Ambiguous` exists for,
     // and the only safe answer is that this machine has no boot volume at all.
-    // Nothing tested that until `fat32_adapter::probe_boot_disks` started
-    // asking the USB bus as well.
-    if !log.contains("carries the same partition GUID as device 1") {
+    if !log.contains("carries the same partition GUID as device ") {
         return Err(format!(
             "a second device carrying the boot partition GUID did not make the answer \
              ambiguous.\n{}",
@@ -127,22 +126,11 @@ pub fn boot_partition_identity(
         ));
     }
 
-    // A boot partition on a disk is not consent to write the disk. This one
-    // carries no TOYOS-DATA partition, so the kernel takes no volume off it and
-    // says which count it saw; `foreign_disk_untouched` is where a ToyOS-typed
-    // partition that is somebody else's is refused at block 0.
-    if !log.contains("TOYOS-DATA partitions, and a data volume is one") {
-        return Err(format!(
-            "the kernel did not say what it found on a disk carrying our boot partition and \
-             no data volume:\n{}",
-            gpt_lines(&log)
-        ));
-    }
-    if log.contains("formatting it") {
-        return Err(format!(
-            "finding our boot partition on a disk made the kernel format it:\n{}",
-            gpt_lines(&log)
-        ));
+    // A boot partition on a disk is not consent to write the disk.
+    if let Some(diff) =
+        toyos_build::fingerprint::first_difference(&untouched, &toyos_build::fingerprint::whole_device(&agreeing))
+    {
+        return Err(format!("finding our boot partition on a disk wrote the disk: {diff}"));
     }
     if !log.contains("Boot: complete") {
         return Err(format!("the boot did not complete:\n{log}"));
@@ -152,12 +140,12 @@ pub fn boot_partition_identity(
     // it. Two accounts of one partition that disagree means this is not the
     // disk firmware read, and the next thing anyone does with a boot volume is
     // write to it.
-    let disagreeing = dir.join("gpt-nvme-shifted.img");
+    let disagreeing = dir.join("gpt-decoy-shifted.img");
     craft_decoy_disk(&disagreeing, &esp, 8)?;
     let log = boot(&config, &boot_image, &disagreeing)?;
 
     let refused = format!(
-        "gpt: device 1 puts {} at LBA {}+{} but firmware said {}+{}",
+        "gpt: device {decoy} puts {} at LBA {}+{} but firmware said {}+{}",
         esp.guid,
         esp.first_lba + 8,
         esp.blocks() - 8,
@@ -171,7 +159,7 @@ pub fn boot_partition_identity(
             gpt_lines(&log)
         ));
     }
-    if log.contains("gpt: device 1 carries the boot partition") {
+    if log.contains(&format!("gpt: device {decoy} carries the boot partition")) {
         return Err(format!(
             "the kernel claimed a boot volume it had just refused:\n{}",
             gpt_lines(&log)
@@ -181,7 +169,7 @@ pub fn boot_partition_identity(
     // partition, which is on the USB bus and where firmware said it was — and
     // with the decoy refused there is no second claimant, so this boot *does*
     // have a boot volume where the agreeing one above does not.
-    if !log.contains("gpt: device 16 carries the boot partition") {
+    if device_saying(&log, "carries the boot partition at LBA ").is_none_or(|stick| stick == decoy) {
         return Err(format!(
             "refusing the shifted decoy cost the boot partition on the stick.\n{}",
             gpt_lines(&log)
@@ -201,24 +189,29 @@ pub fn boot_partition_identity(
     Ok(())
 }
 
-fn boot(
-    config: &Path,
-    boot_image: &Path,
-    nvme_image: &Path,
-) -> Result<String, String> {
+/// The device a `gpt: device N …` line carrying `what` names.
+fn device_saying(log: &str, what: &str) -> Option<u32> {
+    log.lines()
+        .filter(|l| l.contains(what))
+        .find_map(|l| l.split("gpt: device ").nth(1)?.split(' ').next()?.parse().ok())
+}
+
+/// A boot off the stick with `decoy` on the bus ahead of it, so the decoy's
+/// table is the first the kernel reads.
+fn boot(config: &Path, boot_image: &Path, decoy: &Path) -> Result<String, String> {
     let mut qemu = QemuInstance::boot_with_options(
         config.parent().expect("system.toml has a directory"),
         &[],
         &[],
         BootOptions {
-            profile: qemu::Profile::Metal,
+            profile: qemu::Profile::UsbDiskRefusedFirst,
             // Pristine, and this test is why that choice exists: it boots one
             // crafted image twice, and the loader counts an image's attempts
             // into a file on its own log partition before every handoff — so a
             // second launch that saw the first one's writes is a retry and
             // boots no kernel at all.
             boot_image: Some(qemu::Staged::Pristine(boot_image.to_path_buf())),
-            nvme_image: Some(nvme_image.to_path_buf()),
+            usb_images: vec![decoy.to_path_buf()],
             ..Default::default()
         },
     );

@@ -78,19 +78,16 @@ pub struct Published {
     file: Mutex<Option<(u32, String)>>,
     bytes: AtomicU64,
     lost: AtomicU64,
-    stream: bool,
 }
 
 impl Published {
-    /// `stream` is whether this boot's log is served on the network at all.
-    pub fn new(stream: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             state: AtomicU8::new(State::ConsoleOnly as u8),
             part: AtomicU32::new(0),
             file: Mutex::new(None),
             bytes: AtomicU64::new(0),
             lost: AtomicU64::new(0),
-            stream,
         }
     }
 
@@ -108,7 +105,8 @@ impl Published {
         }
     }
 
-    fn snapshot(&self) -> Vec<u8> {
+    /// `stream` is whether this boot's log is served on the network at all.
+    fn snapshot(&self, stream: bool) -> Vec<u8> {
         let mut snap = Snapshot::new(toyos_inspect::LOG);
         snap.put("volume.state", State::word(self.state.load(Ordering::Relaxed)));
         let file = self.file.lock().expect("the loop does not panic holding this").clone();
@@ -118,7 +116,7 @@ impl Published {
             snap.put("volume.bytes", self.bytes.load(Ordering::Relaxed));
         }
         snap.put("records.lost", self.lost.load(Ordering::Relaxed));
-        snap.put("stream", if self.stream { "on" } else { "off" });
+        snap.put("stream", if stream { "on" } else { "off" });
         snap.encode().unwrap_or_else(|why| panic!("logd: its snapshot: {why}"))
     }
 }
@@ -175,7 +173,7 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
             match p.rx.pump(&p.conn) {
                 RxStep::Idle => true,
                 RxStep::Frame { msg_type: toyos_inspect::MSG_INSPECT, payload_len: 0 } => {
-                    let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
+                    let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot(hub.network()));
                     false
                 }
                 RxStep::Frame { msg_type: READ, payload_len: 0 } => {

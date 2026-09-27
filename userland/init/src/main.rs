@@ -1056,10 +1056,10 @@ impl<'a> Init<'a> {
     /// Have every writable file server make its volume durable, each bounded
     /// by [`FLUSH_BOUND`]: the kernel's stop waits for no process, so what a
     /// server holds and has not written is lost unless it is asked first.
-    /// `/log` is `logd`'s flush's, made durable before this.
+    /// After `logd`'s flush, so the log's server writes what logd wrote last.
     fn sync_files(&self) {
         let roles = self.system.programs.iter().flat_map(|p| p.roles.iter());
-        for role in roles.filter(|r| *r != "log" && *r != "boot") {
+        for role in roles.filter(|r| *r != "boot") {
             let Some(dir) = toyos_manifest::role_dirs(role).and_then(|dirs| dirs.first()) else { continue };
             let name = format!("{CAPABILITY_PREFIX}{dir}");
             let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -1600,8 +1600,9 @@ fn start<'a>(
     storage: Storage,
     output: Output<'_>,
 ) -> std::io::Result<(Child, Vec<String>)> {
-    command.args(&program.args);
+    // A storage row's own arguments first: a file server's role leads its argv.
     command.args(&storage.args);
+    command.args(&program.args);
     let booting = matches!(output, Output::Boot(_));
 
     // **Set here, over whatever a launching caller carried**: the row decides

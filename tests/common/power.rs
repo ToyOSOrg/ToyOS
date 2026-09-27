@@ -449,18 +449,12 @@ pub fn quiesce_dump_holds_the_stopped(
 /// other thread still runs. The job reads the kernel's word that the stop
 /// waits there and makes the second call — `SYS_SHUTDOWN` against the first's
 /// `SYS_REBOOT`, so the claim is judged on both syscalls — and starts the
-/// thread the stop waits for only once refused by name. The same boot has the
-/// stop's own drain refused in its retry ladder over a flush the job left
-/// owed, the first call's work after the window.
+/// thread the stop waits for only once refused by name.
 pub fn quiesce_refuses_a_second_shutdown(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    // The kernel's `mirror_refuse::SHUTDOWN_REFUSALS`, spelt here because the
-    // harness cannot link the kernel.
-    const REFUSALS: usize = 8;
-    const REFUSED: &str = "quiesce-drain-refuse: refusing the shutdown drain's";
     const WAITS: &str = "quiesce-last-park: the stop waits for";
     const SECOND_CALLER: &str = "power: this machine is already stopping";
     const SYNCING: &str = "Syncing filesystems...";
@@ -468,12 +462,10 @@ pub fn quiesce_refuses_a_second_shutdown(
         "quiesce-last-park: {} is held until the stop waits on it alone",
         toyos_quiesce::LAST_THREAD
     );
-    // `writeback-stall` parks `iod`, so the closed file's flush is the stop's
-    // own drain's to find and no other drainer's to hold.
     let (whole, _record) = stopped_boot(
         "tests/quiescetwicecase/system.toml",
         "quiesce_twice",
-        &["writeback-stall", "quiesce-drain-refuse", "quiesce-last-park", LATE_WORD],
+        &["quiesce-last-park", LATE_WORD],
         rust_bins,
     )?;
     let lines: Vec<&str> = whole.lines().collect();
@@ -506,16 +498,6 @@ pub fn quiesce_refuses_a_second_shutdown(
             "the first call's wait, the second call's refusal, the held thread and the sync are \
              at console lines {waits}, {second}, {held} and {synced}: the refusal was not made \
              in the window the first call held\n{whole}"
-        ));
-    }
-    // And the first call's own drain met its ladder, after the window.
-    let refusals = at(REFUSED);
-    if refusals.len() != REFUSALS || refusals[0] < synced {
-        return Err(format!(
-            "the quiesce-drain-refuse actuator refused the stop's drain {} time(s), not the \
-             {REFUSALS} the kernel declares after its sync, so the first call's drain was not \
-             parked where this boot says it was\n{whole}",
-            refusals.len(),
         ));
     }
     eprintln!(

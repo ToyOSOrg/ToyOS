@@ -117,19 +117,19 @@ pub const RECORDS: &[Record] = &[
     Record { about: "i8042", needle: "i8042: ok selftest=0x55", presence: Says },
     Record { about: "i8042-quarantine", needle: "i8042: quarantined", presence: NeverSays },
     Record { about: "i8042-lost-edge", needle: "i8042: bytes with no IRQ record", presence: NeverSays },
-    // The internal disk: identified, and — the whole safety argument for
-    // running on this machine at all — never written.
-    Record { about: "nvme", needle: "NVMe: NS1 size=", presence: Says },
-    Record { about: "nvme-refused", needle: "NVMe: NOT INITIALISED", presence: NeverSays },
-    Record { about: "nvme-offline", needle: "NVMe: this controller is offline", presence: NeverSays },
+    // The internal disk — the whole safety argument for running on this
+    // machine at all — never written: the kernel drives no NVMe, and the one
+    // process that may drives none here, since its row names only the
+    // emulated controller.
+    Record { about: "nvme", needle: NVME_UNDRIVEN, presence: Says },
+    Record { about: "nvme-served", needle: "blockd: partition ", presence: NeverSays },
     // The boot ended the way the loop's verdict needs it to.
     Record { about: "boot", needle: "Boot: complete (", presence: Says },
 ];
 
-/// The one census field a boot may not have moved: a write to a disk this
-/// project never writes.
-pub const NVME_CENSUS: &str = "nvme: commands ";
-pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
+/// blockd's word that no NVMe controller its row names is on the machine, so
+/// nothing reads or writes the internal disk.
+pub const NVME_UNDRIVEN: &str = "blockd: no NVMe controller this row names is on this machine";
 
 /// What `loader.log` must carry, which is a different file and a different
 /// reader.
@@ -140,9 +140,8 @@ pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
 /// that pass's `|` prefix.
 pub const LOADER_RECORDS: &[Record] = &[
     Record { about: "chain", needle: "the last boot read DONE", presence: Says },
-    // The stop's census and every disk's write cache emptied before anything
-    // was taken down: records of the stop, sealed in its tail.
-    Record { about: "nvme-census", needle: NVME_CENSUS, presence: Says },
+    // Every disk's write cache emptied before anything was taken down: a
+    // record of the stop, sealed in its tail.
     Record { about: "usb-flush", needle: "usb-quiesce: disk ", presence: Says },
     Record { about: "usb-quiesce", needle: QUIESCE_HEAD, presence: Says },
     // What the stop did about the command a device was inside when it ran. On
@@ -312,8 +311,7 @@ pub fn inventory(log: &str) -> Vec<String> {
         "usb-storage: ",
         "i8042: ",
         "hda: ",
-        "NVMe: ",
-        "nvme: commands ",
+        "blockd: ",
         "GOP: ",
         "PAT: ",
     ] {
@@ -353,13 +351,6 @@ pub fn unmet(loader: &str, log: &str) -> Vec<String> {
             _ => {}
         }
     }
-    if let Some(census) = loader.lines().find(|l| l.contains(NVME_CENSUS)) {
-        for want in NVME_NO_WRITES {
-            if !census.contains(want) {
-                out.push(format!("nvme-census: {census:?}, and this boot owed {want}"));
-            }
-        }
-    }
     match quiesced(loader) {
         Some(said) if !said.complete() => out.push(format!(
             "usb-quiesce: the shutdown left a device behind: {said:?}. A reset with a transfer \
@@ -396,7 +387,7 @@ mod tests {
             line("0.090", "xHCI: max_slots=32 max_ports=16 ctx_size=64 pagesize=0x1"),
             line("0.140", "usb-storage: 1 device(s)"),
             line("0.150", "i8042: ok selftest=0x55 cfg=0x45->0x44 port1=ok port2=ok"),
-            line("0.200", "NVMe: NS1 size=1000215216 sectors, sector_size=512"),
+            line("0.200", "blockd: no NVMe controller this row names is on this machine; serving no partition"),
             line("0.319", "GOP: scanout memory type WC (MTRR WB, PAT entry 4)"),
             line("0.368", "Boot: complete (368ms)"),
             line("1.100", "exit: usbwrite pid=6 code=402000 cpu=140ms"),
@@ -415,8 +406,6 @@ mod tests {
          | log: this boot's newest records follow, newest first (16)\n\
          | log-tail: [kernel 3.960 cpu0] Rebooting.\n\
          | log-tail: [kernel 3.955 cpu0] usb-quiesce: disk 0 SYNCHRONIZE CACHE ok\n\
-         | log-tail: [kernel 3.950 cpu0] nvme: commands identify=2 admin-other=2 read=1 write=0 \
-         io-other=0\n\
          | usb-quiesce: no Bulk-Only command was open, so this reset cuts none\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
          | usb-quiesce: 2/2 disk cache(s) flushed, 1 with no cache to flush, \
@@ -501,9 +490,10 @@ mod tests {
         // The scanout mapped as something other than write-combining.
         let uncached = a_good_boot().replace("memory type WC ", "memory type UC ");
         assert_eq!(about(unmet(&a_good_loader(), &uncached)), ["scanout"]);
-        // One write to the disk this project never writes.
-        let wrote = a_good_loader().replace("write=0 io-other=0", "write=1 io-other=0");
-        assert_eq!(about(unmet(&wrote, &a_good_boot())), ["nvme-census"]);
+        // A partition of the internal disk served, which is where a write to
+        // it would come from.
+        let served = format!("{}{}", a_good_boot(), line("0.3", "blockd: partition 0000 at block 256"));
+        assert_eq!(about(unmet(&a_good_loader(), &served)), ["nvme-served"]);
         // A shutdown that never emptied a cache.
         let unflushed = a_good_loader()
             .lines()
