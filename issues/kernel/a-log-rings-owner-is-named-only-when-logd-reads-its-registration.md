@@ -1,0 +1,41 @@
+---
+status: open
+kind: defect
+opened: 2026-09-27
+---
+
+# A log ring's owner is named only when `logd` reads its registration, so a child that floods first takes the owner's slots
+
+`toyos::log::Ring::push` keeps `CHILD_KEEP` shared slots free for the ring's
+owner, but only once the owner word is set. `logd` sets it (`origin.rs`,
+`ring.own(pid)`) when it reads init's `REGISTER` frame. init sends that
+frame after it spawns the program (`userland/init/src/main.rs`, `register`).
+Until `logd` reads the frame the owner word is 0, and `push` then keeps
+nothing for anyone. A child that starts flooding in that window can take
+every slot, the owner's included.
+
+`log_ring_keeps_the_owners_slots` (fast tier) is red this way beside the
+other `log_` guests and green alone. Its `/log` holds `===READY===`,
+`===TEST_START test_rs_log_flood===` and 1917 flood lines: exactly the ring's
+1919 shared slots, with no slot left for test-runner's `===TEST_END`.
+`logd: reading test-runner again ... with 1919 of its ring's 1919 records
+waiting`.
+
+Rates on the dev host (TCG), `cargo test --test toyos-build -- --nightly
+log_`, interleaved in one session:
+- `nightly-green2` (the branch that filed this): 3 red of 9. Each red was
+  this failure.
+- `origin/main` at 1ce71831: 0 of 8.
+
+No mechanism on that branch reaches the ring, init or logd. The window is a
+race on both trees, and the difference between the two rates is not shown to
+be more than chance.
+
+The fix belongs where the owner is decided:
+- init names the owner itself, after the spawn and before the frame. That
+  narrows the window and does not close it.
+- Or `Ring::push` treats an unowned ring as one in which every writer leaves
+  `CHILD_KEEP`, which closes it. That is `toyos/src`, the SDK.
+
+**Exit**: a child writing before the ring's owner is named cannot take the
+slots the owner is kept, shown by a test that makes it write in that window.

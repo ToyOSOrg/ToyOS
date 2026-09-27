@@ -111,3 +111,16 @@ still the dev host's under cross-arch TCG, so this record is unchanged in what
 it says and only narrower in where a fresh sample can come from: a hosted
 sample is a sample over unnamed CPUs, and a T14 sample is now a job of
 `issues/hardware/the-t14-boots-toyos-unattended.md` rather than of a CI lane.
+
+## Main's nightly at 1ce71831 reds on it
+
+Run 36290616312, `audio (2)`: `audio_tone_load.smp1 wake lateness: median
+5765 -> 6650 (Mann-Whitney z=4.03 > 3.09)`. Dropouts were 0/60, underruns 0,
+ceiling breaches 0/60, and wakes 1396-1426 against the recorded 856-887,
+the 1.6x KVM-over-TCG ratio this file records. The same lane on the nightly
+before #527 (run 36285169430) read median 6478 with wakes 1394-1425 and
+passed. On `nightly-green2` at dbf4ace5 (run 36292135439) it passed too. The
+fresh samples agree with each other and differ from the dev host's TCG
+sample, so this is the instrument, as above. Until a per-host baseline
+exists, whether a KVM runner's gate A reds depends on where its median lands
+against the TCG sample's.
