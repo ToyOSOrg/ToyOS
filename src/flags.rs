@@ -334,12 +334,13 @@ mod tests {
             vec!["-h"],
             vec!["buildonly"],
             vec!["--build-only", "target/bootable.img"],
-            vec!["--host-builds"],
         ] {
             let bad = words.last().expect("a command line to refuse");
             let message = refusal(&words);
             assert!(message.contains(bad), "{words:?}: {message}");
         }
+        let deleted = refusal(&["--host-builds", "4"]);
+        assert!(deleted.contains("--host-builds"), "a deleted flag given its value: {deleted}");
     }
 
     #[test]
