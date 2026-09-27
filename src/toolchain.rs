@@ -394,7 +394,6 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         }
         Owner::Us => {}
     }
-    crate::compiler::refuse_llvm_edit(&rust_dir);
 
     let compiler_stamp = stamps_dir.join("compiler.stamp");
     let hosted_stamp = stamps_dir.join("hosted-rustc.stamp");
@@ -411,9 +410,11 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
                 .unwrap_or(false);
             // A `stage2` that links another LLVM than the one `rust/` names —
             // or one no record says was built from `src/llvm-project` at all —
-            // is a compiler this checkout no longer describes.
-            let moved = fs::read_to_string(rust_dir.join("build/toyos-compiler"))
-                .is_ok_and(|built| built.trim() != crate::compiler::source(&rust_dir));
+            // is a compiler this checkout no longer describes. Named before any
+            // build, so an LLVM edit no commit holds is refused before one.
+            let names = crate::compiler::source(&rust_dir);
+            let moved =
+                fs::read_to_string(rust_dir.join("build/toyos-compiler")).is_ok_and(|built| built.trim() != names);
             if stamps::dir_changed(&rust_dir.join("compiler"), &compiler_stamp) || moved || force_rebuild {
                 Some(Bootstrap { invalidate_hosted: true })
             } else if !toolchain_exists {

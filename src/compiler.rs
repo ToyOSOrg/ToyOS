@@ -14,7 +14,8 @@
 //! and two worktrees naming the same compiler share one copy.
 //!
 //! **LLVM is built from `src/llvm-project`.**
-//! [`source`] names that commit, so another LLVM is another compiler.
+//! [`source`] names that commit, so another LLVM is another compiler, and an
+//! LLVM checkout holding what no commit does names none.
 //!
 //! **A compiler of a worktree's own never touches what the others build with**:
 //! not the primary's `stage2`, not its record, not the machine-global rustup
@@ -163,11 +164,16 @@ pub fn key(fork: &Path) -> String {
     short(parts.join("\n\0\n").as_bytes())
 }
 
-/// Refuse an edit in `fork`'s LLVM checkout that no commit holds, once per
-/// build before any compiler is named: [`llvm_commit`] names the commit alone.
-pub fn refuse_llvm_edit(fork: &Path) {
+/// The LLVM commit `fork` builds against: the one its `HEAD` records, which is
+/// the one bootstrap checks out and builds whatever the submodule holds. An
+/// LLVM change is a commit there and a gitlink here, so a checkout holding
+/// anything no commit does is refused rather than named by its commit.
+fn llvm_commit(fork: &Path) -> String {
     let checkout = fork.join(LLVM);
-    let edited = checkout.join(".git").exists() && !git_bytes(&checkout, &["diff", "--name-only", "HEAD"]).is_empty();
+    // Exactly what bootstrap's LLVM stamp hashes beyond the commit; the untracked
+    // cache spares each call a walk of the whole tree.
+    let status = ["-c", "core.untrackedCache=true", "status", "--porcelain", "--untracked-files=normal"];
+    let edited = checkout.join(".git").exists() && !git_bytes(&checkout, &status).is_empty();
     assert!(
         !edited,
         "{} holds changes no commit does, and a compiler is keyed on the commit its gitlink \
@@ -175,12 +181,6 @@ pub fn refuse_llvm_edit(fork: &Path) {
         checkout.display(),
         fork.display(),
     );
-}
-
-/// The LLVM commit `fork` builds against: the one its `HEAD` records, which is
-/// the one bootstrap checks out and builds whatever the submodule holds. An
-/// LLVM change is a commit there and a gitlink here.
-fn llvm_commit(fork: &Path) -> String {
     let recorded = git_out(fork, &["ls-tree", "HEAD", LLVM]);
     match recorded.split_whitespace().collect::<Vec<_>>().as_slice() {
         ["160000", "commit", sha, _] => sha.to_string(),
@@ -204,7 +204,6 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     if fork == rust_dir {
         return Compiler::primary(rust_dir);
     }
-    refuse_llvm_edit(fork);
     let record = primary_record(rust_dir);
     let built_from = fs::read_to_string(&record).unwrap_or_else(|e| {
         panic!(
@@ -564,34 +563,64 @@ mod tests {
         assert_eq!(builds.get(), 0, "a missing record built a compiler");
     }
 
-    /// An LLVM edit no commit holds is refused.
-    #[test]
-    fn an_uncommitted_llvm_edit_is_refused() {
-        let scratch = TempDir::new("compiler-llvm-edit");
-        let (_primary, rust_dir, [same, _, _]) = estate(&scratch);
-        let fork = same.join("rust");
+    /// `fork`'s LLVM checked out at a commit of its own.
+    fn llvm_checkout(fork: &Path) -> PathBuf {
         let llvm = fork.join(LLVM);
         git(&llvm, &["init", "-q"]);
         write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core;\n");
         git(&llvm, &["add", "-A"]);
         git(&llvm, &["commit", "-qm", "LLVM"]);
-        let committed = key(&fork);
+        llvm
+    }
 
-        write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core_edited;\n");
+    /// What `f` panicked with; `expect` if it returned.
+    fn refusal(expect: &str, f: impl FnOnce()) -> String {
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err(expect);
+        refused.downcast_ref::<String>().cloned().unwrap_or_default()
+    }
+
+    /// An LLVM checkout holding what no commit does, an edit or a file git does
+    /// not track, names no compiler of a worktree's.
+    #[test]
+    fn an_uncommitted_llvm_edit_is_refused() {
+        let scratch = TempDir::new("compiler-llvm-edit");
+        let (_primary, rust_dir, [same, _, _]) = estate(&scratch);
+        let fork = same.join("rust");
+        let llvm = llvm_checkout(&fork);
+        let committed = key(&fork);
         let builds = Cell::new(0);
         let fake = |fork: &Path| {
             builds.set(builds.get() + 1);
             fork.join("build/toyos-compiler/stage2")
         };
-        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+
+        write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core_edited;\n");
+        let said = refusal("an uncommitted LLVM edit named a compiler", || {
             choose(&same, &rust_dir, &fork, fake);
-        }))
-        .expect_err("an uncommitted LLVM edit named a compiler");
-        let said = refused.downcast_ref::<String>().cloned().unwrap_or_default();
+        });
         assert!(said.contains("holds changes no commit does"), "{said}");
-        assert_eq!(builds.get(), 0, "an uncommitted LLVM edit built a compiler");
         git(&llvm, &["commit", "-qam", "the edit"]);
         assert_eq!(key(&fork), committed, "the key read the submodule's commit rather than the gitlink");
+
+        write(&llvm.join("llvm/lib/IR/Untracked.cpp"), "int untracked;\n");
+        let said = refusal("an untracked file in LLVM named a compiler", || {
+            choose(&same, &rust_dir, &fork, fake);
+        });
+        assert!(said.contains("holds changes no commit does"), "{said}");
+        assert_eq!(builds.get(), 0, "an LLVM checkout no commit holds built a compiler");
+    }
+
+    /// The primary records no LLVM edit as the commit it is an edit of.
+    #[test]
+    fn the_primary_records_no_uncommitted_llvm_edit() {
+        let scratch = TempDir::new("compiler-llvm-primary");
+        let (_primary, rust_dir, _) = estate(&scratch);
+        let llvm = llvm_checkout(&rust_dir);
+        let before = fs::read_to_string(primary_record(&rust_dir)).unwrap();
+        write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core_edited;\n");
+        let said = refusal("the primary recorded an uncommitted LLVM edit as its commit", || record(&rust_dir));
+        assert!(said.contains("holds changes no commit does"), "{said}");
+        assert_eq!(fs::read_to_string(primary_record(&rust_dir)).unwrap(), before);
     }
 
     /// Every source a compiler is built from moves its key: LLVM by commit,
