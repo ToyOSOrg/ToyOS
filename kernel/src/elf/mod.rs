@@ -347,8 +347,8 @@ pub fn load_shared_lib(
 
     // `span` is file-chosen; an unchecked round-up could wrap to a too-small allocation.
     let (Some(load_size), Some(rw_end_aligned)) = (
-        usize::try_from(layout.span()).ok().and_then(align_2m_checked),
-        usize::try_from(rw_hi).ok().and_then(align_2m_checked),
+        align_2m_checked(layout.span()).and_then(|v| usize::try_from(v).ok()),
+        align_2m_checked(rw_hi).and_then(|v| usize::try_from(v).ok()),
     ) else {
         return Err("ELF: image span does not fit an allocation");
     };
