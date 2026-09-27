@@ -754,8 +754,8 @@ fn parse_qemu_version(text: &str) -> Option<String> {
     (!version.is_empty()).then(|| version.to_string())
 }
 
-/// The line `cargo run` prints when this host is not the instrument the
-/// project's numbers were taken on, and nothing at all when it is.
+/// The line `cargo run` prints when this host's QEMU is not the version
+/// `.github/qemu-version` declares, and nothing at all when it is.
 pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     let want = declared_qemu_version(root)?;
     let out = Command::new(arch.qemu()).arg("--version").output().ok()?;
