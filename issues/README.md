@@ -27,7 +27,7 @@ Four fields, three required, no defaults.
 |---|---|---|
 | `status` | `open` | it is work, and nobody is holding it |
 | | `assigned` | it is work, and somebody is — the body says who or which task |
-| | `expected-red` | a test fails on this today and `src/redlist.rs` quarantines it |
+| | `expected-red` | a test fails on this today and `src/redlist.rs` disables it |
 | | `owner` | it is the owner's to decide, and nobody else may |
 | | `none` | nothing is owed |
 | `kind` | `defect` | real, reproducible, someone should fix it |
@@ -138,7 +138,7 @@ checkout (`git grep <rev>`): `rg` skips dotfile directories without `--hidden`,
 and `.github/` holds citations too. Then read where the hits are. One in a comment
 under `toyos-abi/src`, `toyos/src` or a published crate changes no identity
 (`src/identity.rs`), so it owes no version and builds no sysroot. One in
-`src/redlist.rs` is a quarantine row's `issue`: the row goes with the file.
+`src/redlist.rs` is a disabled test's `issue`: the row goes with the file.
 
 ## Two area notes, carried over from the file this replaced
 

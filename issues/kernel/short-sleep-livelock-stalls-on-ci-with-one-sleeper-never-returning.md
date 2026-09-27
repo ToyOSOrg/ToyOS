@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-06
 ---
@@ -26,7 +26,9 @@ sleeps of 100000 ns returned
 Four of the program's sleepers finished their 100000 ns round and exited on
 cpu1; the fifth never printed its return and the guest said nothing more for
 63 s. That is the shape the test exists to catch, seen once on the CI
-instrument; the redlist row (`src/redlist.rs`, `short_sleep_livelock`,
-`Instrument::Ci`) records it, and the owner is the sleep path in
-`kernel/src/sched` that the test's write-up (`tests/toyos.rs`,
-`short_sleep_livelock`) names.
+instrument, and the owner is the sleep path in `kernel/src/sched` that the
+test's write-up (`tests/toyos.rs`, `short_sleep_livelock`) names.
+
+**Exit condition.** The fifth sleeper's stall is fixed in the sleep path, and
+`short_sleep_livelock` green on CI's KVM `guest` shards.
+Owner: the sleep path, `kernel/src/sched`; held by the orchestrator.

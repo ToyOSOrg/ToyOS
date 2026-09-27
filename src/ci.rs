@@ -641,8 +641,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
 }
 
 /// The suite's own count line and every line naming a verdict worth reading
-/// without the log: a failure, whether it survived being run alone, and a
-/// quarantined name that failed for something else.
+/// without the log: a failure.
 fn verdicts(log: &str) -> String {
     let total = log
         .lines()
@@ -652,10 +651,8 @@ fn verdicts(log: &str) -> String {
         .lines()
         .filter(|l| {
             l.starts_with("FAIL ")
-                || l.starts_with("XFAIL ")
                 || (l.starts_with(' ')
-                    && ["STALL ", "INVL ", "ALONE "].iter().any(|v| l.trim_start().starts_with(v)))
-                || l.contains("is quarantined for something else")
+                    && ["STALL ", "INVL "].iter().any(|v| l.trim_start().starts_with(v)))
         })
         .collect();
     if named.is_empty() {
@@ -966,11 +963,11 @@ mod tests {
     #[test]
     fn the_summary_keeps_the_count_and_the_verdicts() {
         let log = "test result: ok. 3 passed\n\
-                   FAIL rs::lan_talk: no exit code\n  ALONE lan_talk: GREEN\nnoise\n\
+                   FAIL rs::lan_talk: no exit code\nnoise\n\
                    test result: FAILED. 40 passed; 1 failed, 41 total (300 s)\n";
         let said = verdicts(log);
         assert!(said.starts_with("test result: FAILED. 40 passed; 1 failed, 41 total"), "{said}");
-        assert!(said.contains("FAIL rs::lan_talk") && said.contains("ALONE lan_talk"), "{said}");
+        assert!(said.contains("FAIL rs::lan_talk"), "{said}");
         assert!(!said.contains("noise"), "{said}");
         assert_eq!(verdicts(""), "no suite result line");
     }

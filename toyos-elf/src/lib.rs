@@ -42,13 +42,17 @@ pub mod section;
 pub mod sym;
 pub mod tls;
 
-pub use dynamic::{Dynamic, Table};
+pub use dynamic::{Dynamic, InitArray, Table};
 pub use gnu_hash::GnuHash;
 pub use header::{FileHeader, Machine};
-pub use layout::{Layout, Segment, SegmentFlags, SectionTableRef, StackedImage, TlsSegment};
-pub use rela::{Rela, RelaCounts, RelaTable, RelocError, RelocKind};
+pub use layout::{
+    DynamicSegment, Extent, ImageOffset, ImageRange, Layout, Segment, SegmentFlags,
+    SectionTableRef, StackedImage, TlsSegment,
+};
+pub use rela::{Op, Rela, RelaCounts, RelaTable, Reloc, RelocError, RelocKind, Rules, TlsRef};
 pub use section::{SectionHeader, SectionTable};
-pub use sym::{Sym, SymTab};
+pub use sym::{Sym, SymIndex, SymTab};
+pub use tls::TlsOffset;
 
 /// The most `PT_LOAD` segments an image may declare.
 ///
@@ -131,6 +135,15 @@ pub enum Error {
     /// `PT_TLS` `p_align` is neither zero nor a power of two no larger than
     /// [`MAX_TLS_ALIGN`].
     BadTlsAlign,
+    /// `DT_INIT_ARRAY` does not lie inside the loadable segments.
+    InitArrayOutsideImage,
+    /// `DT_INIT_ARRAYSZ` is not a whole number of pointers.
+    InitArrayNotWholePointers,
+    /// A defined symbol's `st_value` is no address inside the image.
+    SymbolOutsideImage,
+    /// A defined `STT_TLS` symbol's `st_value` is outside the module's
+    /// `PT_TLS`, or the module has none.
+    TlsSymbolOutsideSegment,
 }
 
 impl Error {
@@ -158,6 +171,10 @@ impl Error {
             Error::DynamicOutsideImage => "ELF: PT_DYNAMIC outside the loadable segments",
             Error::EhFrameOutsideImage => "ELF: PT_GNU_EH_FRAME outside the loadable segments",
             Error::BadTlsAlign => "ELF: PT_TLS p_align is not a power of two within a page",
+            Error::InitArrayOutsideImage => "ELF: DT_INIT_ARRAY outside the loadable segments",
+            Error::InitArrayNotWholePointers => "ELF: DT_INIT_ARRAYSZ is not a whole number of pointers",
+            Error::SymbolOutsideImage => "ELF: a defined symbol's value is outside the image",
+            Error::TlsSymbolOutsideSegment => "ELF: a TLS symbol's value is outside its PT_TLS",
         }
     }
 }
@@ -198,6 +215,12 @@ pub(crate) mod read {
 
     pub fn u64_at(data: &[u8], off: usize) -> Option<u64> {
         Some(u64::from_le_bytes(bytes::<8>(data, off)?))
+    }
+
+    /// Two consecutive little-endian `u32`s, low word first: `r_info`'s type
+    /// and symbol.
+    pub fn u32_pair_at(data: &[u8], off: usize) -> Option<[u32; 2]> {
+        Some([u32_at(data, off)?, u32_at(data, off.checked_add(4)?)?])
     }
 
     pub fn i64_at(data: &[u8], off: usize) -> Option<i64> {

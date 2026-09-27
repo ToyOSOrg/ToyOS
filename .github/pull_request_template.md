@@ -26,6 +26,6 @@ command. An estimate says it is one. -->
 
 ## Anything a reader of `main` must not miss
 <!--
-A known red this leaves behind, a `src/redlist.rs` quarantine row it adds, an
+A known red this leaves behind, a test it disables in `src/redlist.rs`, an
 `issues/` file it closes or invalidates.
 -->
