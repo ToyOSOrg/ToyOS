@@ -3977,7 +3977,7 @@ pub fn xhci_flap(
     // **Every cycle's device bound before the next cycle's edges went in**, so
     // a cycle that never bound is named by the last thing its port did.
     if binds != CYCLES + 1 {
-        let last = log.lines().filter(|l| l.contains("xHCI: port ") || bound(l)).last();
+        let last = log.lines().rfind(|l| l.contains("xHCI: port ") || bound(l));
         let why = match last {
             _ if binds > CYCLES + 1 => "more binds than plugs",
             Some(line) if line.contains(COLLAPSED) => {
