@@ -3619,9 +3619,6 @@ impl QemuInstance {
         writeln!(self.stdin, "run {name}").expect("Failed to write to QEMU stdin");
         self.stdin.flush().expect("Failed to flush QEMU stdin");
 
-        let mut fire =
-            |line: &str, socket: Option<&Path>| step(socket, line);
-
         // `run <name> [args...]`, and the markers carry only the binary name.
         let want = name.split_whitespace().next().unwrap_or(name);
         if let Some(carried) = &self.carried {
@@ -3690,7 +3687,7 @@ impl QemuInstance {
                 Ok(line) => {
                     last_line = Instant::now();
                     lines += 1;
-                    fire(&line, self.sockets.qmp());
+                    step(self.sockets.qmp(), &line);
                     if dying.is_none()
                         && super::serial::died(&line) == Some(super::serial::Died::Kernel)
                     {
