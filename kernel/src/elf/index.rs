@@ -7,66 +7,89 @@
 use alloc::vec::Vec;
 
 use crate::mm::{KernelSlice, MAX_HEAP_ALLOC};
-use toyos_elf::rela::ExeRefusal;
-use toyos_elf::{Rela, RelaCounts, RelaTable, RelocKind};
+use toyos_abi::syscall::SyscallError;
+use toyos_elf::rela::{self, ExeRefusal, Rules};
+use toyos_elf::{ImageOffset, Op, RelaCounts, RelaTable, RelocError, SymIndex, SymTab, TlsRef};
 
-/// Relocation entries the loader needs, grouped by what it does with them.
+/// Relocation entries the loader needs, grouped by what it does with them;
+/// each is `(r_offset, what it names)`, parsed.
 pub struct ParsedRelaEntries {
-    /// `R_X86_64_RELATIVE`: (offset, addend).
-    pub relative: Vec<(u64, i64)>,
-    /// `R_X86_64_GLOB_DAT` and `R_X86_64_JUMP_SLOT`: (offset, symbol, addend).
-    pub glob_dat: Vec<(u64, u32, i64)>,
-    pub tpoff64: Vec<(u64, u32, i64)>,
-    pub tpoff32: Vec<(u64, u32, i64)>,
+    /// `RELATIVE`: the position in the image the slot points at.
+    pub relative: Vec<(u64, ImageOffset)>,
+    /// `GLOB_DAT` and `JUMP_SLOT`.
+    pub glob_dat: Vec<(u64, SymIndex)>,
+    pub tpoff64: Vec<(u64, TlsRef)>,
+    pub tpoff32: Vec<(u64, TlsRef)>,
 }
 
-impl ParsedRelaEntries {
-    /// Every entry as a `Rela` for `rela::validate`; `GLOB_DAT` stands for the
-    /// `JUMP_SLOT` grouped with it, since kind carries width and symbol-need.
-    pub fn as_relas(&self) -> impl Iterator<Item = Rela> + '_ {
-        let rel = self.relative.iter().map(|&(offset, addend)| Rela {
-            offset, sym: 0, kind: RelocKind::Relative, addend,
-        });
-        let bind = self.glob_dat.iter().map(|&(offset, sym, addend)| Rela {
-            offset, sym, kind: RelocKind::GlobDat, addend,
-        });
-        let t64 = self.tpoff64.iter().map(|&(offset, sym, addend)| Rela {
-            offset, sym, kind: RelocKind::Tpoff64, addend,
-        });
-        let t32 = self.tpoff32.iter().map(|&(offset, sym, addend)| Rela {
-            offset, sym, kind: RelocKind::Tpoff32, addend,
-        });
-        rel.chain(bind).chain(t64).chain(t32)
+/// The widest record any group keeps: a ceiling sized on it holds whichever
+/// group turns out to be the whole table.
+const WIDEST: usize = {
+    let (a, b, c) = (
+        core::mem::size_of::<(u64, ImageOffset)>(),
+        core::mem::size_of::<(u64, SymIndex)>(),
+        core::mem::size_of::<(u64, TlsRef)>(),
+    );
+    if a > b && a > c { a } else if b > c { b } else { c }
+};
+
+/// Why an executable's relocations are refused.
+pub enum Refused {
+    Counts(ExeRefusal),
+    Entry(RelocError),
+}
+
+impl Refused {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Refused::Counts(e) => e.as_str(),
+            Refused::Entry(e) => e.as_str(),
+        }
+    }
+
+    pub const fn error(&self) -> SyscallError {
+        match self {
+            Refused::Counts(ExeRefusal::TooLarge) => SyscallError::ResourceExhausted,
+            Refused::Counts(ExeRefusal::TlsDescriptor) | Refused::Entry(_) => {
+                SyscallError::InvalidArgument
+            }
+        }
     }
 }
 
-/// Groups both relocation tables, reserved exactly from what
-/// `RelaCounts::for_executable` allows, or its refusal.
-pub fn parse_rela_entries(rela_data: &[u8], jmprel_data: &[u8]) -> Result<ParsedRelaEntries, ExeRefusal> {
+/// Both relocation tables, parsed against `rules` and grouped, reserved
+/// exactly from what `RelaCounts::for_executable` allows — or the first
+/// refusal, before anything is kept.
+pub fn parse_rela_entries(
+    rela_data: &[u8],
+    jmprel_data: &[u8],
+    rules: &Rules,
+    symbols: SymTab<'_>,
+) -> Result<ParsedRelaEntries, Refused> {
     let entries = || {
         RelaTable::new(rela_data, crate::arch::ELF_MACHINE)
             .iter()
             .chain(RelaTable::new(jmprel_data, crate::arch::ELF_MACHINE).iter())
     };
     let counts = RelaCounts::of(entries());
-    // Ceiling assumes the widest record type, since any one group could be the whole table.
-    let widest = core::mem::size_of::<(u64, u32, i64)>();
-    let reserve = counts.for_executable(widest, MAX_HEAP_ALLOC).inspect_err(|_| log!("ELF: {:?} refused", counts))?;
+    let reserve = counts
+        .for_executable(WIDEST, MAX_HEAP_ALLOC)
+        .inspect_err(|_| log!("ELF: {:?} refused", counts))
+        .map_err(Refused::Counts)?;
     let mut out = ParsedRelaEntries {
         relative: Vec::with_capacity(reserve.relative),
         glob_dat: Vec::with_capacity(reserve.bind),
         tpoff64: Vec::with_capacity(reserve.tpoff64),
         tpoff32: Vec::with_capacity(reserve.tpoff32),
     };
-    for r in entries() {
-        match r.kind {
-            RelocKind::Relative => out.relative.push((r.offset, r.addend)),
-            RelocKind::GlobDat | RelocKind::JumpSlot => {
-                out.glob_dat.push((r.offset, r.sym, r.addend))
-            }
-            RelocKind::Tpoff64 => out.tpoff64.push((r.offset, r.sym, r.addend)),
-            RelocKind::Tpoff32 => out.tpoff32.push((r.offset, r.sym, r.addend)),
-            _ => {}
+    for raw in entries() {
+        let Some(r) = rela::parse(raw, rules, symbols).map_err(Refused::Entry)? else { continue };
+        match r.op() {
+            Op::Relative(target) => out.relative.push((r.offset(), target)),
+            Op::Bind(sym) => out.glob_dat.push((r.offset(), sym)),
+            Op::Tpoff64(t) => out.tpoff64.push((r.offset(), t)),
+            Op::Tpoff32(t) => out.tpoff32.push((r.offset(), t)),
+            Op::DtpMod64(_) | Op::DtpOff64(_) => {}
         }
     }
     Ok(out)

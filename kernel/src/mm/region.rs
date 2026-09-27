@@ -51,13 +51,7 @@ impl KernelSlice {
             "KernelSlice OOB: offset={:#x} len={} size={:#x}", offset, len, self.size);
     }
 
-    /// # Safety: nothing may concurrently write `size_of::<T>()` bytes at `offset` while this read runs.
-    pub unsafe fn read<T>(&self, offset: usize) -> T {
-        self.check(offset, core::mem::size_of::<T>());
-        core::ptr::read_unaligned(self.base.add(offset) as *const T)
-    }
-
-    /// # Safety: same as `read`, plus nothing else may concurrently read or write this range.
+    /// # Safety: nothing else may concurrently read or write `size_of::<T>()` bytes at `offset`.
     pub unsafe fn write<T: Copy>(&self, offset: usize, value: T) {
         self.check(offset, core::mem::size_of::<T>());
         core::ptr::write_unaligned(self.base.add(offset) as *mut T, value);

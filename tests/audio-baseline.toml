@@ -51,9 +51,7 @@
 # nor skip: they compare a fresh KVM sample against this one, as they already
 # did across the host and the accelerator
 # (`issues/audio/gate-a-has-no-runner-baseline.md`), and now across the QEMU
-# version as well; a timing red from them is read against this paragraph. No row
-# in `src/redlist.rs` can say so, because the thorough tier ends before the
-# quarantine is read.
+# version as well; a timing red from them is read against this paragraph.
 #
 # RE-RECORDED 2026-08-15 on tree 4c7d809, justified by an instrument change:
 # the dev host's QEMU moved 11.0.3 -> 11.1.0 (owner-approved upgrade; CI's

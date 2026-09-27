@@ -6,13 +6,6 @@ opened: 2026-08-08
 
 # Eleven names are red on CI, at a rate that is now measured
 
-**Do not answer "is this test known-red" out of this file.** Every table and
-every list below is transcribed into `src/redlist.rs`, one row per measurement,
-and `cargo run -- --known-red <test>` is what answers. A `rg` here hits the
-twelve names that came *off* the list exactly as readily as the eleven that are
-on it, and that has been read the wrong way round. What is here is the reasoning
-and the evidence; what is there is the verdict.
-
 Supersedes *a runner reds a rotating handful every run, and the rate is
 unmeasured*, whose whole ask was this run. `probe-rate.yml`, run `31258202923`,
 tree `f8f73e1`: **five reps of the exact twelve-shard configuration `ci.yml`
@@ -53,17 +46,13 @@ is #172's signature away from the T14: two clients connect, both tones say
 **The top five reproduce, so they are defects and not a rate.** The bottom six
 fire one or two runs in five, which is 20–40% and is not "noise" either: the bar
 this was measured against tolerates one in fifty *with the failure named*, and
-none of these six has been looked at. **No entry here is a candidate for
-`EXPECTED_FAILURES`** — an exemption names a defect and a write-up, and "fires
-40% of the time for reasons nobody has looked at" is neither.
+none of these six has been looked at.
 
 **`metal_sim_null_audio` and `hda_two_live_refused` are the first two off this
 table**, closed when soundd stopped racing to present its null sink.
 **Re-taken 2026-09-04 against the last three nightly `ci` runs on `main`**
 (`33485669019`, `33603832656`, `33728852421`): of the names above, only
-`usb_disk_index_stable` reds in any of them, and `src/redlist.rs` carries that
-row at 1 of 3. Every other row this file sources is retired there on those
-runs, never deleted.
+`usb_disk_index_stable` reds in any of them.
 
 **Six of the eleven are `Sched::Serial`, and until 2026-08-08 the harness re-ran
 none of them**: the retry loop was written for the parallel phase and branched on

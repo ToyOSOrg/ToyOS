@@ -8,7 +8,7 @@ use core::mem;
 use alloc::vec;
 use alloc::alloc::Layout;
 use toyos_elf::section::SectionTable;
-use toyos_elf::{RelaTable, RelocKind};
+use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use uefi::{
     prelude::*,
     CStr16,
@@ -361,7 +361,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     // make the image runnable, so a file with no readable table is refused
     // rather than started unrelocated.
     let sections = layout
-        .section_headers
+        .section_headers()
         .and_then(|table| file_range(kernel_elf_bytes, table.file_offset, table.byte_len() as u64))
         .map(SectionTable::new)
         .expect("kernel.elf: no section header table inside the file");
@@ -369,12 +369,16 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     let stack_size: usize = 8 * 1024 * 1024; // 8MB
 
     println!("Kernel stack size: {}", stack_size);
-    // `vaddr_max` is the largest `p_vaddr + p_memsz` over the `PT_LOAD`
+    // The extent's end is the largest `p_vaddr + p_memsz` over the `PT_LOAD`
     // segments, and the image is laid out at its own vaddrs — so it is what the
     // kernel's memory has to cover before the stack is added after it.
-    let placed = toyos_elf::StackedImage::place(layout.vaddr_max, stack_size as u64)
+    let extent = layout.extent();
+    let placed = toyos_elf::StackedImage::place(extent.max(), stack_size as u64)
         .expect("kernel.elf: image plus stack does not fit an allocation");
     let mem_size = usize::try_from(placed.size).expect("kernel.elf: image plus stack does not fit an allocation");
+    // Where an image offset lies in `process_mem`: the image sits at its own
+    // vaddrs, which begin at the extent's start.
+    let at = |offset: ImageOffset| (extent.min() + offset.get()) as usize;
 
     println!("Kernel memory size: {}", mem_size);
 
@@ -383,9 +387,9 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
 
     for segment in layout.segments() {
         println!("Loading segment: {:?}", segment);
-        let src = file_range(kernel_elf_bytes, segment.file_offset, segment.filesz)
+        let src = file_range(kernel_elf_bytes, segment.file_offset(), segment.filesz())
             .expect("kernel.elf: PT_LOAD file extent is past the end of the file");
-        let vstart = segment.vaddr as usize;
+        let vstart = at(segment.image().start());
         // In bounds by construction: `mem_size` is at least
         // `p_vaddr + p_memsz` for this segment and `p_filesz <= p_memsz`.
         process_mem[vstart..vstart + src.len()].copy_from_slice(src);
@@ -394,58 +398,53 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     let rela_sections =
         sections.rela_sections().unwrap_or_else(|form| panic!("kernel.elf: {form} is not supported"));
 
+    // Both fields of a relocation index the image and both come out of the
+    // file: `r_offset` is the destination of an 8-byte store and `r_addend` the
+    // address stored. Unchecked, the store is an arbitrary write anywhere in the
+    // machine, made before ExitBootServices with firmware still live — so every
+    // entry goes through the parse the kernel's own loader uses.
+    let rules = rela::Rules {
+        extent,
+        window: (0, mem_size as u64),
+        fill: None,
+        tls: None,
+    };
     let mut reloc_count = 0u64;
     for section in rela_sections {
         let table = file_range(kernel_elf_bytes, section.offset, section.size)
             .expect("kernel.elf: SHT_RELA section is past the end of the file");
-        for rela in RelaTable::new(table, arch::ELF_MACHINE).iter() {
-            match rela.kind {
-                RelocKind::Relative => {
-                    // Both fields index the image and both come out of the
-                    // file: `r_offset` is the destination of an 8-byte store
-                    // and `r_addend` is the address stored. Unchecked, the
-                    // store is an arbitrary write anywhere in the machine, made
-                    // before ExitBootServices with firmware still live.
-                    let offset = rela.offset;
-                    let addend = rela.addend;
-                    assert!(
-                        offset.checked_add(8).is_some_and(|end| end <= mem_size as u64),
-                        "kernel.elf: relocation stores 8 bytes at {offset:#x}, outside the {mem_size:#x}-byte image"
-                    );
-                    assert!(
-                        (0..=mem_size as i64).contains(&addend),
-                        "kernel.elf: relocation addend {addend:#x} is outside the {mem_size:#x}-byte image"
-                    );
-                    // SAFETY: `addend` is asserted above to be in `0..=mem_size`,
-                    // so this is at most one byte past the end of `process_mem`'s
-                    // allocation — in bounds for pointer arithmetic, and never
-                    // dereferenced: only the resulting address is used.
-                    let value = PHYS_OFFSET + unsafe { process_mem.as_ptr().add(addend as usize) } as u64;
-                    unsafe {
-                        // SAFETY: `offset + 8 <= mem_size` is asserted above, so
-                        // the 8-byte write lands fully inside `process_mem`'s
-                        // allocation. `write_unaligned`, not `write`: an
-                        // `r_offset` from the file is not guaranteed 8-byte
-                        // aligned by anything checked here, only by the
-                        // linker emitting `R_X86_64_RELATIVE` against aligned
-                        // slots — a fact this reader has no way to verify.
-                        process_mem
-                            .as_mut_ptr()
-                            .add(offset as usize)
-                            .cast::<u64>()
-                            .write_unaligned(value);
-                    }
-                    reloc_count += 1;
-                }
-                kind => panic!("kernel.elf: unsupported relocation type {kind:?}"),
+        for raw in RelaTable::new(table, arch::ELF_MACHINE).iter() {
+            let parsed = rela::parse(raw, &rules, SymTab::empty()).unwrap_or_else(|e| panic!("kernel.elf: {e}"));
+            let Some((offset, Op::Relative(target))) = parsed.map(|r| (r.offset(), r.op())) else {
+                panic!("kernel.elf: unsupported relocation type {:?}", raw.kind());
+            };
+            // SAFETY: `target` is inside the image, so this is at most one byte
+            // past the end of `process_mem`'s allocation — in bounds for
+            // pointer arithmetic, and never dereferenced: only the resulting
+            // address is used.
+            let value = PHYS_OFFSET + unsafe { process_mem.as_ptr().add(at(target)) } as u64;
+            unsafe {
+                // SAFETY: the parse put `offset + 8` inside `[0, mem_size)`, so
+                // the 8-byte write lands fully inside `process_mem`'s
+                // allocation. `write_unaligned`, not `write`: an `r_offset`
+                // from the file is not guaranteed 8-byte aligned by anything
+                // checked here, only by the linker emitting
+                // `R_X86_64_RELATIVE` against aligned slots — a fact this
+                // reader has no way to verify.
+                process_mem
+                    .as_mut_ptr()
+                    .add(offset as usize)
+                    .cast::<u64>()
+                    .write_unaligned(value);
             }
+            reloc_count += 1;
         }
     }
     println!("Applied {} relocations", reloc_count);
 
     LoadedKernel {
         memory: process_mem,
-        entry_offset: layout.entry as usize,
+        entry_offset: at(layout.entry()),
         stack_offset: placed.stack as usize,
         stack_size,
     }
