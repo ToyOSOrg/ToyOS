@@ -59,7 +59,8 @@ enum Theirs {
     Refused(String),
     /// Not asked: it allocates the array its header claims before checking it.
     NotAsked,
-    Read { disk: Guid, rows: BTreeMap<u32, Row> },
+    /// `usable` is the header's first and last usable block, as `gpt` decodes them.
+    Read { disk: Guid, usable: (u64, u64), rows: BTreeMap<u32, Row> },
 }
 
 fn theirs(img: &Image) -> Theirs {
@@ -76,6 +77,7 @@ fn theirs(img: &Image) -> Theirs {
         Err(e) => Theirs::Refused(e.to_string()),
         Ok(parts) => Theirs::Read {
             disk: Guid(header.disk_guid.to_bytes_le()),
+            usable: (header.first_usable, header.last_usable),
             // `gpt` keys its entries from 1.
             rows: parts
                 .iter()
@@ -116,7 +118,7 @@ fn differ(layout: &Layout, img: &Image, ours: &Result<Ours, GptError>, theirs: &
             Ok("gpt takes the header CRC over 92 bytes whatever header_size says")
         }
         (Ok(_), Theirs::Refused(why)) => Err(format!("toyos-gpt read the table, and gpt refused it: {why}")),
-        (Ok(o), Theirs::Read { disk, rows }) => {
+        (Ok(o), Theirs::Read { disk, usable, rows }) => {
             if t.entry_bytes != 128 {
                 return Ok("gpt strides 128 bytes whatever the entry size");
             }
@@ -126,6 +128,10 @@ fn differ(layout: &Layout, img: &Image, ours: &Result<Ours, GptError>, theirs: &
             let mut named = "agree";
             for (index, row) in rows {
                 match (o.placed.get(index), o.unplaced.get(index)) {
+                    // UEFI 2.11 §5.3.3 holds every partition inside the usable range.
+                    (Some(mine), None) if mine == row && !(usable.0 <= row.3 && row.3 <= row.4 && row.4 <= usable.1) => {
+                        return Err(format!("toyos-gpt placed {row:?} outside the usable range gpt reads, {usable:?}"));
+                    }
                     (Some(mine), None) if mine == row => {}
                     // A type only toyos-gpt names: gpt answers the zero GUID.
                     (Some(mine), None) if row.1 == unnamed && (&mine.0, &mine.2, mine.3, mine.4) == (&row.0, &row.2, row.3, row.4) => {
