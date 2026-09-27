@@ -38,4 +38,4 @@ either the bucket ceiling is raised and a re-measured base rate stays under it
 on a loaded dev host, or the base's p99 is shown to genuinely exceed 4096 us
 and that is fixed at the timer-interrupt entry the deadline arm already
 touches. Owner: the boot-deadline work (`kernel/src/sched`'s timer-interrupt
-entry); nobody is holding it yet.
+entry); held by the orchestrator.

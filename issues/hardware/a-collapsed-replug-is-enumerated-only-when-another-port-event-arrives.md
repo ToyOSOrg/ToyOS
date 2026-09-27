@@ -71,4 +71,4 @@ every host. `xhci_flap` at an odd cycle count is one such gate. An assertion
 that every collapsed teardown is enumerated before the next cycle's edges is
 another. `xhci_flap` is disabled in `src/redlist.rs` until then, and the change
 that meets this deletes its row. Owner: the xHCI driver's port stepping
-(`kernel/src/drivers/xhci/mod.rs`); nobody is holding it yet.
+(`kernel/src/drivers/xhci/mod.rs`); held by the orchestrator.

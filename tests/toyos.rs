@@ -18984,12 +18984,6 @@ impl Tally {
                 self.stalls.len(),
                 self.stalls.join(", ")
             ));
-            say(
-                "    The guest stopped making progress, so the run established nothing \
-                 about this tree and there is nothing in it to bisect. Re-run; if one \
-                 recurs with the host to itself, the guest really is stopping."
-                    .to_string(),
-            );
             say(String::new());
         }
         if !self.invalid.is_empty() {
