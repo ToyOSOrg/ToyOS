@@ -132,6 +132,8 @@ pub struct TcpOptions<'a> {
     sack_permitted: bool,
     timestamps: Option<Timestamps>,
     sack: &'a [[u8; 8]],
+    md5: bool,
+    fast_open: bool,
 }
 
 fn exactly<const N: usize>(data: &[u8]) -> Result<&[u8; N], TcpError> {
@@ -181,6 +183,8 @@ impl<'a> TcpOptions<'a> {
                         echo: u32::from_be_bytes([e0, e1, e2, e3]),
                     });
                 }
+                19 => options.md5 = true,
+                34 => options.fast_open = true,
                 _ => {}
             }
             area = after;
@@ -202,6 +206,14 @@ impl<'a> TcpOptions<'a> {
 
     pub const fn timestamps(&self) -> Option<Timestamps> {
         self.timestamps
+    }
+
+    pub const fn md5(&self) -> bool {
+        self.md5
+    }
+
+    pub const fn fast_open(&self) -> bool {
+        self.fast_open
     }
 
     pub fn sack_blocks(&self) -> impl ExactSizeIterator<Item = SackBlock> + 'a {
