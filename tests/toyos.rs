@@ -919,7 +919,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("netd_refused_pipes", Sched::Parallel, Tier::Fast),
     // The netcase boot again: an accept netd refuses for room leaves its owner
     // a wake for the connection it left, once room returns. The verdict
-    // is the guest's wake or its absence; its clocks are liveness guards.
+    // is the guest's wake or its absence.
     ("netd_refused_accept", Sched::Parallel, Tier::Fast),
     // The netcase boot again: bytes held back past a full pipe move on the
     // pipe's room alone, the peer holding the connection open and silent. The

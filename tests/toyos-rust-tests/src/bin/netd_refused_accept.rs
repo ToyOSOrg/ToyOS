@@ -14,19 +14,12 @@
 #[path = "../netd_stream.rs"]
 mod netd_stream;
 
-use std::time::Duration;
-
-use netd_stream::{ask, await_until, Ask, FORWARDED_PORT, HOST};
+use netd_stream::{ask, Ask, FORWARDED_PORT, HOST};
 use toyos::net::{
     MsgType, NetError, NetdConn, TcpAcceptPipedRequest, TcpAcceptPipedResponse, TcpBound, TcpConnectPipedRequest,
     TcpConnectResponse, TcpConnection, TcpSocketId, DATA_FROM_CLIENT, DATA_HANDLES, DATA_TO_CLIENT,
 };
-use toyos::poller::READABLE;
 use toyos_abi::syscall::SyscallError;
-
-/// How long netd may take to act on something it has been handed. Orders of
-/// magnitude over a pass; a bound, said by name, not a pace.
-const WITHIN: Duration = Duration::from_secs(20);
 
 fn main() {
     let port: u16 = std::env::args()
@@ -35,7 +28,7 @@ fn main() {
         .expect("usage: netd_refused_accept <host port>");
     let listener = toyos::net::tcp_bind([0; 4], FORWARDED_PORT).expect("bind the forwarded port");
 
-    let dial = toyos::net::tcp_connect(HOST, port, 30_000).expect("connect to the host server");
+    let dial = toyos::net::tcp_connect(HOST, port, 0).expect("connect to the host server");
     ask(&dial.tx, Ask::Dial);
     wake(&listener, "the host's dial");
     let mut held = Vec::new();
@@ -77,15 +70,14 @@ fn main() {
 
 /// Wait for netd's wake on `listener`, and take it.
 fn wake(listener: &TcpBound, what: &str) {
+    println!("netd_refused_accept: waiting for a wake for {what}");
     let mut byte = [0u8; 1];
-    await_until(&listener.notify, READABLE, WITHIN, &format!("a wake for {what}"), || {
-        match listener.notify.read_nonblock(&mut byte) {
-            Ok(1) => Some(()),
-            Ok(_) => panic!("a wake for {what}: netd closed the listener"),
-            Err(SyscallError::WouldBlock) => None,
-            Err(e) => panic!("a wake for {what}: {e:?}"),
-        }
-    });
+    match listener.notify.read(&mut byte) {
+        Ok(1) => {}
+        Ok(0) => panic!("a wake for {what}: netd closed the listener"),
+        Ok(n) => panic!("a wake for {what}: read {n} bytes"),
+        Err(e) => panic!("a wake for {what}: {e:?}"),
+    }
 }
 
 /// netd's answer to an accept on `listener`. An accepted connection is closed
@@ -107,7 +99,7 @@ fn connect(port: u16) -> Result<TcpConnection, NetError> {
         .request_with_handles(
             &handles,
             MsgType::TcpConnectPiped,
-            &TcpConnectPipedRequest { addr: HOST, port, _pad: 0, timeout_ms: 30_000 },
+            &TcpConnectPipedRequest { addr: HOST, port, _pad: 0, timeout_ms: 0 },
         )
         .expect("netd takes the request")
         .response()?;
