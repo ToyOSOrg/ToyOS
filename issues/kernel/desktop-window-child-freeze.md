@@ -72,20 +72,15 @@ beside it. The teardown is not a regression from the deadline fix (`add6aeb`,
 exits, and is not a descendant of it.
 
 **What this does *not* settle is the freeze**, and the entry stays. It stays
-`Sched::Parallel` for the same reason as before, `EXPECTED_FAILURES` keeps its
-declaration to its review date, and a green run still proves nothing — the
-signature at the top of this entry is a guest that goes *silent*, and none of
-the eleven boots in this session produced one. What has changed is that the
-test can now reach the snake rounds where the freeze was seen, which it could
-not before. Judge the next occurrence by the signature, never by a run.
+`Sched::Parallel` for the same reason as before, and a green run still proves
+nothing — the signature at the top of this entry is a guest that goes
+*silent*, and none of the eleven boots in this session produced one. What has
+changed is that the test can now reach the snake rounds where the freeze was
+seen, which it could not before. Judge the next occurrence by the signature,
+never by a run.
 
-**Landing while it is red** needs nothing special: `desktop_window_child` is
-declared in `EXPECTED_FAILURES` (`tests/toyos.rs`) and the gate is the ordinary
-one. The declaration reports it by name on every run, is red
-if the test *passes* where the entry says a pass is proof, and is red on
-`2026-09-06` regardless — this entry is intermittent, so its own expiry is a
-date rather than a green run. The `--skip` flag that used to be the answer is
-deleted: an exclusion nobody reviews cannot expire, and this one has to.
+The `--skip` flag that used to be the answer is deleted: an exclusion nobody
+reviews cannot expire, and this one has to.
 
 **One thing #156's capture leaned on is closed, and it is not this.** The
 deadline was stored twice — `ParkedEntry.deadline` and `DeadlineHeap` — and
@@ -160,8 +155,7 @@ above is the measured one and not the whole of it.
 
 The test stopped at its **first** probe: the windowed child asked for a window,
 was answered `NotEndowed`, and printed `WINDOW-CHILD-REFUSED this program was
-given no compositor` — while `EXPECTED_FAILURES`'s `the windowed child never
-reported leaving` absorbed it, so no run said so. The client is a harness
+given no compositor`. The client is a harness
 binary, no `[programs]` row can name one, and `/system/bin/init` endows a name the
 manifest does not carry with nothing.
 

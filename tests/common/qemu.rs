@@ -536,12 +536,6 @@ pub fn guest_liveness() -> Liveness {
 }
 
 /// A kernel line without its `[kernel <t> cpu<N>] ` stamp.
-///
-/// The stamp is the instance and the rest is the finding, and which of the two
-/// a verdict quotes decides whether two boots of one deterministic panic read
-/// as one defect or two — they differ in the stamp alone, so quoting it whole
-/// would read the same panic on two boots as two. The stamp is still in the
-/// capture underneath.
 fn without_stamp(line: &str) -> &str {
     if !is_kernel_line(line) {
         return line;
@@ -550,13 +544,6 @@ fn without_stamp(line: &str) -> &str {
 }
 
 /// The sentence a wait gives when what stopped the guest is on the console.
-///
-/// **One wording for all three waits**, so a summary line and an issue file
-/// quote the same words wherever the wait was — and so that nothing
-/// in it is a measurement of the host. The silence that proved the panic was
-/// fatal is deliberately not in the sentence: it differs by a poll interval
-/// between two runs of one panic, and the sentence has to read as one defect
-/// on both.
 fn kernel_died_here(line: &str) -> String {
     format!(
         "kernel panic: {} — the guest went quiet because every CPU is halted, not because it \
@@ -640,11 +627,6 @@ impl WaitVerdict {
     }
 
     /// The sentence, without the account under it.
-    ///
-    /// What `headline` in `tests/toyos.rs` reads off a red's reason — so the
-    /// first line is still one line, and the report below it can differ
-    /// between two boots of the same panic without reading as a second
-    /// defect.
     pub fn sentence(&self) -> &str {
         self.0.lines().next().unwrap_or_default()
     }
@@ -775,8 +757,6 @@ pub fn ceiling_self_check() -> Result<(), String> {
     if early >= CEILING {
         return Err(String::from("staged the panic after the ceiling, so it proves nothing"));
     }
-    // The same panic on a later boot, differing only in its stamp, must give
-    // the same sentence, or two boots of one panic read as two defects.
     let again = "[kernel 1.503 cpu7] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
     if ceiling_verdict(Some(again), early, CEILING, quiet, 40).as_deref() != Some(panic.as_str()) {
         return Err(format!(
@@ -923,9 +903,6 @@ pub fn ceiling_self_check() -> Result<(), String> {
             ));
         }
     }
-    // The sentence is still one line and still the sentence — `headline` in
-    // `tests/toyos.rs` reads it off a red's reason, so a report under it must
-    // not become part of it.
     if carried.sentence() != died_verdict {
         return Err(format!(
             "the report changed the sentence a summary quotes:\n{}\n{died_verdict}",

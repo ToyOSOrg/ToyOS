@@ -433,10 +433,7 @@ const RUST_SKIP: &[&str] = &[
     // each other and never against the binaries the registry discovers.
     // `check_no_collisions` closes that, and this is what it found.
     //
-    // Two verdicts under one name is not extra coverage, it is a name that
-    // cannot be read: the shared registry answered for one of these under a
-    // machine test's name, and its verdict was about a different test. What
-    // the shared copy adds is the binary exiting 0 on a boot that gives it
+    // What the shared copy adds is the binary exiting 0 on a boot that gives it
     // nothing to measure — `cache_eviction` in 132 ms against the 22.5 s its
     // own device shape costs (run `31247206462`).
     //
@@ -1605,8 +1602,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // verdict it does not have.
     ("suspend_detector", Sched::Parallel, Tier::Fast),
     ("suspend_invalidates_a_verdict", Sched::Parallel, Tier::Fast),
-    // Same again: whether a red that is a blown liveness guard still reads as
-    // one by the time it reaches the summary.
     ("stall_is_not_a_verdict", Sched::Parallel, Tier::Fast),
     // Same: whether two guests can still be handed one lane's NVMe image, which
     // is what a shared-boot reboot did to itself.
@@ -18655,9 +18650,6 @@ impl Outcome {
 
     /// Whether this red is a blown liveness guard rather than an answer.
     ///
-    /// Deliberately *not* a [`Verdict`] arm. A stall is red on exactly the same
-    /// terms as any other red — the exit code has to treat it identically, and
-    /// an arm would make that a place where somebody could decide otherwise.
     /// What it changes is only what the reader is told, which is the whole
     /// complaint: the run establishes nothing about this tree, so nobody
     /// should bisect it.
@@ -20211,12 +20203,6 @@ fn check_registration() {
 /// The half [`check_registration`] could not ask: the shared boot's tests are
 /// *discovered* from the binaries in `tests/toyos-rust-tests` and `tests/c`, so
 /// nothing declared can be compared against them until they exist.
-///
-/// A name in both places is two tests reporting one name, and the damage is not
-/// a duplicate line: a verdict and a duration label both have to identify
-/// exactly one execution, and a shared name answers for whichever of the two
-/// last wrote the tally. Four names were doing this and the suite had never
-/// been able to see them.
 fn check_no_collisions(shared: &[TestDef]) {
     let mut shared_seen = BTreeSet::new();
     let shared_twice: Vec<&str> = shared
