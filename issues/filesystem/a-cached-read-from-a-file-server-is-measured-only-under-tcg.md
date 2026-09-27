@@ -6,15 +6,15 @@ opened: 2026-09-27
 
 # A cached read from a file server is measured only under TCG, where a copy out of a shared mapping is slow
 
-One guest (QEMU TCG, the test estate's boot), a 16 MiB file in DATA's block
-cache and the same bytes in the kernel's `/tmp`, three interleaved passes of
-256 KiB reads:
+QEMU TCG, the test estate's boot, a 16 MiB file in DATA's block cache and the
+same bytes in the kernel's `/tmp`, three interleaved passes a boot over two
+boots:
 
 | per request | fsd | kernel `/tmp` |
 |---|---|---|
-| at the client | 988–997 µs (251–253 MiB/s) | 99.5–99.8 µs |
-| of which the server's `READ` | 107 µs | — |
-| a 4 KiB read, the round trip | 153 µs | 4.1 µs |
+| 256 KiB at the client | 988–1069 µs (234–253 MiB/s) | 99.5–102.3 µs |
+| of which the server's `READ` | 107–110 µs | — |
+| a 4 KiB read, the round trip | 153–188 µs | 3.9–5.1 µs |
 
 The server copies each cached block into the client's window once, and the
 client copies the window into its buffer once (`toyos::fs::window_take`, one
