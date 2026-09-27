@@ -18,7 +18,7 @@ use common::{
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::heartbeat;
 use toyos_build::testargs::{self, Shard, SUITE};
-use toyos_build::redlist::{self, Quarantined};
+use toyos_build::redlist;
 use toyos_build::tiers::Tier;
 
 struct TestDef {
@@ -436,13 +436,9 @@ const RUST_SKIP: &[&str] = &[
     // each other and never against the binaries the registry discovers.
     // `check_no_collisions` closes that, and this is what it found.
     //
-    // Two verdicts under one name is not extra coverage, it is a name that
-    // cannot be read: `retry_task` searches the shared registry first, so a
-    // machine test of one of these that failed wide was re-run *as the shared
-    // binary* and its `ALONE:` line was about a different test. What the shared
-    // copy adds is the binary exiting 0 on a boot that gives it nothing to
-    // measure — `cache_eviction` in 132 ms against the 22.5 s its own device
-    // shape costs (run `31247206462`).
+    // What the shared copy adds is the binary exiting 0 on a boot that gives it
+    // nothing to measure — `cache_eviction` in 132 ms against the 22.5 s its
+    // own device shape costs (run `31247206462`).
     //
     // `cache_eviction` needs the small NVMe that makes the cache evict at all.
     "cache_eviction",
@@ -1612,19 +1608,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // verdict it does not have.
     ("suspend_detector", Sched::Parallel, Tier::Fast),
     ("suspend_invalidates_a_verdict", Sched::Parallel, Tier::Fast),
-    // Same again: whether a red that is a blown liveness guard still reads as
-    // one by the time it reaches the summary, and whether the `ALONE:` line
-    // under a red is about the run it claims to be about.
     ("stall_is_not_a_verdict", Sched::Parallel, Tier::Fast),
-    ("alone_line_reports_the_alone_run", Sched::Parallel, Tier::Fast),
     // Same: whether two guests can still be handed one lane's NVMe image, which
     // is what a shared-boot reboot did to itself.
     ("nvme_image_is_held_by_one_guest", Sched::Parallel, Tier::Fast),
-    // Same: the quarantine list asking whether it still refuses the
-    // things it exists to refuse.
-    ("quarantine_verdicts", Sched::Parallel, Tier::Fast),
-    ("quarantine_exit_status", Sched::Parallel, Tier::Fast),
-    ("quarantine_entries", Sched::Parallel, Tier::Fast),
+    // Same: what a whole run exits with.
+    ("run_exit_status", Sched::Parallel, Tier::Fast),
     // Same: the control-register verdict, against the machine this tree
     // actually booted before `arch/x86_64/control_regs.rs`.
     ("control_regs_verdict", Sched::Parallel, Tier::Fast),
@@ -11598,14 +11587,13 @@ fn run_machine_test(
             };
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // A liveness ceiling, not a pace: a loaded shard once took past a
-            // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
-            // The T14's readback needs no drain at all — the whole boot's records
-            // are on the stick — so the wait is here and the predicate is shared.
-            let log = qemu.boot_log().to_string()
-                + &qemu.drain_until(Duration::from_secs(10), |l| {
-                    l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
-                });
+            // iod's probe reports on either side of the ready marker and the
+            // drain reads only lines after it, so the boot log is asked first;
+            // the drain's ceiling is a liveness bound on a report still owed.
+            let mut log = qemu.boot_log().to_string();
+            if !log.lines().any(sysret_ss_reported) {
+                log += &qemu.drain_until(Duration::from_secs(10), sysret_ss_reported);
+            }
             sysret_ss(&log)
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
@@ -13043,11 +13031,8 @@ fn run_machine_test(
         "suspend_detector" => common::clock::self_check(),
         "suspend_invalidates_a_verdict" => suspend_invalidates_a_verdict(),
         "stall_is_not_a_verdict" => stall_is_not_a_verdict(),
-        "alone_line_reports_the_alone_run" => alone_line_reports_the_alone_run(),
         "nvme_image_is_held_by_one_guest" => nvme_image_is_held_by_one_guest(),
-        "quarantine_verdicts" => quarantine_verdicts(),
-        "quarantine_exit_status" => quarantine_exit_status(),
-        "quarantine_entries" => quarantine_entries(),
+        "run_exit_status" => run_exit_status(),
         "control_regs_verdict" => control_regs_verdict(),
         "i8042_quarantine_verdict" => idle_trip_verdict(),
         "suite_split" => suite_split(),
@@ -14845,12 +14830,7 @@ fn run_machine_test(
             let start = toyos_build::build::boot_start(&config.join("system.toml"));
             for program in &start {
                 let line = format!("init: started {program}");
-                if !log.contains(&line) {
-                    return Err(format!(
-                        "the shipped `[boot] start` names {program} and init never said \
-                         {line:?}\n{log}"
-                    ));
-                }
+                qemu::await_marker(&mut qemu, &mut log, &line, &line)?;
             }
             serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
             eprintln!(
@@ -17073,18 +17053,35 @@ fn window_held(before: &str, during: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `kernel/src/arch/x86_64/hw.rs`'s probe, when it could not run.
+const SYSRET_SS_UNARMED: &str = "sysret-ss: probe could not arm";
+/// The probe, when a switch refreshed SS from null.
+const SYSRET_SS_RELOADED: &str = "sysret-ss: reloaded";
+/// The probe, when SS stayed null across a switch.
+const SYSRET_SS_NOT_RELOADED: &str = "sysret-ss: NOT reloaded";
+
+/// Whether `line` is the probe's last word: each of its three outcomes.
+fn sysret_ss_reported(line: &str) -> bool {
+    [SYSRET_SS_RELOADED, SYSRET_SS_NOT_RELOADED, SYSRET_SS_UNARMED]
+        .iter()
+        .any(|end| line.contains(end))
+}
+
 /// The context switch reloads SS from null before a `sysretq` can see it.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn sysret_ss(log: &str) -> Result<(), String> {
-        if log.contains("sysret-ss: NOT reloaded") {
+        if log.contains(SYSRET_SS_UNARMED) {
+            return Err(format!("the SS-reload probe could not arm, so it measured nothing:\n{log}"));
+        }
+        if log.contains(SYSRET_SS_NOT_RELOADED) {
             return Err(format!(
                 "the switch did not reload SS — a sysretq here would hand userland an \
                  unusable one:\n{log}"
             ));
         }
-        if !log.contains("sysret-ss: reloaded") {
+        if !log.contains(SYSRET_SS_RELOADED) {
             return Err(format!(
                 "the SS-reload probe never reported — iod may not have run it:\n{log}"
             ));
@@ -18694,51 +18691,29 @@ struct Outcome {
 /// What the suite may conclude from one outcome.
 #[derive(PartialEq, Debug)]
 enum Verdict {
-    /// `Some` when the name is quarantined: still a pass, and still worth a
-    /// line, because one green of a quarantined test closes nothing.
-    Pass(Option<&'static Quarantined>),
-    /// Red. `Some` when the name is quarantined and this is not the failure its
-    /// row quotes: the row excuses one failure, and this is another.
-    Fail(Option<&'static Quarantined>),
+    Pass,
+    Fail,
     /// The host stopped in the middle of it. Neither a pass nor a fail: the
     /// guest, QEMU's virtual clock and every wall-clock margin the test's
     /// assertion rests on all jumped by however long the lid was closed, so the
     /// run measured something and it was not this tree.
     Invalid,
-    /// Quarantined, and failed the way its row quotes. Not red — and reported by
-    /// name, with its issue, on every run.
-    Quarantined(&'static Quarantined),
 }
 
 impl Outcome {
     fn verdict(&self) -> Verdict {
-        self.verdict_against(redlist::QUARANTINE)
-    }
-
-    /// Whether this red is a blown liveness guard rather than an answer.
-    ///
-    /// Deliberately *not* a [`Verdict`] arm. A stall is red on exactly the same
-    /// terms as any other red — the exit code, the quarantine lookup and
-    /// the alone re-run all have to treat it identically, and an arm would make
-    /// each of those a place where somebody could decide otherwise. What it
-    /// changes is only what the reader is told, which is the whole complaint:
-    /// the run establishes nothing about this tree, so nobody should bisect it.
-    fn stalled(&self) -> bool {
-        self.reason.as_deref().is_some_and(|r| r.contains(STALLED))
-    }
-
-    /// The table is a parameter so the gates can state a case rather than
-    /// depend on what the tree happens to quarantine today.
-    fn verdict_against(&self, quarantine: &'static [Quarantined]) -> Verdict {
         if self.suspended >= common::clock::SUSPENDED_AT_LEAST {
             return Verdict::Invalid;
         }
-        let listed = quarantine.iter().find(|q| q.test == self.name);
-        match (&self.reason, listed) {
-            (None, listed) => Verdict::Pass(listed),
-            (Some(reason), Some(row)) if row.excuses(reason) => Verdict::Quarantined(row),
-            (Some(_), listed) => Verdict::Fail(listed),
+        match self.reason {
+            None => Verdict::Pass,
+            Some(_) => Verdict::Fail,
         }
+    }
+
+    /// Whether this red is a blown liveness guard rather than an answer.
+    fn stalled(&self) -> bool {
+        self.reason.as_deref().is_some_and(|r| r.contains(STALLED))
     }
 }
 
@@ -18750,188 +18725,6 @@ impl Outcome {
 /// already prints.
 fn headline(reason: Option<&str>) -> String {
     reason.unwrap_or("check failed").lines().next().unwrap_or("check failed").to_string()
-}
-
-/// What a red says when its name is quarantined and its failure is not the one
-/// the row quotes.
-fn quarantined_for_something_else(row: &Quarantined) -> String {
-    format!(
-        "{} is quarantined for something else, so its row does not cover this failure: {} \
-         excuses {:?}",
-        row.test, row.issue, row.says
-    )
-}
-
-/// What the isolated re-run of one red is allowed to say about it.
-///
-/// **A red-again arm quotes the alone run's own failure**, and says so when it
-/// is not the failure the wide run found. `red again — the defect is real` used
-/// to be the whole line, and the `failures:` summary beside it always carries
-/// the *wide* run's message: on PR #22's run `31424496450` the wide run failed
-/// `xhci_hid_break`'s endpoint count and the alone re-run failed its pointer
-/// delivery three minutes later, and the job said `red again` over the wide
-/// run's sentence — so an adjudicator read one assertion's evidence for
-/// another's. Two different assertions in one job is not a weaker finding than
-/// one twice; it is a different and larger one, and the line now says which it
-/// was.
-///
-/// Which of the two it is is not a text comparison — an assertion that prints
-/// what it measured writes a different sentence every time it fires, so
-/// `toyos_build::alone::same_failure` decides it and both readings are quoted.
-///
-/// The green arms are untouched. They are a classification the issue files are
-/// written against, and nothing about them was wrong.
-///
-/// Pure, and every input a parameter, so [`alone_line_reports_the_alone_run`]
-/// can stage the divergence rather than wait for CI to produce one.
-fn alone_line(name: &str, wide: &str, shared_the_host: bool, alone: Option<&Outcome>) -> String {
-    let Some(outcome) = alone else {
-        return format!("  ALONE {name}: the lone run reported nothing about it");
-    };
-    match outcome.verdict() {
-        // **Two different findings, and which one it is depends on whether the
-        // first run shared the host** — the parallel phase's width, never the
-        // run's, because the serial tail is one guest at any width. Beside other
-        // guests, a green retry says this one was not, which is a classification
-        // defect.
-        Verdict::Pass(_) if shared_the_host => format!(
-            "  ALONE {name}: GREEN — it fails only beside other guests, so its \
-             Sched::Parallel is wrong. The run stays red on the classification."
-        ),
-        // Alone both times, nothing differed that the harness controls: it
-        // failed once and passed once, which is a *rate* and says nothing about
-        // `Sched`. CI runs one lane per machine, so every one of its retries is
-        // the second kind.
-        Verdict::Pass(_) => format!(
-            "  ALONE {name}: GREEN, and it was alone both times — nothing the harness \
-             controls differed, so it failed once and passed once. That is a rate and \
-             not a classification."
-        ),
-        Verdict::Fail(_) | Verdict::Quarantined(_) => {
-            let said = headline(outcome.reason.as_deref());
-            // One decision and one classifier: byte equality is the case
-            // `same_failure` already answers, so asking it first would be a
-            // second rule nothing tests.
-            if toyos_build::alone::same_failure(&said, wide) {
-                format!(
-                    "  ALONE {name}: red again, the same failure both times — the defect is \
-                     real.\n      wide:  {wide}\n      alone: {said}"
-                )
-            } else {
-                format!(
-                    "  ALONE {name}: red again on a DIFFERENT failure — it failed twice, on two \
-                     assertions, so this is not one defect reproduced and the divergence is \
-                     itself the finding.\n      wide:  {wide}\n      alone: {said}"
-                )
-            }
-        }
-        Verdict::Invalid => format!("  ALONE {name}: the host was suspended during the retry too"),
-    }
-}
-
-/// Whether the `ALONE:` line still reports the run it is a line about.
-///
-/// The staged pair is the one that was mis-reported: a wide failure and an
-/// alone failure that are not the same sentence. A gate rather than a comment
-/// because the defect is invisible from inside a green run — every arm prints
-/// *a* plausible line, and only the quoted text says which run it came from.
-fn alone_line_reports_the_alone_run() -> Result<(), String> {
-    const WIDE: &str = "3 endpoint(s) were found Running after the break, want 2";
-    const OTHER: &str = "input never came back: no pointer event moved by (2560, -1920)";
-    let red = |reason: &str| Outcome {
-        name: "a_test".to_string(),
-        reason: Some(format!("{reason}\n[kernel 2.639 cpu0] a whole capture nobody diffs")),
-        elapsed: Duration::from_secs(9),
-        suspended: Duration::ZERO,
-    };
-    let green = Outcome {
-        name: "a_test".to_string(),
-        reason: None,
-        elapsed: Duration::from_secs(9),
-        suspended: Duration::ZERO,
-    };
-
-    // The two greens, byte for byte what they have always been: the issue
-    // files quote these, and a reworded classification would silently
-    // invalidate the record rather than add to it.
-    let wide_green = alone_line("a_test", WIDE, true, Some(&green));
-    if !wide_green.contains(
-        "GREEN — it fails only beside other guests, so its Sched::Parallel is wrong. \
-         The run stays red on the classification.",
-    ) {
-        return Err(format!("the shared-host green arm has changed wording:\n{wide_green}"));
-    }
-    let lone_green = alone_line("a_test", WIDE, false, Some(&green));
-    if !lone_green.contains(
-        "GREEN, and it was alone both times — nothing the harness controls differed, so it \
-         failed once and passed once. That is a rate and not a classification.",
-    ) {
-        return Err(format!("the alone-both-times green arm has changed wording:\n{lone_green}"));
-    }
-    for line in [&wide_green, &lone_green] {
-        if line.contains(WIDE) {
-            return Err(format!("a green quotes the wide run's failure:\n{line}"));
-        }
-    }
-
-    // Red again on the same assertion: still "the defect is real", now with the
-    // sentence the *alone* run produced under it.
-    let same = alone_line("a_test", WIDE, false, Some(&red(WIDE)));
-    if !same.contains("red again, the same failure both times") || !same.contains(WIDE) {
-        return Err(format!("a reproduced failure does not say so, or does not quote it:\n{same}"));
-    }
-    if same.contains("[kernel 2.639") {
-        return Err(format!("the line pasted the whole capture into the summary:\n{same}"));
-    }
-
-    // One assertion at two readings: still a reproduction, and it quotes both
-    // rather than picking one.
-    const MEASURED: &str = "the controller started at 0.303 s, past the 0.3 s the ports are held \
-                            empty for";
-    const AGAIN: &str = "the controller started at 0.300 s, past the 0.3 s the ports are held \
-                         empty for";
-    let twice = alone_line("a_test", MEASURED, false, Some(&red(AGAIN)));
-    if !twice.contains("red again, the same failure both times") {
-        return Err(format!("one assertion at two readings reads as two assertions:\n{twice}"));
-    }
-    // The labels are the whole content of the line: two sentences under swapped
-    // labels is the mis-attribution this gate exists to stop, said in the other
-    // direction.
-    for (label, sentence) in [("wide:  ", MEASURED), ("alone: ", AGAIN)] {
-        if !twice.contains(&format!("{label}{sentence}")) {
-            return Err(format!("{sentence:?} is not the line's {label:?} run:\n{twice}"));
-        }
-    }
-
-    // And the case the old line could not tell apart from it.
-    let diverged = alone_line("a_test", WIDE, false, Some(&red(OTHER)));
-    if !diverged.contains("DIFFERENT failure") {
-        return Err(format!("two different failures read as one reproduced:\n{diverged}"));
-    }
-    for both in [WIDE, OTHER] {
-        if !diverged.contains(both) {
-            return Err(format!("the divergent line drops {both:?}:\n{diverged}"));
-        }
-    }
-    if diverged.find(WIDE) > diverged.find(OTHER) {
-        return Err(format!("the divergent line reads alone-then-wide:\n{diverged}"));
-    }
-
-    // The host stopping during the retry is neither, and a retry that never
-    // reported is not a verdict about anything.
-    let suspended = Outcome {
-        suspended: common::clock::SUSPENDED_AT_LEAST,
-        ..red(OTHER)
-    };
-    let asleep = alone_line("a_test", WIDE, false, Some(&suspended));
-    if !asleep.contains("the host was suspended during the retry too") {
-        return Err(format!("a suspended retry reads as a verdict:\n{asleep}"));
-    }
-    let missing = alone_line("a_test", WIDE, false, None);
-    if !missing.contains("the lone run reported nothing about it") {
-        return Err(format!("a retry that reported nothing reads as a verdict:\n{missing}"));
-    }
-    Ok(())
 }
 
 /// One live guest holds its lane's NVMe image, and the next one may not.
@@ -19034,13 +18827,13 @@ fn stall_is_not_a_verdict() -> Result<(), String> {
         }
         // Red is red. A stall that stopped failing the run would be a gate that
         // reports and enforces nothing.
-        let red = matches!(outcome.verdict_against(&[]), Verdict::Fail(_));
+        let red = outcome.verdict() == Verdict::Fail;
         if red != reason.is_some() {
             return Err(format!("{what} is red={red}, and a reason is always red"));
         }
     }
 
-    let mut tally = Tally::new(&[]);
+    let mut tally = Tally::new();
     tally.record(Outcome {
         name: "a_stalled_test".to_string(),
         reason: Some(format!("{STALLED} waiting for nothing at all — it went quiet")),
@@ -19083,7 +18876,7 @@ fn stall_is_not_a_verdict() -> Result<(), String> {
 fn nightly_tier_is_announced() -> Result<(), String> {
     let held: [&str; 2] = ["desktop_window_child", "sshd_fail_closed"];
     let announced =
-        Tally::new(&[]).holding_back(&held).summary(1, Duration::ZERO, Duration::ZERO);
+        Tally::new().holding_back(&held).summary(1, Duration::ZERO, Duration::ZERO);
     for want in [
         "not run — the nightly tier",
         "desktop_window_child, sshd_fail_closed",
@@ -19094,7 +18887,7 @@ fn nightly_tier_is_announced() -> Result<(), String> {
             return Err(format!("a run holding tests back never says {want:?}:\n{announced}"));
         }
     }
-    let whole = Tally::new(&[]).summary(1, Duration::ZERO, Duration::ZERO);
+    let whole = Tally::new().summary(1, Duration::ZERO, Duration::ZERO);
     if whole.contains("nightly") || whole.contains("held back") {
         return Err(format!("a run that held nothing back says it did:\n{whole}"));
     }
@@ -19116,12 +18909,12 @@ fn suspend_invalidates_a_verdict() -> Result<(), String> {
         .checked_sub(Duration::from_millis(1))
         .expect("SUSPENDED_AT_LEAST must be at least 1ms for this case to mean anything");
     let cases: [(&str, Option<&str>, Duration, Verdict); 6] = [
-        ("a pass on a host that stayed up", None, awake, Verdict::Pass(None)),
-        ("a fail on a host that stayed up", Some("the guest said no"), awake, Verdict::Fail(None)),
+        ("a pass on a host that stayed up", None, awake, Verdict::Pass),
+        ("a fail on a host that stayed up", Some("the guest said no"), awake, Verdict::Fail),
         ("a pass across a suspend", None, slept, Verdict::Invalid),
         ("a fail across a suspend", Some("timed out"), slept, Verdict::Invalid),
-        ("a pass across clock jitter", None, jitter, Verdict::Pass(None)),
-        ("a fail across clock jitter", Some("the guest said no"), jitter, Verdict::Fail(None)),
+        ("a pass across clock jitter", None, jitter, Verdict::Pass),
+        ("a fail across clock jitter", Some("the guest said no"), jitter, Verdict::Fail),
     ];
     for (what, reason, suspended, want) in cases {
         let outcome = Outcome {
@@ -19145,18 +18938,12 @@ fn suspend_invalidates_a_verdict() -> Result<(), String> {
 /// only reports, and what the process exits with. [`Tally::exit_code`] and
 /// [`Tally::summary`] are that arithmetic, and both are gated.
 struct Tally {
-    quarantine: &'static [Quarantined],
     passed: usize,
     failures: Vec<(String, String)>,
     /// The subset of `failures` whose guard expired rather than whose assertion
     /// failed, by name. Red like any other — and named apart, because a run
     /// that never got the guest going has measured the host and not the tree.
     stalls: Vec<String>,
-    /// A quarantined test that failed. Reported, never red.
-    fired: Vec<&'static Quarantined>,
-    /// A quarantined test that passed. Not red, and reported: one green of a
-    /// quarantined test closes nothing.
-    quiet: Vec<&'static Quarantined>,
     invalid: Vec<(String, Duration)>,
     /// What the tier held back, by name. Not a verdict and never red — it is the
     /// one thing a reader of the last line cannot infer from anything else in
@@ -19166,14 +18953,11 @@ struct Tally {
 }
 
 impl Tally {
-    fn new(quarantine: &'static [Quarantined]) -> Self {
+    fn new() -> Self {
         Tally {
-            quarantine,
             passed: 0,
             failures: Vec::new(),
             stalls: Vec::new(),
-            fired: Vec::new(),
-            quiet: Vec::new(),
             invalid: Vec::new(),
             relegated: Vec::new(),
         }
@@ -19186,35 +18970,21 @@ impl Tally {
     }
 
     fn record(&mut self, outcome: Outcome) {
-        match outcome.verdict_against(self.quarantine) {
-            Verdict::Pass(None) => self.passed += 1,
-            Verdict::Pass(Some(row)) => {
-                self.passed += 1;
-                self.quiet.push(row);
-            }
-            Verdict::Fail(listed) => {
+        match outcome.verdict() {
+            Verdict::Pass => self.passed += 1,
+            Verdict::Fail => {
                 if outcome.stalled() {
                     self.stalls.push(outcome.name.clone());
                 }
                 let said = headline(outcome.reason.as_deref());
-                let said = match listed {
-                    None => said,
-                    Some(row) => format!("{said} — {}", quarantined_for_something_else(row)),
-                };
                 self.failures.push((outcome.name, said));
             }
-            Verdict::Quarantined(row) => self.fired.push(row),
             Verdict::Invalid => self.invalid.push((outcome.name.clone(), outcome.suspended)),
         }
     }
 
-    /// **Three statuses, and a quarantined failure is none of them.**
-    ///
-    /// It never reaches this function, which is the statement: a run whose only
-    /// reds were quarantined is exit 0, and a failure on no list is exit 1.
-    ///
-    /// 2 keeps its existing meaning untouched: the run established nothing,
-    /// because the host stopped in the middle of it.
+    /// **Three statuses**: 0 green, 1 red, and 2 when the run established
+    /// nothing, because the host stopped in the middle of it.
     fn exit_code(&self) -> i32 {
         if !self.failures.is_empty() {
             return 1;
@@ -19228,9 +18998,7 @@ impl Tally {
     /// Everything the run has to say, as one block, ending in the result line.
     ///
     /// A string rather than a pile of `eprintln!`s so that the gate can read
-    /// what an agent reads. **The result line names every quarantined test the run
-    /// judged, failed or green**: the whole hazard of this mechanism is a run that
-    /// looks clean, or a row that looks needed, because nobody scrolled up.
+    /// what an agent reads.
     fn summary(&self, total: usize, elapsed: Duration, suspended: Duration) -> String {
         let mut out = String::new();
         let mut say = |line: String| {
@@ -19280,26 +19048,6 @@ impl Tally {
                 self.stalls.len(),
                 self.stalls.join(", ")
             ));
-            say(
-                "    The guest stopped making progress, so the run established nothing \
-                 about this tree and there is nothing in it to bisect. Re-run; if one \
-                 recurs with the host to itself, the guest really is stopping."
-                    .to_string(),
-            );
-            say(String::new());
-        }
-        if !self.fired.is_empty() {
-            say("quarantined — known defects this run reproduced:".to_string());
-            for row in &self.fired {
-                say(format!("    {}  {}", row.test, row.issue));
-            }
-            say(String::new());
-        }
-        if !self.quiet.is_empty() {
-            say("quarantined and green this run — one green closes nothing:".to_string());
-            for row in &self.quiet {
-                say(format!("    {}  {}", row.test, row.issue));
-            }
             say(String::new());
         }
         if !self.invalid.is_empty() {
@@ -19319,18 +19067,6 @@ impl Tally {
             say(String::new());
         }
 
-        let named = |what: &str, rows: &[&Quarantined]| {
-            if rows.is_empty() {
-                return String::new();
-            }
-            let names: Vec<&str> = rows.iter().map(|row| row.test).collect();
-            format!(", {} {what}: {}", rows.len(), names.join(", "))
-        };
-        let quarantined_note = format!(
-            "{}{}",
-            named("quarantined", &self.fired),
-            named("quarantined and green", &self.quiet)
-        );
         // **In the result line, because that is the line a shard's job summary
         // extracts and the line anybody reads.** A count of what ran means
         // something different depending on how much was not attempted.
@@ -19341,7 +19077,7 @@ impl Tally {
         };
         match self.exit_code() {
             1 => say(format!(
-                "test result: FAILED. {} passed, {} failed{quarantined_note}, {} invalidated, \
+                "test result: FAILED. {} passed, {} failed, {} invalidated, \
                  {total} total ({elapsed:.1?}){held}",
                 self.passed,
                 self.failures.len(),
@@ -19349,7 +19085,7 @@ impl Tally {
             )),
             2 => {
                 say(format!(
-                    "test result: INVALID. {} passed{quarantined_note}, {} invalidated by a \
+                    "test result: INVALID. {} passed, {} invalidated by a \
                      host suspend of {suspended:.0?}, {total} total ({elapsed:.1?}){held}",
                     self.passed,
                     self.invalid.len(),
@@ -19360,13 +19096,8 @@ impl Tally {
                         .to_string(),
                 );
             }
-            _ if !self.fired.is_empty() => say(format!(
-                "test result: ok, NOT clean. {} passed{quarantined_note}, {total} total \
-                 ({elapsed:.1?}){held}",
-                self.passed,
-            )),
             _ => say(format!(
-                "test result: ok. {} passed{quarantined_note}, {total} total ({elapsed:.1?}){held}",
+                "test result: ok. {} passed, {total} total ({elapsed:.1?}){held}",
                 self.passed
             )),
         }
@@ -19374,264 +19105,37 @@ impl Tally {
     }
 }
 
-/// Every claim [`redlist::QUARANTINE`] makes that only the registry can check.
-///
-/// `runnable` is the whole registry rather than the two const lists, because the
-/// shared boot's C and Rust tests are discovered and a name that only exists
-/// there must still be listable.
-fn check_quarantine(
-    quarantine: &'static [Quarantined],
-    runnable: &BTreeSet<&str>,
-) -> Result<(), String> {
-    for row in quarantine {
-        if !runnable.contains(row.test) {
-            return Err(format!(
-                "{} is quarantined and no list registers it — a renamed or deleted test must \
-                 take its row with it, or the quarantine is waiting for whatever gets that \
-                 name next",
-                row.test
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// What the quarantine decides about one outcome, and what it must not.
-///
-/// The negative controls are the point: a quarantined test failing any way its
-/// row does not quote is an ordinary red, so is a failure of a name on no list
-/// — a name that merely extends a listed one is on no list — and a suspend
-/// invalidates a quarantined verdict like any other. The match is the row's
-/// fragment inside the *whole* failure text, spelled as the row spells it: a
-/// reason that says nothing is excused by nothing, a fragment reached only past
-/// the headline still excuses, and a fragment that differs only in case is a
-/// different fragment.
-fn quarantine_verdicts() -> Result<(), String> {
-    static LISTED: &[Quarantined] = &[Quarantined {
-        test: "known_to_red",
-        says: &["the guest never answered", "the shell never answered again"],
-        issue: "i.md",
-    }];
-    let awake = Duration::ZERO;
-    let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
-    let row = &LISTED[0];
-    let cases: [(&str, &str, Option<&str>, Duration, Verdict); 12] = [
-        (
-            "a quarantined test failing the way its row quotes",
-            "known_to_red",
-            Some("round 2: the shell never answered again:\n<log>"),
-            awake,
-            Verdict::Quarantined(row),
-        ),
-        (
-            "a quarantined test whose failure says nothing at all",
-            "known_to_red",
-            Some(""),
-            awake,
-            Verdict::Fail(Some(row)),
-        ),
-        (
-            "a quote the reason carries below its headline, as a shared boot's does",
-            "known_to_red",
-            Some("exit code Some(101)\nthe guest never answered"),
-            awake,
-            Verdict::Quarantined(row),
-        ),
-        (
-            "a quote the failure repeats in another case",
-            "known_to_red",
-            Some("The Guest Never Answered"),
-            awake,
-            Verdict::Fail(Some(row)),
-        ),
-        (
-            "the row's second alternative",
-            "known_to_red",
-            Some("the guest never answered"),
-            awake,
-            Verdict::Quarantined(row),
-        ),
-        ("a quarantined test passing", "known_to_red", None, awake, Verdict::Pass(Some(row))),
-        (
-            "a quarantined test failing some other way",
-            "known_to_red",
-            Some("the client binary was not built"),
-            awake,
-            Verdict::Fail(Some(row)),
-        ),
-        (
-            "an unlisted test failing the same way",
-            "some_other_test",
-            Some("round 2: the shell never answered again:\n<log>"),
-            awake,
-            Verdict::Fail(None),
-        ),
-        ("an unlisted test passing", "some_other_test", None, awake, Verdict::Pass(None)),
-        (
-            "an unlisted name that extends a listed one, failing the same way",
-            "known_to_red_controls",
-            Some("round 2: the shell never answered again:\n<log>"),
-            awake,
-            Verdict::Fail(None),
-        ),
-        (
-            "an unlisted name that extends a listed one, passing",
-            "known_to_red_controls",
-            None,
-            awake,
-            Verdict::Pass(None),
-        ),
-        (
-            "a quarantined test across a host suspend",
-            "known_to_red",
-            Some("the shell never answered again"),
-            slept,
-            Verdict::Invalid,
-        ),
-    ];
-    for (what, name, reason, suspended, want) in cases {
-        let outcome = Outcome {
-            name: name.to_string(),
-            reason: reason.map(str::to_string),
-            elapsed: Duration::from_secs(3),
-            suspended,
-        };
-        let got = outcome.verdict_against(LISTED);
-        if got != want {
-            return Err(format!("{what} is {got:?}, and it has to be {want:?}"));
-        }
-    }
-    Ok(())
-}
-
 /// What a whole run exits with, and what its last line says.
 ///
 /// Driven through [`Tally`] rather than asserted about it: the property that
 /// matters is what `--land`'s gate reads off the process, and that is the exit
 /// code after `record` has seen every outcome.
-fn quarantine_exit_status() -> Result<(), String> {
-    static LISTED: &[Quarantined] = &[Quarantined {
-        test: "a_test_pending_on_a_defect",
-        says: &["the shell never answered again"],
-        issue: "issues/nowhere.md",
-    }];
-    let outcome = |name: &str, reason: Option<&str>| Outcome {
+fn run_exit_status() -> Result<(), String> {
+    let outcome = |name: &str, reason: Option<&str>, suspended: Duration| Outcome {
         name: name.to_string(),
         reason: reason.map(str::to_string),
         elapsed: Duration::from_secs(3),
-        suspended: Duration::ZERO,
+        suspended,
     };
-    let fired = || outcome("a_test_pending_on_a_defect", Some("the shell never answered again:\n<log>"));
+    let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
 
-    let mut only_quarantined = Tally::new(LISTED);
-    only_quarantined.record(outcome("something_else", None));
-    only_quarantined.record(fired());
-    let text = only_quarantined.summary(2, Duration::from_secs(9), Duration::ZERO);
-    if only_quarantined.exit_code() != 0 {
-        return Err(format!(
-            "a run whose only red was quarantined exits {}, and it has to be 0:\n{text}",
-            only_quarantined.exit_code()
-        ));
-    }
-    // The whole hazard is a run that reads as clean. The result line is the one
-    // line every reader and every log-scraper looks at, so it is the line that
-    // has to carry it.
-    let result = text.lines().last().unwrap_or_default();
-    for wanted in ["a_test_pending_on_a_defect", "1 quarantined", "NOT clean"] {
-        if !result.contains(wanted) {
-            return Err(format!("the result line does not say {wanted:?}: {result}"));
-        }
-    }
-    if !text.contains("issues/nowhere.md") {
-        return Err(format!("the report never points at the issue that owns the defect:\n{text}"));
+    let mut red = Tally::new();
+    red.record(outcome("a_red", Some("the disk came back short"), Duration::ZERO));
+    red.record(outcome("a_suspended_one", None, slept));
+    if red.exit_code() != 1 {
+        return Err(format!("a run with a red exits {}, and it has to be 1", red.exit_code()));
     }
 
-    // A quarantined test going green is reported and is not red.
-    let mut went_green = Tally::new(LISTED);
-    went_green.record(outcome("a_test_pending_on_a_defect", None));
-    let text = went_green.summary(1, Duration::from_secs(9), Duration::ZERO);
-    if went_green.exit_code() != 0 {
-        return Err(format!("a quarantined test passing exits {}:\n{text}", went_green.exit_code()));
-    }
-    if !text.contains("one green closes nothing") {
-        return Err(format!("a quarantined test passing is not reported:\n{text}"));
-    }
-    let result = text.lines().last().unwrap_or_default();
-    if !result.contains("1 quarantined and green: a_test_pending_on_a_defect") {
-        return Err(format!("the result line does not name the quarantined test that passed: {result}"));
-    }
-
-    // Negative control: a red on no list is still an ordinary red, and a
-    // quarantined one beside it does not soften the status.
-    let mut real_red = Tally::new(LISTED);
-    real_red.record(outcome("something_else", Some("the disk came back short")));
-    real_red.record(fired());
-    if real_red.exit_code() != 1 {
-        return Err(format!(
-            "a run with an unlisted red exits {}, and it has to be 1",
-            real_red.exit_code()
-        ));
-    }
-
-    // And a listed test failing some other way: the row must not reach it.
-    let mut wrong_failure = Tally::new(LISTED);
-    wrong_failure.record(outcome("a_test_pending_on_a_defect", Some("the client was not built")));
-    let text = wrong_failure.summary(1, Duration::from_secs(9), Duration::ZERO);
-    if wrong_failure.exit_code() != 1 {
-        return Err(format!(
-            "a listed test failing another way exits {}, and it has to be 1:\n{text}",
-            wrong_failure.exit_code()
-        ));
-    }
-    if !text.contains("a_test_pending_on_a_defect is quarantined for something else") {
-        return Err(format!("the report does not say why the row did not cover it:\n{text}"));
-    }
-
-    // The same two arms over the table the suite really runs under: every row
-    // excuses the failure it quotes, and none excuses a failure nobody has seen.
-    for row in redlist::QUARANTINE {
-        let mut quoted = Tally::new(redlist::QUARANTINE);
-        let quote = row.says.first().copied().unwrap_or_default();
-        quoted.record(outcome(row.test, Some(&format!("round 2: {quote}:\n<log>"))));
-        if quoted.exit_code() != 0 {
-            return Err(format!(
-                "{} failing the way its row quotes exits {}, and it has to be 0",
-                row.test,
-                quoted.exit_code()
-            ));
-        }
-        let mut unseen = Tally::new(redlist::QUARANTINE);
-        unseen.record(outcome(row.test, Some("a wholly different assertion, never seen before")));
-        if unseen.exit_code() != 1 {
-            return Err(format!(
-                "{} is quarantined for {:?}, and failing on a text matching none of them exits \
-                 {}: it has to be 1",
-                row.test,
-                row.says,
-                unseen.exit_code()
-            ));
-        }
-    }
-
-    // Exit 2 keeps its meaning: a suspended run establishes nothing.
-    let mut suspended = Tally::new(LISTED);
-    suspended.record(Outcome {
-        name: "something_else".to_string(),
-        reason: None,
-        elapsed: Duration::from_secs(3),
-        suspended: common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120),
-    });
+    let mut suspended = Tally::new();
+    suspended.record(outcome("a_suspended_one", None, slept));
     if suspended.exit_code() != 2 {
-        return Err(format!(
-            "a suspended run exits {}, and it has to be 2",
-            suspended.exit_code()
-        ));
+        return Err(format!("a suspended run exits {}, and it has to be 2", suspended.exit_code()));
     }
 
     // The clean case, so that none of the above is passing because everything
     // reds.
-    let mut clean = Tally::new(LISTED);
-    clean.record(outcome("something_else", None));
+    let mut clean = Tally::new();
+    clean.record(outcome("a_green", None, Duration::ZERO));
     let text = clean.summary(1, Duration::from_secs(9), Duration::ZERO);
     if clean.exit_code() != 0 {
         return Err(format!("a clean run exits {}, and it has to be 0", clean.exit_code()));
@@ -19913,60 +19417,6 @@ fn driven_binaries(sources: &[String]) -> BTreeSet<String> {
     found
 }
 
-fn quarantine_entries() -> Result<(), String> {
-    static NAMED_NOTHING: &[Quarantined] =
-        &[Quarantined { test: "a_test_that_was_renamed", says: &["x"], issue: "issues/i.md" }];
-    static GOOD: &[Quarantined] =
-        &[Quarantined { test: "a_real_test", says: &["x"], issue: "issues/i.md" }];
-    let runnable: BTreeSet<&str> = ["a_real_test", "another_real_test"].into_iter().collect();
-    match check_quarantine(NAMED_NOTHING, &runnable) {
-        Ok(()) => return Err("a row for a test that no longer exists was accepted".to_string()),
-        Err(refusal) if !refusal.contains("no list registers it") => {
-            return Err(format!("a stale row was refused, but for {refusal:?}"))
-        }
-        Err(_) => {}
-    }
-    // The negative control: the check is refusing that and not refusing
-    // everything put in front of it.
-    check_quarantine(GOOD, &runnable).map_err(|e| format!("a well-formed row was refused: {e}"))?;
-    check_quarantine(&[], &runnable).map_err(|e| format!("an empty list was refused: {e}"))
-}
-
-/// The task that would run `name` again, by itself.
-///
-/// **Every red from the parallel phase is re-run alone**, and the two possible
-/// answers are both findings. Same verdict: the defect is real and the width had
-/// nothing to do with it. Green: the test is red only when it shares the host,
-/// which makes its [`Sched::Parallel`] wrong — a bug in this file, not in the
-/// kernel, and one the suite has no other way to notice.
-///
-/// **A green retry does not turn the run green.** A rerun-only pass counting as
-/// a pass is selective test running by the back door; the failure line
-/// says which of the two it was and the run stays red until somebody fixes the
-/// classification. That is the whole safety argument for widening the parallel
-/// phase: getting a scheduling answer wrong costs a red run, never a quiet one.
-///
-/// A group member is re-run **as its group**, not on its own, so that the only
-/// thing that changed between the two attempts is how many guests the host had.
-fn retry_task<'a>(name: &str, all_tests: &[&'a TestDef]) -> Option<Task<'a>> {
-    if let Some(def) = all_tests.iter().find(|t| t.name == name) {
-        return Some(Task::Shared(vec![def], shared_kernel(name)));
-    }
-    if let Some((registered, _, _)) = SCREEN_TESTS.iter().find(|(n, _, _)| *n == name) {
-        return Some(Task::Screen(registered));
-    }
-    let (registered, _, _) = MACHINE_TESTS.iter().find(|(n, _, _)| *n == name)?;
-    let names = match group_of(registered) {
-        None => vec![*registered],
-        Some(group) => MACHINE_TESTS
-            .iter()
-            .filter(|(n, _, _)| group_of(n) == Some(group))
-            .map(|(n, _, _)| *n)
-            .collect(),
-    };
-    Some(Task::Machine(names))
-}
-
 /// Which of the two shared boots a name belongs on — a *kernel build*, because
 /// `SYS_DEBUG` is compiled in or it is not, and never a boot parameter.
 fn shared_kernel(name: &str) -> &'static [&'static str] {
@@ -20129,8 +19579,8 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                                 .as_ref()
                                 .map(ToString::to_string)
                                 // What the guest said rides the reason, as a machine
-                                // test's capture does: a quarantine row quotes the
-                                // assertion, and an exit code is every assertion's.
+                                // test's capture does: an exit code is every
+                                // assertion's.
                                 .unwrap_or_else(|| {
                                     format!("exit code {:?}\n{}", result.exit_code, result.stdout)
                                 })
@@ -20315,35 +19765,18 @@ fn longest_first(tasks: &mut [Task<'_>], known: &BTreeMap<String, Duration>) {
 fn report_line(outcome: &Outcome) {
     let reason = || outcome.reason.as_deref().unwrap_or("check failed");
     match outcome.verdict() {
-        Verdict::Pass(None) => eprintln!("  PASS  {}  ({:.0?})", outcome.name, outcome.elapsed),
-        Verdict::Pass(Some(row)) => eprintln!(
-            "  PASS  {}  ({:.0?})  — quarantined, and one green closes nothing: {}",
-            outcome.name, outcome.elapsed, row.issue
-        ),
-        Verdict::Fail(listed) => {
+        Verdict::Pass => eprintln!("  PASS  {}  ({:.0?})", outcome.name, outcome.elapsed),
+        Verdict::Fail => {
             eprintln!("FAIL {}: {}", outcome.name, reason());
-            let other = listed
-                .map(|row| format!("  — {}", quarantined_for_something_else(row)))
-                .unwrap_or_default();
             if outcome.stalled() {
                 eprintln!(
                     "  STALL {}  ({:.0?})  — the guard expired, so this says nothing about \
-                     the tree{other}",
+                     the tree",
                     outcome.name, outcome.elapsed
                 );
             } else {
-                eprintln!("  FAIL  {}  ({:.0?}){other}", outcome.name, outcome.elapsed);
+                eprintln!("  FAIL  {}  ({:.0?})", outcome.name, outcome.elapsed);
             }
-        }
-        Verdict::Quarantined(row) => {
-            // The reason in full, exactly as a red would print it. A
-            // quarantined failure is still a defect reproducing, and the run
-            // that reproduced it is the only place its evidence exists.
-            eprintln!("XFAIL {}: {}", outcome.name, reason());
-            eprintln!(
-                "  XFAIL {}  ({:.0?})  — quarantined, {}",
-                outcome.name, outcome.elapsed, row.issue
-            );
         }
         Verdict::Invalid => eprintln!(
             "  INVL  {}  ({:.0?}) — the host was suspended for {:.0?} while it ran",
@@ -20823,12 +20256,6 @@ fn check_registration() {
 /// The half [`check_registration`] could not ask: the shared boot's tests are
 /// *discovered* from the binaries in `tests/toyos-rust-tests` and `tests/c`, so
 /// nothing declared can be compared against them until they exist.
-///
-/// A name in both places is two tests reporting one name, and the damage is not
-/// a duplicate line. [`retry_task`] searches the shared registry first, so a
-/// machine test of that name which failed wide is re-run *as the other test* and
-/// its `ALONE:` verdict is about neither. Four names were doing this and the
-/// suite had never been able to see them.
 fn check_no_collisions(shared: &[TestDef]) {
     let mut shared_seen = BTreeSet::new();
     let shared_twice: Vec<&str> = shared
@@ -20852,9 +20279,22 @@ fn check_no_collisions(shared: &[TestDef]) {
     assert!(
         clash.is_empty(),
         "{clash:?} name both a binary on the shared boot and a test that declares its own \
-         machine — two verdicts under one name, and `retry_task` takes the shared one. Add \
-         each to RUST_SKIP with the reason its own test exists, or rename one of the two."
+         machine — two verdicts under one name. Add each to RUST_SKIP with the reason its \
+         own test exists, or rename one of the two."
     );
+}
+
+/// `redlist::DISABLED` against every name `all_tests` plus the three declared
+/// registries could produce a verdict for, before any boot on any entry point.
+fn check_redlist(all_tests: &[TestDef]) -> Result<(), String> {
+    let runnable: BTreeSet<&str> = all_tests
+        .iter()
+        .map(|t| t.name.as_str())
+        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
+        .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
+        .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
+        .collect();
+    redlist::check(redlist::DISABLED, |name| runnable.contains(name), &compile::repo_root())
 }
 
 fn main() {
@@ -20869,6 +20309,14 @@ fn main() {
             eprintln!("[toyos] {refusal}");
             std::process::exit(1);
         }
+    };
+    // The one selection every entry point below takes, the metal's included: a
+    // disabled test runs nowhere, and every run names each one with its issue.
+    for row in redlist::DISABLED {
+        eprintln!("[toyos] disabled: {} — {}", row.test, row.issue);
+    }
+    let keep = |name: &str| {
+        filter.is_none_or(|f| name.contains(f)) && redlist::disabled(redlist::DISABLED, name).is_none()
     };
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
@@ -20973,9 +20421,14 @@ fn main() {
         eprintln!("[toyos] Compiling {} C tests for the corpus boot...", c_names.len());
         let c_bins = compile_c_tests(&c_names);
         check_metal_only_unshared(&rust_bins, &c_bins);
+        let c_compiled: Vec<String> = c_bins.iter().map(|(n, _)| n.clone()).collect();
+        if let Err(refusal) = check_redlist(&build_test_registry(&rust_bins, &c_compiled)) {
+            eprintln!("[toyos] src/redlist.rs: {refusal}");
+            run.exit(1);
+        }
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
             .iter()
-            .filter(|(name, _)| filter.is_none_or(|f| name.contains(f)))
+            .filter(|(name, _)| keep(name))
             .map(|(name, decl)| (*name, decl))
             .collect();
         // The shared boots carry names no registration holds, so an empty
@@ -20996,7 +20449,6 @@ fn main() {
                 &dir,
                 &selected,
 &{
-                    let keep = |n: &str| filter.is_none_or(|f| n.contains(f));
                     let mut boots = shared_metal(&rust_bins, keep);
                     boots.push(c_corpus_metal(&c_bins, keep));
                     boots
@@ -21027,10 +20479,17 @@ fn main() {
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
     toyos_build::build::build_host_judges(&common::compile::repo_root(), !nocapture && !debug_mode);
 
+    // Every name this process could produce a verdict for, before `--list`,
+    // `--debug` and `--audio-gate` can return without ever reaching it.
+    let all_tests = build_test_registry(&rust_bins, &c_compiled);
+    if let Err(refusal) = check_redlist(&all_tests) {
+        eprintln!("[toyos] src/redlist.rs: {refusal}");
+        run.exit(1);
+    }
+
     // --list: print test names and exit
     if list_mode {
-        let tests = build_test_registry(&rust_bins, &c_compiled);
-        for t in &tests {
+        for t in &all_tests {
             println!("{}", t.name);
         }
         for (name, _) in AUDIO_TESTS {
@@ -21054,7 +20513,7 @@ fn main() {
         let mut audio_to_run: Vec<&str> = AUDIO_TESTS
             .iter()
             .map(|(name, _)| *name)
-            .filter(|n| filter.is_none_or(|f| n.contains(f)))
+            .filter(|n| keep(n))
             .collect();
         assert!(!audio_to_run.is_empty(), "no audio test matches filter {filter:?}");
         // Sharded too, and this is the tier it buys the most for: the thorough
@@ -21094,7 +20553,6 @@ fn main() {
         return;
     }
 
-    let all_tests = build_test_registry(&rust_bins, &c_compiled);
     check_no_collisions(&all_tests);
     check_metal_only_unshared(&rust_bins, &c_bins);
     // Every row against the catalogue before any boot, so a name the suite did
@@ -21103,25 +20561,10 @@ fn main() {
         qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
     }
     check_shard_partition(&all_tests);
-    // Every name this process could produce a verdict for, which is what a
-    // quarantine row has to be one of. Taken before the filter, so a filtered
-    // run cannot make a stale row look well-formed.
-    let runnable: BTreeSet<&str> = all_tests
-        .iter()
-        .map(|t| t.name.as_str())
-        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
-        .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
-        .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
-        .collect();
-    if let Err(refusal) = check_quarantine(redlist::QUARANTINE, &runnable) {
-        eprintln!("[toyos] src/redlist.rs: {refusal}");
-        run.exit(1);
-    }
 
-    let keep = |name: &str| filter.is_none_or(|f| name.contains(f));
     // The tier filter, and it is not conditional on the name filter: a rule with
     // an exception for filtered runs is two rules, and the second one is the one
-    // nobody remembers. `cargo test -- desktop_window_child` refuses below and
+    // nobody remembers. `cargo test -- screen_diag_boot` refuses below and
     // says what to type instead, which is the same information a silent skip
     // would have withheld.
     let in_tier = |tier: Tier| tier.selected(nightly, shard.is_some());
@@ -21195,18 +20638,13 @@ fn main() {
                  --nightly to run them."
             );
         } else {
-            eprintln!("No tests match filter {filter:?}");
+            eprintln!("No enabled test matches filter {filter:?}");
         }
         run.exit(1);
     }
-    for row in redlist::QUARANTINE {
-        // Before anything boots, so that the run reads as what it is from its
-        // first line: a suite carrying quarantined names is not a clean suite.
-        eprintln!("[toyos] quarantined: {} — {}", row.test, row.issue);
-    }
 
     let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
-    let mut tally = Tally::new(redlist::QUARANTINE).holding_back(&held_back);
+    let mut tally = Tally::new().holding_back(&held_back);
     let suite_start = common::clock::mark();
 
     let bins = Bins {
@@ -21238,9 +20676,6 @@ fn main() {
     }
     let (mut parallel, mut serial) = build_tasks(&tests_to_run, &machine_to_run, &screen_to_run);
 
-    // Every red the wide phase produced, re-run by itself before anything is
-    // believed about it. See [`retry_task`] for why both answers are findings
-    // and why neither turns the run green.
     let known = load_durations();
     // After the phases are decided and before either is ordered: what a shard
     // divides is the work, and a task's answer to `Sched` is a property of the
@@ -21296,29 +20731,12 @@ fn main() {
     eprintln!("\nrunning {total} tests\n");
 
     let mut timed: Vec<(String, Duration)> = Vec::new();
-    // Every red, with whether it had the host to itself when it happened and
-    // *what it said* — the third field, because the re-run below has to be able
-    // to answer whether the two runs failed the same way, and by the time it
-    // runs this outcome has been moved into the tally. Reds only: a test the
-    // host slept through has no verdict to confirm, and re-running it would put
-    // a second guess beside the first — and a quarantined failure has already
-    // been answered by its row, which names the issue that owns it.
-    let mut reds: Vec<(String, bool, String)> = Vec::new();
-    let mut collect = |outcomes: &[Outcome], shared_the_host: bool| {
-        reds.extend(
-            outcomes
-                .iter()
-                .filter(|o| matches!(o.verdict(), Verdict::Fail(_)))
-                .map(|o| (o.name.clone(), shared_the_host, headline(o.reason.as_deref()))),
-        );
-    };
     if !parallel.is_empty() {
         longest_first(&mut parallel, &known);
         eprintln!("  --- parallel, {width} wide ---");
         let started = std::time::Instant::now();
         let outcomes = run_phase(parallel, width, &bins, &slots);
         eprintln!("  --- parallel done in {:.1?} ---", started.elapsed());
-        collect(&outcomes, width > 1);
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
@@ -21327,30 +20745,10 @@ fn main() {
         let started = std::time::Instant::now();
         let outcomes = run_phase(serial, 1, &bins, &slots);
         eprintln!("  --- serial done in {:.1?} ---", started.elapsed());
-        // **The serial tail is one guest whatever `--jobs` says**, which is
-        // exactly why its reds were never re-run: the loop below was written for
-        // the parallel phase and read the *run's* width. So the two
-        // `Sched::Serial` reds of run `31252989653` — `screen_pager_keys` and
-        // `usb_transport_break` — carried no `ALONE:` line at all and nobody
-        // could say whether either was reproducible.
-        collect(&outcomes, false);
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
     qemu::set_width(1);
-
-    if !reds.is_empty() {
-        eprintln!("  --- re-running {} failure(s) alone ---", reds.len());
-        for (name, shared_the_host, wide) in &reds {
-            let Some(task) = retry_task(name, &tests_to_run) else {
-                eprintln!("  ALONE {name}: no way to run it by itself; verdict stands");
-                continue;
-            };
-            let outcomes = run_phase(vec![task], 1, &bins, &slots);
-            let alone = outcomes.iter().find(|o| &o.name == name);
-            eprintln!("{}", alone_line(name, wide, *shared_the_host, alone));
-        }
-    }
 
     // Gate A, alone. `tests/audio-baseline.toml`'s numbers were recorded with
     // one QEMU on the host and no concurrent agents, so a run beside anything
@@ -21399,9 +20797,8 @@ fn main() {
         save_durations(known, &timed);
     }
 
-    // Three exit statuses, because there are three things a run can establish,
-    // and a quarantined failure is deliberately none of them — see
-    // [`Tally::exit_code`], which is where the whole decision now lives.
+    // Three exit statuses, because there are three things a run can establish —
+    // see [`Tally::exit_code`], which is where the whole decision now lives.
     //
     // A green run is a claim that this tree passed, and `--land`'s gate consumes
     // exactly this number. A run that spanned a suspend did not establish that:

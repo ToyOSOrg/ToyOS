@@ -24,11 +24,7 @@ paid at 1.55x width
 ```
 
 `cargo run -- --known-red kernel_log_file` answered `NOT ON THE LIST` when this
-was filed and answers `KNOWN-RED` now: `src/redlist.rs` carries a row for the
-name, sourced here, `Finding::Seen` with `no rate`. So the next reader of the
-name gets the sighting instead of silence — but the row records the same single
-observation this file does, and a `Seen` with no rate is what it says it is.
-What is owed is unchanged and is the rate.
+was filed. What is owed is unchanged and is the rate.
 
 **The company is recorded, because the runner is the instrument.** A second
 agent's `cargo test --workspace` was running in `toyos-banner` on the same
@@ -50,7 +46,5 @@ deletion of an unreachable `if rflags & TF != 0` branch in
 
 ## Promoted 2026-08-25
 
-A known-red test with a `Seen`-and-no-rate row is real, owed work: the
-`src/redlist.rs` row still records the single observation this file does.
 Owed to whoever next runs a session free to measure the rate against an
 unchanged tree.

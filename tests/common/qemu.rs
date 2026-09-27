@@ -425,10 +425,7 @@ pub fn host_scale_self_check() -> Result<(), String> {
 /// is the part of "how fast is the host today" the harness knows. It does not
 /// know the rest, and a retry loop bounded by elapsed time has that ceiling for
 /// a *verdict* the moment the rest moves: a guest that is merely late reports
-/// exactly what a wedged one reports. `issues/design-debt/` is the bill —
-/// `desktop_audio_client` 385 s wide against 13 s alone, a landing gate that is
-/// a coin toss, and six reds in four suites every one of which was
-/// `ALONE: GREEN`.
+/// exactly what a wedged one reports.
 ///
 /// The two are distinguishable and the console is what distinguishes them: a
 /// guest still printing is a guest still working. So the ceiling here is time in
@@ -536,13 +533,6 @@ pub fn guest_liveness() -> Liveness {
 }
 
 /// A kernel line without its `[kernel <t> cpu<N>] ` stamp.
-///
-/// The stamp is the instance and the rest is the finding, and which of the two
-/// a verdict quotes decides an adjudication. `alone_line` compares the wide
-/// run's sentence against the lone re-run's, and two runs of one deterministic
-/// panic differ in the stamp alone — quoted whole, a staged double fault read
-/// `red again on a DIFFERENT failure`, which is the harness reporting two
-/// defects where there is one. The stamp is still in the capture underneath.
 fn without_stamp(line: &str) -> &str {
     if !is_kernel_line(line) {
         return line;
@@ -551,13 +541,6 @@ fn without_stamp(line: &str) -> &str {
 }
 
 /// The sentence a wait gives when what stopped the guest is on the console.
-///
-/// **One wording for all three waits**, so a summary line, a redlist row and an
-/// issue file quote the same words wherever the wait was — and so that nothing
-/// in it is a measurement of the host. The silence that proved the panic was
-/// fatal is deliberately not in the sentence: it differs by a poll interval
-/// between two runs of one panic, and `alone_line` compares those two sentences
-/// to decide whether a re-run reproduced the defect or found a second one.
 fn kernel_died_here(line: &str) -> String {
     format!(
         "kernel panic: {} — the guest went quiet because every CPU is halted, not because it \
@@ -568,8 +551,8 @@ fn kernel_died_here(line: &str) -> String {
 
 /// The heading a verdict puts the guest's own account under.
 ///
-/// One spelling, so an issue file, a redlist row and a CI log all quote the
-/// same words when they quote a report.
+/// One spelling, so an issue file and a CI log both quote the same words when
+/// they quote a report.
 pub const DIED_SAYING: &str = "--- what the kernel said as it died ---";
 
 /// The heading a verdict puts a never-announced test's window under.
@@ -641,11 +624,6 @@ impl WaitVerdict {
     }
 
     /// The sentence, without the account under it.
-    ///
-    /// What `headline` in `tests/toyos.rs` reads off a red's reason and what
-    /// `alone_line` compares two runs of one defect on — so the first line is
-    /// still one line, and the report below it can differ between two boots of
-    /// the same panic without reading as a second defect.
     pub fn sentence(&self) -> &str {
         self.0.lines().next().unwrap_or_default()
     }
@@ -776,13 +754,10 @@ pub fn ceiling_self_check() -> Result<(), String> {
     if early >= CEILING {
         return Err(String::from("staged the panic after the ceiling, so it proves nothing"));
     }
-    // The same panic on a later boot, differing only in its stamp, is the same
-    // sentence — or the lone re-run of a reproducible panic reads as a second,
-    // different defect. `alone_line` is what compares the two.
     let again = "[kernel 1.503 cpu7] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
     if ceiling_verdict(Some(again), early, CEILING, quiet, 40).as_deref() != Some(panic.as_str()) {
         return Err(format!(
-            "one panic on two boots gives two sentences, so a re-run reads as a second defect:\n\
+            "one panic on two boots gives two sentences:\n\
              {panic}\n{:?}",
             ceiling_verdict(Some(again), early, CEILING, quiet, 40)
         ));
@@ -925,9 +900,6 @@ pub fn ceiling_self_check() -> Result<(), String> {
             ));
         }
     }
-    // The sentence is still one line and still the sentence — `headline` in
-    // `tests/toyos.rs` reads it off a red's reason and `alone_line` compares two
-    // runs of one defect on it, so a report under it must not become part of it.
     if carried.sentence() != died_verdict {
         return Err(format!(
             "the report changed the sentence a summary quotes:\n{}\n{died_verdict}",
