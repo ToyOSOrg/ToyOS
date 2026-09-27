@@ -193,10 +193,6 @@ impl LoadedLib {
         unsafe { SymTab::new(syms.as_slice(), strs) }
     }
 
-    pub fn sym_count(&self) -> usize {
-        self.symbols().count()
-    }
-
     fn gnu_hash(&self) -> Option<GnuHash<'_>> {
         // SAFETY: same bounds argument as `symbols` above.
         GnuHash::parse(unsafe { self.gnu_hash.as_ref()?.as_slice() })

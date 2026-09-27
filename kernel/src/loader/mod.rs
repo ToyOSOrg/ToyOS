@@ -287,12 +287,24 @@ fn read_exe_tables(
         fill: Some(FillLattice { base: extent.min(), granule: FILL_GRANULE }),
         tls: layout.tls(),
     };
-    let relas = elf::parse_rela_entries(&rela_data, &jmprel_data, &rules, SymTab::new(&dynsym, &dynstr)).map_err(|refused| {
+    let mut exe = ExeTables {
+        needed,
+        dynstr,
+        dynsym,
+        relas: elf::ParsedRelaEntries {
+            relative: Vec::new(),
+            glob_dat: Vec::new(),
+            tpoff64: Vec::new(),
+            tpoff32: Vec::new(),
+        },
+    };
+    let relas = elf::parse_rela_entries(&rela_data, &jmprel_data, &rules, exe.symbols()).map_err(|refused| {
         log!("spawn: {}: {}", path, refused.as_str());
         refused.error()
     })?;
+    exe.relas = relas;
 
-    Ok(ExeTables { needed, dynstr, dynsym, relas })
+    Ok(exe)
 }
 
 /// `.dynsym`'s entry count, from `.gnu.hash` if present, else the `DT_SYMTAB`–`DT_STRTAB` gap.
@@ -747,7 +759,7 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
             Ok((lib, rw_offset, rw_size)) => {
                 let t_load1 = crate::clock::nanos_since_boot();
                 log!("dynamic: loaded {} base={:#x} ({} syms, {}ms)",
-                    lib_name, lib.phys_base, lib.sym_count(), (t_load1 - t_load0) / 1_000_000);
+                    lib_name, lib.phys_base, lib.symbols().count(), (t_load1 - t_load0) / 1_000_000);
                 out.libs.push(elf::cache_loaded_lib(&lib_path, id, lib, rw_offset, rw_size)?);
                 out.paths.push(lib_path);
             }
