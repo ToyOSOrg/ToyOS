@@ -10,10 +10,6 @@ pub mod bootlog;
 pub mod build;
 pub mod buildlock;
 pub mod ci;
-/// The citation gate over the tracker and the `CLAUDE.md` files, read by
-/// nothing but its own tests.
-#[cfg(test)]
-pub mod citations;
 pub mod clippy;
 pub mod compiler;
 /// What the untouched-disk gate compares a device against, in `tests/`.

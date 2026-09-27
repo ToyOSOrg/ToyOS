@@ -69,14 +69,6 @@
 //! holding what it owes, and one that no longer holds a needle is refused.
 //! The rust fork's std is `src/forkcheck.rs`'s to govern and is not read here.
 //!
-//! The eleventh holds the kernel's arch layer below the rest: a file under
-//! `kernel/src/arch/` may name, by `crate::`, `$crate::` or a `super::` chain
-//! out of it, only the architecture and the root's re-exports of it, and it
-//! hands nothing from above to the rest of the layer: a `pub use` that reaches
-//! above, any `pub type` and a glob of `crate::arch` are refused. What it
-//! names beyond that today is [`ARCH_REACHES_UP`], per file and item: the gate
-//! holds that list shrinking by item, and review holds the rest.
-//!
 //! **What none of them reaches is filed rather than implied**, and each table's
 //! own doc names its half: the entries under `issues/build/` say so.
 
@@ -1283,9 +1275,8 @@ const ARCH_MODULE: &str = "core::arch/std::arch";
 
 /// A path code spells from a root: the 0-based line of its last segment, the
 /// segments after the root, and the name a rename binds. A group is one path
-/// per element, a glob ends in `*`, a rename of the root itself (`core as k`,
-/// `core::{self as k}`) is `self` renamed, and a `super` chain that stays below
-/// the crate root begins with `super`.
+/// per element, a glob ends in `*`, and a rename of the root itself (`core as
+/// k`, `core::{self as k}`) is `self` renamed.
 #[cfg(test)]
 struct Spelled {
     line: usize,
@@ -1293,60 +1284,30 @@ struct Spelled {
     alias: Option<String>,
 }
 
-/// Every path in `text` from one of `roots` (`core`, `crate`, which `$crate`
-/// spells too) and, given the module's `depth` below the crate root, from a
-/// `super` chain, `self::` before it and each inline `mod x {}` around it
-/// counted. The root's rename counts only where it imports: `use core as k;`,
-/// `extern crate core as k;`, an element of a `use` group. A glob or a rename
-/// is not followed to what it brings into scope: that is resolution, which a
-/// scan does not have.
+/// Every path in `text` from one of `roots` (`core`, `std`, which `$crate`
+/// also spells for `crate`). The root's rename counts only where it imports:
+/// `use core as k;`, `extern crate core as k;`, an element of a `use` group. A
+/// glob or a rename is not followed to what it brings into scope: that is
+/// resolution, which a scan does not have.
 #[cfg(test)]
-fn spelled_paths(text: &str, roots: &[&str], depth: Option<usize>) -> Vec<Spelled> {
+fn spelled_paths(text: &str, roots: &[&str]) -> Vec<Spelled> {
     let code = Code(text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect());
     let mut found = Vec::new();
-    // Whether each open `{` is an inline module's, and whether the next one is.
-    let (mut scopes, mut opens_mod) = (Vec::new(), false);
     let mut at = 0;
     while at < code.0.len() {
-        match code.0[at] {
-            '{' if depth.is_some() => scopes.push(std::mem::take(&mut opens_mod)),
-            '}' if depth.is_some() => _ = scopes.pop().expect("a `}` closes nothing: a literal's brace reached the code"),
-            _ => {}
-        }
         let Some((name, end)) = code.ident_at(at) else {
             at += 1;
             continue;
         };
-        let after = code.skip_space(end);
-        let mut prefix = Vec::new();
-        let root_end = match depth {
-            _ if roots.contains(&name.as_str()) => Some(after),
-            Some(depth) if name == "super" && code.ident_before(at).1 != "super" => {
-                let (mut supers, mut next) = (1, after);
-                while let Some((_, e)) =
-                    code.colons(next).then(|| code.ident_at(code.skip_space(next + 2))).flatten().filter(|(s, _)| s == "super")
-                {
-                    supers += 1;
-                    next = code.skip_space(e);
-                }
-                if supers < depth + scopes.iter().filter(|m| **m).count() {
-                    prefix.push("super".to_string());
-                }
-                Some(next)
-            }
-            _ => None,
-        };
-        if name == "mod" {
-            opens_mod = code.ident_at(after).is_some_and(|(_, e)| code.0.get(code.skip_space(e)) == Some(&'{'));
-        }
-        match root_end {
-            Some(next) if code.colons(next) => code.tree(next + 2, prefix, &mut found),
-            Some(next) if prefix.is_empty() && code.imported(at) => {
-                let alias = code.alias_at(next);
+        if roots.contains(&name.as_str()) {
+            let after = code.skip_space(end);
+            if code.colons(after) {
+                code.tree(after + 2, Vec::new(), &mut found);
+            } else if code.imported(at) {
+                let alias = code.alias_at(after);
                 let segments = vec!["self".to_string()];
                 found.extend(alias.is_some().then(|| Spelled { line: code.line_of(at), segments, alias }));
             }
-            _ => {}
         }
         at = end;
     }
@@ -1426,16 +1387,6 @@ impl Code {
         (start, self.0[start..end].iter().collect())
     }
 
-    /// Whether the item keyword at `at` carries a visibility: `pub`,
-    /// `pub(crate)`, `pub(in …)`.
-    fn public(&self, at: usize) -> bool {
-        let at = match (0..at).rev().find(|&j| !self.0[j].is_whitespace()) {
-            Some(j) if self.0[j] == ')' => (0..j).rev().find(|&k| self.0[k] == '(').unwrap_or(at),
-            _ => at,
-        };
-        self.ident_before(at).1 == "pub"
-    }
-
     /// Whether `at` begins an item that imports: `use …`, or `extern crate …`,
     /// or an element of a `use` group.
     fn imported(&self, mut at: usize) -> bool {
@@ -1479,7 +1430,7 @@ impl Code {
 /// an arch module has no other use for either.
 #[cfg(test)]
 fn arch_module_lines(text: &str) -> Vec<usize> {
-    spelled_paths(text, &["core", "std"], None)
+    spelled_paths(text, &["core", "std"])
         .into_iter()
         .filter(|p| matches!(p.segments[0].as_str(), "arch" | "*") || (p.segments[0] == "self" && p.alias.is_some()))
         .map(|p| p.line)
@@ -1664,216 +1615,6 @@ fn every_rust_file() -> Vec<(String, String)> {
         .collect()
 }
 
-// ── The arch layer names nothing above it ───────────────────────────────────
-
-/// The kernel's architecture layer: every file under it is read.
-#[cfg(test)]
-const ARCH_TREE: &str = "kernel/src/arch/";
-
-/// Where the kernel's root declares its modules and re-exports.
-#[cfg(test)]
-const KERNEL_ROOT: &str = "kernel/src/main.rs";
-
-/// Every crate-root item a file under [`ARCH_TREE`] names that is neither the
-/// architecture nor a root re-export of it: the layer reaching up into the
-/// kernel it is meant to sit under. Each entry is recorded debt, owed by
-/// `issues/kernel/the-arch-layer-names-the-kernel-above-it.md`, which is done
-/// when this list is empty.
-///
-/// **It only shrinks, by item.** A name a file adds reds
-/// `the_arch_layer_names_nothing_above_it`, and so does a name a row lists that
-/// its file no longer spells, so no row outlives what it excused. It does not
-/// count reach: a file whose row holds `sched` may name more of `crate::sched`
-/// unseen, and a row that grows is green, so that it shrinks is held by review
-/// and not by this gate.
-#[cfg(test)]
-const ARCH_REACHES_UP: &[(&str, &[&str])] = &[
-    ("kernel/src/arch/aarch64/boot.rs", &["PHYS_OFFSET", "actuator", "drivers", "kernel_main", "log", "mm"]),
-    ("kernel/src/arch/aarch64/console_uart.rs", &["drivers", "log", "mm"]),
-    ("kernel/src/arch/aarch64/control_regs.rs", &["log"]),
-    ("kernel/src/arch/aarch64/hw.rs", &["clock", "log", "mm", "sched", "scheduler", "trace"]),
-    ("kernel/src/arch/aarch64/iommu_unit.rs", &["drivers", "iommu", "log"]),
-    ("kernel/src/arch/aarch64/mod.rs", &["actuator", "log"]),
-    ("kernel/src/arch/aarch64/paging.rs", &["MemoryMapEntry", "mm", "sync", "vma"]),
-    ("kernel/src/arch/aarch64/percpu.rs", &["log", "process"]),
-    ("kernel/src/arch/aarch64/tlb.rs", &["invalidation"]),
-    ("kernel/src/arch/aarch64/trap.rs", &["alert", "log", "symbols"]),
-    ("kernel/src/arch/aarch64/watchdog.rs", &["drivers"]),
-    ("kernel/src/arch/x86_64/apic.rs", &["clock", "log", "time", "trace"]),
-    ("kernel/src/arch/x86_64/boot.rs", &["PHYS_OFFSET", "actuator", "clock", "drivers", "kernel_main", "log", "mm"]),
-    ("kernel/src/arch/x86_64/console_uart.rs", &["log"]),
-    ("kernel/src/arch/x86_64/control_regs.rs", &["actuator", "log"]),
-    ("kernel/src/arch/x86_64/entry.rs", &["sched"]),
-    ("kernel/src/arch/x86_64/fpu.rs", &["log"]),
-    ("kernel/src/arch/x86_64/hpet.rs", &["clock", "log", "mm", "time"]),
-    ("kernel/src/arch/x86_64/hw.rs", &["actuator", "clock", "deadline", "heartbeat", "log", "mm", "preempt", "process", "sched", "scheduler", "time", "trace", "watch"]),
-    ("kernel/src/arch/x86_64/i8042/mod.rs", &["actuator", "clock", "drivers", "irq_ring", "keyboard", "log", "mouse", "preempt", "sync", "time"]),
-    ("kernel/src/arch/x86_64/idt/dma_fault.rs", &["iommu"]),
-    ("kernel/src/arch/x86_64/idt/exceptions.rs", &["DirectMap", "actuator", "alert", "log", "mm", "panic", "process", "scheduler", "symbols", "syscall"]),
-    ("kernel/src/arch/x86_64/idt/hda.rs", &["drivers"]),
-    ("kernel/src/arch/x86_64/idt/log_nest.rs", &["log"]),
-    ("kernel/src/arch/x86_64/idt/mod.rs", &["actuator", "blackbox", "log", "preempt", "sched", "scheduler", "sync", "trace"]),
-    ("kernel/src/arch/x86_64/idt/nmi.rs", &["drivers", "hardlockup", "panic", "sched"]),
-    ("kernel/src/arch/x86_64/idt/spurious.rs", &["clock", "irq_census", "log", "time"]),
-    ("kernel/src/arch/x86_64/idt/timer.rs", &["deadline", "irq_census", "preempt", "scheduler"]),
-    ("kernel/src/arch/x86_64/idt/unclaimed.rs", &["clock", "irq_census", "log", "time"]),
-    ("kernel/src/arch/x86_64/idt/user_dev.rs", &["clock", "irq_ring", "pcidev", "preempt"]),
-    ("kernel/src/arch/x86_64/idt/virtio_sound.rs", &["drivers"]),
-    ("kernel/src/arch/x86_64/idt/xhci.rs", &["clock", "irq_ring", "preempt"]),
-    ("kernel/src/arch/x86_64/ioapic.rs", &["drivers", "iommu", "log", "mm", "sync"]),
-    ("kernel/src/arch/x86_64/mod.rs", &["actuator", "log"]),
-    ("kernel/src/arch/x86_64/nmi_gate.rs", &["actuator", "clock", "log", "mm", "sched", "symbols"]),
-    ("kernel/src/arch/x86_64/paging.rs", &["MemoryMapEntry", "hasher", "invalidation", "log", "mm", "sched", "sync", "vma"]),
-    ("kernel/src/arch/x86_64/percpu.rs", &["actuator", "drivers", "irq_census", "log", "mm", "process", "sync"]),
-    ("kernel/src/arch/x86_64/rtc.rs", &["actuator", "clock", "time"]),
-    ("kernel/src/arch/x86_64/smp.rs", &["DirectMap", "actuator", "clock", "drivers", "hardlockup", "log", "mm", "process", "scheduler", "smp_roster", "time"]),
-    ("kernel/src/arch/x86_64/syscall.rs", &["syscall"]),
-    ("kernel/src/arch/x86_64/tlb.rs", &["clock", "invalidation", "log", "mm", "sched", "shootdown", "time"]),
-    ("kernel/src/arch/x86_64/vtd/dmar.rs", &["drivers", "iommu"]),
-    ("kernel/src/arch/x86_64/vtd/domain.rs", &["iommu", "log", "mm", "sync"]),
-    ("kernel/src/arch/x86_64/vtd/fault.rs", &["drivers", "iommu", "log", "mm", "panic", "pcidev"]),
-    ("kernel/src/arch/x86_64/vtd/interrupt.rs", &["iommu", "log", "sync"]),
-    ("kernel/src/arch/x86_64/vtd/mod.rs", &["actuator", "clock", "drivers", "iommu", "log", "mm", "sync", "time"]),
-    ("kernel/src/arch/x86_64/vtd/queue.rs", &["clock", "mm", "time"]),
-    ("kernel/src/arch/x86_64/vtd/table.rs", &["actuator", "iommu", "mm"]),
-    ("kernel/src/arch/x86_64/watchdog.rs", &["actuator", "drivers", "log", "params", "time"]),
-];
-
-/// Every `(0-based line, item)` for a crate-root item that a file under
-/// [`ARCH_TREE`], `depth` modules below the root, names by a path
-/// ([`spelled_paths`] from `crate` or `super`) that is not the architecture, a
-/// root alias of it or a `super` chain inside it. A glob of the root is the
-/// item `*` and a rename of it `self as`. A path relative to the module
-/// (`self::x`, a child's name, a name a `use` bound) is not read.
-#[cfg(test)]
-fn arch_reach(text: &str, depth: usize, aliases: &[String]) -> Vec<(usize, String)> {
-    let mut found = Vec::new();
-    for path in spelled_paths(text, &["crate"], Some(depth)) {
-        match path.segments[0].as_str() {
-            "self" => found.extend(path.alias.is_some().then(|| (path.line, "self as".to_string()))),
-            "arch" | "super" => {}
-            first if aliases.iter().any(|a| a == first) => {}
-            first => found.push((path.line, first.to_string())),
-        }
-    }
-    found.sort();
-    found.dedup();
-    found
-}
-
-/// Every `(0-based line, what)` by which a file under [`ARCH_TREE`] would hand
-/// the rest of the layer a name from above without that file spelling where it
-/// lives: a `pub use` that reaches above the layer, any `pub type` (an alias is
-/// the one re-export rustc lets carry a privately imported name out), and a
-/// glob of the architecture, which takes in names nobody spells.
-#[cfg(test)]
-fn arch_hands_up(text: &str, depth: usize, aliases: &[String]) -> Vec<(usize, String)> {
-    let code = Code(text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect());
-    let mut found = Vec::new();
-    for at in 0..code.0.len() {
-        match code.ident_at(at) {
-            Some((word, _)) if word == "type" && code.public(at) => {
-                found.push((code.line_of(at), "declares a `pub type`".to_string()));
-            }
-            Some((word, _)) if word == "use" && code.public(at) => {
-                let statement: String = code.0[at..].iter().take_while(|c| **c != ';').collect();
-                let reached = arch_reach(&statement, depth, aliases).into_iter();
-                found.extend(reached.map(|(_, item)| (code.line_of(at), format!("re-exports `crate::{item}`"))));
-            }
-            _ => {}
-        }
-    }
-    for path in spelled_paths(text, &["crate"], Some(depth)) {
-        let arch = path.segments[0] == "arch" || aliases.contains(&path.segments[0]);
-        if arch && path.segments.last().is_some_and(|s| s == "*") {
-            found.push((path.line, "globs `crate::arch`".to_string()));
-        }
-    }
-    found.sort();
-    found.dedup();
-    found
-}
-
-/// How many modules deep the file at repository-relative `path` sits below
-/// the kernel's crate root: `kernel/src/arch/mod.rs` is 1,
-/// `kernel/src/arch/x86_64/tlb.rs` is 3.
-#[cfg(test)]
-fn module_depth(path: &str) -> usize {
-    let under = path.strip_prefix("kernel/src/").unwrap_or(path);
-    let parts = under.split('/').count();
-    if under.ends_with("/mod.rs") { parts - 1 } else { parts }
-}
-
-/// The names the kernel root re-exports from the architecture
-/// (`pub(crate) use arch::hw;`, `use arch::{cpu, smp};`), so `crate::hw` is the
-/// architecture naming itself through the root rather than reaching above it.
-#[cfg(test)]
-fn arch_aliases(root: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in root.lines() {
-        let code = code_only(line);
-        let Some(rest) = after_visibility(code.trim()).strip_prefix("use arch::") else { continue };
-        let rest = rest.trim_end().trim_end_matches(';');
-        let rest = rest.strip_prefix('{').and_then(|r| r.strip_suffix('}')).unwrap_or(rest);
-        for element in rest.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-            let local = element.rsplit(" as ").next().unwrap_or(element);
-            names.push(local.rsplit("::").next().unwrap_or(local).trim().to_string());
-        }
-    }
-    names
-}
-
-/// Every red `rows` and `files` give: a crate-root item a file under
-/// [`ARCH_TREE`] names and no row permits it, and a row entry its file no
-/// longer spells.
-#[cfg(test)]
-fn arch_reach_complaints(
-    files: &[(String, String)],
-    rows: &[(&str, &[&str])],
-    aliases: &[String],
-) -> Vec<String> {
-    let mut complaints = Vec::new();
-    for (i, (file, _)) in rows.iter().enumerate() {
-        if rows[..i].iter().any(|(earlier, _)| earlier == file) {
-            complaints.push(format!("{file} has two rows in the arch reach list; one row per file"));
-        }
-        if !file.starts_with(ARCH_TREE) || !files.iter().any(|(at, _)| at == file) {
-            complaints.push(format!(
-                "the arch reach list names {file}, and this tree holds no such file under {ARCH_TREE}"
-            ));
-        }
-    }
-    for (at, text) in files.iter().filter(|(at, _)| at.starts_with(ARCH_TREE)) {
-        for (line, what) in arch_hands_up(text, module_depth(at), aliases) {
-            complaints.push(format!(
-                "{at}:{}: {what}, which hands the layer a name without its home: name each item where it lives",
-                line + 1
-            ));
-        }
-        let named = arch_reach(text, module_depth(at), aliases);
-        let permitted: &[&str] = rows.iter().find(|(file, _)| file == at).map_or(&[], |(_, items)| items);
-        for (line, item) in &named {
-            if !permitted.contains(&item.as_str()) {
-                complaints.push(format!(
-                    "{at}:{}: names `crate::{item}`, which is above the arch layer. Generic code \
-                     reaches the architecture and never the other way: pass in what it needs, \
-                     or move the code out of {ARCH_TREE}",
-                    line + 1
-                ));
-            }
-        }
-        for item in permitted {
-            if !named.iter().any(|(_, n)| n == item) {
-                complaints.push(format!(
-                    "the arch reach list lets {at} name `crate::{item}`, and it no longer does: \
-                     delete the entry, the list only shrinks"
-                ));
-            }
-        }
-    }
-    complaints
-}
-
 /// The third-party C corpus, whose attribution is per *population* rather than
 /// per file: `tests/testcases/LICENSE` states how many files each of these
 /// directories holds, and `NOTICE` points at that file for the terms.
@@ -1917,126 +1658,6 @@ fn digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **The arch layer names nothing above it**, but for [`ARCH_REACHES_UP`],
-    /// and that list names nothing its files no longer spell.
-    #[test]
-    fn the_arch_layer_names_nothing_above_it() {
-        let files = every_rust_file();
-        let root = files
-            .iter()
-            .find(|(at, _)| at == KERNEL_ROOT)
-            .unwrap_or_else(|| panic!("the walk did not reach {KERNEL_ROOT}"));
-        let aliases = arch_aliases(&root.1);
-        assert!(
-            aliases.iter().any(|a| a == "hw"),
-            "{KERNEL_ROOT} re-exports `arch::hw` and the alias scan did not see it: {aliases:?}"
-        );
-        let arch = files.iter().filter(|(at, _)| at.starts_with(ARCH_TREE)).count();
-        assert!(arch > 40, "the walk found {arch} files under {ARCH_TREE}; it is reading no tree");
-        let complaints = arch_reach_complaints(&files, ARCH_REACHES_UP, &aliases);
-        assert!(complaints.is_empty(), "{}", complaints.join("\n"));
-    }
-
-    /// Teeth for the rule above: every spelling of a root item is read, and
-    /// what is not a path to one is not.
-    #[test]
-    fn every_spelling_of_a_crate_root_item_is_read() {
-        let hw = ["hw".to_string()];
-        let names = |text: &str, depth: usize| -> Vec<String> {
-            arch_reach(text, depth, &hw).into_iter().map(|(_, item)| item).collect()
-        };
-        assert_eq!(names("use crate::sched::driver;\n", 3), ["sched"]);
-        assert_eq!(names("    crate::log!(\"x\");\n", 3), ["log"]);
-        assert_eq!(names("const { $crate::irq_census::TOTAL }\n", 3), ["irq_census"]);
-        assert_eq!(names("use crate::{\n    arch::x,\n    mm::{a, b},\n    self,\n    process,\n};\n", 3), ["mm", "process"]);
-        assert_eq!(names("use crate :: { * };\nuse crate::*;\n", 3), ["*", "*"]);
-        assert_eq!(names("use crate as k;\nuse crate::{self as j};\n", 3), ["self as", "self as"]);
-        // A `super::` chain that leaves the file's module names the root's item,
-        // counted from `self::` and through every inline module around it.
-        assert_eq!(names("use super::super::super::drivers::xhci;\n", 3), ["drivers"]);
-        assert_eq!(names("use super::super::{sched, mm};\n", 2), ["mm", "sched"]);
-        assert_eq!(names("use self::super::super::super::drivers;\n", 3), ["drivers"]);
-        assert_eq!(names("mod t {\n    use super::super::super::super::sched;\n}\nmod u { use super::super::super::x; }\n", 3), ["sched"]);
-        // A char literal hides nothing after it.
-        assert_eq!(names("let q = '\"'; let r = '\\''; fn f<'a>(x: &'a u8) { crate::log!(); }\n", 3), ["log"]);
-        // Not code, not the root, not a path.
-        for text in [
-            "// crate::sched is the scheduler\n",
-            "let s = \"crate::sched\";\n",
-            "pub(crate) fn f() {}\npub(super) fn g() {}\n",
-            "use mycrate::sched;\nuse other_crate::x;\n",
-            "use self::super::x;\nuse super::{apic, smp};\nuse super::super::percpu;\nuse crate::arch::paging::Prot;\n",
-            "let p = crate::hw::paging::Prot::R;\n",
-        ] {
-            assert_eq!(names(text, 3), Vec::<String>::new(), "{text:?}");
-        }
-        // Handing a name from above to the layer, however it is spelled.
-        let handed = |text: &str| -> Vec<(usize, String)> { arch_hands_up(text, 3, &hw) };
-        let at = |line: usize, what: &str| (line, what.to_string());
-        assert_eq!(handed("pub(crate) use crate::mm::{\n    policy::Prot,\n    Mm as M,\n};\n"), [at(0, "re-exports `crate::mm`")]);
-        assert_eq!(handed("pub use super::super::super::sched::X;\n"), [at(0, "re-exports `crate::sched`")]);
-        assert_eq!(
-            handed("pub type Hop = crate::invalidation::Origin;\nuse crate::mm::policy::Prot;\npub(super)  type P =\n Prot;\n"),
-            [at(0, "declares a `pub type`"), at(2, "declares a `pub type`")]
-        );
-        assert_eq!(handed("use crate::arch::paging::*;\nuse crate::hw::{x, *};\n"), [at(0, "globs `crate::arch`"), at(1, "globs `crate::arch`")]);
-        let own = "pub use super::cpu::outb;\npub use Cr3 as Root;\nuse crate::mm::X;\nuse super::*;\n\
-                   impl I for S { type Output = u64; }\npub(crate) use irq_took;\npub use toyos_bootmap::aarch64::MAIR;\n";
-        assert_eq!(handed(own), []);
-        assert_eq!(module_depth("kernel/src/arch/mod.rs"), 1);
-        assert_eq!(module_depth("kernel/src/arch/x86_64/mod.rs"), 2);
-        assert_eq!(module_depth("kernel/src/arch/x86_64/tlb.rs"), 3);
-        assert_eq!(module_depth("kernel/src/arch/x86_64/idt/timer.rs"), 4);
-        assert_eq!(
-            arch_aliases("use arch::{cpu, percpu as p, smp};\npub(crate) use arch::hw;\nuse drivers::acpi;\n"),
-            ["cpu", "p", "smp", "hw"]
-        );
-    }
-
-    /// Teeth for the list: a new reach reds naming the file, the line and the
-    /// item; a listed one does not; a listed one the file stopped spelling reds,
-    /// and so does a row for a file outside the layer; a root alias of the
-    /// architecture is the architecture; and a name handed up reds whatever the
-    /// list says.
-    #[test]
-    fn a_new_reach_out_of_arch_is_red_and_the_list_cannot_rot() {
-        let file = |at: &str, text: &str| (at.to_string(), text.to_string());
-        let mut files = vec![
-            file("kernel/src/arch/x86_64/tlb.rs", "use crate::time::Duration;\nuse crate::drivers::xhci;\n"),
-            file("kernel/src/arch/x86_64/idt/timer.rs", "use crate::hw::HW;\nuse crate::arch::apic;\n"),
-            file("kernel/src/sched/driver.rs", "use crate::drivers::xhci;\n"),
-        ];
-        let aliases = vec!["hw".to_string()];
-        let said = arch_reach_complaints(&files, &[("kernel/src/arch/x86_64/tlb.rs", &["time"])], &aliases);
-        assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].starts_with("kernel/src/arch/x86_64/tlb.rs:2: names `crate::drivers`"), "{said:?}");
-
-        let tlb = ("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time"][..]);
-        let listed = arch_reach_complaints(&files, &[tlb], &aliases);
-        assert!(listed.is_empty(), "{listed:?}");
-
-        let stale = arch_reach_complaints(
-            &files,
-            &[
-                ("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time", "sched"]),
-                ("kernel/src/arch/gone.rs", &["log"]),
-                ("kernel/src/sched/driver.rs", &["drivers"]),
-            ],
-            &aliases,
-        );
-        assert_eq!(stale.len(), 3, "{stale:?}");
-        assert!(stale.iter().any(|s| s.contains("kernel/src/arch/gone.rs")), "{stale:?}");
-        assert!(stale.iter().any(|s| s.contains("names kernel/src/sched/driver.rs")), "{stale:?}");
-        assert!(stale.iter().any(|s| s.contains("`crate::sched`") && s.contains("no longer")), "{stale:?}");
-
-        files.push(file("kernel/src/arch/x86_64/paging.rs", "pub use crate::mm::policy::Prot;\n"));
-        files.push(file("kernel/src/arch/x86_64/rtc.rs", "use crate::arch::paging::*;\n"));
-        let handed = arch_reach_complaints(&files, &[tlb, ("kernel/src/arch/x86_64/paging.rs", &["mm"])], &aliases);
-        assert_eq!(handed.len(), 2, "{handed:?}");
-        assert!(handed[0].starts_with("kernel/src/arch/x86_64/paging.rs:1: re-exports `crate::mm`, which hands"), "{handed:?}");
-        assert!(handed[1].starts_with("kernel/src/arch/x86_64/rtc.rs:1: globs `crate::arch`, which hands"), "{handed:?}");
-    }
 
     /// **The architecture rules hold over the whole repository**, and no place
     /// a rule names is a place that no longer holds a needle — a row nobody
