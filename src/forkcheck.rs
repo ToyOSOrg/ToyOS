@@ -111,7 +111,7 @@ struct Pin {
 }
 
 /// One `forks.toml` entry, as much of it as this check reads: the repository
-/// its `upstream` names, and whether `tier = "source"` says the tree fetches
+/// its `repo` names, or else its `upstream`, and whether `tier = "source"` says the tree fetches
 /// and compiles it rather than patching it — the one shape no manifest
 /// consumes and none is expected to.
 struct Fork {
@@ -382,10 +382,12 @@ fn forks_toml(root: &Path) -> BTreeMap<String, Fork> {
         if name == "meta" || !entry.is_table() {
             continue;
         }
+        // `repo` where the repository ToyOS consumes is named apart from
+        // upstream's, as a packaging mirror of a monorepo is.
         let repo = entry
-            .get("upstream")
+            .get("repo")
             .and_then(toml::Value::as_str)
-            .and_then(|u| u.rsplit('/').next())
+            .or_else(|| entry.get("upstream").and_then(toml::Value::as_str).and_then(|u| u.rsplit('/').next()))
             .map(str::to_string);
         let fetched = entry.get("tier").and_then(toml::Value::as_str) == Some("source");
         forks.insert(name.clone(), Fork { repo, fetched });
@@ -831,6 +833,28 @@ mod tests {
         );
         assert!(report.contains("fetched — forks.toml names fetched at tier `source`"), "{report}");
         assert!(!report.contains("DEAD  fetched"), "{report}");
+    }
+
+    /// **`repo` names the consumed repository where upstream's is another**: a
+    /// mirror of a monorepo is consumed under its own name, and without the
+    /// key the entry reads as dead and the repository as undeclared.
+    #[test]
+    fn a_mirror_is_matched_by_its_repo_key() {
+        let case = case("mirror");
+        let (url, rev) = remote(&case, "toyos");
+        let root = tree(&case, &url, "toyos", &rev);
+        let entry = |repo: &str| {
+            format!("[meta]\nowner = \"Japabu\"\n\n[mirrored]\nupstream = \"google/monorepo\"\n{repo}tier = \"mirror\"\n")
+        };
+        fs::write(root.join("forks.toml"), entry("repo = \"widget\"\n")).unwrap();
+        let (report, wrong) = check(&root);
+        assert_eq!(wrong, 0, "{report}");
+        assert!(!report.contains("not in forks.toml"), "{report}");
+        fs::write(root.join("forks.toml"), entry("")).unwrap();
+        let (report, wrong) = check(&root);
+        assert_eq!(wrong, 1, "{report}");
+        assert!(report.contains("DEAD  mirrored — forks.toml names monorepo"), "{report}");
+        assert!(report.contains("widget — consumed by a manifest and not in forks.toml"), "{report}");
     }
 
     /// **A stub `rust/` accuses nothing.** The toolchain's forks are consumed

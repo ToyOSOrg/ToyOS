@@ -112,12 +112,6 @@ fn main() {
         toyos_build::pr::dispatch_sync(&root);
         return;
     }
-    // Git and a copy, and nothing built: the mirror is refreshed before any
-    // build could read it.
-    if let Some(commit) = CARGO_RUN.value(&args, &flags::SYNC_FUCHSIA) {
-        toyos_build::fuchsia::dispatch(&root, commit);
-        return;
-    }
     // Every CI job. Here for the same reason: the host job's runner has no QEMU,
     // and a guest job names its own instrument rather than being noted at.
     if asked(&flags::CI) {

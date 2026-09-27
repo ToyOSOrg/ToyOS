@@ -16,6 +16,10 @@
 #              is the only one. The tier exists because this manifest is the
 #              estate's inventory, and a third-party source tree that is not in
 #              it is precisely the hole the manifest closes.
+#   mirror   — third-party source ToyOS cannot build as published, carried
+#              unmodified in a repository of ours beside the packaging it needs,
+#              with a byte-identity gate in that repository's CI. `repo` names
+#              that repository where it differs from upstream's name.
 #
 # `base` is the upstream commit the branch is built on. Several are NOT release
 # tags: the vendored snapshots predated the tags they claimed, and using the tag
@@ -375,6 +379,32 @@ end state the audit recommends is Japabu/doomgeneric as a submodule at that
 path, which deletes the fetch and the five build-dependencies that serve it
 (`ureq`, `rustls-rustcrypto`, `webpki-roots`, `flate2`, `tar`). It needs a repo
 the owner creates, so it is his call rather than an agent's.
+"""
+
+[netstack3]
+upstream = "fuchsia.googlesource.com/fuchsia"
+repo = "netstack3"
+base = "bb845d9cf84d71cc34bbd7f07ffc92d09b33a2a4"
+base_note = "Fuchsia's tree on 2026-09-26; `upstream.toml` in the mirror pins every file's blob at it."
+delta = "none"
+tier = "mirror"
+why = """
+netd's network stack: Fuchsia's Netstack3 core and the libraries it stands on,
+22 crate directories of Google's files byte for byte under `upstream/`, with a
+Cargo manifest of ours per crate and an empty `fidl_fuchsia_net_common`
+stand-in beside them. Fuchsia builds with GN, so a Cargo packaging is the one
+thing ToyOS adds; the code needs `never_type` and `-Zpolonius=next`, which
+`userland/Cargo.toml` passes to these crates alone
+(issues/build/netstack3-needs-a-compiler-as-new-as-fuchsias.md).
+"""
+pin = """
+The mirror's `tools/mirror check` holds `upstream/` to the blob ids its
+`upstream.toml` pins, and its own CI runs it on every push; `sync <commit>`
+is the only writer. ToyOS pins the mirror's commit in `userland/Cargo.lock`.
+"""
+licence = "BSD-2-Clause, with Google's PATENTS grant (NOTICE); our packaging MIT OR Apache-2.0."
+pr = """
+none, and none is owed: nothing of ours is in Google's files.
 """
 
 # Not a crate fork: rust/ is a submodule of Japabu/rust (compiler + std with

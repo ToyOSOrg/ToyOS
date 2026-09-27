@@ -11,10 +11,11 @@ toyos-tco = { path = "../../toyos-tco" }
 toyos-mdns = { path = "../../toyos-mdns" }
 toyos-dns = { path = "../../toyos-dns" }
 toyos-inspect = { path = "../../toyos-inspect" }
-netstack3-core = { path = "../../fuchsia/crates/netstack3-core" }
-net-types = { path = "../../fuchsia/crates/net-types" }
-packet = { path = "../../fuchsia/crates/packet" }
-packet-formats = { path = "../../fuchsia/crates/packet-formats" }
+# Fuchsia's Netstack3 core, from its packaging mirror (`forks.toml`).
+netstack3-core = { git = "https://github.com/ToyOSOrg/netstack3", branch = "toyos" }
+net-types = { git = "https://github.com/ToyOSOrg/netstack3", branch = "toyos" }
+packet = { git = "https://github.com/ToyOSOrg/netstack3", branch = "toyos" }
+packet-formats = { git = "https://github.com/ToyOSOrg/netstack3", branch = "toyos" }
 rand = { version = "0.10.2", default-features = false }
 zerocopy = "0.8.48"
 

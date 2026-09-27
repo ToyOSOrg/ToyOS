@@ -16,8 +16,6 @@ pub mod compiler;
 pub mod fingerprint;
 pub mod flags;
 pub mod forkcheck;
-/// The Netstack3 mirror's pin, its gate and its sync.
-pub mod fuchsia;
 pub mod heartbeat;
 pub mod hostws;
 pub mod icmp;

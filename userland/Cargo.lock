@@ -878,6 +878,7 @@ dependencies = [
 [[package]]
 name = "diagnostics-traits"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "net-types",
 ]
@@ -1130,6 +1131,7 @@ dependencies = [
 [[package]]
 name = "explicit"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 
 [[package]]
 name = "fdeflate"
@@ -1165,6 +1167,7 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 [[package]]
 name = "fidl_fuchsia_net_common"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 
 [[package]]
 name = "filepicker"
@@ -1709,6 +1712,7 @@ dependencies = [
 [[package]]
 name = "internet_checksum"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 
 [[package]]
 name = "itoa"
@@ -1902,6 +1906,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "lock-order"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 
 [[package]]
 name = "log"
@@ -2033,6 +2038,7 @@ dependencies = [
 [[package]]
 name = "net-declare"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "fidl_fuchsia_net_common",
  "net-declare-macros",
@@ -2041,6 +2047,7 @@ dependencies = [
 [[package]]
 name = "net-declare-macros"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "net-types",
  "proc-macro2",
@@ -2052,6 +2059,7 @@ dependencies = [
 [[package]]
 name = "net-types"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "net-types-macros",
  "zerocopy",
@@ -2060,6 +2068,7 @@ dependencies = [
 [[package]]
 name = "net-types-macros"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "assert_matches",
  "proc-macro2",
@@ -2089,6 +2098,7 @@ dependencies = [
 [[package]]
 name = "netstack3-base"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.2",
@@ -2114,6 +2124,7 @@ dependencies = [
 [[package]]
 name = "netstack3-core"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "assert_matches",
  "derivative",
@@ -2141,6 +2152,7 @@ dependencies = [
 [[package]]
 name = "netstack3-datagram"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "assert_matches",
  "derivative",
@@ -2163,6 +2175,7 @@ dependencies = [
 [[package]]
 name = "netstack3-device"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "assert_matches",
  "derivative",
@@ -2185,6 +2198,7 @@ dependencies = [
 [[package]]
 name = "netstack3-filter"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "assert_matches",
  "derivative",
@@ -2203,6 +2217,7 @@ dependencies = [
 [[package]]
 name = "netstack3-hashmap"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -2210,6 +2225,7 @@ dependencies = [
 [[package]]
 name = "netstack3-icmp-echo"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "derivative",
  "either",
@@ -2231,6 +2247,7 @@ dependencies = [
 [[package]]
 name = "netstack3-ip"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "arrayvec",
  "assert_matches",
@@ -2262,6 +2279,7 @@ dependencies = [
 [[package]]
 name = "netstack3-macros"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2271,6 +2289,7 @@ dependencies = [
 [[package]]
 name = "netstack3-sync"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "derivative",
  "lock-order",
@@ -2280,6 +2299,7 @@ dependencies = [
 [[package]]
 name = "netstack3-tcp"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "arrayvec",
  "assert_matches",
@@ -2308,6 +2328,7 @@ dependencies = [
 [[package]]
 name = "netstack3-trace"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "netstack3-sync",
 ]
@@ -2315,6 +2336,7 @@ dependencies = [
 [[package]]
 name = "netstack3-udp"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "derivative",
  "either",
@@ -2850,6 +2872,7 @@ dependencies = [
 [[package]]
 name = "packet"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "arrayvec",
  "replace-with",
@@ -2859,6 +2882,7 @@ dependencies = [
 [[package]]
 name = "packet-formats"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 dependencies = [
  "byteorder",
  "derivative",
@@ -3360,6 +3384,7 @@ dependencies = [
 [[package]]
 name = "replace-with"
 version = "0.1.0"
+source = "git+https://github.com/ToyOSOrg/netstack3?branch=toyos#46eb29af0ac4288755354740a670cc7904720279"
 
 [[package]]
 name = "resvg"

@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # Netstack3 needs a compiler as new as Fuchsia's, and the host needs `RUSTC_BOOTSTRAP` for it
 
-The mirror (`fuchsia/upstream/`, `src/fuchsia.rs`) is written for Rust's
+The mirror (ToyOSOrg/netstack3, `forks.toml`) is written for Rust's
 `main` as Fuchsia's toolchain builds it, and the fork (`rust/`, 1.99.0-dev at
 the pin `fbf6ad143d8`) is behind it on two counts, each paid with a flag
 `userland/Cargo.toml` gives the mirrored crates alone through

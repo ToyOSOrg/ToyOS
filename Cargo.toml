@@ -75,10 +75,6 @@ exclude = [
     "bootloader",
     "kernel",
     "userland",
-    # The Netstack3 mirror and our packaging of it: userland crates, path
-    # dependencies of `userland/netd` built with the flags `userland/Cargo.toml`
-    # gives them alone (`src/fuchsia.rs`).
-    "fuchsia",
     # The Rust compiler/std fork: its own workspaces, its own lockfiles, and a
     # submodule this repository does not resolve for.
     "rust",

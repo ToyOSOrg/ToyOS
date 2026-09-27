@@ -22,7 +22,7 @@ cores on one wire: the probes `seq=835278557 len=1` answered
 ESTABLISHED through 30 more seconds of passes. netd reaches it through
 `stream::abort` (`disconnect_bound`), on a stream it gives up.
 
-The code is in the mirror (`fuchsia/upstream/`, `netstack3-tcp`'s `abort`
+The code is in the mirror (ToyOSOrg/netstack3's `upstream/`, `netstack3-tcp`'s `abort`
 path), which this repository never edits.
 
 **What would close it**: the fix upstream, synced in, and the test's

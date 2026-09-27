@@ -828,9 +828,6 @@ fn members(metadata: &Value) -> Result<BTreeSet<PathBuf>, String> {
 /// their build scripts.
 #[derive(Debug, Default)]
 struct Local {
-    /// Where each path package's sources are: its manifest's directory, and
-    /// the directory of each of its targets' roots, which a package built out
-    /// of a mirror keeps outside its manifest's.
     dirs: BTreeSet<PathBuf>,
     scripts: BTreeSet<PathBuf>,
 }
@@ -868,11 +865,6 @@ fn judge_crates(metadata: &Value, roots: &[PathBuf], report: &mut Report) -> Res
                 local.dirs.insert(dir.to_path_buf());
             }
             let targets = package["targets"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-            local.dirs.extend(
-                targets
-                    .iter()
-                    .filter_map(|t| str_of(t, "src_path").and_then(|p| Path::new(p).parent()).map(Path::to_path_buf)),
-            );
             local.scripts.extend(
                 targets
                     .iter()

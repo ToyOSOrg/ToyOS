@@ -353,45 +353,29 @@ and it was never TinyCC's to relicense. Do not re-import it.
 Rust crates and the forks
 -------------------------
 
-Third-party crates keep their own upstream licences; nothing is vendored but
-the Netstack3 mirror, which has a section of its own below.
+Third-party crates keep their own upstream licences; nothing is vendored.
 `forks.toml` is the manifest of every crate ToyOS patches, with each fork's
 upstream, pinned base and licence. The audit read all fourteen fork manifests
 and found them permissive throughout: Apache-2.0, MIT, or MIT OR Apache-2.0.
 
+netd's network stack is Fuchsia's Netstack3 core, consumed from
+ToyOSOrg/netstack3 as a git dependency on branch `toyos`, pinned by
+`userland/Cargo.lock` and recorded in `forks.toml` at tier `mirror`. That
+repository holds Google's files byte for byte under `upstream/`, at the Fuchsia
+commit its `upstream.toml` names, and its own CI refuses an edit to any of
+them. They are BSD-2-Clause (Copyright 2019 The Fuchsia Authors, the text in
+its `upstream/LICENSE`), which asks that a binary redistribution reproduce the
+notice, the two conditions and the disclaimer in its documentation; every
+image carrying `/system/bin/netd` ships them compiled in. They come with
+Google's `upstream/PATENTS`, a grant rather than a restriction with one
+condition that binds: anyone who brings a patent claim alleging that Fuchsia
+infringes loses the grant for that implementation from the day the claim is
+filed. It covers the code as Google distributes it and not claims infringed
+only by further modification, which is one more reason the mirror is never
+edited.
+
 `rust/` is a submodule of a fork of the Rust compiler and standard library, and
 carries upstream's own licensing.
-
-
-fuchsia/upstream/ — Fuchsia's Netstack3 core, BSD-2-Clause with Google's patent grant
---------------------------------------------------------------------------------------
-
-    Byte for byte from https://fuchsia.googlesource.com/fuchsia at the commit
-    fuchsia/upstream.toml names, which pins every file's git blob id
-    Copyright 2019 The Fuchsia Authors.
-    Licence text: fuchsia/upstream/LICENSE
-    Patent grant: fuchsia/upstream/PATENTS
-    SPDX-License-Identifier: BSD-2-Clause
-
-netd's network stack: the Netstack3 core crates and the libraries they stand
-on (net-types, packet, packet-formats and the rest), each crate directory's
-`BUILD.gn` and its `src/`, plus Fuchsia's `LICENSE` and `PATENTS`. They ship
-compiled into `/system/bin/netd` on every image that carries it. BSD-2-Clause
-asks that binary redistribution reproduce the notice, the two conditions and
-the disclaimer in the documentation: the `LICENSE` file above is that text.
-
-**`PATENTS` is a grant, not a restriction, with one condition that binds**:
-anyone who brings a patent claim alleging that Fuchsia infringes loses the
-grant for this implementation from the day the claim is filed. It covers the
-code as Google distributes it and not claims infringed only by further
-modification, which is one more reason nothing here is edited.
-
-The files are never edited in this repository. `src/fuchsia.rs` holds each to
-the blob id Fuchsia's own tree names it by, offline, in `cargo run -- --ci
-host`, and `cargo run -- --sync-fuchsia <commit>` is the only writer.
-`fuchsia/crates/` beside it is ours: the Cargo manifests that package these
-files (each declaring the upstream crate's BSD-2-Clause) and an empty
-`fidl_fuchsia_net_common` stand-in under this repository's own licence.
 
 
 bcachefs/tests/fixtures/ — volumes upstream's tools wrote
