@@ -171,9 +171,9 @@ pub fn quiesce_stops_the_machine(
     // The threads the stop names besides the writers: the job's own main
     // thread, parked on init's answer; `test-runner`'s main and deadline
     // threads; `logd`'s; `blockd`'s; one per file server, three roles; and
-    // `init`'s waiter on each of those four services. `init`'s main thread
-    // asked for the stop and is its caller.
-    const OTHERS: u32 = 1 + 2 + 1 + 1 + 3 + 4;
+    // `init`'s waiter on each of those four services, and its file worker.
+    // `init`'s main thread asked for the stop and is its caller.
+    const OTHERS: u32 = 1 + 2 + 1 + 1 + 3 + 4 + 1;
     let (whole, record) =
         stopped_boot("tests/quiescecase/system.toml", JOB, &[LATE_WORD], rust_bins)?;
     if record.in_flight != 0 {
@@ -197,7 +197,7 @@ pub fn quiesce_stops_the_machine(
     if record.sweep.total() != WRITERS + OTHERS {
         return Err(format!(
             "this boot's stop named {} userland thread(s); {WRITERS} writers plus the {OTHERS} \
-             of the job, test-runner, logd, the storage services and init's waiters make {}, so this is not the machine the writers \
+             of the job, test-runner, logd, the storage services, init's waiters and its file worker make {}, so this is not the machine the writers \
              were on:\n  {record}\n{whole}",
             record.sweep.total(),
             WRITERS + OTHERS,
