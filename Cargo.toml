@@ -43,6 +43,7 @@ members = [
     "toyos-manifest",
     "toyos-mdns",
     "toyos-mixer",
+    "toyos-net-tcp",
     "toyos-net-wire",
     "toyos-pci",
     "toyos-pcid",
