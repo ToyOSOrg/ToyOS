@@ -1271,7 +1271,7 @@ impl XhciController {
                             portsc.raw()
                         ),
                     }
-                    return None;
+                    // No return: the port is left to be read, and nothing else wakes a pass for it.
                 }
                 Step::Write(write) => self.write_portsc(port_idx, write),
                 Step::Reset(kind, write) => {
@@ -1522,7 +1522,7 @@ impl XhciController {
 
         // Nothing below reads the event ring: every step `service_ports` takes is a submit, so one advance is enough.
         let mut wake_at = None;
-        if self.ports_dirty || self.ports.iter().any(PortState::outstanding) {
+        if portmachine::due(self.ports_dirty, &self.ports) {
             self.ports_dirty = false;
             wake_at = self.service_ports();
         }

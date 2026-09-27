@@ -6,7 +6,9 @@
 //! write-1-to-clear, PR is write-1-to-set and the *controller* clears it, PED
 //! is set by a reset that finds a device and cleared by a write of '1'. The
 //! last of those is what QEMU does not implement and what disabled every port
-//! on the laptop.
+//! on the laptop. A Port Status Change Event is raised only where a change
+//! flag goes from 0 to 1, so a driver that looks only when told misses what
+//! no edge reports.
 
 use toyos_xhci::port::Nanos;
 use toyos_xhci::Portsc;
@@ -64,6 +66,8 @@ pub struct FakePort {
     /// Every write the driver made, for the assertions that are about what it
     /// did rather than about where it ended up.
     pub writes: Vec<u32>,
+    /// A change flag went from 0 to 1 since the driver last took the event.
+    signalled: bool,
 }
 
 impl FakePort {
@@ -77,6 +81,7 @@ impl FakePort {
             present: false,
             superspeed: false,
             writes: Vec::new(),
+            signalled: false,
         }
     }
 
@@ -97,6 +102,12 @@ impl FakePort {
         self.raw
     }
 
+    /// Whether a Port Status Change Event has been raised since the last call,
+    /// taking it.
+    pub fn take_event(&mut self) -> bool {
+        core::mem::take(&mut self.signalled)
+    }
+
     /// A SuperSpeed port. Its link trains itself: a device appearing brings the
     /// port to Enabled with the link at U0 and no reset from anybody, which is
     /// §4.19.1.2's own sequence and the thing a USB2-shaped driver resets away.
@@ -109,9 +120,9 @@ impl FakePort {
             return;
         }
         self.present = true;
-        self.raw |= CCS | CSC;
+        self.set(self.raw | CCS | CSC);
         if self.superspeed {
-            self.raw |= PED | ((self.speed as u32) << SPEED_SHIFT);
+            self.set(self.raw | PED | ((self.speed as u32) << SPEED_SHIFT));
             self.set_link(PLS_U0);
         }
     }
@@ -121,7 +132,7 @@ impl FakePort {
     pub fn detach(&mut self) {
         self.present = false;
         if self.raw & CCS != 0 {
-            self.raw = (self.raw & !(CCS | PED | PR)) | CSC;
+            self.set((self.raw & !(CCS | PED | PR)) | CSC);
             self.resetting_since = None;
         }
     }
@@ -157,7 +168,7 @@ impl FakePort {
             next |= self.raw & PR;
         }
         let started = next & PR != 0 && self.raw & PR == 0;
-        self.raw = next;
+        self.set(next);
         if started {
             self.warm = warm;
             self.resetting_since = Some(now);
@@ -176,7 +187,7 @@ impl FakePort {
                     // The link went down when the hot reset hit it, and it is
                     // not coming back on its own.
                     self.set_link(PLS_INACTIVE);
-                    self.raw &= !(PR | PED);
+                    self.set(self.raw & !(PR | PED));
                     self.resetting_since = None;
                     return;
                 }
@@ -189,11 +200,11 @@ impl FakePort {
                 if !self.warm {
                     // §4.19.5's completed failure, bit for bit.
                     self.resetting_since = None;
-                    self.raw &= !(PR | PED | (0xF << SPEED_SHIFT));
+                    self.set(self.raw & !(PR | PED | (0xF << SPEED_SHIFT)));
                     if self.raw & CCS != 0 {
-                        self.raw = (self.raw & !CCS) | CSC;
+                        self.set((self.raw & !CCS) | CSC);
                     }
-                    self.raw |= PRC;
+                    self.set(self.raw | PRC);
                     self.set_link(PLS_RX_DETECT);
                     return;
                 }
@@ -208,23 +219,29 @@ impl FakePort {
         }
         self.resetting_since = None;
         let warm = self.warm;
-        self.raw &= !(PR | WPR);
-        self.raw |= PRC;
+        self.set(self.raw & !(PR | WPR));
+        self.set(self.raw | PRC);
         if warm {
-            self.raw |= WRC;
+            self.set(self.raw | WRC);
             // §4.19.5's failure lost *detection* only; the retrain finds
             // whatever is physically there, connect edge and all.
             if self.present && self.raw & CCS == 0 {
-                self.raw |= CCS | CSC;
+                self.set(self.raw | CCS | CSC);
             }
         }
         if self.raw & CCS != 0 {
-            self.raw |= PED | ((self.speed as u32) << SPEED_SHIFT);
+            self.set(self.raw | PED | ((self.speed as u32) << SPEED_SHIFT));
             self.set_link(PLS_U0);
         }
     }
 
     fn set_link(&mut self, pls: u32) {
-        self.raw = (self.raw & !(0xF << PLS_SHIFT)) | (pls << PLS_SHIFT);
+        self.set((self.raw & !(0xF << PLS_SHIFT)) | (pls << PLS_SHIFT));
+    }
+
+    /// The one way the register changes, so no edge goes unraised.
+    fn set(&mut self, next: u32) {
+        self.signalled |= next & CHANGES & !self.raw != 0;
+        self.raw = next;
     }
 }

@@ -121,6 +121,16 @@ pub fn enumeration_ack(after: Option<Reset>, portsc: Portsc) -> portsc::Write {
     }
 }
 
+/// Whether a pass steps the ports, given whether a Port Status Change Event or
+/// a caller's own reason to look has arrived since the last one.
+///
+/// A port with work of its own is stepped without an event: xHCI raises one
+/// only on a change bit's 0→1 edge, and a port whose belief has just moved may
+/// hold a device whose edge is already spent ([`PortState::believe`]).
+pub fn due(signalled: bool, ports: &[PortState]) -> bool {
+    signalled || ports.iter().any(PortState::outstanding)
+}
+
 /// Why a port stopped being worked on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GaveUp {
@@ -263,9 +273,8 @@ enum Work {
     Resetting { until: Nanos, kind: Reset },
     /// The caller is inside an effect and has not reported it.
     Working(Effect),
-    /// A teardown moved the driver's belief and nothing has read the register
-    /// against it since. Outstanding, so the next pass looks: a device left in
-    /// the port has already spent the change event that would have said so.
+    /// The driver's belief moved ([`PortState::believe`]) and nothing has read
+    /// the register against it since.
     Unread,
 }
 
@@ -365,20 +374,16 @@ impl PortState {
     /// not. Recorded either way: an Enable Slot that succeeded is the
     /// controller's resource whatever happened after it.
     pub fn enumerated(&mut self, slot: Option<NonZeroU8>) {
-        self.adopt(slot);
+        self.believe(true, slot);
     }
 
     /// The teardown finished. The port is empty as far as the driver is
-    /// concerned, whatever the register says, and [`Self::outstanding`] until
-    /// the next look, which runs the ordinary fresh-connect path.
+    /// concerned, whatever the register says, so the next look runs the
+    /// ordinary fresh-connect path.
     pub fn torn_down(&mut self) {
-        self.attached = false;
-        self.slot = None;
-        self.work = Work::Unread;
+        self.believe(false, None);
     }
 
-    /// Adopt a port the boot scan enumerated, so the hot-plug machine starts
-    /// from what the boot path already did rather than re-deciding it.
     /// What the controller's Supported Protocol capability said this port
     /// speaks. Set once, at bring-up, from firmware's own description of the
     /// machine.
@@ -386,10 +391,22 @@ impl PortState {
         self.protocol = protocol;
     }
 
+    /// Adopt a port the boot scan enumerated, so the hot-plug machine starts
+    /// from what the boot path already did rather than re-deciding it.
     pub fn adopt(&mut self, slot: Option<NonZeroU8>) {
-        self.attached = true;
+        self.believe(true, slot);
+    }
+
+    /// **The one place the driver's belief about a port is set, and it leaves
+    /// the port [`Self::outstanding`] until a look has read the register
+    /// against it.** Every caller has just ended an effect or given up on one,
+    /// and the device in the port may have changed meanwhile with no change
+    /// bit going 0→1 again — the only edge xHCI raises an event for — because
+    /// an effect's own acknowledge spent it.
+    fn believe(&mut self, attached: bool, slot: Option<NonZeroU8>) {
+        self.attached = attached;
         self.slot = slot;
-        self.work = Work::Settled;
+        self.work = Work::Unread;
     }
 
     #[cfg(feature = "flaws")]
@@ -442,8 +459,7 @@ impl PortState {
                         return Step::Reset(Reset::Warm, write);
                     }
                     ResetOutcome::GaveUp(why) => {
-                        self.attached = true;
-                        self.work = Work::Settled;
+                        self.believe(true, self.slot);
                         return Step::GaveUp(why);
                     }
                 }
@@ -462,8 +478,7 @@ impl PortState {
             // Attached, so the port is not tried again until its device is
             // pulled — which is what stops a port the controller will not reset
             // from being reset forever.
-            self.attached = true;
-            self.work = Work::Settled;
+            self.believe(true, self.slot);
             return Step::GaveUp(match kind {
                 Reset::Warm => GaveUp::LinkNeverTrained,
                 Reset::Hot => GaveUp::ResetNeverFinished(Reset::Hot),
@@ -591,21 +606,28 @@ mod tests {
         assert_eq!(inherited(None, trained), Reset::Hot);
     }
 
-    /// A device still in a torn-down port raises no further change event, so
-    /// the teardown itself is what has the port read again.
+    /// Every report that moves the belief leaves the port to be read: a device
+    /// that changed under the effect raises no further change event.
     #[test]
-    fn a_torn_down_port_is_outstanding_until_it_is_read() {
-        let mut port = PortState::EMPTY;
-        port.adopt(NonZeroU8::new(1));
-        assert!(!port.outstanding());
-        port.torn_down();
-        assert!(port.outstanding(), "nothing would read a port the device is still in");
-        assert!(matches!(port.step(connected(true, 0), 0), Step::Wait(DEBOUNCE_NS)));
+    fn a_port_whose_belief_moved_is_outstanding_until_it_is_read() {
+        let empty = Portsc::from_raw(1 << 9);
+        let reports = [
+            ("adopt", (|p| p.adopt(NonZeroU8::new(1))) as fn(&mut PortState)),
+            ("enumerated", |p| p.enumerated(NonZeroU8::new(1))),
+            ("torn_down", PortState::torn_down),
+        ];
+        for (name, report) in reports {
+            let mut port = PortState::EMPTY;
+            report(&mut port);
+            assert!(port.outstanding(), "{name}: nothing would read a port whose device changed");
+            let (disagrees, agrees) =
+                if port.attached() { (empty, connected(true, 0)) } else { (connected(true, 0), empty) };
+            assert!(matches!(port.step(disagrees, 0), Step::Wait(DEBOUNCE_NS)), "{name}");
 
-        port.torn_down();
-        assert!(port.outstanding());
-        assert!(matches!(port.step(Portsc::from_raw(1 << 9), 0), Step::Idle));
-        assert!(!port.outstanding(), "an empty port read once is at rest");
+            report(&mut port);
+            assert!(matches!(port.step(agrees, 0), Step::Idle), "{name}");
+            assert!(!port.outstanding(), "{name}: a port read once and found as believed is at rest");
+        }
     }
 
     #[test]

@@ -140,8 +140,10 @@ pub fn init(devices: &[PciDevice]) {
         }
         return;
     }
-    // Safe to zero: the boot scan acted on every port it looked at, so nothing is outstanding.
-    PORT_WORK_AT.store(0, Ordering::Relaxed);
+    // A port the scan bound is outstanding until the first pass reads it: the scan's acknowledge spent its edge.
+    let due = controllers.iter().any(|c| port::due(false, &c.ports));
+    let at = if due { crate::clock::nanos_since_boot().max(1) } else { 0 };
+    PORT_WORK_AT.store(at, Ordering::Relaxed);
     let hid: usize = controllers.iter().map(|c| c.devices.len()).sum();
     log!("xHCI: {} controller(s), {} HID device(s)", controllers.len(), hid);
     log!("usb-storage: {} device(s)", storage_count());
