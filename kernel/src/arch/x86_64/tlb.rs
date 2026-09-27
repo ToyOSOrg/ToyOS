@@ -13,7 +13,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::shootdown::{Generation, Shootdown};
-use crate::time::{Duration, Tripwire};
+use crate::time::Tripwire;
 
 use super::{apic, percpu, smp};
 
@@ -58,17 +58,10 @@ pub fn log_census() {
     );
 }
 
-/// Set above xHCI's `CALL_AFTER_BREAK`, the longest a disk call spins with `IF`
-/// clear once its transport has broken, so no legitimate wait trips it; that
-/// assertion below holds the order.
-const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
-    Duration::from_secs(5),
-    "above the longest IF-clear device spin a target can be inside",
-);
-
-// A disk call spins with interrupts off, so one that outlasted this tripwire
-// would panic another CPU over a device.
-const _: () = assert!(crate::drivers::xhci::CALL_AFTER_BREAK.nanos() < ACK_TIMEOUT.nanos());
+/// How long the initiator waits for one CPU's flush: a target that has not
+/// answered by then is not taking interrupts. Every spin that masks them holds
+/// itself under this at its own site; the architecture knows none of them.
+const ACK_TIMEOUT: Tripwire = crate::time::DEAF_CPU;
 
 /// Spins between deadline checks; `nanos_since_boot`'s 128-bit divide is too
 /// costly to call on every iteration.

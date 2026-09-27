@@ -2526,7 +2526,7 @@ pub fn storage_flush(index: usize, losses: &mut u64) -> BlockResult {
 /// (`toyos_xhci::call`): opened by the first break or by finding the disk
 /// held, carried across every command, the hold and the command sent again,
 /// and closed here. The caller spins with `IF` clear for all of it, which is
-/// why `CALL_AFTER_BREAK` is held under the TLB-ack tripwire.
+/// why `CALL_AFTER_BREAK` is held under `time::DEAF_CPU`, the TLB-ack tripwire.
 ///
 /// **The hold only waits for a verdict.** It ends at the disk's own window
 /// (`toyos_xhci::identity::RETURN_WINDOW`), past which the disk is lost and the
