@@ -838,7 +838,7 @@ pub(crate) const HOST_LINKER_PIN: &str = "default-linker-linux-override = \"off\
 
 /// The linker every guest target names, as the toolchain at `toolchain` carries
 /// it: `lib/rustlib/<host>/bin/rust-lld`, where rustc itself looks for it.
-pub(crate) fn rust_lld(toolchain: &Path) -> PathBuf {
+pub fn rust_lld(toolchain: &Path) -> PathBuf {
     toolchain.join("lib/rustlib").join(host_triple()).join("bin/rust-lld")
 }
 
