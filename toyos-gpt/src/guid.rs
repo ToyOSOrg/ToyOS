@@ -100,14 +100,7 @@ impl Guid {
     }
 
     pub const fn is_zero(&self) -> bool {
-        let mut i = 0;
-        while i < 16 {
-            if self.0[i] != 0 {
-                return false;
-            }
-            i += 1;
-        }
-        true
+        u128::from_ne_bytes(self.0) == 0
     }
 }
 
