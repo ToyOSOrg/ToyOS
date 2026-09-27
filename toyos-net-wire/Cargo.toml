@@ -1,0 +1,8 @@
+# Host-tested; nothing ships it until the stack replaces smoltcp (issues/design-debt/toyos-has-its-own-network-stack.md).
+
+[package]
+name = "toyos-net-wire"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
