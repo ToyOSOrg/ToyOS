@@ -84,7 +84,6 @@ impl Egress {
         }
         queue.push_back(frame);
         self.waiting += 1;
-        self.most = self.most.max(self.waiting);
         if self.waiting > LIMIT {
             let fattest = *self
                 .flows
@@ -95,6 +94,7 @@ impl Egress {
             self.take(fattest).expect("the fattest flow holds a frame");
             self.dropped += 1;
         }
+        self.most = self.most.max(self.waiting);
     }
 
     /// The next frame in turn: the oldest of the flow at the head of the turn,
@@ -180,7 +180,7 @@ mod tests {
         }
         assert_eq!(e.len(), LIMIT);
         assert_eq!(e.dropped, 2);
-        assert_eq!(e.most, LIMIT + 1);
+        assert_eq!(e.most, LIMIT, "no more than the limit ever waits");
         let tags: Vec<u8> = std::iter::from_fn(|| e.pop()).filter(|f| f[14 + 9] == 17).map(|f| f[42]).collect();
         assert_eq!(tags, [1, 2], "the small flow lost nothing");
     }

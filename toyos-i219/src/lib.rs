@@ -38,7 +38,7 @@
 //! Every number in a written-back descriptor is the device's, and this driver
 //! is on the far side of an IOMMU domain from the rest of the machine but on
 //! the *same* side as its own memory. A length longer than the buffer it was
-//! given becomes the length of a slice netd hands to smoltcp, so `parse_rx`
+//! given becomes the length of a slice netd hands to its stack, so `parse_rx`
 //! bounds it, and `RxRefusal` is every way a written-back descriptor is refused
 //! rather than believed.
 //!

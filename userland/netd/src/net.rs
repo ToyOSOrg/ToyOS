@@ -7,7 +7,7 @@
 //! address, its subnet route and its default route together, and clears all
 //! of them together.
 
-use std::time::Instant;
+use std::time::Duration;
 
 use net_types::ethernet::Mac;
 use net_types::ip::{AddrSubnet, Ipv4, Ipv4Addr, Ipv6, Mtu, Subnet};
@@ -23,7 +23,7 @@ use netstack3_core::routes::{AddableEntry, AddableMetric, Generation, RawMetric}
 use netstack3_core::{CoreApi, NetworkParsingContext, StackState, StackStateBuilder};
 use packet::Buf;
 
-use crate::stack::{Bindings, DeviceName, DeviceState, KernelRng, VecAllocator};
+use crate::stack::{Bindings, Clock, DeviceName, DeviceState, VecAllocator};
 
 /// The device's routing metric: its routes' own, since it is the only one.
 const METRIC: RawMetric = RawMetric(100);
@@ -40,21 +40,23 @@ pub struct Address {
 #[derive(Debug)]
 pub struct Unusable(pub String);
 
+/// **The device id is declared before the stack**, so it drops first: the core
+/// refuses to drop a device a strong id still names.
 pub struct Net {
+    device: EthernetDeviceId<Bindings>,
     core: StackState<Bindings>,
     pub bindings: Bindings,
-    device: EthernetDeviceId<Bindings>,
     address: Option<Address>,
 }
 
 impl Net {
-    /// The stack over a device whose link address is `mac`, its clock's zero
-    /// at `epoch`.
-    pub fn new(mac: [u8; 6], epoch: Instant) -> Self {
-        let mut bindings = Bindings::new(epoch);
+    /// The stack over a device whose link address is `mac`, reading `clock`
+    /// and drawing from `random`.
+    pub fn new(mac: [u8; 6], clock: Clock, random: fn(&mut [u8])) -> Self {
+        let mut bindings = Bindings::new(clock, random);
         let mut builder = StackStateBuilder::default();
         // IPv6 is off, and the builder asks for its SLAAC secret all the same.
-        builder.ipv6_builder().slaac_stable_secret_key(IidSecret::new_random(&mut KernelRng));
+        builder.ipv6_builder().slaac_stable_secret_key(IidSecret::new_random(&mut bindings.rng()));
         let core = builder.build_with_ctx(&mut bindings);
         let mac = UnicastAddr::new(Mac::new(mac))
             .unwrap_or_else(|| panic!("netd: the NIC's address {mac:02x?} is not a unicast one"));
@@ -67,7 +69,7 @@ impl Net {
             .api(&mut bindings)
             .device::<EthernetLinkDevice>()
             .add_device(DeviceName, properties, METRIC, DeviceState, VecAllocator);
-        let mut net = Self { core, bindings, device, address: None };
+        let mut net = Self { device, core, bindings, address: None };
         let id = net.device_id();
         let v4 = Ipv4DeviceConfigurationUpdate {
             ip_config: IpDeviceConfigurationUpdate {
@@ -129,9 +131,10 @@ impl Net {
         self.bindings.sweep_deferred();
     }
 
-    /// When the soonest timer is due.
-    pub fn next_timer(&self) -> Option<Instant> {
-        self.bindings.timers.next().map(|at| at.at(self.bindings.epoch()))
+    /// How long until the soonest timer is due.
+    pub fn next_timer(&self) -> Option<Duration> {
+        let now = self.bindings.now();
+        self.bindings.timers.next().map(|at| at.after(now))
     }
 
     /// Write `address` into the device — the address, the subnet it is on and

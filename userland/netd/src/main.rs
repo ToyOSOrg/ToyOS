@@ -699,9 +699,9 @@ impl NetDaemon {
 
     /// How many closing connections netd lets the stack keep for its clients:
     /// as many as live ones. Each costs a local port and, while it owes its
-    /// peer bytes, its send buffer; past this the newest are given up
-    /// (`stream::past_bound`) rather than letting clients that come and go
-    /// fill memory.
+    /// peer bytes, its send buffer; one that finds the table full is given up
+    /// (`PipedConnection::finish`) rather than letting clients that come and
+    /// go fill memory.
     fn max_closing(&self) -> usize {
         self.max_piped_connections
     }
@@ -752,6 +752,9 @@ impl NetDaemon {
         snap.put("piped.orphans", orphans + self.closing.len());
         snap.put("udp.waiting", self.pending_udp_recvs.len());
         snap.put("udp.max_waiting", MAX_PENDING_RECVS);
+        snap.put("limits.fin_wait_2_s", stack::core_limits::FIN_WAIT_2.as_secs());
+        snap.put("limits.time_wait_s", stack::core_limits::TIME_WAIT.as_secs());
+        snap.put("limits.give_up_ms", stack::core_limits::GIVE_UP.as_millis() as u64);
     }
 
     fn alloc_id(&mut self) -> u32 {
@@ -1203,6 +1206,10 @@ impl NetDaemon {
     /// bytes stay in the connection's buffer and the TCP window shrinks — and
     /// hand the stack each connection whose client is done with it.
     fn bridge_piped(&mut self, net: &mut Net, now: Instant) {
+        if !self.closing.is_empty() {
+            let held = stream::census(net);
+            self.closing.retain(|c| held.contains_key(&c.cookie));
+        }
         let mut i = 0;
         while i < self.piped_connections.len() {
             let conn = &mut self.piped_connections[i];
@@ -1217,22 +1224,14 @@ impl NetDaemon {
             if let Some(id) = conn.socket_id {
                 self.sockets.remove(&id);
             }
-            if let Some(closing) = conn.finish(net, now) {
+            let room = self.closing.len() < self.max_closing();
+            if !room {
+                say!("netd: giving up a closing connection, {} are already closing", self.max_closing());
+            }
+            if let Some(closing) = conn.finish(net, room) {
                 self.closing.push(closing);
             }
         }
-        if self.closing.is_empty() {
-            return;
-        }
-        let held = stream::census(net);
-        self.closing.retain(|c| held.contains_key(&c.cookie));
-        let over = stream::past_bound(self.closing.iter().map(|c| c.since).enumerate(), self.max_closing());
-        for &i in &over {
-            say!("netd: giving up a closing connection, {} are already closing", self.max_closing());
-            self.closing[i].give_up(net);
-        }
-        let held = stream::census(net);
-        self.closing.retain(|c| held.contains_key(&c.cookie));
     }
 
     /// Tell each piped listener's owner about a connection it can accept, and
@@ -1558,7 +1557,7 @@ fn main() {
         "netd: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
-    let mut net = Net::new(mac, started);
+    let mut net = Net::new(mac, stack::Clock::Kernel(started), stack::kernel_random);
     let mut dhcp = dhcp::Dhcp::new(mac, Instant::now(), random_u32);
     let mut mdns = mdns::Responder::new(dhcp::HOSTNAME, &mut net);
     let mut transmit = Transmit::default();
@@ -1670,7 +1669,7 @@ fn main() {
         let now = Instant::now();
         let until = |at: Instant| at.saturating_duration_since(now);
         let timeout = [
-            net.next_timer().map(until),
+            net.next_timer(),
             Some(until(dhcp.client.wake_at())),
             dhcp.settle_at().map(until),
             daemon.wake_in(now),

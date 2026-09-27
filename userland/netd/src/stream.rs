@@ -13,8 +13,8 @@
 //! What stays netd's is the client's side: the order the client learns the
 //! peer's end in ([`End`]), a reader that leaves with the peer still sending
 //! (reset at once, RFC 2525 §2.17), a pipe that refuses netd (reset), and how
-//! many closed connections netd lets the stack keep for its clients
-//! ([`past_bound`]).
+//! many closed connections netd lets the stack keep for its clients (the
+//! `room` [`PipedConnection::finish`] is told of).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -166,7 +166,7 @@ impl<T: ToClient, F: FromClient> PipedConnection<T, F> {
     /// read end, a file past its size limit or a handle with no `WRITE` right
     /// each answer a refusal here.
     fn refuse(&mut self, net: &mut Net, end: &str, e: SyscallError) {
-        say!("netd: resetting a connection — its {end} pipe refused netd: {e:?}");
+        crate::say!("netd: resetting a connection — its {end} pipe refused netd: {e:?}");
         self.reset(net);
         self.rx_write.take();
     }
@@ -368,13 +368,23 @@ impl<T: ToClient, F: FromClient> PipedConnection<T, F> {
     /// Hand a connection the client is done with to the stack, which finishes
     /// what it owes alone; netd keeps its cookie for its closing bound, and
     /// nothing of one it reset, which is over.
-    pub fn finish(self, net: &mut Net, now: Instant) -> Option<Closing> {
+    ///
+    /// **Where the closing table has no `room`, the connection is given up
+    /// here, while netd still holds it** — reset, and gone at once — as Linux
+    /// resets the orphan it cannot keep rather than one it already keeps. It
+    /// cannot be given up later: a socket the core holds closed is one netd
+    /// can no longer name, and the core's own reset of one by cookie
+    /// (`disconnect_bound`) cancels the timer that would have freed it.
+    pub fn finish(mut self, net: &mut Net, room: bool) -> Option<Closing> {
         assert!(self.client_done(), "netd: finished a stream whose client still holds a pipe");
+        if !room && !self.reset {
+            abort(net, &self.id);
+            self.reset = true;
+        }
         let cookie = self.id.socket_cookie().export_value();
-        let since = self.orphaned_at.unwrap_or(now);
         let reset = self.reset;
         net.api().tcp::<Ipv4>().close(self.id);
-        (!reset).then_some(Closing { cookie, since })
+        (!reset).then_some(Closing { cookie })
     }
 }
 
@@ -389,12 +399,10 @@ enum Read {
     Refused(SyscallError),
 }
 
-/// Reset `id`: the stack sends the RST its state owes, and lets go.
+/// Reset `id`, a socket netd still holds: the stack sends the RST its state
+/// owes and moves it to CLOSED, and netd's close of it then frees it.
 pub fn abort(net: &mut Net, id: &TcpId) {
-    reset_cookie(net, id.socket_cookie().export_value());
-}
-
-fn reset_cookie(net: &mut Net, cookie: u64) {
+    let cookie = id.socket_cookie().export_value();
     let matcher = IpSocketMatcher::Cookie(SocketCookieMatcher { cookie, invert: false });
     let _ = net.api().tcp::<Ipv4>().disconnect_bound(&matcher);
 }
@@ -403,17 +411,6 @@ fn reset_cookie(net: &mut Net, cookie: u64) {
 /// its cookie: netd keeps no reference to it.
 pub struct Closing {
     pub cookie: u64,
-    /// When its client let go.
-    pub since: Instant,
-}
-
-impl Closing {
-    /// Give it up now: reset where it still owes its peer anything, and gone
-    /// at once either way. Linux resets the orphan it cannot keep, and keeps
-    /// no TIME-WAIT past its bucket limit.
-    pub fn give_up(&self, net: &mut Net) {
-        reset_cookie(net, self.cookie);
-    }
 }
 
 /// Every TCP socket the stack holds bound, by cookie, and the state it is in:
@@ -425,13 +422,5 @@ pub fn census(net: &mut Net) -> std::collections::HashMap<u64, TcpSocketState> {
     found.into_iter().map(|d| (d.cookie.export_value(), d.state_machine)).collect()
 }
 
-/// Which closing connections a closing table holding more than `bound` gives
-/// up: the newest, as Linux gives up the socket being orphaned rather than one
-/// it already keeps. `closing` is each one's index and when its client let go.
-pub fn past_bound(closing: impl Iterator<Item = (usize, Instant)>, bound: usize) -> Vec<usize> {
-    let mut closing: Vec<_> = closing.collect();
-    closing.sort_unstable_by_key(|&(_, since)| std::cmp::Reverse(since));
-    let excess = closing.len().saturating_sub(bound);
-    closing[..excess].iter().map(|&(i, _)| i).collect()
-}
-
+#[cfg(test)]
+mod tests;

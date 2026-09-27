@@ -7,11 +7,11 @@
 //! source, the frames the core makes, and the buffers its sockets fill:
 //!
 //! - **The clock** is the kernel's monotonic clock, counted from this
-//!   process's start ([`StackTime`]).
+//!   process's start ([`Clock`]); the host tests move one of their own.
 //! - **Timers** are a heap netd's loop fires ([`Timers`]); a fired timer is
 //!   handed back to the core with the unique id it was created with.
 //! - **Randomness** is the kernel's random source, asked on every draw
-//!   ([`KernelRng`]): the core's initial sequence numbers (RFC 6528), its
+//!   ([`StackRng`]): the core's initial sequence numbers (RFC 6528), its
 //!   ephemeral ports (RFC 6056) and its opaque identifiers all rest on it.
 //! - **Frames out** join [`crate::egress`]; netd's loop hands them to the
 //!   ring.
@@ -91,6 +91,37 @@ pub const TCP_BUFFER: usize = 65536;
 /// buffer drops on any stack.
 pub const UDP_DATAGRAMS: usize = 16;
 
+/// The bounds the core keeps on a connection netd has let go of, as netd's
+/// `inspect` reports them. **The core's, not netd's**: it exports none of
+/// them, so they are said here once, and `stream/tests.rs` holds each to what
+/// the core does on a wire.
+pub mod core_limits {
+    use std::time::Duration;
+
+    /// FIN-WAIT-2 for a closed socket (`DEFAULT_FIN_WAIT2_TIMEOUT`).
+    pub const FIN_WAIT_2: Duration = Duration::from_secs(60);
+
+    /// TIME-WAIT: RFC 9293 §3.3.2's 2 × MSL, with RFC 793's two-minute MSL.
+    pub const TIME_WAIT: Duration = Duration::from_secs(240);
+
+    /// When a peer that acknowledges nothing is given up, counted from the
+    /// first transmission, at the least RTO: RFC 6298 §5.5's doubling from
+    /// 200 ms, held at 120 s, over fifteen retransmissions. A larger measured
+    /// RTO only lengthens it.
+    pub const GIVE_UP: Duration = {
+        let (mut rto, mut sum, mut k) = (Duration::from_millis(200), Duration::ZERO, 0);
+        while k <= 15 {
+            sum = sum.saturating_add(rto);
+            rto = rto.saturating_mul(2);
+            if rto.as_secs() > 120 {
+                rto = Duration::from_secs(120);
+            }
+            k += 1;
+        }
+        sum
+    };
+}
+
 // --- The clock ---------------------------------------------------------------
 
 /// The one clock the core reads: the kernel's monotonic time since this
@@ -99,14 +130,28 @@ pub const UDP_DATAGRAMS: usize = 16;
 pub struct StackTime(Duration);
 
 impl StackTime {
-    /// The time since `epoch`.
-    pub fn since(epoch: std::time::Instant) -> Self {
-        Self(epoch.elapsed())
+    /// How long from now until `self`, nothing if it has passed.
+    pub fn after(self, now: StackTime) -> Duration {
+        self.0.saturating_sub(now.0)
     }
+}
 
-    /// The same moment as a `std` instant, `epoch` being this clock's zero.
-    pub fn at(self, epoch: std::time::Instant) -> std::time::Instant {
-        epoch + self.0
+/// Where the core's clock reads from.
+pub enum Clock {
+    /// The kernel's monotonic clock, from this instant on.
+    Kernel(std::time::Instant),
+    /// Nanoseconds a host test moves by hand.
+    #[cfg(test)]
+    Moved(Arc<AtomicU64>),
+}
+
+impl Clock {
+    fn now(&self) -> StackTime {
+        match self {
+            Clock::Kernel(epoch) => StackTime(epoch.elapsed()),
+            #[cfg(test)]
+            Clock::Moved(nanos) => StackTime(Duration::from_nanos(nanos.load(Ordering::Relaxed))),
+        }
     }
 }
 
@@ -162,13 +207,20 @@ impl netstack3_core::AtomicInstant<StackTime> for AtomicStackTime {
 
 // --- Randomness --------------------------------------------------------------
 
-/// The kernel's random source, asked on every draw.
+/// The stack's random source: every draw is `fill`'s, which in netd is the
+/// kernel's ([`kernel_random`]) and in the host tests the host's.
+pub struct StackRng(pub fn(&mut [u8]));
+
+/// The kernel's random source.
 ///
 /// **A refusal ends netd**: a sequence number or a port anyone can predict is
 /// a forged segment's way in, and there is no second source to fall back on.
-pub struct KernelRng;
+pub fn kernel_random(dest: &mut [u8]) {
+    toyos_abi::syscall::random(dest)
+        .unwrap_or_else(|e| panic!("netd: the kernel's random source refused the stack: {e:?}"));
+}
 
-impl rand::TryRng for KernelRng {
+impl rand::TryRng for StackRng {
     type Error = Infallible;
 
     fn try_next_u32(&mut self) -> Result<u32, Infallible> {
@@ -184,13 +236,12 @@ impl rand::TryRng for KernelRng {
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
-        toyos_abi::syscall::random(dest)
-            .unwrap_or_else(|e| panic!("netd: the kernel's random source refused the stack: {e:?}"));
+        (self.0)(dest);
         Ok(())
     }
 }
 
-impl rand::TryCryptoRng for KernelRng {}
+impl rand::TryCryptoRng for StackRng {}
 
 // --- Timers ------------------------------------------------------------------
 
@@ -575,7 +626,8 @@ impl DeviceIdAndNameMatcher for DeviceName {
 
 /// Everything the core asks of netd.
 pub struct Bindings {
-    epoch: std::time::Instant,
+    clock: Clock,
+    random: fn(&mut [u8]),
     pub timers: Timers,
     /// The frames the core made, waiting for the ring.
     pub egress: Egress,
@@ -587,11 +639,12 @@ pub struct Bindings {
 }
 
 impl Bindings {
-    pub fn new(epoch: std::time::Instant) -> Self {
+    pub fn new(clock: Clock, random: fn(&mut [u8])) -> Self {
         let size = NonZeroUsize::new(TCP_BUFFER).expect("a TCP buffer holds bytes");
         let sizes = BufferSizeSettings::new(size, size, size).expect("min <= default <= max");
         Self {
-            epoch,
+            clock,
+            random,
             timers: Timers::default(),
             egress: Egress::default(),
             settings: TcpSettings { receive_buffer: sizes, send_buffer: sizes },
@@ -602,12 +655,12 @@ impl Bindings {
 
     /// The moment the core would call now.
     pub fn now(&self) -> StackTime {
-        StackTime::since(self.epoch)
+        self.clock.now()
     }
 
-    /// Where this clock's zero is.
-    pub fn epoch(&self) -> std::time::Instant {
-        self.epoch
+    /// The stack's random source.
+    pub fn rng(&self) -> StackRng {
+        StackRng(self.random)
     }
 
     /// Drop every deferred removal whose value has arrived.
@@ -666,10 +719,10 @@ impl TimerContext for Bindings {
 }
 
 impl RngContext for Bindings {
-    type Rng<'a> = KernelRng;
+    type Rng<'a> = StackRng;
 
-    fn rng(&mut self) -> KernelRng {
-        KernelRng
+    fn rng(&mut self) -> StackRng {
+        Bindings::rng(self)
     }
 }
 

@@ -267,3 +267,6 @@ fn send(net: &mut Net, id: &UdpId, to: [u8; 4], query: Vec<u8>) {
     }
 }
 
+
+#[cfg(test)]
+mod tests;

@@ -93,9 +93,9 @@ pub const RX_BUF_SIZE: usize = 4096;
 /// One descriptor per transmit buffer, and the two counts are one number for
 /// the same reason the receive side's are: buffer `i` is published at head `i`
 /// and nowhere else, so a head this driver holds names a buffer nothing else
-/// is writing. Sixteen heads over one buffer would be sixteen aliases — smoltcp
-/// emits several frames per poll, and the device reads a descriptor whenever it
-/// likes.
+/// is writing. Sixteen heads over one buffer would be sixteen aliases — netd hands
+/// the ring several frames a pass, and the device reads a descriptor whenever
+/// it likes.
 const TX_QUEUE_SIZE: u16 = 16;
 pub const TX_BUF_COUNT: usize = TX_QUEUE_SIZE as usize;
 pub const TX_BUF_SIZE: usize = 4096;
@@ -813,7 +813,7 @@ mod tests {
     }
 
     /// The one that matters most: `written` becomes the length of a slice this
-    /// process hands to smoltcp, so a device claiming more than it was given
+    /// process hands to its stack, so a device claiming more than it was given
     /// would be a read past the buffer.
     #[test]
     fn more_bytes_than_the_chain_was_given_is_refused() {

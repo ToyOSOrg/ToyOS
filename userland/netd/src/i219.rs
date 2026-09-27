@@ -142,8 +142,8 @@ pub struct Nic {
     /// netd's view of the same grant: the frame payloads, and nothing else.
     frames: Window,
     /// Where a dropped frame is written. Ordinary memory outside the grant, so
-    /// no device can reach it: smoltcp's token has to be given somewhere to put
-    /// its bytes even when there is no descriptor to send them on.
+    /// no device can reach it: `tx`'s fill has to be given somewhere to put its
+    /// bytes even when there is no descriptor to send them on.
     dropped: RefCell<Vec<u8>>,
     mac: [u8; 6],
     part: toyos_i219::Part,
@@ -335,8 +335,8 @@ impl Nic {
     /// device.
     ///
     /// Non-blocking. A frame the driver has no slot for is written into the
-    /// scratch buffer and dropped — **a server never blocks**, smoltcp's token
-    /// cannot say no, and a dropped frame's recovery is the peer's retransmit.
+    /// scratch buffer and dropped — **a server never blocks**, and a dropped
+    /// frame's recovery is the peer's retransmit.
     pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         let slot = self.driver.borrow_mut().tx_reserve(len);
         let Some(slot) = slot else {
