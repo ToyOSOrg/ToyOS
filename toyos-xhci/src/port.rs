@@ -276,6 +276,9 @@ enum Work {
     /// The driver's belief moved ([`PortState::believe`]) and nothing has read
     /// the register against it since.
     Unread,
+    /// A reset was given up on ([`PortState::give_up`]) and no read has found
+    /// the port's change flags clear since.
+    GivenUp,
 }
 
 /// A deliberate defect, compiled only for the negative gates.
@@ -391,14 +394,8 @@ impl PortState {
         self.protocol = protocol;
     }
 
-    /// Adopt a port the boot scan enumerated, so the hot-plug machine starts
-    /// from what the boot path already did rather than re-deciding it.
-    pub fn adopt(&mut self, slot: Option<NonZeroU8>) {
-        self.believe(true, slot);
-    }
-
     /// **Leaves the port [`Self::outstanding`] until a look has read the
-    /// register against it.** Every caller has just ended an effect or given up on one,
+    /// register against it.** Every caller has just ended an effect,
     /// and the device in the port may have changed meanwhile with no change
     /// bit going 0→1 again — the only edge xHCI raises an event for — because
     /// an effect's own acknowledge spent it.
@@ -406,6 +403,17 @@ impl PortState {
         self.attached = attached;
         self.slot = slot;
         self.work = Work::Unread;
+    }
+
+    /// **Attached, so the port is not reset again until a fresh edge moves
+    /// it**, and read once, so a pull is still seen. The change flags that
+    /// read finds are the given-up reset's own; a connect flag among them
+    /// judged as a replug would tear the port down and reset it again every
+    /// debounce for as long as its device stayed in.
+    fn give_up(&mut self, why: GaveUp) -> Step<'static> {
+        self.attached = true;
+        self.work = Work::GivenUp;
+        Step::GaveUp(why)
     }
 
     #[cfg(feature = "flaws")]
@@ -457,10 +465,7 @@ impl PortState {
                             Work::Resetting { until: now + RESET_DEADLINE_NS, kind: Reset::Warm };
                         return Step::Reset(Reset::Warm, write);
                     }
-                    ResetOutcome::GaveUp(why) => {
-                        self.believe(true, self.slot);
-                        return Step::GaveUp(why);
-                    }
+                    ResetOutcome::GaveUp(why) => return self.give_up(why),
                 }
             }
             if now < until || self.flawed(Flaw::NoResetDeadline) {
@@ -474,11 +479,7 @@ impl PortState {
                 self.work = Work::Resetting { until: now + RESET_DEADLINE_NS, kind: Reset::Warm };
                 return Step::Reset(Reset::Warm, reset_write(Reset::Warm, portsc));
             }
-            // Attached, so the port is not tried again until its device is
-            // pulled — which is what stops a port the controller will not reset
-            // from being reset forever.
-            self.believe(true, self.slot);
-            return Step::GaveUp(match kind {
+            return self.give_up(match kind {
                 Reset::Warm => GaveUp::LinkNeverTrained,
                 Reset::Hot => GaveUp::ResetNeverFinished(Reset::Hot),
             });
@@ -495,7 +496,7 @@ impl PortState {
         // the device that was here is gone. The ordinary teardown then sets
         // `attached` false, which turns the rest of this into the fresh connect
         // it already knows how to run.
-        if connected && replugged && self.attached {
+        if connected && replugged && self.attached && self.work != Work::GivenUp {
             return Step::Teardown(Gone::Replugged, Pending(self));
         }
 
@@ -512,7 +513,7 @@ impl PortState {
         }
 
         let held = match self.work {
-            Work::Settled | Work::Unread => {
+            Work::Settled | Work::Unread | Work::GivenUp => {
                 if connected == self.attached {
                     self.work = Work::Settled;
                     return Step::Idle;
@@ -611,8 +612,7 @@ mod tests {
     fn a_port_whose_belief_moved_is_outstanding_until_it_is_read() {
         let empty = Portsc::from_raw(1 << 9);
         let reports = [
-            ("adopt", (|p| p.adopt(NonZeroU8::new(1))) as fn(&mut PortState)),
-            ("enumerated", |p| p.enumerated(NonZeroU8::new(1))),
+            ("enumerated", (|p| p.enumerated(NonZeroU8::new(1))) as fn(&mut PortState)),
             ("torn_down", PortState::torn_down),
         ];
         for (name, report) in reports {

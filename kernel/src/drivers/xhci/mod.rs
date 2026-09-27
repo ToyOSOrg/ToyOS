@@ -1188,11 +1188,6 @@ impl XhciController {
         }
     }
 
-    /// Record what the boot scan's enumeration left behind, so hot-plug starts from it; recorded even with no device, since a successful Enable Slot is the controller's resource regardless.
-    fn port_bound(&mut self, port_idx: u8, slot: Option<u8>) {
-        self.ports[port_idx as usize].adopt(slot.and_then(NonZeroU8::new));
-    }
-
     /// Step every port that is not where the driver left it, and say when it wants to be looked at again.
     ///
     /// One step per call, no wait; the enumeration it eventually starts is submit-and-return too.

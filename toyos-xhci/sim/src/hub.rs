@@ -47,6 +47,11 @@ pub enum ResetBehaviour {
     /// comes with the port disabled, CCS and speed zero, the link at
     /// RxDetect; §4.19.5.1's warm reset is the prescribed recovery.
     FailsTheBusReset { warm_works: bool },
+    /// **A USB3 link a retrain finds and cannot bring up.** The bus reset fails
+    /// as [`Self::FailsTheBusReset`]'s does, and the warm reset completes having
+    /// re-detected the device — PRC, WRC, CCS and CSC — with the port still
+    /// disabled.
+    RetrainsDisabled,
 }
 
 pub struct FakePort {
@@ -196,23 +201,22 @@ impl FakePort {
                 }
                 1_000_000
             }
-            ResetBehaviour::FailsTheBusReset { warm_works } => {
-                if !self.warm {
-                    // §4.19.5's completed failure, bit for bit.
-                    self.resetting_since = None;
-                    self.set(self.raw & !(PR | PED | (0xF << SPEED_SHIFT)));
-                    if self.raw & CCS != 0 {
-                        self.set((self.raw & !CCS) | CSC);
-                    }
-                    self.set(self.raw | PRC);
-                    self.set_link(PLS_RX_DETECT);
-                    return;
+            ResetBehaviour::FailsTheBusReset { .. } | ResetBehaviour::RetrainsDisabled
+                if !self.warm =>
+            {
+                // §4.19.5's completed failure, bit for bit.
+                self.resetting_since = None;
+                self.set(self.raw & !(PR | PED | (0xF << SPEED_SHIFT)));
+                if self.raw & CCS != 0 {
+                    self.set((self.raw & !CCS) | CSC);
                 }
-                if !warm_works {
-                    return;
-                }
-                1_000_000
+                self.set(self.raw | PRC);
+                self.set_link(PLS_RX_DETECT);
+                return;
             }
+            ResetBehaviour::FailsTheBusReset { warm_works: false } => return,
+            ResetBehaviour::FailsTheBusReset { warm_works: true }
+            | ResetBehaviour::RetrainsDisabled => 1_000_000,
         };
         if now.saturating_sub(since) < after {
             return;
@@ -229,7 +233,7 @@ impl FakePort {
                 self.set(self.raw | CCS | CSC);
             }
         }
-        if self.raw & CCS != 0 {
+        if self.raw & CCS != 0 && self.behaviour != ResetBehaviour::RetrainsDisabled {
             self.set(self.raw | PED | ((self.speed as u32) << SPEED_SHIFT));
             self.set_link(PLS_U0);
         }

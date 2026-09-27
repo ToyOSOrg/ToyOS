@@ -125,8 +125,6 @@ pub struct Driver {
     /// an enumeration would do. The enumeration drains the event ring, so this
     /// is reachable rather than hypothetical.
     reenter: bool,
-    /// Pull the device between the step that says enumerate and the
-    /// enumeration's first read of the port.
     pull_as_it_enumerates: bool,
     /// Enumerate and tear down without asking whether the controller still owes
     /// an answer, which is the negative gate for the deferral.

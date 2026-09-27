@@ -261,6 +261,36 @@ fn a_completed_failure_that_stays_failed_is_refused_by_name() {
     );
 }
 
+/// A retrain that completes with the device detected and the port disabled
+/// leaves its connect flag set as it gives up. **The port is reset once and
+/// not again while its device stays in**, and the pull that ends it is still
+/// seen.
+#[test]
+fn a_port_given_up_on_is_not_reset_again_until_its_device_is_pulled() {
+    let mut port = FakePort::occupied(ResetBehaviour::RetrainsDisabled);
+    let mut driver = Driver::new().speaking(Protocol::Usb3);
+    let held = 2 * RESET_DEADLINE_NS + 20 * DEBOUNCE_NS;
+    driver.run_to(&mut port, 0, held, PASS).unwrap();
+
+    assert_eq!(
+        driver.did,
+        [Did::Reset(Reset::Hot), Did::Reset(Reset::Warm), Did::GaveUp(GaveUp::LinkNeverTrained)],
+        "a port given up on was torn down and reset again: {} reset(s) in {held} ns",
+        driver.resets().len()
+    );
+    assert!(port.read().connected(), "the device left: PORTSC {:#010x}", port.raw());
+
+    port.detach();
+    driver.run_to(&mut port, held, held + 4 * DEBOUNCE_NS, PASS).unwrap();
+    assert_eq!(
+        driver.did.last(),
+        Some(&Did::ToreDown(Gone::Disconnected)),
+        "the pull of a port given up on was never seen: {:?}",
+        driver.did
+    );
+    assert!(!driver.attached(), "{:?}", driver.did);
+}
+
 /// "USB2 protocol ports never fail" (§4.19.5): a controller that completes
 /// one disabled anyway is refused by name, never written a WPR it lacks.
 #[test]

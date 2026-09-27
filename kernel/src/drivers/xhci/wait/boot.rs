@@ -158,6 +158,7 @@ pub fn init(devices: &[PciDevice]) {
             ctrl.max_ports,
         );
     }
+    // No scheduler pass runs before `smp::set_ready`, so the scan's interrupt record is first polled with `XHCI` published.
     *XHCI.lock() = controllers;
 }
 
@@ -491,7 +492,7 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
                             unreachable!("a completed reset cannot have never finished")
                         }
                     }
-                    return ctrl.port_bound(port_idx, None);
+                    return ctrl.ports[usize::from(port_idx)].enumerated(None);
                 }
             }
         }
@@ -506,7 +507,7 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
         }
         log!("xHCI: port {} never finished its reset (PORTSC {:#010x}); skipping it",
             port_idx + 1, ctrl.read_portsc(port_idx).raw());
-        return ctrl.port_bound(port_idx, None);
+        return ctrl.ports[usize::from(port_idx)].enumerated(None);
     }
 }
 
