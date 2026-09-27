@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use toyos_abi::syscall::SyscallError;
 
 use crate::mm::paging::{CachePolicy, Prot};
-use crate::mm::{align_2m, pmm, Unmapped, PAGE_2M};
+use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M};
 use crate::process::{PageTables, Pid};
 use crate::sync::Lock;
 use crate::{DirectMap, UserAddr};
@@ -77,16 +77,18 @@ impl SharedMemObject {
     /// — no cap above that, since `alloc_contiguous` already refuses more
     /// than free physical memory.
     pub fn create(size: u64) -> Result<Arc<Self>, SyscallError> {
-        if size == 0 || (size as usize).checked_add(PAGE_2M as usize - 1).is_none() {
+        if size == 0 {
             return Err(SyscallError::InvalidArgument);
         }
-        let aligned = align_2m(size as usize);
-        let pages = pmm::alloc_contiguous(aligned / PAGE_2M as usize, pmm::Category::SharedMemory)
+        // `SYS_SHM_CREATE`'s length, straight from a register: the rounding
+        // itself is the checked sum.
+        let aligned = align_2m_checked(size).ok_or(SyscallError::InvalidArgument)?;
+        let pages = pmm::alloc_contiguous((aligned / PAGE_2M) as usize, pmm::Category::SharedMemory)
             .ok_or(SyscallError::ResourceExhausted)?;
         let phys = DirectMap::from_phys(pages[0].direct_map().phys());
         Ok(Self::over(Region {
             phys,
-            size: aligned as u64,
+            size: aligned,
             cache: CachePolicy::Normal,
             pages: Some(Arc::new(Pages(pages))),
         }))
