@@ -18,7 +18,7 @@ console ends at the loader's `Applied 5483 relocations`, with
 `fsync-budget-spent` on the boot parameter line. It was green at 3f46a019
 (run 36111884575).
 
-It is green alone on a dev host at 635a9a14 (`cargo test --test toyos-build
+It is green alone on a dev host at f231c43e (`cargo test --test toyos-build
 -- --nightly home_budget_refusal_retried` EXIT=0).
 `cargo run -- --known-red home_budget_refusal_retried` answers NO.
 
