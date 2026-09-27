@@ -13397,13 +13397,15 @@ fn run_machine_test(
             c_bins,
             rust_bins,
             &["klogd-panic", "panic-reboot-fast"],
-            &["PANIC:", "klogd-panic: the console drainer died", "Process: klogd"],
+            "PANIC: panicked at",
+            &["klogd-panic: the console drainer died", "Process: klogd"],
         ),
         "klogd_fault_halts" => power::klogd_death_resets(
             test_config,
             c_bins,
             rust_bins,
             &["klogd-fault", "panic-reboot-fast"],
+            "#PF UNHANDLED: cr2=0x0",
             &["KERNEL PANIC: read unmapped address at 0x0", "console::body"],
         ),
         "hash_seed_precedes_every_map" => {

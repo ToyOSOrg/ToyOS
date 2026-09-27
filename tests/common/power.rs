@@ -885,44 +885,55 @@ pub fn panic_reboots(
     // Not `must_be_clean`: this boot panics on purpose, and the arm line is
     // what says the panic path — not something else — is holding the machine.
     let line = boot.must_say(&panic_armed())?.to_string();
-    let budget = resets_inside_the_bound(&mut qemu)?;
+    let (budget, _) = resets_inside_the_bound(&mut qemu, PANICKED_AND_STAYED_UP)?;
     eprintln!("  [power] the panicked guest reset itself inside {budget:?} of: {}", line.trim());
     Ok(())
 }
 
-/// QEMU's own `guest-reset`, inside the fast bound plus what a reset costs.
-fn resets_inside_the_bound(qemu: &mut QemuInstance) -> Result<Duration, String> {
+/// QEMU's own `guest-reset`, inside the fast bound plus what a reset costs,
+/// and the serial the guest wrote after its boot log; `never` is what a guest
+/// that did not stop means to the caller.
+fn resets_inside_the_bound(
+    qemu: &mut QemuInstance,
+    never: &str,
+) -> Result<(Duration, String), String> {
     let budget = qemu.budget(Duration::from_secs(PANIC_FAST_SECS) + RESET_ALLOWANCE);
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), budget);
     let reason = stop.reason();
     // A guest that came back to firmware pays none of this: `-no-reboot` exits and the reader disconnects.
     let tail = qemu.drain_serial(WAIT);
-    returned_to_firmware(reason, PANICKED_AND_STAYED_UP, &tail)?;
+    returned_to_firmware(reason, never, &tail)?;
 
     let drain = serial::Serial::named("panic reboot drain", tail.as_str());
     drain.must_say(PANIC_REBOOTING)?;
-    Ok(budget)
+    Ok((budget, tail))
 }
 
 /// `kernel_params` kills `klogd` on its first instruction, and the machine is
-/// what dies: the verdict is QEMU's reset, never the guest's word, because a
-/// recovered `klogd` takes the console down with it.
+/// what dies. The verdict is QEMU's reset, never the guest's word: `marker` is
+/// a line both a halting and a recovering kernel write, and a recovered `klogd`
+/// takes the console down with it.
 pub fn klogd_death_resets(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
     kernel_params: &'static [&'static str],
+    marker: &'static str,
     said: &[&str],
 ) -> Result<(), String> {
     // `panicked()`'s 16550-only guest: the reset's own line goes to the UART raw.
-    let options = BootOptions { kernel_params, ..panicked() };
+    let options = BootOptions { kernel_params, ready_marker: marker, ..panicked() };
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-    let boot = serial::Serial::boot(&qemu);
+    let mut dead = serial::Serial::boot(&qemu);
+    let (budget, tail) = resets_inside_the_bound(
+        &mut qemu,
+        "QEMU never reported stopping: klogd died and the machine carried on without it",
+    )?;
+    dead.push(&tail);
     for want in said {
-        boot.must_say(want)?;
+        dead.must_say(want)?;
     }
-    boot.must_say(&panic_armed())?;
-    let budget = resets_inside_the_bound(&mut qemu)?;
+    dead.must_say(&panic_armed())?;
     eprintln!("  [klogd] {kernel_params:?}: QEMU reset the machine inside {budget:?}");
     Ok(())
 }
