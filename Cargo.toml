@@ -56,6 +56,7 @@ members = [
     "toyos-symbols",
     "toyos-tco",
     "toyos-tmpdir",
+    "toyos-transport",
     "toyos-untrusted",
     "toyos-update",
     "toyos-userbound",
