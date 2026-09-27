@@ -281,10 +281,6 @@ pub fn partition_claim_gives_up(
     Ok(())
 }
 
-/// ROOT's source on the boot stick, which did not answer ROOT's hold and
-/// answers every read after it: its GUID is withheld, so the claim that now
-/// finds its span on a disk that answers, and unheld, is refused as the
-/// kernel's.
 fn root_withheld(
     config: &Path,
     crafted: &Path,

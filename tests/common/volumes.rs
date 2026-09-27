@@ -2089,12 +2089,7 @@ pub fn log_flush_retry(
             volume_lines(&log)
         ));
     }
-    // And refused once per partition and kind, not on every flush: `logd`
-    // flushes every round it wrote a line in, and a refused flush is records of
-    // its own, so a refusal on every flush keeps `/log` retrying for as long as
-    // the machine runs. An absence has no event to wait on, so it is judged over
-    // a fixed window: the storm retries there without pause, the once-per-kind
-    // refusal never.
+    // An absence has no event to wait on, so a fixed window judges it.
     let after = qemu.drain_serial(Duration::from_secs(2));
     let again: Vec<&str> =
         after.lines().filter(|l| l.contains("partclaim: a flush durable on attempt")).collect();

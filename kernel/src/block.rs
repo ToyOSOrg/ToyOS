@@ -258,9 +258,6 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
     Some(handle)
 }
 
-/// `partclaim-table-unanswered` and `partclaim-root-withheld`: a registered disk
-/// that refuses every read of its device block 0 — its protective MBR and GPT
-/// header — from [`unanswered::refuse`] until [`unanswered::answer`].
 #[cfg(feature = "boot-actuators")]
 pub mod unanswered {
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -306,13 +303,12 @@ pub mod unanswered {
     /// block 0.
     pub fn refuse() {
         REFUSING.store(true, Ordering::Relaxed);
-        log!("unanswered: device block 0 of every disk refuses reads from now on");
+        log!("block: device block 0 of every disk refuses reads from now on");
     }
 
-    /// Every disk answers reads of its block 0 again.
     pub fn answer() {
         REFUSING.store(false, Ordering::Relaxed);
-        log!("unanswered: device block 0 of every disk answers reads again");
+        log!("block: device block 0 of every disk answers reads again");
     }
 }
 
