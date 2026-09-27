@@ -157,8 +157,8 @@ both before any lock conversion; the order is forced, not preferred.
   `kill_process` bracket `teardown_resources` between two table acquisitions and
   hold neither across it. So `PROCESS_TABLE` does not have to convert for the
   park to be legal, and converting it anyway would buy the exception-recovery
-  path a `try_lock` with no answer for its failure: `recover_or_halt`'s
-  `Blame::Process` arm reaches `process::exit` from a CPU exception
+  path a `try_lock` with no answer for its failure: `fatal_exception`'s
+  Ring 3 arm reaches `process::exit` from a CPU exception
   (`arch/idt/exceptions.rs:348`), and nothing on that path mints a `Parkable`.
   What *does* have to convert is `Lock<ProcessData>`, and wall 5 is why.
 
@@ -381,7 +381,7 @@ means everywhere, not only here. Three shapes:
 3. **Give the batch an owner** — `deferred-release-outlives-its-syscall`'s own
    second shape — and make `File` deferred. That buys a parkable release site on
    the syscall path and does *not* cover `close_all` reached from
-   `recover_or_halt`'s `Blame::Process` arm, which has no syscall to return
+   `fatal_exception`'s Ring 3 arm, which has no syscall to return
    through; and it needs `drain_zero_handles`'s two scheduler sites to stop
    running hooks that can park, which is a redesign of that queue rather than a
    use of it.

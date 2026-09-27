@@ -2993,7 +2993,7 @@ const MAX_KERNEL_LINES: usize = 60;
 /// The kernel's own account of a test that died, which `stdout` cannot carry.
 ///
 /// **`exit code Some(-1)` is the kernel saying it killed the process** —
-/// `recover_or_halt` answers a Ring 3 fault with `kill_process(-1)` — and every
+/// `fatal_exception` answers a Ring 3 fault with `kill_process(-1)` — and every
 /// word of *why* is a `log!`: the vector, `rip`, `cr2`, the resolved symbol.
 /// `run_test_paced` files kernel lines under `serial` and keeps them out of
 /// `stdout`, which is right for a test that passed and leaves a killed one with

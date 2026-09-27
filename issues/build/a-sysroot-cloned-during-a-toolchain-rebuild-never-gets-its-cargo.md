@@ -6,10 +6,10 @@ opened: 2026-09-27
 
 # A sysroot cloned during a toolchain rebuild never gets its cargo
 
-The primary checkout's `rust/build/aarch64-apple-darwin/stage2/bin` held
-`rustc` and `rustdoc` and no `cargo` from 22:00 until 22:08 on 2026-09-27,
-while `/Users/jan/Dev/jan/toyos` ran `toyos-build --build-only`; the link came
-back at 22:08. At 22:03:59 a `cargo test --test toyos-build` in the
+The primary checkout's `rust/build/aarch64-apple-darwin/stage2/bin` was
+recreated at 22:00 on 2026-09-27 and, read while a `toyos-build --build-only`
+ran in the primary, held `rustc` and `rustdoc` and no `cargo`; the `cargo` link
+appeared at 22:08. At 22:03:59 a `cargo test --test toyos-build` in the
 `wt/toyos-nokthread` worktree rebuilt std and published
 `rust/build/sysroots/5dc157f7fac727be` cloned from that `bin/`, so it has
 `rustc` and `rustdoc` and no `cargo`. The key is found again on every later
