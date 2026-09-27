@@ -60,7 +60,7 @@ pub fn tag(root: &Path) -> Result<String, String> {
     Ok(format!("toolchain-linux-x86_64-{}", &sha256_hex(&out.stdout)[..16]))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -359,8 +359,9 @@ fn manifest(root: &Path, tag: &str) -> Result<String, String> {
         GLIBC_FLOOR.0,
         GLIBC_FLOOR.1
     );
-    for (name, version, manifest) in crate::sdkversion::versions(root) {
-        text.push_str(&format!("{name} {version} {manifest}\n"));
+    for release in crate::sdkversion::plan(root)? {
+        let version = if release.publish { "unpublished" } else { &release.version };
+        text.push_str(&format!("{} {version} {}/Cargo.toml\n", release.krate.name, release.krate.dir));
     }
     Ok(text)
 }
@@ -397,7 +398,7 @@ The host binaries name **GLIBC_{major}.{minor}** at most, so any distribution wi
 ## What this is, and the SDK crates that go with it
 
 {indented}
-The crate versions are the ones on crates.io this toolchain's std was built from; `sdk-<toyos-abi's version>` is the release tag that names them. The same lines are the file `TOOLCHAIN` inside the tarball.
+The crate versions are the ones on crates.io this toolchain's std was built from, `unpublished` where crates.io holds none; `sdk-<toyos-abi's version, less its build metadata>` is the release tag that names them. The same lines are the file `TOOLCHAIN` inside the tarball.
 
 ## raw-window-handle
 
@@ -409,15 +410,17 @@ Until [rust-windowing/raw-window-handle#223](https://github.com/rust-windowing/r
     ))
 }
 
-/// `toolchain-linux-x86_64-sdk-<toyos-abi's version>`: the name a consumer
-/// pins, moved onto this tree's toolchain. A second release carrying only the
-/// manifest, because GitHub hangs an asset off one release id.
+/// `toolchain-linux-x86_64-sdk-<toyos-abi's version, less its build metadata>`:
+/// the name a consumer pins, moved onto this tree's toolchain. A second release
+/// carrying only the manifest, because GitHub hangs an asset off one release id.
 fn alias(root: &Path, manifest: &str, tmp: &Path) -> Result<String, String> {
     let abi = manifest
         .lines()
         .find_map(|l| l.strip_prefix("toyos-abi "))
         .and_then(|rest| rest.split_whitespace().next())
-        .ok_or("the manifest names no toyos-abi version")?;
+        .filter(|v| *v != "unpublished")
+        .and_then(|v| v.split('+').next())
+        .ok_or("crates.io holds no toyos-abi of this tree, so no sdk alias can name it")?;
     let alias = format!("toolchain-linux-x86_64-sdk-{abi}");
     let notes = tmp.join("notes.md");
     let toolchain = tmp.join("TOOLCHAIN");
