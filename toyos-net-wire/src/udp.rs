@@ -2,7 +2,7 @@
 
 use crate::checksum::{Checksum, PseudoHeader};
 use crate::emit::{be16x2, BuildError};
-use crate::ipv4::{sealed, Ipv4Packet, Ipv4Payload, Protocol};
+use crate::ipv4::{Ipv4Packet, Protocol, WritePayload};
 use crate::Port;
 
 pub const HEADER_LEN: usize = 8;
@@ -100,9 +100,7 @@ pub struct UdpBuilder<'a> {
     pub data: &'a [u8],
 }
 
-impl sealed::Sealed for UdpBuilder<'_> {}
-
-impl Ipv4Payload for UdpBuilder<'_> {
+impl WritePayload for UdpBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Udp
     }

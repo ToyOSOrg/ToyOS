@@ -5,7 +5,7 @@ use core::num::NonZeroU8;
 
 use crate::checksum::{Accumulator, PseudoHeader, Sum};
 use crate::emit::{exact, put, put_slice, BuildError};
-use crate::ethernet::{FrameBody, TxEtherType};
+use crate::ethernet::{TxEtherType, WriteFrameBody};
 
 pub const MIN_HEADER_LEN: usize = 20;
 pub const MAX_OPTIONS_LEN: usize = 40;
@@ -387,12 +387,13 @@ impl<'a> Ipv4Packet<'a> {
     }
 }
 
-pub(crate) mod sealed {
-    pub trait Sealed {}
-}
+/// A payload `Ipv4Builder` carries: implemented only in this crate, and written only by `Ipv4Builder::emit`.
+#[allow(private_bounds)]
+pub trait Payload: WritePayload {}
 
-/// Sealed: every payload names its own protocol and computes its own lengths and checksum.
-pub trait Ipv4Payload: sealed::Sealed {
+impl<T: WritePayload> Payload for T {}
+
+pub(crate) trait WritePayload {
     fn protocol(&self) -> Protocol;
 
     fn length(&self, header_len: usize) -> Result<usize, BuildError>;
@@ -406,9 +407,7 @@ pub struct RawPayload<'a> {
     pub bytes: &'a [u8],
 }
 
-impl sealed::Sealed for RawPayload<'_> {}
-
-impl Ipv4Payload for RawPayload<'_> {
+impl WritePayload for RawPayload<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Other(self.protocol)
     }
@@ -433,16 +432,15 @@ pub struct Ipv4Builder<'a, P> {
     pub payload: P,
 }
 
-impl<P: Ipv4Payload> Ipv4Builder<'_, P> {
+impl<P: Payload> Ipv4Builder<'_, P> {
     pub fn emit<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], BuildError> {
-        let packet = exact(out, FrameBody::length(self)?)?;
+        let packet = exact(out, self.length()?)?;
         self.write(packet)?;
         Ok(packet)
     }
 
-    /// The exact byte length `emit` writes, so a caller can size its buffer without the crate-private `FrameBody` it cannot forge.
     pub fn length(&self) -> Result<usize, BuildError> {
-        FrameBody::length(self)
+        WriteFrameBody::length(self)
     }
 
     fn header_len(&self) -> Result<usize, BuildError> {
@@ -454,7 +452,7 @@ impl<P: Ipv4Payload> Ipv4Builder<'_, P> {
     }
 }
 
-impl<P: Ipv4Payload> FrameBody for Ipv4Builder<'_, P> {
+impl<P: Payload> WriteFrameBody for Ipv4Builder<'_, P> {
     const ETHER_TYPE: TxEtherType = TxEtherType::Ipv4;
 
     fn length(&self) -> Result<usize, BuildError> {

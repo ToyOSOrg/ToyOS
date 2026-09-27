@@ -5,7 +5,7 @@ use core::num::NonZeroU16;
 
 use crate::checksum::{Accumulator, PseudoHeader, Sum};
 use crate::emit::{be16x2, BuildError};
-use crate::ipv4::{sealed, FragmentOffset, Ipv4Packet, Ipv4Payload, Protocol};
+use crate::ipv4::{FragmentOffset, Ipv4Packet, Protocol, WritePayload};
 
 pub const HEADER_LEN: usize = 8;
 /// RFC 1812 §4.3.2.3: an error ToyOS sends, IPv4 header included, quotes no more than fits.
@@ -298,9 +298,7 @@ impl<'a> EchoBuilder<'a> {
     }
 }
 
-impl sealed::Sealed for EchoBuilder<'_> {}
-
-impl Ipv4Payload for EchoBuilder<'_> {
+impl WritePayload for EchoBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Icmp
     }
@@ -330,9 +328,7 @@ pub struct UnreachableBuilder<'a> {
     pub datagram: &'a Ipv4Packet<'a>,
 }
 
-impl sealed::Sealed for UnreachableBuilder<'_> {}
-
-impl Ipv4Payload for UnreachableBuilder<'_> {
+impl WritePayload for UnreachableBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Icmp
     }
