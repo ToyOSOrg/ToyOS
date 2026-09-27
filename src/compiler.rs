@@ -140,7 +140,7 @@ pub fn source(checkout: &Path) -> String {
 }
 
 /// Record which compiler the primary's `stage2` is. The primary calls this
-/// after a toolchain build, and nowhere else.
+/// after a toolchain build.
 pub fn record(rust_dir: &Path) {
     let at = primary_record(rust_dir);
     let want = source(rust_dir);
@@ -153,8 +153,7 @@ pub fn record(rust_dir: &Path) {
 /// names — `Err` when nothing records which compiler that is.
 ///
 /// **The source's content, never its files' times**: a checkout that rewrites a
-/// file with the bytes it had is no new compiler, and a bootstrap it set off
-/// recreated `stage2/bin` for nothing.
+/// file with the bytes it had is no new compiler.
 fn primary_is(rust_dir: &Path, checkout: &Path) -> Result<bool, std::io::Error> {
     Ok(fs::read_to_string(primary_record(rust_dir))?.trim() == source(checkout))
 }
