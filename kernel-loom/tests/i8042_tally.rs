@@ -41,11 +41,25 @@
 //! does; the guest suite can supply neither, because a rate is not falsified by
 //! a green boot.
 
-use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as StdOrdering};
 
 use kernel_loom::i8042_tally::{Carried, Counts, Tally};
 use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::Arc;
+
+/// `loom::model`, refusing a model that explored one execution: loom 0.7 explores nothing but the
+/// first schedule when the spawned thread's first operation is a load, which `Tally::record`'s
+/// saturation check is, so every model here spawns the reader and runs the ISR on its own thread.
+fn explored(f: impl Fn() + Sync + Send + 'static) {
+    let runs = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = runs.clone();
+    loom::model(move || {
+        counted.fetch_add(1, StdOrdering::Relaxed);
+        f();
+    });
+    let runs = runs.load(StdOrdering::Relaxed);
+    assert!(runs > 1, "loom explored {runs} execution, so no interleaving was checked");
+}
 
 /// An interrupt the ISR found nothing behind is never counted as one that
 /// carried a byte — at the settled end, and at every instant on the way there.
@@ -55,16 +69,16 @@ use loom::sync::Arc;
 /// is not synchronized against it by anything.
 #[test]
 fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
-    loom::model(|| {
+    explored(|| {
         let tally = Arc::new(Tally::new());
 
-        let isr = {
-            let tally = tally.clone();
-            loom::thread::spawn(move || tally.record(Carried::Nothing))
-        };
-
         // The verdict's own question: "did anything arrive to decode?"
-        let mid = tally.read();
+        let reader = {
+            let tally = tally.clone();
+            loom::thread::spawn(move || tally.read())
+        };
+        tally.record(Carried::Nothing);
+        let mid = reader.join().unwrap();
         assert_eq!(
             mid.carried, 0,
             "a reader saw {mid:?} while the only interrupt on the machine carried nothing — \
@@ -72,8 +86,6 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
         );
         // And the total it prints alongside can never exceed what happened.
         assert!(mid.irqs() <= 1, "a reader saw {mid:?}, which is more interrupts than were taken");
-
-        isr.join().unwrap();
         assert_eq!(
             tally.read(),
             Counts { carried: 0, empty: 1 },
@@ -102,30 +114,29 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
 /// ask the question either.
 #[test]
 fn a_counted_interrupt_carries_its_bytes_with_it() {
-    loom::model(|| {
+    explored(|| {
         let tally = Arc::new(Tally::new());
         let published = Arc::new(AtomicU32::new(0));
 
-        let isr = {
+        let reader = {
             let (tally, published) = (tally.clone(), published.clone());
             loom::thread::spawn(move || {
-                // Everything the interrupt did, before it says it happened.
-                published.store(1, Ordering::Relaxed);
-                tally.record(Carried::Bytes);
+                let seen = tally.read();
+                (seen, published.load(Ordering::Relaxed))
             })
         };
+        // Everything the interrupt did, before it says it happened.
+        published.store(1, Ordering::Relaxed);
+        tally.record(Carried::Bytes);
 
-        let seen = tally.read();
+        let (seen, behind) = reader.join().unwrap();
         if seen.carried > 0 {
             assert_eq!(
-                published.load(Ordering::Relaxed),
-                1,
+                behind, 1,
                 "a reader counted an interrupt as having delivered a byte and could not see the \
                  byte: the report would say `0 bytes` about one that had arrived",
             );
         }
-
-        isr.join().unwrap();
         assert_eq!(
             tally.read(),
             Counts { carried: 1, empty: 0 },
