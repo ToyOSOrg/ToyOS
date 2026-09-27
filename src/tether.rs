@@ -175,6 +175,9 @@ impl Owner {
     pub fn killed(mut self, pids: &[u32]) -> Result<Duration, String> {
         let killed = Instant::now();
         self.child.kill().map_err(|e| format!("SIGKILL the owner: {e}"))?;
+        // Held past the verdict: `wait` would close it, and a child reading
+        // it would end on that instead of on its tether.
+        let _stdin = self.child.stdin.take();
         self.child.wait().map_err(|e| format!("reap the owner: {e}"))?;
         if self.closed.recv_timeout(WITHIN).is_ok() {
             return Ok(killed.elapsed());
