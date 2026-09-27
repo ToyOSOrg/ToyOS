@@ -340,19 +340,23 @@ pub fn slot_table_of(file: &mut std::fs::File) -> Result<toyos_update::slots::Ta
     table_on(file).map(|(table, _, _)| table)
 }
 
-/// Where the partition `guid` names is on the disk image `file`, in bytes, as
-/// its table states it: checked to the entry array's CRC and not for range or
-/// overlap, which are the loader's to refuse — a test that bends them still
-/// has to read what the image says.
+/// Where the partition `guid` names is on the disk image `file`, in bytes.
 pub fn partition_extent(file: &mut std::fs::File, guid: [u8; 16]) -> Result<(u64, u64), String> {
-    let mut out = [BLANK_PARTITION; 16];
+    let mut out = [None; 16];
     let scan = toyos_gpt::list(&mut FileSectors(file), &mut out)
         .map_err(|e| format!("no readable partition table: {e:?}"))?;
-    let found: Vec<&toyos_gpt::Partition> =
-        out[..scan.listed].iter().filter(|p| p.unique_guid == toyos_gpt::Guid(guid)).collect();
+    let unique = |entry: &toyos_gpt::Entry| match entry {
+        Ok(p) => p.unique_guid(),
+        Err(unplaced) => unplaced.unique_guid,
+    };
+    let found: Vec<&toyos_gpt::Entry> =
+        out.iter().flatten().filter(|entry| unique(entry) == toyos_gpt::Guid(guid)).collect();
     match found[..] {
-        [p] if scan.listed == scan.matched as usize => {
-            Ok((p.first_lba * u64::from(LBA), p.lba_count() * u64::from(LBA)))
+        [Ok(p)] if scan.matched as usize <= out.len() => {
+            Ok((p.first_lba() * u64::from(LBA), p.lba_count().get() * u64::from(LBA)))
+        }
+        [Err(unplaced)] => {
+            Err(format!("partition {}: its blocks are no partition: {unplaced:?}", toyos_gpt::Guid(guid)))
         }
         _ => Err(format!(
             "partition {}: the table states it {} time(s) among {} entries",
@@ -473,13 +477,43 @@ pub fn restage_table(path: &Path, edit: impl FnOnce(&mut toyos_update::slots::Ta
 /// The unique GUID of the one partition of type `kind` on the disk image
 /// `file`, as a GPT entry stores it.
 pub fn unique_guid_of(file: &mut std::fs::File, kind: toyos_gpt::Guid) -> Result<[u8; 16], String> {
-    let mut out = [BLANK_PARTITION; 2];
-    let scan = toyos_gpt::locate_type(&mut FileSectors(file), kind, &mut out)
-        .map_err(|e| format!("no readable partition table: {e:?}"))?;
-    match scan.matched {
-        1 => Ok(out[0].unique_guid.0),
-        n => Err(format!("{n} partitions of type {kind}, and this asks for one")),
+    only_partition(&mut FileSectors(file), kind).map(|part| part.unique_guid().0)
+}
+
+/// Why a scan's `out[0]` and `matched` count did not pick out exactly one
+/// partition, once the table itself was readable.
+pub enum OnePartitionError {
+    /// The one entry of the wanted type is no partition on this disk.
+    Unplaced(toyos_gpt::Stated),
+    /// Not exactly one entry carried the wanted type.
+    Matched(u32),
+}
+
+/// The one partition a [`toyos_gpt::locate_type`] scan found, out of its
+/// [`toyos_gpt::TypeScan`] and the `out[0]` slot it filled — the match shared
+/// by every caller that owes exactly one partition of a type and nothing else.
+pub(crate) fn one_partition_of(
+    scan: toyos_gpt::TypeScan,
+    first: Option<toyos_gpt::Entry>,
+) -> Result<toyos_gpt::Partition, OnePartitionError> {
+    match (scan.matched, first) {
+        (1, Some(Ok(part))) => Ok(part),
+        (1, Some(Err(unplaced))) => Err(OnePartitionError::Unplaced(unplaced)),
+        (matched, _) => Err(OnePartitionError::Matched(matched)),
     }
+}
+
+/// The one partition of type `kind` on `disk`.
+pub fn only_partition(disk: &mut dyn toyos_gpt::Sectors, kind: toyos_gpt::Guid) -> Result<toyos_gpt::Partition, String> {
+    let mut out = [None; 2];
+    let scan = toyos_gpt::locate_type(disk, kind, &mut out)
+        .map_err(|e| format!("no readable partition table: {e:?}"))?;
+    one_partition_of(scan, out[0]).map_err(|e| match e {
+        OnePartitionError::Unplaced(unplaced) => {
+            format!("the one entry of type {kind} is no partition: {unplaced:?}")
+        }
+        OnePartitionError::Matched(n) => format!("{n} partitions of type {kind}, where one is owed"),
+    })
 }
 
 /// Overwrite the file `name` on the FAT partition `guid` of the disk image at
@@ -520,14 +554,9 @@ pub fn overwrite_file_on(path: &Path, guid: [u8; 16], name: &str, bytes: &[u8]) 
 /// The slot table on the disk image `file`, which copy is current, and where
 /// its partition starts.
 fn table_on(file: &mut std::fs::File) -> Result<(toyos_update::slots::Table, usize, u64), String> {
-    let mut out = [BLANK_PARTITION; 2];
-    let scan = toyos_gpt::locate_type(&mut FileSectors(file), toyos_gpt::Guid::TOYOS_SLOTS, &mut out)
-        .map_err(|e| format!("no readable partition table: {e:?}"))?;
-    if scan.matched != 1 {
-        return Err(format!("{} slot tables, and a boot image has one", scan.matched));
-    }
+    let part = only_partition(&mut FileSectors(file), toyos_gpt::Guid::TOYOS_SLOTS)?;
     let mut copies = [[0u8; toyos_update::slots::BLOCK]; 2];
-    let at = out[0].first_lba * u64::from(LBA);
+    let at = part.first_lba() * u64::from(LBA);
     for (i, copy) in copies.iter_mut().enumerate() {
         file.seek(SeekFrom::Start(at + (i * toyos_update::slots::BLOCK) as u64))
             .and_then(|_| file.read_exact(copy))
@@ -903,24 +932,10 @@ fn designation(blocks: u64) -> [u8; SECTOR] {
 pub fn data_partition_of(path: &Path) -> Result<(u64, u64), String> {
     let mut file =
         std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let mut out = [BLANK_PARTITION; 2];
-    let scan =
-        toyos_gpt::locate_type(&mut FileSectors(&mut file), toyos_gpt::Guid::TOYOS_DATA, &mut out)
-            .map_err(|e| format!("{} has no readable partition table: {e:?}", path.display()))?;
-    if scan.matched != 1 {
-        return Err(format!("{} carries {} TOYOS-DATA partitions", path.display(), scan.matched));
-    }
-    Ok((out[0].first_lba * u64::from(LBA), out[0].lba_count() * u64::from(LBA)))
+    let part = only_partition(&mut FileSectors(&mut file), toyos_gpt::Guid::TOYOS_DATA)
+        .map_err(|why| format!("{}: {why}", path.display()))?;
+    Ok((part.first_lba() * u64::from(LBA), part.lba_count().get() * u64::from(LBA)))
 }
-
-/// A slot [`toyos_gpt::locate_type`] has not filled in.
-const BLANK_PARTITION: toyos_gpt::Partition = toyos_gpt::Partition {
-    index: 0,
-    type_guid: toyos_gpt::Guid::ZERO,
-    unique_guid: toyos_gpt::Guid::ZERO,
-    first_lba: 0,
-    last_lba: 0,
-};
 
 /// A disk file as logical blocks, for a reader that may not hold the image.
 pub(crate) struct FileSectors<'a>(pub(crate) &'a mut std::fs::File);
@@ -1122,8 +1137,8 @@ fn certify(disk: &[u8], parts: &[(&str, toyos_gpt::Guid, Volume)]) -> Result<(),
     for (what, guid, kind) in parts {
         let located = toyos_gpt::locate(&mut ImageSectors(disk), *guid)
             .map_err(|e| format!("toyos-gpt cannot find the {what} ({guid}) on this image: {e:?}"))?;
-        let at = located.partition.first_lba as usize * LBA as usize;
-        let bytes = located.partition.lba_count() as usize * LBA as usize;
+        let at = located.partition().first_lba() as usize * LBA as usize;
+        let bytes = located.partition().lba_count().get() as usize * LBA as usize;
         let volume = disk
             .get(at..at + bytes)
             .ok_or_else(|| format!("the {what} runs to byte {} of a {}-byte image", at + bytes, disk.len()))?;
@@ -1232,11 +1247,7 @@ mod tests {
 
     /// The one partition of `kind` on `disk`.
     fn only(disk: &[u8], kind: toyos_gpt::Guid) -> toyos_gpt::Guid {
-        let mut out = [BLANK_PARTITION; 2];
-        let scan = toyos_gpt::locate_type(&mut ImageSectors(disk), kind, &mut out)
-            .expect("the image has a partition table");
-        assert_eq!(scan.matched, 1, "the image carries {} partitions of type {kind}", scan.matched);
-        out[0].unique_guid
+        only_partition(&mut ImageSectors(disk), kind).expect("the image carries one").unique_guid()
     }
 
     /// Publishing a flash target runs every reader over the assembled image, and
@@ -1262,8 +1273,8 @@ mod tests {
         let start_of = |guid| {
             toyos_gpt::locate(&mut ImageSectors(&disk), guid)
                 .expect("the partition is on the image")
-                .partition
-                .first_lba as usize
+                .partition()
+                .first_lba() as usize
                 * LBA as usize
         };
 
@@ -1495,24 +1506,10 @@ mod tests {
 
         // Located by *type*, through the parser the kernel uses, at the offset
         // the table gives — never at the one the writer computed.
-        let mut out = [toyos_gpt::Partition {
-            index: 0,
-            type_guid: toyos_gpt::Guid::ZERO,
-            unique_guid: toyos_gpt::Guid::ZERO,
-            first_lba: 0,
-            last_lba: 0,
-        }; 4];
-        let scan =
-            toyos_gpt::locate_type(&mut ImageSectors(&disk), toyos_gpt::Guid::TOYOS_ROOT, &mut out)
-                .expect("the image this build wrote has a partition table");
-        assert_eq!(
-            (scan.matched, scan.listed),
-            (1, 1),
-            "a boot image carries exactly one TOYOS-ROOT partition; this one has {}",
-            scan.matched
-        );
-        let at = out[0].first_lba as usize * LBA as usize;
-        let bytes = out[0].lba_count() as usize * LBA as usize;
+        let part = only_partition(&mut ImageSectors(&disk), toyos_gpt::Guid::TOYOS_ROOT)
+            .expect("a boot image carries exactly one TOYOS-ROOT partition");
+        let at = part.first_lba() as usize * LBA as usize;
+        let bytes = part.lba_count().get() as usize * LBA as usize;
         let volume = disk[at..at + bytes].to_vec();
 
         let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(volume))
@@ -1599,13 +1596,10 @@ mod tests {
             None,
         );
 
-        let mut out = [BLANK_PARTITION; 2];
-        let scan =
-            toyos_gpt::locate_type(&mut ImageSectors(&disk), toyos_gpt::Guid::TOYOS_ROOT, &mut out)
-                .expect("the image this build wrote has a partition table");
-        assert_eq!(scan.matched, 1, "a boot image carries exactly one TOYOS-ROOT partition");
-        let at = out[0].first_lba as usize * LBA as usize;
-        let bytes = out[0].lba_count() as usize * LBA as usize;
+        let part = only_partition(&mut ImageSectors(&disk), toyos_gpt::Guid::TOYOS_ROOT)
+            .expect("a boot image carries exactly one TOYOS-ROOT partition");
+        let at = part.first_lba() as usize * LBA as usize;
+        let bytes = part.lba_count().get() as usize * LBA as usize;
         let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(
             disk[at..at + bytes].to_vec(),
         ))
