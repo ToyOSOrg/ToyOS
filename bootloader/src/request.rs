@@ -13,9 +13,7 @@
 //! variables ([`firmware`]) in whichever pass comes next, the report pass
 //! after a handover included; a slot to boot once ([`once`]) only in a pass
 //! that goes on to boot a slot, so the report pass that ends a chain leaves it
-//! for the pass after. The slot booted once is left on the table as a trial
-//! (`Next::Trial`), which keeps the slot the table marks from any grant while
-//! it runs, and the next pass that chooses a slot takes the trial away.
+//! for the pass after.
 
 use toyos_update::slots::{Next, Request, Table, Which};
 use uefi::prelude::*;
@@ -130,10 +128,9 @@ pub fn firmware(handle: Handle, system_table: &SystemTable<Boot>, ours: Option<&
     }
 }
 
-/// The slot the running system asked to boot once, left on the table as its
-/// trial; or `None` where it asked none, or where the table would not take
-/// the trial — a trial that could not be made a trial is not booted at all.
-/// A trial the last boot ran is over, and is taken away here.
+/// The slot the running system asked to boot once; or `None` where it asked
+/// none, or where taking it off failed — a trial that could not be made a
+/// trial is not booted at all.
 pub fn once(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Which> {
     let (mut disk, at) = match table(handle, system_table) {
         Ok(read) => read,
@@ -142,6 +139,7 @@ pub fn once(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Which> {
     };
     let (left, what, boots) = match at.table.request.next {
         Some(Next::Slot(which)) => (Some(Next::Trial(which)), alloc::format!("a boot of slot {} once", which.letter()), Some(which)),
+        // The trial the last boot ran is over.
         Some(Next::Trial(which)) => (None, alloc::format!("slot {}'s trial, which is over,", which.letter()), None),
         _ => return None,
     };

@@ -96,18 +96,13 @@ impl Which {
     }
 }
 
-/// What to boot once, at the next pass that boots anything, and never again;
-/// or the slot the pass before booted so.
+/// What to boot once, at the next pass that boots anything, and never again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Next {
     /// One of this disk's slots, whether or not it is the marked one: the
     /// bench's trial of an image the machine does not keep.
     Slot(Which),
-    /// The slot the pass before booted once, on the running system's request:
-    /// booted by no pass, and **while it stands the slot the table marks is
-    /// granted to nobody** ([`grant`]) — the image the machine keeps is not a
-    /// trial's to overwrite. The first pass that chooses a slot after it takes
-    /// it away.
+    /// The slot booted once and running: while it stands, nothing is granted.
     Trial(Which),
     /// The EFI system partition with this unique GUID, on any disk the
     /// firmware sees, by its removable-media path: the firmware's `BootNext`,
@@ -317,8 +312,7 @@ pub enum NoIdle {
     NotThisBoot,
     /// The idle slot names a partition that is no idle slot's.
     Stray { part: &'static str, why: Stray },
-    /// The machine runs `running` on trial, and the idle slot is the one the
-    /// table marks: the image the machine keeps.
+    /// The running slot is on trial, and the idle one is the slot kept.
     Trial { running: Which, kept: Which },
 }
 
@@ -385,10 +379,10 @@ pub struct Kinds {
 /// **The table is the grantee's to write**, so nothing it names is taken on
 /// its word: each of the idle slot's two partitions must be on the running
 /// ROOT's disk, of its kind's type, and neither of the running slot's — else
-/// the holder of one grant could name its next one anywhere. And nothing is granted while
-/// the running slot is on trial ([`Next::Trial`]).
+/// the holder of one grant could name its next one anywhere.
 pub fn grant(table: &Table, running: &Listed, listed: &[Listed], kinds: Kinds) -> Result<(Which, Slot), NoIdle> {
     let (idle, slot) = idle(table, &running.unique_guid)?;
+    // A trial writes nothing of the slot the machine keeps.
     if table.request.next == Some(Next::Trial(idle.other())) {
         return Err(NoIdle::Trial { running: idle.other(), kept: idle });
     }
@@ -579,8 +573,6 @@ mod tests {
         let mut twice = listed.to_vec();
         twice.push(at(1, KINDS.boot, [3; 16]));
         assert_eq!(grant(&t, &running, &twice, KINDS), stray("volume", Stray::Duplicate), "a GUID two disks carry");
-        // **A trial writes nothing**: while the running slot is on trial, the
-        // idle one is the image the machine keeps; a trial of the other is over.
         let trial = |which| Table { request: Request { next: Some(Next::Trial(which)), first: false }, ..t };
         assert_eq!(grant(&trial(Which::A), &running, &listed, KINDS), Err(NoIdle::Trial { running: Which::A, kept: Which::B }));
         assert_eq!(grant(&trial(Which::B), &running, &listed, KINDS).map(|(w, _)| w), Ok(Which::B));

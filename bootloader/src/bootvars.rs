@@ -112,14 +112,15 @@ fn entries(rt: &RuntimeServices) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
-/// The entry that boots the GPT partition `guid` ([`entry::naming`]), if any.
+/// The entry that boots the GPT partition `guid`, if any.
 pub fn naming(rt: &RuntimeServices, guid: &[u8; 16]) -> Result<Option<u16>, String> {
     Ok(entry::naming(&entries(rt)?, guid))
 }
 
-/// The entry that boots `esp` ([`entry::naming`]), or one written here for
-/// its removable-media loader at the lowest free number; its number, and
-/// whether it was written.
+/// The entry that boots `esp`: the lowest active one already naming it —
+/// whatever file it boots there, the owner's own entry among them — or one
+/// written here for its removable-media loader, at the lowest free number.
+/// Its number, and whether it was written.
 pub fn entry_for(rt: &RuntimeServices, esp: &Esp) -> Result<(u16, bool), String> {
     let part = &esp.part;
     let held = entries(rt)?;
@@ -172,8 +173,8 @@ pub fn boot_next(rt: &RuntimeServices, number: u16) -> Result<(), String> {
 }
 
 /// The entry the firmware would have tried after the one that booted this
-/// pass ([`entry::after`]), passing over every entry naming `ours` — this
-/// loader's own partition, whose pass has just failed.
+/// pass, skipping an inactive entry and every entry naming `ours` — this
+/// loader's own partition.
 pub fn after_this_one(rt: &RuntimeServices, ours: Option<&[u8; 16]>) -> Result<(u16, Option<u16>), String> {
     let current = words(rt, cstr16!("BootCurrent"))?
         .and_then(|w| w.first().copied())

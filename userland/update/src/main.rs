@@ -40,9 +40,7 @@
 //! **A request is the table's too** (`toyos_update::slots::Request`): the
 //! loader acts on it once at its next pass, and writes it away as it does.
 //! It asks for no more than an entry for an EFI system partition the loader
-//! finds itself, first in the order or next once. Neither ask is signed: whoever
-//! holds the grant — on the bench, the runner key — can reorder the firmware's
-//! boot entries or boot any ESP the firmware sees, once.
+//! finds itself, first in the order or next once. Neither ask is signed.
 
 use std::io::Read;
 use std::time::Instant;

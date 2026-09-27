@@ -263,9 +263,7 @@ impl Rig {
         Ok((from, uart))
     }
 
-    /// The slots' record as a clean hand-back leaves it — no boot counted and
-    /// none written down — for a machine the test powered off while it ran,
-    /// whose next pass would otherwise be the retry of a hang.
+    /// The slots' record as a clean hand-back leaves it, so the next pass is no retry.
     fn powered_off_cleanly(&self) -> Result<(), String> {
         let guid = self.log_guid()?;
         let record = Record { count: 0, booted: None, ..self.record()? };
@@ -726,12 +724,11 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
 const BOOT_NEXT_SET: &str = "(written now): the firmware boots it once, at the reset this pass ends with";
 
 /// **A request for another ESP boots that ESP once, and the order resumes**:
-/// the machine asks for its recovery stick with `update --boot-next`; a pass
-/// that cannot take the request off the slot table — the stick read-only —
-/// sets no `BootNext`; the next pass takes it off, writes an entry for that
-/// stick and points `BootNext` at it; the recovery stick's kernel boots; its
-/// reboot hands the machine to the firmware's order, which is the machine's
-/// own stick; and the machine's next reboot is its own again.
+/// the machine asks for its recovery stick with `update --boot-next`; the pass
+/// takes the request off the slot table, writes an entry for
+/// that stick and points `BootNext` at it; the recovery stick's kernel boots;
+/// its reboot hands the machine to the firmware's order, which is the
+/// machine's own stick; and the machine's next reboot is its own again.
 pub fn update_boot_next_boots_the_entry_once(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
     let rig = Rig::stage("update-boot-next")?.with_recovery()?;
     let recovery = rig.recovery()?.to_path_buf();
@@ -743,8 +740,7 @@ pub fn update_boot_next_boots_the_entry_once(_: &Path, _: &[(String, Vec<u8>)], 
     drop(guest);
     rig.powered_off_cleanly()?;
 
-    // **Consumed before it is acted on**: the pass whose write of the table
-    // fails has set nothing when it says so, and never will.
+    // A pass that cannot take the request off the table sets nothing.
     let unwritable = BootOptions {
         profile: qemu::Profile::Metal,
         boot_image: Some(Staged::Written(rig.image.clone())),
@@ -795,13 +791,8 @@ pub fn update_boot_next_boots_the_entry_once(_: &Path, _: &[(String, Vec<u8>)], 
     Ok(())
 }
 
-/// **A trial writes nothing of the image the machine keeps**: `update --once`
-/// puts an image in slot B for one boot; on that boot slot A — the image the
-/// machine keeps — is the idle slot, init grants nothing, `update` is refused
-/// and slot A's signed header is the one it was; the reboot after is slot A's,
-/// and takes the trial off the table. And a trial the loader refuses boots
-/// slot A as the ordinary boot it is: the kernel is told of no refusal of a
-/// marked slot.
+/// A trial writes nothing of the image the machine keeps, and a refused trial
+/// boots the marked slot with no refusal told.
 pub fn update_trial_writes_nothing_of_the_kept_slot(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
     let rig = Rig::stage("update-trial")?;
     let (next, _) = rig.update("next", &[], &[], NEXT, signing::key())?;
@@ -816,8 +807,7 @@ pub fn update_trial_writes_nothing_of_the_kept_slot(_: &Path, _: &[(String, Vec<
     let (from, _) = rig.reboot_until(&mut guest, &mut console, &trial)?;
     await_machine(&mut guest, &mut console, "the trial's sshd", |c| c[from..].contains(SSHD_LISTENING))?;
 
-    // Newer than the trial's, so nothing but the grant stands between it and
-    // slot A.
+    // Newer than the trial's: nothing but the grant stands before slot A.
     let (later, _) = rig.update("later", &[], &[], NEXT + 1, signing::key())?;
     let (status, said) = rig.install(&later)?;
     if rig.signed_header(Which::A)? != kept {
@@ -885,8 +875,7 @@ pub fn update_boot_first_puts_the_loader_first(_: &Path, _: &[(String, Vec<u8>)]
         .ok_or_else(|| format!("no entry number in {line:?}"))?;
     let (_, uart) = rig.reboot_until(&mut guest, &mut console, DEFAULT_READY)?;
     loader_said(&guest, uart, &format!("this pass was booted as Boot{number:04X}"))?;
-    // **Asked once, written once**: no pass after the one that wrote the
-    // order reads the request again or writes the order again.
+    // Asked once, written once.
     let since = guest.uart_log()[uart..].to_string();
     if let Some(again) = since.lines().find(|l| l.contains("Request:") || l.contains("is first:")) {
         return Err(format!("a pass after the one that wrote the order said {again:?}"));

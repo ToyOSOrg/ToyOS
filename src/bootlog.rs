@@ -128,13 +128,12 @@ pub const LOADER_PREVIOUS_LOG: &str = "loader-previous.log";
 /// filesystem: what ties a `logd` file to the image whose boot wrote it.
 pub const MOUNTED_FROM_MEMORY: &str = "root: mounted read-only from memory at";
 
-/// The loader's line naming its ESP's removable-media loader by its SHA-256:
-/// the one part of a machine no update installs, which a bench's host holds a
-/// delivered image's loader to.
+/// The loader's line naming itself by the SHA-256 of its file: the one part of
+/// a machine no update installs, which a bench's host holds a delivered
+/// image's loader to.
 pub const LOADER_IS: &str = "Loader: the removable-media file on this ESP hashes to";
 
-/// The loader's line naming the boot parameter it hands the kernel, whose
-/// `root=` names the ROOT that boot mounts.
+/// The loader's line naming the boot parameter it hands the kernel.
 pub const BOOT_PARAMETER: &str = "Boot parameter:";
 
 /// That file's first line and its last.

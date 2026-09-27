@@ -13,9 +13,7 @@
 //!
 //! What firmware stores is untrusted here: an option is walked as bytes,
 //! bounded by the slice, and a node claiming a length of zero or one past the
-//! option ends the walk rather than being stepped over. **One policy for every
-//! entry this reads**: an inactive entry is one the boot manager skips, so it
-//! is neither reused, nor pointed at, nor fallen to.
+//! option ends the walk rather than being stepped over.
 
 /// `LOAD_OPTION_ACTIVE` (UEFI 2.10 §3.1.3): the boot manager may boot it.
 pub const LOAD_OPTION_ACTIVE: u32 = 0x1;
@@ -69,8 +67,7 @@ fn node_len(bytes: usize) -> [u8; 2] {
 }
 
 /// The load option `HD(part)/File(path)`, active, described as `description`,
-/// written over the head of `out`; its length. Every byte of it is written
-/// here, and an `out` too short for it is an index past its end.
+/// written into `out`; its length.
 pub fn load_option(description: &str, part: &Partition, path: &str, out: &mut [u8]) -> usize {
     out[..4].copy_from_slice(&LOAD_OPTION_ACTIVE.to_le_bytes());
     let path_at = ucs2(description, out, LOAD_OPTION_HEAD);
@@ -151,17 +148,14 @@ fn active(option: &[u8]) -> bool {
     option.get(..4).is_some_and(|a| u32::from_le_bytes([a[0], a[1], a[2], a[3]]) & LOAD_OPTION_ACTIVE != 0)
 }
 
-/// The lowest active entry of `held` — every `Boot####` firmware holds, with
-/// its option's bytes — that boots off the GPT partition `guid`, whatever
-/// file it names there: the owner's own entry among them. The lowest, so a
-/// machine carrying two is answered the same way twice.
+/// The lowest active entry of `held` that boots off the GPT partition `guid`.
 pub fn naming<B: AsRef<[u8]>>(held: &[(u16, B)], guid: &[u8; 16]) -> Option<u16> {
     held.iter().filter(|(_, o)| active(o.as_ref()) && names(o.as_ref(), guid)).map(|(n, _)| *n).min()
 }
 
 /// `BootOrder` with `ours` first and every other entry after it in the order
 /// it had, into `out`; how many entries that is, or `None` where `out` cannot
-/// hold them all.
+/// hold them.
 pub fn first(order: &[u16], ours: u16, out: &mut [u16]) -> Option<usize> {
     let mut n = 0;
     for entry in core::iter::once(ours).chain(order.iter().copied().filter(|&e| e != ours)) {
@@ -171,17 +165,9 @@ pub fn first(order: &[u16], ours: u16, out: &mut [u16]) -> Option<usize> {
     Some(n)
 }
 
-/// The entry the firmware would have tried after `current`: the first in
-/// `order` after it that `held` carries active and that does not boot off
-/// `ours` — the loader's own partition, which has just failed — and never
-/// `current` again.
-///
-/// **After its last place in the order, never an earlier one**: a fall only
-/// ever moves on through the order, so a machine whose every later entry
-/// fails has nothing to fall to rather than a loop, an order that names one
-/// entry twice included. `current` not in the order at all (a `BootNext`
-/// boot) falls to the order's first such entry, which is what the firmware
-/// tries after a `BootNext` boot fails.
+/// The first active entry of `held` after `current`'s last place in `order`
+/// (all of it where `current` is not there) that is not `current` and does
+/// not boot off `ours`: never an earlier one, so a fall cannot loop.
 pub fn after<B: AsRef<[u8]>>(order: &[u16], current: u16, held: &[(u16, B)], ours: Option<&[u8; 16]>) -> Option<u16> {
     let rest = match order.iter().rposition(|&e| e == current) {
         Some(at) => &order[at + 1..],
@@ -196,15 +182,13 @@ pub fn after<B: AsRef<[u8]>>(order: &[u16], current: u16, held: &[(u16, B)], our
     rest.iter().copied().find(|&e| e != current && boots(e))
 }
 
-/// The lowest `Boot####` number that no entry of `held` holds and `order`
-/// does not name: a number the order still names, with no variable behind it,
-/// would put a new entry at that stale place in the order.
+/// The lowest `Boot####` number neither `held` nor `order` names.
 pub fn free<B>(held: &[(u16, B)], order: &[u16]) -> Option<u16> {
     (0..=u16::MAX).find(|n| !order.contains(n) && !held.iter().any(|(e, _)| e == n))
 }
 
 /// `Boot0003`'s number; `None` for any other variable name, lowercase hex
-/// among them, which UEFI does not read as a load option (UEFI 2.10 §3.3).
+/// among them (UEFI 2.10 §3.3).
 pub fn number(name: &str) -> Option<u16> {
     let hex = name.strip_prefix("Boot")?;
     if hex.len() != 4 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)) {
@@ -290,9 +274,6 @@ mod tests {
         assert!(!names(&unterminated, &[0xE5; 16]), "a description with no end");
     }
 
-    /// **The entry an ESP is booted by is an active one**: an inactive entry
-    /// naming it is one the boot manager skips, so it is passed over for the
-    /// active one behind it, and the lowest of two active ones is the answer.
     #[test]
     fn an_esp_is_booted_by_its_lowest_active_entry() {
         let held = [(2, option(0xE5, false)), (5, option(0xE5, true)), (7, option(0xE5, true)), (1, option(0xE6, true))];
@@ -316,8 +297,7 @@ mod tests {
     }
 
     /// The firmware's own fall-through: the next entry after the one that
-    /// booted, never it again, never one before it, and never one the boot
-    /// manager would skip or that boots off the partition that just failed.
+    /// booted, never it again and never one before it.
     #[test]
     fn the_entry_after_is_later_in_the_order_and_boots_something_else() {
         const OURS: u8 = 0x0E;
@@ -333,8 +313,6 @@ mod tests {
         assert_eq!(after(&order, 4, &inactive, ours), Some(9), "an inactive entry is passed over");
         assert_eq!(after(&order, 4, &held[2..], ours), Some(9), "an entry no variable holds is passed over");
         assert_eq!(after(&[3, 3, 3], 3, &held, None), None, "never the entry that booted");
-        // An order naming 3 twice, both 3 and 5 failing: 3 falls to nothing
-        // behind its last place, so 3 → 5 → 3 → 5 is no loop.
         let twice = [(3, option(1, true)), (5, option(2, true))];
         assert_eq!(after(&[3, 5, 3], 3, &twice, None), None);
         assert_eq!(after(&[3, 5, 3], 5, &twice, None), Some(3));

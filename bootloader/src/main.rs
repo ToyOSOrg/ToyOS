@@ -137,13 +137,10 @@ fn load_file_bytes(handle: Handle, system_table: &SystemTable<Boot>, path: &CStr
     bytes
 }
 
-/// The line naming the file every ToyOS image boots by, this ESP's
-/// removable-media loader, by its SHA-256; held to the host's spelling by
-/// `toyos_build::bootlog`'s gate.
+/// Held to the host's spelling by `toyos_build::bootlog`'s gate.
 const LOADER_IS: &str = "Loader: the removable-media file on this ESP hashes to";
 
-/// The line naming the boot parameter the kernel is handed, `root=` among
-/// it; held to the host's spelling by `toyos_build::bootlog`'s gate.
+/// Held to the host's spelling by `toyos_build::bootlog`'s gate.
 const BOOT_PARAMETER: &str = "Boot parameter:";
 
 /// This loader's own file, at the removable-media path of the volume firmware
@@ -886,17 +883,8 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
     system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS, None)
 }
 
-/// **A pass that fails hands the machine on**: a panic of this loader — no
-/// slot verifying, a floor refused, anything it cannot go on without — sets
-/// `BootNext` to the entry the firmware would have tried after this one
-/// ([`bootvars::after_this_one`]) and resets, so a machine whose stick heads
-/// `BootOrder` still reaches what stands behind it. Where nothing does, the
-/// machine powers off rather than reset into the same failure.
-///
-/// **Not a return to the boot manager**, which would try the next entry itself:
-/// a pass that returns leaves its exit-boot-services callback registered, as
-/// [`end_this_pass`] says. A panic inside this one, or after boot services
-/// are gone, stops here.
+/// A failed pass hands the machine to the entry after this one, or powers it
+/// off where there is none, never resetting into the same failure.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     static PANICKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);

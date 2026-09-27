@@ -1632,7 +1632,7 @@ pub struct Args {
     /// **The old path, named**: flash the stick through Ubuntu, choose the
     /// next boot with `efibootmgr` and read the log partition off the stick.
     /// Absent is the machine running ToyOS and nothing else
-    /// ([`crate::metalbench`]). This flag goes when the T14 has no Ubuntu.
+    /// ([`crate::metalbench`]).
     pub via_ubuntu: bool,
     /// **Flash a bench image and hand the machine to it** (`--via-ubuntu`
     /// only): the image is armed with nothing, boots once through Ubuntu's

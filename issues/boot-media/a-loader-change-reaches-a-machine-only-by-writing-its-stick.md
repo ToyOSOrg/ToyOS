@@ -19,11 +19,8 @@ the T14 a new bench written through `--via-ubuntu --resident`. That path goes
 with the installer, and an owner's machine updated with `ssh … update` has no
 check at all.
 
-A slot table format is the loader's too, and changes the same way: the table
-went from format 1 to format 2 with the running system's request
-(`toyos_update::slots`), so a machine at format 1 that installs a format-2
-image with `update` keeps its format-1 table, which that image's own `update`
-refuses — it cannot update again until its stick is written.
+The slot table's format 2 strands a format-1 machine the same way: its table
+outlives `update`, and the image it installed refuses that table.
 
 **Exit**: a loader change reaches a running machine through a signed update,
 or an image names the loader it needs and a loader that is not it refuses to

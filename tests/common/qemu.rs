@@ -2439,8 +2439,7 @@ pub struct BootOptions {
     /// sector, through QEMU's `blkdebug` under the stick's raw format: a disk
     /// error at a place the test chose, which no well-formed image can stage.
     pub stick_read_error: Option<u64>,
-    /// The boot stick attached read-only: every write the guest makes to it
-    /// fails, the loader's among them.
+    /// The boot stick attached read-only.
     pub stick_readonly: bool,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.

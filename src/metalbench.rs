@@ -15,11 +15,7 @@
 //! because the bench's own pass starts a new `loader.log` — and every `logd`
 //! file of this boot, told from the bench's own by the ROOT this image mounts.
 //! Each is held to this image before it is judged: the loader's by the signed
-//! header's digest it verified, the kernel's by the ROOT UUID it names and by
-//! no name `/log` held before the delivery. **The machine is back only once
-//! its `loader.log` is not the one fetched before the reboot**: every pass
-//! starts that file or appends to it, so the same text is the bench that was
-//! asked to reboot and has not yet. A
+//! header's digest it verified, the kernel's by the ROOT UUID it names. A
 //! volume's raw bytes are the one thing not read: the bench has the log
 //! partition mounted, so no read of it here is a quiescent volume, and
 //! `--fat32-check` is the old path's alone
@@ -150,13 +146,13 @@ impl Bench {
         Err(Refusal::Silent { what, secs })
     }
 
-    /// Wait until the machine's `/log` comes back over this key with a
-    /// `loader.log` that is not `before`, within `secs`: the bench taking the
-    /// runner key and the boot's files, in the one session. How long it took,
-    /// and the files.
+    /// Wait until the machine's `/log` comes back over this key, within
+    /// `secs`: the bench taking the runner key and the boot's files, in the
+    /// one session. How long it took, and the files.
     fn wait_for_the_log(&self, secs: u64, what: &'static str, into: &Path, before: &str) -> Result<(u64, Logs), Refusal> {
         let began = std::time::Instant::now();
         while began.elapsed().as_secs() < secs {
+            // The same loader.log is the bench not yet rebooted.
             if let Some(logs) = self.fetch(into).ok().filter(|logs| rebooted(logs, before)) {
                 return Ok((began.elapsed().as_secs(), logs));
             }
@@ -202,8 +198,7 @@ fn wire(bench: &Bench, logs: &Logs, nic: &str) -> Result<Wire, Refusal> {
     let std::net::IpAddr::V4(addr) = at.ip() else {
         return Err(bad(format!("the bench answers at {at}, which is no IPv4 address")));
     };
-    // The bench's own boot by the ROOT its pass handed the kernel, never by
-    // a name: a name is the bench's clock, which can step back.
+    // By ROOT, never by name: a name is the bench's clock, which can step back.
     let own = logs.read(bootlog::LOADER_LOG)?;
     let root = own
         .lines()
@@ -228,9 +223,7 @@ fn wire(bench: &Bench, logs: &Logs, nic: &str) -> Result<Wire, Refusal> {
 /// **Told from the bench's own by the ROOT it mounted.** Every boot's first
 /// part names its ROOT's filesystem (`kernel/src/rootfs.rs`), and an image's
 /// ROOT UUID is its own, so a file is this boot's by its content, never by
-/// being the one before the newest. **A boot any of whose names `/log` held
-/// `before` the delivery is an earlier one**: an earlier delivery of the same
-/// image names the same ROOT.
+/// being the one before the newest.
 fn kernel_log(logs: &Logs, root: &str, before: &[String]) -> Result<String, Refusal> {
     let mounted = format!("filesystem {root},");
     let logd = logs.logd();
@@ -238,6 +231,7 @@ fn kernel_log(logs: &Logs, root: &str, before: &[String]) -> Result<String, Refu
     stems.dedup();
     for boot in stems.iter().rev() {
         let parts: Vec<&str> = logd.iter().copied().filter(|name| stem(name) == *boot).collect();
+        // A name /log held before the delivery is an earlier boot's.
         if parts.iter().any(|part| before.iter().any(|name| name == part)) {
             continue;
         }
@@ -263,8 +257,7 @@ fn stem(name: &str) -> &str {
     }
 }
 
-/// Whether a pass has run since `before` was fetched: every pass starts a new
-/// `loader.log` or appends to it.
+/// Whether a pass has run since `before`: every pass starts or appends to it.
 fn rebooted(logs: &Logs, before: &str) -> bool {
     logs.read(bootlog::LOADER_LOG).is_ok_and(|now| now != before)
 }
@@ -521,16 +514,10 @@ mod tests {
         assert!(text.contains("filesystem bbbb,") && text.ends_with("the boot's second part\n"), "{text}");
         assert_eq!(kernel_log(&logs, "dddd", &[]).expect("a read"), "", "a boot that reached no logd");
         assert!(matches!(logs.read("loader-previous.log"), Err(Refusal::NotThisBoot(_))));
-        // **A name /log held before the delivery is an earlier boot**, even of
-        // this image: a rerun of one image names one ROOT.
         let before = vec!["2026-09-27-110000_0002.log".to_string()];
         assert_eq!(kernel_log(&logs, "bbbb", &before).expect("a read"), "", "an earlier delivery's boot");
     }
 
-    /// **The machine is back only as a machine that ran a pass since**, and
-    /// the passes it kept are this image's only where they name its header:
-    /// the bench still up after `reboot` was asked, and a kept file of an
-    /// earlier boot, are neither.
     #[test]
     fn a_readback_is_of_a_pass_since_and_of_this_image() {
         let scratch = toyos_tmpdir::TempDir::new("back");

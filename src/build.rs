@@ -2035,10 +2035,8 @@ pub fn bench_image(root: &Path, config: &Path, authorized: &str, version: u64, r
     Ok(build_test_image(root, &plan, quiet, &[(AUTHORIZED_ON_ROOT.to_string(), keys.into_bytes())]))
 }
 
-/// The bench's `authorized_keys` file, or why there is none: ed25519 public
-/// keys and nothing else, one per line — and **never under the owner's key**,
-/// which would make the bench a valid update for every owner machine, and the
-/// runner key authorized there.
+/// The bench's `authorized_keys`: ed25519 keys alone, and never under the
+/// owner's key, which would make it a valid update for every owner machine.
 fn bench_keys(authorized: &str, signer: &crate::signing::Whose) -> Result<String, String> {
     if let crate::signing::Whose::Owner(path) = signer {
         return Err(format!(
@@ -3774,10 +3772,6 @@ mod tests {
         assert_eq!(judge_entry_window(&SCHED_CHECK_KERNEL.join(","), b"not an ELF"), Ok(()));
     }
 
-    /// **No bench under the owner's key**: `--owner-key` or `--update-image`
-    /// beside `--bench-image` would sign a valid update for every owner
-    /// machine that authorizes the runner key, and is refused; so is a key
-    /// file holding anything but ed25519 public keys.
     #[test]
     fn a_bench_is_throwaway_signed_and_authorizes_ed25519_keys_alone() {
         use crate::signing::Whose;

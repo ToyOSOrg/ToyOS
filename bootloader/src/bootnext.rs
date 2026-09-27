@@ -1,19 +1,17 @@
 //! Point the firmware's next boot back at this loader.
 //!
 //! **The chain only closes if the machine comes back here.** A panicked kernel
-//! resets through the FADT register, and the firmware consumes whatever
-//! `BootNext` it was given. So every boot that hands the machine to a kernel
-//! first names *this* loader as the next boot, and the pass after the reset is
-//! the one that reads the page and decides whether to go on.
+//! resets through the FADT register, the firmware consumes whatever `BootNext`
+//! it was given. So every boot that hands the machine to a kernel first names
+//! *this* loader as the next boot, and the pass after the reset is the one that
+//! reads the page and decides whether to go on.
 //!
 //! The entry is found by the GPT partition GUID of the volume this image was
 //! loaded from, which is the same identity `efibootmgr --disk … --part 1` writes
 //! and the same one the metal driver flashes against — never by description, and
 //! never by taking whatever `BootCurrent` happens to say, because a firmware
 //! that booted us from a removable-media fallback path has no entry of ours at
-//! all and must be told so rather than have one guessed at. The entries are
-//! read and `BootNext` is written by [`crate::bootvars`], as every other
-//! variable this loader touches.
+//! all and must be told so rather than have one guessed at.
 
 use uefi::prelude::*;
 use uefi::proto::device_path::media::PartitionSignature;

@@ -112,8 +112,7 @@ impl Guid {
 }
 
 impl Guid {
-    /// The text [`Display`](fmt::Display) prints, read back: the 36 characters
-    /// `C12A7328-F81F-11D2-BA4B-00A0C93EC93B`, in either case, and nothing else.
+    /// The text [`Display`](fmt::Display) prints, read back, in either case.
     pub fn parse(text: &str) -> Option<Self> {
         const DASHES: [usize; 4] = [8, 13, 18, 23];
         let bytes = text.as_bytes();
@@ -185,9 +184,6 @@ mod tests {
         assert_ne!(Guid::TOYOS_ROOT, Guid::TOYOS_DATA);
     }
 
-    /// Every spelling [`Guid`]'s Display prints reads back as the bytes it
-    /// printed, in either case; a missing dash, a short text and a non-digit
-    /// read as nothing.
     #[test]
     fn the_text_it_prints_parses_back() {
         for guid in [Guid::EFI_SYSTEM, Guid::TOYOS_SLOTS, Guid([0xA5; 16])] {

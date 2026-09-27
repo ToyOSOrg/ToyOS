@@ -63,12 +63,10 @@ const PREVIOUS: &CStr16 = cstr16!("loader-previous.log");
 /// Copy `loader.log` to [`PREVIOUS`], replacing it, before the file is cut:
 /// the chain that file holds is over, and this keeps exactly one of them.
 ///
-/// **The old [`PREVIOUS`] goes first**, so a copy refused at any step leaves
-/// no file at all rather than a chain before the one that just ended.
-///
 /// Said on the console only, as [`refused`] is, where it cannot: the new file
 /// is not open yet.
 fn keep_previous(root: &mut Directory) {
+    // First, so no refusal below leaves an earlier chain's file.
     match root.open(PREVIOUS, FileMode::ReadWrite, FileAttribute::empty()) {
         Ok(stale) => {
             if let Err(e) = stale.delete() {
