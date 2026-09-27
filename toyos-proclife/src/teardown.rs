@@ -1,10 +1,9 @@
 //! Who ends a process, which threads they must retire, and what a thread's own
 //! exit is.
 //!
-//! **Exactly one path publishes exactly one exit.** Three of them can arrive at
-//! once — a `SYS_EXIT` on the process's own main thread, a `SYS_PROCESS_KILL`
-//! from a holder of a `Process` handle, and the idle loop's sweep of threads
-//! that died in panic recovery — and the whole arrangement rests on
+//! **Exactly one path publishes exactly one exit.** Two of them can arrive at
+//! once — a `SYS_EXIT` on the process's own main thread and a `SYS_PROCESS_KILL`
+//! from a holder of a `Process` handle — and the whole arrangement rests on
 //! [`claim_teardown`] answering `true` to one of them. A second publish is an
 //! assertion failure in `ProcessObject::publish_exit`, by design: it means two
 //! teardowns claimed one process, and a kernel that tolerated it would free one
@@ -26,7 +25,7 @@ use crate::{Pid, ThreadLocation, Tid, Watch, TORN_DOWN_THREAD_CODE};
 
 /// Claim exclusive teardown of a process.
 ///
-/// Exactly one exit/kill/poison path wins; a later caller must simply exit its
+/// Exactly one exit or kill path wins; a later caller must simply exit its
 /// own thread — the claimant's retire sweep handles it like any other thread.
 /// `false` also covers a process that is not in the table at all, because there
 /// is nothing left for a second claimant to do either way.

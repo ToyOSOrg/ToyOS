@@ -92,10 +92,6 @@ both before any lock conversion; the order is forced, not preferred.
 - **The sleep lock.** A sleep-lock holder stays preemptible and raises no
   preempt count, so the baseline assertion keeps meaning exactly "a spinlock is
   held".
-- **`usbd` and `iod` on the existing kernel-thread machinery.** No housekeeping
-  thread's wait can stop another's, and a panic inside one is recoverable rather
-  than a halted machine. Three threads, not one, because a stuck USB enumeration
-  must not stop the log.
 - **xHCI async, and the four lock conversions.** Inseparable. A CPU never waits
   for a device: the lock is dropped before the park, and a completion is matched
   to its asker by identity, never by arrival order.
@@ -160,10 +156,7 @@ both before any lock conversion; the order is forced, not preferred.
   `PROCESS_TABLE.lock()` at `loader/mod.rs:694`. `release_process` and
   `kill_process` bracket `teardown_resources` between two table acquisitions and
   hold neither across it. So `PROCESS_TABLE` does not have to convert for the
-  park to be legal, and converting it anyway would buy the exception-recovery
-  path a `try_lock` with no answer for its failure: `recover_or_halt`'s
-  `Blame::Process` arm reaches `process::exit` from a CPU exception
-  (`arch/idt/exceptions.rs:348`), and nothing on that path mints a `Parkable`.
+  park to be legal.
   What *does* have to convert is `Lock<ProcessData>`, and wall 5 is why.
 
   **Six, and the count above is the xHCI chunk's rather than the machine's.**
@@ -384,9 +377,7 @@ means everywhere, not only here. Three shapes:
    anywhere.
 3. **Give the batch an owner** — `deferred-release-outlives-its-syscall`'s own
    second shape — and make `File` deferred. That buys a parkable release site on
-   the syscall path and does *not* cover `close_all` reached from
-   `recover_or_halt`'s `Blame::Process` arm, which has no syscall to return
-   through; and it needs `drain_zero_handles`'s two scheduler sites to stop
+   the syscall path, and it needs `drain_zero_handles`'s two scheduler sites to stop
    running hooks that can park, which is a redesign of that queue rather than a
    use of it.
 
