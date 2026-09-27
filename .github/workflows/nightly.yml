@@ -251,14 +251,12 @@ jobs:
       - run: cargo build -p toyos-build
 
   # One standing issue, found by title and commented on; a dispatch is somebody
-  # watching the run, so only the schedule files. `actions: read` is the run
-  # history a registration's red streak is read from.
+  # watching the run, so only the schedule files.
   nightly-red:
     needs: [host, build, guest, tcg, audio, portability-linux, portability-macos]
     if: ${{ !cancelled() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
-      actions: read
       contents: read
       issues: write
     steps:

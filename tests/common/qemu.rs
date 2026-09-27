@@ -3501,16 +3501,6 @@ impl QemuInstance {
         self.drain_for(dur, |_| false)
     }
 
-    /// Every console line already here and not yet read, waiting for none.
-    pub fn take_pending(&mut self) -> String {
-        let mut out = String::new();
-        while let Ok(seen) = self.rx.try_recv() {
-            out.push_str(&seen);
-            out.push('\n');
-        }
-        out
-    }
-
     /// Drain until `line` reads true of a line just seen, or until the guest
     /// goes quiet for the rest of `dur`.
     ///
@@ -3594,12 +3584,6 @@ impl QemuInstance {
     /// host with a core per vCPU it is exactly [`budget`].
     pub fn budget(&self, one_guest: Duration) -> Duration {
         budget_smp(one_guest, self.smp)
-    }
-
-    /// The ceiling a boot of this guest was held to, for a wait on a boot it
-    /// makes after a reset.
-    pub fn boot_ceiling(&self) -> Duration {
-        boot_ceiling(self.smp)
     }
 
     pub fn run_test(&mut self, name: &str, timeout: Duration) -> TestResult {
@@ -5090,7 +5074,10 @@ fn wait_for_ready(
     // `8/4` oversubscribed, which the boot-derived `host_scale` cannot fold in
     // because it *is* what boot measured. `oversubscription` says why in terms
     // of `vcpus/cores`; on a host with a core per vCPU it multiplies by one.
-    let boot_timeout = boot_ceiling(options.smp);
+    let (num, den) = host_scale();
+    let (onum, oden) = oversubscription(options.smp);
+    let boot_timeout =
+        Duration::from_secs(10) * WIDTH.load(Ordering::SeqCst).max(2) * num / den * onum / oden;
     let start = Instant::now();
     let mut seen = String::new();
     loop {
@@ -5179,12 +5166,4 @@ fn wait_for_ready(
     }
     record_boot(start.elapsed());
     seen
-}
-
-/// How long one boot of an `smp`-wide guest may take to its ready marker
-/// before it is a wedge; [`wait_for_ready`] derives it at its one call.
-fn boot_ceiling(smp: u32) -> Duration {
-    let (num, den) = host_scale();
-    let (onum, oden) = oversubscription(smp);
-    Duration::from_secs(10) * WIDTH.load(Ordering::SeqCst).max(2) * num / den * onum / oden
 }
