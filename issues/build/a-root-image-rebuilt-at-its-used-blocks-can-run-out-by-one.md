@@ -22,9 +22,9 @@ root: failed to symlink 'bin/tone' -> '/system/bin/toybox': NoSpace { requested:
 Every test on that boot then failed without a guest (`30_hanoi` onward, 50 in
 the lane). The same branch's local fast tier grouped the corpus as 48 binaries
 and passed it, so whether a set trips it depends on the exact bytes and
-grouping; the rounding to `PARTITION_ALIGN` hides it except where the used
-count lands at or just under an alignment boundary. PR #532's binaries (linked
-by rust-lld) are the first set seen to land there.
+grouping. Why the second layout needs a block the first did not is not
+measured; the rounding to `PARTITION_ALIGN` gives most sets slack. PR #532's
+binaries, linked by rust-lld, are the first set seen to run out.
 
 Exit: the second build's size is one the first proves sufficient (or the
 first build's image is kept and trimmed), and a host test builds a set that
