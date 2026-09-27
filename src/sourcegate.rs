@@ -345,7 +345,7 @@ const RETIRED_ABI_NAMES: &[&str] = &[
 const GUEST_TREES: &[&str] =
     &["kernel/src", "toyos/src", "toyos-abi/src", "userland", "tests"];
 
-/// `line` with its comment and its string and char literals removed.
+/// `line` with its comment and its string literals removed.
 ///
 /// What is left is the part that names things. Prose explaining what a deleted
 /// call used to do is legal and worth keeping; a gravestone table mapping a
@@ -361,21 +361,6 @@ fn code_only(line: &str) -> String {
             }
             '"' => in_string = !in_string,
             '/' if !in_string && chars.peek() == Some(&'/') => break,
-            // A char literal is a literal (`'"'` opens no string); a lifetime or a label is code.
-            '\'' if !in_string => {
-                let mut ahead = chars.clone();
-                match (ahead.next(), ahead.next()) {
-                    (Some('\\'), _) => {
-                        chars.next();
-                        chars.next();
-                        while chars.next().is_some_and(|c| c != '\'') {}
-                    }
-                    (Some(_), Some('\'')) => {
-                        chars.nth(1);
-                    }
-                    _ => out.push(c),
-                }
-            }
             _ if !in_string => out.push(c),
             _ => {}
         }
@@ -1273,168 +1258,131 @@ const ASSEMBLY: &[&str] = &["asm!", "global_asm!", "naked_asm!", "#[naked]", "un
 #[cfg(test)]
 const ARCH_MODULE: &str = "core::arch/std::arch";
 
-/// A path code spells from a root: the 0-based line of its last segment, the
-/// segments after the root, and the name a rename binds. A group is one path
-/// per element, a glob ends in `*`, and a rename of the root itself (`core as
-/// k`, `core::{self as k}`) is `self` renamed.
-#[cfg(test)]
-struct Spelled {
-    line: usize,
-    segments: Vec<String>,
-    alias: Option<String>,
-}
-
-/// Every path in `text` from one of `roots` (`core`, `std`, which `$crate`
-/// also spells for `crate`). The root's rename counts only where it imports:
-/// `use core as k;`, `extern crate core as k;`, an element of a `use` group. A
-/// glob or a rename is not followed to what it brings into scope: that is
-/// resolution, which a scan does not have.
-#[cfg(test)]
-fn spelled_paths(text: &str, roots: &[&str]) -> Vec<Spelled> {
-    let code = Code(text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect());
-    let mut found = Vec::new();
-    let mut at = 0;
-    while at < code.0.len() {
-        let Some((name, end)) = code.ident_at(at) else {
-            at += 1;
-            continue;
-        };
-        if roots.contains(&name.as_str()) {
-            let after = code.skip_space(end);
-            if code.colons(after) {
-                code.tree(after + 2, Vec::new(), &mut found);
-            } else if code.imported(at) {
-                let alias = code.alias_at(after);
-                let segments = vec!["self".to_string()];
-                found.extend(alias.is_some().then(|| Spelled { line: code.line_of(at), segments, alias }));
-            }
-        }
-        at = end;
-    }
-    found
-}
-
-/// Code as characters, its comments and literals gone ([`code_only`]).
-#[cfg(test)]
-struct Code(Vec<char>);
-
-#[cfg(test)]
-impl Code {
-    /// Every path the use tree at `at` spells after `prefix`, into `out`.
-    fn tree(&self, at: usize, prefix: Vec<String>, out: &mut Vec<Spelled>) {
-        let at = self.skip_space(at);
-        let line = self.line_of(at);
-        if self.0.get(at) == Some(&'*') {
-            out.push(Spelled { line, segments: [prefix, vec!["*".to_string()]].concat(), alias: None });
-        } else if self.0.get(at) == Some(&'{') {
-            // Each element begins after the `{` or after a `,` at depth one.
-            self.tree(at + 1, prefix.clone(), out);
-            let (mut depth, mut i) = (0usize, at + 1);
-            while let Some(&c) = self.0.get(i) {
-                match c {
-                    '{' => depth += 1,
-                    '}' if depth == 0 => break,
-                    '}' => depth -= 1,
-                    ',' if depth == 0 => self.tree(i + 1, prefix.clone(), out),
-                    _ => {}
-                }
-                i += 1;
-            }
-        } else if let Some((name, end)) = self.ident_at(at) {
-            let (after, segments) = (self.skip_space(end), [prefix, vec![name]].concat());
-            match self.colons(after) {
-                true => self.tree(after + 2, segments, out),
-                false => out.push(Spelled { line, segments, alias: self.alias_at(after) }),
-            }
-        }
-    }
-
-    /// The name bound by an `as` at `at`.
-    fn alias_at(&self, at: usize) -> Option<String> {
-        let (_, end) = self.ident_at(at).filter(|(word, _)| word == "as")?;
-        self.ident_at(self.skip_space(end)).map(|(name, _)| name)
-    }
-
-    fn line_of(&self, at: usize) -> usize {
-        self.0[..at].iter().filter(|c| **c == '\n').count()
-    }
-
-    fn skip_space(&self, at: usize) -> usize {
-        (at..).find(|&j| !self.0.get(j).is_some_and(|c| c.is_whitespace())).unwrap_or(at)
-    }
-
-    fn colons(&self, at: usize) -> bool {
-        self.0.get(at..at + 2) == Some(&[':', ':'][..])
-    }
-
-    fn word(&self, at: usize) -> bool {
-        self.0.get(at).is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
-    }
-
-    /// The identifier that begins at `at`, and where it ends.
-    fn ident_at(&self, at: usize) -> Option<(String, usize)> {
-        if at.checked_sub(1).is_some_and(|j| self.word(j)) {
-            return None;
-        }
-        let end = (at..).find(|&j| !self.word(j)).unwrap_or(at);
-        (end > at).then(|| (self.0[at..end].iter().collect(), end))
-    }
-
-    /// The identifier that ends before `at`, over whitespace and `::`, and where it begins.
-    fn ident_before(&self, at: usize) -> (usize, String) {
-        let end = (0..at).rev().find(|&j| !self.0[j].is_whitespace() && self.0[j] != ':').map_or(0, |j| j + 1);
-        let start = (0..end).rev().find(|&j| !self.word(j)).map_or(0, |j| j + 1);
-        (start, self.0[start..end].iter().collect())
-    }
-
-    /// Whether `at` begins an item that imports: `use …`, or `extern crate …`,
-    /// or an element of a `use` group.
-    fn imported(&self, mut at: usize) -> bool {
-        loop {
-            let (start, ident) = self.ident_before(at);
-            match ident.as_str() {
-                "use" => return true,
-                "crate" => return self.ident_before(start).1 == "extern",
-                "" => {}
-                _ => return false,
-            }
-            // Not after an identifier: inside a group only if a `{` opens it.
-            let back = (0..start).rev().find(|&j| !self.0[j].is_whitespace());
-            match back.map(|j| (j, self.0[j])) {
-                Some((j, '{')) => at = j,
-                Some((j, ',')) => {
-                    let mut depth = 0usize;
-                    let open = (0..j).rev().find(|&k| match self.0[k] {
-                        '}' => { depth += 1; false }
-                        '{' if depth == 0 => true,
-                        '{' => { depth -= 1; false }
-                        _ => false,
-                    });
-                    match open {
-                        Some(k) if !self.0[k..j].contains(&';') => at = k,
-                        _ => return false,
-                    }
-                }
-                _ => return false,
-            }
-        }
-    }
-}
-
 /// The 0-based lines of `text` on which a path names `core::arch` or
 /// `std::arch`, or makes a name that can: `core::arch::asm!`,
 /// `use core::arch as isa;`, an `arch` that begins an element of a `core::{…}`
 /// group, over any number of lines — and any glob of `core`/`std` itself
 /// (`use core::*;`, `core::{*}`) or rename of it (`use core as k;`,
-/// `extern crate core as k;`, `core::{self as k}`), refused whole: code outside
-/// an arch module has no other use for either.
+/// `extern crate core as k;`, `core::{self as k}`).
+///
+/// **The glob and the rename are refused whole**, not followed to an `arch`
+/// after them: what they bring into scope is read by resolution, which a line
+/// scan does not have, and code outside an arch module has no other use for
+/// either. Comments and string literals are not code ([`code_only`]).
 #[cfg(test)]
 fn arch_module_lines(text: &str) -> Vec<usize> {
-    spelled_paths(text, &["core", "std"])
-        .into_iter()
-        .filter(|p| matches!(p.segments[0].as_str(), "arch" | "*") || (p.segments[0] == "self" && p.alias.is_some()))
-        .map(|p| p.line)
-        .collect()
+    let code: Vec<char> = text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect();
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let line_of = |at: usize| code[..at].iter().filter(|c| **c == '\n').count();
+    let skip_space = |mut at: usize| {
+        while code.get(at).is_some_and(|c| c.is_whitespace()) {
+            at += 1;
+        }
+        at
+    };
+    let ident_at = |at: usize, name: &str| {
+        let end = at + name.len();
+        code.get(at..end).is_some_and(|s| s.iter().copied().eq(name.chars()))
+            && !code.get(end).is_some_and(|c| word(*c))
+            && !at.checked_sub(1).and_then(|j| code.get(j)).is_some_and(|c| word(*c))
+    };
+    // The identifier that ends before `at`, over whitespace and `::`.
+    let ident_before = |at: usize| {
+        let mut end = at;
+        while end > 0 && (code[end - 1].is_whitespace() || code[end - 1] == ':') {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && word(code[start - 1]) {
+            start -= 1;
+        }
+        (start, code[start..end].iter().collect::<String>())
+    };
+    // Whether `at` begins an item that imports: `use …`, or `extern crate …`,
+    // or an element of a `use` group.
+    let imported = |at: usize| {
+        let mut at = at;
+        loop {
+            let (start, ident) = ident_before(at);
+            match ident.as_str() {
+                "use" => return true,
+                "crate" => return ident_before(start).1 == "extern",
+                "" => {}
+                _ => return false,
+            }
+            // Not after an identifier: inside a group only if a `{` opens it.
+            let mut back = start;
+            while back > 0 && code[back - 1].is_whitespace() {
+                back -= 1;
+            }
+            match back.checked_sub(1).map(|j| code[j]) {
+                Some('{') => at = back - 1,
+                Some(',') => {
+                    let mut depth = 0usize;
+                    let mut j = back - 1;
+                    loop {
+                        let Some(k) = j.checked_sub(1) else { return false };
+                        j = k;
+                        match code[j] {
+                            '}' => depth += 1,
+                            '{' if depth == 0 => break,
+                            '{' => depth -= 1,
+                            ';' => return false,
+                            _ => {}
+                        }
+                    }
+                    at = j;
+                }
+                _ => return false,
+            }
+        }
+    };
+    let mut lines = Vec::new();
+    for at in 0..code.len() {
+        let Some(root) = ["core", "std"].into_iter().find(|root| ident_at(at, root)) else { continue };
+        let after = skip_space(at + root.len());
+        if ident_at(after, "as") && imported(at) {
+            lines.push(line_of(at));
+            continue;
+        }
+        let colons = after;
+        if code.get(colons..colons + 2) != Some(&[':', ':'][..]) {
+            continue;
+        }
+        let next = skip_space(colons + 2);
+        if ident_at(next, "arch") || code.get(next) == Some(&'*') {
+            lines.push(line_of(next));
+        } else if code.get(next) == Some(&'{') {
+            // Each element of the group begins after its `{` or a `,` at depth one.
+            let (mut depth, mut i, mut element) = (0usize, next, true);
+            while let Some(&c) = code.get(i) {
+                match c {
+                    '{' => {
+                        depth += 1;
+                        element = depth == 1;
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    ',' if depth == 1 => element = true,
+                    c if c.is_whitespace() => {}
+                    _ => {
+                        let renamed_self =
+                            ident_at(i, "self") && ident_at(skip_space(i + "self".len()), "as");
+                        if element && depth == 1 && (ident_at(i, "arch") || c == '*' || renamed_self) {
+                            lines.push(line_of(i));
+                        }
+                        element = false;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    lines
 }
 
 /// The spelling of the first needle of `rule` that line `n` of a file holds,
