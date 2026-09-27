@@ -912,7 +912,7 @@ fn resets_inside_the_bound(
 /// `kernel_params` kills `klogd` on its first instruction, and the machine is
 /// what dies. The verdict is QEMU's reset, never the guest's word: a recovered
 /// `klogd` takes the console down with it, so the boot stops at klogd's spawn
-/// line, the last one a halting and a recovering kernel both write.
+/// line, which a halting and a recovering kernel both write.
 pub fn klogd_death_resets(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
