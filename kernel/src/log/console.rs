@@ -107,6 +107,19 @@ pub fn drain_all(wire: &SleepGuard<'_, ()>) {
     drain_queue(wire, usize::MAX);
 }
 
+/// Every record and queued line onto the wire, for the stop once it has
+/// stopped every console holder: nothing can add to the queue any more, so
+/// what a holder queued before it was stopped goes on the wire under the
+/// boot's last word and never after it.
+pub fn drain_for_the_stop() {
+    if !serial::has_console() {
+        return;
+    }
+    let parkable = scheduler::Parkable::at_entry();
+    let wire = serial::wire(&parkable);
+    drain_all(&wire);
+}
+
 /// Records and queued lines `klogd` takes per hold of the wire, so a console
 /// holder's line is never behind the whole backlog of records, nor the other
 /// way round.
@@ -397,6 +410,16 @@ impl RecordSink for Raw {
     }
 }
 
+/// Whether `klogd` leaves the queue to the stop: `console-queue-at-the-stop`'s
+/// `klogd`, behind a stop that has been claimed.
+fn left_to_the_stop() -> bool {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::console_queue_at_the_stop() {
+        return crate::quiesce::claimed();
+    }
+    false
+}
+
 extern "C" fn body(_arg: u64) -> ! {
     // First, before any drain: stages a panic inside a kernel thread to test the panic handler's branch.
     #[cfg(feature = "boot-actuators")]
@@ -411,7 +434,7 @@ extern "C" fn body(_arg: u64) -> ! {
             // A chunk of each per hold, with interrupts on throughout.
             let wire = serial::wire(&parkable);
             drain_records(&wire, CHUNK);
-            drain_queue(&wire, CHUNK as usize)
+            !left_to_the_stop() && drain_queue(&wire, CHUNK as usize)
         } else {
             discard_pending();
             discard_queue()
@@ -440,7 +463,7 @@ extern "C" fn body(_arg: u64) -> ! {
         // Safe with no backend because `discard_pending` still advances the position each pass.
         if shard::arm_waiter(shard::log_waiter(), || {
             // Under the lock `queue` stores under, ahead of the fence its wake takes.
-            DRAINED.any_pending() || QUEUE.lock().len > 0
+            DRAINED.any_pending() || (!left_to_the_stop() && QUEUE.lock().len > 0)
         }) {
             continue;
         }

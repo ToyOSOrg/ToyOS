@@ -44,6 +44,10 @@ pub(super) fn sys_log_read(
     }
 }
 
+/// The line `console-queue-at-the-stop` queues once every holder is stopped.
+#[cfg(feature = "boot-actuators")]
+const QUEUED_AT_THE_STOP: &str = "console: a holder's line, queued once the stop had stopped every holder";
+
 fn quiesce(last: &str) -> Result<(), SyscallError> {
     // Refused by name, and first: nothing below runs twice.
     if !crate::quiesce::claim_the_shutdown() {
@@ -90,6 +94,15 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     #[cfg(feature = "boot-actuators")]
     crate::quiesce::last::await_the_held_thread();
     let stopped = crate::quiesce::stop();
+    // A line queued behind the stop, where `klogd` has not reached it.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::console_queue_at_the_stop() {
+        let queued = crate::log::console::queue(QUEUED_AT_THE_STOP.as_bytes(), false);
+        assert!(queued, "console-queue-at-the-stop: the queue had no room for its one line");
+    }
+    // Every console holder is stopped, so the queue only shrinks from here:
+    // what they queued goes on the wire now, above the boot's last word.
+    crate::log::console::drain_for_the_stop();
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::quiesce_dump() {
         crate::sched::dump::serve_for_the_stop();

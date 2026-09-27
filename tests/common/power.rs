@@ -172,8 +172,29 @@ pub fn quiesce_stops_the_machine(
     // thread, parked on init's answer; `test-runner`'s main and deadline
     // threads; and `logd`'s. `init` asked for the stop and is its caller.
     const OTHERS: u32 = 4;
-    let (whole, record) =
-        stopped_boot("tests/quiescecase/system.toml", JOB, &[LATE_WORD], rust_bins)?;
+    /// Mirrored in `kernel/src/syscall/machine.rs`, which queues it.
+    const QUEUED: &str = "console: a holder's line, queued once the stop had stopped every holder";
+    let (whole, record) = stopped_boot(
+        "tests/quiescecase/system.toml",
+        JOB,
+        &[LATE_WORD, "console-queue-at-the-stop"],
+        rust_bins,
+    )?;
+    // **A holder's line still queued at the stop is the stop's to put on the
+    // wire**, above the last word: `klogd` is kept off the queue from the
+    // stop's claim on, so without that drain the line is never written.
+    let lines: Vec<&str> = whole.lines().collect();
+    let queued = lines.iter().position(|l| l.contains(QUEUED));
+    let last = lines.iter().position(|l| l.contains(REBOOTING));
+    match (queued, last) {
+        (Some(queued), Some(last)) if queued < last => {}
+        _ => {
+            return Err(format!(
+                "the line queued at the stop is at {queued:?} and the last word at {last:?}: \
+                 a holder's line the stop left in the queue is lost at the reset\n{whole}"
+            ));
+        }
+    }
     if record.in_flight != 0 {
         return Err(format!(
             "the block layer still had {} operation(s) open on a thread this stop had stopped, so \
