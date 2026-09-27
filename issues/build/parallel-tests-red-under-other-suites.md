@@ -534,7 +534,7 @@ mechanism for it. `src/redlist.rs` carries the sighting.
   **It contradicts a retirement rather than joining a class.** All three of the
   name's earlier rows in `src/redlist.rs` are retired: the two dev-host
   `ALONE: GREEN` rows by the single-word tally in
-  `kernel/src/drivers/i8042/tally.rs` (2026-08-17), which made `N interrupts
+  `kernel/src/arch/x86_64/i8042/tally.rs` (2026-08-17), which made `N interrupts
   and 0 bytes` unprintable, and the CI row by "the verdict revises itself once"
   (2026-08-28) — a mute line said while a decoder still holds the run is
   `HEALTH_MUTE_BLIND`, the first blamed byte moves it to `HEALTH_MUTE_SAID`

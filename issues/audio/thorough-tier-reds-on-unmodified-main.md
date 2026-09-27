@@ -154,7 +154,7 @@ the instrument refusing —
 stopped' after the last client removal — the device is still running with no
 clients`. That is filed apart as `gate-a-suspend-structure-verdict-unread`.
 
-The exit code is fixed in `.github/workflows/gate-a.yml` (`set -o pipefail`, the
+The exit code is fixed in `35383398^:.github/workflows/gate-a.yml` (`set -o pipefail`, the
 idiom every other workflow in `.github/` already uses). Nothing about how a
 verdict is *reached* changed.
 

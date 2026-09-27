@@ -22,9 +22,9 @@ Stage one (#132) put default clippy on every PR and it runs today: the `host`
 job's `clippy` step lints the host workspace (`--workspace --all-targets`), the
 kernel under `x86_64-unknown-none` in both feature arms, the bootloader under
 `x86_64-unknown-uefi` and `toyos-abi`, each with `-D warnings` and the six
-adopted lints (`.github/workflows/host-tests.yml:199-220`). `userland/` is the
+adopted lints (`35383398^:.github/workflows/host-tests.yml:199-220`). `userland/` is the
 one tree it cannot reach, and that step says why at
-`.github/workflows/host-tests.yml:130-137`: `x86_64-unknown-toyos` is a custom
+`35383398^:.github/workflows/host-tests.yml:130-137`: `x86_64-unknown-toyos` is a custom
 target and the `toyos` toolchain has no `cargo-clippy` component. This entry
 carries stage two: every
 `pedantic`/`nursery` lint measured on all three trees, adopted or rejected
@@ -47,9 +47,9 @@ the group).
 
 | lint | count | why |
 |---|---:|---|
-| `checked_conversions` | 1 | `kernel/src/arch/syscall.rs`'s device-register-write syscall bounded a `u64` against `u32::MAX` with a manual `as` comparison, then cast twice more in the body. Restructured through `u32::try_from` — one conversion, no repeated casts, at a trust-boundary site that is exactly what this bar is for. |
+| `checked_conversions` | 1 | `4a98107f^:kernel/src/arch/syscall.rs`'s device-register-write syscall bounded a `u64` against `u32::MAX` with a manual `as` comparison, then cast twice more in the body. Restructured through `u32::try_from` — one conversion, no repeated casts, at a trust-boundary site that is exactly what this bar is for. |
 | `manual_midpoint` | 3 | `(a + b) / 2` can overflow near the integer's max; `T::midpoint` can't. Two in a `toyos-desktop` test, one in `toyos-sched/sim`'s binary-search shrinker — no realistic overflow today, but the fix is free and closes the class everywhere, forever. |
-| `redundant_clone` | 6 | Real, not the false-positive-prone lint its `nursery` placement suggested — every instance checked was a clone of a binding never used again after (verified by hand, not by trusting the lint): `kernel/src/arch/syscall.rs`, a `kernel-loom` test, `toyos-cc`'s parser (a double clone — the match scrutinee was already an owned value), and three in `tests/toyos.rs`. |
+| `redundant_clone` | 6 | Real, not the false-positive-prone lint its `nursery` placement suggested — every instance checked was a clone of a binding never used again after (verified by hand, not by trusting the lint): `4a98107f^:kernel/src/arch/syscall.rs`, a `kernel-loom` test, `toyos-cc`'s parser (a double clone — the match scrutinee was already an owned value), and three in `tests/toyos.rs`. |
 | `unchecked_time_subtraction` | 1 | `tests/toyos.rs`: a bare `Duration - Duration` that panics identically today either way — `.checked_sub().expect(msg)` says why it can't underflow instead of hiding the same panic behind an operator. No behavior change; an honesty win at zero cost. |
 | `unnecessary_semicolon` | 2 | Two dead `;` after `if` statements in `kernel/src/process.rs` and `kernel/src/main.rs`. Nothing to weigh. |
 | `default_trait_access` | 1 | `bootloader/src/main.rs`'s UEFI `open()` call passed `Default::default()` where `FileAttribute::default()` names the type. One site, one import. |

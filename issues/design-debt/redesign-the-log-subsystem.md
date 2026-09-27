@@ -2,7 +2,6 @@
 status: open
 kind: track
 opened: 2026-08-08
-decided: 2026-08-19
 ---
 
 # Redesign the log subsystem, and re-shape `kernel/src`
@@ -22,7 +21,7 @@ work in a scheduler-adjacent path, and fails alone.
 
 The original question, recorded verbatim because it was the owner asking:
 *"should we redesign and rewrite the log subsystem and rethink if the current
-file/folder structure of the kernel makes sense?"* (`kernel/src/log.rs`). What
+file/folder structure of the kernel makes sense?"* (`c31e9f97^:kernel/src/log.rs`). What
 follows is the evidence that made it decidable.
 
 **The log subsystem, as it was when this was written.** Six places, no core:
@@ -46,8 +45,8 @@ writers and readers never observe a torn record"
 (`kernel/src/log/shard.rs:1`). The record type is not the kernel's at all —
 `LogRecord` comes from `toyos_abi::log`, imported at `kernel/src/log/mod.rs:19`
 and filled at `:158`. The three files the table
-calls the log's own are gone: `kernel/src/log.rs`,
-`kernel/src/drivers/log_ring.rs` and `kernel/src/log_file.rs` are none of them
+calls the log's own are gone: `c31e9f97^:kernel/src/log.rs`,
+`ee8369c9^:kernel/src/drivers/log_ring.rs` and `9ca7631a^:kernel/src/log_file.rs` are none of them
 in the tree. The file sink is not a kernel module at all — `/system/bin/logd` is an
 ordinary user process, and "the kernel keeps the record ring and the console;
 every policy about files — where they go, what they are called, how many there
@@ -100,7 +99,7 @@ Two smaller layout items ride the same answer. `usb_gate.rs` (242 lines) and
 call (`kernel/src/main.rs:34`, `:36`, `:408`, `:537`) and are never in an
 ordinary build, but
 they sit interleaved with production sources; the review's target is one
-`kernel/src/gates/` directory so that what test machinery exists is auditable
+`gates/` directory under `kernel/src/` so that what test machinery exists is auditable
 in one listing. And `input_merge_test` is the tell that pure logic is trapped
 in the kernel: the merge state machine (one held-set, one button-merge, both
 bounded) is host-testable with synthetic multi-source streams, after which the

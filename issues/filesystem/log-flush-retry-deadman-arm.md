@@ -37,6 +37,39 @@ The first boot of the same test passes, so the retry half is sound; what is
 unresolved is whether the second boot's refusal is the deadman it is supposed to
 stage or a different error arriving first, and the console does not say which.
 
-**Exit condition.** The deadman boot produces the record the test reads, or the
-test reads the record that boot actually produces — decided by which error
-`SYS_FSYNC` returned, which is a value nothing on that console prints today.
+## Two older ways it reddened, not re-seen since ROOT-in-memory
+
+`d5c2d9c9^:issues/boot-media/log-flush-retry-reds-two-ways-at-two-in-five.md`
+recorded four ways `log_flush_retry` had been seen to red; `d5c2d9c9` deleted
+it once ROOT-in-memory gave the `[hung]` arm's own mechanism — a stick going
+offline while userland is still paged from it — a fix and six green runs. Two
+of its other ways were not re-seen in those six runs, so neither is known fixed
+by that work:
+
+- **The `[hung]` arm missing its "transport broke on SCSI" line.** One of that
+  file's two originally-recorded assertions: the wide run reds on
+  `the deadman never declared the volume failed` while the *alone* re-run of
+  the same boot reds instead on
+  `no "transport broke on SCSI" in the log, so the staged hung device never
+  met its recovery` — two different assertions from the same staged fault,
+  which was that file's reason for treating this as more than a scheduling
+  classification.
+- **A boot timeout before `===READY===`.** Measured 2026-09-07 on three
+  separate points (`main` 71ed50cf, `metal-suite` 7f16914d and f63bce1d), each
+  run alone: `log_flush_retry: [qemu] Boot timed out waiting for
+  ===READY===`, with the boot never coming up at all — a third shape beside
+  the two assertion failures, seen before ROOT-in-memory and on a branch that
+  does not carry it.
+
+## Exit condition
+
+The deadman boot produces the record the test reads, or the test reads the
+record that boot actually produces — decided by which error `SYS_FSYNC`
+returned, which is a value nothing on that console prints today.
+
+And `log_flush_retry` is re-measured (wide and alone) enough times, on a tree
+that carries ROOT-in-memory, to say whether either older mode still occurs; if
+seen again, a `src/redlist.rs` row carries it with a measured rate, or it is
+fixed at its owner (`kernel/src/drivers/xhci` for the transport line, the boot
+harness for the timeout). If not seen in that many runs, that half closes with
+the count that supports it.
