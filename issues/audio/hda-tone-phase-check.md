@@ -103,3 +103,9 @@ fresh one holds 139,253-142,325 of the 144,256 submitted frames, so the
 adjacent-frame *pairs* with |period| in the hundreds, not the 118-frame
 clusters. And the load dependence is sharp where it used to be a correlation:
 0 of 8 alone against 3 of 11 beside other guests, same tree, same hour.
+
+**Exit condition.** Re-enabled when a load-beside-other-guests capture pins the
+adjacent-frame-pair breaks to one side of the QEMU `hda-codec` output ring or
+soundd's eight-period pipeline, with the WAV retained so the break can be read
+rather than only counted. Owner: the HDA output path
+(`kernel/src/drivers/hda.rs` and `userland/soundd`); nobody is holding it.

@@ -8,7 +8,6 @@ opened: 2026-08-19
 
 Two findings in one sighting, dev host under load (two worktrees' full
 suites interleaved over the shared twelve guest slots), 2026-08-19 22:21 UTC.
-`src/redlist.rs` carries the row.
 
 **1. The kernel double-panicked under load.** `log_poll_outlives_a_close`,
 parallel phase, 25 s: the guest went quiet with every CPU halted, and the
@@ -48,16 +47,15 @@ could not: the first crash's identity and site, the second panic's site, and
 the state the CPU was in when it arrived. What this sighting still does not
 establish is what that first crash was. The capture is
 `scratchpad/hkpfix-harness.log` in the 2026-08-20 orchestrator session; the
-durable evidence is quoted here and in the redlist row.
+durable evidence is quoted here.
 
 ## What closes it is a count, and the count is owed
 
 There is a leading explanation and it is not this entry's to argue: the
-`log_poll_outlives_a_close` row in `src/redlist.rs` records it as the
 already-fixed missing-`cld` class, with the before/after boot counts that make
 the case, and reasons that a machine-wide death at boot's edge under two suites
-on a branch carrying no kernel byte is that class's shape. It is not shown here,
-so the row stands and so does this.
+on a branch carrying no kernel byte is that class's shape. It is not shown
+here, so it stands and so does this.
 
 **Nothing about it is a decision.** The row names its own retirement condition —
 three loaded suites of the fixed tree with no red under this name — and that is

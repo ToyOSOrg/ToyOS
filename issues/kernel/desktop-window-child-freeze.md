@@ -87,14 +87,6 @@ if the test *passes* where the entry says a pass is proof, and is red on
 date rather than a green run. The `--skip` flag that used to be the answer is
 deleted: an exclusion nobody reviews cannot expire, and this one has to.
 
-**What the declaration will and will not absorb.** Its `says` list covers the
-six of this test's messages whose failure is *the desktop ceasing to answer
-after a window closed*. The other five red the run — the client binary missing,
-the desktop never coming up, a window never being created, and the client
-leaving on its own deadline. That pins which assertion failed and not why, so
-the log-tail discriminator above is still a human's to apply; the run prints the
-pointer to this section beside every `XFAIL` line for exactly that reason.
-
 **One thing #156's capture leaned on is closed, and it is not this.** The
 deadline was stored twice — `ParkedEntry.deadline` and `DeadlineHeap` — and
 `fire_deadlines`' lost claim discarded one copy, so a CPU could halt with
@@ -186,3 +178,11 @@ left both ways and the shell kept its prompt — which is the outcome this entry
 calls "#156 did not fire this run, which proves nothing". What changed is that a
 red now means the desktop stopped answering, which is what the declaration was
 written about.
+
+**Exit condition and owner.** Re-enabled when #156 is fixed and a `sched::dump`
+NMI probe taken on a reproduction confirms no CPU stopped taking scheduler
+passes during the freeze — nothing short of that instrument distinguishes this
+signature from a green run, which this entry has already shown proves nothing
+either way. Owner: `toyos-sched`, the placement track that closed the
+CPU-selection half of this family (`CpuHandle::answering`,
+`toyos-sched/src/cpu.rs`) and is nearest the remaining half.

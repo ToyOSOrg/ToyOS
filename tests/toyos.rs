@@ -434,12 +434,11 @@ const RUST_SKIP: &[&str] = &[
     // `check_no_collisions` closes that, and this is what it found.
     //
     // Two verdicts under one name is not extra coverage, it is a name that
-    // cannot be read: `retry_task` searches the shared registry first, so a
-    // machine test of one of these that failed wide was re-run *as the shared
-    // binary* and its `ALONE:` line was about a different test. What the shared
-    // copy adds is the binary exiting 0 on a boot that gives it nothing to
-    // measure — `cache_eviction` in 132 ms against the 22.5 s its own device
-    // shape costs (run `31247206462`).
+    // cannot be read: the shared registry answered for one of these under a
+    // machine test's name, and its verdict was about a different test. What
+    // the shared copy adds is the binary exiting 0 on a boot that gives it
+    // nothing to measure — `cache_eviction` in 132 ms against the 22.5 s its
+    // own device shape costs (run `31247206462`).
     //
     // `cache_eviction` needs the small NVMe that makes the cache evict at all.
     "cache_eviction",
@@ -1606,10 +1605,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("suspend_detector", Sched::Parallel, Tier::Fast),
     ("suspend_invalidates_a_verdict", Sched::Parallel, Tier::Fast),
     // Same again: whether a red that is a blown liveness guard still reads as
-    // one by the time it reaches the summary, and whether the `ALONE:` line
-    // under a red is about the run it claims to be about.
+    // one by the time it reaches the summary.
     ("stall_is_not_a_verdict", Sched::Parallel, Tier::Fast),
-    ("alone_line_reports_the_alone_run", Sched::Parallel, Tier::Fast),
     // Same: whether two guests can still be handed one lane's NVMe image, which
     // is what a shared-boot reboot did to itself.
     ("nvme_image_is_held_by_one_guest", Sched::Parallel, Tier::Fast),
@@ -12970,7 +12967,6 @@ fn run_machine_test(
         "suspend_detector" => common::clock::self_check(),
         "suspend_invalidates_a_verdict" => suspend_invalidates_a_verdict(),
         "stall_is_not_a_verdict" => stall_is_not_a_verdict(),
-        "alone_line_reports_the_alone_run" => alone_line_reports_the_alone_run(),
         "nvme_image_is_held_by_one_guest" => nvme_image_is_held_by_one_guest(),
         "run_exit_status" => run_exit_status(),
         "control_regs_verdict" => control_regs_verdict(),
@@ -18659,11 +18655,11 @@ impl Outcome {
     /// Whether this red is a blown liveness guard rather than an answer.
     ///
     /// Deliberately *not* a [`Verdict`] arm. A stall is red on exactly the same
-    /// terms as any other red — the exit code and the alone re-run both have
-    /// to treat it identically, and an arm would make
-    /// each of those a place where somebody could decide otherwise. What it
-    /// changes is only what the reader is told, which is the whole complaint:
-    /// the run establishes nothing about this tree, so nobody should bisect it.
+    /// terms as any other red — the exit code has to treat it identically, and
+    /// an arm would make that a place where somebody could decide otherwise.
+    /// What it changes is only what the reader is told, which is the whole
+    /// complaint: the run establishes nothing about this tree, so nobody
+    /// should bisect it.
     fn stalled(&self) -> bool {
         self.reason.as_deref().is_some_and(|r| r.contains(STALLED))
     }
@@ -18677,178 +18673,6 @@ impl Outcome {
 /// already prints.
 fn headline(reason: Option<&str>) -> String {
     reason.unwrap_or("check failed").lines().next().unwrap_or("check failed").to_string()
-}
-
-/// What the isolated re-run of one red is allowed to say about it.
-///
-/// **A red-again arm quotes the alone run's own failure**, and says so when it
-/// is not the failure the wide run found. `red again — the defect is real` used
-/// to be the whole line, and the `failures:` summary beside it always carries
-/// the *wide* run's message: on PR #22's run `31424496450` the wide run failed
-/// `xhci_hid_break`'s endpoint count and the alone re-run failed its pointer
-/// delivery three minutes later, and the job said `red again` over the wide
-/// run's sentence — so an adjudicator read one assertion's evidence for
-/// another's. Two different assertions in one job is not a weaker finding than
-/// one twice; it is a different and larger one, and the line now says which it
-/// was.
-///
-/// Which of the two it is is not a text comparison — an assertion that prints
-/// what it measured writes a different sentence every time it fires, so
-/// `toyos_build::alone::same_failure` decides it and both readings are quoted.
-///
-/// The green arms are untouched. They are a classification the issue files are
-/// written against, and nothing about them was wrong.
-///
-/// Pure, and every input a parameter, so [`alone_line_reports_the_alone_run`]
-/// can stage the divergence rather than wait for CI to produce one.
-fn alone_line(name: &str, wide: &str, shared_the_host: bool, alone: Option<&Outcome>) -> String {
-    let Some(outcome) = alone else {
-        return format!("  ALONE {name}: the lone run reported nothing about it");
-    };
-    match outcome.verdict() {
-        // **Two different findings, and which one it is depends on whether the
-        // first run shared the host** — the parallel phase's width, never the
-        // run's, because the serial tail is one guest at any width. Beside other
-        // guests, a green retry says this one was not, which is a classification
-        // defect.
-        Verdict::Pass if shared_the_host => format!(
-            "  ALONE {name}: GREEN — it fails only beside other guests, so its \
-             Sched::Parallel is wrong. The run stays red on the classification."
-        ),
-        // Alone both times, nothing differed that the harness controls: it
-        // failed once and passed once, which is a *rate* and says nothing about
-        // `Sched`. CI runs one lane per machine, so every one of its retries is
-        // the second kind.
-        Verdict::Pass => format!(
-            "  ALONE {name}: GREEN, and it was alone both times — nothing the harness \
-             controls differed, so it failed once and passed once. That is a rate and \
-             not a classification."
-        ),
-        Verdict::Fail => {
-            let said = headline(outcome.reason.as_deref());
-            // One decision and one classifier: byte equality is the case
-            // `same_failure` already answers, so asking it first would be a
-            // second rule nothing tests.
-            if toyos_build::alone::same_failure(&said, wide) {
-                format!(
-                    "  ALONE {name}: red again, the same failure both times — the defect is \
-                     real.\n      wide:  {wide}\n      alone: {said}"
-                )
-            } else {
-                format!(
-                    "  ALONE {name}: red again on a DIFFERENT failure — it failed twice, on two \
-                     assertions, so this is not one defect reproduced and the divergence is \
-                     itself the finding.\n      wide:  {wide}\n      alone: {said}"
-                )
-            }
-        }
-        Verdict::Invalid => format!("  ALONE {name}: the host was suspended during the retry too"),
-    }
-}
-
-/// Whether the `ALONE:` line still reports the run it is a line about.
-///
-/// The staged pair is the one that was mis-reported: a wide failure and an
-/// alone failure that are not the same sentence. A gate rather than a comment
-/// because the defect is invisible from inside a green run — every arm prints
-/// *a* plausible line, and only the quoted text says which run it came from.
-fn alone_line_reports_the_alone_run() -> Result<(), String> {
-    const WIDE: &str = "3 endpoint(s) were found Running after the break, want 2";
-    const OTHER: &str = "input never came back: no pointer event moved by (2560, -1920)";
-    let red = |reason: &str| Outcome {
-        name: "a_test".to_string(),
-        reason: Some(format!("{reason}\n[kernel 2.639 cpu0] a whole capture nobody diffs")),
-        elapsed: Duration::from_secs(9),
-        suspended: Duration::ZERO,
-    };
-    let green = Outcome {
-        name: "a_test".to_string(),
-        reason: None,
-        elapsed: Duration::from_secs(9),
-        suspended: Duration::ZERO,
-    };
-
-    // The two greens, byte for byte what they have always been: the issue
-    // files quote these, and a reworded classification would silently
-    // invalidate the record rather than add to it.
-    let wide_green = alone_line("a_test", WIDE, true, Some(&green));
-    if !wide_green.contains(
-        "GREEN — it fails only beside other guests, so its Sched::Parallel is wrong. \
-         The run stays red on the classification.",
-    ) {
-        return Err(format!("the shared-host green arm has changed wording:\n{wide_green}"));
-    }
-    let lone_green = alone_line("a_test", WIDE, false, Some(&green));
-    if !lone_green.contains(
-        "GREEN, and it was alone both times — nothing the harness controls differed, so it \
-         failed once and passed once. That is a rate and not a classification.",
-    ) {
-        return Err(format!("the alone-both-times green arm has changed wording:\n{lone_green}"));
-    }
-    for line in [&wide_green, &lone_green] {
-        if line.contains(WIDE) {
-            return Err(format!("a green quotes the wide run's failure:\n{line}"));
-        }
-    }
-
-    // Red again on the same assertion: still "the defect is real", now with the
-    // sentence the *alone* run produced under it.
-    let same = alone_line("a_test", WIDE, false, Some(&red(WIDE)));
-    if !same.contains("red again, the same failure both times") || !same.contains(WIDE) {
-        return Err(format!("a reproduced failure does not say so, or does not quote it:\n{same}"));
-    }
-    if same.contains("[kernel 2.639") {
-        return Err(format!("the line pasted the whole capture into the summary:\n{same}"));
-    }
-
-    // One assertion at two readings: still a reproduction, and it quotes both
-    // rather than picking one.
-    const MEASURED: &str = "the controller started at 0.303 s, past the 0.3 s the ports are held \
-                            empty for";
-    const AGAIN: &str = "the controller started at 0.300 s, past the 0.3 s the ports are held \
-                         empty for";
-    let twice = alone_line("a_test", MEASURED, false, Some(&red(AGAIN)));
-    if !twice.contains("red again, the same failure both times") {
-        return Err(format!("one assertion at two readings reads as two assertions:\n{twice}"));
-    }
-    // The labels are the whole content of the line: two sentences under swapped
-    // labels is the mis-attribution this gate exists to stop, said in the other
-    // direction.
-    for (label, sentence) in [("wide:  ", MEASURED), ("alone: ", AGAIN)] {
-        if !twice.contains(&format!("{label}{sentence}")) {
-            return Err(format!("{sentence:?} is not the line's {label:?} run:\n{twice}"));
-        }
-    }
-
-    // And the case the old line could not tell apart from it.
-    let diverged = alone_line("a_test", WIDE, false, Some(&red(OTHER)));
-    if !diverged.contains("DIFFERENT failure") {
-        return Err(format!("two different failures read as one reproduced:\n{diverged}"));
-    }
-    for both in [WIDE, OTHER] {
-        if !diverged.contains(both) {
-            return Err(format!("the divergent line drops {both:?}:\n{diverged}"));
-        }
-    }
-    if diverged.find(WIDE) > diverged.find(OTHER) {
-        return Err(format!("the divergent line reads alone-then-wide:\n{diverged}"));
-    }
-
-    // The host stopping during the retry is neither, and a retry that never
-    // reported is not a verdict about anything.
-    let suspended = Outcome {
-        suspended: common::clock::SUSPENDED_AT_LEAST,
-        ..red(OTHER)
-    };
-    let asleep = alone_line("a_test", WIDE, false, Some(&suspended));
-    if !asleep.contains("the host was suspended during the retry too") {
-        return Err(format!("a suspended retry reads as a verdict:\n{asleep}"));
-    }
-    let missing = alone_line("a_test", WIDE, false, None);
-    if !missing.contains("the lone run reported nothing about it") {
-        return Err(format!("a retry that reported nothing reads as a verdict:\n{missing}"));
-    }
-    Ok(())
 }
 
 /// One live guest holds its lane's NVMe image, and the next one may not.
@@ -19545,41 +19369,6 @@ fn driven_binaries(sources: &[String]) -> BTreeSet<String> {
         }
     }
     found
-}
-
-/// The task that would run `name` again, by itself.
-///
-/// **Every red of a run wider than one is re-run alone**, and the two possible
-/// answers are both findings. Same verdict: the defect is real and the width had
-/// nothing to do with it. Green: the test is red only when it shares the host,
-/// which makes its [`Sched::Parallel`] wrong — a bug in this file, not in the
-/// kernel, and one the suite has no other way to notice.
-///
-/// **A green retry does not turn the run green.** A rerun-only pass counting as
-/// a pass is selective test running by the back door; the failure line
-/// says which of the two it was and the run stays red until somebody fixes the
-/// classification. That is the whole safety argument for widening the parallel
-/// phase: getting a scheduling answer wrong costs a red run, never a quiet one.
-///
-/// A group member is re-run **as its group**, not on its own, so that the only
-/// thing that changed between the two attempts is how many guests the host had.
-fn retry_task<'a>(name: &str, all_tests: &[&'a TestDef]) -> Option<Task<'a>> {
-    if let Some(def) = all_tests.iter().find(|t| t.name == name) {
-        return Some(Task::Shared(vec![def], shared_kernel(name)));
-    }
-    if let Some((registered, _, _)) = SCREEN_TESTS.iter().find(|(n, _, _)| *n == name) {
-        return Some(Task::Screen(registered));
-    }
-    let (registered, _, _) = MACHINE_TESTS.iter().find(|(n, _, _)| *n == name)?;
-    let names = match group_of(registered) {
-        None => vec![*registered],
-        Some(group) => MACHINE_TESTS
-            .iter()
-            .filter(|(n, _, _)| group_of(n) == Some(group))
-            .map(|(n, _, _)| *n)
-            .collect(),
-    };
-    Some(Task::Machine(names))
 }
 
 /// Which of the two shared boots a name belongs on — a *kernel build*, because
@@ -20423,10 +20212,10 @@ fn check_registration() {
 /// nothing declared can be compared against them until they exist.
 ///
 /// A name in both places is two tests reporting one name, and the damage is not
-/// a duplicate line. [`retry_task`] searches the shared registry first, so a
-/// machine test of that name which failed wide is re-run *as the other test* and
-/// its `ALONE:` verdict is about neither. Four names were doing this and the
-/// suite had never been able to see them.
+/// a duplicate line: a verdict and a duration label both have to identify
+/// exactly one execution, and a shared name answers for whichever of the two
+/// last wrote the tally. Four names were doing this and the suite had never
+/// been able to see them.
 fn check_no_collisions(shared: &[TestDef]) {
     let mut shared_seen = BTreeSet::new();
     let shared_twice: Vec<&str> = shared
@@ -20450,9 +20239,46 @@ fn check_no_collisions(shared: &[TestDef]) {
     assert!(
         clash.is_empty(),
         "{clash:?} name both a binary on the shared boot and a test that declares its own \
-         machine — two verdicts under one name, and `retry_task` takes the shared one. Add \
-         each to RUST_SKIP with the reason its own test exists, or rename one of the two."
+         machine — two verdicts under one name. Add each to RUST_SKIP with the reason its \
+         own test exists, or rename one of the two."
     );
+}
+
+/// `redlist::DISABLED` against every name `all_tests` plus the three declared
+/// registries could produce a verdict for, before any boot on any entry point.
+///
+/// **A name nothing registers is checked first, and has to red for that
+/// reason.** Every real row currently names a test this run does register, so
+/// a `registered` predicate broken into always answering yes would pass every
+/// one of them silently — this stages the one row that tells the two apart,
+/// and refuses to trust its own verdict on the real list until it reds this
+/// one for the right reason.
+///
+/// `--metal` returns before the ordinary compile below builds its own
+/// `all_tests`, so it calls this on the registry built from its own binaries
+/// rather than skip it — a disabled row is otherwise unchecked on that path.
+/// Returns the refusal rather than exiting, so each caller keeps its own
+/// owned `Run` to exit with.
+fn check_redlist(all_tests: &[TestDef]) -> Result<(), String> {
+    let runnable: BTreeSet<&str> = all_tests
+        .iter()
+        .map(|t| t.name.as_str())
+        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
+        .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
+        .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
+        .collect();
+    let registered = |name: &str| runnable.contains(name);
+    let unregistered =
+        redlist::Disabled { test: "a-name-nothing-in-this-tree-registers", issue: "issues/nowhere.md" };
+    match redlist::check(std::slice::from_ref(&unregistered), registered, &compile::repo_root()) {
+        Err(reason) if reason.contains("nothing registers it") => {}
+        other => {
+            return Err(format!(
+                "the redlist check's own negative control did not red on its reason: {other:?}"
+            ))
+        }
+    }
+    redlist::check(redlist::DISABLED, registered, &compile::repo_root())
 }
 
 fn main() {
@@ -20577,6 +20403,11 @@ fn main() {
         eprintln!("[toyos] Compiling {} C tests for the corpus boot...", c_names.len());
         let c_bins = compile_c_tests(&c_names);
         check_metal_only_unshared(&rust_bins, &c_bins);
+        let c_compiled: Vec<String> = c_bins.iter().map(|(n, _)| n.clone()).collect();
+        if let Err(refusal) = check_redlist(&build_test_registry(&rust_bins, &c_compiled)) {
+            eprintln!("[toyos] src/redlist.rs: {refusal}");
+            run.exit(1);
+        }
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
             .iter()
             .filter(|(name, _)| keep(name))
@@ -20630,10 +20461,17 @@ fn main() {
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
     toyos_build::build::build_host_judges(&common::compile::repo_root(), !nocapture && !debug_mode);
 
+    // Every name this process could produce a verdict for, before `--list`,
+    // `--debug` and `--audio-gate` can return without ever reaching it.
+    let all_tests = build_test_registry(&rust_bins, &c_compiled);
+    if let Err(refusal) = check_redlist(&all_tests) {
+        eprintln!("[toyos] src/redlist.rs: {refusal}");
+        run.exit(1);
+    }
+
     // --list: print test names and exit
     if list_mode {
-        let tests = build_test_registry(&rust_bins, &c_compiled);
-        for t in &tests {
+        for t in &all_tests {
             println!("{}", t.name);
         }
         for (name, _) in AUDIO_TESTS {
@@ -20697,7 +20535,6 @@ fn main() {
         return;
     }
 
-    let all_tests = build_test_registry(&rust_bins, &c_compiled);
     check_no_collisions(&all_tests);
     check_metal_only_unshared(&rust_bins, &c_bins);
     // Every row against the catalogue before any boot, so a name the suite did
@@ -20706,20 +20543,6 @@ fn main() {
         qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
     }
     check_shard_partition(&all_tests);
-    // Every name this process could produce a verdict for, which is what a
-    // disabled row has to be one of. Taken before the filter, so a filtered
-    // run cannot make a stale row look well-formed.
-    let runnable: BTreeSet<&str> = all_tests
-        .iter()
-        .map(|t| t.name.as_str())
-        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
-        .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
-        .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
-        .collect();
-    if let Err(refusal) = redlist::check(redlist::DISABLED, |name| runnable.contains(name), &compile::repo_root()) {
-        eprintln!("[toyos] src/redlist.rs: {refusal}");
-        run.exit(1);
-    }
 
     // The tier filter, and it is not conditional on the name filter: a rule with
     // an exception for filtered runs is two rules, and the second one is the one
@@ -20835,9 +20658,6 @@ fn main() {
     }
     let (mut parallel, mut serial) = build_tasks(&tests_to_run, &machine_to_run, &screen_to_run);
 
-    // Every red the wide phase produced, re-run by itself before anything is
-    // believed about it. See [`retry_task`] for why both answers are findings
-    // and why neither turns the run green.
     let known = load_durations();
     // After the phases are decided and before either is ordered: what a shard
     // divides is the work, and a task's answer to `Sched` is a property of the
@@ -20893,28 +20713,12 @@ fn main() {
     eprintln!("\nrunning {total} tests\n");
 
     let mut timed: Vec<(String, Duration)> = Vec::new();
-    // Every red, with whether it had the host to itself when it happened and
-    // *what it said* — the third field, because the re-run below has to be able
-    // to answer whether the two runs failed the same way, and by the time it
-    // runs this outcome has been moved into the tally. Reds only: a test the
-    // host slept through has no verdict to confirm, and re-running it would put
-    // a second guess beside the first.
-    let mut reds: Vec<(String, bool, String)> = Vec::new();
-    let mut collect = |outcomes: &[Outcome], shared_the_host: bool| {
-        reds.extend(
-            outcomes
-                .iter()
-                .filter(|o| o.verdict() == Verdict::Fail)
-                .map(|o| (o.name.clone(), shared_the_host, headline(o.reason.as_deref()))),
-        );
-    };
     if !parallel.is_empty() {
         longest_first(&mut parallel, &known);
         eprintln!("  --- parallel, {width} wide ---");
         let started = std::time::Instant::now();
         let outcomes = run_phase(parallel, width, &bins, &slots);
         eprintln!("  --- parallel done in {:.1?} ---", started.elapsed());
-        collect(&outcomes, width > 1);
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
@@ -20923,34 +20727,10 @@ fn main() {
         let started = std::time::Instant::now();
         let outcomes = run_phase(serial, 1, &bins, &slots);
         eprintln!("  --- serial done in {:.1?} ---", started.elapsed());
-        // **The serial tail is one guest whatever `--jobs` says**, which is
-        // exactly why its reds were never re-run: the loop below was written for
-        // the parallel phase and read the *run's* width. So the two
-        // `Sched::Serial` reds of run `31252989653` — `screen_pager_keys` and
-        // `usb_transport_break` — carried no `ALONE:` line at all and nobody
-        // could say whether either was reproducible.
-        collect(&outcomes, false);
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
     qemu::set_width(1);
-
-    if !toyos_build::alone::reruns(width) {
-        for (name, _, _) in &reds {
-            eprintln!("  ALONE {name}: not re-run — the run is one wide, so it already ran alone");
-        }
-    } else if !reds.is_empty() {
-        eprintln!("  --- re-running {} failure(s) alone ---", reds.len());
-        for (name, shared_the_host, wide) in &reds {
-            let Some(task) = retry_task(name, &tests_to_run) else {
-                eprintln!("  ALONE {name}: no way to run it by itself; verdict stands");
-                continue;
-            };
-            let outcomes = run_phase(vec![task], 1, &bins, &slots);
-            let alone = outcomes.iter().find(|o| &o.name == name);
-            eprintln!("{}", alone_line(name, wide, *shared_the_host, alone));
-        }
-    }
 
     // Gate A, alone. `tests/audio-baseline.toml`'s numbers were recorded with
     // one QEMU on the host and no concurrent agents, so a run beside anything

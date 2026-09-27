@@ -1,17 +1,10 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-08-08
 ---
 
 # Eleven names are red on CI, at a rate that is now measured
-
-**Do not answer "is this test known-red" out of this file.** Every table and
-every list below is transcribed into `src/redlist.rs`, one row per measurement,
-and `cargo run -- --known-red <test>` is what answers. A `rg` here hits the
-twelve names that came *off* the list exactly as readily as the eleven that are
-on it, and that has been read the wrong way round. What is here is the reasoning
-and the evidence; what is there is the verdict.
 
 Supersedes *a runner reds a rotating handful every run, and the rate is
 unmeasured*, whose whole ask was this run. `probe-rate.yml`, run `31258202923`,
@@ -61,9 +54,7 @@ none of these six has been looked at. **No entry here is a candidate for
 table**, closed when soundd stopped racing to present its null sink.
 **Re-taken 2026-09-04 against the last three nightly `ci` runs on `main`**
 (`33485669019`, `33603832656`, `33728852421`): of the names above, only
-`usb_disk_index_stable` reds in any of them, and `src/redlist.rs` carries that
-row at 1 of 3. Every other row this file sources is retired there on those
-runs, never deleted.
+`usb_disk_index_stable` reds in any of them.
 
 **Six of the eleven are `Sched::Serial`, and until 2026-08-08 the harness re-ran
 none of them**: the retry loop was written for the parallel phase and branched on

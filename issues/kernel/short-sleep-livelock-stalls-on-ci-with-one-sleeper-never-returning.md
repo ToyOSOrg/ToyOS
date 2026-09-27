@@ -26,7 +26,10 @@ sleeps of 100000 ns returned
 Four of the program's sleepers finished their 100000 ns round and exited on
 cpu1; the fifth never printed its return and the guest said nothing more for
 63 s. That is the shape the test exists to catch, seen once on the CI
-instrument; the redlist row (`src/redlist.rs`, `short_sleep_livelock`,
-`Instrument::Ci`) records it, and the owner is the sleep path in
-`kernel/src/sched` that the test's write-up (`tests/toyos.rs`,
-`short_sleep_livelock`) names.
+instrument, and the owner is the sleep path in `kernel/src/sched` that the
+test's write-up (`tests/toyos.rs`, `short_sleep_livelock`) names.
+
+**Exit condition.** Re-enabled when a reproduction shows the fifth sleeper's
+own exit — whether it returned late, never returned, or returned and never
+printed — with the sleep path's own state at that CPU read at the same moment.
+Owner: the sleep path, `kernel/src/sched`.

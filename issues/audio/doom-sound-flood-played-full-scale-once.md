@@ -37,6 +37,4 @@ value, and whether a listener would hear it. Nothing in the captured line
 distinguishes those, and the WAV that would is not kept by a CI job.
 
 **Exit condition.** A run that reproduces the peak with the capture retained,
-and one sentence naming which of the three it is. `src/redlist.rs` carries the
-rate (1 of the 3 nightlies of that week); the two rows for this name that were
-about `timed out after 88s` are retired on the change of shape.
+and one sentence naming which of the three it is.

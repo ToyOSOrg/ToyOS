@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-08-04
 ---
@@ -68,21 +68,21 @@ changes.
   the profile used to seat a second desktop beside, `desktop_window_child`, is
   `Tier::Nightly` and so never in a pull request's parallel phase.
 - **`desktop_locale_detect`** — retired 2026-09-04, green 5 of 5 beside a full
-  fast tier; `src/redlist.rs` carries the runs.
+  fast tier.
 - **`netd_connection_caps`** — retired 2026-09-04, green 5 of 5 beside a full
-  fast tier; `src/redlist.rs` carries the runs.
+  fast tier.
 - **`metal_sim_pointer_churn`** — observed once, on a host carrying three other
   suites *and* a `toyos-sched-sim` run. Not investigated. Still
   `Sched::Parallel`.
 - **`dump_nmi_probe`** — retired 2026-09-04, green 3 of 3 beside a full fast
-  tier; `src/redlist.rs` carries the runs. `4ad8875` made it `Sched::Serial`,
+  tier. `4ad8875` made it `Sched::Serial`,
   which shows what serialising buys and what it does not: within one run the
   phase is quiet, across runs nothing but `buildlock::guest_slot` spans
   worktrees and twelve slots is not one guest.
 - **`blocked_dump`** — retired 2026-09-04, green 3 of 3 beside a full fast
-  tier; `src/redlist.rs` carries the runs.
+  tier.
 - **`screen_console_scroll`** — retired 2026-09-04, green 3 of 3 beside a full
-  fast tier; `src/redlist.rs` carries the runs.
+  fast tier.
 - **`hda_tone`** — added 2026-08-07, hours after the test itself landed. In a
   full run on a host carrying another worktree's suite: `2 mid-tone silences in
   the capture: total 2 [3p×1 4p×1]`, `dither 3.3%`, `phase-breaks 92`. Alone on
@@ -103,7 +103,7 @@ changes.
   the branch last merged, which reads as the branch's own work and is not.
 
 - **`xhci_hid_break`** — retired 2026-09-04, green 3 of 3 beside a full fast
-  tier; `src/redlist.rs` carries the runs. It is one of the three longest jobs
+  tier. It is one of the three longest jobs
   in the suite by `longest_first`'s own profile, so it is dispatched early and
   runs beside everything.
 
@@ -147,9 +147,7 @@ changes.
   immediately afterwards: `PASS handle_kill_policy (615ms)`. A third sighting of
   the same census, on a third unrelated branch, is what the mechanism above
   predicts — and the three together are why it is no longer only this file's
-  record: `src/redlist.rs` carries an `Instrument::Ci` row for
-  `handle_kill_policy` as of the CI sighting, so `cargo run -- --known-red
-  handle_kill_policy` now answers it.
+  record.
 
 - **`wall_clock_file`** — added 2026-08-17, same session, **1 of 6**,
   `ALONE … GREEN`, green on all twelve shards of the same tree. Not
@@ -220,8 +218,7 @@ changes.
   record of which children died and which calls their parent made.
 
 - **`console_line_atomicity`** — added 2026-08-20, the name's first sighting
-  on the CI instrument (its standing rows are the loaded dev host's, 1 of 3
-  there): PR #166 run 32364721784, `guest (10)`, `writer A declared 1000
+  on the CI instrument: PR #166 run 32364721784, `guest (10)`, `writer A declared 1000
   whole lines and the capture carries 995`, `ALONE: GREEN` in the same job.
   CI runs one guest per machine, so whatever loses five of a writer's
   thousand lines there is not host contention — which sharpens this file's
@@ -275,7 +272,7 @@ changes.
   yet. `ALONE … GREEN` in **5 s** in the same session, reporting the storm in
   full: `3000 sent, 3000 taken, 43 in the window, 140 in Ring 3, 663 syscalls
   made under the storm`. `cargo run -- --known-red syscall_window_nmi` answered
-  `NOT ON THE LIST` when it was filed; `src/redlist.rs` carries a row now.
+  `NOT ON THE LIST` when it was filed.
 
   **Not the branch it was found on**: that branch changed the syscall entry's
   displacement *spelling* — `const` operands for the same immediates,
@@ -517,7 +514,7 @@ describes. `ALONE: GREEN` both times, and green again when re-run alone by hand
 (3 s, 2 s). So the name flakes for two different reasons and only one of them
 is the ceiling this section corrects; what a contended host does to `/system/bin/init`'s
 handle accounting on a *refused* launch is not explained here, and nobody has a
-mechanism for it. `src/redlist.rs` carries the sighting.
+mechanism for it.
 
 - **`i8042_undecoded_bytes`** — added 2026-09-07 on the metal branch's
   pre-pull-request fast tier over the merged tip `8d895a15`, one sighting:

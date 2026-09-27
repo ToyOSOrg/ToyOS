@@ -58,8 +58,7 @@ controller" from "the console stopped reading the kernel's queue", and it needs
   denominator**: the same STALL sentence, **891 s**, `ALONE: GREEN — it fails
   only beside other guests`, in **1 of 6** full `cargo test` fast tiers run in
   one worktree that day, each with single-test runs of the same suite beside
-  it. Green in the three nightly `ci` runs of the same week. `src/redlist.rs`
-  carries it as this name's first `DevHostLoaded` row.
+  it. Green in the three nightly `ci` runs of the same week.
 
 The two do not reconcile at a common rate: at the 2-of-5 arm's own p = 0.4,
 P(0 of 20) is 3.66e-05. **The tree is not the difference** — the branch's

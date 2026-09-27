@@ -25,7 +25,10 @@ pub struct Disabled {
 
 /// Every disabled test.
 pub const DISABLED: &[Disabled] = &[
-    Disabled { test: "console_line_atomicity", issue: "issues/build/parallel-tests-red-under-other-suites.md" },
+    Disabled {
+        test: "console_line_atomicity",
+        issue: "issues/build/console-line-atomicity-loses-five-of-a-thousand-lines-on-ci.md",
+    },
     Disabled {
         test: "console_locale_detect",
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
@@ -52,7 +55,10 @@ pub const DISABLED: &[Disabled] = &[
         test: "so_cache_refusals",
         issue: "issues/kernel/so-cache-refusals-saw-the-kernel-refuse-nothing-once.md",
     },
-    Disabled { test: "usb_disk_index_stable", issue: "issues/hardware/eleven-names-red-on-ci.md" },
+    Disabled {
+        test: "usb_disk_index_stable",
+        issue: "issues/hardware/usb-disk-index-stable-nothing-enumerates-on-the-first-controller.md",
+    },
 ];
 
 /// The row that disables `test`, matched by the whole name.
@@ -60,8 +66,40 @@ pub fn disabled(test: &str) -> Option<&'static Disabled> {
     DISABLED.iter().find(|row| row.test == test)
 }
 
+/// Whether `issue` has the one shape a per-test issue is allowed:
+/// `issues/<area>/<slug>.md` — an area directory and a file, nothing nested
+/// deeper and nothing sitting directly in `issues/` itself (`issues/README.md`
+/// is the tracker's own doc, not a test's issue).
+fn is_per_test_issue_path(issue: &str) -> bool {
+    let Some(rest) = issue.strip_prefix("issues/") else { return false };
+    let mut parts = rest.split('/');
+    let (Some(_area), Some(slug)) = (parts.next(), parts.next()) else { return false };
+    parts.next().is_none() && slug.ends_with(".md")
+}
+
+/// Whether the file at `path` opens with a frontmatter block whose `status`
+/// field is `expected-red` — the one status a disabled test's issue may carry
+/// (`issues/README.md`'s own frontmatter table).
+fn is_expected_red(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let mut lines = text.lines();
+    if lines.next() != Some("---") {
+        return false;
+    }
+    for line in lines {
+        if line == "---" {
+            return false;
+        }
+        if let Some(value) = line.strip_prefix("status:") {
+            return value.trim() == "expected-red";
+        }
+    }
+    false
+}
+
 /// Every row of `rows` against the tree under `root`: no test twice, each one
-/// `registered`, and each issue a file under `issues/`.
+/// `registered`, and each issue an `issues/<area>/<slug>.md` file whose
+/// frontmatter says `status: expected-red`.
 pub fn check(rows: &[Disabled], registered: impl Fn(&str) -> bool, root: &Path) -> Result<(), String> {
     for (at, row) in rows.iter().enumerate() {
         if rows[..at].iter().any(|earlier| earlier.test == row.test) {
@@ -74,8 +112,21 @@ pub fn check(rows: &[Disabled], registered: impl Fn(&str) -> bool, root: &Path) 
                 row.test
             ));
         }
-        if !row.issue.starts_with("issues/") || !root.join(row.issue).is_file() {
-            return Err(format!("{}: `{}` is not an issue file in this tree", row.test, row.issue));
+        if !is_per_test_issue_path(row.issue) {
+            return Err(format!(
+                "{}: `{}` is not an `issues/<area>/<slug>.md` path",
+                row.test, row.issue
+            ));
+        }
+        let path = root.join(row.issue);
+        if !path.is_file() {
+            return Err(format!("{}: `{}` is not a file in this tree", row.test, row.issue));
+        }
+        if !is_expected_red(&path) {
+            return Err(format!(
+                "{}: `{}` does not open with `status: expected-red`",
+                row.test, row.issue
+            ));
         }
     }
     Ok(())
@@ -104,7 +155,14 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
     }
 
-    const ISSUE: &str = "issues/README.md";
+    /// A scratch `issues/build/<slug>.md` under `dir`, so a test can point a
+    /// row at a file it controls rather than one this tree tracks and might
+    /// close out from under it.
+    fn write_issue_fixture(dir: &Path, path: &str, status: &str) {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, format!("---\nstatus: {status}\nkind: defect\n---\n\n# fixture\n")).unwrap();
+    }
 
     #[test]
     fn every_row_names_one_test_and_an_issue_file_that_exists() {
@@ -113,20 +171,52 @@ mod tests {
 
     #[test]
     fn a_row_is_refused_for_an_unregistered_test_a_missing_issue_or_a_second_row() {
+        let tmp = toyos_tmpdir::TempDir::new("redlist-check");
+        const ISSUE: &str = "issues/build/a-fixture.md";
+        write_issue_fixture(tmp.path(), ISSUE, "expected-red");
         let registered = |name: &str| name == "a_real_test";
-        check(&[Disabled { test: "a_real_test", issue: ISSUE }], registered, root()).unwrap();
-        check(&[], registered, root()).unwrap();
+        check(&[Disabled { test: "a_real_test", issue: ISSUE }], registered, tmp.path()).unwrap();
+        check(&[], registered, tmp.path()).unwrap();
         let refused = |rows: &[Disabled], why: &str| {
-            let said = check(rows, registered, root()).unwrap_err();
+            let said = check(rows, registered, tmp.path()).unwrap_err();
             assert!(said.contains(why), "{said}");
         };
         refused(&[Disabled { test: "a_renamed_test", issue: ISSUE }], "nothing registers it");
-        refused(&[Disabled { test: "a_real_test", issue: "issues/no-such-issue.md" }], "not an issue file");
-        refused(&[Disabled { test: "a_real_test", issue: "CLAUDE.md" }], "not an issue file");
+        refused(
+            &[Disabled { test: "a_real_test", issue: "issues/build/no-such-issue.md" }],
+            "is not a file in this tree",
+        );
+        refused(
+            &[Disabled { test: "a_real_test", issue: "issues/README.md" }],
+            "is not an `issues/<area>/<slug>.md` path",
+        );
+        refused(
+            &[Disabled { test: "a_real_test", issue: "CLAUDE.md" }],
+            "is not an `issues/<area>/<slug>.md` path",
+        );
         refused(
             &[Disabled { test: "a_real_test", issue: ISSUE }, Disabled { test: "a_real_test", issue: ISSUE }],
             "disabled twice",
         );
+    }
+
+    #[test]
+    fn a_row_is_refused_unless_its_issue_says_status_expected_red() {
+        let tmp = toyos_tmpdir::TempDir::new("redlist-check-status");
+        let registered = |_: &str| true;
+        for (path, status) in [
+            ("issues/build/a-fixture-open.md", "open"),
+            ("issues/build/a-fixture-assigned.md", "assigned"),
+            ("issues/build/a-fixture-owner.md", "owner"),
+            ("issues/build/a-fixture-none.md", "none"),
+        ] {
+            write_issue_fixture(tmp.path(), path, status);
+            let said = check(&[Disabled { test: "a_real_test", issue: path }], registered, tmp.path()).unwrap_err();
+            assert!(said.contains("does not open with `status: expected-red`"), "{status}: {said}");
+        }
+        const RED: &str = "issues/build/a-fixture-red.md";
+        write_issue_fixture(tmp.path(), RED, "expected-red");
+        check(&[Disabled { test: "a_real_test", issue: RED }], registered, tmp.path()).unwrap();
     }
 
     #[test]

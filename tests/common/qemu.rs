@@ -538,11 +538,10 @@ pub fn guest_liveness() -> Liveness {
 /// A kernel line without its `[kernel <t> cpu<N>] ` stamp.
 ///
 /// The stamp is the instance and the rest is the finding, and which of the two
-/// a verdict quotes decides an adjudication. `alone_line` compares the wide
-/// run's sentence against the lone re-run's, and two runs of one deterministic
-/// panic differ in the stamp alone — quoted whole, a staged double fault read
-/// `red again on a DIFFERENT failure`, which is the harness reporting two
-/// defects where there is one. The stamp is still in the capture underneath.
+/// a verdict quotes decides whether two boots of one deterministic panic read
+/// as one defect or two — they differ in the stamp alone, so quoting it whole
+/// would read the same panic on two boots as two. The stamp is still in the
+/// capture underneath.
 fn without_stamp(line: &str) -> &str {
     if !is_kernel_line(line) {
         return line;
@@ -556,8 +555,8 @@ fn without_stamp(line: &str) -> &str {
 /// quote the same words wherever the wait was — and so that nothing
 /// in it is a measurement of the host. The silence that proved the panic was
 /// fatal is deliberately not in the sentence: it differs by a poll interval
-/// between two runs of one panic, and `alone_line` compares those two sentences
-/// to decide whether a re-run reproduced the defect or found a second one.
+/// between two runs of one panic, and the sentence has to read as one defect
+/// on both.
 fn kernel_died_here(line: &str) -> String {
     format!(
         "kernel panic: {} — the guest went quiet because every CPU is halted, not because it \
@@ -642,10 +641,10 @@ impl WaitVerdict {
 
     /// The sentence, without the account under it.
     ///
-    /// What `headline` in `tests/toyos.rs` reads off a red's reason and what
-    /// `alone_line` compares two runs of one defect on — so the first line is
-    /// still one line, and the report below it can differ between two boots of
-    /// the same panic without reading as a second defect.
+    /// What `headline` in `tests/toyos.rs` reads off a red's reason — so the
+    /// first line is still one line, and the report below it can differ
+    /// between two boots of the same panic without reading as a second
+    /// defect.
     pub fn sentence(&self) -> &str {
         self.0.lines().next().unwrap_or_default()
     }
@@ -776,9 +775,8 @@ pub fn ceiling_self_check() -> Result<(), String> {
     if early >= CEILING {
         return Err(String::from("staged the panic after the ceiling, so it proves nothing"));
     }
-    // The same panic on a later boot, differing only in its stamp, is the same
-    // sentence — or the lone re-run of a reproducible panic reads as a second,
-    // different defect. `alone_line` is what compares the two.
+    // The same panic on a later boot, differing only in its stamp, must give
+    // the same sentence, or two boots of one panic read as two defects.
     let again = "[kernel 1.503 cpu7] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
     if ceiling_verdict(Some(again), early, CEILING, quiet, 40).as_deref() != Some(panic.as_str()) {
         return Err(format!(
@@ -926,8 +924,8 @@ pub fn ceiling_self_check() -> Result<(), String> {
         }
     }
     // The sentence is still one line and still the sentence — `headline` in
-    // `tests/toyos.rs` reads it off a red's reason and `alone_line` compares two
-    // runs of one defect on it, so a report under it must not become part of it.
+    // `tests/toyos.rs` reads it off a red's reason, so a report under it must
+    // not become part of it.
     if carried.sentence() != died_verdict {
         return Err(format!(
             "the report changed the sentence a summary quotes:\n{}\n{died_verdict}",
