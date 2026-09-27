@@ -288,8 +288,7 @@ static CLAIMED_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 #[cfg(feature = "boot-actuators")]
 const PROBE_DELAY_NS: u64 = 5_000_000_000;
 
-/// Whether the `metal-panic-probe` boot should panic now. Called from the
-/// idle loop.
+/// Whether the `metal-panic-probe` boot should panic now.
 #[cfg(feature = "boot-actuators")]
 pub fn probe_due() -> bool {
     if !crate::actuator::metal_panic_probe() {

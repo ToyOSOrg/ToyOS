@@ -3137,13 +3137,6 @@ fn check_disk_backtrace(result: &TestResult) -> bool {
 /// task's own record — so the two reasons left are a CPU inside a scheduler pass
 /// and a CPU running nothing, and either one in a report is a finding rather
 /// than weather.
-///
-/// The measured before/after on the dev host under a twelve-wide suite, which is
-/// what makes that a claim — N = 12 rounds of `fault_gates` + `panic_recovery`
-/// an arm, 2026-08-22: 3 of 12 conceded with the table lookup, 0 of 12 without
-/// it, and 1 of 12 with the lookup put back on the same base, that third arm
-/// being the control that says the first two are about the code and not about
-/// the day.
 fn check_symbols_were_read(test: &str, serial: &str) -> bool {
     const CONCEDED: &str = "<symbol unread:";
     let lines: Vec<&str> = serial.lines().filter(|l| l.contains(CONCEDED)).collect();
@@ -3197,6 +3190,9 @@ fn check_ring0_read_unmapped(serial: &str) -> Result<(), String> {
         .strip_prefix("0x")
         .and_then(|hex| u64::from_str_radix(hex, 16).ok())
         .ok_or_else(|| format!("the address the kernel read is not a number: {named:?}"))?;
+    if addr == 0 {
+        return Err("expected the demand-paged window, not the null read".to_string());
+    }
     let want = format!("KERNEL PANIC: read unmapped address at {addr:#x}");
     if !serial.contains(&want) {
         return Err(format!("expected `{want}`: the read did not fault as unmapped at {addr:#x}"));

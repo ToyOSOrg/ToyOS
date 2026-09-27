@@ -99,8 +99,8 @@ static POINTS: [Point; SLOTS] = [Point::EMPTY, Point::EMPTY, Point::EMPTY, Point
 /// What the shutdown's flush pass emptied, for the one summary line.
 ///
 /// **Two atomics and not a return value.** The flush runs above the boot's last
-/// word, where a record still reaches the file; this summary is written from
-/// `acpi::reboot`, below it. Nothing carries a value across that, and a reset
+/// word, where a record still reaches the file; this summary is written
+/// below it. Nothing carries a value across that, and a reset
 /// that flushed nothing — every panic — reads the zeros it was born with.
 static DISKS: AtomicU32 = AtomicU32::new(0);
 static FLUSHED: AtomicU32 = AtomicU32::new(0);
@@ -635,9 +635,8 @@ fn stop_all(said: &mut dyn fmt::Write) {
 
 /// Hand every USB device back, then let the caller end the machine.
 ///
-/// **Called from `acpi::reboot` and `acpi::shutdown` and nowhere else**, which
-/// is what makes "no reset this kernel performs leaves a USB device
-/// mid-command" a property of the reset rather than of whoever asked for one.
+/// Makes "no reset this kernel performs leaves a USB device mid-command" a
+/// property of the reset rather than of whoever asked for one.
 pub fn before_reset() {
     if STOPPING.swap(true, Ordering::AcqRel) {
         return;
