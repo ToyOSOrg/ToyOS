@@ -51,6 +51,9 @@ above; otherwise it is a NOTE.
   abstraction with one caller, a parameter with one value, dead code. Size is never bought with a
   weaker check: tests are cut only when they test nothing. A compromise the branch found is removed or
   recorded in `issues/` with an owner, evidence and an exit condition.
+  Code is liability: code that does not earn its keep is deleted or simplified, and code kept
+  "just in case", or because nobody knows whether it is needed, is an instant delete. Doubt is
+  not a reason to keep; confidence decides.
 - **Tests.** The refusals and the boundary, not the happy path. Write down the partial fix or
   one-field mutation that would still pass, as a patch the implementer can apply. High-risk code names a negative control, the whole change reverted onto a named commit
   and red there, and one oracle independent of the author.
@@ -67,6 +70,10 @@ above; otherwise it is a NOTE.
 A wrong line number, a stale run id, a count, a date, a citation: never a send-back, never
 corrected, never checked for its own sake. Prose that is false, will rot or misleads is flagged
 REMOVE, one line, and the implementer deletes it. Nobody rewrites prose.
+
+Reducing prose is part of the review. Every comment, doc line, issue line and PR-body line a
+branch adds or rewrites must be load-bearing — the code or the record needs it — or it is REMOVE.
+Prose rewritten or "corrected" instead of deleted is REMOVE.
 
 ## Output
 

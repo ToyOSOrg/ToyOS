@@ -736,9 +736,8 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     Ok(line)
 }
 
-/// The QEMU every guest in CI runs, and the one this project's recorded numbers
-/// were taken on. Comment lines and blanks are stripped, so the file can explain
-/// itself.
+/// The QEMU every guest in CI runs. Comment lines and blanks are stripped, so
+/// the file can explain itself.
 pub fn declared_qemu_version(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join(".github/qemu-version")).ok()?;
     let version: String = text
@@ -759,8 +758,8 @@ fn parse_qemu_version(text: &str) -> Option<String> {
     (!version.is_empty()).then(|| version.to_string())
 }
 
-/// The line `cargo run` prints when this host is not the instrument the
-/// project's numbers were taken on, and nothing at all when it is.
+/// The line `cargo run` prints when this host's QEMU is not the version
+/// `.github/qemu-version` declares, and nothing at all when it is.
 pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     let want = declared_qemu_version(root)?;
     let out = Command::new(arch.qemu()).arg("--version").output().ok()?;
@@ -768,7 +767,7 @@ pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     (have != want).then(|| {
         format!(
             "Note: this host runs QEMU {have} and .github/qemu-version declares {want} — \
-             CI's guests and tests/audio-baseline.toml are on {want}, and the QEMU version \
+             CI's guests are on {want}, and the QEMU version \
              has been measured to decide test outcomes. Nothing here is broken; a comparison \
              across the two is."
         )
