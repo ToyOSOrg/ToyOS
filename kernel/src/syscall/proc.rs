@@ -154,12 +154,24 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
     // None means never existed or already collected; the predicate below answers both.
     let target = process::thread_sched(caller, tid);
     let parkable = crate::scheduler::Parkable::at_entry();
-    loop {
-        match process::wait_thread_zombie(tid, caller) {
-            Ok(Some(_)) => return 0,
-            Ok(None) => {}
-            Err(()) => return SyscallError::NotFound.to_u64(),
-        }
+    // Collecting takes the zombie out of the table, so the first answer is kept: asked
+    // again, the same join finds no such thread.
+    let answer = core::cell::Cell::new(None);
+    let settled = || {
+        answer.get().is_some()
+            || match process::wait_thread_zombie(tid, caller) {
+                Ok(None) => false,
+                Ok(Some(_)) => {
+                    answer.set(Some(0));
+                    true
+                }
+                Err(()) => {
+                    answer.set(Some(SyscallError::NotFound.to_u64()));
+                    true
+                }
+            }
+    };
+    while !settled() {
         let Some(sched) = target.as_ref() else {
             // Nothing to arm on and no zombie: wait_thread_zombie will never answer differently.
             return SyscallError::NotFound.to_u64();
@@ -171,13 +183,14 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
             tid.raw() as u64,
             WaitClass::Other,
             Deadline::never(),
-            || matches!(process::wait_thread_zombie(tid, caller), Ok(Some(_)) | Err(())),
+            settled,
         )
         .is_err()
         {
             return cancelled();
         }
     }
+    answer.get().expect("a settled join holds its answer")
 }
 
 pub(super) fn sys_nanosleep(nanos: u64) -> u64 {
