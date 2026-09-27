@@ -2855,6 +2855,7 @@ mod tests {
             ("toyos-sched-sim", "toyos-sched/sim/Cargo.toml"),
             ("toyos-proclife", "toyos-proclife/Cargo.toml"),
             ("toyos-blockring", "toyos-blockring/Cargo.toml"),
+            ("toyos-transport", "toyos-transport/Cargo.toml"),
         ] {
             let path = root.join(manifest);
             let text = fs::read_to_string(&path)
