@@ -3359,7 +3359,6 @@ impl QemuInstance {
         }
     }
 
-    /// The QEMU process's pid.
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
@@ -4894,6 +4893,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         console_file,
     } = files;
 
+    // Inherited: `orphan` reads QEMU's exit as the end of its harness's stderr.
     qemu.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());

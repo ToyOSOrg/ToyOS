@@ -14214,7 +14214,7 @@ fn run_machine_test(
             control_regs(qemu.boot_log(), CPUS)
         }
         "control_regs_negative" => control_regs_negative(test_config, c_bins, rust_bins),
-        "guest_dies_with_its_harness" => common::orphan::guest_dies_with_its_harness(),
+        "guest_dies_with_its_harness" => common::orphan::guest_dies_with_its_harness(test_config),
         "smp_roster_and_tsc_trail" => {
             // Eight, which is the T14's own count and this suite's ceiling.
             const CPUS: u32 = 8;
@@ -20371,8 +20371,11 @@ fn main() {
     // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
-    if SUITE.present(&args, &testargs::HOLD) {
-        common::orphan::hold(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases"));
+    if let Some(image) = SUITE.value(&args, &testargs::HOLD) {
+        common::orphan::hold(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases"),
+            Path::new(image),
+        );
         run.exit(0);
     }
 

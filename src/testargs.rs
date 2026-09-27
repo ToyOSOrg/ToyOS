@@ -165,9 +165,9 @@ declare_flags!(pub SUITE = {
     /// machine is not touched**: the run builds the images and writes down what
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
-    /// The owner `guest_dies_with_its_harness` kills: one guest, held until
-    /// stdin ends. Alone on its line.
-    pub HOLD = "--hold", None;
+    /// The owner `guest_dies_with_its_harness` kills: the image it names,
+    /// booted and held until stdin ends. Alone on its line.
+    pub HOLD = "--hold", Next;
 });
 
 /// Validate the harness's argv and return the run's filter.
@@ -188,6 +188,7 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
     if let Some(refusal) = line.malformed() {
         return Err(refusal);
     }
+    let flags = line.seen.len();
 
     let mut filter: Option<&str> = None;
     for word in line.positionals {
@@ -231,10 +232,10 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
                 .to_string(),
         );
     }
-    if has(&HOLD) && args.len() != 1 {
+    if has(&HOLD) && (flags != 1 || filter.is_some()) {
         return Err(
-            "--hold boots one guest and holds it, and reads nothing else on the line; every \
-             other word would be dropped in silence"
+            "--hold boots the image it names and holds it, and reads nothing else on the line; \
+             every other word would be dropped in silence"
                 .to_string(),
         );
     }
@@ -503,7 +504,8 @@ mod tests {
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
             vec!["--metal", "--nightly"],
-            vec!["--hold"],
+            vec!["--hold", "boot.img"],
+            vec!["--hold=boot.img"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
         }
@@ -522,7 +524,12 @@ mod tests {
 
     #[test]
     fn hold_is_alone_on_its_line() {
-        for argv in [&["--hold", "boot"][..], &["--hold", "--nightly"], &["-j", "2", "--hold"]] {
+        for argv in [
+            &["--hold", "boot.img", "boot"][..],
+            &["--hold", "boot.img", "--nightly"],
+            &["-j", "2", "--hold", "boot.img"],
+            &["--hold"],
+        ] {
             let refusal = parse_owned(argv).unwrap_err();
             assert!(refusal.contains("--hold"), "{argv:?}: {refusal}");
         }
