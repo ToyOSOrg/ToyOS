@@ -336,14 +336,14 @@ fn a_century_register_outside_cmos_ram_is_told_apart_from_none() {
 }
 
 const FIXTURES: &[(&str, &[u8], u64)] = &[
-    ("rsdp", include_bytes!("../fixtures/qemu-11.1.0/rsdp.bin"), 0x7fb7_e014),
-    ("xsdt", include_bytes!("../fixtures/qemu-11.1.0/xsdt.bin"), 0x7fb7_d0e8),
-    ("facp", include_bytes!("../fixtures/qemu-11.1.0/facp.bin"), 0x7fb7_9000),
-    ("apic", include_bytes!("../fixtures/qemu-11.1.0/apic.bin"), 0x7fb7_8000),
-    ("hpet", include_bytes!("../fixtures/qemu-11.1.0/hpet.bin"), 0x7fb7_7000),
-    ("mcfg", include_bytes!("../fixtures/qemu-11.1.0/mcfg.bin"), 0x7fb7_6000),
-    ("dmar", include_bytes!("../fixtures/qemu-11.1.0/dmar.bin"), 0x7fb7_5000),
-    ("waet", include_bytes!("../fixtures/qemu-11.1.0/waet.bin"), 0x7fb7_4000),
+    ("rsdp", include_bytes!("../fixtures/qemu-11.1.1/rsdp.bin"), 0x7fb7_e014),
+    ("xsdt", include_bytes!("../fixtures/qemu-11.1.1/xsdt.bin"), 0x7fb7_d0e8),
+    ("facp", include_bytes!("../fixtures/qemu-11.1.1/facp.bin"), 0x7fb7_9000),
+    ("apic", include_bytes!("../fixtures/qemu-11.1.1/apic.bin"), 0x7fb7_8000),
+    ("hpet", include_bytes!("../fixtures/qemu-11.1.1/hpet.bin"), 0x7fb7_7000),
+    ("mcfg", include_bytes!("../fixtures/qemu-11.1.1/mcfg.bin"), 0x7fb7_6000),
+    ("dmar", include_bytes!("../fixtures/qemu-11.1.1/dmar.bin"), 0x7fb7_5000),
+    ("waet", include_bytes!("../fixtures/qemu-11.1.1/waet.bin"), 0x7fb7_4000),
 ];
 
 /// **No panic and no unbounded walk, over every byte of every table this crate

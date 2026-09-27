@@ -68,6 +68,10 @@ A wrong line number, a stale run id, a count, a date, a citation: never a send-b
 corrected, never checked for its own sake. Prose that is false, will rot or misleads is flagged
 REMOVE, one line, and the implementer deletes it. Nobody rewrites prose.
 
+Reducing prose is part of the review. Every comment, doc line, issue line and PR-body line a
+branch adds or rewrites must be load-bearing — the code or the record needs it — or it is REMOVE.
+Prose rewritten or "corrected" instead of deleted is REMOVE.
+
 ## Output
 
 Post the report as a comment on the pull request (`gh pr comment <N> --body-file`) and return the

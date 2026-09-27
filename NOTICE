@@ -283,7 +283,7 @@ aavmf/*.fd — EDK II firmware for QEMU `virt`, BSD-2-Clause-Patent AND Apache-2
     SPDX-License-Identifier: BSD-2-Clause-Patent AND Apache-2.0
 
 QEMU's own prebuilt ArmVirtQemu firmware, unmodified: `edk2-aarch64-code.fd`
-and `edk2-arm-vars.fd` as QEMU 11.1.0 installs them under `share/qemu/`,
+and `edk2-arm-vars.fd` as QEMU 11.1.1 installs them under `share/qemu/`,
 whose version string reads `edk2-stable202408-prebuilt.qemu.org` (a
 `DEBUG_GCC5` build of 2024-09-12). The variable store is the template: every
 boot gives it a writable snapshot QEMU discards, because this `DEBUG` build
