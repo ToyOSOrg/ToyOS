@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use crate::elf;
 use crate::object::{ops, HandleTable, KObjectRef};
-use crate::mm::paging::{CachePolicy, Prot};
+use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
     ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Pid,
@@ -168,8 +168,8 @@ fn insert_elf_regions(
 ///
 /// `PF_W | PF_X` refuses the write, not the execution: taking `X` away would
 /// let a hostile ELF run as data instead.
-fn segment_prot(seg: &toyos_elf::Segment) -> crate::mm::paging::Prot {
-    use crate::mm::paging::Prot;
+fn segment_prot(seg: &toyos_elf::Segment) -> crate::mm::policy::Prot {
+    use crate::mm::policy::Prot;
     if seg.flags.executable() {
         Prot::ReadExec
     } else if seg.flags.writable() {

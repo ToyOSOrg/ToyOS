@@ -215,7 +215,7 @@ pub fn regen_panic_font(root: &Path) {
 /// again. A build that cannot find out what is committed refuses, because it
 /// cannot honestly build an image either.
 fn tracked(dir: &Path) -> BTreeSet<PathBuf> {
-    crate::sysroot::tracked_files(dir, &[]).into_iter().map(PathBuf::from).collect()
+    crate::sysroot::tracked_files(dir, &[]).unwrap_or_else(|e| panic!("{e}")).into_iter().map(PathBuf::from).collect()
 }
 
 /// The paths `declared` names under `dir` that are not there, in the order they

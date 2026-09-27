@@ -218,9 +218,7 @@ impl fmt::Display for Tripwire {
 }
 
 /// How long a CPU waits for another to take an interrupt before calling it
-/// deaf and panicking — the TLB shootdown's acknowledgement wait is this. A
-/// spin that holds interrupts masked is bounded under it at its own site, and
-/// never the other way.
+/// deaf and panicking — the TLB shootdown's acknowledgement wait is this.
 pub const DEAF_CPU: Tripwire = Tripwire::absurd(
     Duration::from_secs(5),
     "no CPU that is not wedged goes five seconds without taking an interrupt",

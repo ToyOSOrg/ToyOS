@@ -16,9 +16,10 @@
 //!
 //! **A root this tree no longer holds is still read**, or deleting a whole one
 //! would silence every citation into it: a token shaped like a file or a
-//! directory (`name/…/file.ext`, `name/…/`, the name lowercase) whose first
-//! component is no tracked root, no directory below one and no [`FOREIGN`]
-//! name is a citation of a root that is gone, and reds.
+//! directory (`name/`, `name/…/`, `name/…/file.ext`, the name lowercase after
+//! an optional `.`) whose first component is no tracked root, no directory
+//! below one and no [`FOREIGN`] name is a citation of a root that is gone, and
+//! reds. A `FOREIGN` name no citation needs reds too.
 //!
 //! **What is not one**, each because another namespace spells the same text:
 //!
@@ -34,8 +35,9 @@
 //!
 //! So a path in another repository is written with that repository's name in
 //! front of it (`mio/src/sys/toyos/waker.rs`), a path that no longer exists is
-//! written as the revision that held it (`<rev>^:src/durations.rs`), and a path
-//! that does not exist yet is written relative to its crate (`arch/api.rs`).
+//! written as the revision that held it (`<rev>^:src/durations.rs`), a path
+//! that does not exist yet is written relative to its crate (`arch/api.rs`),
+//! and a directory that exists nowhere is named without its slash (`fs`).
 //!
 //! **The holes it leaves.** A crate-relative citation (`sched/dump.rs`) is not
 //! read, even of a real file, and neither is a gone root whose name is also a
@@ -52,13 +54,14 @@ use std::path::Path;
 /// header gives.
 const NOT_READ: &[&str] = &["rust", ".cargo"];
 
-/// First components the tracker writes that name something outside this tree:
-/// QEMU's `hw/` and `chardev/`, the std fork's `library/`, `pal/` and `base/`,
-/// the forked or quoted crates, a game's repository, and the host directories a
-/// capture was read from.
+/// First components the tracker and the `CLAUDE.md` files write that name
+/// something outside this tree: QEMU's `hw/` and `chardev/`, the std fork's
+/// `library/`, `compiler/`, `pal/` and `base/`, the forked or quoted crates, a
+/// game's repository, the host directories a capture was read from, and the
+/// untracked `.git/` and `.build-locks/` a checkout holds.
 const FOREIGN: &[&str] = &[
-    "base", "chardev", "debug", "gbae", "hw", "library", "memmap2", "mio", "pal", "scratchpad",
-    "smoltcp-0.12.0", "softbuffer", "t14-run122", "t14-run76",
+    ".build-locks", ".git", "base", "chardev", "compiler", "debug", "gbae", "hw", "library", "memmap2",
+    "mio", "pal", "scratchpad", "softbuffer", "t14-run122", "t14-run76",
 ];
 
 /// Characters that make a token a pattern rather than a path.
@@ -72,7 +75,7 @@ fn delimits(c: char) -> bool {
 /// Every file `git` tracks, repository-relative, and every directory above one.
 pub fn tracked(root: &Path) -> BTreeSet<String> {
     let mut all = BTreeSet::new();
-    for file in crate::sysroot::tracked_files(root, &[]) {
+    for file in crate::sysroot::tracked_files(root, &[]).unwrap_or_else(|e| panic!("{e}")) {
         let mut at = 0;
         while let Some(slash) = file[at..].find('/') {
             all.insert(file[..at + slash].to_string());
@@ -109,9 +112,9 @@ fn path_shaped(first: &str, rest: &str) -> bool {
     let extension = rest.rsplit('/').next().and_then(|last| last.rsplit_once('.')).is_some_and(|(stem, ext)| {
         !stem.is_empty() && lowercase(ext) && ext.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
     });
-    lowercase(first)
+    lowercase(first.strip_prefix('.').unwrap_or(first))
         && first.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
-        && (rest.ends_with('/') || extension)
+        && (rest.is_empty() || rest.ends_with('/') || extension)
 }
 
 /// Every path `line` cites, with its trailing `/` kept off.
@@ -138,7 +141,7 @@ pub fn cited(line: &str, names: &Names) -> Vec<String> {
         if NOT_READ.contains(&first) || path.split('/').any(|segment| segment == "target") {
             continue;
         }
-        let gone = !names.below.contains(first) && !FOREIGN.contains(&first) && path_shaped(first, rest);
+        let gone = !names.below.contains(first) && path_shaped(first, rest);
         if names.roots.contains(first) || gone {
             found.push(path.trim_end_matches('/').to_string());
         }
@@ -146,12 +149,22 @@ pub fn cited(line: &str, names: &Names) -> Vec<String> {
     found
 }
 
-/// Every `file:line: cites path` in `text` that `tracked` does not hold.
-pub fn dead(file: &str, text: &str, names: &Names, tracked: &BTreeSet<String>) -> Vec<String> {
+/// Every `file:line: cites path` in `text` that `tracked` does not hold, with
+/// each [`FOREIGN`] name that excused a citation added to `foreign`.
+pub fn dead(
+    file: &str,
+    text: &str,
+    names: &Names,
+    tracked: &BTreeSet<String>,
+    foreign: &mut BTreeSet<&'static str>,
+) -> Vec<String> {
     let mut out = Vec::new();
     for (n, line) in text.lines().enumerate() {
         for path in cited(line, names) {
-            if !tracked.contains(&path) {
+            let first = path.split('/').next().unwrap_or_default();
+            if let Some(name) = FOREIGN.iter().find(|f| **f == first && !names.roots.contains(first)) {
+                foreign.insert(name);
+            } else if !tracked.contains(&path) {
                 out.push(format!("{file}:{}: cites {path}, which this tree does not hold", n + 1));
             }
         }
@@ -185,7 +198,8 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    /// **The gate.** Every path an issue or a `CLAUDE.md` cites resolves.
+    /// **The gate.** Every path an issue or a `CLAUDE.md` cites resolves, and
+    /// every [`FOREIGN`] name excuses one.
     #[test]
     fn every_path_the_tracker_and_the_claude_files_cite_exists() {
         let root = repo_root();
@@ -197,14 +211,17 @@ mod tests {
             "the walk reached neither the tracker nor the root CLAUDE.md, so it reads nothing: {files:?}"
         );
         assert!(["kernel", "src", "issues"].iter().all(|r| names.roots.contains(*r)), "{:?}", names.roots);
-        let mut complaints = Vec::new();
+        let (mut complaints, mut foreign) = (Vec::new(), BTreeSet::new());
         let mut read = 0;
         for file in &files {
             let text = std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
             read += text.lines().map(|l| cited(l, &names).len()).sum::<usize>();
-            complaints.extend(dead(file, &text, &names, &tracked));
+            complaints.extend(dead(file, &text, &names, &tracked, &mut foreign));
         }
         assert!(read > 500, "only {read} citations read across {} files; the scan is reading nothing", files.len());
+        complaints.extend(
+            FOREIGN.iter().filter(|f| !foreign.contains(*f)).map(|f| format!("FOREIGN names {f}, and no citation needs it: delete it")),
+        );
         assert!(
             complaints.is_empty(),
             "{} citation(s) name a path this tree does not hold. Point each at where the file went, \
@@ -215,24 +232,31 @@ mod tests {
     }
 
     /// Teeth: a dead citation reds, naming the file, the line and the path; a
-    /// live one, a directory and a line-suffixed one do not; and a root the
-    /// tree no longer holds is read rather than forgotten.
+    /// live one, a directory and a line-suffixed one do not; a root the tree no
+    /// longer holds is read in every shape rather than forgotten; and a
+    /// [`FOREIGN`] name is recorded as needed only where it excuses a citation.
     #[test]
     fn a_dead_citation_is_named_and_a_live_one_is_not() {
         let tracked = set(&["kernel", "kernel/src", "kernel/src/vfs.rs", "issues", "issues/README.md"]);
         let names = names(&tracked);
         let text = "See `kernel/src/vfs.rs:32` and kernel/src/.\nThen `kernel/src/gone.rs`, and issues/README.md.\n\
-                    `toyos-cc/src/lower.rs:9` and toyos-cc/tests/, not toyos-cc/, and/or `src/vfs.rs` in A/B.\n";
-        assert_eq!(dead("issues/x/y.md", text, &names, &tracked), [
+                    `toyos-cc/src/lower.rs:9` and toyos-cc/tests/, and/or `src/vfs.rs` in A/B.\n\
+                    toyos-cc/, `.claude/agents/reviewer.md`, and ../forks, fs and 44100/2ch.\n\
+                    `mio/src/lib.rs`, `hw/`.\n";
+        let mut foreign = BTreeSet::new();
+        assert_eq!(dead("issues/x/y.md", text, &names, &tracked, &mut foreign), [
             "issues/x/y.md:2: cites kernel/src/gone.rs, which this tree does not hold",
             "issues/x/y.md:3: cites toyos-cc/src/lower.rs, which this tree does not hold",
             "issues/x/y.md:3: cites toyos-cc/tests, which this tree does not hold",
+            "issues/x/y.md:4: cites toyos-cc, which this tree does not hold",
+            "issues/x/y.md:4: cites .claude/agents/reviewer.md, which this tree does not hold",
         ]);
+        assert_eq!(foreign, ["hw", "mio"].into_iter().collect());
     }
 
     /// What another namespace spells is not read as ours.
     #[test]
-    fn a_pattern_a_panic_location_build_output_and_a_foreign_path_are_not_citations() {
+    fn a_pattern_a_panic_location_build_output_and_a_revision_are_not_citations() {
         let names = names(&set(&["kernel/src/arch/tlb.rs", "src/lib.rs", "tests/a", "rust/x", ".cargo/c"]));
         for line in [
             "PANIC: panicked at src/arch/tlb.rs:171:42:",
@@ -241,7 +265,7 @@ mod tests {
             "`kernel/src/{a,b}.rs`, `kernel/src/…`",
             "`kernel/target` 318 MB, `userland/target`",
             "the fork's `rust/src/bootstrap/` and a `.cargo/config.toml`",
-            "`mio/src/sys/toyos/waker.rs` and `d5c2d9c9^:src/durations.rs`",
+            "`d5c2d9c9^:src/durations.rs`",
             "https://github.com/ToyOSOrg/ToyOS/blob/main/src/lib.rs",
             "`arch/api.rs`, 44100/2ch/i16, read/write and A/B",
         ] {

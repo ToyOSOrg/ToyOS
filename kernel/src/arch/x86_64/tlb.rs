@@ -13,13 +13,12 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::shootdown::{Generation, Shootdown};
-use crate::time::Tripwire;
 
 use super::{apic, percpu, smp};
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
-pub use crate::invalidation::Origin;
+use crate::invalidation::Origin;
 
 /// Issuer-side census; `irq_census`'s `tlb` column is the receiver side, and a
 /// delivery the two disagree on is an uncounted issuing path.
@@ -57,13 +56,6 @@ pub fn log_census() {
         Fields(&counts)
     );
 }
-
-/// How long the initiator waits for one CPU's flush: a target that has not
-/// answered by then is not taking interrupts.
-const ACK_TIMEOUT: Tripwire = crate::time::DEAF_CPU;
-
-// A spin with interrupts masked is held under `DEAF_CPU` at its own site, so this wait is no shorter.
-const _: () = assert!(ACK_TIMEOUT.nanos() >= crate::time::DEAF_CPU.nanos());
 
 /// Spins between deadline checks; `nanos_since_boot`'s 128-bit divide is too
 /// costly to call on every iteration.
@@ -142,11 +134,11 @@ fn wait_for(me: usize, cpu: u32, generation: Generation) {
             spins = 0;
             let now = crate::clock::nanos_since_boot();
             match deadline {
-                None => deadline = Some(now.saturating_add(ACK_TIMEOUT.nanos())),
+                None => deadline = Some(now.saturating_add(crate::time::DEAF_CPU.nanos())),
                 Some(at) if now >= at => panic!(
                     "tlb: cpu {cpu} has not flushed for generation {generation:?} in {}ns — \
                      it is not taking interrupts",
-                    ACK_TIMEOUT.nanos(),
+                    crate::time::DEAF_CPU.nanos(),
                 ),
                 Some(_) => {}
             }

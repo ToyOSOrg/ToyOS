@@ -79,16 +79,16 @@ carrying explicit backpressure — a slow sink drops-and-counts, never blocks,
 does no unbounded work in a scheduler-adjacent path, and fails alone.
 
 **The layout half, re-measured.** `kernel/src` is **50 flat `.rs` files**
-(`ls kernel/src/*.rs | wc -l`) beside ten directories — `arch/`, `completion/`,
-`drivers/`, `elf/`, `iommu/`, `loader/`, `log/`, `mm/`, `object/`, `sched/`.
+(`ls kernel/src/*.rs | wc -l`) beside ten directories — `arch`, `completion`,
+`drivers`, `elf`, `iommu`, `loader`, `log`, `mm`, `object`, `sched`.
 The 39-beside-seven figure this entry opened with is three directories and
 eleven files out of date; `log/` is one of the six the review named as the
 target and it exists. `elf.rs` and
 `loader.rs` became directories in `42b29c9`, which is the precedent. The flat
 set mixes a filesystem adapter, an IPC primitive, two input devices, a page
 cache, io_uring, the process table and two cfg-gated test actuators at one
-level. The review's target was subsystem directories (fs/, ipc/, input/,
-proc/, log/, time/), and the `syscall.rs` split already forces at least one.
+level. The review's target was subsystem directories (fs, ipc, input,
+proc, log, time), and the `syscall.rs` split already forces at least one.
 
 Cost, so the question is priced: a directory move is `git mv` plus `mod` lines,
 it touches no logic, and it collides with every worktree in flight — which is
@@ -99,7 +99,7 @@ Two smaller layout items ride the same answer. `usb_gate.rs` (242 lines) and
 call (`kernel/src/main.rs:34`, `:36`, `:408`, `:537`) and are never in an
 ordinary build, but
 they sit interleaved with production sources; the review's target is one
-`gates/` directory under `kernel/src/` so that what test machinery exists is auditable
+`gates` directory under `kernel/src/` so that what test machinery exists is auditable
 in one listing. And `input_merge_test` is the tell that pure logic is trapped
 in the kernel: the merge state machine (one held-set, one button-merge, both
 bounded) is host-testable with synthetic multi-source streams, after which the

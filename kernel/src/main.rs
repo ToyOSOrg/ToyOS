@@ -111,7 +111,7 @@ mod late_panic {
     }
 }
 
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use arch::{cpu, percpu, smp};

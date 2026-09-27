@@ -15,7 +15,7 @@ use crate::hasher::HashMap;
 use toyos_pcid::{Alloc, Pcid, PcidPool};
 
 use crate::mm::{UserAddr, PAGE_2M};
-pub use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
+use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
 use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
 use crate::sync::Lock;
@@ -276,7 +276,7 @@ pub fn flush_tlb_all() {
 pub struct Cr3(u64);
 
 /// The address space a CPU runs in, as the architecture names its root: CR3.
-pub type Root = Cr3;
+pub use Cr3 as Root;
 
 impl Cr3 {
     pub fn current() -> Self {
@@ -351,7 +351,7 @@ fn alloc_pcid() -> Option<PcidGuard> {
         match pool.alloc() {
             Alloc::Ready(p) => return Some(PcidGuard(p)),
             Alloc::NeedsFlush => {
-                crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Pcid);
+                crate::arch::tlb::shootdown(crate::invalidation::Origin::Pcid);
                 pool.reclaim();
             }
             Alloc::Exhausted => return None,
@@ -917,7 +917,7 @@ pub fn load_kernel_flush() {
 /// sibling's stale entry, which is SDM Vol. 3A §11.12.4 undefined behaviour.
 pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
     let mmio = kernel().lock().map_mmio(phys, size, policy.cache());
-    crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Mmio);
+    crate::arch::tlb::shootdown(crate::invalidation::Origin::Mmio);
     // Read back off the table and logged beside firmware's MTRR verdict: the
     // boot's own evidence that no register window trusts firmware.
     let installed =

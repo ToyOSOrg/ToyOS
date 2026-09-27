@@ -3,7 +3,7 @@
 //! else may write any of the three. Each register is written whole: `CR0`
 //! and `EFER` are constants, `CR4` is required bits plus whatever optional
 //! bits this CPU offers. `EFER.NXE` lets bit 63 of a paging entry mean *not
-//! executable* ([`Prot`](crate::mm::paging::Prot)).
+//! executable* ([`Prot`](crate::mm::policy::Prot)).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

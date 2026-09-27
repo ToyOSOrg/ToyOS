@@ -71,8 +71,9 @@
 //!
 //! The eleventh holds the kernel's arch layer below the rest: a file under
 //! `kernel/src/arch/` may name, by `crate::`, `$crate::` or a `super::` chain
-//! out of it, only the architecture and the root's re-exports of it, and a name
-//! the layer itself re-exports from above counts as where it came from. What it
+//! out of it, only the architecture and the root's re-exports of it, and it
+//! hands nothing from above to the rest of the layer: a `pub use` that reaches
+//! above, any `pub type` and a glob of `crate::arch` are refused. What it
 //! names beyond that today is [`ARCH_REACHES_UP`], per file and item: the gate
 //! holds that list shrinking by item, and review holds the rest.
 //!
@@ -1425,6 +1426,16 @@ impl Code {
         (start, self.0[start..end].iter().collect())
     }
 
+    /// Whether the item keyword at `at` carries a visibility: `pub`,
+    /// `pub(crate)`, `pub(in …)`.
+    fn public(&self, at: usize) -> bool {
+        let at = match (0..at).rev().find(|&j| !self.0[j].is_whitespace()) {
+            Some(j) if self.0[j] == ')' => (0..j).rev().find(|&k| self.0[k] == '(').unwrap_or(at),
+            _ => at,
+        };
+        self.ident_before(at).1 == "pub"
+    }
+
     /// Whether `at` begins an item that imports: `use …`, or `extern crate …`,
     /// or an element of a `use` group.
     fn imported(&self, mut at: usize) -> bool {
@@ -1730,31 +1741,19 @@ const ARCH_REACHES_UP: &[(&str, &[&str])] = &[
 
 /// Every `(0-based line, item)` for a crate-root item that a file under
 /// [`ARCH_TREE`], `depth` modules below the root, names by a path
-/// ([`spelled_paths`] from `crate` or `super`): the path's first segment, or,
-/// through the architecture, a root alias of it or a `super` chain inside it,
-/// the origin of each of `reexports` the path passes through. A glob of the
-/// root is the item `*` and a rename of it `self as`. A path relative to the
-/// module (`self::x`, a child's name, a name a `use` bound) is not read.
+/// ([`spelled_paths`] from `crate` or `super`) that is not the architecture, a
+/// root alias of it or a `super` chain inside it. A glob of the root is the
+/// item `*` and a rename of it `self as`. A path relative to the module
+/// (`self::x`, a child's name, a name a `use` bound) is not read.
 #[cfg(test)]
-fn arch_reach(
-    text: &str,
-    depth: usize,
-    aliases: &[String],
-    reexports: &std::collections::BTreeSet<(String, String)>,
-) -> Vec<(usize, String)> {
+fn arch_reach(text: &str, depth: usize, aliases: &[String]) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     for path in spelled_paths(text, &["crate"], Some(depth)) {
-        let first = path.segments[0].as_str();
-        if first == "self" {
-            found.extend(path.alias.is_some().then(|| (path.line, "self as".to_string())));
-        } else if first == "arch" || first == "super" || aliases.iter().any(|a| a == first) {
-            for (name, origin) in reexports {
-                if path.segments[1..].contains(name) {
-                    found.push((path.line, origin.clone()));
-                }
-            }
-        } else {
-            found.push((path.line, first.to_string()));
+        match path.segments[0].as_str() {
+            "self" => found.extend(path.alias.is_some().then(|| (path.line, "self as".to_string()))),
+            "arch" | "super" => {}
+            first if aliases.iter().any(|a| a == first) => {}
+            first => found.push((path.line, first.to_string())),
         }
     }
     found.sort();
@@ -1762,31 +1761,37 @@ fn arch_reach(
     found
 }
 
-/// Every `(name, origin)` a file under [`ARCH_TREE`] re-exports from above the
-/// layer: `pub use crate::invalidation::Origin;` is `("Origin",
-/// "invalidation")`. A name a glob re-exports is not known, so not resolved.
+/// Every `(0-based line, what)` by which a file under [`ARCH_TREE`] would hand
+/// the rest of the layer a name from above without that file spelling where it
+/// lives: a `pub use` that reaches above the layer, any `pub type` (an alias is
+/// the one re-export rustc lets carry a privately imported name out), and a
+/// glob of the architecture, which takes in names nobody spells.
 #[cfg(test)]
-fn arch_reexports(files: &[(String, String)], aliases: &[String]) -> std::collections::BTreeSet<(String, String)> {
-    let mut out = std::collections::BTreeSet::new();
-    for (at, text) in files.iter().filter(|(at, _)| at.starts_with(ARCH_TREE)) {
-        let code = text.lines().map(code_only).collect::<Vec<_>>().join("\n");
-        let mut offset = 0;
-        for line in code.split_inclusive('\n') {
-            let item = after_visibility(line);
-            if item != line.trim_start() && item.starts_with("use ") {
-                let statement = code[offset..].split(';').next().unwrap_or_default();
-                for path in spelled_paths(statement, &["crate"], Some(module_depth(at))) {
-                    let first = path.segments[0].as_str();
-                    if !["self", "arch", "super"].contains(&first) && !aliases.iter().any(|a| a == first) {
-                        let name = path.alias.clone().or_else(|| path.segments.last().cloned());
-                        out.extend(name.map(|name| (name, first.to_string())));
-                    }
-                }
+fn arch_hands_up(text: &str, depth: usize, aliases: &[String]) -> Vec<(usize, String)> {
+    let code = Code(text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect());
+    let mut found = Vec::new();
+    for at in 0..code.0.len() {
+        match code.ident_at(at) {
+            Some((word, _)) if word == "type" && code.public(at) => {
+                found.push((code.line_of(at), "declares a `pub type`".to_string()));
             }
-            offset += line.len();
+            Some((word, _)) if word == "use" && code.public(at) => {
+                let statement: String = code.0[at..].iter().take_while(|c| **c != ';').collect();
+                let reached = arch_reach(&statement, depth, aliases).into_iter();
+                found.extend(reached.map(|(_, item)| (code.line_of(at), format!("re-exports `crate::{item}`"))));
+            }
+            _ => {}
         }
     }
-    out
+    for path in spelled_paths(text, &["crate"], Some(depth)) {
+        let arch = path.segments[0] == "arch" || aliases.contains(&path.segments[0]);
+        if arch && path.segments.last().is_some_and(|s| s == "*") {
+            found.push((path.line, "globs `crate::arch`".to_string()));
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// How many modules deep the file at repository-relative `path` sits below
@@ -1838,9 +1843,14 @@ fn arch_reach_complaints(
             ));
         }
     }
-    let reexports = arch_reexports(files, aliases);
     for (at, text) in files.iter().filter(|(at, _)| at.starts_with(ARCH_TREE)) {
-        let named = arch_reach(text, module_depth(at), aliases, &reexports);
+        for (line, what) in arch_hands_up(text, module_depth(at), aliases) {
+            complaints.push(format!(
+                "{at}:{}: {what}, which hands the layer a name without its home: name each item where it lives",
+                line + 1
+            ));
+        }
+        let named = arch_reach(text, module_depth(at), aliases);
         let permitted: &[&str] = rows.iter().find(|(file, _)| file == at).map_or(&[], |(_, items)| items);
         for (line, item) in &named {
             if !permitted.contains(&item.as_str()) {
@@ -1932,10 +1942,9 @@ mod tests {
     /// what is not a path to one is not.
     #[test]
     fn every_spelling_of_a_crate_root_item_is_read() {
-        let reexports = [("Prot".to_string(), "mm".to_string())].into_iter().collect();
         let hw = ["hw".to_string()];
         let names = |text: &str, depth: usize| -> Vec<String> {
-            arch_reach(text, depth, &hw, &reexports).into_iter().map(|(_, item)| item).collect()
+            arch_reach(text, depth, &hw).into_iter().map(|(_, item)| item).collect()
         };
         assert_eq!(names("use crate::sched::driver;\n", 3), ["sched"]);
         assert_eq!(names("    crate::log!(\"x\");\n", 3), ["log"]);
@@ -1949,9 +1958,6 @@ mod tests {
         assert_eq!(names("use super::super::{sched, mm};\n", 2), ["mm", "sched"]);
         assert_eq!(names("use self::super::super::super::drivers;\n", 3), ["drivers"]);
         assert_eq!(names("mod t {\n    use super::super::super::super::sched;\n}\nmod u { use super::super::super::x; }\n", 3), ["sched"]);
-        // A name the layer re-exports from above is its origin, however it is reached.
-        assert_eq!(names("use crate::arch::paging::Prot;\n", 3), ["mm"]);
-        assert_eq!(names("use super::paging::{Other, Prot};\nlet p = crate::hw::paging::Prot::R;\n", 3), ["mm", "mm"]);
         // A char literal hides nothing after it.
         assert_eq!(names("let q = '\"'; let r = '\\''; fn f<'a>(x: &'a u8) { crate::log!(); }\n", 3), ["log"]);
         // Not code, not the root, not a path.
@@ -1960,21 +1966,24 @@ mod tests {
             "let s = \"crate::sched\";\n",
             "pub(crate) fn f() {}\npub(super) fn g() {}\n",
             "use mycrate::sched;\nuse other_crate::x;\n",
-            "use self::super::x;\nuse super::{apic, smp};\nuse super::super::percpu;\nuse crate::arch::paging::Other;\n",
+            "use self::super::x;\nuse super::{apic, smp};\nuse super::super::percpu;\nuse crate::arch::paging::Prot;\n",
+            "let p = crate::hw::paging::Prot::R;\n",
         ] {
             assert_eq!(names(text, 3), Vec::<String>::new(), "{text:?}");
         }
-        let file = |at: &str, text: &str| (at.to_string(), text.to_string());
-        let reexported = arch_reexports(
-            &[
-                file("kernel/src/arch/x86_64/tlb.rs", "pub use crate::invalidation::Origin;\nuse crate::sched::X;\n"),
-                file("kernel/src/arch/x86_64/paging.rs", "pub(crate) use crate::mm::{\n    policy::Prot,\n    Mm as M,\n};\npub use super::cpu::outb;\n"),
-                file("kernel/src/sched/mod.rs", "pub use crate::log::Up;\n"),
-            ],
-            &hw,
+        // Handing a name from above to the layer, however it is spelled.
+        let handed = |text: &str| -> Vec<(usize, String)> { arch_hands_up(text, 3, &hw) };
+        let at = |line: usize, what: &str| (line, what.to_string());
+        assert_eq!(handed("pub(crate) use crate::mm::{\n    policy::Prot,\n    Mm as M,\n};\n"), [at(0, "re-exports `crate::mm`")]);
+        assert_eq!(handed("pub use super::super::super::sched::X;\n"), [at(0, "re-exports `crate::sched`")]);
+        assert_eq!(
+            handed("pub type Hop = crate::invalidation::Origin;\nuse crate::mm::policy::Prot;\npub(super)  type P =\n Prot;\n"),
+            [at(0, "declares a `pub type`"), at(2, "declares a `pub type`")]
         );
-        let pair = |n: &str, o: &str| (n.to_string(), o.to_string());
-        assert_eq!(reexported, [pair("M", "mm"), pair("Origin", "invalidation"), pair("Prot", "mm")].into_iter().collect());
+        assert_eq!(handed("use crate::arch::paging::*;\nuse crate::hw::{x, *};\n"), [at(0, "globs `crate::arch`"), at(1, "globs `crate::arch`")]);
+        let own = "pub use super::cpu::outb;\npub use Cr3 as Root;\nuse crate::mm::X;\nuse super::*;\n\
+                   impl I for S { type Output = u64; }\npub(crate) use irq_took;\npub use toyos_bootmap::aarch64::MAIR;\n";
+        assert_eq!(handed(own), []);
         assert_eq!(module_depth("kernel/src/arch/mod.rs"), 1);
         assert_eq!(module_depth("kernel/src/arch/x86_64/mod.rs"), 2);
         assert_eq!(module_depth("kernel/src/arch/x86_64/tlb.rs"), 3);
@@ -1986,28 +1995,25 @@ mod tests {
     }
 
     /// Teeth for the list: a new reach reds naming the file, the line and the
-    /// item, and so does one through a re-export; a listed one does not; a
-    /// listed one the file stopped spelling reds, and so does a row for a file
-    /// outside the layer; and a root alias of the architecture is the architecture.
+    /// item; a listed one does not; a listed one the file stopped spelling reds,
+    /// and so does a row for a file outside the layer; a root alias of the
+    /// architecture is the architecture; and a name handed up reds whatever the
+    /// list says.
     #[test]
     fn a_new_reach_out_of_arch_is_red_and_the_list_cannot_rot() {
         let file = |at: &str, text: &str| (at.to_string(), text.to_string());
-        let files = [
+        let mut files = vec![
             file("kernel/src/arch/x86_64/tlb.rs", "use crate::time::Duration;\nuse crate::drivers::xhci;\n"),
             file("kernel/src/arch/x86_64/idt/timer.rs", "use crate::hw::HW;\nuse crate::arch::apic;\n"),
-            file("kernel/src/arch/x86_64/paging.rs", "pub use crate::mm::policy::Prot;\n"),
-            file("kernel/src/arch/x86_64/rtc.rs", "use crate::arch::paging::Prot;\n"),
             file("kernel/src/sched/driver.rs", "use crate::drivers::xhci;\n"),
         ];
         let aliases = vec!["hw".to_string()];
-        let paging = ("kernel/src/arch/x86_64/paging.rs", &["mm"][..]);
-        let said = arch_reach_complaints(&files, &[("kernel/src/arch/x86_64/tlb.rs", &["time"]), paging], &aliases);
-        assert_eq!(said.len(), 2, "{said:?}");
+        let said = arch_reach_complaints(&files, &[("kernel/src/arch/x86_64/tlb.rs", &["time"])], &aliases);
+        assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].starts_with("kernel/src/arch/x86_64/tlb.rs:2: names `crate::drivers`"), "{said:?}");
-        assert!(said[1].starts_with("kernel/src/arch/x86_64/rtc.rs:1: names `crate::mm`"), "{said:?}");
 
-        let rtc = ("kernel/src/arch/x86_64/rtc.rs", &["mm"][..]);
-        let listed = arch_reach_complaints(&files, &[("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time"]), paging, rtc], &aliases);
+        let tlb = ("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time"][..]);
+        let listed = arch_reach_complaints(&files, &[tlb], &aliases);
         assert!(listed.is_empty(), "{listed:?}");
 
         let stale = arch_reach_complaints(
@@ -2016,8 +2022,6 @@ mod tests {
                 ("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time", "sched"]),
                 ("kernel/src/arch/gone.rs", &["log"]),
                 ("kernel/src/sched/driver.rs", &["drivers"]),
-                paging,
-                rtc,
             ],
             &aliases,
         );
@@ -2025,6 +2029,13 @@ mod tests {
         assert!(stale.iter().any(|s| s.contains("kernel/src/arch/gone.rs")), "{stale:?}");
         assert!(stale.iter().any(|s| s.contains("names kernel/src/sched/driver.rs")), "{stale:?}");
         assert!(stale.iter().any(|s| s.contains("`crate::sched`") && s.contains("no longer")), "{stale:?}");
+
+        files.push(file("kernel/src/arch/x86_64/paging.rs", "pub use crate::mm::policy::Prot;\n"));
+        files.push(file("kernel/src/arch/x86_64/rtc.rs", "use crate::arch::paging::*;\n"));
+        let handed = arch_reach_complaints(&files, &[tlb, ("kernel/src/arch/x86_64/paging.rs", &["mm"])], &aliases);
+        assert_eq!(handed.len(), 2, "{handed:?}");
+        assert!(handed[0].starts_with("kernel/src/arch/x86_64/paging.rs:1: re-exports `crate::mm`, which hands"), "{handed:?}");
+        assert!(handed[1].starts_with("kernel/src/arch/x86_64/rtc.rs:1: globs `crate::arch`, which hands"), "{handed:?}");
     }
 
     /// **The architecture rules hold over the whole repository**, and no place
@@ -2461,7 +2472,7 @@ mod tests {
             let walked: std::collections::BTreeSet<String> =
                 files.iter().map(|p| rel(&root, p)).collect();
             let tracked: std::collections::BTreeSet<String> =
-                crate::sysroot::tracked_files(&root, &[tree]).into_iter().filter(|p| p.ends_with(".rs")).collect();
+                crate::sysroot::tracked_files(&root, &[tree]).unwrap_or_else(|e| panic!("{e}")).into_iter().filter(|p| p.ends_with(".rs")).collect();
             assert!(
                 tracked.len() > 1,
                 "git tracks {} .rs file(s) under {tree}, so this floor is not one",
@@ -2883,7 +2894,7 @@ mod tests {
     #[test]
     fn every_committed_binary_file_is_declared() {
         let root = repo_root();
-        let listing = crate::sysroot::tracked_files(&root, &[]);
+        let listing = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
 
         let mut found: Vec<(String, String)> = Vec::new();
         for name in &listing {
@@ -2944,7 +2955,7 @@ mod tests {
         let licence_path = format!("{CORPUS}/LICENSE");
         let licence = std::fs::read_to_string(root.join(&licence_path))
             .unwrap_or_else(|e| panic!("{licence_path}: {e}"));
-        let tracked = crate::sysroot::tracked_files(&root, &[]);
+        let tracked = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
         let under_corpus: Vec<&String> =
             tracked.iter().filter(|f| f.starts_with(&format!("{CORPUS}/"))).collect();
         assert!(

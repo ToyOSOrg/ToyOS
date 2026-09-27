@@ -53,7 +53,7 @@ fn publish_page(counter_at_boot: u64, period_fs: u64) {
 /// the ABI names. A region of its own, so no `mmap` can land on it and a
 /// fault in it is refused rather than filled.
 pub fn map_page(space: &mut crate::mm::paging::AddressSpace) {
-    use crate::mm::paging::{CachePolicy, Prot};
+    use crate::mm::policy::{CachePolicy, Prot};
     let phys = PAGE_PHYS.load(Acquire);
     assert!(phys != 0, "clock: an address space was built before the clock page");
     let at = crate::UserAddr::new(toyos_abi::clock::CLOCK_PAGE);

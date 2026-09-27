@@ -343,8 +343,8 @@ fn split_versions(root: &Path) -> Result<Vec<String>, String> {
 }
 
 fn tracked_lockfiles(root: &Path) -> Result<Vec<String>, String> {
-    let out = git(root, &["ls-files", "-z", "*Cargo.lock"])?;
-    Ok(out.split('\0').filter(|p| !p.is_empty() && !p.starts_with("rust/")).map(String::from).collect())
+    let all = crate::sysroot::tracked_files(root, &["*Cargo.lock"])?;
+    Ok(all.into_iter().filter(|p| !p.starts_with("rust/")).collect())
 }
 
 #[derive(Default)]

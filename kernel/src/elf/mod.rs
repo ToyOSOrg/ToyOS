@@ -117,8 +117,8 @@ impl LoadedLib {
     /// Protection for the page at `offset`: exec below the writable window,
     /// write inside it, read-only above — over-permissive, never under, for
     /// an unusual segment layout.
-    fn page_prot(&self, offset: u64) -> crate::mm::paging::Prot {
-        use crate::mm::paging::Prot;
+    fn page_prot(&self, offset: u64) -> crate::mm::policy::Prot {
+        use crate::mm::policy::Prot;
         if offset < self.rw_lo {
             Prot::ReadExec
         } else if offset < self.rw_hi {
@@ -134,7 +134,7 @@ impl LoadedLib {
     /// A `Shared` module's split window holds a shared tail of `.text` plus
     /// the private copy, byte-identical there, so `ReadExec` is safe over either.
     pub fn map_into(&self, pt: &crate::process::PageTables) -> Option<UserAddr> {
-        use crate::mm::paging::WindowProt;
+        use crate::mm::policy::WindowProt;
 
         let (image_phys, image_size) = match &self.memory {
             LibMemory::Owned(alloc) => (
@@ -164,7 +164,7 @@ impl LoadedLib {
                     }
                 }
             };
-            let mut prot = WindowProt::uniform(crate::mm::paging::Prot::Read);
+            let mut prot = WindowProt::uniform(crate::mm::policy::Prot::Read);
             let mut page = 0;
             while page < PAGE_2M {
                 prot.set(page, self.page_prot(offset + page));

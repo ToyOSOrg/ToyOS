@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::syscall::SyscallError;
 
-use crate::mm::paging::{CachePolicy, Prot};
+use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::{align_2m, pmm, Unmapped, PAGE_2M};
 use crate::process::{PageTables, Pid};
 use crate::sync::Lock;

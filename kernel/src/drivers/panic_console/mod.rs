@@ -24,7 +24,7 @@ use toyos_ps2::{KeyDecoder, KeyOutcome};
 use crate::log;
 use crate::panic_reboot::Bound;
 use crate::time::{Budget, Cadence, Duration};
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use crate::mm::{self, DirectMap, align_2m};
 
 /// 1 bpp 8x16, codepoints 0x20..=0x7E, one byte per row, bit 7 leftmost.

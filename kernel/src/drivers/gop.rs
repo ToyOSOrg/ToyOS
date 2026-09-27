@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 
 use toyos_abi::syscall::SyscallError;
 
-use crate::mm::paging::{CachePolicy, MmioPolicy};
+use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::{PAGE_2M, align_2m_checked, DirectMap};
 use crate::gpu::{Gpu, GpuInfo};
 use crate::log;

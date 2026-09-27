@@ -6,7 +6,7 @@ use core::sync::atomic::Ordering;
 
 use crate::log;
 use crate::time::{Budget, Cadence, Duration};
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use crate::mm::Mmio;
 use crate::drivers::pci::PciDevice;
 use crate::drivers::DmaPool;

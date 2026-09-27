@@ -147,7 +147,7 @@ pub fn map_block(
 
     let phys = alloc.phys();
     let (vaddr, _) = crate::process::vma_map(child_pt, phys, alloc.size() as u64,
-        crate::mm::paging::Prot::ReadWrite)?;
+        crate::mm::policy::Prot::ReadWrite)?;
     let rebase = vaddr.raw() as i64 - phys as i64;
     let fs_base = (fs_base as i64 + rebase) as u64;
     // SAFETY: nothing runs in the unscheduled child yet, and `fs_base - vaddr` is the `tp_offset` the builder bounded.

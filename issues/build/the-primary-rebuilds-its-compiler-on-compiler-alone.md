@@ -4,13 +4,13 @@ kind: tooling
 opened: 2026-09-26
 ---
 
-# The primary rebuilds its compiler on `compiler/` alone
+# The primary rebuilds its compiler on `rust/compiler/` alone
 
 `src/toolchain.rs` rebuilds the primary's toolchain when the stamp over
 `rust/compiler/` changes, and `compiler::record` writes that tree as the
 compiler the primary's `stage2` is. A fork commit that moves only
 `rust/src/bootstrap`, `rust/src/tools`, `rust/src/stage0`, `rust/Cargo.lock` or the LLVM submodule
-leaves the primary on the compiler it had, and a worktree whose `compiler/`
+leaves the primary on the compiler it had, and a worktree whose `rust/compiler/`
 matches the record is handed that compiler too. A worktree's own compiler is
 keyed on all of them (`compiler::key`, PR #524), so the two answers to "which
 compiler do these sources name" differ.
