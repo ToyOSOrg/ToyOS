@@ -3587,18 +3587,23 @@ const STORM_CALLS: [(u64, usize); 3] = [
     (toyos_abi::syscall::SYS_THREAD_JOIN, STORM_CHILDREN),
 ];
 
-/// The parent is the *first* `spawn:` line, since every later one is a child of
-/// it; `spawned_pid` reads the last and would answer with a child.
+/// What the storm's judge reads: the window and the lines before its start
+/// marker. The marker reaches the console through `logd` and the kernel's
+/// records through `klogd`, so the parent's spawn record and its first
+/// children's can arrive ahead of it, and the window then opens at a child's.
+fn storm_log(result: &TestResult) -> String {
+    format!("{}{}", result.before, result.serial)
+}
+
+/// The parent is the lowest pid among the storm's `spawn:` lines: pids are
+/// never reused and it is made before any child. `spawned_pid` reads the last
+/// and would answer with a child.
 fn storm_parent(log: &str) -> Option<u32> {
     let want = format!("/system/bin/test_rs_{STORM} ");
     log.lines()
-        .find(|l| l.contains("spawn: ") && l.contains(&want))?
-        .split("pid=")
-        .nth(1)?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+        .filter(|l| l.contains("spawn: ") && l.contains(&want))
+        .filter_map(|l| l.split("pid=").nth(1)?.split_whitespace().next()?.parse().ok())
+        .min()
 }
 
 /// Wait for the parent's accounting line: every child's and every thread's
@@ -3608,9 +3613,9 @@ fn settle_exit_wait_storm(qemu: &mut QemuInstance, result: &mut TestResult) {
     /// A liveness ceiling and never a verdict.
     const ACCOUNTED: Duration = Duration::from_secs(5);
 
-    let Some(pid) = storm_parent(&result.serial) else { return };
+    let Some(pid) = storm_parent(&storm_log(result)) else { return };
     let want = accounting_of(pid);
-    if result.serial.contains(&want) {
+    if storm_log(result).contains(&want) {
         return;
     }
     let more = qemu.drain_until(ACCOUNTED, |l| l.contains(&want));
@@ -3625,7 +3630,8 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
     }
-    let Some(parent) = storm_parent(&result.serial) else {
+    let log = storm_log(result);
+    let Some(parent) = storm_parent(&log) else {
         eprintln!(
             "FAIL rs::{STORM}: no `spawn: /system/bin/test_rs_{STORM}` line reached the capture, so \
              nothing here says what the kernel saw{}",
@@ -3635,13 +3641,14 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     };
     let died = format!("exit: test_rs_{STORM} pid=");
     let mut codes: Vec<i32> = Vec::new();
-    for line in result.serial.lines() {
+    for line in log.lines() {
         let Some(rest) = line.split(died.as_str()).nth(1) else {
             continue;
         };
         let mut fields = rest.split_whitespace();
         let Some(Ok(pid)) = fields.next().map(str::parse::<u32>) else { continue };
-        if pid == parent {
+        // Its children are the pids made after it.
+        if pid <= parent {
             continue;
         }
         if let Some(Ok(code)) =
@@ -3662,7 +3669,7 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
         return false;
     }
     let want = accounting_of(parent);
-    let Some(line) = result.serial.lines().find(|l| l.contains(want.as_str())) else {
+    let Some(line) = log.lines().find(|l| l.contains(want.as_str())) else {
         eprintln!(
             "FAIL rs::{STORM}: the kernel never accounted the parent — no `{want}` line \
              reached the capture, so nothing here says which calls it made{}",
