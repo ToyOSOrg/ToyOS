@@ -115,14 +115,18 @@ fn the_window_is_what_phys_offset_leaves() {
 
 #[test]
 fn memory_past_the_window_is_refused_by_name() {
+    let map = [e(CONVENTIONAL, DIRECT_MAP_WINDOW - PAGE_2M, DIRECT_MAP_WINDOW + 1)];
+    assert_eq!(
+        direct_map_end(&map),
+        Err(Refusal::PastWindow(DIRECT_MAP_WINDOW + 1)),
+        "memory one byte past the window"
+    );
+    let map = [e(CONVENTIONAL, DIRECT_MAP_WINDOW - PAGE_2M, DIRECT_MAP_WINDOW)];
+    assert_eq!(direct_map_end(&map), Ok(DIRECT_MAP_WINDOW), "memory that ends at the window");
     for ty in (0..=255).filter(|&ty| is_usable_type(ty)) {
         let map = [e(CONVENTIONAL, 0x10_0000, 2 * GIB), e(ty, 4 * GIB, u64::MAX)];
         assert_eq!(direct_map_end(&map), Err(Refusal::PastWindow(u64::MAX)), "type {ty}");
     }
-    let map = [e(CONVENTIONAL, DIRECT_MAP_WINDOW - PAGE_2M, DIRECT_MAP_WINDOW + 1)];
-    assert_eq!(direct_map_end(&map), Err(Refusal::PastWindow(DIRECT_MAP_WINDOW + 1)));
-    let map = [e(CONVENTIONAL, DIRECT_MAP_WINDOW - PAGE_2M, DIRECT_MAP_WINDOW)];
-    assert_eq!(direct_map_end(&map), Ok(DIRECT_MAP_WINDOW));
 }
 
 #[test]
