@@ -342,7 +342,7 @@ impl Conn {
 impl Tcp {
     pub fn new(config: Config) -> Self {
         let buffer = config.receive_buffer;
-        let shift = (0u8..14).find(|&r| buffer.checked_shr(u32::from(r)).is_some_and(|w| w <= u32::from(u16::MAX))).unwrap_or(14);
+        let shift = (0u8..14).find(|&r| buffer.checked_shr(u32::from(r)).is_some_and(|w| u16::try_from(w).is_ok())).unwrap_or(14);
         let port_table = config.secrets.port_table;
         Self {
             config,
@@ -1265,5 +1265,16 @@ impl Tcp {
         if let Some(at) = deadline {
             self.deadlines.insert((at, index));
         }
+    }
+}
+
+#[cfg(test)]
+impl Tcp {
+    /// Every synchronized connection, for the property tests' invariants.
+    pub(crate) fn each_sync(&self) -> impl Iterator<Item = (Tuple, &Sync)> {
+        self.conns.iter().filter_map(|s| s.value.as_ref()).filter_map(|c| match &c.state {
+            Tcb::Sync(sync) => Some((c.tuple, &**sync)),
+            _ => None,
+        })
     }
 }

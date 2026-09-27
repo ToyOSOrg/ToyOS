@@ -33,6 +33,8 @@ mod cc;
 mod conn;
 mod counters;
 mod open;
+#[cfg(test)]
+mod props;
 mod ring;
 mod rtt;
 mod rx;

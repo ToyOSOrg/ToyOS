@@ -371,6 +371,14 @@ impl Sync {
         self.recovery != Recovery::None
     }
 
+    #[cfg(test)]
+    pub fn high_rxt(&self) -> Option<Seq> {
+        match self.recovery {
+            Recovery::Sack { high_rxt, .. } => Some(high_rxt),
+            Recovery::None | Recovery::Fast { .. } => None,
+        }
+    }
+
     /// Eff.snd.MSS (RFC 9293 §3.7.1): SMSS everywhere below.
     pub fn smss(&self) -> u32 {
         self.cc.smss

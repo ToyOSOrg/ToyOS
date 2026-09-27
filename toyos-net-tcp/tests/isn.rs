@@ -91,8 +91,7 @@ fn s_isn_007_prop_unpredictable() {
     assert!(distinct.len() >= 60, "{} distinct ISNs over 64 ports", distinct.len());
     let steps: Vec<u32> = across_ports.windows(2).map(|w| w[1].wrapping_sub(w[0])).collect();
     assert!(steps.windows(2).any(|w| w[0] != w[1]), "the ISN steps by a constant with the port");
-    let through_stack: Vec<u32> = (0..64).map(|p| syn(now, tuple(49152, 2000 + p)).seq).collect();
-    let mut distinct = through_stack.clone();
+    let mut distinct: Vec<u32> = (0..64).map(|p| syn(now, tuple(49152, 2000 + p)).seq).collect();
     distinct.sort_unstable();
     distinct.dedup();
     assert!(distinct.len() >= 60, "the stack's SYNs: {} distinct ISNs over 64 ports", distinct.len());

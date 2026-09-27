@@ -263,10 +263,8 @@ impl Net {
                     Err(e) => panic!("send: {e:?}"),
                 }
             }
-            if auto_shut && app.source.left == 0 && app.source.pending.is_empty() && !app.shut {
-                if node.tcp.shutdown_write(now, app.id).is_ok() {
-                    app.shut = true;
-                }
+            if auto_shut && app.source.left == 0 && app.source.pending.is_empty() && !app.shut && node.tcp.shutdown_write(now, app.id).is_ok() {
+                app.shut = true;
             }
             let mut budget = app.read_limit.unwrap_or(usize::MAX);
             while app.reading && app.end.is_none() && budget > 0 {

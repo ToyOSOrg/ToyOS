@@ -136,7 +136,11 @@ impl Tx {
                 counters.add(Counter::SackBlockInvalid, 1);
                 continue;
             }
-            newly |= self.insert(left, right);
+            // An old ACK's blocks can reach below SND.UNA: that part is acknowledged already.
+            let left = left.later(self.una);
+            if left.before(right) {
+                newly |= self.insert(left, right);
+            }
         }
         newly
     }
