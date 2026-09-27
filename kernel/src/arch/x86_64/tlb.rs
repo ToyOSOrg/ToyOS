@@ -274,3 +274,6 @@ pub fn debug_disarm_ack_delay() -> u64 {
     delay::TARGET.store(delay::EVERY, Ordering::Relaxed);
     0
 }
+
+// Negative control, reverted by the next commit.
+const _: usize = crate::process::KERNEL_STACK_SIZE;
