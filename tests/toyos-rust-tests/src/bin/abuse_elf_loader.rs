@@ -546,6 +546,9 @@ fn main() {
     // 14. A cross-module initial-exec TLS reference resolves to `S + A - tp`.
     f13_cross_module_addend_is_kept();
 
+    // 19. The apply-time TLS refusals, each named by its reason in the log.
+    tls_apply_time_refusals_are_reached();
+
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.
     let mut blocks: Vec<Vec<u8>> = Vec::new();
@@ -710,7 +713,6 @@ fn values_are_bounded_by_the_image() {
         "so_init_array_past_image.so",
         &so_with(&[(DT_INIT_ARRAY, u64::MAX), (DT_INIT_ARRAYSZ, 8)], &[], None),
     );
-    // Refused at load now; before, `dlsym` added the value to the module's base.
     let far = so_with(&[], &[], None);
     let far = patch_sym(far, 0x218, 1, (STB_GLOBAL << 4) | STT_FUNC, 1, FAR_VALUE);
     let path = write_file("so_export_past_image.so", &far);
@@ -821,7 +823,8 @@ fn f13_cross_module_addend_is_kept() {
     drop(lib_defs);
 }
 
-/// Defines `xtls` (`STT_TLS`, offset 8) for a cross-module `TPOFF64`.
+/// Defines `xtls` (`STT_TLS`, offset 8) for a cross-module `TPOFF64`, with a
+/// 0x200-byte `PT_TLS` its addends stay inside.
 fn tls_defs_so() -> Vec<u8> {
     Elf::new(0x2000)
         .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
@@ -833,6 +836,62 @@ fn tls_defs_so() -> Vec<u8> {
         .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
         .poke(0x1401, b"xtls\0")
         .shdr(0x1C00, SHT_DYNSYM, 0x1200, 48, 24)
+        .build()
+}
+
+/// The two apply-time TLS refusals — a `dlopen`ed library's and an
+/// executable's — are new code no other case here reaches, because every other
+/// TLS case uses `r_sym == 0`, which `rela::parse` refuses before either apply
+/// pass runs. Both refuse a *resolved* `S + A` outside the defining module's
+/// `PT_TLS`, named `TLS_OUTSIDE_SEGMENT` in the kernel log the harness checks.
+/// Each references its *own* defined `STT_TLS` symbol, so the module resolved
+/// against is unambiguously this fixture's and not some other loaded module's.
+fn tls_apply_time_refusals_are_reached() {
+    // dlopen side: `apply_tpoff_relocs` refuses, and the mapping guard takes the
+    // library back down.
+    dlopen_refused("tls_apply_refs.so", &so_tls_ref_past_segment());
+
+    // spawn side: `apply_tls_relocs` refuses during `spawn`.
+    spawn_refused("tls_apply_spawn", &exe_tls_ref_past_segment());
+}
+
+/// A shared object defining its own `xtls` (`STT_TLS`, offset 8) in a 0x20-byte
+/// `PT_TLS`, with a `TPOFF64` against it whose `S + A` (0x148) leaves it.
+fn so_tls_ref_past_segment() -> Vec<u8> {
+    Elf::new(0x5000)
+        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
+        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x600, filesz: 0x200, memsz: 0x200, align: 8 })
+        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz: 0x20, align: 16 })
+        .sections(0x900, 1, 64)
+        .dynamic(0x600, &[
+            (DT_SYMTAB, 0x200), (DT_STRTAB, 0x300), (DT_STRSZ, 0x100),
+            (DT_RELA, 0x800), (DT_RELASZ, 24),
+        ])
+        // sym[1] xtls: defined STT_TLS, offset 8 in the block.
+        .sym(0x218, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
+        .poke(0x301, b"xtls\0")
+        .rela(0x800, 0x1000, (1u64 << 32) | R_X86_64_TPOFF64, 0x140)
+        .shdr(0x900, SHT_DYNSYM, 0x200, 48, 24)
+        .build()
+}
+
+/// An executable defining `xtls` (`STT_TLS`, offset 8) in a 0x20-byte `PT_TLS`,
+/// with a `TPOFF64` against it whose `S + A` (0x148) leaves the segment.
+fn exe_tls_ref_past_segment() -> Vec<u8> {
+    Elf::new(0x4000)
+        .ph(Phdr::load(0, 0, 0x4000, 0x4000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
+        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x3000, vaddr: 0x3000, filesz: 0, memsz: 0x20, align: 16 })
+        .entry(0)
+        .dynamic(0x1000, &[
+            (DT_SYMTAB, 0x1400), (DT_STRTAB, 0x1800), (DT_STRSZ, 0x100),
+            (DT_RELA, 0x1200), (DT_RELASZ, 24),
+        ])
+        // sym[1] xtls: defined STT_TLS, offset 8 in the block.
+        .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
+        .poke(0x1801, b"xtls\0")
+        .rela(0x1200, 0x2000, (1u64 << 32) | R_X86_64_TPOFF64, 0x140)
         .build()
 }
 

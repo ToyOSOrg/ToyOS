@@ -23,8 +23,9 @@ pub struct Extent {
 }
 
 impl Extent {
-    /// `None` for `min > max`, which no image has.
-    pub const fn new(min: u64, max: u64) -> Option<Extent> {
+    /// `None` for `min > max`, which no image has. Crate-private: an extent is
+    /// the hull [`Layout::parse`] derives, never a bound a caller hands in.
+    pub(crate) const fn new(min: u64, max: u64) -> Option<Extent> {
         if min > max {
             return None;
         }
@@ -216,8 +217,20 @@ impl TlsSegment {
 /// `PT_DYNAMIC`, where the file holds it and where the image does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DynamicSegment {
-    pub file_offset: u64,
-    pub image: ImageRange,
+    pub(crate) file_offset: u64,
+    pub(crate) image: ImageRange,
+}
+
+impl DynamicSegment {
+    /// `p_offset`: where the file holds `PT_DYNAMIC`.
+    pub const fn file_offset(&self) -> u64 {
+        self.file_offset
+    }
+
+    /// Where the image holds it, inside the extent.
+    pub const fn image(&self) -> ImageRange {
+        self.image
+    }
 }
 
 /// Where the section header table is, when the file has a usable one.
@@ -274,16 +287,6 @@ pub struct Layout {
     eh_frame_hdr: Option<ImageRange>,
 }
 
-/// A `PT_LOAD` as read, before the extent it belongs to is known.
-#[derive(Clone, Copy)]
-struct RawLoad {
-    vaddr: u64,
-    memsz: u64,
-    filesz: u64,
-    file_offset: u64,
-    flags: u32,
-}
-
 impl Layout {
     /// Parse program headers out of the first bytes of a file.
     ///
@@ -297,8 +300,6 @@ impl Layout {
         }
         let phdrs = ehdr.program_headers(data)?;
 
-        let mut loads = [RawLoad { vaddr: 0, memsz: 0, filesz: 0, file_offset: 0, flags: 0 };
-            MAX_LOAD_SEGMENTS];
         let mut segment_count = 0usize;
         let mut vaddr_min = u64::MAX;
         let mut vaddr_max = 0u64;
@@ -306,6 +307,9 @@ impl Layout {
         let mut dynamic = None;
         let mut eh_frame_hdr = None;
 
+        // First pass: the extent, the singleton headers, and every `PT_LOAD`
+        // field validated — so the second pass over the same headers only places
+        // the segments the extent it derives here holds.
         for i in 0..usize::from(ehdr.phnum) {
             let Some(phdr) = ProgramHeader::parse(phdrs, i) else {
                 return Err(Error::ProgramHeadersOutsideBuffer);
@@ -322,14 +326,9 @@ impl Layout {
                     if phdr.offset.checked_add(phdr.filesz).is_none() {
                         return Err(Error::FileExtentOverflows);
                     }
-                    let slot = loads.get_mut(segment_count).ok_or(Error::TooManyLoadSegments)?;
-                    *slot = RawLoad {
-                        vaddr: phdr.vaddr,
-                        memsz: phdr.memsz,
-                        filesz: phdr.filesz,
-                        file_offset: phdr.offset,
-                        flags: phdr.flags,
-                    };
+                    if segment_count >= MAX_LOAD_SEGMENTS {
+                        return Err(Error::TooManyLoadSegments);
+                    }
                     segment_count = segment_count.wrapping_add(1);
                     vaddr_min = vaddr_min.min(phdr.vaddr);
                     vaddr_max = vaddr_max.max(seg_end);
@@ -353,15 +352,21 @@ impl Layout {
             flags: SegmentFlags(0),
         };
         let mut segments = [blank; MAX_LOAD_SEGMENTS];
-        for (slot, raw) in segments.iter_mut().zip(loads.iter().take(segment_count)) {
+        let mut placed = 0usize;
+        for i in 0..usize::from(ehdr.phnum) {
+            let phdr = ProgramHeader::parse(phdrs, i).ok_or(Error::ProgramHeadersOutsideBuffer)?;
+            if phdr.kind != PT_LOAD {
+                continue;
+            }
             // Inside by construction: the extent is the hull of these.
-            let image = extent.range(raw.vaddr, raw.memsz).ok_or(Error::SegmentExtentOverflows)?;
-            *slot = Segment {
+            let image = extent.range(phdr.vaddr, phdr.memsz).ok_or(Error::SegmentExtentOverflows)?;
+            segments[placed] = Segment {
                 image,
-                filesz: raw.filesz,
-                file_offset: raw.file_offset,
-                flags: SegmentFlags(raw.flags),
+                filesz: phdr.filesz,
+                file_offset: phdr.offset,
+                flags: SegmentFlags(phdr.flags),
             };
+            placed = placed.wrapping_add(1);
         }
 
         // Every other program header names a vaddr the loader turns into an

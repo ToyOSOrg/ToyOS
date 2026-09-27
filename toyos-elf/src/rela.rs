@@ -16,7 +16,7 @@
 use crate::header::Machine;
 use crate::layout::{Extent, ImageOffset};
 use crate::read;
-use crate::sym::{Sym, SymIndex};
+use crate::sym::SymIndex;
 use crate::tls::TlsOffset;
 
 /// Bytes in one `Elf64_Rela`.
@@ -219,19 +219,15 @@ impl TlsSymRef {
         self.sym
     }
 
-    /// `S + A`, where `defined` is the symbol as its defining module holds it
-    /// and `memsz` that module's `PT_TLS` size; `None` when the sum leaves the
-    /// segment.
-    pub fn offset_in(self, defined: &Sym, memsz: u64) -> Option<TlsOffset> {
-        defined.tls_offset(self.addend, memsz)
+    /// The addend `A`, resolved against the defining symbol's `S` through
+    /// [`crate::Sym::tls_offset`].
+    pub const fn addend(self) -> i64 {
+        self.addend
     }
 }
 
 /// Parse one entry against the module's [`Rules`]: `Ok(None)` for a type this
 /// loader does not write, the reason for one it must not.
-///
-/// Parsed ahead of the first write, not as each one happens: a module that is
-/// refused halfway through has already been modified.
 ///
 /// The window is the *writable* one rather than the whole image: once the
 /// module is cached its read-only pages are shared between processes, and the

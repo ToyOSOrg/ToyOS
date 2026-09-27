@@ -184,6 +184,19 @@ impl Elf {
     }
 }
 
+/// The extent `Layout::parse` derives for a single `PT_LOAD` spanning
+/// `[min, max]`: the only way a test names an [`toyos_elf::Extent`], since its
+/// constructor is the parse's alone.
+pub fn extent(min: u64, max: u64) -> toyos_elf::Extent {
+    let bytes = Elf::new(0x200)
+        .entry(min)
+        .ph(Phdr::load(0x100, min, 0, max - min, PF_R | PF_X))
+        .build();
+    toyos_elf::Layout::parse(&bytes, toyos_elf::Machine::X86_64)
+        .unwrap()
+        .extent()
+}
+
 /// One `Elf64_Rela`, as bytes.
 pub fn rela(r_offset: u64, r_sym: u32, r_type: u32, r_addend: i64) -> [u8; 24] {
     let mut out = [0u8; 24];

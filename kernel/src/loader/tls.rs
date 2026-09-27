@@ -159,16 +159,6 @@ unsafe fn rebase(frames: &Unpublished, tp_offset: usize, at: UserAddr) {
     }
 }
 
-/// Build one thread's TLS block and map it into the child address space; `None` when either fails.
-pub fn map_block(
-    child_pt: &PageTables,
-    modules: &[TlsModule],
-    tls: Static,
-) -> Option<(MappedPages, u64)> {
-    let (pages, fs_base, _) = TlsBlock::build(modules, tls)?.publish(child_pt)?;
-    Some((pages, fs_base))
-}
-
 /// One combined block for every startup module; `None` when they do not fit, since a missing module would mean relocations resolving against a block that is not there.
 /// The executable's module goes where its linker resolved its own accesses: next to the thread
 /// pointer, last in variant II and first in variant I.

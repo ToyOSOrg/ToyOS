@@ -2,8 +2,8 @@
 //! `DT_INIT_ARRAY`, the TLS segment's size and alignment, and every `TPOFF`
 //! derived from them.
 //!
-//! Every other test here varies where a table is, never what it says, and four
-//! kernel panics lived in what it says. Each image is a structurally valid
+//! Every other test here varies where a table is, never what it says. Each
+//! image is a structurally valid
 //! module — text, data, `PT_DYNAMIC`, `PT_TLS`, a relocation table, a symbol
 //! table, an init array — whose numbers are drawn honest most of the time and
 //! hostile the rest, and then run through the calls the kernel's loader makes,
@@ -275,7 +275,7 @@ impl Reached {
 
 /// The bytes the image holds at `range`, as a loader holding the image reads
 /// them. This image's file offsets are its image offsets.
-fn at<'a>(bytes: &'a [u8], range: ImageRange) -> &'a [u8] {
+fn at(bytes: &[u8], range: ImageRange) -> &[u8] {
     let start = range.start().get() as usize;
     bytes.get(start..start + range.len() as usize).unwrap_or(&[])
 }
@@ -310,7 +310,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
         image_start.checked_add(offset).expect("an offset inside the span leaves the placement")
     };
 
-    let dyn_bytes = at(&case.bytes, layout.dynamic().ok_or(())?.image);
+    let dyn_bytes = at(&case.bytes, layout.dynamic().ok_or(())?.image());
     let dynamic = Dynamic::parse(dyn_bytes);
 
     if let Some(init) = InitArray::parse(dynamic.init_array, extent).map_err(|_| ())? {
@@ -411,7 +411,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
             // another module's, which the kernel resolves by name and this
             // image has no other module to find it in.
             TlsRef::Symbol(s) => match symbols.get(s.sym().get()).filter(|d| d.is_defined()) {
-                Some(d) => s.offset_in(&d, memsz).map(Some).ok_or(()),
+                Some(d) => d.tls_offset(s.addend(), memsz).map(Some).ok_or(()),
                 None => Ok(None),
             },
         }

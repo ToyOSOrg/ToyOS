@@ -156,7 +156,9 @@ pub struct TlsOffset(u64);
 
 impl TlsOffset {
     /// `value + addend`, when it lies inside a segment of `memsz` bytes.
-    pub const fn of(value: u64, addend: i64, memsz: u64) -> Option<TlsOffset> {
+    /// Crate-private: a TLS offset is a symbol's, reached through
+    /// [`crate::Sym::tls_offset`], never a bound a caller hands in.
+    pub(crate) const fn of(value: u64, addend: i64, memsz: u64) -> Option<TlsOffset> {
         match value.checked_add_signed(addend) {
             Some(at) if at <= memsz => Some(TlsOffset(at)),
             _ => None,

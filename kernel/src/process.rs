@@ -137,8 +137,7 @@ unsafe impl crate::mm::Allocation for PageAlloc {
 /// alone, and [`publish`](Self::publish) is the only way to map them: it
 /// consumes this, and runs the caller's last fix-up — the one that needs the
 /// address the frames will have — under the address-space lock that then maps
-/// them. Nothing is written into the frames with a mapping in place, and
-/// nothing is read back out of them once one is.
+/// them.
 pub struct Unpublished(PageAlloc);
 
 impl Unpublished {
@@ -162,10 +161,14 @@ impl Unpublished {
     /// frames freed, when `pt` has no room.
     pub fn publish(self, pt: &PageTables, prot: Prot, fix: impl FnOnce(&Self, UserAddr)) -> Option<MappedPages> {
         let size = self.0.size() as u64;
+        let phys = self.0.phys();
+        // `alloc_and_map` fuses the reserve and the map with no seam for `fix`,
+        // whose whole point is to run between them under one lock.
+        assert!(phys & (PAGE_2M - 1) == 0, "publish: phys {phys:#x} not 2MB-aligned");
         let mut space = pt.lock();
         let at = space.alloc_region(size, crate::vma::RegionKind::Mapped)?;
         fix(&self, at);
-        space.map_range(at, self.0.phys(), size, prot, CachePolicy::Normal);
+        space.map_range(at, phys, size, prot, CachePolicy::Normal);
         drop(space);
         Some(MappedPages::new(at, self.0))
     }

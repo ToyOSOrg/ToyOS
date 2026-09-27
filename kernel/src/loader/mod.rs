@@ -247,7 +247,7 @@ fn read_exe_tables(
 ) -> Result<ExeTables, SyscallError> {
     let (dyn_info, needed) = match layout.dynamic() {
         Some(dynamic) => {
-            let data = table(backing, path, "PT_DYNAMIC", dynamic.file_offset, dynamic.image.len() as usize)?;
+            let data = table(backing, path, "PT_DYNAMIC", dynamic.file_offset(), dynamic.image().len() as usize)?;
             let mut needed = Vec::new();
             needed.reserve_exact(data.len() / toyos_elf::dynamic::ENTRY_SIZE);
             needed.extend(toyos_elf::Dynamic::needed(&data));
@@ -272,15 +272,20 @@ fn read_exe_tables(
         }
         None => Vec::new(),
     };
+    let symtab_file_off = match dyn_info.symtab {
+        Some(vaddr) => Some(file_off(layout, path, "DT_SYMTAB", vaddr)?),
+        None => None,
+    };
+    let sym_count = exe_sym_count(backing, layout, &dyn_info, path)?;
+
     // Parsed like a library's but for the window and the fill page: the
     // executable's writes land anywhere in its own image, one demand-fault page
-    // at a time, so a crossing write is refused, not silently dropped. The
-    // symbol bound is left to `ExeTables::symbol`'s read off the file.
+    // at a time, so a crossing write is refused, not silently dropped.
     let extent = layout.extent();
     let rules = Rules {
         extent,
         window: (extent.min(), extent.max()),
-        sym_count: usize::MAX,
+        sym_count,
         fill: Some(FillLattice { base: extent.min(), granule: FILL_GRANULE }),
         tls_memsz: layout.tls_memsz(),
     };
@@ -297,11 +302,6 @@ fn read_exe_tables(
         None => Vec::new(),
     };
 
-    let symtab_file_off = match dyn_info.symtab {
-        Some(vaddr) => Some(file_off(layout, path, "DT_SYMTAB", vaddr)?),
-        None => None,
-    };
-    let sym_count = exe_sym_count(backing, layout, &dyn_info, path)?;
     let dynsym = match (symtab_file_off, sym_count) {
         (Some(off), n) if n > 0 => table(backing, path, "symbol count", off, n * sym::ENTRY_SIZE)?,
         _ => Vec::new(),
@@ -565,8 +565,8 @@ pub fn spawn(
     };
 
     log!("spawn: TLS {} modules, total_memsz={}", tls_modules.len(), tls.total_memsz());
-    let Some((tls_pages, fs_base)) =
-        tls::map_block(&child_pt, &tls_modules, tls)
+    let Some((tls_pages, fs_base, _)) =
+        tls::TlsBlock::build(&tls_modules, tls).and_then(|b| b.publish(&child_pt))
     else {
         log!("spawn: {}: failed to allocate TLS ({} bytes)", path, tls.total_memsz());
         return Err(SyscallError::ResourceExhausted.into());
@@ -843,7 +843,9 @@ fn apply_tls_relocs(
 
 /// One of the executable's `TPOFF` relocations, resolved to a value: `0` for
 /// a symbol no module defines, a refusal for one the file does not hold or
-/// whose `S + A` leaves the defining module's segment.
+/// whose `S + A` leaves the defining module's segment. The executable's symbols
+/// are read off the file, but the resolution is `elf::reloc`'s, shared with a
+/// library's.
 #[allow(clippy::too_many_arguments)]
 fn exe_tpoff(
     exe: &ExeTables,
@@ -854,28 +856,18 @@ fn exe_tpoff(
     tls: toyos_elf::tls::Static,
     tls_info: &elf::TlsModuleInfo,
 ) -> Result<i64, RelocError> {
-    let (base_offset, at) = match r {
-        TlsRef::Own(at) => (exe_base_offset, at),
-        TlsRef::Symbol(s) => {
-            let sym = exe.symbol(backing, s.sym()).ok_or(RelocError::SymbolPastTable)?;
-            if sym.is_defined() {
-                let memsz = layout.tls_memsz().ok_or(RelocError::TlsOutsideSegment)?;
-                (exe_base_offset, s.offset_in(&sym, memsz).ok_or(RelocError::TlsOutsideSegment)?)
-            } else {
-                let name = sym.name_in(&exe.dynstr);
-                // `None` means a lib resolved the symbol but has no TLS module
-                // in the combined block — an inconsistency, logged rather than
-                // guessed at with base_offset 0.
-                let Some((module, defined)) = elf::defining_module(name, tls_info) else {
-                    log!("tpoff: unresolved exe TLS symbol: {}", name);
-                    return Ok(0);
-                };
-                let at = s.offset_in(&defined, module.memsz as u64).ok_or(RelocError::TlsOutsideSegment)?;
-                (module.base_offset, at)
-            }
-        }
-    };
-    tls.tpoff(base_offset, at).ok_or(RelocError::TpoffOverflows)
+    let resolved = elf::resolve_tls_ref(
+        r,
+        exe_base_offset,
+        layout.tls_memsz(),
+        |i| exe.symbol(backing, i),
+        &exe.dynstr,
+        tls_info,
+    )?;
+    match resolved {
+        Some((base_offset, at)) => tls.tpoff(base_offset, at).ok_or(RelocError::TpoffOverflows),
+        None => Ok(0),
+    }
 }
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every

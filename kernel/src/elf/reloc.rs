@@ -50,22 +50,13 @@ impl LoadedLib {
         }
     }
 
-    fn bind_entries(&self) -> impl Iterator<Item = (u64, SymIndex)> + '_ {
-        let cached = self.cached_relocs.as_ref().map(|r| r.bind.iter().copied());
-        let scanned = self.cached_relocs.is_none().then(|| {
-            self.relocations().filter_map(|r| match r.op() {
-                Op::Bind(sym) => Some((r.offset(), sym)),
-                _ => None,
-            })
-        });
-        cached.into_iter().flatten().chain(scanned.into_iter().flatten())
-    }
-
-    fn tls_entries(
-        &self,
-        of: fn(Op) -> Option<TlsRef>,
-        pick: fn(&CachedRelocs) -> &alloc::vec::Vec<(u64, TlsRef)>,
-    ) -> impl Iterator<Item = (u64, TlsRef)> + '_ {
+    /// Every slot of one kind and what it names — from the cache when a clone
+    /// holds one, else scanned off the image, the two never both present.
+    fn tls_entries<'a, T: Copy + 'a>(
+        &'a self,
+        of: fn(Op) -> Option<T>,
+        pick: fn(&CachedRelocs) -> &alloc::vec::Vec<(u64, T)>,
+    ) -> impl Iterator<Item = (u64, T)> + 'a {
         let cached = self.cached_relocs.as_ref().map(|r| pick(r).iter().copied());
         let scanned = self.cached_relocs.is_none().then(move || {
             self.relocations().filter_map(move |r| Some((r.offset(), of(r.op())?)))
@@ -73,15 +64,12 @@ impl LoadedLib {
         cached.into_iter().flatten().chain(scanned.into_iter().flatten())
     }
 
+    fn bind_entries(&self) -> impl Iterator<Item = (u64, SymIndex)> + '_ {
+        self.tls_entries(|op| match op { Op::Bind(sym) => Some(sym), _ => None }, |c| &c.bind)
+    }
+
     fn dtpmod_entries(&self) -> impl Iterator<Item = (u64, Option<SymIndex>)> + '_ {
-        let cached = self.cached_relocs.as_ref().map(|r| r.dtpmod64.iter().copied());
-        let scanned = self.cached_relocs.is_none().then(|| {
-            self.relocations().filter_map(|r| match r.op() {
-                Op::DtpMod64(sym) => Some((r.offset(), sym)),
-                _ => None,
-            })
-        });
-        cached.into_iter().flatten().chain(scanned.into_iter().flatten())
+        self.tls_entries(|op| match op { Op::DtpMod64(sym) => Some(sym), _ => None }, |c| &c.dtpmod64)
     }
 
     /// Every `RELATIVE` slot and the position in the image it points at.
@@ -281,29 +269,36 @@ fn resolve_dtpmod(lib: &LoadedLib, sym: Option<SymIndex>, self_module_id: u64, t
     }
 }
 
-/// `S + A` for one TLS reference, and the static-block offset of the module
-/// it lies in: this module's own (`own_base_offset`), or the module defining
-/// the symbol. `None` is a symbol no module defines, which is logged; a sum
-/// outside the defining module's segment refuses the module.
-fn resolve_tls(
-    lib: &LoadedLib,
+/// `S + A` for one TLS reference, and the static-block offset of the module it
+/// lies in: the referencing module's own (`own_base_offset`, `own_memsz`), or
+/// the module defining the symbol. `None` is a symbol no module defines, which
+/// is logged; a sum outside the defining module's segment refuses the module.
+///
+/// `lookup` and `strings` are the referencing module's symbol table however it
+/// is held — a library's in-image `SymTab`, or the executable's read off the
+/// file — so both loaders resolve through this one function.
+pub fn resolve_tls_ref(
     r: TlsRef,
     own_base_offset: usize,
+    own_memsz: Option<u64>,
+    lookup: impl Fn(SymIndex) -> Option<Sym>,
+    strings: &[u8],
     tls_info: &TlsModuleInfo,
 ) -> Result<Option<(usize, TlsOffset)>, RelocError> {
     let s = match r {
         TlsRef::Own(at) => return Ok(Some((own_base_offset, at))),
         TlsRef::Symbol(s) => s,
     };
-    let symbols = lib.symbols();
-    if let Some(defined) = symbols.get(s.sym().get()).filter(|d| d.is_defined()) {
-        let at = s.offset_in(&defined, lib.tls_memsz as u64).ok_or(RelocError::TlsOutsideSegment)?;
+    let sym = lookup(s.sym()).ok_or(RelocError::SymbolPastTable)?;
+    if sym.is_defined() {
+        let memsz = own_memsz.ok_or(RelocError::TlsOutsideSegment)?;
+        let at = sym.tls_offset(s.addend(), memsz).ok_or(RelocError::TlsOutsideSegment)?;
         return Ok(Some((own_base_offset, at)));
     }
-    let name = symbols.name(s.sym().get());
+    let name = sym.name_in(strings);
     match defining_module(name, tls_info) {
         Some((module, defined)) => {
-            let at = s.offset_in(&defined, module.memsz as u64).ok_or(RelocError::TlsOutsideSegment)?;
+            let at = defined.tls_offset(s.addend(), module.memsz as u64).ok_or(RelocError::TlsOutsideSegment)?;
             Ok(Some((module.base_offset, at)))
         }
         None => {
@@ -311,6 +306,24 @@ fn resolve_tls(
             Ok(None)
         }
     }
+}
+
+/// [`resolve_tls_ref`] for a loaded library, whose symbol table is in-image.
+fn resolve_tls(
+    lib: &LoadedLib,
+    r: TlsRef,
+    own_base_offset: usize,
+    tls_info: &TlsModuleInfo,
+) -> Result<Option<(usize, TlsOffset)>, RelocError> {
+    let symbols = lib.symbols();
+    resolve_tls_ref(
+        r,
+        own_base_offset,
+        Some(lib.tls_memsz as u64),
+        |i| symbols.get(i.get()),
+        symbols.strings(),
+        tls_info,
+    )
 }
 
 /// `S + A - tp` for one initial-exec reference, or `0` for a symbol no module

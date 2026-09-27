@@ -18,7 +18,7 @@ use toyos_elf::gnu_hash::{self, GnuHash};
 use toyos_elf::rela::{self, FillLattice, Op, Rela, RelaCounts, RelaTable, RelocError, RelocKind, Rules};
 use toyos_elf::section::{SectionTable, Unapplied, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_RELR, SHT_SYMTAB};
 use toyos_elf::sym::SymTab;
-use toyos_elf::{Extent, Machine};
+use toyos_elf::Machine;
 
 /// Every entry through [`rela::parse`], in an image spanning all of memory with
 /// a TLS segment no offset leaves: the window, fill page and symbol count are
@@ -30,7 +30,7 @@ fn validate(
     fill: Option<FillLattice>,
 ) -> Result<(), RelocError> {
     let rules = Rules {
-        extent: Extent::new(0, u64::MAX).unwrap(),
+        extent: extent(0, u64::MAX),
         window,
         sym_count,
         fill,
@@ -734,7 +734,7 @@ fn each_machine_reads_its_own_relocation_numbers() {
     let entry = RelaTable::new(&bytes, Machine::Aarch64).get(0).unwrap();
     assert_eq!(entry.kind(), RelocKind::Relative);
     let rules = Rules {
-        extent: Extent::new(0, 0x100).unwrap(),
+        extent: extent(0, 0x100),
         window: (0, 0x100),
         sym_count: 0,
         fill: None,

@@ -30,7 +30,7 @@ fn a_toyos_ld_binary_parses_to_what_readelf_says() {
     assert!(!segs[2].writable() && !segs[2].flags().executable());
     assert_eq!(layout.writable_window(), Some((0x145000, 0x155000)));
 
-    let dynamic = layout.dynamic().map(|d| (d.file_offset, d.image.start().get(), d.image.len()));
+    let dynamic = layout.dynamic().map(|d| (d.file_offset(), d.image().start().get(), d.image().len()));
     assert_eq!(dynamic, Some((0x166490, 0x166490, 0x60)));
     let eh = layout.eh_frame_hdr().map(|r| (r.start().get(), r.len()));
     assert_eq!(eh, Some((0x13e118, 0x688c)));

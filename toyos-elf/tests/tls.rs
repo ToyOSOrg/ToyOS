@@ -5,15 +5,26 @@
 //! kernel-bug assert reached from a crafted `PT_TLS`. The property is proved
 //! here instead, which is what lets the assert go.
 
+use toyos_elf::sym;
 use toyos_elf::tls::{self, Static, TlsOffset, Variant};
 
 const TCB: usize = 64;
 const DTV: usize = 16 + 64 * 8;
 const GRANULE: usize = 2 * 1024 * 1024;
 
+/// `S + A` inside a segment of `memsz` bytes, through the only public path to a
+/// [`TlsOffset`]: a crafted `STT_TLS` symbol read as one.
+fn tls_offset(value: u64, addend: i64, memsz: u64) -> Option<TlsOffset> {
+    let mut bytes = [0u8; sym::ENTRY_SIZE];
+    bytes[4] = (1 << 4) | 6; // STB_GLOBAL, STT_TLS
+    bytes[6..8].copy_from_slice(&1u16.to_le_bytes()); // st_shndx: defined
+    bytes[8..16].copy_from_slice(&value.to_le_bytes()); // st_value
+    sym::parse_at(&bytes, 0).unwrap().tls_offset(addend, memsz)
+}
+
 /// A datum `off` bytes into a segment no offset here leaves.
 fn datum(off: u64) -> TlsOffset {
-    TlsOffset::of(off, 0, u64::MAX).unwrap()
+    tls_offset(off, 0, u64::MAX).unwrap()
 }
 
 #[test]
@@ -114,7 +125,7 @@ fn tpoff_carries_the_addend() {
         assert_eq!(one.tpoff(0, datum(module_addr)), Some(module_addr as i64 + 64));
         for &addend in &[0i64, 8, -8, 0x100, -0x100] {
             // `S + A` below the segment's start names nothing in it.
-            let Some(sum) = TlsOffset::of(module_addr, addend, u64::MAX) else {
+            let Some(sum) = tls_offset(module_addr, addend, u64::MAX) else {
                 assert!(addend < 0 && addend.unsigned_abs() > module_addr);
                 continue;
             };
@@ -131,18 +142,18 @@ fn tpoff_carries_the_addend() {
 #[test]
 fn a_tpoff_no_segment_or_word_holds_is_refused() {
     let s = Static::new(Variant::II, 16, 8, 8).unwrap();
-    assert_eq!(TlsOffset::of(0, i64::MIN, 16), None);
-    assert_eq!(TlsOffset::of(16, i64::MAX, 16), None);
+    assert_eq!(tls_offset(0, i64::MIN, 16), None);
+    assert_eq!(tls_offset(16, i64::MAX, 16), None);
     // A segment as large as a file can declare: the offset exists, the
     // thread-pointer offset does not.
-    let huge = TlsOffset::of(16, i64::MAX, u64::MAX).unwrap();
+    let huge = tls_offset(16, i64::MAX, u64::MAX).unwrap();
     assert_eq!(s.tpoff(0, huge), None);
     assert_eq!(s.tpoff(usize::MAX, datum(1)), None);
     let wide = Static::new(Variant::II, usize::MAX, 8, 8).unwrap();
     assert_eq!(wide.tpoff(0, datum(0)), None);
     // The inclusive end is a datum: one past the segment's last byte.
-    assert_eq!(TlsOffset::of(8, 8, 16).map(TlsOffset::get), Some(16));
-    assert_eq!(TlsOffset::of(8, 9, 16), None);
+    assert_eq!(tls_offset(8, 8, 16).map(TlsOffset::get), Some(16));
+    assert_eq!(tls_offset(8, 9, 16), None);
 }
 
 /// Variant I, as lld resolves an AArch64 executable's own local-exec access

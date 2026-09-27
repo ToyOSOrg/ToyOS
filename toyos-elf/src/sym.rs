@@ -3,9 +3,7 @@
 //! [`SymTab::get`] answers `None` past the end rather than reading a partial
 //! record, and a [`Sym`]'s `st_value` is readable only as what it names: an
 //! [`ImageOffset`] inside its module ([`Sym::address`]) or a [`TlsOffset`]
-//! inside its module's TLS segment ([`Sym::tls_offset`]). The number itself is
-//! the file's, and a loader that added it to a base unchecked was a kernel
-//! panic away from any process that could write a file.
+//! inside its module's TLS segment ([`Sym::tls_offset`]).
 
 use crate::layout::{Extent, ImageOffset};
 use crate::read;

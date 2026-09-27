@@ -17,8 +17,9 @@ mod reloc;
 pub use cache::{cache_loaded_lib, try_clone_cached, CachedRelocs};
 pub use index::{parse_rela_entries, ParsedRelaEntries, RelocationIndex};
 pub use reloc::{
-    apply_dtpmod_relocs, apply_dtpoff_relocs, apply_tpoff_relocs, defining_module,
-    rebase_relative_relocs, resolve_dlopen_relocs, resolve_lib_bind_relocs, tpoff32_value,
+    apply_dtpmod_relocs, apply_dtpoff_relocs, apply_tpoff_relocs,
+    rebase_relative_relocs, resolve_dlopen_relocs, resolve_lib_bind_relocs, resolve_tls_ref,
+    tpoff32_value,
 };
 
 use crate::mm::{align_2m_checked, KernelSlice, MAX_HEAP_ALLOC, PAGE_2M, PAGE_BYTES};
@@ -380,7 +381,7 @@ pub fn load_shared_lib(
 
     let dyn_info = match layout.dynamic() {
         Some(dynamic) => {
-            let region = module.at(dynamic.image);
+            let region = module.at(dynamic.image());
             // SAFETY: `region` came from the layout's own range inside the image;
             // `image` is still exclusively owned here.
             Dynamic::parse(unsafe { region.as_slice() })

@@ -3492,10 +3492,47 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "fault_gates" => check_fault_gates,
         "debug_trap" => check_debug_trap,
         "dlopen_dedup" => check_dlopen_dedup,
+        "abuse_elf_loader" => check_abuse_elf_loader,
         "syscall_cost" => check_syscall_cost,
         "exit_wait_storm" => check_exit_wait_storm,
         _ => check_rust_result,
     }
+}
+
+/// The reason the loader logs when a resolved TLS `S + A` leaves the defining
+/// module's `PT_TLS` — `RelocError::TlsOutsideSegment`, kept in step with
+/// `toyos-elf/src/rela.rs`.
+const TLS_OUTSIDE_SEGMENT: &str = "ELF: TLS relocation names an offset outside its PT_TLS";
+
+/// `abuse_elf_loader` plus the reason each apply-time TLS refusal must fire for.
+///
+/// The two cases (`tls_apply_refs.so` on `dlopen`, `tls_apply_spawn` on
+/// `spawn`) are refused for the right reason only if the kernel names
+/// [`TLS_OUTSIDE_SEGMENT`] beside the file — a case refused later, for another
+/// reason, would pass the exit-code check alone.
+fn check_abuse_elf_loader(result: &TestResult) -> bool {
+    if !check_rust_result(result) {
+        return false;
+    }
+    let log = format!("{}{}", result.before, result.serial);
+    let mut ok = true;
+    for (file, what) in [
+        ("tls_apply_refs.so", "the dlopen apply-time TLS refusal"),
+        ("tls_apply_spawn", "the spawn apply-time TLS refusal"),
+    ] {
+        let named = log
+            .lines()
+            .any(|l| l.contains(file) && l.contains(TLS_OUTSIDE_SEGMENT));
+        if !named {
+            eprintln!(
+                "FAIL rs::abuse_elf_loader: {what} did not fire for its reason — no line names \
+                 {file:?} with {TLS_OUTSIDE_SEGMENT:?}{}",
+                kernel_account(result)
+            );
+            ok = false;
+        }
+    }
+    ok
 }
 
 /// What a loader writes when it caches a library under the directory it searched
@@ -18478,6 +18515,9 @@ fn build_test_registry(
             // the slow one: it spends its own patience before reporting, and
             // the report is worth more than the harness's timeout message.
             "inbox_cancel_wakes" => Duration::from_secs(30),
+            // Twenty thousand spawn/retire rounds, each a race attempt against
+            // the TLS-block rebase.
+            "tls_dtv_race" => Duration::from_secs(60),
             _ => Duration::from_secs(5),
         };
         tests.push(TestDef {
