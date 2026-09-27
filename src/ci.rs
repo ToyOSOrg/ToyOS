@@ -30,6 +30,7 @@
 //! reds on a disagreement, and on a `/dev/kvm` that is present and does not
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::Command;
@@ -55,7 +56,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
   tcg               one test on an emulated CPU (nightly)
   audio <i>/<n>     one shard of gate A (nightly)
-  nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
+  nightly-red       file or update the nightly-red issue from $NEEDS, and red on
+                    a registration red in consecutive nightly runs (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -114,7 +116,10 @@ pub fn dispatch(root: &Path, args: &[String]) {
         }
         Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
         Job::Audio(shard) => guest(root, &suite_args(&["--audio-gate", "30", "--shard", shard])),
-        Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
+        Job::NightlyRed => vec![
+            step("the nightly-red issue", nightly_red),
+            step(&format!("no registration red {RED_STREAK} nightlies running"), red_streak),
+        ],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
@@ -834,6 +839,143 @@ fn nightly_red() -> Result<String, String> {
     Ok(format!("reported {}", failed.join(" ")))
 }
 
+/// How many consecutive nightly runs on `main` a registration may be red in
+/// before [`red_streak`] reds naming it: by then it is quarantined with an
+/// issue (`src/redlist.rs`) or reverted.
+///
+/// **Two**, because that is the reproduction a one-wide run no longer makes
+/// in-job (`tests/toyos.rs` skips its `ALONE` rerun): red on two runners on two
+/// nights is a defect reproduced, and the first red's alarm has had a night.
+const RED_STREAK: usize = 2;
+
+/// The owner's rule, enforced: a registration red in [`RED_STREAK`]
+/// consecutive nightly runs on `main` is quarantined with an issue or
+/// reverted, and until it is this step is red naming it and the runs.
+fn red_streak() -> Result<String, String> {
+    let mut history = Vec::new();
+    for run in nightly_runs(RED_STREAK)? {
+        let reds = run_reds(run)?;
+        // A run that judged nothing red ends every streak, so what is older is
+        // not asked for.
+        let ends = reds.is_empty();
+        history.push((run, reds));
+        if ends {
+            break;
+        }
+    }
+    streak_verdict(&history, RED_STREAK)
+}
+
+/// [`red_streak`]'s verdict over `history`, newest run first, each a run id
+/// and the registrations it judged red.
+fn streak_verdict(history: &[(u64, BTreeSet<String>)], streak: usize) -> Result<String, String> {
+    if let Some((run, _)) = history.first().filter(|(_, reds)| reds.is_empty()) {
+        return Ok(format!("run {run} judged no registration red"));
+    }
+    let Some(window) = history.get(..streak).filter(|w| !w.is_empty()) else {
+        return Ok(format!("{} nightly run(s) read, fewer than the {streak} a streak takes", history.len()));
+    };
+    let runs = window.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>().join(", ");
+    let over: Vec<&String> =
+        window[0].1.iter().filter(|name| window.iter().all(|(_, reds)| reds.contains(*name))).collect();
+    if over.is_empty() {
+        return Ok(format!("no registration red in each of runs {runs}"));
+    }
+    Err(over
+        .iter()
+        .map(|name| {
+            format!(
+                "{name} was red in {streak} consecutive nightly runs on main ({runs}): quarantine it \
+                 with an issue in src/redlist.rs, or revert it"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The registrations a job log judged red: every `FAIL` and `STALL` verdict
+/// line `tests/toyos.rs`'s `report_line` prints, and never an `XFAIL`, which a
+/// quarantine row excused.
+fn reds_in(log: &str) -> BTreeSet<String> {
+    log.lines()
+        // The API's raw log stamps each line with an RFC 3339 time and a space.
+        .map(|line| match line.split_once(' ') {
+            Some((stamp, rest)) if stamp.ends_with('Z') && stamp.starts_with(|c: char| c.is_ascii_digit()) => rest,
+            _ => line,
+        })
+        .filter_map(|line| line.strip_prefix("  FAIL  ").or_else(|| line.strip_prefix("  STALL ")))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(String::from)
+        .collect()
+}
+
+/// `gh api <path>`, as JSON.
+fn gh_json(path: &str) -> Result<serde_json::Value, String> {
+    let out = Command::new("gh").args(["api", path]).output().map_err(|e| format!("gh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("gh api {path}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("gh api {path}: {e}"))
+}
+
+/// Up to `n` nightly runs on `main`, newest first and starting at this one —
+/// `$GITHUB_RUN_ID` on a runner, the newest finished one anywhere else. A
+/// cancelled run judged nothing and is passed over.
+fn nightly_runs(n: usize) -> Result<Vec<u64>, String> {
+    let this = match std::env::var("GITHUB_RUN_ID") {
+        Ok(id) => Some(id.parse::<u64>().map_err(|e| format!("GITHUB_RUN_ID {id:?}: {e}"))?),
+        Err(_) => None,
+    };
+    let listed = gh_json("repos/{owner}/{repo}/actions/workflows/nightly.yml/runs?branch=main&per_page=30")?;
+    let listed = listed["workflow_runs"].as_array().ok_or("the nightly's run list carries no runs")?;
+    let mut runs = Vec::new();
+    let mut reached = this.is_none();
+    for run in listed {
+        let id = run["id"].as_u64().ok_or("a nightly run with no id")?;
+        let judged = run["status"] == "completed" && run["conclusion"] != "cancelled";
+        if Some(id) == this || (reached && judged) {
+            reached = true;
+            runs.push(id);
+        }
+        if runs.len() == n {
+            break;
+        }
+    }
+    if !reached {
+        return Err(format!("run {} is not among main's 30 newest nightly runs", this.unwrap_or_default()));
+    }
+    Ok(runs)
+}
+
+/// What one nightly run judged red, off the logs of its jobs that ended
+/// neither green nor skipped.
+fn run_reds(run: u64) -> Result<BTreeSet<String>, String> {
+    let listed = gh_json(&format!("repos/{{owner}}/{{repo}}/actions/runs/{run}/jobs?per_page=100"))?;
+    let jobs = listed["jobs"].as_array().ok_or_else(|| format!("run {run} lists no jobs"))?;
+    if listed["total_count"].as_u64() != Some(jobs.len() as u64) {
+        return Err(format!("run {run} has more jobs than one page of {} lists", jobs.len()));
+    }
+    let mut reds = BTreeSet::new();
+    for job in jobs {
+        // Unfinished is this step's own job, and has no log yet.
+        let Some(conclusion) = job["conclusion"].as_str() else { continue };
+        if conclusion == "success" || conclusion == "skipped" {
+            continue;
+        }
+        let id = job["id"].as_u64().ok_or_else(|| format!("run {run}: a job with no id"))?;
+        let path = format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs");
+        let out = Command::new("gh")
+            .args(["api", "--allow-escape-sequences", &path])
+            .output()
+            .map_err(|e| format!("gh: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("gh api {path}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        reds.extend(reds_in(&String::from_utf8_lossy(&out.stdout)));
+    }
+    Ok(reds)
+}
+
 /// Each of the SDK crates the index does not already hold, in dependency
 /// order, waiting for each to be readable before the next resolves it. Only
 /// `main` publishes: a version is a name taken once.
@@ -1001,6 +1143,51 @@ mod tests {
         });
         assert_eq!(failed_jobs(&needs), ["guest(failure)", "tcg(skipped)"]);
         assert!(failed_jobs(&serde_json::json!({"host": {"result": "success"}})).is_empty());
+    }
+
+    /// Lines as `gh api …/actions/jobs/<id>/logs` answered for run
+    /// `36306830048`'s shards, with a quarantined red and the lines that name a
+    /// test without judging it.
+    const SHARD_LOG: &str = "\u{feff}2026-09-27T08:50:35.8149002Z   --- parallel, 1 wide ---\n\
+        2026-09-27T09:00:32.8084298Z FAIL update_boots_the_new_kernel: STALLED: waiting for it\n\
+        2026-09-27T09:00:32.8086240Z   STALL update_boots_the_new_kernel  (304s)  — the guard expired\n\
+        2026-09-27T08:56:02.4225700Z   FAIL  update_refusals_boot_the_other_slot  (335s)\n\
+        2026-09-27T08:52:23.2413358Z   PASS  log_program_line  (3s)\n\
+        2026-09-27T09:02:55.4071405Z   PASS  latency_wake  (6s)  — quarantined, and one green closes nothing\n\
+        2026-09-27T09:03:00.0000000Z XFAIL hda_tone: the captured tone is not one sine\n\
+        2026-09-27T09:03:00.0000001Z   XFAIL hda_tone  (9s)  — quarantined, issues/audio/hda-tone-phase-check.md\n\
+        2026-09-27T09:09:57.3690738Z   ALONE update_boots_the_new_kernel: red again\n";
+
+    fn reds(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_log_s_reds_are_its_fail_and_stall_verdicts() {
+        assert_eq!(
+            reds_in(SHARD_LOG),
+            reds(&["update_boots_the_new_kernel", "update_refusals_boot_the_other_slot"])
+        );
+        assert!(reds_in("  PASS  a_test  (2s)\n").is_empty());
+    }
+
+    /// The negative control: a synthetic history in which one registration
+    /// crosses the streak reds, naming it and every run; one short of it, or
+    /// broken by a green night, does not.
+    #[test]
+    fn a_registration_red_two_nightlies_running_is_red() {
+        let history = [
+            (3, reds(&["update_floor_is_the_images_own", "lan_swap"])),
+            (2, reds(&["update_floor_is_the_images_own"])),
+            (1, reds(&["lan_swap"])),
+        ];
+        let red = streak_verdict(&history, 2).expect_err("a streak of two is red");
+        assert!(red.contains("update_floor_is_the_images_own") && red.contains("(3, 2)"), "{red}");
+        assert!(!red.contains("lan_swap"), "lan_swap was green on run 2: {red}");
+        assert!(streak_verdict(&history, 3).is_ok(), "no registration is red three runs running");
+        assert!(streak_verdict(&history[..1], 2).is_ok(), "one run is no streak");
+        assert!(streak_verdict(&[(4, reds(&[])), (3, reds(&["lan_swap"]))], 2).is_ok());
+        assert!(streak_verdict(&[], 2).is_ok());
     }
 
     #[test]
