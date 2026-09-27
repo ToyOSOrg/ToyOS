@@ -100,7 +100,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     crate::vfs::lock().sync_all();
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
-    crate::drivers::nvme::log_census();
     crate::drivers::panic_console::log_census();
     // A shortfall is the budget spent, not the reset refused: it is said at
     // alert level, and the reset lands anyway.

@@ -491,6 +491,20 @@ const PAGE: usize = 0x1000;
 // The pool's fixed head: one of each, since enumeration is serial — see `device::init_device`.
 #[allow(clippy::erasing_op)]
 const OFF_DCBAA: usize     = 0 * PAGE; // (max_slots + 1) * 8, 2 KiB at most
+
+/// The half of the DCBAA's page no slot reaches — its at most 256 entries
+/// fill the first — zeroed at bring-up and never written: another device's
+/// IOMMU control is aimed here, and it must still read zero afterwards.
+#[cfg(feature = "boot-actuators")]
+pub(crate) const PROBE_OFF: usize = OFF_DCBAA + 0x800;
+#[cfg(feature = "boot-actuators")]
+pub const PROBE_LEN: usize = 0x800;
+
+/// Physical, not what this controller is programmed with: the actuator has to
+/// hand another device an address that device's own domain does not map. The
+/// first controller's.
+#[cfg(feature = "boot-actuators")]
+pub static FOREIGN_PROBE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 #[allow(clippy::identity_op)]
 const OFF_CMD_RING: usize  = 1 * PAGE;
 const OFF_ERST: usize      = 2 * PAGE;

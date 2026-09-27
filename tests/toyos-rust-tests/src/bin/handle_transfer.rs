@@ -47,9 +47,9 @@ const SELF_PATH: &str = "/system/bin/test_rs_handle_transfer";
 /// The name the child's namespace carries the connector under.
 const SERVICE: &str = "transfer";
 
-/// A file on the one mount in this config that reaches a real block device, so
-/// the flush arm exercises the deep path rather than tmpfs.
-const DIRTY_PATH: &str = "/home/handle_transfer_flush.bin";
+/// A kernel file: tmpfs is the one writable mount the kernel still has, and its
+/// last handle's release runs the same write-back a device's did.
+const DIRTY_PATH: &str = "/tmp/handle_transfer_flush.bin";
 const DIRTY_BYTES: &[u8] = b"a file whose last handle went while it was queued";
 
 fn main() {

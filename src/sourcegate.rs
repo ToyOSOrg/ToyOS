@@ -438,7 +438,6 @@ const BUS_MASTER_SITES: &[(&str, usize)] = &[
     ("kernel/src/drivers/pci.rs", 1),
     ("kernel/src/drivers/virtio.rs", 1),
     ("kernel/src/drivers/hda.rs", 1),
-    ("kernel/src/drivers/nvme.rs", 1),
     ("kernel/src/drivers/xhci/wait/boot.rs", 1),
 ];
 

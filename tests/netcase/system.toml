@@ -8,7 +8,7 @@
 # ===TEST_START=== protocol.
 
 [boot]
-start = ["logd", "netd", "test-runner"]
+start = ["logd", "blockd", "fsd", "netd", "test-runner"]
 
 # `every_boot_config_runs_logd` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
@@ -60,3 +60,20 @@ receives = ["launcher"]
 # What `dns_resolve` runs: a name's addresses, asked of netd's resolver.
 [programs.host]
 receives = ["netd"]
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

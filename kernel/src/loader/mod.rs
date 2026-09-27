@@ -355,6 +355,11 @@ fn rela_dyn_from_sections(
 /// No parent argument: a process has no parent, and the only thing the caller
 /// contributes beyond its endowment is the working directory it passes in.
 ///
+/// `image` is the program's bytes when the caller read them itself, and then
+/// `argv[0]` is only its name: nothing opens it, and its libraries come from
+/// `/system/lib` alone, since the directory it names is no volume of this
+/// kernel's.
+///
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
 /// unwinds, so the error must travel out as a value rather than strand it.
@@ -363,6 +368,7 @@ pub fn spawn(
     pending: PendingHandles,
     cwd: String,
     env: Vec<u8>,
+    image: Option<Arc<dyn crate::file_backing::FileBacking>>,
 ) -> Result<Arc<crate::object::process::ProcessObject>, crate::object::Refusal> {
     // An argv of only separators survives sys_spawn's split as an empty slice.
     let Some(&path) = argv.first() else {
@@ -370,13 +376,19 @@ pub fn spawn(
     };
     let t0 = crate::clock::nanos_since_boot();
 
-    // Scoped, not held across the match: dropping `pending` on any `return` here takes the VFS lock.
-    let opened = vfs::lock().open_backing(path);
-    let backing: Arc<dyn crate::file_backing::FileBacking> = match opened {
-        Ok(b) => b,
-        Err(e) => {
-            log!("spawn: {}: {e}", path);
-            return Err(e.into());
+    let from_image = image.is_some();
+    let backing: Arc<dyn crate::file_backing::FileBacking> = match image {
+        Some(image) => image,
+        None => {
+            // Scoped, not held across the match: dropping `pending` on any `return` here takes the VFS lock.
+            let opened = vfs::lock().open_backing(path);
+            match opened {
+                Ok(b) => b,
+                Err(e) => {
+                    log!("spawn: {}: {e}", path);
+                    return Err(e.into());
+                }
+            }
         }
     };
 
@@ -433,7 +445,7 @@ pub fn spawn(
     }
 
     let t2 = crate::clock::nanos_since_boot();
-    let mut loaded_libs = load_needed_libs(&exe, path)?;
+    let mut loaded_libs = load_needed_libs(&exe, path, from_image)?;
     let t_deps = crate::clock::nanos_since_boot();
 
     // ELF segments are demand-faulted; the address space starts with the clock page alone.
@@ -679,13 +691,17 @@ struct NeededLibs {
 /// 2 MiB window, so a `DT_NEEDED` list naming more is refused rather than loaded.
 const MAX_NEEDED_LIBS: usize = 64;
 
-/// Load each distinct `DT_NEEDED` library, from the executable's own directory first and `/system/lib` second.
-fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallError> {
+/// Load each distinct `DT_NEEDED` library, from the executable's own directory
+/// first and `/system/lib` second; an image's from `/system/lib` alone.
+fn load_needed_libs(exe: &ExeTables, path: &str, from_image: bool) -> Result<NeededLibs, SyscallError> {
     let mut out = NeededLibs { libs: Vec::new(), paths: Vec::new() };
     if exe.needed.is_empty() {
         return Ok(out);
     }
-    let exe_dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let exe_dir = match from_image {
+        true => "/system/lib",
+        false => path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(""),
+    };
 
     // Collapse duplicates to the distinct set and bound it: a repeat resolves to
     // one library `elf/cache.rs` holds one window for, so it buys no second one.
@@ -920,7 +936,7 @@ pub fn spawn_init() -> Pid {
         }],
         label.as_bytes().to_vec(),
     );
-    match spawn(&[INIT_PATH], PendingHandles::Ready(handles, endowments), String::from("/"), Vec::new()) {
+    match spawn(&[INIT_PATH], PendingHandles::Ready(handles, endowments), String::from("/"), Vec::new(), None) {
         Ok(object) => object.pid(),
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_init: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_init: {e}"),

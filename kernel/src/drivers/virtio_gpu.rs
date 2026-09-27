@@ -454,15 +454,15 @@ impl GpuController {
     #[cfg(feature = "boot-actuators")]
     fn attach_a_foreign_backing(&mut self) {
         let foreign =
-            super::nvme::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
+            super::xhci::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
         assert!(foreign != 0, "VirtIO GPU: this machine staged no foreign pool to aim at");
         // Sized to the probe exactly, so one transfer of the whole resource reads every byte of it.
-        const ROWS: u32 = super::nvme::PROBE_LEN as u32 / (FOREIGN_COLUMNS * 4);
+        const ROWS: u32 = super::xhci::PROBE_LEN as u32 / (FOREIGN_COLUMNS * 4);
         self.create_resource(FOREIGN_RESOURCE_ID, FORMAT_B8G8R8X8_UNORM, FOREIGN_COLUMNS, ROWS);
         let resp = self.attach_backing_answering(
             FOREIGN_RESOURCE_ID,
             foreign,
-            super::nvme::PROBE_LEN as u32,
+            super::xhci::PROBE_LEN as u32,
         );
         log!(
             "VirtIO GPU: a backing at {foreign:#x}, inside another driver's pool, was answered \
@@ -473,7 +473,7 @@ impl GpuController {
             self.transfer_to_host(FOREIGN_RESOURCE_ID, rect, 0);
             log!(
                 "VirtIO GPU: the device read all {} bytes of it (actuator)",
-                super::nvme::PROBE_LEN
+                super::xhci::PROBE_LEN
             );
         }
     }

@@ -1,0 +1,24 @@
+[package]
+name = "fsd"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# The library is the server's decisions — the block cache, the volumes and the
+# resolver — so the host can test them; the service is `src/main.rs`.
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "fsd"
+path = "src/main.rs"
+
+[dependencies]
+toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../toyos" }
+toyos-blockring = { path = "../../toyos-blockring" }
+toyos-gpt = { path = "../../toyos-gpt" }
+toyos-fat32 = { path = "../../toyos-fat32" }
+toyos-wallclock = { path = "../../toyos-wallclock" }
+bcachefs = { path = "../../bcachefs" }
+blockd = { path = "../blockd" }

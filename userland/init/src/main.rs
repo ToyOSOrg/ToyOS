@@ -39,7 +39,7 @@
 //! the caller's direct spawn carries in place of its own.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -50,6 +50,7 @@ use toyos_swap::{Refusal, Request as SwapRequest, Word};
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program};
 use toyos::endow::Endowments;
+use toyos::fs::CAPABILITY_PREFIX;
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::launch::{self, Request};
 use toyos::namespace::{self, Namespace};
@@ -136,7 +137,8 @@ const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_SWAP_ACCEPTOR: u64 = 1;
 const TOKEN_HANGUP: u64 = 2;
 const TOKEN_POWER_ACCEPTOR: u64 = 3;
-const TOKEN_PENDING_BASE: u64 = 4;
+const TOKEN_WAKE: u64 = 4;
+const TOKEN_PENDING_BASE: u64 = 5;
 
 /// How long a stop waits for `logd` to say the log is whole.
 ///
@@ -322,10 +324,8 @@ fn main() {
         .take(SYSCAP_LABEL)
         .expect("init: the kernel spawns this program holding the system capability");
 
-    make_session_home();
-
-    let text = std::fs::read_to_string(toyos_manifest::GUEST_PATH)
-        .unwrap_or_else(|e| panic!("init: cannot read {}: {e}", toyos_manifest::GUEST_PATH));
+    let text = read_manifest()
+        .unwrap_or_else(|e| panic!("init: cannot read {}: {e:?}", toyos_manifest::GUEST_PATH));
     let system = toyos_manifest::parse(&text);
 
     // Before anything is spawned, and for every `serves` name in the manifest
@@ -345,30 +345,97 @@ fn main() {
         connectors.insert(name, connector);
     }
 
+    // One port per directory a file server serves, made here for the same
+    // reason: a program's first open works whether or not its server runs yet.
+    let mut dirs: BTreeMap<String, Connector> = BTreeMap::new();
+    let mut dir_acceptors: BTreeMap<String, Acceptor> = BTreeMap::new();
+    for role in system.programs.iter().flat_map(|p| p.roles.iter()) {
+        for dir in toyos_manifest::role_dirs(role).expect("init: the build refuses a role it does not know") {
+            let name = format!("{CAPABILITY_PREFIX}{dir}");
+            let (acceptor, connector) =
+                port::create().unwrap_or_else(|e| panic!("init: no port for `{name}`: {e:?}"));
+            dir_acceptors.insert(name.clone(), acceptor);
+            dirs.insert(name, connector);
+        }
+    }
+    // init's own files are resolved through the same directories as every
+    // program's, and it is the one process nobody endows a namespace: std
+    // resolves through this one, and the stop's syncs through the second.
+    let files: &'static Namespace = {
+        let build = || {
+            let mut builder = namespace::build();
+            for (name, connector) in &dirs {
+                builder = builder.add(name, connector);
+            }
+            builder.finish().expect("init: no namespace for its own files")
+        };
+        if let Err(e) = std::os::toyos::fs::adopt_namespace(build().into_raw().0) {
+            panic!("init: std would not take its namespace ({e}), and init is endowed none");
+        }
+        Box::leak(Box::new(build()))
+    };
+
+    let (wake_read, wake_write) = toyos::pipe_pair().expect("init: no pipe to hear a service end");
+    let wake = wake_write.into_raw();
+
     // Kept for the machine's life: init is the only thing that can kill a
-    // daemon, and there is no other way back to a process it started.
+    // daemon, and there is no other way back to a process it started. The
+    // storage services go first: every other start may make a directory, and
+    // a directory is a file server's.
     let mut services: Vec<Service> = Vec::new();
-    for name in &system.start {
+    let storage_first = system
+        .start
+        .iter()
+        .filter(|n| system.program(n).is_some_and(is_storage))
+        .chain(system.start.iter().filter(|n| system.program(n).is_none_or(|p| !is_storage(p))));
+    let mut homes_made = false;
+    for name in storage_first {
         let program = system
             .program(name)
             .unwrap_or_else(|| panic!("init: [boot] start names `{name}`, which is not declared"));
-        let kept = program
-            .serves
-            .iter()
-            .map(|served| {
-                let acceptor = acceptors.remove(served.as_str()).unwrap_or_else(|| {
-                    panic!("init: `{}` has already been given the `{served}` acceptor", program.name)
-                });
-                (served.clone(), acceptor)
-            })
-            .collect();
-        let mut service = Service::new(program, kept);
-        if let Err(e) =
-            service.spawn(&program.path, &[], &system, &syscap, &connectors, &mut log)
-        {
-            panic!("init: cannot start {}: {e}", program.name);
+        if !is_storage(program) && !homes_made {
+            make_session_home();
+            homes_made = true;
         }
-        services.push(service);
+        let instances: Vec<Option<&str>> = match program.roles.is_empty() {
+            true => vec![None],
+            false => program.roles.iter().map(|r| Some(r.as_str())).collect(),
+        };
+        for role in instances {
+            let kept: Vec<(String, Acceptor)> = match role {
+                None => program
+                    .serves
+                    .iter()
+                    .map(|served| {
+                        let acceptor = acceptors.remove(served.as_str()).unwrap_or_else(|| {
+                            panic!("init: `{}` has already been given the `{served}` acceptor", program.name)
+                        });
+                        (served.clone(), acceptor)
+                    })
+                    .collect(),
+                Some(role) => toyos_manifest::role_dirs(role)
+                    .expect("known role")
+                    .iter()
+                    .map(|dir| {
+                        let name = format!("{CAPABILITY_PREFIX}{dir}");
+                        let acceptor = dir_acceptors.remove(&name).unwrap_or_else(|| {
+                            panic!("init: the `{role}` role is served twice")
+                        });
+                        (name, acceptor)
+                    })
+                    .collect(),
+            };
+            let mut service = Service::new(program, role, kept, wake);
+            if let Err(e) =
+                service.spawn(&program.path, &[], &system, &syscap, &connectors, &dirs, &mut log)
+            {
+                panic!("init: cannot start {}: {e}", program.name);
+            }
+            services.push(service);
+        }
+    }
+    if !homes_made {
+        make_session_home();
     }
 
     // Nothing else holds a `serves` acceptor that has not been launched yet, so
@@ -383,8 +450,16 @@ fn main() {
     let power = acceptors
         .remove(power::PORT)
         .expect("init: the manifest declares init serves `power`");
-    let mut init = Init { system: &system, syscap: &syscap, acceptors, connectors, services, log };
+    let mut init =
+        Init { system: &system, syscap: &syscap, acceptors, connectors, dirs, files, services, log, wake: wake_read };
     init.serve_forever(&launcher, &swap, &power);
+}
+
+/// A row whose process the machine's files depend on: a block service, or a
+/// file server. Started before every other row, and never made a home, which
+/// would be a directory on the volume it serves.
+fn is_storage(program: &Program) -> bool {
+    !program.roles.is_empty() || program.serves.iter().any(|s| s == toyos_blockring::PORT)
 }
 
 /// Everything init's loop acts on, for the machine's life.
@@ -395,16 +470,25 @@ struct Init<'a> {
     /// takes by move.
     acceptors: BTreeMap<&'a str, Acceptor>,
     connectors: BTreeMap<&'a str, Connector>,
-    /// What `[boot] start` named, in that order.
+    /// Every directory capability, by its namespace name: what each program's
+    /// view is built from.
+    dirs: BTreeMap<String, Connector>,
+    /// The same directories as a namespace of init's own, for the stop's syncs.
+    files: &'static Namespace,
+    /// What `[boot] start` named, a file server once per role.
     services: Vec<Service<'a>>,
     /// Where a service init (re)starts writes its stdout and stderr, whichever
     /// process ends up holding its row.
     log: Log,
+    /// Readable when a `restart` service has ended and is owed a new process.
+    wake: Pipe,
 }
 
 /// One program init started at boot, and the ports it serves.
 struct Service<'a> {
     program: &'a Program,
+    /// The file-server role this process serves, for a row with `roles`.
+    role: Option<&'a str>,
     /// The binary the running process was started from: the row's path, or a
     /// swap's installed one.
     path: String,
@@ -414,28 +498,51 @@ struct Service<'a> {
     /// started in its place is owed.
     devices: Vec<String>,
     kept: Arc<Mutex<Kept>>,
+    /// When each recent start after an end happened, for [`toyos_manifest::RESTARTS`].
+    restarts: VecDeque<Instant>,
 }
 
 /// What a service's waiter thread shares with the loop.
 struct Kept {
     /// The acceptors of every name the service serves. Empty once the service
-    /// has ended with no swap owning it: the port is then closed for good.
+    /// has ended with no swap owning it and no restart owed: the port is then
+    /// closed for good.
     acceptors: Vec<(String, Acceptor)>,
     /// Counts the service's starts, so a waiter answers only for its own.
     generation: u64,
     /// A swap owns the service: its process ending is expected and the port
     /// stays open for the next one.
     swapping: bool,
+    /// The row says init starts it again when it ends.
+    restart: bool,
+    /// It ended, and the loop owes it a new process on the same ports.
+    ended: bool,
+    /// The write end of [`Init::wake`].
+    wake: toyos::RawHandle,
 }
 
 impl<'a> Service<'a> {
-    fn new(program: &'a Program, acceptors: Vec<(String, Acceptor)>) -> Self {
+    fn new(
+        program: &'a Program,
+        role: Option<&'a str>,
+        acceptors: Vec<(String, Acceptor)>,
+        wake: toyos::RawHandle,
+    ) -> Self {
         Self {
             program,
+            role,
             path: program.path.clone(),
             child: None,
             devices: Vec::new(),
-            kept: Arc::new(Mutex::new(Kept { acceptors, generation: 0, swapping: false })),
+            kept: Arc::new(Mutex::new(Kept {
+                acceptors,
+                generation: 0,
+                swapping: false,
+                restart: program.restart,
+                ended: false,
+                wake,
+            })),
+            restarts: VecDeque::new(),
         }
     }
 
@@ -450,6 +557,7 @@ impl<'a> Service<'a> {
         system: &Manifest,
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
+        dirs: &BTreeMap<String, Connector>,
         log: &mut Log,
     ) -> std::io::Result<u32> {
         // **Checked again at every start, not only on arrival**: the installed
@@ -470,6 +578,7 @@ impl<'a> Service<'a> {
             0 => Served::Keep(&kept.acceptors),
             _ => Served::Restart { acceptors: &kept.acceptors, owed },
         };
+        let storage = storage_endowment(self.program, self.role, syscap);
         let (child, devices) = start(
             Command::new(path),
             self.program,
@@ -477,10 +586,13 @@ impl<'a> Service<'a> {
             syscap,
             served,
             connectors,
+            dirs,
             &[],
+            storage,
             Output::Boot(log),
         )?;
         kept.generation += 1;
+        kept.ended = false;
         if !kept.acceptors.is_empty() {
             let process = toyos_abi::syscall::dup(toyos::RawHandle(child.as_raw_handle()))
                 .unwrap_or_else(|e| panic!("init: {}'s process handle: {e:?}", self.program.name));
@@ -500,10 +612,19 @@ impl<'a> Service<'a> {
     fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }
+
+    /// The name its lines and init's say it under: a file server's role
+    /// beside its row's.
+    fn label(&self) -> String {
+        match self.role {
+            Some(role) => format!("{} {role}", self.program.name),
+            None => self.program.name.clone(),
+        }
+    }
 }
 
 /// Wait for one start of a service to end, and close its ports if nothing was
-/// expecting it to.
+/// expecting it to, or wake the loop to start it again if its row says so.
 ///
 /// **A thread, because the kernel answers a process's end to a wait and to
 /// nothing a poll can watch.** It parks in the kernel for the process's life
@@ -513,7 +634,13 @@ fn close_when_it_ends(kept: &Mutex<Kept>, generation: u64, process: toyos::RawHa
     toyos_abi::syscall::close(process);
     let mut kept = kept.lock().expect("init: a service's state is poisoned");
     if kept.generation == generation && !kept.swapping {
-        kept.acceptors.clear();
+        if kept.restart {
+            kept.ended = true;
+            // A full pipe is a wake already pending, which is all this is.
+            let _ = toyos_abi::syscall::write_nonblock(kept.wake, &[1]);
+        } else {
+            kept.acceptors.clear();
+        }
     }
 }
 
@@ -566,7 +693,7 @@ impl<'a> Init<'a> {
     /// service it has just killed to finish ending, which is the kernel's
     /// teardown and no client's.
     fn serve_forever(&mut self, launcher: &Acceptor, swap: &Acceptor, power: &Acceptor) -> ! {
-        let poller = Poller::new(4 + MAX_PENDING_LAUNCHES as u32);
+        let poller = Poller::new(5 + MAX_PENDING_LAUNCHES as u32);
         let mut pending: Vec<Pending> = Vec::new();
         let mut flight: Option<Flight> = None;
         let mut ready: Vec<u64> = Vec::new();
@@ -574,6 +701,7 @@ impl<'a> Init<'a> {
             poller.watch(launcher, READABLE, TOKEN_ACCEPTOR);
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
+            poller.watch(&self.wake, READABLE, TOKEN_WAKE);
             if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
                 poller.watch(conn, READABLE, TOKEN_HANGUP);
             }
@@ -666,6 +794,7 @@ impl<'a> Init<'a> {
                                 self.syscap,
                                 &mut self.acceptors,
                                 &self.connectors,
+                                &self.dirs,
                                 &mut self.log,
                             ),
                             Port::Power => self.stop(&p.conn, msg_type),
@@ -695,6 +824,12 @@ impl<'a> Init<'a> {
             pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
             flight = flight.and_then(|f| self.advance(f, ready.contains(&TOKEN_HANGUP)));
+
+            if ready.contains(&TOKEN_WAKE) {
+                let mut sink = [0u8; 64];
+                while matches!(self.wake.read_nonblock(&mut sink), Ok(n) if n > 0) {}
+                self.restart_ended();
+            }
         }
     }
 
@@ -827,7 +962,7 @@ impl<'a> Init<'a> {
             let _ = old.wait();
         }
         let started =
-            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &mut self.log);
+            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log);
         match started {
             Ok(pid) => {
                 swapped(
@@ -908,6 +1043,7 @@ impl<'a> Init<'a> {
         };
         say!("{STOPPING} ({how:?})");
         self.log.flush();
+        self.sync_files();
         let refused = match how {
             Stop::Reboot => self.syscap.reboot(),
             Stop::Shutdown => self.syscap.shutdown(),
@@ -917,12 +1053,100 @@ impl<'a> Init<'a> {
         let _ = conn.try_send_bytes(power::MSG_REFUSED, &refused.to_u64().to_le_bytes());
     }
 
+    /// Have every writable file server make its volume durable, each bounded
+    /// by [`FLUSH_BOUND`]: the kernel's stop waits for no process, so what a
+    /// server holds and has not written is lost unless it is asked first.
+    /// `/log` is `logd`'s flush's, made durable before this.
+    fn sync_files(&self) {
+        let roles = self.system.programs.iter().flat_map(|p| p.roles.iter());
+        for role in roles.filter(|r| *r != "log" && *r != "boot") {
+            let Some(dir) = toyos_manifest::role_dirs(role).and_then(|dirs| dirs.first()) else { continue };
+            let name = format!("{CAPABILITY_PREFIX}{dir}");
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let (asked, names) = (name.clone(), self.files);
+            let spawned = std::thread::Builder::new().name(format!("sync-{role}")).spawn(move || {
+                let answer = toyos::fs::Dir::connect(names, &asked)
+                    .and_then(|mut dir| {
+                        dir.sync().map_err(|e| match e {
+                            toyos::fs::Refused::Error(e) => e,
+                            toyos::fs::Refused::Link(_) => SyscallError::Unknown,
+                        })
+                    });
+                let _ = done_tx.send(answer);
+            });
+            let Ok(syncer) = spawned else {
+                say!("init: power: no thread to sync {name}; its unsynced writes are lost with the stop");
+                continue;
+            };
+            let answered = done_rx.recv_timeout(FLUSH_BOUND);
+            // Joined once it has answered, so the stop never counts a thread
+            // that was on its way out.
+            if answered.is_ok() {
+                syncer.join().expect("init: a sync thread panicked");
+            }
+            match answered {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => say!("init: power: {name}'s server would not sync ({e:?})"),
+                Err(_) => say!(
+                    "init: power: {name}'s server did not sync in {} ms; stopping without it",
+                    FLUSH_BOUND.as_millis()
+                ),
+            }
+        }
+    }
+
+    /// Start again every `restart` service that ended, on the ports it kept,
+    /// unless it has ended [`toyos_manifest::RESTARTS`] times inside
+    /// [`toyos_manifest::RESTART_WINDOW_SECS`]: then its ports close, and a
+    /// client's next connection is answered `Gone`.
+    fn restart_ended(&mut self) {
+        let window = Duration::from_secs(toyos_manifest::RESTART_WINDOW_SECS);
+        for index in 0..self.services.len() {
+            let ended = self.services[index].kept.lock().expect("init: a service's state is poisoned").ended;
+            if !ended {
+                continue;
+            }
+            let service = &mut self.services[index];
+            let label = service.label();
+            let now = Instant::now();
+            while service.restarts.front().is_some_and(|at| now.duration_since(*at) > window) {
+                service.restarts.pop_front();
+            }
+            let pid = service.pid().map_or(0, |p| p);
+            if let Some(mut old) = service.child.take() {
+                let _ = old.wait();
+            }
+            if service.restarts.len() as u32 >= toyos_manifest::RESTARTS {
+                let mut kept = service.kept.lock().expect("init: a service's state is poisoned");
+                kept.ended = false;
+                kept.acceptors.clear();
+                say!(
+                    "init: {label} ended {} times in {} s; its ports are closed and its clients answered Gone",
+                    toyos_manifest::RESTARTS + 1,
+                    toyos_manifest::RESTART_WINDOW_SECS
+                );
+                continue;
+            }
+            service.restarts.push_back(now);
+            let (path, owed) = (service.path.clone(), service.devices.clone());
+            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log) {
+                Ok(new) => say!("init: {label} (pid {pid}) ended; started again as pid {new}"),
+                Err(e) => {
+                    let mut kept = service.kept.lock().expect("init: a service's state is poisoned");
+                    kept.ended = false;
+                    kept.acceptors.clear();
+                    say!("init: {label} ended and would not start again ({e}); its ports are closed");
+                }
+            }
+        }
+    }
+
     /// Start the binary a failed swap replaced, or close the service's ports
     /// when that will not start either.
     fn restore(&mut self, index: usize, previous: &str, owed: &[String]) {
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &mut self.log) {
+        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log) {
             Ok(pid) => {
                 service.kept.lock().expect("init: a service's state is poisoned").swapping = false;
                 swapped(&self.log, &name, Word::Restored, &format!("{previous} as pid {pid}"));
@@ -991,6 +1215,7 @@ fn serve_launch<'a>(
     syscap: &SysCap,
     acceptors: &mut BTreeMap<&'a str, Acceptor>,
     connectors: &BTreeMap<&str, Connector>,
+    dirs: &BTreeMap<String, Connector>,
     log: &mut Log,
 ) {
     if msg_type != launch::MSG_LAUNCH {
@@ -1106,7 +1331,9 @@ fn serve_launch<'a>(
         syscap,
         Served::Move(acceptors),
         connectors,
+        dirs,
         &extras,
+        Storage::default(),
         Output::Launch { log, slots: &caller_slots },
     );
     match started {
@@ -1368,16 +1595,19 @@ fn start<'a>(
     syscap: &SysCap,
     served: Served<'_, 'a>,
     connectors: &BTreeMap<&str, Connector>,
+    dirs: &BTreeMap<String, Connector>,
     extras: &[(&str, Connector)],
+    storage: Storage,
     output: Output<'_>,
 ) -> std::io::Result<(Child, Vec<String>)> {
     command.args(&program.args);
+    command.args(&storage.args);
     let booting = matches!(output, Output::Boot(_));
 
     // **Set here, over whatever a launching caller carried**: the row decides
     // where a program's home is, and a service's is made before it first runs.
     let home = program.home();
-    if program.service {
+    if program.service && !is_storage(program) {
         if let Err(e) = make_dir(&home) {
             say!("init: {}: {home} could not be made: {e}", program.name);
         }
@@ -1395,7 +1625,12 @@ fn start<'a>(
     // acceptor is gone can never be served again.
     let mut taken: Vec<(&'a str, Acceptor)> = Vec::new();
 
-    if let Some(ns) = build_namespace(program, system, connectors, extras)? {
+    for (label, claim) in storage.claims {
+        let raw = claim.into_raw();
+        command.endow(&label, raw.0);
+        held.0.push(raw);
+    }
+    if let Some(ns) = build_namespace(program, system, connectors, dirs, extras)? {
         let raw = ns.into_raw();
         command.endow(SVC_LABEL, raw.0);
         held.0.push(raw);
@@ -1447,10 +1682,13 @@ fn start<'a>(
             given_back = Some(acceptors);
         }
         Served::Keep(kept) | Served::Restart { acceptors: kept, .. } => {
-            for name in &program.serves {
-                let (_, acceptor) = kept.iter().find(|(kept, _)| kept == name).ok_or_else(|| {
-                    std::io::Error::other(format!("the `{name}` port is closed for good"))
-                })?;
+            // Every acceptor the service keeps: its row's `serves`, or the
+            // directories of a file server's role. None left is a service
+            // whose ports closed for good.
+            if kept.is_empty() && (!program.serves.is_empty() || !program.roles.is_empty()) {
+                return Err(std::io::Error::other("its ports are closed for good"));
+            }
+            for (name, acceptor) in kept {
                 let handed = toyos_abi::syscall::dup(acceptor.as_handle()).map_err(|e| {
                     std::io::Error::other(format!("the `{name}` acceptor did not duplicate: {e:?}"))
                 })?;
@@ -1676,12 +1914,14 @@ fn build_namespace(
     program: &Program,
     system: &Manifest,
     connectors: &BTreeMap<&str, Connector>,
+    dirs: &BTreeMap<String, Connector>,
     extras: &[(&str, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
     // Never the swap port: [`swap_namespace`] says why.
     let receives: Vec<&String> =
         program.receives.iter().filter(|name| *name != toyos_swap::PORT).collect();
-    if receives.is_empty() && extras.is_empty() {
+    let view: Vec<(&String, &Connector)> = dirs.iter().filter(|(name, _)| in_view(program, name)).collect();
+    if receives.is_empty() && extras.is_empty() && view.is_empty() {
         return Ok(None);
     }
     let mut builder = namespace::build();
@@ -1695,6 +1935,9 @@ fn build_namespace(
             ),
         }
     }
+    for (name, connector) in view {
+        builder = builder.add(name, connector);
+    }
     // A `provides` name reaches its holder from whoever made the port, never
     // from init, and this is where it arrives.
     for (name, connector) in extras {
@@ -1706,6 +1949,25 @@ fn build_namespace(
             panic!("init: no namespace for {}: {e:?}", program.name)
         }
         Err(e) => Err(std::io::Error::other(format!("a provided connector was refused: {e:?}"))),
+    }
+}
+
+/// Whether the directory capability `name` is in `program`'s view.
+///
+/// **Every program sees the whole tree the file servers serve**, which is the
+/// kernel's old view kept whole until each row declares its own
+/// (`issues/isolation/every-program-sees-only-the-files-it-was-given.md`,
+/// stage 2), with two exceptions: `/boot` is the updater's alone, and a
+/// storage row sees none, since a file server resolving a path of its own
+/// through itself waits for ever.
+fn in_view(program: &Program, name: &str) -> bool {
+    if is_storage(program) {
+        return false;
+    }
+    match name.strip_prefix(CAPABILITY_PREFIX) {
+        Some("/boot") => program.slots,
+        Some(_) => true,
+        None => false,
     }
 }
 
@@ -1743,4 +2005,125 @@ fn swapped(log: &Log, service: &str, word: Word, detail: &str) {
             Word::Refused | Word::Stopping | Word::InService => {}
         }
     }
+}
+
+/// What a storage row's process is started with beside its row: its
+/// arguments, and the claims on the partition a file server's role is on
+/// where a disk the kernel drives carries it.
+#[derive(Default)]
+struct Storage {
+    args: Vec<String>,
+    claims: Vec<(String, toyos::Device)>,
+}
+
+/// Every record the kernel's inventory answers.
+fn inventory(syscap: &SysCap) -> Vec<toyos_abi::inventory::Record> {
+    use toyos_abi::inventory::{RawRecord, Record};
+    let Ok(asked) = syscap.inventory(&mut []) else { return Vec::new() };
+    let mut raw = vec![RawRecord::EMPTY; asked];
+    let Ok(n) = syscap.inventory(&mut raw) else { return Vec::new() };
+    raw[..n].iter().filter_map(|r| Record::decode(r).ok()).collect()
+}
+
+/// The unique GUID the loader named for `role`.
+fn loaded(records: &[toyos_abi::inventory::Record], role: toyos_abi::inventory::Role) -> Option<[u8; 16]> {
+    records.iter().find_map(|r| match r {
+        toyos_abi::inventory::Record::Loaded(l) if l.role == role => Some(l.unique_guid),
+        _ => None,
+    })
+}
+
+fn guid_text(guid: [u8; 16]) -> String {
+    let mut buf = [0u8; toyos_abi::part::GUID_TEXT_LEN];
+    toyos_abi::part::PartGuid(guid).write_text(&mut buf).to_string()
+}
+
+/// A storage row's arguments and claims for one start.
+///
+/// A block service is told the ROOT the machine runs from, which it serves no
+/// session on. A file server is told its role, and gets its partition as a
+/// claim when a disk the kernel drives carries it — the stick, until usbd
+/// serves it — and otherwise the partition's GUID, which it opens through the
+/// block service; DATA it finds by type there itself.
+fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> Storage {
+    use toyos_abi::inventory::{Record, Role};
+    let mut storage = Storage::default();
+    let is_block = program.serves.iter().any(|s| s == toyos_blockring::PORT);
+    if !is_block && role.is_none() {
+        return storage;
+    }
+    let records = inventory(syscap);
+    if is_block {
+        if let Some(root) = loaded(&records, Role::Root) {
+            storage.args.extend(["--running".to_string(), guid_text(root)]);
+        }
+        return storage;
+    }
+    let role = role.expect("checked above");
+    storage.args.push(role.to_string());
+    let on_kernel_disk = |pick: &dyn Fn(&toyos_abi::inventory::Partition) -> bool| -> Vec<[u8; 16]> {
+        records
+            .iter()
+            .filter_map(|r| match r {
+                Record::Partition(p) if pick(p) => Some(p.unique_guid),
+                _ => None,
+            })
+            .collect()
+    };
+    let (kernel, named) = match role {
+        "data" => (on_kernel_disk(&|p| p.type_guid == toyos_gpt::Guid::TOYOS_DATA.0), None),
+        "log" | "boot" => {
+            let which = if role == "log" { Role::Log } else { Role::Boot };
+            match loaded(&records, which) {
+                Some(guid) => (on_kernel_disk(&|p| p.unique_guid == guid), Some(guid)),
+                None => (Vec::new(), None),
+            }
+        }
+        other => panic!("init: `{other}` is no role; the build refuses it"),
+    };
+    match kernel.as_slice() {
+        [guid] => {
+            let request = toyos_abi::syscall::DeviceRequest::Partition(toyos_abi::part::PartGuid(*guid));
+            let mut buf = [0u8; toyos_abi::syscall::DeviceRequest::MAX_NAME];
+            let name = request.write_name(&mut buf).to_string();
+            match syscap.claim_partition::<toyos::Device>(toyos_abi::part::PartGuid(*guid)) {
+                Ok(claim) => storage.claims.push((format!("{DEV_PREFIX}{name}"), claim)),
+                Err(e) => say!("init: {}: {}", program.name, refused(&name, e)),
+            }
+        }
+        [] => {
+            if let Some(guid) = named {
+                storage.args.push(guid_text(guid));
+            }
+        }
+        many => say!(
+            "init: {}: the kernel's disks carry {} partitions for the `{role}` role, and a role is one",
+            program.name,
+            many.len()
+        ),
+    }
+    storage
+}
+
+/// The manifest, off ROOT through the kernel's own `open`.
+///
+/// **Not through std**: std resolves a path through this process's namespace,
+/// and the first path it resolves fixes that namespace for the process's life.
+/// init builds its namespace out of the manifest, so the manifest is read
+/// before std is asked anything.
+fn read_manifest() -> Result<String, SyscallError> {
+    use toyos_abi::syscall::{self, OpenFlags};
+    let handle = syscall::open(toyos_manifest::GUEST_PATH.as_bytes(), OpenFlags::READ)?;
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    let read = loop {
+        match syscall::read(handle, &mut buf) {
+            Ok(0) => break Ok(()),
+            Ok(n) => bytes.extend_from_slice(&buf[..n]),
+            Err(e) => break Err(e),
+        }
+    };
+    syscall::close(handle);
+    read?;
+    String::from_utf8(bytes).map_err(|_| SyscallError::InvalidArgument)
 }

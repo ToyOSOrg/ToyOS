@@ -10,9 +10,10 @@ use std::process::{Command, Stdio};
 
 use toyos_abi::syscall::{self, SyscallError};
 
-/// Mirrored in `so_cache_refusals`, which reads its bytes off the device.
-const STALE: &str = "/home/so-cache-stale.so";
-const SAME_SIZE: &str = "/home/so-cache-same-size.so";
+/// On tmpfs: the cache answers for a path the kernel opens itself, which
+/// DATA's are not.
+const STALE: &str = "/tmp/so-cache-stale.so";
+const SAME_SIZE: &str = "/tmp/so-cache-same-size.so";
 const FIRST: &str = "/system/lib/libtls_lib.so";
 const SECOND: &str = "/system/lib/libtls_dlopen_lib.so";
 /// A symbol `FIRST` exports and `SECOND` does not: the verdict is a name.
@@ -67,6 +68,10 @@ fn a_changed_file_is_refused() -> Result<String, String> {
     }
 
     copy(SECOND, STALE);
+    // The file really changed, or the refusal below would be about one that had not.
+    if std::fs::read(STALE).ok() != std::fs::read(SECOND).ok() {
+        return Err(format!("{STALE} does not hold {SECOND}'s bytes after the copy"));
+    }
     let second = load_in_child(STALE);
     if second.contains("SYMBOL-FOUND") {
         return Err(format!(
@@ -108,7 +113,7 @@ fn a_same_size_rewrite_is_refused() -> Result<String, String> {
 /// budget as surely as distinct libraries would.
 fn the_budget_is_refused() -> Result<String, String> {
     for attempt in 0..BUDGET_ATTEMPTS {
-        let path = format!("/home/so-cache-fill-{attempt}.so");
+        let path = format!("/tmp/so-cache-fill-{attempt}.so");
         copy(FIRST, &path);
         let said = load_in_child(&path);
         if said.contains("REFUSED ResourceExhausted") {

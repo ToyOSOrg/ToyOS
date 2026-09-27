@@ -13,6 +13,11 @@ pub const MSG_OPEN: u32 = 1;
 pub const MSG_OPENED: u32 = 2;
 /// Refused; the payload is a [`Refusal`]'s word.
 pub const MSG_REFUSED: u32 = 3;
+/// What partitions the service serves, for a client that finds its own by
+/// type: no payload, no handles; answered [`MSG_LISTED`].
+pub const MSG_LIST: u32 = 4;
+/// The answer to [`MSG_LIST`]: one [`Listed`] after another.
+pub const MSG_LISTED: u32 = 5;
 
 /// The bytes of a GUID payload.
 pub const GUID_BYTES: usize = 16;
@@ -42,6 +47,39 @@ impl Opened {
         let blocks = u64::from_le_bytes(bytes[..8].try_into().ok()?);
         let unique = bytes[8..].try_into().ok()?;
         Some(Self { blocks, unique })
+    }
+}
+
+/// One partition of the table a service drives, as [`MSG_LISTED`] carries
+/// it: its unique and type GUIDs as the table stores them. Every entry is
+/// listed, one the service will not open among them, so a client that finds
+/// its partition by type learns why from the open's refusal rather than
+/// taking the partition for missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub unique: [u8; GUID_BYTES],
+    pub kind: [u8; GUID_BYTES],
+}
+
+impl Listed {
+    pub const BYTES: usize = 2 * GUID_BYTES;
+
+    pub fn encode(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        out[..GUID_BYTES].copy_from_slice(&self.unique);
+        out[GUID_BYTES..].copy_from_slice(&self.kind);
+        out
+    }
+
+    /// Every entry of a listing, or `None` for one that is not whole entries.
+    pub fn decode_all(bytes: &[u8]) -> Option<impl Iterator<Item = Self> + '_> {
+        if bytes.len() % Self::BYTES != 0 {
+            return None;
+        }
+        Some(bytes.chunks_exact(Self::BYTES).map(|c| Self {
+            unique: c[..GUID_BYTES].try_into().expect("sixteen bytes"),
+            kind: c[GUID_BYTES..].try_into().expect("sixteen bytes"),
+        }))
     }
 }
 
@@ -104,6 +142,13 @@ mod tests {
 
     #[test]
     fn opened_and_refusal_survive_their_bytes_and_nothing_else_decodes() {
+        let listed = [
+            Listed { unique: [1; GUID_BYTES], kind: [2; GUID_BYTES] },
+            Listed { unique: [4; GUID_BYTES], kind: [5; GUID_BYTES] },
+        ];
+        let bytes: Vec<u8> = listed.iter().flat_map(|l| l.encode()).collect();
+        assert_eq!(Listed::decode_all(&bytes).map(|all| all.collect::<Vec<_>>()), Some(listed.to_vec()));
+        assert!(Listed::decode_all(&bytes[1..]).is_none());
         let opened = Opened { blocks: u64::MAX - 3, unique: [7; GUID_BYTES] };
         assert_eq!(Opened::decode(&opened.encode()), Some(opened));
         assert_eq!(Opened::decode(&opened.encode()[1..]), None);

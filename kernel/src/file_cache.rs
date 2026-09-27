@@ -150,12 +150,6 @@ fn undo_open(file_id: FileId) {
     }
 }
 
-/// This file's open-reference count, for the leak-rollback self-test's census.
-#[cfg(feature = "boot-actuators")]
-pub fn ref_count(file_id: FileId) -> u32 {
-    FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.ref_count)
-}
-
 /// The verdict [`release_to_writeback`] hands its caller.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Release {

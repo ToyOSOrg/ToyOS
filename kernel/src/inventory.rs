@@ -15,13 +15,13 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use toyos_abi::inventory::{Block, Claim, Claimed, Holder, PartState, Partition, Record, NAME_BYTES};
+use toyos_abi::inventory::{Block, Claim, Claimed, Holder, Loaded, PartState, Partition, Record, NAME_BYTES};
 
 use crate::object::KObjectRef;
 use crate::process;
 
 /// Every record, in a fixed order: PCI, USB, block devices, partitions,
-/// claims.
+/// claims, and the partitions the loader named.
 pub fn collect() -> Vec<Record> {
     let mut out: Vec<Record> = crate::pcidev::inventory().into_iter().map(Record::Pci).collect();
     out.extend(crate::drivers::xhci::inventory().into_iter().map(Record::Usb));
@@ -46,6 +46,11 @@ pub fn collect() -> Vec<Record> {
         }));
     }
     out.extend(claims().into_iter().map(Record::Claim));
+    out.extend(
+        crate::gpt::loaded()
+            .into_iter()
+            .map(|(role, guid)| Record::Loaded(Loaded { role, unique_guid: guid.0 })),
+    );
     out
 }
 

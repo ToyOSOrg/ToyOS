@@ -138,6 +138,11 @@ struct ProgramConfig {
     /// A system service: init starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
     service: bool,
+    /// The file-server roles this binary serves, one process each
+    /// (`toyos_manifest::Program::roles`).
+    roles: Vec<String>,
+    /// init starts it again when it ends (`toyos_manifest::Program::restart`).
+    restart: bool,
 }
 
 impl ProgramConfig {
@@ -733,6 +738,8 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
                     service: cfg.service,
+                    roles: cfg.roles.clone(),
+                    restart: cfg.restart,
                 }
             })
             .collect(),

@@ -129,18 +129,6 @@ pub fn note_progress() {
     }
 }
 
-/// Whether the running thread is the one performing the shutdown: what the
-/// `quiesce-drain-refuse` actuator refuses by.
-#[cfg(feature = "boot-actuators")]
-pub fn runs_the_shutdown() -> bool {
-    if STAGE.read() != STOPPING {
-        return false;
-    }
-    let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
-        return false;
-    };
-    ThreadId { pid: pid.raw(), tid: tid.raw() } == caller()
-}
 
 /// Stop every userland thread but the caller, and answer with what it took.
 ///

@@ -193,7 +193,15 @@ pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
     0
 }
 
-pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init_out: Option<UserAddr>) -> u64 {
+/// `image` is the library's bytes when the caller read them itself, and `path`
+/// then only names it: an image is loaded afresh and kept out of the shared
+/// cache, which answers for what a path holds and an image is no path's.
+pub(super) fn sys_dlopen(
+    ctx: &crate::user_ptr::SyscallContext,
+    path: &str,
+    init_out: Option<UserAddr>,
+    image: Option<crate::file_backing::ImageBacking>,
+) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
     let resolved = vfs::lock().resolve_absolute(&cwd, path);
 
@@ -211,15 +219,37 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         return idx as u64;
     }
 
+    let loaded = match image {
+        Some(image) => match crate::elf::load_shared_lib(&image) {
+            Ok((lib, _, _)) => Ok(lib),
+            Err(msg) => {
+                log!("dlopen: {}: {}", resolved, msg);
+                return SyscallError::Unknown.to_u64();
+            }
+        },
+        None => Err(()),
+    };
+    let lib = match loaded {
+        Ok(lib) => lib,
+        Err(()) => match open_cached(&resolved) {
+            Ok(lib) => lib,
+            Err(e) => return e,
+        },
+    };
+    map_dlopened(ctx, &resolved, init_out, lib)
+}
+
+/// A library at `resolved`, out of the shared cache or loaded into it.
+fn open_cached(resolved: &str) -> Result<crate::elf::LoadedLib, u64> {
     // Opened before the cache is consulted: the answer depends on what the path holds *now*, and the fast path above is what keeps a `dlopen` loop from paying.
-    let (backing, id) = match vfs::lock().open_backing_identified(&resolved) {
+    let (backing, id) = match vfs::lock().open_backing_identified(resolved) {
         Ok(pair) => pair,
         Err(e) => {
             log!("dlopen: {}: {e}", resolved);
-            return e.to_u64();
+            return Err(e.to_u64());
         }
     };
-    let mut lib = match crate::elf::try_clone_cached(&resolved, id) {
+    let lib = match crate::elf::try_clone_cached(resolved, id) {
         Ok(Some(lib)) => lib,
         Err(e) => {
             log!(
@@ -227,24 +257,33 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
                  it was loaded, and the image cannot be replaced while a process has it mapped",
                 resolved
             );
-            return e.to_u64();
+            return Err(e.to_u64());
         }
         Ok(None) => {
             let (lib, rw_offset, rw_size) = match crate::elf::load_shared_lib(backing.as_ref()) {
                 Ok(result) => result,
                 Err(msg) => {
                     log!("dlopen: {}", msg);
-                    return SyscallError::Unknown.to_u64();
+                    return Err(SyscallError::Unknown.to_u64());
                 }
             };
 
-            match crate::elf::cache_loaded_lib(&resolved, id, lib, rw_offset, rw_size) {
+            match crate::elf::cache_loaded_lib(resolved, id, lib, rw_offset, rw_size) {
                 Ok(lib) => lib,
-                Err(e) => return e.to_u64(),
+                Err(e) => return Err(e.to_u64()),
             }
         }
     };
+    Ok(lib)
+}
 
+/// Map `lib` into the caller, run its relocations, and register it under `resolved`.
+fn map_dlopened(
+    ctx: &crate::user_ptr::SyscallContext,
+    resolved: &str,
+    init_out: Option<UserAddr>,
+    mut lib: crate::elf::LoadedLib,
+) -> u64 {
     let pt = process::current_address_space();
     let mapped = process::with_process_data(|_data| {
         // The module's own program headers decide which pages are writable
@@ -347,7 +386,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             is_static: false,
         });
     }
-    data.elf.lib_paths.push(resolved);
+    data.elf.lib_paths.push(alloc::string::String::from(resolved));
     data.elf.loaded_libs.push(lib);
     idx as u64
 }

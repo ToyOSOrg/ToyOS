@@ -215,7 +215,6 @@ hda_two_live_refused 4848
 heap_ceiling_recovery 10371
 hierarchy_paths 87
 home_backing_revoked 663
-home_budget_refusal_retried 18661
 home_overwrite_reads_back 4835
 https_tls13 5166
 https_tls13_e1000e 6072
@@ -312,7 +311,6 @@ nvme_image_is_held_by_one_guest 0
 nvme_large_device 6052
 nvme_wide_sector 3500
 operation_nesting 5075
-page_cache_partition_offset 6984
 panic_before_peripherals_reboots 3227
 panic_key_holds 42033
 panic_reboots 9768

@@ -320,8 +320,10 @@ impl Vfs {
             return Ok(abs);
         }
 
-        // A mount point exists whether or not anything is mounted on it.
-        if subdir.is_empty() && Self::entry(&mount).is_some() {
+        // A mount point exists whether or not anything is mounted on it; and
+        // under one this kernel mounts nothing at, the directory is a file
+        // server's, which the caller's client asked and this kernel cannot.
+        if Self::entry(&mount).is_some() && (subdir.is_empty() || self.point(&mount).is_none()) {
             return Ok(abs);
         }
 
@@ -671,11 +673,6 @@ impl Vfs {
         mount.fs.sync()?;
         mount.commit.settle(upto);
         Ok(())
-    }
-
-    /// Is there a filesystem mounted under `name`?
-    pub fn has_mount(&self, name: &str) -> bool {
-        self.point(name).is_some()
     }
 
     /// `/system/bin/logd` calls a line durable off this call's result, so `sync_for_path` must reach the device's write cache, not stop at the page cache.

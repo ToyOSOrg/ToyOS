@@ -41,8 +41,10 @@ unsafe impl UserSafe for [u64; 2] {}
 // SAFETY: `#[repr(C)] Copy`, three `u64`s, no padding; `file_type` is a `u64`, not the enum it names, so every bit pattern stays valid.
 unsafe impl UserSafe for crate::object::ops::Stat {}
 
-// SAFETY: `#[repr(C)] Copy`, ten `u64`s, no padding; every field is validated where it is used, not here.
+// SAFETY: `#[repr(C)] Copy`, fourteen `u64`s, no padding; every field is validated where it is used, not here.
 unsafe impl UserSafe for toyos_abi::syscall::SpawnArgs {}
+// SAFETY: `#[repr(C)] Copy`, two `u64`s, no padding; both are bounded by the copy that reads them.
+unsafe impl UserSafe for toyos_abi::syscall::ImageRef {}
 // SAFETY: `#[repr(C)] Copy`, `RawHandle`, a `flags: u32`, then six `u64`s — no padding.
 unsafe impl UserSafe for toyos_abi::syscall::NamespaceBuild {}
 // SAFETY: `#[repr(C)] Copy`, `u64`, `u64`, `i64` — 24 bytes, no padding.

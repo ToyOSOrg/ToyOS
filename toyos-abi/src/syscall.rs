@@ -385,15 +385,32 @@ pub struct SpawnArgs {
     /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
     pub labels_ptr: u64,
     pub labels_len: u64,
-    /// The child's working directory: an absolute path to a directory that
-    /// exists, or the spawn is refused — `InvalidArgument` for a path that is
-    /// not absolute, `NotFound` for one that names no directory. **Always the
-    /// caller's statement**: the kernel never substitutes the caller's own.
+    /// The child's working directory, absolute, or the spawn is refused
+    /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
+    /// must be a directory there or the spawn is `NotFound`; under any other
+    /// name it is a file server's directory, which the caller's client asked
+    /// that server about and the kernel cannot. **Always the caller's
+    /// statement**: the kernel never substitutes the caller's own.
     pub cwd_ptr: u64,
     pub cwd_len: u64,
+    /// The program's bytes, read whole by the caller, or `image_len` 0 for a
+    /// program the kernel opens at `argv[0]` itself. An image is copied at the
+    /// call and the child is paged from the copy; `argv[0]` names it and is
+    /// opened by nobody, and its libraries are found in `/system/lib` alone.
+    pub image_ptr: u64,
+    pub image_len: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 96);
+const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 112);
+
+/// A library's bytes, read whole by the caller, for `SYS_DLOPEN`'s fourth word:
+/// what [`SpawnArgs::image_ptr`] is to a spawn.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ImageRef {
+    pub ptr: u64,
+    pub len: u64,
+}
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///
@@ -1893,8 +1910,21 @@ pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
 /// Load a shared library (.so) into the current process.
 /// Runs .init_array constructors after loading.
 pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
+    dl_open_with(path, 0)
+}
+
+/// Load a shared library whose bytes the caller read itself, under `name`: a
+/// library on a file server's volume, which the kernel cannot open. The kernel
+/// copies `image` at the call; a second load under the same name in this
+/// process answers the first's handle, as a path load does.
+pub fn dl_open_image(name: &[u8], image: &[u8]) -> Result<u64, SyscallError> {
+    let image = ImageRef { ptr: image.as_ptr() as u64, len: image.len() as u64 };
+    dl_open_with(name, &image as *const ImageRef as u64)
+}
+
+fn dl_open_with(path: &[u8], image: u64) -> Result<u64, SyscallError> {
     let mut init_info: [u64; 2] = [0; 2];
-    let handle = check(syscall(SYS_DLOPEN, path.as_ptr() as u64, path.len() as u64, init_info.as_mut_ptr() as u64, 0))?;
+    let handle = check(syscall(SYS_DLOPEN, path.as_ptr() as u64, path.len() as u64, init_info.as_mut_ptr() as u64, image))?;
     // Run .init_array constructors (e.g. EH frame finder registration in cdylib std)
     let init_array_ptr = init_info[0];
     let init_count = init_info[1];

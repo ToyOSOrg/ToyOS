@@ -230,8 +230,17 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             } else {
                 alloc::vec::Vec::new()
             };
+            // Last, because it is the one copy that can be large: every refusal
+            // above costs the caller nothing it must hand over again.
+            let image = match args.image_len {
+                0 => None,
+                len => match crate::file_backing::ImageBacking::copy_in(&ctx, UserAddr::new(args.image_ptr), len) {
+                    Ok(image) => Some(alloc::sync::Arc::new(image) as alloc::sync::Arc<dyn crate::file_backing::FileBacking>),
+                    Err(e) => return e.to_u64(),
+                },
+            };
             let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-            sys_spawn(&argv, pending, cwd, env)
+            sys_spawn(&argv, pending, cwd, env, image)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {
@@ -333,8 +342,19 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     None => return bad_addr,
                 },
             };
+            let image = match a4 {
+                0 => None,
+                raw => {
+                    let Some(at) = UserAddr::checked(raw) else { return bad_addr };
+                    let Ok(image) = ctx.copy_in::<ImageRef>(at) else { return bad_addr };
+                    match crate::file_backing::ImageBacking::copy_in(&ctx, UserAddr::new(image.ptr), image.len) {
+                        Ok(image) => Some(image),
+                        Err(e) => return e.to_u64(),
+                    }
+                }
+            };
             // ctx carries the copy-out: sys_dlopen writes init_out only once the load succeeds.
-            sys_dlopen(&ctx, &path, init_out)
+            sys_dlopen(&ctx, &path, init_out, image)
         }
         SYS_DLSYM => {
             let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };

@@ -1766,7 +1766,7 @@ fn foreign_if_armed(first: bool, at: u64) -> u64 {
     #[cfg(feature = "boot-actuators")]
     if first && crate::actuator::iommu_userdev_foreign_dma() {
         let foreign =
-            crate::drivers::nvme::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
+            crate::drivers::xhci::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
         if foreign != 0 {
             return foreign;
         }

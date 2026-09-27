@@ -1,18 +1,15 @@
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bcachefs::Extent;
-use crate::block::{BlockError, BlockResult};
-use crate::page_cache;
+use crate::block::BlockResult;
 use crate::rootfs::MemoryImage;
-use crate::sync::Lock;
-use crate::time::Deadline;
 
 /// `mm::PAGE_SIZE`: `usize` for buffer sizing, `u64` for file offsets.
 const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 const BLOCK_SIZE_U64: u64 = crate::mm::PAGE_SIZE;
 
-/// Backing store for a memory-mapped file; callers don't know if it's NVMe, RAM, or something else.
+/// Backing store for a memory-mapped file: ROOT's image, an image a caller
+/// handed over, or a tmpfs file; callers do not know which.
 pub trait FileBacking: Send + Sync {
     /// Reads one page of file data at `file_offset` into `buf`, zero-filling past EOF.
     #[must_use = "a failed read left the buffer zeroed; it does not hold the file's bytes"]
@@ -20,102 +17,6 @@ pub trait FileBacking: Send + Sync {
 
     /// Total file size in bytes.
     fn file_size(&self) -> u64;
-}
-
-/// Which blocks a `/home` file's data lives in, and whether they are still that file's.
-pub struct FileBlocks {
-    /// `None` once the filesystem has taken the blocks back.
-    extents: Lock<Option<Vec<Extent>>>,
-}
-
-impl FileBlocks {
-    pub fn new(extents: Vec<Extent>) -> Arc<Self> {
-        Arc::new(Self { extents: Lock::new(Some(extents)) })
-    }
-
-    /// Gives the blocks up; every read through a backing that shares this fails from here on.
-    pub fn revoke(&self) {
-        // Not refcounted: a read after this must fail, not extend a freed block's life.
-        *self.extents.lock() = None;
-    }
-
-    /// Runs `f` over the current extent list, or `None` if the file is gone.
-    pub fn with<R>(&self, f: impl FnOnce(&mut Vec<Extent>) -> R) -> Option<R> {
-        // Lock stays held across `f`: the write path resolves and allocates inside it.
-        self.extents.lock().as_mut().map(f)
-    }
-
-    /// Keep the first `keep` blocks and hand back the dropped tail runs, for
-    /// the caller to free once the shortened record is on the device. Every
-    /// backing sharing this cell reads the dropped range as a hole from here on.
-    pub fn truncate_to_blocks(&self, keep: u64) -> Vec<Extent> {
-        let mut guard = self.extents.lock();
-        let Some(runs) = guard.as_mut() else { return Vec::new() };
-        let mut dropped = Vec::new();
-        let mut remaining = keep;
-        let mut kept = Vec::with_capacity(runs.len());
-        for run in runs.drain(..) {
-            let count = run.block_count as u64;
-            if remaining >= count {
-                remaining -= count;
-                kept.push(run);
-            } else {
-                if remaining > 0 {
-                    kept.push(Extent {
-                        start_block: run.start_block,
-                        block_count: remaining as u32,
-                        _reserved: 0,
-                    });
-                }
-                dropped.push(Extent {
-                    start_block: run.start_block + remaining,
-                    block_count: (count - remaining) as u32,
-                    _reserved: 0,
-                });
-                remaining = 0;
-            }
-        }
-        *runs = kept;
-        dropped
-    }
-}
-
-/// One block of `cache`, retried while the refusal is the budget's.
-///
-/// A `BudgetExpired` is a claim about the caller's clock and never a loss, and
-/// each attempt here is above `block::Partition`'s device lock, so it queues
-/// afresh with a whole `block::OPERATION` to spend. Bounded by
-/// `block::DEADMAN`, which is what bounds the run of attempts in both the
-/// kernel's other ladders (`writeback::drain_retrying`, `ops::fsync`).
-///
-/// It cannot park or yield between attempts, unlike either of those: a
-/// demand-paging fill runs under the process-data lock, where a park is the
-/// runtime panic `kernel/CLAUDE.md` names. Re-acquiring the device lock is the
-/// only wait, so the deadline is checked before each attempt and the caller
-/// gets the device's own last word when it is reached.
-fn read_block_retrying(
-    cache: &page_cache::Cached,
-    block: u64,
-    raw: &mut [u8; BLOCK_SIZE],
-) -> BlockResult {
-    let began = crate::clock::now();
-    let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
-    let mut attempts = 0u32;
-    loop {
-        attempts += 1;
-        let answer = cache.raw_read(block, raw);
-        if answer != Err(BlockError::BudgetExpired) {
-            return answer;
-        }
-        if deadman.reached(crate::clock::now()) {
-            log!(
-                "file: block {block} refused on the operation budget {attempts} time(s) in {} — {}",
-                crate::clock::now() - began,
-                crate::block::DEADMAN,
-            );
-            return answer;
-        }
-    }
 }
 
 /// The block holding `file_offset`, if the extents reach that far.
@@ -132,52 +33,9 @@ fn offset_to_block(extents: &[Extent], file_offset: u64) -> Option<u64> {
     None
 }
 
-/// File backed by blocks of the partition one page cache serves.
-pub struct NvmeBacking {
-    cache: Arc<page_cache::Cached>,
-    blocks: Arc<FileBlocks>,
-    size: u64,
-}
-
-impl NvmeBacking {
-    pub fn new(cache: Arc<page_cache::Cached>, blocks: Arc<FileBlocks>, size: u64) -> Self {
-        Self { cache, blocks, size }
-    }
-}
-
-impl FileBacking for NvmeBacking {
-    fn read_page(&self, file_offset: u64, buf: &mut [u8; BLOCK_SIZE]) -> BlockResult {
-        buf.fill(0);
-        if file_offset >= self.size {
-            return Ok(());
-        }
-        // Unlinked: blocks may already belong to another file.
-        let Some(block) = self.blocks.with(|extents| offset_to_block(extents, file_offset)) else {
-            log!("file: read through a backing whose file was deleted");
-            return Err(BlockError::Device);
-        };
-        if let Some(block) = block {
-            // Bypasses block page cache; file cache is the sole cache for file data.
-            let mut raw = [0u8; BLOCK_SIZE];
-            // `buf` is already zeroed, so a failed read here returns a hole, not stale data.
-            if let Err(e) = read_block_retrying(&self.cache, block, &mut raw) {
-                log!("file: read of block {block} failed");
-                return Err(e);
-            }
-            let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
-            buf[..valid].copy_from_slice(&raw[..valid]);
-        }
-        Ok(())
-    }
-
-    fn file_size(&self) -> u64 {
-        self.size
-    }
-}
-
 /// File on ROOT, backed by a fixed extent list over the image in memory.
 ///
-/// No revocation cell, unlike [`NvmeBacking`]: nothing can delete or truncate a
+/// No revocation cell: nothing can delete or truncate a
 /// file here, so the blocks a backing was opened over stay that file's for as
 /// long as it lives. A block outside the image is refused by
 /// [`MemoryImage::read`], which is where every bound on a number the image
@@ -212,6 +70,87 @@ impl FileBacking for ReadOnlyBacking {
         }
         let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
         buf[..valid].copy_from_slice(&raw[..valid]);
+        Ok(())
+    }
+
+    fn file_size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// An executable or library userland read and handed over whole: the bytes are
+/// copied into pages of the kernel's own at the call, so nothing its sender
+/// writes afterwards reaches a page this serves. What a program in `/apps` is
+/// spawned and paged from, since no file server's volume is the kernel's.
+pub struct ImageBacking {
+    pages: Vec<crate::mm::pmm::PhysPage>,
+    size: u64,
+}
+
+/// The most bytes one image may carry: the copy is kernel memory for the life
+/// of every process paged from it, and nothing charges that to the sender.
+pub const MAX_IMAGE_BYTES: u64 = 256 << 20;
+
+impl ImageBacking {
+    /// Copy `len` bytes of the caller's memory at `ptr`, a 2 MiB page's run at
+    /// a time, which is the most one user window maps contiguously.
+    pub fn copy_in(
+        ctx: &crate::user_ptr::SyscallContext,
+        ptr: crate::UserAddr,
+        len: u64,
+    ) -> Result<Self, toyos_abi::syscall::SyscallError> {
+        use toyos_abi::syscall::SyscallError;
+        const PAGE: u64 = crate::mm::PAGE_2M;
+        if len == 0 || len > MAX_IMAGE_BYTES {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let mut pages = Vec::new();
+        pages.try_reserve_exact(len.div_ceil(PAGE) as usize).map_err(|_| SyscallError::ResourceExhausted)?;
+        for _ in 0..len.div_ceil(PAGE) {
+            let page = crate::mm::pmm::alloc_page(crate::mm::pmm::Category::Elf)
+                .ok_or(SyscallError::ResourceExhausted)?;
+            pages.push(page);
+        }
+        let mut done = 0u64;
+        while done < len {
+            let at = ptr.raw().checked_add(done).ok_or(SyscallError::BadAddress)?;
+            // A run ends at the sender's page boundary or the image's own, whichever is first.
+            let run = (PAGE - at % PAGE).min(PAGE - done % PAGE).min(len - done);
+            let window = ctx.user_bytes(crate::UserAddr::new(at), run).ok_or(SyscallError::BadAddress)?;
+            let page = &pages[(done / PAGE) as usize];
+            // SAFETY: the page is this backing's own and 2 MiB long; `done % PAGE + run <= PAGE` by the `min` above.
+            let dst = unsafe {
+                core::slice::from_raw_parts_mut(
+                    page.direct_map().as_mut_ptr::<u8>().add((done % PAGE) as usize),
+                    run as usize,
+                )
+            };
+            window.read_at(0, dst);
+            done += run;
+        }
+        Ok(Self { pages, size: len })
+    }
+}
+
+impl FileBacking for ImageBacking {
+    fn read_page(&self, file_offset: u64, buf: &mut [u8; BLOCK_SIZE]) -> BlockResult {
+        buf.fill(0);
+        if file_offset >= self.size {
+            return Ok(());
+        }
+        const PAGE: u64 = crate::mm::PAGE_2M;
+        // Every backing is read a page at a time, and a 4 KiB-aligned page never crosses a 2 MiB one.
+        assert!(file_offset % BLOCK_SIZE_U64 == 0, "an image read at {file_offset:#x} is not page-aligned");
+        let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
+        let page = &self.pages[(file_offset / PAGE) as usize];
+        // SAFETY: the page is this backing's, immutable since `copy_in`, and `file_offset % PAGE + valid <= PAGE`.
+        let src = unsafe {
+            core::slice::from_raw_parts(
+                page.direct_map().as_ptr::<u8>().add((file_offset % PAGE) as usize),
+                valid,
+            )
+        };
+        buf[..valid].copy_from_slice(src);
         Ok(())
     }
 

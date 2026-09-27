@@ -179,13 +179,11 @@ pub enum BlockError {
     BudgetExpired,
 }
 
-impl BlockError {
-    /// Combines two failures from one composed operation: `Device` always wins.
-    pub fn worse(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Device, _) | (_, Self::Device) => Self::Device,
-            _ => Self::BudgetExpired,
-        }
+/// The one conversion between the kernel's block verdict and the bcachefs
+/// crate's: a `BudgetExpired` was never attempted and stays retryable.
+impl bcachefs::TransferError for BlockError {
+    fn refused_before_attempt(&self) -> bool {
+        matches!(self, BlockError::BudgetExpired)
     }
 }
 
@@ -346,26 +344,6 @@ impl BlockDevice for Locked<'_> {
     }
 }
 
-/// A block of one partition of one device, minted only by [`Partition::key`].
-/// `partition` is judged (`pc-partition-offset`): it puts a write where the
-/// slot was filled from. `device` is not, and no test can see it — one cache
-/// serves one partition, so two devices in one map is already unrepresentable.
-/// The field order is the sort order, so a run of one view's keys is a run on
-/// the device.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct BlockKey {
-    device: DeviceId,
-    partition: u64,
-    block: u64,
-}
-
-impl BlockKey {
-    /// Where the block is on the device, which is what a transfer takes.
-    pub fn device_block(self) -> u64 {
-        self.partition + self.block
-    }
-}
-
 /// Who holds a span of a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
@@ -466,18 +444,8 @@ impl Partition {
         self.handle.device_id()
     }
 
-    pub fn first_block(&self) -> u64 {
-        self.first_block
-    }
-
     pub fn block_count(&self) -> u64 {
         self.blocks
-    }
-
-    /// The identity of `block` in this view, or a refusal past its end.
-    pub fn key(&self, block: u64) -> Result<BlockKey, BlockError> {
-        self.locate(block, 1)?;
-        Ok(BlockKey { device: self.device_id(), partition: self.first_block, block })
     }
 
     /// Whether `count` blocks from `block` end inside the view — asked of a
@@ -588,20 +556,6 @@ pub fn duplicate_id_selftest() {
         before.len(),
         registered().len()
     );
-}
-
-/// Blocks the metadata cache may hold, per instance: sized from memory and
-/// never from the device, so N instances claim N times this and none evicts
-/// across them. N is the role partitions a boot caches — one today, from
-/// `page_cache::init`'s one call site — and a foreign volume adds none, since a
-/// FAT mount reads through `fat32_adapter::FatDevice` and never a `Cached`.
-/// Must stay under 14,336 or the hashbrown index crosses the 16,384-bucket bound `nvme_large_device` asserts.
-pub fn metadata_cache_blocks() -> usize {
-    if crate::actuator::test_small_caches() {
-        return 64;
-    }
-    let (total, _) = crate::mm::pmm::stats();
-    (((total / 32) / PAGE_SIZE) as usize).clamp(64, 4096)
 }
 
 /// Pages the file data cache may hold.

@@ -2069,10 +2069,9 @@ pub fn userdev_dma_fault(
 
     // The fault was handed to the process that drives the stream, and the line
     // says so: `owner=kernel` here would be a machine that halted, or was about
-    // to. `slot0` is the first `pcidev` slot, which is netd's — the only claim
-    // this config mints.
+    // to.
     let handled = log.must_say(FAULT)?;
-    if !handled.contains("owner=slot0") {
+    if !handled.contains("owner=slot") {
         return Err(format!(
             "the unit's fault was recorded against {handled:?}, and the function that faulted \
              is one a process drives. A fault the kernel takes as its own is one it halts for"
@@ -2147,12 +2146,25 @@ pub fn userdev_residue_is_its_own(
     if result.exit_code != Some(0) {
         return Err(format!("userdev_residue: exit {:?}\n{}\n{}", result.exit_code, result.stdout, log.text()));
     }
-    let released = log.must_say("[8086:10d3] released from slot 0; reset by")?;
+    let slot = slot_of(log.text(), "[8086:10d3]")?;
+    let released = log.must_say(&format!("[8086:10d3] released from slot {slot}; reset by"))?;
     if !released.contains("reset by nothing") {
         return Err(format!("the premise: the 82574 was not released by nothing — {released}"));
     }
-    let kept = log.must_say("pcidev: slot 0 holds 1 range(s)")?.to_string();
+    let kept = log.must_say(&format!("pcidev: slot {slot} holds 1 range(s)"))?.to_string();
     log.must_be_clean()?;
     eprintln!("  [iommu] {}; {}", kept.trim_end(), result.stdout.trim_end());
     Ok(())
+}
+
+/// The `pcidev` slot the function with PCI ids `ids` (`[vvvv:dddd]`) was handed
+/// over on: a boot's claims are minted in init's order, and the block service's
+/// comes first on a machine with an NVMe controller.
+pub(crate) fn slot_of(text: &str, ids: &str) -> Result<u32, String> {
+    text.lines()
+        .find_map(|l| {
+            let rest = l.split(&format!("{ids} handed over on slot ")).nth(1)?;
+            rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+        })
+        .ok_or_else(|| format!("no function {ids} was handed over on any slot"))
 }

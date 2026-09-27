@@ -14,3 +14,5 @@ toyos-swap = { path = "../../toyos-swap" }
 toyos-update = { path = "../../toyos-update" }
 # The partition types that name the running ROOT and the slot table.
 toyos-gpt = { path = "../../toyos-gpt" }
+# The block service's port name, which marks a storage row.
+toyos-blockring = { path = "../../toyos-blockring" }

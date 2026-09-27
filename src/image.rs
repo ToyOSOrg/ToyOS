@@ -504,11 +504,11 @@ fn round_up_sectors(n: usize) -> usize {
 
 /// Where each partition is made to start.
 ///
-/// A correctness requirement rather than tidiness. The kernel's `BlockDevice`
-/// transfers whole 4 KiB blocks and each mounted volume keeps its own resident
-/// copies of the blocks it has touched (`fat32_adapter::FatDevice`); two
-/// partitions sharing one device block would make each other's copies stale
-/// with nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
+/// A correctness requirement rather than tidiness. Every block service
+/// transfers whole 4 KiB blocks and each file server keeps its own cached
+/// copies of the blocks it has touched (`userland/fsd`); two partitions
+/// sharing one device block would make each other's copies stale with
+/// nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
 /// because that is what every partitioner uses and what an erase block wants.
 const PARTITION_ALIGN: usize = 1024 * 1024;
 

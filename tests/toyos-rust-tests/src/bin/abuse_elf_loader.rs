@@ -16,7 +16,9 @@ use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
 
-const DIR: &str = "/home/abuse_loader";
+/// Kernel-served, so a path spawn reaches the kernel's own open; every refusal
+/// is asked again with the same bytes handed over as an image.
+const DIR: &str = "/tmp/abuse_loader_exe";
 
 /// The two cases about a table larger than one kernel allocation need a file
 /// larger than one kernel allocation, because `read_file_range` clamps a
@@ -239,6 +241,8 @@ fn spawn_path(path: &str) -> Result<u64, SyscallError> {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
+            image_ptr: 0,
+            image_len: 0,
         })
     }
     .map(|pid| pid.0 as u64)
@@ -260,8 +264,35 @@ fn refused(name: &str, outcome: Result<u64, SyscallError>) {
     }
 }
 
+/// The same bytes handed to the kernel whole, as a spawn from a file server's
+/// volume hands them: the image route to the same loader.
+fn spawn_image(path: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
+    let argv = format!("{path}\0");
+    unsafe {
+        syscall::spawn(&SpawnArgs {
+            argv_ptr: argv.as_ptr() as u64,
+            argv_len: argv.len() as u64,
+            slot_map_ptr: 0,
+            slot_map_count: 0,
+            env_ptr: 0,
+            env_len: 0,
+            endow_ptr: 0,
+            endow_count: 0,
+            labels_ptr: 0,
+            labels_len: 0,
+            cwd_ptr: CWD.as_ptr() as u64,
+            cwd_len: CWD.len() as u64,
+            image_ptr: bytes.as_ptr() as u64,
+            image_len: bytes.len() as u64,
+        })
+    }
+    .map(|pid| pid.0 as u64)
+}
+
+/// Refused whether the kernel opens the file or is handed its bytes.
 fn spawn_refused(name: &str, bytes: &[u8]) {
     refused(name, spawn_result(name, bytes));
+    refused(&format!("{name} as an image"), spawn_image(&format!("{DIR}/{name}"), bytes));
 }
 
 /// Load it and throw it away. These cases are about a *walk* the loader does,
@@ -287,6 +318,11 @@ fn dlopen_refused(name: &str, bytes: &[u8]) {
         }
         Err(e) => assert!(!format!("{e}").is_empty(), "{name}: dlopen error message"),
     }
+    // The same bytes handed over whole, under a name no path holds.
+    let named = format!("/image/{name}");
+    if let Ok(handle) = syscall::dl_open_image(named.as_bytes(), bytes) {
+        panic!("{name}: dlopen of the image loaded it as handle {handle}, and the loader must refuse it");
+    }
 }
 
 /// A minimal, honest exe: one PT_LOAD covering the whole file at vaddr 0.
@@ -295,7 +331,7 @@ fn base_exe(size: usize) -> Elf {
 }
 
 fn main() {
-    fs::create_dir_all(DIR).expect("create /home/abuse_loader");
+    fs::create_dir_all(DIR).expect("create /tmp/abuse_loader_exe");
     fs::create_dir_all(BIG_DIR).expect("create /tmp/abuse_loader");
 
     // 1. A DT_* vaddr below every PT_LOAD. `vaddr_to_file_offset` searched for

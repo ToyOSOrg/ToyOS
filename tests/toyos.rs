@@ -478,9 +478,6 @@ const RUST_SKIP: &[&str] = &[
     // succeeds and its two must-refuse assertions red for an honest reason.
     // `fsync_failed_commit` boots it with the arm.
     "fsync_flush_failed",
-    // Needs `fsync-budget-spent` and the NVMe `/home`; unstaged it passes
-    // vacuously. `home_budget_refusal_retried` boots it with both.
-    "home_fsync_budget",
     // Needs `so-cache-tiny` and the NVMe `/home`. `so_cache_refusals` gives both.
     "so_cache_policy",
     // Needs the NVMe `/home` and a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
@@ -988,7 +985,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("internal_disk_boot", Sched::Parallel, Tier::Fast),
     // One boot each, kernel lines and image bytes for verdicts, no clock in either.
     ("block_duplicate_id", Sched::Parallel, Tier::Fast),
-    ("page_cache_partition_offset", Sched::Parallel, Tier::Fast),
     // A partition claimed as a device: one boot, every refusal in the guest,
     // the neighbours and the target judged off the image. Body in
     // `tests/common/partclaim.rs`, as are the two below.
@@ -1001,10 +997,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // for its own writes, across a close, after another's flush, and at the
     // shutdown when nobody asked.
     ("partition_claim_departure", Sched::Parallel, Tier::Fast),
-    // F9's negative control: a budget-refused /home fsync retried to durable,
-    // its bytes then read off the NVMe image by the host's own bcachefs
-    // reader. Body in `tests/common/storage.rs`.
-    ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
     // The shared-object cache's two refusals. Body in `tests/common/storage.rs`.
     ("so_cache_refusals", Sched::Parallel, Tier::Fast),
     // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
@@ -1737,7 +1729,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("layout_fresh_boot", &["test_rs_layout_paths"]),
     ("broken_data_volume_is_absent", &["test_rs_home_absent"]),
     ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
-    ("home_budget_refusal_retried", &["test_rs_home_fsync_budget"]),
     ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
     ("so_cache_refusals", &["test_rs_so_cache_policy"]),
     ("boot_volume_metadata_error", &["test_rs_boot_volume_metadata_error"]),
@@ -11435,9 +11426,6 @@ fn run_machine_test(
             partclaim::partition_claim_departure(test_config, c_bins, rust_bins)
         }
         "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),
-        "page_cache_partition_offset" => {
-            storage::page_cache_partition_offset(test_config, c_bins, rust_bins)
-        }
         "volume_from_another_disk" => {
             storage::volume_from_another_disk(test_config, c_bins, rust_bins)
         }
@@ -11446,9 +11434,6 @@ fn run_machine_test(
         }
         "data_candidate_with_bad_geometry_is_absent" => {
             storage::data_candidate_with_bad_geometry_is_absent(test_config, c_bins, rust_bins)
-        }
-        "home_budget_refusal_retried" => {
-            storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
         }
         "so_cache_refusals" => storage::so_cache_refusals(test_config, c_bins, rust_bins),
         "home_overwrite_reads_back" => {

@@ -629,14 +629,9 @@ pub fn fsync(object: &KObjectRef) -> u64 {
         // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
         // Flush and sync share one acquisition so this file cannot be unmounted between them.
         let mut vfs = crate::vfs::lock();
-        // Tags the flush as `SYS_FSYNC`'s, for `quiesce-fsync-refuse` to stage on this path.
-        #[cfg(feature = "boot-actuators")]
-        crate::fat32_adapter::enter_fsync_flush(&path);
         let done = vfs
             .flush_file(&path, file_id, mtime)
             .and_then(|()| vfs.sync_for_path(&path));
-        #[cfg(feature = "boot-actuators")]
-        crate::fat32_adapter::leave_fsync_flush();
         drop(vfs);
         done
     });

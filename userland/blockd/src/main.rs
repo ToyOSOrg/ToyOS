@@ -23,9 +23,12 @@
 //! A partition whose range is not whole 4 KiB blocks, or whose GUID the table
 //! carries twice, is listed and refused by name.
 //!
-//! **What this process does not know** is which of its partitions the machine
-//! is running from, so it refuses none of them for that
-//! (`issues/filesystem/blockd-serves-the-slot-the-machine-runs-from.md`).
+//! **The partition the machine runs from is refused to every session**: its
+//! starter names it (`--running <guid>`, the ROOT the loader read), because a
+//! writer there changes the image under the kernel that booted from it.
+//!
+//! **A client may ask what is served** ([`wire::MSG_LIST`]) before it opens
+//! anything, which is how a file server finds its role's partition by type.
 //!
 //! **A server never blocks on a client.** Accept and the open frame are two
 //! events, the open is buffered until whole, every answer is one `try_send`,
@@ -72,6 +75,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// always answers.
 const SILENCE_WRITE: &str = "--silence-write";
 
+/// Argv, followed by a unique GUID: the partition the machine runs from, which
+/// no session opens.
+const RUNNING: &str = "--running";
+
 const TOKEN_IRQ: u64 = 0;
 const TOKEN_ACCEPT: u64 = 1;
 const TOKEN_PENDING: u64 = 0x1_0000;
@@ -80,6 +87,7 @@ const TOKEN_SESSION: u64 = 0x2_0000;
 /// One partition of the table, in 4 KiB blocks of the device.
 struct Part {
     unique: [u8; 16],
+    kind: [u8; 16],
     /// Where it starts and how long it is, or why it cannot be served.
     span: Result<(u64, u64), String>,
 }
@@ -143,6 +151,7 @@ fn read_table(ctrl: &mut Controller) -> Vec<Part> {
     let mut parts = Vec::new();
     for listed in &found[..scan.listed] {
         let unique = listed.unique_guid.0;
+        let kind = listed.type_guid.0;
         let span = match toyos_gpt::locate(&mut sectors, listed.unique_guid) {
             Err(why) => Err(format!("its own table refuses it: {why:?}")),
             Ok(located) => {
@@ -159,7 +168,7 @@ fn read_table(ctrl: &mut Controller) -> Vec<Part> {
                 }
             }
         };
-        parts.push(Part { unique, span });
+        parts.push(Part { unique, kind, span });
     }
     parts
 }
@@ -194,6 +203,10 @@ struct Service {
     losses: u64,
     sessions: BTreeMap<u64, Served>,
     next_id: u64,
+    /// The partition the machine is running from, as the loader named it:
+    /// refused to every session, since a writer there changes the image
+    /// under the kernel that booted from it.
+    running: Option<[u8; 16]>,
 }
 
 /// A session decided on and not yet told to its client.
@@ -216,6 +229,9 @@ impl Service {
             Some(Err(_)) => return Err(Refusal::Unusable),
             Some(Ok(span)) => *span,
         };
+        if self.running == Some(guid) {
+            return Err(Refusal::Held);
+        }
         if self.sessions.len() >= MAX_SESSIONS {
             return Err(Refusal::Exhausted);
         }
@@ -431,13 +447,75 @@ impl Service {
     }
 }
 
-fn claim() -> toyos::PciDev {
+/// The PCI function this process was endowed, or `None` on a machine that
+/// has none its row names: init says which, and starts it anyway.
+fn claim() -> Option<toyos::PciDev> {
     let label = Endowments::get()
         .labels()
         .find(|l| l.starts_with(DEV_PREFIX) && l[DEV_PREFIX.len()..].starts_with("pci:"))
-        .map(str::to_string)
-        .unwrap_or_else(|| panic!("blockd: started holding no PCI function"));
-    Endowments::get().take(&label).expect("blockd: the claim its label names")
+        .map(str::to_string)?;
+    Some(Endowments::get().take(&label).expect("blockd: the claim its label names"))
+}
+
+/// Serve a machine with no controller: every listing empty, every open
+/// `NotFound`, so a file server finds no partition here rather than waiting on
+/// one. A connection says one frame and is answered, or is let go.
+fn serve_nothing(acceptor: &toyos::port::Acceptor) -> ! {
+    let poller = Poller::new(2 + MAX_PENDING as u32);
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut ready: Vec<u64> = Vec::new();
+    loop {
+        if pending.len() < MAX_PENDING {
+            poller.watch(acceptor, READABLE, TOKEN_ACCEPT);
+        }
+        for p in &pending {
+            poller.watch(&p.conn, READABLE, TOKEN_PENDING + p.conn.as_handle().0 as u64);
+        }
+        let now = Instant::now();
+        let timeout = pending
+            .iter()
+            .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
+            .min()
+            .map_or(u64::MAX, |left| left.as_nanos() as u64);
+        ready.clear();
+        poller.wait(1, timeout, |token| ready.push(token));
+        let now = Instant::now();
+        pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
+        if ready.contains(&TOKEN_ACCEPT) {
+            match acceptor.accept() {
+                Ok(conn) => pending.push(Pending { conn, rx: ipc::FrameRx::new(), since: now }),
+                Err(why) => panic!("blockd: its own acceptor refused an accept: {why:?}"),
+            }
+        }
+        let mut i = 0;
+        while i < pending.len() {
+            let token = TOKEN_PENDING + pending[i].conn.as_handle().0 as u64;
+            if !ready.contains(&token) {
+                i += 1;
+                continue;
+            }
+            let step = {
+                let p = &mut pending[i];
+                p.rx.pump(&p.conn)
+            };
+            match step {
+                RxStep::Idle => i += 1,
+                RxStep::Eof | RxStep::Malformed => {
+                    pending.remove(i);
+                }
+                RxStep::Frame { msg_type, .. } => {
+                    let p = pending.remove(i);
+                    if let Some(handles) = p.conn.recv_handles_exact::<1>() {
+                        toyos_abi::syscall::close(handles[0]);
+                    }
+                    let _ = match msg_type {
+                        wire::MSG_LIST => p.conn.try_send_bytes(wire::MSG_LISTED, &[]),
+                        _ => p.conn.try_send_bytes(wire::MSG_REFUSED, &Refusal::NotFound.encode()),
+                    };
+                }
+            }
+        }
+    }
 }
 
 fn main() {
@@ -448,8 +526,17 @@ fn main() {
             .filter(|n| *n > 0)
             .unwrap_or_else(|| panic!("blockd: {SILENCE_WRITE} takes the write whose answer to withhold, from 1"))
     });
-    let dev = claim();
+    let running = args.iter().position(|a| a == RUNNING).map(|at| {
+        args.get(at + 1)
+            .and_then(|text| PartGuid::parse(text))
+            .map(|guid| guid.0)
+            .unwrap_or_else(|| panic!("blockd: {RUNNING} takes the running ROOT's unique GUID"))
+    });
     let acceptor = endow::acceptor(PORT).unwrap_or_else(|| panic!("blockd: started serving no `{PORT}` port"));
+    let Some(dev) = claim() else {
+        println!("blockd: no NVMe controller this row names is on this machine; serving no partition");
+        serve_nothing(&acceptor);
+    };
     let mut ctrl = Controller::open(dev, silence).unwrap_or_else(|why| panic!("blockd: NOT SERVING — {why}"));
     println!(
         "blockd: NVMe up: {} I/O queues of {} commands, volatile write cache {}, {}-byte sectors, \
@@ -463,13 +550,18 @@ fn main() {
     let parts = read_table(&mut ctrl);
     for part in &parts {
         match &part.span {
+            Ok(_) if running == Some(part.unique) => println!(
+                "blockd: partition {} is the ROOT this machine runs from; refusing every session to it",
+                guid_text(part.unique)
+            ),
             Ok((first, blocks)) => {
                 println!("blockd: partition {} at block {first}, {blocks} blocks", guid_text(part.unique))
             }
             Err(why) => println!("blockd: partition {} is not served: {why}", guid_text(part.unique)),
         }
     }
-    let mut service = Service { ctrl, parts, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0 };
+    let mut service =
+        Service { ctrl, parts, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0, running };
     serve(&mut service, &acceptor);
 }
 
@@ -574,11 +666,25 @@ fn doorbells(conn: &Connection) -> bool {
     }
 }
 
-/// Answer one connection's first frame: an open, and nothing else.
+/// Answer one connection's first frame: a listing, or an open.
 fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usize) {
     let refuse = |conn: &Connection, why: Refusal| {
         let _ = conn.try_send_bytes(wire::MSG_REFUSED, &why.encode());
     };
+    if msg_type == wire::MSG_LIST && payload_len == 0 {
+        let listing: Vec<u8> = service
+            .parts
+            .iter()
+            .map(|p| wire::Listed { unique: p.unique, kind: p.kind })
+            .flat_map(|l| l.encode())
+            .collect();
+        // One frame, and the connection is done with: a table larger than a
+        // frame is one this service lists no part of rather than half of.
+        if p.conn.try_send_bytes(wire::MSG_LISTED, &listing).is_err() {
+            refuse(&p.conn, Refusal::Exhausted);
+        }
+        return;
+    }
     let guid = wire::guid(p.rx.payload(payload_len));
     let handles = p.conn.recv_handles_exact::<1>();
     let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
