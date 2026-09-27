@@ -39,6 +39,12 @@ pub fn collect_zombie<T: Processes>(
 ) -> Result<Option<i32>, JoinRefused> {
     let proc = table.get_mut(pid).ok_or(JoinRefused::NoSuchProcess)?;
     let at = proc.location(tid).ok_or(JoinRefused::NoSuchThread)?;
+    // A thread that left a claimed process still holds mappings its siblings
+    // may run in until the last one out; the joiner leaves with it instead.
+    #[cfg(not(feature = "mutate-join-collects-in-a-teardown"))]
+    if proc.tearing_down() {
+        return Ok(None);
+    }
     match at.zombie_code() {
         Some(code) => {
             proc.forget_thread(tid);
@@ -71,6 +77,18 @@ mod tests {
         world.set_location(pid, t1, ThreadLocation::Zombie(11));
         assert_eq!(collect_zombie(&mut world, pid, t1), Ok(Some(11)));
         assert_eq!(collect_zombie(&mut world, pid, t1), Err(JoinRefused::NoSuchThread));
+    }
+
+    #[cfg(not(feature = "mutate-join-collects-in-a-teardown"))]
+    #[test]
+    fn a_process_being_torn_down_gives_up_no_thread() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let t1 = world.spawn_thread(pid);
+        assert!(crate::teardown::claim_teardown(&mut world, pid, 137));
+        let _ = crate::teardown::leave(&mut world, pid, t1, None);
+        assert_eq!(collect_zombie(&mut world, pid, t1), Ok(None));
+        assert!(world.get(pid).unwrap().location(t1).is_some(), "the entry keeps the thread");
     }
 
     #[test]

@@ -290,8 +290,8 @@ pub struct ProcessEntry {
     symbols: Arc<SymbolTable>,
     main_tid: Tid,
     threads: crate::id_map::IdMap<Tid, ThreadEntry>,
-    /// Set once by the exit/kill path that owns teardown; checked by `spawn_thread` so no thread appears after the retire sweep.
-    tearing_down: bool,
+    /// Set once, with the exit's code, by the exit/kill/poison path that claims teardown; checked by `spawn_thread` so no thread appears after the retire set.
+    teardown_code: Option<i32>,
 }
 
 impl ProcessEntry {
@@ -313,7 +313,7 @@ impl ProcessEntry {
             symbols,
             main_tid,
             threads,
-            tearing_down: false,
+            teardown_code: None,
         }
     }
     pub fn pid(&self) -> Pid { self.pid }
@@ -330,14 +330,14 @@ impl ProcessEntry {
 
 impl ProcessEntry {
     /// Mirrors [`Lifecycle::tearing_down`], usable without the trait in scope.
-    pub fn tearing_down(&self) -> bool { self.tearing_down }
+    pub fn tearing_down(&self) -> bool { self.teardown_code.is_some() }
 }
 
 /// The lifecycle face of an entry: only the fields `toyos-proclife` decides against, and nothing else this type carries.
 impl Lifecycle for ProcessEntry {
     fn main_tid(&self) -> Tid { self.main_tid }
-    fn tearing_down(&self) -> bool { self.tearing_down }
-    fn begin_teardown(&mut self) { self.tearing_down = true; }
+    fn teardown_code(&self) -> Option<i32> { self.teardown_code }
+    fn begin_teardown(&mut self, code: i32) { self.teardown_code = Some(code); }
     fn location(&self, tid: Tid) -> Option<ThreadLocation> {
         self.threads.get(tid).map(|t| t.state)
     }
@@ -556,7 +556,6 @@ pub struct ProcessAccounting {
     pub blocked_pipe_ns: u64,
     pub blocked_ipc_ns: u64,
     pub blocked_other_ns: u64,
-    pub child_threads_cpu_ns: u64,
     pub runqueue_wait_ns: u64,
 }
 
@@ -709,35 +708,27 @@ pub fn stats_of(
     Some(stats_from(&data, pid, cpu_ns, syscall_total, syscall_total_ns))
 }
 
-/// Mark one thread dead; see `toyos_proclife::teardown::mark_zombie` for idempotency and silence.
-pub fn mark_thread_zombie(table: &mut ProcessTable, pid: Pid, tid: Tid, code: i32) {
-    proclife::mark_zombie(table, pid, tid, code);
-}
-
-/// What a thread that died in panic recovery leaves to be cleaned up; the panic path itself may hold any lock the faulted thread held, so this only records the thread, and the idle loop runs it later.
+/// What a thread that died in panic recovery leaves to be done once the table lock is given up; the panic path itself may hold any lock the faulted thread held, so it only records the thread, and the idle loop runs this later.
 #[must_use = "a poisoned thread's waiter must be woken"]
-pub enum PoisonWake {
-    /// A child thread died; the pair is the subject `thread_join` arms on (not the process's main thread).
-    Joiner(Pid, Tid),
-    /// The main thread died, so the process is over; publish outside the table lock.
-    Process(Arc<crate::object::process::ProcessObject>),
+pub struct PoisonWake {
+    /// The rest of a process whose main thread died.
+    pub retire: Vec<ThreadSched>,
+    /// A thread that is not the main one: what its joiner armed on.
+    pub joiner: Option<ThreadSched>,
+    /// It was the last thread out: the object to publish its exit on, and the code.
+    pub exit: Option<(Arc<crate::object::process::ProcessObject>, i32)>,
 }
 
-/// Mark a poisoned thread dead and say what the idle loop must wake for it. `None`: nothing to do — the entry is gone, or another path already owns teardown.
+/// Take a poisoned thread out of its process and say what the idle loop must do for it.
 /// Resources are freed with the table entry rather than before it: every release below wants a lock the faulted thread may still hold.
-#[must_use = "a poisoned thread's waiter must be woken"]
-pub fn zombify_poisoned(table: &mut ProcessTable, pid: Pid, tid: Tid) -> Option<PoisonWake> {
-    match poison::zombify_poisoned(table, pid, tid) {
-        poison::PoisonOutcome::Nothing => None,
-        poison::PoisonOutcome::Joiner(watch) => {
-            let (pid, tid) = watch.thread()?;
-            Some(PoisonWake::Joiner(pid, tid))
-        }
-        poison::PoisonOutcome::Process(pid) => {
-            let proc = Processes::get(table, pid)
-                .expect("zombify_poisoned: the entry it just claimed and marked");
-            Some(PoisonWake::Process(Arc::clone(&proc.object)))
-        }
+pub fn zombify_poisoned(table: &mut ProcessTable, pid: Pid, tid: Tid) -> PoisonWake {
+    let owed = poison::zombify_poisoned(table, pid, tid);
+    let proc = Processes::get(table, pid);
+    let sched = |tid: Tid| proc.and_then(|p| p.threads.get(tid)).and_then(ThreadEntry::sched).cloned();
+    PoisonWake {
+        retire: owed.retire.into_iter().map(|t| sched(t).expect("zombify_poisoned: a thread still in its process has a scheduler record")).collect(),
+        joiner: owed.joiner.and_then(|watch| sched(watch.thread()?.1)),
+        exit: owed.exit.map(|code| (Arc::clone(&proc.expect("zombify_poisoned: the entry its last thread left").object), code)),
     }
 }
 
@@ -769,7 +760,7 @@ pub fn current_data() -> Arc<Lock<ThreadData>> {
         Some(thread) => Arc::clone(&thread.thread_data),
         None => {
             drop(guard);
-            scheduler::exit_current(-1);
+            scheduler::exit_current();
         }
     }
 }
@@ -793,7 +784,7 @@ pub fn process_data() -> Arc<Lock<ProcessData>> {
         Some(proc) => Arc::clone(&proc.process_data),
         None => {
             drop(guard);
-            scheduler::exit_current(-1);
+            scheduler::exit_current();
         }
     }
 }
@@ -940,10 +931,6 @@ fn teardown_resources(
 
     let mut data = process_data_arc.lock();
 
-    if percpu::current_pid() == Some(pid) {
-        scheduler::flush_current_stats(&mut data.accounting);
-    }
-
     if syscall_total > 0 {
         use alloc::string::String;
         use core::fmt::Write;
@@ -983,38 +970,18 @@ fn teardown_resources(
     (syscall_total, syscall_total_ns)
 }
 
-/// Table-side teardown bookkeeping: mark remaining threads zombie, drop the symbol table.
-/// Caller must hold `PROCESS_TABLE`, have claimed teardown, retired every other thread and freed resources. Returns the object whose exit the caller publishes once the table lock is given up.
+/// Table-side teardown bookkeeping: drop the symbol table and total the CPU time of every thread still in the table.
+/// Caller must hold `PROCESS_TABLE`, be the last thread out and have freed the resources. Returns the object whose exit the caller publishes once the table lock is given up, with that total.
 #[must_use = "the exit must be published on the object returned"]
-fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
-                        main_cpu_ns: u64, child_threads_cpu_ns: u64)
-                        -> Arc<crate::object::process::ProcessObject> {
+fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32)
+                        -> (Arc<crate::object::process::ProcessObject>, u64) {
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
-
-    proclife::mark_all_zombie(proc, code);
-
-    // Dropping this `Arc` is the release; every other thread is already retired, so the thread running this line holds the last clone — which is why a lock-free crash-report read can never see a table whose owner is off every CPU.
     proc.symbols = Arc::new(SymbolTable::empty());
-
-    // Whole-process total: fold_retired already folded sibling time into child_threads_cpu_ns.
-    let cpu_ms = (main_cpu_ns + child_threads_cpu_ns) / 1_000_000;
+    let cpu_ns: u64 = proc.threads.iter().map(|(_, t)| t.sched().map_or(0, scheduler::task_cpu_ns)).sum();
     let name = proc.name_str();
-    log!("exit: {name} pid={process_pid} code={code} cpu={cpu_ms}ms");
-
-    Arc::clone(&proc.object)
-}
-
-/// The accounting a process leaves behind, for `SYS_PROCESS_STATS`. Must run after [`fold_retired`], which folds retired threads' accounting into `ProcessData`.
-fn final_stats(
-    process_data_arc: &Arc<Lock<ProcessData>>,
-    pid: Pid,
-    syscall_total: u64,
-    syscall_total_ns: u64,
-    main_cpu_ns: u64,
-) -> toyos_abi::syscall::ProcessStats {
-    let data = process_data_arc.lock();
-    stats_from(&data, pid, main_cpu_ns, syscall_total, syscall_total_ns)
+    log!("exit: {name} pid={process_pid} code={code} cpu={}ms", cpu_ns / 1_000_000);
+    (Arc::clone(&proc.object), cpu_ns)
 }
 
 /// One `ProcessStats`, from a process's own data; written once, since `SYS_PROCESS_STATS` samples a live process through the same fields the teardown snapshots.
@@ -1029,7 +996,7 @@ pub fn stats_from(
     let acct = &data.accounting;
     ProcessStats {
         wall_ns: crate::clock::nanos_since_boot().saturating_sub(data.spawn_ns),
-        cpu_ns: cpu_ns + acct.child_threads_cpu_ns,
+        cpu_ns,
         syscall_total,
         syscall_total_ns,
         fault_demand_count: acct.fault_demand_count,
@@ -1049,116 +1016,68 @@ pub fn stats_from(
     }
 }
 
-/// The scheduler records of `tids`, cloned out of the table.
-fn scheds(pid: Pid, tids: Vec<Tid>) -> Vec<(Tid, ThreadSched)> {
-    tids.into_iter().filter_map(|t| Some((t, thread_sched(pid, t)?))).collect()
-}
-
-/// Fold released threads' scheduler accounting into the process's; returns the main thread's CPU time if it was among them (else 0).
-fn fold_retired(
-    threads: Vec<(Tid, ThreadSched)>,
-    main_tid: Tid,
-    process_data_arc: &Arc<Lock<ProcessData>>,
-) -> u64 {
-    // The whole teardown's memory-freeing safety rests on this: what follows frees what these threads ran on.
-    assert!(
-        threads.iter().all(|(_, sched)| sched.handle.released()),
-        "teardown: a thread of the process is still on the scheduler",
-    );
-    let mut main_cpu_ns = 0u64;
-    for (t, sched) in threads {
-        let cpu_ns = scheduler::task_cpu_ns(&sched);
-        let mut pdata = process_data_arc.lock();
-        sched.handle.merge_into(&mut pdata.accounting);
-        match proclife::charge(t, main_tid) {
-            proclife::CpuCharge::MainThread => main_cpu_ns = cpu_ns,
-            proclife::CpuCharge::ChildThreads => {
-                pdata.accounting.child_threads_cpu_ns += cpu_ns;
-            }
-        }
-    }
-    main_cpu_ns
-}
-
-/// Phases 3-5 of a process teardown, shared by exit and kill: free resources, do the table-locked bookkeeping, then publish the exit. The ordering is load-bearing: the caller has already retired every other thread, so none of this process can run.
+/// The last thread out's teardown of its process, on its own stack: free what the process holds, then publish its exit. Every thread has left, so none of this process can run in what is freed.
 /// Publish happens after the table lock is released — `teardown_bookkeeping`'s wake needs that — and once published the entry is reapable, so nothing may read the table for this pid after.
-fn teardown_tail(
-    process_data_arc: &Arc<Lock<ProcessData>>,
-    thread_data_arc: &Arc<Lock<ThreadData>>,
-    pid: Pid,
-    code: i32,
-    main_cpu_ns: u64,
-) {
-    // Phase 3: free resources — no other thread of this process can run.
-    let (syscall_total, syscall_total_ns) =
-        teardown_resources(process_data_arc, thread_data_arc, pid);
-
-    let child_threads_cpu_ns = process_data_arc.lock().accounting.child_threads_cpu_ns;
-
-    // Phase 4: table bookkeeping (thread zombie marks, symbols released).
-    let object = {
-        let mut guard = PROCESS_TABLE.lock();
-        let table = guard.as_mut().unwrap();
-        teardown_bookkeeping(table, pid, code, main_cpu_ns, child_threads_cpu_ns)
+fn teardown(pid: Pid, code: i32, process_data: &Arc<Lock<ProcessData>>) {
+    let main_thread_data = {
+        let guard = PROCESS_TABLE.lock();
+        let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread just left");
+        Arc::clone(&proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread").thread_data)
     };
-
-    // Phase 5: publish; once published the entry is reapable, so nothing may read the table for this pid after.
-    let stats = final_stats(process_data_arc, pid, syscall_total, syscall_total_ns, main_cpu_ns);
+    let (syscall_total, syscall_total_ns) = teardown_resources(process_data, &main_thread_data, pid);
+    let (object, cpu_ns) = {
+        let mut guard = PROCESS_TABLE.lock();
+        teardown_bookkeeping(guard.as_mut().unwrap(), pid, code)
+    };
+    let stats = stats_from(&process_data.lock(), pid, cpu_ns, syscall_total, syscall_total_ns);
     object.publish_exit(crate::object::process::Exit { code, stats });
 }
 
-pub fn exit(code: i32) -> ! {
-    release_process(code);
-    scheduler::exit_current(code);
-}
-
-/// Everything a process's own teardown gives back; returns rather than diverging because `exit_current` never comes back, and three live `Arc`s (`ProcessObject`, `ProcessData`, `ThreadData`) would leak with no scope left to drop them.
-fn release_process(code: i32) {
-    let process_pid = current_process();
-    let tid = current_tid();
-
-    // Phase 1: claim teardown. Exactly one exit/kill path wins; later arrivals just exit their own thread, and the claimant's retire sweep accounts for them like any other thread.
-    let (process_data_arc, thread_data_arc, main_tid, set) = {
-        let mut guard = PROCESS_TABLE.lock();
-        let table = guard.as_mut().unwrap();
-        // Checked before the claim: a thread not in its own process's entry has nothing to tear down.
-        let present = Processes::get(table, process_pid)
-            .is_some_and(|proc| Lifecycle::location(proc, tid).is_some());
-        if !present || !proclife::claim_teardown(table, process_pid) {
-            drop(guard);
-            crate::mm::paging::activate_kernel();
-            return;
-        }
-        let proc = Processes::get(table, process_pid)
-            .expect("release_process: the entry the claim just succeeded on");
-        let set = proclife::exit_set(proc, tid);
-        let thread = proc.threads.get(tid).expect("checked present above");
-        (Arc::clone(&proc.process_data), Arc::clone(&thread.thread_data),
-         proc.main_tid, set)
-    };
-
+/// Take the running thread out of its process: out of its address space, its accounting into the process's, and its own mark in the table. The last thread out of a claimed process tears the process down here.
+/// Returns rather than diverging: the exit pass never comes back, and the live `Arc`s here would leak with no scope left to drop them.
+pub fn leave(chosen: Option<i32>) {
+    let (pid, tid) = (current_process(), current_tid());
     crate::mm::paging::activate_kernel();
-
-    // Phase 2: retire every *other* thread — the current thread can't retire itself.
-    let others = scheds(process_pid, set.others);
-    for (_, sched) in &others {
-        scheduler::post_retire(sched);
+    let process_data = process_data();
+    scheduler::flush_current_stats(&mut process_data.lock().accounting);
+    let out = {
+        let mut guard = PROCESS_TABLE.lock();
+        proclife::leave(guard.as_mut().unwrap(), pid, tid, chosen)
+    };
+    // The table says zombie now, which a sweep counts as nothing left to stop.
+    crate::quiesce::note_progress();
+    if let proclife::Leave::Last { code } = out {
+        teardown(pid, code, &process_data);
     }
-    for (_, sched) in &others {
-        scheduler::await_released(sched);
-    }
-    let mut main_cpu_ns = fold_retired(others, main_tid, &process_data_arc);
-    // Filtered out of the retire set above, so its time is picked up here if it's the main thread.
-    if set.current_is_main {
-        main_cpu_ns = thread_sched(process_pid, tid)
-            .map_or(0, |s| scheduler::task_cpu_ns(&s));
-    }
-
-    // Phases 3-5: free resources, table bookkeeping, publish the exit.
-    teardown_tail(&process_data_arc, &thread_data_arc, process_pid, code, main_cpu_ns);
 }
 
-/// Exit the current thread. If this is the main thread, tears down the entire process via `exit()`. For child threads, frees thread resources and zombifies.
+/// Claim `pid`'s teardown for `code`: the winner gets the threads it retires, every one still in the process but `caller`; a loser, or a process already gone, gets none.
+fn claim(pid: Pid, code: i32, caller: Option<Tid>) -> Vec<ThreadSched> {
+    let mut guard = PROCESS_TABLE.lock();
+    let table = guard.as_mut().unwrap();
+    if !proclife::claim_teardown(table, pid, code) {
+        return Vec::new();
+    }
+    let proc = Processes::get(table, pid).expect("claim: the entry the claim just succeeded on");
+    proclife::retire_set(proc, caller)
+        .into_iter()
+        .map(|tid| {
+            proc.threads.get(tid).and_then(ThreadEntry::sched).cloned()
+                .expect("claim: a thread in the table has its scheduler record")
+        })
+        .collect()
+}
+
+pub fn exit(code: i32) -> ! {
+    let tid = current_tid();
+    for sched in claim(current_process(), code, Some(tid)) {
+        scheduler::post_retire(&sched);
+    }
+    leave(None);
+    scheduler::exit_current();
+}
+
+/// Exit the current thread. If this is the main thread, it is the process's exit. For a child thread, frees its own mappings and leaves.
 pub fn thread_exit(code: i32) -> ! {
     let process_pid = current_process();
     let tid = current_tid();
@@ -1167,18 +1086,13 @@ pub fn thread_exit(code: i32) -> ! {
         let table = guard.as_ref().unwrap();
         proclife::route_thread_exit(table, process_pid, tid)
     };
-
     let post = match route {
         proclife::ThreadExit::Process => exit(code),
         proclife::ThreadExit::Sibling { post } => post,
-        // The entry went under this thread on the way here (the race `mark_thread_zombie` already tolerates); it leaves by the sibling door.
-        proclife::ThreadExit::Gone { post } => {
-            log!("exit: pid={process_pid} tid={tid} outlived its process-table entry");
-            post
-        }
     };
 
     release_thread(process_pid, tid, code);
+    leave(Some(code));
     // Whoever joined this thread armed on it; post before the exit pass — after it this thread never runs again.
     if let Some(handle) = crate::sched::driver::current_handle() {
         // Held together by assertion, not shared state: the decision names the subject, this performs it via the CPU's own handle.
@@ -1190,11 +1104,10 @@ pub fn thread_exit(code: i32) -> ! {
         );
         handle.watch().post();
     }
-    scheduler::exit_current(code);
+    scheduler::exit_current();
 }
 
-/// A child thread's own teardown; returns rather than diverging for [`release_process`]'s reason (a live `Arc` nothing would drop).
-/// Every table write here is silent about a gone entry: the process may already have been reaped by another CPU's kill.
+/// A child thread's own mappings, released before it leaves; returns rather than diverging for [`leave`]'s reason.
 fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
     let addr_space = current_address_space();
     crate::mm::paging::activate_kernel();
@@ -1212,18 +1125,11 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
     // After the block: dropping waits for every other CPU, and the page-fault handler takes this same lock with IF clear.
     drop(released);
 
-    let mut guard = PROCESS_TABLE.lock();
-    let table = guard.as_mut().unwrap();
-    let cpu_ms = table.get(process_pid).and_then(|p| p.threads.get(tid))
-        .and_then(|t| t.sched())
-        .map_or(0, scheduler::task_cpu_ns) / 1_000_000;
-    if let Some(thread) = table.get_mut(process_pid).and_then(|p| p.threads.get_mut(tid)) {
-        thread.state = ThreadLocation::Zombie(code);
-    }
-    if let Some(proc) = table.get(process_pid) {
-        let name = proc.name_str();
-        crate::log_limited!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
-    }
+    let guard = PROCESS_TABLE.lock();
+    let proc = guard.as_ref().unwrap().get(process_pid).expect("release_thread: a thread's process is not in the table");
+    let cpu_ms = proc.threads.get(tid).and_then(|t| t.sched()).map_or(0, scheduler::task_cpu_ns) / 1_000_000;
+    let name = proc.name_str();
+    crate::log_limited!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
 }
 
 /// A thread's scheduler record, cloned out of the table so wake/retire never hold the table lock while they post.
@@ -1648,60 +1554,12 @@ fn with_current_symbols(f: impl FnOnce(&crate::symbols::SymbolTable) -> bool) ->
 
 /// Kill the process an object names.
 /// The handle is the whole authorization, not the parent relationship: a `Process` handle carrying `Rights::MANAGE` says who may, and it can be narrowed away or handed on. `Ok` for an already-gone process: the caller asked for it to be dead and it is.
-/// Returns once the victim's retires are posted; the reaper finishes the teardown, and the object's exit is published when it has.
+/// Returns once the victim's retires are posted, never waiting on it: the victim may be killing this caller. Its last thread out publishes the object's exit.
 pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
-    let target_pid = object.pid();
-
-    // Phase 1: claim teardown (brief table lock)
-    let (process_data, thread_data, main_tid, tids) = {
-        let mut guard = PROCESS_TABLE.lock();
-        let table = guard.as_mut().unwrap();
-
-        // Gone, and already-tearing-down, are the same answer here: the caller asked for it to be dead.
-        if !proclife::claim_teardown(table, target_pid) {
-            return 0;
-        }
-        let proc = Processes::get(table, target_pid)
-            .expect("kill_process: the entry the claim just succeeded on");
-        let tids = proclife::kill_set(proc);
-        let main_thread = proc.threads.get(proc.main_tid).unwrap();
-        (Arc::clone(&proc.process_data), Arc::clone(&main_thread.thread_data), proc.main_tid, tids)
-    };
-
-    // Phase 2, posted and never awaited here: the victim may be killing this caller.
-    let threads = scheds(target_pid, tids);
-    for (_, sched) in &threads {
-        scheduler::post_retire(sched);
+    for sched in claim(object.pid(), KILLED_EXIT_CODE, None) {
+        scheduler::post_retire(&sched);
     }
-    crate::reaper::owe(Killed { pid: target_pid, process_data, thread_data, main_tid, threads });
     0
-}
-
-/// A claimed kill whose every retire is posted, waiting for the reaper.
-pub struct Killed {
-    pid: Pid,
-    process_data: Arc<Lock<ProcessData>>,
-    thread_data: Arc<Lock<ThreadData>>,
-    main_tid: Tid,
-    threads: Vec<(Tid, ThreadSched)>,
-}
-
-impl Killed {
-    /// Whether every thread is off the scheduler, so [`finish_kill`] may run.
-    pub fn released(&self) -> bool {
-        self.threads.iter().all(|(_, sched)| sched.handle.released())
-    }
-
-    pub fn pid(&self) -> Pid {
-        self.pid
-    }
-}
-
-/// The reaper's half of a kill, once [`Killed::released`]: phases 3-5, the same teardown tail as exit.
-pub fn finish_kill(killed: Killed) {
-    let Killed { pid, process_data, thread_data, main_tid, threads } = killed;
-    let main_cpu_ns = fold_retired(threads, main_tid, &process_data);
-    teardown_tail(&process_data, &thread_data, pid, KILLED_EXIT_CODE, main_cpu_ns);
 }
 
 /// The shell convention for "died on SIGKILL"; kept because every test that reads one already spells it.

@@ -25,7 +25,7 @@ use toyos_sched::park::notify;
 use crate::drivers::serial::{self, BackendGuard, MAX_CONSOLE_LINE};
 use crate::hw::HW;
 use crate::sched::driver::{cpus, irq_off};
-use crate::sched::kthread::{self, OnPanic, OnStop};
+use crate::sched::kthread::{self, OnPanic};
 use crate::sleeplock::SleepGuard;
 use crate::watch;
 use crate::sched::payload::KShared;
@@ -67,7 +67,7 @@ static DRAINED: Published = Published::new();
 /// Start the thread. Called once, from `kernel_main`, before the scheduler starts.
 /// Placement matters: APs spin until the machine is released, so an earlier spawn could not run while the machine has no console.
 pub fn start() {
-    let sched = kthread::spawn(NAME, body, 0, OnPanic::Halt, OnStop::Runs);
+    let sched = kthread::spawn(NAME, body, 0, OnPanic::Halt);
     // Leaked: `klogd` never exits, and a producer reading this pointer under lock may not touch a refcount.
     let shared: &'static Arc<KShared> = alloc::boxed::Box::leak(alloc::boxed::Box::new(sched.shared));
     KLOGD.store(shared as *const _ as *mut _, Ordering::Release);

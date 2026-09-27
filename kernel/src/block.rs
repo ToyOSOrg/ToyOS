@@ -132,12 +132,9 @@ pub fn userland_operations() -> (u32, u64) {
 }
 
 /// Whether the stop this count is read for stops the thread opening an
-/// operation now.
+/// operation now: it stops every userland thread and no kernel thread.
 fn counted() -> bool {
-    let (Some(pid), Some(tid)) = (crate::arch::percpu::current_pid(), crate::arch::percpu::current_tid()) else {
-        return false;
-    };
-    !crate::sched::kthread::runs_through_the_stop(crate::scheduler::TaskId(pid, tid))
+    !crate::sched::kthread::current_is_kernel_thread() && crate::arch::percpu::current_pid().is_some()
 }
 
 #[must_use = "the operation lasts exactly as long as this guard"]

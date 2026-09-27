@@ -48,10 +48,7 @@ pub struct Outcome {
     /// registration window. Reported for the same reason.
     pub killed_at_park: u64,
     /// Invariant I14's measurement: the longest a retire went unfinalized, and
-    /// the bound in force. A number as well as a verdict, because the kernel's
-    /// `await_released` states the same property with a wall clock and a panic, and
-    /// how much of that budget the protocol spends is what says whether the wall
-    /// clock is a backstop or a coin flip.
+    /// the bound in force.
     pub retire_latency: u64,
     pub retire_bound: u64,
     /// The longest one CPU's unwind gate held every other CPU still — see

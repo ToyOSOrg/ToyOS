@@ -7,7 +7,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::process::{
     ElfInfo, Endowments, PageFaultTrace, ProcessAccounting, ProcessData, ProcessEntry, ThreadData,
@@ -19,10 +19,11 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
+/// `klogd`, `usbd` and `iod`, plus one `log-storm` thread per shard in the actuator build.
 #[cfg(not(feature = "boot-actuators"))]
-const MAX_KERNEL_TASKS: usize = 4;
+const MAX_KERNEL_TASKS: usize = 3;
 #[cfg(feature = "boot-actuators")]
-const MAX_KERNEL_TASKS: usize = 4 + toyos_abi::log::MAX_LOG_SHARDS;
+const MAX_KERNEL_TASKS: usize = 3 + toyos_abi::log::MAX_LOG_SHARDS;
 
 /// Collides with no packed id: neither id map issues `u32::MAX`.
 const NO_TASK: u64 = u64::MAX;
@@ -31,14 +32,13 @@ const NO_TASK: u64 = u64::MAX;
 /// after the policy word, without another claimant matching the same row.
 const CLAIMING: u64 = u64::MAX - 1;
 
-/// `task` is stored `Release` after `recoverable` and `stops` and loaded `Acquire` before them,
+/// `task` is stored `Release` after `recoverable` and loaded `Acquire` before it,
 /// so a row found by identity never answers with an unwritten policy.
 struct Row {
     task: AtomicU64,
     // `recoverable` exists because `percpu::in_syscall()` is never true for a kernel
     // thread, which would otherwise make every kernel-thread panic halt the machine by default.
     recoverable: AtomicU64,
-    stops: AtomicBool,
 }
 
 /// A row reserved before the table lock and published before `enqueue_new`.
@@ -60,28 +60,18 @@ impl Claim {
     }
 
     /// Payload first, then the identity `Release`.
-    fn publish(self, id: TaskId, on_panic: OnPanic, on_stop: OnStop) {
+    fn publish(self, id: TaskId, on_panic: OnPanic) {
         self.0
             .recoverable
             .store(u64::from(on_panic == OnPanic::Recover), Ordering::Relaxed);
-        self.0.stops.store(on_stop == OnStop::Stops, Ordering::Relaxed);
         self.0.task.store(id.pack(), Ordering::Release);
     }
 }
 
 /// Registered at spawn and never cleared: a dead `Recover` thread's row stays.
-static ROWS: [Row; MAX_KERNEL_TASKS] = [const {
-    Row { task: AtomicU64::new(NO_TASK), recoverable: AtomicU64::new(0), stops: AtomicBool::new(false) }
-}; MAX_KERNEL_TASKS];
-
-/// Whether the machine's stop (`quiesce`) stops a kernel thread.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum OnStop {
-    /// It carries the stop's own work, as `iod` carries the sync to its volume.
-    Runs,
-    /// The work it does is userland's, so it stops with userland.
-    Stops,
-}
+static ROWS: [Row; MAX_KERNEL_TASKS] =
+    [const { Row { task: AtomicU64::new(NO_TASK), recoverable: AtomicU64::new(0) } };
+        MAX_KERNEL_TASKS];
 
 /// What a kernel thread's panic does.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -119,21 +109,17 @@ pub fn is_kernel_task(id: TaskId) -> bool {
     ROWS.iter().any(|row| row.task.load(Ordering::Acquire) == packed)
 }
 
-/// Is `id` a kernel thread declared [`OnStop::Runs`]?
-pub fn runs_through_the_stop(id: TaskId) -> bool {
-    let packed = id.pack();
-    ROWS.iter()
-        .any(|row| row.task.load(Ordering::Acquire) == packed && !row.stops.load(Ordering::Relaxed))
-}
-
 /// Control for `process::process_object`'s refusal: no kernel thread's pid names a process a handle could hold.
 #[cfg(feature = "boot-actuators")]
 pub fn open_selftest() {
     let pids: Vec<_> = ROWS
         .iter()
         .map(|row| row.task.load(Ordering::Acquire))
-        .filter(|&task| task != NO_TASK && task != CLAIMING)
-        .map(|task| TaskId::unpack(task).0)
+        .filter(|&task| task != NO_TASK)
+        .map(|task| {
+            assert_ne!(task, CLAIMING, "kthread: a row is still being claimed after the last spawn");
+            TaskId::unpack(task).0
+        })
         .collect();
     let opened = pids.iter().filter(|&&pid| crate::process::process_object(pid).is_some()).count();
     let verdict = if !pids.is_empty() && opened == 0 { "PASS" } else { "FAIL" };
@@ -146,13 +132,7 @@ pub fn panic_recovers_here() -> Option<bool> {
 }
 
 /// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
-pub fn spawn(
-    name: &str,
-    body: extern "C" fn(u64) -> !,
-    arg: u64,
-    on_panic: OnPanic,
-    on_stop: OnStop,
-) -> ThreadSched {
+pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPanic) -> ThreadSched {
     let (stack, entry_rsp) = crate::loader::alloc_kernel_stack(
         crate::loader::kernel_start,
         body as usize as u64,
@@ -185,7 +165,7 @@ pub fn spawn(
     });
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     // Before `enqueue_new`: from that call the task can run and panic.
-    claim.publish(TaskId(pid, tid), on_panic, on_stop);
+    claim.publish(TaskId(pid, tid), on_panic);
     // The kernel address space, named so one declaration decides every task's `cr3`.
     let (sched, _dst) = scheduler::enqueue_new(
         TaskId(pid, tid),

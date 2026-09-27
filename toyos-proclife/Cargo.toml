@@ -43,11 +43,20 @@ mutate-claim-teardown-always-wins = []
 # under the very lock the insert takes. `interleave::tests::a_published_exit_
 # leaves_no_unretired_thread` must red under this.
 mutate-spawn-skips-the-insert-recheck = []
-# The model's kill finishes the teardown itself, retiring each victim thread
-# and waiting for it, as `process::kill_process` did before the reaper.
+# The model's kill waits for its victim's exit before it returns.
 # `interleave::tests::two_processes_killing_each_other_both_end` must red under
-# this: each killer waits on a thread that is inside the other's kill.
+# this: each killer waits on a process whose thread is inside the other's kill.
 mutate-kill-waits-for-its-victims = []
+# `teardown::leave` answers `Last` to every thread that leaves a claimed
+# process, so the first one out tears it down under its siblings.
+# `interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down` must
+# red under this.
+mutate-first-out-tears-down = []
+# `join::collect_zombie` gives up a thread of a process being torn down, whose
+# mappings its siblings may still run in.
+# `interleave::tests::a_join_racing_the_kill_that_takes_its_target` must red
+# under this.
+mutate-join-collects-in-a-teardown = []
 
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }

@@ -151,19 +151,12 @@ pub struct ProcState {
 /// the retire-to-release interval therefore contains an unbounded quantity — so
 /// I14 should be read on a clock with the RT band's service subtracted out.
 ///
-/// Every step of that was true and the conclusion was a blindfold. The kernel
-/// does not wait on that clock: `scheduler::await_released` blocks behind a
-/// **wall-clock** tripwire and panics when it expires. A model measuring the
-/// same wait on a clock the kernel cannot read is a model that cannot see the
-/// panic — and the unbounded quantity the paragraph named is exactly the defect
-/// that panic was reachable through, declared as a modelling convenience one
-/// file away from the invariant that would have caught it.
+/// Every step of that was true and the conclusion was a blindfold.
 ///
 /// So the quantity is bounded at its source instead: `CpuSched::pick`'s
 /// [`toyos_sched::cpu::DYING_AGE_NS`] makes the RT band's precedence over a
-/// corpse a bounded deferral, and I14 is read on the clock the kernel's own
-/// guard reads. The RT service the victim's CPU owed is *in* the number, which
-/// is the only way the number means anything.
+/// corpse a bounded deferral. The RT service the victim's CPU owed is *in* the
+/// number, which is the only way the number means anything.
 ///
 /// (I5 still stops measuring service while the RT band is occupied. That
 /// exclusion is about *fairness*, which the RT band exists to be unfair to;

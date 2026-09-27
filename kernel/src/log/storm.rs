@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::sched::kthread::{self, OnPanic, OnStop};
+use crate::sched::kthread::{self, OnPanic};
 
 // Exceeds a shard's capacity, so the drop path under test is reached at every `--smp` count.
 const STORM_RECORDS: u64 = 1024;
@@ -47,7 +47,7 @@ pub fn start_once() {
     crate::log!("logstorm start threads={threads} records={STORM_RECORDS}");
     for thread in 0..threads {
         // `Halt`: a panicked storm thread invalidates the gate's conservation law, so continuing would answer over an incomplete storm.
-        kthread::spawn("logstorm", body, thread as u64, OnPanic::Halt, OnStop::Runs);
+        kthread::spawn("logstorm", body, thread as u64, OnPanic::Halt);
     }
 }
 

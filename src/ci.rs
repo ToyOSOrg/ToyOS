@@ -356,6 +356,12 @@ pub(crate) const CONTROLS: &[Control] = &[
         "two_processes_killing_each_other_both_end ... FAILED",
         "a_kill_chain_of_three_ends ... FAILED",
     ]),
+    red(PROCLIFE, "mutate-first-out-tears-down", None, &[
+        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
+        "a_join_racing_the_kill_that_takes_its_target ... FAILED",
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         "a_stopped_cpu_stops_taking_work ... FAILED",
     ]),

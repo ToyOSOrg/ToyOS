@@ -38,6 +38,7 @@ pub fn must_stop(thread: ThreadId, caller: ThreadId) -> bool {
     thread != caller
 }
 
+/// What one sweep of the machine's userland threads found.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Sweep {
     /// Threads that must stop and have: banded at a safe point, or parked and
@@ -76,7 +77,7 @@ pub const LAST_THREAD: &str = "quiesce-last";
 pub const STOPPED: &str = "stop: ";
 
 const OF: &str = " of ";
-const THREADS: &str = " thread(s) stopped across ";
+const THREADS: &str = " userland thread(s) stopped across ";
 const CPUS: &str = " cpu(s) in ";
 const BUDGET: &str = " ms of a ";
 const MS: &str = " ms budget over ";
@@ -248,12 +249,12 @@ mod tests {
     fn the_record_names_the_shortfall_only_when_there_is_one() {
         assert_eq!(
             alloc::format!("{WHOLE}"),
-            "stop: 6 of 6 thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 ms \
+            "stop: 6 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 ms \
              budget over 3 sweep(s), 0 of 4812 userland block operation(s) still open",
         );
         assert_eq!(
             alloc::format!("{}", short()),
-            "stop: 4 of 6 thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 ms \
+            "stop: 4 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 ms \
              budget over 3 sweep(s), 1 of 4812 userland block operation(s) still open; this \
              reset lands wherever the other 2 are",
         );
@@ -287,17 +288,17 @@ mod tests {
     fn a_line_that_is_not_a_record_is_refused_rather_than_half_read() {
         for line in [
             "[stamp] Rebooting.",
-            "[stamp] stop: 6 of 6 thread(s) stopped across 8 cpu(s)",
+            "[stamp] stop: 6 of 6 userland thread(s) stopped across 8 cpu(s)",
             // The shortfall clause disagreeing with the counts it restates.
-            "[stamp] stop: 4 of 6 thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
+            "[stamp] stop: 4 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
              ms budget over 3 sweep(s), 1 of 4812 userland block operation(s) still open; this \
              reset lands wherever the other 9 are",
             // A shortfall clause on a record that claims to have stopped.
-            "[stamp] stop: 6 of 6 thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
+            "[stamp] stop: 6 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
              ms budget over 3 sweep(s), 0 of 4812 userland block operation(s) still open; this \
              reset lands wherever the other 2 are",
             // More threads stopped than there were.
-            "[stamp] stop: 7 of 6 thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
+            "[stamp] stop: 7 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
              ms budget over 3 sweep(s), 0 of 4812 userland block operation(s) still open",
         ] {
             assert_eq!(Record::parse(line), None, "{line}");

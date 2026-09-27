@@ -22,7 +22,7 @@ use crate::sched::payload::{KShare, KernelLock, TaskHandle, ThreadSched};
 use crate::sched::reap_gate::ReapGate;
 use crate::sched::futex;
 use crate::sync::Lock;
-use crate::time::{Cadence, Deadline, Duration, Tripwire};
+use crate::time::{Cadence, Deadline, Duration};
 use crate::DirectMap;
 
 pub use crate::sched::driver::{
@@ -382,25 +382,20 @@ pub fn leave_ring3_if_due() {
             unreachable!("leave_ring3_if_due: a stopped task was dispatched again");
         }
         SafePoint::Exit => {
-            // The retirer owns teardown; a mark_thread_zombie here would race it.
+            // A syscall's own depth: the last thread out tears its process down here, and that parks.
+            crate::preempt::disable();
+            process::leave(None);
+            crate::preempt::enable_no_resched();
             driver::pass(Dispose::Exit);
             unreachable!("leave_ring3_if_due: returned from the exit pass");
         }
     }
 }
 
+/// The exit pass of a thread that has left its process (`process::leave`).
 #[track_caller]
-pub fn exit_current(code: i32) -> ! {
+pub fn exit_current() -> ! {
     assert_baseline(BASELINE_TRAP);
-    {
-        let mut guard = process::PROCESS_TABLE.lock();
-        let table = guard.as_mut().unwrap();
-        let tid = percpu::current_tid().unwrap();
-        let pid = percpu::current_pid().unwrap();
-        process::mark_thread_zombie(table, pid, tid, code);
-    }
-    // The table says zombie now, which a sweep counts as nothing left to stop.
-    crate::quiesce::note_progress();
     driver::pass(Dispose::Exit);
     unreachable!("exit_current: returned from the exit pass");
 }
@@ -502,76 +497,11 @@ pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
 }
 
 /// Set a thread's kill bit and ask its CPU for a safe point; returns at once.
+/// The thread leaves at that safe point: `process::leave`.
 pub fn post_retire(sched: &ThreadSched) {
-    if !sched.handle.mark_killed() {
-        return;
-    }
     preempt_off(|p| {
         toyos_sched::retire::begin(&sched.shared).post(cpus(), &HW, p);
     });
-}
-
-/// How long a retired thread may take to be released before the kernel panics.
-/// Superseded by the scheduling-reservations design; kept because a
-/// known-wrong constant is still what this kernel runs
-/// (`issues/kernel/scheduler-pass-blocks-in-xhci.md`).
-pub const RETIRE_GIVE_UP: Tripwire = Tripwire::absurd(
-    Duration::from_secs(10),
-    "four pass prologues on xHCI's own 2 s deadline, two quanta, and an unwind \
-     the real-time band may stretch elevenfold; past this the wake was lost",
-);
-
-/// Wait until a retired thread's record — kernel stack and address-space
-/// reference — is released. The state word reading `Dead` is not enough: that
-/// payload is freed by the pass after the one that publishes it.
-#[track_caller]
-pub fn await_released(sched: &ThreadSched) {
-    // Also on the early-return path below, where no park happens and the two
-    // asserts inside the wait would never run.
-    assert_baseline(BASELINE_TRAP);
-    if let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) {
-        if let Some(handle) = driver::current_shared() {
-            assert!(
-                !Arc::ptr_eq(&handle, &sched.shared),
-                "await_released: cannot retire self ({})",
-                TaskId(pid, tid),
-            );
-        }
-    }
-    if sched.handle.released() {
-        return;
-    }
-    /// Re-poll rate for the liveness backstop; the release wake is what
-    /// actually ends the wait.
-    const RECHECK: Cadence = Cadence::every(
-        Duration::from_millis(50),
-        "two hundred re-polls inside the tripwire, on a thread that is otherwise parked",
-    );
-    let give_up = Deadline::at(crate::clock::now() + RETIRE_GIVE_UP.duration());
-    let parkable = Parkable::at_entry();
-    // Uncancellable: a killed retirer cannot propagate a cancel with the
-    // retire half done; the tripwire above bounds it instead.
-    let Some(armed) = watch::arm(
-        sched.handle.watch(),
-        sched.shared.key().0,
-        WaitClass::Other,
-    ) else {
-        panic!("await_released: no current task to park");
-    };
-    while !sched.handle.released() {
-        if give_up.reached(crate::clock::now()) {
-            panic!(
-                "await_released: task not released after {}: {:?}",
-                RETIRE_GIVE_UP.duration(),
-                sched.shared.state()
-            );
-        }
-        watch::wait_uncancellable(
-            &parkable,
-            &armed,
-            Deadline::at(crate::clock::now() + RECHECK.duration()),
-        );
-    }
 }
 
 /// Per-CPU hand-off bank for threads that died in panic recovery: the panic
@@ -629,27 +559,26 @@ pub(crate) fn reap_poisoned() {
         for bank in POISONED.iter() {
             bank.drain(|raw| {
                 let id = TaskId::unpack(raw);
-                wakes[next] = process::zombify_poisoned(table, id.0, id.1);
+                wakes[next] = Some(process::zombify_poisoned(table, id.0, id.1));
                 next += 1;
             });
         }
     }
     drop(reaped);
     for wake in wakes.into_iter().flatten() {
-        match wake {
-            process::PoisonWake::Joiner(pid, tid) => {
-                if let Some(sched) = process::thread_sched(pid, tid) {
-                    sched.handle.watch().post();
-                }
-            }
-            // -1: nobody asked for this exit, and teardown never ran to account it.
-            process::PoisonWake::Process(object) => {
-                let stats = toyos_abi::syscall::ProcessStats {
-                    pid: object.pid().raw(),
-                    ..Default::default()
-                };
-                object.publish_exit(crate::object::process::Exit { code: -1, stats })
-            }
+        for sched in &wake.retire {
+            post_retire(sched);
+        }
+        if let Some(sched) = wake.joiner {
+            sched.handle.watch().post();
+        }
+        // No teardown ran to account this exit: the resources go with the entry.
+        if let Some((object, code)) = wake.exit {
+            let stats = toyos_abi::syscall::ProcessStats {
+                pid: object.pid().raw(),
+                ..Default::default()
+            };
+            object.publish_exit(crate::object::process::Exit { code, stats });
         }
     }
 }

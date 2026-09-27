@@ -25,6 +25,10 @@
 //! whatever lock the thread on that CPU was holding, and `sync_all` is the
 //! first thing that would wait on it.
 //!
+//! Kernel threads are exempt by identity, not by accident: `klogd`, `iod` and
+//! `usbd` are in the process table like anything else, and
+//! [`crate::sched::kthread::is_kernel_task`] is what tells them apart.
+//!
 //! # What the stop waits on
 //!
 //! [`PROGRESS`], posted by [`note_progress`] from the three transitions that
@@ -94,7 +98,10 @@ fn stops(stage: u32) -> bool {
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
         return false;
     };
-    if crate::sched::kthread::runs_through_the_stop(TaskId(pid, tid)) {
+    // A kernel thread reaches this boundary on its first dispatch and has no
+    // Ring 3 to be stopped from; `iod` is also what carries the sync to its
+    // volume while userland is being stopped around it.
+    if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
         return false;
     }
     must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller())
@@ -220,7 +227,7 @@ fn sweep(caller: ThreadId) -> Sweep {
             if matches!(thread.state(), process::ThreadLocation::Zombie(_)) {
                 continue;
             }
-            if crate::sched::kthread::runs_through_the_stop(TaskId(pid, tid)) {
+            if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
                 continue;
             }
             let sched = thread

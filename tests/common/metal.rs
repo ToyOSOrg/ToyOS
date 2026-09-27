@@ -397,7 +397,7 @@ impl Readback {
     pub fn stop_completed(&self) -> Result<(), String> {
         match self.stop_record() {
             Some(park) if !park.stopped_the_machine() => Err(format!(
-                "{}'s stop gave up on {} thread(s) that never reached a safe point, so \
+                "{}'s stop gave up on {} userland thread(s) that never reached a safe point, so \
                  this boot's sync and its last word are claims about a machine that was still \
                  running:\n    {park}",
                 self.label,

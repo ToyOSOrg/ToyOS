@@ -3,7 +3,7 @@
 //! released exactly once, by `Hw::release`.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use toyos_sched::fair::{FairShare, ShareState};
 use toyos_sched::hw::Nanos;
@@ -77,25 +77,12 @@ pub const SCHED_READY: u8 = 1;
 pub const SCHED_BLOCKED: u8 = 2;
 pub const SCHED_UNKNOWN: u8 = 3;
 
-/// Posted after a killed thread's release, for a waiter on whichever of many threads goes first.
-pub static ANY_RELEASED: Watch = Watch::new();
-
-/// [`TaskHandle`]'s `fate` bits.
-const RELEASED: u8 = 1;
-const KILLED: u8 = 2;
-
 /// What a thread other than the one running can be asked about; published here since a `CpuSched` is `!Sync` and unreachable remotely.
 pub struct TaskHandle {
     cpu_ns: AtomicU64,
     /// Dispatch timestamp while running, 0 otherwise; a reader adds the live slice itself.
     running_since: AtomicU64,
-    acct: Lock<TaskAccounting>,
-    /// `RELEASED`, set by `Hw::release`: the one fact a retirer needs, that the thread is off
-    /// every CPU. `KILLED`, set by `scheduler::post_retire`. One word, so the two decide by one
-    /// read-modify-write each whether the release posts [`ANY_RELEASED`]: `Hw::release` holds
-    /// no `TaskShared` whose kill bit it could read.
-    fate: AtomicU8,
-    /// What another thread arms on to be told this one moved: its exit, for `SYS_THREAD_JOIN`, and its release, for the retirer.
+    /// What another thread arms on to be told this one moved: its exit, for `SYS_THREAD_JOIN`.
     watch: Watch,
     /// Cancels reported to this thread; a second one means a caller swallowed the first, so it panics rather than spinning.
     cancels: AtomicU32,
@@ -108,8 +95,6 @@ impl TaskHandle {
         Self {
             cpu_ns: AtomicU64::new(0),
             running_since: AtomicU64::new(0),
-            acct: Lock::new(TaskAccounting::default()),
-            fate: AtomicU8::new(0),
             watch: Watch::new(),
             cancels: AtomicU32::new(0),
             operation: OperationSlot::new(),
@@ -126,27 +111,6 @@ impl TaskHandle {
     pub(crate) fn finalize(&self, acct: TaskAccounting) {
         self.cpu_ns.store(acct.cpu_ns, Ordering::Relaxed);
         self.running_since.store(0, Ordering::Relaxed);
-        *self.acct.lock() = acct;
-    }
-
-    /// Announces the death only after the payload is dropped; that ordering is the guarantee a retirer's park buys.
-    pub(crate) fn publish_released(&self) {
-        let fate = self.fate.fetch_or(RELEASED, Ordering::AcqRel);
-        // The retirer arms on this thread's own watch, the same subject a joiner uses.
-        self.watch.post();
-        if fate & KILLED != 0 {
-            ANY_RELEASED.post();
-        }
-    }
-
-    /// Has `Hw::release` run for this thread? The retire wait's condition.
-    pub fn released(&self) -> bool {
-        self.fate.load(Ordering::Acquire) & RELEASED != 0
-    }
-
-    /// Mark the thread killed; `false` if it is already released, and so has no retire to post.
-    pub fn mark_killed(&self) -> bool {
-        self.fate.fetch_or(KILLED, Ordering::AcqRel) & RELEASED == 0
     }
 
     /// Where this thread's establishment lives; `scheduler::Operation` owns every rule about it.
@@ -182,10 +146,6 @@ impl TaskHandle {
         }
     }
 
-    pub fn merge_into(&self, target: &mut ProcessAccounting) {
-        let acct = self.acct.lock();
-        merge_accounting(&acct, target);
-    }
 }
 
 /// A thread's two scheduler-visible faces, kept by the process table; created at different instants.

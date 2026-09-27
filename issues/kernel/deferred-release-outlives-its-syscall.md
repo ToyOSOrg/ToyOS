@@ -196,11 +196,7 @@ at all.** It belongs with that track, not beside it.
 
 ### What "give the batch an owner" costs, worked out 2026-08-20
 
-An owner has to be the *thread*, not the CPU. `kill_process` phase 2 calls
-`scheduler::retire_task`, which parks the killer until the victim's record is
-released, so the killing thread can be moved to another CPU between the
-`close_all` that queues its objects and the syscall exit that would drain them —
-a per-CPU list would strand exactly the batch it was added to own.
+An owner has to be the *thread*, not the CPU.
 
 A per-thread list cannot live behind `ThreadData`'s lock either:
 `teardown_resources` holds `ProcessData` across `close_all`, and its own first
