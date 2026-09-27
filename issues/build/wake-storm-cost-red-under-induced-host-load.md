@@ -55,3 +55,9 @@ on a quiet host and on a loaded one, several runs of each, with the host's load
 recorded per run. If the ratio moves with the load, the assertion needs a
 denominator that host time cannot inflate — a count of claims rather than a span
 of cycles. If it does not, the finding is the kernel's and this is a `defect`.
+
+## Third sighting, main's nightly at 1ce71831
+
+Run 36290616312, one guest shard: `FAIL rs::wake_storm_cost: exit code 101`
+wide, then `ALONE wake_storm_cost: GREEN` twice. This is again a hosted
+four-core shard running eight-vCPU guests, so an oversubscribed host.

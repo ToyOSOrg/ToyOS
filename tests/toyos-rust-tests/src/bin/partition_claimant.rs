@@ -17,6 +17,8 @@
 //! - `endowed` — finds the claim its parent moved to it, by the label init
 //!   endows a `part:` row under;
 //! - `unanswered` — a claim while a disk does not answer a read of its table;
+//! - `withheld <ROOT>` — a claim of ROOT's source, whose disk did not answer
+//!   ROOT's hold and answers now;
 //! - `deadman` — transfers whose every attempt is refused on its budget until
 //!   the deadman;
 //! - `departure`, `silent`, `untold` — claims on one USB stick whose device
@@ -113,6 +115,7 @@ fn main() {
         Some("holder") => holder(&cap),
         Some("endowed") => endowed(),
         Some("unanswered") => unanswered(&cap),
+        Some("withheld") => withheld(&cap, &args[1..]),
         Some("deadman") => deadman(&cap),
         Some("departure") => departure(&cap),
         Some("silent") => silent(&cap),
@@ -351,6 +354,20 @@ fn unanswered(cap: &SysCap) {
         "the target, while its disk does not answer a read of its table,",
         guid(TARGET),
         SyscallError::NotSupported,
+    );
+    println!("partition_claimant: PASS");
+}
+
+/// ROOT's source, which the boot withheld when its disk did not answer: the
+/// disk answers now and nothing holds the span, and the claim is still the
+/// kernel's to refuse.
+fn withheld(cap: &SysCap, root: &[String]) {
+    let [root] = root else { panic!("withheld takes ROOT's GUID, got {root:?}") };
+    refused(
+        cap,
+        "ROOT, withheld when its disk did not answer the boot's hold,",
+        guid(root),
+        SyscallError::PermissionDenied,
     );
     println!("partition_claimant: PASS");
 }

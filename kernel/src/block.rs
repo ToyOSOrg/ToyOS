@@ -234,7 +234,11 @@ static DEVICES: Lock<BTreeMap<DeviceId, Handle>> = Lock::new(BTreeMap::new());
 pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
     #[cfg(feature = "boot-actuators")]
     let dev: Box<dyn BlockDevice> =
-        if crate::actuator::partclaim_table_unanswered() { Box::new(unanswered::Table(dev)) } else { dev };
+        if crate::actuator::partclaim_table_unanswered() || crate::actuator::partclaim_root_withheld() {
+            Box::new(unanswered::Table(dev))
+        } else {
+            dev
+        };
     let id = dev.device_id();
     let blocks = dev.block_count();
     let mut devices = DEVICES.lock();
@@ -254,9 +258,9 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
     Some(handle)
 }
 
-/// `partclaim-table-unanswered`: a registered disk that refuses every read of
-/// its device block 0 — its protective MBR and GPT header — once
-/// [`unanswered::refuse`] has been called.
+/// `partclaim-table-unanswered` and `partclaim-root-withheld`: a registered disk
+/// that refuses every read of its device block 0 — its protective MBR and GPT
+/// header — from [`unanswered::refuse`] until [`unanswered::answer`].
 #[cfg(feature = "boot-actuators")]
 pub mod unanswered {
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -299,10 +303,16 @@ pub mod unanswered {
     }
 
     /// Every disk registered from here on, and before, refuses reads of its
-    /// block 0. Called once the boot's own table reads are done.
+    /// block 0.
     pub fn refuse() {
         REFUSING.store(true, Ordering::Relaxed);
-        log!("partclaim-table-unanswered: device block 0 of every disk refuses reads from now on");
+        log!("unanswered: device block 0 of every disk refuses reads from now on");
+    }
+
+    /// Every disk answers reads of its block 0 again.
+    pub fn answer() {
+        REFUSING.store(false, Ordering::Relaxed);
+        log!("unanswered: device block 0 of every disk answers reads again");
     }
 }
 

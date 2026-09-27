@@ -1984,11 +1984,11 @@ pub fn log_partition_identity(
 /// one volume:
 ///
 /// 1. **Retry keeps the volume, and a refused attempt discarded nothing.**
-///    `fsync-budget-spent` runs every `SYS_FSYNC`'s first attempt under an
+///    `fsync-budget-spent` runs each file's first `SYS_FSYNC` attempt under an
 ///    already-spent operation — the state a loaded dev host reproduced 1 in
 ///    73 full 12-wide suites (2026-08-22, this test's own blob fsync on
-///    `/log`) — so every flush in the boot is refused once
-///    at the shipped site and retried on a fresh budget. The guest's own
+///    `/log`) — so each file's first flush is refused once at the shipped site
+///    and retried on a fresh budget. The guest's own
 ///    fsync must succeed, logd must never give its volume up, and the blob is
 ///    then read off the *image* by the host: the safety invariant is that the
 ///    refused attempt left every un-flushed page dirty, so the retry delivered
@@ -2087,6 +2087,23 @@ pub fn log_flush_retry(
         return Err(format!(
             "logd gave its volume up under refusals that were only budget words:\n{}",
             volume_lines(&log)
+        ));
+    }
+    // And refused once per partition and kind, not on every flush: `logd`
+    // flushes every round it wrote a line in, and a refused flush is records of
+    // its own, so a refusal on every flush keeps `/log` retrying for as long as
+    // the machine runs. An absence has no event to wait on, so it is judged over
+    // a fixed window: the storm retries there without pause, the once-per-kind
+    // refusal never.
+    let after = qemu.drain_serial(Duration::from_secs(2));
+    let again: Vec<&str> =
+        after.lines().filter(|l| l.contains("partclaim: a flush durable on attempt")).collect();
+    if !again.is_empty() {
+        return Err(format!(
+            "{} flush(es) retried in the 2 s after the guest's, first {:?}: every flush is being \
+             refused, and each refusal's records are the next flush\n{after}",
+            again.len(),
+            again[0]
         ));
     }
 

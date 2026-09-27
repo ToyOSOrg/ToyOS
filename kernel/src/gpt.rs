@@ -330,6 +330,43 @@ pub struct Claimable {
     pub unique: Guid,
 }
 
+/// Partitions no claim may take whatever a table says: ROOT's source, when
+/// the boot could not hold its span (`rootfs::hold_source`).
+static WITHHELD: Lock<Vec<Guid>> = Lock::new(Vec::new());
+
+/// Refuse every claim of `guid` for the machine's life, as the kernel's.
+pub fn withhold(guid: PartGuid) {
+    WITHHELD.lock().push(Guid(guid.0));
+}
+
+/// Where one partition is on the disks that answered, and which did not.
+pub struct Sought {
+    /// The one partition carrying the GUID, `None` where no table that
+    /// answered carries it, or why the tables that answered name no one.
+    pub found: Result<Option<Claimable>, Unnamed>,
+    /// The disks that did not answer a read of their table, of which neither
+    /// "none" nor "one" is known.
+    pub silent: Vec<DeviceId>,
+}
+
+/// Why the tables that answered name no one partition for a GUID.
+#[derive(Clone, Copy, Debug)]
+pub enum Unnamed {
+    /// Carried twice, on one disk or across two.
+    Ambiguous,
+    /// Named by a table that refuses it.
+    Unusable,
+}
+
+impl From<Unnamed> for ClaimError {
+    fn from(unnamed: Unnamed) -> Self {
+        match unnamed {
+            Unnamed::Ambiguous => ClaimError::Ambiguous,
+            Unnamed::Unusable => ClaimError::Unusable,
+        }
+    }
+}
+
 /// The one partition on this machine whose unique GUID is `guid`, past the
 /// range and overlap checks `toyos_gpt::locate` makes (UEFI 2.10 §5.3.3).
 ///
@@ -337,11 +374,32 @@ pub struct Claimable {
 /// partition, so no claim can write one. `Absent` for a GUID no table carries
 /// and for the zero GUID, which GPT gives every unused entry; `Ambiguous` for
 /// one carried twice, on one disk or across two; `Unusable` for a disk that
-/// did not answer, since then neither "none" nor "one" is known.
+/// did not answer, since then neither "none" nor "one" is known;
+/// `KernelDriven` for a GUID [`withhold`] named.
 pub fn claimable(guid: PartGuid) -> Result<Claimable, ClaimError> {
     let target = Guid(guid.0);
     if target.is_zero() {
         return Err(ClaimError::Absent);
+    }
+    if WITHHELD.lock().contains(&target) {
+        log!("partclaim: {target} is where ROOT was read from, and the kernel withholds it");
+        return Err(ClaimError::KernelDriven);
+    }
+    let sought = seek(guid);
+    let found = sought.found?;
+    if !sought.silent.is_empty() {
+        return Err(ClaimError::Unusable);
+    }
+    found.ok_or(ClaimError::Absent)
+}
+
+/// Look for `guid` on every disk [`probe`] read, reading past a disk that does
+/// not answer and naming it.
+pub fn seek(guid: PartGuid) -> Sought {
+    let target = Guid(guid.0);
+    let mut silent = Vec::new();
+    if target.is_zero() {
+        return Sought { found: Ok(None), silent };
     }
     let disks = DISKS.lock().clone();
     let mut found: Option<Claimable> = None;
@@ -350,7 +408,11 @@ pub fn claimable(guid: PartGuid) -> Result<Claimable, ClaimError> {
         let part = match toyos_gpt::locate(&mut DeviceSectors::new(handle, *lba_bytes), target) {
             Ok(located) => located.partition,
             Err(e) => {
-                table_refused(id, target, e)?;
+                match table_refused(id, target, e) {
+                    Ok(Unread::Lacks) => {}
+                    Ok(Unread::Silent) => silent.push(id),
+                    Err(refused) => return Sought { found: Err(refused), silent },
+                }
                 continue;
             }
         };
@@ -360,7 +422,7 @@ pub fn claimable(guid: PartGuid) -> Result<Claimable, ClaimError> {
                  partition",
                 first.volume.device
             );
-            return Err(ClaimError::Ambiguous);
+            return Sought { found: Err(Unnamed::Ambiguous), silent };
         }
         found = Some(Claimable {
             volume: Volume {
@@ -372,25 +434,33 @@ pub fn claimable(guid: PartGuid) -> Result<Claimable, ClaimError> {
             unique: part.unique_guid,
         });
     }
-    found.ok_or(ClaimError::Absent)
+    Sought { found: Ok(found), silent }
 }
 
-/// What a table's refusal means for a claim: `Ok` for a disk that does not
-/// carry the partition, or the claim's refusal.
-fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<(), ClaimError> {
+/// A disk whose table gave no partition for a GUID, and no refusal.
+enum Unread {
+    /// Its table does not carry the GUID.
+    Lacks,
+    /// It did not answer a read of its table.
+    Silent,
+}
+
+/// What a table's refusal means for a claim: a disk that does not carry the
+/// partition, one that did not answer, or the claim's refusal.
+fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<Unread, Unnamed> {
     match e {
-        GptError::NotFound { .. } => Ok(()),
+        GptError::NotFound { .. } => Ok(Unread::Lacks),
         GptError::ReadFailed(lba) => {
             log!("partclaim: device {id} did not answer a read of LBA {lba} while looking for {target}");
-            Err(ClaimError::Unusable)
+            Ok(Unread::Silent)
         }
         GptError::DuplicateUniqueGuid { first, second } => {
             log!("partclaim: device {id} carries {target} in entries {first} and {second}");
-            Err(ClaimError::Ambiguous)
+            Err(Unnamed::Ambiguous)
         }
         GptError::PartitionRange { .. } | GptError::PartitionOverlap { .. } => {
             log!("partclaim: device {id} names {target} and its own table refuses it: {e:?}");
-            Err(ClaimError::Unusable)
+            Err(Unnamed::Unusable)
         }
         // No table this kernel parses: a disk that carries no partition, which
         // is what `probe` concluded of it too.
@@ -408,7 +478,7 @@ fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<(), ClaimErr
         | GptError::EntryArrayTooBig { .. }
         | GptError::EntryArrayMisplaced { .. }
         | GptError::EntryArrayCrc { .. }
-        | GptError::UsableRangeCoversBackup { .. } => Ok(()),
+        | GptError::UsableRangeCoversBackup { .. } => Ok(Unread::Lacks),
     }
 }
 
