@@ -19,7 +19,8 @@ one clause; do not work around it.
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test before anyone reviews:
 
-- `cargo test`, never `cargo run`: the run path opens a window on the owner's desktop.
+- Host tests only: an implementer never runs QEMU. Every guest arm goes to the orchestrator as
+  the exact command, the patch file and the expected outcome with its named reason.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the job scratchpad the brief
