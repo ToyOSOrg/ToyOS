@@ -95,7 +95,7 @@ pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
     let mut out = Vec::new();
     for (handle, lba_bytes, parts) in listed {
         for part in parts {
-            let holder = match crate::block::span_blocks(part.first_lba, part.lba_count(), lba_bytes) {
+            let holder = match crate::block::span_blocks(part.first_lba(), part.lba_count().get(), lba_bytes) {
                 Ok((first_block, blocks)) => handle.holder(first_block, first_block + blocks),
                 Err(_) => None,
             };
@@ -108,7 +108,7 @@ pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
 /// List `handle`'s table into [`LISTED`], once per disk.
 fn list(sectors: &mut DeviceSectors<'_>, handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
-    let mut found = alloc::vec![BLANK; MAX_LISTED];
+    let mut found = alloc::vec![None; MAX_LISTED];
     // A disk with no table this kernel parses carries no partition, and
     // `collect` says so, naming the refusal.
     let Ok(scan) = toyos_gpt::list(sectors, &mut found) else { return };
@@ -119,8 +119,21 @@ fn list(sectors: &mut DeviceSectors<'_>, handle: &Handle, lba_bytes: u32) {
             scan.listed
         );
     }
-    found.truncate(scan.listed);
-    LISTED.lock().push(Listed { handle: handle.clone(), lba_bytes, parts: found });
+    let mut parts = Vec::new();
+    for entry in found.into_iter().flatten() {
+        match entry {
+            Ok(part) => parts.push(part),
+            Err(unplaced) => log!(
+                "gpt: device {id} states entry {} ({}) at LBA {}..={}, whose blocks are no \
+                 partition on it, and the inventory does not list it",
+                unplaced.index,
+                unplaced.unique_guid,
+                unplaced.first,
+                unplaced.last
+            ),
+        }
+    }
+    LISTED.lock().push(Listed { handle: handle.clone(), lba_bytes, parts });
 }
 
 /// How many partitions of one ToyOS type one device may offer this kernel.
@@ -216,13 +229,13 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
     };
 
     // Firmware's and the table's accounts must agree; a mismatch refuses, never repairs.
-    let part = found.partition;
-    if part.first_lba != firmware.start_lba || part.lba_count() != firmware.blocks {
+    let part = found.partition();
+    if part.first_lba() != firmware.start_lba || part.lba_count().get() != firmware.blocks {
         log!(
             "gpt: device {id} puts {} at LBA {}+{} but firmware said {}+{} — not treating it as \
              the boot volume",
-            part.unique_guid,
-            part.first_lba,
+            part.unique_guid(),
+            part.first_lba(),
             part.lba_count(),
             firmware.start_lba,
             firmware.blocks
@@ -233,8 +246,8 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
     let volume = Volume {
         device: id,
         lba_bytes,
-        start_lba: part.first_lba,
-        blocks: part.lba_count(),
+        start_lba: part.first_lba(),
+        blocks: part.lba_count().get(),
     };
 
     let mut resolved = RESOLVED.lock();
@@ -248,9 +261,9 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
                 volume.start_lba,
                 volume.blocks,
                 lba_bytes,
-                part.index,
-                found.used_entries,
-                found.disk_guid,
+                part.index(),
+                found.used_entries(),
+                found.disk_guid(),
                 if part.is_efi_system() { "" } else { " — and its type is not ESP" }
             );
             *resolved = Resolution::Found { boot: volume, log };
@@ -283,7 +296,7 @@ fn collect(
     ty: Guid,
     into: &Lock<Vec<Candidate>>,
 ) {
-    let mut found = [BLANK; MAX_PER_DEVICE];
+    let mut found = [None; MAX_PER_DEVICE];
     let scan = match toyos_gpt::locate_type(sectors, ty, &mut found) {
         Ok(scan) => scan,
         Err(e) => {
@@ -298,31 +311,44 @@ fn collect(
             scan.listed
         );
     }
-    for candidate in &found[..scan.listed] {
-        let checked = match toyos_gpt::locate(sectors, candidate.unique_guid) {
-            Ok(located) => located.partition,
+    for entry in found.iter().flatten() {
+        let candidate = match entry {
+            Ok(candidate) => candidate,
+            Err(unplaced) => {
+                log!(
+                    "gpt: device {id} names a {what} {} at LBA {}..={}, whose blocks are no \
+                     partition on it",
+                    unplaced.unique_guid,
+                    unplaced.first,
+                    unplaced.last
+                );
+                continue;
+            }
+        };
+        let checked = match toyos_gpt::locate(sectors, candidate.unique_guid()) {
+            Ok(located) => located.partition(),
             Err(e) => {
                 log!(
                     "gpt: device {id} names a {what} {} its own table then refuses: {e:?}",
-                    candidate.unique_guid
+                    candidate.unique_guid()
                 );
                 continue;
             }
         };
         log!(
             "gpt: device {id} carries the {what} candidate {} at LBA {}+{}",
-            checked.unique_guid,
-            checked.first_lba,
+            checked.unique_guid(),
+            checked.first_lba(),
             checked.lba_count()
         );
         into.lock().push(Candidate {
             volume: Volume {
                 device: id,
                 lba_bytes,
-                start_lba: checked.first_lba,
-                blocks: checked.lba_count(),
+                start_lba: checked.first_lba(),
+                blocks: checked.lba_count().get(),
             },
-            guid: checked.unique_guid,
+            guid: checked.unique_guid(),
         });
     }
 }
@@ -410,7 +436,7 @@ pub fn seek(guid: PartGuid) -> Sought {
     for (handle, lba_bytes) in &disks {
         let id = handle.device_id();
         let part = match toyos_gpt::locate(&mut DeviceSectors::new(handle, *lba_bytes), target) {
-            Ok(located) => located.partition,
+            Ok(located) => located.partition(),
             Err(e) => {
                 match table_refused(id, target, e) {
                     Ok(Unread::Lacks) => {}
@@ -432,10 +458,10 @@ pub fn seek(guid: PartGuid) -> Sought {
             volume: Volume {
                 device: id,
                 lba_bytes: *lba_bytes,
-                start_lba: part.first_lba,
-                blocks: part.lba_count(),
+                start_lba: part.first_lba(),
+                blocks: part.lba_count().get(),
             },
-            unique: part.unique_guid,
+            unique: part.unique_guid(),
         });
     }
     Sought { found: Ok(found), silent }
@@ -486,33 +512,24 @@ fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<Unread, Unna
     }
 }
 
-/// A slot [`toyos_gpt::locate_type`] has not filled in.
-const BLANK: Partition = Partition {
-    index: 0,
-    type_guid: Guid::ZERO,
-    unique_guid: Guid::ZERO,
-    first_lba: 0,
-    last_lba: 0,
-};
-
 /// The log partition on the device already proven to carry the boot partition, or `None`.
 fn locate_log(sectors: &mut DeviceSectors<'_>, id: DeviceId, lba_bytes: u32) -> Option<Volume> {
     let target = LOG_GUID.lock().expect("gpt::init runs before any device is probed");
     match toyos_gpt::locate(sectors, target) {
         Ok(found) => {
-            let part = found.partition;
+            let part = found.partition();
             log!(
                 "gpt: device {id} carries the log partition {target} at LBA {}+{}, entry {} of {}",
-                part.first_lba,
+                part.first_lba(),
                 part.lba_count(),
-                part.index,
-                found.used_entries
+                part.index(),
+                found.used_entries()
             );
             Some(Volume {
                 device: id,
                 lba_bytes,
-                start_lba: part.first_lba,
-                blocks: part.lba_count(),
+                start_lba: part.first_lba(),
+                blocks: part.lba_count().get(),
             })
         }
         Err(e) => {

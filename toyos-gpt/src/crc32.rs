@@ -6,25 +6,7 @@
 //! every table on earth. The two implementations look identical apart from one
 //! constant, which is exactly why this file says so.
 
-const TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0u32;
-    while i < 256 {
-        let mut crc = i;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-            j += 1;
-        }
-        table[i as usize] = crc;
-        i += 1;
-    }
-    table
-};
+const POLY: u32 = 0xEDB8_8320;
 
 /// A CRC-32 taken over pieces. The partition entry array is read a block at a
 /// time and never held whole, and the header's own CRC is taken over the
@@ -39,8 +21,12 @@ impl Crc32 {
 
     pub fn update(&mut self, data: &[u8]) {
         for &byte in data {
-            let idx = ((self.0 ^ byte as u32) & 0xFF) as usize;
-            self.0 = (self.0 >> 8) ^ TABLE[idx];
+            let mut crc = self.0 ^ u32::from(byte);
+            for _ in 0..8 {
+                // `POLY` where the bit shifted out is set, zero where it is not.
+                crc = crc.wrapping_shr(1) ^ (POLY & (crc & 1).wrapping_neg());
+            }
+            self.0 = crc;
         }
     }
 

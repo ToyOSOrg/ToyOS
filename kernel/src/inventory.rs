@@ -33,11 +33,11 @@ pub fn collect() -> Vec<Record> {
     for (device, part, holder) in crate::gpt::inventory() {
         out.push(Record::Partition(Partition {
             device,
-            index: part.index,
-            type_guid: part.type_guid.0,
-            unique_guid: part.unique_guid.0,
-            first_lba: part.first_lba,
-            lbas: part.lba_count(),
+            index: part.index(),
+            type_guid: part.type_guid().0,
+            unique_guid: part.unique_guid().0,
+            first_lba: part.first_lba(),
+            lbas: part.lba_count().get(),
             state: match holder {
                 None => PartState::Free,
                 Some(crate::block::Holder::Kernel(_)) => PartState::Kernel,

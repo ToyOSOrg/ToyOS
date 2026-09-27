@@ -541,27 +541,15 @@ fn boot_stick_guids(image: &Path) -> Result<[String; 3], String> {
     // ROOT's type is read with the kernel's parser: the `gpt` crate answers the
     // all-zero GUID for a type its own table does not name.
     let bytes = std::fs::read(image).map_err(|e| format!("read the boot image: {e}"))?;
-    let blank = toyos_gpt::Partition {
-        index: 0,
-        type_guid: toyos_gpt::Guid::ZERO,
-        unique_guid: toyos_gpt::Guid::ZERO,
-        first_lba: 0,
-        last_lba: 0,
-    };
-    let mut found = [blank; 2];
-    let scan = toyos_gpt::locate_type(
+    let root = toyos_build::image::only_partition(
         &mut super::volumes::ImageSectors { bytes: &bytes },
         toyos_gpt::Guid::TOYOS_ROOT,
-        &mut found,
     )
-    .map_err(|e| format!("the boot image's table: {e:?}"))?;
-    if scan.matched != 1 {
-        return Err(format!("the boot image has {} of ROOT, expected one", scan.matched));
-    }
+    .map_err(|why| format!("the boot image's ROOT: {why}"))?;
     Ok([
         one(gpt::partition_types::EFI.guid, "ESP")?,
         one(gpt::partition_types::BASIC.guid, "log partition")?,
-        found[0].unique_guid.to_string(),
+        root.unique_guid().to_string(),
     ])
 }
 

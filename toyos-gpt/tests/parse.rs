@@ -215,7 +215,7 @@ impl Image {
     fn locate_type(
         &mut self,
         target: Guid,
-        out: &mut [toyos_gpt::Partition],
+        out: &mut [Option<toyos_gpt::Entry>],
     ) -> Result<toyos_gpt::TypeScan, GptError> {
         toyos_gpt::locate_type(self, target, out)
     }
@@ -248,13 +248,13 @@ impl Sectors for Image {
 fn finds_the_partition_by_unique_guid() {
     let mut img = Builder::default().build();
     let found = img.locate(guid(0xC3)).expect("the table has this GUID");
-    assert_eq!(found.partition.index, 2);
-    assert_eq!(found.partition.first_lba, 200);
-    assert_eq!(found.partition.last_lba, 299);
-    assert_eq!(found.partition.lba_count(), 100);
-    assert_eq!(found.used_entries, 4);
-    assert!(found.partition.is_efi_system());
-    assert_eq!(found.disk_guid, guid(0x5D));
+    assert_eq!(found.partition().index(), 2);
+    assert_eq!(found.partition().first_lba(), 200);
+    assert_eq!(found.partition().last_lba(), 299);
+    assert_eq!(found.partition().lba_count().get(), 100);
+    assert_eq!(found.used_entries(), 4);
+    assert!(found.partition().is_efi_system());
+    assert_eq!(found.disk_guid(), guid(0x5D));
 }
 
 /// The one that matters: three of the four entries are ESPs, so anything
@@ -271,7 +271,7 @@ fn each_guid_finds_its_own_entry() {
     for (g, index, first, last) in want {
         let mut img = Builder::default().build();
         let found = img.locate(g).expect("present");
-        assert_eq!((found.partition.index, found.partition.first_lba, found.partition.last_lba), (index, first, last));
+        assert_eq!((found.partition().index(), found.partition().first_lba(), found.partition().last_lba()), (index, first, last));
     }
 }
 
@@ -281,17 +281,11 @@ fn each_guid_finds_its_own_entry() {
 #[test]
 fn a_type_scan_lists_every_entry_of_that_type() {
     let mut img = Builder::default().build();
-    let mut out = [toyos_gpt::Partition {
-        index: 0,
-        type_guid: Guid::ZERO,
-        unique_guid: Guid::ZERO,
-        first_lba: 0,
-        last_lba: 0,
-    }; 4];
+    let mut out = [None; 4];
     let scan = img.locate_type(TYPE_ESP, &mut out).expect("the table parses");
     assert_eq!((scan.matched, scan.listed, scan.used_entries), (3, 3, 4));
     assert_eq!(scan.disk_guid, guid(0x5D));
-    let found: Vec<Guid> = out[..scan.listed].iter().map(|p| p.unique_guid).collect();
+    let found: Vec<Guid> = out[..scan.listed].iter().flatten().flatten().map(|p| p.unique_guid()).collect();
     assert_eq!(found, vec![guid(0xA1), guid(0xC3), guid(0xD4)]);
 
     // A type nothing carries is not an error; it is an empty set.
@@ -304,16 +298,10 @@ fn a_type_scan_lists_every_entry_of_that_type() {
 #[test]
 fn a_type_scan_says_how_many_it_could_not_hand_back() {
     let mut img = Builder::default().build();
-    let mut out = [toyos_gpt::Partition {
-        index: 0,
-        type_guid: Guid::ZERO,
-        unique_guid: Guid::ZERO,
-        first_lba: 0,
-        last_lba: 0,
-    }; 1];
+    let mut out = [None; 1];
     let scan = img.locate_type(TYPE_ESP, &mut out).expect("the table parses");
     assert_eq!((scan.matched, scan.listed), (3, 1));
-    assert_eq!(out[0].unique_guid, guid(0xA1));
+    assert_eq!(out[0].and_then(Result::ok).map(|p| p.unique_guid()), Some(guid(0xA1)));
 }
 
 /// The scan is held to the same CRC as the search: a damaged array yields no
@@ -322,13 +310,7 @@ fn a_type_scan_says_how_many_it_could_not_hand_back() {
 fn a_type_scan_over_a_damaged_array_is_refused() {
     let mut img = Builder::default().build();
     *img.at(ARRAY_LBA, 3) ^= 0x01;
-    let mut out = [toyos_gpt::Partition {
-        index: 0,
-        type_guid: Guid::ZERO,
-        unique_guid: Guid::ZERO,
-        first_lba: 0,
-        last_lba: 0,
-    }; 4];
+    let mut out = [None; 4];
     assert!(matches!(
         img.locate_type(TYPE_ESP, &mut out),
         Err(GptError::EntryArrayCrc { .. })
@@ -427,7 +409,7 @@ fn the_array_ends_where_the_header_says() {
     assert_eq!(img.locate(guid(0xD4)), Err(GptError::NotFound { used_entries: 3 }));
     *img.at(ARRAY_LBA, 3 * 128 + 1) ^= 0xFF;
     let found = img.locate(guid(0xC3)).expect("still parses");
-    assert_eq!(found.used_entries, 3);
+    assert_eq!(found.used_entries(), 3);
 }
 
 #[test]
@@ -572,11 +554,11 @@ fn a_damaged_primary_falls_back_to_a_good_backup() {
     let mut img = Builder { backup: true, ..Default::default() }.build();
     *img.at(1, 0) = b'X';
     let found = img.locate(guid(0xC3)).expect("the backup carries this GUID");
-    assert_eq!(found.partition.index, 2);
-    assert_eq!(found.partition.first_lba, 200);
-    assert_eq!(found.partition.last_lba, 299);
-    assert_eq!(found.used_entries, 4);
-    assert_eq!(found.disk_guid, guid(0x5D));
+    assert_eq!(found.partition().index(), 2);
+    assert_eq!(found.partition().first_lba(), 200);
+    assert_eq!(found.partition().last_lba(), 299);
+    assert_eq!(found.used_entries(), 4);
+    assert_eq!(found.disk_guid(), guid(0x5D));
 }
 
 /// Both copies gone must be a named refusal, not a panic and not a made-up
@@ -634,8 +616,8 @@ fn a_four_kibibyte_block_device_parses() {
     }
     .build();
     let found = img.locate(guid(0x22)).expect("present");
-    assert_eq!((found.partition.index, found.partition.first_lba), (1, 21));
-    assert_eq!(found.used_entries, 2);
+    assert_eq!((found.partition().index(), found.partition().first_lba()), (1, 21));
+    assert_eq!(found.used_entries(), 2);
 }
 
 #[test]
@@ -729,7 +711,7 @@ fn an_honest_table_on_a_floored_device_view_parses() {
     .build();
     let mut floored = Floored(img, 2048);
     let found = toyos_gpt::locate(&mut floored, guid(0xC3)).expect("an honest disk lost /boot");
-    assert_eq!(found.partition.index, 2);
+    assert_eq!(found.partition().index(), 2);
 }
 
 /// UEFI gives every entry a `UniquePartitionGUID` that must be unique. Two
@@ -745,7 +727,7 @@ fn two_entries_claiming_the_target_guid_are_refused() {
         Err(GptError::DuplicateUniqueGuid { first: 2, second: 3 })
     );
     // A duplicate of a GUID nobody asked for does not refuse the answer.
-    assert_eq!(img.locate(guid(0xB2)).map(|f| f.partition.index), Ok(1));
+    assert_eq!(img.locate(guid(0xB2)).map(|f| f.partition().index()), Ok(1));
 }
 
 /// `entry_count` is the table's own byte: 8 entries make a 2-LBA array, whose
@@ -769,16 +751,10 @@ fn a_tiny_entry_array_cannot_buy_the_backup_header() {
 #[test]
 fn a_list_is_every_used_entry_in_order() {
     let mut img = Builder::default().build();
-    let mut out = [toyos_gpt::Partition {
-        index: 0,
-        type_guid: Guid::ZERO,
-        unique_guid: Guid::ZERO,
-        first_lba: 0,
-        last_lba: 0,
-    }; 8];
+    let mut out = [None; 8];
     let scan = toyos_gpt::list(&mut img, &mut out).expect("the table parses");
     assert_eq!((scan.matched, scan.listed, scan.used_entries), (4, 4, 4));
-    let found: Vec<(u32, Guid)> = out[..scan.listed].iter().map(|p| (p.index, p.unique_guid)).collect();
+    let found: Vec<(u32, Guid)> = out[..scan.listed].iter().flatten().flatten().map(|p| (p.index(), p.unique_guid())).collect();
     assert_eq!(
         found,
         vec![(0, guid(0xA1)), (1, guid(0xB2)), (2, guid(0xC3)), (3, guid(0xD4))]

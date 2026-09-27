@@ -954,24 +954,21 @@ fn one_partition(
     guid: toyos_gpt::Guid,
     what: &'static str,
 ) -> Result<Part, Refusal> {
-    const BLANK: toyos_gpt::Partition = toyos_gpt::Partition {
-        index: 0,
-        type_guid: toyos_gpt::Guid::ZERO,
-        unique_guid: toyos_gpt::Guid::ZERO,
-        first_lba: 0,
-        last_lba: 0,
-    };
-    let mut out = [BLANK; 2];
+    let mut out = [None; 2];
     let scan = toyos_gpt::locate_type(&mut crate::image::FileSectors(file), guid, &mut out)
         .map_err(|e| Refusal::Table(format!("{e:?}")))?;
-    if scan.matched != 1 {
-        return Err(Refusal::Partitions { what, matched: scan.matched });
-    }
+    let part = match (scan.matched, out[0]) {
+        (1, Some(Ok(part))) => part,
+        (1, Some(Err(unplaced))) => {
+            return Err(Refusal::Table(format!("the {what} entry is no partition: {unplaced:?}")))
+        }
+        (matched, _) => return Err(Refusal::Partitions { what, matched }),
+    };
     Ok(Part {
-        index: out[0].index + 1,
-        start: out[0].first_lba,
-        sectors: out[0].lba_count(),
-        guid: out[0].unique_guid,
+        index: part.index() + 1,
+        start: part.first_lba(),
+        sectors: part.lba_count().get(),
+        guid: part.unique_guid(),
     })
 }
 

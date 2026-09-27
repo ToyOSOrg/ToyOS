@@ -21,9 +21,22 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    forbid(
+        clippy::arithmetic_side_effects,
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::as_conversions
+    )
+)]
 
 mod crc32;
 mod guid;
+
+use core::num::NonZeroU64;
 
 pub use crc32::{crc32, Crc32};
 pub use guid::Guid;
@@ -69,7 +82,7 @@ pub trait Sectors {
     fn lba_count(&self) -> u64;
     /// Granularity of `lba_count()` in logical blocks. A count floored by a
     /// coarser reader can omit at most one less than this value.
-    fn lba_count_granularity(&self) -> core::num::NonZeroU64;
+    fn lba_count_granularity(&self) -> NonZeroU64;
     /// Fill `buf` — exactly `lba_bytes()` long — with logical block `lba`.
     /// `false` means the read did not happen and its contents are unknown.
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool;
@@ -157,18 +170,67 @@ impl GptError {
 /// One partition entry, after it has been checked against the disk it is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Partition {
-    /// Position in the entry array, from 0.
-    pub index: u32,
-    pub type_guid: Guid,
-    pub unique_guid: Guid,
-    pub first_lba: u64,
-    /// Inclusive, as GPT stores it.
-    pub last_lba: u64,
+    index: u32,
+    type_guid: Guid,
+    unique_guid: Guid,
+    first_lba: u64,
+    last_lba: u64,
+    lba_count: NonZeroU64,
 }
 
 impl Partition {
-    pub const fn lba_count(&self) -> u64 {
-        self.last_lba - self.first_lba + 1
+    /// `stated`, if its blocks are a partition inside `header`'s usable range.
+    fn place(stated: &Stated, header: &Header) -> Result<Self, Unplaced> {
+        let unplaced = Unplaced {
+            index: stated.index,
+            type_guid: stated.type_guid,
+            unique_guid: stated.unique_guid,
+            first: stated.first,
+            last: stated.last,
+        };
+        if stated.first < header.first_usable_lba || stated.last > header.last_usable_lba {
+            return Err(unplaced);
+        }
+        let lba_count = stated
+            .last
+            .checked_sub(stated.first)
+            .and_then(|span| span.checked_add(1))
+            .and_then(NonZeroU64::new)
+            .ok_or(unplaced)?;
+        Ok(Self {
+            index: stated.index,
+            type_guid: stated.type_guid,
+            unique_guid: stated.unique_guid,
+            first_lba: stated.first,
+            last_lba: stated.last,
+            lba_count,
+        })
+    }
+
+    /// Position in the entry array, from 0.
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
+    pub const fn type_guid(&self) -> Guid {
+        self.type_guid
+    }
+
+    pub const fn unique_guid(&self) -> Guid {
+        self.unique_guid
+    }
+
+    pub const fn first_lba(&self) -> u64 {
+        self.first_lba
+    }
+
+    /// Inclusive, as GPT stores it.
+    pub const fn last_lba(&self) -> u64 {
+        self.last_lba
+    }
+
+    pub const fn lba_count(&self) -> NonZeroU64 {
+        self.lba_count
     }
 
     /// Whether this is an ESP *by type*. A sanity check for a log line and
@@ -178,7 +240,22 @@ impl Partition {
     }
 }
 
+/// An entry that exists and whose blocks are no partition on its disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unplaced {
+    pub index: u32,
+    pub type_guid: Guid,
+    pub unique_guid: Guid,
+    pub first: u64,
+    pub last: u64,
+}
+
+/// One used entry a scan hands back.
+pub type Entry = Result<Partition, Unplaced>;
+
 /// A located partition plus what the table around it looked like.
+///
+/// Made only by [`locate`]: no other entry of its table claims its blocks.
 ///
 /// The extra fields are not decoration: a log line saying "this disk has three
 /// partitions and none of them is ours" is a different diagnostic from "this
@@ -186,10 +263,24 @@ impl Partition {
 /// difference is the whole debugging session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Located {
-    pub partition: Partition,
-    pub disk_guid: Guid,
+    partition: Partition,
+    disk_guid: Guid,
+    used_entries: u32,
+}
+
+impl Located {
+    pub const fn partition(&self) -> Partition {
+        self.partition
+    }
+
+    pub const fn disk_guid(&self) -> Guid {
+        self.disk_guid
+    }
+
     /// Entries with a non-zero type GUID, i.e. partitions that exist.
-    pub used_entries: u32,
+    pub const fn used_entries(&self) -> u32 {
+        self.used_entries
+    }
 }
 
 /// The primary GPT header, once every field in it has been checked.
@@ -199,9 +290,26 @@ struct Header {
     first_usable_lba: u64,
     last_usable_lba: u64,
     entry_array_lba: u64,
+    /// One past the array's last block, which the header check proved
+    /// representable.
+    entry_array_end: u64,
     entry_count: u32,
     entry_bytes: u32,
+    /// `entry_bytes`, which the header check proved at least 128 and a
+    /// divisor of the block.
+    entry_len: usize,
     entry_array_crc: u32,
+}
+
+/// One used entry as the table states it, before anything is proven of its
+/// blocks.
+#[derive(Debug, Clone, Copy)]
+struct Stated {
+    index: u32,
+    type_guid: Guid,
+    unique_guid: Guid,
+    first: u64,
+    last: u64,
 }
 
 /// Find the partition carrying `target` on `dev`.
@@ -229,43 +337,38 @@ pub fn locate(dev: &mut dyn Sectors, target: Guid) -> Result<Located, GptError> 
     match locate_at(dev, 1, target, &disk) {
         Ok(located) => Ok(located),
         Err(primary_err) if primary_err.primary_never_checked_out() => {
-            locate_at(dev, disk.lba_count - 1, target, &disk).or(Err(primary_err))
+            locate_at(dev, disk.backup_header_lba, target, &disk).or(Err(primary_err))
         }
         Err(primary_err) => Err(primary_err),
     }
 }
 
 /// Every partition on `dev` whose *type* GUID is `target`, in entry order.
-///
-/// The same walk [`locate`] makes, up to and including the entry array's CRC
-/// and no further: a match here is a **candidate**, not a partition anything
-/// may read. `locate` on a candidate's own [`Partition::unique_guid`] is what
-/// applies the range and overlap checks a set cannot carry.
+/// `out` is cleared, then filled from the front.
 pub fn locate_type(
     dev: &mut dyn Sectors,
     target: Guid,
-    out: &mut [Partition],
+    out: &mut [Option<Entry>],
 ) -> Result<TypeScan, GptError> {
-    scan(dev, &|part| part.type_guid == target, out)
+    scan(dev, &|type_guid| type_guid == target, out)
 }
 
 /// Every partition on `dev`, in entry order: [`locate_type`] with no type
-/// asked for, so a match here is what the table *states* — checked up to the
-/// entry array's CRC and not for range or overlap.
-pub fn list(dev: &mut dyn Sectors, out: &mut [Partition]) -> Result<TypeScan, GptError> {
+/// asked for.
+pub fn list(dev: &mut dyn Sectors, out: &mut [Option<Entry>]) -> Result<TypeScan, GptError> {
     scan(dev, &|_| true, out)
 }
 
 fn scan(
     dev: &mut dyn Sectors,
-    keep: &dyn Fn(&Partition) -> bool,
-    out: &mut [Partition],
+    keep: &dyn Fn(Guid) -> bool,
+    out: &mut [Option<Entry>],
 ) -> Result<TypeScan, GptError> {
     let disk = open_disk(dev)?;
     match scan_type_at(dev, 1, keep, &disk, out) {
         Ok(scan) => Ok(scan),
         Err(primary_err) if primary_err.primary_never_checked_out() => {
-            scan_type_at(dev, disk.lba_count - 1, keep, &disk, out).or(Err(primary_err))
+            scan_type_at(dev, disk.backup_header_lba, keep, &disk, out).or(Err(primary_err))
         }
         Err(primary_err) => Err(primary_err),
     }
@@ -283,61 +386,109 @@ pub struct TypeScan {
 }
 
 struct Disk {
-    lba_bytes: u32,
+    lba: LbaSize,
     lba_count: u64,
+    /// `lba_count - 1`, where the backup header is: at least 2.
+    backup_header_lba: u64,
     lba_count_slack: u64,
+}
+
+/// A logical block size this crate parses, so one block is a fixed prefix of
+/// a [`Block`].
+#[derive(Clone, Copy)]
+enum LbaSize {
+    B512,
+    B1024,
+    B2048,
+    B4096,
+}
+
+/// One logical block of the largest size this crate parses.
+type Block = [u8; 4096];
+
+impl LbaSize {
+    fn of(bytes: u32) -> Option<Self> {
+        match bytes {
+            512 => Some(Self::B512),
+            1024 => Some(Self::B1024),
+            2048 => Some(Self::B2048),
+            4096 => Some(Self::B4096),
+            _ => None,
+        }
+    }
+
+    const fn bytes(self) -> u32 {
+        match self {
+            Self::B512 => 512,
+            Self::B1024 => 1024,
+            Self::B2048 => 2048,
+            Self::B4096 => 4096,
+        }
+    }
+
+    fn of_block(self, block: &mut Block) -> &mut [u8] {
+        match self {
+            Self::B512 => &mut block[..512],
+            Self::B1024 => &mut block[..1024],
+            Self::B2048 => &mut block[..2048],
+            Self::B4096 => &mut block[..],
+        }
+    }
 }
 
 /// The preamble both walks share: a block size this crate parses, a device big
 /// enough to hold a table, and a protective MBR at LBA 0.
 fn open_disk(dev: &mut dyn Sectors) -> Result<Disk, GptError> {
     let lba_bytes = dev.lba_bytes();
-    if !(MIN_LBA_BYTES..=MAX_LBA_BYTES).contains(&lba_bytes) || !lba_bytes.is_power_of_two() {
-        return Err(GptError::UnsupportedLbaSize(lba_bytes));
-    }
+    let lba = LbaSize::of(lba_bytes).ok_or(GptError::UnsupportedLbaSize(lba_bytes))?;
     let lba_count = dev.lba_count();
     // LBA 0 protective MBR, LBA 1 header, at least one block of entries.
-    if lba_count < 3 {
-        return Err(GptError::DeviceTooSmall(lba_count));
-    }
-    let lba_count_slack = dev.lba_count_granularity().get() - 1;
+    let backup_header_lba = match lba_count.checked_sub(1) {
+        Some(last) if last >= 2 => last,
+        _ => return Err(GptError::DeviceTooSmall(lba_count)),
+    };
+    let lba_count_slack = dev.lba_count_granularity().get().saturating_sub(1);
 
-    let mut block = [0u8; MAX_LBA_BYTES as usize];
-    let block = &mut block[..lba_bytes as usize];
+    let mut block: Block = [0; 4096];
+    let block = lba.of_block(&mut block);
 
     read(dev, 0, block)?;
     check_protective_mbr(block)?;
 
-    Ok(Disk { lba_bytes, lba_count, lba_count_slack })
+    Ok(Disk { lba, lba_count, backup_header_lba, lba_count_slack })
 }
 
 /// [`locate_type`]'s work against one header, primary or backup.
 fn scan_type_at(
     dev: &mut dyn Sectors,
     header_lba: u64,
-    keep: &dyn Fn(&Partition) -> bool,
+    keep: &dyn Fn(Guid) -> bool,
     disk: &Disk,
-    out: &mut [Partition],
+    out: &mut [Option<Entry>],
 ) -> Result<TypeScan, GptError> {
-    let mut block = [0u8; MAX_LBA_BYTES as usize];
-    let block = &mut block[..disk.lba_bytes as usize];
+    out.fill(None);
+    let capacity = out.len();
+    let mut block: Block = [0; 4096];
+    let block = disk.lba.of_block(&mut block);
 
     read(dev, header_lba, block)?;
     let header = parse_header(block, disk, header_lba)?;
 
+    // At most `entry_count`, a `u32`: never saturates.
     let mut matched = 0u32;
-    let mut listed = 0usize;
+    let mut slots = out.iter_mut();
     // Meaningless unless `walk_entries` returns `Ok`: the array's CRC is
     // checked at the end of the walk, and an `Err` hands the caller nothing.
-    let used_entries = walk_entries(dev, &header, disk.lba_bytes, &mut |part| {
-        if keep(&part) {
-            matched += 1;
-            if let Some(slot) = out.get_mut(listed) {
-                *slot = part;
-                listed += 1;
-            }
+    let used_entries = walk_entries(dev, &header, disk.lba, &mut |stated| {
+        if !keep(stated.type_guid) {
+            return;
+        }
+        matched = matched.saturating_add(1);
+        if let Some(slot) = slots.next() {
+            *slot = Some(Partition::place(&stated, &header));
         }
     })?;
+    let listed = usize::try_from(matched).map_or(capacity, |matched| matched.min(capacity));
 
     Ok(TypeScan { matched, listed, disk_guid: header.disk_guid, used_entries })
 }
@@ -350,27 +501,19 @@ fn locate_at(
     target: Guid,
     disk: &Disk,
 ) -> Result<Located, GptError> {
-    let mut block = [0u8; MAX_LBA_BYTES as usize];
-    let block = &mut block[..disk.lba_bytes as usize];
+    let mut block: Block = [0; 4096];
+    let block = disk.lba.of_block(&mut block);
 
     read(dev, header_lba, block)?;
     let header = parse_header(block, disk, header_lba)?;
 
-    let (found, used_entries) = scan_entries(dev, &header, target, disk.lba_bytes)?;
-    let Some(partition) = found else {
+    let (found, used_entries) = scan_entries(dev, &header, target, disk.lba)?;
+    let Some(stated) = found else {
         return Err(GptError::NotFound { used_entries });
     };
-
-    if partition.first_lba > partition.last_lba
-        || partition.first_lba < header.first_usable_lba
-        || partition.last_lba > header.last_usable_lba
-    {
-        return Err(GptError::PartitionRange {
-            first: partition.first_lba,
-            last: partition.last_lba,
-        });
-    }
-    check_no_overlap(dev, &header, &partition, disk.lba_bytes)?;
+    let partition = Partition::place(&stated, &header)
+        .map_err(|unplaced| GptError::PartitionRange { first: unplaced.first, last: unplaced.last })?;
+    check_no_overlap(dev, &header, &partition, disk.lba)?;
 
     Ok(Located { partition, disk_guid: header.disk_guid, used_entries })
 }
@@ -391,62 +534,97 @@ fn read(dev: &mut dyn Sectors, lba: u64, buf: &mut [u8]) -> Result<(), GptError>
 /// one of them is guessing.
 fn check_protective_mbr(lba0: &[u8]) -> Result<(), GptError> {
     // The MBR is 512 bytes at the front of LBA 0 whatever the block size is.
-    let Some(mbr) = lba0.get(..512) else {
+    let Some(mbr) = lba0.first_chunk::<512>() else {
         return Err(GptError::NoProtectiveMbr);
     };
     if mbr[510] != 0x55 || mbr[511] != 0xAA {
         return Err(GptError::NoProtectiveMbr);
     }
-    let mut protective = 0;
-    for record in 0..4 {
-        let ty = mbr[446 + record * 16 + 4];
-        match ty {
-            0 => {}
-            MBR_TYPE_PROTECTIVE => protective += 1,
-            _ => return Err(GptError::NoProtectiveMbr),
-        }
-    }
-    if protective != 1 {
+    // The type byte of each of the four 16-byte records from byte 446.
+    let types = [mbr[450], mbr[466], mbr[482], mbr[498]];
+    let protective = types.iter().filter(|&&ty| ty == MBR_TYPE_PROTECTIVE).count();
+    if protective != 1 || types.iter().any(|&ty| ty != 0 && ty != MBR_TYPE_PROTECTIVE) {
         return Err(GptError::NoProtectiveMbr);
     }
     Ok(())
 }
 
+/// Every header field this crate reads, as the disk states it.
+struct StatedHeader {
+    signature: [u8; 8],
+    revision: u32,
+    header_bytes: u32,
+    crc: u32,
+    reserved: u32,
+    my_lba: u64,
+    first_usable_lba: u64,
+    last_usable_lba: u64,
+    disk_guid: Guid,
+    entry_array_lba: u64,
+    entry_count: u32,
+    entry_bytes: u32,
+    entry_array_crc: u32,
+}
+
+impl StatedHeader {
+    /// `None` only where `block` is shorter than a header.
+    fn decode(block: &[u8]) -> Option<Self> {
+        Some(Self {
+            signature: bytes(block, 0)?,
+            revision: le_u32(block, 8)?,
+            header_bytes: le_u32(block, 12)?,
+            crc: le_u32(block, 16)?,
+            reserved: le_u32(block, 20)?,
+            my_lba: le_u64(block, 24)?,
+            first_usable_lba: le_u64(block, 40)?,
+            last_usable_lba: le_u64(block, 48)?,
+            disk_guid: bytes(block, 56).map(Guid)?,
+            entry_array_lba: le_u64(block, 72)?,
+            entry_count: le_u32(block, 80)?,
+            entry_bytes: le_u32(block, 84)?,
+            entry_array_crc: le_u32(block, 88)?,
+        })
+    }
+}
+
 fn parse_header(lba1: &[u8], disk: &Disk, header_lba: u64) -> Result<Header, GptError> {
-    let Disk { lba_bytes, lba_count, lba_count_slack } = *disk;
-    if lba1.get(..8) != Some(&HEADER_SIGNATURE[..]) {
+    let Disk { lba, lba_count, backup_header_lba, lba_count_slack } = *disk;
+    let lba_bytes = lba.bytes();
+    let Some(stated) = StatedHeader::decode(lba1) else {
+        return Err(GptError::NoHeader);
+    };
+    if &stated.signature != HEADER_SIGNATURE {
         return Err(GptError::NoHeader);
     }
-    let revision = le_u32(lba1, 8);
-    if revision != HEADER_REVISION_1_0 {
-        return Err(GptError::UnsupportedRevision(revision));
+    if stated.revision != HEADER_REVISION_1_0 {
+        return Err(GptError::UnsupportedRevision(stated.revision));
     }
-    let header_bytes = le_u32(lba1, 12);
+    let header_bytes = stated.header_bytes;
     if header_bytes < MIN_HEADER_BYTES || header_bytes > lba_bytes {
         return Err(GptError::HeaderSize(header_bytes));
     }
-    let reserved = le_u32(lba1, 20);
-    if reserved != 0 {
-        return Err(GptError::HeaderReserved(reserved));
+    if stated.reserved != 0 {
+        return Err(GptError::HeaderReserved(stated.reserved));
     }
-    let my_lba = le_u64(lba1, 24);
-    if my_lba != header_lba {
-        return Err(GptError::HeaderMisplaced(my_lba));
+    if stated.my_lba != header_lba {
+        return Err(GptError::HeaderMisplaced(stated.my_lba));
     }
 
-    let stored_crc = le_u32(lba1, 16);
-    let computed = header_crc(lba1, header_bytes as usize);
-    if stored_crc != computed {
-        return Err(GptError::HeaderCrc { stored: stored_crc, computed });
+    let covered = usize::try_from(header_bytes).ok().and_then(|len| lba1.get(..len));
+    let Some(computed) = covered.and_then(header_crc) else {
+        return Err(GptError::HeaderSize(header_bytes));
+    };
+    if stated.crc != computed {
+        return Err(GptError::HeaderCrc { stored: stated.crc, computed });
     }
 
-    let first_usable_lba = le_u64(lba1, 40);
-    let last_usable_lba = le_u64(lba1, 48);
+    let (first_usable_lba, last_usable_lba) = (stated.first_usable_lba, stated.last_usable_lba);
     if first_usable_lba < 2 || last_usable_lba < first_usable_lba || last_usable_lba >= lba_count {
         return Err(GptError::UsableRange { first: first_usable_lba, last: last_usable_lba });
     }
 
-    let entry_bytes = le_u32(lba1, 84);
+    let entry_bytes = stated.entry_bytes;
+    let entry_len = usize::try_from(entry_bytes).map_err(|_| GptError::EntrySize(entry_bytes))?;
     if entry_bytes < MIN_ENTRY_BYTES
         || !entry_bytes.is_power_of_two()
         || entry_bytes > lba_bytes
@@ -454,15 +632,16 @@ fn parse_header(lba1: &[u8], disk: &Disk, header_lba: u64) -> Result<Header, Gpt
     {
         return Err(GptError::EntrySize(entry_bytes));
     }
-    let entry_count = le_u32(lba1, 80);
-    let array_bytes = entry_count as u64 * entry_bytes as u64;
+    let entry_count = stated.entry_count;
+    let too_big = GptError::EntryArrayTooBig { entries: entry_count, entry_size: entry_bytes };
+    let array_bytes = u64::from(entry_count).checked_mul(u64::from(entry_bytes)).ok_or(too_big)?;
     if array_bytes == 0 || array_bytes > MAX_ENTRY_ARRAY_BYTES {
-        return Err(GptError::EntryArrayTooBig { entries: entry_count, entry_size: entry_bytes });
+        return Err(too_big);
     }
 
-    let entry_array_lba = le_u64(lba1, 72);
-    let array_lbas = array_bytes.div_ceil(lba_bytes as u64);
-    let array_end = entry_array_lba
+    let entry_array_lba = stated.entry_array_lba;
+    let array_lbas = array_bytes.div_ceil(u64::from(lba_bytes));
+    let entry_array_end = entry_array_lba
         .checked_add(array_lbas)
         .ok_or(GptError::EntryArrayMisplaced { lba: entry_array_lba, lbas: array_lbas })?;
     // The primary's array sits between the header block and the first usable
@@ -472,9 +651,9 @@ fn parse_header(lba1: &[u8], disk: &Disk, header_lba: u64) -> Result<Header, Gpt
     // is data somebody may be using, or off the device, and a table that says
     // otherwise describes a different disk.
     let misplaced = if header_lba == 1 {
-        entry_array_lba < 2 || array_end > first_usable_lba
+        entry_array_lba < 2 || entry_array_end > first_usable_lba
     } else {
-        entry_array_lba <= last_usable_lba || array_end > header_lba
+        entry_array_lba <= last_usable_lba || entry_array_end > header_lba
     };
     if misplaced {
         return Err(GptError::EntryArrayMisplaced { lba: entry_array_lba, lbas: array_lbas });
@@ -485,31 +664,36 @@ fn parse_header(lba1: &[u8], disk: &Disk, header_lba: u64) -> Result<Header, Gpt
     // the clamp keeps the backup header itself unconcedable.
     let backup_array_lba = lba_count
         .saturating_add(lba_count_slack)
-        .saturating_sub(1 + array_lbas)
-        .min(lba_count.saturating_sub(1));
+        .saturating_sub(array_lbas.saturating_add(1))
+        .min(backup_header_lba);
     if header_lba == 1 && last_usable_lba >= backup_array_lba {
         return Err(GptError::UsableRangeCoversBackup { last: last_usable_lba, backup_array_lba });
     }
 
     Ok(Header {
-        disk_guid: read_guid(lba1, 56),
+        disk_guid: stated.disk_guid,
         first_usable_lba,
         last_usable_lba,
         entry_array_lba,
+        entry_array_end,
         entry_count,
         entry_bytes,
-        entry_array_crc: le_u32(lba1, 88),
+        entry_len,
+        entry_array_crc: stated.entry_array_crc,
     })
 }
 
 /// The header's CRC is taken over itself with its own CRC field zeroed, so it
 /// is computed in three pieces rather than by copying the block to patch it.
-fn header_crc(lba1: &[u8], header_bytes: usize) -> u32 {
+/// `None` only where `covered` is shorter than the CRC field's end.
+fn header_crc(covered: &[u8]) -> Option<u32> {
+    let (before, rest) = covered.split_first_chunk::<16>()?;
+    let (_stored, after) = rest.split_first_chunk::<4>()?;
     let mut crc = Crc32::new();
-    crc.update(&lba1[..16]);
+    crc.update(before);
     crc.update(&[0; 4]);
-    crc.update(&lba1[20..header_bytes]);
-    crc.finish()
+    crc.update(after);
+    Some(crc.finish())
 }
 
 /// Walk the entry array once, checking its CRC as we go, and show `visit`
@@ -522,46 +706,32 @@ fn header_crc(lba1: &[u8], header_bytes: usize) -> u32 {
 fn walk_entries(
     dev: &mut dyn Sectors,
     header: &Header,
-    lba_bytes: u32,
-    visit: &mut dyn FnMut(Partition),
+    lba: LbaSize,
+    visit: &mut dyn FnMut(Stated),
 ) -> Result<u32, GptError> {
-    let mut block = [0u8; MAX_LBA_BYTES as usize];
-    let block = &mut block[..lba_bytes as usize];
+    let mut block: Block = [0; 4096];
+    let block = lba.of_block(&mut block);
 
-    let entries_per_lba = lba_bytes / header.entry_bytes;
     let mut crc = Crc32::new();
-    let mut remaining = header.entry_count as u64 * header.entry_bytes as u64;
+    let mut indices = 0..header.entry_count;
+    // At most `entry_count`, a `u32`: never saturates.
     let mut used = 0u32;
-    let mut index = 0u32;
-    let mut lba = header.entry_array_lba;
 
-    while remaining > 0 {
-        read(dev, lba, block)?;
-        let take = remaining.min(lba_bytes as u64) as usize;
-        crc.update(&block[..take]);
-
-        for slot in 0..entries_per_lba {
-            if index >= header.entry_count {
-                break;
+    for at in header.entry_array_lba..header.entry_array_end {
+        read(dev, at, block)?;
+        // The array is `entry_count` whole entries and nothing after them, so
+        // the entries walked are exactly the bytes its CRC covers.
+        for entry in block.chunks_exact(header.entry_len) {
+            let Some(index) = indices.next() else { break };
+            crc.update(entry);
+            let Some(stated) = Stated::decode(index, entry) else {
+                return Err(GptError::EntrySize(header.entry_bytes));
+            };
+            if !stated.type_guid.is_zero() {
+                used = used.saturating_add(1);
+                visit(stated);
             }
-            let at = slot as usize * header.entry_bytes as usize;
-            let entry = &block[at..at + header.entry_bytes as usize];
-            let type_guid = read_guid(entry, 0);
-            if !type_guid.is_zero() {
-                used += 1;
-                visit(Partition {
-                    index,
-                    type_guid,
-                    unique_guid: read_guid(entry, 16),
-                    first_lba: le_u64(entry, 32),
-                    last_lba: le_u64(entry, 40),
-                });
-            }
-            index += 1;
         }
-
-        remaining -= take as u64;
-        lba += 1;
     }
 
     let computed = crc.finish();
@@ -571,23 +741,36 @@ fn walk_entries(
     Ok(used)
 }
 
+impl Stated {
+    /// `None` only where `entry` is shorter than the fields read.
+    fn decode(index: u32, entry: &[u8]) -> Option<Self> {
+        Some(Self {
+            index,
+            type_guid: bytes(entry, 0).map(Guid)?,
+            unique_guid: bytes(entry, 16).map(Guid)?,
+            first: le_u64(entry, 32)?,
+            last: le_u64(entry, 40)?,
+        })
+    }
+}
+
 /// The entry carrying the unique GUID `target`, out of a walk whose CRC held.
 fn scan_entries(
     dev: &mut dyn Sectors,
     header: &Header,
     target: Guid,
-    lba_bytes: u32,
-) -> Result<(Option<Partition>, u32), GptError> {
-    let mut found: Option<Partition> = None;
+    lba: LbaSize,
+) -> Result<(Option<Stated>, u32), GptError> {
+    let mut found: Option<Stated> = None;
     let mut duplicate: Option<(u32, u32)> = None;
 
-    let used = walk_entries(dev, header, lba_bytes, &mut |part| {
-        if part.unique_guid != target {
+    let used = walk_entries(dev, header, lba, &mut |stated| {
+        if stated.unique_guid != target {
             return;
         }
         match &found {
-            None => found = Some(part),
-            Some(first) if duplicate.is_none() => duplicate = Some((first.index, part.index)),
+            None => found = Some(stated),
+            Some(first) if duplicate.is_none() => duplicate = Some((first.index, stated.index)),
             Some(_) => {}
         }
     })?;
@@ -608,53 +791,55 @@ fn check_no_overlap(
     dev: &mut dyn Sectors,
     header: &Header,
     matched: &Partition,
-    lba_bytes: u32,
+    lba: LbaSize,
 ) -> Result<(), GptError> {
-    let mut block = [0u8; MAX_LBA_BYTES as usize];
-    let block = &mut block[..lba_bytes as usize];
-
-    let entries_per_lba = lba_bytes / header.entry_bytes;
-    let mut remaining = header.entry_count as u64 * header.entry_bytes as u64;
-    let mut index = 0u32;
-    let mut lba = header.entry_array_lba;
-
-    while remaining > 0 {
-        read(dev, lba, block)?;
-        for slot in 0..entries_per_lba {
-            if index >= header.entry_count {
-                break;
-            }
-            let at = slot as usize * header.entry_bytes as usize;
-            let entry = &block[at..at + header.entry_bytes as usize];
-            if index != matched.index && !read_guid(entry, 0).is_zero() {
-                let first = le_u64(entry, 32);
-                let last = le_u64(entry, 40);
-                if first <= last && first <= matched.last_lba && matched.first_lba <= last {
-                    return Err(GptError::PartitionOverlap { index });
-                }
-            }
-            index += 1;
+    let mut overlap = None;
+    walk_entries(dev, header, lba, &mut |other| {
+        if overlap.is_none()
+            && other.index != matched.index
+            && other.first <= other.last
+            && other.first <= matched.last_lba
+            && matched.first_lba <= other.last
+        {
+            overlap = Some(other.index);
         }
-        remaining -= remaining.min(lba_bytes as u64);
-        lba += 1;
+    })?;
+    match overlap {
+        Some(index) => Err(GptError::PartitionOverlap { index }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-fn read_guid(buf: &[u8], at: usize) -> Guid {
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&buf[at..at + 16]);
-    Guid(out)
+/// `N` bytes of `buf` from `at`, or `None` where `buf` ends first.
+fn bytes<const N: usize>(buf: &[u8], at: usize) -> Option<[u8; N]> {
+    buf.get(at..)?.first_chunk::<N>().copied()
 }
 
-fn le_u32(buf: &[u8], at: usize) -> u32 {
-    let mut b = [0u8; 4];
-    b.copy_from_slice(&buf[at..at + 4]);
-    u32::from_le_bytes(b)
+fn le_u32(buf: &[u8], at: usize) -> Option<u32> {
+    bytes(buf, at).map(u32::from_le_bytes)
 }
 
-fn le_u64(buf: &[u8], at: usize) -> u64 {
-    let mut b = [0u8; 8];
-    b.copy_from_slice(&buf[at..at + 8]);
-    u64::from_le_bytes(b)
+fn le_u64(buf: &[u8], at: usize) -> Option<u64> {
+    bytes(buf, at).map(u64::from_le_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The public bounds and the sizes [`LbaSize`] admits are one range.
+    #[test]
+    fn the_block_sizes_parsed_are_the_declared_range() {
+        let parsed: [u32; 4] = [512, 1024, 2048, 4096];
+        for bytes in 0..=2 * MAX_LBA_BYTES {
+            let admitted = LbaSize::of(bytes).map(LbaSize::bytes);
+            assert_eq!(admitted.is_some(), parsed.contains(&bytes), "{bytes}");
+            assert_eq!(admitted.unwrap_or(bytes), bytes);
+        }
+        assert_eq!((parsed[0], parsed[3]), (MIN_LBA_BYTES, MAX_LBA_BYTES));
+        let mut block: Block = [0; 4096];
+        for lba in [LbaSize::B512, LbaSize::B1024, LbaSize::B2048, LbaSize::B4096] {
+            assert_eq!(lba.of_block(&mut block).len() as u32, lba.bytes());
+        }
+    }
 }
