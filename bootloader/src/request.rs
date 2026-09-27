@@ -89,7 +89,7 @@ pub fn firmware(handle: Handle, system_table: &SystemTable<Boot>, ours: Option<&
     if asked.first {
         match ours {
             None => println!("{ENTRIES} this loader came off no GPT partition, so it has no entry to put first"),
-            Some(guid) => match bootvars::esp(bs, guid).and_then(|part| bootvars::entry_for(rt, &part)) {
+            Some(guid) => match bootvars::esp(bs, guid).and_then(|esp| bootvars::entry_for(rt, &esp)) {
                 Err(why) => println!("{ENTRIES} this loader's own ESP has no entry to put first: {why}"),
                 Ok((number, made)) => {
                     let made = if made { "written now" } else { "already there" };
@@ -107,7 +107,7 @@ pub fn firmware(handle: Handle, system_table: &SystemTable<Boot>, ours: Option<&
     }
     let Some(guid) = esp else { return Fired::Nothing };
     let named = toyos_gpt::Guid(guid);
-    match bootvars::esp(bs, &guid).and_then(|part| bootvars::entry_for(rt, &part)) {
+    match bootvars::esp(bs, &guid).and_then(|esp| bootvars::entry_for(rt, &esp)) {
         Err(why) => {
             println!("{ENTRIES} no boot of ESP {named} is set, because {why}; this pass boots as it would have");
             Fired::Nothing

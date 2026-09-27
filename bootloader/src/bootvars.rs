@@ -46,10 +46,16 @@ const OPTION_BYTES: usize = 256;
 /// not one this loader rewrites.
 const MAX_ORDER: usize = 256;
 
-/// The EFI system partition `guid` names, as a HARDDRIVE node names it, with
-/// its removable-media loader checked to be there: `Err` says which of those
-/// it is not.
-pub fn esp(bs: &BootServices, guid: &[u8; 16]) -> Result<Partition, String> {
+/// An EFI system partition as a HARDDRIVE node names it, and whether its
+/// removable-media loader is there to write an entry for.
+pub struct Esp {
+    pub part: Partition,
+    /// `Err` says why an entry for its removable path would boot nothing.
+    removable: Result<(), String>,
+}
+
+/// The EFI system partition `guid` names, or which of those it is not.
+pub fn esp(bs: &BootServices, guid: &[u8; 16]) -> Result<Esp, String> {
     let handle = crate::loaderlog::volume_handle(bs, guid)?;
     let info = crate::rootimage::try_get_protocol::<PartitionInfo>(bs, handle)
         .map_err(|e| alloc::format!("the partition names no partition record ({e:?})"))?;
@@ -81,9 +87,11 @@ pub fn esp(bs: &BootServices, guid: &[u8; 16]) -> Result<Partition, String> {
         .map_err(|e| alloc::format!("its volume would not open ({e:?})"))?;
     let mut root = fs.open_volume().map_err(|e| alloc::format!("it has no volume ({e})"))?;
     let loader = CString16::try_from(crate::arch::REMOVABLE_PATH).expect("the removable path is ASCII");
-    root.open(&loader, FileMode::Read, FileAttribute::empty())
-        .map_err(|e| alloc::format!("it carries no {} ({e})", crate::arch::REMOVABLE_PATH))?;
-    Ok(part)
+    let removable = root
+        .open(&loader, FileMode::Read, FileAttribute::empty())
+        .map(|_| ())
+        .map_err(|e| alloc::format!("it carries no {} ({e})", crate::arch::REMOVABLE_PATH));
+    Ok(Esp { part, removable })
 }
 
 /// A `Boot####` entry: its number and its option's bytes.
@@ -104,15 +112,20 @@ fn entries(rt: &RuntimeServices) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
-/// The entry that boots `part`: the lowest active one already naming it, or
-/// one written here at the lowest free number. Its number, and whether it was
-/// written.
-pub fn entry_for(rt: &RuntimeServices, part: &Partition) -> Result<(u16, bool), String> {
+/// The entry that boots `esp`: the lowest active one already naming it —
+/// whatever file it boots there, the owner's own entry among them — or one
+/// written here for its removable-media loader, at the lowest free number.
+/// Its number, and whether it was written.
+pub fn entry_for(rt: &RuntimeServices, esp: &Esp) -> Result<(u16, bool), String> {
+    let part = &esp.part;
     let held = entries(rt)?;
     if let Some(number) =
         held.iter().filter(|(_, o)| entry::active(o) && entry::names(o, &part.guid)).map(|(n, _)| *n).min()
     {
         return Ok((number, false));
+    }
+    if let Err(why) = &esp.removable {
+        return Err(alloc::format!("no entry names it, and {why}"));
     }
     let used: Vec<u16> = held.iter().map(|(n, _)| *n).collect();
     let number = entry::free(&used).ok_or("every Boot#### number is taken")?;
