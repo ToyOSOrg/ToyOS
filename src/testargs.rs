@@ -158,6 +158,7 @@ declare_flags!(pub SUITE = {
     pub SHARD = "--shard", Next;
     pub SLOW_USB = "--slow-usb", None;
     pub NIGHTLY = "--nightly", None;
+    pub WEEKLY = "--weekly", None;
     /// The metal profile: the registrations that run on the T14, batched into
     /// images and judged off the log the stick came back with.
     pub METAL = "--metal", None;
@@ -221,12 +222,22 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
                 .to_string(),
         );
     }
-    if has(&NIGHTLY) && has(&AUDIO_GATE) {
+    if has(&NIGHTLY) && has(&WEEKLY) {
         return Err(
-            "--nightly and --audio-gate are separate tiers and cannot be combined; run one \
-             tier at a time"
+            "--weekly runs the nightly tier too, so a --nightly beside it would be read by \
+             nothing; write one"
                 .to_string(),
         );
+    }
+    for reach in [&NIGHTLY, &WEEKLY] {
+        for other in [&AUDIO_GATE, &METAL] {
+            if has(reach) && has(other) {
+                return Err(format!(
+                    "{} and {} are separate tiers and cannot be combined; run one tier at a time",
+                    reach.name, other.name
+                ));
+            }
+        }
     }
     Ok(filter)
 }
@@ -261,16 +272,24 @@ mod tests {
     }
 
     #[test]
-    fn nightly_and_audio_gate_are_refused_by_the_argv_validator() {
-        for argv in [
-            vec!["--nightly", "--audio-gate", "30"],
-            vec!["--audio-gate=30", "--nightly"],
+    fn a_reach_and_another_tier_are_refused_by_the_argv_validator() {
+        for (argv, reach, other) in [
+            (vec!["--nightly", "--audio-gate", "30"], "--nightly", "--audio-gate"),
+            (vec!["--audio-gate=30", "--nightly"], "--nightly", "--audio-gate"),
+            (vec!["--weekly", "--audio-gate", "30"], "--weekly", "--audio-gate"),
+            (vec!["--metal", "--nightly"], "--nightly", "--metal"),
+            (vec!["--weekly", "--metal"], "--weekly", "--metal"),
         ] {
             let refusal = parse_owned(&argv).unwrap_err();
-            assert!(refusal.contains("--nightly"), "{refusal}");
-            assert!(refusal.contains("--audio-gate"), "{refusal}");
-            assert!(refusal.contains("cannot be combined"), "{refusal}");
+            assert!(refusal.contains(reach) && refusal.contains(other), "{argv:?}: {refusal}");
+            assert!(refusal.contains("cannot be combined"), "{argv:?}: {refusal}");
         }
+    }
+
+    #[test]
+    fn the_weekly_reach_refuses_a_nightly_it_already_runs() {
+        let refusal = parse_owned(&["--nightly", "--weekly"]).unwrap_err();
+        assert!(refusal.contains("read by nothing"), "{refusal}");
     }
 
     #[test]
@@ -489,10 +508,11 @@ mod tests {
             vec!["--host-builds", "0"],
             vec!["--shard", "2/4"],
             vec!["--nightly"],
+            vec!["--weekly"],
+            vec!["--weekly", "--shard", "2/12", "--jobs", "1"],
             vec!["--debug"],
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
-            vec!["--metal", "--nightly"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
         }

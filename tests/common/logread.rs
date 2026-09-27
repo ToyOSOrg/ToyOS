@@ -58,15 +58,6 @@ struct Contaminated {
 }
 
 /// The conservation law, at one width.
-///
-/// **Three registered names and not one, and the reason is the fast tier's
-/// line.** What the law is about is concurrent producers, so a machine with one
-/// CPU and a machine with eight are different subjects rather than one subject
-/// measured three times: `--smp 1` is where the reader and the one producer
-/// share a CPU, `--smp 4` and `--smp 8` are where they do not. One name over
-/// all three boots measured 17,112 ms in CI — over the fast tier's 10 s line, and the
-/// gate the whole design turns on may not sit in the nightly tier — while each
-/// boot on its own is comfortably under it.
 fn conservation(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -110,22 +101,6 @@ pub fn log_conservation_smp1(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     conservation(test_config, c_bins, rust_bins, 1)
-}
-
-pub fn log_conservation_smp4(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    conservation(test_config, c_bins, rust_bins, 4)
-}
-
-pub fn log_conservation_smp8(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    conservation(test_config, c_bins, rust_bins, 8)
 }
 
 /// The nested-`emit` gate: an interrupt that logs, inside another `emit`, on one CPU.
