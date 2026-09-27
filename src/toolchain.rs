@@ -1004,9 +1004,9 @@ mod tests {
         assert!(said.contains("clang") && !said.contains("rust-lld,"), "the refusal names clang alone: {said}");
     }
 
-    /// **LLD is rebuilt when the LLVM commit moves, and only then**: the stamp
-    /// bootstrap skips LLD's build by goes when the commit LLD was built
-    /// against is not the one about to be built, and stays when it is.
+    /// **LLD is rebuilt when the LLVM commit moves, and only then**: bootstrap's
+    /// LLD stamp goes when LLD was built against another commit than the one
+    /// about to be built, and stays when it was built against that one.
     #[test]
     fn lld_is_rebuilt_exactly_when_its_llvm_moves() {
         let build = TempDir::new("lld-follows");
