@@ -918,7 +918,7 @@ pub fn misaligned_data_disk(path: &Path, len: u64) -> u64 {
     start
 }
 
-/// Block 0 of a volume the kernel may format: the magic and its block count.
+/// Block 0 of a volume: the magic and its block count.
 fn designation(blocks: u64) -> [u8; SECTOR] {
     let mut block = [0u8; SECTOR];
     block[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);

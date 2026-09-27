@@ -1530,9 +1530,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // still mapped: the verdict is the first holder's own grant, read in the
     // guest after the second holder wrote its own.
     ("userdev_residue_is_its_own", Sched::Parallel, Tier::Fast),
-    // blockd, the NVMe driver in userland, on a second controller beside the
-    // kernel's: partitions served and timed against the kernel's driver; a
-    // controller reset and its own death, each survived by the client and
+    // blockd, the NVMe driver in userland, on a second controller: partitions
+    // served; a controller reset and its own death, each survived by the client and
     // judged off the image by the host's readers; and a transfer outside what
     // its function was lent, which is a fault record. Each boot runs several
     // blockd lifetimes and one waits out a ten-second silence.

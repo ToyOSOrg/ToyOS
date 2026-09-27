@@ -28,3 +28,5 @@ nothing says whether metal pays it.
 **Exit**: the same interleaved runs on the T14, with the copy out of a
 shared mapping timed beside a heap-to-heap one; a cost metal also pays is a
 defect filed against the mapping, one it does not is closed here.
+
+Owner: the orchestrator, which holds the T14 the exit runs on.

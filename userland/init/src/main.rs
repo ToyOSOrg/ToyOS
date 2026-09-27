@@ -617,7 +617,7 @@ impl<'a> Service<'a> {
             0 => Served::Keep(&kept.acceptors),
             _ => Served::Restart { acceptors: &kept.acceptors, owed },
         };
-        let storage = storage_endowment(self.program, self.role, syscap);
+        let storage = storage_endowment(self.program, self.role, syscap).map_err(std::io::Error::other)?;
         let (child, devices) = start(
             Command::new(path),
             self.program,
@@ -1660,14 +1660,11 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
 /// its two partitions are claimed only as `toyos_update::slots::grant` admits
 /// them.
 fn slot_grant(syscap: &SysCap) -> Result<[(&'static str, toyos::Device); 3], String> {
-    use toyos_abi::inventory::{PartState, Partition, RawRecord, Record};
-    let asked = syscap.inventory(&mut []).map_err(|e| format!("the inventory would not count: {e:?}"))?;
-    let mut raw = vec![RawRecord::EMPTY; asked];
-    let n = syscap.inventory(&mut raw).map_err(|e| format!("the inventory would not read: {e:?}"))?;
-    let parts: Vec<Partition> = raw[..n]
-        .iter()
-        .filter_map(|r| match Record::decode(r) {
-            Ok(Record::Partition(p)) => Some(p),
+    use toyos_abi::inventory::{PartState, Partition, Record};
+    let parts: Vec<Partition> = inventory(syscap)?
+        .into_iter()
+        .filter_map(|r| match r {
+            Record::Partition(p) => Some(p),
             _ => None,
         })
         .collect();
@@ -2193,12 +2190,8 @@ struct Storage {
 }
 
 /// Every record the kernel's inventory answers.
-fn inventory(syscap: &SysCap) -> Vec<toyos_abi::inventory::Record> {
-    use toyos_abi::inventory::{RawRecord, Record};
-    let Ok(asked) = syscap.inventory(&mut []) else { return Vec::new() };
-    let mut raw = vec![RawRecord::EMPTY; asked];
-    let Ok(n) = syscap.inventory(&mut raw) else { return Vec::new() };
-    raw[..n].iter().filter_map(|r| Record::decode(r).ok()).collect()
+fn inventory(syscap: &SysCap) -> Result<Vec<toyos_abi::inventory::Record>, String> {
+    toyos_inventory::read(|buf| syscap.inventory(buf)).map_err(|why| why.to_string())
 }
 
 /// The unique GUID the loader named for `role`.
@@ -2221,19 +2214,19 @@ fn guid_text(guid: [u8; 16]) -> String {
 /// claim when a disk the kernel drives carries it — the stick, until usbd
 /// serves it — and otherwise the partition's GUID, which it opens through the
 /// block service; DATA it finds by type there itself.
-fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> Storage {
+fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> Result<Storage, String> {
     use toyos_abi::inventory::{Record, Role};
     let mut storage = Storage::default();
     let is_block = program.serves.iter().any(|s| s == toyos_blockring::PORT);
     if !is_block && role.is_none() {
-        return storage;
+        return Ok(storage);
     }
-    let records = inventory(syscap);
+    let records = inventory(syscap)?;
     if is_block {
         if let Some(root) = loaded(&records, Role::Root) {
             storage.args.extend(["--running".to_string(), guid_text(root)]);
         }
-        return storage;
+        return Ok(storage);
     }
     let role = role.expect("checked above");
     storage.args.push(role.to_string());
@@ -2278,7 +2271,7 @@ fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> 
             many.len()
         ),
     }
-    storage
+    Ok(storage)
 }
 
 /// The manifest, off ROOT through the kernel's own `open`.

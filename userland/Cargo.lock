@@ -1652,6 +1652,7 @@ dependencies = [
  "toyos-abi",
  "toyos-blockring",
  "toyos-gpt",
+ "toyos-inventory",
  "toyos-logstream",
  "toyos-manifest",
  "toyos-quiesce",
@@ -4121,6 +4122,13 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-inspect"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
+name = "toyos-inventory"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",

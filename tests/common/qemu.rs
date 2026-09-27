@@ -2447,13 +2447,11 @@ pub struct BootOptions {
     /// A second NVMe controller, for a driver in userland, backed by this file.
     ///
     /// QEMU's NVMe under Intel's ids (`use-intel-id`, `8086:5845`), so a claim
-    /// names it apart from the one the kernel drives; its MSI-X table in a BAR
+    /// names it; its MSI-X table in a BAR
     /// of its own (`msix-exclusive-bar`), because a claim never maps the BAR
     /// holding the table and NVMe keeps its registers in BAR 0; and its
     /// namespace's write cache on, so the controller has a volatile cache a
-    /// flush has to issue Flush for. Emitted after the kernel's controller, so
-    /// the kernel's first-by-class probe takes that one, and refused on a
-    /// profile with none — the kernel would take this one.
+    /// flush has to issue Flush for.
     pub userland_nvme: Option<PathBuf>,
     /// Have QEMU record every NVMe command it is sent, every completion it
     /// posts, every write with its sectors, every flush it runs and every
@@ -4613,10 +4611,6 @@ fn qemu_command(
             ));
     }
     if let Some(image) = &options.userland_nvme {
-        assert!(
-            shape.nvme_bytes != 0,
-            "a userland NVMe on a machine whose kernel drives none is the one the kernel takes"
-        );
         qemu.arg("-drive")
             .arg(format!("if=none,id=nvme1,format=raw,file={}", image.display()))
             .arg("-device")

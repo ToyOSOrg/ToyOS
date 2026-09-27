@@ -550,6 +550,8 @@ mod tests {
         assert!(v.open[&a].file.needs_reconcile());
         assert_eq!(v.close(a), Err(SyscallError::Io), "a close that left the entry behind is refused");
         assert!(v.open.contains_key(&a), "and its node kept");
+        assert_eq!(v.sync(), Ok(vec![(a, SyscallError::Io)]), "a sync the entry still refuses names it again");
+        assert!(v.open.contains_key(&a), "and keeps its node");
 
         refused.set(u64::MAX);
         assert_eq!(v.sync(), Ok(Vec::new()));

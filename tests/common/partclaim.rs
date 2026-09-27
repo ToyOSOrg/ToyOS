@@ -744,24 +744,6 @@ fn designate(device: &mut dyn gpt::DiskDevice, data: Span) -> Result<(), String>
     device.write_all(&stamp).map_err(|e| format!("stamp DATA: {e}"))
 }
 
-/// A disk at `path` carrying `parts` — each a name, a length in bytes and its
-/// unique GUID, on its own MiB boundary — and after them a DATA of
-/// `data_bytes` the kernel may format, so `/home` mounts from this disk.
-pub(super) fn craft_plain_disk(
-    path: &Path,
-    parts: &[(&'static str, u64, &'static str)],
-    data_bytes: u64,
-) -> Result<(), String> {
-    const DATA_GUID: &str = "C1A2B3D4-E5F6-4718-9A0B-1C2D3E4F5A6B";
-    let mut all: Vec<Part> =
-        parts.iter().map(|&(name, len, unique)| (name, len, PLAIN_TYPE, unique, ALIGNED)).collect();
-    all.push(("ToyOS data", data_bytes, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA_GUID, ALIGNED));
-    let total = MIB + all.iter().map(|p| p.1.next_multiple_of(MIB)).sum::<u64>() + 2 * MIB;
-    let (mut device, spans) = table(path, total, &all)?;
-    designate(&mut *device, *spans.last().expect("DATA was just added"))?;
-    device.flush().map_err(|e| format!("flush the disk: {e}"))
-}
-
 /// A USB stick of `bytes` carrying `parts`, each a name, a length and its
 /// unique GUID; their spans.
 pub(super) fn craft_stick(

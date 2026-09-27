@@ -102,7 +102,7 @@ impl SharedImage {
     /// memory the kernel allocated — a device aperture is no program, and a
     /// read of one is a device access — and the object holds them all.
     pub fn over(object: Arc<SharedMemObject>, len: u64) -> Result<Self, SyscallError> {
-        if len == 0 || len > object.size() || object.ram().is_none() {
+        if len > object.size() || object.ram().is_none() {
             return Err(SyscallError::InvalidArgument);
         }
         Ok(Self { object, size: len })

@@ -24,7 +24,7 @@ const MOUNTED: &str = "fsd: mounted the DATA volume";
 /// fsd's word for a volume of ours that did not, followed by the reason.
 const UNMOUNTABLE: &str = "fsd: the DATA volume is ours and does not mount (";
 /// fsd's word for DATA's directories served from memory.
-const IN_MEMORY: &str = "are in memory and will not survive a reboot";
+pub(super) const IN_MEMORY: &str = "are in memory and will not survive a reboot";
 
 /// Whether fsd said it serves DATA's directories as absent: every name under
 /// them refused, and never a volume in memory under the paths an owner's data
@@ -532,7 +532,7 @@ pub fn home_overwrite_reads_back(
         BootOptions { profile: qemu::Profile::MetalDisk, ..Default::default() },
     );
     let boot = qemu.boot_log().to_string();
-    if boot.contains("are in memory and will not survive a reboot") {
+    if boot.contains(IN_MEMORY) {
         return Err(format!(
             "/apps and /home fell back to memory, so nothing below touches the NVMe path:\n{boot}"
         ));
@@ -778,7 +778,7 @@ pub fn apps_and_home_are_one_filesystem(
         BootOptions { profile: qemu::Profile::MetalDisk, ..Default::default() },
     );
     let boot = qemu.boot_log().to_string();
-    if boot.contains("are in memory and will not survive a reboot") {
+    if boot.contains(IN_MEMORY) {
         return Err(format!(
             "/apps and /home fell back to memory, so the readback below would judge no device:\n\
              {boot}"

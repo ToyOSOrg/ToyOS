@@ -4,9 +4,9 @@
 //! **A write lands here and reaches the disk at a flush.** [`Cache::flush`]
 //! writes every dirty block, lowest first and in runs, then asks the disk to
 //! make them durable; a volume's sync is its own metadata written into the
-//! cache and then this. A cache holding more than [`DIRTY_LIMIT`] dirty blocks
-//! flushes by itself, so memory bounds the write-back and not the other way
-//! round.
+//! cache and then this. A write that would take the cache past [`DIRTY_LIMIT`]
+//! dirty blocks flushes first, and is refused whole when that flush is, so
+//! memory bounds the write-back and not the other way round.
 //!
 //! **Clean blocks are kept up to [`CLEAN_LIMIT`]** and the oldest-read goes
 //! first; a dirty block is never dropped.
@@ -137,33 +137,35 @@ impl<D: Disk> Cache<D> {
     /// next flush.
     pub fn write(&self, first: u64, data: &[u8]) -> Result<(), DiskError> {
         assert!(data.len() % BLOCK == 0, "fsd: a cache write of {} bytes", data.len());
-        let over = {
-            let mut inner = self.inner.borrow_mut();
-            if first.checked_add((data.len() / BLOCK) as u64).is_none_or(|end| end > inner.disk.blocks()) {
-                return Err(DiskError::Range);
-            }
-            for (k, chunk) in data.chunks_exact(BLOCK).enumerate() {
-                let block = first + k as u64;
-                let newly = match inner.slots.get_mut(&block) {
-                    Some(slot) => {
-                        slot.data.copy_from_slice(chunk);
-                        !std::mem::replace(&mut slot.dirty, true)
-                    }
-                    None => {
-                        let mut buf = Box::new([0u8; BLOCK]);
-                        buf.copy_from_slice(chunk);
-                        inner.slots.insert(block, Slot { data: buf, dirty: true });
-                        true
-                    }
-                };
-                if newly {
-                    inner.dirty += 1;
-                }
-            }
-            inner.dirty > DIRTY_LIMIT
+        let (end, over) = {
+            let inner = self.inner.borrow();
+            let end = match first.checked_add((data.len() / BLOCK) as u64) {
+                Some(end) if end <= inner.disk.blocks() => end,
+                _ => return Err(DiskError::Range),
+            };
+            let newly = (first..end).filter(|b| !inner.slots.get(b).is_some_and(|s| s.dirty)).count();
+            (end, inner.dirty + newly > DIRTY_LIMIT)
         };
         if over {
             self.flush()?;
+        }
+        let mut inner = self.inner.borrow_mut();
+        for (block, chunk) in (first..end).zip(data.chunks_exact(BLOCK)) {
+            let newly = match inner.slots.get_mut(&block) {
+                Some(slot) => {
+                    slot.data.copy_from_slice(chunk);
+                    !std::mem::replace(&mut slot.dirty, true)
+                }
+                None => {
+                    let mut buf = Box::new([0u8; BLOCK]);
+                    buf.copy_from_slice(chunk);
+                    inner.slots.insert(block, Slot { data: buf, dirty: true });
+                    true
+                }
+            };
+            if newly {
+                inner.dirty += 1;
+            }
         }
         Ok(())
     }
@@ -346,5 +348,50 @@ mod tests {
         assert_eq!(counts.dirty, 1);
         c.read(0, &mut out).unwrap();
         assert_eq!(out, vec![1; BLOCK]);
+    }
+
+    /// A disk that takes writes until it is told to refuse them.
+    struct Refusing {
+        ram: Ram,
+        refusing: bool,
+    }
+
+    impl Disk for Refusing {
+        fn blocks(&self) -> u64 {
+            self.ram.blocks()
+        }
+        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
+            self.ram.read(first, out)
+        }
+        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
+            match self.refusing {
+                true => Err(DiskError::Device),
+                false => self.ram.write(first, data),
+            }
+        }
+        fn flush(&mut self) -> Result<(), DiskError> {
+            match self.refusing {
+                true => Err(DiskError::Device),
+                false => self.ram.flush(),
+            }
+        }
+    }
+
+    #[test]
+    fn at_the_dirty_limit_a_refused_flush_refuses_the_write_and_the_cache_grows_no_larger() {
+        let limit = DIRTY_LIMIT as u64;
+        let c = Cache::new(Refusing { ram: Ram::new(limit + 16), refusing: false });
+        for b in 0..limit {
+            c.write(b, &[1; BLOCK]).unwrap();
+        }
+        c.inner.borrow_mut().disk.refusing = true;
+        let held = c.counts();
+        assert_eq!(held.dirty, DIRTY_LIMIT);
+        for b in limit..limit + 3 {
+            assert_eq!(c.write(b, &[2; BLOCK]), Err(DiskError::Device), "block {b}");
+        }
+        assert_eq!(c.counts(), held, "a refused write left the cache no larger");
+        c.write(0, &[3; BLOCK]).expect("a block already dirty is rewritten in place");
+        assert_eq!(c.counts(), held);
     }
 }
