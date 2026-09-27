@@ -20286,7 +20286,9 @@ fn main() {
     for row in redlist::DISABLED {
         eprintln!("[toyos] disabled: {} — {}", row.test, row.issue);
     }
-    let keep = |name: &str| filter.is_none_or(|f| name.contains(f)) && redlist::disabled(name).is_none();
+    let keep = |name: &str| {
+        filter.is_none_or(|f| name.contains(f)) && redlist::disabled(redlist::DISABLED, name).is_none()
+    };
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
     let list_mode = SUITE.present(&args, &testargs::LIST);

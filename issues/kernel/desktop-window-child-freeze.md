@@ -79,9 +79,6 @@ changed is that the test can now reach the snake rounds where the freeze was
 seen, which it could not before. Judge the next occurrence by the signature,
 never by a run.
 
-The `--skip` flag that used to be the answer is deleted: an exclusion nobody
-reviews cannot expire, and this one has to.
-
 **One thing #156's capture leaned on is closed, and it is not this.** The
 deadline was stored twice — `ParkedEntry.deadline` and `DeadlineHeap` — and
 `fire_deadlines`' lost claim discarded one copy, so a CPU could halt with

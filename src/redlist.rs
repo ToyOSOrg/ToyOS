@@ -35,10 +35,22 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
     Disabled { test: "doom_sound_flood", issue: "issues/audio/doom-sound-flood-played-full-scale-once.md" },
+    Disabled {
+        test: "handle_kill_policy",
+        issue: "issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md",
+    },
     Disabled { test: "handle_transfer", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled { test: "hda_tone", issue: "issues/audio/hda-tone-phase-check.md" },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },
+    Disabled {
+        test: "quiesce_dump_holds_the_stopped",
+        issue: "issues/kernel/quiesce-dump-holds-the-stopped-reds-wide-with-usb-transport-breaks.md",
+    },
+    Disabled {
+        test: "quiesce_wakes_on_the_last_exit",
+        issue: "issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md",
+    },
     Disabled {
         test: "sched_check_build",
         issue: "issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",
@@ -46,6 +58,10 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "screen_fatal_halt",
         issue: "issues/boot-media/screen-fatal-halt-reds-on-ci-with-a-usb-storage-transport-break-during-boot.md",
+    },
+    Disabled {
+        test: "shipped_config_boots",
+        issue: "issues/build/shipped-config-boots-ended-before-init-said-it-started-filepicker.md",
     },
     Disabled {
         test: "short_sleep_livelock",
@@ -59,11 +75,15 @@ pub const DISABLED: &[Disabled] = &[
         test: "usb_disk_index_stable",
         issue: "issues/hardware/usb-disk-index-stable-nothing-enumerates-on-the-first-controller.md",
     },
+    Disabled {
+        test: "xhci_flap",
+        issue: "issues/hardware/a-collapsed-replug-is-enumerated-only-when-another-port-event-arrives.md",
+    },
 ];
 
-/// The row that disables `test`, matched by the whole name.
-pub fn disabled(test: &str) -> Option<&'static Disabled> {
-    DISABLED.iter().find(|row| row.test == test)
+/// The row of `rows` that disables `test`, matched by the whole name.
+pub fn disabled<'a>(rows: &'a [Disabled], test: &str) -> Option<&'a Disabled> {
+    rows.iter().find(|row| row.test == test)
 }
 
 /// Whether `issue` has the one shape a per-test issue is allowed:
@@ -102,7 +122,7 @@ fn is_expected_red(path: &Path) -> bool {
 /// frontmatter says `status: expected-red`.
 pub fn check(rows: &[Disabled], registered: impl Fn(&str) -> bool, root: &Path) -> Result<(), String> {
     for (at, row) in rows.iter().enumerate() {
-        if rows[..at].iter().any(|earlier| earlier.test == row.test) {
+        if disabled(&rows[..at], row.test).is_some() {
             return Err(format!("{} is disabled twice", row.test));
         }
         if !registered(row.test) {
@@ -141,7 +161,7 @@ fn answer(rows: &[Disabled], asked: Option<&str>) -> String {
     let Some(test) = asked else {
         return rows.iter().map(|row| format!("{}  {}\n", row.test, row.issue)).collect();
     };
-    match rows.iter().find(|row| row.test == test) {
+    match disabled(rows, test) {
         Some(row) => format!("{test}: YES, disabled — it does not run.\n  {}\n", row.issue),
         None => format!("{test}: NO, not disabled — it runs, and its red fails the suite.\n"),
     }
@@ -222,10 +242,10 @@ mod tests {
     #[test]
     fn a_row_disables_its_whole_name_and_nothing_that_extends_it() {
         for row in DISABLED {
-            assert_eq!(disabled(row.test), Some(row));
-            assert_eq!(disabled(&format!("{}_controls", row.test)), None);
+            assert_eq!(disabled(DISABLED, row.test), Some(row));
+            assert_eq!(disabled(DISABLED, &format!("{}_controls", row.test)), None);
         }
-        assert_eq!(disabled(""), None);
+        assert_eq!(disabled(DISABLED, ""), None);
     }
 
     #[test]

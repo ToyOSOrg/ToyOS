@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-27
 ---
@@ -34,9 +34,13 @@ second census. The red boot's kernel reports a TLB shootdown wait of up to
 Not shown: which process held the tenth `SharedMem`, or that its release was
 the one in flight.
 
-`cargo run -- --known-red handle_kill_policy` answers NO.
+PR #542's nightly at 059c5de7 (run 36328646395, `guest (9)`), KVM, QEMU
+11.1.0, red with the same sentence, numbers included; that boot's kernel
+reports `tlb: shootdowns=89 wait=354978us max=66850us`. The branch changes no
+kernel or guest code.
 
-**Exit**: the census names the owner of a grown kind, and the red is
-attributed or the release is shown to finish before `wait` returns. Until then
-`handle_kill_policy` reds on main's nightly at a rate. It should go on #542's
-disabled list when that lands, citing this file.
+**Exit condition.** Re-enabled when the census names the owner of a grown kind,
+and the red is attributed or the release is shown to finish before `wait`
+returns. Owner: the census in
+`tests/toyos-rust-tests/src/bin/handle_kill_policy.rs` and the object release
+in `kernel/src/object/mod.rs`; nobody is holding it yet.

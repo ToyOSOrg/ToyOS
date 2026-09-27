@@ -51,16 +51,6 @@ durable evidence is quoted here.
 
 ## What closes it is a count, and the count is owed
 
-There is a leading explanation and it is not this entry's to argue: the
-already-fixed missing-`cld` class, with the before/after boot counts that make
-the case, and reasons that a machine-wide death at boot's edge under two suites
-on a branch carrying no kernel byte is that class's shape. It is not shown
-here, so it stands and so does this.
-
-**Nothing about it is a decision.** The row names its own retirement condition —
-three loaded suites of the fixed tree with no red under this name — and that is
-an instrument run: the result read rather than argued.
-
 **2026-09-04, run: six, and the row is retired.** Six full `cargo test` fast
 tiers in one worktree, each with single-test runs of the same suite beside it,
 four of the six contending with a second worktree (`toyos-rootfs3`) for guest
