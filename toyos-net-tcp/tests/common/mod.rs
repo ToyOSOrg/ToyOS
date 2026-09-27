@@ -440,7 +440,7 @@ impl H {
 
     pub fn with(config: Config) -> Self {
         Self {
-            tcp: Tcp::new(config),
+            tcp: Tcp::new(config).unwrap(),
             t: 0,
             now: Instant::from_nanos(0),
             base: 0,
@@ -630,12 +630,14 @@ impl H {
         buf
     }
 
-    /// The connection's variables, SND.UNA and SND.NXT in the test's numbers.
+    /// The connection's variables, A's sequence numbers in the test's numbers.
     pub fn info(&mut self) -> Info {
         let id = self.id();
         let mut info = self.tcp.info(id).expect("a synchronized connection");
         info.snd_una = toyos_net_tcp::Seq::new(self.spec(info.snd_una.get()));
         info.snd_nxt = toyos_net_tcp::Seq::new(self.spec(info.snd_nxt.get()));
+        info.high_rxt = info.high_rxt.map(|s| toyos_net_tcp::Seq::new(self.spec(s.get())));
+        info.rescue_rxt = info.rescue_rxt.map(|s| toyos_net_tcp::Seq::new(self.spec(s.get())));
         info
     }
 

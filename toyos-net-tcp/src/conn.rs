@@ -1,14 +1,14 @@
-//! ESTABLISHED through LAST-ACK: segment arrival in RFC 9293 §3.10.7.4's order with RFC 7323's
-//! PAWS and RFC 5961's checks, and the segment each transmit opportunity builds (§11.2's order).
+//! Segment arrival: the checks SYN-RECEIVED, ESTABLISHED through LAST-ACK, and TIME-WAIT share
+//! ([`screen`]), then ESTABLISHED through LAST-ACK in RFC 9293 §3.10.7.4's order, and the segment
+//! each transmit opportunity builds (§11.2's order).
 
-use alloc::vec::Vec;
 use core::num::NonZeroU16;
 use core::time::Duration;
 
 use toyos_net_wire::tcp::{SackBlock, SynOptions, TcpFlags, TcpOptions, TcpSegment, Timestamps};
 
 use crate::cc::Cc;
-use crate::counters::{Counter, Counters, Refusal};
+use crate::counters::{Counter, Log};
 use crate::ring::Ring;
 use crate::rtt::{Rtt, RTO_AFTER_HANDSHAKE_LOSS, RTO_MAX};
 use crate::rx::{Placed, Rx};
@@ -101,13 +101,12 @@ pub struct Ctx<'a> {
     pub tuple: Tuple,
     pub options: Options,
     pub orphan: bool,
-    pub counters: &'a mut Counters,
-    pub events: &'a mut Vec<Event>,
+    pub log: &'a mut Log,
 }
 
 impl Ctx<'_> {
     pub fn count(&mut self, counter: Counter) {
-        self.counters.add(counter, 1);
+        self.log.count(counter);
     }
 
     /// Challenge ACKs and every answer to an unacceptable segment share one allowance: one in
@@ -122,13 +121,79 @@ impl Ctx<'_> {
         true
     }
 
-    /// Counts a refusal, and names it for the log when its rule is one the log carries.
     pub fn refuse(&mut self, rule: Counter) {
-        self.count(rule);
-        if rule.logged() {
-            self.events.push(Event::Refused(Refusal { rule, local: self.tuple.local, remote: self.tuple.remote }));
+        self.log.refuse(rule, &self.tuple);
+    }
+}
+
+/// What [`screen`] made of a segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screened {
+    /// Acceptable, neither an RST nor a SYN in the window: TS.Recent is updated.
+    Pass,
+    /// Dropped; `challenge` owes the ACK the per-connection allowance may send.
+    Drop { challenge: bool },
+    /// Outside the window and not an RST; `old` when every sequence number in it is before RCV.NXT.
+    Unacceptable { old: bool },
+    /// An RST at RCV.NXT, or a SYN in the window where `syn_ends` (a passive child's).
+    Ends,
+}
+
+/// The checks every state from SYN-RECEIVED on makes of an arriving segment, each once: T-4's drop
+/// and PAWS (RFC 7323 §5.3 R1), acceptability (RFC 9293 Table 5), the TS.Recent update (RFC 7323
+/// §4.3), and RFC 5961's exact RST (§3.2) and SYN challenge (§4.2). The receiver stands at `next`
+/// with `window` and TS.Recent `ts`, having last acknowledged `last_ack_sent`.
+pub fn screen(seg: &In<'_>, next: Seq, window: u32, last_ack_sent: Seq, ts: Option<&mut Ts>, syn_ends: bool, ctx: &mut Ctx<'_>) -> Screened {
+    let now = ctx.now;
+    if let Some(recent) = ts.as_deref().filter(|_| !seg.rst()) {
+        let Some(t) = seg.options.timestamps() else {
+            ctx.refuse(Counter::TsMissing);
+            return Screened::Drop { challenge: false };
+        };
+        if recent.judges(now) && Stamp(t.value).before(Stamp(recent.recent)) {
+            ctx.count(Counter::PawsReject);
+            return Screened::Drop { challenge: true };
         }
     }
+    let len = seg.len();
+    let offset = seg.seq.since(next);
+    let acceptable = match (len, window) {
+        (0, 0) => offset == 0,
+        // Table 5 also takes the ACK at the right edge a peer sends once it filled the window: two
+        // peers that filled each other's windows over a hole would otherwise refuse each other's
+        // every ACK. An RST there stays outside (RFC 5961 §3.2).
+        (0, window) => offset < window || (offset == window && !seg.rst()),
+        (_, 0) => false,
+        (_, window) => offset < window || seg.seq.add(len.saturating_sub(1)).since(next) < window,
+    };
+    if !acceptable {
+        if seg.rst() {
+            return Screened::Drop { challenge: false };
+        }
+        return Screened::Unacceptable { old: len > 0 && seg.seq.add(len).at_or_before(next) };
+    }
+    if let (Some(recent), Some(t)) = (ts, seg.options.timestamps()) {
+        let newer = !recent.judges(now) || Stamp(t.value).at_or_after(Stamp(recent.recent));
+        if !seg.rst() && newer && seg.seq.at_or_before(last_ack_sent) {
+            recent.recent = t.value;
+            recent.recent_at = now;
+        }
+    }
+    if seg.rst() {
+        if seg.seq == next {
+            return Screened::Ends;
+        }
+        ctx.refuse(Counter::RstChallenged);
+        return Screened::Drop { challenge: true };
+    }
+    if seg.syn() && !seg.seq.before(next) {
+        if syn_ends {
+            return Screened::Ends;
+        }
+        ctx.refuse(Counter::SynChallenged);
+        return Screened::Drop { challenge: true };
+    }
+    Screened::Pass
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,8 +243,21 @@ pub struct Ts {
 }
 
 impl Ts {
-    pub fn clock(&self, now: Instant) -> u32 {
-        now.millis32().wrapping_add(self.offset)
+    /// RFC 7323 §5.5: TS.Recent judges PAWS until it is 24 days old.
+    fn judges(&self, now: Instant) -> bool {
+        now.since(self.recent_at) < TS_RECENT_VALID
+    }
+
+    /// What a segment sent now carries: TSval now, TSecr TS.Recent.
+    pub fn option(&self, now: Instant) -> Timestamps {
+        Timestamps { value: now.tsval(self.offset), echo: self.recent }
+    }
+
+    /// RFC 7323 §4.1: the round trip an echoed TSval measures, unless it is one we never sent or
+    /// one from the future.
+    pub fn echo_rtt(&self, echo: u32, now: Instant) -> Option<Duration> {
+        let age = Stamp(now.tsval(self.offset)).since(Stamp(echo));
+        (age < 1 << 31 && Stamp(echo).at_or_after(Stamp(self.first))).then(|| Duration::from_millis(u64::from(age)))
     }
 }
 
@@ -383,17 +461,28 @@ impl Sync {
         self.recovery != Recovery::None
     }
 
-    #[cfg(test)]
-    pub fn high_rxt(&self) -> Option<Seq> {
+    /// RFC 6675's HighRxt and RescueRxt, during SACK recovery.
+    pub fn sack_marks(&self) -> Option<(Seq, Option<Seq>)> {
         match self.recovery {
-            Recovery::Sack { high_rxt, .. } => Some(high_rxt),
+            Recovery::Sack { high_rxt, rescue, .. } => Some((high_rxt, rescue)),
             Recovery::None | Recovery::Fast { .. } => None,
         }
+    }
+
+    /// RFC 6675's SetPipe, HighRxt at SND.UNA outside SACK recovery.
+    pub fn pipe(&self) -> u32 {
+        self.tx.pipe(self.sack_marks().map_or(self.tx.una, |(high_rxt, _)| high_rxt), self.smss())
     }
 
     /// Eff.snd.MSS (RFC 9293 §3.7.1): SMSS everywhere below.
     pub fn smss(&self) -> u32 {
         self.cc.smss
+    }
+
+    /// The congestion window every send obeys (RFC 5681 §2): go-back, NextSeg, new data and
+    /// Limited Transmit read it here and nowhere else.
+    fn cwnd(&self) -> u32 {
+        self.cc.cwnd
     }
 
     fn ts_bytes(&self) -> u32 {
@@ -408,58 +497,23 @@ impl Sync {
 
     pub fn receive(&mut self, seg: &In<'_>, ctx: &mut Ctx<'_>) -> Verdict {
         let now = ctx.now;
-        if let Some(ts) = self.ts {
-            if !seg.rst() {
-                let Some(t) = seg.options.timestamps() else {
-                    ctx.refuse(Counter::TsMissing);
-                    return Verdict::Keep;
-                };
-                if now.since(ts.recent_at) < TS_RECENT_VALID && Stamp(t.value).before(Stamp(ts.recent)) {
-                    ctx.count(Counter::PawsReject);
+        match screen(seg, self.rx.next, self.rx.window(), self.rx.last_ack_sent, self.ts.as_mut(), false, ctx) {
+            Screened::Pass => {}
+            Screened::Drop { challenge } => {
+                if challenge {
                     self.unsolicited(ctx);
-                    return Verdict::Keep;
                 }
+                return Verdict::Keep;
             }
-        }
-        let len = seg.len();
-        let next = self.rx.next;
-        let window = self.rx.window();
-        let offset = seg.seq.since(next);
-        let acceptable = match (len, window) {
-            (0, 0) => seg.seq == next,
-            (0, _) => offset < window,
-            (_, 0) => false,
-            _ => offset < window || seg.seq.add(len.saturating_sub(1)).since(next) < window,
-        };
-        if !acceptable {
-            if !seg.rst() {
-                self.unacceptable(seg, ctx);
+            Screened::Unacceptable { old } => {
+                self.unacceptable(seg, old, ctx);
+                return Verdict::Keep;
             }
-            return Verdict::Keep;
+            Screened::Ends => return Verdict::Reset,
         }
         self.last_heard = now;
         self.ka_probes = 0;
-        let (seq, text, syn, fin) = self.trim(seg);
-        if let (Some(ts), Some(t)) = (self.ts.as_mut(), seg.options.timestamps()) {
-            let stale = now.since(ts.recent_at) >= TS_RECENT_VALID;
-            if !seg.rst() && (stale || Stamp(t.value).at_or_after(Stamp(ts.recent))) && seg.seq.at_or_before(self.rx.last_ack_sent) {
-                ts.recent = t.value;
-                ts.recent_at = now;
-            }
-        }
-        if seg.rst() {
-            if seg.seq == next {
-                return Verdict::Reset;
-            }
-            ctx.refuse(Counter::RstChallenged);
-            self.unsolicited(ctx);
-            return Verdict::Keep;
-        }
-        if syn {
-            ctx.refuse(Counter::SynChallenged);
-            self.unsolicited(ctx);
-            return Verdict::Keep;
-        }
+        let (seq, text, fin) = self.trim(seg);
         let Some(ack) = seg.ack else {
             return Verdict::Keep;
         };
@@ -529,10 +583,8 @@ impl Sync {
     }
 
     /// An unacceptable segment that is not an RST (RFC 9293 §3.10.7.4 first check).
-    fn unacceptable(&mut self, seg: &In<'_>, ctx: &mut Ctx<'_>) {
+    fn unacceptable(&mut self, seg: &In<'_>, old: bool, ctx: &mut Ctx<'_>) {
         let next = self.rx.next;
-        let len = seg.len();
-        let old = len > 0 && seg.seq.add(len).at_or_before(next);
         let keepalive = seg.seq == next.sub(1) && seg.text() <= 1;
         let probe = self.rx.window() == 0 && seg.seq == next;
         if old && seg.text() > 0 && self.sack_ok {
@@ -546,13 +598,11 @@ impl Sync {
 
     /// Only the new parts are processed: bytes before RCV.NXT (and a SYN there) and bytes at or
     /// past the right edge (and a FIN there) are cut.
-    fn trim<'s>(&self, seg: &In<'s>) -> (Seq, &'s [u8], bool, bool) {
+    fn trim<'s>(&self, seg: &In<'s>) -> (Seq, &'s [u8], bool) {
         let next = self.rx.next;
         let mut seq = seg.seq;
-        let mut syn = seg.syn();
-        if syn && seq.before(next) {
+        if seg.syn() && seq.before(next) {
             seq = seq.add(1);
-            syn = false;
         }
         let mut text = seg.payload;
         if seq.before(next) {
@@ -566,7 +616,7 @@ impl Sync {
             fin = false;
             text = text.get(..room).unwrap_or(text);
         }
-        (seq, text, syn, fin)
+        (seq, text, fin)
     }
 
     fn unsolicited(&mut self, ctx: &mut Ctx<'_>) {
@@ -585,7 +635,7 @@ impl Sync {
             return false;
         }
         let newly = if self.sack_ok {
-            self.tx.read_sack(ack, &seg.options, ctx.counters)
+            self.tx.read_sack(ack, &seg.options, ctx.log)
         } else {
             if seg.options.sack_blocks().len() > 0 {
                 ctx.count(Counter::SackUnnegotiated);
@@ -637,9 +687,8 @@ impl Sync {
         self.progress_since = Some(now);
         self.acked_since = Some(now);
         self.stalled = 0;
-        self.timeout_rtx = false;
         self.orphan_progress(now);
-        ctx.events.push(Event::Reachable(ctx.tuple.remote.addr));
+        ctx.log.event(Event::Reachable(ctx.tuple.remote.addr));
         let smss = self.smss();
         match self.recovery {
             Recovery::Fast { .. } if ack.sub(1).at_or_after(self.recover) => {
@@ -665,7 +714,24 @@ impl Sync {
         self.dupacks = 0;
         self.lt_budget = 0;
         self.lt_bytes = 0;
-        self.rtx_timer = if self.tx.flight() == 0 || self.persist.is_some() { None } else { Some(now.after(self.rtt.rto())) };
+        if self.tx.flight() == 0 {
+            self.rto_pending = false;
+        }
+        // RFC 6298 (5.2), (5.3); while the retransmission an expiry marked has not left, that
+        // hand-off starts the timer and a later expiry is the same segment's again.
+        if !self.rto_pending {
+            self.timeout_rtx = false;
+            self.rtx_timer = None;
+            self.arm(now);
+        }
+    }
+
+    /// RFC 6298 (5.1): the timer runs while sequence space that left is outstanding, and never
+    /// while the retransmission an expiry marked has yet to leave.
+    fn arm(&mut self, now: Instant) {
+        if self.rtx_timer.is_none() && self.persist.is_none() && !self.rto_pending && self.tx.flight() > 0 {
+            self.rtx_timer = Some(now.after(self.rtt.rto()));
+        }
     }
 
     fn sample(&mut self, seg: &In<'_>, ack: Seq, flight: u32, ctx: &mut Ctx<'_>) {
@@ -673,12 +739,12 @@ impl Sync {
         match self.ts {
             Some(ts) => {
                 let Some(t) = seg.options.timestamps() else { return };
-                let age = Stamp(ts.clock(now)).since(Stamp(t.echo));
-                if age < 1 << 31 && Stamp(t.echo).at_or_after(Stamp(ts.first)) {
-                    let expected = flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1);
-                    self.rtt.sample(Duration::from_millis(u64::from(age)), expected);
-                } else {
-                    ctx.count(Counter::TsEcrInvalid);
+                match ts.echo_rtt(t.echo, now) {
+                    Some(rtt) => {
+                        let expected = flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1);
+                        self.rtt.sample(rtt, expected);
+                    }
+                    None => ctx.count(Counter::TsEcrInvalid),
                 }
             }
             None => {
@@ -741,7 +807,7 @@ impl Sync {
     /// Persist runs while the peer offers a zero window and something is owed (RFC 9293 §3.8.6.1);
     /// data behind a shut window is not retransmitted by the timer.
     fn update_persist(&mut self, now: Instant) {
-        if self.tx.wnd == 0 && self.tx.owes() {
+        if self.tx.window() == 0 && self.tx.owes() {
             if self.persist.is_none() {
                 let rto = self.rtt.rto();
                 self.persist = Some(Persist { at: now.after(rto), interval: rto, from: self.tx.nxt, due: false, unanswered: false });
@@ -751,9 +817,7 @@ impl Sync {
             if self.tx.nxt.after(persist.from) {
                 self.rtx_next = Some(self.tx.una);
             }
-            if self.tx.flight() > 0 && self.rtx_timer.is_none() {
-                self.rtx_timer = Some(now.after(self.rtt.rto()));
-            }
+            self.arm(now);
         }
     }
 
@@ -765,7 +829,7 @@ impl Sync {
         } else if self.progress_since.is_none() {
             self.progress_since = Some(now);
         }
-        let waiting = self.tx.flight() > 0 || (self.tx.wnd == 0 && self.tx.owes());
+        let waiting = self.tx.flight() > 0 || (self.tx.window() == 0 && self.tx.owes());
         if !waiting {
             self.acked_since = None;
         } else if self.acked_since.is_none() {
@@ -852,7 +916,7 @@ impl Sync {
 
     /// The RST a timer's abort sends, whatever the state.
     pub fn reset_always(&self, now: Instant) -> Rst {
-        let ts = self.ts.map(|ts| Timestamps { value: ts.clock(now), echo: ts.recent });
+        let ts = self.ts.map(|ts| ts.option(now));
         Rst { seq: self.tx.reset_seq(), ack: Some(self.rx.next), ts }
     }
 
@@ -956,7 +1020,7 @@ impl Sync {
         self.stalled = self.stalled.saturating_add(1);
         if self.stalled == 3 {
             self.delivery_problem = true;
-            ctx.events.push(Event::Reverify(ctx.tuple.remote.addr));
+            ctx.log.event(Event::Reverify(ctx.tuple.remote.addr));
         }
     }
 
@@ -1005,7 +1069,7 @@ impl Sync {
     fn finish(&mut self, now: Instant, seq: Seq, len: u32, fin: bool, sack: Blocks) -> Out {
         let push = len > 0 && seq.add(len) == self.tx.data_end();
         let window = self.rx.advertise(self.smss());
-        let ts = self.ts.map(|ts| Timestamps { value: ts.clock(now), echo: ts.recent });
+        let ts = self.ts.map(|ts| ts.option(now));
         self.rx.sent_ack();
         let data = (self.tx.offset(seq).min(self.tx.buf.len()), usize::try_from(len).unwrap_or(0));
         Out { seq, kind: Kind::Ack { ack: self.rx.next, push, fin }, window, ts, sack, data }
@@ -1027,7 +1091,7 @@ impl Sync {
             self.sws_fired = false;
         }
         if resent {
-            ctx.counters.add(Counter::RetransmitBytes, u64::from(old.earlier(end).since(start)));
+            ctx.log.add(Counter::RetransmitBytes, u64::from(old.earlier(end).since(start)));
             self.timing = None;
             if start == self.tx.una {
                 self.rto_pending = false;
@@ -1035,9 +1099,7 @@ impl Sync {
         } else if end.after(old) && self.timing.is_none() && self.ts.is_none() {
             self.timing = Some((end, now));
         }
-        if self.rtx_timer.is_none() && self.persist.is_none() && end != start {
-            self.rtx_timer = Some(now.after(self.rtt.rto()));
-        }
+        self.arm(now);
         self.refresh(now);
         self.finish(now, start, len, fin, sack)
     }
@@ -1078,7 +1140,7 @@ impl Sync {
             self.rtx_next = None;
             return None;
         }
-        let limit = self.tx.una.add(self.cc.cwnd.min(self.tx.wnd));
+        let limit = self.tx.una.add(self.cwnd().min(self.tx.window()));
         let blocks = self.blocks();
         let mut stop = pos.add(self.room(&blocks)).earlier(end_of_data).earlier(limit);
         if let Some(sacked) = self.tx.next_sacked(pos) {
@@ -1098,7 +1160,7 @@ impl Sync {
     fn next_seg(&mut self, ctx: &mut Ctx<'_>) -> Option<Out> {
         let Recovery::Sack { high_rxt, rescue, point } = self.recovery else { return None };
         let smss = self.smss();
-        if self.cc.cwnd.saturating_sub(self.tx.pipe(high_rxt, smss)) < smss {
+        if self.cwnd().saturating_sub(self.pipe()) < smss {
             return None;
         }
         let blocks = self.blocks();
@@ -1149,7 +1211,7 @@ impl Sync {
     /// New data and the FIN (RFC 9293 §3.7.4 Nagle, §3.8.6.2.1 sender silly-window avoidance),
     /// within SND.UNA + min(cwnd, SND.WND) (RFC 5681 §2).
     fn new_data(&mut self, ctx: &mut Ctx<'_>) -> Option<Out> {
-        if self.persist.is_some() || matches!(self.recovery, Recovery::Sack { .. }) || self.tx.wnd == 0 {
+        if self.persist.is_some() || matches!(self.recovery, Recovery::Sack { .. }) || self.tx.window() == 0 {
             return None;
         }
         let now = ctx.now;
@@ -1164,8 +1226,8 @@ impl Sync {
         let blocks = self.blocks();
         let mss = signed(self.room(&blocks));
         let w_rcv = self.tx.usable();
-        let in_flight = if self.sack_ok && self.dupacks > 0 { self.tx.pipe(self.tx.una, smss) } else { self.tx.flight() };
-        let cwnd = signed(self.cc.cwnd);
+        let in_flight = if self.sack_ok && self.dupacks > 0 { self.pipe() } else { self.tx.flight() };
+        let cwnd = signed(self.cwnd());
         let mut w_cc = cwnd.saturating_sub(signed(in_flight));
         let limited_transmit = self.recovery == Recovery::None && if self.sack_ok { self.dupacks > 0 } else { self.lt_budget > 0 };
         if limited_transmit && !self.sack_ok {

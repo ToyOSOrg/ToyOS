@@ -384,10 +384,6 @@ fn many_up(frames: usize) -> (u64, u64) {
     (expiries, retransmissions)
 }
 
-/// PL-11, and the same at 4 frames a millisecond. At 16 the backlog a push model builds (an
-/// initial window per connection, 1000 segments) drains in 62 ms, inside the 200 ms RTO floor, so
-/// neither model would fire; at 4 it takes 250 ms, and the `mutate-egress-push` control makes
-/// `tcp.rto-unsent` count.
 #[test]
 fn s_pl_011_many_up() {
     many_up(16);

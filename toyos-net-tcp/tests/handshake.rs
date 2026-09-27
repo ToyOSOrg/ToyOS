@@ -331,6 +331,8 @@ fn s_hs_031_child_text_without_ack() {
     let mut h = child();
     nothing(&h.input(1, seg(5001).len(10)));
     assert_eq!(accept(&mut h), None);
+    nothing(&h.input(2, seg(5001).ack(1001)));
+    assert!(accept(&mut h).is_some(), "the child stayed in SYN-RECEIVED");
 }
 
 #[test]
@@ -437,6 +439,8 @@ fn s_hs_043_calls_in_the_wrong_state() {
     assert_eq!(r, Ok(()));
     nothing(&outs);
     assert_eq!(h.tcp.status(h.id()), Err(Error::NoSuchSocket));
+    assert_eq!(h.call(4, |tcp, now, id| tcp.send(now, id, b"x")).0, Err(Error::NoSuchSocket));
+    assert_eq!(h.call(5, |tcp, now, id| tcp.recv(now, id, &mut [0u8; 4])).0, Err(Error::NoSuchSocket));
     nothing(&h.at(10_000));
     let mut h = fixture_e();
     expect(&h.call(1, |tcp, now, id| tcp.shutdown_write(now, id)).1, &["CTL=FIN,ACK"]);
@@ -445,4 +449,18 @@ fn s_hs_043_calls_in_the_wrong_state() {
     nothing(&outs);
     let (r, _) = h.call(3, |tcp, now, id| tcp.send(now, id, b"x"));
     assert_eq!(r, Err(Error::Closing));
+    let mut h = fixture_e();
+    h.input(1, seg(5001).rst());
+    assert_eq!(h.status().state, State::Closed);
+    let reset = Error::Failed(Failure::Reset);
+    assert_eq!(h.call(2, |tcp, now, id| tcp.send(now, id, b"x")).0, Err(reset));
+    assert_eq!(h.call(3, |tcp, now, id| tcp.recv(now, id, &mut [0u8; 4])).0, Err(reset));
+    assert_eq!(h.call(4, |tcp, now, id| tcp.shutdown_write(now, id)).0, Err(reset));
+    let mut h = fixture_e();
+    h.input(1, seg(5001).ack(1001).fin());
+    h.call(2, |tcp, now, id| tcp.shutdown_write(now, id)).0.unwrap();
+    h.input(3, seg(5002).ack(1002));
+    assert_eq!(h.status().state, State::Closed);
+    assert_eq!(h.call(4, |tcp, now, id| tcp.send(now, id, b"x")).0, Err(Error::Closing));
+    assert_eq!(h.call(5, |tcp, now, id| tcp.recv(now, id, &mut [0u8; 4])).0, Ok(Received::End));
 }

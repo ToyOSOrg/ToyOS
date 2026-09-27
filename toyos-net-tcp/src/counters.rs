@@ -2,9 +2,10 @@
 //! named `tcp.<name>`. A refusal of legacy or insecure input is also an event naming the rule and
 //! both endpoints; [`RefusalLog`] decides which of those become a log line.
 
+use alloc::vec::Vec;
 use core::time::Duration;
 
-use crate::{Endpoint, Instant};
+use crate::{limits, Endpoint, Event, Instant, Tuple};
 
 macro_rules! counters {
     ($($variant:ident = $name:literal $(, $logged:ident)?;)*) => {
@@ -113,6 +114,7 @@ counters! {
     LimitedTransmit = "tcp.limited-transmit";
     PersistProbe = "tcp.persist-probe";
     KeepaliveProbe = "tcp.keepalive-probe";
+    EventOverflow = "tcp.event-overflow";
 }
 
 #[derive(Clone, Debug, Default)]
@@ -123,13 +125,52 @@ impl Counters {
         *self.0.get(counter)
     }
 
-    pub(crate) fn add(&mut self, counter: Counter, n: u64) {
+    fn add(&mut self, counter: Counter, n: u64) {
         let value = self.0.get_mut(counter);
         *value = value.saturating_add(n);
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
         Counter::ALL.iter().map(|&c| (c.name(), self.get(c)))
+    }
+}
+
+/// The counters and the events the shell has not drained: a refusal is both.
+#[derive(Debug, Default)]
+pub struct Log {
+    pub counters: Counters,
+    events: Vec<Event>,
+}
+
+impl Log {
+    pub fn count(&mut self, counter: Counter) {
+        self.counters.add(counter, 1);
+    }
+
+    pub fn add(&mut self, counter: Counter, n: u64) {
+        self.counters.add(counter, n);
+    }
+
+    /// Counts a refusal, and names it for the log when its rule is one the log carries.
+    pub fn refuse(&mut self, rule: Counter, tuple: &Tuple) {
+        self.count(rule);
+        if rule.logged() {
+            self.event(Event::Refused(Refusal { rule, local: tuple.local, remote: tuple.remote }));
+        }
+    }
+
+    /// Past [`limits::EVENTS`] undrained, an event is refused and counted: a peer never grows
+    /// the list.
+    pub fn event(&mut self, event: Event) {
+        if self.events.len() >= limits::EVENTS {
+            self.count(Counter::EventOverflow);
+        } else {
+            self.events.push(event);
+        }
+    }
+
+    pub fn drain(&mut self) -> alloc::vec::Drain<'_, Event> {
+        self.events.drain(..)
     }
 }
 

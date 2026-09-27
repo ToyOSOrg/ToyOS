@@ -68,7 +68,9 @@ pub struct Cc {
     /// A send was held by cwnd, with data waiting and the peer's window open, since the last growth.
     pub limited: bool,
     w_max: Option<u32>,
-    prior: Option<u32>,
+    /// RFC 9438 §4.3's cwnd_prior: cwnd when ssthresh was last set, and before that the initial
+    /// cwnd, which avoidance before any congestion event is past (tcp.md §8.4).
+    prior: u32,
     after_timeout: bool,
     epoch: Option<Epoch>,
     last_ack: Option<Instant>,
@@ -83,7 +85,7 @@ impl Cc {
             smss,
             limited: false,
             w_max: None,
-            prior: None,
+            prior: cwnd,
             after_timeout: false,
             epoch: None,
             last_ack: None,
@@ -123,7 +125,7 @@ impl Cc {
         let cwnd64 = u64::from(cwnd);
         let target = epoch.cubic(smss, t.saturating_add(srtt.map_or(0, us))).clamp(cwnd64, cwnd64.saturating_mul(3) / 2);
         let step = (u64::from(acked).saturating_mul(u64::from(smss)) << FRACTION).checked_div(cwnd64).unwrap_or(0);
-        let reno_friendly = self.prior.is_some_and(|prior| epoch.estimate >> FRACTION >= u64::from(prior));
+        let reno_friendly = epoch.estimate >> FRACTION >= u64::from(self.prior);
         epoch.estimate = epoch.estimate.saturating_add(if reno_friendly { step } else { step.saturating_mul(9) / 17 });
         let cwnd = if w_t < epoch.estimate >> FRACTION {
             epoch.estimate >> FRACTION
@@ -144,17 +146,17 @@ impl Cc {
             Some(w_max) if self.cwnd < w_max => u32::try_from(u64::from(self.cwnd).saturating_mul(17) / 20).unwrap_or(u32::MAX),
             _ => self.cwnd,
         });
-        self.prior = Some(self.cwnd);
+        self.prior = self.cwnd;
         self.ssthresh = self.reduced(flight);
     }
 
     /// A retransmission timeout (RFC 5681 §3.1, RFC 9438 §4.8). `repeat` is a second timeout of
-    /// the same segment, which leaves ssthresh where the first put it.
+    /// the same segment, which sets neither ssthresh nor cwnd_prior again.
     pub fn on_timeout(&mut self, flight: u32, repeat: bool) {
         if !repeat {
             self.ssthresh = self.reduced(flight);
+            self.prior = self.cwnd;
         }
-        self.prior = Some(self.cwnd);
         self.cwnd = self.smss;
         self.epoch = None;
         self.after_timeout = true;
@@ -238,24 +240,27 @@ mod tests {
         let mut cc = Cc::new(1460, 0);
         cc.cwnd = 146_000;
         cc.on_loss(146_000);
-        assert_eq!((cc.ssthresh, cc.w_max, cc.prior), (102_200, Some(146_000), Some(146_000)));
+        assert_eq!((cc.ssthresh, cc.w_max, cc.prior), (102_200, Some(146_000), 146_000));
         cc.cwnd = 130_000;
         cc.on_loss(130_000);
         assert_eq!(cc.w_max, Some(110_500), "fast convergence");
     }
 
+    /// A second timeout of the same segment sets neither ssthresh nor cwnd_prior (RFC 9438 §4.3).
     #[test]
     fn s_cc_014_flight_not_cwnd_at_a_timeout() {
         let mut cc = Cc::new(1460, 0);
         cc.cwnd = 29_200;
         cc.on_timeout(14_600, false);
-        assert_eq!((cc.ssthresh, cc.cwnd), (10_220, 1460));
+        assert_eq!((cc.ssthresh, cc.cwnd, cc.prior), (10_220, 1460, 29_200));
+        cc.on_timeout(1460, true);
+        assert_eq!((cc.ssthresh, cc.cwnd, cc.prior), (10_220, 1460, 29_200));
     }
 
     #[test]
     fn s_cc_009_cubic_values() {
         let mut cc = avoidance(102_200, 146_000);
-        cc.prior = Some(146_000);
+        cc.prior = 146_000;
         cc.on_ack(at(0), 0, None);
         let epoch = cc.epoch.unwrap();
         assert!(epoch.k_us.abs_diff(4_217_200) <= 1_000, "K = {} µs", epoch.k_us);
@@ -265,14 +270,31 @@ mod tests {
         }
     }
 
+    /// CC-11's epoch (K = 0, W_max = cwnd = 14,600) as production reaches it: the first avoidance
+    /// after a timeout that set ssthresh 14,600 from a cwnd of 21,900, so W_est stays below
+    /// cwnd_prior and grows by alpha_cubic.
     #[test]
     fn s_cc_011_reno_friendly_region() {
-        let mut cc = avoidance(14_600, 14_600);
-        cc.on_ack(at(0), 0, None);
-        for i in 1..=10 {
+        let mut cc = Cc::new(1460, 0);
+        let mut t = 0;
+        let ack = |cc: &mut Cc, t: &mut u64, step: u64, srtt: Option<Duration>| {
+            *t += step;
             cc.limited = true;
-            cc.on_ack(at(5 * i), 1460, Some(Duration::from_millis(5)));
+            cc.on_ack(at(*t), 1460, srtt);
+        };
+        while cc.cwnd < 21_900 {
+            ack(&mut cc, &mut t, 1, None);
         }
+        cc.on_timeout(20_858, false);
+        assert_eq!((cc.ssthresh, cc.prior), (14_600, 21_900));
+        while cc.cwnd < cc.ssthresh {
+            ack(&mut cc, &mut t, 1, None);
+        }
+        for _ in 0..10 {
+            ack(&mut cc, &mut t, 5, Some(Duration::from_millis(5)));
+        }
+        let epoch = cc.epoch.unwrap();
+        assert_eq!((epoch.k_us, epoch.w_max), (0, 14_600));
         assert!((f64::from(cc.cwnd) - 15_355.0).abs() <= 153.0, "cwnd {}", cc.cwnd);
     }
 

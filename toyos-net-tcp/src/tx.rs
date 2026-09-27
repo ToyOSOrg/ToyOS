@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use toyos_net_wire::tcp::TcpOptions;
 
-use crate::counters::{Counter, Counters};
+use crate::counters::{Counter, Log};
 use crate::ring::Ring;
 use crate::seq::Seq;
 
@@ -79,13 +79,21 @@ impl Tx {
         self.flight() > 0 || self.unsent() > 0 || self.fin_unsent()
     }
 
+    /// The edge the peer offered: SND.WND counts from the ACK it came with (SND.WL2), which an ACK
+    /// that fails the SND.WL1 test leaves behind SND.UNA; SND.UNA + SND.WND would then lie past
+    /// anything the peer offered.
     pub fn right_edge(&self) -> Seq {
-        self.una.add(self.wnd)
+        self.wl2.add(self.wnd)
+    }
+
+    /// The window from SND.UNA to the right edge; zero once the edge is at or before SND.UNA.
+    pub fn window(&self) -> u32 {
+        self.wnd.saturating_sub(self.una.since(self.wl2))
     }
 
     /// W_rcv of RFC 9293 §3.8.6.2.1: negative once the peer shrank its window below SND.NXT.
     pub fn usable(&self) -> i64 {
-        i64::from(self.wnd).saturating_sub(i64::from(self.flight()))
+        i64::from(self.wnd).saturating_sub(i64::from(self.nxt.since(self.wl2)))
     }
 
     pub fn offset(&self, seq: Seq) -> usize {
@@ -122,18 +130,18 @@ impl Tx {
 
     /// Reads an ACK's SACK blocks (RFC 2018 §3, RFC 2883 §4). `true` when a block covered bytes
     /// the scoreboard did not hold: RFC 6675's duplicate acknowledgment.
-    pub fn read_sack(&mut self, ack: Seq, options: &TcpOptions<'_>, counters: &mut Counters) -> bool {
+    pub fn read_sack(&mut self, ack: Seq, options: &TcpOptions<'_>, log: &mut Log) -> bool {
         let second = options.sack_blocks().nth(1);
         let mut newly = false;
         for (i, block) in options.sack_blocks().enumerate() {
             let (left, right) = (Seq::from(block.left), Seq::from(block.right));
             let inside_second = second.is_some_and(|s| Seq::from(s.left).at_or_before(left) && right.at_or_before(Seq::from(s.right)));
             if i == 0 && (right.at_or_before(ack) || inside_second) {
-                counters.add(Counter::DsackRcvd, 1);
+                log.count(Counter::DsackRcvd);
                 continue;
             }
             if !(ack.before(left) && left.before(right) && right.at_or_before(self.nxt)) {
-                counters.add(Counter::SackBlockInvalid, 1);
+                log.count(Counter::SackBlockInvalid);
                 continue;
             }
             // An old ACK's blocks can reach below SND.UNA: that part is acknowledged already.

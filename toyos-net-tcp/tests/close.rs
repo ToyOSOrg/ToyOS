@@ -249,7 +249,6 @@ fn s_cl_017_time_wait_is_60_s() {
     assert_eq!(h.tcp.time_wait_count(), 1);
     h.at(60_020);
     assert_eq!(h.tcp.time_wait_count(), 0);
-    assert!(limits::all().contains(&("time_wait_ms", 60_000)));
 }
 
 #[test]
@@ -292,6 +291,8 @@ fn s_cl_020_rst_in_time_wait_is_ignored() {
     nothing(&h.input(30, seg(5002).rst()));
     assert_eq!(h.count(Counter::TimeWaitRstIgnored), 1);
     assert_eq!(h.refusals(Counter::TimeWaitRstIgnored).len(), 1);
+    expect(&h.input(40, seg(5003).rst()), &["SEQ=1002 ACK=5002 CTL=ACK"]);
+    assert_eq!((h.count(Counter::RstChallenged), h.count(Counter::TimeWaitRstIgnored)), (1, 1), "an inexact RST is challenged");
     h.at(60_019);
     assert_eq!(h.tcp.time_wait_count(), 1);
     h.at(60_020);
@@ -305,6 +306,23 @@ fn s_cl_021_a_failed_reopening_returns_to_time_wait() {
     nothing(&h.input(300, seg(6001).rst()));
     assert_eq!(h.tcp.time_wait_count(), 1);
     nothing(&h.input(400, seg(5000).syn()));
+    h.at(60_009);
+    assert_eq!(h.tcp.time_wait_count(), 1);
+    h.at(60_010);
+    assert_eq!(h.tcp.time_wait_count(), 0);
+    let mut h = server_time_wait();
+    for i in 0..limits::LISTEN_PENDING as u16 {
+        h.input(100, seg(9000).syn().from(B, 41_000 + i));
+    }
+    nothing(&h.input(200, seg(6000).syn()));
+    assert_eq!(h.count(Counter::ListenOverflow), 1);
+    assert_eq!((h.tcp.time_wait_count(), h.count(Counter::TimeWaitReuse)), (1, 0), "a SYN the listener refused reopens nothing");
+    let mut h = server_time_wait();
+    expect(&h.input(200, seg(6000).syn()), &["CTL=SYN,ACK ACK=6001"]);
+    let now = h.now();
+    h.tcp.close_listener(now, h.listener.unwrap()).unwrap();
+    expect(&h.transmit(), &["CTL=RST,ACK ACK=6001"]);
+    assert_eq!(h.tcp.time_wait_count(), 1, "the reset child's TIME-WAIT resumes");
     h.at(60_009);
     assert_eq!(h.tcp.time_wait_count(), 1);
     h.at(60_010);

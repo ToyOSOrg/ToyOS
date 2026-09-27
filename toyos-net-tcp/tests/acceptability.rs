@@ -57,6 +57,18 @@ fn s_ac_004_zero_window_pure_ack() {
     let mut h = zero_window();
     nothing(&h.input(10, seg(70_536).ack(1001).wnd(30_000)));
     assert_eq!(h.info().snd_wnd, 30_000);
+    let mut h = fixture_e();
+    h.send(0, 1000);
+    let mut seq = 6461u32;
+    while seq < 70_536 {
+        let n = (70_536 - seq).min(1460);
+        h.arrive(seg(seq).ack(1001).len(n as usize));
+        seq += n;
+    }
+    h.at(1);
+    assert_eq!((h.info().rcv_nxt.get(), h.info().rcv_edge.get()), (5001, 70_536));
+    h.input(2, seg(70_536).ack(2001));
+    assert_eq!(h.info().snd_una.get(), 2001, "the ACK of a peer that filled the window over a hole");
 }
 
 #[test]
@@ -199,6 +211,14 @@ fn s_ac_020_old_segments_do_not_update_the_window() {
     let info = h.info();
     assert_eq!(info.rcv_nxt.get(), 5201);
     assert_eq!(info.snd_wnd, 40_000);
+    let mut h = fixture_e();
+    h.input(0, seg(5001).ack(1001).wnd(2920));
+    assert_eq!(h.send(0, 5840).len(), 2);
+    h.input(1, seg(5101).ack(1001).wnd(2920).len(100));
+    let outs = h.input(2, seg(5001).ack(2461).wnd(1460).len(100));
+    let sent: Vec<(u32, usize)> = outs.iter().map(|o| (o.seq, o.payload.len())).collect();
+    assert!(sent.iter().all(|&(_, len)| len == 0), "nothing past the edge 3921 B offered: {sent:?}");
+    assert_eq!(h.info().snd_nxt.get(), 3921);
 }
 
 #[test]

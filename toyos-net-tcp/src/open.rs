@@ -5,13 +5,13 @@ use core::time::Duration;
 
 use toyos_net_wire::tcp::{SynOptions, Timestamps, WindowShift};
 
-use crate::conn::{Ctx, In, Kind, Negotiated, Out, Params, Rst, Sync, Ts, NO_BLOCKS};
+use crate::conn::{screen, Ctx, In, Kind, Negotiated, Out, Params, Rst, Screened, Sync, Ts, NO_BLOCKS};
 use crate::counters::Counter;
 use crate::ring::Ring;
 use crate::rtt::Rtt;
-use crate::seq::{Seq, Stamp};
+use crate::seq::Seq;
 use crate::stack::TimeWait;
-use crate::{limits, Instant, Tuple};
+use crate::{limits, Instant};
 
 /// What a SYN or SYN-ACK of ours offers, fixed for the connection's life.
 #[derive(Clone, Copy, Debug)]
@@ -52,17 +52,26 @@ pub fn negotiate(seg: &In<'_>, local: &Local, first_tsval: u32, ctx: &mut Ctx<'_
     Negotiated { peer_mss, snd_shift, rcv_shift, scaled, sack: options.sack_permitted(), ts }
 }
 
-fn ts_now(local: &Local, now: Instant) -> u32 {
-    Ts { recent: 0, recent_at: now, offset: local.ts_offset, first: 0 }.clock(now)
+/// Counts what a SYN asks for that this stack does not do: TCP-MD5, Fast Open, and text.
+pub fn refuse_syn_extras(seg: &In<'_>, ctx: &mut Ctx<'_>) {
+    let (md5, fast_open) = seg.unimplemented_options();
+    if md5 {
+        ctx.refuse(Counter::OptionMd5);
+    }
+    if fast_open {
+        ctx.refuse(Counter::OptionFastOpen);
+    }
+    if !seg.payload.is_empty() {
+        ctx.refuse(Counter::SynDataDiscarded);
+    }
 }
 
 /// An RTT sample from the handshake: from the echoed timestamp, or from a SYN sent once (Karn).
 fn handshake_sample(rtt: &mut Rtt, seg: &In<'_>, n: &Negotiated, once: Option<Instant>, now: Instant) {
     match (n.ts, seg.options.timestamps()) {
         (Some(ts), Some(t)) => {
-            let age = Stamp(ts.clock(now)).since(Stamp(t.echo));
-            if age < 1 << 31 && Stamp(t.echo).at_or_after(Stamp(ts.first)) {
-                rtt.sample(Duration::from_millis(u64::from(age)), 1);
+            if let Some(sample) = ts.echo_rtt(t.echo, now) {
+                rtt.sample(sample, 1);
             }
         }
         _ => {
@@ -125,7 +134,7 @@ impl Retransmit {
         self.owed = true;
         self.stalled = self.stalled.saturating_add(1);
         if self.stalled == 3 {
-            ctx.events.push(crate::Event::Reverify(ctx.tuple.remote.addr));
+            ctx.log.event(crate::Event::Reverify(ctx.tuple.remote.addr));
         }
         false
     }
@@ -183,9 +192,7 @@ impl SynSent {
         if !seg.syn() {
             return (Some(self), Sent::Keep);
         }
-        if !seg.payload.is_empty() {
-            ctx.refuse(Counter::SynDataDiscarded);
-        }
+        refuse_syn_extras(seg, ctx);
         let negotiated = negotiate(seg, local, self.timer.first_tsval, ctx);
         if seg.ack.is_none() {
             let rcvd = SynRcvd {
@@ -231,7 +238,7 @@ impl SynSent {
         if !self.timer.owed {
             return None;
         }
-        let tsval = ts_now(local, now);
+        let tsval = now.tsval(local.ts_offset);
         self.timer.handed_off(now, tsval, true);
         Some(Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, tsval)), window: local.window, ts: None, sack: NO_BLOCKS, data: (0, 0) })
     }
@@ -250,7 +257,7 @@ impl SynSent {
 pub enum Origin {
     /// A listener's child, and the TIME-WAIT it reopened, which it returns to if it never
     /// reaches ESTABLISHED (RFC 9293 MAY-2 (2)).
-    Passive { listener: u32, time_wait: Option<(Tuple, TimeWait)> },
+    Passive { listener: u32, time_wait: Option<TimeWait> },
     /// A simultaneous open (MUST-10): the user's queued data and FIN wait for ESTABLISHED.
     Active { buf: Ring, fin: bool },
 }
@@ -282,7 +289,7 @@ pub enum Rcvd {
 }
 
 impl SynRcvd {
-    pub fn passive(iss: Seq, seg: &In<'_>, negotiated: Negotiated, listener: u32, time_wait: Option<(Tuple, TimeWait)>) -> Self {
+    pub fn passive(iss: Seq, seg: &In<'_>, negotiated: Negotiated, listener: u32, time_wait: Option<TimeWait>) -> Self {
         Self {
             iss,
             irs: seg.seq,
@@ -323,53 +330,17 @@ impl SynRcvd {
             }
             return Rcvd::Keep;
         }
-        if let Some(ts) = self.negotiated.ts {
-            if !seg.rst() {
-                let Some(t) = seg.options.timestamps() else {
-                    ctx.refuse(Counter::TsMissing);
-                    return Rcvd::Keep;
-                };
-                if Stamp(t.value).before(Stamp(ts.recent)) {
-                    ctx.count(Counter::PawsReject);
-                    self.unsolicited(ctx);
-                    return Rcvd::Keep;
-                }
-            }
-        }
         let next = self.rcv_next();
-        let window = u32::from(local.window);
-        let len = seg.len();
-        let acceptable = match len {
-            0 => seg.seq.since(next) < window,
-            _ => seg.seq.since(next) < window || seg.seq.add(len.saturating_sub(1)).since(next) < window,
-        };
-        if !acceptable {
-            if !seg.rst() {
+        let passive = self.is_passive();
+        match screen(seg, next, u32::from(local.window), next, self.negotiated.ts.as_mut(), passive, ctx) {
+            Screened::Pass => {}
+            Screened::Drop { challenge: false } => return Rcvd::Keep,
+            Screened::Drop { challenge: true } | Screened::Unacceptable { .. } => {
                 self.unsolicited(ctx);
+                return Rcvd::Keep;
             }
-            return Rcvd::Keep;
-        }
-        if let (Some(ts), Some(t)) = (self.negotiated.ts.as_mut(), seg.options.timestamps()) {
-            if !seg.rst() && Stamp(t.value).at_or_after(Stamp(ts.recent)) && seg.seq.at_or_before(next) {
-                ts.recent = t.value;
-                ts.recent_at = ctx.now;
-            }
-        }
-        if seg.rst() {
-            if seg.seq == next {
-                return if self.is_passive() { Rcvd::Gone } else { Rcvd::Refused };
-            }
-            ctx.refuse(Counter::RstChallenged);
-            self.unsolicited(ctx);
-            return Rcvd::Keep;
-        }
-        if seg.syn() {
-            if self.is_passive() {
-                return Rcvd::Gone;
-            }
-            ctx.refuse(Counter::SynChallenged);
-            self.unsolicited(ctx);
-            return Rcvd::Keep;
+            Screened::Ends if passive => return Rcvd::Gone,
+            Screened::Ends => return Rcvd::Refused,
         }
         match seg.ack {
             None => Rcvd::Keep,
@@ -424,8 +395,8 @@ impl SynRcvd {
         if let Some(rst) = self.answer.take() {
             return Some(Out::rst(&rst));
         }
-        let tsval = ts_now(local, now);
-        let ts = self.negotiated.ts.map(|ts| Timestamps { value: tsval, echo: ts.recent });
+        let tsval = now.tsval(local.ts_offset);
+        let ts = self.negotiated.ts.map(|ts| ts.option(now));
         let dup = core::mem::replace(&mut self.dup_answer, false);
         if self.timer.owed || dup {
             self.timer.handed_off(now, tsval, self.timer.owed);
@@ -456,9 +427,8 @@ impl SynRcvd {
         self.timer.expire(ctx.now, bound, ctx)
     }
 
-    pub fn reset(&self, now: Instant, local: &Local) -> Rst {
-        let ts = self.negotiated.ts.map(|ts| Timestamps { value: ts_now(local, now), echo: ts.recent });
-        Rst { seq: self.iss.add(1), ack: Some(self.rcv_next()), ts }
+    pub fn reset(&self, now: Instant) -> Rst {
+        Rst { seq: self.iss.add(1), ack: Some(self.rcv_next()), ts: self.negotiated.ts.map(|ts| ts.option(now)) }
     }
 
     pub fn shutdown_write(&mut self) -> bool {

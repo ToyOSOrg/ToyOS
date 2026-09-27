@@ -9,7 +9,7 @@ use common::*;
 use toyos_net_tcp::{siphash24, Counter, Error, Instant, Tcp};
 
 fn stack() -> Tcp {
-    Tcp::new(config(65_535))
+    Tcp::new(config(65_535)).unwrap()
 }
 
 fn now() -> Instant {
@@ -103,7 +103,7 @@ fn s_port_007_never_a_self_connection() {
     let index = (siphash24(&key(0x30), &input) as u32 & 15) as usize;
     let mut secrets = secrets();
     secrets.port_table[index] = (u32::from(q - 49152).wrapping_sub(offset) % 16384) as u16;
-    let mut tcp = Tcp::new(toyos_net_tcp::Config { secrets, ..config(65_535) });
+    let mut tcp = Tcp::new(toyos_net_tcp::Config { secrets, ..config(65_535) }).unwrap();
     let id = tcp.connect(now(), A, None, ep(A, q)).unwrap();
     assert_ne!(tcp.tuple(id).unwrap().local.port.get(), q, "the first candidate named the destination itself");
 }

@@ -31,6 +31,18 @@ fn s_pl_002_no_expiry_for_a_retransmission_that_never_left() {
     expect(&h.at(5400), &["SEQ=1001 LEN=1000"]);
     assert_eq!(h.count(Counter::Rto), 2);
     assert_eq!(h.count(Counter::RtoUnsent), 0);
+    let mut h = fixture_e();
+    assert_eq!(h.send(0, 2920).len(), 2);
+    h.credit = Some(0);
+    h.at(200);
+    h.input(250, seg(5001).ack(2461));
+    nothing(&h.at(2000));
+    assert_eq!((h.count(Counter::Rto), h.count(Counter::RtoUnsent)), (1, 0), "a partial ACK arms nothing for a retransmission not yet left");
+    h.credit = None;
+    expect(&h.at(2001), &["SEQ=2461 LEN=1460"]);
+    nothing(&h.at(2400));
+    expect(&h.at(2401), &["SEQ=2461 LEN=1460"]);
+    assert_eq!((h.count(Counter::Rto), h.count(Counter::RtoUnsent)), (2, 0));
 }
 
 #[test]

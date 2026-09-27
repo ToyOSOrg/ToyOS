@@ -1,10 +1,9 @@
 //! The receive side: in-order bytes the user has not read, out-of-order ranges at their stream
 //! positions, the right edge the peer was offered, and what acknowledgment is owed.
 //!
-//! `unread + (edge − next) ≤ capacity` always holds, so every byte the peer may send has room
-//! and in-window data is never dropped for want of memory. The edge never retreats (RFC 7323
-//! §2.4), bytes already stored are never overwritten, and bytes once reported in a SACK block are
-//! kept until delivered: this receiver never reneges.
+//! `unread + (edge − next) ≤ capacity` always holds, so every byte the peer may send has room. The
+//! edge never retreats (RFC 7323 §2.4), bytes already stored are never overwritten, and bytes once
+//! reported in a SACK block are kept until delivered: this receiver never reneges.
 
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -132,12 +131,13 @@ impl Rx {
         let lo = first.unwrap_or(self.ranges.len());
         let hi = lo.saturating_add(touching);
         let mut dsack = None;
-        let mut stored = false;
+        // `Some(true)` when every gap was stored whole: text is recorded only then.
+        let mut stored = None;
         let mut cursor = seq;
         for i in lo..hi {
             let Some(r) = self.ranges.get(i).copied() else { break };
             if r.start.after(cursor) {
-                stored |= self.store(cursor, r.start.earlier(end), seq, data);
+                stored = Some(stored.unwrap_or(true) && self.store(cursor, r.start.earlier(end), seq, data));
             }
             let dup = (cursor.later(r.start), end.earlier(r.end));
             if dsack.is_none() && dup.0.before(dup.1) {
@@ -146,12 +146,12 @@ impl Rx {
             cursor = cursor.later(r.end);
         }
         if cursor.before(end) {
-            stored |= self.store(cursor, end, seq, data);
+            stored = Some(stored.unwrap_or(true) && self.store(cursor, end, seq, data));
         }
         if dsack.is_some() {
             self.dsack = dsack;
         }
-        if !stored {
+        if stored != Some(true) {
             return Placed::Nothing;
         }
         let holes = !self.ranges.is_empty();
@@ -185,7 +185,7 @@ impl Rx {
         let skip = usize::try_from(from.since(seq)).unwrap_or(usize::MAX);
         let take = usize::try_from(to.since(from)).unwrap_or(0);
         let offset = self.offset(from);
-        data.get(skip..skip.saturating_add(take)).is_some_and(|bytes| self.buf.write_at(offset, bytes) > 0)
+        data.get(skip..skip.saturating_add(take)).is_some_and(|bytes| self.buf.write_at(offset, bytes) == bytes.len())
     }
 
     fn bump(&mut self) -> u32 {

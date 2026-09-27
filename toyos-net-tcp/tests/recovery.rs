@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use toyos_net_tcp::Counter;
+use toyos_net_tcp::{Counter, Seq};
 
 /// B's duplicate ACK in E.
 fn dup() -> S {
@@ -151,6 +151,8 @@ fn sack_recovery() -> H {
 #[test]
 fn s_lr_008_sack_recovery() {
     let mut h = sack_recovery();
+    let info = h.info();
+    assert_eq!((info.high_rxt, info.rescue_rxt, info.pipe), (Some(Seq::new(2449)), Some(Seq::new(2449)), 10_136));
     for (t, end) in [(23, 8241), (24, 9689), (25, 11_137), (26, 12_585), (27, 14_033), (28, 15_481)] {
         nothing(&sack_dup(&mut h, t, &[(2449, end)]));
     }

@@ -11,15 +11,15 @@ use core::net::Ipv4Addr;
 use core::time::Duration;
 
 use toyos_net_wire::icmp::UnreachableCode;
-use toyos_net_wire::tcp::{Control, EstablishedOptions, RawWindow, TcpBuilder, TcpSegment, Timestamps};
+use toyos_net_wire::tcp::{Control, EstablishedOptions, RawWindow, TcpBuilder, TcpSegment};
 use toyos_net_wire::Port;
 
-use crate::conn::{Ctx, In, Kind, Out, Rst, Sync, Tick, Ts, Verdict};
-use crate::counters::{Counter, Counters, Refusal};
-use crate::open::{negotiate, Local, Origin, Rcvd, Sent, SynRcvd, SynSent};
+use crate::conn::{screen, Ctx, In, Kind, Out, Rst, Screened, Sync, Tick, Ts, Verdict};
+use crate::counters::{Counter, Counters, Log};
+use crate::open::{negotiate, refuse_syn_extras, Local, Origin, Rcvd, Sent, SynRcvd, SynSent};
 use crate::rx::Rx;
 use crate::seq::{Seq, Stamp};
-use crate::{isn, limits, reuse_iss, siphash, ts_offset, Config, Endpoint, Error, Event, Failure, IcmpError, IcmpKind, Instant, Options, Received, SoftError, State, Status, Tuple};
+use crate::{isn, limits, reuse_iss, siphash, ts_offset, Config, ConfigError, Endpoint, Error, Event, Failure, IcmpError, IcmpKind, Instant, Options, Received, SoftError, State, Status, Tuple};
 
 const EPHEMERAL_FIRST: u16 = 49_152;
 const EPHEMERAL_COUNT: u16 = 16_384;
@@ -70,6 +70,9 @@ pub struct Info {
     pub ts_recent: Option<u32>,
     pub sacked_ranges: usize,
     pub in_recovery: bool,
+    pub high_rxt: Option<Seq>,
+    pub rescue_rxt: Option<Seq>,
+    pub pipe: u32,
     pub ooo_ranges: usize,
     pub queued: usize,
     pub unread: usize,
@@ -131,15 +134,15 @@ pub struct TimeWait {
     window: u32,
     rcv_shift: u8,
     end: Instant,
-    ack_owed: bool,
     last_unsolicited: Option<Instant>,
 }
 
 enum Entry {
     Conn(u32),
     TimeWait(TimeWait),
-    /// An RST owed under pull egress; segments for the 4-tuple are dropped until it leaves.
-    Stub(Rst),
+    /// An RST owed under pull egress; segments for the 4-tuple are dropped until it leaves, and
+    /// then the TIME-WAIT a reset child had reopened resumes.
+    Stub(Rst, Option<TimeWait>),
 }
 
 struct Answer {
@@ -161,10 +164,10 @@ pub struct Tcp {
     active: VecDeque<u32>,
     stubs: VecDeque<Tuple>,
     answers: VecDeque<Answer>,
-    tw_owed: VecDeque<Tuple>,
+    /// TIME-WAITs owing an ACK: a set, so a segment finds its entry in log n.
+    tw_owed: BTreeSet<Tuple>,
     port_table: [u16; 16],
-    counters: Counters,
-    events: Vec<Event>,
+    log: Log,
     scratch: Vec<u8>,
 }
 
@@ -213,7 +216,6 @@ impl TimeWait {
             window: sync.rx.last_window,
             rcv_shift: sync.rx.shift,
             end: now.after(limits::TIME_WAIT),
-            ack_owed: sync.rx.ack_now || sync.rx.dup_owed > 0 || sync.rx.delayed.is_some(),
             last_unsolicited: None,
         }
     }
@@ -229,70 +231,33 @@ impl TimeWait {
         }
     }
 
-    fn unsolicited(&mut self, ctx: &mut Ctx<'_>) {
-        if ctx.unsolicited(&mut self.last_unsolicited) {
-            self.ack_owed = true;
-        }
-    }
-
-    /// Everything but a reopening SYN. RSTs are ignored (RFC 1337 fix F1).
-    fn receive(&mut self, seg: &In<'_>, ctx: &mut Ctx<'_>) {
-        if let Some(ts) = self.ts.filter(|_| !seg.rst()) {
-            let Some(t) = seg.options.timestamps() else {
-                ctx.refuse(Counter::TsMissing);
-                return;
-            };
-            if Stamp(t.value).before(Stamp(ts.recent)) {
-                ctx.count(Counter::PawsReject);
-                self.unsolicited(ctx);
-                return;
-            }
-        }
-        let len = seg.len();
-        let offset = seg.seq.since(self.rcv_nxt);
-        let acceptable = match (len, self.window) {
-            (0, 0) => offset == 0,
-            (0, w) => offset < w,
-            (_, 0) => false,
-            (_, w) => offset < w || seg.seq.add(len.saturating_sub(1)).since(self.rcv_nxt) < w,
-        };
-        if !acceptable {
-            if seg.rst() {
-                return;
-            }
-            if len > 0 && seg.seq.add(len).at_or_before(self.rcv_nxt) {
-                if seg.fin() && seg.seq.add(len) == self.rcv_nxt {
+    /// Everything but a reopening SYN; `true` owes an ACK. An exact RST is ignored (RFC 1337 fix
+    /// F1), and a retransmitted FIN restarts the wait.
+    fn receive(&mut self, seg: &In<'_>, ctx: &mut Ctx<'_>) -> bool {
+        match screen(seg, self.rcv_nxt, self.window, self.rcv_nxt, self.ts.as_mut(), false, ctx) {
+            Screened::Pass => false,
+            Screened::Drop { challenge } => challenge && ctx.unsolicited(&mut self.last_unsolicited),
+            Screened::Unacceptable { old: true } => {
+                if seg.fin() && seg.seq.add(seg.len()) == self.rcv_nxt {
                     self.end = ctx.now.after(limits::TIME_WAIT);
                 }
-                self.ack_owed = true;
-            } else {
-                self.unsolicited(ctx);
+                true
             }
-            return;
-        }
-        if seg.rst() {
-            if seg.seq == self.rcv_nxt {
+            Screened::Unacceptable { old: false } => ctx.unsolicited(&mut self.last_unsolicited),
+            Screened::Ends => {
                 ctx.refuse(Counter::TimeWaitRstIgnored);
-            } else {
-                ctx.refuse(Counter::RstChallenged);
-                self.unsolicited(ctx);
+                false
             }
-            return;
-        }
-        if seg.syn() {
-            ctx.refuse(Counter::SynChallenged);
-            self.unsolicited(ctx);
         }
     }
 
     fn ack(&self, now: Instant) -> Out {
         let window = u16::try_from((self.window >> self.rcv_shift).min(u32::from(u16::MAX))).unwrap_or(u16::MAX);
-        let ts = self.ts.map(|ts| Timestamps { value: ts.clock(now), echo: ts.recent });
         Out {
             seq: self.snd_nxt,
             kind: Kind::Ack { ack: self.rcv_nxt, push: false, fin: false },
             window,
-            ts,
+            ts: self.ts.map(|ts| ts.option(now)),
             sack: crate::conn::NO_BLOCKS,
             data: (0, 0),
         }
@@ -322,8 +287,8 @@ fn builder<'a>(out: &'a Out, tuple: &Tuple, data: &'a [u8]) -> Outgoing<'a> {
 }
 
 impl Conn {
-    fn ctx<'a>(&self, now: Instant, counters: &'a mut Counters, events: &'a mut Vec<Event>) -> Ctx<'a> {
-        Ctx { now, tuple: self.tuple, options: self.options, orphan: self.user == User::Orphan, counters, events }
+    fn ctx<'a>(&self, now: Instant, log: &'a mut Log) -> Ctx<'a> {
+        Ctx { now, tuple: self.tuple, options: self.options, orphan: self.user == User::Orphan, log }
     }
 
     fn deadline(&self, ctx: &Ctx<'_>) -> Option<Instant> {
@@ -337,11 +302,14 @@ impl Conn {
 }
 
 impl Tcp {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Result<Self, ConfigError> {
         let buffer = config.receive_buffer;
+        if buffer > limits::RECEIVE_BUFFER_MAX {
+            return Err(ConfigError::ReceiveBufferTooLarge);
+        }
         let shift = (0u8..14).find(|&r| buffer.checked_shr(u32::from(r)).is_some_and(|w| u16::try_from(w).is_ok())).unwrap_or(14);
         let port_table = config.secrets.port_table;
-        Self {
+        Ok(Self {
             config,
             shift,
             conns: Vec::new(),
@@ -355,21 +323,20 @@ impl Tcp {
             active: VecDeque::new(),
             stubs: VecDeque::new(),
             answers: VecDeque::new(),
-            tw_owed: VecDeque::new(),
+            tw_owed: BTreeSet::new(),
             port_table,
-            counters: Counters::default(),
-            events: Vec::new(),
+            log: Log::default(),
             scratch: Vec::new(),
-        }
+        })
     }
 
     pub fn counters(&self) -> &Counters {
-        &self.counters
+        &self.log.counters
     }
 
     /// Refusals and reachability advice since the last call.
     pub fn drain_events(&mut self) -> impl Iterator<Item = Event> + '_ {
-        self.events.drain(..)
+        self.log.drain()
     }
 
     pub fn time_wait_count(&self) -> usize {
@@ -386,13 +353,6 @@ impl Tcp {
             send_buffer: usize::try_from(self.config.send_buffer).unwrap_or(0),
             mtu,
             ts_offset: ts_offset(&self.config.secrets.timestamp, tuple),
-        }
-    }
-
-    fn refuse(&mut self, rule: Counter, tuple: &Tuple) {
-        self.counters.add(rule, 1);
-        if rule.logged() {
-            self.events.push(Event::Refused(Refusal { rule, local: tuple.local, remote: tuple.remote }));
         }
     }
 
@@ -450,7 +410,7 @@ impl Tcp {
                 if let Some(l) = listener {
                     l.ready.retain(|&i| i != index);
                     if failure.is_some() {
-                        self.counters.add(Counter::AcceptResetDropped, 1);
+                        self.log.count(Counter::AcceptResetDropped);
                     }
                 }
                 self.free(index);
@@ -458,23 +418,44 @@ impl Tcp {
         }
     }
 
-    fn stub(&mut self, tuple: Tuple, rst: Rst) {
-        self.demux.insert(tuple, Entry::Stub(rst));
+    fn stub(&mut self, tuple: Tuple, rst: Rst, resume: Option<TimeWait>) {
+        self.demux.insert(tuple, Entry::Stub(rst, resume));
         self.stubs.push_back(tuple);
     }
 
-    fn enter_time_wait(&mut self, tuple: Tuple, tw: TimeWait) {
+    fn enter_time_wait(&mut self, tuple: Tuple, tw: TimeWait, owed: bool) {
         if self.time_waits.len() >= limits::TIME_WAIT_MAX {
-            if let Some((_, oldest)) = self.time_waits.pop_first() {
-                self.demux.remove(&oldest);
-                self.counters.add(Counter::TimeWaitEvicted, 1);
+            if let Some(&(end, oldest)) = self.time_waits.first() {
+                self.leave_time_wait(oldest, end);
+                self.log.count(Counter::TimeWaitEvicted);
             }
         }
-        if tw.ack_owed {
-            self.tw_owed.push_back(tuple);
+        if owed {
+            self.tw_owed.insert(tuple);
         }
         self.time_waits.insert((tw.end, tuple));
         self.demux.insert(tuple, Entry::TimeWait(tw));
+    }
+
+    /// Ends the TIME-WAIT of `tuple`, due to end at `end`.
+    fn leave_time_wait(&mut self, tuple: Tuple, end: Instant) {
+        self.time_waits.remove(&(end, tuple));
+        self.tw_owed.remove(&tuple);
+        if matches!(self.demux.get(&tuple), Some(Entry::TimeWait(_))) {
+            self.demux.remove(&tuple);
+        }
+    }
+
+    /// The TIME-WAIT a passive child reopened, to resume when the child ends before ESTABLISHED
+    /// (RFC 9293 MAY-2 (2)).
+    fn reopened(state: &mut Tcb) -> Option<TimeWait> {
+        match state {
+            Tcb::SynRcvd(rcvd) => match &mut rcvd.origin {
+                Origin::Passive { time_wait, .. } => time_wait.take(),
+                Origin::Active { .. } => None,
+            },
+            Tcb::SynSent(_) | Tcb::Sync(_) | Tcb::Ended(_) => None,
+        }
     }
 
     // ---- listening ----
@@ -502,7 +483,7 @@ impl Tcp {
                 match found {
                     Some(port) => port,
                     None => {
-                        self.counters.add(Counter::NoEphemeralPort, 1);
+                        self.log.count(Counter::NoEphemeralPort);
                         return Err(Error::AddrInUse);
                     }
                 }
@@ -533,7 +514,8 @@ impl Tcp {
         Ok(Some(ConnId { index, generation }))
     }
 
-    /// Every child is reset, so its peer learns at once (§12.4).
+    /// Every child is reset, so its peer learns at once (§12.4); a TIME-WAIT a child reopened
+    /// resumes once the reset has left.
     pub fn close_listener(&mut self, now: Instant, id: ListenerId) -> Result<(), Error> {
         slot(&mut self.listeners, id.index, id.generation).ok_or(Error::NoSuchSocket)?;
         let Some(listener) = release(&mut self.listeners, &mut self.free_listeners, id.index) else { return Err(Error::NoSuchSocket) };
@@ -542,16 +524,16 @@ impl Tcp {
             let Some(conn) = value(&mut self.conns, index) else { continue };
             let tuple = conn.tuple;
             let rst = match &conn.state {
-                Tcb::SynRcvd(rcvd) => Some(rcvd.reset(now, &conn.local)),
+                Tcb::SynRcvd(rcvd) => Some(rcvd.reset(now)),
                 Tcb::Sync(sync) => sync.reset(now),
                 Tcb::SynSent(_) | Tcb::Ended(_) => None,
             };
-            conn.user = User::Orphan;
+            let resume = Self::reopened(&mut conn.state);
             self.free(index);
             if let Some(rst) = rst {
-                self.stub(tuple, rst);
+                self.stub(tuple, rst, resume);
             }
-            self.counters.add(Counter::ListenerClosedReset, 1);
+            self.log.count(Counter::ListenerClosedReset);
         }
         Ok(())
     }
@@ -588,14 +570,14 @@ impl Tcp {
             None => match self.ephemeral(local, remote) {
                 Some(port) => port,
                 None => {
-                    self.counters.add(Counter::NoEphemeralPort, 1);
+                    self.log.count(Counter::NoEphemeralPort);
                     return Err(Error::AddrInUse);
                 }
             },
         };
         let tuple = Tuple { local: Endpoint { addr: local, port }, remote };
         if tuple.local == tuple.remote {
-            self.counters.add(Counter::SelfConnect, 1);
+            self.log.count(Counter::SelfConnect);
             return Err(Error::InvalidRemote);
         }
         if self.demux.contains_key(&tuple) {
@@ -627,17 +609,17 @@ impl Tcp {
         let seg = In::new(segment);
         let tuple = Tuple { local: Endpoint { addr: to, port: segment.destination_port() }, remote: Endpoint { addr: from, port: segment.source_port() } };
         if seg.syn() && seg.rst() {
-            self.refuse(Counter::SynRst, &tuple);
+            self.log.refuse(Counter::SynRst, &tuple);
             return;
         }
         if seg.syn() && seg.fin() {
-            self.refuse(Counter::SynFin, &tuple);
+            self.log.refuse(Counter::SynFin, &tuple);
             return;
         }
         match self.demux.get(&tuple) {
             Some(Entry::Conn(index)) => self.for_conn(*index, &seg, now),
             Some(Entry::TimeWait(_)) => self.for_time_wait(tuple, &seg, now),
-            Some(Entry::Stub(_)) => {}
+            Some(Entry::Stub(..)) => {}
             None => match self.listener_for(&tuple.local) {
                 Some(listener) => self.for_listener(listener, tuple, &seg, now, reset_allowed, None),
                 None => self.for_nobody(tuple, &seg, reset_allowed),
@@ -647,7 +629,7 @@ impl Tcp {
 
     fn answer(&mut self, tuple: Tuple, rst: Rst, reset_allowed: impl FnOnce(Ipv4Addr) -> bool) {
         if self.answers.len() >= ANSWERS || !reset_allowed(tuple.remote.addr) {
-            self.counters.add(Counter::ClosedRstLimited, 1);
+            self.log.count(Counter::ClosedRstLimited);
             return;
         }
         self.answers.push_back(Answer { tuple, rst });
@@ -656,7 +638,7 @@ impl Tcp {
     /// RFC 9293 §3.10.7.1.
     fn for_nobody(&mut self, tuple: Tuple, seg: &In<'_>, reset_allowed: impl FnOnce(Ipv4Addr) -> bool) {
         if seg.rst() {
-            self.counters.add(Counter::ClosedRst, 1);
+            self.log.count(Counter::ClosedRst);
             return;
         }
         let rst = match seg.ack {
@@ -666,24 +648,11 @@ impl Tcp {
         self.answer(tuple, rst, reset_allowed);
     }
 
-    /// Counts what a SYN asks for that this stack does not do.
-    fn syn_refusals(&mut self, seg: &In<'_>, tuple: &Tuple) {
-        let (md5, fast_open) = seg.unimplemented_options();
-        if md5 {
-            self.refuse(Counter::OptionMd5, tuple);
-        }
-        if fast_open {
-            self.refuse(Counter::OptionFastOpen, tuple);
-        }
-        if !seg.payload.is_empty() {
-            self.refuse(Counter::SynDataDiscarded, tuple);
-        }
-    }
-
-    /// RFC 9293 §3.10.7.2, and admission under the listener's bounds (§12.2).
+    /// RFC 9293 §3.10.7.2, and admission under the listener's bounds (§12.2). A TIME-WAIT the
+    /// SYN would reopen ends only when the child is admitted.
     fn for_listener(&mut self, index: u32, tuple: Tuple, seg: &In<'_>, now: Instant, reset_allowed: impl FnOnce(Ipv4Addr) -> bool, time_wait: Option<TimeWait>) {
         if seg.rst() {
-            self.counters.add(Counter::ListenRst, 1);
+            self.log.count(Counter::ListenRst);
             return;
         }
         if let Some(ack) = seg.ack {
@@ -691,25 +660,29 @@ impl Tcp {
             return;
         }
         if !seg.syn() {
-            self.counters.add(Counter::ListenNoSyn, 1);
+            self.log.count(Counter::ListenNoSyn);
             return;
         }
         let Some(listener) = value(&mut self.listeners, index) else { return };
         if listener.pending.len() >= limits::LISTEN_PENDING || listener.ready.len() >= limits::LISTEN_READY {
-            self.counters.add(Counter::ListenOverflow, 1);
+            self.log.count(Counter::ListenOverflow);
             return;
         }
         let options = listener.options;
-        self.syn_refusals(seg, &tuple);
-        if seg.flags.contains(toyos_net_wire::tcp::TcpFlags::ECE) && seg.flags.contains(toyos_net_wire::tcp::TcpFlags::CWR) {
-            self.counters.add(Counter::EcnNotNegotiated, 1);
+        if let Some(tw) = time_wait {
+            self.leave_time_wait(tuple, tw.end);
+            self.log.count(Counter::TimeWaitReuse);
         }
         let local = self.local(&tuple);
         let fresh = isn(&self.config.secrets.isn, &tuple, now);
         let iss = time_wait.map_or(fresh, |tw| reuse_iss(tw.snd_nxt, fresh));
-        let mut ctx = Ctx { now, tuple, options, orphan: false, counters: &mut self.counters, events: &mut self.events };
+        let mut ctx = Ctx { now, tuple, options, orphan: false, log: &mut self.log };
+        refuse_syn_extras(seg, &mut ctx);
+        if seg.flags.contains(toyos_net_wire::tcp::TcpFlags::ECE) && seg.flags.contains(toyos_net_wire::tcp::TcpFlags::CWR) {
+            ctx.count(Counter::EcnNotNegotiated);
+        }
         let negotiated = negotiate(seg, &local, 0, &mut ctx);
-        let child = SynRcvd::passive(iss, seg, negotiated, index, time_wait.map(|tw| (tuple, tw)));
+        let child = SynRcvd::passive(iss, seg, negotiated, index, time_wait);
         let conn = Conn {
             tuple,
             options,
@@ -728,49 +701,35 @@ impl Tcp {
         self.settle(child, now);
     }
 
+    /// A SYN without ACK where a listener holds the endpoint either reopens the 4-tuple (§9.6) or
+    /// is dropped; TIME-WAIT itself judges everything else.
     fn for_time_wait(&mut self, tuple: Tuple, seg: &In<'_>, now: Instant) {
-        if seg.syn() && seg.ack.is_none() {
-            if let Some(listener) = self.listener_for(&tuple.local) {
-                let Some(Entry::TimeWait(tw)) = self.demux.get(&tuple) else { return };
-                let tw = *tw;
-                if tw.reopens(seg) {
-                    self.demux.remove(&tuple);
-                    self.time_waits.remove(&(tw.end, tuple));
-                    self.counters.add(Counter::TimeWaitReuse, 1);
-                    self.for_listener(listener, tuple, seg, now, |_| true, Some(tw));
-                }
-                return;
-            }
-        }
+        let listener = self.listener_for(&tuple.local).filter(|_| seg.syn() && seg.ack.is_none());
         let Some(Entry::TimeWait(tw)) = self.demux.get_mut(&tuple) else { return };
-        let mut ctx = Ctx { now, tuple, options: Options::default(), orphan: true, counters: &mut self.counters, events: &mut self.events };
-        let before = tw.end;
-        tw.receive(seg, &mut ctx);
-        let (after, owed) = (tw.end, tw.ack_owed);
-        if after != before {
-            self.time_waits.remove(&(before, tuple));
-            self.time_waits.insert((after, tuple));
+        if let Some(listener) = listener {
+            let tw = *tw;
+            if tw.reopens(seg) {
+                self.for_listener(listener, tuple, seg, now, |_| true, Some(tw));
+            }
+            return;
         }
-        if owed && !self.tw_owed.contains(&tuple) {
-            self.tw_owed.push_back(tuple);
+        let mut ctx = Ctx { now, tuple, options: Options::default(), orphan: true, log: &mut self.log };
+        let before = tw.end;
+        if tw.receive(seg, &mut ctx) {
+            self.tw_owed.insert(tuple);
+        }
+        if tw.end != before {
+            self.time_waits.remove(&(before, tuple));
+            self.time_waits.insert((tw.end, tuple));
         }
     }
 
     fn for_conn(&mut self, index: u32, seg: &In<'_>, now: Instant) {
         let Some(conn) = value(&mut self.conns, index) else { return };
-        let mut ctx = conn.ctx(now, &mut self.counters, &mut self.events);
+        let mut ctx = conn.ctx(now, &mut self.log);
         let tuple = conn.tuple;
         match core::mem::replace(&mut conn.state, Tcb::Ended(Ended { failure: None, rx: None })) {
             Tcb::SynSent(sent) => {
-                if seg.syn() {
-                    let (md5, fast_open) = seg.unimplemented_options();
-                    if md5 {
-                        ctx.refuse(Counter::OptionMd5);
-                    }
-                    if fast_open {
-                        ctx.refuse(Counter::OptionFastOpen);
-                    }
-                }
                 let (kept, outcome) = sent.receive(seg, &conn.local, &mut ctx);
                 if let Some(sent) = kept {
                     conn.state = Tcb::SynSent(sent);
@@ -796,7 +755,7 @@ impl Tcp {
                         if let Origin::Passive { listener, .. } = rcvd.origin {
                             let full = value(&mut self.listeners, listener).is_none_or(|l| l.ready.len() >= limits::LISTEN_READY);
                             if full {
-                                self.counters.add(Counter::AcceptQueueFull, 1);
+                                self.log.count(Counter::AcceptQueueFull);
                                 if let Some(conn) = value(&mut self.conns, index) {
                                     conn.state = Tcb::SynRcvd(rcvd);
                                 }
@@ -844,12 +803,13 @@ impl Tcp {
             Verdict::Reset => self.end(index, Some(Failure::Reset), None),
             Verdict::TimeWait => {
                 let tw = TimeWait::from_sync(&sync, now);
+                let owed = sync.rx.ack_now || sync.rx.dup_owed > 0 || sync.rx.delayed.is_some();
                 self.end(index, None, Some(Box::new(sync.rx)));
-                self.enter_time_wait(tuple, tw);
+                self.enter_time_wait(tuple, tw, owed);
             }
             Verdict::Abort(rst) => {
                 self.end(index, Some(Failure::Reset), None);
-                self.stub(tuple, rst);
+                self.stub(tuple, rst, None);
             }
         }
     }
@@ -857,16 +817,11 @@ impl Tcp {
     /// A passive child deleted without a word; a 4-tuple it took from TIME-WAIT returns there.
     fn child_gone(&mut self, index: u32) {
         let Some(conn) = value(&mut self.conns, index) else { return };
-        let restore = match &mut conn.state {
-            Tcb::SynRcvd(rcvd) => match &mut rcvd.origin {
-                Origin::Passive { time_wait, .. } => time_wait.take(),
-                Origin::Active { .. } => None,
-            },
-            _ => None,
-        };
+        let tuple = conn.tuple;
+        let resume = Self::reopened(&mut conn.state);
         self.free(index);
-        if let Some((tuple, tw)) = restore {
-            self.enter_time_wait(tuple, TimeWait { ack_owed: false, ..tw });
+        if let Some(tw) = resume {
+            self.enter_time_wait(tuple, tw, false);
         }
     }
 
@@ -875,8 +830,8 @@ impl Tcp {
         let tuple = Tuple { local: error.local, remote: error.remote };
         let index = match self.demux.get(&tuple) {
             Some(Entry::Conn(index)) => *index,
-            Some(Entry::TimeWait(_)) => return self.counters.add(Counter::IcmpStale, 1),
-            Some(Entry::Stub(_)) | None => return self.counters.add(Counter::IcmpNoSocket, 1),
+            Some(Entry::TimeWait(_)) => return self.log.count(Counter::IcmpStale),
+            Some(Entry::Stub(..)) | None => return self.log.count(Counter::IcmpNoSocket),
         };
         let Some(conn) = value(&mut self.conns, index) else { return };
         let soft = match error.kind {
@@ -895,7 +850,7 @@ impl Tcp {
             IcmpKind::Unreachable(UnreachableCode::FragmentationNeeded) => Some((None, 0)),
             IcmpKind::Unreachable(_) | IcmpKind::TimeExceeded | IcmpKind::ParameterProblem => None,
         };
-        let mut ctx = conn.ctx(now, &mut self.counters, &mut self.events);
+        let mut ctx = conn.ctx(now, &mut self.log);
         let (valid, passive) = match &conn.state {
             Tcb::SynSent(sent) => (error.sequence == sent.iss, false),
             Tcb::SynRcvd(rcvd) => (error.sequence == rcvd.iss, rcvd.is_passive()),
@@ -1006,7 +961,6 @@ impl Tcp {
         let tuple = conn.tuple;
         match &mut conn.state {
             Tcb::SynSent(_) | Tcb::Ended(_) => {
-                conn.user = User::Orphan;
                 self.free(id.index);
             }
             Tcb::SynRcvd(rcvd) => {
@@ -1016,10 +970,9 @@ impl Tcp {
             }
             Tcb::Sync(sync) if sync.rx.unread() > 0 => {
                 let rst = sync.reset_always(now);
-                conn.user = User::Orphan;
-                self.counters.add(Counter::CloseUnreadRst, 1);
+                self.log.count(Counter::CloseUnreadRst);
                 self.free(id.index);
-                self.stub(tuple, rst);
+                self.stub(tuple, rst, None);
             }
             Tcb::Sync(sync) => {
                 sync.shutdown_write(now);
@@ -1037,23 +990,19 @@ impl Tcp {
         let tuple = conn.tuple;
         let rst = match &conn.state {
             Tcb::SynSent(_) => None,
-            Tcb::SynRcvd(rcvd) => Some(rcvd.reset(now, &conn.local)),
+            Tcb::SynRcvd(rcvd) => Some(rcvd.reset(now)),
             Tcb::Sync(sync) => sync.reset(now),
             Tcb::Ended(_) => {
                 if let Some(Entry::TimeWait(tw)) = self.demux.get(&tuple) {
                     let end = tw.end;
-                    self.time_waits.remove(&(end, tuple));
-                    self.demux.remove(&tuple);
+                    self.leave_time_wait(tuple, end);
                 }
                 None
             }
         };
-        if let Some(conn) = value(&mut self.conns, id.index) {
-            conn.user = User::Orphan;
-        }
         self.free(id.index);
         if let Some(rst) = rst {
-            self.stub(tuple, rst);
+            self.stub(tuple, rst, None);
         }
         Ok(())
     }
@@ -1101,6 +1050,9 @@ impl Tcp {
             ts_recent: sync.ts.map(|ts| ts.recent),
             sacked_ranges: sync.tx.sacked().len(),
             in_recovery: sync.in_recovery(),
+            high_rxt: sync.sack_marks().map(|(high_rxt, _)| high_rxt),
+            rescue_rxt: sync.sack_marks().and_then(|(_, rescue)| rescue),
+            pipe: sync.pipe(),
             ooo_ranges: sync.rx.ranges(),
             queued: sync.tx.buf.len(),
             unread: sync.rx.unread(),
@@ -1127,10 +1079,7 @@ impl Tcp {
             if end > now {
                 break;
             }
-            self.time_waits.pop_first();
-            if matches!(self.demux.get(&tuple), Some(Entry::TimeWait(_))) {
-                self.demux.remove(&tuple);
-            }
+            self.leave_time_wait(tuple, end);
         }
         while let Some(&(at, index)) = self.deadlines.first() {
             if at > now {
@@ -1146,7 +1095,7 @@ impl Tcp {
 
     fn tick(&mut self, index: u32, now: Instant) {
         let Some(conn) = value(&mut self.conns, index) else { return };
-        let mut ctx = conn.ctx(now, &mut self.counters, &mut self.events);
+        let mut ctx = conn.ctx(now, &mut self.log);
         let tuple = conn.tuple;
         let soft = conn.soft;
         match &mut conn.state {
@@ -1173,7 +1122,7 @@ impl Tcp {
                 if let Some(failure) = failure {
                     let rst = sync.reset_always(now);
                     self.end(index, Some(failure), None);
-                    return self.stub(tuple, rst);
+                    return self.stub(tuple, rst, None);
                 }
             }
             Tcb::Ended(_) => {}
@@ -1190,9 +1139,12 @@ impl Tcp {
         let mut sent = 0usize;
         while sent < credit {
             if let Some(tuple) = self.stubs.pop_front() {
-                if let Some(Entry::Stub(rst)) = self.demux.remove(&tuple) {
+                if let Some(Entry::Stub(rst, resume)) = self.demux.remove(&tuple) {
                     sink(&builder(&Out::rst(&rst), &tuple, &[]));
                     sent = sent.saturating_add(1);
+                    if let Some(tw) = resume {
+                        self.enter_time_wait(tuple, tw, false);
+                    }
                 }
                 continue;
             }
@@ -1201,18 +1153,16 @@ impl Tcp {
                 sent = sent.saturating_add(1);
                 continue;
             }
-            if let Some(tuple) = self.tw_owed.pop_front() {
-                if let Some(Entry::TimeWait(tw)) = self.demux.get_mut(&tuple) {
-                    if core::mem::replace(&mut tw.ack_owed, false) {
-                        sink(&builder(&tw.ack(now), &tuple, &[]));
-                        sent = sent.saturating_add(1);
-                    }
+            if let Some(tuple) = self.tw_owed.pop_first() {
+                if let Some(Entry::TimeWait(tw)) = self.demux.get(&tuple) {
+                    sink(&builder(&tw.ack(now), &tuple, &[]));
+                    sent = sent.saturating_add(1);
                 }
                 continue;
             }
             let Some(index) = self.active.pop_front() else { break };
             let Some(conn) = value(&mut self.conns, index) else { continue };
-            let mut ctx = conn.ctx(now, &mut self.counters, &mut self.events);
+            let mut ctx = conn.ctx(now, &mut self.log);
             let out = match &mut conn.state {
                 Tcb::SynSent(s) => s.next_segment(&conn.local, now),
                 Tcb::SynRcvd(s) => s.next_segment(&conn.local, now),
@@ -1248,7 +1198,7 @@ impl Tcp {
 
     fn settle_deadline(&mut self, index: u32, now: Instant) {
         let Some(conn) = value(&mut self.conns, index) else { return };
-        let ctx = conn.ctx(now, &mut self.counters, &mut self.events);
+        let ctx = conn.ctx(now, &mut self.log);
         let deadline = conn.deadline(&ctx);
         if let Some(old) = core::mem::replace(&mut conn.deadline, deadline) {
             self.deadlines.remove(&(old, index));

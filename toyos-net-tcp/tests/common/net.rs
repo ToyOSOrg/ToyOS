@@ -19,8 +19,9 @@ pub const NODE_B: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 pub struct Digest(pub u64, pub u64, pub Option<Vec<u8>>);
 
 impl Digest {
-    pub fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325, 0, std::env::var("NET_KEEP").ok().map(|_| Vec::new()))
+    /// `keep`, or `NET_KEEP` in the environment, keeps the bytes as well.
+    pub fn new(keep: bool) -> Self {
+        Self(0xcbf2_9ce4_8422_2325, 0, (keep || std::env::var("NET_KEEP").is_ok()).then(Vec::new))
     }
     pub fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
@@ -73,6 +74,8 @@ pub struct App {
     /// Read at most this many bytes per step; `None` reads everything.
     pub read_limit: Option<usize>,
     pub reading: bool,
+    /// Write at most this many bytes per pass; `None` writes all the stack takes.
+    pub write_limit: Option<usize>,
 }
 
 /// What the link does with one datagram.
@@ -83,6 +86,8 @@ pub enum Fate {
     Duplicate,
     /// Hold it until the next datagram on this link has gone.
     Hold,
+    /// Deliver it this many milliseconds after the link's delay.
+    Late(u64),
 }
 
 pub struct Node {
@@ -105,6 +110,9 @@ struct Flight {
 
 pub type Impair = Box<dyn FnMut(usize, &O) -> Fate>;
 pub type Rewrite = Box<dyn FnMut(usize, &O) -> Option<Vec<u8>>>;
+/// Called with a node's stack after each arrival and each firing (`None`), and with each segment it
+/// hands off (`Some`).
+pub type Check = Box<dyn FnMut(usize, &mut Tcp, Instant, Option<&O>)>;
 
 pub struct Net {
     pub now: u64,
@@ -128,6 +136,9 @@ pub struct Net {
     pending_accepts: Vec<(ListenerId, usize)>,
     /// When timers last fired: a deadline still due then is a timer that does not fire.
     fired_at: Option<u64>,
+    /// Applications keep every byte they send and receive, not only its digest.
+    pub keep_streams: bool,
+    pub check: Option<Check>,
 }
 
 pub fn ns(ms: u64) -> u64 {
@@ -149,7 +160,8 @@ impl Net {
                     port_index: key(seed.wrapping_add(0x30)),
                     port_table: [0; 16],
                 },
-            }),
+            })
+            .unwrap(),
             addr,
             offset: 0,
             credit_per_ms: None,
@@ -173,6 +185,8 @@ impl Net {
             auto_shut: true,
             pending_accepts: Vec::new(),
             fired_at: None,
+            keep_streams: false,
+            check: None,
         }
     }
 
@@ -188,19 +202,7 @@ impl Net {
             let now = self.instant(0);
             let local = self.local_port.map(|p| port(p + i as u16));
             let id = self.nodes[0].tcp.connect(now, NODE_A, local, ep(NODE_B, port_)).unwrap();
-            let tuple = self.nodes[0].tcp.tuple(id).unwrap();
-            self.apps.push(App {
-                id,
-                node: 0,
-                tuple,
-                source: Source::new(0x1000 + i as u64, len[0]),
-                sent: Digest::new(),
-                received: Digest::new(),
-                end: None,
-                shut: false,
-                read_limit: None,
-                reading: true,
-            });
+            self.add_app(0, id, Source::new(0x1000 + i as u64, len[0]));
         }
         self.pending_accepts.push((listener, len[1]));
         listener
@@ -213,24 +215,30 @@ impl Net {
         }
     }
 
+    fn add_app(&mut self, node: usize, id: ConnId, source: Source) {
+        let tuple = self.nodes[node].tcp.tuple(id).unwrap();
+        let keep = self.keep_streams;
+        self.apps.push(App {
+            id,
+            node,
+            tuple,
+            source,
+            sent: Digest::new(keep),
+            received: Digest::new(keep),
+            end: None,
+            shut: false,
+            read_limit: None,
+            reading: true,
+            write_limit: None,
+        });
+    }
+
     fn accept_all(&mut self) {
         for k in 0..self.pending_accepts.len() {
             let (listener, len) = self.pending_accepts[k];
             while let Some(id) = self.nodes[1].tcp.accept(listener).unwrap() {
                 let seed = 0x2000 + self.apps.len() as u64;
-                let tuple = self.nodes[1].tcp.tuple(id).unwrap();
-                self.apps.push(App {
-                    id,
-                    node: 1,
-                    tuple,
-                    source: Source::new(seed, len),
-                    sent: Digest::new(),
-                    received: Digest::new(),
-                    end: None,
-                    shut: false,
-                    read_limit: None,
-                    reading: true,
-                });
+                self.add_app(1, id, Source::new(seed, len));
             }
         }
     }
@@ -244,16 +252,19 @@ impl Net {
             if matches!(app.end, Some(End::Failed(_))) {
                 continue;
             }
-            loop {
-                app.source.fill(65_536);
-                if app.source.pending.is_empty() {
+            let mut room = app.write_limit.unwrap_or(usize::MAX);
+            while room > 0 {
+                app.source.fill(room.min(65_536));
+                let chunk = app.source.pending.len().min(room);
+                if chunk == 0 {
                     break;
                 }
-                match node.tcp.send(now, app.id, &app.source.pending) {
+                match node.tcp.send(now, app.id, &app.source.pending[..chunk]) {
                     Ok(n) => {
                         app.sent.feed(&app.source.pending[..n]);
                         app.source.pending.drain(..n);
                         app.source.left -= n;
+                        room -= n;
                         if n == 0 {
                             break;
                         }
@@ -321,6 +332,7 @@ impl Net {
 
     fn launch(&mut self, from: usize, bytes: Vec<u8>) {
         let mut parsed = parse_out(&bytes, (self.now / 1_000_000) as i64);
+        self.checked(from, Some(&parsed));
         let bytes = match self.rewrite.as_mut().and_then(|r| r(from, &parsed)) {
             Some(new) => {
                 parsed = parse_out(&new, parsed.t);
@@ -336,27 +348,28 @@ impl Net {
             return;
         }
         let to = 1 - from;
-        let push = |net: &mut Net, bytes: Vec<u8>| {
+        let push = |net: &mut Net, bytes: Vec<u8>, late: u64| {
             net.order += 1;
-            net.in_flight.push(Flight { at: net.now + net.delay, order: net.order, to, bytes });
+            net.in_flight.push(Flight { at: net.now + net.delay + ns(late), order: net.order, to, bytes });
         };
         match fate {
             Fate::Drop => {}
             Fate::Pass => {
-                push(self, bytes);
+                push(self, bytes, 0);
                 if let Some(held) = self.held[from].take() {
-                    push(self, held);
+                    push(self, held, 0);
                 }
             }
             Fate::Duplicate => {
-                push(self, bytes.clone());
-                push(self, bytes);
+                push(self, bytes.clone(), 0);
+                push(self, bytes, 0);
             }
             Fate::Hold => {
                 if let Some(held) = self.held[from].replace(bytes) {
-                    push(self, held);
+                    push(self, held, 0);
                 }
             }
+            Fate::Late(ms) => push(self, bytes, ms),
         }
     }
 
@@ -365,6 +378,14 @@ impl Net {
         let ip = Ipv4Packet::parse(&flight.bytes).unwrap();
         let tcp = TcpSegment::parse(&ip).unwrap();
         self.nodes[flight.to].tcp.receive(now, ip.source(), ip.destination(), &tcp, |_| true);
+        self.checked(flight.to, None);
+    }
+
+    fn checked(&mut self, node: usize, seg: Option<&O>) {
+        let now = self.instant(node);
+        if let Some(check) = self.check.as_mut() {
+            check(node, &mut self.nodes[node].tcp, now, seg);
+        }
     }
 
     fn next_event(&self) -> Option<u64> {
@@ -392,6 +413,7 @@ impl Net {
         for node in 0..2 {
             let now = self.instant(node);
             self.nodes[node].tcp.fire(now);
+            self.checked(node, None);
         }
         self.fired_at = Some(self.now);
         self.drive_apps();
@@ -521,5 +543,13 @@ impl Net {
         }
         self.now = target;
         self.pass();
+    }
+}
+
+impl Net {
+    /// Delivers `bytes` to node `to` in the next pass, as if the link had carried them.
+    pub fn inject(&mut self, to: usize, bytes: Vec<u8>) {
+        self.order += 1;
+        self.in_flight.push(Flight { at: self.now, order: self.order, to, bytes });
     }
 }

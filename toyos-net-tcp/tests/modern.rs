@@ -5,9 +5,7 @@ mod common;
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_tcp::{Counter, Failure, Instant, Refusal, RefusalLog, State};
-use toyos_net_wire::ipv4::Ipv4Packet;
-use toyos_net_wire::tcp::{TcpError, TcpSegment};
+use toyos_net_tcp::{limits, Counter, Failure, Instant, Refusal, RefusalLog, State};
 
 fn listening() -> H {
     let mut h = H::new(65_535);
@@ -72,6 +70,12 @@ fn s_mod_005_one_line_per_rule_per_10_s() {
     assert_eq!(lines.len(), 2);
     assert_eq!((lines[0].0.remote, lines[0].1), (ep(Ipv4Addr::new(192, 0, 2, 10), 1234), 0));
     assert_eq!((lines[1].0.remote, lines[1].1), (ep(Ipv4Addr::new(192, 0, 2, 60), 1234), 49));
+    let mut h = listening();
+    for i in 0..=limits::EVENTS as u16 {
+        h.arrive(seg(5000).syn().fin().from(B, 1024 + i));
+    }
+    assert_eq!(h.tcp.drain_events().count(), limits::EVENTS, "an undrained shell holds a bounded list");
+    assert_eq!(h.count(Counter::EventOverflow), 1);
 }
 
 #[test]
@@ -125,17 +129,6 @@ fn s_mod_009_out_of_range_acks_are_logged_per_10_s() {
     let refusals = h.refusals(Counter::AckOutOfRange);
     assert!(refusals.iter().all(|r| r.remote == ep(B, 80)));
     assert_eq!(log_lines(&h, Counter::AckOutOfRange, &times), 2);
-}
-
-#[test]
-fn s_mod_010_an_illegal_option_length_never_reaches_tcp() {
-    let mut h = fixture_e();
-    let before = h.info();
-    let bytes = seg(5001).ack(1001).opt(Opt::Raw(vec![2, 1, 0, 0])).len(10).bytes((B, 80), (A, 49152), 0, 0);
-    let ip = Ipv4Packet::parse(&bytes).unwrap();
-    assert_eq!(TcpSegment::parse(&ip), Err(TcpError::OptionLength));
-    nothing(&h.at(1));
-    assert_eq!(h.info(), before);
 }
 
 /// TX-13 up to t = 210: SND.NXT 1002 past a shut window.

@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use toyos_net_tcp::{Counter, Failure, State};
+use toyos_net_tcp::{limits, ConfigError, Counter, Failure, State, Tcp};
 
 fn hex(text: &str) -> Vec<u8> {
     text.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
@@ -207,6 +207,28 @@ fn recent_50100() -> H {
     h
 }
 
+/// A passive child whose SYN carried TSval 49,980.
+fn timestamped_child() -> H {
+    let mut h = listener();
+    expect(&h.input(-20, seg(5000).syn().mss(1460).sackok().ts(49_980, 0).ws(7)), &["CTL=SYN,ACK TS=*/49980"]);
+    h
+}
+
+/// ESF closed by A into TIME-WAIT with TS.Recent 50,020, ending at 60,020.
+fn timestamped_time_wait() -> H {
+    let mut h = fixture_esf();
+    h.close(0);
+    h.input(10, seg(5001).ack(1002).wnd(512).ts(50_010, 1000));
+    h.input(20, seg(5001).ack(1002).wnd(512).fin().ts(50_020, 1000));
+    assert_eq!(h.tcp.time_wait_count(), 1);
+    h
+}
+
+fn accepted(h: &mut H) -> bool {
+    h.tcp.accept(h.listener.unwrap()).unwrap().is_some()
+}
+
+/// In ESTABLISHED, SYN-RECEIVED and TIME-WAIT.
 #[test]
 fn s_op_020_paws() {
     let mut h = recent_50100();
@@ -214,10 +236,21 @@ fn s_op_020_paws() {
     expect(&outs, &["SEQ=1001 ACK=5001 TS=*/50100"]);
     assert_eq!(h.info().rcv_nxt.get(), 5001);
     assert_eq!(h.count(Counter::PawsReject), 1);
+    let mut h = timestamped_child();
+    expect(&h.input(-10, seg(5001).ack(1001).ts(49_000, 1000)), &["SEQ=1001 ACK=5001 CTL=ACK TS=*/49980"]);
+    assert_eq!(h.count(Counter::PawsReject), 1);
+    assert!(!accepted(&mut h));
+    h.input(-5, seg(5001).ack(1001).ts(49_990, 1000));
+    assert!(accepted(&mut h), "the child stayed in SYN-RECEIVED");
+    let mut h = timestamped_time_wait();
+    expect(&h.input(1000, seg(5001).ack(1002).wnd(512).fin().ts(40_000, 1000)), &["SEQ=1002 ACK=5002 CTL=ACK TS=*/50020"]);
+    assert_eq!(h.count(Counter::PawsReject), 1);
+    h.at(60_020);
+    assert_eq!(h.tcp.time_wait_count(), 0, "an old FIN rejected by PAWS does not restart TIME-WAIT");
 }
 
 /// T-4, decided the modern way: a segment without timestamps on a timestamped connection is
-/// dropped (RFC 7323 §3.2), counted and logged.
+/// dropped (RFC 7323 §3.2), counted and logged; in ESTABLISHED, SYN-RECEIVED and TIME-WAIT.
 #[test]
 fn s_op_021_missing_timestamps_are_dropped() {
     let mut h = fixture_ef();
@@ -227,6 +260,17 @@ fn s_op_021_missing_timestamps_are_dropped() {
     assert_eq!(h.count(Counter::TsMissing), 1);
     assert_eq!(h.refusals(Counter::TsMissing).len(), 1);
     assert_eq!(h.info().state, State::Established);
+    let mut h = timestamped_child();
+    nothing(&h.input(-10, seg(5001).ack(1001)));
+    assert_eq!((h.count(Counter::TsMissing), h.refusals(Counter::TsMissing).len()), (1, 1));
+    assert!(!accepted(&mut h));
+    h.input(-5, seg(5001).ack(1001).ts(49_990, 1000));
+    assert!(accepted(&mut h), "the child stayed in SYN-RECEIVED");
+    let mut h = timestamped_time_wait();
+    nothing(&h.input(1000, seg(5001).ack(1002).wnd(512).fin()));
+    assert_eq!((h.count(Counter::TsMissing), h.refusals(Counter::TsMissing).len()), (1, 1));
+    h.at(60_020);
+    assert_eq!(h.tcp.time_wait_count(), 0, "a FIN without timestamps does not restart TIME-WAIT");
 }
 
 #[test]
@@ -295,6 +339,8 @@ fn s_op_031_the_shift_fits_the_buffer() {
     let id = h.tcp.connect(h.now(), A, Some(port(49152)), ep(B, 80)).unwrap();
     h.conn = Some(id);
     expect(&h.transmit(), &["CTL=SYN WS=1"]);
+    assert!(Tcp::new(config(limits::RECEIVE_BUFFER_MAX)).is_ok());
+    assert_eq!(Tcp::new(config(limits::RECEIVE_BUFFER_MAX + 1)).err(), Some(ConfigError::ReceiveBufferTooLarge));
 }
 
 #[test]

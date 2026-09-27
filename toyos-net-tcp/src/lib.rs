@@ -6,14 +6,12 @@
 //! credit; nothing here reads a clock, draws randomness or does I/O.
 //!
 //! **Pull egress.** A segment exists only while [`Tcp::transmit`] hands it to the caller's sink,
-//! built from the state of that moment. Sequence space counts as sent, and the retransmission timer
-//! starts, only then; an expiry marks the oldest segment due and arms nothing, so a retransmission
-//! timeout can never fire for a segment that has not left (`tcp.rto-unsent` stays 0).
+//! built from the state of that moment. An RTO never fires for a segment that has not left.
 //!
 //! **Refusals are values.** Legacy or insecure input is refused, counted in [`Counters`], and
 //! named by an [`Event::Refused`] the shell logs through [`RefusalLog`].
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 #![cfg_attr(
     not(test),
@@ -28,6 +26,9 @@
 )]
 
 extern crate alloc;
+/// `tests/common`, which the property tests share, names the crate from outside.
+#[cfg(test)]
+extern crate self as toyos_net_tcp;
 
 mod cc;
 mod conn;
@@ -80,10 +81,10 @@ impl Instant {
         Duration::from_nanos(self.0.saturating_sub(earlier.0))
     }
 
-    /// The timestamp clock's tick: one per millisecond (RFC 7323 §5.4).
-    const fn millis32(self) -> u32 {
+    /// The TSval a 4-tuple with `offset` sends now: one tick per millisecond (RFC 7323 §5.4).
+    const fn tsval(self, offset: u32) -> u32 {
         let [a, b, c, d, ..] = (self.0 / 1_000_000).to_le_bytes();
-        u32::from_le_bytes([a, b, c, d])
+        u32::from_le_bytes([a, b, c, d]).wrapping_add(offset)
     }
 }
 
@@ -163,7 +164,6 @@ pub fn reuse_iss(old_snd_nxt: Seq, fresh: Seq) -> Seq {
     }
 }
 
-/// Published bounds: inspect's `limits.tcp.*`, read by tests instead of restated.
 pub mod limits {
     use core::time::Duration;
 
@@ -172,57 +172,26 @@ pub mod limits {
     pub const GIVE_UP: Duration = Duration::from_secs(900);
     pub const SYN_GIVE_UP: Duration = Duration::from_secs(180);
     pub const SYNACK_GIVE_UP: Duration = Duration::from_secs(60);
-    pub const RTO_INITIAL: Duration = crate::rtt::RTO_INITIAL;
-    pub const RTO_MIN: Duration = crate::rtt::RTO_MIN;
-    pub const RTO_MAX: Duration = crate::rtt::RTO_MAX;
-    pub const DELAYED_ACK: Duration = crate::rx::DELAYED_ACK;
     pub const SWS_OVERRIDE: Duration = Duration::from_millis(200);
     pub const KEEPALIVE_IDLE: Duration = Duration::from_secs(7_200);
     pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(75);
     pub const KEEPALIVE_PROBES: u32 = 9;
     pub const LISTEN_READY: usize = 128;
     pub const LISTEN_PENDING: usize = 256;
-    pub const OOO_RANGES: usize = crate::rx::OOO_RANGES;
-    pub const SACK_RANGES: usize = crate::tx::SACK_RANGES;
     pub const TIME_WAIT_MAX: usize = 16_384;
     pub const MSS_FLOOR: u16 = 536;
     pub const UNSOLICITED_ACK: Duration = Duration::from_millis(500);
-    pub const REFUSAL_LOG: Duration = crate::REFUSAL_LOG_INTERVAL;
+    /// Events held for the shell until it drains them.
+    pub const EVENTS: usize = 1_024;
+    /// The largest window scaling can offer (RFC 7323 §2.3): no receive buffer is larger.
+    pub const RECEIVE_BUFFER_MAX: u32 = 65_535 << 14;
+}
 
-    fn ms(d: Duration) -> u64 {
-        u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
-    }
-
-    fn units(n: usize) -> u64 {
-        u64::try_from(n).unwrap_or(u64::MAX)
-    }
-
-    /// `limits.tcp.<name>` and its value in milliseconds or units.
-    pub fn all() -> [(&'static str, u64); 21] {
-        [
-            ("time_wait_ms", ms(TIME_WAIT)),
-            ("orphan_idle_ms", ms(ORPHAN_IDLE)),
-            ("give_up_ms", ms(GIVE_UP)),
-            ("syn_give_up_ms", ms(SYN_GIVE_UP)),
-            ("synack_give_up_ms", ms(SYNACK_GIVE_UP)),
-            ("rto_initial_ms", ms(RTO_INITIAL)),
-            ("rto_min_ms", ms(RTO_MIN)),
-            ("rto_max_ms", ms(RTO_MAX)),
-            ("delayed_ack_ms", ms(DELAYED_ACK)),
-            ("sws_override_ms", ms(SWS_OVERRIDE)),
-            ("keepalive_idle_ms", ms(KEEPALIVE_IDLE)),
-            ("keepalive_interval_ms", ms(KEEPALIVE_INTERVAL)),
-            ("keepalive_probes", u64::from(KEEPALIVE_PROBES)),
-            ("listen_ready", units(LISTEN_READY)),
-            ("listen_pending", units(LISTEN_PENDING)),
-            ("ooo_ranges", units(OOO_RANGES)),
-            ("sack_ranges", units(SACK_RANGES)),
-            ("timewait_max", units(TIME_WAIT_MAX)),
-            ("mss_floor", u64::from(MSS_FLOOR)),
-            ("unsolicited_ack_ms", ms(UNSOLICITED_ACK)),
-            ("refusal_log_ms", ms(REFUSAL_LOG)),
-        ]
-    }
+/// A [`Config`] that [`Tcp::new`] refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigError {
+    /// Above [`limits::RECEIVE_BUFFER_MAX`]: the window could never offer all of it.
+    ReceiveBufferTooLarge,
 }
 
 /// Per-connection options, inherited by a listener's children.
