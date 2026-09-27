@@ -171,8 +171,8 @@ fn parse_config(path: &Path) -> SystemConfig {
 
 /// `config` less every program the licence gate names as a package pending
 /// the owner. A program's key is its package's name
-/// (`the_release_withholds_every_pending_package`); one another row starts or
-/// receives stays named there, and `build_and_assemble` refuses the image.
+/// (`the_release_withholds_every_pending_package`). One that `[boot] start` or
+/// a symlink still names is refused by `build_and_assemble`.
 fn withhold_pending(config: &mut SystemConfig) {
     for subject in crate::licence::pending_owner() {
         if let crate::licence::Subject::Crate(name) = subject {
