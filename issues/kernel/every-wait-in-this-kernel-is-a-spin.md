@@ -9,7 +9,7 @@ opened: 2026-08-12
 **The heading and the paragraph under it are the state at opening, not the
 state of the tree.** What exists now: the completion core, where every wait in
 the kernel rechecks one predicate and a waiter lends a watch to the object it
-waits on (`kernel/src/completion/mod.rs:1-8`); typed durations; and a sleep
+waits on (`aaddf38a^:kernel/src/completion/mod.rs:1-8`, since folded into `kernel/src/watch.rs`); typed durations; and a sleep
 lock a contender parks on — written, loom-driven, and still
 `#![allow(dead_code)]` "until a kernel static converts to it"
 (`kernel/src/sleeplock.rs:1-9`), because none has. What has not moved is the

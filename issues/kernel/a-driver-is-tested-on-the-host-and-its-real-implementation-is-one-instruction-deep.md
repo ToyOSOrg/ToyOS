@@ -11,7 +11,7 @@ boot, the suite's flakiness is the host's load, and a stub of the hardware's
 own rules would have caught this month's hardware bugs before a machine did:
 a wait that checked its deadline only on an empty ring, a port acknowledgement
 that disables the port, a controller reset that is not what a device sees
-(`issues/kernel/a-usb-wait-checks-its-deadline-only-on-an-empty-ring.md` and
+(`46f4c14d^:issues/kernel/a-usb-wait-checks-its-deadline-only-on-an-empty-ring.md` and
 the reset ruling in `kernel/src/drivers/acpi.rs`). Owner direction, 2026-09-07:
 the logic inside every driver is tested on the host against stubs that
 implement the hardware's behavior, errors and unpredictability; QEMU keeps a

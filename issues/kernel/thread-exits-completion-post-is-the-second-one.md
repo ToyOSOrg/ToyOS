@@ -20,7 +20,7 @@ scheduler::exit_current(code);
 
 `exit_current` reaches `driver::pass(Dispose::Exit)`, and the pass after that
 one drops the task's payload through `Hw::release`
-(`kernel/src/hw.rs`), which ends with `TaskHandle::publish_released` —
+(`kernel/src/arch/x86_64/hw.rs`), which ends with `TaskHandle::publish_released` —
 and that posts `Gone(Closed)` **on the same watch**, which its own comment
 states in those words: *"the retirer is armed on this thread's own watch — the
 same subject a joiner uses, and the reason the release no longer needs a queue

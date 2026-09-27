@@ -13,6 +13,7 @@
 
 [package]
 name = "toyos-blockring"
+description = "The block protocol between a block service and its client: one shared session of request and completion rings and an arena."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

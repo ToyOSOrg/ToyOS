@@ -10,6 +10,7 @@
 name = "toyos-transport"
 version = "0.1.0"
 edition = "2021"
+description = "The transport every client/server session runs over: rings, an arena of runs and a tag table, decided over words an adapter hands in."
 license = "MIT OR Apache-2.0"
 publish = false
 

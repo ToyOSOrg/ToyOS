@@ -1,5 +1,6 @@
 [package]
 name = "toyos-sched-loom"
+description = "Loom models of the toyos-sched primitives, over the same sources compiled a second time."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

@@ -12,6 +12,7 @@
 
 [package]
 name = "toyos-userbound"
+description = "Every decision the kernel makes about the user/kernel boundary, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
