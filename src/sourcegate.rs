@@ -531,9 +531,9 @@ struct Spawn {
 /// A spawn that is not `Command` — `libc::system`, `execvp`, `posix_spawn` —
 /// which `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md` carries.
 /// A binary a third-party crate runs for us: `userland/doom/build.rs` drives
-/// `cc::Build`, which compiles and archives with whatever `cc` and `ar` it
-/// finds in `PATH`, and the `cc` half is one of the three standing failures
-/// `CLAUDE.md` declares. And an alias no one line spells, which the
+/// `cc::Build`, which compiles and archives with the toolchain's clang and
+/// `llvm-ar` because `src/build.rs` names them in `cc`'s own variables — and
+/// with whatever `cc` and `ar` it finds in `PATH` for a build that names none. And an alias no one line spells, which the
 /// not-`Command` record carries under its own heading. A workflow or a
 /// container image is [`CI_PACKAGES`] and [`CI_ACTIONS`], not this.
 const HOST_SPAWNS: &[Spawn] = &[
@@ -635,20 +635,21 @@ const HOST_SPAWNS: &[Spawn] = &[
               scratch holder whose death is what is judged",
     },
     Spawn {
-        arg: "env!(\"CARGO_BIN_EXE_toyos-cc\")",
-        sites: &[("toyos-cc/tests/determinism.rs", 1), ("toyos-cc/tests/pp_corpus.rs", 1)],
-        why: "our own compiler, built by cargo for its own tests",
-    },
-    Spawn {
         arg: "env!(\"CARGO_BIN_EXE_toyos-ld\")",
         sites: &[("toyos-ld/tests/common/mod.rs", 2), ("toyos-ld/tests/determinism.rs", 1)],
-        why: "our own linker, the same way",
+        why: "our own linker, built by cargo for its own tests",
     },
     Spawn {
-        arg: "&rust_lld",
-        sites: &[("tests/common/compile.rs", 1)],
-        why: "the toolchain's own `rust-lld`, which rustc links every guest binary with, \
-              linking the C tests that have no Rust crate for rustc to link",
+        arg: "&c.clang",
+        sites: &[("tests/common/compile.rs", 2), ("tests/common/clang.rs", 1)],
+        why: "the toolchain's own clang, from the LLVM rustc is built with, compiling and \
+              linking the C programs the harness runs",
+    },
+    Spawn {
+        arg: "readobj",
+        sites: &[("tests/common/clang.rs", 1)],
+        why: "the toolchain's own `llvm-readobj`, the second reader a linked C program is \
+              judged by beside the loader's decoder",
     },
     Spawn {
         arg: "toyos_build::build::https_fetch_host(&compile::repo_root())",
@@ -716,6 +717,17 @@ const CI_PACKAGES: &[Package] = &[
               no binary anything here runs",
     },
     Package {
+        name: "cmake",
+        why: "CMake, which rustc's bootstrap configures LLVM and clang with — a declared host \
+              tool (`ALSO_USED` in src/main.rs, issues/build/python-and-cc-are-declared.md), \
+              unpinned where a portability job installs its platform's own",
+    },
+    Package {
+        name: "cmake=3.28.3-1build7",
+        why: "the same CMake, pinned to the version Ubuntu 24.04 released, on the nightly's \
+              toolchain runner, whose LLVM build is the one a release ships",
+    },
+    Package {
         name: "curl",
         why: "outside the bar, and declared by nothing else: it fetches rustup-init.sh, and \
               src/release.rs and src/ci.rs ask GitHub and the crates.io index with it",
@@ -723,6 +735,20 @@ const CI_PACKAGES: &[Package] = &[
     Package {
         name: "git",
         why: "the version control this repository is, and `REQUIRED` in src/main.rs",
+    },
+    Package {
+        name: "ninja",
+        why: "Ninja, what CMake builds LLVM and clang with under rustc's bootstrap, under \
+              Homebrew's formula name; declared beside CMake",
+    },
+    Package {
+        name: "ninja-build",
+        why: "the same Ninja under Debian's package name, unpinned on the portability job",
+    },
+    Package {
+        name: "ninja-build=1.11.1-2",
+        why: "the same Ninja, pinned to the version Ubuntu 24.04 released, on the nightly's \
+              toolchain runner",
     },
     Package {
         name: "python3",
@@ -1494,10 +1520,6 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("toyos-abi/src/arch/", "toyos-abi's per-architecture reads: the counter and the thread's id, and their selector"),
             ("src/arch.rs", "the build system's one reading of the host it runs on"),
             (
-                "toyos-cc/src/preprocess/mod.rs",
-                "the C compiler's default target is its host's, when the command line names none",
-            ),
-            (
                 "src/licence.rs",
                 "the licence gate resolves a dependency's `cfg(target_arch = ...)` against the target an image is built for: the architecture is the data it reads, not a choice it makes",
             ),
@@ -1589,12 +1611,13 @@ const CORPUS: &str = "tests/testcases";
 
 /// The populations that licence attributes, each the directory its count counts.
 #[cfg(test)]
-const CORPUS_POPULATIONS: &[&str] = &["tinycc", "pp_tcc"];
+const CORPUS_POPULATIONS: &[&str] = &["tinycc"];
 
 /// The corpus files that are this repository's own, so a tracked file under
 /// [`CORPUS`] that is in no population and is none of these is an arrival.
 #[cfg(test)]
-const CORPUS_OURS: &[&str] = &["tests/testcases/LICENSE", "tests/testcases/system.toml"];
+const CORPUS_OURS: &[&str] =
+    &["tests/testcases/LICENSE", "tests/testcases/system.toml", "tests/testcases/hello.c"];
 
 /// `NOTICE`: "Do not re-import it." A re-import arrives as new bytes under a new
 /// digest, so the file name is the thing that can be refused.

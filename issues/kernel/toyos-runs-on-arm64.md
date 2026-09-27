@@ -44,8 +44,10 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   hardware: the kernel's `Relaxed` orderings and `Mmio`'s barrier semantics are
   real latent defects on x86 too (`issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
   is one instance).
-- **`toyos-cc` gets no AArch64 backend yet.** Doom and tinycc stay x86-only
-  until userland runs on ARM, and that is decided again then.
+- **C on AArch64 goes through clang**, whose driver knows
+  `aarch64-unknown-toyos` (`issues/build/toyos-builds-itself.md`). Doom and the
+  C corpus stay x86-only until userland runs on ARM and an AArch64 C sysroot is
+  built.
 - **Randomness** comes from RNDR where the CPU has it, and from virtio-rng
   under QEMU/HVF, behind one `sys_random` source.
 - **TLS**: each architecture uses its ABI's variant (x86-64 keeps variant II;
@@ -152,7 +154,6 @@ output (`collect.rs` 80 `Aarch64` mentions, `reloc.rs` 69) but hardwires
 (`emit_elf.rs:1228,1313,1399`) and `IMAGE_FILE_MACHINE_AMD64`
 (`emit_pe.rs:143`) on output, and has no AArch64 TLS relocations. `toyos-elf`
 refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
-`toyos-cc` (10,576 lines) emits only x86.
 
 **Already abstracted.** The syscall stub already has both arms
 (`toyos-abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `toyos-sched`
@@ -177,8 +178,7 @@ most of `arch/tlb.rs`'s 303-line IPI shootdown machinery unnecessary — a
 contract change, not a port); the memory model (the 711 `Relaxed` orderings
 and every doorbell-after-descriptor site — undiscovered TSO reliance is the
 one cost nobody can estimate from a grep); userland TLS and the toolchain
-(variant I and TLSDESC across `toyos-ld`, the kernel loader and std;
-`toyos-cc` has no AArch64 backend); the test harness (33,907 lines in
+(variant I and TLSDESC across `toyos-ld`, the kernel loader and std); the test harness (33,907 lines in
 `tests/common/`, written against q35, i8042, OVMF, KVM, `intel-iommu`).
 
 ## Hardware evidence
@@ -322,8 +322,8 @@ Each stage names its exit; "measured" means a number from a run.
    test until then.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
-   built for `aarch64-unknown-toyos`. C programs stay x86-only per the
-   `toyos-cc` ruling. **Exit**: the desktop comes up on virtio-gpu; `ssh`
+   built for `aarch64-unknown-toyos`. C programs stay x86-only until an
+   AArch64 C sysroot is built. **Exit**: the desktop comes up on virtio-gpu; `ssh`
    works from the host; `/log` survives a reboot; the same `system.toml`
    drives both arches.
 

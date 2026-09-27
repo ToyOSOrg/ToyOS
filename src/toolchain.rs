@@ -337,6 +337,7 @@ pub(crate) fn assert_toolchain_is_honest(stage2: &Path) {
         stage2.display(),
         lld.display(),
     );
+    crate::clang::assert_present(stage2);
 }
 
 /// Ensure the toolchain is up to date, and return the sysroot this checkout's
@@ -368,29 +369,6 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
     fs::create_dir_all(&stamps_dir).ok();
 
     let owner = owner(root);
-
-    // Used as a host tool by doom's build.rs.
-    let cc_src = root.join("toyos-cc/src");
-    let cc_inc = root.join("toyos-cc/include");
-    let cc_stamp = stamps_dir.join("toyos-cc.stamp");
-    let cc_inc_stamp = stamps_dir.join("toyos-cc-include.stamp");
-    lock.act_if(
-        Scope::Worktree,
-        "build toyos-cc",
-        || {
-            (stamps::dir_changed(&cc_src, &cc_stamp)
-                || stamps::dir_changed(&cc_inc, &cc_inc_stamp)
-                || !toyos_cc_binary(root).exists())
-            .then_some(())
-        },
-        |()| {
-            eprintln!("Building toyos-cc...");
-            build_toyos_cc(root);
-            stamps::write_dir_stamp(&cc_src, &cc_stamp);
-            stamps::write_dir_stamp(&cc_inc, &cc_inc_stamp);
-        },
-    );
-
 
     match owner {
         Owner::Elsewhere(primary) => {
@@ -430,7 +408,11 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            if stamps::dir_changed(&rust_dir.join("compiler"), &compiler_stamp) || force_rebuild {
+            // The record says what `stage2` was built from; one that names
+            // another LLVM is a compiler this checkout no longer describes.
+            let moved = fs::read_to_string(rust_dir.join("build/toyos-compiler"))
+                .is_ok_and(|built| built.trim() != crate::compiler::source(&rust_dir));
+            if stamps::dir_changed(&rust_dir.join("compiler"), &compiler_stamp) || moved || force_rebuild {
                 Some(Bootstrap { invalidate_hosted: true })
             } else if !toolchain_exists {
                 Some(Bootstrap { invalidate_hosted: false })
@@ -491,6 +473,12 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         "give the toyos toolchain its own cargo",
         || cargo_link_stale(&stage2).then_some(()),
         |()| provision_toolchain_cargo(&stage2),
+    );
+    lock.act_if(
+        Scope::Global,
+        "give the toyos toolchain the clang of its LLVM",
+        || crate::clang::missing(&stage2).then_some(()),
+        |()| crate::clang::provision(&stage2, &crate::compiler::primary_llvm(&rust_dir)),
     );
     assert_toolchain_is_honest(&stage2);
 
@@ -683,6 +671,8 @@ fn full_bootstrap(root: &Path, rust_dir: &Path) {
     // Write bootstrap.toml — ToyOS as target only, not host (fast rebuilds)
     let host = host_triple();
     write_config(rust_dir, &host, false);
+    let llvm = crate::compiler::llvm_commit(rust_dir);
+    let lld = LldFollowsLlvm::before(&rust_dir.join(format!("build/{host}")), &llvm);
 
     // Clean cached std for all ToyOS targets so bootstrap picks up compiler changes
     // (e.g. target spec changes like default_uwtable that affect codegen).
@@ -709,11 +699,44 @@ fn full_bootstrap(root: &Path, rust_dir: &Path) {
         );
         tolerated_failure(&log, "the toolchain build");
     }
+    lld.built();
     for arch in Arch::ALL {
         assert_std_built_from(
             root,
             &rust_dir.join(format!("build/{host}/stage1-std/{}", arch.userland())),
         );
+    }
+}
+
+/// `rust-lld` rebuilt whenever the LLVM it links is.
+///
+/// Bootstrap rebuilds LLVM when the `src/llvm-project` commit moves, and LLD —
+/// a separate CMake build against that LLVM — only when its own stamp is
+/// missing, which nothing removes. So after a move the toolchain would carry an
+/// LLD of the LLVM before it: a linker that is not the fork its compiler is.
+/// This records the commit LLD was last built against beside bootstrap's
+/// stamp, and removes the stamp when the commit is another.
+pub(crate) struct LldFollowsLlvm {
+    record: PathBuf,
+    commit: String,
+}
+
+impl LldFollowsLlvm {
+    /// Before a bootstrap build in the build directory whose host half is
+    /// `host_build` (`<build-dir>/<host>`), of a checkout naming LLVM `commit`.
+    pub(crate) fn before(host_build: &Path, commit: &str) -> Self {
+        let lld = host_build.join("lld");
+        let record = lld.join(".toyos-llvm-commit");
+        if fs::read_to_string(&record).ok().as_deref() != Some(commit) {
+            let _ = fs::remove_file(lld.join(".lld-stamp"));
+        }
+        Self { record, commit: commit.to_string() }
+    }
+
+    /// After that build succeeded: LLD is now the given commit's.
+    pub(crate) fn built(self) {
+        fs::write(&self.record, &self.commit)
+            .unwrap_or_else(|e| panic!("write {}: {e}", self.record.display()));
     }
 }
 
@@ -771,11 +794,13 @@ fn build_hosted_rustc(rust_dir: &Path) {
 /// `lld = true` is what puts `rust-lld` in every stage's sysroot, where rustc
 /// finds the linker every guest target names. The hosted rustc's build cannot
 /// have it: bootstrap would then build LLD for the ToyOS host from C++, which
-/// nothing here can compile, so that build links the architecture it builds a
-/// rustc for through the LLD bootstrap downloaded with LLVM — the same binary
-/// `lld = true` ships as `rust-lld`. Every assemble removes the host's `stage2`
-/// first, so [`build_hosted_rustc`] reassembles it under the host-only config
-/// after.
+/// nothing here can compile yet, so that build links the architecture it
+/// builds a rustc for through the LLD the host-only build made — the same
+/// binary `lld = true` ships as `rust-lld`. Every assemble removes the host's
+/// `stage2` first, so [`build_hosted_rustc`] reassembles it under the host-only
+/// config after.
+///
+/// [`LLVM_CONFIG`] is the `[llvm]` both builds share.
 ///
 /// The host's `default-linker-linux-override` is pinned off because bootstrap
 /// otherwise ties it to `lld` for `x86_64-unknown-linux-gnu`, and a host rustc
@@ -808,11 +833,11 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
                 // C built for this target (blake3's assembly), and a host `ar`
                 // that indexes only its own object format, as macOS's does,
                 // leaves those ELF members out of the index lld pulls from.
-                let llvm = rust_dir.join(format!("build/{host}/ci-llvm/bin"));
+                let build = rust_dir.join(format!("build/{host}"));
                 format!(
                     "linker = \"{}\"\nar = \"{}\"\ncodegen-backends = [\"cranelift\"]",
-                    llvm.join("lld").display(),
-                    llvm.join("llvm-ar").display(),
+                    build.join("lld/bin/lld").display(),
+                    build.join("llvm/bin/llvm-ar").display(),
                 )
             } else {
                 "linker = \"rust-lld\"".to_string()
@@ -827,6 +852,9 @@ profile = "compiler"
 [build]
 {host_line}
 target = [{targets}]
+
+[llvm]
+{LLVM_CONFIG}
 
 [rust]
 incremental = true
@@ -845,30 +873,19 @@ lld = {lld}
 /// `bootstrap.toml` that builds a host compiler: [`write_config`] says why.
 pub(crate) const HOST_LINKER_PIN: &str = "default-linker-linux-override = \"off\"";
 
+/// The LLVM every host compiler links, in every `bootstrap.toml` that builds
+/// one: built from `src/llvm-project` — the fork that knows the ToyOS target —
+/// with clang beside it, for the host and the two architectures ToyOS runs on.
+/// Bootstrap rebuilds it only when that commit moves.
+pub(crate) const LLVM_CONFIG: &str = "download-ci-llvm = false\n\
+                                      clang = true\n\
+                                      targets = \"AArch64;X86\"\n\
+                                      experimental-targets = \"\"";
+
 /// The linker every guest target names, as the toolchain at `toolchain` carries
 /// it: `lib/rustlib/<host>/bin/rust-lld`, where rustc itself looks for it.
 pub fn rust_lld(toolchain: &Path) -> PathBuf {
     toolchain.join("lib/rustlib").join(host_triple()).join("bin/rust-lld")
-}
-
-/// Path to the host toyos-cc binary. The workspace root's `target/`, not
-/// `toyos-cc/target/`: `toyos-cc` is a member of the host workspace (root
-/// `Cargo.toml`), and a member has no target directory of its own —
-/// `src/hostws.rs::target_dir` is the same answer for the crates `src/build.rs`
-/// asks about generically.
-pub fn toyos_cc_binary(root: &Path) -> PathBuf {
-    let host = host_triple();
-    root.join(format!("target/{host}/release/toyos-cc"))
-}
-
-fn build_toyos_cc(root: &Path) {
-    let host = host_triple();
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--target", &host])
-        .current_dir(root.join("toyos-cc"))
-        .status()
-        .expect("Failed to build toyos-cc");
-    assert!(status.success(), "toyos-cc build failed");
 }
 
 /// The host triple, asked of rustc once per process.
@@ -976,10 +993,39 @@ mod tests {
         let said = refused.downcast_ref::<String>().expect("a formatted refusal");
         assert!(said.contains("rust-lld"), "the refusal names the linker: {said}");
 
+        // And with its linker, it is still refused: it has no C compiler, which
+        // `clang`'s own tests provision.
         let lld = rust_lld(&stage2);
         fs::create_dir_all(lld.parent().unwrap()).unwrap();
         fs::write(&lld, b"").unwrap();
-        assert_toolchain_is_honest(&stage2);
+        let refused = std::panic::catch_unwind(|| assert_toolchain_is_honest(&stage2))
+            .expect_err("a toolchain with no clang is refused");
+        let said = refused.downcast_ref::<String>().expect("a formatted refusal");
+        assert!(said.contains("clang") && !said.contains("rust-lld,"), "the refusal names clang alone: {said}");
+    }
+
+    /// **LLD is rebuilt when the LLVM commit moves, and only then**: the stamp
+    /// bootstrap skips LLD's build by goes when the commit LLD was built
+    /// against is not the one about to be built, and stays when it is.
+    #[test]
+    fn lld_is_rebuilt_exactly_when_its_llvm_moves() {
+        let build = TempDir::new("lld-follows");
+        let stamp = build.join("lld/.lld-stamp");
+        fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        fs::write(&stamp, "").unwrap();
+
+        // A build directory from before the record existed: LLD's commit is
+        // unknown, so it is rebuilt once.
+        LldFollowsLlvm::before(&build, "aaaa").built();
+        assert!(!stamp.exists(), "an LLD of unknown LLVM was kept");
+
+        fs::write(&stamp, "").unwrap();
+        LldFollowsLlvm::before(&build, "aaaa").built();
+        assert!(stamp.exists(), "LLD was rebuilt with its LLVM unmoved");
+
+        LldFollowsLlvm::before(&build, "bbbb").built();
+        assert!(!stamp.exists(), "LLVM moved and LLD's stamp stayed");
+        assert_eq!(fs::read_to_string(build.join("lld/.toyos-llvm-commit")).unwrap(), "bbbb");
     }
 
     /// The negative control is the defect itself: this is verbatim what cargo

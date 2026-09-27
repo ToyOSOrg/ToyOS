@@ -35,37 +35,20 @@ fn main() {
         fs::write(dg_dir.join(PIN_STAMP), DOOMGENERIC_COMMIT).expect("failed to record the pin");
     }
 
-    // Use pre-built toyos-cc host binary (built by the build system's toolchain
-    // phase). `<repo>/target/`, not `<repo>/toyos-cc/target/`: `toyos-cc` is a
-    // member of the host workspace the root `Cargo.toml` declares, and a member
-    // builds into the workspace root's target directory. `src/toolchain.rs`'s
-    // `toyos_cc_binary` is the same path, and this build script is too far
-    // outside that crate to share it — `userland/` is excluded from that
-    // workspace on purpose, so the two agree by the assert below and by nothing
-    // else.
-    let host = std::env::var("HOST").unwrap();
-    let toyos_cc = root.join(format!("../../target/{host}/release/toyos-cc"));
-    assert!(
-        toyos_cc.exists(),
-        "toyos-cc host binary not found at {} — run `cargo run` from repo root first",
-        toyos_cc.display()
-    );
-
-    let target = std::env::var("TARGET").unwrap();
-
+    // The C compiler, archiver and sysroot are the toolchain's own clang, its
+    // `llvm-ar` and libc's C sysroot, which the build system names in `cc`'s
+    // `CC_<target>`, `AR_<target>` and `CFLAGS_<target>` for every userland
+    // build (`src/build.rs`), as it would for any crate that compiles C.
     let mut build = cc::Build::new();
     build
-        .compiler(&toyos_cc)
         .cargo_warnings(false)
-        .include("../libc/include")
         .include("include")
         .include("doomgeneric")
         .define("FEATURE_SOUND", None)
         .warnings(false)
         .opt_level(2)
-        .flag(&format!("--target={target}"))
         .flag("-include")
-        .flag(&root.join("include/doomtype.h").to_string_lossy().into_owned());
+        .flag(root.join("include/doomtype.h").to_string_lossy().into_owned());
 
     let sources = [
         "am_map.c",
@@ -156,15 +139,7 @@ fn main() {
         build.file(format!("doomgeneric/{src}"));
     }
 
-    // `compile`, not `compile_intermediates`, is what `cc` documents — and it
-    // is the call that reaches for a host `ar`. See `write_archive`.
-    let objects = build.compile_intermediates();
-    assert_eq!(objects.len(), sources.len(), "cc returned one object per source and did not");
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    write_archive(&out_dir.join("libdoomgeneric.a"), &sources, &objects);
-    // The two lines `cc::Build::compile` prints after it archives.
-    println!("cargo:rustc-link-lib=static=doomgeneric");
-    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    build.compile("doomgeneric");
     // The C library doomgeneric calls, which the sysroot carries beside std
     // (`src/libc.rs`): the driver names it, as `cc` names libc for any C
     // program, and the linker is given no rule of its own for finding it.
@@ -172,66 +147,6 @@ fn main() {
 
     println!("cargo:rerun-if-changed=include");
     println!("cargo:rerun-if-changed=doomgeneric");
-}
-
-/// Write `libdoomgeneric.a` from the objects `cc` just compiled.
-///
-/// **`cc::Build::compile` archives with whatever `ar` it finds in `PATH`, and
-/// that binary is not one this project declares.** On a stock macOS host it is
-/// Apple's cctools archiver — `/usr/bin/ar`, the same inode as `/usr/bin/libtool`
-/// and `/usr/bin/ranlib` — which builds *Mach-O* static libraries. Handed an ELF
-/// object it prints a `ranlib: warning: ... not a mach-o file`, writes a 96-byte
-/// archive whose only member is an empty `__.SYMDEF SORTED`, and exits 0. Every
-/// object is gone and nothing says so; the first report is one undefined symbol
-/// out of the linker, from a library that appeared to build. `AR=/usr/bin/ar
-/// cargo run -- --build-only` on the dev host reproduces the macOS portability
-/// run's `toyos-ld: undefined symbol: DG_ScreenBuffer` exactly; the dev host
-/// only ever works because Homebrew's binutils put a GNU `ar` earlier in `PATH`.
-///
-/// So the archive is written here. A `.a` is a byte format, not a tool:
-/// `!<arch>\n`, then per member a 60-byte ASCII header and the member's bytes
-/// padded to an even length. Two things are deliberately absent. There is no
-/// symbol index (GNU's `/` member): `rust-lld` reads each member's own symbol
-/// table when an archive carries none, so an index would be a second copy of
-/// the truth for nobody. And there is no `//`
-/// long-name member, because the member names are the source stems, which fit
-/// the header's 16-byte field; the assert below is what keeps that true.
-///
-/// Every header field is fixed — zero timestamp, zero uid and gid, mode 100644
-/// — so the same objects archive to the same bytes on any host, on any day, and
-/// this archive links `/system/bin/doom` to the bytes GNU `ar`'s archive of the
-/// same objects does.
-///
-/// `src/libc.rs`'s `merge_rlibs` writes the other one of these, for
-/// `libtoyos_c.a`. The two are not shared code and cannot be: `userland/` is
-/// excluded from the host workspace on purpose, which is the same reason this
-/// build script re-derives the `toyos-cc` path above instead of importing it.
-fn write_archive(path: &Path, sources: &[&str], objects: &[PathBuf]) {
-    let mut out = b"!<arch>\n".to_vec();
-    for (src, obj) in sources.iter().zip(objects) {
-        // `cc` returns its objects in the order the sources were added, which
-        // is the order of `sources` — so the member is named for the C file it
-        // was compiled from rather than for `cc`'s hashed temporary.
-        let name = format!("{}.o", src.strip_suffix(".c").expect("a C source name ends in .c"));
-        assert!(name.len() < 16, "{name} does not fit an ar header's name field");
-        let data = fs::read(obj).unwrap_or_else(|e| panic!("cannot read {}: {e}", obj.display()));
-        let header = format!(
-            "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
-            format!("{name}/"),
-            0,
-            0,
-            0,
-            "100644",
-            data.len(),
-        );
-        assert_eq!(header.len(), 60, "an ar member header is 60 bytes");
-        out.extend_from_slice(header.as_bytes());
-        out.extend_from_slice(&data);
-        if data.len() % 2 == 1 {
-            out.push(b'\n');
-        }
-    }
-    fs::write(path, out).unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
 }
 
 fn http_agent() -> ureq::Agent {

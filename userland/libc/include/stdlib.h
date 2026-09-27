@@ -19,6 +19,7 @@ void abort(void);
 int atexit(void (*func)(void));
 int system(const char *command);
 
+double atof(const char *s);
 int atoi(const char *s);
 long atol(const char *s);
 long strtol(const char *s, char **endptr, int base);

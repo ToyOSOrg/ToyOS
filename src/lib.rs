@@ -10,8 +10,10 @@ pub mod bootlog;
 pub mod build;
 pub mod buildlock;
 pub mod ci;
+pub mod clang;
 pub mod clippy;
 pub mod compiler;
+pub mod csysroot;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
 pub mod flags;

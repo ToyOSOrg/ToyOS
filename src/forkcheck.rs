@@ -53,8 +53,8 @@
 //! would match the head of open upstream PR #223, so the code we built was not
 //! the code we had asked upstream to merge; and `target-lexicon`'s unpinned
 //! commit was the one adding `OperatingSystem::Toyos` to the SysV arm, so
-//! `default_calling_convention()` answered `Err(())` in `toyos-cc` and `SystemV`
-//! in cranelift.
+//! `default_calling_convention()` answered `Err(())` in one consumer and
+//! `SystemV` in another.
 //!
 //! **On demand only, and it must stay that way.** It asks every fork remote for
 //! a branch head, so it needs the network. Wiring it into `cargo test` or into
@@ -65,6 +65,12 @@
 //! It reports and never re-pins. Naming the `cargo update` that would fix a
 //! drift keeps a dependency change a reviewed act rather than something a
 //! helper did on the way past.
+//!
+//! **`rust/`'s submodules are consumed and pinned too.** A submodule whose
+//! `rust/.gitmodules` entry names a `branch` — `src/llvm-project`, the
+//! toolchain's LLVM — is read as a manifest asking for that branch, and the
+//! commit `rust/`'s `HEAD` records for it as the pin. A fork of LLVM that moved
+//! without the fork's gitlink following is behind exactly as a lockfile is.
 //!
 //! **The consumed branch comes from the manifests**, never from `forks.toml`:
 //! that file records a `pr_branch` for the forks with an open PR and it is
@@ -98,9 +104,14 @@ fn repo_name(url: &str) -> &str {
     url.trim_end_matches('/').rsplit('/').next().unwrap_or(url).trim_end_matches(".git")
 }
 
-/// One `[[package]]` in one lockfile that resolves to a git source.
+/// One `[[package]]` in one lockfile that resolves to a git source, or one
+/// submodule of `rust/` that names a branch.
 struct Pin {
+    /// The lockfile, or `rust/.gitmodules` for a submodule.
     lockfile: String,
+    /// Whether this is a submodule's gitlink rather than a lockfile's entry,
+    /// which is moved by a commit in `rust/` and not by `cargo update`.
+    gitlink: bool,
     package: String,
     version: String,
     url: String,
@@ -339,6 +350,7 @@ fn collect(root: &Path, rust: Option<&Path>) -> Estate {
             let Some((url, branch, rev)) = git_source(source) else { continue };
             pins.push(Pin {
                 lockfile: display.clone(),
+                gitlink: false,
                 package: string(package, "name"),
                 version: string(package, "version"),
                 url,
@@ -351,7 +363,59 @@ fn collect(root: &Path, rust: Option<&Path>) -> Estate {
         }
     }
 
+    if let Some(rust) = rust {
+        for (path, url, branch, rev) in submodule_pins(rust) {
+            consumed.entry(Source { url: url.clone(), branch: branch.clone() }).or_default().insert(GITMODULES.to_string());
+            pins.push(Pin {
+                lockfile: GITMODULES.to_string(),
+                gitlink: true,
+                package: path,
+                version: "gitlink".to_string(),
+                url,
+                branch: Some(branch),
+                rev,
+            });
+        }
+    }
+
     Estate { forks: forks_toml(root), consumed, pins, lockfiles, rust_manifests }
+}
+
+/// Where `rust/`'s submodules are declared, as the report names it.
+const GITMODULES: &str = "rust/.gitmodules";
+
+/// Every submodule of the checkout at `rust` whose `.gitmodules` entry names a
+/// branch: its path, its URL, that branch, and the commit `HEAD` records.
+/// Nothing when `rust` is not a checkout, which is every linked worktree
+/// before its first build.
+fn submodule_pins(rust: &Path) -> Vec<(String, String, String, String)> {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(rust)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    if !rust.join(".gitmodules").is_file() {
+        return Vec::new();
+    }
+    let Some(branches) = git(&["config", "--file", ".gitmodules", "--get-regexp", r"^submodule\..*\.branch$"]) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in branches.lines() {
+        let Some((key, branch)) = line.split_once(' ') else { continue };
+        let Some(name) = key.strip_prefix("submodule.").and_then(|k| k.strip_suffix(".branch")) else { continue };
+        let field = |f: &str| git(&["config", "--file", ".gitmodules", &format!("submodule.{name}.{f}")]);
+        let (Some(path), Some(url)) = (field("path"), field("url")) else { continue };
+        let path = path.trim().to_string();
+        let Some(tree) = git(&["ls-tree", "HEAD", &path]) else { continue };
+        let Some(rev) = tree.split_whitespace().nth(2) else { continue };
+        out.push((path, url.trim().to_string(), branch.trim().to_string(), rev.to_string()));
+    }
+    out
 }
 
 /// A manifest or lockfile that will not read or will not parse is skipped
@@ -542,6 +606,14 @@ fn render(estate: &Estate, heads: &BTreeMap<Source, Result<String, String>>) -> 
                 pin.version,
                 pin.lockfile
             ));
+            if pin.gitlink {
+                say(&format!(
+                    "        fix         a commit in rust/ that points {} at {}",
+                    pin.package,
+                    short(head)
+                ));
+                continue;
+            }
             fixes
                 .entry(&pin.lockfile)
                 .or_default()
@@ -860,6 +932,51 @@ mod tests {
         let (report, wrong) = check(&root);
         assert_eq!(wrong, 1, "{report}");
         assert!(report.contains("DEAD  doomgeneric"), "{report}");
+    }
+
+    /// **A `rust/` submodule that names a branch is judged like a lockfile
+    /// pin**: consumed by `rust/.gitmodules`, pinned by the commit `rust/`'s
+    /// `HEAD` records, current at the branch head and behind once it moves —
+    /// with a fix that is a commit in `rust/`, never a `cargo update`.
+    #[test]
+    fn a_rust_submodule_on_a_branch_is_a_pin_like_any_other() {
+        let case = case("submodule");
+        let (url, old) = remote(&case, "toyos-rustc");
+        let root = tree(&case, &url, "toyos-rustc", &old);
+        fs::remove_file(root.join("Cargo.lock")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        let rust = root.join("rust");
+        sh(&rust, &["init", "-q"]);
+        sh(&rust, &["config", "user.email", "t@t"]);
+        sh(&rust, &["config", "user.name", "t"]);
+        sh(&rust, &["config", "commit.gpgsign", "false"]);
+        fs::write(
+            rust.join(".gitmodules"),
+            format!(
+                "[submodule \"src/widget\"]\n\tpath = src/widget\n\turl = {}\n\tbranch = toyos-rustc\n\
+                 [submodule \"src/branchless\"]\n\tpath = src/branchless\n\turl = {}\n",
+                url.display(),
+                url.display()
+            ),
+        )
+        .unwrap();
+        sh(&rust, &["add", "-A"]);
+        sh(&rust, &["update-index", "--add", "--cacheinfo", &format!("160000,{old},src/widget")]);
+        sh(&rust, &["update-index", "--add", "--cacheinfo", &format!("160000,{old},src/branchless")]);
+        sh(&rust, &["commit", "-qm", "pin"]);
+
+        let (report, wrong) = check(&root);
+        assert_eq!(wrong, 0, "{report}");
+        assert!(report.contains("current widget branch toyos-rustc"), "{report}");
+        assert!(report.contains("rust/.gitmodules"), "{report}");
+
+        let new = commit(&url, "two");
+        let (report, wrong) = check(&root);
+        assert_eq!(wrong, 1, "{report}");
+        assert!(report.contains("BEHIND  widget branch toyos-rustc"), "{report}");
+        assert!(report.contains("by src/widget gitlink in rust/.gitmodules"), "{report}");
+        assert!(report.contains(&format!("a commit in rust/ that points src/widget at {}", short(&new))), "{report}");
+        assert!(!report.contains("cargo update"), "a gitlink was told to cargo update:\n{report}");
     }
 
     /// A remote that cannot be reached is not a clean run.

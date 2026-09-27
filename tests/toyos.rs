@@ -419,6 +419,8 @@ const RUST_SKIP: &[&str] = &[
     // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
     // `tests/doommusiccase`.
     "doom_music",
+    // Same WAD, same config: `doom_frames` runs it on `tests/doommusiccase`.
+    "doom_frames",
     // Needs a `logd` that leaves soundd's ring unread until it says so, and a
     // capture of the tone it plays into that. `soundd_log_stall` runs it on
     // `tests/logstallcase`.
@@ -769,6 +771,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // floor on audio recorded in real time, not a fraction of the capture and
     // not compute-bound: timer-anchored, and Nightly for that reason.
     ("doom_music", Sched::Parallel, Tier::Nightly),
+    // One C program through the toolchain's clang, read by the loader's decoder
+    // and by llvm-readobj, and one boot to run it.
+    ("c_hello", Sched::Parallel, Tier::Fast),
+    // One boot and one number, with no clock in the verdict: the frames are
+    // counted in game tics, whatever the host's speed. Fast, because it is the
+    // gate on what the C compiler makes of doom.
+    ("doom_frames", Sched::Parallel, Tier::Fast),
     // A tone played while soundd's pipe to a stalled log is full. The verdicts
     // are the capture's gaps and a count of lines; the clocks are liveness
     // guards. Nightly for the two megabytes of refusals the log reads back
@@ -1720,6 +1729,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("toolkit_winit_pace", &["test_rs_winit_pace"]),
     ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
     ("doom_music", &["test_rs_doom_music"]),
+    ("doom_frames", &["test_rs_doom_frames"]),
     ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
     ("metal_sim_null_audio", &["test_rs_audio_tone"]),
     ("null_sink_shipped_client", &["test_rs_null_sink_client_exits"]),
@@ -2594,7 +2604,7 @@ const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 /// eight that stayed off the suite each say what their own output was.
 #[derive(Clone, Copy)]
 enum Stage {
-    /// toyos-cc refuses it, and this is what the refusal says.
+    /// clang refuses it, and this is what the refusal says.
     ///
     /// Quoted so that a second defect landing on the same case cannot hide
     /// under the first.
@@ -2647,18 +2657,23 @@ struct NotRun {
 const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "03_struct",
-        stage: Stage::Refused("__attribute__((__cleanup__)) is not implemented"),
-        why: Why::Declined("cleanup attributes; the entry used to say _Generic, which is 33_ternary_op's reason and not this one"),
+        stage: Stage::Built,
+        why: Why::Declined("its `.expect` begins with TinyCC's own warning that `__cleanup__` is ignored on a type — the compiler's diagnostic, not the program's output. What the program prints matches the rest"),
+    },
+    NotRun {
+        case: "22_floating_point",
+        stage: Stage::Built,
+        why: Why::Declined("it prints `long double`s through `%Lf`, and libc reads a `long double` as a `double` (issues/build/libc-reads-a-long-double-as-a-double.md): every `%Lf` of a line whose `double`s filled the registers prints 0.000000"),
     },
     NotRun {
         case: "31_args",
         stage: Stage::Built,
-        why: Why::Declined("its `.expect` is written for tcc's own runner, which passes it five arguments; every corpus binary here is run with none, so it prints `hello world 1` against an expected `hello world 6`. Nothing about this compiler is in it"),
+        why: Why::Declined("its `.expect` is written for tcc's own runner, which passes it five arguments; every corpus binary here is run with none, so it prints `hello world 1` against an expected `hello world 6`. Nothing about the compiler is in it"),
     },
     NotRun {
-        case: "33_ternary_op",
-        stage: Stage::Refused("_Generic type dispatch is not implemented"),
-        why: Why::Declined("_Generic"),
+        case: "34_array_assignment",
+        stage: Stage::Refused("array type 'int[4]' is not assignable"),
+        why: Why::Declined("it assigns one array to another, which C does not allow — an array is not a modifiable lvalue (C11 6.5.16p2) — and TinyCC accepts as an extension"),
     },
     NotRun {
         case: "40_stdio",
@@ -2666,9 +2681,24 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("it writes `fred.txt` into the working directory and reads it back; the corpus runs from the read-only ROOT, so the write fails and the program prints `couldn't read fred.txt`. A writable working directory for the corpus is a harness change nothing else has needed"),
     },
     NotRun {
-        case: "79_vla_continue",
+        case: "73_arm64",
         stage: Stage::Built,
-        why: Why::Declined("it asserts that a VLA declared inside a loop has the same address on every iteration — tcc reuses one stack slot and ours are heap allocations, so four of its five checks print `NOT OK` and the fifth is the allocator's accident. C99 requires no such thing, so this is tcc's implementation and not the language"),
+        why: Why::Declined("AArch64's argument-passing corners, run here on x86-64: its `long double` lines print 0.0, for libc's reason in 22_floating_point"),
+    },
+    NotRun {
+        case: "83_utf8_in_identifiers",
+        stage: Stage::Built,
+        why: Why::Declined("its identifiers are UTF-8 and so is its `printf` format, and libc's `printf` writes each byte of a format as a character of its own (issues/build/libc-printf-re-encodes-every-non-ascii-byte-of-its-format.md): `привет` arrives as `Ð¿Ñ\u{80}Ð¸Ð²ÐµÑ\u{82}`"),
+    },
+    NotRun {
+        case: "95_bitfields",
+        stage: Stage::Built,
+        why: Why::Declined("its expected layouts are TinyCC's, and TinyCC packs a `#pragma pack(1)` bitfield struct otherwise than GCC and clang do: `TEST 2 - PACKED` is 12 bytes there and 11 here, and every packed test after it differs the same way"),
+    },
+    NotRun {
+        case: "95_bitfields_ms",
+        stage: Stage::Built,
+        why: Why::Declined("the same file under `ms_struct`, whose expected values are TinyCC's widths for an MS-layout bitfield: `fffffffffffffffe` there, `fffffffe` here"),
     },
     NotRun {
         case: "60_errors_and_warnings",
@@ -2676,74 +2706,39 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("a meta-test of compiler diagnostics: every branch is behind a -D the harness does not pass, so the file preprocesses to no `main`"),
     },
     NotRun {
-        case: "73_arm64",
-        stage: Stage::Refused("va_arg of a struct or union"),
-        why: Why::Declined("aarch64-specific, and this target is x86-64. Its myprintf pulls whole structs through va_arg, which toyos-cc refuses by name — the case used to reach the Cranelift verifier instead, through the one expression that yielded an aggregate as a scalar"),
-    },
-    NotRun {
-        case: "83_utf8_in_identifiers",
-        stage: Stage::Refused("unexpected character '\u{ef}' (0xef)"),
-        why: Why::Declined("non-ASCII identifiers. UTF-8 in strings and comments works; the lexer stops on the byte it could not read, so nothing is dropped"),
-    },
-    NotRun {
-        case: "85_asm_outside_function",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("emitting file-scope asm needs an x86-64 assembler"),
-    },
-    NotRun {
-        case: "94_generic",
-        stage: Stage::Refused("_Generic type dispatch is not implemented"),
-        why: Why::Declined("_Generic"),
-    },
-    NotRun {
-        case: "95_bitfields",
-        stage: Stage::Refused("#pragma pack(push,1) is not implemented"),
-        why: Why::Declined("a self-including bitfield torture test wanting #pragma pack, ms_struct, gcc_struct, aligned on a declaration specifier and packed bitfields — every one of them a deliberate refusal"),
-    },
-    NotRun {
-        case: "95_bitfields_ms",
-        stage: Stage::Refused("#pragma pack(push,1) is not implemented"),
-        why: Why::Declined("the same file again, through a two-line wrapper"),
-    },
-    NotRun {
         case: "96_nodata_wanted",
         stage: Stage::NoLink("main"),
-        why: Why::Declined("seven configurations selected by a -D from tcc's own Makefile, four of which expect compiler diagnostics. The harness compiles one configuration and compares one stdout, so no fix to toyos-cc can make it pass"),
-    },
-    NotRun {
-        case: "98_al_ax_extend",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("file-scope asm again"),
+        why: Why::Declined("seven configurations selected by a -D from tcc's own Makefile, four of which expect compiler diagnostics. The harness compiles one configuration and compares one stdout, so no compiler can make it pass"),
     },
     NotRun {
         case: "99_fastcall",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("32-bit x86 — pushl %esp, pusha, __attribute((fastcall)). It stops on the file-scope asm at line 26 before reaching any of that"),
+        stage: Stage::Refused("instruction requires: Not 64-bit mode"),
+        why: Why::Declined("32-bit x86 — pushl %esp, pusha, __attribute((fastcall)) — and this target is x86-64"),
     },
     NotRun {
         case: "101_cleanup",
-        stage: Stage::Refused("__attribute__((cleanup)) is not implemented"),
-        why: Why::Declined("cleanup attributes"),
+        stage: Stage::Built,
+        why: Why::Declined("`main` returns its counter, 105, and a corpus case passes on exit 0; it also prints a `long double` through `%Lf`, for libc's reason in 22_floating_point"),
     },
     NotRun {
         case: "102_alignas",
-        stage: Stage::Refused("expected Semi, got Alignas"),
-        why: Why::Declined("_Alignas. It stops as a parse error rather than by name, which reads worse and is still a stop"),
+        stage: Stage::Built,
+        why: Why::Declined("`i8` takes its alignment from `__attribute__((aligned(16)))` on a type name inside `_Alignas`, which the case's own comment says clang does not apply, so it prints `1 1 1 0`; and its `.expect` begins with TinyCC's warning line"),
     },
     NotRun {
         case: "104_inline",
-        stage: Stage::Refused("unexpected token in expression: Attribute"),
-        why: Why::Declined("weak symbols. The file itself compiles — the companion `104+_inline.c` is what stops, which is the stage as the harness reaches it"),
+        stage: Stage::NoLink("inline_inline_undeclared"),
+        why: Why::Declined("it expects tcc's reading of `inline`, which emits a definition a plain `inline` function never has in C99 and later (C11 6.7.4p7): the companion calls one no translation unit defines"),
     },
     NotRun {
         case: "106_versym",
-        stage: Stage::NoLink("PTHREAD_PROCESS_SHARED"),
-        why: Why::Declined("pthread condition variables"),
+        stage: Stage::Refused("use of undeclared identifier 'PTHREAD_PROCESS_SHARED'"),
+        why: Why::Declined("pthread condition variables shared across processes, which `pthread.h` does not declare"),
     },
     NotRun {
         case: "108_constructor",
-        stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
-        why: Why::Declined("constructor attributes"),
+        stage: Stage::Built,
+        why: Why::Declined("libc runs neither `.init_array` nor `.fini_array` (issues/build/libc-runs-no-constructors.md), so it prints `main` alone"),
     },
     NotRun {
         case: "113_btdll",
@@ -2753,12 +2748,12 @@ const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "112_backtrace",
         stage: Stage::Built,
-        why: Why::Declined("a meta-test of tcc's `-b` runtime: it expects `RUNTIME ERROR: invalid memory access` and `BCHECK: invalid pointer` lines from a bounds-checking runtime this compiler does not have, and prints nothing"),
+        why: Why::Declined("a meta-test of tcc's `-b` runtime: it expects `RUNTIME ERROR: invalid memory access` and `BCHECK: invalid pointer` lines from a bounds-checking runtime clang does not have, and prints nothing"),
     },
     NotRun {
         case: "114_bound_signal",
-        stage: Stage::Refused("expected Semi, got Ident(\"sj\")"),
-        why: Why::Declined("sigaction and sigjmp_buf, which no header here declares, so the declaration does not parse"),
+        stage: Stage::Refused("use of undeclared identifier 'SIGUSR1'"),
+        why: Why::Declined("sigaction, sigjmp_buf and the signal numbers, which no header here declares"),
     },
     NotRun {
         case: "115_bound_setjmp",
@@ -2771,49 +2766,39 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("the same `longjmp not implemented` panic, exit 134"),
     },
     NotRun {
-        case: "122_vla_reuse",
-        stage: Stage::Built,
-        why: Why::Declined("the same claim `79_vla_continue` makes, through a `goto` loop: it requires `&x[0]` to repeat across 100,000 iterations and stops on the second with `ERROR: 0xffff005ae0 0xffff000040`"),
-    },
-    NotRun {
         case: "126_bound_global",
         stage: Stage::Built,
         why: Why::Declined("tcc's `-b` bounds checker again: it expects `BCHECK: … is outside of the region` and `RUNTIME ERROR: invalid memory access`, and prints nothing"),
     },
     NotRun {
         case: "117_builtins",
-        stage: Stage::NoLink("__builtin_abort"),
-        why: Why::Declined("__builtin_abort, and the compiler implements no builtin under that name"),
+        stage: Stage::Built,
+        why: Why::Declined("its second half is behind TinyCC's `-b` bounds checker, which clang does not have, so it prints `BOUNDS OFF:` and stops"),
     },
     NotRun {
         case: "120_alias",
-        stage: Stage::Refused("__attribute__((alias)) is not implemented"),
-        why: Why::Declined("symbol aliases. Its two `__asm__(_\"name\")` renames at lines 19 and 20 are refused too, but the attribute at line 9 comes first"),
+        stage: Stage::Refused("definition 'alias_int' cannot also be an alias"),
+        why: Why::Declined("it gives a symbol a definition and an alias at once, which TinyCC allows and clang refuses"),
     },
     NotRun {
         case: "124_atomic_counter",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics: clang's `stdatomic.h` needs the `least` types `stdint.h` does not define"),
     },
     NotRun {
         case: "125_atomic_misc",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
-    },
-    NotRun {
-        case: "127_asm_goto",
-        stage: Stage::Refused("expected LParen, got Goto"),
-        why: Why::Declined("`asm goto`, and inline asm generally"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
     },
     NotRun {
         case: "128_run_atexit",
-        stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
-        why: Why::Declined("constructor attributes, and a -D per configuration to have a main at all"),
+        stage: Stage::NoLink("on_exit"),
+        why: Why::Declined("`on_exit`, a glibc extension libc does not define, and a -D per configuration to have a main at all"),
     },
     NotRun {
         case: "136_atomic_gcc_style",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
     },
 ];
 
@@ -2865,23 +2850,46 @@ fn discover_rust_tests(bins: &[(String, Vec<u8>)]) -> Vec<String> {
 }
 
 fn compile_c_tests(names: &[String]) -> Vec<(String, Vec<u8>)> {
+    // Made before the hook below goes in: a C sysroot that cannot be made is
+    // no case's failure, and says so in its own words.
+    compile::c_sysroot();
     // Suppress panic messages during compilation — we handle failures via catch_unwind.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
-    let mut bins = Vec::new();
-    let mut broken: Vec<(&str, String)> = Vec::new();
-    for name in names {
-        match std::panic::catch_unwind(|| {
-            let (obj, extras) = compile::compile_c(name);
-            compile::link_toyos(&obj, &extras, name)
-        }) {
-            Ok(linked) => bins.push((name.clone(), linked)),
-            Err(e) => broken.push((name.as_str(), panic_message(&e))),
-        }
-    }
+    // A clang and a link per case, so the cases are spread over threads; the
+    // result is in `names`' order whatever order they finish in.
+    let per_thread = names.len().div_ceil(8).max(1);
+    let results: Vec<(&String, Result<Vec<u8>, String>)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = names
+            .chunks(per_thread)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|name| {
+                            let built = std::panic::catch_unwind(|| {
+                                compile::link_toyos(&compile::compile_c(name), name)
+                            });
+                            (name, built.map_err(|e| panic_message(&e)))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("a compile thread")).collect()
+    });
 
     std::panic::set_hook(prev_hook);
+
+    let mut bins = Vec::new();
+    let mut broken: Vec<(&str, String)> = Vec::new();
+    for (name, built) in results {
+        match built {
+            Ok(linked) => bins.push((name.clone(), linked)),
+            Err(why) => broken.push((name.as_str(), why)),
+        }
+    }
 
     if !broken.is_empty() {
         let mut msg = String::from(
@@ -2907,6 +2915,7 @@ fn check_not_run() {
     let mut wrong: Vec<String> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
 
+    compile::c_sysroot();
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
@@ -2940,8 +2949,8 @@ fn check_not_run() {
                 "{case}: no longer compiles, and it was declared to get further: {}",
                 panic_message(&e)
             )),
-            (stage, Ok((obj, extras))) => {
-                let linked = std::panic::catch_unwind(|| compile::link_toyos(&obj, &extras, case));
+            (stage, Ok(objects)) => {
+                let linked = std::panic::catch_unwind(|| compile::link_toyos(&objects, case));
                 match (stage, linked) {
                     (Stage::NoLink(symbol), Err(e)) => {
                         let said = panic_message(&e);
@@ -8730,6 +8739,55 @@ const SNAKE_ROUNDS: usize = 3;
 /// a program that has been running and drawing rather than one a second old.
 const SNAKE_TURNS: usize = 8;
 
+/// What doom's renderer draws over `demo1`'s first [`DOOM_FRAME_TICS`] tics, as
+/// `userland/doom/src/frames.rs` hashes it: the frames doom drew before clang
+/// built its C, which a compiler that builds doom correctly draws again.
+const DOOM_FRAMES: &str = "874685cf6fd3dfa5";
+const DOOM_FRAME_TICS: u32 = 700;
+
+/// Gate: doom draws, frame for frame, what it drew when another compiler built
+/// it.
+///
+/// One verdict and no clock: the hash of each game tic's frame over a timedemo
+/// of `demo1`, which replays identically on any machine at any speed, against
+/// [`DOOM_FRAMES`]. A miscompile anywhere in the renderer, the game logic or the
+/// demo's playback moves it.
+fn doom_frames(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = root.join("tests/doommusiccase");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, BootOptions::default());
+    let result = qemu.run_test("test_rs_doom_frames", Duration::from_secs(300));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("doom's frame check did not finish (exit {:?}):\n{}", result.exit_code, result.stdout));
+    }
+    let line = result
+        .stdout
+        .lines()
+        .find(|line| line.contains("[frame-check] tics="))
+        .ok_or_else(|| format!("doom printed no [frame-check] line:\n{}", result.stdout))?;
+    let field = |name: &str| {
+        line.split_whitespace()
+            .find_map(|word| word.strip_prefix(name))
+            .ok_or_else(|| format!("no {name} in {line:?}"))
+    };
+    let tics: u32 = field("tics=")?.parse().map_err(|e| format!("tics in {line:?}: {e}"))?;
+    let hash = field("hash=")?;
+    if tics != DOOM_FRAME_TICS {
+        return Err(format!("doom hashed {tics} tics and the recorded hash is of {DOOM_FRAME_TICS}: {line}"));
+    }
+    if hash != DOOM_FRAMES {
+        return Err(format!(
+            "doom drew other frames than the ones recorded: hash {hash}, recorded {DOOM_FRAMES} \
+             ({line})"
+        ));
+    }
+    eprintln!("  [doommusiccase] {line}");
+    Ok(())
+}
+
 /// Gate: doom's music reaches the device, with the SoundFont this tree ships.
 ///
 /// **The wiring is all this measures, and the wiring is the part nothing else
@@ -12109,6 +12167,9 @@ fn run_machine_test(
         "null_sink_shipped_client" => audio::null_sink_shipped_client(test_config, c_bins, rust_bins),
         "doom_sound_flood" => audio::doom_sound_flood(rust_bins),
         "doom_music" => doom_music(rust_bins),
+        // Body in `tests/common/clang.rs`.
+        "c_hello" => common::clang::c_hello(rust_bins),
+        "doom_frames" => doom_frames(rust_bins),
         "soundd_log_stall" => audio::soundd_log_stall(rust_bins),
         "metal_sim_compositor" => {
             metal_sim_compositor(group_boot(held, METAL_SIM_DESKTOP, || {

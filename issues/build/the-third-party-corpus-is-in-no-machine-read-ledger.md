@@ -11,10 +11,10 @@ committed file carrying a NUL, plus everything under `assets/` whether it does
 or not. The clause it half-closes was written over *"every binary file git
 tracks **plus every third-party source corpus**"*.
 
-The corpus is `tests/testcases/` --- 365 tracked files, of which **363** are
-third-party across `tinycc/` and `pp_tcc/` (the other two are its own `LICENSE`
-and a `system.toml` that is ours): TinyCC's `tests/tests2` and `tests/pp` under
-LGPL-2.1 plus picoc under BSD-3-Clause. They are compiler *input* rather than
+The corpus is `tests/testcases/` --- 315 tracked files, of which **312** are
+`tinycc/` (the other three, its own `LICENSE`, a `system.toml` and `hello.c`,
+are ours): TinyCC's `tests/tests2` under LGPL-2.1 plus picoc under
+BSD-3-Clause. They are compiler *input* rather than
 linked code, so their terms do not reach this repository's own, but the
 attribution is still owed and
 `NOTICE` says where it lives: `tests/testcases/LICENSE`, which says file by file

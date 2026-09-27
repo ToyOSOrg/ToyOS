@@ -2,8 +2,9 @@
 //! tarball it ships as, and how a runner installs one.
 //!
 //! **The tag is the content hash of everything the tarball's bytes depend on**
-//! — [`TREES`]: the rust fork, whose LLVM is also the `rust-lld` it carries, the
-//! three trees compiled into the sysroot, and this file, which is the packaging. A tree
+//! — [`TREES`]: the rust fork, whose `src/llvm-project` is built from source into
+//! rustc's LLVM and the `rust-lld` and clang the tarball carries, the three trees
+//! compiled into the sysroot, and this file, which is the packaging. A tree
 //! whose toolchain somebody already built finds it published; a tree that moved
 //! any of them asks for a tag nobody has, and `cargo run -- --ci toolchain`
 //! builds it. Publishing is idempotent because the tag *is* the content.
@@ -228,8 +229,8 @@ pub fn ensure_published(root: &Path) -> Result<String, String> {
 /// Bootstrap, check the glibc floor, package, publish, and wait for the asset.
 fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     run(Command::new("git").args(["submodule", "update", "--init", "rust"]).current_dir(root))?;
-    // Bootstrap takes `HEAD^1` as the upstream commit whose LLVM to fetch when
-    // it sees GitHub Actions; in this fork that is our own merge, which
+    // Bootstrap takes `HEAD^1` as the upstream commit whose artifacts to fetch
+    // when it sees GitHub Actions; in this fork that is our own merge, which
     // rust-lang's CI never built.
     run(Command::new("cargo")
         .args(["run", "--", "--build-only"])
@@ -300,11 +301,13 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
 }
 
 /// Every `GLIBC_x.y` the shipped host binaries and libraries name, as the
-/// newest. A byte scan: it can only over-report, so its failure is a refused
-/// publish.
+/// newest: `rustc` and its libraries, and the `rust-lld`, clang and LLVM tools
+/// beside them. A byte scan: it can only over-report, so its failure is a
+/// refused publish.
 fn shipped_glibc(stage2: &Path) -> Result<(u32, u32), String> {
     let mut files: Vec<PathBuf> = Vec::new();
-    for (dir, lib) in [(stage2.join("bin"), false), (stage2.join("lib"), true)] {
+    let tools = stage2.join(format!("lib/rustlib/{HOST}/bin"));
+    for (dir, lib) in [(stage2.join("bin"), false), (stage2.join("lib"), true), (tools, false)] {
         let entries = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         for entry in entries.flatten() {
             let path = entry.path();
@@ -389,6 +392,10 @@ fn notes(root: &Path, tag: &str, manifest: &str) -> Result<String, String> {
     cargo +toyos build --target x86_64-unknown-toyos
 
 rustc's ToyOS target names `rust-lld` as its linker, and the toolchain carries it where rustc looks for it, so nothing goes on `PATH`. The `cargo` symlink is not shipped because its path would be the publisher's.
+
+## C
+
+`lib/rustlib/{HOST}/bin/clang` is the clang of the LLVM this `rustc` is built with, from ToyOSOrg/llvm-project, which knows `x86_64-unknown-toyos`. Given a C sysroot — the ToyOS C library's headers in `include/` and its `staticlib` as `lib/libtoyos_c.a` — `clang --target=x86_64-unknown-toyos --sysroot=<it> hello.c` builds a ToyOS program, linked by the `ld.lld` beside it.
 
 ## glibc
 
