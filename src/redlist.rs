@@ -115,6 +115,11 @@ pub const QUARANTINE: &[Quarantined] = &[
         issue: "issues/kernel/so-cache-refusals-saw-the-kernel-refuse-nothing-once.md",
     },
     Quarantined {
+        test: "swap_crash_rolls_back",
+        says: &["the stream's redial was turned away"],
+        issue: "issues/build/swap-crash-rolls-back-redial-turned-away-once-on-mains-nightly.md",
+    },
+    Quarantined {
         test: "usb_disk_index_stable",
         says: &["nothing enumerated on the first controller; there is no renumbering to survive"],
         issue: "issues/hardware/eleven-names-red-on-ci.md",
