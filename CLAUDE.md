@@ -11,7 +11,7 @@ An operating system built from scratch in Rust, held to a production-grade engin
 | `kernel/CLAUDE.md` | the caveats that bite kernel work |
 | `userland/CLAUDE.md` | the server doctrine, and the caveats that bite userland work |
 | `tests/CLAUDE.md` | the caveats that bite the harness |
-| `src/CLAUDE.md` | boot modes, the locks and slots, worktrees — the operational file |
+| `src/CLAUDE.md` | boot modes, the locks, worktrees — the operational file |
 | `issues/README.md` | the issue tracker: one file per issue, typed by kind; `ls` is the index |
 | `.claude/agents/reviewer.md` | the review prompt the orchestrator spawns a reviewer with |
 
