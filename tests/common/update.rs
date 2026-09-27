@@ -730,13 +730,24 @@ pub fn update_boot_next_boots_the_entry_once(_: &Path, _: &[(String, Vec<u8>)], 
     await_machine(&mut guest, &mut console, "the recovery stick's sshd", |c| c[from..].contains(SSHD_LISTENING))?;
     eprintln!("  [update] `update --boot-next {esp}` booted the recovery stick at the next reboot");
 
-    let (from, _) = rig.reboot_until(&mut guest, &mut console, &ours)?;
-    await_machine(&mut guest, &mut console, "the machine's sshd after the recovery stick", |c| c[from..].contains(SSHD_LISTENING))?;
-    let (from, uart) = rig.reboot_until(&mut guest, &mut console, &ours)?;
-    await_machine(&mut guest, &mut console, "the machine's sshd a third time", |c| c[from..].contains(SSHD_LISTENING))?;
-    let since = guest.uart_log()[uart..].to_string();
-    if since.contains("Request:") {
-        return Err(format!("the pass after the order resumed still read a request:\n{since}"));
+    // Twice more, each until the machine's own kernel or the recovery stick's
+    // a second time: a request never taken away boots the recovery stick at
+    // every pass, and that is the answer, not a wait for one that never comes.
+    for doing in ["the recovery stick hands the machine back", "the machine reboots itself"] {
+        let (from, uart) = (console.len(), guest.uart_log().len());
+        ssh::ssh_fire(HOST, rig.port, &rig.identity, "reboot")?;
+        await_machine(&mut guest, &mut console, doing, |c| {
+            let since = &c[from.min(c.len())..];
+            since.contains(&ours) || since.contains(&theirs)
+        })?;
+        if console[from..].contains(&theirs) {
+            return Err(format!("{doing}, and the recovery stick booted again: the request asked for it once"));
+        }
+        await_machine(&mut guest, &mut console, "the machine's sshd", |c| c[from..].contains(SSHD_LISTENING))?;
+        let since = guest.uart_log()[uart..].to_string();
+        if since.contains("BootNext=Boot") {
+            return Err(format!("{doing}, and a pass set BootNext again:\n{since}"));
+        }
     }
     let booted = console.matches(&theirs).count();
     if booted != 1 {
