@@ -97,10 +97,32 @@ retired_syscalls! {
     96 => "SYS_SET_RT_PRIORITY",
 }
 
+/// `sched-operation-nesting`'s task half and `sysret-ss-probe`, run once a boot
+/// on the first syscall: a task's own deadline slot, and a park that switches
+/// away from it and back.
+#[cfg(feature = "boot-actuators")]
+fn task_probes() {
+    use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    static RAN: AtomicBool = AtomicBool::new(false);
+    let nesting = crate::actuator::sched_operation_nesting();
+    let ss = crate::actuator::sysret_ss_probe();
+    if !(nesting || ss) || RAN.swap(true, Relaxed) {
+        return;
+    }
+    if nesting {
+        crate::sched_gate::run("syscall");
+    }
+    if ss {
+        crate::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
+    }
+}
+
 pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     // Placed first so the architecture counts the call whatever it turns out to be.
     #[cfg(feature = "boot-actuators")]
     crate::arch::syscall::note_entry();
+    #[cfg(feature = "boot-actuators")]
+    task_probes();
     let t0 = crate::clock::nanos_since_boot();
 
     process::with_current_data(|data| {

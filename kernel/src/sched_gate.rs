@@ -1,7 +1,7 @@
 //! In-guest gate on [`Operation`] nesting: `begin` narrows the current
 //! deadline and never widens it, and `Drop` restores what it displaced.
-//! [`run`] is called from a boot-phase CPU context and from the `probe` task,
-//! the two places a deadline slot can be established.
+//! [`run`] is called from a boot-phase CPU context and from a syscall, the two
+//! places a deadline slot can be established.
 
 use crate::clock;
 use crate::scheduler::Operation;

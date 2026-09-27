@@ -61,7 +61,7 @@ actuators! {
     /// record before it and `screen_early_panel` reads a paint it can attribute.
     test_early_halt = "test-early-halt";
 
-    /// Have the `probe` thread null SS, force a switch, and report whether it reloaded — the
+    /// Have the first syscall null SS, force a switch, and report whether it reloaded — the
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";
 

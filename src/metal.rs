@@ -763,7 +763,7 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     ("xhci-xecp-selftest", Flash::Ok),
     ("xhci-descriptor-selftest", Flash::Ok),
     // Two probes rather than staged inputs, and both are reads: the SS-reload
-    // one runs inside the `probe` thread's own context switch, and the input-core one merges
+    // one runs inside the first syscall's own context switch, and the input-core one merges
     // events it made up itself.
     ("sysret-ss-probe", Flash::Ok),
     ("test-input-merge", Flash::Ok),

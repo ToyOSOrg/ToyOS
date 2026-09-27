@@ -11470,24 +11470,16 @@ fn run_machine_test(
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
         "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
-        // `sysret-ss-probe` has the `probe` thread null SS, force a switch, and log whether the
+        // `sysret-ss-probe` has the first syscall null SS, force a switch, and log whether the
         // switch reloaded it; a missing `mov ss` turns `reloaded` into `NOT`.
         "sysret_ss_reload" => {
             let options = BootOptions {
                 kernel_params: &["sysret-ss-probe"],
                 ..Default::default()
             };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // A liveness ceiling, not a pace: a loaded shard once took past a
-            // fixed 500 ms drain to run the probe (run 33246638742, alone-green).
-            // The T14's readback needs no drain at all — the whole boot's records
-            // are on the stick — so the wait is here and the predicate is shared.
-            let log = qemu.boot_log().to_string()
-                + &qemu.drain_until(Duration::from_secs(10), |l| {
-                    l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
-                });
-            sysret_ss(&log)
+            // The first syscall is init's, so the probe's line precedes the ready marker.
+            let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            sysret_ss(qemu.boot_log())
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
@@ -16598,7 +16590,7 @@ fn sysret_ss(log: &str) -> Result<(), String> {
         }
         if !log.contains("sysret-ss: reloaded") {
             return Err(format!(
-                "the SS-reload probe never reported — the probe thread may not have run it:\n{log}"
+                "the SS-reload probe never reported — the first syscall may not have run it:\n{log}"
             ));
         }
         eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
@@ -16639,7 +16631,7 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         // with no task uses one slot per CPU, and the two are reached by
         // different arms of `operation_slot` — so a gate that ran in one
         // place would leave the other arm unexecuted by any test at all.
-        for site in ["boot", "probe"] {
+        for site in ["boot", "syscall"] {
             let say = |what: &str| -> Result<String, String> {
                 let needle = format!("sched-op: {site} {what}");
                 log.lines()
