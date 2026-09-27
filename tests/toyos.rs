@@ -18644,10 +18644,6 @@ impl Outcome {
     }
 
     /// Whether this red is a blown liveness guard rather than an answer.
-    ///
-    /// What it changes is only what the reader is told, which is the whole
-    /// complaint: the run establishes nothing about this tree, so nobody
-    /// should bisect it.
     fn stalled(&self) -> bool {
         self.reason.as_deref().is_some_and(|r| r.contains(STALLED))
     }

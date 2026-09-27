@@ -176,4 +176,5 @@ passes during the freeze — nothing short of that instrument distinguishes this
 signature from a green run, which this entry has already shown proves nothing
 either way. Owner: `toyos-sched`, the placement track that closed the
 CPU-selection half of this family (`CpuHandle::answering`,
-`toyos-sched/src/cpu.rs`) and is nearest the remaining half.
+`toyos-sched/src/cpu.rs`) and is nearest the remaining half; held by the
+orchestrator.

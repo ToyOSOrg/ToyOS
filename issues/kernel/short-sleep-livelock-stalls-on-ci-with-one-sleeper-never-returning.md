@@ -31,4 +31,4 @@ test's write-up (`tests/toyos.rs`, `short_sleep_livelock`) names.
 
 **Exit condition.** The fifth sleeper's stall is fixed in the sleep path, and
 `short_sleep_livelock` green on CI's KVM `guest` shards.
-Owner: the sleep path, `kernel/src/sched`.
+Owner: the sleep path, `kernel/src/sched`; held by the orchestrator.

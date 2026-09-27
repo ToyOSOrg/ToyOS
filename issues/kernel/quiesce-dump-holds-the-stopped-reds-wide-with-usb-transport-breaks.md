@@ -43,5 +43,5 @@ one-guest lane is not the other suites' load.
 **Exit condition.** Re-enabled when a reproduction names what holds a writer's
 first write-and-fsync pass for over 5 s while another writer passes in under a
 third of a second, and the fix is shown against it. Owner: the `/log` write and
-sync path `tests/toyos-rust-tests/src/bin/quiesce_writers.rs` drives; nobody is
-holding it yet.
+sync path `tests/toyos-rust-tests/src/bin/quiesce_writers.rs` drives; held by
+the orchestrator.

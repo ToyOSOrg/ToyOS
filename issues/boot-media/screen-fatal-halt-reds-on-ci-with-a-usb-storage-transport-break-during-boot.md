@@ -32,4 +32,4 @@ runner's stdout blocked on.
 runner's stdout was blocked behind the usb-storage transport break or the two
 are independent, and the wait path stops holding the runner's own output
 hostage. Owner: the usb-storage wait path,
-`kernel/src/drivers/xhci/wait/msc.rs`.
+`kernel/src/drivers/xhci/wait/msc.rs`; held by the orchestrator.
