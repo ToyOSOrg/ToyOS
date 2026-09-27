@@ -394,6 +394,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         }
         Owner::Us => {}
     }
+    crate::compiler::refuse_llvm_edit(&rust_dir);
 
     let compiler_stamp = stamps_dir.join("compiler.stamp");
     let hosted_stamp = stamps_dir.join("hosted-rustc.stamp");
@@ -760,9 +761,7 @@ fn build_hosted_rustc(rust_dir: &Path) {
 /// `lld = true` is what puts `rust-lld` in every stage's sysroot, where rustc
 /// finds the linker every guest target names. The hosted rustc's build cannot
 /// have it: bootstrap would then build LLD for the ToyOS host from C++, which
-/// nothing here can compile yet, so that build links the architecture it
-/// builds a rustc for through the LLD the host-only build made — the same
-/// binary `lld = true` ships as `rust-lld`. Every assemble removes the host's
+/// nothing here can compile yet. Every assemble removes the host's
 /// `stage2` first, so [`build_hosted_rustc`] reassembles it under the host-only
 /// config after.
 ///
@@ -787,15 +786,7 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
     let userland: String = Arch::ALL
         .iter()
         .map(|arch| {
-            // rust-lld by name: rustc finds it in the sysroot of the stage that
-            // links, which `lld = true` puts it in. It takes no `-Wl,` rpath,
-            // and a guest std has no host library path to record.
-            let linker = if with_hosted_rustc {
-                // `lld = false` here, so no stage's sysroot carries `rust-lld`.
-                format!("linker = \"{}\"", build.join("lld/bin/lld").display())
-            } else {
-                "linker = \"rust-lld\"".to_string()
-            };
+            let linker = format!("linker = \"{}\"", build.join("lld/bin/lld").display());
             let hosted = if with_hosted_rustc && *arch == HOSTED_ARCH {
                 // Cranelift because no LLVM is built for a ToyOS host yet, and
                 // only for that reason: the hosted rustc carries LLVM once clang
@@ -967,16 +958,16 @@ mod tests {
         assert!(said.contains("clang") && !said.contains("rust-lld,"), "the refusal names clang alone: {said}");
     }
 
-    /// The hosted rustc's build, which has no `rust-lld`, names none.
+    /// Every guest links through the host build's LLD, named by path.
     #[test]
-    fn the_hosted_build_names_no_rust_lld() {
-        let rust_dir = TempDir::new("hosted-config");
-        write_config(&rust_dir, "h", true);
-        let hosted = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
-        assert!(hosted.contains("lld = false") && !hosted.contains("\"rust-lld\""), "{hosted}");
-        write_config(&rust_dir, "h", false);
-        let host_only = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
-        assert!(host_only.contains("lld = true") && host_only.contains("linker = \"rust-lld\""), "{host_only}");
+    fn every_build_names_its_lld_by_path() {
+        let rust_dir = TempDir::new("lld-config");
+        let lld = format!("linker = \"{}\"", rust_dir.join("build/h/lld/bin/lld").display());
+        for (hosted, lld_flag) in [(true, "lld = false"), (false, "lld = true")] {
+            write_config(&rust_dir, "h", hosted);
+            let config = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
+            assert!(config.contains(lld_flag) && config.contains(&lld) && !config.contains("\"rust-lld\""), "{config}");
+        }
     }
 
     /// The negative control is the defect itself: this is verbatim what cargo

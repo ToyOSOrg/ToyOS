@@ -102,8 +102,7 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         .env("RUSTUP_TOOLCHAIN", toolchain)
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
-        // Not `userland/`, whose `-Dwarnings` refuses libc-without-std-runtime-warns.
-        .current_dir(root)
+        .current_dir(root.join("userland"))
         .output()
         .unwrap_or_else(|e| panic!("run cargo for toyos-libc's staticlib: {e}"));
     assert!(

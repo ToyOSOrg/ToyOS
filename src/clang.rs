@@ -32,7 +32,6 @@ pub(crate) const SOURCE: &str = file!();
 /// The LLVM every host compiler links, in every `bootstrap.toml` that builds
 /// one: built from `src/llvm-project` — the fork that knows the ToyOS target —
 /// with clang beside it, for the host and the two architectures ToyOS runs on.
-/// Bootstrap rebuilds it only when that commit moves.
 pub(crate) const LLVM_CONFIG: &str = "download-ci-llvm = false\n\
                                       clang = true\n\
                                       targets = \"AArch64;X86\"\n\

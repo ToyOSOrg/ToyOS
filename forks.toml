@@ -397,3 +397,6 @@ pr_note = "9481b7db adds crt0.o, d03e5f68 removes it and 39ec544b fixes 9481b7db
 
 # Not a crate fork: rust/ is a submodule of Japabu/rust (compiler + std with
 # ToyOS as a target). Its own upstream sync is tracked separately.
+# Its `wt-toyos-clang` branch is left behind, unrewritten: `wt-toyos-clang-folded`
+# carries its bootstrap work as three commits that each stand alone, off
+# `ce9814d0115`, and the gitlink pins that one.

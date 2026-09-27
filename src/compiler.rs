@@ -13,7 +13,7 @@
 //! the `src/llvm-project` commit, and [`RECIPE`]. Nothing writes that directory after its [`SOURCE`] file exists,
 //! and two worktrees naming the same compiler share one copy.
 //!
-//! **LLVM is built from `src/llvm-project`, and only when its commit moves.**
+//! **LLVM is built from `src/llvm-project`.**
 //! [`source`] names that commit, so another LLVM is another compiler.
 //!
 //! **A compiler of a worktree's own never touches what the others build with**:
@@ -40,7 +40,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::buildlock::{self, Guard, Held, Keyed};
 use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity, Restore};
@@ -164,18 +163,11 @@ pub fn key(fork: &Path) -> String {
     short(parts.join("\n\0\n").as_bytes())
 }
 
-/// The LLVM commit `fork` builds against: the one its `HEAD` records, which is
-/// the one bootstrap checks out and builds whatever the submodule holds. An
-/// LLVM change is a commit there and a gitlink here.
-fn llvm_commit(fork: &Path) -> String {
+/// Refuse an edit in `fork`'s LLVM checkout that no commit holds, once per
+/// build before any compiler is named: [`llvm_commit`] names the commit alone.
+pub fn refuse_llvm_edit(fork: &Path) {
     let checkout = fork.join(LLVM);
-    let edited = checkout.join(".git").exists()
-        && !Command::new("git")
-            .args(["diff", "--quiet", "HEAD"])
-            .current_dir(&checkout)
-            .status()
-            .unwrap_or_else(|e| panic!("run git in {}: {e}", checkout.display()))
-            .success();
+    let edited = checkout.join(".git").exists() && !git_bytes(&checkout, &["diff", "--name-only", "HEAD"]).is_empty();
     assert!(
         !edited,
         "{} holds changes no commit does, and a compiler is keyed on the commit its gitlink \
@@ -183,6 +175,12 @@ fn llvm_commit(fork: &Path) -> String {
         checkout.display(),
         fork.display(),
     );
+}
+
+/// The LLVM commit `fork` builds against: the one its `HEAD` records, which is
+/// the one bootstrap checks out and builds whatever the submodule holds. An
+/// LLVM change is a commit there and a gitlink here.
+fn llvm_commit(fork: &Path) -> String {
     let recorded = git_out(fork, &["ls-tree", "HEAD", LLVM]);
     match recorded.split_whitespace().collect::<Vec<_>>().as_slice() {
         ["160000", "commit", sha, _] => sha.to_string(),
@@ -206,6 +204,7 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     if fork == rust_dir {
         return Compiler::primary(rust_dir);
     }
+    refuse_llvm_edit(fork);
     let record = primary_record(rust_dir);
     let built_from = fs::read_to_string(&record).unwrap_or_else(|e| {
         panic!(
@@ -569,7 +568,7 @@ mod tests {
     #[test]
     fn an_uncommitted_llvm_edit_is_refused() {
         let scratch = TempDir::new("compiler-llvm-edit");
-        let (_primary, _rust_dir, [same, _, _]) = estate(&scratch);
+        let (_primary, rust_dir, [same, _, _]) = estate(&scratch);
         let fork = same.join("rust");
         let llvm = fork.join(LLVM);
         git(&llvm, &["init", "-q"]);
@@ -579,9 +578,18 @@ mod tests {
         let committed = key(&fork);
 
         write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core_edited;\n");
-        let refused = std::panic::catch_unwind(|| key(&fork)).expect_err("an uncommitted LLVM edit was keyed");
+        let builds = Cell::new(0);
+        let fake = |fork: &Path| {
+            builds.set(builds.get() + 1);
+            fork.join("build/toyos-compiler/stage2")
+        };
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            choose(&same, &rust_dir, &fork, fake);
+        }))
+        .expect_err("an uncommitted LLVM edit named a compiler");
         let said = refused.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(said.contains("holds changes no commit does"), "{said}");
+        assert_eq!(builds.get(), 0, "an uncommitted LLVM edit built a compiler");
         git(&llvm, &["commit", "-qam", "the edit"]);
         assert_eq!(key(&fork), committed, "the key read the submodule's commit rather than the gitlink");
     }

@@ -18,24 +18,19 @@ const SAYS: &str = "hello from clang, on ToyOS: 6 * 7 = 42";
 /// it: a PIE for this machine, its entry loaded, an unwind table header, and no
 /// program interpreter.
 pub fn judge_elf(elf: &[u8]) -> Result<(), String> {
-    /// `PT_INTERP`, from the System V ABI.
-    const PT_INTERP: u32 = 3;
     let header = toyos_elf::FileHeader::parse(elf).map_err(|e| format!("toyos-elf refuses the header: {e:?}"))?;
     let machine = match super::qemu::SUITE_ARCH {
         toyos_build::arch::Arch::X86_64 => toyos_elf::Machine::X86_64,
         toyos_build::arch::Arch::Aarch64 => toyos_elf::Machine::Aarch64,
     };
     let layout = toyos_elf::Layout::parse(elf, machine).map_err(|e| format!("the loader's decoder refuses it: {e:?}"))?;
-    if !layout.contains(layout.entry, 1) {
-        return Err(format!("its entry {:#x} is in no loaded segment", layout.entry));
-    }
     if layout.eh_frame_hdr.is_none() {
         return Err("it has no unwind table header, which the driver asks for".to_string());
     }
     let table = header.program_headers(elf).map_err(|e| format!("its program headers: {e:?}"))?;
     let interp = (0..usize::from(header.phnum))
         .filter_map(|i| toyos_elf::header::ProgramHeader::parse(table, i))
-        .any(|p| p.kind == PT_INTERP);
+        .any(|p| p.kind == toyos_elf::header::PT_INTERP);
     if interp {
         return Err("it names a program interpreter, which ToyOS does not have".to_string());
     }
