@@ -675,16 +675,19 @@ mod tests {
     /// **`KillEachOther`, K1's shape**: two processes, each one's thread inside
     /// `SYS_PROCESS_KILL` on the other. A thread in the kernel reaches no safe
     /// point until its kill returns, so a kill that waited for its victim waits
-    /// on a thread that is waiting on it.
+    /// on a thread that is waiting on it. Each process has a second thread, and
+    /// one of the killers is it.
     ///
     /// Reds under `mutate-kill-waits-for-its-victims`, the base's kill.
     #[test]
     fn two_processes_killing_each_other_both_end() {
         let mut world = World::new();
         let p = world.spawn_process();
+        let p_sibling = world.spawn_thread(p);
         let c = world.spawn_process();
+        world.spawn_thread(c);
         let ops = vec![
-            Op::kill_by(c, 137, (p, world.main_tid(p))),
+            Op::kill_by(c, 137, (p, p_sibling)),
             Op::kill_by(p, 137, (c, world.main_tid(c))),
             Op::reap(),
         ];
