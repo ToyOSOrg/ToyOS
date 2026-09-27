@@ -2,7 +2,9 @@
 
 use std::net::Ipv4Addr;
 
-use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
+use toyos_net_wire::ethernet::{FrameBody, IndividualMac, MacAddr};
+use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Payload, Ipv4Source, OtherProtocol, Protocol, TrafficClass, Ttl};
+use toyos_net_wire::BuildError;
 
 pub const MAC_A: MacAddr = MacAddr([0x02, 0, 0, 0, 0, 0x0a]);
 pub const MAC_B: MacAddr = MacAddr([0x02, 0, 0, 0, 0, 0x0b]);
@@ -135,6 +137,68 @@ pub fn payload_of(ip: &[u8]) -> Vec<u8> {
 /// So a builder that skips a byte shows it.
 pub fn junk(len: usize) -> Vec<u8> {
     vec![0xAA; len]
+}
+
+pub fn fixed(mut message: Vec<u8>, edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
+    edit(&mut message);
+    fix_message(&mut message);
+    message
+}
+
+pub fn unassigned(number: u8) -> OtherProtocol {
+    match Protocol::from_number(number) {
+        Protocol::Other(protocol) => protocol,
+        protocol => panic!("{protocol:?} is assigned"),
+    }
+}
+
+pub fn datagram<P: Ipv4Payload>(source: Ipv4Addr, destination: Ipv4Addr, payload: P) -> Ipv4Builder<'static, P> {
+    Ipv4Builder {
+        source: Ipv4Source::new(source).unwrap(),
+        destination,
+        ttl: Ttl::DEFAULT,
+        traffic_class: TrafficClass::ZERO,
+        options: &[],
+        payload,
+    }
+}
+
+pub fn emit<P: Ipv4Payload>(builder: &Ipv4Builder<'_, P>) -> Result<Vec<u8>, BuildError> {
+    let mut out = junk(builder.length().unwrap_or(0));
+    builder.emit(&mut out).map(<[u8]>::to_vec)
+}
+
+pub struct Rng(pub u64);
+
+impl Rng {
+    pub fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    pub fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+
+    pub fn byte(&mut self) -> u8 {
+        self.next() as u8
+    }
+
+    pub fn bytes(&mut self, max: usize) -> Vec<u8> {
+        let len = self.below(max + 1);
+        (0..len).map(|_| self.byte()).collect()
+    }
+
+    pub fn chance(&mut self, percent: usize) -> bool {
+        self.below(100) < percent
+    }
+
+    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len())]
+    }
 }
 
 pub const V_ARP_REQ: &str = "
@@ -353,8 +417,6 @@ c0 00 02 01 13 88 13 89 00 0a ec 5b 68 69";
 pub const V_IP_MIN: &str = "
 45 00 00 14 00 00 40 00 40 fd b5 e9 c0 00 02 02
 c0 00 02 01";
-
-// ip.md §18: the IGMPv3 report builder's vectors (§16.3 W-1).
 
 pub const V_IGMP3_JOIN: &str = "
 01 00 5e 00 00 16 02 00 00 00 00 0a 08 00 46 c0

@@ -1,8 +1,8 @@
 //! TCP segments and their options (RFC 9293 §3.1).
 
 use crate::checksum::PseudoHeader;
-use crate::emit::{be16x2, put, put_slice, BuildError};
-use crate::ipv4::{Ipv4Packet, Ipv4Payload, Protocol};
+use crate::emit::{be16x2, put, BuildError};
+use crate::ipv4::{sealed, Ipv4Packet, Ipv4Payload, Protocol, MAX_LEN};
 use crate::Port;
 
 pub const MIN_HEADER_LEN: usize = 20;
@@ -232,7 +232,8 @@ impl<'a> TcpSegment<'a> {
         }
         let (full_header, payload) = bytes.split_at_checked(header_len).ok_or(TcpError::HeaderOverrun)?;
         let length = u16::try_from(bytes.len()).map_err(|_| TcpError::Checksum)?;
-        if !ip.pseudo_header(length).accumulator().feed(bytes).sum().verifies() {
+        let pseudo = PseudoHeader { source: ip.source(), destination: ip.destination(), protocol: Protocol::Tcp, length };
+        if !pseudo.accumulator().feed(bytes).sum().verifies() {
             return Err(TcpError::Checksum);
         }
         let (source, destination) = Port::new(u16::from_be_bytes([header[0], header[1]]))
@@ -397,14 +398,16 @@ impl TcpBuilder<'_> {
     }
 }
 
+impl sealed::Sealed for TcpBuilder<'_> {}
+
 impl Ipv4Payload for TcpBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Tcp
     }
 
-    fn length(&self, room: usize) -> Result<usize, BuildError> {
+    fn length(&self, header_len: usize) -> Result<usize, BuildError> {
         match MIN_HEADER_LEN.checked_add(self.options_len()?).and_then(|header| header.checked_add(self.data.len())) {
-            Some(len) if len <= room => Ok(len),
+            Some(len) if len <= MAX_LEN.saturating_sub(header_len) => Ok(len),
             _ => Err(BuildError::TcpTooLong),
         }
     }
@@ -434,14 +437,13 @@ impl Ipv4Payload for TcpBuilder<'_> {
                 (TcpFlags::RST | ack, *acknowledgment)
             }
         };
-        put_slice(data, self.data)?;
         let words = u8::try_from(MIN_HEADER_LEN.saturating_add(options_len) >> 2).map_err(|_| BuildError::TcpTooLong)?;
         let [p0, p1, p2, p3] = be16x2(self.source.get(), self.destination.get());
         let [s0, s1, s2, s3] = self.sequence.0.to_be_bytes();
         let [a0, a1, a2, a3] = acknowledgment.map_or(0, SeqNum::get).to_be_bytes();
         let [w0, w1] = self.window.0.to_be_bytes();
         let mut fixed = [p0, p1, p2, p3, s0, s1, s2, s3, a0, a1, a2, a3, words << 4, flags.0, w0, w1, 0, 0, 0, 0];
-        let [c0, c1] = pseudo.accumulator().feed(&fixed).feed(options).feed(self.data).sum().checksum().to_be_bytes();
+        let [c0, c1] = pseudo.accumulator().feed(&fixed).feed(options).copy(data, self.data)?.sum().checksum().to_be_bytes();
         fixed[16] = c0;
         fixed[17] = c1;
         *header = fixed;

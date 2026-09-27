@@ -165,9 +165,6 @@ impl<'a> Frame<'a> {
         let mut field = u16::from_be_bytes(*field);
         let mut tags = Tags::Untagged;
         while let Some(protocol) = TagProtocol::from_field(field) {
-            if matches!(tags, Tags::Double { .. }) {
-                return Err(EthError::TooManyTags);
-            }
             let (tag, after) = rest.split_first_chunk::<4>().ok_or(EthError::TruncatedTag)?;
             let [c0, c1, t0, t1] = *tag;
             let tag = VlanTag { protocol, control: u16::from_be_bytes([c0, c1]) };

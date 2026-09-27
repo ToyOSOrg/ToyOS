@@ -30,6 +30,8 @@ macro_rules! reasons {
         }
 
         impl $name {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+
             /// The counter this refusal increments.
             pub const fn name(self) -> &'static str {
                 match self {
@@ -133,4 +135,33 @@ mod compile_fail {
     /// ```
     #[allow(non_camel_case_types)]
     pub struct s_rt_010_transport_parse_takes_only_its_ipv4_view;
+
+    /// ```
+    /// use toyos_net_wire::ipv4::{Protocol, RawPayload};
+    /// let Protocol::Other(protocol) = Protocol::from_number(253) else { panic!() };
+    /// let _ = RawPayload { protocol, bytes: &[] };
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_wire::ipv4::{Protocol, RawPayload};
+    /// let _ = RawPayload { protocol: Protocol::Udp, bytes: &[] };
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_wire::{checksum::PseudoHeader, ipv4::{Ipv4Payload, Protocol}, BuildError};
+    /// struct Forged;
+    /// impl Ipv4Payload for Forged {
+    ///     fn protocol(&self) -> Protocol {
+    ///         Protocol::Udp
+    ///     }
+    ///     fn length(&self, _header_len: usize) -> Result<usize, BuildError> {
+    ///         Ok(0)
+    ///     }
+    ///     fn write(&self, _pseudo: &PseudoHeader, _out: &mut [u8]) -> Result<(), BuildError> {
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    #[allow(non_camel_case_types)]
+    pub struct raw_payload_takes_no_transport_protocol_and_no_payload_is_forged;
 }

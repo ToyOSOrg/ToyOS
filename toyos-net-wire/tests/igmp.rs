@@ -15,12 +15,6 @@ fn parse(bytes: &[u8]) -> Result<IgmpMessage<'_>, IgmpError> {
     IgmpPacket::parse(bytes).map(|packet| packet.message())
 }
 
-fn fixed(mut message: Vec<u8>, edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
-    edit(&mut message);
-    fix_message(&mut message);
-    message
-}
-
 fn mdns() -> MulticastAddr {
     MulticastAddr::new(Ipv4Addr::new(224, 0, 0, 251)).unwrap()
 }
@@ -58,11 +52,14 @@ fn s_igmp_003_v1_query() {
 #[test]
 fn s_igmp_004_v3_general_query() {
     let bytes = hex(V_IGMP_QUERY_V3);
-    let query = query(&bytes);
-    let QueryVersion::V3(v3) = query.version else { panic!("{query:?}") };
-    assert_eq!((query.group, query.max_response), (QueryGroup::General, Deciseconds(100)));
+    let general = query(&bytes);
+    let QueryVersion::V3(v3) = general.version else { panic!("{general:?}") };
+    assert_eq!((general.group, general.max_response), (QueryGroup::General, Deciseconds(100)));
     assert_eq!((v3.suppress_router_processing, v3.robustness, v3.interval_code), (false, 2, 125));
     assert_eq!(v3.sources().count(), 0);
+    let suppressed = fixed(bytes.clone(), |b| b[8] = 0x0A);
+    let QueryVersion::V3(v3) = query(&suppressed).version else { panic!() };
+    assert_eq!((v3.suppress_router_processing, v3.robustness), (true, 2));
 }
 
 #[test]
@@ -95,6 +92,10 @@ fn s_igmp_008_group_and_source_query() {
 fn s_igmp_009_sources_overrun() {
     let bytes = fixed(hex(V_IGMP_QUERY_V3_SRC), |b| b[11] = 3);
     assert_eq!(parse(&bytes), Err(IgmpError::QuerySourcesOverrun));
+    // wire.md §7.2(3) checks the group before the sources, and the length before both.
+    let bytes = fixed(bytes, |b| b[4..8].copy_from_slice(&IP_A.octets()));
+    assert_eq!(parse(&bytes), Err(IgmpError::QueryGroup));
+    assert_eq!(parse(&fixed(bytes[..9].to_vec(), |_| {})), Err(IgmpError::QueryLength));
 }
 
 #[test]
@@ -215,17 +216,8 @@ fn s_igmp_027_emit_leave() {
 }
 
 #[test]
-fn s_igmp_028_emit_v1_report() {
-    let bytes = emit_leave_like(V2Kind::V1Report);
-    let ip = Ipv4Packet::parse(&bytes).unwrap();
-    assert_eq!((ip.payload().len(), ip.payload()[0]), (8, 0x12));
-    assert_eq!(ip.destination(), mdns().get());
-    assert_eq!(parse(ip.payload()), Ok(IgmpMessage::V1Report(mdns())));
-}
-
-#[test]
 fn s_igmp_030_emitted_max_response_is_zero() {
-    for kind in [V2Kind::Report, V2Kind::V1Report, V2Kind::Leave] {
+    for kind in [V2Kind::Report, V2Kind::Leave] {
         let bytes = emit_leave_like(kind);
         assert_eq!(bytes[25], 0, "{kind:?}");
     }
@@ -236,13 +228,13 @@ fn network_control() -> TrafficClass {
     TrafficClass::new(48, Ecn::NotEct).unwrap()
 }
 
-fn emit_v3(source: Ipv4Addr, records: &[GroupRecord<'_>]) -> Vec<u8> {
+fn emit_v3(source: Ipv4Addr, records: &[GroupRecord]) -> Vec<u8> {
     let datagram = igmp::datagram(Ipv4Source::new(source).unwrap(), network_control(), V3ReportBuilder { records });
     let mut out = junk(1500);
     datagram.emit(&mut out).unwrap().to_vec()
 }
 
-fn record(record: RecordType<'_>) -> GroupRecord<'_> {
+fn record(record: RecordType) -> GroupRecord {
     GroupRecord { group: ReportGroup::new(mdns()).unwrap(), record }
 }
 
@@ -263,18 +255,16 @@ fn w1_igmp3_leave_current_and_unspecified_source() {
 }
 
 #[test]
-fn w1_igmp3_records_and_sources_layout() {
-    let sources = [Ipv4Addr::new(192, 0, 2, 9), Ipv4Addr::new(192, 0, 2, 10)];
+fn w1_igmp3_records_layout() {
     let other = ReportGroup::new(MulticastAddr::new(Ipv4Addr::new(239, 1, 2, 3)).unwrap()).unwrap();
-    let records = [record(RecordType::IsInclude(&sources)), GroupRecord { group: other, record: RecordType::IsExclude }];
+    let records = [record(RecordType::ToExclude), GroupRecord { group: other, record: RecordType::IsExclude }];
     let bytes = emit_v3(IP_A, &records);
     let ip = Ipv4Packet::parse(&bytes).unwrap();
     let igmp = ip.payload();
     assert_eq!(oracle_sum(igmp), 0xFFFF);
     assert_eq!(igmp[..2], [0x22, 0]);
     assert_eq!(igmp[4..8], [0, 0, 0, 2]);
-    assert_eq!(igmp[8..16], hex("01 00 00 02 e0 00 00 fb")[..]);
-    assert_eq!(igmp[16..24], hex("c0 00 02 09 c0 00 02 0a")[..]);
-    assert_eq!(igmp[24..32], hex("02 00 00 00 ef 01 02 03")[..]);
-    assert_eq!(igmp.len(), 32);
+    assert_eq!(igmp[8..16], hex("04 00 00 00 e0 00 00 fb")[..]);
+    assert_eq!(igmp[16..24], hex("02 00 00 00 ef 01 02 03")[..]);
+    assert_eq!(igmp.len(), 24);
 }

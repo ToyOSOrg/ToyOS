@@ -3,19 +3,13 @@ mod common;
 use common::*;
 use toyos_net_wire::icmp::{
     Echo, EchoBuilder, EchoKind, HostUnreachable, IcmpError, IcmpMessage, IcmpPacket, ParameterProblemCode, Quote,
-    RedirectCode, TimeExceededCode, Timestamp, UnreachableBuilder, UnreachableCode,
+    RedirectCode, TimeExceededCode, UnreachableBuilder, UnreachableCode, MAX_ERROR_LEN,
 };
-use toyos_net_wire::ipv4::{Form, Ipv4Builder, Ipv4Packet, Ipv4Payload, Ipv4Source, Protocol, TrafficClass, Ttl};
+use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Packet, Protocol, TxOption, TxOptionKind};
 use toyos_net_wire::Class;
 
 fn parse(bytes: &[u8]) -> Result<IcmpMessage<'_>, IcmpError> {
     IcmpPacket::parse(bytes).map(|packet| packet.message())
-}
-
-fn fixed(mut message: Vec<u8>, edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
-    edit(&mut message);
-    fix_message(&mut message);
-    message
 }
 
 fn echo_icmp() -> Vec<u8> {
@@ -102,6 +96,9 @@ fn s_icmp_009_port_unreachable() {
     assert_eq!(u16::from_be_bytes([d0, d1]), 53);
     assert_eq!(u16::from_be_bytes([l0, l1]), 37);
     assert_eq!(u16::from_be_bytes([c0, c1]), 0xD995);
+    // Bytes 6-7 are a next-hop MTU only under code 4.
+    let bytes = fixed(bytes, |b| b[6..8].copy_from_slice(&[0x05, 0x78]));
+    assert!(matches!(parse(&bytes), Ok(IcmpMessage::DestinationUnreachable { code: UnreachableCode::Port, next_hop_mtu: None, .. })));
 }
 
 #[test]
@@ -267,23 +264,20 @@ fn s_icmp_023_redirect() {
 }
 
 #[test]
-fn s_icmp_024_timestamp_request() {
-    let bytes = hex(V_ICMP_TIMESTAMP_REQ);
-    let expected = Timestamp { identifier: 7, sequence: 1, originate: 0x0100_0000, receive: 0, transmit: 0 };
-    assert_eq!(parse(&bytes), Ok(IcmpMessage::TimestampRequest(expected)));
+fn s_icmp_024_timestamp_request_refused_by_type() {
+    assert_eq!(parse(&hex(V_ICMP_TIMESTAMP_REQ)), Err(IcmpError::TimestampRequest));
 }
 
 #[test]
-fn s_icmp_025_timestamp_length() {
+fn s_icmp_025_timestamp_fields_are_never_read() {
     let base = hex(V_ICMP_TIMESTAMP_REQ);
-    assert_eq!(parse(&fixed(base[..19].to_vec(), |_| {})), Err(IcmpError::TimestampLength));
-    assert_eq!(parse(&fixed(base, |b| b.push(0))), Err(IcmpError::TimestampLength));
+    assert_eq!(parse(&fixed(base[..19].to_vec(), |_| {})), Err(IcmpError::TimestampRequest));
+    assert_eq!(parse(&fixed(base, |b| b.push(0))), Err(IcmpError::TimestampRequest));
 }
 
 #[test]
-fn s_icmp_026_timestamp_reply() {
-    let bytes = fixed(hex(V_ICMP_TIMESTAMP_REQ), |b| b[0] = 14);
-    assert!(matches!(parse(&bytes), Ok(IcmpMessage::TimestampReply(Timestamp { identifier: 7, .. }))));
+fn s_icmp_026_timestamp_reply_refused_by_type() {
+    assert_eq!(parse(&fixed(hex(V_ICMP_TIMESTAMP_REQ), |b| b[0] = 14)), Err(IcmpError::TimestampReply));
 }
 
 #[test]
@@ -326,18 +320,6 @@ fn s_icmp_031_checksum_before_type() {
     assert_eq!(parse(&bytes), Err(IcmpError::Checksum));
 }
 
-fn icmp_datagram<P: Ipv4Payload>(payload: P) -> Ipv4Builder<'static, P> {
-    Ipv4Builder {
-        source: Ipv4Source::new(IP_A).unwrap(),
-        destination: IP_B,
-        ttl: Ttl::DEFAULT,
-        traffic_class: TrafficClass::ZERO,
-        form: Form::Atomic,
-        options: &[],
-        payload,
-    }
-}
-
 #[test]
 fn s_icmp_047_echo_reply_to_odd_data() {
     let request = fixed(echo_icmp()[..15].to_vec(), |_| {});
@@ -345,7 +327,7 @@ fn s_icmp_047_echo_reply_to_odd_data() {
     let reply = EchoBuilder::reply_to(&echo);
     assert_eq!(reply.kind, EchoKind::Reply);
     let mut out = junk(100);
-    let built = icmp_datagram(reply).emit(&mut out).unwrap();
+    let built = datagram(IP_A, IP_B, reply).emit(&mut out).unwrap();
     let ip = Ipv4Packet::parse(built).unwrap();
     assert_eq!(parse(ip.payload()), Ok(IcmpMessage::EchoReply(Echo { identifier: 1, sequence: 1, data: b"abcdefg" })));
     assert_eq!(oracle_sum(ip.payload()), 0xFFFF);
@@ -357,15 +339,32 @@ fn s_icmp_048_unreachable_zeroes_unused_bytes() {
     let offending = Ipv4Packet::parse(&offending).unwrap();
     let mut out = junk(100);
     let unreachable = UnreachableBuilder { code: HostUnreachable::Port, datagram: &offending };
-    let built = icmp_datagram(unreachable).emit(&mut out).unwrap();
+    let built = datagram(IP_A, IP_B, unreachable).emit(&mut out).unwrap();
     assert_eq!(built[24..28], [0, 0, 0, 0]);
     assert_eq!(built, hex(V_ICMP_PORT_UNREACH_GEN));
     let offending = hex(V_IP_MIN);
     let offending = Ipv4Packet::parse(&offending).unwrap();
     let unreachable = UnreachableBuilder { code: HostUnreachable::Protocol, datagram: &offending };
-    assert_eq!(icmp_datagram(unreachable).emit(&mut out).unwrap(), hex(V_ICMP_PROTO_UNREACH_GEN));
+    assert_eq!(datagram(IP_A, IP_B, unreachable).emit(&mut out).unwrap(), hex(V_ICMP_PROTO_UNREACH_GEN));
     // A datagram with no payload is quoted whole, and ToyOS parses what it sent.
     let sent = hex(V_ICMP_PROTO_UNREACH_GEN);
     let quote = quote_of(parse(&sent[20..]).unwrap());
     assert_eq!((quote.payload(), quote.transport()), (&[][..], None));
+}
+
+#[test]
+fn quote_total_length_below_its_header_is_refused() {
+    let bytes = fixed(payload_of(&hex(V_ICMP_PORT_UNREACH)), |b| b[10..12].copy_from_slice(&19u16.to_be_bytes()));
+    assert_eq!(parse(&bytes), Err(IcmpError::QuoteTotalLengthBelowHeader));
+}
+
+#[test]
+fn an_error_with_options_still_fits_576_bytes() {
+    let offending = ipv4(IP_B, IP_A, 253, &[0x11; 1000]);
+    let offending = Ipv4Packet::parse(&offending).unwrap();
+    let options = [TxOption::Other { kind: TxOptionKind::new(68).unwrap(), data: &[0; 38] }];
+    let unreachable = UnreachableBuilder { code: HostUnreachable::Protocol, datagram: &offending };
+    let built = emit(&Ipv4Builder { options: &options, ..datagram(IP_A, IP_B, unreachable) }).unwrap();
+    assert_eq!(built.len(), MAX_ERROR_LEN);
+    assert_eq!(built[68..], offending.bytes()[..MAX_ERROR_LEN - 68]);
 }

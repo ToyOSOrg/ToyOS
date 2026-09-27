@@ -1,7 +1,8 @@
-//! The Internet checksum (RFC 1071), its incremental update (RFC 1624) and the IPv4 pseudo-header; a received checksum verifies when its covered sum is 0xFFFF.
+//! The Internet checksum (RFC 1071) and the IPv4 pseudo-header; a received checksum verifies when its covered sum is 0xFFFF.
 
 use core::net::Ipv4Addr;
 
+use crate::emit::BuildError;
 use crate::ipv4::Protocol;
 
 fn add16(a: u16, b: u16) -> u16 {
@@ -16,6 +17,26 @@ fn add64(a: u64, b: u64) -> u64 {
     sum.wrapping_add(u64::from(carry))
 }
 
+/// Two carry chains, so neither waits on the other.
+fn add_words(sum: u64, bytes: &[u8]) -> (u64, Option<u8>) {
+    let (words, tail) = bytes.as_chunks::<8>();
+    let (pairs, last) = words.as_chunks::<2>();
+    let (mut a, mut b) = (sum, 0);
+    for [x, y] in pairs {
+        a = add64(a, u64::from_ne_bytes(*x));
+        b = add64(b, u64::from_ne_bytes(*y));
+    }
+    for word in last {
+        a = add64(a, u64::from_ne_bytes(*word));
+    }
+    let (pairs, odd) = tail.as_chunks::<2>();
+    for pair in pairs {
+        a = add64(a, u64::from(u16::from_ne_bytes(*pair)));
+    }
+    (add64(a, b), odd.first().copied())
+}
+
+/// Words are summed in native byte order and swapped once, in `sum` (RFC 1071 §2(B)).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Accumulator {
     sum: u64,
@@ -29,36 +50,35 @@ impl Accumulator {
 
     #[must_use]
     pub fn feed(self, bytes: &[u8]) -> Self {
-        let mut sum = self.sum;
-        let rest = match (self.pending, bytes.split_first()) {
-            (Some(high), Some((&low, rest))) => {
-                sum = add64(sum, u64::from(u16::from_be_bytes([high, low])));
-                rest
-            }
+        let (sum, rest) = match (self.pending, bytes.split_first()) {
+            (Some(high), Some((&low, rest))) => (add64(self.sum, u64::from(u16::from_ne_bytes([high, low]))), rest),
             (Some(_), None) => return self,
-            (None, _) => bytes,
+            (None, _) => (self.sum, bytes),
         };
-        let (words, tail) = rest.as_chunks::<8>();
-        for word in words {
-            sum = add64(sum, u64::from_be_bytes(*word));
-        }
-        let (pairs, odd) = tail.as_chunks::<2>();
-        for pair in pairs {
-            sum = add64(sum, u64::from(u16::from_be_bytes(*pair)));
-        }
-        Self { sum, pending: odd.first().copied() }
+        let (sum, pending) = add_words(sum, rest);
+        Self { sum, pending }
+    }
+
+    /// Copies `from` to the front of `to` and sums it, a block at a time, so the bytes are read once.
+    pub(crate) fn copy(self, to: &mut [u8], from: &[u8]) -> Result<Self, BuildError> {
+        let (to, _) = to.split_at_mut_checked(from.len()).ok_or(BuildError::BufferTooSmall)?;
+        Ok(to.chunks_mut(512).zip(from.chunks(512)).fold(self, |sum, (to, from)| {
+            to.copy_from_slice(from);
+            sum.feed(to)
+        }))
     }
 
     pub fn sum(self) -> Sum {
         let padded = match self.pending {
-            Some(high) => add64(self.sum, u64::from(u16::from_be_bytes([high, 0]))),
+            Some(high) => add64(self.sum, u64::from(u16::from_ne_bytes([high, 0]))),
             None => self.sum,
         };
-        let [a, b, c, d, e, f, g, h] = padded.to_be_bytes();
-        Sum(add16(
-            add16(u16::from_be_bytes([a, b]), u16::from_be_bytes([c, d])),
-            add16(u16::from_be_bytes([e, f]), u16::from_be_bytes([g, h])),
-        ))
+        let [a, b, c, d, e, f, g, h] = padded.to_ne_bytes();
+        let native = add16(
+            add16(u16::from_ne_bytes([a, b]), u16::from_ne_bytes([c, d])),
+            add16(u16::from_ne_bytes([e, f]), u16::from_ne_bytes([g, h])),
+        );
+        Sum(u16::from_be_bytes(native.to_ne_bytes()))
     }
 }
 
@@ -103,15 +123,6 @@ impl Checksum {
     pub const fn to_be_bytes(self) -> [u8; 2] {
         self.0.to_be_bytes()
     }
-
-    /// RFC 1624 equation 3: equal to recomputation whenever the covered data holds a nonzero byte.
-    #[must_use]
-    pub fn replace(self, old: [u8; 2], new: [u8; 2]) -> Self {
-        let m = u16::from_be_bytes(old);
-        let m_new = u16::from_be_bytes(new);
-        Self(!add16(add16(!self.0, !m), m_new))
-    }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
