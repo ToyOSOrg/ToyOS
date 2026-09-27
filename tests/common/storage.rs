@@ -598,6 +598,22 @@ pub fn home_budget_refusal_retried(
         })?
         .trim()
         .to_string();
+    // And the refusal was one per file, not one per flush: `logd` flushes every
+    // round it wrote a line in, and a refused flush is lines of its own, so a
+    // refusal on every flush keeps `/log` retrying for as long as the machine
+    // runs and rotates the boot's own log away. An absence, so it is judged
+    // over a window with nothing left to flush in it.
+    let after = qemu.drain_serial(Duration::from_secs(2));
+    let again: Vec<&str> =
+        after.lines().filter(|l| l.contains("fsync: ") && l.contains("durable on attempt")).collect();
+    if !again.is_empty() {
+        return Err(format!(
+            "{} flush(es) retried in the 2 s after the guest's, first {:?}: every flush is \
+             being refused, and each refusal's records are the next flush\n{after}",
+            again.len(),
+            again[0]
+        ));
+    }
 
     let image = qemu.nvme_image().to_path_buf();
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");

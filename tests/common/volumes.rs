@@ -2830,11 +2830,11 @@ pub fn log_partition_identity(
 /// one volume:
 ///
 /// 1. **Retry keeps the volume, and a refused attempt discarded nothing.**
-///    `fsync-budget-spent` runs every `SYS_FSYNC`'s first attempt under an
+///    `fsync-budget-spent` runs each file's first `SYS_FSYNC` attempt under an
 ///    already-spent operation — the state a loaded dev host reproduced 1 in
 ///    73 full 12-wide suites (2026-08-22, this test's own blob fsync on
-///    `/log`) — so every flush in the boot is refused once
-///    at the shipped site and retried on a fresh budget. The guest's own
+///    `/log`) — so each file's first flush is refused once at the shipped site
+///    and retried on a fresh budget. The guest's own
 ///    fsync must succeed, logd must never give its volume up, and the blob is
 ///    then read off the *image* by the host: the safety invariant is that the
 ///    refused attempt left every un-flushed page dirty, so the retry delivered

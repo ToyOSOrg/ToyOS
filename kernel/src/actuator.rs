@@ -244,9 +244,9 @@ actuators! {
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
-    /// Run the first attempt of every block operation `object::ops::until_answered`
-    /// retries — `SYS_FSYNC`, a partition transfer — under an operation that is
-    /// already over.
+    /// Run the first attempt of each run `object::ops::until_answered` retries —
+    /// a file's `SYS_FSYNC`, a claimed partition's read, write or flush — under an
+    /// operation that is already over, once per file and per partition and kind.
     fsync_budget_spent = "fsync-budget-spent";
 
     /// Make the deadman of every run `object::ops::until_answered` makes already
