@@ -153,7 +153,7 @@ pub struct Tcp {
     free_conns: Vec<u32>,
     listeners: Vec<Slot<Listener>>,
     free_listeners: Vec<u32>,
-    bound: BTreeMap<(Ipv4Addr, u16), u32>,
+    bound: BTreeMap<(u16, Ipv4Addr), u32>,
     demux: BTreeMap<Tuple, Entry>,
     time_waits: BTreeSet<(Instant, Tuple)>,
     deadlines: BTreeSet<(Instant, u32)>,
@@ -488,18 +488,18 @@ impl Tcp {
 
     fn listener_for(&self, local: &Endpoint) -> Option<u32> {
         let port = local.port.get();
-        self.bound.get(&(local.addr, port)).or_else(|| self.bound.get(&(Ipv4Addr::UNSPECIFIED, port))).copied()
+        self.bound.get(&(port, local.addr)).or_else(|| self.bound.get(&(port, Ipv4Addr::UNSPECIFIED))).copied()
     }
 
     fn port_listened(&self, port: u16) -> bool {
-        self.bound.keys().any(|&(_, p)| p == port)
+        self.bound.range((port, Ipv4Addr::UNSPECIFIED)..=(port, Ipv4Addr::BROADCAST)).next().is_some()
     }
 
     /// `addr` is the local address to listen on, UNSPECIFIED for any. Port 0 draws RFC 6056
     /// Algorithm 2's candidates from `random`.
     pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, mut random: impl FnMut() -> u16) -> Result<ListenerId, Error> {
         let port = match port {
-            Some(port) if self.bound.contains_key(&(addr, port.get())) => return Err(Error::AddrInUse),
+            Some(port) if self.bound.contains_key(&(port.get(), addr)) => return Err(Error::AddrInUse),
             Some(port) => port,
             None => {
                 let found = (0..EPHEMERAL_COUNT)
@@ -517,7 +517,7 @@ impl Tcp {
         };
         let listener = Listener { addr, port, options: Options::default(), pending: Vec::new(), ready: VecDeque::new() };
         let (index, generation) = insert(&mut self.listeners, &mut self.free_listeners, listener);
-        self.bound.insert((addr, port.get()), index);
+        self.bound.insert((port.get(), addr), index);
         Ok(ListenerId { index, generation })
     }
 
@@ -544,7 +544,7 @@ impl Tcp {
     pub fn close_listener(&mut self, now: Instant, id: ListenerId) -> Result<(), Error> {
         slot(&mut self.listeners, id.index, id.generation).ok_or(Error::NoSuchSocket)?;
         let Some(listener) = release(&mut self.listeners, &mut self.free_listeners, id.index) else { return Err(Error::NoSuchSocket) };
-        self.bound.remove(&(listener.addr, listener.port.get()));
+        self.bound.remove(&(listener.port.get(), listener.addr));
         for index in listener.pending.iter().chain(listener.ready.iter()).copied() {
             let Some(conn) = value(&mut self.conns, index) else { continue };
             let tuple = conn.tuple;

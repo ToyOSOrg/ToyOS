@@ -483,8 +483,12 @@ impl Sync {
             }
             self.rx.owe_for_text(placed, now);
         }
-        if fin && !peer_closed && !self.rx.fin_at(seq.add(us32(text.len()))) {
-            ctx.count(Counter::FinConflict);
+        if fin && !peer_closed {
+            if !self.rx.fin_at(seq.add(us32(text.len()))) {
+                ctx.count(Counter::FinConflict);
+            } else if !self.rx.closed && text.is_empty() {
+                self.rx.owe_dup();
+            }
         }
         self.rx.absorb_fin();
         if self.rx.closed && !peer_closed {
