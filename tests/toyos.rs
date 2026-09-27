@@ -13323,11 +13323,14 @@ fn run_machine_test(
                 other => unreachable!("{other} is not a syscall-death row"),
             };
             let said = power::syscall_death_resets(test_config, c_bins, rust_bins, action, said)?;
+            // With the capture: this guest's 16550 is its stdio, so no
+            // `uart-*.log` keeps what it said.
             match name {
                 "lock_across_switch_halts" => check_tripwire_attribution(&said),
                 "syscall_fault_halts" => check_ring0_read_unmapped(&said),
                 _ => Ok(()),
             }
+            .map_err(|e| format!("{e}\n{said}"))
         }
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
