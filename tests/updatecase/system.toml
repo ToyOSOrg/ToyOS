@@ -28,7 +28,9 @@ slots = true
 [programs.test-runner]
 syscap = ["logread"]
 
-# `reboot` is how the host hands the machine to the slot `update` marked.
+# `reboot` is how the host hands the machine to the slot `update` marked: the
+# connector to init's `power` port, where init has `logd` make the log whole
+# and then stops the machine.
 [programs.toybox]
 receives = ["power"]
 

@@ -217,12 +217,13 @@ pub fn partition_claim(
     Ok(())
 }
 
-/// The two exits of a claim that gets no answer: a disk that does not answer a
+/// The exits of a claim that gets no answer: a disk that does not answer a
 /// read of its table refuses the claim rather than resolving it on the disks
-/// that did, and a transfer every attempt of which is refused on its budget
-/// ends at the deadman with the device's word.
+/// that did, a transfer every attempt of which is refused on its budget ends
+/// at the deadman with the device's word, and ROOT's source, whose disk did
+/// not answer its hold, stays the kernel's once the disk answers.
 pub fn partition_claim_gives_up(
-    _test_config: &Path,
+    test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
@@ -276,6 +277,53 @@ pub fn partition_claim_gives_up(
         }
     }
     let _ = std::fs::remove_file(&nvme);
+    root_withheld(test_config, c_bins, rust_bins)
+}
+
+/// ROOT's source on the one disk, which did not answer ROOT's hold and answers
+/// every read after it: its GUID is withheld, so the claim that now finds its
+/// span on a disk that answers, and unheld, is refused as the kernel's.
+fn root_withheld(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["partclaim-root-withheld"];
+    let image = super::lane::dir().join("partclaim-root-withheld.img");
+    std::fs::write(&image, qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS))
+        .map_err(|e| format!("write the boot image: {e}"))?;
+    let [_, _, root] = boot_stick_guids(&image)?;
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::InternalDisk,
+            boot_image: Some(Staged::Pristine(image.clone())),
+            kernel_params: PARAMS,
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    no_panic("withheld", &boot)?;
+    let not_held = format!(
+        "root: the partition ROOT was read from, {root}, is not held because it is on no disk \
+         that answered"
+    );
+    if !boot.contains(&not_held) {
+        return Err(format!("withheld: the kernel never said {not_held:?}:\n{boot}"));
+    }
+    let result =
+        qemu.run_test(&format!("test_rs_partition_claimant withheld {root}"), Duration::from_secs(180));
+    let tail = shut_down(qemu);
+    let kernel = guest_verdict(&result, &tail, 1).map_err(|e| format!("withheld: {e}"))?;
+    let want = format!("partclaim: {root} is where ROOT was read from, and the kernel withholds it");
+    if !kernel.contains(&want) {
+        return Err(format!("withheld: the kernel never said {want:?}:\n{kernel}"));
+    }
+    no_panic("withheld", &tail)?;
+    let _ = std::fs::remove_file(&image);
+    eprintln!("  [partclaim] withheld: {want}");
     Ok(())
 }
 

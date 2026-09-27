@@ -19,12 +19,15 @@ pub struct Cached {
     part: Partition,
 }
 
-/// Wraps `dev` in the read-fault injector when `pc-unbind-selftest` or
-/// `partclaim-table-unanswered` is armed — at registration, so it sits under
-/// the one device object consumers share.
+/// Wraps `dev` in the read-fault injector when `pc-unbind-selftest`,
+/// `partclaim-table-unanswered` or `partclaim-root-withheld` is armed — at
+/// registration, so it sits under the one device object consumers share.
 pub fn instrumented(dev: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
     #[cfg(feature = "boot-actuators")]
-    if crate::actuator::pc_unbind_selftest() || crate::actuator::partclaim_table_unanswered() {
+    if crate::actuator::pc_unbind_selftest()
+        || crate::actuator::partclaim_table_unanswered()
+        || crate::actuator::partclaim_root_withheld()
+    {
         return Box::new(read_fault::FaultDevice(dev));
     }
     dev
@@ -466,13 +469,20 @@ mod read_fault {
     }
 }
 
-/// `partclaim-table-unanswered`: every instrumented disk refuses reads of its
-/// device block 0 from here on. Armed after the mounts, which read their own
-/// partitions and nothing there again.
+/// Every instrumented disk refuses reads of its device block 0 until
+/// [`answer_table_reads`]: `partclaim-table-unanswered` arms it after the
+/// mounts, which read their own partitions and nothing there again, and
+/// `partclaim-root-withheld` across ROOT's hold alone.
 #[cfg(feature = "boot-actuators")]
 pub fn refuse_table_reads() {
     read_fault::FAIL_BLOCK.store(0, core::sync::atomic::Ordering::Relaxed);
-    log!("partclaim-table-unanswered: device block 0 of every NVMe disk refuses reads from now on");
+    log!("read-fault: device block 0 of every NVMe disk refuses reads from now on");
+}
+
+#[cfg(feature = "boot-actuators")]
+pub fn answer_table_reads() {
+    read_fault::FAIL_BLOCK.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+    log!("read-fault: device block 0 of every NVMe disk answers reads again");
 }
 
 /// The un-index control, behind `pc-unbind-selftest`, for `PageCache::read`'s

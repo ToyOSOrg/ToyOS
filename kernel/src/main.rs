@@ -426,7 +426,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     arch::watchdog::init(&pci_devices);
     file_cache::init();
     gpt::init(kernel_args);
-    arch::boot::platform_devices(kernel_args.rsdp_addr);
     acpi::init_power(kernel_args.rsdp_addr);
 
     boot_phase!("peripherals ready", t_periph);
@@ -510,7 +509,15 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     // After xhci::init, not beside the NVMe probe: a USB-booted disk doesn't exist until the controller binds it.
     fat32_adapter::probe_boot_disks();
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_root_withheld() {
+        page_cache::refuse_table_reads();
+    }
     rootfs::hold_source();
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_root_withheld() {
+        page_cache::answer_table_reads();
+    }
 
     // One filesystem, four paths: each of `DATA_PATHS` is a directory of DATA,
     // so one sync settles them all and none can outlive the others.
@@ -586,6 +593,10 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     boot_phase!("storage ready", t_storage);
 
     let t_devices = clock::nanos_since_boot();
+
+    // First in the device phase, after storage: its lines are the diagnostic
+    // boot's answer for a dead keyboard, and a panel shows the log's tail.
+    arch::boot::platform_devices(kernel_args.rsdp_addr);
 
     // Runs once for the machine: it touches no device, so per-driver repetition would say the same thing four times.
     #[cfg(feature = "boot-actuators")]
