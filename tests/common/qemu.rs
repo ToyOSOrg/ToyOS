@@ -38,6 +38,80 @@ pub fn live_instances() -> u32 {
     LIVE.load(Ordering::SeqCst)
 }
 
+/// The vCPUs the task on this thread reserved of the host, and how many of
+/// them its guests have up.
+///
+/// A task's slot is sized before it boots anything (`buildlock::guest_slot`),
+/// so a guest that would take the task past its reservation is one the host's
+/// budget never counted. Such a boot is refused before QEMU is spawned, naming
+/// the task, and so is a boot on a thread no task claimed. Per thread, because
+/// every guest a task boots is booted on the worker that took the task.
+struct Claim {
+    what: String,
+    vcpus: u32,
+    live: AtomicU32,
+}
+
+thread_local! {
+    static CLAIM: std::cell::RefCell<Option<Arc<Claim>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// This thread's claim, from [`claim`] until it drops.
+#[must_use]
+pub struct Claimed(());
+
+/// Declare that the task about to run on this thread has at most `vcpus` vCPUs
+/// up at once — the width its host slot was taken for.
+pub fn claim(what: &str, vcpus: u32) -> Claimed {
+    CLAIM.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(slot.is_none(), "{what}: this thread already runs a task that claimed vCPUs");
+        *slot = Some(Arc::new(Claim { what: what.to_string(), vcpus, live: AtomicU32::new(0) }));
+    });
+    Claimed(())
+}
+
+impl Drop for Claimed {
+    fn drop(&mut self) {
+        CLAIM.with(|slot| slot.borrow_mut().take());
+    }
+}
+
+/// One guest's vCPUs, counted against its task's claim from before its QEMU
+/// is spawned until after it is reaped.
+struct VcpuHold {
+    claim: Arc<Claim>,
+    smp: u32,
+}
+
+impl VcpuHold {
+    fn take(smp: u32) -> Self {
+        let claim = CLAIM.with(|slot| slot.borrow().clone()).unwrap_or_else(|| {
+            panic!(
+                "[qemu] an smp={smp} guest was booted on a thread no task claimed vCPUs on, so \
+                 the host's guest budget does not count it"
+            )
+        });
+        let live = claim.live.fetch_add(smp, Ordering::SeqCst) + smp;
+        if live > claim.vcpus {
+            claim.live.fetch_sub(smp, Ordering::SeqCst);
+            panic!(
+                "[qemu] {}: this smp={smp} boot would have {live} vCPUs up for a task whose host \
+                 slot was taken for {}. Declare the task's widest moment — the vCPUs of every \
+                 guest it has up at once — in `tests/toyos.rs`'s VCPUS.",
+                claim.what, claim.vcpus
+            );
+        }
+        Self { claim, smp }
+    }
+}
+
+impl Drop for VcpuHold {
+    fn drop(&mut self) {
+        self.claim.live.fetch_sub(self.smp, Ordering::SeqCst);
+    }
+}
+
 /// The NVMe backing files live guests are holding open.
 ///
 /// A lane reuses one image across its boots on purpose ([`super::lane`]), so
@@ -2693,6 +2767,9 @@ pub struct QemuInstance {
     /// The test binaries this boot put on ROOT, by the name `run` takes; `None`
     /// for a staged image, whose contents its builder chose.
     carried: Option<BTreeSet<String>>,
+    /// Counted against its task's claim, and released after [`Drop`] has reaped
+    /// the process — fields drop after the body.
+    _vcpus: VcpuHold,
 }
 
 /// The test binaries one boot carries onto ROOT, out of the suite's catalogue.
@@ -3050,6 +3127,9 @@ impl QemuInstance {
         if let Some(staged) = options.boot_image.as_ref().and_then(Staged::authored) {
             refuse_a_staged_image_this_boot_did_not_ask_for(staged, &options);
         }
+        // Before anything is built: a boot its task did not reserve for is refused
+        // at no cost.
+        let vcpus = VcpuHold::take(options.smp);
         let mut features: Vec<&str> = kernel_of(&options);
         if options.debug_wait {
             features.push(toyos_build::build::DEBUG_KERNEL_BUILD);
@@ -3213,6 +3293,7 @@ impl QemuInstance {
                 own_boot_image,
                 carried,
                 console_file,
+                vcpus,
             },
         )
     }
@@ -4833,6 +4914,7 @@ struct Files {
     own_boot_image: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
     console_file: Option<ConsoleFile>,
+    vcpus: VcpuHold,
 }
 
 /// [`BootOptions::console_file`]'s two paths, beside the boot's UART log: the
@@ -4907,6 +4989,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         own_boot_image,
         carried,
         console_file,
+        vcpus,
     } = files;
 
     qemu.stdin(Stdio::piped())
@@ -5011,6 +5094,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         smp: options.smp,
         ssh_port: options.ssh_port,
         carried,
+        _vcpus: vcpus,
     }
 }
 

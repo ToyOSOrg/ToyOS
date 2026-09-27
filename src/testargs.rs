@@ -231,6 +231,19 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
     Ok(filter)
 }
 
+/// Whether a run that boots guests is a full tier, and so takes
+/// `buildlock::full_tier` before it boots anything.
+///
+/// A run is a tier unless its filter is some registered test's whole name.
+/// "No filter" alone is the wrong line, because the filter is a substring: `_`
+/// selects nearly the whole suite and `screen` a family of it, and a run that
+/// selects by pattern is doing a tier's job. A whole name still runs the few
+/// names it is a prefix of — `audio_tone` runs `audio_tone_load` too — and that
+/// is a named run: what it adds is bounded by the names, not by the suite.
+pub fn is_full_tier<'a>(filter: Option<&str>, names: impl IntoIterator<Item = &'a str>) -> bool {
+    filter.is_none_or(|filter| !names.into_iter().any(|name| name == filter))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +480,20 @@ mod tests {
         // Two spellings of the width are the same drop under two names.
         let refusal = parse_owned(&["--jobs", "1", "-j", "4"]).unwrap_err();
         assert!(refusal.contains("--jobs and -j"), "{refusal}");
+    }
+
+    /// No filter is a tier, a pattern is a tier, and only a test's whole name
+    /// is a named run.
+    #[test]
+    fn only_a_whole_test_name_is_not_a_full_tier() {
+        let names = ["control_regs", "control_regs_negative", "audio_tone", "audio_tone_load"];
+        assert!(is_full_tier(None, names), "a run with no filter is not a tier");
+        for pattern in ["_", "control", "regs_neg", "screen", ""] {
+            assert!(is_full_tier(Some(pattern), names), "{pattern:?} names no test, yet is a named run");
+        }
+        for name in names {
+            assert!(!is_full_tier(Some(name), names), "{name:?} is a test's name, yet is a tier");
+        }
     }
 
     #[test]

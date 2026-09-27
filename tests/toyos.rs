@@ -86,10 +86,11 @@ const DEFAULT_WIDTH: usize = 12;
 /// is a wrong one: `screen_fatal_halt` red at 11 s against 3.3 s alone, and an
 /// agent's hour spent chasing that as a regression.
 ///
-/// **One slot per task, never per boot.** A worker holds at most one and never
-/// waits for a second while holding one, which is what makes the semaphore
-/// deadlock-free rather than lucky: several tests hold two guests at once, and a
-/// slot each would let twelve workers each hold one and each wait for another.
+/// **One slot per task, never per boot, as wide as the task's widest moment**
+/// ([`task_vcpus`]). A worker holds at most one and never waits for a second
+/// while holding one, which is what makes the semaphore deadlock-free rather
+/// than lucky: a slot per guest would let a task holding one guest's units wait
+/// for its second guest's while every other task did the same.
 ///
 /// The wait sits outside the task, so it lands in the phase's wall clock and in
 /// no test's duration — a `PASS` time, and the profile [`longest_first`] orders
@@ -99,17 +100,85 @@ struct HostSlots {
     /// The name this run answers to in another run's waiting message. A pid
     /// alone is not enough to act on: an agent needs to know which worktree.
     label: String,
-    /// Zero is the semaphore off. It is the only way to measure a suite against
-    /// one that has it, which is what `--host-slots 0` is for.
+    /// In vCPUs. Zero is the semaphore off. It is the only way to measure a
+    /// suite against one that has it, which is what `--host-slots 0` is for.
     budget: usize,
 }
 
+/// One task's hold on the host: its units, when the semaphore is on, and the
+/// claim every boot it makes is checked against whether or not it is.
+struct TaskSlot {
+    _claim: qemu::Claimed,
+    _units: Option<toyos_build::buildlock::Slot>,
+}
+
 impl HostSlots {
-    fn take(&self, what: &str) -> Option<toyos_build::buildlock::Guard> {
-        let budget = self.budget;
-        (budget > 0)
-            .then(|| toyos_build::buildlock::guest_slot(&self.root, budget, &format!("{}: {what}", self.label)))
+    /// `Err` is a task wider than the whole budget, refused by name.
+    fn take(&self, what: &str, vcpus: u32) -> Result<TaskSlot, String> {
+        let what = format!("{}: {what}", self.label);
+        let units = match self.budget {
+            0 => None,
+            budget => Some(toyos_build::buildlock::guest_slot(&self.root, budget, vcpus as usize, &what)?),
+        };
+        Ok(TaskSlot { _claim: qemu::claim(&what, vcpus), _units: units })
     }
+
+    /// The machine's tier lock, when this run is a full tier
+    /// ([`testargs::is_full_tier`]): taken before the first boot and with no
+    /// slot held, as the lock order in `src/buildlock.rs` says.
+    fn full_tier<'a>(
+        &self,
+        filter: Option<&str>,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Option<toyos_build::buildlock::Guard> {
+        if !testargs::is_full_tier(filter, names) {
+            return None;
+        }
+        let what = match filter {
+            None => format!("{}: a full tier", self.label),
+            Some(pattern) => format!("{}: a full tier, since {pattern:?} names no test", self.label),
+        };
+        eprintln!("[toyos] {what} — one runs on this machine at a time");
+        Some(toyos_build::buildlock::full_tier(&self.root, &what))
+    }
+}
+
+/// Every machine and screen test whose widest moment is not one guest of
+/// [`BootOptions::default`]'s width: the vCPUs of every guest it has up at
+/// once. Its host slot is taken this wide before it boots anything, and a boot
+/// past that is refused by name (`qemu::claim`), so a missing row reds the
+/// test's first run rather than putting a guest on the host that its budget
+/// never counted. A row wider than the test holds units idle and nothing else.
+const VCPUS: &[(&str, u32)] = &[
+    ("screen_blocked_dump", 8),
+    ("screen_fatal_halt_composited", 8),
+    ("irq_census_conservation", 4),
+    ("control_regs", 4),
+    ("smp_roster_and_tsc_trail", 8),
+    ("tlb_shootdown_cost", 8),
+    ("smp_failed_ap_leaves_no_hole", 4),
+    ("panic_halts_the_others_first", 4),
+    ("kernel_heartbeat", 8),
+    ("syscall_window_nmi", 4),
+    ("syscall_window_nmi_controls", 4),
+    ("log_conservation_smp4", 4),
+    ("log_conservation_smp8", 8),
+    ("log_reserve_window", 8),
+    ("log_reserve_window_negative", 8),
+    ("usb_transport_break", 4),
+    ("usb_boot_stick_pulled", 8),
+    ("desktop_window_child", 8),
+    ("desktop_audio_client", 8),
+    ("blocked_dump", 8),
+    ("toolkit_iced", 8),
+    ("toolkit_window_wake", 8),
+    ("toolkit_winit_loop", 8),
+    ("toolkit_winit_pace", 8),
+];
+
+/// How many vCPUs a registered test has up at its widest ([`VCPUS`]).
+fn vcpus_of(name: &str) -> u32 {
+    VCPUS.iter().find(|(test, _)| *test == name).map_or(BootOptions::default().smp, |(_, n)| *n)
 }
 
 /// Which tier the shared boot's discovered members are in: one boot, so one
@@ -20129,6 +20198,19 @@ impl Task<'_> {
     }
 }
 
+/// How many vCPUs `task` has up at its widest, which is what its host slot is
+/// taken for: a group's members share one boot, and a shared block boots its
+/// lists one guest at a time.
+fn task_vcpus(task: &Task<'_>) -> u32 {
+    match task {
+        Task::Shared(tests, _) => shared_smp(&tests[0].name),
+        Task::Machine(names) => {
+            names.iter().map(|name| vcpus_of(name)).max().expect("a task has a name")
+        }
+        Task::Screen(name) => vcpus_of(name),
+    }
+}
+
 /// Where the last run in this worktree left what each test cost it.
 ///
 /// Under `target/`, so it is per-worktree: on a single dev host repeating runs
@@ -20314,7 +20396,20 @@ fn run_phase(
                     let next =
                         queue.lock().expect("a worker panicked holding the queue").pop_front();
                     let Some(task) = next else { return };
-                    let _slot = slots.take(&task.names().join(" "));
+                    let _slot = match slots.take(&task.names().join(" "), task_vcpus(&task)) {
+                        Ok(slot) => slot,
+                        Err(why) => {
+                            for name in task.names() {
+                                let _ = tx.send(Outcome {
+                                    name: name.to_string(),
+                                    reason: Some(why.clone()),
+                                    elapsed: Duration::ZERO,
+                                    suspended: Duration::ZERO,
+                                });
+                            }
+                            continue;
+                        }
+                    };
                     run_task(task, bins, &tx);
                 }
             });
@@ -20714,6 +20809,19 @@ fn check_registration() {
             "CARRIES has a row for {test}, which no MACHINE_TESTS or SCREEN_TESTS entry registers"
         );
     }
+    let mut wide: BTreeSet<&str> = BTreeSet::new();
+    for (test, vcpus) in VCPUS {
+        assert!(wide.insert(test), "VCPUS has two rows for {test}");
+        assert!(
+            MACHINE_TESTS.iter().chain(SCREEN_TESTS).any(|(name, _, _)| name == test),
+            "VCPUS has a row for {test}, which no MACHINE_TESTS or SCREEN_TESTS entry registers"
+        );
+        assert_ne!(
+            *vcpus,
+            BootOptions::default().smp,
+            "VCPUS's row for {test} says what no row says"
+        );
+    }
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for name in MACHINE_TESTS
         .iter()
@@ -20852,11 +20960,11 @@ fn main() {
     // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
-    // How many guests may be up on the *host* at once, across every worktree.
+    // How many vCPUs may be up on the *host* at once, across every worktree.
     // `--jobs` is this run's demand; this is what the machine will supply, and
     // zero turns it off.
-    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or(
-        toyos_build::buildlock::HOST_GUESTS,
+    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or_else(
+        toyos_build::buildlock::host_vcpus,
         |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
     );
 
@@ -20977,6 +21085,10 @@ fn main() {
     }
 
     if debug_mode {
+        // One guest of the default width, held for as long as the session.
+        let _slot = slots
+            .take("debug mode", BootOptions::default().smp)
+            .unwrap_or_else(|why| panic!("{why}"));
         run_debug_mode(&c_bins, &rust_bins);
         return;
     }
@@ -21006,11 +21118,19 @@ fn main() {
         }
         let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
         // One slot for the whole tier: it boots one guest at a time for the
-        // length of it, so one slot is what it occupies. The owner has ruled
-        // that gate A does not get a quiet host (CLAUDE.md, 2026-08-04), so it
-        // takes its share of the machine like everything else and does not
-        // reserve it.
-        let _slot = slots.take("gate A, thorough");
+        // length of it, so one slot as wide as its widest config is what it
+        // occupies. The owner has ruled that gate A does not get a quiet host
+        // (CLAUDE.md, 2026-08-04), so it takes its share of the machine like
+        // everything else and does not reserve it.
+        let _tier = slots.full_tier(filter, AUDIO_TESTS.iter().map(|(name, _)| *name));
+        let widest = *AUDIO_SMP.iter().max().expect("gate A has a config");
+        let _slot = match slots.take("gate A, thorough", widest) {
+            Ok(slot) => slot,
+            Err(why) => {
+                eprintln!("[toyos] {why}");
+                run.exit(1);
+            }
+        };
         let ok = run_audio_gate(
             iterations,
             &load_audio_baseline(),
@@ -21135,6 +21255,7 @@ fn main() {
         // first line: a suite carrying quarantined names is not a clean suite.
         eprintln!("[toyos] quarantined: {} — {}", row.test, row.issue);
     }
+    let _tier = slots.full_tier(filter, runnable.iter().copied());
 
     let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
     let mut tally = Tally::new(redlist::QUARANTINE).holding_back(&held_back);
@@ -21300,14 +21421,17 @@ fn main() {
             for &smp in AUDIO_SMP {
                 let label = format!("{name} (smp={smp})");
                 let baseline = config_baseline(&audio_baseline, name, smp);
-                let _slot = slots.take(&label);
+                let slot = slots.take(&label, smp);
                 let start = common::clock::mark();
                 // A boot that never reaches its marker panics, and gate A is the
                 // last thing the suite runs: unwrapped, that panic took the
                 // whole run's verdict with it and printed no result line at all.
-                let outcome = catching(|| {
-                    run_audio_test(name, smp, &baseline, &test_config, &c_bins, &rust_bins)
-                });
+                let outcome = match &slot {
+                    Ok(_) => catching(|| {
+                        run_audio_test(name, smp, &baseline, &test_config, &c_bins, &rust_bins)
+                    }),
+                    Err(why) => Err(why.clone()),
+                };
                 // Gate A's every number comes off a clock — wake lateness, a
                 // period's worth of samples, the position of a gap in the
                 // capture. A host that stopped in the middle of one moved all of
