@@ -61,7 +61,6 @@ Vendor firmware a device verifies by its maker's signature may be shipped: pinne
 The bar is not yet the tree. The standing failures are declared rather than removed — Python via `rust/x`, `cc` for every host link, four macOS FAT tools. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
 
 - **toyos-ld** — frozen: everything links with rust-lld, and toyos-ld stays only as the linker inside ToyOS until lld runs there, then goes.
-- **toyos-cc** — minimal C compiler; exists to bootstrap tinycc and compile doomgeneric, not to grow. A layout or linkage construct it does not implement is refused by name — dropping one silently is a miscompilation.
 - **rust/** — Rust compiler/std fork with ToyOS platform support (submodule). Auto-bootstraps; kept current with upstream. Its rules: `src/forkcheck.rs`'s module header.
 
 ## Build & test
@@ -100,7 +99,6 @@ toyos-dma/         Every bound and alignment a DMA view checks — pure, forbid(
 toyos-blockhold/   Who holds each span of a block device, and whose flush answers for the writes its disk lost — pure
 toyos-desktop/     Every decision the compositor makes, pure
 toyos-ld/          Custom linker
-toyos-cc/          Custom C compiler
 rust/              Rust compiler/std fork (submodule)
 tests/             Integration tests (QEMU-based)
 issues/            The issue tracker: one file per issue, typed by kind — see its README
