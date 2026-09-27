@@ -35,7 +35,7 @@ is known fixed by that work.
 
 Re-measure `log_flush_retry` (wide and alone) enough times, on a tree that
 carries ROOT-in-memory, to say whether either mode still occurs; if seen
-again, a `src/redlist.rs` row carries it with a measured rate, or it is fixed
-at its owner (`kernel/src/drivers/xhci` for the transport line, the boot
+again, it is disabled with a `src/redlist.rs` row and this file, or it is
+fixed at its owner (`kernel/src/drivers/xhci` for the transport line, the boot
 harness for the timeout). If not seen in that many runs, this file closes with
 the count that supports it.

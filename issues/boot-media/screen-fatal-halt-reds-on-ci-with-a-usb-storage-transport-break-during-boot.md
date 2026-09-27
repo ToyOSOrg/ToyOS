@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-05
 ---
@@ -24,8 +24,12 @@ Two facts the log holds. test-runner was spawned at 0.635 s and its first act
 is to print `===READY===`, which never reached the console in 31 s. The
 SYNCHRONIZE CACHE (0x35) the boot issued to the USB disk got no status-phase
 answer in 2000 ms and the transport was declared broken at 2.718 s. Whether the
-second stalls the first is the question; the redlist row
-(`src/redlist.rs`, `screen_fatal_halt`, `Instrument::Ci`) records the one
-observation, and this file is its owner's: the usb-storage wait path
-(`kernel/src/drivers/xhci/wait/msc.rs`) and whatever the runner's stdout
-blocked on.
+second stalls the first is the question, and this file is its owner's: the
+usb-storage wait path (`kernel/src/drivers/xhci/wait/msc.rs`) and whatever the
+runner's stdout blocked on.
+
+**Exit condition.** Re-enabled when a reproduction pins whether the boot
+runner's stdout was blocked behind the usb-storage transport break or the two
+are independent, and the wait path stops holding the runner's own output
+hostage. Owner: the usb-storage wait path,
+`kernel/src/drivers/xhci/wait/msc.rs`; held by the orchestrator.

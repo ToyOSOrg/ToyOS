@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: finding
 opened: 2026-09-07
 ---
@@ -28,9 +28,11 @@ A seventh sighting, in the whole-branch review's twelve-wide `cargo test` on
 7294acef: `258 past the 4096us histogram`, and the harness's own isolated re-run
 green.
 
-So this is a rate on this host, not a classification and not a regression. The
-rate is on the list — two `src/redlist.rs` rows under this name, `FIRES 1 of 6`
-alone and one `SEEN` under load, both citing this file. What is still owed is
-the other reading of the same evidence: whether cyclictest's 4,096-bucket
-histogram is simply too low for a TCG guest on a loaded laptop, which is a
-change to the instrument and not to the kernel.
+What is still owed is the other reading of the same evidence: whether
+cyclictest's 4,096-bucket histogram is simply too low for a TCG guest on a
+loaded laptop, which is a change to the instrument and not to the kernel.
+
+**Exit condition.** Re-enabled when the base's p99 is shown to genuinely
+exceed 4096 us and that is fixed at the timer-interrupt entry the deadline arm
+already touches. Owner: the boot-deadline work (`kernel/src/sched`'s
+timer-interrupt entry); held by the orchestrator.
