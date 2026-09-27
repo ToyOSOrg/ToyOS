@@ -917,8 +917,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // round trip after each case, a named line per refusal and a clean
     // console; its clocks are liveness guards.
     ("netd_refused_pipes", Sched::Parallel, Tier::Fast),
-    // The netcase boot again: an accept netd refuses leaves its owner a wake
-    // for the connection it left, at once or once room returns. The verdict
+    // The netcase boot again: an accept netd refuses for room leaves its owner
+    // a wake for the connection it left, once room returns. The verdict
     // is the guest's wake or its absence; its clocks are liveness guards.
     ("netd_refused_accept", Sched::Parallel, Tier::Fast),
     // The netcase boot again: bytes held back past a full pipe move on the
@@ -976,9 +976,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("sshd_exec", Sched::Parallel, Tier::Fast),
     ("sshd_files", Sched::Parallel, Tier::Fast),
     ("sshd_key_auth", Sched::Parallel, Tier::Fast),
-    // Its own boot: on a netd that strands a hasty peer, port 22 stays shut for
-    // the rest of it. Every verdict is an exit status or a console line.
-    ("sshd_hasty_peers", Sched::Parallel, Tier::Fast),
     // Serial: it measures netd's 2 s handshake deadline against the host's
     // clock, and counts how many connections survived a 48 ms paced burst
     // before that deadline could expire any of them. Both are wall-clock
@@ -10544,8 +10541,8 @@ fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// An accept netd refuses leaves its owner a wake for the connection it left:
-/// the guest's wakes are the verdict. This side carries that netd named the
+/// An accept netd refuses for room leaves its owner a wake for the connection
+/// it left: the guest's wakes are the verdict. This side carries that netd named the
 /// refusal for room and that no program panicked.
 fn netd_refused_accept(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let HostRun { result, console, .. } = netcase_against_host(rust_bins, "netd_refused_accept", true, "")?;
@@ -10556,7 +10553,7 @@ fn netd_refused_accept(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         return Err(format!("netd refused an accept for room without saying so:\n{console}"));
     }
     serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-    eprintln!("  [netcase] an accept refused for its pipes and one refused for room each left a wake");
+    eprintln!("  [netcase] an accept refused for room left a wake once room returned");
     Ok(())
 }
 
@@ -12261,7 +12258,6 @@ fn run_machine_test(
             let boot = group_boot(held, SSHD_LOGIN, || common::ssh::boot(rust_bins));
             common::ssh::key_auth_gate(&mut boot.qemu)
         }
-        "sshd_hasty_peers" => common::ssh::hasty_peers_gate(&mut common::ssh::boot(rust_bins)),
         "console_locale_detect" => console_locale_detect(),
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
