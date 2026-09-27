@@ -1472,6 +1472,7 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("tests/toyos-rust-tests/src/bin/log_hold.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/mmap_prot.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/nmi_window_spin.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/panic_halts_first.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/partition_claimant.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/process_lifecycle.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/syscall_cost.rs", USERLAND_ASM),

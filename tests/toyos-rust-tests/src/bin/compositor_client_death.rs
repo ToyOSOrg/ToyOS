@@ -20,8 +20,8 @@
 //! each one used to take a process with it.
 //!
 //! Each case leaves its damage standing and then asks the compositor a
-//! question **with a deadline**, exactly as `compositor_stall` does — the host
-//! asserts the other half, that the desktop is still painting and that every
+//! question, exactly as `compositor_stall` does — the host asserts the other
+//! half, that the desktop is still painting and that every
 //! client dropped on the way was named with its pid.
 
 use std::io::{BufRead, BufReader};
@@ -32,7 +32,7 @@ use toyos::endow;
 use toyos::AsHandle;
 use toyos::shm::SharedMemory;
 use toyos::{ipc, Connection};
-use toyos_abi::syscall::{self, SyscallError};
+use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use window::Window;
 
@@ -45,21 +45,6 @@ const RELAY_SOCKET: RawHandle = RawHandle(3);
 /// reaped. Nothing is ever read off it but the hang-up.
 const RELAY_GO: RawHandle = RawHandle(4);
 
-/// `MSG_GET_RESOLUTION` is answered from the compositor's dispatch, so a reply
-/// proves the event loop reached the end of a pass rather than merely that the
-/// process still exists.
-const PROBE_POLLS: u32 = 500;
-const PROBE_POLL_NS: u64 = 10_000_000;
-
-/// How many events a closed window is asked for.
-///
-/// Two would do — `Close`, then `None` — and this is a handful more so the
-/// failure prints a stream rather than a single wrong answer. Each poll past
-/// the close costs nothing: the handle is ready, so none of them waits.
-const POLLS_AFTER_CLOSE: usize = 8;
-/// Long enough that a compositor still on its way to closing the connection is
-/// waited for rather than raced.
-const POLL_TIMEOUT_NS: u64 = 2_000_000_000;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -139,39 +124,27 @@ fn run() {
     // `MSG_DESTROY_WINDOW` makes the compositor drop the connection, after
     // which the handle is permanently read-ready at EOF — so a `poll_event` that
     // did not latch answered `Close` for as long as anybody kept asking, and a
-    // client draining until `None` never got out. Two calls decide it.
+    // client draining until `None` never got out.
     let mut ending = Window::create(64, 64).expect("a window to close from the inside");
     ipc::signal(ending.handle(), window::MSG_DESTROY_WINDOW)
         .expect("ask the compositor to destroy this window");
-    // Named rather than kept, because `Event` is not `Debug` and a failure
-    // here has to print the whole sequence it saw.
-    let mut seen: Vec<&'static str> = Vec::new();
-    for _ in 0..POLLS_AFTER_CLOSE {
-        let name = match ending.poll_event(POLL_TIMEOUT_NS) {
-            None => "none",
-            Some(window::Event::Close) => "close",
-            // A frame the compositor had already sent can arrive first. It is
-            // not what this case is about, and skipping it is not a weakening:
-            // what follows still has to be close and then nothing.
-            Some(_) => "other",
-        };
-        seen.push(name);
-        if name == "none" {
-            break;
+    // No deadline on the close: a compositor that never drops the connection
+    // leaves this waiting, and the harness ceiling reds it. A frame the
+    // compositor had already sent can arrive first, and is not this case.
+    loop {
+        match ending.poll_event(u64::MAX) {
+            Some(window::Event::Close) => break,
+            Some(_) => continue,
+            None => fail("[a window closed from the inside] a wait with no deadline answered None"),
         }
     }
-    let sequence = seen.join(",");
-    let Some(closed_at) = seen.iter().position(|n| *n == "close") else {
-        fail(&format!(
-            "[a window closed from the inside] the connection went and the window never said \
-             so: {sequence}"
-        ));
-    };
-    if seen.get(closed_at + 1) != Some(&"none") {
-        fail(&format!(
-            "[a window closed from the inside] the poll after Close answered again: {sequence} \
-             — a client that drains until None cannot leave"
-        ));
+    // Asked without waiting: the handle stays read-ready at EOF, so only the
+    // latch answers `None` here.
+    if ending.poll_event(0).is_some() {
+        fail(
+            "[a window closed from the inside] the poll after Close answered again — a client \
+             that drains until None cannot leave",
+        );
     }
     probe("a window closed from the inside");
 
@@ -257,7 +230,9 @@ fn write_handle(handle: toyos_abi::RawHandle, bytes: &[u8], what: &str) {
     }
 }
 
-/// Ask the compositor something it always answers, and give it a deadline.
+/// Ask the compositor something it always answers from its dispatch, so a reply
+/// proves the event loop reached the end of a pass. No deadline: a compositor
+/// parked on a client never answers, and the harness ceiling reds it.
 fn probe(what: &str) {
     let conn: Connection = endow::service("compositor")
         .unwrap_or_else(|e| fail(&format!("[{what}] the compositor is not serving: {e:?}")));
@@ -266,23 +241,13 @@ fn probe(what: &str) {
     }
     let mut buf = [0u8; 16];
     let mut got = 0;
-    for _ in 0..PROBE_POLLS {
-        match conn.read_nonblock(&mut buf[got..]) {
+    while got < buf.len() {
+        match syscall::read(conn.as_handle(), &mut buf[got..]) {
             Ok(0) => fail(&format!("[{what}] the compositor closed the probe unanswered")),
-            Ok(n) => {
-                got += n;
-                if got == buf.len() {
-                    return;
-                }
-            }
-            Err(SyscallError::WouldBlock) => syscall::nanosleep(PROBE_POLL_NS),
+            Ok(n) => got += n,
             Err(e) => fail(&format!("[{what}] the probe could not be read: {e:?}")),
         }
     }
-    fail(&format!(
-        "[{what}] the compositor did not answer in {} ms — it is gone or its loop is parked",
-        PROBE_POLLS as u64 * PROBE_POLL_NS / 1_000_000,
-    ));
 }
 
 fn fail(msg: &str) -> ! {

@@ -31,6 +31,9 @@ use toyos::{namespace, port, AsHandle};
 use toyos_abi::inbox::RingLayout;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom, SyscallError, SERVE_PREFIX};
 
+#[path = "../census_wait.rs"]
+mod census_wait;
+
 const SELF_PATH: &str = "/system/bin/test_rs_handle_lifetime";
 /// The name this test's own namespaces map to the port under test. Private to
 /// this process and its children, which is the whole of what a namespace is.
@@ -215,10 +218,10 @@ fn kill_releases_acceptor() {
 /// a green run. `Census::grown_since` is the comparison the census header asks
 /// for.
 ///
-/// **Both readings are [`settled_census`] and not [`Census::now`], because the
-/// release does not finish inside the killing syscall** — see that function.
+/// **The second reading is a wait and not a sample**: the release does not
+/// finish inside the killing syscall (`census_wait`).
 fn kill_releases_ring() {
-    let before = settled_census();
+    let before = census_wait::settled();
     let (mut child, _) = spawn_holder("ring");
     let held = Census::now();
 
@@ -239,54 +242,7 @@ fn kill_releases_ring() {
     // bound to `_` and is gone at the call.
     drop(child);
 
-    let after = settled_census();
-    let grown: Vec<_> = after.grown_since(&before).collect();
-    assert!(
-        grown.is_empty(),
-        "a killed process kept what it held: {grown:?} — first {before}, then {after}"
-    );
-}
-
-/// How many 10 ms samples [`settled_census`] will take before it stops asking.
-/// Reaching it is not a failure — the last reading is handed back and the
-/// caller's assertion is still the whole verdict.
-const SETTLE_SAMPLES: usize = 100;
-
-/// The live-object census once the machine has stopped giving objects back.
-///
-/// **A killed process's rings are not released by the syscall that killed it,
-/// and the first reading after `wait` is therefore not the reading this test
-/// is about.** The kill drains the victim's handle table on the killer's CPU,
-/// which drops each ring's last handle onto the object layer's zero-handle
-/// queue; the *release* happens when some CPU drains that queue.
-/// `object::drain_zero_handles` clears its pending flag before it runs the
-/// hooks, so the killer's own drain site — its syscall exit — can find the
-/// queue empty while another CPU is still working through the batch, and every
-/// ring still unreleased at that moment is released outside the killing
-/// syscall altogether.
-///
-/// Measured on this tree, 2026-08-19, alone in the guest: the deficit after
-/// `wait` decays 2 MiB at a time across consecutive `SYS_SYSINFO` calls —
-/// `[12, 10, 10, 10, 8, 6, 4, 2]` MiB over eight back-to-back reads — and over
-/// twenty kill rounds free memory returned to its starting value every single
-/// time. Nothing is lost; the first reading is simply early. The kernel half is
-/// `issues/kernel/deferred-release-outlives-its-syscall.md`.
-///
-/// So this samples until two readings ten milliseconds apart agree, which is
-/// the machine saying it has finished. **It is a liveness bound and not a
-/// margin**: a kernel that releases nothing holds a stable, elevated census, is
-/// quiescent on the first pair, and reds at once.
-fn settled_census() -> Census {
-    let mut last = Census::now();
-    for _ in 0..SETTLE_SAMPLES {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let next = Census::now();
-        if next == last {
-            return next;
-        }
-        last = next;
-    }
-    last
+    census_wait::released_to(&before);
 }
 
 /// A killed process's dirty file must still reach the filesystem: that flush

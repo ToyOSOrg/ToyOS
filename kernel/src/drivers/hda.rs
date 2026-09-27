@@ -77,8 +77,6 @@ const SD_STS_FIFOE: u8 = 1 << 3;
 const SD_STS_DESE: u8 = 1 << 4;
 const SD_STS_WRITE_CLEAR: u8 = SD_STS_BCIS | SD_STS_FIFOE | SD_STS_DESE;
 
-// The pipeline shape; soundd's mix loop and its client ring depth are sized
-/// against it.
 const PERIODS: usize = 8;
 const PERIOD_BYTES: usize = 512;
 

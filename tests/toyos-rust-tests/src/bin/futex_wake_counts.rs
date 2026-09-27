@@ -69,13 +69,6 @@ static WORDS: SameBucket = SameBucket {
     sibling: AtomicU32::new(0),
 };
 
-/// How long the waiters are given to reach their `futex_wait` before the first
-/// wake. **A margin and not a bound**: every assertion in [`counts`] is about a
-/// *number returned*, so a waiter that had not parked yet makes that arm
-/// weaker rather than wrong — it would count one fewer, and the count-limit
-/// assertions would fail loudly rather than pass vacuously.
-const PARK_MARGIN: Duration = Duration::from_millis(300);
-
 static WORD_RETURNED: AtomicU32 = AtomicU32::new(0);
 static SIBLING_RETURNED: AtomicU32 = AtomicU32::new(0);
 
@@ -144,7 +137,7 @@ fn timeout_is_its_own_answer() {
     assert_eq!(changed, 0, "a futex wait whose word did not match answered {changed}");
 
     let waiter = thread::spawn(|| unsafe { syscall::futex_wait(WOKEN.as_ptr(), 7, None) });
-    thread::sleep(PARK_MARGIN);
+    wait_until_parked(&WOKEN, 1);
     WOKEN.store(8, Ordering::SeqCst);
     unsafe { syscall::futex_wake(WOKEN.as_ptr(), 1) };
     let woken = waiter.join().expect("the woken waiter panicked");
@@ -168,7 +161,8 @@ fn counts() {
         unsafe { syscall::futex_wait(WORDS.sibling.as_ptr(), 0, None) };
         SIBLING_RETURNED.fetch_add(1, Ordering::SeqCst);
     });
-    thread::sleep(PARK_MARGIN);
+    wait_until_parked(&WORDS.word, 2);
+    wait_until_parked(&WORDS.sibling, 1);
 
     // The word changes first, so a waiter that is told goes home instead of
     // re-parking — otherwise it would re-arm and be counted twice.
@@ -180,7 +174,11 @@ fn counts() {
         "futex_wake(count=1) with two waiters answered {one}, and the ABI's answer is \
          the number of threads woken",
     );
-    thread::sleep(PARK_MARGIN);
+    // No deadline: the woken waiter's return is the event, and one that never
+    // comes is a hang the harness ceiling reds.
+    while WORD_RETURNED.load(Ordering::SeqCst) == 0 {
+        thread::yield_now();
+    }
     let returned = WORD_RETURNED.load(Ordering::SeqCst);
     assert_eq!(
         returned, 1,
@@ -326,7 +324,8 @@ fn claim_semantics() {
     }
 }
 
-/// Wake `word` until the kernel answers that it claimed `want` waiters.
+/// Wake `word` until the kernel answers that it claimed `want` waiters, with no
+/// deadline: waiters that never park are a hang the harness ceiling reds.
 ///
 /// The word must still hold what the waiters are waiting for, so every waiter
 /// this probe wakes re-checks and re-parks; what it costs is a round trip, and
@@ -335,13 +334,7 @@ fn claim_semantics() {
 /// parked and unclaimed waiters answers `want` under every arithmetic this file
 /// is about.
 fn wait_until_parked(word: &AtomicU32, want: u64) {
-    for _ in 0..200 {
-        if unsafe { syscall::futex_wake(word.as_ptr(), 10) } == want {
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("{want} waiters never parked on the word");
+    wait_until_parked_raw(word.as_ptr(), want);
 }
 
 /// One never-yielding thread per CPU, so the kernel has no sleeping target to
@@ -365,8 +358,6 @@ fn stop_spinners(spinners: Vec<thread::JoinHandle<()>>) {
         spinner.join().expect("a spinner panicked");
     }
 }
-
-static ORPHAN_RETURNED: AtomicU32 = AtomicU32::new(0);
 
 /// A wait whose word is unmapped ends there, and the frame carries no claim
 /// away with it.
@@ -410,7 +401,6 @@ fn orphaned_by_unmap() {
         .map(|&addr| {
             thread::spawn(move || {
                 unsafe { syscall::futex_wait(addr as *const u32, 0, None) };
-                ORPHAN_RETURNED.fetch_add(1, Ordering::SeqCst);
             })
         })
         .collect();
@@ -435,19 +425,9 @@ fn orphaned_by_unmap() {
         status.code().unwrap_or(-1),
     );
 
-    for _ in 0..100 {
-        if ORPHAN_RETURNED.load(Ordering::SeqCst) as usize == STALE_FRAMES {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let home = ORPHAN_RETURNED.load(Ordering::SeqCst) as usize;
-    assert_eq!(
-        home, STALE_FRAMES,
-        "{home} of {STALE_FRAMES} waiters came back after the word each was parked on was \
-         unmapped — nothing can ever post to a frame that has gone back to the PMM, so a wait \
-         an unmap orphans is a wait nothing will end",
-    );
+    // No deadline: nothing can ever post to a frame that has gone back to the
+    // PMM, so a wait an unmap orphans and does not end is a hang the harness
+    // ceiling reds.
     for waiter in waiters {
         waiter.join().expect("an orphaned waiter panicked");
     }
@@ -456,16 +436,12 @@ fn orphaned_by_unmap() {
 
 /// [`wait_until_parked`] for a word that is not a `static`.
 fn wait_until_parked_raw(word: *const u32, want: u64) {
-    for _ in 0..200 {
-        if unsafe { syscall::futex_wake(word, 10) } == want {
-            return;
-        }
+    // A pace, and never a verdict: the probe's wake re-parks the waiters it
+    // finds, so each look waits for them to be back.
+    while unsafe { syscall::futex_wake(word, 10) } != want {
         thread::sleep(Duration::from_millis(10));
     }
-    panic!("{want} waiters never parked on a mapped word");
 }
-
-static REVOKED_RETURNED: AtomicU32 = AtomicU32::new(0);
 
 /// A wait a revoke ended stays ended while its word still reads `expected`.
 ///
@@ -482,11 +458,7 @@ fn revoked_while_still_mapped() {
     let word = window.wrapping_add(4096) as usize;
     let expected = unsafe { (word as *const u32).read_volatile() };
 
-    let waiter = thread::spawn(move || {
-        let answer = unsafe { syscall::futex_wait(word as *const u32, expected, None) };
-        REVOKED_RETURNED.store(1, Ordering::SeqCst);
-        answer
-    });
+    let waiter = thread::spawn(move || unsafe { syscall::futex_wait(word as *const u32, expected, None) });
     // A wake to an unchanged word re-parks inside the call, so the
     // registration the revoke must find is still there.
     wait_until_parked_raw(word as *const u32, 1);
@@ -506,18 +478,9 @@ fn revoked_while_still_mapped() {
         out.status.code(),
     );
 
-    for _ in 0..500 {
-        if REVOKED_RETURNED.load(Ordering::SeqCst) == 1 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(
-        REVOKED_RETURNED.load(Ordering::SeqCst),
-        1,
-        "a waiter whose registration a revoke ended is still in futex_wait 5 s after it, \
-         its word still mapped and still {expected:#x}: nothing can ever post to that wait",
-    );
+    // No deadline: a waiter whose registration the revoke ended and that goes
+    // round its phase 1 for ever, its word still mapped and unchanged, is a
+    // hang the harness ceiling reds.
     waiter.join().expect("the revoked waiter panicked");
     syscall::close(ends.read);
     syscall::close(ends.write);

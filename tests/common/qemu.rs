@@ -628,12 +628,8 @@ impl std::fmt::Display for WaitVerdict {
 /// `dying` is the line on which the kernel said it was dying, if it ever did,
 /// and `quiet` is how long the guest has said nothing. **The first arm is the
 /// whole point.** A Rust `panic!` in the kernel prints `PANIC:` and then
-/// `halt_all_cpus` stops every CPU, so the guest goes silent and the ceiling —
-/// which is a liveness guard and never a verdict — expired on a machine that
-/// had been dead since the first second. `sched_check_build` in run
-/// `31946183485` was reported `STALLED: 382s of guard expired` with the panic
-/// and its full backtrace four lines above that sentence, on a guest that died
-/// at 1.450 s of its own uptime.
+/// `halt_all_cpus` stops every CPU, so the guest goes silent and the ceiling
+/// expires on a machine that has been dead since the panic.
 ///
 /// A kernel panic does not end the wait *by itself*, and that is deliberate:
 /// the same handler recovers a panic taken in syscall context, killing the
@@ -957,11 +953,6 @@ pub fn ceiling_self_check() -> Result<(), String> {
 /// `doing` is what the guest was asked to do, in the caller's own words. The
 /// caller keeps its assertion; what this owns is the difference between "it did
 /// the wrong thing" and "it never got there".
-///
-/// It lives beside [`Liveness`] rather than in the test list because a test in
-/// `tests/common/` could not reach it there, and the two that could not —
-/// `metal_sim_null_audio` and `hda_two_live_refused` — each reached for a span
-/// of host wall clock instead and lost the race on a runner.
 pub fn await_guest(
     qemu: &mut QemuInstance,
     log: &mut String,
@@ -1024,6 +1015,42 @@ pub fn await_marker_new(
     doing: &str,
 ) -> Result<(), String> {
     await_guest(qemu, log, doing, |log| log[from.min(log.len())..].contains(marker))
+}
+
+/// Whether `info registers -a` shows every vCPU halted with interrupts off: the
+/// fatal path's `cli; hlt`, which no interrupt ends. An idle CPU halts with
+/// `IF` set, so a machine with nothing to do is not this.
+pub fn halted_for_good(registers: &str) -> bool {
+    let cpus: Vec<&str> = registers.split("CPU#").skip(1).collect();
+    !cpus.is_empty()
+        && cpus.iter().all(|cpu| {
+            let field = |name: &str| -> Option<String> {
+                Some(cpu.split(name).nth(1)?.chars().take_while(char::is_ascii_hexdigit).collect())
+            };
+            let flags = field("RFL=").and_then(|f| u64::from_str_radix(&f, 16).ok());
+            field("HLT=").as_deref() == Some("1") && flags.is_some_and(|f| f & (1 << 9) == 0)
+        })
+}
+
+/// Drain the console into `log` until QEMU shows every vCPU [`halted_for_good`]
+/// or the console says one of `refused`: the end of a fatal path, after which
+/// this guest writes nothing more, so a line it must never write is judged over
+/// a capture that is whole — and one it wrote ends the wait at once. A machine
+/// that gets to neither is what the hang ceiling reds. Needs `BootOptions {
+/// qmp: true }`, and the socket to itself while it waits.
+pub fn await_halted(
+    qemu: &mut QemuInstance,
+    log: &mut String,
+    doing: &str,
+    refused: &[&str],
+) -> Result<(), String> {
+    let from = log.len();
+    let socket = qemu.qmp_socket().to_path_buf();
+    let monitor = std::cell::RefCell::new(QmpMonitor::open(&socket));
+    await_guest(qemu, log, doing, |log| {
+        refused.iter().any(|line| log[from..].contains(line))
+            || halted_for_good(&monitor.borrow_mut().human("info registers -a"))
+    })
 }
 
 /// The hardware shape QEMU presents to the guest.
@@ -1319,6 +1346,13 @@ pub enum Profile {
     /// HDA controller and one codec — the machine soundd drives itself, and
     /// the class-0403 function the IOMMU tests aim.
     Hda,
+    /// [`Profile::Hda`] with a second controller that also has a codec.
+    ///
+    /// Two live links, which the kernel refuses by name rather than binding
+    /// the first: choosing between them means walking their codec graphs, and
+    /// that is the driver's work. The negative control on the whole bind path
+    /// — a first-match kernel would go green on every other HDA test.
+    HdaTwoLive,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, and nothing else — no virtio, NIC, NVMe or
     /// IOMMU. The machine the AArch64 port reaches its console on, and the only
@@ -1369,7 +1403,8 @@ impl Profile {
             | Self::IommuNarrow
             | Self::IommuNoIntremap
             | Self::IommuEim
-            | Self::Hda => Arch::X86_64,
+            | Self::Hda
+            | Self::HdaTwoLive => Arch::X86_64,
         }
     }
 
@@ -1452,6 +1487,17 @@ const XHCI_NO_IRQ_SECOND: &str = "nec-usb-xhci,id=xhci1,msix=off,msi=off";
 /// configures no input path and a duplex codec would only add widgets nothing
 /// walks.
 const HDA_ONE: &[&str] = &["intel-hda,id=hda0", "hda-output,bus=hda0.0,cad=0,audiodev=hdaaud"];
+
+/// Two controllers, each with a codec that answers.
+///
+/// The state the kernel refuses: it can tell which links are alive and cannot
+/// tell which one a human is wired to, so binding either would be a guess.
+const HDA_TWO_LIVE: &[&str] = &[
+    "intel-hda,id=hda0",
+    "hda-output,bus=hda0.0,cad=0,audiodev=hdaaud",
+    "intel-hda,id=hda1",
+    "hda-output,bus=hda1.0,cad=0,audiodev=hdaaud",
+];
 
 /// Whether a machine has the virtio console and sound block. Which NIC it has
 /// is [`Nic`].
@@ -1568,7 +1614,8 @@ struct Shape {
     usb_disks: &'static [UsbDisk],
     /// Every Intel HDA controller on the machine and the codecs behind each,
     /// as `-device` arguments in the order QEMU is to create them. Empty is
-    /// what every profile but [`Profile::Hda`] declares, and it is the machine this kernel has always booted: audio
+    /// what every profile but [`Profile::Hda`] and [`Profile::HdaTwoLive`]
+    /// declares, and it is the machine this kernel has always booted: audio
     /// through virtio-sound or through nothing at all.
     ///
     /// Presence of a class-0403 *function* is the shape dimension, and it is
@@ -2186,6 +2233,12 @@ impl Profile {
                 virtio: Virtio::WithoutSound,
                 nic: Nic::Virtio,
                 hda: HDA_ONE,
+                ..Self::Headless.shape()
+            },
+            Self::HdaTwoLive => Shape {
+                virtio: Virtio::WithoutSound,
+                nic: Nic::Virtio,
+                hda: HDA_TWO_LIVE,
                 ..Self::Headless.shape()
             },
         }
@@ -3562,15 +3615,9 @@ impl QemuInstance {
         // dropped — `TestResult::before` is the argument.
         let mut before = String::new();
         let mut in_test = false;
-        // **Which of the two things the ceiling caught.** A test's `timeout` is
-        // a liveness guard and never a verdict, and until now its expiry said
-        // only how many seconds had passed — `metal_sim_client_death` 364 s,
-        // `metal_sim_window_drag` 355 s, `desktop_audio_client` 354 s and
-        // `blocked_dump` 329 s in run `31250706113`, four reds indistinguishable
-        // from four slow tests. The console tells them apart for free, and the
-        // fix `1cf7fee` made to the waits *inside* a test never reached this
-        // one: a guest that has said nothing for [`GUEST_QUIET`] has stopped,
-        // and one still talking at the ceiling has not.
+        // **Which of the two things the ceiling caught**: a guest that has said
+        // nothing for [`GUEST_QUIET`] has stopped, and one still talking at the
+        // ceiling has not.
         let mut last_line = Instant::now();
         let mut lines = 0usize;
         // **The line on which the kernel said it was dying, if it ever did.**

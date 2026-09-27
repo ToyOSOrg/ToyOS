@@ -470,8 +470,7 @@ pub fn lan_dhcp_lease(
     }
     let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
     let mut console = guest.boot_log().to_string();
-    qemu::await_marker(&mut guest, &mut console, READY, "netd to take an address")?;
-    console.push_str(&guest.drain_serial(std::time::Duration::from_millis(500)));
+    qemu::await_marker(&mut guest, &mut console, LEASE, "netd to take an address")?;
     // QEMU owns the pcap while it runs, and every refusal below is a return:
     // the frames are taken once the machine is gone and the file removed here.
     drop(guest);
@@ -499,12 +498,6 @@ pub fn lan_dhcp_lease(
     // The order, and not merely the presence of both.
     log.must_say_after(LEASE, READY)?;
     log.must_say(LINK_UP)?;
-    let ms = link_up_ms(log.text())?;
-    eprintln!(
-        "  [lan] the emulated link came up in {ms} ms and the lease landed {} ms after netd \
-         started",
-        lease.ms
-    );
     log.must_be_clean()?;
     asked_under_its_own_name(&frames)?;
     eprintln!("  [lan] the client asked under its own name on the wire");
@@ -525,17 +518,19 @@ pub fn lan_no_lease(
     let options = BootOptions { profile: qemu::Profile::E1000eNoServer, ..Default::default() };
     let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
     let mut console = guest.boot_log().to_string();
-    // Drained rather than waited on: netd owes its line inside its own bound
-    // and the guest says nothing at all until then, which every wait in this
-    // harness reads as a machine that stopped.
-    console.push_str(
-        &guest.drain_serial(std::time::Duration::from_millis(toyos_tco::LEASE_BOUND_MS + 10_000)),
-    );
+    // Drained until the line and not awaited: the guest says nothing at all
+    // until netd gives up on its own clock, which every wait in this harness
+    // reads as a machine that stopped. The ceiling is the harness's.
+    let gave_up = format!("{NO_LEASE}{HOSTNAME} in ");
+    console.push_str(&guest.drain_until(qemu::GUEST_WEDGED, |line| line.contains(&gave_up)));
+    if !console.contains(&gave_up) {
+        return Err(format!("{} waiting for {gave_up:?}\n{console}", qemu::STALLED));
+    }
     let log = serial::Serial::named("the lan boot with no server", console.as_str());
     if let Ok(lease) = lease_in(log.text()) {
         return Err(format!("a wire with no server leased {lease:?}"));
     }
-    log.must_say_after(&format!("{NO_LEASE}{HOSTNAME} in "), READY)?;
+    log.must_say_after(&gave_up, READY)?;
     eprintln!("  [lan] no server answered and netd said so, then served anyway");
     Ok(())
 }

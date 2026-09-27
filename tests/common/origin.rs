@@ -352,16 +352,6 @@ pub fn refused_stop(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)
 /// What init says when it stops the machine without `logd`'s answer.
 const FLUSH_WAITED_OUT: &str = "init: logd did not answer the flush in";
 
-/// The milliseconds since boot a program's line in `/log` carries: the one
-/// field of its head with a decimal point.
-fn program_millis(line: &str) -> Option<u64> {
-    let (head, _) = line.strip_prefix(toyos_logstream::OPEN)?.split_once(toyos_logstream::CLOSE)?;
-    head.split_whitespace().find_map(|field| {
-        let (secs, millis) = field.split_once('.')?;
-        secs.parse::<u64>().ok()?.checked_mul(1_000)?.checked_add(millis.parse().ok()?)
-    })
-}
-
 /// **A resume that reaches `logd` with its flush unrun answers that flush.**
 /// `tests/logflushcase` holds `logd`'s first flush until init speaks again, so
 /// init waits the flush out, the kernel refuses the stop, and the resume is
@@ -465,12 +455,16 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
     let _ = std::fs::remove_file(&staged.image);
     // A stop that went ahead before the flush answered cuts `/log` short
     // whatever the slots did, so that is its own verdict and not this one's.
-    // An answered flush wrote init's stop line.
-    let stop = bootlog::stopping_line(&log).and_then(program_millis);
-    let unanswered = match stop {
-        _ if tail.contains(FLUSH_WAITED_OUT) => Some("init said so".to_string()),
-        None => Some("init's stop line never reached /log".to_string()),
-        Some(_) => None,
+    // init's stop line in /log does not say the flush was answered: init says
+    // it waited one out, on the console or in /log, and neither may carry that.
+    let unanswered = if tail.contains(FLUSH_WAITED_OUT)
+        || bootlog::lines_of(&log, "init").contains(FLUSH_WAITED_OUT)
+    {
+        Some("init said so")
+    } else if bootlog::stopping_line(&log).is_none() {
+        Some("init's stop line never reached /log")
+    } else {
+        None
     };
     if let Some(why) = unanswered {
         return Err(format!(
@@ -666,7 +660,6 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     const LOOPBACK_ID: u16 = 0x7f01;
     const OTHER_ID: u16 = 0x0bad;
     const OWN_ID: u16 = 0x5eed;
-    let asked = Instant::now();
     wire.send(&ask([127, 0, 0, 1], &query(LOOPBACK_ID, host)))?;
     wire.send(&ask(NEIGHBOUR, &query(OTHER_ID, "some-other-host")))?;
     wire.send(&ask(NEIGHBOUR, &query(OWN_ID, host)))?;
@@ -690,7 +683,6 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
             _ => {}
         }
     };
-    let took = asked.elapsed();
     let mut want = query(OWN_ID, host);
     // QR and AA, one question, one answer.
     want[2..8].copy_from_slice(&[0x84, 0x00, 0, 1, 0, 1]);
@@ -706,9 +698,8 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     drop(guest);
     serial::Serial::named("the boot", console.as_str()).must_be_clean()?;
     eprintln!(
-        "  [mdns] {host}.local answered {GUEST:?} to an on-link neighbour in {} ms; 127.0.0.1 and \
-         another name, nothing",
-        took.as_millis()
+        "  [mdns] {host}.local answered {GUEST:?} to an on-link neighbour; 127.0.0.1 and another \
+         name, nothing"
     );
     Ok(())
 }

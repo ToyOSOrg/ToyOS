@@ -20,10 +20,15 @@ the device is still running with no clients
 `soundd: suspended` and
 `virtio-sound: stream 0 stopped` are the two lines that say the idle path
 released the device; their absence says a boot left the device running with no
-clients, which is the subject of `stop-the-device-voice-keep-the-wake` and
-`idle-suspend-reds-on-a-loaded-host-and-on-main` from the other side. One
+clients, which is the subject of `stop-the-device-voice-keep-the-wake` from the other side. One
 occurrence in 25 iterations is a rate nobody has.
 
 **The evidence expires.** `/tmp/gate-a.log` is uploaded per shard with
 `retention-days: 30`, so run `31992902784`'s artifacts go on 2026-09-16; the job
 logs outlive them. Everything quoted above is already here for that reason.
+
+## Exit condition
+
+A `METAL` row reads `soundd: suspended` after each last client's removal on the
+T14's HDA ring, and it holds across the T14's boots. Owner: the metal suite
+(`tests/toyos.rs`'s `METAL`).

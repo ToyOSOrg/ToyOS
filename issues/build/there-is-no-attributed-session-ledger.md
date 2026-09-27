@@ -11,7 +11,6 @@ alone, or a cost charged to the wrong artifact. Every one of them is blocked on
 the same missing observation: **no record joins a guest's loss of progress to
 the interval that overlapped it.** They are one instrument.
 
-- `issues/audio/idle-suspend-reds-on-a-loaded-host-and-on-main.md`
 - `issues/boot-media/kernel-log-file-reds-beside-other-guests-and-is-green-alone.md`
 - `issues/boot-media/usb-short-read-reds-beside-other-guests-and-is-green-alone.md`
 - `issues/build/parallel-tests-red-under-other-suites.md`

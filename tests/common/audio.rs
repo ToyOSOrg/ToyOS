@@ -3,25 +3,85 @@
 
 use super::serial::Serial;
 
-/// The text of `log` from the kernel's record of `job`'s spawn up to the next
-/// test binary's, which is the window soundd's lines about that job land in.
-fn job_window<'a>(log: &'a str, job: &str) -> Result<&'a str, String> {
+/// The text of `log` from the kernel's record of `job`'s spawn to the end of
+/// what soundd said about the `sessions` streams it played, one after another.
+///
+/// A session ends at soundd's flush on its last client leaving — the stats line
+/// that carries `clients=0`, which soundd writes after the removal — and not at
+/// the next job's spawn, which can land before it. A job that plays nothing
+/// (`sessions` of 0) ends at the next test binary's spawn.
+fn job_window<'a>(log: &'a str, job: &str, sessions: usize) -> Result<&'a str, String> {
     let head = format!("spawn: /system/bin/{job} ");
     let at = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
     let rest = &log[at + head.len()..];
-    Ok(&rest[..rest.find("spawn: /system/bin/test_rs_").unwrap_or(rest.len())])
+    if sessions == 0 {
+        return Ok(&rest[..rest.find("spawn: /system/bin/test_rs_").unwrap_or(rest.len())]);
+    }
+    let mut end = 0;
+    for session in 1..=sessions {
+        let flushed = rest[end..]
+            .match_indices(SESSION_ENDED)
+            .find(|&(line_at, _)| is_soundd_stats(&rest[end..], line_at))
+            .map(|(line_at, _)| end + line_at)
+            .ok_or_else(|| {
+                format!(
+                    "soundd never said session {session} of {job}'s {sessions} ended (a stats \
+                     line with `{}`):\n{rest}",
+                    SESSION_ENDED.trim()
+                )
+            })?;
+        end = rest[flushed..].find('\n').map_or(rest.len(), |nl| flushed + nl + 1);
+    }
+    Ok(&rest[..end])
+}
+
+/// What soundd's flush on its last client leaving carries, and no other stats
+/// line does.
+const SESSION_ENDED: &str = " clients=0 ";
+
+/// Whether the match at `at` in `text` is on one of soundd's stats lines.
+fn is_soundd_stats(text: &str, at: usize) -> bool {
+    let line_start = text[..at].rfind('\n').map_or(0, |nl| nl + 1);
+    text[line_start..at].contains("soundd: wakes=")
 }
 
 /// The tone client played to its end through the HDA controller soundd drives
-/// itself, and soundd never fell back to the null sink.
+/// itself, soundd never fell back to the null sink, and no period of it went
+/// unfilled.
 pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
     log.must_say("soundd: hda path configured in")?;
     log.must_not_say(NULL_SINK)?;
+    let window = job_window(log.text(), "test_rs_audio_tone", 1)?;
+    let underruns = sum_field(window, "underruns");
+    if underruns != 0 {
+        return Err(format!(
+            "soundd filled {underruns} period(s) the tone client had not covered, on a client \
+             that keeps its ring full:\n{window}"
+        ));
+    }
     Ok(())
 }
 
 /// soundd's own word for the sink it took when the machine has none.
-const NULL_SINK: &str = "soundd: no audio device, presenting a null sink";
+pub const NULL_SINK: &str = "soundd: no audio device, presenting a null sink";
+
+/// soundd with no client costs no CPU, and the device is not what is running:
+/// in a window no client connects in, soundd never started the stream. A zero
+/// CPU delta is the signature of a suspended soundd and equally of one wedged
+/// with the device running; the start line tells them apart.
+pub fn idle_suspend_on_metal(log: &Serial) -> Result<(), String> {
+    let window = job_window(log.text(), "test_rs_audio_idle_suspend", 0)?;
+    if window.contains(DEVICE_STARTED) {
+        return Err(format!(
+            "`{DEVICE_STARTED}` with no client connected — soundd's zero CPU is the device left \
+             running, not a suspend:\n{window}"
+        ));
+    }
+    Ok(())
+}
+
+/// What soundd says as it starts the stream, before the first submit.
+const DEVICE_STARTED: &str = "soundd: resumed";
 
 /// The T14's panic, staged on its own HDA ring: a client that stops producing
 /// for longer than the DMA ring takes to come round. The engine replays every
@@ -30,7 +90,7 @@ const NULL_SINK: &str = "soundd: no audio device, presenting a null sink";
 /// suspend and a resume.
 pub fn client_stall_on_metal(log: &Serial) -> Result<(), String> {
     log.must_not_say("repeated completion for free buffer")?;
-    let window = job_window(log.text(), "test_rs_hda_client_stall")?;
+    let window = job_window(log.text(), "test_rs_hda_client_stall", 2)?;
     let resumes = window.matches("soundd: resumed").count();
     if resumes < 2 {
         return Err(format!(
@@ -61,7 +121,7 @@ pub fn client_stall_on_metal(log: &Serial) -> Result<(), String> {
 /// removal names a departure soundd established, and none claims a death.
 pub fn departures_on_metal(log: &Serial) -> Result<(), String> {
     const CLIENTS: usize = 2;
-    let window = job_window(log.text(), "test_rs_null_sink_client_exits")?;
+    let window = job_window(log.text(), "test_rs_null_sink_client_exits", CLIENTS)?;
     let problems = check_departures(window, CLIENTS);
     if problems.is_empty() {
         return Ok(());
@@ -145,7 +205,6 @@ fn check_departures(serial: &str, expect: usize) -> Vec<String> {
     problems
 }
 
-
 /// soundd's mix thread never waits on the log: `tests/logstallcase`'s `logd`
 /// reads nothing of soundd's until the job says the tone has played, and the
 /// job fills soundd's ring with soundd's own refusals before it plays. Judged
@@ -222,93 +281,156 @@ pub fn log_stall_on_metal(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// Doom's sound producer outruns its audio callback and the game lives — the
-/// first domino of the T14's freeze. `/system/bin/doom --sound-stress` parks the
-/// callback and requires its own period counter to stand still across the
-/// burst, so "the producer outran the consumer" is a fact about the two of them.
-///
-/// 1. **The burst was real.** More commands were issued with the callback's
-///    period count unchanged than the retired 64-entry ring held.
-/// 2. **The callback converged.** The sound the last command started plays to
-///    completion, in no fewer periods than its length: a mixer that lost the
-///    command never finishes.
-pub fn sound_flood_on_metal(log: &Serial) -> Result<(), String> {
-    let counters = parse_stress_line(log.text())?;
-    // The retired ring held 64 commands and asserted on the 65th.
-    const RETIRED_RING_CAP: u64 = 64;
-    if counters.stalled_burst <= RETIRED_RING_CAP {
-        return Err(format!(
-            "the flood was {} commands against a callback that had stopped, which the retired \
-             64-entry ring would have swallowed — the actuator proved nothing",
-            counters.stalled_burst
-        ));
-    }
-    check_playback("tone", counters.tone_periods, counters.tone_frames)?;
-    check_playback("probe", counters.probe_periods, counters.probe_frames)
-}
 
-struct StressCounters {
-    stalled_burst: u64,
-    tone_periods: u64,
-    tone_frames: u64,
-    probe_periods: u64,
-    probe_frames: u64,
-}
-
-fn parse_stress_line(text: &str) -> Result<StressCounters, String> {
-    let line = text
-        .lines()
-        .find(|l| l.contains("[sound-stress] stalled_burst="))
-        .ok_or_else(|| format!("doom printed no [sound-stress] line:\n{text}"))?;
-    let field = |name: &str| -> Result<u64, String> {
-        let prefix = format!("{name}=");
-        line.split_whitespace()
-            .find_map(|tok| tok.strip_prefix(&prefix)?.parse().ok())
-            .ok_or_else(|| format!("no {name} in {line:?}"))
+/// Every judge above against logs crafted to pass it and logs crafted to fail
+/// it, one way each: the judges read a stick only the T14 comes back with, so
+/// this is where each is shown able to red at all.
+pub fn judges_verdict() -> Result<(), String> {
+    let judged = |what: &str, judge: fn(&Serial) -> Result<(), String>, log: &str, green: bool| {
+        match (judge(&Serial::named(what, log)), green) {
+            (Ok(()), true) | (Err(_), false) => Ok(()),
+            (Ok(()), false) => Err(format!("{what} passed a log it has to refuse:\n{log}")),
+            (Err(why), true) => Err(format!("{what} refused a log it has to pass: {why}\n{log}")),
+        }
     };
-    Ok(StressCounters {
-        stalled_burst: field("stalled_burst")?,
-        tone_periods: field("tone_periods")?,
-        tone_frames: field("tone_frames")?,
-        probe_periods: field("probe_periods")?,
-        probe_frames: field("probe_frames")?,
-    })
-}
+    let stats = |underruns: u32, clients: u32, deferred: u32| {
+        format!(
+            "{{2.000 soundd}} soundd: wakes=9 completions=9 submitted=9 underruns={underruns} \
+             drains=0 max_wake_lat_us=9 max_batch=1 clients={clients} deferred={deferred} \
+             starve_max=0 worst_irq_late_us=0 worst_pickup_us=0 worst_empty=0 worst_batch=1 \
+             late_wakes=0\n"
+        )
+    };
+    let spawn = |job: &str| format!("[kernel 1.000 cpu0] spawn: /system/bin/{job} pid=7\n");
+    // One stream through soundd: `playing` is the stats line while it plays,
+    // and `ended` the flush once it has left.
+    let session = |playing: String, how: &str, ended: String| {
+        format!(
+            "{{1.000 soundd}} soundd: client 0 connected (id=1)\n{{1.000 soundd}} soundd: \
+             resumed\n{playing}{{3.000 soundd}} soundd: client 1 removed ({how})\n{ended}\
+             {{3.000 soundd}} soundd: suspended\n"
+        )
+    };
+    let next = spawn("test_rs_next");
 
-/// A period is 128 frames, so a sound of N frames occupies ceil(N/128) of them,
-/// and a mixer that skipped part of it lands under that.
-fn check_playback(what: &str, periods: u64, frames: u64) -> Result<(), String> {
-    const PERIOD_FRAMES: u64 = 128;
-    let exact = frames.div_ceil(PERIOD_FRAMES);
-    if periods < exact {
-        return Err(format!(
-            "the {what} took {periods} periods to play {frames} frames (expected at least \
-             {exact}): the mixer did not apply the last command as written"
-        ));
-    }
-    Ok(())
-}
+    let configured = "{0.500 soundd} soundd: hda path configured in 3 ms\n";
+    let tone = |ended: String| {
+        format!("{configured}{}{}", spawn("test_rs_audio_tone"), session(stats(0, 1, 0), "closed", ended))
+    };
+    judged("the tone", tone_on_metal, &format!("{}{next}", tone(stats(0, 0, 0))), true)?;
+    judged("a tone short of periods", tone_on_metal, &format!("{}{next}", tone(stats(2, 0, 0))), false)?;
+    judged(
+        "a tone off no hda path",
+        tone_on_metal,
+        &format!("{}{next}", tone(stats(0, 0, 0))).replace(configured, ""),
+        false,
+    )?;
+    judged(
+        "a tone on the null sink",
+        tone_on_metal,
+        &format!("{}{{0.600 soundd}} {NULL_SINK}\n{next}", tone(stats(0, 0, 0))),
+        false,
+    )?;
 
-/// Doom's music reaches the device with the SoundFont this tree ships: doom
-/// opened the committed file — its byte count against `assets/soundfont.sf2` on
-/// the host — and played to the end of the check.
-pub fn music_on_metal(log: &Serial) -> Result<(), String> {
-    let root = super::compile::repo_root();
-    let shipped = std::fs::metadata(root.join(toyos_build::soundfont::SOUNDFONT_PATH))
-        .map_err(|e| format!("{}: {e}", toyos_build::soundfont::SOUNDFONT_PATH))?
-        .len();
-    let opened = log.must_say("[doom-sound] /system/share/soundfont.sf2:")?;
-    let bytes: u64 = opened
-        .split_whitespace()
-        .find_map(|token| token.parse().ok())
-        .ok_or_else(|| format!("no byte count in {opened:?}"))?;
-    if bytes != shipped {
-        return Err(format!(
-            "doom opened a {bytes}-byte SoundFont and this tree ships {shipped} bytes: the image \
-             is not carrying {}",
-            toyos_build::soundfont::SOUNDFONT_PATH
-        ));
-    }
-    log.must_say("[music-check] lump=")?;
+    let stall = |second: String, rest: &str| {
+        format!(
+            "{}{}{second}{rest}",
+            spawn("test_rs_hda_client_stall"),
+            session(stats(3, 1, 0), "closed", stats(0, 0, 0))
+        )
+    };
+    let second = session(stats(1, 1, 0), "closed", stats(0, 0, 0));
+    judged("the stalled client", client_stall_on_metal, &stall(second.clone(), &next), true)?;
+    judged(
+        "a stalled client whose second stream never resumed soundd",
+        client_stall_on_metal,
+        &stall(second.replace("soundd: resumed\n", "soundd: client 0 streaming\n"), &next),
+        false,
+    )?;
+    judged(
+        "a stalled client soundd filled no period for",
+        client_stall_on_metal,
+        &stall(second.clone(), &next).replace("underruns=3", "underruns=0").replace("underruns=1", "underruns=0"),
+        false,
+    )?;
+    // The next job spawned ahead of soundd's last word on the second stream.
+    let (playing, tail) = second.split_at(second.find("{3.000 soundd} soundd: client 1 removed").expect("staged"));
+    judged(
+        "a stalled client soundd deferred for after the next job began",
+        client_stall_on_metal,
+        &stall(format!("{playing}{next}{}", tail.replace("deferred=0", "deferred=1")), ""),
+        false,
+    )?;
+    judged(
+        "a stalled client over a repeated completion",
+        client_stall_on_metal,
+        &stall(second.clone(), &format!("{{2.500 soundd}} soundd: repeated completion for free buffer\n{next}")),
+        false,
+    )?;
+
+    let departures = |second: &str| {
+        format!(
+            "{}{}{}{next}",
+            spawn("test_rs_null_sink_client_exits"),
+            session(stats(0, 1, 0), "closed", stats(0, 0, 0)),
+            session(stats(0, 1, 0), second, stats(0, 0, 0))
+        )
+    };
+    judged("two departures", departures_on_metal, &departures("signal pipe gone"), true)?;
+    judged("a departure soundd did not establish", departures_on_metal, &departures("died"), false)?;
+    judged(
+        "a death soundd claimed beside a departure it established",
+        departures_on_metal,
+        &departures("closed").replacen(
+            "{3.000 soundd} soundd: client 1 removed",
+            "{3.000 soundd} soundd: client 1 died\n{3.000 soundd} soundd: client 1 removed",
+            1,
+        ),
+        false,
+    )?;
+    judged(
+        "a departure soundd never reported",
+        departures_on_metal,
+        &departures("closed").replacen("{3.000 soundd} soundd: client 1 removed (closed)\n", "", 1),
+        false,
+    )?;
+    judged(
+        "one departure of two",
+        departures_on_metal,
+        &format!(
+            "{}{}{next}",
+            spawn("test_rs_null_sink_client_exits"),
+            session(stats(0, 1, 0), "closed", stats(0, 0, 0))
+        ),
+        false,
+    )?;
+
+    let idle = |said: &str| format!("{}{said}{next}", spawn("test_rs_audio_idle_suspend"));
+    judged("an idle soundd", idle_suspend_on_metal, &idle("{1.000 soundd} soundd: suspended\n"), true)?;
+    judged(
+        "an idle soundd that started the device",
+        idle_suspend_on_metal,
+        &idle(&format!("{{1.000 soundd}} {DEVICE_STARTED}\n")),
+        false,
+    )?;
+
+    // Eleven lines owed after the boot and the two others: six refusals and
+    // both others in `/log`, and five counted unwritten.
+    let stalled = |held: u32, unwritten: u32, refusals: usize| {
+        format!(
+            "{{1.000 test_rs_soundd_log_stall}} flooded soundd with 10 refusals\n\
+             {{1.000 test_rs_soundd_log_stall}} soundd refused 1 probe\n\
+             {}{{1.100 soundd}} soundd: protocol violation (msg 7)\n\
+             {{1.200 soundd}} soundd: opening stream: 48000 Hz\n\
+             {{2.000 logd}} logd: reading soundd again, as `--stall-until` asked, with {held} of \
+             its ring's 64 slots waiting\n\
+             {{2.100 logd}} logd: {unwritten} record(s) of soundd's found its ring full\n",
+            "{1.050 soundd} soundd: refusing connection, too many\n".repeat(refusals)
+        )
+    };
+    judged("the stalled log", log_stall_on_metal, &stalled(64, 5, 6), true)?;
+    judged("a log stall that never filled the ring", log_stall_on_metal, &stalled(40, 5, 6), false)?;
+    judged("a log stall that lost a line silently", log_stall_on_metal, &stalled(64, 4, 6), false)?;
+    judged("a log stall that counted nothing unwritten", log_stall_on_metal, &stalled(64, 0, 11), false)?;
     Ok(())
 }

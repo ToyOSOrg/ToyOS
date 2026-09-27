@@ -21,9 +21,7 @@ soundd: wakes=389 completions=690 submitted=690 underruns=1 drains=2 max_wake_la
 Nine periods — 26 ms — submitted with a client streaming and no client audio
 behind them (`MixStats::period` in `toyos-mixer/src/stats.rs`, which is where
 that counter moved when the mixer's decisions became a pure crate).
-`tests/audio-baseline.toml` records `underruns` 0
-on all 120 runs of its sample, and the fast tier's verdict is exactly this
-counter. There is no capture to corroborate it: `--dump-audio` was not on.
+There is no capture to corroborate it: `--dump-audio` was not on.
 
 **And it is not confined to those two windows.** Across the whole run, 15 of
 119 windows report `drains` (22 events; recorded sample 0/120), and the
@@ -37,8 +35,7 @@ audio_tone sample   30    5666       —       —   10090   (baseline file)
 ```
 
 The tone phase is 88 windows, none below 18116 us, against a recorded sample
-whose *worst of 30* is 10090. The two distributions are disjoint. 106654 us is
-past the `audio_tone_load.smp8` ceiling of 80000 (this guest is `--smp 8`).
+whose *worst of 30* is 10090. The two distributions are disjoint.
 
 **Whose lateness it is, is not the same question in the two phases, and the
 `deferred` column separates them.** `deferred` counts a mix cycle declining to

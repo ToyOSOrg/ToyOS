@@ -9,15 +9,14 @@
 //! accepted connection.
 //!
 //! Each case sets its stall up and leaves it standing, then asks the
-//! compositor a question **with a deadline**. That is the shape the assertion
-//! has to have: a frozen compositor turns any unbounded call into a hung boot,
-//! and a hung boot names no defect. The host side asserts the other half —
-//! that the desktop is still *painting*, and that every client dropped along
-//! the way was named in the log.
+//! compositor a question. No wait here has a deadline: a compositor frozen on a
+//! client never answers, and the harness ceiling reds it. The host side asserts
+//! the other half — that the desktop is still *painting*, and that every client
+//! dropped along the way was named in the log.
 
 use std::process::exit;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use toyos::endow;
 use toyos::AsHandle;
@@ -25,25 +24,14 @@ use toyos::{ipc, Connection};
 use toyos_abi::syscall::{self, SyscallError};
 use window::Window;
 
-/// `MSG_GET_RESOLUTION` is answered from the compositor's dispatch, so a reply
-/// proves the event loop reached the end of a pass rather than merely that the
-/// process exists.
-const PROBE_POLLS: u32 = 500;
-const PROBE_POLL_NS: u64 = 10_000_000;
-
-/// Past the compositor's own `HANDSHAKE_TIMEOUT`, so the three connections
-/// that never finish a first frame have been ruled on by the time the run
-/// ends and the host can require the lines that say so.
-const HANDSHAKE_WAIT: Duration = Duration::from_secs(3);
+/// Between two looks at a connection the compositor is expected to drop. A
+/// pace and never a verdict.
+const POLL_NS: u64 = 10_000_000;
 
 /// A message type no protocol here defines: the compositor's dispatch ignores
 /// it, so a stream of them is pure event-loop load with nothing to draw. That
 /// is what makes it a starvation case rather than a redraw case.
 const UNKNOWN_MSG: u32 = 0x7FFF_0001;
-
-/// Long enough to contain the compositor's 2 s reporting interval whichever
-/// side of one it starts on.
-const STREAM: Duration = Duration::from_secs(5);
 
 /// One `MSG_GET_RESOLUTION` costs the client 8 bytes and the compositor 16, so
 /// filling a client's 2,097,088-byte receive ring from the far side takes
@@ -51,13 +39,6 @@ const STREAM: Duration = Duration::from_secs(5);
 /// half the bytes and fit in the client's own ring — nothing here can block
 /// the *client* instead, which would prove the wrong thing.
 const REQUESTS: usize = 140_000;
-
-/// How long the compositor gets to reach the end of that ring and say so.
-///
-/// Measured at roughly a second on the metal-sim boot; this is an order of
-/// magnitude of slack, and it is a bound on the machine rather than on the
-/// answer — the answer is the connection closing.
-const REFUSAL_POLLS: u32 = 1_500;
 
 fn main() {
     // Held to the end of the run: a dropped `Connection` closes the handle, and
@@ -79,8 +60,11 @@ fn main() {
     probe("header without payload");
 
     // The three above are handshakes that never complete. Nothing the client
-    // does ends them; the compositor's own deadline does.
-    thread::sleep(HANDSHAKE_WAIT);
+    // does ends them; the compositor's own deadline does, and each one's close
+    // is what is waited for.
+    for conn in &held {
+        await_hang_up(conn.as_handle());
+    }
     probe("after the handshake deadline");
 
     // A window that stops in the middle of a message it already declared. The
@@ -100,37 +84,54 @@ fn main() {
         requests.extend_from_slice(&header(window::MSG_GET_RESOLUTION, 0));
     }
     write_handle(deaf.handle(), &requests, "window that will not read");
-    await_refusal(&deaf);
+    await_hang_up(deaf.handle());
     probe("window that will not read");
 
     // A window with something to send on every pass. Nothing here is
     // unanswerable — the loop simply never runs out of work, and a drain that
-    // ends only when nothing is ready never reaches the screen. The assertion
-    // is the host's: frames, between these two markers.
+    // ends only when nothing is ready never reaches the screen. So a second
+    // window presents while it streams, and the stream runs until that present
+    // is composited: a drain loop the stream starves never gets to `redraw`, and
+    // the frame never comes.
     let noisy = Window::create(64, 64).expect("a window to stream from");
     let handle = noisy.handle();
-    println!("compositor stall: stream start");
-    let streamer = thread::spawn(move || {
-        let frame = header(UNKNOWN_MSG, 0);
-        let until = Instant::now() + STREAM;
-        loop {
-            // Fill the ring, not merely feed it. The compositor takes one
-            // frame per client per pass, so a client that keeps up with only
-            // that lets the drain run dry and the screen get painted — which
-            // is the thing this case is supposed to prevent.
-            //
-            // Never a torn frame: both ends move this ring in multiples of
-            // eight bytes and its capacity is one too, so a write of a header
-            // either fits whole or finds no room at all.
-            while matches!(syscall::write_nonblock(handle, &frame), Ok(8)) {}
-            if Instant::now() >= until {
-                break;
+    let mut watcher = Window::create(64, 64).expect("a window to composite under the stream");
+    let (streaming, framed) = (AtomicBool::new(false), AtomicBool::new(false));
+    thread::scope(|s| {
+        s.spawn(|| {
+            let frame = header(UNKNOWN_MSG, 0);
+            while !framed.load(Ordering::Acquire) {
+                // Fill the ring, not merely feed it. The compositor takes one
+                // frame per client per pass, so a client that keeps up with only
+                // that lets the drain run dry and the screen get painted — which
+                // is the thing this case is supposed to prevent.
+                //
+                // Never a torn frame: both ends move this ring in multiples of
+                // eight bytes and its capacity is one too, so a write of a header
+                // either fits whole or finds no room at all.
+                while matches!(syscall::write_nonblock(handle, &frame), Ok(8)) {}
+                streaming.store(true, Ordering::Release);
+                syscall::nanosleep(1_000_000);
             }
-            syscall::nanosleep(1_000_000);
+        });
+        // Presented once the ring is full, so the frame is composited under
+        // the stream and not ahead of it.
+        while !streaming.load(Ordering::Acquire) {
+            thread::yield_now();
         }
+        watcher.present();
+        loop {
+            match watcher.recv_event() {
+                window::Event::Frame => break,
+                window::Event::Close => fail(
+                    "[window that never stops sending] the window presented under the stream \
+                     was closed",
+                ),
+                _ => {}
+            }
+        }
+        framed.store(true, Ordering::Release);
     });
-    streamer.join().expect("the streaming thread");
-    println!("compositor stall: stream end");
     probe("window that never stops sending");
 
     println!("compositor stall: 6 stalls survived, compositor still serving");
@@ -164,7 +165,7 @@ fn write_handle(handle: toyos_abi::RawHandle, bytes: &[u8], what: &str) {
     }
 }
 
-/// Wait for the compositor to hang up on the window that stopped reading.
+/// Wait, with no deadline, until nothing holds the other end of `handle`.
 ///
 /// **Without draining a byte**, which is the whole difficulty: this client's
 /// receive ring has to stay full for the compositor to reach the end of it,
@@ -173,21 +174,15 @@ fn write_handle(handle: toyos_abi::RawHandle, bytes: &[u8], what: &str) {
 /// still holding the read end — so the refusal is observed rather than slept
 /// through. A compositor parked in `write` instead has its handle open and
 /// answers `Ok` here forever.
-fn await_refusal(deaf: &Window) {
-    for _ in 0..REFUSAL_POLLS {
-        if let Err(SyscallError::Gone) = syscall::write_nonblock(deaf.handle(), &[]) {
-            return;
-        }
-        syscall::nanosleep(PROBE_POLL_NS);
+fn await_hang_up(handle: toyos_abi::RawHandle) {
+    while syscall::write_nonblock(handle, &[]) != Err(SyscallError::Gone) {
+        syscall::nanosleep(POLL_NS);
     }
-    fail(&format!(
-        "[window that will not read] {} bytes of unread answers and the compositor never \
-         dropped the connection — it is waiting for this client to read its mail",
-        REQUESTS * 16,
-    ));
 }
 
-/// Ask the compositor something it always answers, and give it a deadline.
+/// Ask the compositor something it always answers from its dispatch, so a reply
+/// proves the event loop reached the end of a pass. No deadline: a compositor
+/// parked on a client never answers, and the harness ceiling reds it.
 fn probe(what: &str) {
     let conn = connect(what);
     if let Err(e) = ipc::signal(conn.as_handle(), window::MSG_GET_RESOLUTION) {
@@ -195,23 +190,13 @@ fn probe(what: &str) {
     }
     let mut buf = [0u8; 16];
     let mut got = 0;
-    for _ in 0..PROBE_POLLS {
-        match conn.read_nonblock(&mut buf[got..]) {
+    while got < buf.len() {
+        match syscall::read(conn.as_handle(), &mut buf[got..]) {
             Ok(0) => fail(&format!("[{what}] the compositor closed the probe unanswered")),
-            Ok(n) => {
-                got += n;
-                if got == buf.len() {
-                    return;
-                }
-            }
-            Err(SyscallError::WouldBlock) => syscall::nanosleep(PROBE_POLL_NS),
+            Ok(n) => got += n,
             Err(e) => fail(&format!("[{what}] the probe could not be read: {e:?}")),
         }
     }
-    fail(&format!(
-        "[{what}] the compositor did not answer in {} ms — its event loop is parked on a client",
-        PROBE_POLLS as u64 * PROBE_POLL_NS / 1_000_000,
-    ));
 }
 
 fn fail(msg: &str) -> ! {

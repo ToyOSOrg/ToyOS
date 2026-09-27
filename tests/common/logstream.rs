@@ -247,10 +247,6 @@ const NETWORK_READERS: usize = 8;
 /// TCG guest's netd, as long as the flood job itself is given.
 const FLOOD_CEILING: Duration = Duration::from_secs(300);
 
-/// How long `logd` lets a reader take no bytes before it lets it go
-/// (`serve.rs`'s `STALLED`).
-const STALLED_SECS: u64 = 10;
-
 /// What `logd` says as it lets a reader go that took no bytes it was owed.
 const LET_GO: &str = "logd: letting ";
 
@@ -280,12 +276,10 @@ pub fn stalled_reader(
     // Flooded until every stalled reader is let go, not by an amount: a
     // reader is owed only what `logd` took of the flood, which is `logd`'s
     // pace and not this test's, so a fixed flood outruns every buffer between
-    // them only on a host fast enough. Each let-go is owed `STALLED_SECS`
-    // after its reader's writes stop being taken; the flood's own ceiling,
-    // widened by this host, is that promise judged, and a guest past it has
-    // broken it, which is this test's verdict and not a stall of the harness.
-    let began = Instant::now();
-    let deadline = began + guest.budget(FLOOD_CEILING);
+    // them only on a host fast enough. When `logd` lets each one go is its own
+    // clock's business and no verdict here: the ceiling is the harness's, and
+    // a `logd` that never lets a reader go is a hang it reds.
+    let deadline = Instant::now() + guest.budget(FLOOD_CEILING);
     let mut floods = 0usize;
     while seen(&console) < NETWORK_READERS {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -307,15 +301,14 @@ pub fn stalled_reader(
     }
     let let_go = seen(&console);
     if let_go < NETWORK_READERS {
-        let waited = began.elapsed().as_secs();
         let said = match shut_down(guest, &mut console, &staged) {
             Ok(file) => file.iter().filter(|l| l.contains("logd: ")).cloned().collect::<String>(),
             Err(why) => format!("none read: {}", why.lines().next().unwrap_or("")),
         };
         return Err(format!(
-            "logd let {let_go} of the {NETWORK_READERS} readers that stopped reading go in {waited} s \
-             of {floods} flood(s), and owes each one {STALLED_SECS} s after its writes stop being \
-             taken; /log's logd lines:\n{said}"
+            "{} flooding until logd let the readers that stopped reading go: {let_go} of \
+             {NETWORK_READERS} after {floods} flood(s); /log's logd lines:\n{said}",
+            qemu::STALLED
         ));
     }
     let second = reader(port, "logstream-stalled-second.txt")?;

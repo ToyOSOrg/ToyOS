@@ -1271,8 +1271,8 @@ fn home_of(state: TaskState) -> Option<CpuId> {
 /// term is set by the host's scheduler, which this CPU neither observes nor
 /// controls and no constant bounds. A panic may only assert what its own site
 /// observes and what no workload scales, so the cost of a pass is recorded as a
-/// distribution ([`PassCosts`]), and a verdict on it is metal's. This constant
-/// is the policy number `over` is counted against.
+/// distribution ([`PassCosts`]). This constant is the policy number `over` is
+/// counted against.
 pub const MAX_PASS_NS: u64 = 200_000;
 
 /// How long the real-time band may defer one corpse's unwind before that

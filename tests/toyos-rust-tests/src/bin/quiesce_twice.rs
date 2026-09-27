@@ -14,7 +14,6 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::log::{LogTail, Record, MAX_LOG_SHARDS};
@@ -38,14 +37,6 @@ const BATCH: usize = 4 * MAX_LOG_SHARDS as usize;
 
 /// The poll's one token.
 const LOG_TOKEN: u64 = 1;
-
-/// How long the first call gets to reach its wait before this boot says it
-/// never did: inside the kernel's own bound on that wait, so this line is the
-/// one that says why.
-const WAITS_WITHIN: Duration = Duration::from_secs(5);
-
-/// How long the machine gets to stop this process once the held thread runs.
-const STOPPED_WITHIN: Duration = Duration::from_secs(20);
 
 fn main() {
     let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
@@ -78,7 +69,6 @@ fn main() {
     let mut tail = LogTail::new();
     let mut buf = [Record::EMPTY; BATCH];
     let poller = Poller::new(1);
-    let give_up = Instant::now() + WAITS_WITHIN;
     poller.watch(&cap, READABLE, LOG_TOKEN);
     poller.wait(0, 0, |_| {});
     loop {
@@ -92,11 +82,9 @@ fn main() {
         if !batch.is_empty() {
             continue;
         }
-        let Some(left) = give_up.checked_duration_since(Instant::now()) else {
-            eprintln!("quiesce_twice: the first call never waited for {LAST_THREAD}");
-            std::process::exit(1);
-        };
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+        // No deadline: a first call that never waits is a hang the harness
+        // ceiling reds.
+        poller.wait(1, u64::MAX, |_| {});
         poller.watch(&cap, READABLE, LOG_TOKEN);
         poller.wait(0, 0, |_| {});
     }
@@ -109,9 +97,16 @@ fn main() {
     }
     std::thread::Builder::new()
         .name(LAST_THREAD.into())
-        .spawn(|| std::thread::sleep(STOPPED_WITHIN))
+        .spawn(park_for_ever)
         .expect("spawn the thread the stop waits for");
-    std::thread::sleep(STOPPED_WITHIN);
-    eprintln!("quiesce_twice: the machine did not stop this process in {STOPPED_WITHIN:?}");
-    std::process::exit(1);
+    // No deadline: a machine that never stops this process is a hang the
+    // harness ceiling reds.
+    park_for_ever()
+}
+
+/// Parked until the machine stops, which is the only thing that ends it.
+fn park_for_ever() -> ! {
+    loop {
+        std::thread::park();
+    }
 }

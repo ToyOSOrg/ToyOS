@@ -598,23 +598,6 @@ pub fn home_budget_refusal_retried(
         })?
         .trim()
         .to_string();
-    // And the refusal was one per file, not one per flush: `logd` flushes every
-    // round it wrote a line in, and a refused flush is lines of its own, so a
-    // refusal on every flush keeps `/log` retrying for as long as the machine
-    // runs and rotates the boot's own log away. An absence has no event to wait
-    // on, so it is judged over a fixed window: the storm retries there without
-    // pause, the once-per-file refusal never.
-    let after = qemu.drain_serial(Duration::from_secs(2));
-    let again: Vec<&str> =
-        after.lines().filter(|l| l.contains("fsync: ") && l.contains("durable on attempt")).collect();
-    if !again.is_empty() {
-        return Err(format!(
-            "{} flush(es) retried in the 2 s after the guest's, first {:?}: every flush is \
-             being refused, and each refusal's records are the next flush\n{after}",
-            again.len(),
-            again[0]
-        ));
-    }
 
     let image = qemu.nvme_image().to_path_buf();
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
@@ -625,6 +608,24 @@ pub fn home_budget_refusal_retried(
         if tail.contains(bad) {
             return Err(format!("{bad:?} on the way down\n{tail}"));
         }
+    }
+    // And the refusal was one per file, not one per flush: `logd` flushes every
+    // round it wrote a line in, and a refused flush is lines of its own, so a
+    // refusal on every flush retries `/log` again and again until the shutdown
+    // ends it. The whole boot, shutdown included, is the span: no path retries
+    // twice in it.
+    let whole = format!("{log}{tail}");
+    let mut retried_paths: Vec<&str> = Vec::new();
+    for line in whole.lines().filter(|l| l.contains("durable on attempt")) {
+        let Some((_, rest)) = line.split_once("fsync: ") else { continue };
+        let path = rest.split_once(" durable on attempt").map_or(rest, |(p, _)| p);
+        if retried_paths.contains(&path) {
+            return Err(format!(
+                "{path} was retried to durable twice, the second at {line:?}: every flush is \
+                 being refused, and each refusal's records are the next flush\n{whole}"
+            ));
+        }
+        retried_paths.push(path);
     }
 
     let io = FileBlocks::open(&image)?;

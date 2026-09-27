@@ -1194,9 +1194,8 @@ fn foreign_fault(
     unit_is_first(&qemu::profile_argv(&options), arm.name)?;
     // An arm whose device is driven by a process boots that process's config.
     let config = arm.driver.config(test_config);
-    let mut qemu = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
-    let mut log = Serial::boot(&qemu);
-    log.push(&qemu.drain_serial(Duration::from_secs(2)));
+    let qemu = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
+    let log = Serial::boot(&qemu);
     let socket = qemu.qmp_socket();
 
     let blocked = blocked_on(log.must_say(FAULT)?)?;
@@ -1340,7 +1339,6 @@ pub fn iommu_gpu_scanout_swap(
         ));
     }
     log.push(&result.serial);
-    log.push(&qemu.drain_serial(Duration::from_millis(500)));
     log.must_not_say(FAULT)?;
     log.must_be_clean()?;
     let shown = qemu.screendump();
@@ -1799,6 +1797,7 @@ fn fault_boot(
         rust_bins,
         BootOptions {
             profile: Profile::Metal,
+            qmp: true,
             kernel_params: params,
             ready_marker: FAULT,
             ..Default::default()
@@ -1806,9 +1805,10 @@ fn fault_boot(
     );
     let mut log = Serial::boot(&qemu);
     // Past the fault, because the claim is that the machine stopped there: the
-    // handler halts every CPU, so anything the boot would have gone on to do
-    // has to be absent from a window that stays open after it.
-    log.push(&qemu.drain_serial(Duration::from_secs(2)));
+    // handler halts every CPU, and the capture is judged once QEMU shows it has.
+    let mut after = String::new();
+    qemu::await_halted(&mut qemu, &mut after, "the fault to halt every CPU", &["Boot: complete", qemu::DEFAULT_READY])?;
+    log.push(&after);
     log.must_not_say("Boot: complete")?;
     log.must_not_say(qemu::DEFAULT_READY)?;
 
@@ -2102,7 +2102,6 @@ pub fn userdev_dma_fault(
     // this line through `must_be_clean`; this is the one that staged it.
     let mut after = log;
     after.push(&result.serial);
-    after.push(&qemu.drain_serial(Duration::from_millis(500)));
     after.must_be_clean_apart_from("iommu: DMA FAULT owner=slot", 1)?;
     eprintln!(
         "  [iommu] the NIC's driver was refused an address it was handed, and the machine ran on"

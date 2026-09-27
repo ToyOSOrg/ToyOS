@@ -301,28 +301,20 @@ pub fn update_boots_the_new_kernel(_: &Path, _: &[(String, Vec<u8>)], _: &[(Stri
     let (mut guest, mut console) = rig.boot()?;
     owed(&console, 0, &format!("{SLOT_RECORD} A, the one the slot table marks"))?;
 
-    let asked = Instant::now();
     let (status, said) = rig.install(&next)?;
-    let installed = asked.elapsed();
     if status != Some(0) || !said.contains(&format!("update: installed version {NEXT} in slot B")) {
         return Err(format!("`update` ended {status:?} saying {said:?}"));
     }
     let (from, uart) = rig.reboot_until(&mut guest, &mut console, &format!("{SLOT_RECORD} B, the one the slot table marks"))?;
     await_machine(&mut guest, &mut console, "the new slot's ready marker", |c| c[from..].contains(DEFAULT_READY))?;
-    let booted = asked.elapsed();
     loader_said(&guest, uart, &format!("Anti-rollback floor: {BASE}, raised from 0 by the boot that proved it"))?;
     loader_said(&guest, uart, &format!("Slot B: {VERIFIED}"))?;
     loader_said(&guest, uart, &format!("Kernel: {next_kernel} bytes"))?;
-    for line in guest.uart_log()[uart..].lines().filter(|l| l.contains("TSC cycles") || l.contains("Loader TSC")) {
-        eprintln!("  [update] loader: {line}");
-    }
     eprintln!(
-        "  [update] {} bytes installed in {} ms; slot B's kernel ({next_kernel} bytes, the base's {}) \
-         at its ready marker {} ms after `update` was asked",
+        "  [update] {} bytes installed; slot B's kernel ({next_kernel} bytes, the base's {}) at its \
+         ready marker",
         std::fs::metadata(&next).map(|m| m.len()).unwrap_or(0),
-        installed.as_millis(),
         rig.base_kernel,
-        booted.as_millis()
     );
 
     // **A record the running system forged proves nothing**: slot B's own

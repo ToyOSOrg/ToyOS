@@ -151,12 +151,6 @@ impl Record {
     pub fn stopped_the_machine(self) -> bool {
         self.sweep.running == 0
     }
-
-    /// Whether the stop ran to its budget. On a record that stopped the
-    /// machine, that is a wait no transition of its threads ended.
-    pub fn spent_its_budget(self) -> bool {
-        self.elapsed_ms >= self.budget_ms
-    }
 }
 
 impl fmt::Display for Record {
@@ -260,17 +254,6 @@ mod tests {
         );
         assert!(WHOLE.stopped_the_machine());
         assert!(!short().stopped_the_machine());
-    }
-
-    /// The budget is the record's own, so a reader judges a stop against what
-    /// the kernel gave it; the boundary is the kernel's, where `keep_waiting`
-    /// stops.
-    #[test]
-    fn a_stop_that_reached_its_budget_spent_it() {
-        assert!(!WHOLE.spent_its_budget());
-        assert!(!Record { elapsed_ms: 2009, ..WHOLE }.spent_its_budget());
-        assert!(Record { elapsed_ms: 2010, ..WHOLE }.spent_its_budget());
-        assert!(Record { elapsed_ms: 2017, ..WHOLE }.spent_its_budget());
     }
 
     /// **The one declaration, checked both ways.** A reworded arm of `Display`

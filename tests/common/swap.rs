@@ -411,14 +411,11 @@ const RESET_NOTHING: &[&str] = &["pcidev-reset-nothing"];
 /// last of them.
 const KNOCKS: usize = 25;
 
-/// A liveness guard on those connects, never a verdict.
-const KNOCKS_WITHIN: Duration = Duration::from_secs(30);
-
 /// netd swapped for `replacement` (the test binary `name`), and from the moment
 /// it says `holding` — its part mastering — [`KNOCKS`] SYNs sent through slirp
-/// at the guest's address. Answers how many slirp completed and how long they
-/// took; `Err` is a why the caller fails the rig with.
-fn swap_and_knock(rig: &mut Rig, rust_bins: &[(String, Vec<u8>)], name: &str, holding: &str) -> Result<(usize, Duration), String> {
+/// at the guest's address. Answers how many slirp completed; `Err` is a why the
+/// caller fails the rig with.
+fn swap_and_knock(rig: &mut Rig, rust_bins: &[(String, Vec<u8>)], name: &str, holding: &str) -> Result<usize, String> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -443,21 +440,13 @@ fn swap_and_knock(rig: &mut Rig, rust_bins: &[(String, Vec<u8>)], name: &str, ho
             }
         })
     };
-    let asked = std::time::Instant::now();
     let knocked = qemu::await_guest(&mut rig.guest, &mut rig.console, "the host's frames at the part", |_| {
-        taken.load(Ordering::SeqCst) >= KNOCKS || asked.elapsed() > KNOCKS_WITHIN
+        taken.load(Ordering::SeqCst) >= KNOCKS
     });
     stop.store(true, Ordering::SeqCst);
     let _ = knocking.join();
     knocked?;
-    let taken = taken.load(Ordering::SeqCst);
-    if taken < KNOCKS {
-        return Err(format!(
-            "slirp took {taken} of {KNOCKS} connects in {KNOCKS_WITHIN:?}, so the window held too few \
-             frames for a clean console to mean anything"
-        ));
-    }
-    Ok((taken, asked.elapsed()))
+    Ok(taken.load(Ordering::SeqCst))
 }
 
 /// **The part keeps running across a release, and the next holder stops it
@@ -479,7 +468,7 @@ pub fn swap_quiets_the_function(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let mut rig = Rig::boot("swap-quiet", super::lan::TALK_BENCH)?;
-    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, IDLE, HOLDING) {
+    let taken = match swap_and_knock(&mut rig, rust_bins, IDLE, HOLDING) {
         Ok(knocked) => knocked,
         Err(why) => return Err(rig.fail(why)),
     };
@@ -491,7 +480,7 @@ pub fn swap_quiets_the_function(
         return Err(rig.fail(format!("{why}\n  the release said: {}", released.trim_end())));
     }
     eprintln!(
-        "  [swap] {}; {}; the next holder stopped it, mastered it through {taken} SYNs in {took:?}, and \
+        "  [swap] {}; {}; the next holder stopped it, mastered it through {taken} SYNs, and \
          the unit saw no fault",
         released.trim_end(),
         inherited.trim_end(),
@@ -523,7 +512,7 @@ pub fn swap_keeps_what_nothing_reset(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let mut rig = Rig::boot_armed("swap-residue", super::lan::TALK_BENCH, RESET_NOTHING)?;
-    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, RUNNING, RUNNING_HOLDING) {
+    let taken = match swap_and_knock(&mut rig, rust_bins, RUNNING, RUNNING_HOLDING) {
         Ok(knocked) => knocked,
         Err(why) => return Err(rig.fail(why)),
     };
@@ -547,7 +536,7 @@ pub fn swap_keeps_what_nothing_reset(
         console.must_be_clean()?;
         let taken_over = console.must_say("pcidev: slot 0 holds 1 range(s)")?;
         eprintln!(
-            "  [swap] {}; {}; {}; mastered through {taken} SYNs in {took:?}, and the unit saw no fault",
+            "  [swap] {}; {}; {}; mastered through {taken} SYNs, and the unit saw no fault",
             released.trim_end(),
             inherited.trim_end(),
             taken_over.trim_end(),
@@ -586,15 +575,15 @@ const HOLDER_FAULT: &str = "iommu: DMA FAULT owner=slot";
 /// this host's SYNs make the part fetch a descriptor there, and the unit
 /// refuses it. Nothing but that fault can wake the program. The verdict is its
 /// own line: the claim refused the interrupt read with `Io`. Without the
-/// refusal and the wake it earns, the program waits out its bound and says it
-/// was told nothing.
+/// refusal and the wake it earns, the program waits, and the harness ceiling reds
+/// the boot.
 pub fn swap_fault_tells_its_holder(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let mut rig = Rig::boot("swap-astray", super::lan::TALK_BENCH)?;
-    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, ASTRAY, ASTRAY_HOLDING) {
+    let taken = match swap_and_knock(&mut rig, rust_bins, ASTRAY, ASTRAY_HOLDING) {
         Ok(knocked) => knocked,
         Err(why) => return Err(rig.fail(why)),
     };
@@ -615,7 +604,7 @@ pub fn swap_fault_tells_its_holder(
         let faults = text.matches(HOLDER_FAULT).count();
         console.must_be_clean_apart_from(HOLDER_FAULT, faults)?;
         eprintln!(
-            "  [swap] {}; {}; after {taken} SYNs in {took:?}",
+            "  [swap] {}; {}; after {taken} SYNs",
             fault.trim_end(),
             told.trim_end(),
         );
