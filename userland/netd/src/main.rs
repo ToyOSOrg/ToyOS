@@ -556,6 +556,21 @@ struct PendingConn {
     since: Instant,
 }
 
+/// Whether a connection waits on `acceptor` now, asked of `poller`, which
+/// watches nothing else.
+///
+/// **Its ring is emptied first**: a watch the last ask left armed fires into
+/// it when a connection arrives later, and that connection may since have
+/// been accepted on the loop's own wake — answering from it would park netd
+/// in a blocking accept.
+fn still_queued(poller: &Poller, acceptor: &toyos::port::Acceptor) -> bool {
+    poller.wait(0, 0, |_| {});
+    poller.watch(acceptor, READABLE, 0);
+    let mut queued = false;
+    poller.wait(0, 0, |_| queued = true);
+    queued
+}
+
 /// A whole request, off the connection and in memory: the read side is
 /// finished before anything acts on a message, so no handler below can park
 /// on the client that sent it.
@@ -1572,6 +1587,9 @@ fn main() {
     // between two `wait` calls is the two fixed registrations, at most two per live
     // piped connection, one per pending connection, one per lookup and one per
     // pending receive, and the ceiling is what that can never exceed.
+    // Asks whether the kernel still queues a connection, apart from the
+    // loop's batch (`still_queued`).
+    let accepting = Poller::new(1);
     let poller = Poller::new(
         FIXED_POLL_HANDLES
             + POLL_HANDLES_PER_PIPED * MAX_PIPED_SLOTS as u32
@@ -1754,7 +1772,14 @@ fn main() {
         // Accept and the request are two events. Nothing is read here: a client
         // that connects and then says nothing costs a slot and a deadline, not
         // the network stack.
-        if ready.contains(&TOKEN_LISTENER) {
+        //
+        // **Every connection the table has room for, not one a pass**: the
+        // kernel's queue holds 32 and refuses the next connect, so a burst of
+        // clients met one a pass is refused by a netd that is only busy. With
+        // the table full, one is accepted and refused by name, as before, and
+        // the rest wait in the kernel's queue for the room the next pass makes.
+        let mut queued = ready.contains(&TOKEN_LISTENER);
+        while queued {
             let conn = acceptor.accept().expect("accept failed");
             if pending.len() >= MAX_PENDING_CONNS as usize {
                 say!(
@@ -1762,9 +1787,12 @@ fn main() {
                      waiting to say what they want",
                     conn.as_handle().0
                 );
-            } else {
-                pending.push(PendingConn { conn, rx: ClientRx::new(), since: Instant::now() });
+                break;
             }
+            // Read in this pass: a client sends its request with its connect.
+            ready.push(TOKEN_PENDING_BASE + conn.as_handle().0 as u64);
+            pending.push(PendingConn { conn, rx: ClientRx::new(), since: Instant::now() });
+            queued = pending.len() < MAX_PENDING_CONNS as usize && still_queued(&accepting, &acceptor);
         }
 
         // `remove` rather than `swap_remove`: the entries after `i` shift down,

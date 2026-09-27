@@ -962,15 +962,16 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // most of its losses wait out its one-second retransmission timer, and
     // the run's length is a count of those.
     ("netd_tcp_loss", Sched::Parallel, Tier::Nightly),
-    // The same boot, a stream's last bytes read after smoltcp's ten-second
+    // The same boot, a stream's last bytes read after the core's four-minute
     // TIME-WAIT has passed. Nightly: that wait is its premise.
     ("netd_tcp_time_wait", Sched::Parallel, Tier::Nightly),
     // The same boot, two orphans owing bytes behind a shut window: one
-    // released past netd's FIN-WAIT-2 limit, one never. Nightly: its verdicts
-    // are anchored to that minute and to netd's hundred-second stall limit.
+    // released past the core's FIN-WAIT-2 bound, one never. Nightly: its
+    // verdicts are anchored to that minute and to the core's retransmission
+    // limit, a quarter of an hour.
     ("netd_tcp_orphan_owes", Sched::Parallel, Tier::Nightly),
     // The same boot on a wire that goes dark (`tests/common/middlebox.rs`).
-    // Nightly: its verdicts are anchored to netd's stall limit.
+    // Nightly: its verdicts are anchored to the core's retransmission limit.
     ("netd_tcp_vanish", Sched::Parallel, Tier::Nightly),
     // The netcase boot, whose user network forwards 10.0.2.3 to this host's
     // resolver: `host` resolves a real name to the addresses this host's
@@ -984,8 +985,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // answers; the schedule's end is a bound derived from it.
     ("netd_lookup_let_go", Sched::Parallel, Tier::Fast),
     // Two netcase boots, each frame put on the wire kept: the first DHCP
-    // transaction ID of each differs, because netd seeds smoltcp's random
-    // source from the kernel's. The verdict is two numbers off the wire.
+    // transaction ID of each differs, because netd's DHCP client draws it
+    // from the kernel's random source. The verdict is two numbers off the wire.
     ("netd_seeds_its_stack", Sched::Parallel, Tier::Fast),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
@@ -10320,7 +10321,9 @@ fn netd_tcp_run(rust_bins: &[(String, Vec<u8>)], cases: &[&str], wire: TcpWire) 
                 break;
             }
         };
-        let result = qemu.run_test(&format!("test_rs_{NAME} {port} {case}"), Duration::from_secs(300));
+        // A liveness guard: the longest case waits out the core's retransmission
+        // limit, a quarter of an hour (netd's `limits.give_up_ms`), and a step.
+        let result = qemu.run_test(&format!("test_rs_{NAME} {port} {case}"), Duration::from_secs(1200));
         console.push_str(&result.serial);
         if let Some(err) = &result.error {
             failed = Some(format!("{case}: {err}\n{}", result.stdout));
@@ -10377,7 +10380,7 @@ const NETD_TCP_GUEST_JUDGED: [(&str, &str); 4] = [
     // closes: every one connected, and no more kept closing than its bound.
     ("netd_tcp_closing", "closing {cap}"),
     // The peer's last bytes, behind a full receive pipe when its FIN arrives,
-    // outlive smoltcp's TIME-WAIT.
+    // outlive the core's TIME-WAIT.
     ("netd_tcp_time_wait", "time_wait"),
 ];
 
@@ -10406,9 +10409,9 @@ fn netd_tcp_reset(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 ///
 /// **On a NIC that sends one frame a millisecond, across a wire that drops
 /// the first FIN of every connection the guest closes**: the ring fills
-/// whenever netd has more to send than that, and each close after it finishes on smoltcp's own
+/// whenever netd has more to send than that, and each close after it finishes on the core's own
 /// retransmission timer, which nothing but netd's wake for it can fire: a
-/// netd that stopped honouring smoltcp's deadlines once its ring had filled
+/// netd that stopped honouring the core's deadlines once its ring had filled
 /// never finishes a case here. The wire's count and netd's own count of
 /// frames that waited for the ring are the premise.
 fn netd_tcp_half_close(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
@@ -10705,9 +10708,8 @@ fn netd_lookup_let_go(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 }
 
 /// Two boots of one image draw different first DHCP transaction IDs, because
-/// netd seeds smoltcp's random source from the kernel's; seeded as smoltcp's
-/// `Config::new` leaves it, every boot draws the same one. Read off the wire
-/// QEMU's user network was handed, where a server reads them.
+/// netd's DHCP client draws each from the kernel's random source. Read off the
+/// wire QEMU's user network was handed, where a server reads them.
 fn netd_seeds_its_stack() -> Result<(), String> {
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
     let mut firsts = Vec::new();

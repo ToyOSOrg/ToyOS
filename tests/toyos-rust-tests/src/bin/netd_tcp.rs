@@ -449,13 +449,10 @@ fn many_up(peer: SocketAddr, count: usize) {
         thread.join().expect("an upload's thread panicked");
     }
     let net = Net::ask(STEP);
-    let (most, sockets, replies) =
-        (net.count("net.tx.most_waiting"), net.count("net.sockets.most"), net.count("net.tx.max_replies_waiting"));
-    // A frame a socket and a report for the one multicast group netd joins,
-    // and the replies netd lets wait.
-    assert!(most <= sockets + 1 + replies, "many_up: {most} frames waited at once, past {sockets} sockets' and {replies} replies");
-    let dropped = net.count("net.tx.replies_dropped");
-    assert!(dropped > 0, "many_up: the premise — the flood's replies never filled netd's {replies}");
+    let (most, bound) = (net.count("net.tx.most_waiting"), net.count("net.tx.max_waiting"));
+    assert!(most <= bound, "many_up: {most} frames waited at once, past netd's bound of {bound}");
+    let dropped = net.count("net.tx.dropped");
+    assert!(dropped > 0, "many_up: the premise — the flood's replies never filled netd's {bound}");
     let spun = net.count("net.passes.spun") - spun;
     assert_eq!(spun, 0, "many_up: netd asked to wait for nothing {spun} times with a full ring");
     let found = found.unwrap_or_else(|e| panic!("many_up: a lookup during {count} uploads ended {e:?} after {took:?}"));
@@ -549,14 +546,15 @@ fn leaves(peer: SocketAddr) {
 }
 
 /// A stream's last bytes, behind a full receive pipe when the peer's FIN
-/// arrives, outlive smoltcp's TIME-WAIT, whose end clears the socket's buffer:
-/// a client that shut its sending half down and then fell a whole receive pipe
+/// arrives, outlive the core's TIME-WAIT, whose end frees the socket: a
+/// client that shut its sending half down and then fell a whole receive pipe
 /// behind reads every byte.
 fn time_wait(peer: SocketAddr) {
     /// Bytes past the ring's capacity: inside the socket's own buffer, so the
     /// FIN behind them is taken, and outside the full pipe.
     const TAIL: u64 = 32 * 1024;
     let time_wait = || Net::ask(STEP).count("net.sockets.time_wait");
+    let lasts = Duration::from_secs(Net::ask(STEP).count("net.limits.time_wait_s"));
     let before = time_wait();
     let capacity = netd_stream::ring_capacity();
     let len = capacity + TAIL;
@@ -565,7 +563,7 @@ fn time_wait(peer: SocketAddr) {
     toyos::net::tcp_shutdown(conn.socket_id, 1).expect("time_wait: shut the sending half down");
     netd_stream::await_ring_full(&conn.rx, capacity, STEP);
     await_net("time_wait: the stream's TIME-WAIT begun", STEP, time_wait, |n| n > before);
-    await_net("time_wait: the stream's TIME-WAIT over", STEP, time_wait, |n| n == before);
+    await_net("time_wait: the stream's TIME-WAIT over", lasts + STEP, time_wait, |n| n == before);
     let at = netd_stream::read_pattern(&conn.rx, STEP, "time_wait");
     assert_eq!(at, len, "time_wait: the stream ended after {at} of {len} bytes");
     println!("netd_tcp: time_wait ok bytes={len}");
@@ -670,9 +668,6 @@ fn neighbour() {
     });
     await_net("neighbour: the silent connect's socket", STEP, held, |h| h.tcp == before.tcp + 1);
     let socket = UdpSocket::bind("0.0.0.0:0").expect("bind a UDP socket");
-    let net = Net::ask(STEP);
-    let behind = (net.count("net.udp.behind_connects"), net.count("net.sockets.udp"));
-    assert_eq!(behind, (1, 1), "neighbour: the premise — smoltcp visits the silent connect's socket before this one");
     let started = Instant::now();
     socket.send_to(b"neighbour", SocketAddrV4::new(NEIGHBOUR, 7)).expect("send to the neighbour");
     // Bounded on a thread of its own: std's UDP socket keeps no timeout
@@ -716,15 +711,16 @@ fn spawn_with(peer: SocketAddr, case: &str, args: &[&str]) -> Child {
 }
 
 /// Two clients leave bytes behind a peer that keeps its window shut: netd
-/// delivers every byte of the one whose peer opens its window after netd's
-/// FIN-WAIT-2 limit and a second more — the longest an orphan's peer is given
-/// to close — and resets the other once its stall limit has passed with
-/// nothing acknowledged.
+/// delivers every byte of the one whose peer opens its window after the core's
+/// FIN-WAIT-2 bound and a second more — the longest an orphan's peer is given
+/// to close — and the core gives the other up at its retransmission limit, its
+/// zero-window probes answered with the window still shut.
 fn orphan_owes(peer: SocketAddr) {
     const RELEASED: u64 = ORPHAN_RELEASED_SEED;
     const HELD_SHUT: u64 = 92;
     let net = Net::ask(STEP);
-    let (fin_wait_2_s, stall_s) = (net.count("net.limits.fin_wait_2_s"), net.count("net.limits.stall_s"));
+    let fin_wait_2_s = net.count("net.limits.fin_wait_2_s");
+    let give_up = Duration::from_millis(net.count("net.limits.give_up_ms"));
     let before = held();
     let upload = |seed: u64| {
         let out = Command::new(std::env::current_exe().expect("this program's path"))
@@ -748,25 +744,26 @@ fn orphan_owes(peer: SocketAddr) {
     let now = held();
     assert_eq!(now.piped, before.piped + 2, "orphan_owes: an orphan held shut for {premise:?} was given up: {now:?}");
     drop(ask(peer, Mode::Release, 0, RELEASED));
-    await_net("orphan_owes: the released orphan delivered", STEP, held, |h| h.piped + h.closing == before.piped + before.closing + 1);
-    let stall = Duration::from_secs(stall_s);
-    await_net("orphan_owes: the orphan held shut", stall + STEP, held, |h| h == before);
+    // Delivered once its send pipe is drained: the stack finishes it from
+    // there, through a TIME-WAIT longer than a step.
+    await_net("orphan_owes: the released orphan delivered", STEP, held, |h| h.piped == before.piped + 1);
+    await_net("orphan_owes: the orphan held shut", give_up + STEP, held, |h| h == before);
     let took = left.elapsed();
-    assert!(took + Duration::from_secs(1) >= stall, "orphan_owes: the orphan held shut was reset after {took:?}");
+    // The core counts from the window's shutting, which was before the
+    // children left, each inside a step.
+    assert!(took + STEP >= give_up, "orphan_owes: the orphan held shut was given up after {took:?}");
     // Its host connection waits on a release, which it is now given.
     drop(ask(peer, Mode::Release, 0, HELD_SHUT));
     println!("netd_tcp: orphan_owes ok released_seed={RELEASED} held_shut_ms={}", took.as_millis());
 }
 
 /// The wire goes dark under three streams — one whose client is killed, one
-/// whose client keeps writing, and the one that asked for the dark — and netd
-/// gives up on each once its stall limit has passed with nothing from its
-/// peer, the writer told by its write failing, and lets every one go within
-/// its RST linger though no RST can leave: the peers' link address is
-/// forgotten by then, and asked for in the dark.
+/// whose client keeps writing, and the one that asked for the dark — and the
+/// core gives each up at its retransmission limit with nothing acknowledged,
+/// the writer told by its write failing, and netd lets every one go though no
+/// RST can leave.
 fn vanish(peer: SocketAddr) {
-    let net = Net::ask(STEP);
-    let (stall_s, linger_s) = (net.count("net.limits.stall_s"), net.count("net.limits.rst_linger_s"));
+    let give_up = Duration::from_millis(Net::ask(STEP).count("net.limits.give_up_ms"));
     let before = held();
     let mut child = spawn(peer, "child_idle");
     let mut writer = ask(peer, Mode::Hold, 0, 0);
@@ -775,11 +772,10 @@ fn vanish(peer: SocketAddr) {
     let dark = Instant::now();
     child.kill().expect("kill the child");
     child.wait().expect("reap the child");
-    let stall = Duration::from_secs(stall_s);
     let buf = vec![0u8; 65536];
-    // A write that blocks past the stall limit and its step is a writer
-    // never told, and times out by name.
-    writer.set_write_timeout(Some(stall + STEP)).expect("vanish: bound the writer");
+    // A write that blocks past the limit and its step is a writer never told,
+    // and times out by name.
+    writer.set_write_timeout(Some(give_up + STEP)).expect("vanish: bound the writer");
     let err = loop {
         if let Err(e) = writer.write(&buf) {
             break e;
@@ -791,10 +787,11 @@ fn vanish(peer: SocketAddr) {
         "vanish: the writer was told {err} ({:?})",
         err.kind()
     );
-    assert!(told >= stall, "vanish: the writer was told after {told:?}");
+    // The core counts from the oldest unacknowledged segment, sent at most a
+    // moment before the dark.
+    assert!(told + Duration::from_secs(1) >= give_up, "vanish: the writer was told after {told:?}");
     drop(writer);
-    let linger = Duration::from_secs(linger_s);
-    let after = await_net("vanish: every stream in the dark", stall + linger + STEP, held, |h| h == before);
+    let after = await_net("vanish: every stream in the dark", give_up + STEP, held, |h| h == before);
     println!("netd_tcp: vanish ok told_ms={} after {after:?} in {}ms", told.as_millis(), dark.elapsed().as_millis());
 }
 

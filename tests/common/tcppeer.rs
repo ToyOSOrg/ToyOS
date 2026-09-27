@@ -2,7 +2,7 @@
 //! TCP stack, which the guest reaches at `10.0.2.2` through QEMU's user
 //! network. **The guest's TCP peer on the wire is slirp's**, a BSD-derived
 //! stack that relays each connection onto a socket of this host's; neither
-//! shares code with smoltcp. This side is the oracle the guest's client is
+//! shares code with Netstack3. This side is the oracle the guest's client is
 //! judged against: it hashes exactly the bytes its sockets carried, and a test
 //! compares that with what the guest saw of the same stream.
 //!
@@ -47,6 +47,11 @@ pub struct Served {
 
 /// Longest any step of a connection may stall: the guest's own run bound.
 pub const STALL: Duration = Duration::from_secs(120);
+
+/// Longest a `LateUpload` waits for its release: past the core's retransmission
+/// limit, a quarter of an hour, so an orphan the guest leaves behind this
+/// shut window is given up by netd's stack and not by this side's close.
+pub const HELD: Duration = Duration::from_secs(1200);
 
 /// What every connection's thread shares.
 struct Shared {
@@ -262,13 +267,13 @@ fn serve(mut stream: TcpStream, shared: &Shared, mut open: Open) -> Result<Serve
                 let (named, waited) = shared
                     .seeds
                     .1
-                    .wait_timeout_while(shared.seeds.0.lock().expect("the released seeds"), STALL, |s| {
+                    .wait_timeout_while(shared.seeds.0.lock().expect("the released seeds"), HELD, |s| {
                         !s.contains(&seed)
                     })
                     .expect("the released seeds");
                 drop(named);
                 if waited.timed_out() {
-                    served.ended = Err((ErrorKind::TimedOut, format!("no release named seed {seed} within {STALL:?}")));
+                    served.ended = Err((ErrorKind::TimedOut, format!("no release named seed {seed} within {HELD:?}")));
                     served.sha = hex(&hash.finalize());
                     return Ok(served);
                 }

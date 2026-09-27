@@ -19,9 +19,9 @@
 //! sees a socket left in the stack: closing one already frees its port.
 //!
 //! **A held port is not bound twice**: binding the ordinary socket's port by
-//! number is refused as in use. smoltcp hands a datagram to the first socket
-//! that takes it, so a second socket on a port receives nothing, the
-//! resolver's among them.
+//! number is refused as in use: the core refuses a second bind of a bound
+//! port, and netd asks it for no sharing, so no socket's datagrams are split
+//! with another's, the resolver's among them.
 //!
 //! argv[1] is the port of the harness's host server, which this program does
 //! not use; argv[2] is the port of the harness's UDP echo on `HOST`.
