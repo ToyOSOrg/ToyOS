@@ -816,7 +816,13 @@ pub fn update_trial_writes_nothing_of_the_kept_slot(_: &Path, _: &[(String, Vec<
     let (from, _) = rig.reboot_until(&mut guest, &mut console, &trial)?;
     await_machine(&mut guest, &mut console, "the trial's sshd", |c| c[from..].contains(SSHD_LISTENING))?;
 
-    let (status, said) = rig.install(&next)?;
+    // Newer than the trial's, so nothing but the grant stands between it and
+    // slot A.
+    let (later, _) = rig.update("later", &[], &[], NEXT + 1, signing::key())?;
+    let (status, said) = rig.install(&later)?;
+    if rig.signed_header(Which::A)? != kept {
+        return Err(format!("on the trial, `update` wrote slot A, the image the machine keeps, and ended {status:?} saying {said:?}"));
+    }
     if status != Some(1) || !said.contains("this process holds no `slots:table`") {
         return Err(format!("on the trial, `update` ended {status:?} saying {said:?}"));
     }
@@ -826,9 +832,6 @@ pub fn update_trial_writes_nothing_of_the_kept_slot(_: &Path, _: &[(String, Vec<
     loader_said(&guest, uart, "Request: slot B's trial, which is over, is taken off the slot table")?;
     drop(guest);
     rig.powered_off_cleanly()?;
-    if rig.signed_header(Which::A)? != kept {
-        return Err("slot A's signed header changed under a trial".to_string());
-    }
     let mut file = std::fs::File::open(&rig.image).map_err(|e| format!("{}: {e}", rig.image.display()))?;
     let table = image::slot_table_of(&mut file)?;
     if table.marked != Which::A || !table.request.is_empty() {
