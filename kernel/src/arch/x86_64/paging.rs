@@ -783,9 +783,8 @@ impl AddressSpace {
         flush_tlb_all();
     }
 
-    /// Replaces whatever is there — the boot map covers every physical
-    /// address, so an MMIO window's target is pre-mapped by the time its
-    /// driver asks; a page `guard_4k` already split must not reach here.
+    /// Replaces whatever is there; a page `guard_4k` already split must not
+    /// reach here.
     fn map_2m(&mut self, phys: u64, flags: u64) {
         let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
         let pd_idx = indices(virt).2;
@@ -840,8 +839,6 @@ impl AddressSpace {
         unsafe { PageTablePage::from_phys_mut(pdpt[pdpt_idx] & ADDR_MASK) }
     }
 }
-
-const MIN_PHYS_MAP: u64 = 4 * 1024 * 1024 * 1024;
 
 /// `Arc<Lock<AddressSpace>>`, not `Lock<Option<_>>`: a kernel thread names it
 /// as `KernelPayload.address_space` with no second answer. Leaked, since the
@@ -910,15 +907,10 @@ pub fn guard_kernel_page(addr: u64) {
     kernel().lock().guard_4k(crate::mm::DirectMap::phys_of(addr as *const u8));
 }
 
-/// Build kernel page tables: map all physical memory in the high half using 2MB large pages.
+/// Build kernel page tables: the direct map in the high half, in 2 MiB pages,
+/// as far as [`toyos_memmap::direct_map_end`] reaches.
 pub(crate) fn init(memory_map: &[MemoryMapEntry]) {
-    let mut max_addr: u64 = MIN_PHYS_MAP;
-    for entry in memory_map {
-        if entry.end > max_addr {
-            max_addr = entry.end;
-        }
-    }
-    max_addr = (max_addr + PAGE_2M - 1) & !(PAGE_2M - 1);
+    let end = toyos_memmap::direct_map_end(memory_map);
 
     let mut kernel = AddressSpace {
         root: Box::new(PageTablePage([0; 512])),
@@ -929,10 +921,11 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry]) {
     };
 
     let mut addr: u64 = 0;
-    while addr < max_addr {
+    while addr < end {
         kernel.map_2m(addr, PAGE_PRESENT | PAGE_WRITE);
         addr += PAGE_2M;
     }
+    crate::log!("paging: the direct map covers 0x0..{end:#x}");
 
     let cr3 = kernel.root();
     KERNEL_CR3.store(cr3.0, core::sync::atomic::Ordering::Release);

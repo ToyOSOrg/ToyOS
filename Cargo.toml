@@ -41,6 +41,7 @@ members = [
     "toyos-logstream",
     "toyos-manifest",
     "toyos-mdns",
+    "toyos-memmap",
     "toyos-mixer",
     "toyos-net-wire",
     "toyos-pci",

@@ -1,0 +1,16 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-rootimage: the
+# kernel depends on it by path and its tests run on the host.
+# What lives here is what the kernel takes from firmware's memory map by UEFI
+# memory type — which frames the pmm hands out and how far the direct map
+# reaches — decisions whose only other instrument is a firmware nobody here
+# chose.
+
+[package]
+name = "toyos-memmap"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+toyos-abi = { path = "../toyos-abi" }
