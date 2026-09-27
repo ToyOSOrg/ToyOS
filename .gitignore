@@ -19,3 +19,6 @@ assets/*.sf2
 phosphor-icons
 .cargo/config.toml
 .build-locks/
+# The std fork's `library/` and licence files, fetched where `rust/` holds no source
+# (`src/licence.rs`).
+.licence-fork/

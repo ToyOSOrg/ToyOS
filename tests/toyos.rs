@@ -983,9 +983,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
     ("broken_data_volume_is_absent", Sched::Parallel, Tier::Fast),
     ("data_candidate_with_bad_geometry_is_absent", Sched::Parallel, Tier::Fast),
-    // The image release's command line booted as its notes print it: console
-    // lines and firmware bytes, and the ceiling is a liveness guard.
-    ("release_command_boots", Sched::Parallel, Tier::Fast),
+    // The image release's macOS command line booted as its notes print it:
+    // console lines and firmware bytes, and the ceiling is a liveness guard.
+    // The Linux line is the nightly `release` job's own boot.
+    ("release_command_boots", Sched::Parallel, Tier::AppleSilicon),
     // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
     ("internal_disk_boot", Sched::Parallel, Tier::Fast),
     // One boot each, kernel lines and image bytes for verdicts, no clock in either.
@@ -20613,6 +20614,15 @@ fn main() {
     };
     let held_back = held(Tier::Nightly);
     let held_local = held(Tier::Local);
+    let held_apple = held(Tier::AppleSilicon);
+    if !held_apple.is_empty() {
+        eprintln!(
+            "[toyos] Apple Silicon tier: {} test(s) NOT run, because they boot a command line \
+             only an Apple Silicon Mac has and this run is sharded or on another host.",
+            held_apple.len(),
+        );
+        eprintln!("[toyos]   {}", held_apple.join(", "));
+    }
     if !held_local.is_empty() {
         eprintln!(
             "[toyos] local tier: {} test(s) NOT run, because a sharded run is CI's and no CI \

@@ -7,9 +7,10 @@
 //! [`Job::GateStage`] run as `host`. Every test that boots no guest is in
 //! [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
 //! everything that boots a guest, `host` again to write the cache the merge
-//! queue restores, portability, and the image release, which boots the image it
-//! publishes ([`Job::Release`]). `publish.yml` puts a landing's crates on
-//! crates.io.
+//! queue restores, portability, and the image release: [`Job::Release`] boots the
+//! image it stages with a token that only reads, and [`Job::ReleasePublish`]
+//! publishes those bytes with one that writes. `publish.yml` puts a landing's
+//! crates on crates.io.
 //!
 //! A host job runs every step and reds if any failed; a guest job stops at the
 //! first failure among the instrument, the toolchain and the suite, because
@@ -50,7 +51,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
   tcg               one test on an emulated CPU (nightly)
   audio <i>/<n>     one shard of gate A (nightly)
-  release           build the release image, boot it, and on main publish it (nightly)
+  release           build the release image, boot it, and stage its assets (nightly)
+  release-publish   on main, publish the assets `release` staged (nightly)
   nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -63,6 +65,7 @@ enum Job {
     Tcg,
     Audio(String),
     Release,
+    ReleasePublish,
     NightlyRed,
     Publish,
 }
@@ -81,6 +84,7 @@ fn parse(words: &[String]) -> Result<Job, String> {
         Some("tcg") => Job::Tcg,
         Some("audio") => Job::Audio(shard(words.get(1))?),
         Some("release") => Job::Release,
+        Some("release-publish") => Job::ReleasePublish,
         Some("nightly-red") => Job::NightlyRed,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
@@ -110,6 +114,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
             guest(root, "the suite", || suite(root, &suite_args(&["--audio-gate", "30", "--shard", shard])))
         }
         Job::Release => guest(root, "the image release", || imagerelease::release(root)),
+        Job::ReleasePublish => vec![step("the image release's publication", || imagerelease::publish(root))],
         Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
@@ -153,6 +158,14 @@ fn step(label: &str, f: impl FnOnce() -> Result<String, String>) -> Step {
 
 fn on_runner() -> bool {
     std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
+}
+
+/// Set this step's output `name`, which a later job reads through its own
+/// job's `outputs:`. Refused where no runner gave the step an output file.
+pub fn output(name: &str, value: &str) -> Result<(), String> {
+    let path = std::env::var("GITHUB_OUTPUT").map_err(|_| "GITHUB_OUTPUT is unset".to_string())?;
+    let mut file = std::fs::OpenOptions::new().append(true).open(&path).map_err(|e| format!("{path}: {e}"))?;
+    writeln!(file, "{name}={value}").map_err(|e| format!("{path}: {e}"))
 }
 
 /// Append to the runner's job summary; nowhere off a runner.
@@ -915,6 +928,7 @@ mod tests {
     fn a_job_is_named_and_a_shard_is_a_shard() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
         assert_eq!(parse(&words("guest 3/12")), Ok(Job::Guest("3/12".into())));
+        assert_eq!(parse(&words("release-publish")), Ok(Job::ReleasePublish));
         assert!(parse(&words("guest")).is_err());
         assert!(parse(&words("guest 13/12")).is_err());
         assert!(parse(&words("host extra")).is_err());
@@ -1063,6 +1077,53 @@ mod tests {
         prefixes.dedup();
         assert_eq!(prefixes.len(), writers.len(), "a cache with two writers: {writers:?}");
         assert!(writers.iter().all(|(f, _)| f == "nightly.yml"), "{writers:?}");
+    }
+
+    /// A job whose token writes restores no cache, since a cache is a tree a
+    /// job running third-party code wrote, and hands `GH_TOKEN` to a step
+    /// rather than to every step.
+    #[test]
+    fn a_token_that_writes_meets_no_cache_and_only_the_step_that_needs_it() {
+        let dir = repo_root().join(".github/workflows");
+        let mut writing = 0;
+        for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
+            let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let (head, jobs) = text.split_once("\njobs:\n").expect("a workflow has jobs");
+            let lines: Vec<&str> = text.lines().collect();
+            let restoring: Vec<String> = lines
+                .windows(2)
+                .filter(|w| w[1].contains("actions/cache/restore@"))
+                .filter_map(|w| w[0].trim_start().strip_prefix("- &"))
+                .map(|anchor| format!("*{anchor}"))
+                .collect();
+            let mut chunks: Vec<(String, String)> = Vec::new();
+            for line in jobs.lines() {
+                let key = line.strip_prefix("  ").and_then(|l| l.strip_suffix(':'));
+                match key.filter(|k| !k.starts_with([' ', '#'])) {
+                    Some(job) => chunks.push((job.to_string(), String::new())),
+                    None => {
+                        if let Some((_, body)) = chunks.last_mut() {
+                            body.push_str(&format!("{line}\n"));
+                        }
+                    }
+                }
+            }
+            for (job, body) in &chunks {
+                let permissions = if body.contains("\n    permissions:\n") { body.as_str() } else { head };
+                if !permissions.contains(": write") {
+                    continue;
+                }
+                writing += 1;
+                let restores = body.contains("actions/cache/restore@") || restoring.iter().any(|a| body.contains(a.as_str()));
+                assert!(!restores, "{file}: {job} restores a cache with a token that writes");
+                let job_env = body.split("\n    env:\n").nth(1).map(|env| {
+                    env.lines().take_while(|l| l.starts_with("      ")).any(|l| l.contains("GH_TOKEN"))
+                });
+                assert_ne!(job_env, Some(true), "{file}: {job} hands a token that writes to every step");
+            }
+        }
+        assert!(writing > 0, "no job's token writes, so this checked nothing");
     }
 
     #[test]

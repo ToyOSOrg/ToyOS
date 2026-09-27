@@ -1,13 +1,14 @@
-//! The image release's command line for this host, booted as its notes print
-//! it (`toyos_build::imagerelease::boots`) over a copy of the release image.
+//! The image release's macOS command line, booted as its notes print it
+//! (`toyos_build::imagerelease::boots`) over a copy of the release image.
 
 use toyos_build::build::{self, Boot};
 use toyos_build::imagerelease::{self, Host};
 
-/// The notes' line for this host boots the release image to a painting
-/// desktop and leaves both firmware files as they were.
+/// The notes' Apple Silicon line boots the release image to a painting
+/// desktop and leaves both firmware files as they were. Registered in the
+/// Apple Silicon tier, so no other host runs it.
 pub fn release_command_boots() -> Result<(), String> {
-    let host = Host::this()?;
+    let host = Host::MacosAppleSilicon;
     let root = super::compile::repo_root();
     let boot = Boot::release(&root);
     let plan = build::plan_for(&root, &boot, false, &[]);

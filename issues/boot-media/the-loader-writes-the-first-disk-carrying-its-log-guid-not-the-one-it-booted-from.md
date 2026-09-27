@@ -13,8 +13,8 @@ copy of one image carries the same partition unique GUIDs, and the image
 release (`src/imagerelease.rs`) is written byte for byte to every stick made
 from it. With two sticks of one release plugged in, the loader can write the
 log partition of the stick it did not boot from: a disk it was not given, and
-one that carries no TOYOS-DATA partition, which the release notes say a boot
-never writes.
+one that carries no TOYOS-DATA partition. The release notes name this as the
+one such disk a boot may write.
 
 Owner: the bootloader.
 

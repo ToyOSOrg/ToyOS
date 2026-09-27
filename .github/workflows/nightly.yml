@@ -250,9 +250,10 @@ jobs:
       - *checkout
       - run: cargo build -p toyos-build
 
-  # The disk image a person downloads: built once, booted under the Linux line
-  # its notes print, and on main published as those same bytes
-  # (`src/imagerelease.rs`).
+  # The disk image a person downloads, built once and booted under the Linux
+  # line its notes print (`src/imagerelease.rs`). It compiles and runs
+  # third-party code out of a cache another such job wrote, so its token only
+  # reads: the assets go on as an artifact and their digest as an output.
   release:
     needs: build
     runs-on: ubuntu-24.04
@@ -260,22 +261,52 @@ jobs:
     timeout-minutes: 60
     container: *kvm
     permissions:
-      contents: write
+      contents: read
     env:
       GH_TOKEN: ${{ github.token }}
+    outputs:
+      digest: ${{ steps.release.outputs.digest }}
     steps:
       - *deps
-      - name: gh
-        run: |
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh
       - *checkout
       - *guest-cache
-      - run: cargo run -- --ci release
+      - id: release
+        run: cargo run -- --ci release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-release
+          path: target/image-release/
+          if-no-files-found: error
+          retention-days: 1
+
+  # The one job that writes releases, publishing on main what `release` booted
+  # once its digest is the one `release` answered. No cache and nothing built
+  # but the build system, and the token only in the publishing step: the
+  # checkout keeps no credential, and the build step has none.
+  release-publish:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image-release
+          path: target/image-release
+      - run: cargo build -p toyos-build
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_RELEASE_DIGEST: ${{ needs.release.outputs.digest }}
+        run: cargo run -- --ci release-publish
 
   # One standing issue, found by title and commented on; a dispatch is somebody
   # watching the run, so only the schedule files.
   nightly-red:
-    needs: [host, build, guest, tcg, audio, portability-linux, portability-macos, release]
+    needs: [host, build, guest, tcg, audio, portability-linux, portability-macos, release, release-publish]
     if: ${{ !cancelled() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:

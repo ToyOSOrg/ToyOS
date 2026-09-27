@@ -19,9 +19,11 @@ use super::qemu::{self, BootOptions, QemuInstance};
 /// Boot the guest against three disks that belong to somebody else, and prove
 /// each comes back untouched: an NVMe disk whose TOYOS-DATA partition holds
 /// another system's volume, a USB disk whose table names only other systems'
-/// partitions, and a USB stick with no table. The two USB disks ride USB
-/// because the kernel drives one NVMe controller, and that one carries the
-/// first.
+/// partitions, and a USB stick with no table.
+///
+/// Two boots, one per USB disk, each beside the NVMe disk: the boot stick
+/// takes one of the USB driver's two disks, so a machine carries one more
+/// (`Profile::UsbDiskCrowd`'s third is never served).
 ///
 /// Lives here so the registration hunk in `toyos.rs` stays one line: every
 /// agent edits that file.
@@ -41,24 +43,48 @@ pub fn foreign_disk_untouched(
     let parts = other_systems_disk(&other, USB_BYTES)?;
     let bare = dir.join("bare-stick.img");
     filled(&bare, USB_BYTES, 0x5A)?;
-    let disks = [image, other, bare];
-    let before: Vec<Vec<u8>> = disks.iter().map(|disk| whole_device(disk)).collect();
 
     // The premise, checked before the boot rather than assumed: if this volume
     // somehow already parsed as a ToyOS volume, the kernel would mount it and
     // the assertion below would pass for the wrong reason.
-    if front(&disks[0], data_at, 4) == *b"BCFS" {
+    if front(&image, data_at, 4) == *b"BCFS" {
         return Err("the foreign volume starts with a bcachefs superblock".to_string());
     }
 
+    let sticks = [
+        (&other, format!("has {parts} partitions and none of them is ours")),
+        (&bare, "has no partition table we can use".to_string()),
+    ];
+    for (stick, read) in sticks {
+        untouched_beside(test_config, c_bins, rust_bins, &image, stick, &read)?;
+    }
+    for disk in [&image, &other, &bare] {
+        let _ = std::fs::remove_file(disk);
+    }
+    Ok(())
+}
+
+/// One boot with `nvme` and `stick` beside the boot stick, each compared byte
+/// for byte after QEMU has exited. `read` is what the kernel says reading
+/// `stick`'s table, so the comparison is about a disk it saw.
+fn untouched_beside(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    nvme: &Path,
+    stick: &Path,
+    read: &str,
+) -> Result<(), String> {
+    let disks = [nvme, stick];
+    let before: Vec<Vec<u8>> = disks.iter().map(|disk| whole_device(disk)).collect();
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
         rust_bins,
         BootOptions {
-            profile: qemu::Profile::UsbDiskCrowd,
-            nvme_image: Some(disks[0].clone()),
-            usb_images: disks[1..].to_vec(),
+            profile: qemu::Profile::UsbDisk,
+            nvme_image: Some(nvme.to_path_buf()),
+            usb_images: vec![stick.to_path_buf()],
             ..Default::default()
         },
     );
@@ -103,22 +129,15 @@ pub fn foreign_disk_untouched(
         }
     }
     drop(qemu);
-    // The USB disks were read, so the comparison below is about disks the
-    // kernel saw.
     let said = format!("{log}{tail}");
-    for read in [format!("has {parts} partitions and none of them is ours"), "has no partition table we can use".into()] {
-        if !said.contains(&read) {
-            return Err(format!("the kernel never said {read:?}, so it never read that disk\n{said}"));
-        }
+    if !said.contains(read) {
+        return Err(format!("the kernel never said {read:?}, so it never read {}\n{said}", stick.display()));
     }
 
     for (disk, before) in disks.iter().zip(&before) {
         if let Some(diff) = first_difference(before, &whole_device(disk)) {
             return Err(format!("the kernel wrote to {}, a disk it was not given: {diff}", disk.display()));
         }
-    }
-    for disk in &disks {
-        let _ = std::fs::remove_file(disk);
     }
     Ok(())
 }

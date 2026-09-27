@@ -1,13 +1,19 @@
 //! The image release: the disk a person downloads and boots under QEMU or
-//! writes to a stick, published by `cargo run -- --ci release`.
+//! writes to a stick, published by the nightly's `release` and
+//! `release-publish` jobs.
 //!
-//! **What is published is what booted**: the job builds `build::Boot::release`'s
-//! image once, boots a copy of it under the Linux command line its notes print
-//! ([`boots`]), and on `main` uploads those bytes. **Named by the commit**,
-//! [`tag`]: every build draws its partition GUIDs and a runner mints its own
-//! throwaway signing key (`src/signing.rs`), so a second build reproduces no
-//! byte of the first. **Kept to [`KEEP`]**: each publish deletes every older
-//! image release and its tag ([`stale`]).
+//! **What is published is what booted**: [`release`] builds
+//! `build::Boot::release`'s image once, boots a copy of it under the Linux
+//! command line its notes print ([`boots`]), and stages those bytes' assets in
+//! [`STAGED`]. **The token that writes releases never meets the code a build
+//! runs**: that job's token reads, and it hands the assets on as an artifact
+//! and their [`digest`] as a job output; [`publish`], in a job that restores no
+//! cache and builds only this crate, publishes them on `main` once their digest
+//! is the one it was handed. **Named by the commit**, [`tag`]: every build draws
+//! its partition GUIDs and a runner mints its own throwaway signing key
+//! (`src/signing.rs`), so a second build reproduces no byte of the first.
+//! **Kept to [`KEEP`]**: each publish deletes every older image release and its
+//! tag ([`stale`]).
 //!
 //! Not in `src/release.rs`, whose bytes are hashed into the toolchain's tag.
 
@@ -23,6 +29,7 @@ use serde_json::Value;
 use crate::arch::{Accel, Arch};
 use crate::fingerprint::{first_difference, whole_device};
 use crate::licence::{pending_owner, Subject};
+use crate::release::sha256_hex;
 
 /// What every image release's tag starts with; the rest is the commit's first
 /// twelve hex digits.
@@ -45,6 +52,21 @@ pub const NOTES_ASSET: &str = "README.md";
 
 /// The image's licence notice (`build::RELEASE_NOTICES`), as an asset.
 pub const LICENCES_ASSET: &str = "licences.txt";
+
+/// Every asset, in upload order.
+pub const ASSETS: [&str; 4] = [IMAGE_ASSET, SUMS_ASSET, NOTES_ASSET, LICENCES_ASSET];
+
+/// Where [`release`] stages the assets and [`publish`] reads them: the
+/// directory the nightly's artifact carries between the two jobs.
+pub const STAGED: &str = "target/image-release";
+
+/// What the publish job is handed the release job's [`digest`] in.
+pub const DIGEST_VAR: &str = "IMAGE_RELEASE_DIGEST";
+
+/// The defect behind the one disk the notes say a boot may write though it
+/// was not given it.
+const TWO_STICKS: &str =
+    "issues/boot-media/the-loader-writes-the-first-disk-carrying-its-log-guid-not-the-one-it-booted-from.md";
 
 /// One guest's ceiling from power-on to a painting desktop, unscaled: a
 /// liveness guard, never a verdict.
@@ -74,20 +96,6 @@ pub enum Host {
 
 impl Host {
     pub const ALL: [Host; 2] = [Host::MacosAppleSilicon, Host::LinuxKvm];
-
-    /// The one of the two this machine is, or, refused by name, that it is
-    /// neither: the notes print no line for it, so there is no line to boot.
-    pub fn this() -> Result<Host, String> {
-        if cfg!(target_os = "macos") && Arch::HOST == Some(Arch::Aarch64) {
-            return Ok(Host::MacosAppleSilicon);
-        }
-        if cfg!(target_os = "linux") && Arch::HOST == Some(Arch::X86_64) && Arch::X86_64.accel() == Accel::Kvm {
-            return Ok(Host::LinuxKvm);
-        }
-        Err("the release notes print a command line for an Apple Silicon Mac and for an x86-64 \
-             Linux whose /dev/kvm opens, and this host is neither"
-            .into())
-    }
 
     /// Where the notes say this host is.
     pub fn named(self) -> &'static str {
@@ -342,7 +350,7 @@ Write `{IMAGE}` to the whole stick, not to a partition of it; what the stick hel
     dd if={IMAGE} of=/dev/<the stick> bs=4194304
     sync
 
-A boot writes to the stick it booted from, and to another disk only where that disk carries a partition of ToyOS's DATA type, `{data}`, a type no other system uses. That is where `/apps`, `/config`, `/home` and `/state` live. Every other disk is read for its partition table and never written.
+A boot writes to the stick it booted from, and to another disk only where that disk carries a partition of ToyOS's DATA type, `{data}`, a type no other system uses. That is where `/apps`, `/config`, `/home` and `/state` live. Every other disk is read for its partition table and not written, but for one known defect: with two sticks made from one image plugged in, the loader can write its log to the one it did not boot from (`{TWO_STICKS}` in the ToyOS source).
 
 ## Terms
 
@@ -365,7 +373,6 @@ pub fn stale(listed: &[(String, String)], keep: usize) -> Vec<String> {
 
 /// Write every asset of `tag`'s release into `out`: the image at `image`
 /// compressed, its sum, the notes and the licence notice at `licences`.
-/// Answers the paths in upload order.
 pub fn write_assets(
     root: &Path,
     image: &Path,
@@ -373,9 +380,8 @@ pub fn write_assets(
     out: &Path,
     tag: &str,
     commit: &str,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<(), String> {
     use flate2::write::GzEncoder;
-    use sha2::{Digest, Sha256};
 
     let compressed = out.join(IMAGE_ASSET);
     let file = fs::File::create(&compressed).map_err(|e| format!("{}: {e}", compressed.display()))?;
@@ -385,16 +391,34 @@ pub fn write_assets(
     gz.finish().map_err(|e| format!("compressing {}: {e}", image.display()))?.flush().map_err(|e| e.to_string())?;
 
     let bytes = fs::read(&compressed).map_err(|e| format!("{}: {e}", compressed.display()))?;
-    let sum: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-    let sums = out.join(SUMS_ASSET);
-    fs::write(&sums, format!("{sum}  {IMAGE_ASSET}\n")).map_err(|e| e.to_string())?;
+    let sums = format!("{}  {IMAGE_ASSET}\n", sha256_hex(&bytes));
+    fs::write(out.join(SUMS_ASSET), sums).map_err(|e| e.to_string())?;
+    fs::write(out.join(NOTES_ASSET), notes(root, tag, commit)?).map_err(|e| e.to_string())?;
+    fs::copy(licences, out.join(LICENCES_ASSET)).map_err(|e| format!("{}: {e}", licences.display()))?;
+    Ok(())
+}
 
-    let readme = out.join(NOTES_ASSET);
-    fs::write(&readme, notes(root, tag, commit)?).map_err(|e| e.to_string())?;
-
-    let notice = out.join(LICENCES_ASSET);
-    fs::copy(licences, &notice).map_err(|e| format!("{}: {e}", licences.display()))?;
-    Ok(vec![compressed, sums, readme, notice])
+/// The SHA-256 of every asset's own, one `sha256sum` line each in upload
+/// order: what the release job answers and the publish job recomputes.
+/// Refused while `dir` holds anything but the four assets.
+pub fn digest(dir: &Path) -> Result<String, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut held = entries
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    held.sort();
+    let mut want = ASSETS.to_vec();
+    want.sort();
+    if held != want {
+        return Err(format!("{} holds {held:?}, and the assets are {ASSETS:?}", dir.display()));
+    }
+    let mut sums = String::new();
+    for name in ASSETS {
+        let bytes = fs::read(dir.join(name)).map_err(|e| format!("{}: {e}", dir.join(name).display()))?;
+        sums.push_str(&format!("{}  {name}\n", sha256_hex(&bytes)));
+    }
+    Ok(sha256_hex(sums.as_bytes()))
 }
 
 /// `gh <args>`: what it printed, or its exit and what it said.
@@ -456,13 +480,13 @@ fn releases(json: &str) -> Result<Vec<(String, String)>, String> {
         .collect()
 }
 
-/// Upload `assets` as a draft of `tag`, and publish it once GitHub holds the
-/// image, so a failed upload leaves nothing public.
-fn publish(root: &Path, tag: &str, commit: &str, notes: &Path, assets: &[PathBuf]) -> Result<(), String> {
-    let notes = notes.display().to_string();
+/// Upload the assets in `staged` as a draft of `tag`, and publish it once
+/// GitHub holds the image, so a failed upload leaves nothing public.
+fn create(root: &Path, tag: &str, commit: &str, staged: &Path) -> Result<(), String> {
+    let notes = staged.join(NOTES_ASSET).display().to_string();
     let mut args: Vec<&str> =
         vec!["release", "create", tag, "--draft", "--title", tag, "--target", commit, "--notes-file", &notes];
-    let assets: Vec<String> = assets.iter().map(|a| a.display().to_string()).collect();
+    let assets: Vec<String> = ASSETS.iter().map(|a| staged.join(a).display().to_string()).collect();
     args.extend(assets.iter().map(String::as_str));
     gh(root, &args)?;
     let drafted = held(root, tag)?;
@@ -470,53 +494,68 @@ fn publish(root: &Path, tag: &str, commit: &str, notes: &Path, assets: &[PathBuf
         return Err(format!("{tag} was created as a draft carrying {IMAGE_ASSET}, and GitHub holds {drafted:?}"));
     }
     gh(root, &["release", "edit", tag, "--draft=false", "--latest"])?;
-    let published = held(root, tag)?;
-    if published != Some(Held { draft: false, image: true }) {
-        return Err(format!("{tag} was published, and GitHub holds {published:?}"));
-    }
     Ok(())
 }
 
-/// `cargo run -- --ci release`: build the release image once, boot a copy of
-/// it under this host's line, and on `main` publish those bytes unless this
-/// commit's are, then delete the image releases past [`KEEP`].
-pub fn release(root: &Path) -> Result<String, String> {
-    if !std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true") {
-        return Err("only a runner releases an image".into());
-    }
+/// The commit this run is of, which the checkout has to be, as its [`tag`]
+/// and itself.
+fn this_run(root: &Path) -> Result<(String, String), String> {
     let commit = std::env::var("GITHUB_SHA").map_err(|_| "GITHUB_SHA is unset".to_string())?;
     let head = crate::pr::git(root, &["rev-parse", "HEAD"])?;
     if head != commit {
         return Err(format!("the checkout is {head} and the run is of {commit}"));
     }
-    let tag = tag(&commit)?;
-    let on_main = std::env::var("GITHUB_REF").ok().as_deref() == Some("refs/heads/main");
-    let host = Host::this()?;
+    Ok((tag(&commit)?, commit))
+}
 
+/// `cargo run -- --ci release`: build the release image once, boot a copy of
+/// it under the Linux line, stage its assets in [`STAGED`], and answer their
+/// [`digest`] as the step's `digest` output.
+pub fn release(root: &Path) -> Result<String, String> {
+    let (tag, commit) = this_run(root)?;
+    let host = Host::LinuxKvm;
+    let boot = crate::build::Boot::release(root);
+    let plan = crate::build::plan_for(root, &boot, false, &[]);
+    let image = crate::build::build(root, boot, false, &plan);
+    let scratch = toyos_tmpdir::TempDir::new("image-release");
+    let stick = scratch.join("stick.img");
+    fs::copy(&image, &stick).map_err(|e| format!("copy {} to {}: {e}", image.display(), stick.display()))?;
+    boots(root, host, &stick, DESKTOP, &scratch.join("qemu.stderr"))?;
+
+    let staged = root.join(STAGED);
+    if staged.exists() {
+        fs::remove_dir_all(&staged).map_err(|e| format!("remove {}: {e}", staged.display()))?;
+    }
+    fs::create_dir_all(&staged).map_err(|e| format!("create {}: {e}", staged.display()))?;
+    let licences = root.join(crate::build::RELEASE_NOTICES);
+    write_assets(root, &image, &licences, &staged, &tag, &commit)?;
+    let digest = digest(&staged)?;
+    crate::ci::output("digest", &digest)?;
+    Ok(format!("{tag} booted to its desktop under {host:?}'s line; its assets are staged, digest {digest}"))
+}
+
+/// `cargo run -- --ci release-publish`: the assets [`release`] staged, refused
+/// unless their [`digest`] is the one it answered, published on `main` unless
+/// this commit's are; then the image releases past [`KEEP`] deleted.
+pub fn publish(root: &Path) -> Result<String, String> {
+    let (tag, commit) = this_run(root)?;
+    let staged = root.join(STAGED);
+    let handed = std::env::var(DIGEST_VAR).map_err(|_| format!("{DIGEST_VAR} is unset"))?;
+    let digest = digest(&staged)?;
+    if digest != handed {
+        return Err(format!("the assets' digest is {digest}, and the release job answered {handed:?}"));
+    }
+    if std::env::var("GITHUB_REF").ok().as_deref() != Some("refs/heads/main") {
+        return Ok(format!("{tag}'s assets arrived as the release job staged them; off main, so not published"));
+    }
     let mut said = match held(root, &tag)? {
         Some(Held { draft: false, image: true }) => format!("{tag} is already published"),
         Some(other) => return Err(format!("GitHub holds {tag} as {other:?}: a failed run's, to delete by hand")),
         None => {
-            let boot = crate::build::Boot::release(root);
-            let plan = crate::build::plan_for(root, &boot, false, &[]);
-            let image = crate::build::build(root, boot, false, &plan);
-            let out = toyos_tmpdir::TempDir::new("image-release");
-            let stick = out.join("stick.img");
-            fs::copy(&image, &stick).map_err(|e| format!("copy {} to {}: {e}", image.display(), stick.display()))?;
-            boots(root, host, &stick, DESKTOP, &out.join("qemu.stderr"))?;
-            fs::remove_file(&stick).map_err(|e| format!("{}: {e}", stick.display()))?;
-            if !on_main {
-                return Ok(format!("{tag} booted to its desktop under {host:?}'s line; off main, so not published"));
-            }
-            let licences = root.join(crate::build::RELEASE_NOTICES);
-            let assets = write_assets(root, &image, &licences, &out, &tag, &commit)?;
-            publish(root, &tag, &commit, &out.join(NOTES_ASSET), &assets)?;
-            format!("{tag} booted to its desktop under {host:?}'s line and is published")
+            create(root, &tag, &commit, &staged)?;
+            format!("{tag} is published")
         }
     };
-    if !on_main {
-        return Ok(said);
-    }
     let old = stale(&listed(root)?, KEEP);
     for old in &old {
         gh(root, &["release", "delete", old, "--cleanup-tag", "--yes"])?;
@@ -626,14 +665,18 @@ mod tests {
         }
     }
 
-    /// What `sha256sum -c` checks is the compressed asset's own digest, the
-    /// asset decompresses to the image byte for byte, and the notice is
-    /// carried as it was written.
+    /// The one disk the notes say a boot may write though it was not given it
+    /// is cited by an issue that is open, so the sentence goes when the defect
+    /// does.
     #[test]
-    fn the_sum_is_the_compressed_images_and_it_decompresses_to_the_image() {
-        use sha2::{Digest, Sha256};
-        use std::io::Read;
-        let dir = toyos_tmpdir::TempDir::new("image-assets");
+    fn the_notes_cite_the_open_defect_behind_the_disk_a_boot_may_write() {
+        assert!(notes_of_a_commit().contains(&format!("`{TWO_STICKS}`")));
+        let issue = fs::read_to_string(root().join(TWO_STICKS)).unwrap_or_else(|e| panic!("{TWO_STICKS}: {e}"));
+        assert!(issue.contains("\nstatus: open\n"), "{TWO_STICKS} is not open");
+    }
+
+    /// Four assets written into a directory of their own.
+    fn staged(dir: &Path) -> PathBuf {
         let image = dir.join("in.img");
         let bytes: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).chain(std::iter::repeat_n(0, 1 << 20)).collect();
         fs::write(&image, &bytes).unwrap();
@@ -641,17 +684,48 @@ mod tests {
         fs::write(&licences, "the notice").unwrap();
         let out = dir.join("out");
         fs::create_dir(&out).unwrap();
-        let assets = write_assets(&root(), &image, &licences, &out, "image-x86_64-c55189490123", &"c".repeat(40)).unwrap();
-        let names: Vec<String> =
-            assets.iter().map(|a| a.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, [IMAGE_ASSET, SUMS_ASSET, NOTES_ASSET, LICENCES_ASSET]);
-        assert_eq!(fs::read_to_string(out.join(LICENCES_ASSET)).unwrap(), "the notice");
+        write_assets(&root(), &image, &licences, &out, "image-x86_64-c55189490123", &"c".repeat(40)).unwrap();
+        out
+    }
 
+    /// What `sha256sum -c` checks is the compressed asset's own digest, the
+    /// asset decompresses to the image byte for byte, and the notice is
+    /// carried as it was written.
+    #[test]
+    fn the_sum_is_the_compressed_images_and_it_decompresses_to_the_image() {
+        use std::io::Read;
+        let dir = toyos_tmpdir::TempDir::new("image-assets");
+        let out = staged(&dir);
+        assert_eq!(fs::read_to_string(out.join(LICENCES_ASSET)).unwrap(), "the notice");
         let gz = fs::read(out.join(IMAGE_ASSET)).unwrap();
-        let sum: String = Sha256::digest(&gz).iter().map(|b| format!("{b:02x}")).collect();
+        let sum = sha256_hex(&gz);
         assert_eq!(fs::read_to_string(out.join(SUMS_ASSET)).unwrap(), format!("{sum}  {IMAGE_ASSET}\n"));
         let mut back = Vec::new();
         flate2::read::GzDecoder::new(&gz[..]).read_to_end(&mut back).unwrap();
-        assert!(back == bytes, "the asset does not decompress to the image");
+        assert!(back == fs::read(dir.join("in.img")).unwrap(), "the asset does not decompress to the image");
+    }
+
+    /// The digest the publish job checks moves with a byte of any asset, and a
+    /// directory holding more or fewer files than the assets is refused.
+    #[test]
+    fn the_digest_covers_every_asset_and_refuses_anything_else() {
+        let dir = toyos_tmpdir::TempDir::new("image-digest");
+        let out = staged(&dir);
+        let whole = digest(&out).unwrap();
+        for asset in ASSETS {
+            let at = out.join(asset);
+            let bytes = fs::read(&at).unwrap();
+            let mut changed = bytes.clone();
+            changed[0] ^= 1;
+            fs::write(&at, &changed).unwrap();
+            assert_ne!(digest(&out).unwrap(), whole, "{asset} is outside the digest");
+            fs::write(&at, &bytes).unwrap();
+        }
+        assert_eq!(digest(&out).unwrap(), whole);
+        fs::write(out.join("extra"), "").unwrap();
+        assert!(digest(&out).unwrap_err().contains("extra"));
+        fs::remove_file(out.join("extra")).unwrap();
+        fs::remove_file(out.join(NOTES_ASSET)).unwrap();
+        assert!(digest(&out).is_err(), "a directory without the notes was digested");
     }
 }

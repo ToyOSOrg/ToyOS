@@ -1232,50 +1232,80 @@ fn ls_files(root: &Path, pathspecs: &[String]) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// The fork's `library/`, checked out at the commit this tree pins. A checkout
-/// whose `rust/` was never initialised — a CI runner's — fetches that commit
-/// alone. One whose toolchain was installed fetches it beside `rust/` instead:
-/// a source tree there makes the toolchain the checkout's own to build
-/// (`toolchain::owner`).
-fn std_library(root: &Path) -> Result<PathBuf, String> {
-    if matches!(crate::toolchain::owner(root), crate::toolchain::Owner::Installed) {
-        return fetched_library(root);
+/// The fork's `library/` at the commit this tree pins: a linked worktree's
+/// fork checkout, `rust/library` where this checkout holds it, and everywhere
+/// else — a runner, an installed toolchain — [`fetched_library`]. Asks the
+/// network, so it is called with no build lock held.
+pub fn std_library(root: &Path) -> Result<PathBuf, String> {
+    if let crate::toolchain::Owner::Elsewhere(_) = crate::toolchain::owner(root) {
+        return Ok(crate::sysroot::fork_checkout(root).join("library"));
     }
-    let fork = crate::sysroot::fork_checkout(root);
-    if !fork.join("library/Cargo.toml").exists() {
-        run(
-            Command::new("git")
-                .args(["submodule", "update", "--init", "--depth", "1", "rust"])
-                .current_dir(root),
-            "git submodule update --init --depth 1 rust",
-        )?;
+    let library = root.join("rust/library");
+    if library.join("Cargo.toml").is_file() {
+        return Ok(library);
     }
-    Ok(fork.join("library"))
+    fetched_library(root)
 }
 
-/// Where the fork is fetched to where `rust/` may hold no source.
-const FETCHED_FORK: &str = "target/licence/fork";
+/// Where the fork is fetched to where `rust/` holds no source. A directory of
+/// the checkout's own, because std's manifest names `toyos` and `toyos-abi`
+/// three levels above its crates; hidden and ignored, as `.build-locks/` is.
+const FETCHED_FORK: &str = ".licence-fork";
+
+/// Where a fetch is made before it is renamed into place, and where the fork
+/// it replaces goes before it is removed: on the checkout's own filesystem.
+const FETCHING: &str = "target/licence/fork.partial";
+const REPLACED: &str = "target/licence/fork.replaced";
+
+/// What of the fork is checked out: its `library/` and its licence texts.
+const SPARSE: [&str; 4] = ["/library/", "/COPYRIGHT", "/LICENSE-*", "/LICENSES/"];
 
 /// The fork's `library/` and its own licence files at the pinned commit, and
-/// nothing else of it.
+/// nothing else of it. Fetched beside its place and renamed into it, so what
+/// is there is always a whole fetch; a source tree at `rust/` would make the
+/// toolchain the checkout's own to build (`toolchain::owner`).
 fn fetched_library(root: &Path) -> Result<PathBuf, String> {
-    let fork = root.join(FETCHED_FORK);
     let commit = crate::sysroot::pinned_fork(root);
-    let git = |args: &[&str]| -> Result<Vec<u8>, String> {
-        run(Command::new("git").args(args).current_dir(&fork), &format!("git {}", args.join(" ")))
+    let fork = root.join(FETCHED_FORK);
+    let git = |dir: &Path, args: &[&str]| -> Result<Vec<u8>, String> {
+        run(Command::new("git").args(args).current_dir(dir), &format!("git {}", args.join(" ")))
     };
-    if fork.join(".git").exists() && git(&["rev-parse", "HEAD"])? == format!("{commit}\n").into_bytes() {
+    let sparse: String = SPARSE.iter().map(|p| format!("{p}\n")).collect();
+    let pinned = || -> Result<bool, String> {
+        Ok(fork.is_dir()
+            && git(&fork, &["rev-parse", "HEAD"])? == format!("{commit}\n").into_bytes()
+            && git(&fork, &["sparse-checkout", "list"])? == sparse.as_bytes())
+    };
+    if pinned()? {
+        return Ok(fork.join("library"));
+    }
+    let _fetching = crate::buildlock::fork_fetch(root);
+    if pinned()? {
         return Ok(fork.join("library"));
     }
     let url = fork_url(root)?;
-    if fork.exists() {
-        std::fs::remove_dir_all(&fork).map_err(|e| format!("remove {}: {e}", fork.display()))?;
+    let (partial, replaced) = (root.join(FETCHING), root.join(REPLACED));
+    // Under the lock, either is only ever what a call cut short left.
+    for dir in [&partial, &replaced] {
+        if dir.exists() {
+            std::fs::remove_dir_all(dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+        }
     }
-    std::fs::create_dir_all(&fork).map_err(|e| format!("create {}: {e}", fork.display()))?;
-    git(&["init", "-q"])?;
-    git(&["fetch", "-q", "--depth", "1", "--filter=blob:none", &url, &commit])?;
-    git(&["sparse-checkout", "set", "--no-cone", "/library/", "/COPYRIGHT", "/LICENSE-*", "/LICENSES/"])?;
-    git(&["checkout", "-q", "FETCH_HEAD"])?;
+    std::fs::create_dir_all(&partial).map_err(|e| format!("create {}: {e}", partial.display()))?;
+    git(&partial, &["init", "-q"])?;
+    git(&partial, &["fetch", "-q", "--depth", "1", "--filter=blob:none", &url, &commit])?;
+    git(&partial, &[&["sparse-checkout", "set", "--no-cone"][..], &SPARSE].concat())?;
+    git(&partial, &["checkout", "-q", "FETCH_HEAD"])?;
+    let rename = |from: &Path, to: &Path| {
+        std::fs::rename(from, to).map_err(|e| format!("rename {} to {}: {e}", from.display(), to.display()))
+    };
+    if fork.exists() {
+        rename(&fork, &replaced)?;
+    }
+    rename(&partial, &fork)?;
+    if replaced.exists() {
+        std::fs::remove_dir_all(&replaced).map_err(|e| format!("remove {}: {e}", replaced.display()))?;
+    }
     Ok(fork.join("library"))
 }
 
@@ -1310,10 +1340,15 @@ struct Walk {
     files: BTreeMap<String, Vec<String>>,
 }
 
-/// Walk every crate `shipped` names, libc and std, judging each package into
-/// `report`, and read where committed files ship from. `root` is canonical:
-/// cargo names every manifest by its canonical path.
-fn walk(root: &Path, shipped: crate::build::Shipped, report: &mut Report) -> Result<Walk, String> {
+/// Walk every crate `shipped` names, libc, and std out of `library`, judging
+/// each package into `report`, and read where committed files ship from.
+/// `root` is canonical: cargo names every manifest by its canonical path.
+fn walk(
+    root: &Path,
+    shipped: crate::build::Shipped,
+    library: &Path,
+    report: &mut Report,
+) -> Result<Walk, String> {
     let mut roots: Vec<(PathBuf, Features)> = shipped.crates.into_iter().collect();
     roots.push((
         root.join(crate::libc::CRATE),
@@ -1345,7 +1380,7 @@ fn walk(root: &Path, shipped: crate::build::Shipped, report: &mut Report) -> Res
     // committed lock is stale by design: it is re-locked into a scratch copy,
     // and the fork's is never written. `RUSTC_BOOTSTRAP` because the fork's
     // manifests use cargo features a stable cargo otherwise refuses.
-    let library = std_library(root)?;
+    let library = canonical(library)?;
     let scratch = root.join("target/licence");
     std::fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
     let lock = scratch.join("Cargo.lock");
@@ -1412,7 +1447,7 @@ fn canonical(root: &Path) -> Result<PathBuf, String> {
 pub fn judge(root: &Path) -> Result<String, String> {
     let root = &canonical(root)?;
     let mut report = Report::default();
-    let walk = walk(root, crate::build::shipped(root)?, &mut report)?;
+    let walk = walk(root, crate::build::shipped(root)?, &std_library(root)?, &mut report)?;
     judge_files(COMMITTED_FILES, &walk.tracked, &walk.shipping, &mut report);
     judge_notice(&walk.sections, &walk.files, COMMITTED_FILES, &walk.shipping, &mut report);
     verdict(report, EXCEPTIONS)
@@ -1466,8 +1501,8 @@ fn licence_files(p: &Reached) -> Result<Vec<PathBuf>, String> {
 
 /// The standard texts of the licences `p` declares, from the fork's
 /// `LICENSES/`, which holds one `<SPDX id>.txt` per licence: each of an `AND`,
-/// an exception with its licence, and of an `OR` the first branch held whole.
-/// `None` where no branch is.
+/// an exception with its licence, and of an `OR` its Apache-2.0 branch where
+/// it has one, else the first branch held whole. `None` where no branch is.
 fn standard_texts(p: &Reached, fork: &Path) -> Option<Vec<PathBuf>> {
     fn held(expr: &Expr, dir: &Path) -> Option<Vec<PathBuf>> {
         let text = |id: &str| Some(dir.join(format!("{id}.txt"))).filter(|f| f.is_file());
@@ -1475,7 +1510,12 @@ fn standard_texts(p: &Reached, fork: &Path) -> Option<Vec<PathBuf>> {
             Expr::Id(id) => Some(vec![text(id)?]),
             Expr::With(id, exception) => Some(vec![text(id)?, text(exception)?]),
             Expr::And(parts) => Some(parts.iter().map(|p| held(p, dir)).collect::<Option<Vec<_>>>()?.concat()),
-            Expr::Or(parts) => parts.iter().find_map(|p| held(p, dir)),
+            // Apache-2.0's text is whole as it stands; MIT's asks for a
+            // copyright line that a package publishing no text never gave.
+            Expr::Or(parts) => {
+                let apache = parts.iter().filter(|p| matches!(p, Expr::Id(id) if id == "Apache-2.0"));
+                apache.chain(parts).find_map(|p| held(p, dir))
+            }
         }
     }
     held(&parse(p.licence.as_deref()?).ok()?, &fork.join("LICENSES"))
@@ -1506,14 +1546,15 @@ impl Texts {
     }
 }
 
-/// The licence notice of an image built from `shipped`: every package the
-/// walk reaches with its licence, where its source is and the texts it
-/// carries; every `NOTICE` section over a file it ships, with its terms and
-/// texts, less what [`pending_owner`] names; and each text once. Refused while
-/// any package carries no licence text.
-pub fn notices(root: &Path, shipped: crate::build::Shipped) -> Result<String, String> {
+/// The licence notice of an image built from `shipped` with std out of
+/// `library` ([`std_library`]): every package the walk reaches with its
+/// licence, where its source is and the texts it carries; every `NOTICE`
+/// section over a file it ships, with its terms and texts, less what
+/// [`pending_owner`] names; and each text once. Refused while any package
+/// carries no licence text.
+pub fn notices(root: &Path, shipped: crate::build::Shipped, library: &Path) -> Result<String, String> {
     let root = &canonical(root)?;
-    let walk = walk(root, shipped, &mut Report::default())?;
+    let walk = walk(root, shipped, library, &mut Report::default())?;
     let fork = walk.library.parent().ok_or("std's library/ is in no directory")?;
     let (url, commit) = (fork_url(root)?, crate::sysroot::pinned_fork(root));
     let mut texts = Texts::default();
@@ -1521,9 +1562,10 @@ pub fn notices(root: &Path, shipped: crate::build::Shipped) -> Result<String, St
     let mut out = String::from(
         "Licence notices\n===============\n\n\
          Every package in the dependency graphs of this image's kernel, loader and programs,\n\
-         some of them compiled only for other platforms, with its licence, where its source\n\
-         is, and its licence texts; every third-party file on the image, with its terms; and\n\
-         each of those texts once, at the end.\n\n\
+         less those depended on only under another target's triple, with its licence, where\n\
+         its source is, and its licence texts: some of them are compiled only for other\n\
+         platforms. Then every third-party file on the image, with its terms; and each of\n\
+         those texts once, at the end.\n\n\
          Packages\n--------\n",
     );
     let guest: Vec<&str> = Arch::ALL.iter().flat_map(|a| [a.userland(), a.kernel(), a.loader()]).collect();
@@ -2284,15 +2326,111 @@ prose.
         assert!(why.contains("gone.txt"), "{why}");
     }
 
-    /// The release's notice: every package its walk reaches carries a licence
-    /// text, the loader's MPL crates name where their source is, std carries
-    /// the fork's texts, and every third-party file the release ships is there
-    /// while nothing pending the owner is.
+    /// `git <args>` in `dir`, which has to succeed: what it printed, trimmed.
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// `root` pins the fork at `url` at `commit`, as `.gitmodules` and the
+    /// index say it.
+    fn pinning(root: &Path, url: &str, commit: &str) {
+        let modules = format!("[submodule \"rust\"]\n\tpath = rust\n\turl = {url}\n");
+        std::fs::write(root.join(".gitmodules"), modules).unwrap();
+        git_in(root, &["update-index", "--add", "--cacheinfo", &format!("160000,{commit},rust")]);
+    }
+
+    /// The fetched fork is a whole fetch or nothing: one that failed leaves
+    /// nothing a later call refuses on, only `library/` and the licence texts
+    /// are checked out, a whole fetch is reused without the network, and a new
+    /// pin replaces it.
+    #[test]
+    fn a_fetch_cut_short_is_fetched_again_and_a_new_pin_replaces_the_fork() {
+        let tmp = toyos_tmpdir::TempDir::new("fetched-fork");
+        let remote = tmp.join("fork");
+        for dir in ["library", "LICENSES", "src"] {
+            std::fs::create_dir_all(remote.join(dir)).unwrap();
+        }
+        let files = [
+            ("library/Cargo.toml", "[workspace]\n"),
+            ("COPYRIGHT", "one"),
+            ("LICENSE-MIT", "mit"),
+            ("LICENSES/MIT.txt", "mit"),
+            ("x.py", ""),
+            ("src/lib.rs", ""),
+        ];
+        for (file, text) in files {
+            std::fs::write(remote.join(file), text).unwrap();
+        }
+        git_in(&remote, &["init", "-q"]);
+        git_in(&remote, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+        git_in(&remote, &["config", "uploadpack.allowFilter", "true"]);
+        git_in(&remote, &["add", "-A"]);
+        git_in(&remote, &["commit", "-q", "-m", "one"]);
+        let first = git_in(&remote, &["rev-parse", "HEAD"]);
+        let root = tmp.join("toyos");
+        std::fs::create_dir(&root).unwrap();
+        git_in(&root, &["init", "-q"]);
+        let url = format!("file://{}", remote.display());
+        let gone = format!("file://{}", tmp.join("gone").display());
+
+        pinning(&root, &gone, &first);
+        assert!(fetched_library(&root).is_err(), "a fork nobody serves was fetched");
+        pinning(&root, &url, &first);
+        let library = fetched_library(&root).unwrap_or_else(|why| panic!("{why}"));
+        let fork = library.parent().unwrap();
+        for file in ["library/Cargo.toml", "COPYRIGHT", "LICENSE-MIT", "LICENSES/MIT.txt"] {
+            assert!(fork.join(file).is_file(), "{file} was not checked out");
+        }
+        assert!(!fork.join("x.py").exists() && !fork.join("src").exists(), "more than the licence sources was checked out");
+
+        pinning(&root, &gone, &first);
+        assert_eq!(fetched_library(&root).unwrap_or_else(|why| panic!("{why}")), library, "a whole fetch was not reused");
+
+        std::fs::write(remote.join("COPYRIGHT"), "two").unwrap();
+        git_in(&remote, &["commit", "-q", "-am", "two"]);
+        pinning(&root, &url, &git_in(&remote, &["rev-parse", "HEAD"]));
+        let library = fetched_library(&root).unwrap_or_else(|why| panic!("{why}"));
+        assert_eq!(std::fs::read_to_string(library.parent().unwrap().join("COPYRIGHT")).unwrap(), "two");
+    }
+
+    /// A package that publishes no text is given Apache-2.0's where its `OR`
+    /// offers it, wherever it stands, and otherwise the first branch the fork
+    /// holds.
+    #[test]
+    fn an_or_is_given_apache_2_0s_standard_text_where_it_is_a_branch() {
+        let fork = toyos_tmpdir::TempDir::new("standard-texts");
+        std::fs::create_dir(fork.join("LICENSES")).unwrap();
+        for id in ["MIT", "Apache-2.0", "BSD-3-Clause"] {
+            std::fs::write(fork.join(format!("LICENSES/{id}.txt")), id).unwrap();
+        }
+        let given = |licence: &str| -> Vec<String> {
+            let p = Reached { licence: Some(licence.into()), ..reached(&fork, None, None) };
+            let texts = standard_texts(&p, &fork).unwrap_or_else(|| panic!("{licence}: no text"));
+            texts.iter().map(|t| file_name(t.to_str().unwrap()).to_string()).collect()
+        };
+        assert_eq!(given("MIT OR Apache-2.0"), ["Apache-2.0.txt"]);
+        assert_eq!(given("MIT/Apache-2.0"), ["Apache-2.0.txt"]);
+        assert_eq!(given("Zlib OR MIT OR BSD-3-Clause"), ["MIT.txt"]);
+    }
+
+    /// The release's notice, with std fetched the way the release job fetches
+    /// it: every package its walk reaches carries a licence text, the loader's
+    /// MPL crates name where their source is, std carries the fork's texts, and
+    /// every third-party file the release ships is there while nothing pending
+    /// the owner is.
     #[test]
     fn the_release_notice_carries_every_package_and_file_it_ships() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let parts = crate::build::Boot::release(root).parts(root).unwrap();
-        let text = notices(root, parts).unwrap_or_else(|why| panic!("{why}"));
+        let library = fetched_library(root).unwrap_or_else(|why| panic!("{why}"));
+        let text = notices(root, parts, &library).unwrap_or_else(|why| panic!("{why}"));
         let block = |head: &str| -> &str {
             let at = text.find(&format!("\n{head}")).unwrap_or_else(|| panic!("no {head:?} in the notice"));
             text[at + 1..].split("\n\n").next().unwrap()

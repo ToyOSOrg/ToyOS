@@ -726,11 +726,6 @@ const CI_PACKAGES: &[Package] = &[
               src/release.rs and src/ci.rs ask GitHub and the crates.io index with it",
     },
     Package {
-        name: "gh",
-        why: "GitHub's CLI, which the image release publishes with (src/imagerelease.rs), in the \
-              one container job that publishes",
-    },
-    Package {
         name: "git",
         why: "the version control this repository is, and `REQUIRED` in src/main.rs",
     },
@@ -815,7 +810,13 @@ const CI_ACTIONS: &[Action] = &[
     },
     Action {
         name: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-        why: "how a red guest job keeps its boots' serial logs (v4.6.2)",
+        why: "how a red guest job keeps its boots' serial logs, and how the image release's \
+              boot job hands its assets to the job that publishes them (v4.6.2)",
+    },
+    Action {
+        name: "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        why: "the read half of the same store: the image release's publish job takes the \
+              assets the boot job staged (v4.3.0)",
     },
     Action {
         name: "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18",
