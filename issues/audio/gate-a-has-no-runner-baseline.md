@@ -124,3 +124,12 @@ fresh samples agree with each other and differ from the dev host's TCG
 sample, so this is the instrument, as above. Until a per-host baseline
 exists, whether a KVM runner's gate A reds depends on where its median lands
 against the TCG sample's.
+
+The four `audio (2)` samples of `audio_tone_load.smp1` around #527 have
+medians of 6453 (before #527, passed), 6648 (main at 1ce71831, red), 6190
+(`nightly-green2` at dbf4ace5, passed) and 6520 (`nightly-green2` at
+c2715880, red, run 36297455432). Mann-Whitney of each later sample against
+the one before #527, on the gate's 30-value arrays: z=1.40, -1.20 and 0.84.
+None is a difference at the gate's alpha. The runner's sample did not move.
+The gate's verdict flips because that sample's median sits about 0.8 ms above
+the TCG sample's 5765, right at the gate's edge.
