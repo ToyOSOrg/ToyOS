@@ -36,7 +36,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 > A snapshot, deliberately shallow — always read the code.
 
-**Kernel** — minimal; new additions are discussed and justified. Resource management, scheduling, process lifecycle, filesystem, device arbitration. 2 MB pages, demand paging, PIE binaries, full SMP.
+**Kernel** — minimal; new additions are discussed and justified. Resource management, scheduling, process lifecycle, filesystem, device arbitration. 2 MB pages, demand paging, PIE binaries, full SMP. **The kernel creates no thread but the per-CPU idle loop:** kernel work runs, bounded, on the thread or interrupt that caused it and is charged to it; long-running work with no owner is a userland server's.
 
 **Userspace daemons** — compositor, netd, soundd, sshd, logd. Each claims a device or capability from the kernel and serves its function; crash one and the kernel is fine.
 
