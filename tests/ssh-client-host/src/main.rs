@@ -21,6 +21,7 @@
 //! toyos_ssh abandon <host> <port> <key> <command…>       → ok <bytes>
 //! toyos_ssh fire    <host> <port> <key> <command…>
 //!                                                → accepted | refused | closed | silent
+//!                                                  | exited <n>
 //! toyos_ssh put     <host> <port> <key> <local> <remote> → ok <bytes>
 //! toyos_ssh get     <host> <port> <key> <remote> <local> → ok <bytes>
 //! toyos_ssh list    <host> <port> <key> <remote> → entry <name> <size>…, ok <n>
@@ -331,13 +332,25 @@ async fn fire(host: &str, port: &str, key: &str, command: &str) -> Result<(), St
     // whose connection is gone, so a client that left the moment the request
     // was accepted could end the very `reboot` it asked for before it reached
     // its syscall.
+    // A status is the program coming back, which one that ended the machine
+    // never does: `exited <n>` rather than `accepted`.
+    let mut exited = None;
     if answer == "accepted" {
         let _ = tokio::time::timeout(FIRE_ANSWER, async {
-            while !matches!(channel.wait().await, Some(ChannelMsg::Close) | None) {}
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::ExitStatus { exit_status }) => exited = Some(exit_status),
+                    Some(ChannelMsg::Close) | None => break,
+                    Some(_) => {}
+                }
+            }
         })
         .await;
     }
-    println!("{answer}");
+    match exited {
+        Some(status) => println!("exited {status}"),
+        None => println!("{answer}"),
+    }
     // Dropped rather than disconnected: the machine this was fired at may
     // already be gone, and a goodbye to it is one more wait on nothing.
     drop(session);
