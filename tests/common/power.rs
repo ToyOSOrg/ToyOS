@@ -942,7 +942,6 @@ pub fn syscall_death_resets(
 ) -> Result<String, String> {
     let options = BootOptions {
         kernel_params: &["panic-reboot-fast"],
-        kernel_features: toyos_build::build::TEST_KERNEL,
         ready_marker: qemu::DEFAULT_READY,
         ..panicked()
     };
@@ -970,7 +969,7 @@ fn died_and_reset(
         dead.must_say(want)?;
     }
     dead.must_say(&panic_armed())?;
-    eprintln!("  [power] {:?}: QEMU reset the machine inside {budget:?}", said.first());
+    eprintln!("  [power] {said:?}: QEMU reset the machine inside {budget:?}");
     Ok(dead.text().to_string())
 }
 
