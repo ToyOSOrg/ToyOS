@@ -22,4 +22,4 @@ execution (`explored`). No other model in `kernel-loom/` or
 `toyos-sched/loom` has been counted.
 
 **Exit**: every loom model in the tree shown to run more than one execution —
-the same refusal `explored` makes, applied to each .
+the same refusal `explored` makes, applied to each.
