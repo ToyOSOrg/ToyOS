@@ -4,13 +4,20 @@
 //! `sleep` word on its head's, so the client's stores and the server's never
 //! share a line.
 
-use toyos_transport::{Consumer, Cursors, Place, Producer, Violation, Word};
+use toyos_transport::{Consumer, Cursors, Geometry, Place, Producer, Violation, Word};
 
 /// A session's whole region: the one size shared memory comes in.
-pub const SESSION_BYTES: usize = 2 * 1024 * 1024;
+pub const SESSION_BYTES: usize = Geometry::BYTES as usize;
 
 /// The unit every request is in, and the unit the arena is cut into.
 pub const BLOCK_BYTES: usize = 4096;
+
+/// The arena: whole blocks after the rings' page, which a request names by
+/// run.
+pub const ARENA: Geometry = match Geometry::new(BLOCK_BYTES as u32) {
+    Some(arena) => arena,
+    None => panic!("a block is no longer than the arena"),
+};
 
 /// How many requests, and so how many completions, one session has in flight.
 pub const DEPTH: u32 = 64;
@@ -64,16 +71,5 @@ pub fn server<W: Word>(page: &[W]) -> Result<ServerRings, Violation> {
     Ok((Consumer::new(page, REQUESTS)?, Producer::new(page, COMPLETIONS)?))
 }
 
-/// Where the arena starts, in bytes: the block after the rings' page.
-pub const ARENA_OFFSET: usize = BLOCK_BYTES;
-
-/// The arena's blocks; a request's `arena` is an index below this.
-pub const ARENA_BLOCKS: u32 = ((SESSION_BYTES - ARENA_OFFSET) / BLOCK_BYTES) as u32;
-
-const _: () = assert!(RING_WORDS * 4 <= ARENA_OFFSET);
-const _: () = assert!(MAX_REQUEST_BLOCKS <= ARENA_BLOCKS);
-
-/// The byte offset of arena block `block` in the region.
-pub const fn arena_byte(block: u32) -> usize {
-    ARENA_OFFSET + block as usize * BLOCK_BYTES
-}
+const _: () = assert!(RING_WORDS * 4 <= Geometry::HEADER_BYTES as usize);
+const _: () = assert!(MAX_REQUEST_BLOCKS <= ARENA.slots());

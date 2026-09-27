@@ -4,7 +4,10 @@
 //! ([`Inflight::answer`]) or, when the session ends, by [`Inflight::end`] —
 //! never by both, and never by a completion naming a tag from before its
 //! slot was last filled. A tag is the slot's index under the slot's own
-//! sequence, so a tag answered, ended or replayed names nothing.
+//! sequence, so a tag answered, ended or replayed names nothing. The sequence
+//! wraps: a tag replayed a wrap later answers the request then in its slot,
+//! which a server could answer by naming that request's own tag, so it grants
+//! the peer nothing.
 
 use crate::{Untrusted, Violation};
 
@@ -55,6 +58,11 @@ impl<T, const D: usize> Inflight<T, D> {
         slot.value.take().ok_or(Violation::Tag)
     }
 
+    /// What is in flight, in no order.
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.slots.iter().filter_map(|slot| slot.value.as_ref())
+    }
+
     /// The session ended: `each` is given every tag in flight, once, with what
     /// it carried, and none of them is answered again.
     pub fn end(&mut self, mut each: impl FnMut(u32, T)) {
@@ -90,6 +98,9 @@ mod tests {
         assert_eq!(inflight.answer(Untrusted::new(a)), Err(Violation::Tag), "answered twice");
         let c = inflight.insert("c").unwrap();
         assert_ne!(c, a, "the slot's next tag is not its last");
+        let mut held: Vec<&str> = inflight.values().copied().collect();
+        held.sort_unstable();
+        assert_eq!(held, ["b", "c"], "what is in flight, and only that");
         assert_eq!(inflight.answer(Untrusted::new(a)), Err(Violation::Tag), "a replay answers nothing");
         assert_eq!(inflight.answer(Untrusted::new(2)), Err(Violation::Tag), "an index past the table");
         assert_eq!(inflight.answer(Untrusted::new(b)), Ok("b"));

@@ -1,12 +1,13 @@
 //! Every ordering of a client, a server, a device and their failures.
 //!
 //! A scripted caller asks for writes and flushes; the rings between the client
-//! and the server are queues; the server is [`ServerSession`] over a device of
-//! two blocks with a volatile cache. [`explore`] runs, depth first and
-//! exhaustively, every interleaving of: the caller asking for its next step,
-//! the server taking a request, the device completing any one it holds, **the
-//! device failing any one it holds** (not done, answered so), the client
-//! reading a completion, **the device being reset** under whatever is in
+//! and the server are queues, and the session page's own rings are driven
+//! beside them and held to them ([`Queues`]); the server is [`ServerSession`]
+//! over a device of two blocks with a volatile cache. [`explore`] runs, depth
+//! first and exhaustively, every interleaving of: the caller asking for its
+//! next step, the server taking a request, the device completing any one it
+//! holds, **the device failing any one it holds** (not done, answered so), the
+//! client reading a completion, **the device being reset** under whatever is in
 //! flight (each command dropped, or run before the stop with its completion
 //! read or not; the cache kept or dropped), **the server dying** (each command
 //! dropped or applied; the cache kept or dropped; the rings left as they
@@ -29,12 +30,17 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::Cell;
+use core::fmt;
+use core::sync::atomic::Ordering;
 use std::collections::HashSet;
 
 use toyos_blockhold::Holds;
+use toyos_transport::{Untrusted, Word};
 
 use crate::client::{Client, Outcome, Ticket, MAX_ATTEMPTS};
 use crate::entry::{Completion, Op, Request};
+use crate::layout::{self, ClientRings, ServerRings, ARENA, CQE_WORDS, RING_WORDS, SQE_WORDS};
 use crate::server::{ServerSession, Taken};
 
 const BLOCKS: usize = 2;
@@ -79,6 +85,92 @@ pub enum Law {
     Durable,
 }
 
+/// One word of the session page. The model runs on one thread, so every order
+/// is the program's.
+#[derive(Clone)]
+struct Shared(Cell<u32>);
+
+impl Word for Shared {
+    fn load(&self, _: Ordering) -> u32 {
+        self.0.get()
+    }
+    fn store(&self, value: u32, _: Ordering) {
+        self.0.set(value)
+    }
+    fn fence() {}
+}
+
+const RING: &str = "the page holds every ring word";
+
+/// The rings between the client and the server, twice: as queues, the
+/// reference, and as the session page's own rings, whose every entry either
+/// end takes is held equal to the queue's. A state is rendered by its queues
+/// alone, so the search tells apart what the protocol can, not where on the
+/// page it is.
+#[derive(Clone)]
+struct Queues {
+    sq: VecDeque<Request>,
+    cq: VecDeque<Completion>,
+    page: Vec<Shared>,
+    client: ClientRings,
+    server: ServerRings,
+}
+
+impl fmt::Debug for Queues {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Queues").field("sq", &self.sq).field("cq", &self.cq).finish()
+    }
+}
+
+impl Queues {
+    fn new() -> Self {
+        let page: Vec<Shared> = (0..RING_WORDS).map(|_| Shared(Cell::new(0))).collect();
+        let (client, server) = (layout::client(&page).expect(RING), layout::server(&page).expect(RING));
+        Self { sq: VecDeque::new(), cq: VecDeque::new(), page, client, server }
+    }
+
+    /// The session is over: what either queue held is gone, and the next
+    /// session's two ends start over the same page.
+    fn reset(&mut self) {
+        self.sq.clear();
+        self.cq.clear();
+        self.client = layout::client(&self.page).expect(RING);
+        self.server = layout::server(&self.page).expect(RING);
+    }
+
+    fn send(&mut self, request: Request) {
+        assert_eq!(self.client.0.push(&self.page, request.encode()), Ok(true), "a request past the ring's depth");
+        let _ = self.client.0.publish(&self.page).expect(RING);
+        self.sq.push_back(request);
+    }
+
+    /// The oldest request, as the server's ring gives it.
+    fn take(&mut self) -> Option<[Untrusted<u32>; SQE_WORDS]> {
+        let want = self.sq.pop_front()?;
+        let words = self.server.0.pop(&self.page).expect("an honest client's tail");
+        let words = words.expect("the ring holds what the queue does");
+        self.server.0.release(&self.page).expect(RING);
+        assert_eq!(Request::decode(words, u64::MAX), Ok(want), "the ring gave the server what the queue holds");
+        Some(words)
+    }
+
+    fn post(&mut self, c: Completion) {
+        assert_eq!(self.server.1.push(&self.page, c.encode()), Ok(true), "a completion past the ring's depth");
+        let _ = self.server.1.publish(&self.page).expect(RING);
+        self.cq.push_back(c);
+    }
+
+    /// The oldest completion, as the client's ring gives it.
+    fn read(&mut self) -> Option<Completion> {
+        let want = self.cq.pop_front()?;
+        let words: [Untrusted<u32>; CQE_WORDS] =
+            self.client.1.pop(&self.page).expect("an honest server's tail").expect("the ring holds what the queue does");
+        self.client.1.release(&self.page).expect(RING);
+        assert_eq!(Completion::decode(words), Some(want), "the ring gave the client what the queue holds");
+        Some(want)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Server {
     session: ServerSession,
@@ -87,15 +179,16 @@ struct Server {
 
 #[derive(Clone, Debug)]
 struct World {
-    client: Client,
+    /// Boxed: its tag table has a slot for every entry of the ring, and a
+    /// frame of the search holds several worlds.
+    client: Box<Client>,
     next: usize,
     /// Every answer each ticket has had.
     answers: BTreeMap<Ticket, Vec<Outcome>>,
     /// For each flush ticket, the write tickets answered `Done` before it was
     /// asked for.
     acked_before: BTreeMap<Ticket, Vec<Ticket>>,
-    sq: VecDeque<Request>,
-    cq: VecDeque<Completion>,
+    queues: Queues,
     server: Option<Server>,
     /// The connection: false once the server has died, until a reconnect.
     alive: bool,
@@ -127,12 +220,11 @@ struct Run<'a> {
 /// Explore `script` against at most `failures`.
 pub fn explore(script: &[Step], failures: Failures) -> Explored {
     let mut world = World {
-        client: Client::new(),
+        client: Box::new(Client::new()),
         next: 0,
         answers: BTreeMap::new(),
         acked_before: BTreeMap::new(),
-        sq: VecDeque::new(),
-        cq: VecDeque::new(),
+        queues: Queues::new(),
         server: None,
         alive: false,
         losses: 0,
@@ -164,7 +256,7 @@ fn connect(world: &mut World) {
 /// goes onto the ring.
 fn pump(world: &mut World) {
     while let Some(request) = world.client.next_request() {
-        world.sq.push_back(request);
+        world.queues.send(request);
     }
 }
 
@@ -181,7 +273,8 @@ fn write_of(script: &[Step], ticket: Ticket) -> Option<(u64, u8)> {
 fn apply(script: &[Step], cache: &mut [Option<u8>; BLOCKS], media: &mut [u8; BLOCKS], request: Request) {
     match request.op {
         Op::Write => {
-            let (_, value) = write_of(script, u64::from(request.arena)).expect("a write's arena is its ticket");
+            let (_, value) = write_of(script, u64::from(request.run.expect("a write names its run").first()))
+                .expect("a write's arena block is its ticket");
             cache[request.lba as usize] = Some(value);
         }
         Op::Flush => {
@@ -330,7 +423,7 @@ fn dfs(run: &mut Run, world: World) {
         if !busy {
             let mut w = world.clone();
             match script[world.next] {
-                Step::Write { block, .. } => w.client.submit(ticket, Op::Write, block, 1, ticket as u32),
+                Step::Write { block, .. } => w.client.submit(ticket, Op::Write, block, ARENA.run(ticket as u32, 1)),
                 Step::Flush => {
                     let acked = w
                         .answers
@@ -339,7 +432,7 @@ fn dfs(run: &mut Run, world: World) {
                         .map(|(t, _)| *t)
                         .collect();
                     w.acked_before.insert(ticket, acked);
-                    w.client.submit(ticket, Op::Flush, 0, 0, 0);
+                    w.client.submit(ticket, Op::Flush, 0, None);
                 }
             }
             w.next += 1;
@@ -350,16 +443,22 @@ fn dfs(run: &mut Run, world: World) {
     }
 
     // The server takes the oldest request.
-    if world.alive && !world.sq.is_empty() {
+    if world.alive && !world.queues.sq.is_empty() {
         let mut w = world.clone();
-        let request = w.sq.pop_front().expect("just seen");
+        let words = w.queues.take().expect("just seen");
         let server = w.server.as_mut().expect("alive");
-        match server.session.take(request.encode()) {
-            Taken::Issue(request) => w.device.push((request.tag, request)),
-            Taken::Answer(c) => w.cq.push_back(c),
-        }
+        let step = match server.session.take(words) {
+            Taken::Issue(request) => {
+                w.device.push((request.tag, request));
+                format!("take {:?}#{}", request.op, request.tag)
+            }
+            Taken::Answer(c) => {
+                w.queues.post(c);
+                format!("refuse #{}", c.tag)
+            }
+        };
         moved = true;
-        go(run, format!("take {:?}#{}", request.op, request.tag), w);
+        go(run, step, w);
     }
 
     // The device completes any one command it holds.
@@ -370,7 +469,7 @@ fn dfs(run: &mut Run, world: World) {
         let losses = w.losses;
         if let Some(server) = w.server.as_mut() {
             if let Some(c) = server.session.complete(tag, true, &mut server.holds, losses) {
-                w.cq.push_back(c);
+                w.queues.post(c);
             }
         }
         moved = true;
@@ -386,7 +485,7 @@ fn dfs(run: &mut Run, world: World) {
             let losses = w.losses;
             if let Some(server) = w.server.as_mut() {
                 if let Some(c) = server.session.complete(tag, false, &mut server.holds, losses) {
-                    w.cq.push_back(c);
+                    w.queues.post(c);
                 }
             }
             moved = true;
@@ -395,9 +494,9 @@ fn dfs(run: &mut Run, world: World) {
     }
 
     // The client reads the oldest completion.
-    if world.client.up() && !world.cq.is_empty() {
+    if world.client.up() && !world.queues.cq.is_empty() {
         let mut w = world.clone();
-        let c = w.cq.pop_front().expect("just seen");
+        let c = w.queues.read().expect("just seen");
         if w.client.complete(c).is_err() {
             fail(run, Law::Answers, format!("the client met a second completion for tag {}", c.tag));
             return;
@@ -415,7 +514,7 @@ fn dfs(run: &mut Run, world: World) {
         let losses = w.losses;
         let server = w.server.as_mut().expect("alive");
         if let Some(c) = server.session.complete(tag, true, &mut server.holds, losses) {
-            w.cq.push_back(c);
+            w.queues.post(c);
         }
         moved = true;
         go(run, format!("posted #{tag}"), w);
@@ -432,7 +531,9 @@ fn dfs(run: &mut Run, world: World) {
             w.media = media;
             w.losses += 1;
             let server = w.server.as_mut().expect("alive");
-            w.cq.extend(server.session.abort_all());
+            for c in server.session.abort_all() {
+                w.queues.post(c);
+            }
             moved = true;
             go(run, format!("reset({posted:?} {cache:?} {media:?})"), w);
         }
@@ -458,8 +559,7 @@ fn dfs(run: &mut Run, world: World) {
     if !world.alive && world.client.up() {
         let mut w = world.clone();
         w.client.session_ended();
-        w.sq.clear();
-        w.cq.clear();
+        w.queues.reset();
         collect(run, &mut w);
         moved = true;
         go(run, "notice".into(), w);

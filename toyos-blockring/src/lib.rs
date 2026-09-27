@@ -3,12 +3,12 @@
 //! **A session is one shared region**, [`SESSION_BYTES`] long, that the client
 //! makes and sends. Its first page holds two single-producer rings — requests
 //! from the client ([`layout::SQ_BASE`]), completions from the server
-//! ([`layout::CQ_BASE`]) — and the rest is the *arena*: whole
-//! [`BLOCK_BYTES`] blocks a request names by index and the device moves data
-//! into and out of directly. Nothing on the page is a pointer and nothing on it
+//! ([`layout::CQ_BASE`]) — and the rest is the *arena* ([`layout::ARENA`]):
+//! whole [`BLOCK_BYTES`] blocks a request names by run and the device moves
+//! data into and out of directly. Nothing on the page is a pointer and nothing on it
 //! is trusted by the end that did not write it: a consumer bounds every index
 //! and every field before it acts ([`entry::Request::decode`], the
-//! transport's cursor bounds); [`entry::Block`] is the protocol as its schema.
+//! transport's cursor bounds).
 //!
 //! **A doorbell is a byte on the session's connection**, written after the
 //! entries it announces are published. The connection is also what tells each
@@ -47,7 +47,8 @@ pub mod wire;
 mod model;
 
 pub use entry::{Completion, Op, Request, Status};
-pub use layout::{ARENA_BLOCKS, BLOCK_BYTES, DEPTH, MAX_REQUEST_BLOCKS, SESSION_BYTES};
+pub use toyos_transport::Run;
+pub use layout::{BLOCK_BYTES, DEPTH, MAX_REQUEST_BLOCKS, SESSION_BYTES};
 
 /// The name a block service is served under. A holder of its connector may
 /// open any partition the service has.

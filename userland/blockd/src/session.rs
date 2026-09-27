@@ -23,9 +23,9 @@ use toyos::poller::{Poller, READABLE};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockring::client::{Client, Outcome, Ticket};
 use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{self, ClientRings, ARENA_BLOCKS, MAX_REQUEST_BLOCKS};
+use toyos_blockring::layout::{self, ClientRings, ARENA, MAX_REQUEST_BLOCKS};
 use toyos_blockring::wire::{self, Opened, Refusal};
-use toyos_blockring::BLOCK_BYTES;
+use toyos_blockring::{Run, BLOCK_BYTES};
 
 use crate::region::Region;
 
@@ -78,10 +78,10 @@ struct Arena {
 
 impl Arena {
     fn new() -> Self {
-        Self { free: vec![true; ARENA_BLOCKS as usize] }
+        Self { free: vec![true; ARENA.slots() as usize] }
     }
 
-    fn alloc(&mut self, blocks: u32) -> Option<u32> {
+    fn alloc(&mut self, blocks: u32) -> Option<Run> {
         let n = blocks as usize;
         let mut run = 0;
         for i in 0..self.free.len() {
@@ -89,22 +89,23 @@ impl Arena {
             if run == n {
                 let first = i + 1 - n;
                 self.free[first..=i].iter_mut().for_each(|b| *b = false);
-                return Some(first as u32);
+                return ARENA.run(first as u32, blocks);
             }
         }
         None
     }
 
-    fn release(&mut self, first: u32, blocks: u32) {
-        for b in &mut self.free[first as usize..(first + blocks) as usize] {
-            assert!(!*b, "blockd: arena block {first}+{blocks} released twice");
+    fn release(&mut self, run: Run) {
+        let first = run.first() as usize;
+        for b in &mut self.free[first..first + run.count() as usize] {
+            assert!(!*b, "blockd: arena run {run:?} released twice");
             *b = true;
         }
     }
 }
 
 enum Pending {
-    Read { arena: u32, blocks: u32 },
+    Read { run: Run },
     Write,
     Flush,
 }
@@ -183,10 +184,10 @@ impl Session {
         if self.conn.is_none() {
             return Err(Unsent::Ended);
         }
-        let arena = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
-        self.region.arena(arena, blocks).copy_in(0, data);
+        let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
+        self.region.arena(&run).copy_in(0, data);
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Write, lba, blocks, arena);
+        self.client.submit(ticket, Op::Write, lba, Some(run));
         self.pending.insert(ticket, Pending::Write);
         Ok(ticket)
     }
@@ -197,10 +198,10 @@ impl Session {
         if self.conn.is_none() {
             return Err(Unsent::Ended);
         }
-        let arena = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
+        let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Read, lba, blocks, arena);
-        self.pending.insert(ticket, Pending::Read { arena, blocks });
+        self.client.submit(ticket, Op::Read, lba, Some(run));
+        self.pending.insert(ticket, Pending::Read { run });
         Ok(ticket)
     }
 
@@ -210,7 +211,7 @@ impl Session {
             return Err(Unsent::Ended);
         }
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Flush, 0, 0, 0);
+        self.client.submit(ticket, Op::Flush, 0, None);
         self.pending.insert(ticket, Pending::Flush);
         Ok(ticket)
     }
@@ -324,9 +325,9 @@ impl Session {
         for (ticket, outcome) in decided {
             let pending = self.pending.remove(&ticket).expect("blockd: an answer for no ticket");
             let data = match (pending, outcome) {
-                (Pending::Read { arena, blocks }, Outcome::Done) => {
-                    let mut data = vec![0u8; blocks as usize * BLOCK_BYTES];
-                    self.region.arena(arena, blocks).copy_out(0, &mut data);
+                (Pending::Read { run }, Outcome::Done) => {
+                    let mut data = vec![0u8; run.span().len];
+                    self.region.arena(&run).copy_out(0, &mut data);
                     Some(data)
                 }
                 _ => None,
@@ -334,8 +335,8 @@ impl Session {
             answers.push(Answer { ticket, outcome, data });
         }
         let released: Vec<_> = self.client.take_released().collect();
-        for (first, blocks) in released {
-            self.arena.release(first, blocks);
+        for run in released {
+            self.arena.release(run);
         }
     }
 

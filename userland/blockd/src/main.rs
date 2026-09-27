@@ -47,7 +47,7 @@ use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
 use toyos_abi::syscall::{DEV_PREFIX, SyscallError};
 use toyos_blockhold::Holds;
 use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{self, arena_byte, ServerRings, DEPTH};
+use toyos_blockring::layout::{self, ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::wire::{self, Opened, Refusal};
 use toyos_blockring::{BLOCK_BYTES, PORT, SESSION_BYTES};
@@ -330,15 +330,16 @@ impl Service {
                 }
             };
             s.requests += 1;
-            match s.state.take_entry(words) {
+            match s.state.take(words) {
                 Taken::Answer(c) => Self::post(s, c),
                 Taken::Issue(req) => {
                     let owner = Owner::Session { session: id, tag: req.tag, write: req.op == Op::Write };
                     match req.op {
                         Op::Read | Op::Write => {
-                            let at = s.device_addr + arena_byte(req.arena) as u64;
+                            let run = req.run.expect("blockd: a transfer names its run");
+                            let at = s.device_addr + run.span().offset as u64;
                             let block = s.state.first() + req.lba;
-                            self.ctrl.submit_io(req.op == Op::Write, block, req.blocks, at, owner);
+                            self.ctrl.submit_io(req.op == Op::Write, block, run.count(), at, owner);
                         }
                         Op::Flush if self.ctrl.vwc => self.ctrl.submit_flush(owner),
                         // No volatile cache: every write answered is on the

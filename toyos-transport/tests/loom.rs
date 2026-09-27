@@ -4,12 +4,13 @@
 //! - **Publication**: a consumer that sees a tail sees every word of the
 //!   entries below it. `publish-relaxed` takes the edge away.
 //! - **No lost wake**: a consumer that says it sleeps and a producer that
-//!   publishes cannot both miss the other; the futex is park and unpark, and
-//!   a lost wake is a consumer parked for good. `no-sleep-fence` takes the
-//!   fences away.
-//! - **A hostile peer** that stores to every word it can reach, at every step,
-//!   leaves the honest end with entries, nothing, or a named violation, and
-//!   never more entries than the ring holds. `no-clamp` believes the peer.
+//!   publishes cannot both miss the other; the futex is a load of the word it
+//!   waits on, and a lost wake is a consumer that slept over a publish that
+//!   answered [`Wake::Busy`]. `no-wake-fence` takes the producer's fence away
+//!   and `no-sleep-fence` the consumer's.
+//! - **A hostile peer** leaves the honest end with entries, nothing, or a
+//!   named violation, and never more entries than the ring holds. `no-clamp`
+//!   believes the peer.
 //!
 //!   cargo test -p toyos-transport --features <control> --test loom
 
@@ -84,30 +85,30 @@ fn a_published_entry_is_read_whole() {
     });
 }
 
-/// A consumer that finds nothing sleeps as a futex does — parked while the
-/// tail still holds what it saw — and is woken only when a publish answers
-/// [`Wake::Peer`]. Whatever the schedule, it gets the entry.
+/// A consumer that finds nothing sleeps as a futex does — only while the tail
+/// still holds what it saw — and is woken only when a publish answers
+/// [`Wake::Peer`]. Whatever the schedule, a consumer that slept is woken.
 #[test]
 fn a_publish_and_a_sleep_cannot_both_miss() {
     loom::model(|| {
         let page = page();
         let (mut tx, mut rx) = ends(&page);
         let consumer_page = Arc::clone(&page);
-        let consumer = loom::thread::spawn(move || loop {
-            if let Some(words) = rx.pop(&consumer_page).unwrap() {
-                return plain(words);
+        let consumer = loom::thread::spawn(move || {
+            if rx.pop(&consumer_page).unwrap().is_some() {
+                return false;
             }
-            if let Some(asleep) = rx.before_sleep(&consumer_page).unwrap() {
-                if consumer_page[asleep.word].load(Ordering::Relaxed) == asleep.value {
-                    loom::thread::park();
-                }
-            }
+            rx.before_sleep(&consumer_page)
+                .unwrap()
+                .is_some_and(|asleep| consumer_page[asleep.word].load(Ordering::Relaxed) == asleep.value)
         });
         assert!(tx.push(&page, entry(1)).unwrap());
-        if tx.publish(&page).unwrap() == Some(Wake::Peer) {
-            consumer.thread().unpark();
-        }
-        assert_eq!(consumer.join().expect("the consumer parked over a published entry"), entry(1));
+        let wake = tx.publish(&page).unwrap();
+        let slept = consumer.join().expect("the consumer thread");
+        assert!(
+            !slept || wake == Some(Wake::Peer),
+            "the consumer slept over a published entry and the publish answered {wake:?}"
+        );
     });
 }
 

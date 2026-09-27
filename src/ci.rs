@@ -368,14 +368,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
     ]),
-    // The transport's four: a tail published before its entry, a wake both
-    // sides miss, a peer's cursor believed, and a session's tags outliving it.
     red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
-    // A lost wake is a consumer parked for good: loom's deadlock, whose unwind
-    // panics again before the harness prints a `FAILED` line.
-    red(TRANSPORT, "no-sleep-fence", Some("loom"), &[
-        "deadlock; threads = [(Id(0), Blocked(Location(None))), (Id(1), Blocked(Location(None)))]",
-    ]),
+    red(TRANSPORT, "no-wake-fence", Some("loom"), &["a_publish_and_a_sleep_cannot_both_miss ... FAILED"]),
+    red(TRANSPORT, "no-sleep-fence", Some("loom"), &["a_publish_and_a_sleep_cannot_both_miss ... FAILED"]),
     red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
     red(TRANSPORT, "end-keeps-inflight", None, &["every_tag_is_answered_exactly_once ... FAILED"]),
 ];

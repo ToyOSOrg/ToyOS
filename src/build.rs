@@ -2739,14 +2739,13 @@ mod tests {
     ///
     /// `loom` selects loom's instrumented atomics; `check`, `protocol-port`,
     /// `tripwire` and `std` mirror `toyos-sched`'s own features so the shared
-    /// sources compile identically and name nothing a model turns on;
-    /// `rustc-dep-of-std` builds a crate under std. Everything
+    /// sources compile identically and name nothing a model turns on. Everything
     /// else declared in any of these files is, by construction, a
     /// `--features <name>` command that must red a named model — each file's own
     /// comment beside the name carries the argument for why.
     fn declared_model_controls(root: &Path) -> Vec<(&'static str, String)> {
         const NOT_A_CONTROL: &[&str] =
-            &["loom", "check", "protocol-port", "tripwire", "std", "default", "rustc-dep-of-std"];
+            &["loom", "check", "protocol-port", "tripwire", "std", "default"];
         let mut out = Vec::new();
         for (crate_name, manifest) in [
             ("kernel-loom", "kernel-loom/Cargo.toml"),

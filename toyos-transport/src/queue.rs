@@ -244,6 +244,45 @@ mod tests {
         assert_eq!(tx.space(&page), Ok(D - 1), "a head moved back costs its consumer the room");
     }
 
+    /// A producer that steps its tail one past each entry popped, none of them
+    /// released: the ring's depth is taken, and the next tail is past it.
+    #[test]
+    fn a_tail_stepped_past_each_pop_is_refused_at_the_depth() {
+        let page = page();
+        let (_, mut rx) = ends(&page);
+        let mut taken = 0;
+        let refused = loop {
+            page[16].store(taken + 1, Ordering::Release);
+            match rx.pop(&page) {
+                Ok(Some(_)) => taken += 1,
+                Ok(None) => panic!("a published entry was not taken"),
+                Err(violation) => break violation,
+            }
+            assert!(taken <= D, "took {taken} entries from a ring of {D} without releasing one");
+        };
+        assert_eq!((taken, refused), (D, Violation::TailPastDepth));
+    }
+
+    /// A consumer that steps its head onto each entry pushed, none of them
+    /// published: the ring's depth is pushed, and the next head is past what
+    /// was published.
+    #[test]
+    fn a_head_stepped_past_each_push_is_refused_at_the_depth() {
+        let page = page();
+        let (mut tx, _) = ends(&page);
+        let mut pushed = 0;
+        let refused = loop {
+            match tx.push(&page, [pushed, pushed]) {
+                Ok(true) => pushed += 1,
+                Ok(false) => panic!("a ring with nothing published was full"),
+                Err(violation) => break violation,
+            }
+            page[0].store(pushed, Ordering::Release);
+            assert!(pushed <= D, "pushed {pushed} into a ring of {D} with none published");
+        };
+        assert_eq!((pushed, refused), (D, Violation::HeadPastTail));
+    }
+
     #[test]
     fn a_place_outside_the_words_is_refused() {
         let page = page();

@@ -18,7 +18,6 @@
 use alloc::collections::BTreeMap;
 
 use toyos_blockhold::{Holds, Writer};
-
 use toyos_transport::Untrusted;
 
 use crate::entry::{Completion, Op, Refused, Request, Status};
@@ -77,7 +76,7 @@ impl ServerSession {
     /// A malformed entry, and a tag already in flight, are answered at once
     /// and never reach the device: the second would make one tag two
     /// requests, and the client could not tell which answer was whose.
-    pub fn take_entry(&mut self, words: [Untrusted<u32>; SQE_WORDS]) -> Taken {
+    pub fn take(&mut self, words: [Untrusted<u32>; SQE_WORDS]) -> Taken {
         let request = match Request::decode(words, self.blocks) {
             Ok(request) => request,
             Err(Refused::Malformed { tag }) => {
@@ -89,13 +88,6 @@ impl ServerSession {
         }
         self.inflight.insert(request.tag, request.op);
         Taken::Issue(request)
-    }
-
-    /// [`Self::take_entry`] of words a test wrote as the client, which arrive
-    /// as a peer's do.
-    #[cfg(test)]
-    pub fn take(&mut self, words: [u32; SQE_WORDS]) -> Taken {
-        self.take_entry(words.map(Untrusted::new))
     }
 
     /// The device answered the request `tag` with `done` (whether it did it),
@@ -142,12 +134,13 @@ impl ServerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::ARENA;
 
-    fn write(tag: u32) -> [u32; SQE_WORDS] {
-        Request { op: Op::Write, tag, lba: 0, blocks: 1, arena: 0 }.encode()
+    fn write(tag: u32) -> [Untrusted<u32>; SQE_WORDS] {
+        Request { op: Op::Write, tag, lba: 0, run: ARENA.run(0, 1) }.encode().map(Untrusted::new)
     }
-    fn flush(tag: u32) -> [u32; SQE_WORDS] {
-        Request { op: Op::Flush, tag, lba: 0, blocks: 0, arena: 0 }.encode()
+    fn flush(tag: u32) -> [Untrusted<u32>; SQE_WORDS] {
+        Request { op: Op::Flush, tag, lba: 0, run: None }.encode().map(Untrusted::new)
     }
 
     #[test]
