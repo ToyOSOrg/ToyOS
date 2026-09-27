@@ -803,8 +803,17 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
                 // only for that reason: the hosted rustc carries LLVM once clang
                 // and libc++ run on ToyOS, and Cranelift is not where the
                 // compiler that builds ToyOS goes.
-                let lld = rust_dir.join(format!("build/{host}/ci-llvm/bin/lld"));
-                format!("linker = \"{}\"\ncodegen-backends = [\"cranelift\"]", lld.display())
+                //
+                // The archiver is that LLVM's too: the compiler's crates carry
+                // C built for this target (blake3's assembly), and a host `ar`
+                // that indexes only its own object format, as macOS's does,
+                // leaves those ELF members out of the index lld pulls from.
+                let llvm = rust_dir.join(format!("build/{host}/ci-llvm/bin"));
+                format!(
+                    "linker = \"{}\"\nar = \"{}\"\ncodegen-backends = [\"cranelift\"]",
+                    llvm.join("lld").display(),
+                    llvm.join("llvm-ar").display(),
+                )
             } else {
                 "linker = \"rust-lld\"".to_string()
             };
