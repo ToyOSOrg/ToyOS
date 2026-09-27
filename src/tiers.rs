@@ -142,7 +142,8 @@ mod tests {
     #[test]
     fn an_unregistered_test_is_refused_by_name() {
         let schedule = Schedule::new([("registered", Tier::Weekly)]).unwrap();
-        let refusal = schedule.tier("never_registered").unwrap_err();
+        let refusal =
+            schedule.tier("never_registered").expect_err("an unregistered name was given a tier");
         assert!(refusal.starts_with("never_registered is not a registered test"), "{refusal}");
         assert!(schedule.tier("registere").is_err(), "a prefix is not the name");
     }
@@ -154,9 +155,14 @@ mod tests {
         let selected = |reach| -> Vec<Tier> {
             EVERY.into_iter().filter(|tier| tier.selected(reach, true)).collect()
         };
-        assert_eq!(selected(Reach::Fast), [Tier::Fast]);
-        assert_eq!(selected(Reach::Nightly), [Tier::Fast, Tier::Nightly]);
-        assert_eq!(selected(Reach::Weekly), [Tier::Fast, Tier::Nightly, Tier::Weekly]);
+        let nested = [
+            (Reach::Fast, &[Tier::Fast][..]),
+            (Reach::Nightly, &[Tier::Fast, Tier::Nightly]),
+            (Reach::Weekly, &[Tier::Fast, Tier::Nightly, Tier::Weekly]),
+        ];
+        for (reach, tiers) in nested {
+            assert_eq!(selected(reach), tiers, "a {reach:?} run selects the wrong tiers");
+        }
         for reach in [Reach::Fast, Reach::Nightly, Reach::Weekly] {
             assert!(Tier::Local.selected(reach, false) && !Tier::Local.selected(reach, true));
         }
@@ -167,7 +173,8 @@ mod tests {
     fn a_held_tiers_flag_selects_it() {
         for tier in EVERY {
             let Some(flag) = tier.flag() else {
-                assert!(tier.selected(Reach::Fast, false), "{tier:?} names no flag, so a plain run takes it");
+                let plain = tier.selected(Reach::Fast, false);
+                assert!(plain, "{tier:?} names no flag, so a plain run takes it");
                 continue;
             };
             let reach = Reach::of(&[flag.to_string()]);

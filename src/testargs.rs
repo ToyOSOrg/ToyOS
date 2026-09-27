@@ -288,7 +288,8 @@ mod tests {
 
     #[test]
     fn the_weekly_reach_refuses_a_nightly_it_already_runs() {
-        let refusal = parse_owned(&["--nightly", "--weekly"]).unwrap_err();
+        let refusal = parse_owned(&["--nightly", "--weekly"])
+            .expect_err("a --nightly beside --weekly was accepted and read by nothing");
         assert!(refusal.contains("read by nothing"), "{refusal}");
     }
 

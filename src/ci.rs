@@ -945,8 +945,10 @@ mod tests {
 
     #[test]
     fn each_schedule_names_its_reach_and_another_is_refused() {
-        assert_eq!(reach_of_schedule(Some(NIGHTLY_CRON)), Ok("--nightly"));
-        assert_eq!(reach_of_schedule(Some(WEEKLY_CRON)), Ok("--weekly"));
+        let nightly = reach_of_schedule(Some(NIGHTLY_CRON));
+        let weekly = reach_of_schedule(Some(WEEKLY_CRON));
+        assert_eq!(nightly, Ok("--nightly"), "the nightly schedule's reach");
+        assert_eq!(weekly, Ok("--weekly"), "the weekly schedule's reach");
         for stray in [Some("0 4 * * *"), None] {
             let refusal = reach_of_schedule(stray).unwrap_err();
             assert!(refusal.contains(&format!("{stray:?}")), "{refusal}");
