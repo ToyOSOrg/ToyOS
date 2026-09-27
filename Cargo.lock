@@ -1188,8 +1188,8 @@ version = "0.1.0"
 name = "toyos-blockring"
 version = "0.1.0"
 dependencies = [
- "loom",
  "toyos-blockhold",
+ "toyos-transport",
 ]
 
 [[package]]
@@ -1354,6 +1354,13 @@ name = "toyos-mixer"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-net-tcp"
+version = "0.1.0"
+dependencies = [
+ "toyos-net-wire",
+]
+
+[[package]]
 name = "toyos-net-wire"
 version = "0.1.0"
 
@@ -1430,6 +1437,14 @@ version = "0.1.0"
 [[package]]
 name = "toyos-tmpdir"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-transport"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "toyos-untrusted",
+]
 
 [[package]]
 name = "toyos-untrusted"
