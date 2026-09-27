@@ -617,8 +617,7 @@ pub fn home_overwrite_reads_back(
 /// again, and with the machine down the DATA partition is read by this
 /// crate's own build of the `bcachefs` reader over a plain seek-and-read of
 /// the image — nothing the guest executed. The flushed file holds its bytes
-/// there, and the file a held handle wrote across an end holds the bytes of
-/// the file renamed over it and nothing that handle wrote after the next.
+/// there.
 pub fn fsd_restart(
     _test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -686,8 +685,8 @@ pub fn fsd_restart(
     }
     eprintln!(
         "  [fsd] DATA's server ended four times, the first under init's resolution of a launch that \
-         was answered; started again three, its clients reopened, a handle on a file renamed over \
-         answered Gone, the fourth closed /home to Gone; {KEPT} and {ACROSS} read back off the \
+         was answered; started again three, every handle held across an end answered Gone, new \
+         opens answered, the fourth closed /home to Gone; {KEPT} and {ACROSS} read back off the \
          image by the host's own bcachefs reader"
     );
     Ok(())

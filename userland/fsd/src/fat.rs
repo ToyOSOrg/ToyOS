@@ -25,7 +25,7 @@ use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError};
 
 use crate::cache::Cache;
 use crate::disk::{Disk, BLOCK};
-use crate::volume::{identity, parent, Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{parent, Kind, Meta, Node, OpenHow, Out, Volume};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
@@ -300,16 +300,6 @@ impl<D: Disk> Volume for FatVolume<D> {
         let (path, size) = (open.path.clone(), open.file.len());
         let mtime = self.fs.metadata(&path).map(|m| m.modified_unix).unwrap_or(0);
         Ok(Meta { kind: Kind::File, size, mtime: mtime * 1_000_000_000 })
-    }
-
-    fn ident(&mut self, node: Node) -> Result<u64, SyscallError> {
-        let open = self.entry(node)?;
-        let (entry, cluster) = open.file.identity();
-        if cluster == 0 {
-            return Ok(0);
-        }
-        let half = |at: usize| u64::from_le_bytes(entry[at..at + 8].try_into().expect("eight bytes"));
-        Ok(identity(&[half(0), half(8), cluster as u64, open.file.len()]))
     }
 
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {

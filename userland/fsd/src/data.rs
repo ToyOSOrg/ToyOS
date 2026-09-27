@@ -37,7 +37,7 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::cache::{Cache, Shared};
 use crate::disk::{Disk, DiskError, BLOCK};
-use crate::volume::{identity, join, parent, Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{join, parent, Kind, Meta, Node, OpenHow, Out, Volume};
 
 /// The longest symlink target read back: the wire's path bound.
 const MAX_LINK: u64 = toyos::fs::MAX_PATH as u64;
@@ -425,17 +425,6 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(Meta { kind: Kind::File, size: open.size, mtime: open.mtime })
     }
 
-    fn ident(&mut self, node: Node) -> Result<u64, SyscallError> {
-        let open = self.entry(node)?;
-        // The first block is this file's alone among the live ones, and the
-        // length and mtime move with every write; a file with no block yet is
-        // told from another by nothing the format records.
-        Ok(match open.extents.first() {
-            Some(first) => identity(&[first.start_block, open.size, open.mtime]),
-            None => 0,
-        })
-    }
-
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {
         let cache = Rc::clone(&self.cache);
         let open = self.entry(node)?;
@@ -758,44 +747,6 @@ mod tests {
         let mut out = vec![0u8; 5000];
         again.read(n, 0, &mut Buf(&mut out)).unwrap();
         assert_eq!(out, vec![7; 5000]);
-    }
-
-    /// What a holder re-opening by path after a restart compares: the same
-    /// file unchanged states the same identity off the device, and the file
-    /// renamed over it, or a write to it, does not. A file with no block is
-    /// told from another by nothing, and says so.
-    #[test]
-    fn an_identity_survives_a_remount_and_tells_a_replacement_apart() {
-        let remount = |v: DataVolume<Ram>| {
-            let DataVolume { fs, cache, .. } = v;
-            drop(fs);
-            let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
-            let Probed::Mounted(again) = DataVolume::probe(disk, &["home"], clock) else { panic!("remount") };
-            again
-        };
-        let mut v = vol();
-        let n = v.open("home/x", CREATE).unwrap();
-        assert_eq!(v.ident(n), Ok(0), "no block yet: nothing tells it from another");
-        v.write(n, 0, &[7; 5000]).unwrap();
-        let held = v.ident(n).unwrap();
-        assert_ne!(held, 0);
-        v.sync().unwrap();
-
-        let mut v = remount(v);
-        let n = v.open("home/x", PLAIN).unwrap();
-        assert_eq!(v.ident(n), Ok(held), "the same file, unchanged, off the device");
-        v.write(n, 5000, b"more").unwrap();
-        assert_ne!(v.ident(n).unwrap(), held, "a write changes it");
-        v.close(n);
-
-        let y = v.open("home/y", CREATE).unwrap();
-        v.write(y, 0, &[9; 5000]).unwrap();
-        v.close(y);
-        v.rename("home/y", "home/x").unwrap();
-        v.sync().unwrap();
-        let mut v = remount(v);
-        let n = v.open("home/x", PLAIN).unwrap();
-        assert_ne!(v.ident(n).unwrap(), held, "the file renamed over it is another");
     }
 
     #[test]

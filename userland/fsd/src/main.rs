@@ -682,9 +682,8 @@ impl Server {
                     truncate: r.flags & O_TRUNCATE != 0,
                 };
                 let node = self.volume.open(&path, how)?;
-                let stated = self.volume.node_meta(node).and_then(|meta| self.volume.ident(node).map(|ident| (meta, ident)));
-                let (meta, ident) = match stated {
-                    Ok(stated) => stated,
+                let meta = match self.volume.node_meta(node) {
+                    Ok(meta) => meta,
                     Err(e) => {
                         self.volume.close(node);
                         return Err(e);
@@ -701,7 +700,7 @@ impl Server {
                 let ends = append && self.end_on.as_deref() == Some(path.as_str());
                 let client = self.clients.get_mut(&id).expect("pumped");
                 client.fids.insert(fid, Fid { node, write, append, ends });
-                Ok(Answer::Reply(Reply { value: fid, ident, ..stat_reply(meta) }))
+                Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta) }))
             }
             CLOSE => {
                 let client = self.clients.get_mut(&id).expect("pumped");
@@ -743,13 +742,12 @@ impl Server {
                     std::process::exit(1);
                 }
                 self.dirtied();
-                let ident = self.volume.ident(node)?;
-                Ok(Answer::Reply(Reply { value: len as u64, value2: at + len as u64, ident, ..Reply::ok() }))
+                Ok(Answer::Reply(Reply { value: len as u64, value2: at + len as u64, ..Reply::ok() }))
             }
             FSTAT => {
                 let node = self.fid(id, r.fid)?.node;
                 let meta = self.volume.node_meta(node)?;
-                Ok(Answer::Reply(Reply { ident: self.volume.ident(node)?, ..stat_reply(meta) }))
+                Ok(Answer::Reply(stat_reply(meta)))
             }
             TRUNCATE => {
                 let f = self.fid(id, r.fid)?;
@@ -762,7 +760,7 @@ impl Server {
                 }
                 self.volume.truncate(node, r.offset)?;
                 self.dirtied();
-                Ok(Answer::Reply(Reply { ident: self.volume.ident(node)?, ..Reply::ok() }))
+                Ok(Answer::Reply(Reply::ok()))
             }
             FSYNC => {
                 self.fid(id, r.fid)?;

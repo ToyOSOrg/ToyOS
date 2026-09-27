@@ -135,13 +135,6 @@ impl File {
         self.size == 0
     }
 
-    /// What tells this file from another at the same path: its entry's short
-    /// name and creation stamp, and its first cluster — 0 for a file that has
-    /// none yet.
-    pub fn identity(&self) -> ([u8; 16], u32) {
-        (self.identity.0, self.first_cluster.map_or(0, Cluster::raw))
-    }
-
     /// Whether stopping now would leave the volume holding clusters this
     /// handle's directory entry does not reach.
     ///

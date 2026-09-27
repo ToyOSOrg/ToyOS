@@ -57,10 +57,6 @@ impl Volume for Absent {
         Err(SyscallError::NotFound)
     }
 
-    fn ident(&mut self, _node: Node) -> Result<u64, SyscallError> {
-        Err(SyscallError::NotFound)
-    }
-
     fn read(&mut self, _node: Node, _offset: u64, _out: &mut dyn Out) -> Result<usize, SyscallError> {
         Err(SyscallError::NotFound)
     }

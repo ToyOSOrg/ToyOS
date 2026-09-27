@@ -96,12 +96,6 @@ pub trait Volume {
 
     fn node_meta(&mut self, node: Node) -> Result<Meta, SyscallError>;
 
-    /// The file as it stands, as `toyos::fs::Stat::ident` states it: what
-    /// the volume itself records of it, so the same after a restart for the
-    /// same file unchanged; 0 where the volume records nothing that tells
-    /// this file from another.
-    fn ident(&mut self, node: Node) -> Result<u64, SyscallError>;
-
     /// Up to `out.len()` bytes at `offset`, from the start of `out`; 0 at or
     /// past the end.
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError>;
@@ -127,20 +121,6 @@ pub trait Volume {
 
     /// One line of what the volume and its cache have done, for a log.
     fn describe(&self) -> String;
-}
-
-/// One token for `words`, never 0: 0 is a volume saying it cannot tell. Two
-/// different lists meet on one token as two 64-bit hashes do.
-pub fn identity(words: &[u64]) -> u64 {
-    // splitmix64's finaliser, chained over the words.
-    let mut h = 0x243F_6A88_85A3_08D3u64;
-    for &w in words {
-        let mut z = (h ^ w).wrapping_add(0x9E37_79B9_7F4A_7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        h = z ^ (z >> 31);
-    }
-    h.max(1)
 }
 
 /// The parent of `path`, `""` for a name at the root.

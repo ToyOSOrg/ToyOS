@@ -24,12 +24,9 @@
 //! **A server that ends is survivable and not invisible.** [`Dir`] connects
 //! again through the same connector — init keeps a file server's ports open
 //! across its restart — and counts its connections in a generation. A file id
-//! from an earlier generation names nothing on the new connection; the holder
-//! of a file opens it again by its path and keeps it only when the server
-//! answers the [`Stat::ident`] it last saw. Any other answer — another file at
-//! the path, this one changed by a write the restart lost, or a volume that
-//! cannot tell — is [`SyscallError::Gone`]. Nothing here keeps a write the
-//! server acknowledged and never made durable: that is what `Fsync` is for.
+//! from an earlier generation names nothing on the new connection. Nothing
+//! here keeps a write the server acknowledged and never made durable: that is
+//! what `Fsync` is for.
 
 use toyos_abi::syscall::{SyscallError, MAX_SERVICE_NAME};
 
@@ -111,15 +108,13 @@ ipc_payload! {
         pub flags: u64,
     }
 
-    /// Every reply's words. `status` is 0 or a [`SyscallError`]'s wire value;
-    /// `ident` is a file's [`Stat::ident`], on every reply about an open file.
+    /// Every reply's words. `status` is 0 or a [`SyscallError`]'s wire value.
     pub struct Reply {
         pub status: u64,
         pub kind: u64,
         pub value: u64,
         pub value2: u64,
         pub mtime: u64,
-        pub ident: u64,
     }
 }
 
@@ -131,11 +126,11 @@ impl Request {
 
 impl Reply {
     pub const fn ok() -> Self {
-        Self { status: 0, kind: 0, value: 0, value2: 0, mtime: 0, ident: 0 }
+        Self { status: 0, kind: 0, value: 0, value2: 0, mtime: 0 }
     }
 
     pub const fn refused(e: SyscallError) -> Self {
-        Self { status: e.to_u64(), kind: 0, value: 0, value2: 0, mtime: 0, ident: 0 }
+        Self { status: e.to_u64(), kind: 0, value: 0, value2: 0, mtime: 0 }
     }
 
     fn result(self) -> Result<Self, SyscallError> {
@@ -185,11 +180,6 @@ pub struct Stat {
     pub kind: u64,
     pub size: u64,
     pub mtime: u64,
-    /// For an open file: the server's token for this file as it stands, the
-    /// same across a restart of the server for the same file unchanged and
-    /// different for any other file at the path or any change to this one;
-    /// 0 where the volume cannot tell one file from another, and for a path.
-    pub ident: u64,
 }
 
 /// A write answered.
@@ -199,8 +189,6 @@ pub struct Written {
     pub len: usize,
     /// The offset after them: for a file opened to append, the file's end.
     pub offset: u64,
-    /// The file's [`Stat::ident`] after it.
-    pub ident: u64,
 }
 
 /// An open answered.
@@ -277,16 +265,9 @@ impl Dir {
         unsafe { Window::new(self.window.as_ptr(), WINDOW_BYTES) }
     }
 
-    /// Whether the connection is up: `false` once a call found it ended, which
-    /// is the one `Gone` a reconnect answers. A `Gone` the server replied is
-    /// about the file, and a new connection would not change it.
-    pub fn connected(&self) -> bool {
-        self.conn.is_some()
-    }
-
     /// Open a fresh connection through the same connector, and lend it the
     /// window again. The old one's file ids name nothing from here on.
-    pub fn reconnect(&mut self) -> Result<(), SyscallError> {
+    fn reconnect(&mut self) -> Result<(), SyscallError> {
         self.conn = None;
         let name = core::str::from_utf8(&self.name[..self.name_len]).map_err(|_| SyscallError::InvalidArgument)?;
         let conn = self.names.open(name)?;
@@ -349,8 +330,7 @@ impl Dir {
         &buf[..len]
     }
 
-    /// A call on a file id: `Gone` when `generation` is not this connection's,
-    /// and the holder opens the file again by its path.
+    /// A call on a file id: `Gone` when `generation` is not this connection's.
     fn fid_call(&mut self, op: u32, generation: u64, request: &Request) -> Result<Reply, SyscallError> {
         if generation != self.generation || self.conn.is_none() {
             return Err(SyscallError::Gone);
@@ -385,16 +365,15 @@ impl Dir {
         let len = data.len().min(WINDOW_BYTES);
         window_put(self.window(), 0, &data[..len]);
         let reply = self.fid_call(WRITE, generation, &Request { fid, offset, len: len as u64, ..Request::new() })?;
-        Ok(Written { len: (reply.value as usize).min(len), offset: reply.value2, ident: reply.ident })
+        Ok(Written { len: (reply.value as usize).min(len), offset: reply.value2 })
     }
 
     pub fn fstat(&mut self, fid: u64, generation: u64) -> Result<Stat, SyscallError> {
         self.fid_call(FSTAT, generation, &Request { fid, ..Request::new() }).map(|r| stat_of(&r))
     }
 
-    /// Answers the file's [`Stat::ident`] after it.
-    pub fn truncate(&mut self, fid: u64, generation: u64, size: u64) -> Result<u64, SyscallError> {
-        self.fid_call(TRUNCATE, generation, &Request { fid, offset: size, ..Request::new() }).map(|r| r.ident)
+    pub fn truncate(&mut self, fid: u64, generation: u64, size: u64) -> Result<(), SyscallError> {
+        self.fid_call(TRUNCATE, generation, &Request { fid, offset: size, ..Request::new() }).map(drop)
     }
 
     /// Make what this file was written durable on the volume.
@@ -510,7 +489,7 @@ pub fn encode_entry(out: &mut [u8], kind: u64, size: u64, name: &str) -> Option<
 }
 
 fn stat_of(reply: &Reply) -> Stat {
-    Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime, ident: reply.ident }
+    Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime }
 }
 
 fn receive(conn: &Connection) -> Result<Reply, SyscallError> {
