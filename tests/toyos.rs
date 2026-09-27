@@ -100,15 +100,18 @@ struct HostSlots {
     /// The name this run answers to in another run's waiting message. A pid
     /// alone is not enough to act on: an agent needs to know which worktree.
     label: String,
-    /// In vCPUs. Zero is the semaphore off. It is the only way to measure a
-    /// suite against one that has it, which is what `--host-slots 0` is for.
+    /// In vCPUs, and this process's view of the host rather than the host's
+    /// (`src/buildlock.rs`). Zero is the semaphore off. It is the only way to
+    /// measure a suite against one that has it, which is what `--host-slots 0`
+    /// is for.
     budget: usize,
 }
 
-/// One task's hold on the host: its units, when the semaphore is on, and the
-/// claim every boot it makes is checked against whether or not it is.
+/// One task's hold on the host: its units, when the semaphore is on and it
+/// boots anything, and the claim every boot it makes is checked against
+/// whether or not it is.
 struct TaskSlot {
-    _claim: qemu::Claimed,
+    claim: toyos_build::vcpuclaim::Claimed,
     _units: Option<toyos_build::buildlock::Slot>,
 }
 
@@ -116,15 +119,22 @@ impl HostSlots {
     /// `Err` is a task wider than the whole budget, refused by name.
     fn take(&self, what: &str, vcpus: u32) -> Result<TaskSlot, String> {
         let what = format!("{}: {what}", self.label);
-        let units = match self.budget {
-            0 => None,
-            budget => Some(toyos_build::buildlock::guest_slot(&self.root, budget, vcpus as usize, &what)?),
+        let units = match (self.budget, vcpus) {
+            (0, _) | (_, 0) => None,
+            (budget, vcpus) => {
+                Some(toyos_build::buildlock::guest_slot(&self.root, budget, vcpus as usize, &what)?)
+            }
         };
-        Ok(TaskSlot { _claim: qemu::claim(&what, vcpus), _units: units })
+        Ok(TaskSlot { claim: toyos_build::vcpuclaim::claim(&what, vcpus), _units: units })
+    }
+
+    /// This worktree's run lock: every run takes it before its first compile.
+    fn run(&self) -> toyos_build::buildlock::Guard {
+        toyos_build::buildlock::run(&self.root, &format!("{}: a harness run", self.label))
     }
 
     /// The machine's tier lock, when this run is a full tier
-    /// ([`testargs::is_full_tier`]): taken before the first boot and with no
+    /// ([`testargs::is_full_tier`]): taken before the first compile and with no
     /// slot held, as the lock order in `src/buildlock.rs` says.
     fn full_tier<'a>(
         &self,
@@ -145,11 +155,12 @@ impl HostSlots {
 
 /// Every machine and screen test whose widest moment is not one guest of
 /// [`BootOptions::default`]'s width: the vCPUs of every guest it has up at
-/// once. Its host slot is taken this wide before it boots anything, and a boot
-/// past that is refused by name (`qemu::claim`), so a missing row reds the
-/// test's first run rather than putting a guest on the host that its budget
-/// never counted. A row wider than the test holds units idle and nothing else.
+/// once, and 0 for a test that boots nothing. Its host slot is taken this wide
+/// before it boots anything, and checked both ways (`toyos_build::vcpuclaim`):
+/// a boot past it is refused by name, and so is a green task that never
+/// reached it.
 const VCPUS: &[(&str, u32)] = &[
+    ("screen_decoder", 0),
     ("screen_blocked_dump", 8),
     ("screen_fatal_halt_composited", 8),
     ("irq_census_conservation", 4),
@@ -174,6 +185,24 @@ const VCPUS: &[(&str, u32)] = &[
     ("toolkit_window_wake", 8),
     ("toolkit_winit_loop", 8),
     ("toolkit_winit_pace", 8),
+    ("keyboard_claim_close_spares_stdin", 1),
+    ("dump_left_pending_is_owed", 1),
+    ("fpu_isolation", 1),
+    ("gsbase_locked", 1),
+    ("heap_ceiling_recovery", 1),
+    ("serial_vocabulary", 0),
+    ("suspend_detector", 0),
+    ("suspend_invalidates_a_verdict", 0),
+    ("stall_is_not_a_verdict", 0),
+    ("alone_line_reports_the_alone_run", 0),
+    ("nvme_image_is_held_by_one_guest", 0),
+    ("quarantine_verdicts", 0),
+    ("quarantine_exit_status", 0),
+    ("quarantine_entries", 0),
+    ("control_regs_verdict", 0),
+    ("i8042_quarantine_verdict", 0),
+    ("suite_split", 0),
+    ("nightly_tier_is_announced", 0),
 ];
 
 /// How many vCPUs a registered test has up at its widest ([`VCPUS`]).
@@ -2917,18 +2946,40 @@ fn discover_c_tests() -> Vec<String> {
 fn discover_rust_tests(bins: &[(String, Vec<u8>)]) -> Vec<String> {
     let mut names: Vec<String> = bins
         .iter()
-        .filter_map(|(name, _)| {
-            if name.ends_with(".so") {
-                return None;
-            }
-            if RUST_SKIP.contains(&name.as_str())
-                || AUDIO_TESTS.iter().any(|(audio, _)| *audio == name)
-            {
-                return None;
-            }
-            Some(name.clone())
-        })
+        .map(|(name, _)| name)
+        .filter(|name| !name.ends_with(".so") && is_shared_rust_test(name))
+        .cloned()
         .collect();
+    names.sort();
+    names
+}
+
+fn is_shared_rust_test(name: &str) -> bool {
+    !RUST_SKIP.contains(&name) && !AUDIO_TESTS.iter().any(|(audio, _)| *audio == name)
+}
+
+/// Every name this suite registers, read off the sources before anything is
+/// built: what the tier and run decisions need before the first compile. A Rust
+/// test is its `src/bin/<name>.rs` (`build::build_toyos_bins`), and a C test is
+/// what [`discover_c_tests`] finds whether or not it compiles.
+fn listed_names() -> Vec<String> {
+    let bin_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests/src/bin");
+    let rust = fs::read_dir(&bin_dir)
+        .unwrap_or_else(|e| panic!("list {}: {e}", bin_dir.display()))
+        .map(|entry| {
+            let name = entry.unwrap_or_else(|e| panic!("list {}: {e}", bin_dir.display())).file_name();
+            let name = name.to_str().expect("a test's file name is UTF-8");
+            name.strip_suffix(".rs")
+                .unwrap_or_else(|| panic!("{name} in {} is not a test's source", bin_dir.display()))
+                .to_string()
+        })
+        .filter(|name| is_shared_rust_test(name));
+    let declared = AUDIO_TESTS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(SCREEN_TESTS.iter().chain(MACHINE_TESTS).map(|(name, _, _)| *name))
+        .map(String::from);
+    let mut names: Vec<String> = discover_c_tests().into_iter().chain(rust).chain(declared).collect();
     names.sort();
     names
 }
@@ -20036,12 +20087,12 @@ fn shared_boots<'a>(tests: &[&'a TestDef], bins: &Bins<'_>) -> Vec<(Vec<&'a Test
         .collect()
 }
 
-fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Outcome>) {
+fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &dyn Fn(Outcome)) {
     // Both clocks, at every test, because what the host did *between* two of
     // them is a different question from what it did during one: a lid closed
     // while nothing was running invalidates nothing.
     let send = |name: String, reason: Option<String>, start: common::clock::Mark| {
-        let _ = report.send(Outcome {
+        report(Outcome {
             name,
             reason,
             elapsed: start.elapsed(),
@@ -20396,7 +20447,7 @@ fn run_phase(
                     let next =
                         queue.lock().expect("a worker panicked holding the queue").pop_front();
                     let Some(task) = next else { return };
-                    let _slot = match slots.take(&task.names().join(" "), task_vcpus(&task)) {
+                    let slot = match slots.take(&task.names().join(" "), task_vcpus(&task)) {
                         Ok(slot) => slot,
                         Err(why) => {
                             for name in task.names() {
@@ -20410,7 +20461,23 @@ fn run_phase(
                             continue;
                         }
                     };
-                    run_task(task, bins, &tx);
+                    // Each outcome goes out as the next arrives, and the last
+                    // once the task is over: a task that was green throughout
+                    // and never reached its claim is red on its last name.
+                    let last: std::cell::RefCell<Option<Outcome>> = std::cell::RefCell::new(None);
+                    let red = std::cell::Cell::new(false);
+                    run_task(task, bins, &|outcome: Outcome| {
+                        red.set(red.get() || outcome.reason.is_some());
+                        if let Some(before) = last.replace(Some(outcome)) {
+                            let _ = tx.send(before);
+                        }
+                    });
+                    if let Some(mut outcome) = last.take() {
+                        if !red.get() {
+                            outcome.reason = slot.claim.unreached();
+                        }
+                        let _ = tx.send(outcome);
+                    }
                 }
             });
         }
@@ -20799,8 +20866,16 @@ fn the_metal_gates_refuse_what_they_name() -> Result<(), String> {
     Ok(())
 }
 
-fn check_registration() {
+fn check_registration(listed: &[String]) {
     check_metal_registration();
+    let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+    let broad = testargs::too_broad(&names);
+    assert!(
+        broad.is_empty(),
+        "{broad:?}: a test's name is a named run, and each of these is inside more than {} \
+         others, so running it by name would be a tier. Rename it.",
+        testargs::NAMED_RUN_EXTRA
+    );
     let mut rows: BTreeSet<&str> = BTreeSet::new();
     for (test, _) in CARRIES {
         assert!(rows.insert(test), "CARRIES has two rows for {test}");
@@ -20960,11 +21035,11 @@ fn main() {
     // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
-    // How many vCPUs may be up on the *host* at once, across every worktree.
-    // `--jobs` is this run's demand; this is what the machine will supply, and
-    // zero turns it off.
+    // How many vCPUs may be up on the *host* at once, across every worktree, as
+    // this process counts them. `--jobs` is this run's demand; this is what the
+    // machine will supply, and zero turns it off.
     let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or_else(
-        toyos_build::buildlock::host_vcpus,
+        toyos_build::buildlock::host_cores,
         |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
     );
 
@@ -20987,7 +21062,21 @@ fn main() {
         budget: host_budget,
     };
 
-    check_registration();
+    let listed = listed_names();
+    check_registration(&listed);
+
+    // Before the first compile, in the order `src/buildlock.rs` declares, and
+    // held to the exit: one full tier on the machine, then one run in this
+    // worktree at a time, of any kind. `--list`, `--debug` and `--metal` boot
+    // no tier.
+    let _tier = if audio_gate.is_some() {
+        slots.full_tier(filter, AUDIO_TESTS.iter().map(|(name, _)| *name))
+    } else if list_mode || debug_mode || metal_mode {
+        None
+    } else {
+        slots.full_tier(filter, listed.iter().map(String::as_str))
+    };
+    let _run = slots.run();
 
     if nocapture || debug_mode {
         common::qemu::VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -21119,10 +21208,7 @@ fn main() {
         let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
         // One slot for the whole tier: it boots one guest at a time for the
         // length of it, so one slot as wide as its widest config is what it
-        // occupies. The owner has ruled that gate A does not get a quiet host
-        // (CLAUDE.md, 2026-08-04), so it takes its share of the machine like
-        // everything else and does not reserve it.
-        let _tier = slots.full_tier(filter, AUDIO_TESTS.iter().map(|(name, _)| *name));
+        // occupies.
         let widest = *AUDIO_SMP.iter().max().expect("gate A has a config");
         let _slot = match slots.take("gate A, thorough", widest) {
             Ok(slot) => slot,
@@ -21255,7 +21341,6 @@ fn main() {
         // first line: a suite carrying quarantined names is not a clean suite.
         eprintln!("[toyos] quarantined: {} — {}", row.test, row.issue);
     }
-    let _tier = slots.full_tier(filter, runnable.iter().copied());
 
     let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
     let mut tally = Tally::new(redlist::QUARANTINE).holding_back(&held_back);

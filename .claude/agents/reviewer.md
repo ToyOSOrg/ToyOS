@@ -17,8 +17,6 @@ Untested code is not reviewed. First establish, from CI and the pull request bod
 green, and where the change targets hardware the reading from that hardware exists. QEMU is not the
 hardware. If one is missing, say which in one line and stop: NOT READY FOR REVIEW.
 
-A reviewer runs host tests and named QEMU tests only; a full tier it needs is requested from the orchestrator.
-
 Then `git log origin/main..HEAD`, `git diff origin/main...HEAD`, and every changed file whole.
 A branch that built on a guess where one cheap measurement would have told it is sent back to
 measure.

@@ -38,80 +38,6 @@ pub fn live_instances() -> u32 {
     LIVE.load(Ordering::SeqCst)
 }
 
-/// The vCPUs the task on this thread reserved of the host, and how many of
-/// them its guests have up.
-///
-/// A task's slot is sized before it boots anything (`buildlock::guest_slot`),
-/// so a guest that would take the task past its reservation is one the host's
-/// budget never counted. Such a boot is refused before QEMU is spawned, naming
-/// the task, and so is a boot on a thread no task claimed. Per thread, because
-/// every guest a task boots is booted on the worker that took the task.
-struct Claim {
-    what: String,
-    vcpus: u32,
-    live: AtomicU32,
-}
-
-thread_local! {
-    static CLAIM: std::cell::RefCell<Option<Arc<Claim>>> = const { std::cell::RefCell::new(None) };
-}
-
-/// This thread's claim, from [`claim`] until it drops.
-#[must_use]
-pub struct Claimed(());
-
-/// Declare that the task about to run on this thread has at most `vcpus` vCPUs
-/// up at once — the width its host slot was taken for.
-pub fn claim(what: &str, vcpus: u32) -> Claimed {
-    CLAIM.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        assert!(slot.is_none(), "{what}: this thread already runs a task that claimed vCPUs");
-        *slot = Some(Arc::new(Claim { what: what.to_string(), vcpus, live: AtomicU32::new(0) }));
-    });
-    Claimed(())
-}
-
-impl Drop for Claimed {
-    fn drop(&mut self) {
-        CLAIM.with(|slot| slot.borrow_mut().take());
-    }
-}
-
-/// One guest's vCPUs, counted against its task's claim from before its QEMU
-/// is spawned until after it is reaped.
-struct VcpuHold {
-    claim: Arc<Claim>,
-    smp: u32,
-}
-
-impl VcpuHold {
-    fn take(smp: u32) -> Self {
-        let claim = CLAIM.with(|slot| slot.borrow().clone()).unwrap_or_else(|| {
-            panic!(
-                "[qemu] an smp={smp} guest was booted on a thread no task claimed vCPUs on, so \
-                 the host's guest budget does not count it"
-            )
-        });
-        let live = claim.live.fetch_add(smp, Ordering::SeqCst) + smp;
-        if live > claim.vcpus {
-            claim.live.fetch_sub(smp, Ordering::SeqCst);
-            panic!(
-                "[qemu] {}: this smp={smp} boot would have {live} vCPUs up for a task whose host \
-                 slot was taken for {}. Declare the task's widest moment — the vCPUs of every \
-                 guest it has up at once — in `tests/toyos.rs`'s VCPUS.",
-                claim.what, claim.vcpus
-            );
-        }
-        Self { claim, smp }
-    }
-}
-
-impl Drop for VcpuHold {
-    fn drop(&mut self) {
-        self.claim.live.fetch_sub(self.smp, Ordering::SeqCst);
-    }
-}
-
 /// The NVMe backing files live guests are holding open.
 ///
 /// A lane reuses one image across its boots on purpose ([`super::lane`]), so
@@ -377,35 +303,11 @@ pub fn host_speed() -> (Option<u32>, u32, u32, u32) {
     ((fastest != u32::MAX).then_some(fastest), REFERENCE_BOOT_MS, num, den)
 }
 
-/// The host cores this process may run on, read once.
-///
-/// [`std::thread::available_parallelism`] is the Rust-native reading of what
-/// `cargo run -- --ci`'s instrument line prints as `N core(s)`: it needs no host binary and
-/// respects any affinity the runner imposed. The CI `guest` shard is a
-/// four-core AMD EPYC; the dev host has fourteen, and that gap is the whole of
-/// why the oversubscription factor below widens a ceiling on the runner and is
-/// a no-op locally.
-///
-/// `TOYOS_HOST_CORES` overrides the reading, and only ever downward in effect —
-/// it exists so a large host can reproduce a small one's oversubscription for a
-/// measurement, and so a run can pin the number a verdict was read against. It
-/// can only *widen* a liveness ceiling, never shorten one, so a stale value
-/// costs a slower wedge report and never a false pass.
+/// This host's cores as `toyos_build::buildlock::host_cores` declares them, the
+/// one reading the guest budget and every ceiling here share: a
+/// `TOYOS_HOST_CORES` pin moves both.
 pub fn host_cores() -> u32 {
-    static CORES: AtomicU32 = AtomicU32::new(0);
-    let cached = CORES.load(Ordering::Relaxed);
-    if cached != 0 {
-        return cached;
-    }
-    let detected = std::env::var("TOYOS_HOST_CORES")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1)
-        });
-    CORES.store(detected, Ordering::Relaxed);
-    detected
+    u32::try_from(toyos_build::buildlock::host_cores()).expect("a core count fits in a u32")
 }
 
 /// How much an `smp`-vCPU guest is oversubscribed on `cores` host cores, as a
@@ -2769,7 +2671,7 @@ pub struct QemuInstance {
     carried: Option<BTreeSet<String>>,
     /// Counted against its task's claim, and released after [`Drop`] has reaped
     /// the process — fields drop after the body.
-    _vcpus: VcpuHold,
+    _vcpus: toyos_build::vcpuclaim::Hold,
 }
 
 /// The test binaries one boot carries onto ROOT, out of the suite's catalogue.
@@ -3129,7 +3031,7 @@ impl QemuInstance {
         }
         // Before anything is built: a boot its task did not reserve for is refused
         // at no cost.
-        let vcpus = VcpuHold::take(options.smp);
+        let vcpus = toyos_build::vcpuclaim::hold(options.smp).unwrap_or_else(|why| panic!("{why}"));
         let mut features: Vec<&str> = kernel_of(&options);
         if options.debug_wait {
             features.push(toyos_build::build::DEBUG_KERNEL_BUILD);
@@ -4914,7 +4816,7 @@ struct Files {
     own_boot_image: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
     console_file: Option<ConsoleFile>,
-    vcpus: VcpuHold,
+    vcpus: toyos_build::vcpuclaim::Hold,
 }
 
 /// [`BootOptions::console_file`]'s two paths, beside the boot's UART log: the

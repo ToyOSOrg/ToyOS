@@ -39,12 +39,21 @@
 //! counts. The host's cores are spent by intra-suite width and by inter-worktree
 //! suites alike, and nothing was handing them out, so a second suite on the
 //! machine timed the first one's boots out. A guest slot is weighed in vCPUs,
-//! out of one unit per host core ([`host_vcpus`]); a worker that is *compiling*
-//! holds one and is not a guest, which is what [`build_slot`] adds and what
-//! twelve simultaneous kernel builds on fourteen cores cost.
+//! out of one unit per host core ([`host_cores`]); a worker that is *compiling*
+//! holds one and is not a guest, which is what [`build_slot`] adds.
+//!
+//! **A budget is one process's view, not the machine's.** A process scans the
+//! units `0..budget` of its own budget: one run with `--host-slots N` below the
+//! cores cannot see units past `N` held, and one above them takes units nobody
+//! else counts, so the host is only as bounded as the smallest and the largest
+//! budget running on it agree. And a harness built before the units were
+//! weighed takes one file per guest in the same `slots/` without the
+//! [`QUEUE`], so until every worktree has merged it, its guests are undercounted
+//! and it overtakes a queued wide slot.
 //!
 //! [`full_tier`] is exclusive-only too: one full QEMU tier on the machine at a
-//! time, whoever starts it.
+//! time, whoever starts it. [`run`] is the same per worktree: one harness run in
+//! a worktree at a time, of any kind, from its first compile to its exit.
 //!
 //! **Neither count reaches work that does not go through `src/build.rs`** — a
 //! `toyos-sched-sim measure`, a `cargo build` typed by hand in a fork clone,
@@ -54,18 +63,22 @@
 //! `[host-builds] waiting …` line was printed.
 //!
 //! **The order between them is a constraint, not a preference:** tier lock →
-//! host slot (guest or build) → a compiler key's lock → a sysroot key's lock →
-//! the worktree build lock → the global one → artifact. The tier lock is taken
-//! before any slot and never while one is held; a build slot is taken before
+//! run lock → host slot (guest or build) → a compiler key's lock → a sysroot
+//! key's lock → the worktree build lock → the global one → artifact. The tier
+//! and run locks are taken before anything is built and never while a slot is
+//! held, the tier first so that a tier queued behind another worktree's keeps
+//! nothing of its own worktree waiting; a build slot is taken before
 //! any build lock and never while one is held; a key's lock is taken with the
 //! worktree lock put down ([`Held::without_shared`]), because the key's builder
 //! takes the worktree lock exclusively.
 //!
 //! Holder death: `flock` is released by the kernel when the open file
 //! description closes, so a builder that is SIGKILLed mid-phase — routine here
-//! — strands nothing, which a lock file with a pid in it could not promise.
+//! — strands no file, which a lock file with a pid in it could not promise.
 //! Established on this host (Darwin 25.5.0) rather than assumed, and
-//! `killed_holder_releases_the_lock` keeps it that way.
+//! `killed_holder_releases_the_lock` keeps it that way. It does strand cores: a
+//! SIGKILLed harness's guests run on with their units free
+//! (`issues/build/a-sigkilled-harness-leaves-its-qemu-children-running.md`).
 
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -278,10 +291,33 @@ fn tier_path(root: &Path) -> PathBuf {
     git_lock_dir(root).join("tier")
 }
 
-/// How many vCPUs may be up on this host at once, across every worktree: one
-/// per core this process may run on.
+/// The run lock: one harness run in this worktree at a time, from before its
+/// first compile to its exit.
 ///
-/// Derived, not tuned. Under TCG each vCPU is one host thread, busy while its
+/// Two runs in one worktree share its crate targets and the C corpus's libc
+/// archive, which each rebuilds and the other reads, and a full tier's lock
+/// cannot keep a named run out of either. Per worktree, so two worktrees' runs
+/// meet only in the machine-wide locks after it.
+pub fn run(root: &Path, what: &str) -> Guard {
+    exclusive(&run_path(root), "run lock", what)
+}
+
+fn run_path(root: &Path) -> PathBuf {
+    root.join(LOCK_DIR).join("run")
+}
+
+/// The host cores this process may run on, read once: the guest budget, and the
+/// core count every liveness ceiling that widens for an oversubscribed guest
+/// divides by. One declaration, so a run pinned to a small host's count is
+/// pinned in both.
+///
+/// `TOYOS_HOST_CORES` overrides the reading, so a large host can reproduce a
+/// small one for a measurement; a value that is not a positive count is refused
+/// rather than ignored. With it below a guest's width, that guest's slot is
+/// refused, and `--host-slots 0` is the run that measures it.
+///
+/// How many vCPUs may be up at once is one per core, and that is derived, not
+/// tuned. Under TCG each vCPU is one host thread, busy while its
 /// vCPU runs and asleep while it halts, so a guest occupies at most its `-smp`
 /// cores; guests holding one unit per core never outnumber the cores between
 /// them, and none waits for a core on another guest's account. QEMU's main-loop
@@ -295,13 +331,22 @@ fn tier_path(root: &Path) -> PathBuf {
 /// time instead: a task compiles before it boots, so its own build runs while
 /// the units it holds have no guest in them, and what builds cost above this
 /// budget is bounded by [`HOST_BUILDS`], one cargo each.
-///
-/// Every process on one host reads the same number, which the per-index files
-/// need: a process scanning a prefix cannot see that a longer one is full.
-pub fn host_vcpus() -> usize {
-    std::thread::available_parallelism()
-        .unwrap_or_else(|e| panic!("the host's core count, which the guest budget is: {e}"))
-        .get()
+pub fn host_cores() -> usize {
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CORES.get_or_init(|| match std::env::var("TOYOS_HOST_CORES") {
+        Ok(pinned) => parse_cores(&pinned).unwrap_or_else(|why| panic!("{why}")),
+        Err(std::env::VarError::NotPresent) => std::thread::available_parallelism()
+            .unwrap_or_else(|e| panic!("the host's core count, which the guest budget is: {e}"))
+            .get(),
+        Err(e) => panic!("TOYOS_HOST_CORES: {e}"),
+    })
+}
+
+fn parse_cores(pinned: &str) -> Result<usize, String> {
+    match pinned.parse::<usize>() {
+        Ok(cores) if cores >= 1 => Ok(cores),
+        _ => Err(format!("TOYOS_HOST_CORES={pinned:?} is not a count of cores")),
+    }
 }
 
 /// One of the host's guest slots, `vcpus` units wide, held until it drops.
@@ -346,12 +391,7 @@ const QUEUE: &str = "queue";
 ///
 /// [`guest_slot`] counts vCPUs, and a compile is not one. A suite worker holds
 /// a guest slot from the moment it picks a task up, and the first thing the
-/// task does is build its kernel variant — so twelve workers is twelve
-/// concurrent `cargo build`s, each of which asks cargo for the whole machine.
-/// Measured on 2026-08-07: load average 49.9 on
-/// fourteen cores with twelve `rustc`/`cargo` processes and **one** guest live,
-/// which is the one worker that had got as far as booting being given a
-/// fiftieth of the host its wall-clock margins were written for.
+/// task does is build its kernel variant.
 ///
 /// Four rather than one, because a build is not saturating for its whole
 /// length — the tail of any crate graph is a single rustc — and because a bound
@@ -497,7 +537,10 @@ fn slot(dir: &Path, budget: usize, want: usize, what: &str, kind: Slots) -> Resu
             units = kind.units
         ));
     }
-    let _head = exclusive(
+    // Quiet unless it lasts: every contended dispatch of a wide suite queues
+    // here for the microseconds another gatherer takes, and a line for each is
+    // noise that buries the waits that matter.
+    let _head = exclusive_quietly(
         &dir.join(QUEUE),
         &format!("{} queue", kind.tag),
         &format!("{what}, gathering {want} {}", kind.units),
@@ -600,6 +643,22 @@ fn exclusive(path: &Path, lock: &str, what: &str) -> Guard {
         announce(lock, what, &holder);
         take_lock_announcing(&file, LOCK_EX, path, lock, what);
         eprintln!("[build-lock] {what} acquired after {:.1?}", start.elapsed());
+    }
+    let mut guard = Guard { file, records_holder: true };
+    write_note(&mut guard.file, &note_text(what));
+    guard
+}
+
+/// [`exclusive`] for a lock held for moments: the wait says nothing until it
+/// has lasted a [`HEARTBEAT`], and then says what [`exclusive`]'s would.
+fn exclusive_quietly(path: &Path, lock: &str, what: &str) -> Guard {
+    let file = open_lock_file(path);
+    let start = Instant::now();
+    if !try_lock(&file, LOCK_EX) {
+        take_lock_announcing(&file, LOCK_EX, path, lock, what);
+        if start.elapsed() >= HEARTBEAT {
+            eprintln!("[build-lock] {what} acquired after {:.1?}", start.elapsed());
+        }
     }
     let mut guard = Guard { file, records_holder: true };
     write_note(&mut guard.file, &note_text(what));
@@ -959,7 +1018,8 @@ mod tests {
             .append(true)
             .open(root.join("order.log"))
             .unwrap();
-        writeln!(f, "{line}").unwrap();
+        // One `write`, so two holders noting at once cannot interleave a line.
+        f.write_all(format!("{line}\n").as_bytes()).unwrap();
     }
 
     #[test]
@@ -1070,6 +1130,26 @@ mod tests {
             "want-one" => {
                 let _slot = take_vcpus(&root, 1, "the one-vCPU task");
                 note(&root, "narrow");
+            }
+            "gather-two-forever" => {
+                let _slot = take_vcpus(&root, 2, "a gatherer killed mid-gather");
+                until_orphaned();
+            }
+            "want-five" => {
+                let said = match guest_slot(&root, TEST_VCPUS, TEST_VCPUS + 1, "a five-vCPU guest") {
+                    Ok(_) => "admitted".to_string(),
+                    Err(why) => format!("refused: {why}"),
+                };
+                note(&root, &said);
+            }
+            "hold-run" => {
+                let _run = run(&root, "the first run");
+                touch(&root.join("held"));
+                appeared(&root.join("release"), Duration::from_secs(20));
+            }
+            "want-run" => {
+                let _run = run(&root, "the second run");
+                note(&root, "second run");
             }
             "hold-tier" => {
                 let _tier = full_tier(&root, "the first full tier");
@@ -1531,21 +1611,108 @@ mod tests {
     /// **A guest wider than the whole host is refused by name, at once.** No
     /// release can ever admit it, so queueing it would be a wait with no end
     /// that says only that it is waiting.
+    ///
+    /// Asked in a child under a deadline, because the defect it catches is a
+    /// wait that never ends, and a test that waits with it reports nothing.
     #[test]
     fn a_guest_wider_than_the_budget_is_refused() {
         let root = scratch("vcpus-refused");
-        let asked = Instant::now();
-        let why = match guest_slot(&root, TEST_VCPUS, TEST_VCPUS + 1, "a five-vCPU guest") {
-            Ok(_) => panic!("a {}-vCPU guest was admitted to a {TEST_VCPUS}-vCPU host", TEST_VCPUS + 1),
-            Err(why) => why,
-        };
-        assert!(asked.elapsed() < Duration::from_secs(5), "the refusal waited before refusing");
+        let mut asker = child(&root, "want-five");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while asker.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                asker.kill().unwrap();
+                asker.wait().unwrap();
+                panic!("a {}-vCPU guest was queued on a {TEST_VCPUS}-vCPU host, not refused", TEST_VCPUS + 1);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let said = fs::read_to_string(root.join("order.log")).unwrap();
         assert!(
-            why.contains("a five-vCPU guest") && why.contains("needs 5 vCPUs") && why.contains("budget is 4"),
-            "the refusal does not name what it refused and why: {why}"
+            !said.starts_with("admitted"),
+            "a {}-vCPU guest was admitted to a {TEST_VCPUS}-vCPU host",
+            TEST_VCPUS + 1
+        );
+        assert!(
+            said.contains("a five-vCPU guest") && said.contains("needs 5 vCPUs") && said.contains("budget is 4"),
+            "the refusal does not name what it refused and why: {said}"
         );
         assert_eq!(units_held(&root), 0, "a refused guest kept units");
         drop(take_vcpus(&root, TEST_VCPUS, "a guest exactly as wide as the host"));
+    }
+
+    /// **A gatherer killed mid-gather strands neither the queue nor what it
+    /// had gathered.** It is the one process holding part of a slot, so its
+    /// death is the one that could leave the host short for good.
+    #[test]
+    fn a_gatherer_killed_mid_gather_gives_back_the_queue_and_its_units() {
+        let root = scratch("vcpus-gatherer-killed");
+        let mut holder = child(&root, "hold-three");
+        assert!(
+            appeared(&root.join(format!("held-{}", holder.id())), Duration::from_secs(20)),
+            "the holder never took its slot"
+        );
+        let mut gatherer = child(&root, "gather-two-forever");
+        let queue = slot_dir(&root).join(QUEUE);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while units_held(&root) < TEST_VCPUS {
+            assert!(Instant::now() < deadline, "the gatherer never took the free unit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !try_lock(&open_lock_file(&queue), LOCK_EX),
+            "the gatherer holds a unit and not the queue"
+        );
+
+        gatherer.kill().unwrap();
+        gatherer.wait().unwrap();
+        assert!(try_lock(&open_lock_file(&queue), LOCK_EX), "a killed gatherer stranded the queue");
+        assert_eq!(units_held(&root), 3, "a killed gatherer stranded the unit it had gathered");
+
+        touch(&root.join("release"));
+        assert!(holder.wait().unwrap().success());
+    }
+
+    /// **Two runs in one worktree never overlap**, and the second names the
+    /// first while it waits; a run in another worktree does not wait at all.
+    #[test]
+    fn two_runs_in_one_worktree_serialise() {
+        let root = scratch("runs");
+        let mut first = child(&root, "hold-run");
+        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "the first run never took the lock");
+
+        let elsewhere = scratch("runs-elsewhere");
+        assert!(
+            try_lock(&open_lock_file(&run_path(&elsewhere)), LOCK_EX),
+            "a run in one worktree kept a run in another out"
+        );
+
+        let (mut second, said) = child_saying(&root, "want-run");
+        let waiting = format!(
+            "waiting for the run lock (the second run) — held by pid {} (the first run)",
+            first.id()
+        );
+        assert!(
+            waits_before_it_runs(&root, &said, &waiting),
+            "a second run started in a worktree while the first was running, or waited without \
+             naming it"
+        );
+
+        touch(&root.join("release"));
+        assert!(first.wait().unwrap().success());
+        assert!(second.wait().unwrap().success());
+        assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "second run\n");
+    }
+
+    /// A pinned core count is a positive count or it is refused: a pin that
+    /// was quietly ignored would measure the host it was meant to replace.
+    #[test]
+    fn a_pinned_core_count_is_a_count_or_refused() {
+        assert_eq!(parse_cores("4"), Ok(4));
+        for bad in ["0", "", "four", "-1", "4 "] {
+            let why = parse_cores(bad).expect_err(bad);
+            assert!(why.contains("TOYOS_HOST_CORES"), "{why}");
+        }
     }
 
     /// **A wide slot at the head of the queue is not overtaken.** With three
@@ -1576,7 +1743,11 @@ mod tests {
         assert!(holder.wait().unwrap().success());
         assert!(wide.wait().unwrap().success());
         assert!(narrow.wait().unwrap().success());
-        assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "wide\nnarrow\n");
+        // In either order: once released, the two fit the host together.
+        let mut ran: Vec<String> =
+            fs::read_to_string(root.join("order.log")).unwrap().lines().map(String::from).collect();
+        ran.sort();
+        assert_eq!(ran, ["narrow", "wide"]);
     }
 
     /// Every unit of a killed wide slot comes back, not one of them.

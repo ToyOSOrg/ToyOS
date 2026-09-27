@@ -50,6 +50,7 @@ pub mod testargs;
 pub mod tiers;
 pub mod toolchain;
 pub mod userlandhost;
+pub mod vcpuclaim;
 pub mod wallpaper;
 pub mod worktree;
 

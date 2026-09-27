@@ -420,10 +420,7 @@ before anything else. `GREEN` there means the host, not the kernel. What none of
 them should get is a widened bound — a gate that tolerates one lost byte
 tolerates the defect it was written for. The two fixes above are the two shapes
 that are legitimate: make the verdict independent of the rate, or scale a
-liveness ceiling with the phase. The global QEMU-slot semaphore this section
-used to name as the closing move now exists (`buildlock::guest_slot`): the host
-admits twelve guests across every
-worktree, so the four-suite regime these were observed in cannot recur. A looser
+liveness ceiling with the phase. A looser
 assertion is still not the answer.
 
 **But `ALONE … red again — the defect is real` is not evidence, and the protocol

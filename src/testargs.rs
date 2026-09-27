@@ -237,11 +237,29 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
 /// A run is a tier unless its filter is some registered test's whole name.
 /// "No filter" alone is the wrong line, because the filter is a substring: `_`
 /// selects nearly the whole suite and `screen` a family of it, and a run that
-/// selects by pattern is doing a tier's job. A whole name still runs the few
-/// names it is a prefix of — `audio_tone` runs `audio_tone_load` too — and that
-/// is a named run: what it adds is bounded by the names, not by the suite.
+/// selects by pattern is doing a tier's job.
 pub fn is_full_tier<'a>(filter: Option<&str>, names: impl IntoIterator<Item = &'a str>) -> bool {
     filter.is_none_or(|filter| !names.into_iter().any(|name| name == filter))
+}
+
+/// How many other registered names one test's name may be contained in.
+///
+/// A whole name is a named run and the filter is a substring, so a name inside
+/// many others would be a tier that [`is_full_tier`] calls named; this bounds a
+/// named run at the test it names and this many beside it.
+pub const NAMED_RUN_EXTRA: usize = 4;
+
+/// Every registered name contained in more than [`NAMED_RUN_EXTRA`] others,
+/// with the names it is inside.
+pub fn too_broad<'a>(names: &[&'a str]) -> Vec<(&'a str, Vec<&'a str>)> {
+    names
+        .iter()
+        .filter_map(|&name| {
+            let inside: Vec<&str> =
+                names.iter().copied().filter(|&other| other != name && other.contains(name)).collect();
+            (inside.len() > NAMED_RUN_EXTRA).then_some((name, inside))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -494,6 +512,16 @@ mod tests {
         for name in names {
             assert!(!is_full_tier(Some(name), names), "{name:?} is a test's name, yet is a tier");
         }
+    }
+
+    /// A name inside more than [`NAMED_RUN_EXTRA`] others is refused with
+    /// them, and one inside exactly that many is not.
+    #[test]
+    fn a_name_inside_too_many_others_is_refused() {
+        let at = ["log", "log_a", "log_b", "log_c", "log_d", "other"];
+        assert!(too_broad(&at).is_empty(), "a name inside {NAMED_RUN_EXTRA} others was refused");
+        let past = ["log", "log_a", "log_b", "log_c", "log_d", "a_log_e", "other"];
+        assert_eq!(too_broad(&past), vec![("log", vec!["log_a", "log_b", "log_c", "log_d", "a_log_e"])]);
     }
 
     #[test]

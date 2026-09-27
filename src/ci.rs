@@ -717,7 +717,7 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
                 .map(|l| l.trim_start_matches([' ', '\t', ':']).to_string())
         })
         .unwrap_or_else(|| "an unnamed CPU".to_string());
-    let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
+    let cores = crate::buildlock::host_cores();
     let line = format!("QEMU {have}, {accel}, {cpu}, {cores} core(s)");
     if have != want {
         return Err(format!(
