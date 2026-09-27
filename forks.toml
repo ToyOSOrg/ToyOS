@@ -382,7 +382,7 @@ upstream = "rust-lang/llvm-project"
 base = "52ed14fcd56a"
 base_note = "rust-lang/llvm-project's rustc/22.1-2026-05-19, the commit rust/ pinned when the fork was made. A rust/ upstream merge that moves rust-lang's pin moves this base: the ToyOS commits are carried onto a new `toyos-rustc-<branch>` branch, and the old one is left behind, unrewritten."
 branch = "toyos-rustc-22.1-2026-05-19"
-delta = "+330/-1"
+delta = "+341/-1"
 tier = "toolchain"
 why = """
 rustc's LLVM and the clang that builds ToyOS's C, built from source by rustc's
@@ -394,6 +394,7 @@ a PIE with no interpreter, the sysroot's `include/` and `lib/`, `-ltoyos_c` —
 with a Triple unit test and a driver lit test.
 """
 pr = "none — no upstream PRs for now (owner). Written to upstream quality; its destination is llvm/llvm-project, not rust-lang's mirror of it."
+pr_note = "Not yet a series to send: 9481b7db puts crt0.o in the link, d03e5f68 takes it out, and 39ec544b fixes 9481b7db's test. The branch is what rust/'s gitlink pins, so it is not rewritten; the series is folded, one commit per change, when it is proposed."
 
 # Not a crate fork: rust/ is a submodule of Japabu/rust (compiler + std with
 # ToyOS as a target). Its own upstream sync is tracked separately.

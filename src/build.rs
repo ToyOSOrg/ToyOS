@@ -843,9 +843,8 @@ fn build_programs(
     let ws_target = userland_dir.join(format!("target/{target}/{PROFILE}"));
 
     // Every userland crate that compiles C compiles it with the toolchain's
-    // clang against libc's C sysroot (`src/csysroot.rs`), which takes the
-    // artifact lock below for itself, so it is made first.
-    let cc_env = crate::csysroot::ensure(root, &env.toolchain, arch).cc_env();
+    // clang against the C sysroot beside the Rust one (`src/clang.rs`).
+    let cc_env = crate::clang::CSysroot::of(&env.toolchain, arch).cc_env();
     let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     // Build and read under one hold, exactly as `build_toyos_bins` does and for

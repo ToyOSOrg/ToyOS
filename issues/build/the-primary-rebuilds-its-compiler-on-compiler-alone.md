@@ -9,7 +9,7 @@ opened: 2026-09-26
 `src/toolchain.rs` rebuilds the primary's toolchain when the stamp over
 `rust/compiler/` changes, and `compiler::record` writes that tree as the
 compiler the primary's `stage2` is. A fork commit that moves only
-`src/bootstrap`, `src/tools`, `src/stage0`, `Cargo.lock` or the LLVM submodule
+`src/bootstrap`, `src/tools`, `src/stage0` or `Cargo.lock`
 leaves the primary on the compiler it had, and a worktree whose `compiler/`
 matches the record is handed that compiler too. A worktree's own compiler is
 keyed on all of them (`compiler::key`, PR #524), so the two answers to "which

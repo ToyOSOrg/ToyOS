@@ -3,7 +3,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::fs;
 
-use toyos_build::csysroot::CSysroot;
+use toyos_build::clang::CSysroot;
 
 /// Root of the repository.
 pub fn repo_root() -> PathBuf {
@@ -24,7 +24,7 @@ pub fn c_sysroot() -> CSysroot {
         let _slot = toyos_build::buildlock::build_slot(&repo_root(), "the C sysroot");
         let mut lock = toyos_build::buildlock::shared(&repo_root(), "the C sysroot");
         let sysroot = toyos_build::toolchain::ensure(&repo_root(), false, &mut lock);
-        toyos_build::csysroot::ensure(&repo_root(), &sysroot.dir, super::qemu::SUITE_ARCH)
+        CSysroot::of(&sysroot.dir, super::qemu::SUITE_ARCH)
     })
     .clone()
 }

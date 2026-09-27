@@ -21,7 +21,10 @@ const SAYS: &str = "hello from clang, on ToyOS: 6 * 7 = 42";
 /// segments; and it names no program interpreter, which ToyOS does not have.
 pub fn judge_elf(elf: &[u8], readobj: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
     let header = toyos_elf::FileHeader::parse(elf).map_err(|e| format!("toyos-elf refuses the header: {e:?}"))?;
-    let machine = toyos_elf::Machine::X86_64;
+    let (machine, em) = match super::qemu::SUITE_ARCH {
+        toyos_build::arch::Arch::X86_64 => (toyos_elf::Machine::X86_64, "EM_X86_64"),
+        toyos_build::arch::Arch::Aarch64 => (toyos_elf::Machine::Aarch64, "EM_AARCH64"),
+    };
     if header.machine != machine {
         return Err(format!("toyos-elf reads machine {:?}, not {machine:?}", header.machine));
     }
@@ -45,7 +48,7 @@ pub fn judge_elf(elf: &[u8], readobj: &std::path::Path, path: &std::path::Path) 
     if !field("Type:")?.starts_with("SharedObject") {
         return Err(format!("llvm-readobj reads type {}, and a PIE is ET_DYN", field("Type:")?));
     }
-    if !field("Machine:")?.starts_with("EM_X86_64") {
+    if !field("Machine:")?.starts_with(em) {
         return Err(format!("llvm-readobj reads machine {}", field("Machine:")?));
     }
     let entry = field("Entry:")?;

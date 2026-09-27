@@ -19,12 +19,33 @@
 //! Bootstrap removes `stage2` on every assemble, so these are put back after
 //! every build that makes one, and a toolchain directory without all of it is
 //! refused rather than left to fail at the first C compile.
+//!
+//! **The C sysroot a guest target's clang reads is in the Rust sysroot**, at
+//! `lib/rustlib/<target>/c/` ([`CSysroot`]): made with it (`libc::build_c`),
+//! keyed with it, and published with it.
+//!
+//! What this file declares — [`LLVM_CONFIG`], [`TOOLS`], [`provision`] — is what
+//! the published toolchain's C half is, so the release tag hashes it
+//! (`src/release.rs`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::arch::Arch;
 use crate::sysroot::clone_tree;
 use crate::toolchain::host_triple;
+
+/// This file, as the release tag names it.
+pub(crate) const SOURCE: &str = file!();
+
+/// The `[llvm]` of every `bootstrap.toml` that builds a host compiler: LLVM
+/// built from `src/llvm-project` — the fork that knows the ToyOS target — with
+/// clang beside it, for the two architectures ToyOS runs on and the hosts it is
+/// built on. Bootstrap rebuilds it only when that commit moves.
+pub(crate) const LLVM_CONFIG: &str = "download-ci-llvm = false\n\
+                                      clang = true\n\
+                                      targets = \"AArch64;X86\"\n\
+                                      experimental-targets = \"\"";
 
 /// What a toolchain directory's `bin` must hold for C: bootstrap's two, then
 /// the two [`provision`] adds.
@@ -35,19 +56,49 @@ fn bin(toolchain: &Path) -> PathBuf {
     toolchain.join("lib/rustlib").join(host_triple()).join("bin")
 }
 
-/// The clang `toolchain` carries.
-pub fn clang(toolchain: &Path) -> PathBuf {
-    bin(toolchain).join("clang")
+/// A guest target's C toolchain in a sysroot: its C sysroot, and the clang,
+/// archiver and ELF reader that sysroot's toolchain carries.
+#[derive(Clone, Debug)]
+pub struct CSysroot {
+    /// What `--sysroot` names: `include/`, libc's headers, and
+    /// `lib/libtoyos_c.a`, its `staticlib`.
+    pub dir: PathBuf,
+    pub clang: PathBuf,
+    pub ar: PathBuf,
+    pub readobj: PathBuf,
+    /// The guest target, as clang's `--target` spells it.
+    pub target: &'static str,
 }
 
-/// The `llvm-ar` `toolchain` carries.
-pub fn ar(toolchain: &Path) -> PathBuf {
-    bin(toolchain).join("llvm-ar")
-}
+impl CSysroot {
+    /// `arch`'s, in the sysroot at `toolchain`.
+    pub fn of(toolchain: &Path, arch: Arch) -> Self {
+        let target = arch.userland();
+        Self {
+            dir: toolchain.join("lib/rustlib").join(target).join("c"),
+            clang: bin(toolchain).join("clang"),
+            ar: bin(toolchain).join("llvm-ar"),
+            readobj: bin(toolchain).join("llvm-readobj"),
+            target,
+        }
+    }
 
-/// The `llvm-readobj` `toolchain` carries.
-pub fn readobj(toolchain: &Path) -> PathBuf {
-    bin(toolchain).join("llvm-readobj")
+    /// The arguments every compile and link against this sysroot starts with.
+    pub fn args(&self) -> [String; 2] {
+        [format!("--target={}", self.target), format!("--sysroot={}", self.dir.display())]
+    }
+
+    /// What names this C toolchain to the `cc` crate for this target, as the
+    /// variables it reads: so a crate that compiles C for ToyOS builds it with
+    /// this clang against this sysroot and archives it with this `llvm-ar`.
+    pub fn cc_env(&self) -> Vec<(String, String)> {
+        let suffix = self.target.replace('-', "_");
+        vec![
+            (format!("CC_{suffix}"), self.clang.display().to_string()),
+            (format!("AR_{suffix}"), self.ar.display().to_string()),
+            (format!("CFLAGS_{suffix}"), format!("--sysroot={}", self.dir.display())),
+        ]
+    }
 }
 
 /// clang's resource directory's parent: `lib/clang`, beside `bin`.
@@ -107,10 +158,11 @@ fn resource_version(llvm: &Path) -> PathBuf {
     }
 }
 
-/// Give `toolchain` the C toolchain of the LLVM installed at `llvm`, replacing
-/// whatever it carried.
-pub(crate) fn provision(toolchain: &Path, llvm: &Path) {
-    let bin = bin(toolchain);
+/// Give the `stage2` bootstrap assembled the C toolchain of the LLVM it
+/// installed beside it, `../llvm`, replacing whatever it carried.
+pub(crate) fn provision(stage2: &Path) {
+    let llvm = &stage2.parent().expect("stage2 is under a build directory").join("llvm");
+    let bin = bin(stage2);
     let from = llvm.join("bin/clang");
     let to = bin.join("clang");
     let _ = fs::remove_file(&to);
@@ -123,10 +175,10 @@ pub(crate) fn provision(toolchain: &Path, llvm: &Path) {
         .unwrap_or_else(|e| panic!("symlink {} -> rust-lld: {e}", lld.display()));
 
     let version = resource_version(llvm);
-    let into = resource_parent(toolchain).join(version.file_name().expect("a version directory"));
-    let _ = fs::remove_dir_all(resource_parent(toolchain));
+    let into = resource_parent(stage2).join(version.file_name().expect("a version directory"));
+    let _ = fs::remove_dir_all(resource_parent(stage2));
     clone_tree(&version.join("include"), &into.join("include"));
-    assert_present(toolchain);
+    assert_present(stage2);
 }
 
 #[cfg(test)]
@@ -139,7 +191,7 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// An LLVM install as bootstrap leaves one: `clang` a link to the
+    /// An LLVM install as bootstrap leaves one beside `stage2`: `clang` a link to the
     /// versioned binary, the resource headers under `lib/clang/<version>`.
     fn llvm(base: &Path) -> PathBuf {
         let llvm = base.join("llvm");
@@ -167,25 +219,25 @@ mod tests {
         let said = refused.downcast_ref::<String>().expect("a formatted refusal");
         assert!(said.contains("clang") && said.contains("ld.lld") && said.contains("include"), "{said}");
 
-        provision(&stage2, &llvm);
+        provision(&stage2);
         assert!(!missing(&stage2));
-        assert_eq!(fs::read_to_string(clang(&stage2)).unwrap(), "the clang");
-        assert!(!fs::symlink_metadata(clang(&stage2)).unwrap().file_type().is_symlink(), "clang is a copy, not the link");
+        assert_eq!(fs::read_to_string(bin(&stage2).join("clang")).unwrap(), "the clang");
+        assert!(!fs::symlink_metadata(bin(&stage2).join("clang")).unwrap().file_type().is_symlink(), "clang is a copy, not the link");
         assert_eq!(fs::read_link(bin(&stage2).join("ld.lld")).unwrap(), Path::new("rust-lld"));
         assert_eq!(fs::read_to_string(bin(&stage2).join("ld.lld")).unwrap(), "lld");
-        assert_eq!(fs::read_to_string(readobj(&stage2)).unwrap(), "the reader");
-        assert_eq!(fs::read_to_string(ar(&stage2)).unwrap(), "the archiver");
+        assert_eq!(fs::read_to_string(bin(&stage2).join("llvm-readobj")).unwrap(), "the reader");
+        assert_eq!(fs::read_to_string(bin(&stage2).join("llvm-ar")).unwrap(), "the archiver");
         let stddef = resource_parent(&stage2).join("22/include/stddef.h");
         assert_eq!(fs::read_to_string(stddef).unwrap(), "typedef long ptrdiff_t;");
 
         // Provisioning again, from another LLVM, replaces what was there.
         fs::remove_dir_all(llvm.join("lib/clang/22")).unwrap();
         write(&llvm.join("lib/clang/23/include/stddef.h"), "v23");
-        provision(&stage2, &llvm);
+        provision(&stage2);
         assert!(!resource_parent(&stage2).join("22").exists(), "the old headers stayed beside the new");
         assert_eq!(fs::read_to_string(resource_parent(&stage2).join("23/include/stddef.h")).unwrap(), "v23");
 
-        fs::remove_file(readobj(&stage2)).unwrap();
+        fs::remove_file(bin(&stage2).join("llvm-readobj")).unwrap();
         assert!(missing(&stage2), "a missing llvm-readobj went unnoticed");
     }
 }

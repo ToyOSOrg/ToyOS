@@ -19,7 +19,7 @@ doomgeneric for the first time, found two places they had already parted:
 
 Both are fixed in the headers. The class is not: a signature changed in
 `userland/libc/src` changes no header, and the C sysroot
-(`src/csysroot.rs`) ships whatever the headers say. The corpus shows the
+(`src/libc.rs`'s `build_c`) ships whatever the headers say. The corpus shows the
 surface is also incomplete — `stdint.h` has no `least`/`fast` types, so clang's
 own `stdatomic.h` does not compile (`124_atomic_counter`), and `pthread.h` and
 `signal.h` stop short of `PTHREAD_PROCESS_SHARED` and `SIGUSR1`.

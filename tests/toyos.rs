@@ -2657,11 +2657,6 @@ struct NotRun {
 
 const NOT_RUN: &[NotRun] = &[
     NotRun {
-        case: "03_struct",
-        stage: Stage::Built,
-        why: Why::Declined("its `.expect` begins with TinyCC's own warning that `__cleanup__` is ignored on a type — the compiler's diagnostic, not the program's output. What the program prints matches the rest"),
-    },
-    NotRun {
         case: "22_floating_point",
         stage: Stage::Built,
         why: Why::Declined("it prints `long double`s through `%Lf`, and libc reads a `long double` as a `double` (issues/build/libc-reads-a-long-double-as-a-double.md): every `%Lf` of a line whose `double`s filled the registers prints 0.000000"),
@@ -2724,7 +2719,7 @@ const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "102_alignas",
         stage: Stage::Built,
-        why: Why::Declined("`i8` takes its alignment from `__attribute__((aligned(16)))` on a type name inside `_Alignas`, which the case's own comment says clang does not apply, so it prints `1 1 1 0`; and its `.expect` begins with TinyCC's warning line"),
+        why: Why::Declined("`i8` takes its alignment from `__attribute__((aligned(16)))` on a type name inside `_Alignas`, which the case's own comment says clang does not apply, so it prints `1 1 1 0`"),
     },
     NotRun {
         case: "104_inline",
@@ -3045,7 +3040,16 @@ fn check_c_result(result: &TestResult) -> bool {
         Some(0) => {
             let expect_file = compile::testcases_dir().join(format!("{test_name}.expect"));
             if expect_file.exists() {
-                let expected = fs::read_to_string(&expect_file).unwrap();
+                // TinyCC's runner captures its compiler's warnings about the
+                // case with the program's output; they are no part of what the
+                // program prints.
+                let warned = format!("{test_name}.c:");
+                let expected: String = fs::read_to_string(&expect_file)
+                    .unwrap()
+                    .lines()
+                    .filter(|l| !(l.starts_with(&warned) && l.contains(": warning: ")))
+                    .map(|l| format!("{l}\n"))
+                    .collect();
                 // **The one comparison in this suite that reads a whole capture
                 // as one program's output, on a console every process shares.**
                 // `common::console::verdict` takes the lines that are some
@@ -8740,11 +8744,10 @@ const SNAKE_ROUNDS: usize = 3;
 /// a program that has been running and drawing rather than one a second old.
 const SNAKE_TURNS: usize = 8;
 
-/// What doom's renderer draws over `demo1`'s first [`DOOM_FRAME_TICS`] tics, as
-/// `userland/doom/src/frames.rs` hashes it: the frames doom drew before clang
+/// What doom's renderer draws over `demo1`'s first `TICS` tics, as
+/// `userland/doom/src/frames.rs` hashes them: the frames doom drew before clang
 /// built its C, which a compiler that builds doom correctly draws again.
 const DOOM_FRAMES: &str = "874685cf6fd3dfa5";
-const DOOM_FRAME_TICS: u32 = 700;
 
 /// Gate: doom draws, frame for frame, what it drew when another compiler built
 /// it.
@@ -8774,11 +8777,7 @@ fn doom_frames(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
             .find_map(|word| word.strip_prefix(name))
             .ok_or_else(|| format!("no {name} in {line:?}"))
     };
-    let tics: u32 = field("tics=")?.parse().map_err(|e| format!("tics in {line:?}: {e}"))?;
     let hash = field("hash=")?;
-    if tics != DOOM_FRAME_TICS {
-        return Err(format!("doom hashed {tics} tics and the recorded hash is of {DOOM_FRAME_TICS}: {line}"));
-    }
     if hash != DOOM_FRAMES {
         return Err(format!(
             "doom drew other frames than the ones recorded: hash {hash}, recorded {DOOM_FRAMES} \

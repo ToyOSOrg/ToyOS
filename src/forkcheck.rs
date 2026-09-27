@@ -404,15 +404,23 @@ fn submodule_pins(rust: &Path) -> Vec<(String, String, String, String)> {
     let Some(branches) = git(&["config", "--file", ".gitmodules", "--get-regexp", r"^submodule\..*\.branch$"]) else {
         return Vec::new();
     };
+    // An entry that names a branch and cannot be read whole is refused by name:
+    // skipping it would report its fork as checked.
     let mut out = Vec::new();
     for line in branches.lines() {
-        let Some((key, branch)) = line.split_once(' ') else { continue };
-        let Some(name) = key.strip_prefix("submodule.").and_then(|k| k.strip_suffix(".branch")) else { continue };
-        let field = |f: &str| git(&["config", "--file", ".gitmodules", &format!("submodule.{name}.{f}")]);
-        let (Some(path), Some(url)) = (field("path"), field("url")) else { continue };
-        let path = path.trim().to_string();
-        let Some(tree) = git(&["ls-tree", "HEAD", &path]) else { continue };
-        let Some(rev) = tree.split_whitespace().nth(2) else { continue };
+        let (key, branch) = line.split_once(' ').unwrap_or_else(|| panic!("{GITMODULES}: {line:?} is no `key value`"));
+        let name = key.strip_prefix("submodule.").and_then(|k| k.strip_suffix(".branch")).expect("what the regexp matched");
+        let field = |f: &str| {
+            git(&["config", "--file", ".gitmodules", &format!("submodule.{name}.{f}")])
+                .unwrap_or_else(|| panic!("{GITMODULES} names a branch for {name} and no {f}"))
+        };
+        let path = field("path").trim().to_string();
+        let url = field("url");
+        let tree = git(&["ls-tree", "HEAD", &path]).unwrap_or_default();
+        let rev = tree
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or_else(|| panic!("{GITMODULES} names {path}, and `rust/`'s HEAD records no gitlink there"));
         out.push((path, url.trim().to_string(), branch.trim().to_string(), rev.to_string()));
     }
     out

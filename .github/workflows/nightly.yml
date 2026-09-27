@@ -57,8 +57,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Full history: bootstrap walks back to the newest bors commit for the
-      # prebuilt LLVM it downloads.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
@@ -224,8 +222,6 @@ jobs:
 
       - *checkout
 
-      # A fresh machine has neither variable, and bootstrap under them takes
-      # our own merge commit as the upstream one whose LLVM to fetch.
       - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
 
   portability-macos:

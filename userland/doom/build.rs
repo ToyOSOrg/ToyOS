@@ -38,9 +38,20 @@ fn main() {
     // The C compiler, archiver and sysroot are the toolchain's own clang, its
     // `llvm-ar` and libc's C sysroot, which the build system names in `cc`'s
     // `CC_<target>`, `AR_<target>` and `CFLAGS_<target>` for every userland
-    // build (`src/build.rs`), as it would for any crate that compiles C.
+    // build (`src/build.rs`). A build without them is refused, never handed
+    // to whatever `cc` and `ar` the host has.
+    let suffix = std::env::var("TARGET").expect("cargo names the target").replace('-', "_");
+    let tool = |name: &str| {
+        let var = format!("{name}_{suffix}");
+        println!("cargo:rerun-if-env-changed={var}");
+        std::env::var(&var).unwrap_or_else(|_| {
+            panic!("{var} is unset: doomgeneric is compiled by the ToyOS toolchain's clang and llvm-ar, which the build system names there")
+        })
+    };
     let mut build = cc::Build::new();
     build
+        .compiler(tool("CC"))
+        .archiver(tool("AR"))
         .cargo_warnings(false)
         .include("include")
         .include("doomgeneric")
