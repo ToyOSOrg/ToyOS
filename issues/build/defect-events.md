@@ -208,3 +208,5 @@ ledger was written.
   the same guest work — so the emulator was not the weaker instrument here, it
   was very much the stronger one, and a class measured only there is not
   replicated by pointing faster silicon at it.
+
+Negative control: `kernel/src/no_such_module.rs` does not exist.
