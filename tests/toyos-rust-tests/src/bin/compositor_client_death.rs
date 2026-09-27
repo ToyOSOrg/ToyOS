@@ -30,7 +30,6 @@ use std::process::{exit, Command, Stdio};
 
 use toyos::endow;
 use toyos::AsHandle;
-use toyos::shm::SharedMemory;
 use toyos::{ipc, Connection};
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
@@ -110,19 +109,20 @@ fn run() {
     write_handle(doubled.handle(), &create_frame(), "a second create");
     probe("a second create on a live window");
 
-    // A clipboard frame with no region sent ahead of it. The receive is not a
-    // poll — a short batch is a peer that sent its frame first — so this must
-    // cost the client its connection and nothing else.
-    clipboard_shm(None, 64, "a clipboard frame with no region");
-    probe("a clipboard frame with no region");
+    // A commit with no copy begun: there is no region for it to name, so this
+    // must cost the client its connection and nothing else.
+    let commit = endow::service("compositor").expect("a connection to commit on");
+    ipc::signal(commit.as_handle(), window::MSG_COPY_COMMIT).expect("send the commit");
+    probe("a commit with no copy begun");
 
-    // A region really sent, with a length no region can satisfy. The length
-    // decides how much of the region is read as clipboard text, so it is the
-    // compositor's to bound rather than the client's to choose.
-    let region = SharedMemory::create(4096).expect("a region of our own");
-    let shared = region.share().expect("a second handle to it");
-    clipboard_shm(Some(shared), u32::MAX, "a clipboard longer than any region");
-    probe("a clipboard longer than any region");
+    // A copy no region is made for. The length decides how large a region the
+    // compositor makes, so it is the compositor's to bound rather than the
+    // client's to choose.
+    let begin = endow::service("compositor").expect("a connection to begin on");
+    begin
+        .send(window::MSG_COPY_BEGIN, &window::ClipboardShmMsg { len: u32::MAX })
+        .expect("send the begin");
+    probe("a copy longer than any clipboard");
 
     // An inline clipboard one byte past what any client may inline. The
     // compositor keeps that one byte, so the frame is refusable here instead of
@@ -232,17 +232,6 @@ fn create_frame() -> Vec<u8> {
     frame[8..12].copy_from_slice(&64u32.to_ne_bytes());
     frame[12..16].copy_from_slice(&64u32.to_ne_bytes());
     frame
-}
-
-fn clipboard_shm(region: Option<toyos_abi::RawHandle>, len: u32, what: &str) {
-    let conn = endow::service("compositor")
-        .unwrap_or_else(|e| fail(&format!("[{what}] the compositor is not serving: {e:?}")));
-    let msg = window::ClipboardShmMsg { len };
-    let sent = match region {
-        Some(h) => conn.send_with_handles(&[h], window::MSG_CLIPBOARD_SET_SHM, &msg),
-        None => conn.send(window::MSG_CLIPBOARD_SET_SHM, &msg),
-    };
-    sent.unwrap_or_else(|e| fail(&format!("[{what}] could not send: {e:?}")));
 }
 
 /// Every write here fits in the pipe it goes into, so a blocking `write` can

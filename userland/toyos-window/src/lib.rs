@@ -61,9 +61,34 @@ pub const MSG_RESOLUTION_CHANGED: u32 = 8;
 /// another window has no move except to serve it or to drop the connection.
 pub const MSG_WINDOW_REFUSED: u32 = 9;
 
-// Shared-memory clipboard (for payloads > 116 bytes)
-pub const MSG_CLIPBOARD_SET_SHM: u32 = 10;
+/// Client → compositor, retired: it carried a region the client chose, and the
+/// compositor never uses a handle a client sent. A client sending it is dropped
+/// by name.
+pub const MSG_RETIRED_CLIPBOARD_SET_SHM: u32 = 10;
+/// Compositor → client: a clipboard past [`MAX_INLINE_PAYLOAD`], in a region
+/// the compositor made. Payload is a [`ClipboardShmMsg`].
 pub const MSG_CLIPBOARD_PASTE_SHM: u32 = 11;
+
+/// Client → compositor, as a connection's first frame: a clipboard of
+/// [`ClipboardShmMsg::len`] bytes, which [`copy_fits`]. Answered with
+/// [`MSG_COPY_REGION`].
+pub const MSG_COPY_BEGIN: u32 = 13;
+/// Client → compositor, bare, and the only frame a connection answered with
+/// [`MSG_COPY_REGION`] may send next: the text is in the region. The compositor
+/// copies it once and closes the connection.
+pub const MSG_COPY_COMMIT: u32 = 14;
+/// Compositor → client: a region of [`ClipboardShmMsg::len`] bytes the
+/// compositor made, for the text of the copy [`MSG_COPY_BEGIN`] announced.
+pub const MSG_COPY_REGION: u32 = 13;
+
+/// The longest clipboard. Policy: a clipboard is text somebody selected, and
+/// this is one 2 MiB page, the smallest region the kernel makes.
+pub const MAX_CLIPBOARD_BYTES: usize = 2 * 1024 * 1024;
+
+/// Whether a clipboard of `len` bytes is one the compositor makes a region for.
+pub fn copy_fits(len: usize) -> bool {
+    (1..=MAX_CLIPBOARD_BYTES).contains(&len)
+}
 
 /// Either direction: [`surface::LAYOUT_CONFIG`] changed, re-read it.
 ///
@@ -163,8 +188,8 @@ toyos::ipc_payload! {
         pub h: u32,
     }
 
-    /// How much of the region that travels with this message is text. The
-    /// region itself is one transferred handle, sent ahead of the frame.
+    /// How many bytes of clipboard text a copy region holds. Where a region
+    /// travels with the message, it is one handle sent ahead of the frame.
     pub struct ClipboardShmMsg {
         pub len: u32,
     }
@@ -353,31 +378,71 @@ pub fn load_layout(translator: &mut Translator) {
     }
 }
 
+/// Why [`clipboard_set`] put nothing on the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyError {
+    /// This program was given no `compositor` connector.
+    NotEndowed,
+    /// The compositor exited, or the connection died mid-copy.
+    CompositorGone,
+    /// The compositor answered, and not with anything this exchange allows.
+    Protocol(u32),
+    /// Longer than [`MAX_CLIPBOARD_BYTES`].
+    TooLong(usize),
+}
+
+impl std::fmt::Display for CopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotEndowed => write!(f, "this program was given no compositor"),
+            Self::CompositorGone => write!(f, "the compositor is gone"),
+            Self::Protocol(msg_type) => {
+                write!(f, "the compositor answered with message type {msg_type}")
+            }
+            Self::TooLong(len) => {
+                write!(f, "{len} bytes is past the clipboard's {MAX_CLIPBOARD_BYTES}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CopyError {}
+
+impl From<EndowError> for CopyError {
+    fn from(e: EndowError) -> Self {
+        match e {
+            EndowError::NotEndowed => Self::NotEndowed,
+            EndowError::ServerGone | EndowError::Refused(_) => Self::CompositorGone,
+        }
+    }
+}
+
 /// Put `text` on the system clipboard, over a connection of its own.
 ///
-/// Fallible where it used to `expect`: a program the manifest gives no
-/// compositor is a program that cannot copy, which is an answer and not a
-/// reason to take the caller down.
-pub fn clipboard_set(text: &str) -> Result<(), CreateError> {
-    use std::sync::Mutex;
-    static CLIPBOARD_SHM: Mutex<Option<SharedMemory>> = Mutex::new(None);
-
-    let conn = endow::service("compositor")?;
+/// Past [`MAX_INLINE_PAYLOAD`] the text goes into a region the compositor
+/// made for it ([`MSG_COPY_BEGIN`]).
+pub fn clipboard_set(text: &str) -> Result<(), CopyError> {
     let bytes = text.as_bytes();
+    let gone = |_: ipc::IpcError| CopyError::CompositorGone;
     if bytes.len() <= MAX_INLINE_PAYLOAD {
-        let _ = conn.send_bytes(MSG_CLIPBOARD_SET, bytes);
-    } else if let Ok(mut shm) = SharedMemory::create(bytes.len()) {
-        shm.as_mut_slice()[..bytes.len()].copy_from_slice(bytes);
-        if let Ok(handle) = shm.share() {
-            let _ = conn.send_with_handles(
-                &[handle],
-                MSG_CLIPBOARD_SET_SHM,
-                &ClipboardShmMsg { len: bytes.len() as u32 },
-            );
-        }
-        *CLIPBOARD_SHM.lock().unwrap() = Some(shm);
+        let conn = endow::service("compositor")?;
+        return conn.send_bytes(MSG_CLIPBOARD_SET, bytes).map_err(gone);
     }
-    Ok(())
+    if !copy_fits(bytes.len()) {
+        return Err(CopyError::TooLong(bytes.len()));
+    }
+    let conn = endow::service("compositor")?;
+    conn.send(MSG_COPY_BEGIN, &ClipboardShmMsg { len: bytes.len() as u32 }).map_err(gone)?;
+    let header = conn.recv_header().map_err(gone)?;
+    if header.msg_type != MSG_COPY_REGION {
+        return Err(CopyError::Protocol(header.msg_type));
+    }
+    let _: ClipboardShmMsg = conn.recv_payload(&header).map_err(gone)?;
+    let [region] = conn.recv_handles_exact::<1>().ok_or(CopyError::CompositorGone)?;
+    let mut region =
+        SharedMemory::adopt(region, bytes.len()).map_err(|_| CopyError::CompositorGone)?;
+    region.as_mut_slice().copy_from_slice(bytes);
+    conn.signal(MSG_COPY_COMMIT).map_err(gone)
 }
 
 pub struct Window {

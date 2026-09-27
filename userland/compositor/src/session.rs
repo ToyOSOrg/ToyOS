@@ -8,6 +8,7 @@
 //! to the panel.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use toyos::endow;
@@ -28,7 +29,7 @@ use window::Screen;
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handles, mark_dead, note_closed, note_opened,
     Client, ClientFrame, ClientRx, Dead, DropReason, PendingConn, Win, HANDSHAKE_TIMEOUT,
-    MAX_CLIPBOARD_BYTES, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
+    MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::{FrameStats, FrameTotals};
@@ -96,9 +97,8 @@ pub struct Session {
     screen: Screen,
     back: BackBuffer,
     hw_cursor: bool,
-    /// Held because `cursor_buf` points into it.
-    _cursor_shm: SharedMemory,
-    cursor_buf: *mut u8,
+    /// The hardware cursor's 64x64 BGRA image.
+    cursor_shm: SharedMemory,
     cursors: Cursors,
     current_cursor: CursorStyle,
 
@@ -172,9 +172,8 @@ impl Session {
         let back = BackBuffer::new(screen.width(), screen.height(), screen.pixel_format_raw());
 
         let hw_cursor = fb_info.flags & FLAG_HARDWARE_CURSOR != 0;
-        let cursor_shm = SharedMemory::adopt(fb_info.cursor, 64 * 64 * 4)
+        let mut cursor_shm = SharedMemory::adopt(fb_info.cursor, 64 * 64 * 4)
             .expect("the cursor buffer the framebuffer claim just handed over");
-        let cursor_buf = cursor_shm.as_ptr();
         let cursors = Cursors {
             default: read_sprite("/system/share/icons/cursor-bold.svg", CURSOR_PX, [255, 255, 255]),
             resize: read_sprite(
@@ -184,7 +183,7 @@ impl Session {
             ),
             crosshair: read_sprite("/system/share/icons/crosshair-simple-bold.svg", CURSOR_PX, [0, 0, 0]),
         };
-        render::upload_cursor(&fb_dev, cursor_buf, &cursors.default, hw_cursor);
+        render::upload_cursor(&fb_dev, cursor_shm.as_mut_slice(), &cursors.default, hw_cursor);
 
         let font_data = std::fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font")
             .expect("failed to read font");
@@ -257,8 +256,7 @@ impl Session {
             screen,
             back,
             hw_cursor,
-            _cursor_shm: cursor_shm,
-            cursor_buf,
+            cursor_shm,
             cursors,
             current_cursor: CursorStyle::Default,
             font,
@@ -335,11 +333,11 @@ impl Session {
         // client's traffic.
         let now = Instant::now();
         for p in self.pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
-            eprintln!(
-                "compositor: dropping client {} — {}",
-                p.conn.as_handle().0,
-                DropReason::HandshakeTimeout.why()
-            );
+            let reason = match p.copy {
+                Some(_) => DropReason::CopyTimeout,
+                None => DropReason::HandshakeTimeout,
+            };
+            eprintln!("compositor: dropping client {} — {}", p.conn.as_handle().0, reason.why());
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
@@ -373,19 +371,18 @@ impl Session {
     }
 
     fn keys(&mut self) {
-        let mut events = [window::KeyEvent::EMPTY; 8];
-        let buf = unsafe {
-            std::slice::from_raw_parts_mut(
-                events.as_mut_ptr() as *mut u8,
-                std::mem::size_of_val(&events),
-            )
-        };
+        const EVENT: usize = std::mem::size_of::<window::KeyEvent>();
+        let mut buf = [0u8; 8 * EVENT];
         // Never read blocking here. The kernel wakes only when a report queued
         // an event, so readiness and `has_data` agree — but a blocking read on
         // an empty queue parks the compositor until the next real key, and one
         // spurious wake anywhere would freeze it.
-        let n = self.kb.read_nonblock(buf).unwrap_or(0);
-        for event in &events[..n / std::mem::size_of::<window::KeyEvent>()] {
+        let n = self.kb.read_nonblock(&mut buf).unwrap_or(0);
+        let (events, torn) = buf[..n].as_chunks::<EVENT>();
+        assert!(torn.is_empty(), "compositor: the keyboard read {n} bytes, not whole events");
+        for raw in events {
+            let event = &ipc::decode_payload::<window::KeyEvent>(raw)
+                .expect("a chunk is exactly one event long");
             let focused = self.stack.focused();
             let action =
                 key_action((*event).into(), focused.map(|i| self.stack[i].mode), self.launcher_open);
@@ -466,7 +463,7 @@ impl Session {
             self.current_cursor = wanted;
             render::upload_cursor(
                 &self.fb_dev,
-                self.cursor_buf,
+                self.cursor_shm.as_mut_slice(),
                 self.cursors.get(wanted),
                 self.hw_cursor,
             );
@@ -655,7 +652,12 @@ impl Session {
             }
             Ok(conn) => {
                 self.poller.watch(&conn, READABLE, conn.as_handle().0 as u64);
-                self.pending.push(PendingConn { conn, rx: ClientRx::new(), since: Instant::now() });
+                self.pending.push(PendingConn {
+                    conn,
+                    rx: ClientRx::new(),
+                    since: Instant::now(),
+                    copy: None,
+                });
             }
         }
     }
@@ -688,14 +690,16 @@ impl Session {
                     frame.set_payload(self.pending[i].rx.payload(payload_len));
                     // A connection is identified by its first frame and by
                     // nothing else. `MSG_CREATE_WINDOW` promotes it to a
-                    // window; anything else is a one-shot request, answered and
-                    // closed — which is what an `endow::service` caller like
-                    // `window::clipboard_set` expects.
+                    // window; `MSG_COPY_BEGIN` puts it back to wait for its
+                    // commit; anything else is a one-shot request, answered and
+                    // closed.
                     //
                     // One promotion per pass keeps `i` meaningful across the
                     // `remove`; the rest are re-armed below and served next
                     // pass.
-                    frame.conn = Some(self.pending.remove(i).conn);
+                    let p = self.pending.remove(i);
+                    frame.conn = Some(p.conn);
+                    frame.copy = p.copy;
                     out.push(frame);
                     break;
                 }
@@ -739,8 +743,14 @@ impl Session {
                 mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
                 continue;
             }
+            if frame.copy.is_some() && frame.msg_type != window::MSG_COPY_COMMIT {
+                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                continue;
+            }
             match frame.msg_type {
                 window::MSG_CREATE_WINDOW => self.create_window(frame),
+                window::MSG_COPY_BEGIN => self.copy_begin(frame),
+                window::MSG_COPY_COMMIT => self.copy_commit(frame),
                 window::MSG_PRESENT => {
                     let Ok(rect) = ipc::decode_payload::<window::Rect>(frame.payload()) else {
                         mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
@@ -761,8 +771,9 @@ impl Session {
                         self.damage_all();
                     }
                 }
-                window::MSG_CLIPBOARD_SET => {
-                    self.clipboard = String::from_utf8_lossy(frame.payload()).into_owned();
+                window::MSG_CLIPBOARD_SET => self.set_clipboard(handle, frame.payload().to_vec()),
+                window::MSG_RETIRED_CLIPBOARD_SET_SHM => {
+                    mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
                 }
                 window::MSG_LAYOUT_CHANGED => {
                     // The compositor is the root of the surface tree and
@@ -775,38 +786,6 @@ impl Session {
                     for win in self.stack.iter() {
                         deliver_signal(&mut self.dead, win, window::MSG_LAYOUT_CHANGED);
                     }
-                }
-                window::MSG_CLIPBOARD_SET_SHM => {
-                    let Ok(info) =
-                        ipc::decode_payload::<window::ClipboardShmMsg>(frame.payload())
-                    else {
-                        mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-                        continue;
-                    };
-                    // The length is the client's claim about how much of the
-                    // region it sent is text, and past the region that is a
-                    // read of somebody else's memory rather than a clipboard.
-                    // The region itself is no longer a claim: it is a handle
-                    // the client moved, so there is nothing left to disbelieve
-                    // about which memory this is.
-                    if info.len as usize > MAX_CLIPBOARD_BYTES {
-                        eprintln!(
-                            "compositor: refusing {} bytes of clipboard from client {}, max \
-                             {MAX_CLIPBOARD_BYTES}",
-                            info.len,
-                            handle.0
-                        );
-                        continue;
-                    }
-                    let Some([buffer]) = ipc::recv_handles_exact::<1>(handle) else {
-                        mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-                        continue;
-                    };
-                    let Ok(shm) = SharedMemory::adopt(buffer, info.len as usize) else {
-                        mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-                        continue;
-                    };
-                    self.clipboard = String::from_utf8_lossy(shm.as_slice()).into_owned();
                 }
                 window::MSG_SET_CURSOR => {
                     let Ok(style) = ipc::decode_payload::<u32>(frame.payload()) else {
@@ -960,6 +939,81 @@ impl Session {
             },
         );
         self.damage_all();
+    }
+
+    /// `MSG_COPY_BEGIN`: make the region the client's text goes into, send it,
+    /// and hold the connection for its commit.
+    fn copy_begin(&mut self, frame: ClientFrame) {
+        let handle = frame.handle;
+        let info = ipc::decode_payload::<window::ClipboardShmMsg>(frame.payload());
+        let (Ok(info), Some(conn)) = (info, frame.conn) else {
+            mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+            return;
+        };
+        let len = info.len as usize;
+        if !window::copy_fits(len) {
+            eprintln!(
+                "compositor: refusing a copy of {len} bytes from client {}, max {}",
+                handle.0,
+                window::MAX_CLIPBOARD_BYTES
+            );
+            return;
+        }
+        let region = match SharedMemory::create(len) {
+            Ok(region) => region,
+            Err(e) => {
+                eprintln!(
+                    "compositor: client {} gets no copy — no memory for {len} bytes ({e:?})",
+                    handle.0
+                );
+                return;
+            }
+        };
+        let theirs = match region.share() {
+            Ok(theirs) => theirs,
+            Err(e) => {
+                eprintln!(
+                    "compositor: client {} gets no copy — its region cannot be shared ({e:?})",
+                    handle.0
+                );
+                return;
+            }
+        };
+        if let Err(e) = conn.try_send_with_handles(&[theirs], window::MSG_COPY_REGION, &info) {
+            mark_dead(&mut self.dead, handle, e.into());
+            return;
+        }
+        self.pending.push(PendingConn {
+            conn,
+            rx: ClientRx::new(),
+            since: Instant::now(),
+            copy: Some(region),
+        });
+    }
+
+    /// `MSG_COPY_COMMIT`: take the text out of the region once, and let the
+    /// connection close.
+    fn copy_commit(&mut self, frame: ClientFrame) {
+        let handle = frame.handle;
+        let bare = frame.payload().is_empty();
+        let (Some(region), true) = (frame.copy, bare) else {
+            mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+            return;
+        };
+        self.set_clipboard(handle, copy_out(&region));
+    }
+
+    /// The clipboard, from bytes that are the compositor's own: validated
+    /// only once no client can change them.
+    fn set_clipboard(&mut self, from: RawHandle, bytes: Vec<u8>) {
+        match String::from_utf8(bytes) {
+            Ok(text) => self.clipboard = text,
+            Err(e) => eprintln!(
+                "compositor: refusing a clipboard from client {} — it is not UTF-8 ({})",
+                from.0,
+                e.utf8_error()
+            ),
+        }
     }
 
     fn answer_resolution(&mut self, handle: RawHandle) {
@@ -1321,6 +1375,19 @@ fn desk_of(screen: &Screen, font: &font::Font, apps: usize) -> Desk {
         font_w: font.width() as i32,
         apps,
     }
+}
+
+/// Every byte of `region`, each read once.
+///
+/// The client still maps the region and may be writing it, so this copy is
+/// the only read of it and the only thing validated.
+fn copy_out(region: &SharedMemory) -> Vec<u8> {
+    // SAFETY: the mapping is `region.len()` bytes and `region` outlives the
+    // borrow; an atomic is the one type that may alias memory another process
+    // writes.
+    let bytes =
+        unsafe { std::slice::from_raw_parts(region.as_ptr() as *const AtomicU8, region.len()) };
+    bytes.iter().map(|b| b.load(Ordering::Relaxed)).collect()
 }
 
 fn read_sprite(path: &str, size: u32, color: [u8; 3]) -> sprite::Sprite {
