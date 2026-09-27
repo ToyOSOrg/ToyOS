@@ -172,6 +172,8 @@ pub fn quiesce_stops_the_machine(
     // thread, parked on init's answer; `test-runner`'s main and deadline
     // threads; and `logd`'s. `init` asked for the stop and is its caller.
     const OTHERS: u32 = 4;
+    // The kernel's `reaper`, which stops with userland because it runs userland's kills.
+    const REAPER: u32 = 1;
     /// Mirrored in `kernel/src/syscall/machine.rs`, which queues it.
     const QUEUED: &str = "console: a holder's line, queued once the stop had stopped every holder";
     let (whole, record) = stopped_boot(
@@ -213,13 +215,13 @@ pub fn quiesce_stops_the_machine(
     // harness is told, or lost one to an I/O error before the reset, has fewer
     // threads to stop and would pass every judge above over a machine that was
     // not the one described.
-    if record.sweep.total() != WRITERS + OTHERS {
+    if record.sweep.total() != WRITERS + OTHERS + REAPER {
         return Err(format!(
             "this boot's stop named {} userland thread(s); {WRITERS} writers plus the {OTHERS} \
-             of the job, test-runner and logd make {}, so this is not the machine the writers \
-             were on:\n  {record}\n{whole}",
+             of the job, test-runner and logd and the reaper make {}, so this is not the machine \
+             the writers were on:\n  {record}\n{whole}",
             record.sweep.total(),
-            WRITERS + OTHERS,
+            WRITERS + OTHERS + REAPER,
         ));
     }
     woken_by_its_threads(&record)?;
