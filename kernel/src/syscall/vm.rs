@@ -3,6 +3,12 @@
 //! thread's per-module TLS block, `SYS_QUERY_MODULES` reports what is loaded.
 //! Exhausting address space is an error return, never an `.expect`.
 //!
+//! **A length from userland is refused by `vma::window().span` before any
+//! arithmetic touches it**: one no placement window could hold is
+//! `InvalidArgument`, one that could but finds no room is `ResourceExhausted`.
+//! A sum that traps here traps under the process-data and address-space
+//! locks, and a recovered syscall panic never releases either.
+//!
 //! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
 //! shoots down and waits, and a sibling thread can be spinning on that same
 //! lock with `IF` clear.
@@ -32,13 +38,12 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     if prot.0 & !MMAP_PROT_KNOWN != 0 || flags.0 & !MMAP_FLAGS_KNOWN != 0 {
         return SyscallError::InvalidArgument.to_u64();
     }
-    // `size` crossed the trust boundary: zero, and a size whose 2 MiB rounding
-    // would wrap, are refused rather than silently turned into a small request.
-    // No cap beyond that: the PMM's own `free_count` check is the physical limit.
-    if size == 0 || (size as usize).checked_add(crate::mm::PAGE_2M as usize - 1).is_none() {
+    // Before any sum on `size` and before any lock: the window is the one
+    // `find_gap` places in, so what passes here can never overflow there.
+    let Some(span) = crate::vma::window().span(size) else {
         return SyscallError::InvalidArgument.to_u64();
-    }
-    let aligned = crate::mm::align_2m(size as usize);
+    };
+    let aligned = span.bytes() as usize;
     let fixed = flags.contains(MmapFlags::FIXED);
     // Anonymous memory is never executable: `MmapProt` has no bit for it and
     // there is no `mprotect` to add one later.

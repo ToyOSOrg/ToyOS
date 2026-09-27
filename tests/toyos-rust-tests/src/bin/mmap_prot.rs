@@ -16,8 +16,18 @@
 //! Each refusal is checked in a child, because the whole point is that the
 //! access kills the process — and the parent then asks whether the machine is
 //! still there.
+//!
+//! **A length no placement window could hold is `InvalidArgument`, and the
+//! address space still answers after it.** A sum on such a length that traps
+//! under the process-data and address-space locks strands both — a recovered
+//! syscall panic never releases them — and the next thread to take either
+//! spins the machine into its deadlock halt. So a sibling thread maps and
+//! unmaps across the refusals, and must finish a round after them.
 
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt, SyscallError, SYS_MMAP};
 
@@ -45,6 +55,7 @@ fn main() {
     readonly_is_readable();
     none_is_a_mapping_and_not_an_error();
     an_undefined_bit_in_either_word_is_refused();
+    a_length_no_window_holds_is_refused_and_the_space_still_answers();
     text_is_readable_and_executable();
 
     dies("write-none", "a store to a PROT_NONE mapping");
@@ -156,6 +167,75 @@ fn mmap_raw(size: usize, prot: MmapProt, flags: MmapFlags) -> u64 {
         );
     }
     ret
+}
+
+/// Lengths past every placement window. The first two round to the last whole
+/// 2 MiB page below 2^64, which a second rounding or the guard carries past
+/// it: the first is the one a sum `size + PAGE_2M` accepts and a placement
+/// under the locks then wraps, the second the largest whose rounding fits.
+/// Then `u64::MAX`, whose rounding wraps, and the whole user half.
+const UNPLACEABLE: [u64; 4] =
+    [u64::MAX - PAGE_2M, u64::MAX - (PAGE_2M - 1), u64::MAX, 1 << 47];
+const PAGE_2M: u64 = 2 * 1024 * 1024;
+
+/// A liveness bound on the sibling's round, never a pace: it maps 4 KiB.
+const SIBLING_BOUND: Duration = Duration::from_secs(10);
+
+/// The sibling keeps taking both address-space locks while the main thread
+/// asks for every [`UNPLACEABLE`] length under both prots; told to stop, it
+/// finishes one whole round more, so at least one map and unmap begins after
+/// the last refusal returned. The harm — that round never answering — is
+/// judged before the refusals are.
+fn a_length_no_window_holds_is_refused_and_the_space_still_answers() {
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (done_tx, done_rx) = mpsc::channel::<u64>();
+    let sibling = thread::spawn(move || {
+        let mut rounds = 0u64;
+        loop {
+            let stopping = stop_rx.try_recv().is_ok();
+            let p = map(MmapProt::READ | MmapProt::WRITE);
+            unsafe {
+                p.add(OFFSET).write_volatile(0x3C);
+                assert_eq!(p.add(OFFSET).read_volatile(), 0x3C, "the sibling's mapping lost a byte");
+                munmap(p, SIZE).expect("the sibling unmaps what it mapped");
+            }
+            rounds += 1;
+            if rounds == 1 {
+                started_tx.send(()).expect("the main thread waits for the first round");
+            }
+            if stopping {
+                break;
+            }
+        }
+        done_tx.send(rounds).expect("the main thread waits for the last round");
+    });
+    started_rx.recv_timeout(SIBLING_BOUND).expect("the sibling never finished its first round");
+
+    let mut answers = Vec::with_capacity(2 * UNPLACEABLE.len());
+    for prot in [MmapProt::NONE, MmapProt::READ | MmapProt::WRITE] {
+        for size in UNPLACEABLE {
+            answers.push((prot, size, mmap_raw(size as usize, prot, MmapFlags::ANONYMOUS | MmapFlags::PRIVATE)));
+        }
+    }
+
+    stop_tx.send(()).expect("the sibling is still running");
+    let rounds = done_rx.recv_timeout(SIBLING_BOUND).unwrap_or_else(|e| {
+        panic!("the sibling's address space stopped answering after the unplaceable lengths: {e:?}")
+    });
+    sibling.join().expect("the sibling thread");
+
+    for (prot, size, ret) in answers {
+        assert_eq!(
+            SyscallError::from_u64(ret),
+            Some(SyscallError::InvalidArgument),
+            "mmap(len={size:#x}, prot={:#x}) answered {ret:#x}",
+            prot.0,
+        );
+    }
+    println!(
+        "  PASS: a length no window holds is InvalidArgument, and a sibling mapped across it ({rounds} rounds)"
+    );
 }
 
 /// The positive control for `write-text`: making `.text` unwritable must not

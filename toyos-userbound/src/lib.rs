@@ -1,14 +1,16 @@
 //! Every decision the kernel makes about the user/kernel boundary.
 //!
-//! Two questions and one line between them. **Before a dereference**: is this
+//! Three questions and one line between them. **Before a dereference**: is this
 //! address userland's, is the object at it aligned for the type being read, and
-//! does it lie wholly inside one mapping? **After a trap**: which side did the
-//! frame come from, and whose fault was it?
+//! does it lie wholly inside one mapping? **Before a placement**: can a length
+//! userland asked for be placed at all, and where does it go? **After a trap**:
+//! which side did the frame come from, and whose fault was it?
 //!
-//! [`span`] answers the first, [`fault`] the second — and the second is written
-//! in terms of the first. A fault is classified against the same [`USER_TOP`]
-//! the accessors refuse an address above, not against a copy of it, and that is
-//! why the two are one crate rather than two: a second constant is a second
+//! [`span`] answers the first, [`place`] the second and [`fault`] the third —
+//! and the third is written in terms of the first. A fault is classified
+//! against the same [`USER_TOP`] the accessors refuse an address above, not
+//! against a copy of it, and that is why those two are one crate rather than
+//! two: a second constant is a second
 //! thing to get wrong, and [`blame`]'s whole argument is that the bound it
 //! reads is the kernel's own.
 //!
@@ -28,9 +30,11 @@
 #![forbid(unsafe_code)]
 
 pub mod fault;
+pub mod place;
 pub mod span;
 
 pub use fault::{blame, Blame, Faulted, Ring};
+pub use place::{PageSpan, Window};
 pub use span::{
     contiguous, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M, PAGE_4K,
     USER_TOP,
