@@ -113,11 +113,12 @@ fn fail(what: String) -> ! {
     std::process::exit(1)
 }
 
-/// blockd, held by this process: its claim minted here, the port's acceptor
-/// kept here, so a blockd can end and another take its place on the same
-/// name. What blockd says goes to this process's stdout, a line at a time.
+/// blockd, held by this process: its claim minted here, from `syscap` when
+/// there is one, the port's acceptor kept here, so a blockd can end and
+/// another take its place on the same name. What blockd says goes to this
+/// process's stdout, a line at a time.
 struct Blockd {
-    syscap: SysCap,
+    syscap: Option<SysCap>,
     acceptor: Acceptor,
     connector: Connector,
     child: Option<Child>,
@@ -125,10 +126,10 @@ struct Blockd {
 
 impl Blockd {
     fn start(args: &[&str]) -> Self {
-        Self::with(capability(), args)
+        Self::with(Some(capability()), args)
     }
 
-    fn with(syscap: SysCap, args: &[&str]) -> Self {
+    fn with(syscap: Option<SysCap>, args: &[&str]) -> Self {
         let (acceptor, connector) = port::create().unwrap_or_else(|e| fail(format!("no port: {e:?}")));
         let mut blockd = Self { syscap, acceptor, connector, child: None };
         blockd.spawn(args, false);
@@ -145,22 +146,24 @@ impl Blockd {
     /// write's answer: the write is done on the device, and its session never
     /// hears.
     fn spawn(&mut self, args: &[&str], kill_on_withheld: bool) {
-        let asked = Instant::now();
-        let claim: toyos::Device = loop {
-            match self.syscap.claim_pci(BLOCKD) {
-                Err(SyscallError::AlreadyExists) if asked.elapsed() < CLAIM_RETURN => {
-                    std::thread::sleep(Duration::from_millis(1));
+        let mut command = Command::new("/system/bin/blockd");
+        if let Some(syscap) = &self.syscap {
+            let asked = Instant::now();
+            let claim: toyos::Device = loop {
+                match syscap.claim_pci(BLOCKD) {
+                    Err(SyscallError::AlreadyExists) if asked.elapsed() < CLAIM_RETURN => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(claim) => break claim,
+                    Err(e) => fail(format!("the controller's claim was refused: {e:?}")),
                 }
-                Ok(claim) => break claim,
-                Err(e) => fail(format!("the controller's claim was refused: {e:?}")),
-            }
-        };
+            };
+            command.endow(&format!("{DEV_PREFIX}pci:8086:5845"), claim.into_raw().0);
+        }
         let acceptor = toyos_abi::syscall::dup(self.acceptor.as_handle())
             .unwrap_or_else(|e| fail(format!("the acceptor would not duplicate: {e:?}")));
-        let mut command = Command::new("/system/bin/blockd");
         command.args(args);
         command.stdout(Stdio::piped());
-        command.endow(&format!("{DEV_PREFIX}pci:8086:5845"), claim.into_raw().0);
         command.endow(&format!("{SERVE_PREFIX}{PORT}"), acceptor.0);
         let mut child = command.spawn().unwrap_or_else(|e| fail(format!("blockd did not start: {e}")));
         let out = child.stdout.take().expect("piped");
@@ -405,7 +408,7 @@ fn mb_per_s(blocks: u64, took: Duration) -> f64 {
 /// the arena holds, the data built before and checked after what is timed,
 /// so each number is the driver's path and nothing of this binary's.
 fn bench() {
-    let blockd = Blockd::with(capability(), &[]);
+    let blockd = Blockd::start(&[]);
     let mut s = open(blockd.names(), BENCH);
     let mut runs = Vec::new();
     for (salt, in_flight) in [(0x3D, 1usize), (0x3C, 15)] {
@@ -965,12 +968,8 @@ fn dma_residue() {
 /// it answers every other: the malformed refused as such, a listing empty and
 /// an open `NotFound`.
 fn nothing() {
-    let (acceptor, connector) = port::create().unwrap_or_else(|e| fail(format!("no port: {e:?}")));
-    let mut command = Command::new("/system/bin/blockd");
-    command.endow(&format!("{SERVE_PREFIX}{PORT}"), acceptor.into_raw().0);
-    let mut child = command.spawn().unwrap_or_else(|e| fail(format!("blockd did not start: {e}")));
-    let names =
-        namespace::build().add(PORT, &connector).finish().unwrap_or_else(|e| fail(format!("no namespace: {e:?}")));
+    let blockd = Blockd::with(None, &[]);
+    let names = blockd.names();
     let region = || {
         let region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
         vec![region.share().unwrap_or_else(|e| fail(format!("a second handle: {e:?}")))]
@@ -995,8 +994,7 @@ fn nothing() {
         }
         println!("blockd_io: with no controller, {what} was answered {answered} {refusal:?}");
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(blockd);
     println!("blockd_io: PASS nothing");
 }
 

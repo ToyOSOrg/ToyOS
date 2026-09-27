@@ -731,6 +731,8 @@ impl<D: Disk> Volume for DataVolume<D> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::disk::Ram;
     use crate::volume::Buf;
@@ -870,26 +872,86 @@ mod tests {
         v.lstat(path).unwrap().size / BLOCK as u64
     }
 
-    /// Two files that grow a page at a time in turn each keep their runs, so
-    /// neither's entry fills with one extent per page.
-    #[test]
-    fn two_files_written_in_turn_keep_every_accepted_write() {
-        let mut v = vol();
-        let a = v.open("home/a", CREATE).unwrap();
-        let b = v.open("home/b", CREATE).unwrap();
-        for page in 0..300u64 {
-            v.write(a, page * BLOCK as u64, &[1; BLOCK]).unwrap();
-            v.write(b, page * BLOCK as u64, &[2; BLOCK]).unwrap();
-        }
-        let c = v.open("home/c", CREATE).unwrap();
-        v.write(c, 0, b"c").unwrap();
+    /// The free count a sync leaves in the superblock.
+    fn free_blocks(v: &mut DataVolume<Ram>) -> u64 {
         assert_eq!(v.sync(), Ok(Vec::new()));
-        for n in [a, b, c] {
+        bcachefs::Superblock::read(v.fs.io()).unwrap().free_blocks
+    }
+
+    fn write_into(file: &mut Vec<u8>, offset: u64, data: &[u8]) {
+        let end = offset as usize + data.len();
+        if file.len() < end {
+            file.resize(end, 0);
+        }
+        file[offset as usize..end].copy_from_slice(data);
+    }
+
+    /// Differential against a plain map of what each accepted write made
+    /// each file: three files grow in turn past twice the runs one entry
+    /// names at a block a run, through overwrites, holes, a shrink and writes
+    /// the volume refuses, and every byte the map holds is what the remounted
+    /// volume reads.
+    #[test]
+    fn every_file_reads_back_as_a_plain_map_of_its_accepted_writes() {
+        const PAST: usize = (2 * 250 + 20) * BLOCK;
+        let paths = ["home/a", "home/b", "home/c"];
+        let mut v = vol();
+        let nodes: Vec<Node> = paths.iter().map(|p| v.open(p, CREATE).unwrap()).collect();
+        let mut model: HashMap<&str, Vec<u8>> = paths.iter().map(|p| (*p, Vec::new())).collect();
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut round = 0u64;
+        while paths.iter().any(|p| model[p].len() < PAST) {
+            for (i, (&path, &node)) in paths.iter().zip(&nodes).enumerate() {
+                let held = model.get_mut(path).unwrap();
+                let len = held.len() as u64;
+                let (offset, n) = match (round + i as u64) % 11 {
+                    3 if len > 0 => (next() % len, (next() % (3 * BLOCK as u64)) as usize + 1),
+                    7 => (len + next() % (2 * BLOCK as u64), BLOCK),
+                    _ => (len, BLOCK + (next() % 64) as usize),
+                };
+                let data: Vec<u8> = (0..n).map(|_| next() as u8).collect();
+                assert_eq!(v.write(node, offset, &data), Ok(()), "{path}: {n} bytes at {offset}, of {len} held");
+                write_into(held, offset, &data);
+            }
+            if round % 97 == 50 {
+                let at = round as usize % paths.len();
+                assert_eq!(
+                    v.write(nodes[at], 64 << 20, b"past every block"),
+                    Err(SyscallError::ResourceExhausted),
+                    "{}: a write the volume has no blocks for",
+                    paths[at]
+                );
+            }
+            if round == 300 {
+                let b = model.get_mut("home/b").unwrap();
+                let to = b.len() / 3 + 17;
+                v.truncate(nodes[1], to as u64).unwrap();
+                b.truncate(to);
+            }
+            round += 1;
+        }
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        for n in nodes {
             v.close(n).unwrap();
         }
         let mut v = remount(v);
-        assert_eq!(page_count(&mut v, "home/a"), 300);
-        assert_eq!(page_count(&mut v, "home/b"), 300);
+        let listed: Vec<String> = v.list("home").unwrap().into_iter().map(|(n, _)| format!("home/{n}")).collect();
+        assert_eq!(listed, paths);
+        for path in paths {
+            let held = &model[path];
+            assert_eq!(v.lstat(path).unwrap().size, held.len() as u64, "{path}'s length");
+            let n = v.open(path, PLAIN).unwrap();
+            let mut out = vec![0xEEu8; held.len()];
+            assert_eq!(v.read(n, 0, &mut Buf(&mut out)), Ok(held.len()));
+            let first = out.iter().zip(held).position(|(a, b)| a != b);
+            assert_eq!(first, None, "{path}: the first byte the volume and the map disagree on");
+        }
     }
 
     /// On a volume whose free blocks are all apart, a file's entry fills: the
@@ -911,7 +973,9 @@ mod tests {
         // what the one entry holding `home/a` names.
         assert_eq!(pages, 250, "the entry filled, not the volume");
         assert_eq!(page_count(&mut v, "home/a"), pages, "the refused write changed nothing");
-        assert_eq!(v.sync(), Ok(Vec::new()));
+        let before = free_blocks(&mut v);
+        assert_eq!(v.write(a, pages * BLOCK as u64, &[4; 4 * BLOCK]), Err(SyscallError::ResourceExhausted));
+        assert_eq!(free_blocks(&mut v), before, "a refused write's blocks went back");
         v.close(a).unwrap();
         let mut v = remount(v);
         assert_eq!(page_count(&mut v, "home/a"), pages);
@@ -938,6 +1002,8 @@ mod tests {
         assert_eq!(v.sync(), Ok(vec![(a, SyscallError::ResourceExhausted)]));
         v.close(b).unwrap();
         assert_eq!(v.close(a), Err(SyscallError::ResourceExhausted), "a close that lost the writes is refused");
+        assert_eq!(v.sync(), Ok(vec![(a, SyscallError::ResourceExhausted)]), "unheld, it is named again");
+        assert!(v.open.contains_key(&a), "and kept again");
         assert_eq!(page_count(&mut v, "home/a"), 1, "the refused file is still what its writes made it");
 
         v.open.get_mut(&a).unwrap().extents = real;

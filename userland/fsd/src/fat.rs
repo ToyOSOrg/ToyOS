@@ -424,16 +424,25 @@ impl<D: Disk> Volume for FatVolume<D> {
     }
 }
 
+/// A FAT32 volume built from fatgen103 by the checker's tests, and not by the
+/// driver under test.
+#[cfg(test)]
+#[path = "../../../toyos-fat32-check/tests/common/mod.rs"]
+mod spec_volume;
+
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+    use crate::cache::CLEAN_LIMIT;
     use crate::disk::{DiskError, Ram};
 
     /// A disk that refuses every read of one block, after the fixture's own
     /// bytes are on it.
     struct Refusing {
         ram: Ram,
-        refused: u64,
+        refused: Rc<Cell<u64>>,
     }
 
     impl Disk for Refusing {
@@ -442,7 +451,7 @@ mod tests {
         }
         fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
             let count = (out.len() / BLOCK) as u64;
-            if (first..first + count).contains(&self.refused) {
+            if (first..first + count).contains(&self.refused.get()) {
                 return Err(DiskError::Device);
             }
             self.ram.read(first, out)
@@ -459,7 +468,7 @@ mod tests {
     fn bytes() -> Bytes<Refusing> {
         let mut ram = Ram::new(4);
         ram.write(0, &[0x5A; 4 * BLOCK]).unwrap();
-        let cache = Rc::new(Cache::new(Refusing { ram, refused: 1 }));
+        let cache = Rc::new(Cache::new(Refusing { ram, refused: Rc::new(Cell::new(1)) }));
         Bytes { cache, len: 4 * BLOCK as u64 }
     }
 
@@ -486,10 +495,68 @@ mod tests {
         b.flush().unwrap();
         let cache = Rc::try_unwrap(b.cache).ok().expect("the one holder");
         let mut disk = cache.into_disk();
-        disk.refused = u64::MAX;
+        disk.refused.set(u64::MAX);
         let mut block = [0u8; BLOCK];
         disk.read(1, &mut block).unwrap();
         assert!(block.iter().all(|&x| x == 0x5A), "the unreadable block was written over");
+    }
+
+    /// The specification's fixture volume, writable, on a disk with room past
+    /// it for [`evict`] to read, and the handle that moves its refused block.
+    fn spec_fat() -> (FatVolume<Refusing>, Rc<Cell<u64>>, spec_volume::Volume) {
+        let spec = spec_volume::fixture();
+        let blocks = spec.bytes.len().div_ceil(BLOCK);
+        let mut image = spec.bytes.clone();
+        image.resize(blocks * BLOCK, 0);
+        let mut ram = Ram::new((blocks + 2 * CLEAN_LIMIT) as u64);
+        ram.write(0, &image).unwrap();
+        let refused = Rc::new(Cell::new(u64::MAX));
+        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, || 1_717_245_296).unwrap();
+        (v, refused, spec)
+    }
+
+    /// Every clean block out of the cache, so the next read of one asks the disk.
+    fn evict(v: &FatVolume<Refusing>) {
+        let mut block = [0u8; BLOCK];
+        for b in v.cache.blocks() - 2 * CLEAN_LIMIT as u64..v.cache.blocks() {
+            v.cache.read_block(b, &mut block).unwrap();
+        }
+    }
+
+    /// One file whose entry will not read back leaves every other file's sync
+    /// whole, its own close refused and its node kept, and the next sync that
+    /// reaches it brings it level.
+    #[test]
+    fn a_file_that_will_not_level_costs_only_its_own_file() {
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        let (mut v, refused, spec) = spec_fat();
+        let a = v.open("a.txt", CREATE).unwrap();
+        let b = v.open("sub/b.txt", CREATE).unwrap();
+        for n in [a, b] {
+            v.write(n, 0, &[1; 3000]).unwrap();
+        }
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        for n in [a, b] {
+            v.write(n, 3000, &[2; 3000]).unwrap();
+        }
+        let root = (spec_volume::cluster_offset(spec_volume::ROOT_CLUSTER) / BLOCK) as u64;
+        let sub = (spec_volume::cluster_offset(spec.at("sub").first) / BLOCK) as u64;
+        assert_ne!(root, sub, "`a.txt`'s entry and `sub/b.txt`'s are in different blocks");
+        evict(&v);
+        refused.set(root);
+
+        assert_eq!(v.sync(), Ok(vec![(a, SyscallError::Io)]), "only the file that did not level is named");
+        assert!(!v.open[&b].file.needs_reconcile(), "the other file was brought level");
+        assert!(v.open[&a].file.needs_reconcile());
+        assert_eq!(v.close(a), Err(SyscallError::Io), "a close that left the entry behind is refused");
+        assert!(v.open.contains_key(&a), "and its node kept");
+
+        refused.set(u64::MAX);
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert!(!v.open.contains_key(&a), "levelled, the unheld node goes");
+        assert_eq!(v.lstat("a.txt").unwrap().size, 6000);
+        v.close(b).unwrap();
+        assert_eq!(v.lstat("sub/b.txt").unwrap().size, 6000);
     }
 
     /// What the driver says of a volume that stopped answering is `Io`, which

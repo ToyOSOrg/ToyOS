@@ -20,7 +20,7 @@
 //! what is acted on is that copy.
 //!
 //! **What is written reaches the disk at a sync**: an fsync, a client's
-//! `SYNC`, or [`WRITEBACK`] after the first unsynced write when nothing asked
+//! `SYNC`, or [`fsd::writeback::WRITEBACK`] after the first unsynced write when nothing asked
 //! sooner. A kill loses what no sync covered, which is POSIX's promise and no
 //! more.
 
@@ -33,6 +33,7 @@ use fsd::disk::{Claimed, Disk, Ram, Served};
 use fsd::fat::FatVolume;
 use fsd::resolve::{self, Found, Refusal as Escape, Resolved};
 use fsd::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
+use fsd::writeback::WriteBack;
 use toyos::endow::{self, Endowments};
 use toyos::fs::*;
 use toyos::ipc::{self, Connection, RxStep};
@@ -42,10 +43,6 @@ use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::Pipe;
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX, SERVE_PREFIX};
-
-/// How long a write waits for a sync nobody asked for. Policy: the kernel's
-/// write-back drained a closed file's pages on its next pass.
-const WRITEBACK: Duration = Duration::from_secs(2);
 
 /// Clients served at once, machine-wide: one connection per directory per
 /// process. The next is answered `ResourceExhausted` at its hello and let go,
@@ -226,7 +223,7 @@ fn main() {
         next_client: 0,
         streams: BTreeMap::new(),
         next_stream: 0,
-        dirty_since: None,
+        writeback: WriteBack::default(),
         end_on,
         end_at_read,
         probe: Poller::new(caps_len),
@@ -371,8 +368,8 @@ struct Server {
     next_client: u64,
     streams: BTreeMap<u64, Stream>,
     next_stream: u64,
-    /// When a write first went unsynced.
-    dirty_since: Option<Instant>,
+    /// When the sync nobody asked for is due.
+    writeback: WriteBack,
     /// [`END_ON`]'s path on the volume.
     end_on: Option<String>,
     /// [`END_AT_READ`]'s paths on the volume.
@@ -481,7 +478,7 @@ impl Server {
                 .values()
                 .filter(|c| c.window.is_none())
                 .map(|c| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(c.since)))
-                .chain(self.dirty_since.map(|at| WRITEBACK.saturating_sub(now.duration_since(at))))
+                .chain(self.writeback.left(now))
                 .min()
                 .map_or(u64::MAX, |left| left.as_nanos() as u64);
             ready.clear();
@@ -506,8 +503,7 @@ impl Server {
             for id in late {
                 self.drop_client(id, "it never lent its window");
             }
-            if self.dirty_since.is_some_and(|at| now.duration_since(at) >= WRITEBACK) {
-                self.dirty_since = None;
+            if self.writeback.take_due(now) {
                 if let Err(e) = self.sync(None) {
                     println!("fsd: the write-back sync failed: {e:?}");
                 }
@@ -677,7 +673,7 @@ impl Server {
 
     /// Mark the volume written: the write-back sync is due from here.
     fn dirtied(&mut self) {
-        self.dirty_since.get_or_insert_with(Instant::now);
+        self.writeback.dirtied(Instant::now());
     }
 
     /// `rel` resolved without following its last component, for an operation
@@ -920,7 +916,7 @@ impl Server {
     /// due, so the next one tries it again.
     fn sync(&mut self, node: Option<Node>) -> Result<Answer, SyscallError> {
         let unwritten = self.volume.sync()?;
-        self.dirty_since = (!unwritten.is_empty()).then(Instant::now);
+        self.writeback.synced(!unwritten.is_empty(), Instant::now());
         match unwritten.into_iter().find(|&(n, _)| node.is_none_or(|node| n == node)) {
             Some((_, e)) => Err(e),
             None => Ok(Answer::Reply(Reply::ok())),

@@ -1,11 +1,3 @@
-//! What a refused batch does to this boot's log volume.
-//!
-//! **One pure function, because this is the whole refused-batch policy and it used to be
-//! `if let Err(_) = … { volume = None }`.** Everything above [`fate`] is I/O
-//! and everything below it is what the console says; the decision itself is a
-//! function of what a host test can hand it, which is why this file exists
-//! rather than the two lines it replaces living in the loop.
-
 use std::time::Duration;
 
 /// The round time past which a volume that answered every call is announced
@@ -19,10 +11,6 @@ use std::time::Duration;
 pub const LOG_WRITE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Which call refused.
-///
-/// Named rather than a `&str`, because [`fate`] matches on it: the append and
-/// the flush have different answers and a string cannot be matched
-/// exhaustively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     /// One of the batch's lines did not reach the file.
@@ -45,50 +33,9 @@ impl Step {
     }
 }
 
-/// What happens to this boot's volume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fate {
-    /// Keep it, publish this batch — every call answered, so the records are
-    /// durable — and say once that the volume is slow. The state the whole
-    /// slow-vs-failed split exists for: degraded is not dead, and a log that
-    /// arrives late beats a log that was thrown away.
-    Degraded,
-    /// Stop feeding the volume for the rest of the boot. The log is on the
-    /// console only from here.
-    GiveUp,
-}
-
-/// The decision, from the call that refused.
-pub fn fate(step: Step) -> Fate {
-    match step {
-        // Every call answered: the records are durable, however long the round
-        // took, and a volume is never ended on elapsed time.
-        Step::TooSlow => Fate::Degraded,
-        Step::Append | Step::Flush => Fate::GiveUp,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A stick that cannot flush ends the boot's log: the writes are not
-    /// durable and no retry makes them so. A refused append is a hole in the
-    /// file: the records have left the cursor and there is nothing to
-    /// re-write.
-    #[test]
-    fn a_refused_append_or_flush_ends_the_volume() {
-        assert_eq!(fate(Step::Flush), Fate::GiveUp);
-        assert_eq!(fate(Step::Append), Fate::GiveUp);
-    }
-
-    /// A volume that answered every call and took too long over it is
-    /// degraded, never dead: the records are durable and elapsed time is not
-    /// one of the evidences a volume may be declared failed on.
-    #[test]
-    fn a_slow_round_degrades_and_keeps_the_volume() {
-        assert_eq!(fate(Step::TooSlow), Fate::Degraded);
-    }
 
     /// The console words, which the table in `main` is written against.
     #[test]

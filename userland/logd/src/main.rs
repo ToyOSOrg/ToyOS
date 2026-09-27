@@ -98,7 +98,7 @@ use toyos_logstream::{
 use toyos_wallclock::Civil;
 
 use origin::{Origin, Said};
-use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
+use policy::{Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES, ROTATE_FAST_BYTES};
 
 /// Records asked of `SYS_LOG_READ` at once: above `MAX_LOG_SHARDS`, which the
@@ -187,7 +187,6 @@ fn main() {
         lost: 0,
         waiting: Vec::new(),
         volume,
-        owed: false,
         degraded: false,
         boot_local,
         hub,
@@ -215,8 +214,6 @@ struct Log {
     /// round merges.
     waiting: Vec<Line>,
     volume: Option<Volume>,
-    /// Lines the volume took and has not made durable.
-    owed: bool,
     /// Whether the volume answers, slower than `LOG_WRITE_BUDGET` a round.
     degraded: bool,
     boot_local: Option<u64>,
@@ -298,7 +295,6 @@ impl Log {
                 self.flushed();
                 read_any = true;
             }
-            self.sync_owed();
             self.feed_console();
 
             cadence = if read_any { POLL_QUICK } else { (cadence * 2).min(POLL_SLOW) };
@@ -306,8 +302,7 @@ impl Log {
                 continue;
             }
             // Nothing new: park until the kernel posts, init speaks, a program
-            // ends, the console has room, or the cadence comes round, which is
-            // also when an owed sync is asked again.
+            // ends, the console has room, or the cadence comes round.
             poller.wait(1, cadence.as_nanos() as u64, |token| {
                 if token >= ORIGIN_BASE {
                     ended.push((token - ORIGIN_BASE) as usize);
@@ -624,11 +619,8 @@ impl Log {
         let Some(v) = self.volume.as_mut() else { return };
         let began = Instant::now();
         let mut refused = v.write(text).err().map(|e| (Step::Append, e.to_string()));
-        if refused.is_none() {
-            self.owed = true;
-            if sync {
-                refused = self.sync().err();
-            }
+        if refused.is_none() && sync {
+            refused = self.sync().err();
         }
         // A volume that answered, and took longer than a log is worth doing it.
         if refused.is_none() && began.elapsed() > LOG_WRITE_BUDGET {
@@ -637,19 +629,10 @@ impl Log {
         self.answered(refused);
     }
 
-    fn sync_owed(&mut self) {
-        if self.owed {
-            let refused = self.sync().err();
-            self.answered(refused);
-        }
-    }
-
     /// Make the volume durable now.
     fn sync(&mut self) -> Result<(), (Step, String)> {
         let Some(v) = self.volume.as_mut() else { return Ok(()) };
-        v.sync().map_err(|e| (Step::Flush, e.to_string()))?;
-        self.owed = false;
-        Ok(())
+        v.sync().map_err(|e| (Step::Flush, e.to_string()))
     }
 
     /// What a round's write came to: rotation after a clean one, and the
@@ -664,9 +647,9 @@ impl Log {
             self.rotate_if_full();
             return;
         };
-        match fate(step) {
+        match step {
             // Stop feeding the volume, say so once, and keep running.
-            Fate::GiveUp => {
+            Step::Append | Step::Flush => {
                 toyos::error!(
                     "logd: {DIR} has not answered ({}: {why}) - this boot's log is on the console \
                      only from {path}",
@@ -675,8 +658,7 @@ impl Log {
                 self.volume = None;
             }
             // Every call answered, slowly: the round is durable.
-            Fate::Degraded => {
-                self.owed = false;
+            Step::TooSlow => {
                 if !self.degraded {
                     self.degraded = true;
                     toyos::warn!(

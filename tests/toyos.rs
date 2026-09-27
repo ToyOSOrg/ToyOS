@@ -421,20 +421,11 @@ const RUST_SKIP: &[&str] = &[
     // shared boot it would be reported against whichever test came next — and
     // every one after that. `short_sleep_livelock` gives it a boot of its own.
     "abuse_short_sleep",
-    // The four below were **running twice under one name**, once here on the
-    // plain boot and once as the test that owns the name, and the collision was
-    // invisible: `check_registration` compared the three declared lists against
-    // each other and never against the binaries the registry discovers.
-    // `check_no_collisions` closes that, and this is what it found.
-    //
-    // What the shared copy adds is the binary exiting 0 on a boot that gives it
-    // nothing to measure.
-
     // What it stages on `/log` — a file
     // unlinked out from under a held descriptor, its clusters handed to the next
     // writer — is only half the claim, and the other half is the volume read
-    // back off the image after a shutdown by a FAT implementation that is not
-    // the kernel's. `fat_backing_revoked` runs it.
+    // back off the image after a shutdown by a FAT implementation.
+    // `fat_backing_revoked` runs it.
     "fat_backing_revoked",
     // Stages a rename with an absent source on `/log` and leaves the
     // destination for `fs_rename_durable` to read back off the image.
@@ -12019,8 +12010,8 @@ fn run_machine_test(
         "blockd_lends_within_its_bound" => {
             common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
         }
-        // Body in `tests/common/hda.rs`, same reason.
         "blockd_serves_nothing" => common::blockd::blockd_serves_nothing(test_config, c_bins, rust_bins),
+        // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
         "hda_client_stall" => common::hda::hda_client_stall(test_config, c_bins, rust_bins),
         "hda_two_live_refused" => {
@@ -12914,6 +12905,12 @@ fn run_machine_test(
             log.must_not_say("divide by zero")?;
             // Nothing downstream ran: no queue was made over the namespace.
             log.must_not_say("blockd: NVMe up")?;
+            // A refused controller is a disk that failed: DATA is absent, and
+            // never served from memory as on a machine with no disk.
+            log.must_say(
+                "fsd: the block service would not list its partitions (Refused(Unusable)); DATA is absent this boot",
+            )?;
+            log.must_not_say("this machine has no DATA partition")?;
             log.must_say("Boot: complete")?;
             eprintln!("  [nvme] 8 KiB-format namespace refused by name, and the boot went on");
             Ok(())

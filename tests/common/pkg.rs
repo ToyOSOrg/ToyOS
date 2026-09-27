@@ -78,9 +78,9 @@ pub fn pkg_install_gbae(
     };
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
     let boot = qemu.boot_log().to_string();
-    if boot.contains("are a tmpfs") {
+    if boot.contains("are in memory and will not survive a reboot") {
         return Err(format!(
-            "/apps and /home fell back to tmpfs, so the readback below would judge no device:\n\
+            "/apps and /home fell back to memory, so the readback below would judge no device:\n\
              {boot}"
         ));
     }

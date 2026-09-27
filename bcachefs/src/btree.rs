@@ -806,6 +806,28 @@ mod tests {
         );
     }
 
+    /// A split that finds no block for a later sibling gives back the ones it
+    /// took for the earlier: nothing names them yet, so nothing else frees
+    /// them.
+    #[test]
+    fn a_split_short_of_a_sibling_gives_back_the_ones_it_took() {
+        let io = crate::block_io::VecBlockIO::new(16);
+        let mut alloc = BitmapAllocator::format(&io, BlockNum::new(0), 1, 16, 1).unwrap();
+        let taken = alloc.free_blocks as u32 - 2;
+        let _ = alloc.alloc_exact(&io, taken).unwrap();
+        let leaf = alloc.alloc_block(&io).unwrap();
+        assert_eq!(alloc.free_blocks, 1);
+
+        let mut middle: Vec<Entry> = (0..40).map(|_| entry(72)).collect();
+        middle.insert(20, entry(MAX_ENTRY_SIZE - KEY_HEADER_SIZE));
+        assert_eq!(pack(middle.clone()).len(), 3, "two siblings, and a block for one");
+        assert!(matches!(
+            split_node(&io, &mut alloc, leaf, Node::Leaf(middle)),
+            Err(FsError::NoSpace { .. }),
+        ));
+        assert_eq!(alloc.free_blocks, 1, "the first sibling's block went back");
+    }
+
     #[test]
     fn a_descent_gives_up_before_it_runs_out_of_stack() {
         let mut depth = Depth::ROOT;

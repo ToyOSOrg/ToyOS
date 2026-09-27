@@ -192,11 +192,11 @@ struct Served {
     posted: bool,
 }
 
-/// The controller this service drives, or why it drives none. Without one no
-/// partition is listed and no session opened, and a connection says one frame
-/// and is answered, or is let go.
+/// The controller this service drives and the partitions its table names, or
+/// why it drives none. Without one no partition is listed and no session
+/// opened, and a connection says one frame and is answered, or is let go.
 enum Drive {
-    Up(Controller),
+    Up(Controller, Vec<Part>),
     /// No controller this row names is on this machine: a listing is empty
     /// and an open `NotFound`.
     Absent,
@@ -207,17 +207,18 @@ enum Drive {
 }
 
 impl Drive {
-    /// The controller a session is on: a service without one opens none.
+    /// The controller a session is on: a service without one has no partition
+    /// to open.
     fn up(&mut self) -> &mut Controller {
         match self {
-            Drive::Up(ctrl) => ctrl,
+            Drive::Up(ctrl, _) => ctrl,
             Drive::Absent | Drive::Unusable => unreachable!("blockd: a session with no controller"),
         }
     }
 
     fn oldest(&self) -> Option<Instant> {
         match self {
-            Drive::Up(ctrl) => ctrl.oldest(),
+            Drive::Up(ctrl, _) => ctrl.oldest(),
             Drive::Absent | Drive::Unusable => None,
         }
     }
@@ -225,7 +226,6 @@ impl Drive {
 
 struct Service {
     ctrl: Drive,
-    parts: Vec<Part>,
     holds: Holds<u64>,
     /// The device's loss count: every reset may have dropped its cache.
     losses: u64,
@@ -247,18 +247,29 @@ struct Opening {
 }
 
 impl Service {
-    fn new(ctrl: Drive, parts: Vec<Part>, running: Option<[u8; 16]>) -> Self {
-        Self { ctrl, parts, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0, running }
+    fn new(ctrl: Drive, running: Option<[u8; 16]>) -> Self {
+        Self { ctrl, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0, running }
     }
 
-    /// What an open answers: a session to admit, or its refusal. `region` is
-    /// the client's and is consumed either way.
-    fn open(&mut self, guid: [u8; 16], region: toyos::RawHandle) -> Result<Opening, Refusal> {
-        let region = Region::adopt(region).map_err(|_| Refusal::Malformed)?;
-        if let Drive::Unusable = self.ctrl {
-            return Err(Refusal::Unusable);
+    /// What a listing answers: every partition the table names.
+    fn listing(&self) -> Result<Vec<u8>, Refusal> {
+        match &self.ctrl {
+            Drive::Up(_, parts) => {
+                Ok(parts.iter().flat_map(|p| wire::Listed { unique: p.unique, kind: p.kind }.encode()).collect())
+            }
+            Drive::Absent => Ok(Vec::new()),
+            Drive::Unusable => Err(Refusal::Unusable),
         }
-        let part = self.parts.iter().find(|p| p.unique == guid && guid != [0; 16]);
+    }
+
+    /// The span an open of `guid` is served on, held for it; or its refusal.
+    fn place(&mut self, guid: [u8; 16]) -> Result<(u64, u64), Refusal> {
+        let parts = match &self.ctrl {
+            Drive::Up(_, parts) => parts,
+            Drive::Absent => return Err(Refusal::NotFound),
+            Drive::Unusable => return Err(Refusal::Unusable),
+        };
+        let part = parts.iter().find(|p| p.unique == guid && guid != [0; 16]);
         let (first, blocks) = match part.map(|p| &p.span) {
             None => return Err(Refusal::NotFound),
             Some(Err(_)) => return Err(Refusal::Unusable),
@@ -273,6 +284,14 @@ impl Service {
         if self.holds.hold(first, first + blocks, self.next_id).is_err() {
             return Err(Refusal::Held);
         }
+        Ok((first, blocks))
+    }
+
+    /// What an open answers: a session to admit, or its refusal. `region` is
+    /// the client's and is consumed either way.
+    fn open(&mut self, guid: [u8; 16], region: toyos::RawHandle) -> Result<Opening, Refusal> {
+        let region = Region::adopt(region).map_err(|_| Refusal::Malformed)?;
+        let (first, blocks) = self.place(guid)?;
         match self.ctrl.up().claim().dma_map(region.handle()) {
             Ok(mapping) if mapping.bytes == SESSION_BYTES as u64 => {
                 Ok(Opening { region, device_addr: mapping.device_addr, first, blocks, unique: guid })
@@ -511,15 +530,13 @@ fn main() {
     let acceptor = endow::acceptor(PORT).unwrap_or_else(|| panic!("blockd: started serving no `{PORT}` port"));
     let Some(dev) = claim() else {
         println!("blockd: no NVMe controller this row names is on this machine; serving no partition");
-        serve(&mut Service::new(Drive::Absent, Vec::new(), running), &acceptor);
+        serve(&mut Service::new(Drive::Absent, running), &acceptor);
     };
-    // A controller this service cannot use is a machine without one, said by
-    // name: restarting would meet the same device and the same refusal.
     let mut ctrl = match Controller::open(dev, silence) {
         Ok(ctrl) => ctrl,
         Err(why) => {
             println!("blockd: NOT SERVING — {why}; serving no partition");
-            serve(&mut Service::new(Drive::Unusable, Vec::new(), running), &acceptor);
+            serve(&mut Service::new(Drive::Unusable, running), &acceptor);
         }
     };
     println!(
@@ -544,7 +561,7 @@ fn main() {
             Err(why) => println!("blockd: partition {} is not served: {why}", guid_text(part.unique)),
         }
     }
-    serve(&mut Service::new(Drive::Up(ctrl), parts, running), &acceptor);
+    serve(&mut Service::new(Drive::Up(ctrl, parts), running), &acceptor);
 }
 
 fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
@@ -553,7 +570,7 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
     let mut ready: Vec<u64> = Vec::new();
     let mut done: Vec<Done> = Vec::new();
     loop {
-        if let Drive::Up(ctrl) = &service.ctrl {
+        if let Drive::Up(ctrl, _) = &service.ctrl {
             poller.watch(ctrl.claim(), READABLE, TOKEN_IRQ);
         }
         if pending.len() < MAX_PENDING {
@@ -577,7 +594,7 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
         ready.clear();
         poller.wait(1, timeout, |token| ready.push(token));
 
-        if let Drive::Up(ctrl) = &mut service.ctrl {
+        if let Drive::Up(ctrl, _) = &mut service.ctrl {
             if let Err(why) = ctrl.take_interrupt() {
                 panic!(
                     "blockd: the claim refused its interrupt read ({why:?}): the unit refused this \
@@ -658,20 +675,15 @@ fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usiz
         let _ = conn.try_send_bytes(wire::MSG_REFUSED, &why.encode());
     };
     if msg_type == wire::MSG_LIST && payload_len == 0 {
-        if let Drive::Unusable = service.ctrl {
-            refuse(&p.conn, Refusal::Unusable);
-            return;
-        }
-        let listing: Vec<u8> = service
-            .parts
-            .iter()
-            .map(|p| wire::Listed { unique: p.unique, kind: p.kind })
-            .flat_map(|l| l.encode())
-            .collect();
-        // One frame, and the connection is done with: a table larger than a
-        // frame is one this service lists no part of rather than half of.
-        if p.conn.try_send_bytes(wire::MSG_LISTED, &listing).is_err() {
-            refuse(&p.conn, Refusal::Exhausted);
+        match service.listing() {
+            Err(why) => refuse(&p.conn, why),
+            // One frame, and the connection is done with: a table larger than
+            // a frame is one this service lists no part of rather than half of.
+            Ok(listing) => {
+                if p.conn.try_send_bytes(wire::MSG_LISTED, &listing).is_err() {
+                    refuse(&p.conn, Refusal::Exhausted);
+                }
+            }
         }
         return;
     }
@@ -698,5 +710,24 @@ fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usiz
             let id = service.admit(opening, p.conn);
             println!("blockd: session {id} opened {} ({} blocks)", guid_text(guid), opened.blocks);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A controller this service cannot use is a disk that failed and never a
+    /// machine without one: its listing and its open are refused `Unusable`,
+    /// where an absent controller's listing is empty and its open `NotFound`.
+    #[test]
+    fn an_unusable_controller_is_refused_and_an_absent_one_lists_nothing() {
+        let guid = [7; 16];
+        let mut unusable = Service::new(Drive::Unusable, None);
+        assert_eq!(unusable.listing(), Err(Refusal::Unusable));
+        assert_eq!(unusable.place(guid), Err(Refusal::Unusable));
+        let mut absent = Service::new(Drive::Absent, None);
+        assert_eq!(absent.listing(), Ok(Vec::new()));
+        assert_eq!(absent.place(guid), Err(Refusal::NotFound));
     }
 }

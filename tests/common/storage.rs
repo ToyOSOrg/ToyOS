@@ -532,9 +532,9 @@ pub fn home_overwrite_reads_back(
         BootOptions { profile: qemu::Profile::MetalDisk, ..Default::default() },
     );
     let boot = qemu.boot_log().to_string();
-    if boot.contains("are a tmpfs") {
+    if boot.contains("are in memory and will not survive a reboot") {
         return Err(format!(
-            "/apps and /home fell back to tmpfs, so nothing below touches the NVMe path:\n{boot}"
+            "/apps and /home fell back to memory, so nothing below touches the NVMe path:\n{boot}"
         ));
     }
 
@@ -778,9 +778,9 @@ pub fn apps_and_home_are_one_filesystem(
         BootOptions { profile: qemu::Profile::MetalDisk, ..Default::default() },
     );
     let boot = qemu.boot_log().to_string();
-    if boot.contains("are a tmpfs") {
+    if boot.contains("are in memory and will not survive a reboot") {
         return Err(format!(
-            "/apps and /home fell back to tmpfs, so the readback below would judge no device:\n\
+            "/apps and /home fell back to memory, so the readback below would judge no device:\n\
              {boot}"
         ));
     }

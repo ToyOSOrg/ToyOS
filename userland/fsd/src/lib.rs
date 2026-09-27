@@ -19,3 +19,4 @@ pub mod disk;
 pub mod fat;
 pub mod resolve;
 pub mod volume;
+pub mod writeback;
