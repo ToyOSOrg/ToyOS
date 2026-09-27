@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Rasterize `codepoints` into `cell_width * cell_height` 8-bit alpha cells,
 /// laid out one cell after another. The pixel size is the largest at which
@@ -216,21 +215,7 @@ pub fn regen_panic_font(root: &Path) {
 /// again. A build that cannot find out what is committed refuses, because it
 /// cannot honestly build an image either.
 fn tracked(dir: &Path) -> BTreeSet<PathBuf> {
-    let out = Command::new("git")
-        .args(["-C", &dir.display().to_string(), "ls-files", "-z"])
-        .output()
-        .unwrap_or_else(|e| panic!("asking git what it tracks under {}: {e}", dir.display()));
-    assert!(
-        out.status.success(),
-        "git could not list {}: {}",
-        dir.display(),
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    String::from_utf8_lossy(&out.stdout)
-        .split('\0')
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .collect()
+    crate::sysroot::tracked_files(dir, &[]).into_iter().map(PathBuf::from).collect()
 }
 
 /// The paths `declared` names under `dir` that are not there, in the order they
@@ -367,6 +352,7 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     /// A sample of the `ch(de)` AltGr characters the console font once could
     /// not render — past Latin-1, so absent unless a layout's own reach is

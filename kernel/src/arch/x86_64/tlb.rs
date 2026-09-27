@@ -59,9 +59,11 @@ pub fn log_census() {
 }
 
 /// How long the initiator waits for one CPU's flush: a target that has not
-/// answered by then is not taking interrupts. Every spin that masks them holds
-/// itself under this at its own site; the architecture knows none of them.
+/// answered by then is not taking interrupts.
 const ACK_TIMEOUT: Tripwire = crate::time::DEAF_CPU;
+
+// A spin with interrupts masked is held under `DEAF_CPU` at its own site, so this wait is no shorter.
+const _: () = assert!(ACK_TIMEOUT.nanos() >= crate::time::DEAF_CPU.nanos());
 
 /// Spins between deadline checks; `nanos_since_boot`'s 128-bit divide is too
 /// costly to call on every iteration.

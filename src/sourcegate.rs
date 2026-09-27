@@ -71,9 +71,10 @@
 //!
 //! The eleventh holds the kernel's arch layer below the rest: a file under
 //! `kernel/src/arch/` may name, by `crate::`, `$crate::` or a `super::` chain
-//! out of it, only the architecture and the root's re-exports of it. What it
-//! names beyond that today is [`ARCH_REACHES_UP`], per file, and that list
-//! only shrinks.
+//! out of it, only the architecture and the root's re-exports of it, and a name
+//! the layer itself re-exports from above counts as where it came from. What it
+//! names beyond that today is [`ARCH_REACHES_UP`], per file and item: the gate
+//! holds that list shrinking by item, and review holds the rest.
 //!
 //! **What none of them reaches is filed rather than implied**, and each table's
 //! own doc names its half: the entries under `issues/build/` say so.
@@ -351,7 +352,7 @@ const RETIRED_ABI_NAMES: &[&str] = &[
 const GUEST_TREES: &[&str] =
     &["kernel/src", "toyos/src", "toyos-abi/src", "userland", "tests"];
 
-/// `line` with its comment and its string literals removed.
+/// `line` with its comment and its string and char literals removed.
 ///
 /// What is left is the part that names things. Prose explaining what a deleted
 /// call used to do is legal and worth keeping; a gravestone table mapping a
@@ -367,6 +368,21 @@ fn code_only(line: &str) -> String {
             }
             '"' => in_string = !in_string,
             '/' if !in_string && chars.peek() == Some(&'/') => break,
+            // A char literal is a literal (`'"'` opens no string); a lifetime or a label is code.
+            '\'' if !in_string => {
+                let mut ahead = chars.clone();
+                match (ahead.next(), ahead.next()) {
+                    (Some('\\'), _) => {
+                        chars.next();
+                        chars.next();
+                        while chars.next().is_some_and(|c| c != '\'') {}
+                    }
+                    (Some(_), Some('\'')) => {
+                        chars.nth(1);
+                    }
+                    _ => out.push(c),
+                }
+            }
             _ if !in_string => out.push(c),
             _ => {}
         }
@@ -1231,24 +1247,6 @@ fn used_actions(text: &str) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// Every `.rs` file `git` tracks under `tree`, repository-relative — the list
-/// the walks above are held against, read from something that is not a walk.
-#[cfg(test)]
-fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<String> {
-    let out = std::process::Command::new("git")
-        .args(["ls-files", "-z", "--", tree])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|e| panic!("git ls-files {tree}: {e}"));
-    assert!(out.status.success(), "git ls-files {tree} failed");
-    String::from_utf8(out.stdout)
-        .expect("git ls-files is not UTF-8")
-        .split('\0')
-        .filter(|p| p.ends_with(".rs"))
-        .map(str::to_string)
-        .collect()
-}
-
 // ── Architecture rules ──────────────────────────────────────────────────────
 
 /// One architecture rule, stated as where its spellings may appear: a set of
@@ -1282,131 +1280,199 @@ const ASSEMBLY: &[&str] = &["asm!", "global_asm!", "naked_asm!", "#[naked]", "un
 #[cfg(test)]
 const ARCH_MODULE: &str = "core::arch/std::arch";
 
+/// A path code spells from a root: the 0-based line of its last segment, the
+/// segments after the root, and the name a rename binds. A group is one path
+/// per element, a glob ends in `*`, a rename of the root itself (`core as k`,
+/// `core::{self as k}`) is `self` renamed, and a `super` chain that stays below
+/// the crate root begins with `super`.
+#[cfg(test)]
+struct Spelled {
+    line: usize,
+    segments: Vec<String>,
+    alias: Option<String>,
+}
+
+/// Every path in `text` from one of `roots` (`core`, `crate`, which `$crate`
+/// spells too) and, given the module's `depth` below the crate root, from a
+/// `super` chain, `self::` before it and each inline `mod x {}` around it
+/// counted. The root's rename counts only where it imports: `use core as k;`,
+/// `extern crate core as k;`, an element of a `use` group. A glob or a rename
+/// is not followed to what it brings into scope: that is resolution, which a
+/// scan does not have.
+#[cfg(test)]
+fn spelled_paths(text: &str, roots: &[&str], depth: Option<usize>) -> Vec<Spelled> {
+    let code = Code(text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect());
+    let mut found = Vec::new();
+    // Whether each open `{` is an inline module's, and whether the next one is.
+    let (mut scopes, mut opens_mod) = (Vec::new(), false);
+    let mut at = 0;
+    while at < code.0.len() {
+        match code.0[at] {
+            '{' if depth.is_some() => scopes.push(std::mem::take(&mut opens_mod)),
+            '}' if depth.is_some() => _ = scopes.pop().expect("a `}` closes nothing: a literal's brace reached the code"),
+            _ => {}
+        }
+        let Some((name, end)) = code.ident_at(at) else {
+            at += 1;
+            continue;
+        };
+        let after = code.skip_space(end);
+        let mut prefix = Vec::new();
+        let root_end = match depth {
+            _ if roots.contains(&name.as_str()) => Some(after),
+            Some(depth) if name == "super" && code.ident_before(at).1 != "super" => {
+                let (mut supers, mut next) = (1, after);
+                while let Some((_, e)) =
+                    code.colons(next).then(|| code.ident_at(code.skip_space(next + 2))).flatten().filter(|(s, _)| s == "super")
+                {
+                    supers += 1;
+                    next = code.skip_space(e);
+                }
+                if supers < depth + scopes.iter().filter(|m| **m).count() {
+                    prefix.push("super".to_string());
+                }
+                Some(next)
+            }
+            _ => None,
+        };
+        if name == "mod" {
+            opens_mod = code.ident_at(after).is_some_and(|(_, e)| code.0.get(code.skip_space(e)) == Some(&'{'));
+        }
+        match root_end {
+            Some(next) if code.colons(next) => code.tree(next + 2, prefix, &mut found),
+            Some(next) if prefix.is_empty() && code.imported(at) => {
+                let alias = code.alias_at(next);
+                let segments = vec!["self".to_string()];
+                found.extend(alias.is_some().then(|| Spelled { line: code.line_of(at), segments, alias }));
+            }
+            _ => {}
+        }
+        at = end;
+    }
+    found
+}
+
+/// Code as characters, its comments and literals gone ([`code_only`]).
+#[cfg(test)]
+struct Code(Vec<char>);
+
+#[cfg(test)]
+impl Code {
+    /// Every path the use tree at `at` spells after `prefix`, into `out`.
+    fn tree(&self, at: usize, prefix: Vec<String>, out: &mut Vec<Spelled>) {
+        let at = self.skip_space(at);
+        let line = self.line_of(at);
+        if self.0.get(at) == Some(&'*') {
+            out.push(Spelled { line, segments: [prefix, vec!["*".to_string()]].concat(), alias: None });
+        } else if self.0.get(at) == Some(&'{') {
+            // Each element begins after the `{` or after a `,` at depth one.
+            self.tree(at + 1, prefix.clone(), out);
+            let (mut depth, mut i) = (0usize, at + 1);
+            while let Some(&c) = self.0.get(i) {
+                match c {
+                    '{' => depth += 1,
+                    '}' if depth == 0 => break,
+                    '}' => depth -= 1,
+                    ',' if depth == 0 => self.tree(i + 1, prefix.clone(), out),
+                    _ => {}
+                }
+                i += 1;
+            }
+        } else if let Some((name, end)) = self.ident_at(at) {
+            let (after, segments) = (self.skip_space(end), [prefix, vec![name]].concat());
+            match self.colons(after) {
+                true => self.tree(after + 2, segments, out),
+                false => out.push(Spelled { line, segments, alias: self.alias_at(after) }),
+            }
+        }
+    }
+
+    /// The name bound by an `as` at `at`.
+    fn alias_at(&self, at: usize) -> Option<String> {
+        let (_, end) = self.ident_at(at).filter(|(word, _)| word == "as")?;
+        self.ident_at(self.skip_space(end)).map(|(name, _)| name)
+    }
+
+    fn line_of(&self, at: usize) -> usize {
+        self.0[..at].iter().filter(|c| **c == '\n').count()
+    }
+
+    fn skip_space(&self, at: usize) -> usize {
+        (at..).find(|&j| !self.0.get(j).is_some_and(|c| c.is_whitespace())).unwrap_or(at)
+    }
+
+    fn colons(&self, at: usize) -> bool {
+        self.0.get(at..at + 2) == Some(&[':', ':'][..])
+    }
+
+    fn word(&self, at: usize) -> bool {
+        self.0.get(at).is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+    }
+
+    /// The identifier that begins at `at`, and where it ends.
+    fn ident_at(&self, at: usize) -> Option<(String, usize)> {
+        if at.checked_sub(1).is_some_and(|j| self.word(j)) {
+            return None;
+        }
+        let end = (at..).find(|&j| !self.word(j)).unwrap_or(at);
+        (end > at).then(|| (self.0[at..end].iter().collect(), end))
+    }
+
+    /// The identifier that ends before `at`, over whitespace and `::`, and where it begins.
+    fn ident_before(&self, at: usize) -> (usize, String) {
+        let end = (0..at).rev().find(|&j| !self.0[j].is_whitespace() && self.0[j] != ':').map_or(0, |j| j + 1);
+        let start = (0..end).rev().find(|&j| !self.word(j)).map_or(0, |j| j + 1);
+        (start, self.0[start..end].iter().collect())
+    }
+
+    /// Whether `at` begins an item that imports: `use …`, or `extern crate …`,
+    /// or an element of a `use` group.
+    fn imported(&self, mut at: usize) -> bool {
+        loop {
+            let (start, ident) = self.ident_before(at);
+            match ident.as_str() {
+                "use" => return true,
+                "crate" => return self.ident_before(start).1 == "extern",
+                "" => {}
+                _ => return false,
+            }
+            // Not after an identifier: inside a group only if a `{` opens it.
+            let back = (0..start).rev().find(|&j| !self.0[j].is_whitespace());
+            match back.map(|j| (j, self.0[j])) {
+                Some((j, '{')) => at = j,
+                Some((j, ',')) => {
+                    let mut depth = 0usize;
+                    let open = (0..j).rev().find(|&k| match self.0[k] {
+                        '}' => { depth += 1; false }
+                        '{' if depth == 0 => true,
+                        '{' => { depth -= 1; false }
+                        _ => false,
+                    });
+                    match open {
+                        Some(k) if !self.0[k..j].contains(&';') => at = k,
+                        _ => return false,
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
 /// The 0-based lines of `text` on which a path names `core::arch` or
 /// `std::arch`, or makes a name that can: `core::arch::asm!`,
 /// `use core::arch as isa;`, an `arch` that begins an element of a `core::{…}`
 /// group, over any number of lines — and any glob of `core`/`std` itself
 /// (`use core::*;`, `core::{*}`) or rename of it (`use core as k;`,
-/// `extern crate core as k;`, `core::{self as k}`).
-///
-/// **The glob and the rename are refused whole**, not followed to an `arch`
-/// after them: what they bring into scope is read by resolution, which a line
-/// scan does not have, and code outside an arch module has no other use for
-/// either. Comments and string literals are not code ([`code_only`]).
+/// `extern crate core as k;`, `core::{self as k}`), refused whole: code outside
+/// an arch module has no other use for either.
 #[cfg(test)]
 fn arch_module_lines(text: &str) -> Vec<usize> {
-    let code: Vec<char> = text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect();
-    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let line_of = |at: usize| code[..at].iter().filter(|c| **c == '\n').count();
-    let skip_space = |mut at: usize| {
-        while code.get(at).is_some_and(|c| c.is_whitespace()) {
-            at += 1;
-        }
-        at
-    };
-    let ident_at = |at: usize, name: &str| {
-        let end = at + name.len();
-        code.get(at..end).is_some_and(|s| s.iter().copied().eq(name.chars()))
-            && !code.get(end).is_some_and(|c| word(*c))
-            && !at.checked_sub(1).and_then(|j| code.get(j)).is_some_and(|c| word(*c))
-    };
-    // The identifier that ends before `at`, over whitespace and `::`.
-    let ident_before = |at: usize| {
-        let mut end = at;
-        while end > 0 && (code[end - 1].is_whitespace() || code[end - 1] == ':') {
-            end -= 1;
-        }
-        let mut start = end;
-        while start > 0 && word(code[start - 1]) {
-            start -= 1;
-        }
-        (start, code[start..end].iter().collect::<String>())
-    };
-    // Whether `at` begins an item that imports: `use …`, or `extern crate …`,
-    // or an element of a `use` group.
-    let imported = |at: usize| {
-        let mut at = at;
-        loop {
-            let (start, ident) = ident_before(at);
-            match ident.as_str() {
-                "use" => return true,
-                "crate" => return ident_before(start).1 == "extern",
-                "" => {}
-                _ => return false,
-            }
-            // Not after an identifier: inside a group only if a `{` opens it.
-            let mut back = start;
-            while back > 0 && code[back - 1].is_whitespace() {
-                back -= 1;
-            }
-            match back.checked_sub(1).map(|j| code[j]) {
-                Some('{') => at = back - 1,
-                Some(',') => {
-                    let mut depth = 0usize;
-                    let mut j = back - 1;
-                    loop {
-                        let Some(k) = j.checked_sub(1) else { return false };
-                        j = k;
-                        match code[j] {
-                            '}' => depth += 1,
-                            '{' if depth == 0 => break,
-                            '{' => depth -= 1,
-                            ';' => return false,
-                            _ => {}
-                        }
-                    }
-                    at = j;
-                }
-                _ => return false,
-            }
-        }
-    };
-    let mut lines = Vec::new();
-    for at in 0..code.len() {
-        let Some(root) = ["core", "std"].into_iter().find(|root| ident_at(at, root)) else { continue };
-        let after = skip_space(at + root.len());
-        if ident_at(after, "as") && imported(at) {
-            lines.push(line_of(at));
-            continue;
-        }
-        let colons = after;
-        if code.get(colons..colons + 2) != Some(&[':', ':'][..]) {
-            continue;
-        }
-        let next = skip_space(colons + 2);
-        if ident_at(next, "arch") || code.get(next) == Some(&'*') {
-            lines.push(line_of(next));
-        } else if code.get(next) == Some(&'{') {
-            // Each element of the group begins after its `{` or a `,` at depth one.
-            let (mut depth, mut i, mut element) = (0usize, next, true);
-            while let Some(&c) = code.get(i) {
-                match c {
-                    '{' => {
-                        depth += 1;
-                        element = depth == 1;
-                    }
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    ',' if depth == 1 => element = true,
-                    c if c.is_whitespace() => {}
-                    _ => {
-                        let renamed_self =
-                            ident_at(i, "self") && ident_at(skip_space(i + "self".len()), "as");
-                        if element && depth == 1 && (ident_at(i, "arch") || c == '*' || renamed_self) {
-                            lines.push(line_of(i));
-                        }
-                        element = false;
-                    }
-                }
-                i += 1;
-            }
-        }
-    }
-    lines
+    spelled_paths(text, &["core", "std"], None)
+        .into_iter()
+        .filter(|p| matches!(p.segments[0].as_str(), "arch" | "*") || (p.segments[0] == "self" && p.alias.is_some()))
+        .map(|p| p.line)
+        .collect()
 }
 
 /// The spelling of the first needle of `rule` that line `n` of a file holds,
@@ -1603,9 +1669,12 @@ const KERNEL_ROOT: &str = "kernel/src/main.rs";
 /// `issues/kernel/the-arch-layer-names-the-kernel-above-it.md`, which is done
 /// when this list is empty.
 ///
-/// **It only shrinks.** A name a file adds reds
+/// **It only shrinks, by item.** A name a file adds reds
 /// `the_arch_layer_names_nothing_above_it`, and so does a name a row lists that
-/// its file no longer spells, so no row outlives what it excused.
+/// its file no longer spells, so no row outlives what it excused. It does not
+/// count reach: a file whose row holds `sched` may name more of `crate::sched`
+/// unseen, and a row that grows is green, so that it shrinks is held by review
+/// and not by this gate.
 #[cfg(test)]
 const ARCH_REACHES_UP: &[(&str, &[&str])] = &[
     ("kernel/src/arch/aarch64/boot.rs", &["PHYS_OFFSET", "actuator", "drivers", "kernel_main", "log", "mm"]),
@@ -1643,7 +1712,7 @@ const ARCH_REACHES_UP: &[(&str, &[&str])] = &[
     ("kernel/src/arch/x86_64/ioapic.rs", &["drivers", "iommu", "log", "mm", "sync"]),
     ("kernel/src/arch/x86_64/mod.rs", &["actuator", "log"]),
     ("kernel/src/arch/x86_64/nmi_gate.rs", &["actuator", "clock", "log", "mm", "sched", "symbols"]),
-    ("kernel/src/arch/x86_64/paging.rs", &["MemoryMapEntry", "hasher", "log", "mm", "sched", "sync", "vma"]),
+    ("kernel/src/arch/x86_64/paging.rs", &["MemoryMapEntry", "hasher", "invalidation", "log", "mm", "sched", "sync", "vma"]),
     ("kernel/src/arch/x86_64/percpu.rs", &["actuator", "drivers", "irq_census", "log", "mm", "process", "sync"]),
     ("kernel/src/arch/x86_64/rtc.rs", &["actuator", "clock", "time"]),
     ("kernel/src/arch/x86_64/smp.rs", &["DirectMap", "actuator", "clock", "drivers", "hardlockup", "log", "mm", "process", "scheduler", "smp_roster", "time"]),
@@ -1659,110 +1728,65 @@ const ARCH_REACHES_UP: &[(&str, &[&str])] = &[
     ("kernel/src/arch/x86_64/watchdog.rs", &["actuator", "drivers", "log", "params", "time"]),
 ];
 
-/// Every `(0-based line, item)` for a crate-root item `text` names by path, in
-/// a file whose module sits `depth` levels below the crate root: the segment
-/// after `crate::` or `$crate::`, the first segment of each element of a
-/// `crate::{…}` group over any number of lines, and the same after a `super::`
-/// chain long enough to reach the root. A glob of the root is the item `*` and
-/// a rename of it (`crate as k`) the item `crate as`, because what either
-/// brings in is decided by resolution, which a line scan does not have.
-/// Comments and string literals are not code ([`code_only`]). A macro reached
-/// by textual scope (`#[macro_use]`) is not a path and is not read.
+/// Every `(0-based line, item)` for a crate-root item that a file under
+/// [`ARCH_TREE`], `depth` modules below the root, names by a path
+/// ([`spelled_paths`] from `crate` or `super`): the path's first segment, or,
+/// through the architecture, a root alias of it or a `super` chain inside it,
+/// the origin of each of `reexports` the path passes through. A glob of the
+/// root is the item `*` and a rename of it `self as`. A path relative to the
+/// module (`self::x`, a child's name, a name a `use` bound) is not read.
 #[cfg(test)]
-fn crate_items_named(text: &str, depth: usize) -> Vec<(usize, String)> {
-    let code: Vec<char> = text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect();
-    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let line_of = |at: usize| code[..at].iter().filter(|c| **c == '\n').count();
-    let skip_space = |mut at: usize| {
-        while code.get(at).is_some_and(|c| c.is_whitespace()) {
-            at += 1;
-        }
-        at
-    };
-    // The identifier that begins at `at`, and where it ends.
-    let ident_at = |at: usize| -> Option<(String, usize)> {
-        if at.checked_sub(1).and_then(|j| code.get(j)).is_some_and(|c| word(*c)) {
-            return None;
-        }
-        let end = (at..).find(|&j| !code.get(j).is_some_and(|c| word(*c))).unwrap_or(at);
-        (end > at).then(|| (code[at..end].iter().collect(), end))
-    };
-    let colons = |at: usize| code.get(at..at + 2) == Some(&[':', ':'][..]);
-    // What follows the root, `at` being just past its `::`.
-    let after_root = |at: usize, found: &mut Vec<(usize, String)>| {
-        let at = skip_space(at);
-        match code.get(at) {
-            Some('*') => found.push((line_of(at), "*".to_string())),
-            Some('{') => {
-                let (mut depth, mut i, mut element) = (0usize, at, true);
-                while let Some(&c) = code.get(i) {
-                    match c {
-                        '{' => {
-                            depth += 1;
-                            element = depth == 1;
-                        }
-                        '}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        ',' if depth == 1 => element = true,
-                        c if c.is_whitespace() => {}
-                        _ => {
-                            if element && depth == 1 {
-                                match ident_at(i) {
-                                    Some((name, _)) if name != "self" => found.push((line_of(i), name)),
-                                    Some(_) => {}
-                                    None if c == '*' => found.push((line_of(i), "*".to_string())),
-                                    None => {}
-                                }
-                            }
-                            element = false;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            _ => {
-                if let Some((name, _)) = ident_at(at) {
-                    found.push((line_of(at), name));
-                }
-            }
-        }
-    };
+fn arch_reach(
+    text: &str,
+    depth: usize,
+    aliases: &[String],
+    reexports: &std::collections::BTreeSet<(String, String)>,
+) -> Vec<(usize, String)> {
     let mut found = Vec::new();
-    let mut at = 0;
-    while at < code.len() {
-        let Some((name, end)) = ident_at(at) else {
-            at += 1;
-            continue;
-        };
-        let after = skip_space(end);
-        if name == "crate" {
-            if colons(after) {
-                after_root(after + 2, &mut found);
-            } else if ident_at(after).is_some_and(|(next, _)| next == "as") {
-                found.push((line_of(at), "crate as".to_string()));
-            }
-        } else if name == "super" && !(at >= 2 && colons(at - 2)) {
-            let (mut supers, mut next) = (1, after);
-            while colons(next) {
-                match ident_at(skip_space(next + 2)) {
-                    Some((s, e)) if s == "super" => {
-                        supers += 1;
-                        next = skip_space(e);
-                    }
-                    _ => break,
+    for path in spelled_paths(text, &["crate"], Some(depth)) {
+        let first = path.segments[0].as_str();
+        if first == "self" {
+            found.extend(path.alias.is_some().then(|| (path.line, "self as".to_string())));
+        } else if first == "arch" || first == "super" || aliases.iter().any(|a| a == first) {
+            for (name, origin) in reexports {
+                if path.segments[1..].contains(name) {
+                    found.push((path.line, origin.clone()));
                 }
             }
-            if supers == depth && colons(next) {
-                after_root(next + 2, &mut found);
-            }
+        } else {
+            found.push((path.line, first.to_string()));
         }
-        at = end;
     }
+    found.sort();
+    found.dedup();
     found
+}
+
+/// Every `(name, origin)` a file under [`ARCH_TREE`] re-exports from above the
+/// layer: `pub use crate::invalidation::Origin;` is `("Origin",
+/// "invalidation")`. A name a glob re-exports is not known, so not resolved.
+#[cfg(test)]
+fn arch_reexports(files: &[(String, String)], aliases: &[String]) -> std::collections::BTreeSet<(String, String)> {
+    let mut out = std::collections::BTreeSet::new();
+    for (at, text) in files.iter().filter(|(at, _)| at.starts_with(ARCH_TREE)) {
+        let code = text.lines().map(code_only).collect::<Vec<_>>().join("\n");
+        let mut offset = 0;
+        for line in code.split_inclusive('\n') {
+            let item = after_visibility(line);
+            if item != line.trim_start() && item.starts_with("use ") {
+                let statement = code[offset..].split(';').next().unwrap_or_default();
+                for path in spelled_paths(statement, &["crate"], Some(module_depth(at))) {
+                    let first = path.segments[0].as_str();
+                    if !["self", "arch", "super"].contains(&first) && !aliases.iter().any(|a| a == first) {
+                        let name = path.alias.clone().or_else(|| path.segments.last().cloned());
+                        out.extend(name.map(|name| (name, first.to_string())));
+                    }
+                }
+            }
+            offset += line.len();
+        }
+    }
+    out
 }
 
 /// How many modules deep the file at repository-relative `path` sits below
@@ -1808,17 +1832,15 @@ fn arch_reach_complaints(
         if rows[..i].iter().any(|(earlier, _)| earlier == file) {
             complaints.push(format!("{file} has two rows in the arch reach list; one row per file"));
         }
-        if !files.iter().any(|(at, _)| at == file) {
+        if !file.starts_with(ARCH_TREE) || !files.iter().any(|(at, _)| at == file) {
             complaints.push(format!(
                 "the arch reach list names {file}, and this tree holds no such file under {ARCH_TREE}"
             ));
         }
     }
+    let reexports = arch_reexports(files, aliases);
     for (at, text) in files.iter().filter(|(at, _)| at.starts_with(ARCH_TREE)) {
-        let named: Vec<(usize, String)> = crate_items_named(text, module_depth(at))
-            .into_iter()
-            .filter(|(_, item)| item != "arch" && !aliases.contains(item))
-            .collect();
+        let named = arch_reach(text, module_depth(at), aliases, &reexports);
         let permitted: &[&str] = rows.iter().find(|(file, _)| file == at).map_or(&[], |(_, items)| items);
         for (line, item) in &named {
             if !permitted.contains(&item.as_str()) {
@@ -1910,31 +1932,49 @@ mod tests {
     /// what is not a path to one is not.
     #[test]
     fn every_spelling_of_a_crate_root_item_is_read() {
+        let reexports = [("Prot".to_string(), "mm".to_string())].into_iter().collect();
+        let hw = ["hw".to_string()];
         let names = |text: &str, depth: usize| -> Vec<String> {
-            crate_items_named(text, depth).into_iter().map(|(_, item)| item).collect()
+            arch_reach(text, depth, &hw, &reexports).into_iter().map(|(_, item)| item).collect()
         };
         assert_eq!(names("use crate::sched::driver;\n", 3), ["sched"]);
         assert_eq!(names("    crate::log!(\"x\");\n", 3), ["log"]);
         assert_eq!(names("const { $crate::irq_census::TOTAL }\n", 3), ["irq_census"]);
-        assert_eq!(names("use crate::{\n    arch::x,\n    mm::{a, b},\n    self,\n    process,\n};\n", 3), [
-            "arch", "mm", "process"
-        ]);
+        assert_eq!(names("use crate::{\n    arch::x,\n    mm::{a, b},\n    self,\n    process,\n};\n", 3), ["mm", "process"]);
         assert_eq!(names("use crate :: { * };\nuse crate::*;\n", 3), ["*", "*"]);
-        assert_eq!(names("use crate as k;\n", 3), ["crate as"]);
-        // A `super::` chain that leaves the file's module names the root's item.
+        assert_eq!(names("use crate as k;\nuse crate::{self as j};\n", 3), ["self as", "self as"]);
+        // A `super::` chain that leaves the file's module names the root's item,
+        // counted from `self::` and through every inline module around it.
         assert_eq!(names("use super::super::super::drivers::xhci;\n", 3), ["drivers"]);
-        assert_eq!(names("use super::super::{sched, mm};\n", 2), ["sched", "mm"]);
-        assert_eq!(names("use super::{apic, smp};\nuse super::super::percpu;\n", 3), Vec::<String>::new());
+        assert_eq!(names("use super::super::{sched, mm};\n", 2), ["mm", "sched"]);
+        assert_eq!(names("use self::super::super::super::drivers;\n", 3), ["drivers"]);
+        assert_eq!(names("mod t {\n    use super::super::super::super::sched;\n}\nmod u { use super::super::super::x; }\n", 3), ["sched"]);
+        // A name the layer re-exports from above is its origin, however it is reached.
+        assert_eq!(names("use crate::arch::paging::Prot;\n", 3), ["mm"]);
+        assert_eq!(names("use super::paging::{Other, Prot};\nlet p = crate::hw::paging::Prot::R;\n", 3), ["mm", "mm"]);
+        // A char literal hides nothing after it.
+        assert_eq!(names("let q = '\"'; let r = '\\''; fn f<'a>(x: &'a u8) { crate::log!(); }\n", 3), ["log"]);
         // Not code, not the root, not a path.
         for text in [
             "// crate::sched is the scheduler\n",
             "let s = \"crate::sched\";\n",
             "pub(crate) fn f() {}\npub(super) fn g() {}\n",
             "use mycrate::sched;\nuse other_crate::x;\n",
-            "use self::super::x;\n",
+            "use self::super::x;\nuse super::{apic, smp};\nuse super::super::percpu;\nuse crate::arch::paging::Other;\n",
         ] {
             assert_eq!(names(text, 3), Vec::<String>::new(), "{text:?}");
         }
+        let file = |at: &str, text: &str| (at.to_string(), text.to_string());
+        let reexported = arch_reexports(
+            &[
+                file("kernel/src/arch/x86_64/tlb.rs", "pub use crate::invalidation::Origin;\nuse crate::sched::X;\n"),
+                file("kernel/src/arch/x86_64/paging.rs", "pub(crate) use crate::mm::{\n    policy::Prot,\n    Mm as M,\n};\npub use super::cpu::outb;\n"),
+                file("kernel/src/sched/mod.rs", "pub use crate::log::Up;\n"),
+            ],
+            &hw,
+        );
+        let pair = |n: &str, o: &str| (n.to_string(), o.to_string());
+        assert_eq!(reexported, [pair("M", "mm"), pair("Origin", "invalidation"), pair("Prot", "mm")].into_iter().collect());
         assert_eq!(module_depth("kernel/src/arch/mod.rs"), 1);
         assert_eq!(module_depth("kernel/src/arch/x86_64/mod.rs"), 2);
         assert_eq!(module_depth("kernel/src/arch/x86_64/tlb.rs"), 3);
@@ -1946,31 +1986,44 @@ mod tests {
     }
 
     /// Teeth for the list: a new reach reds naming the file, the line and the
-    /// item; a listed one does not; a listed one the file stopped spelling reds;
-    /// and a root alias of the architecture is the architecture.
+    /// item, and so does one through a re-export; a listed one does not; a
+    /// listed one the file stopped spelling reds, and so does a row for a file
+    /// outside the layer; and a root alias of the architecture is the architecture.
     #[test]
     fn a_new_reach_out_of_arch_is_red_and_the_list_cannot_rot() {
         let file = |at: &str, text: &str| (at.to_string(), text.to_string());
         let files = [
             file("kernel/src/arch/x86_64/tlb.rs", "use crate::time::Duration;\nuse crate::drivers::xhci;\n"),
             file("kernel/src/arch/x86_64/idt/timer.rs", "use crate::hw::HW;\nuse crate::arch::apic;\n"),
+            file("kernel/src/arch/x86_64/paging.rs", "pub use crate::mm::policy::Prot;\n"),
+            file("kernel/src/arch/x86_64/rtc.rs", "use crate::arch::paging::Prot;\n"),
             file("kernel/src/sched/driver.rs", "use crate::drivers::xhci;\n"),
         ];
         let aliases = vec!["hw".to_string()];
-        let said = arch_reach_complaints(&files, &[("kernel/src/arch/x86_64/tlb.rs", &["time"])], &aliases);
-        assert_eq!(said.len(), 1, "{said:?}");
+        let paging = ("kernel/src/arch/x86_64/paging.rs", &["mm"][..]);
+        let said = arch_reach_complaints(&files, &[("kernel/src/arch/x86_64/tlb.rs", &["time"]), paging], &aliases);
+        assert_eq!(said.len(), 2, "{said:?}");
         assert!(said[0].starts_with("kernel/src/arch/x86_64/tlb.rs:2: names `crate::drivers`"), "{said:?}");
+        assert!(said[1].starts_with("kernel/src/arch/x86_64/rtc.rs:1: names `crate::mm`"), "{said:?}");
 
-        let listed = arch_reach_complaints(&files, &[("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time"])], &aliases);
+        let rtc = ("kernel/src/arch/x86_64/rtc.rs", &["mm"][..]);
+        let listed = arch_reach_complaints(&files, &[("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time"]), paging, rtc], &aliases);
         assert!(listed.is_empty(), "{listed:?}");
 
         let stale = arch_reach_complaints(
             &files,
-            &[("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time", "sched"]), ("kernel/src/arch/gone.rs", &["log"])],
+            &[
+                ("kernel/src/arch/x86_64/tlb.rs", &["drivers", "time", "sched"]),
+                ("kernel/src/arch/gone.rs", &["log"]),
+                ("kernel/src/sched/driver.rs", &["drivers"]),
+                paging,
+                rtc,
+            ],
             &aliases,
         );
-        assert_eq!(stale.len(), 2, "{stale:?}");
+        assert_eq!(stale.len(), 3, "{stale:?}");
         assert!(stale.iter().any(|s| s.contains("kernel/src/arch/gone.rs")), "{stale:?}");
+        assert!(stale.iter().any(|s| s.contains("names kernel/src/sched/driver.rs")), "{stale:?}");
         assert!(stale.iter().any(|s| s.contains("`crate::sched`") && s.contains("no longer")), "{stale:?}");
     }
 
@@ -2407,7 +2460,8 @@ mod tests {
             rust_files(&root.join(tree), &mut files);
             let walked: std::collections::BTreeSet<String> =
                 files.iter().map(|p| rel(&root, p)).collect();
-            let tracked = tracked_rust_files(&root, tree);
+            let tracked: std::collections::BTreeSet<String> =
+                crate::sysroot::tracked_files(&root, &[tree]).into_iter().filter(|p| p.ends_with(".rs")).collect();
             assert!(
                 tracked.len() > 1,
                 "git tracks {} .rs file(s) under {tree}, so this floor is not one",
@@ -2829,16 +2883,10 @@ mod tests {
     #[test]
     fn every_committed_binary_file_is_declared() {
         let root = repo_root();
-        let out = std::process::Command::new("git")
-            .args(["ls-files", "-z"])
-            .current_dir(&root)
-            .output()
-            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
-        assert!(out.status.success(), "git ls-files failed");
-        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
+        let listing = crate::sysroot::tracked_files(&root, &[]);
 
         let mut found: Vec<(String, String)> = Vec::new();
-        for name in listing.split('\0').filter(|s| !s.is_empty()) {
+        for name in &listing {
             let Ok(bytes) = std::fs::read(root.join(name)) else { continue };
             if !is_binary(&bytes) && !name.starts_with("assets/") {
                 continue;
@@ -2896,15 +2944,8 @@ mod tests {
         let licence_path = format!("{CORPUS}/LICENSE");
         let licence = std::fs::read_to_string(root.join(&licence_path))
             .unwrap_or_else(|e| panic!("{licence_path}: {e}"));
-        let out = std::process::Command::new("git")
-            .args(["ls-files", "-z"])
-            .current_dir(&root)
-            .output()
-            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
-        assert!(out.status.success(), "git ls-files failed");
-        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
-        let tracked: Vec<&str> = listing.split('\0').filter(|s| !s.is_empty()).collect();
-        let under_corpus: Vec<&&str> =
+        let tracked = crate::sysroot::tracked_files(&root, &[]);
+        let under_corpus: Vec<&String> =
             tracked.iter().filter(|f| f.starts_with(&format!("{CORPUS}/"))).collect();
         assert!(
             under_corpus.len() > CORPUS_OURS.len(),
@@ -2927,7 +2968,7 @@ mod tests {
             }
         }
         for file in &under_corpus {
-            let attributed = CORPUS_OURS.contains(file)
+            let attributed = CORPUS_OURS.contains(&file.as_str())
                 || CORPUS_POPULATIONS
                     .iter()
                     .any(|p| file.starts_with(&format!("{CORPUS}/{p}/")));

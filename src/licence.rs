@@ -1151,22 +1151,6 @@ fn metadata(
     serde_json::from_slice(&out).map_err(|e| format!("cargo metadata printed no JSON: {e}"))
 }
 
-/// The tracked files `pathspecs` name, root-relative.
-fn ls_files(root: &Path, pathspecs: &[String]) -> Result<Vec<String>, String> {
-    let out = run(
-        Command::new("git")
-            .args(["ls-files", "-z", "--"])
-            .args(pathspecs)
-            .current_dir(root),
-        "git ls-files",
-    )?;
-    Ok(String::from_utf8_lossy(&out)
-        .split('\0')
-        .filter(|f| !f.is_empty())
-        .map(String::from)
-        .collect())
-}
-
 /// The fork's `library/`, checked out at the commit this tree pins. A checkout
 /// whose `rust/` was never initialised — a CI runner's — fetches that commit
 /// alone.
@@ -1264,7 +1248,7 @@ pub fn judge(root: &Path) -> Result<String, String> {
         packages: local.dirs.iter().filter_map(|d| relative(d)).filter(|d| !d.is_empty()).collect(),
         named: BTreeSet::new(),
     };
-    let tracked = ls_files(root, &[])?;
+    let tracked = crate::sysroot::tracked_files(root, &[]);
     let names: BTreeSet<&str> = COMMITTED_FILES.iter().map(|(p, ..)| file_name(p)).collect();
     let sources = tracked.iter().filter(|f| under(&shipping.packages, f) && f.ends_with(".rs"));
     let read = sources
@@ -1282,7 +1266,7 @@ pub fn judge(root: &Path) -> Result<String, String> {
     let sections = sections(&notice);
     let mut files = BTreeMap::new();
     for section in &sections {
-        let named = ls_files(root, &[format!(":(glob){}", section.path)])?;
+        let named = crate::sysroot::tracked_files(root, &[&format!(":(glob){}", section.path)]);
         files.insert(section.path.clone(), named);
     }
     judge_notice(&sections, &files, COMMITTED_FILES, &shipping, &mut report);

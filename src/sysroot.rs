@@ -603,6 +603,13 @@ pub(crate) fn git_out(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&git_bytes(dir, args)).into_owned()
 }
 
+/// The files `git` tracks under `dir` that `pathspecs` name, every one when
+/// there are none, relative to `dir`.
+pub(crate) fn tracked_files(dir: &Path, pathspecs: &[&str]) -> Vec<String> {
+    let args = [&["ls-files", "-z", "--"][..], pathspecs].concat();
+    git_out(dir, &args).split('\0').filter(|f| !f.is_empty()).map(String::from).collect()
+}
+
 fn git_run(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
         .args(args)

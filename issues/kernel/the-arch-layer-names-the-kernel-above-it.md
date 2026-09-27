@@ -9,10 +9,8 @@ opened: 2026-09-27
 `kernel/src/arch/` is meant to be the machine and nothing else: generic code
 reaches it through `crate::arch::…`, and it reaches nothing back. It does. Its
 files name kernel modules above it by path — the scheduler, the process table,
-the log, drivers, the IOMMU layer, test actuators — and `ARCH_REACHES_UP` in
-`src/sourcegate.rs` enumerates every such name, per file. The gate beside it
-reds on a name a file adds and on a listed name a file no longer spells, so the
-list only shrinks; each entry is this file's debt.
+the log, drivers, the IOMMU layer, test actuators. The gate
+reds on a name a file adds and on a listed name a file no longer spells; each entry is this file's debt.
 
 What the list holds, by kind:
 
@@ -33,7 +31,7 @@ Why it matters: the AArch64 port inherits whatever x86-64 exports, so every
 upward name here is one the port has to satisfy or stub, and until the gate
 nothing but review stopped the next.
 
-Owed by the arch-contract work: an `arch/api.rs` contract, a trait implemented
+Owed by the ARM track, `issues/kernel/toyos-runs-on-arm64.md`: an `arch/api.rs` contract, a trait implemented
 by a zero-sized type and dispatched statically, that is the only way generic
 code reaches the machine and the only way the machine reaches back; and
 `platform/{pc,virt}` for the PC's own devices, so `arch/` is the ISA alone.
