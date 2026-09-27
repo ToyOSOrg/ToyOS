@@ -1,4 +1,4 @@
-//! The congestion window (tcp.md §18.11). CC-07 to CC-11 and CC-13 to CC-15 exercise the
+//! The congestion window. CC-07 to CC-11 and CC-13 to CC-15 exercise the
 //! controller directly and live beside it in `src/cc.rs`.
 
 mod common;

@@ -1,4 +1,4 @@
-//! Ephemeral ports (tcp.md §18.4): RFC 6056 Algorithm 4 for connects, Algorithm 2 for listeners.
+//! Ephemeral ports: RFC 6056 Algorithm 4 for connects, Algorithm 2 for listeners.
 
 mod common;
 

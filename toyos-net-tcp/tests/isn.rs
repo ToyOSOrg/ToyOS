@@ -1,4 +1,4 @@
-//! Initial sequence numbers and timestamp offsets (tcp.md §18.3). The expected values are the
+//! Initial sequence numbers and timestamp offsets. The expected values are the
 //! specification's, computed from the SipHash paper by the reader, not by this crate.
 
 mod common;

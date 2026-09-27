@@ -245,7 +245,7 @@ impl TimeWait {
             }
             Screened::Unacceptable { old: false } => ctx.unsolicited(&mut self.last_unsolicited),
             Screened::Ends => {
-                ctx.refuse(Counter::TimeWaitRstIgnored);
+                ctx.log.refuse(Counter::TimeWaitRstIgnored, &ctx.tuple);
                 false
             }
         }
@@ -514,7 +514,7 @@ impl Tcp {
         Ok(Some(ConnId { index, generation }))
     }
 
-    /// Every child is reset, so its peer learns at once (§12.4); a TIME-WAIT a child reopened
+    /// Every child is reset, so its peer learns at once; a TIME-WAIT a child reopened
     /// resumes once the reset has left.
     pub fn close_listener(&mut self, now: Instant, id: ListenerId) -> Result<(), Error> {
         slot(&mut self.listeners, id.index, id.generation).ok_or(Error::NoSuchSocket)?;
@@ -679,7 +679,7 @@ impl Tcp {
         let mut ctx = Ctx { now, tuple, options, orphan: false, log: &mut self.log };
         refuse_syn_extras(seg, &mut ctx);
         if seg.flags.contains(toyos_net_wire::tcp::TcpFlags::ECE) && seg.flags.contains(toyos_net_wire::tcp::TcpFlags::CWR) {
-            ctx.count(Counter::EcnNotNegotiated);
+            ctx.log.count(Counter::EcnNotNegotiated);
         }
         let negotiated = negotiate(seg, &local, 0, &mut ctx);
         let child = SynRcvd::passive(iss, seg, negotiated, index, time_wait);
@@ -701,7 +701,7 @@ impl Tcp {
         self.settle(child, now);
     }
 
-    /// A SYN without ACK where a listener holds the endpoint either reopens the 4-tuple (§9.6) or
+    /// A SYN without ACK where a listener holds the endpoint either reopens the 4-tuple or
     /// is dropped; TIME-WAIT itself judges everything else.
     fn for_time_wait(&mut self, tuple: Tuple, seg: &In<'_>, now: Instant) {
         let listener = self.listener_for(&tuple.local).filter(|_| seg.syn() && seg.ack.is_none());
@@ -825,7 +825,7 @@ impl Tcp {
         }
     }
 
-    /// An ICMP error [ip] validated and classified (RFC 5927 §4.1, tcp.md §13).
+    /// An ICMP error [ip] validated and classified (RFC 5927 §4.1).
     pub fn icmp(&mut self, now: Instant, error: IcmpError) {
         let tuple = Tuple { local: error.local, remote: error.remote };
         let index = match self.demux.get(&tuple) {
@@ -858,7 +858,7 @@ impl Tcp {
             Tcb::Ended(_) => (false, false),
         };
         if !valid {
-            ctx.count(Counter::IcmpStale);
+            ctx.log.count(Counter::IcmpStale);
             return;
         }
         let handshake = !matches!(conn.state, Tcb::Sync(_));
@@ -879,9 +879,9 @@ impl Tcp {
             sync.packet_too_big(mtu, quoted, error.sequence, &mut ctx);
             return self.settle(index, now);
         } else if refused {
-            ctx.refuse(Counter::IcmpHardAsSoft);
+            ctx.log.refuse(Counter::IcmpHardAsSoft, &ctx.tuple);
         }
-        ctx.count(Counter::IcmpSoft);
+        ctx.log.count(Counter::IcmpSoft);
         conn.soft = soft;
     }
 
@@ -1107,7 +1107,7 @@ impl Tcp {
             Tcb::SynRcvd(rcvd) => {
                 if rcvd.tick(&mut ctx) {
                     if rcvd.is_passive() {
-                        ctx.count(Counter::SynAckGiveUp);
+                        ctx.log.count(Counter::SynAckGiveUp);
                         return self.child_gone(index);
                     }
                     return self.end(index, Some(failure_of(soft)), None);

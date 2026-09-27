@@ -1,4 +1,4 @@
-//! Options and their negotiation (tcp.md §18.5).
+//! Options and their negotiation.
 
 mod common;
 

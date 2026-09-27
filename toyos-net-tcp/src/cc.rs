@@ -69,7 +69,7 @@ pub struct Cc {
     pub limited: bool,
     w_max: Option<u32>,
     /// RFC 9438 §4.3's cwnd_prior: cwnd when ssthresh was last set, and before that the initial
-    /// cwnd, which avoidance before any congestion event is past (tcp.md §8.4).
+    /// cwnd, which avoidance before any congestion event is past.
     prior: u32,
     after_timeout: bool,
     epoch: Option<Epoch>,

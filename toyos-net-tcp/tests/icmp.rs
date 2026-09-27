@@ -1,4 +1,4 @@
-//! ICMP errors (tcp.md §18.17), delivered already classified by [ip].
+//! ICMP errors, delivered already classified by [ip].
 
 mod common;
 

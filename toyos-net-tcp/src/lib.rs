@@ -6,7 +6,7 @@
 //! credit; nothing here reads a clock, draws randomness or does I/O.
 //!
 //! **Pull egress.** A segment exists only while [`Tcp::transmit`] hands it to the caller's sink,
-//! built from the state of that moment. An RTO never fires for a segment that has not left.
+//! built from the state of that moment.
 //!
 //! **Refusals are values.** Legacy or insecure input is refused, counted in [`Counters`], and
 //! named by an [`Event::Refused`] the shell logs through [`RefusalLog`].
@@ -44,7 +44,6 @@ mod siphash;
 mod stack;
 mod tx;
 
-use core::cmp::Ordering;
 use core::net::Ipv4Addr;
 use core::time::Duration;
 
@@ -88,22 +87,10 @@ impl Instant {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Endpoint {
     pub addr: Ipv4Addr,
     pub port: Port,
-}
-
-impl Ord for Endpoint {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (self.addr, self.port.get()).cmp(&(other.addr, other.port.get()))
-    }
-}
-
-impl PartialOrd for Endpoint {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

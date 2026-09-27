@@ -1,4 +1,4 @@
-//! Loss recovery (tcp.md §18.12): NewReno on E, RFC 6675 on EF. LR-15's 64-range bound lives
+//! Loss recovery: NewReno on E, RFC 6675 on EF. LR-15's 64-range bound lives
 //! beside the scoreboard in `src/tx.rs`.
 
 mod common;

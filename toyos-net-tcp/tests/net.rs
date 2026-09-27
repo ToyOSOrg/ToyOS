@@ -1,4 +1,4 @@
-//! Loss, reordering, duplication and wraparound on the test network (tcp.md §18.20), the
+//! Loss, reordering, duplication and wraparound on the test network, the
 //! `many_up` shape (PL-11) and a SYN flood (LS-12). Ours against ours: a consistency control,
 //! not an independent oracle.
 
@@ -61,7 +61,7 @@ fn s_net_001_sack_repairs_every_50th() {
 }
 
 /// Strips Timestamps, Window Scale and SACK-permitted from node 0's SYN: node 1 sees a peer that
-/// offers none of them, and both ends run without them (tcp.md §4.6).
+/// offers none of them, and both ends run without them.
 fn bare_syn(from: usize, o: &O) -> Option<Vec<u8>> {
     (from == 0 && o.flags & SYN != 0).then(|| {
         let s = seg(o.seq).syn().wnd(o.wnd).mss(o.mss.unwrap());

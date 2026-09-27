@@ -1,6 +1,6 @@
 //! Segment arrival: the checks SYN-RECEIVED, ESTABLISHED through LAST-ACK, and TIME-WAIT share
 //! ([`screen`]), then ESTABLISHED through LAST-ACK in RFC 9293 §3.10.7.4's order, and the segment
-//! each transmit opportunity builds (§11.2's order).
+//! each transmit opportunity builds.
 
 use core::num::NonZeroU16;
 use core::time::Duration;
@@ -32,7 +32,6 @@ pub struct In<'a> {
     pub window: u16,
     pub options: TcpOptions<'a>,
     pub payload: &'a [u8],
-    pub raw_options: &'a [u8],
 }
 
 impl<'a> In<'a> {
@@ -44,7 +43,6 @@ impl<'a> In<'a> {
             window: segment.window().0,
             options: segment.options(),
             payload: segment.payload(),
-            raw_options: segment.options_bytes(),
         }
     }
 
@@ -69,26 +67,6 @@ impl<'a> In<'a> {
         self.text().saturating_add(u32::from(self.syn())).saturating_add(u32::from(self.fin()))
     }
 
-    /// Whether TCP-MD5 (kind 19) or Fast Open (kind 34) appears, walking the list the wire crate
-    /// already validated.
-    pub fn unimplemented_options(&self) -> (bool, bool) {
-        let mut area = self.raw_options;
-        let (mut md5, mut fast_open) = (false, false);
-        while let Some((&kind, rest)) = area.split_first() {
-            match kind {
-                0 => break,
-                1 => area = rest,
-                _ => {
-                    md5 |= kind == 19;
-                    fast_open |= kind == 34;
-                    let len = rest.first().map_or(2, |&len| usize::from(len).max(2));
-                    area = area.get(len..).unwrap_or_default();
-                }
-            }
-        }
-        (md5, fast_open)
-    }
-
     /// The RST RFC 7323 §5.2 answers this segment with: TSval 0, TSecr its TSval.
     pub fn answer_ts(&self) -> Option<Timestamps> {
         self.options.timestamps().map(|t| Timestamps { value: 0, echo: t.value })
@@ -105,24 +83,16 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    pub fn count(&mut self, counter: Counter) {
-        self.log.count(counter);
-    }
-
     /// Challenge ACKs and every answer to an unacceptable segment share one allowance: one in
     /// any 500 ms per connection (RFC 5961 §7). Per connection, never global: a global budget is
     /// an off-path counter of sequence-number guesses.
     pub fn unsolicited(&mut self, last: &mut Option<Instant>) -> bool {
         if last.is_some_and(|at| self.now.since(at) < limits::UNSOLICITED_ACK) {
-            self.count(Counter::UnsolicitedAckLimited);
+            self.log.count(Counter::UnsolicitedAckLimited);
             return false;
         }
         *last = Some(self.now);
         true
-    }
-
-    pub fn refuse(&mut self, rule: Counter) {
-        self.log.refuse(rule, &self.tuple);
     }
 }
 
@@ -147,11 +117,11 @@ pub fn screen(seg: &In<'_>, next: Seq, window: u32, last_ack_sent: Seq, ts: Opti
     let now = ctx.now;
     if let Some(recent) = ts.as_deref().filter(|_| !seg.rst()) {
         let Some(t) = seg.options.timestamps() else {
-            ctx.refuse(Counter::TsMissing);
+            ctx.log.refuse(Counter::TsMissing, &ctx.tuple);
             return Screened::Drop { challenge: false };
         };
         if recent.judges(now) && Stamp(t.value).before(Stamp(recent.recent)) {
-            ctx.count(Counter::PawsReject);
+            ctx.log.count(Counter::PawsReject);
             return Screened::Drop { challenge: true };
         }
     }
@@ -183,14 +153,14 @@ pub fn screen(seg: &In<'_>, next: Seq, window: u32, last_ack_sent: Seq, ts: Opti
         if seg.seq == next {
             return Screened::Ends;
         }
-        ctx.refuse(Counter::RstChallenged);
+        ctx.log.refuse(Counter::RstChallenged, &ctx.tuple);
         return Screened::Drop { challenge: true };
     }
     if seg.syn() && !seg.seq.before(next) {
         if syn_ends {
             return Screened::Ends;
         }
-        ctx.refuse(Counter::SynChallenged);
+        ctx.log.refuse(Counter::SynChallenged, &ctx.tuple);
         return Screened::Drop { challenge: true };
     }
     Screened::Pass
@@ -530,40 +500,40 @@ impl Sync {
         }
         if seg.flags.contains(TcpFlags::URG) {
             if self.urgent_logged {
-                ctx.count(Counter::UrgentIgnored);
+                ctx.log.count(Counter::UrgentIgnored);
             } else {
                 self.urgent_logged = true;
-                ctx.refuse(Counter::UrgentIgnored);
+                ctx.log.refuse(Counter::UrgentIgnored, &ctx.tuple);
             }
         }
         let peer_closed = self.rx.closed;
         let mut text = text;
         if !text.is_empty() {
             if peer_closed {
-                ctx.count(Counter::DataAfterFin);
+                ctx.log.count(Counter::DataAfterFin);
                 text = &[];
             } else if ctx.orphan {
-                ctx.count(Counter::OrphanDataRst);
+                ctx.log.count(Counter::OrphanDataRst);
                 return Verdict::Abort(Rst { seq: self.tx.reset_seq(), ack: Some(self.rx.next), ts: seg.answer_ts() });
             }
         }
         if let Some(limit) = self.rx.fin_remembered().filter(|_| !peer_closed) {
             let room = usize::try_from(limit.since(seq)).unwrap_or(usize::MAX);
             if text.len() > room || (seq.after(limit) && !text.is_empty()) {
-                ctx.count(Counter::DataAfterFin);
+                ctx.log.count(Counter::DataAfterFin);
                 text = if seq.after(limit) { &[] } else { text.get(..room).unwrap_or_default() };
             }
         }
         if !text.is_empty() {
             let placed = self.rx.place(seq, text);
             if placed == Placed::RangeLimit {
-                ctx.count(Counter::OooRangeLimit);
+                ctx.log.count(Counter::OooRangeLimit);
             }
             self.rx.owe_for_text(placed, now);
         }
         if fin && !peer_closed {
             if !self.rx.fin_at(seq.add(us32(text.len()))) {
-                ctx.count(Counter::FinConflict);
+                ctx.log.count(Counter::FinConflict);
             } else if !self.rx.closed && text.is_empty() {
                 self.rx.owe_dup();
             }
@@ -630,7 +600,7 @@ impl Sync {
         let now = ctx.now;
         let lower = self.tx.una.sub(self.tx.max_wnd);
         if ack.since(lower) > self.tx.max_wnd.saturating_add(self.tx.flight()) {
-            ctx.refuse(Counter::AckOutOfRange);
+            ctx.log.refuse(Counter::AckOutOfRange, &ctx.tuple);
             self.unsolicited(ctx);
             return false;
         }
@@ -638,7 +608,7 @@ impl Sync {
             self.tx.read_sack(ack, &seg.options, ctx.log)
         } else {
             if seg.options.sack_blocks().len() > 0 {
-                ctx.count(Counter::SackUnnegotiated);
+                ctx.log.count(Counter::SackUnnegotiated);
             }
             false
         };
@@ -744,7 +714,7 @@ impl Sync {
                         let expected = flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1);
                         self.rtt.sample(rtt, expected);
                     }
-                    None => ctx.count(Counter::TsEcrInvalid),
+                    None => ctx.log.count(Counter::TsEcrInvalid),
                 }
             }
             None => {
@@ -790,11 +760,11 @@ impl Sync {
         if self.sack_ok {
             self.cc.cwnd = self.cc.ssthresh;
             self.recovery = Recovery::Sack { point: self.tx.nxt, high_rxt: self.tx.una, rescue: None };
-            ctx.count(Counter::SackRecovery);
+            ctx.log.count(Counter::SackRecovery);
         } else {
             self.cc.cwnd = self.cc.ssthresh.saturating_add(smss.saturating_mul(3));
             self.recovery = Recovery::Fast { inflations: flight.div_ceil(smss.max(1)) };
-            ctx.count(Counter::FastRecovery);
+            ctx.log.count(Counter::FastRecovery);
         }
     }
 
@@ -839,16 +809,16 @@ impl Sync {
 
     pub fn packet_too_big(&mut self, mtu: Option<NonZeroU16>, quoted_length: u16, seq: Seq, ctx: &mut Ctx<'_>) {
         let Some(mtu) = mtu.map(NonZeroU16::get) else {
-            ctx.refuse(Counter::PmtuNoMtu);
+            ctx.log.refuse(Counter::PmtuNoMtu, &ctx.tuple);
             return;
         };
         let current = self.path_mss.saturating_add(u32::from(HEADERS));
         if u32::from(mtu) >= current || mtu >= quoted_length {
-            ctx.count(Counter::PmtuBogus);
+            ctx.log.count(Counter::PmtuBogus);
             return;
         }
         let mtu = if mtu < MIN_MTU {
-            ctx.count(Counter::PmtuFloored);
+            ctx.log.count(Counter::PmtuFloored);
             MIN_MTU
         } else {
             mtu
@@ -859,7 +829,7 @@ impl Sync {
         if seq.within(self.tx.una, self.tx.flight()) {
             self.urgent = Some(seq);
         }
-        ctx.count(Counter::PmtuLowered);
+        ctx.log.count(Counter::PmtuLowered);
     }
 
     // ---- user calls ----
@@ -956,14 +926,14 @@ impl Sync {
         .min()
     }
 
-    /// Every expired timer, deletions first (§11.4).
+    /// Every expired timer, deletions first.
     pub fn tick(&mut self, ctx: &mut Ctx<'_>) -> Tick {
         let now = ctx.now;
         if self.give_up_at(ctx).is_some_and(|at| at <= now) {
             return if ctx.options.user_timeout.is_some() { Tick::TimedOut } else { Tick::GiveUp };
         }
         if self.orphan_since.is_some_and(|at| at.after(limits::ORPHAN_IDLE) <= now) {
-            ctx.count(Counter::OrphanIdleAbort);
+            ctx.log.count(Counter::OrphanIdleAbort);
             return Tick::Orphan;
         }
         if self.rtx_timer.is_some_and(|at| at <= now) {
@@ -993,9 +963,9 @@ impl Sync {
     /// until that retransmission leaves.
     fn expire(&mut self, ctx: &mut Ctx<'_>) {
         self.rtx_timer = None;
-        ctx.count(Counter::Rto);
+        ctx.log.count(Counter::Rto);
         if self.rto_pending {
-            ctx.count(Counter::RtoUnsent);
+            ctx.log.count(Counter::RtoUnsent);
         }
         self.rto_pending = true;
         self.rtt.back_off();
@@ -1026,7 +996,7 @@ impl Sync {
 
     // ---- transmit ----
 
-    /// The next segment this opportunity owes, in §11.2's order after SYNs and resets.
+    /// The next segment this opportunity owes, after SYNs and resets.
     pub fn next_segment(&mut self, ctx: &mut Ctx<'_>) -> Option<Out> {
         if self.rx.dup_owed > 0 {
             self.rx.dup_owed = self.rx.dup_owed.saturating_sub(1);
@@ -1263,7 +1233,7 @@ impl Sync {
                 self.lt_budget = self.lt_budget.saturating_sub(1);
             }
             self.lt_bytes = self.lt_bytes.saturating_add(len);
-            ctx.count(Counter::LimitedTransmit);
+            ctx.log.count(Counter::LimitedTransmit);
         }
         let fin = self.fin_fits(start.add(len)) && signed(len) < w_rcv;
         Some(self.hand_off(ctx, start, len, fin, blocks))
@@ -1290,14 +1260,14 @@ impl Sync {
             };
             let interval = persist.interval.saturating_mul(2).min(RTO_MAX);
             self.persist = Some(Persist { at: now.after(interval), interval, due: false, unanswered: true, ..persist });
-            ctx.count(Counter::PersistProbe);
+            ctx.log.count(Counter::PersistProbe);
             return Some(self.hand_off(ctx, start, len, fin, blocks));
         }
         if self.ka_due {
             self.ka_due = false;
             self.ka_probes = self.ka_probes.saturating_add(1);
             self.ka_last = Some(now);
-            ctx.count(Counter::KeepaliveProbe);
+            ctx.log.count(Counter::KeepaliveProbe);
             return Some(self.pure(now, self.tx.nxt.sub(1)));
         }
         None

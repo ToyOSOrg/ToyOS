@@ -1,4 +1,4 @@
-//! Round-trip time and the retransmission timeout (tcp.md §18.10). RT-01 to RT-04 and RT-12 feed
+//! Round-trip time and the retransmission timeout. RT-01 to RT-04 and RT-12 feed
 //! a fresh estimator and live beside it in `src/rtt.rs`.
 
 mod common;

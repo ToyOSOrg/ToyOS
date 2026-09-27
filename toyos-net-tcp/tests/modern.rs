@@ -1,11 +1,11 @@
-//! Modern only and visible refusals (tcp.md §18.18), and the divergences (§18.19).
+//! Modern only and visible refusals, and the divergences.
 
 mod common;
 
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_tcp::{limits, Counter, Failure, Instant, Refusal, RefusalLog, State};
+use toyos_net_tcp::{limits, Counter, Event, Failure, Instant, Refusal, RefusalLog, State};
 
 fn listening() -> H {
     let mut h = H::new(65_535);
@@ -76,6 +76,21 @@ fn s_mod_005_one_line_per_rule_per_10_s() {
     }
     assert_eq!(h.tcp.drain_events().count(), limits::EVENTS, "an undrained shell holds a bounded list");
     assert_eq!(h.count(Counter::EventOverflow), 1);
+}
+
+#[test]
+fn s_mod_005_a_bulk_peer_leaves_room_for_refusals() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    for k in 1..=limits::EVENTS as u32 + 1 {
+        h.arrive(seg(5001).ack(1001 + k));
+    }
+    h.arrive(seg(7000).syn().rst().from(Ipv4Addr::new(192, 0, 2, 3), 1234).to(A, 81));
+    h.transmit();
+    assert_eq!(h.info().snd_una.get(), 1001 + limits::EVENTS as u32 + 1);
+    assert_eq!(h.events.iter().filter(|e| **e == Event::Reachable(B)).count(), 1);
+    assert_eq!(h.refusals(Counter::SynRst).len(), 1);
+    assert_eq!(h.count(Counter::EventOverflow), 0);
 }
 
 #[test]
@@ -176,7 +191,29 @@ fn s_div_002_rst_at_a_shrunk_edge() {
     h.input(1, seg(5001).ack(1001).wnd(2000));
     let (r, outs) = h.call(2, |tcp, now, id| tcp.abort(now, id));
     r.unwrap();
-    expect(&outs, &["SEQ=3001 ACK=5001 CTL=RST,ACK"]);
+    expect(&outs, &["SEQ=3000 ACK=5001 CTL=RST,ACK"]);
+    let mut peer = open_peer();
+    nothing(&peer.input(1, seg(3001).rst()));
+    assert_eq!(peer.info().state, State::Established, "an RST at the right edge is dropped");
+    let mut peer = open_peer();
+    expect(&peer.input(1, seg(3000).rst()), &["SEQ=5001 ACK=1001 CTL=ACK"]);
+    expect(&h.input(3, seg(5001).ack(1001)), &["SEQ=1001 ACK=- CTL=RST"]);
+    nothing(&peer.input(2, seg(1001).rst()));
+    assert_eq!(peer.status().failure, Some(Failure::Reset), "the exact reset lands");
+}
+
+/// A peer of ours at RCV.NXT 1001 with a 2000-byte window, B of DIV-02.
+fn open_peer() -> H {
+    let mut h = H::new(2000);
+    h.iss = 5000;
+    h.local = (B, 80);
+    h.peer = (A, 49152);
+    h.start(-20);
+    let listener = h.tcp.listen(B, Some(port(80)), || 0).unwrap();
+    expect(&h.input(-20, seg(1000).syn().mss(1460)), &["SEQ=5000 ACK=1001 CTL=SYN,ACK WND=2000"]);
+    h.input(0, seg(1001).ack(5001));
+    h.conn = Some(h.tcp.accept(listener).unwrap().expect("a ready child"));
+    h
 }
 
 #[test]

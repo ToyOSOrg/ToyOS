@@ -1,4 +1,4 @@
-//! Pull egress (tcp.md §18.13): segments are built at a transmit opportunity, and timers start at
+//! Pull egress: segments are built at a transmit opportunity, and timers start at
 //! hand-off. PL-11, the `many_up` shape, runs on the test network in `tests/net.rs`.
 
 mod common;

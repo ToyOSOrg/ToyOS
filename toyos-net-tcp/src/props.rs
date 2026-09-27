@@ -1,4 +1,4 @@
-//! The invariants of tcp.md §18.21 and the scenarios tagged [prop], over seeded runs of the test
+//! The invariants and the scenarios tagged [prop], over seeded runs of the test
 //! network in `tests/common`: two stacks exchanging data through a lossy, reordering, duplicating
 //! link, and one stack against an adversary sending arbitrary segments. Every invariant is checked
 //! after every arrival, every firing and every segment handed off.
@@ -180,7 +180,7 @@ impl Checker {
     }
 
     /// RT-17 judges what the timer retransmits: the segment that was oldest when it expired
-    /// (RFC 6298 (5.4)). What follows it is §8.8's resending of the rest as cwnd allows, which
+    /// (RFC 6298 (5.4)). What follows it is resending of the rest as cwnd allows, which
     /// after a spurious expiry resends segments sooner than an RTO after they left; telling a
     /// spurious expiry is stage 8's (RFC 3522, 5682).
     fn record_send(&mut self, node: usize, rto: Duration, now: Instant, o: &O) {

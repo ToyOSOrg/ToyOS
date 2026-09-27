@@ -1,4 +1,4 @@
-//! Sequence arithmetic (tcp.md §18.2).
+//! Sequence arithmetic.
 
 mod common;
 

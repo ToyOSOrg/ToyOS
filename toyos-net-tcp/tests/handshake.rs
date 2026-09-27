@@ -1,4 +1,4 @@
-//! Opening: CLOSED, LISTEN, SYN-SENT, SYN-RECEIVED (tcp.md §18.6).
+//! Opening: CLOSED, LISTEN, SYN-SENT, SYN-RECEIVED.
 
 mod common;
 

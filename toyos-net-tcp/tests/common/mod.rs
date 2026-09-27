@@ -680,7 +680,7 @@ pub fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-// ---- fixtures (tcp.md §18.1) ----
+// ---- fixtures ----
 
 /// A connects from 49152 at t = −10; B's SYN-ACK arrives at 0 with `options`.
 pub fn client(receive_buffer: u32, synack: S) -> H {

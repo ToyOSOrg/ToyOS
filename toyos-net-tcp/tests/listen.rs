@@ -1,4 +1,4 @@
-//! Listening and accepting (tcp.md §18.16). LS-12, the SYN flood, runs in `tests/net.rs`.
+//! Listening and accepting. LS-12, the SYN flood, runs in `tests/net.rs`.
 
 mod common;
 

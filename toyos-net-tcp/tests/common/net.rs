@@ -1,5 +1,5 @@
 //! Two of our stacks on one moved clock, joined by a link with seeded impairment: the consistency
-//! control of tcp.md §18.20 (ours against ours; not an independent oracle). Applications write a
+//! control (ours against ours; not an independent oracle). Applications write a
 //! seeded byte stream and hash what they read, so a transfer is checked end to end without
 //! keeping it.
 

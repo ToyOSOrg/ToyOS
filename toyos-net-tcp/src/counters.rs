@@ -160,12 +160,13 @@ impl Log {
     }
 
     /// Past [`limits::EVENTS`] undrained, an event is refused and counted: a peer never grows
-    /// the list.
+    /// the list. A pending `Reachable` is not repeated: one peer's ACKs never crowd out another's
+    /// refusals.
     pub fn event(&mut self, event: Event) {
-        if self.events.len() >= limits::EVENTS {
-            self.count(Counter::EventOverflow);
-        } else {
-            self.events.push(event);
+        match event {
+            Event::Reachable(_) if self.events.contains(&event) => {}
+            _ if self.events.len() >= limits::EVENTS => self.count(Counter::EventOverflow),
+            _ => self.events.push(event),
         }
     }
 

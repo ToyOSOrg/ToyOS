@@ -1,4 +1,4 @@
-//! Acceptability, RST, SYN and ACK in the synchronized states (tcp.md §18.7). From E unless
+//! Acceptability, RST, SYN and ACK in the synchronized states. From E unless
 //! stated.
 
 mod common;

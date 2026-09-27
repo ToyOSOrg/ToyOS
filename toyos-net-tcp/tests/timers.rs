@@ -1,4 +1,4 @@
-//! Keepalive, give-up and the user timeout (tcp.md §18.15).
+//! Keepalive, give-up and the user timeout.
 
 mod common;
 

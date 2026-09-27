@@ -33,7 +33,7 @@ pub fn negotiate(seg: &In<'_>, local: &Local, first_tsval: u32, ctx: &mut Ctx<'_
     let peer_mss = match options.mss() {
         None => limits::MSS_FLOOR,
         Some(mss) if mss < limits::MSS_FLOOR => {
-            ctx.refuse(Counter::MssBelowFloor);
+            ctx.log.refuse(Counter::MssBelowFloor, &ctx.tuple);
             limits::MSS_FLOOR
         }
         Some(mss) => mss,
@@ -42,7 +42,7 @@ pub fn negotiate(seg: &In<'_>, local: &Local, first_tsval: u32, ctx: &mut Ctx<'_
     let (snd_shift, rcv_shift) = match options.window_scale() {
         Some(scale) => {
             if scale.raw() > scale.effective() {
-                ctx.refuse(Counter::WscaleClamped);
+                ctx.log.refuse(Counter::WscaleClamped, &ctx.tuple);
             }
             (scale.effective(), local.shift)
         }
@@ -54,15 +54,14 @@ pub fn negotiate(seg: &In<'_>, local: &Local, first_tsval: u32, ctx: &mut Ctx<'_
 
 /// Counts what a SYN asks for that this stack does not do: TCP-MD5, Fast Open, and text.
 pub fn refuse_syn_extras(seg: &In<'_>, ctx: &mut Ctx<'_>) {
-    let (md5, fast_open) = seg.unimplemented_options();
-    if md5 {
-        ctx.refuse(Counter::OptionMd5);
+    if seg.options.md5() {
+        ctx.log.refuse(Counter::OptionMd5, &ctx.tuple);
     }
-    if fast_open {
-        ctx.refuse(Counter::OptionFastOpen);
+    if seg.options.fast_open() {
+        ctx.log.refuse(Counter::OptionFastOpen, &ctx.tuple);
     }
     if !seg.payload.is_empty() {
-        ctx.refuse(Counter::SynDataDiscarded);
+        ctx.log.refuse(Counter::SynDataDiscarded, &ctx.tuple);
     }
 }
 
@@ -140,10 +139,10 @@ impl Retransmit {
     }
 }
 
-fn syn_options(local: &Local, peer: Option<&Negotiated>, tsval: u32) -> SynOptions {
+fn syn_options(local: &Local, peer: Option<&Negotiated>, now: Instant) -> SynOptions {
     let timestamps = match peer {
-        None => Some(Timestamps { value: tsval, echo: 0 }),
-        Some(n) => n.ts.map(|ts| Timestamps { value: tsval, echo: ts.recent }),
+        None => Some(Timestamps { value: now.tsval(local.ts_offset), echo: 0 }),
+        Some(n) => n.ts.map(|ts| ts.option(now)),
     };
     SynOptions {
         mss: Some(local.mss),
@@ -186,7 +185,7 @@ impl SynSent {
             if seg.ack.is_some() {
                 return (None, Sent::Refused);
             }
-            ctx.count(Counter::SynSentRstNoAck);
+            ctx.log.count(Counter::SynSentRstNoAck);
             return (Some(self), Sent::Keep);
         }
         if !seg.syn() {
@@ -240,7 +239,7 @@ impl SynSent {
         }
         let tsval = now.tsval(local.ts_offset);
         self.timer.handed_off(now, tsval, true);
-        Some(Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, tsval)), window: local.window, ts: None, sack: NO_BLOCKS, data: (0, 0) })
+        Some(Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, now)), window: local.window, ts: None, sack: NO_BLOCKS, data: (0, 0) })
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -322,7 +321,7 @@ impl SynRcvd {
         if seg.syn() && seg.seq == self.irs {
             match seg.ack {
                 None => {
-                    ctx.count(Counter::SynRcvdDupSyn);
+                    ctx.log.count(Counter::SynRcvdDupSyn);
                     self.dup_answer = true;
                 }
                 Some(ack) if ack == first => return Rcvd::Crossed,
@@ -400,7 +399,7 @@ impl SynRcvd {
         let dup = core::mem::replace(&mut self.dup_answer, false);
         if self.timer.owed || dup {
             self.timer.handed_off(now, tsval, self.timer.owed);
-            let options = syn_options(local, Some(&self.negotiated), tsval);
+            let options = syn_options(local, Some(&self.negotiated), now);
             return Some(Out {
                 seq: self.iss,
                 kind: Kind::SynAck(self.rcv_next(), options),

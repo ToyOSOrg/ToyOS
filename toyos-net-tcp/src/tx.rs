@@ -100,14 +100,16 @@ impl Tx {
         usize::try_from(seq.since(self.una)).unwrap_or(usize::MAX)
     }
 
-    /// The reset's sequence number: SND.NXT, or the peer's right edge when SND.NXT lies beyond
-    /// it (DIV-1), since an RST outside the peer's window is dropped and the abort never lands.
+    /// The reset's sequence number (DIV-1): SND.NXT inside the peer's window, since one outside
+    /// it is dropped; else a shut window's edge, the peer's RCV.NXT, or an open one's edge less
+    /// one, which an RFC 5961 peer answers with the challenge ACK whose reset is exact.
     pub fn reset_seq(&self) -> Seq {
-        let edge = self.right_edge();
-        if self.nxt.after(edge) {
-            edge
-        } else {
-            self.nxt
+        let window = self.window();
+        let edge = self.una.add(window);
+        match window {
+            _ if self.nxt.before(edge) => self.nxt,
+            0 => edge,
+            _ => edge.sub(1),
         }
     }
 

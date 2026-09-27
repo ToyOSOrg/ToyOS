@@ -1,4 +1,4 @@
-//! The send side (tcp.md §18.9). From E unless stated.
+//! The send side. From E unless stated.
 
 mod common;
 

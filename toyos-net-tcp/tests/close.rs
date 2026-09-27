@@ -1,4 +1,4 @@
-//! Closing (tcp.md §18.14). From E unless stated.
+//! Closing. From E unless stated.
 
 mod common;
 
