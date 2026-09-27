@@ -259,7 +259,7 @@ fn a_peer_that_resets_before_it_is_taken_frees_the_port() {
     let isn = net.syn(5001);
     net.ack_and(5001, isn, TcpControl::Rst);
     assert_eq!(net.socket().state(), tcp::State::Closed, "the premise: both in one pass");
-    assert!(!net.wakes(true));
+    assert!(!net.wakes(false));
     assert!(net.listens(5002), "the port answered the next peer {:?}", net.sent.last());
 }
 
@@ -275,8 +275,8 @@ fn a_wake_spent_on_a_reset_connection_announces_the_next() {
     net.send(5001, TcpControl::Rst, PEER_ISN + 1, Some(isn + 1));
     net.pass();
     assert!(!net.wakes(true), "a reset connection was announced");
-    assert_eq!(net.accept(true, true), Accept::Nothing, "an accept took a connection its peer had reset");
     let isn = net.syn(5002);
+    assert_eq!(net.accept(true, true), Accept::Nothing, "an accept took a connection its peer had reset");
     net.send(5002, TcpControl::None, PEER_ISN + 1, Some(isn + 1));
     net.pass();
     assert!(net.wakes(true), "the connection after a reset one was never announced");
