@@ -560,10 +560,6 @@ fn enable(
     );
 }
 
-/// Device class the actuators target — the xHCI controller, which this kernel
-/// drives by DMA from boot — not a bus/device/function: QEMU's slot
-/// choice is not this kernel's business, and the harness reads the same
-/// class independently out of `pci::enumerate`.
 /// The requester id `iommu-context-absent` or `iommu-empty-domain` staged, so
 /// its driver's move to a domain of its own leaves the staging in place;
 /// `u32::MAX`, which no requester id is, when neither is armed.

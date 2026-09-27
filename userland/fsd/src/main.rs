@@ -63,6 +63,9 @@ const MAX_FIDS: usize = 1024;
 /// Streams served at once, machine-wide.
 const MAX_STREAMS: usize = 64;
 
+/// What one turn of a stream appends at most.
+const STREAM_READ: usize = 64 * 1024;
+
 /// Directories one server serves: DATA's four, with room.
 const MAX_DIRS: usize = 32;
 
@@ -359,9 +362,9 @@ struct Server {
     /// Asks an acceptor whether a connection waits, before [`Server::accept`]
     /// takes it.
     probe: Poller,
-    /// A write's bytes, copied out of the client's window into this process's
-    /// own memory before the volume sees them. Kept, so a write allocates
-    /// nothing.
+    /// A write's bytes, copied out of the client's window or a stream's pipe
+    /// into this process's own memory before the volume sees them. Kept, so a
+    /// write allocates nothing.
     scratch: Vec<u8>,
 }
 
@@ -896,9 +899,11 @@ impl Server {
     /// its file, and no more: a pipe with more waiting fires at the next
     /// wait, after every other client that was ready — [`Self::pump`]'s rule.
     fn drain(&mut self, sid: u64) {
-        let mut buf = vec![0u8; 64 * 1024];
+        if self.scratch.len() < STREAM_READ {
+            self.scratch.resize(STREAM_READ, 0);
+        }
         let Some(stream) = self.streams.get_mut(&sid) else { return };
-        let ended = match stream.pipe.read_nonblock(&mut buf) {
+        let ended = match stream.pipe.read_nonblock(&mut self.scratch[..STREAM_READ]) {
             Err(SyscallError::WouldBlock) => return,
             Ok(0) | Err(SyscallError::Gone) => None,
             Err(e) => Some(format!("its pipe would not read ({e:?})")),
@@ -908,7 +913,7 @@ impl Server {
                     None => Some("it reached the largest offset a file has".to_string()),
                     Some(end) => {
                         stream.offset = end;
-                        match self.volume.write(node, at, &buf[..n]) {
+                        match self.volume.write(node, at, &self.scratch[..n]) {
                             Ok(()) => {
                                 self.dirtied();
                                 return;

@@ -67,6 +67,11 @@ impl Sweep {
     }
 }
 
+/// A policy number: how long init waits on one call into a file server that
+/// is alive and has not answered — and so how long a stop request can wait
+/// behind one, since init serves `power` between its loop's passes.
+pub const FILES_MS: u64 = 30_000;
+
 /// A policy number: how long init waits for `logd`'s flush before a stop.
 pub const FLUSH_MS: u64 = 5_000;
 

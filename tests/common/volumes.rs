@@ -321,7 +321,7 @@ pub fn esp_filesystem(
         // `flush_meta`, the FSInfo write, the device cache flush — reaches
         // userland as one `SyscallError::Io`, which `std` flattens to
         // `Kind(Other)`; *which* layer refused is in a `log!` line and nowhere
-        // else (`fat32_adapter::refused`, `usb_storage`'s three trait methods,
+        // else (`usb_storage`'s three trait methods,
         // `xhci::wait::msc`'s `log_refusal` and its budget line). Reporting
         // `stdout` alone left `fsync the blob: Kind(Other)` as the whole of the
         // evidence for a real 2026-08-21 sighting, and the next author with no
@@ -1984,11 +1984,7 @@ pub fn log_partition_identity(
 /// one volume:
 ///
 /// 1. **Retry keeps the volume, and a refused attempt discarded nothing.**
-///    `fsync-budget-spent` runs each file's first `SYS_FSYNC` attempt under an
-///    already-spent operation — the state a loaded dev host reproduced 1 in
-///    73 full 12-wide suites (2026-08-22, this test's own blob fsync on
-///    `/log`) — so each file's first flush is refused once at the shipped site
-///    and retried on a fresh budget. The guest's own
+///    The guest's own
 ///    fsync must succeed, logd must never give its volume up, and the blob is
 ///    then read off the *image* by the host: the safety invariant is that the
 ///    refused attempt left every un-flushed page dirty, so the retry delivered
@@ -2070,14 +2066,20 @@ pub fn log_flush_retry(
             volume_lines(&log)
         ));
     }
-    // `/log` is flushed through fsd's partition claim, whose retry says so.
+    // `/log` is flushed through fsd's claim of the log partition, whose retry
+    // says so by that partition's name.
+    let log_guid = {
+        let mut file =
+            std::fs::File::open(&image_path).map_err(|e| format!("{}: {e}", image_path.display()))?;
+        toyos_gpt::Guid(toyos_build::image::unique_guid_of(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC)?)
+    };
+    let log_retry = format!("partclaim: a flush of {log_guid} durable on attempt");
     let retried = log
         .lines()
-        .find(|l| l.contains("partclaim: a flush durable on attempt"))
+        .find(|l| l.contains(&log_retry))
         .ok_or_else(|| {
             format!(
-                "no `partclaim: a flush durable on attempt` line, so the operation-level retry \
-                 never ran:\n{}",
+                "no `{log_retry}` line, so the operation-level retry never ran:\n{}",
                 volume_lines(&log)
             )
         })?
@@ -2089,19 +2091,6 @@ pub fn log_flush_retry(
             volume_lines(&log)
         ));
     }
-    // An absence has no event to wait on, so a fixed window judges it.
-    let after = qemu.drain_serial(Duration::from_secs(2));
-    let again: Vec<&str> =
-        after.lines().filter(|l| l.contains("partclaim: a flush durable on attempt")).collect();
-    if !again.is_empty() {
-        return Err(format!(
-            "{} flush(es) retried in the 2 s after the guest's, first {:?}: every flush is being \
-             refused, and each refusal's records are the next flush\n{after}",
-            again.len(),
-            again[0]
-        ));
-    }
-
     // The device's view, after a clean shutdown: what the retried flushes left.
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
@@ -2111,6 +2100,24 @@ pub fn log_flush_retry(
         if tail.contains(bad) {
             return Err(format!("{bad:?} on the way down\n{tail}"));
         }
+    }
+    // init has logd flush before it asks for the stop, so a flush of the log
+    // partition follows the guest's; every record before the stop's own is on
+    // the wire ahead of it, so a retry of that flush would be here too.
+    let whole = format!("{log}\n{tail}");
+    let stop = whole
+        .lines()
+        .position(|l| toyos_quiesce::Record::parse(l).is_some())
+        .ok_or_else(|| format!("the shutdown wrote no stop record:\n{tail}"))?;
+    let retries: Vec<&str> = whole.lines().take(stop).filter(|l| l.contains(&log_retry)).collect();
+    if retries.len() != 1 {
+        return Err(format!(
+            "{} flush(es) of the log partition retried before the stop, and the refused one is \
+             the first alone: every flush is being refused, and each refusal's records are the \
+             next flush\n{}",
+            retries.len(),
+            retries.join("\n")
+        ));
     }
     let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
     let (log_start, log_len) = log_extent(&after, &image_path)?;

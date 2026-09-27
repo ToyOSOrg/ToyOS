@@ -13,8 +13,7 @@
 //! which is what `kernel/src/block.rs`'s `BlockError::Device` becomes — and
 //! ending the boot's log on one is right: the writes are not durable and no
 //! number of retries will make them so. A *budget* that expired is
-//! `io::ErrorKind::WouldBlock` — `BlockError::BudgetExpired` through
-//! `toyos_fat32::Error::BudgetExpired` and `SyscallError::WouldBlock` — and
+//! `io::ErrorKind::WouldBlock` — and
 //! ending the log on one is wrong: nothing was issued, the device is untouched,
 //! and the next operation gets a whole fresh `block::OPERATION`.
 //!

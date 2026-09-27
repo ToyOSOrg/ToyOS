@@ -1927,10 +1927,6 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         flush of each writer whose writes they were fails";
     const FLUSH_LOST: &str =
         "made before its disk came back owing a flush may not have survived, and its flush says so";
-    // The stick's one writer at the break is `/log`: logd's first batch is
-    // the first WRITE(10) that goes out owing a flush.
-    const LOG_TOLD: &str =
-        "writes a process's partition claim made before its disk came back owing a flush";
     const STILL_HELD: &str = "is still held when this call may wait no longer";
     const AFTER_A_FLUSH: &str = "breaks next (usb-transport-break-flushed)";
     const SILENT: &str = "answers nothing on the operation sent again on it (usb-return-silent)";
@@ -1956,6 +1952,16 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     let image = test_dir().join(name);
     std::fs::write(&image, qemu::build_boot_image(&case, &[], &[], params))
         .map_err(|e| format!("write {}: {e}", image.display()))?;
+    // The stick's one writer at the break is `/log`: logd's first batch is
+    // the first WRITE(10) that goes out owing a flush.
+    let log_told = {
+        let mut file = std::fs::File::open(&image).map_err(|e| format!("{}: {e}", image.display()))?;
+        let guid = toyos_build::image::unique_guid_of(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC)?;
+        format!(
+            "writes a process's claim of partition {} made before its disk came back owing a flush",
+            toyos_gpt::Guid(guid)
+        )
+    };
     let mut qemu = QemuInstance::boot_with_options(
         &case,
         &[],
@@ -2143,7 +2149,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             let mut want = left.to_vec();
             want.extend(back.iter().cloned());
             want.push(OWED.to_string());
-            want.push(LOG_TOLD.to_string());
+            want.push(log_told.clone());
             in_order(&want)?;
             for never in [" did not come back within ", "disk 1 ready", " is not disk 0 come back"] {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {
@@ -2151,8 +2157,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                 }
             }
             eprintln!(
-                "  [usb] a stick that left owing a flush was taken back as disk 0, and the flush of \
-                 /log, whose write it lost, failed by name"
+                "  [usb] a stick that left owing a flush was taken back as disk 0"
             );
         }
         Moved::SilentReturn => {

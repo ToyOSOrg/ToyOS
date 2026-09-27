@@ -459,12 +459,12 @@ const RUST_SKIP: &[&str] = &[
     // succeeds and its two must-refuse assertions red for an honest reason.
     // `fsync_failed_commit` boots it with the arm.
     "fsync_flush_failed",
-    // Needs `so-cache-tiny` and the NVMe `/home`. `so_cache_refusals` gives both.
+    // Needs `so-cache-tiny`. `so_cache_refusals` gives it.
     "so_cache_policy",
     // Needs a boot whose file servers are armed to end under its write, and
     // ends DATA's for the rest of the boot. `fsd_restart` runs it.
     "fs_restart",
-    // Needs the NVMe `/home` and a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
+    // Needs a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
     "home_overwrite_zero",
     // Needs a boot where the DATA volume is ours and absent; on the shared
     // boot `/apps` and `/home` are ordinarily mounted, so every refusal it

@@ -426,7 +426,7 @@ fn main() {
 /// which would otherwise hold the machine's only way to start a process. A
 /// first boot's DATA server formats and mounts before its first answer, so the
 /// bound is generous.
-const FILES_BOUND: Duration = Duration::from_secs(30);
+const FILES_BOUND: Duration = Duration::from_millis(toyos_quiesce::FILES_MS);
 
 /// A job on init's file worker.
 type Job = Box<dyn FnOnce() + Send>;

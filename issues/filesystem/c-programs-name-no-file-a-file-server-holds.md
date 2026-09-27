@@ -16,7 +16,4 @@ program — tinycc, doomgeneric, anything built with `toyos-cc` — is refused
 every path under those six directories with `ENOENT`, and a file it writes
 where a user's files live cannot be written at all.
 
-**Exit**: libc resolves a path under a directory capability through
-`toyos::fs` as std does — open, read, write, seek, stat, readdir, mkdir,
-unlink, rename, fsync — with a C test in the corpus that writes a file under
-`/home`, reads it back, and lists it.
+**Exit**: one file-server client crate in the SDK, the protocol's only implementation, which std uses; libc on top of it, with a C test that writes a file under `/home`, reads it back and lists it; then `/system` over the same protocol and the kernel's file syscalls deleted — the owner accepted the gap until then.

@@ -185,6 +185,9 @@ pub fn hold_source() {
                 .map(|view| (found, view))
                 .map_err(|()| "it is no span a view can hold")
         }
+        // Every disk this kernel drives answered and lacks it: a disk a process
+        // drives, NVMe's under blockd, is never asked.
+        Ok(None) if sought.silent.is_empty() => Err("it is on no disk this kernel drives"),
         Ok(None) => Err("it is on no disk that answered"),
         Err(Unnamed::Ambiguous) => Err("it is carried twice"),
         Err(Unnamed::Unusable) => Err("its table refuses it"),

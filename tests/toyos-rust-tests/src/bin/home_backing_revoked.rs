@@ -1,11 +1,5 @@
 //! A file backing must not outlive the file it reads.
 //!
-//! `/home` hands every open file an `NvmeBacking` holding the blocks its data
-//! lives in. Unlink the file and those blocks go back to bcachefs's allocator;
-//! the next file takes them. A backing that still names them reads that file's
-//! contents — an information disclosure through `open`, `rm` and `cp`, with
-//! nothing crafted about it and no privilege needed.
-//!
 //! Staged here rather than reasoned about: the victim's blocks are freed and
 //! then deliberately handed to a file whose bytes are nothing like the
 //! victim's, and the still-open descriptor is read afterwards.

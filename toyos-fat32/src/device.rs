@@ -32,30 +32,12 @@ pub trait BlockAccess {
     fn flush(&mut self) -> Result<(), IoError>;
 }
 
-/// The volume did not do it, and which of two kinds of "did not" it was.
+/// The volume did not do it.
 ///
-/// **Two variants, because one of them is not about the device.** Everything a
-/// device can say about itself — a transfer it refused, a controller that gave
-/// up, a request past the end — is one fact this crate can act on none of; that
-/// is [`IoError::Device`], and it carries no detail for the reason the single
-/// unit struct this replaces carried none. But an implementor of
-/// [`BlockAccess`] may also have a *bound of its own* on how long one call may
-/// take, and reaching it is a statement about the caller's clock rather than
-/// about the volume, and asking again later is the honest response. Flattening
-/// the two costs the caller the only decision it could make.
-///
-/// Neither variant says whether a refused write reached the medium: an
-/// implementor may have issued it before its bound or the device gave up.
 /// This crate treats every refused write as of unknown outcome — see
 /// `crate::repair`.
-///
-/// The kernel's implementor is `kernel/src/fat32_adapter.rs` over
-/// `block::BlockDevice`, whose `block::OPERATION` budget is that bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoError {
     /// The device refused, failed, or would not answer.
     Device,
-    /// The implementor's own bound on the operation expired. A write may
-    /// have landed before it did; the caller may ask again.
-    BudgetExpired,
 }

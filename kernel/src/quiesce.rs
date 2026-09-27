@@ -273,10 +273,14 @@ pub mod last {
         }
     }
 
-    /// How long either side waits for the other before the boot dies by name.
-    // The thread is held before init prepares the stop, so its wait covers that too.
+    /// How long either side waits for the other before the boot dies by name:
+    /// the thread is held before init takes the stop request, so its wait is
+    /// init's file call, flush and sync, then the stop's own sweeps.
     const STAGED: Budget = Budget::of(
-        Duration::from_millis(toyos_quiesce::FLUSH_MS + toyos_quiesce::SYNC_MS + 10_000),
+        Duration::from_nanos(
+            (toyos_quiesce::FILES_MS + toyos_quiesce::FLUSH_MS + toyos_quiesce::SYNC_MS) * 1_000_000
+                + super::PARK.nanos(),
+        ),
         "the boot panics naming the side of the staging that never arrived",
     );
 

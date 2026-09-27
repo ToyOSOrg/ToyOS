@@ -1,8 +1,7 @@
 //! What a mutating call does when one of its device reads or writes is
 //! refused, and a refused write's outcome is unknown.
 //!
-//! A refused write may already be on the medium: a block layer can issue a
-//! write, lose the answer, and report its own budget expired. So a refusal says
+//! A refused write may already be on the medium. So a refusal says
 //! nothing about which of the two states an entry is in, and nothing here reads
 //! to find out — a cache under [`BlockAccess`] may still serve the bytes the
 //! refusal did not update. What is known is the state the call wanted and the
@@ -14,8 +13,7 @@
 //! call that returns `Err` re-drives them; one the device refuses stays, and
 //! [`Fat32::atomic`] re-drives it before the next mutating call touches
 //! anything, so nothing is allocated, freed or linked over an entry whose
-//! value on the medium is unknown. A call refused because that re-drive was
-//! refused again answers [`Error::RepairPending`].
+//! value on the medium is unknown.
 //!
 //! Before a call's commit the repair is its rollback, so a refused call is a
 //! call that did not happen. The one commit this crate has is a free: once
@@ -84,31 +82,6 @@ pub(crate) enum Repair {
     Entry { offset: u64, raw: RawEntry },
 }
 
-/// The [`Fat32::repair_episode`] a caller last announced, so a log names each
-/// pending repair once rather than at every call that meets it.
-#[derive(Debug, Default)]
-pub struct RepairNotice(Option<u64>);
-
-impl RepairNotice {
-    /// Whether a call answering `e` while `episode` ([`Fat32::repair_episode`])
-    /// is queued leaves the volume waiting on that repair: `RepairPending` is a
-    /// budget refusing its re-drive, and `Io` a device failure refusing either
-    /// the re-drive or the call's own write, which queues it the same way.
-    pub fn waits_on(e: Error, episode: Option<u64>) -> bool {
-        episode.is_some() && matches!(e, Error::RepairPending | Error::Io)
-    }
-
-    /// Whether `episode` is a pending repair not yet announced; from here it
-    /// is. `None`, nothing pending, is never one.
-    pub fn first_sight(&mut self, episode: Option<u64>) -> bool {
-        if episode.is_none() || episode == self.0 {
-            return false;
-        }
-        self.0 = episode;
-        true
-    }
-}
-
 impl<D: BlockAccess> Fat32<D> {
     /// Run one mutating call so that an `Err` leaves the volume where the
     /// repair takes it.
@@ -121,7 +94,7 @@ impl<D: BlockAccess> Fat32<D> {
         op: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
         assert!(!self.in_call, "toyos-fat32: a mutating call nested inside another");
-        self.settle_first()?;
+        self.settle()?;
         self.in_call = true;
         let result = op(self);
         self.in_call = false;
@@ -133,11 +106,11 @@ impl<D: BlockAccess> Fat32<D> {
             // and report.
             Ok(v) if committed => {
                 let mut driven = self.settle();
-                if matches!(driven, Err(Error::BudgetExpired | Error::Io)) {
+                if driven == Err(Error::Io) {
                     driven = self.settle();
                 }
                 match driven {
-                    Ok(()) | Err(Error::BudgetExpired | Error::Io) => Ok(v),
+                    Ok(()) | Err(Error::Io) => Ok(v),
                     Err(e) => Err(e),
                 }
             }
@@ -150,10 +123,6 @@ impl<D: BlockAccess> Fat32<D> {
             // the answer rather than the error that started the rollback.
             Err(e) => self.settle().map_or_else(Err, |()| Err(e)),
         };
-        // The queue was empty when `settle_first` let this call start.
-        if !self.repair.is_empty() {
-            self.episodes += 1;
-        }
         answer
     }
 
@@ -177,27 +146,6 @@ impl<D: BlockAccess> Fat32<D> {
     /// before. Zero once every write has landed.
     pub fn pending_repair(&self) -> usize {
         self.repair.len()
-    }
-
-    /// Which refused call's repair is queued, numbered from mount, or `None`
-    /// when nothing is. Two answers that differ are two refused calls, whatever
-    /// landed between them.
-    pub fn repair_episode(&self) -> Option<u64> {
-        (!self.repair.is_empty()).then_some(self.episodes)
-    }
-
-    /// [`Self::settle`] before a call of its own, naming a refusal as the
-    /// earlier call's repair rather than this call's write.
-    ///
-    /// Every other error it answers is the earlier call's too, answered by a
-    /// call that did not start: a device failure, or a
-    /// [`Error::CorruptChain`] met walking a queued free, whose chain past the
-    /// corrupt link leaks and is recorded nowhere else.
-    pub(crate) fn settle_first(&mut self) -> Result<(), Error> {
-        self.settle().map_err(|e| match e {
-            Error::BudgetExpired => Error::RepairPending,
-            e => e,
-        })
     }
 
     /// Re-drive every queued repair, the most recent write's first.

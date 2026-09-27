@@ -410,15 +410,15 @@ impl BlockDevice for Locked<'_> {
 pub enum Holder {
     /// Something in this kernel — a mount, a probe — named for the log.
     Kernel(&'static str),
-    /// A process, through a partition claim.
-    Claim,
+    /// A process, through its claim of the partition this unique GUID names.
+    Claim(toyos_gpt::Guid),
 }
 
 impl core::fmt::Display for Holder {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Kernel(what) => write!(f, "the kernel ({what})"),
-            Self::Claim => f.write_str("a process's partition claim"),
+            Self::Claim(guid) => write!(f, "a process's claim of partition {guid}"),
         }
     }
 }

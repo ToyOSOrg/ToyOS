@@ -108,9 +108,6 @@ fn word(e: Error) -> SyscallError {
         Error::Io | Error::NotFat32 | Error::Truncated | Error::CorruptChain | Error::CorruptDirectory => {
             SyscallError::Io
         }
-        // Nothing here refuses on a clock, so a repair pending is a volume
-        // that will not settle: the device's word.
-        Error::BudgetExpired | Error::RepairPending => SyscallError::Io,
         Error::NotADirectory | Error::IsADirectory | Error::DirectoryNotEmpty | Error::InvalidName => {
             SyscallError::InvalidArgument
         }

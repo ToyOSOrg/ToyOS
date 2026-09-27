@@ -90,7 +90,7 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     // process that issues a `write` after `sync_all` returns has dirty pages
     // nothing will flush. Every userland thread stops here, the log's writer
     // with the rest: `/system/bin/init` had it flush before it asked for this
-    // stop, and what it wrote since is in the page cache the sync below takes.
+    // stop.
     #[cfg(feature = "boot-actuators")]
     crate::quiesce::last::await_the_held_thread();
     let stopped = crate::quiesce::stop();

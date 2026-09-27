@@ -771,11 +771,12 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
         Some(view) => view.flush().map_err(block_word),
         None => Err(SyscallError::Gone),
     });
-    if let Answered::Answer { answer: Ok(()), attempts, took } = &run {
+    if let (Answered::Answer { answer: Ok(()), attempts, took }, Some((_, guid))) = (&run, claim.partition_on()) {
         if *attempts > 1 {
             crate::log!(
-                "partclaim: a flush durable on attempt {attempts} after {took} — a refused \
+                "partclaim: a flush of {} durable on attempt {attempts} after {took} — a refused \
                  attempt was asked again on a fresh budget",
+                toyos_gpt::Guid(guid),
             );
         }
     }

@@ -41,7 +41,7 @@ pub fn collect() -> Vec<Record> {
             state: match holder {
                 None => PartState::Free,
                 Some(crate::block::Holder::Kernel(_)) => PartState::Kernel,
-                Some(crate::block::Holder::Claim) => PartState::Claimed,
+                Some(crate::block::Holder::Claim(_)) => PartState::Claimed,
             },
         }));
     }

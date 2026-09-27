@@ -44,9 +44,6 @@ pub struct Fat32<D: BlockAccess> {
     /// mutating call starts until it lands. Never past
     /// [`MAX_REPAIR_STEPS`], and allocated at that capacity once.
     pub(crate) repair: Vec<Repair>,
-    /// Calls that left a repair queued, counted from mount: which one the
-    /// queue belongs to, see [`Fat32::repair_episode`].
-    pub(crate) episodes: u64,
     /// A mutating call is running; a second one inside it panics.
     pub(crate) in_call: bool,
     /// The running call has passed its commit, so what the repair holds is
@@ -253,7 +250,6 @@ impl<D: BlockAccess> Fat32<D> {
             scratch,
             scratch_at: None,
             repair: Vec::with_capacity(MAX_REPAIR_STEPS),
-            episodes: 0,
             in_call: false,
             committed: false,
         })
@@ -1147,7 +1143,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// mounted with no count has it taken from the FAT rather than written as
     /// unknown. FSInfo is written before the flush so the flush covers it.
     pub fn sync(&mut self) -> Result<(), Error> {
-        self.settle_first()?;
+        self.settle()?;
         if self.fsinfo.dirty {
             if self.fsinfo.free_count.is_none() {
                 self.fsinfo.free_count = Some(self.count_free()?);
@@ -1170,7 +1166,7 @@ impl<D: BlockAccess> Fat32<D> {
         let free = match self.fsinfo.free_count {
             Some(n) => n,
             None => {
-                self.settle_first()?;
+                self.settle()?;
                 let n = self.count_free()?;
                 self.fsinfo.free_count = Some(n);
                 self.fsinfo.dirty = true;
