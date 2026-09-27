@@ -1351,6 +1351,10 @@ name = "toyos-mixer"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-net-wire"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-pci"
 version = "0.1.0"
 dependencies = [
