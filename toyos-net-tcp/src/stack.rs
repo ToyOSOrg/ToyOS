@@ -213,7 +213,7 @@ impl TimeWait {
             window: sync.rx.last_window,
             rcv_shift: sync.rx.shift,
             end: now.after(limits::TIME_WAIT),
-            ack_owed: sync.rx.owes_ack() || sync.rx.dup_owed > 0 || sync.rx.delayed.is_some(),
+            ack_owed: sync.rx.ack_now || sync.rx.dup_owed > 0 || sync.rx.delayed.is_some(),
             last_unsolicited: None,
         }
     }
@@ -230,12 +230,9 @@ impl TimeWait {
     }
 
     fn unsolicited(&mut self, ctx: &mut Ctx<'_>) {
-        if self.last_unsolicited.is_some_and(|at| ctx.now.since(at) < limits::UNSOLICITED_ACK) {
-            ctx.count(Counter::UnsolicitedAckLimited);
-            return;
+        if ctx.unsolicited(&mut self.last_unsolicited) {
+            self.ack_owed = true;
         }
-        self.last_unsolicited = Some(ctx.now);
-        self.ack_owed = true;
     }
 
     /// Everything but a reopening SYN. RSTs are ignored (RFC 1337 fix F1).
@@ -408,17 +405,11 @@ impl Tcp {
 
     /// Re-files a connection's deadline and offers it the next transmit opportunity.
     fn settle(&mut self, index: u32, now: Instant) {
-        let Some(conn) = value(&mut self.conns, index) else { return };
-        let ctx = conn.ctx(now, &mut self.counters, &mut self.events);
-        let deadline = conn.deadline(&ctx);
-        if let Some(old) = core::mem::replace(&mut conn.deadline, deadline) {
-            self.deadlines.remove(&(old, index));
-        }
-        if let Some(at) = deadline {
-            self.deadlines.insert((at, index));
-        }
-        if !core::mem::replace(&mut conn.queued, true) {
-            self.active.push_back(index);
+        self.settle_deadline(index, now);
+        if let Some(conn) = value(&mut self.conns, index) {
+            if !core::mem::replace(&mut conn.queued, true) {
+                self.active.push_back(index);
+            }
         }
     }
 
@@ -797,7 +788,7 @@ impl Tcp {
                     Rcvd::Keep => conn.state = Tcb::SynRcvd(rcvd),
                     Rcvd::Gone => {
                         conn.state = Tcb::SynRcvd(rcvd);
-                        return self.child_gone(index, now);
+                        return self.child_gone(index);
                     }
                     Rcvd::Refused => return self.end(index, Some(Failure::Refused), None),
                     Rcvd::Established | Rcvd::Crossed => {
@@ -864,7 +855,7 @@ impl Tcp {
     }
 
     /// A passive child deleted without a word; a 4-tuple it took from TIME-WAIT returns there.
-    fn child_gone(&mut self, index: u32, _now: Instant) {
+    fn child_gone(&mut self, index: u32) {
         let Some(conn) = value(&mut self.conns, index) else { return };
         let restore = match &mut conn.state {
             Tcb::SynRcvd(rcvd) => match &mut rcvd.origin {
@@ -921,7 +912,7 @@ impl Tcp {
                 return;
             }
             if passive && (refused || prohibited) {
-                return self.child_gone(index, now);
+                return self.child_gone(index);
             }
             if refused {
                 return self.end(index, Some(Failure::Refused), None);
@@ -1168,7 +1159,7 @@ impl Tcp {
                 if rcvd.tick(&mut ctx) {
                     if rcvd.is_passive() {
                         ctx.count(Counter::SynAckGiveUp);
-                        return self.child_gone(index, now);
+                        return self.child_gone(index);
                     }
                     return self.end(index, Some(failure_of(soft)), None);
                 }

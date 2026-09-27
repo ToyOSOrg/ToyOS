@@ -110,6 +110,18 @@ impl Ctx<'_> {
         self.counters.add(counter, 1);
     }
 
+    /// Challenge ACKs and every answer to an unacceptable segment share one allowance: one in
+    /// any 500 ms per connection (RFC 5961 §7). Per connection, never global: a global budget is
+    /// an off-path counter of sequence-number guesses.
+    pub fn unsolicited(&mut self, last: &mut Option<Instant>) -> bool {
+        if last.is_some_and(|at| self.now.since(at) < limits::UNSOLICITED_ACK) {
+            self.count(Counter::UnsolicitedAckLimited);
+            return false;
+        }
+        *last = Some(self.now);
+        true
+    }
+
     /// Counts a refusal, and names it for the log when its rule is one the log carries.
     pub fn refuse(&mut self, rule: Counter) {
         self.count(rule);
@@ -557,16 +569,10 @@ impl Sync {
         (seq, text, syn, fin)
     }
 
-    /// Challenge ACKs and every answer to an unacceptable segment share one allowance: one in
-    /// any 500 ms per connection (RFC 5961 §7). Per connection, never global: a global budget is
-    /// an off-path counter of sequence-number guesses.
     fn unsolicited(&mut self, ctx: &mut Ctx<'_>) {
-        if self.last_unsolicited.is_some_and(|at| ctx.now.since(at) < limits::UNSOLICITED_ACK) {
-            ctx.count(Counter::UnsolicitedAckLimited);
-            return;
+        if ctx.unsolicited(&mut self.last_unsolicited) {
+            self.rx.ack_now = true;
         }
-        self.last_unsolicited = Some(ctx.now);
-        self.rx.ack_now = true;
     }
 
     /// The ACK field (RFC 9293 §3.10.7.4 fifth, RFC 5961 §5.2). `false` drops the segment.
@@ -676,8 +682,7 @@ impl Sync {
                 }
             }
             None => {
-                if let Some((end, at)) = self.timing.filter(|&(end, _)| ack.at_or_after(end)) {
-                    let _ = end;
+                if let Some((_, at)) = self.timing.filter(|&(end, _)| ack.at_or_after(end)) {
                     self.timing = None;
                     self.rtt.sample(now.since(at), 1);
                 }
@@ -840,13 +845,9 @@ impl Sync {
         self.orphan_since = Some(now);
     }
 
-    /// The RST an abort or a give-up sends (RFC 9293 §3.10.5): none from CLOSING or LAST-ACK.
+    /// The RST an abort sends (RFC 9293 §3.10.5): none from CLOSING or LAST-ACK.
     pub fn reset(&self, now: Instant) -> Option<Rst> {
-        let ts = self.ts.map(|ts| Timestamps { value: ts.clock(now), echo: ts.recent });
-        match self.phase {
-            Phase::Closing | Phase::LastAck => None,
-            _ => Some(Rst { seq: self.tx.reset_seq(), ack: Some(self.rx.next), ts }),
-        }
+        (!matches!(self.phase, Phase::Closing | Phase::LastAck)).then(|| self.reset_always(now))
     }
 
     /// The RST a timer's abort sends, whatever the state.
@@ -976,7 +977,7 @@ impl Sync {
         if let Some(out) = self.probe(ctx) {
             return Some(out);
         }
-        if self.rx.owes_ack() {
+        if self.rx.ack_now {
             return Some(self.pure(ctx.now, self.tx.nxt));
         }
         None
@@ -1050,7 +1051,6 @@ impl Sync {
         if self.persist.is_some() {
             return None;
         }
-        let smss = self.smss();
         if let Some(start) = self.urgent.take().map(|u| u.later(self.tx.una)).filter(|u| u.before(self.tx.nxt)) {
             let blocks = self.blocks();
             let stop = start.add(self.room(&blocks)).earlier(self.tx.data_end()).earlier(self.tx.nxt);
@@ -1091,7 +1091,6 @@ impl Sync {
             return None;
         }
         self.rtx_next = Some(pos.add(len).add(u32::from(fin)));
-        let _ = smss;
         Some(self.hand_off(ctx, pos, len, fin, blocks))
     }
 

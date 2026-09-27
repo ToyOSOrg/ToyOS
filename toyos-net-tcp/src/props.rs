@@ -10,7 +10,7 @@ use core::net::Ipv4Addr;
 use core::time::Duration;
 use std::collections::HashMap;
 
-use toyos_net_wire::ipv4::{Form, Ipv4Builder, Ipv4Packet, Ipv4Source, TrafficClass, Ttl};
+use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Packet, Ipv4Source, TrafficClass, Ttl};
 use toyos_net_wire::tcp::TcpSegment;
 use toyos_net_wire::Port;
 
@@ -62,7 +62,6 @@ fn datagram(out: &crate::Outgoing<'_>) -> Vec<u8> {
         destination: out.destination,
         ttl: Ttl::DEFAULT,
         traffic_class: TrafficClass::ZERO,
-        form: Form::Atomic,
         options: &[],
         payload: out.segment,
     };
@@ -239,7 +238,7 @@ impl Pair {
     fn check_segment(&mut self, node: usize, s: &Seen) {
         assert_eq!(s.flags & 0x20, 0, "MOD-04: URG set");
         assert_eq!(s.urgent, 0, "MOD-04: an urgent pointer");
-        let Some((tuple, sync)) = self.tcp[node].each_sync().next() else { return };
+        let Some((_, sync)) = self.tcp[node].each_sync().next() else { return };
         if sync.ts.is_some() && s.flags & 0x06 == 0 {
             assert!(s.ts.is_some(), "OP-25: a segment without timestamps on a timestamped connection");
         }
@@ -248,7 +247,6 @@ impl Pair {
             let advertised = ack.add(u32::from(s.window) << shift);
             let edge = sync.rx.edge();
             assert!(advertised.at_or_before(edge) && edge.since(advertised) < 1 << shift, "PROP-04: advertised {advertised:?}, edge {edge:?}");
-            let _ = tuple;
         }
         if s.flags & 0x04 == 0 {
             self.sacked[node].extend(s.sack.iter().copied());

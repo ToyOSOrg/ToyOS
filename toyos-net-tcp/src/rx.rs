@@ -247,11 +247,6 @@ impl Rx {
         }
     }
 
-    /// Whether a pure ACK is owed apart from duplicates.
-    pub fn owes_ack(&self) -> bool {
-        self.ack_now
-    }
-
     /// The window field for a segment built now, moving the edge by the silly-window rule
     /// (RFC 9293 §3.8.6.2.2, Fr = 1/2) only while no hole is open.
     pub fn advertise(&mut self, mss: u32) -> u16 {

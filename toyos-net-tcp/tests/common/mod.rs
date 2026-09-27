@@ -21,7 +21,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use toyos_net_tcp::{Config, ConnId, Counter, Endpoint, Event, Info, Instant, ListenerId, Outgoing, Secrets, Status, Tcp, Tuple};
-use toyos_net_wire::ipv4::{Form, Ipv4Builder, Ipv4Packet, Ipv4Source, TrafficClass, Ttl};
+use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Packet, Ipv4Source, TrafficClass, Ttl};
 use toyos_net_wire::tcp::TcpSegment;
 use toyos_net_wire::Port;
 
@@ -370,7 +370,6 @@ pub fn datagram(out: &Outgoing<'_>) -> Vec<u8> {
         destination: out.destination,
         ttl: Ttl::DEFAULT,
         traffic_class: TrafficClass::ZERO,
-        form: Form::Atomic,
         options: &[],
         payload: out.segment,
     };

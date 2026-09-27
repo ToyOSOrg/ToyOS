@@ -305,12 +305,9 @@ impl SynRcvd {
     }
 
     fn unsolicited(&mut self, ctx: &mut Ctx<'_>) {
-        if self.last_unsolicited.is_some_and(|at| ctx.now.since(at) < limits::UNSOLICITED_ACK) {
-            ctx.count(Counter::UnsolicitedAckLimited);
-            return;
+        if ctx.unsolicited(&mut self.last_unsolicited) {
+            self.ack_owed = true;
         }
-        self.last_unsolicited = Some(ctx.now);
-        self.ack_owed = true;
     }
 
     pub fn receive(&mut self, seg: &In<'_>, local: &Local, ctx: &mut Ctx<'_>) -> Rcvd {
@@ -387,11 +384,8 @@ impl SynRcvd {
     /// ESTABLISHED from the segment that completed the handshake. A crossing SYN-ACK's window is a
     /// SYN's, never scaled (RFC 7323 §2.2).
     pub fn establish(self, seg: &In<'_>, crossed: bool, local: &Local, now: Instant) -> Sync {
-        let (snd_wnd, wl1) = if crossed {
-            (u32::from(seg.window), seg.seq)
-        } else {
-            (u32::from(seg.window).checked_shl(u32::from(self.negotiated.snd_shift)).unwrap_or(u32::MAX), seg.seq)
-        };
+        let shift = if crossed { 0 } else { self.negotiated.snd_shift };
+        let snd_wnd = u32::from(seg.window).checked_shl(u32::from(shift)).unwrap_or(u32::MAX);
         let mut negotiated = self.negotiated;
         if let Some(ts) = negotiated.ts.as_mut() {
             ts.first = self.timer.first_tsval;
@@ -409,7 +403,7 @@ impl SynRcvd {
                 una: self.iss.add(1),
                 rcv_next: self.irs.add(1),
                 snd_wnd,
-                wl1,
+                wl1: seg.seq,
                 negotiated,
                 rtt,
                 handshake_timeouts: self.timer.timeouts,
