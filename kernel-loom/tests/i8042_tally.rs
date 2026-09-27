@@ -103,8 +103,7 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
 /// so a count visible ahead of its own evidence is a report on a ring that looks
 /// empty. **This is the direction that reds on the old shape**: with the two
 /// counters back in `tally.rs` it failed here too, `published` still 0 under a
-/// count that already said a byte had arrived. It reds too with `record`'s
-/// release and `read`'s acquire both weakened to `Relaxed`.
+/// count that already said a byte had arrived.
 #[test]
 fn a_counted_interrupt_carries_its_bytes_with_it() {
     explored(|| {
