@@ -103,15 +103,8 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
 /// so a count visible ahead of its own evidence is a report on a ring that looks
 /// empty. **This is the direction that reds on the old shape**: with the two
 /// counters back in `tally.rs` it failed here too, `published` still 0 under a
-/// count that already said a byte had arrived.
-///
-/// **It is not a gate on the release/acquire pair, and saying so is the point.**
-/// Measured: with `record`'s release and `read`'s acquire both weakened to
-/// `Relaxed`, all three models still passed. Loom 0.7 does not distinguish the
-/// weakening — which is why this crate's other negative control removes `SeqCst`
-/// *fences* rather than weakening an ordering. The pair rests on the argument in
-/// `tally.rs`, and on x86 it is the same instruction either way, so no guest can
-/// ask the question either.
+/// count that already said a byte had arrived. It reds too with `record`'s
+/// release and `read`'s acquire both weakened to `Relaxed`.
 #[test]
 fn a_counted_interrupt_carries_its_bytes_with_it() {
     explored(|| {
