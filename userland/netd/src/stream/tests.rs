@@ -255,7 +255,7 @@ impl World {
             self.netd.fire_timers();
             self.peer.fire_timers();
             let mut moved = false;
-            while let Some(frame) = self.netd.bindings.egress.pop() {
+            while let Some(frame) = self.netd.bindings.pop_frame() {
                 moved = true;
                 let data = tcp_segment(&frame).is_some_and(|(_, carries)| carries);
                 match self.link {
@@ -268,7 +268,7 @@ impl World {
                     Link::LoseNextData => self.peer.receive(&frame),
                 }
             }
-            while let Some(frame) = self.peer.bindings.egress.pop() {
+            while let Some(frame) = self.peer.bindings.pop_frame() {
                 moved = true;
                 if self.link != Link::Lost {
                     self.netd.receive(&frame);
@@ -620,13 +620,13 @@ fn first_isn(nanos: u64, port: u16) -> u32 {
     // ARP first: answer it as the peer would, and the SYN follows.
     let mut peer = stack(&clock, PEER);
     for _ in 0..4 {
-        while let Some(frame) = netd.bindings.egress.pop() {
+        while let Some(frame) = netd.bindings.pop_frame() {
             if let Some((seq, _)) = tcp_segment(&frame) {
                 return seq;
             }
             peer.receive(&frame);
         }
-        while let Some(frame) = peer.bindings.egress.pop() {
+        while let Some(frame) = peer.bindings.pop_frame() {
             netd.receive(&frame);
         }
     }

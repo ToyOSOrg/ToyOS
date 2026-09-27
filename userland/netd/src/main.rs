@@ -316,8 +316,8 @@ struct Transmit {
 impl Transmit {
     /// Hand the ring every waiting frame it has a slot for, in their turn.
     fn flush(&mut self, card: &Card, net: &mut Net) {
-        while !net.bindings.egress.is_empty() && card.tx_room() {
-            let frame = net.bindings.egress.pop().expect("a frame waits");
+        while card.tx_room() {
+            let Some(frame) = net.bindings.pop_frame() else { break };
             card.tx(&frame);
         }
         self.waited += net.bindings.egress.len() as u64;
@@ -1652,7 +1652,7 @@ fn main() {
         let now = Instant::now();
         changes.extend(dhcp.client.on_time(now));
         for frame in dhcp.client.take_frames() {
-            net.bindings.egress.push(frame);
+            net.bindings.push_frame(frame);
         }
         for change in changes {
             apply_lease(change, &dhcp, &mut net, &mut daemon.resolver, report.as_ref(), now);

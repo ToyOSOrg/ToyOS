@@ -206,7 +206,7 @@ impl Wire {
             let now = self.now();
             let ended = self.resolver.pass(&mut self.net, now);
             self.ended.extend(ended);
-            while let Some(frame) = self.net.bindings.egress.pop() {
+            while let Some(frame) = self.net.bindings.pop_frame() {
                 self.far_end(&frame);
             }
             if self.held.iter().all(|(at, _)| *at > now_ms) {

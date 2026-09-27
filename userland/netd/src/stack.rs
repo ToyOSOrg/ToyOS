@@ -642,11 +642,14 @@ impl Bindings {
     pub fn new(clock: Clock, random: fn(&mut [u8])) -> Self {
         let size = NonZeroUsize::new(TCP_BUFFER).expect("a TCP buffer holds bytes");
         let sizes = BufferSizeSettings::new(size, size, size).expect("min <= default <= max");
+        // The key that keeps a peer from aiming two flows at one bucket.
+        let mut key = [0u8; 8];
+        random(&mut key);
         Self {
             clock,
             random,
             timers: Timers::default(),
-            egress: Egress::default(),
+            egress: Egress::new(u64::from_le_bytes(key)),
             settings: TcpSettings { receive_buffer: sizes, send_buffer: sizes },
             deferred: Vec::new(),
             joined: Vec::new(),
@@ -656,6 +659,18 @@ impl Bindings {
     /// The moment the core would call now.
     pub fn now(&self) -> StackTime {
         self.clock.now()
+    }
+
+    /// Queue a frame for the ring, made now.
+    pub fn push_frame(&mut self, frame: Vec<u8>) {
+        let now = self.now().0;
+        self.egress.push(frame, now);
+    }
+
+    /// The next frame for the ring, taken now.
+    pub fn pop_frame(&mut self) -> Option<Vec<u8>> {
+        let now = self.now().0;
+        self.egress.pop(now)
     }
 
     /// The stack's random source.
@@ -928,7 +943,7 @@ impl DeviceLayerEventDispatcher for Bindings {
         _dequeue_context: Option<&mut Infallible>,
         _csum_offload: Option<netstack3_core::ChecksumOffloadResult>,
     ) -> Result<(), DeviceSendFrameError> {
-        self.egress.push(frame.into_inner());
+        self.push_frame(frame.into_inner());
         Ok(())
     }
 
