@@ -517,6 +517,10 @@ mod tests {
     fn a_readback_directory_alone_selects_no_tier() {
         let refusal = parse_owned(&["--metal-readback", "target/metal"]).unwrap_err();
         assert!(refusal.contains("add --metal"), "{refusal}");
+        // And the path to the machine alone, which reaches no machine.
+        let refusal = parse_owned(&["--metal-via-ubuntu"]).unwrap_err();
+        assert!(refusal.contains("add --metal"), "{refusal}");
+        assert!(parse_owned(&["--metal", "--metal-via-ubuntu"]).is_ok());
         let refusal = parse_owned(&["--metal", "--audio-gate", "30"]).unwrap_err();
         assert!(refusal.contains("cannot be combined"), "{refusal}");
     }

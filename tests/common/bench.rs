@@ -106,6 +106,19 @@ pub fn bench_loop_drives_a_toyos_machine(
     }
     eprintln!("  [bench] a kernel byte flipped under its signature: {}", said.trim());
 
+    // **The clock the loop reads a `--nic` boot's cable against**, from the
+    // bench itself: `date -u +%s` answers a second, and no other form is here.
+    let clock = ssh::ssh_exec(HOST, ssh_port, &runner, "date -u +%s")?;
+    let said = clock.stdout_text();
+    if clock.status != Some(0) || said.trim().parse::<u64>().is_err() {
+        return Err(format!("`date -u +%s` ended {:?} saying {said:?}", clock.status));
+    }
+    let other = ssh::ssh_exec(HOST, ssh_port, &runner, "date")?;
+    if other.status != Some(2) {
+        return Err(format!("a bare `date` ended {:?}, where the one form is refused as 2", other.status));
+    }
+    eprintln!("  [bench] the bench's clock reads {}", said.trim());
+
     // **The loop**: the library call `toyos-metal` makes, the machine reached
     // through the forwards.
     let readback = scratch.join("readback");
