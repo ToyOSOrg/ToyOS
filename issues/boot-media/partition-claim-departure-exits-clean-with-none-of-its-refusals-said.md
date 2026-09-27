@@ -47,11 +47,6 @@ or `"partition_claimant: PASS"`), yet the guest's exit code was 0.
 An exit of 0 rules out a panic on a wrong assertion (`departure()`'s
 `assert_eq!`s all `panic!` on mismatch, and a panic does not exit 0), so the
 guest's own logic is not shown to have run into an unexpected state.
-`departed()` also depends on a QMP hook (`MOVE_NOW`) firing off a marker the
-guest prints mid-run; this suite's own `tests/CLAUDE.md` already names both a channel that can silently lose a
-stimulus and a demultiplexer for concurrent guests' console lines as classes
-of defect this harness is exposed to, and either is consistent with what was
-seen. Nothing here narrows which.
 
 This is the same family flagged in
 `issues/boot-media/partition-claim-gives-up-reds-beside-other-guests-and-is-green-alone.md`
@@ -62,9 +57,7 @@ differs: that file's evidence is a kernel-log line count coming up short
 lines the kernel actually printed) on the `silent` role, attributed to a
 hypothesised unscoped global fsync deadman race; this is a `guest_verdict`
 failure on the `departure` role with the guest's entire stdout capture
-missing, which that hypothesis does not by itself explain. Both may yet share
-one root cause in how this harness handles concurrent guests under load; that
-is unconfirmed.
+missing, which that hypothesis does not by itself explain.
 
 ## Exit condition
 

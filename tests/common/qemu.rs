@@ -10,7 +10,7 @@ use std::{fs, thread};
 
 use super::compile;
 use toyos_build::arch::{Accel, Arch};
-use toyos_build::socketpath::{self, Socket};
+use toyos_tmpdir::TempDir;
 
 /// The architecture every machine this suite builds and boots is: the suite's
 /// q35 shapes, i8042 and VT-d are x86-64's, and the aarch64 bring-up boots
@@ -3156,10 +3156,7 @@ impl QemuInstance {
         let audio_wav = test_dir.join(format!("audio-{seq}.wav"));
         let _ = fs::remove_file(&audio_wav);
 
-        let sockets = Sockets {
-            qmp: options.qmp.then(|| socketpath::short("qmp", seq)),
-            segment: options.segment.then(|| super::segment::Tap::of_boot(seq)),
-        };
+        let sockets = Sockets::new(&options);
         let screendump = test_dir.join(format!("screen-{seq}.ppm"));
 
         // Per-instance, not a fixed /tmp path: the audio gate boots dozens of
@@ -3175,7 +3172,7 @@ impl QemuInstance {
             &usb_images,
             &audio_wav,
             &uart_log,
-            &sockets,
+            &sockets.dir,
             &options,
         );
         spawn_and_wait_ready(
@@ -3204,11 +3201,7 @@ impl QemuInstance {
     /// command that answers, so what a test judges is memory QEMU dumped and not
     /// a report the guest wrote about itself.
     pub fn guest_memory(&mut self, phys: u64, bytes: usize) -> Result<Vec<u8>, String> {
-        let socket = self
-            .sockets
-            .qmp()
-            .map(Path::to_path_buf)
-            .expect("guest_memory needs BootOptions { qmp: true }");
+        let socket = self.sockets.qmp.clone().expect("guest_memory needs BootOptions { qmp: true }");
         // Beside the screendump, which is this instance's own scratch path.
         let out = self.screendump.with_extension(format!("mem-{phys:#x}"));
         let _ = fs::remove_file(&out);
@@ -3235,11 +3228,7 @@ impl QemuInstance {
     /// the file itself, so the only synchronization needed is the command's
     /// own reply.
     pub fn screendump(&mut self) -> super::screen::Ppm {
-        let socket = self
-            .sockets
-            .qmp()
-            .map(Path::to_path_buf)
-            .expect("screendump needs BootOptions { qmp: true }");
+        let socket = self.sockets.qmp.clone().expect("screendump needs BootOptions { qmp: true }");
         let out = self.screendump.clone();
         let _ = fs::remove_file(&out);
 
@@ -3554,7 +3543,7 @@ impl QemuInstance {
     /// The QMP socket this instance opened. Injection needs it, and it needs
     /// `BootOptions { qmp: true }`.
     pub fn qmp_socket(&self) -> &Path {
-        self.sockets.qmp().expect("qmp_socket needs BootOptions { qmp: true }")
+        self.sockets.qmp.as_deref().expect("qmp_socket needs BootOptions { qmp: true }")
     }
 
     /// Stand on this guest's segment; it needs `BootOptions { segment: true }`.
@@ -3687,7 +3676,7 @@ impl QemuInstance {
                 Ok(line) => {
                     last_line = Instant::now();
                     lines += 1;
-                    step(self.sockets.qmp(), &line);
+                    step(self.sockets.qmp.as_deref(), &line);
                     if dying.is_none()
                         && super::serial::died(&line) == Some(super::serial::Died::Kernel)
                     {
@@ -4336,9 +4325,7 @@ impl QmpDevices {
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
     let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
-    // A sequence no boot reaches, so no live boot's names are touched.
-    let sockets = Sockets { qmp: None, segment: options.segment.then(|| super::segment::Tap::of_boot(u32::MAX)) };
-    qemu_command(p, p, &usb, p, p, &sockets, options)
+    qemu_command(p, p, &usb, p, p, p, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -4364,9 +4351,10 @@ fn qemu_command(
     usb_images: &[PathBuf],
     audio_wav: &Path,
     uart_log: &Path,
-    sockets: &Sockets,
+    socket_dir: &Path,
     options: &BootOptions,
 ) -> Command {
+    let (qmp_socket, segment) = socket_names(socket_dir, options);
     let shape = options.profile.shape();
     let console_file = options.console_file.then(|| ConsoleFile::of(uart_log));
     assert!(
@@ -4744,7 +4732,7 @@ fn qemu_command(
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
     }
-    if let Some(tap) = &sockets.segment {
+    if let Some(tap) = &segment {
         assert!(
             !matches!(shape.nic, Nic::Absent),
             "this profile carries no NIC, so there is no `net0` segment to stand on"
@@ -4798,7 +4786,7 @@ fn qemu_command(
     if options.gdb_stub {
         qemu.arg("-s");
     }
-    if let Some(socket) = sockets.qmp() {
+    if let Some(socket) = qmp_socket {
         qemu.arg("-qmp")
             .arg(format!("unix:{},server,nowait", socket.display()));
     }
@@ -4806,17 +4794,30 @@ fn qemu_command(
     qemu
 }
 
-/// A boot's Unix sockets, named under `/tmp` by [`socketpath`] and removed when
-/// this is dropped.
+/// A boot's Unix sockets, in a directory of its own under `/tmp` rather than
+/// the lane's: `sun_path` is 104 bytes on Darwin, and `$TMPDIR`'s depth is the
+/// host's. The directory goes with this, after QEMU is reaped.
 struct Sockets {
-    qmp: Option<Socket>,
+    dir: TempDir,
+    qmp: Option<PathBuf>,
     segment: Option<super::segment::Tap>,
 }
 
 impl Sockets {
-    fn qmp(&self) -> Option<&Path> {
-        self.qmp.as_ref().map(Socket::path)
+    fn new(options: &BootOptions) -> Sockets {
+        let dir = TempDir::short("boot");
+        let (qmp, segment) = socket_names(&dir, options);
+        Sockets { dir, qmp, segment }
     }
+}
+
+/// The QMP and segment sockets `options` asks for, named in `dir`.
+fn socket_names(
+    dir: &Path,
+    options: &BootOptions,
+) -> (Option<PathBuf>, Option<super::segment::Tap>) {
+    let qmp = options.qmp.then(|| dir.join("qmp.sock"));
+    (qmp, options.segment.then(|| super::segment::Tap::in_dir(dir)))
 }
 
 /// Every file one boot owns, so that adding another does not lengthen a

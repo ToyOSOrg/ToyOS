@@ -143,7 +143,7 @@ toyos-swap = { path = "toyos-swap" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "toyos-tco" }
-# The one scratch directory under `$TMPDIR`: the harness's run takes one, and so does
+# The one scratch directory, under `$TMPDIR` or, for a socket, `/tmp`: the harness's run takes one, and so does
 # every test here; `--ci host` holds the host tests to leaving nothing behind.
 toyos-tmpdir = { path = "toyos-tmpdir" }
 toyos-blackbox = { path = "toyos-blackbox" }

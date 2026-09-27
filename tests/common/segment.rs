@@ -12,25 +12,24 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Instant;
 
 use toyos_build::icmp::checksum;
-use toyos_build::socketpath::{self, Socket};
 
-/// The two sockets QEMU serves the segment on, held by the
+/// The two sockets QEMU serves the segment on, in the socket directory of the
 /// [`super::qemu::QemuInstance`] that booted with them.
 #[derive(Debug)]
 pub struct Tap {
-    into_guest: Socket,
-    from_guest: Socket,
+    into_guest: PathBuf,
+    from_guest: PathBuf,
 }
 
 impl Tap {
-    /// The two socket names of boot `seq`.
-    pub fn of_boot(seq: u32) -> Self {
-        Self { into_guest: socketpath::short("tap-in", seq), from_guest: socketpath::short("tap-out", seq) }
+    /// The two sockets' names in a boot's socket directory `dir`.
+    pub fn in_dir(dir: &Path) -> Self {
+        Self { into_guest: dir.join("tap-in.sock"), from_guest: dir.join("tap-out.sock") }
     }
 
     /// QEMU's half: two listening sockets, one filter each, both on `net0`. A
@@ -39,11 +38,11 @@ impl Tap {
     pub fn argv(&self) -> [String; 8] {
         [
             "-chardev".into(),
-            format!("socket,id=tapin,path={},server=on,wait=off", self.into_guest.path().display()),
+            format!("socket,id=tapin,path={},server=on,wait=off", self.into_guest.display()),
             "-object".into(),
             "filter-redirector,id=tapinf,netdev=net0,queue=tx,indev=tapin".into(),
             "-chardev".into(),
-            format!("socket,id=tapout,path={},server=on,wait=off", self.from_guest.path().display()),
+            format!("socket,id=tapout,path={},server=on,wait=off", self.from_guest.display()),
             "-object".into(),
             "filter-mirror,id=tapoutf,netdev=net0,queue=rx,outdev=tapout".into(),
         ]
@@ -53,11 +52,11 @@ impl Tap {
     /// sockets before the machine ran, so both connects answer at once; a frame
     /// the guest sent before them is not seen, and QEMU says so on its stderr.
     pub fn open(&self) -> Result<Segment, String> {
-        let connect = |path: &Path| {
+        let connect = |path: &PathBuf| {
             UnixStream::connect(path).map_err(|e| format!("connect to QEMU's {}: {e}", path.display()))
         };
-        let into = connect(self.into_guest.path())?;
-        let mut from = connect(self.from_guest.path())?;
+        let into = connect(&self.into_guest)?;
+        let mut from = connect(&self.from_guest)?;
         let (tx, frames) = mpsc::channel();
         std::thread::spawn(move || {
             let mut len = [0u8; 4];

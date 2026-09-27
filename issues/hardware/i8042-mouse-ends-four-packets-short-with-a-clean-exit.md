@@ -22,8 +22,9 @@ message are in `issues/build/parallel-tests-red-under-other-suites.md`'s
 
 - **The run ended cleanly.** This message is reached only when
   `run_test_paced` returned no error, so the test runner printed
-  `===TEST_END test_rs_i8042_mouse exit=<n>===`; a stall, a ceiling or a
-  runner error ends in the `STALLED` message instead.
+  `===TEST_END test_rs_i8042_mouse` with a tail other than `error=`: `exit=<n>`,
+  none, or one it cannot parse. A stall, a ceiling or a runner error ends in
+  the `STALLED` message instead.
 - **The guest stopped reading mid-burst.** 876 injected is the four lead-in
   packets plus 872 of `BURST`'s 1000. The shortfall, 4, equals `MOUSE_LEAD`:
   the host always refills to `arrived + MOUSE_LEAD`, so any guest that stops
@@ -54,8 +55,10 @@ them apart:
 
 ## Exit condition
 
-The mechanism is named, and a deterministic test is red on it. Then this file
-and its `src/redlist.rs` row are deleted.
+The shortfall refusal (`i8042_mouse` in `tests/toyos.rs`) carries
+`result.stdout` and `result.exit_code`, so the next sighting is not blind; the
+mechanism is named, and a deterministic test is red on it. Then this file and
+its `src/redlist.rs` row are deleted.
 
 ## Owner
 

@@ -26,8 +26,8 @@
 //! # QMP, and the machine that has already stopped
 //!
 //! The socket is `/tmp/toyos-qmp.sock`, and a harness boot's is
-//! `/tmp/toyos-qmp-<pid>-<boot>.sock` ([`crate::socketpath::short`]) while its
-//! guest lives, which is how a frozen guest is read
+//! `/tmp/toyos-tmp-<pid>-*/boot-<n>/qmp.sock` (`toyos_tmpdir::TempDir::short`)
+//! while its guest lives, which is how a frozen guest is read
 //! without a `cargo run` at all: `human-monitor-command` with `info registers
 //! -a` gives every vCPU's `RIP`, `RFL` and `HLT`, and that is what tells a
 //! halted-awaiting-interrupt machine from a wedged one.

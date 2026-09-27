@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use toyos_tmpdir::{TempDir, GLOBAL, OWNER, ROOT_PREFIX};
+use toyos_tmpdir::{TempDir, GLOBAL, OWNER, ROOT_PREFIX, SHORT_BASE};
 
 const HOLD: &str = "TOYOS_TMPDIR_TEST_HOLD";
 const HOLDING: &str = "holding ";
@@ -28,13 +28,19 @@ fn spawning() -> MutexGuard<'static, ()> {
     SPAWNING.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// [`HOLD`]'s value for a holder of a [`TempDir::new`], and of a [`TempDir::short`].
+const IN_TMPDIR: &str = "tmpdir";
+const SHORT: &str = "short";
+
 /// The holder: this test, run as a child with [`HOLD`] set; a no-op otherwise.
 #[test]
 fn holder() {
-    if std::env::var_os(HOLD).is_none() {
-        return;
-    }
-    let dir = TempDir::new("held");
+    let dir = match std::env::var(HOLD) {
+        Err(std::env::VarError::NotPresent) => return,
+        Ok(hold) if hold == IN_TMPDIR => TempDir::new("held"),
+        Ok(hold) if hold == SHORT => TempDir::short("held"),
+        hold => panic!("{HOLD}={hold:?} is neither {IN_TMPDIR:?} nor {SHORT:?}"),
+    };
     std::fs::write(dir.join("image.img"), b"a guest's disk").unwrap();
     println!("{HOLDING}{}", dir.display());
     let mut line = String::new();
@@ -54,9 +60,19 @@ impl Holder {
     /// A holder under `tmp`, returned once its directory exists, and so once its
     /// sweep of `tmp` is done.
     fn start(tmp: &Path) -> Holder {
+        Self::spawn(IN_TMPDIR, tmp)
+    }
+
+    /// A holder of a [`TempDir::short`], run with `$TMPDIR` at `tmp`, returned
+    /// once its sweep of [`SHORT_BASE`] is done.
+    fn short(tmp: &Path) -> Holder {
+        Self::spawn(SHORT, tmp)
+    }
+
+    fn spawn(hold: &str, tmp: &Path) -> Holder {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "holder", "--nocapture", "--test-threads", "1"])
-            .env(HOLD, "1")
+            .env(HOLD, hold)
             .env("TMPDIR", tmp)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -119,30 +135,51 @@ fn entries(tmp: &Path) -> Vec<String> {
     names
 }
 
-/// **The whole contract over one `$TMPDIR`**: a killed process's scratch is
-/// taken by the next process's first directory, a live process's is left alone
-/// however many processes sweep past it, and a process that returns leaves
-/// nothing but the lock.
+/// **The whole contract, over a `$TMPDIR` and over `/tmp`**: a killed process's
+/// scratch is taken by the next process's first directory, a live process's is
+/// left alone however many processes sweep past it, and a process that returns
+/// leaves nothing but the lock.
 #[test]
 fn a_killed_process_is_reclaimed_and_a_live_one_is_never_touched() {
     let _spawning = spawning();
     let tmp = TempDir::new("reclaim");
+    reclaimed(|| Holder::start(&tmp));
+    assert_eq!(entries(&tmp), [GLOBAL], "a returned process left something behind");
+    reclaimed(|| Holder::short(&tmp));
+}
 
-    let killed = Holder::start(&tmp);
+fn reclaimed(start: impl Fn() -> Holder) {
+    let killed = start();
     let killed_root = killed.root();
     killed.kill();
     assert!(killed_root.exists(), "the premise: SIGKILL leaves the root");
 
-    let live = Holder::start(&tmp);
+    let live = start();
     assert!(!killed_root.exists(), "a killed process's root outlived the next process's sweep");
-    let past = Holder::start(&tmp);
+    let past = start();
     assert!(live.dir.join("image.img").exists(), "a sweep took a live process's directory");
 
     let (live_root, past_root) = (live.root(), past.root());
     live.finish();
     past.finish();
     assert!(!live_root.exists() && !past_root.exists(), "a process that returned left its root");
-    assert_eq!(entries(&tmp), [GLOBAL], "a returned process left something behind");
+}
+
+/// A short directory is under `/tmp` however deep `$TMPDIR` is, so a socket's
+/// path in it fits Darwin's `sun_path`, the shorter of the hosts'.
+#[test]
+fn a_socket_in_a_short_directory_fits_whatever_tmpdir_is() {
+    const DARWIN_SUN_PATH: usize = 104;
+    let _spawning = spawning();
+    let tmp = TempDir::new("deep");
+    let deep = tmp.join("d".repeat(DARWIN_SUN_PATH));
+    std::fs::create_dir(&deep).unwrap();
+    let holder = Holder::short(&deep);
+    let socket = holder.dir.join("tap-out.sock");
+    holder.finish();
+    let base = std::fs::canonicalize(SHORT_BASE).unwrap();
+    assert!(socket.starts_with(&base), "{} is not under {}", socket.display(), base.display());
+    assert!(socket.as_os_str().len() < DARWIN_SUN_PATH, "{} outgrows sun_path", socket.display());
 }
 
 /// A root whose making or removal was cut short, with no owner file, is a gone
