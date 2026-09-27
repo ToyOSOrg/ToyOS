@@ -500,9 +500,65 @@ pub fn verdict(log: &str) -> Result<u64, Unfit> {
     Ok(boot_ms)
 }
 
+/// **`Rebooting.` is the last record, and nothing this boot still holds may
+/// write one after it.**
+///
+/// The runner's deadline kills the job it is watching, which releases the `wait`
+/// its own job loop is inside, and that loop can spawn the next job into the
+/// window between the boot's last word and the reset.
+///
+/// A boot with no such word — a panic — is not asked: it correctly writes none.
+/// The window ends at the next loader pass, because everything that pass prints
+/// is after the reset by construction.
+///
+/// **A spawn record and not every record**, because those are the two different
+/// claims. `quiesce` writes after its own last word by construction — an idle
+/// CPU's `sched:` report can land there — and nothing is left running to take
+/// it anywhere but the console. A *spawn* is a process that was still on a run
+/// queue after the stop said it had stopped every one.
+///
+/// **The boot's own word, not the next pass's copy of it**: that pass prints
+/// the boot's newest records under [`LOG_TAIL`], newest first, so the
+/// copy of the last word heads records that were written before it.
+pub fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(at) = lines
+        .iter()
+        .rposition(|line| line.contains(REBOOTING) && !line.contains(LOG_TAIL))
+    else {
+        return Ok(());
+    };
+    let mut window =
+        lines[at + 1..].iter().take_while(|line| !line.contains(LOADER_FIRST_LINE));
+    match window.find(|line| line.contains(SPAWN)) {
+        None => Ok(()),
+        Some(line) => Err(format!(
+            "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
+             metal boot is judged on: {line:?}"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A spawn after the boot's own last word is refused; the next pass's
+    /// newest-first copy of that word, which heads records written before it,
+    /// opens no window, and the next pass is after the reset.
+    #[test]
+    fn a_spawn_after_the_boots_own_last_word_is_refused() {
+        let word = format!("[kernel 23.340 cpu1] {REBOOTING}\n");
+        let spawn = format!("[kernel 23.341 cpu0] {SPAWN}late pid=9\n");
+        let loader = format!("{LOADER_FIRST_LINE}\n");
+        let tail = format!(
+            "| {LOG_TAIL}[kernel 23.340 cpu1] {REBOOTING}\n| {LOG_TAIL}[kernel 1.0 cpu0] {SPAWN}init pid=1\n"
+        );
+        assert_eq!(nothing_after_the_last_word(&format!("{word}{loader}{tail}")), Ok(()));
+        assert!(nothing_after_the_last_word(&format!("{word}{spawn}{loader}{tail}")).is_err());
+        assert_eq!(nothing_after_the_last_word(&format!("{word}{loader}{spawn}")), Ok(()));
+        assert_eq!(nothing_after_the_last_word(&spawn), Ok(()));
+    }
 
     /// The half-told boot: the kernel got all the way up and the log stops
     /// there, so the machine either never asked for the reset or `logd` never

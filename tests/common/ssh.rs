@@ -119,9 +119,15 @@ pub fn ssh_pipe(host: &str, port: u16, identity: &Identity, command: &str, stdin
 
 /// Ask for `command` and answer the guest's reply to the request, without
 /// waiting for the program: `reboot`, whose status no client can collect.
+/// A refused request, or a program that came back, is an error by name: the
+/// command did not end the machine.
 pub fn ssh_fire(host: &str, port: u16, identity: &Identity, command: &str) -> Result<String, String> {
     let said = client(&["fire", host, &port.to_string(), str(&identity.private), command])?;
-    Ok(said.lines().last().unwrap_or("").to_string())
+    let said = said.lines().last().unwrap_or("").to_string();
+    match said.as_str() {
+        "accepted" | "closed" | "silent" => Ok(said),
+        _ => Err(format!("`{command}` over ssh answered {said:?}, so it did not end the machine")),
+    }
 }
 
 /// Run `command` with `stdin` on its input, after asking the guest to set an

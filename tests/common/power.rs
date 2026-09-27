@@ -172,8 +172,29 @@ pub fn quiesce_stops_the_machine(
     // thread, parked on init's answer; `test-runner`'s main and deadline
     // threads; and `logd`'s. `init` asked for the stop and is its caller.
     const OTHERS: u32 = 4;
-    let (whole, record) =
-        stopped_boot("tests/quiescecase/system.toml", JOB, &[LATE_WORD], rust_bins)?;
+    /// Mirrored in `kernel/src/syscall/machine.rs`, which queues it.
+    const QUEUED: &str = "console: a holder's line, queued once the stop had stopped every holder";
+    let (whole, record) = stopped_boot(
+        "tests/quiescecase/system.toml",
+        JOB,
+        &[LATE_WORD, "console-queue-at-the-stop"],
+        rust_bins,
+    )?;
+    // **A holder's line still queued at the stop is the stop's to put on the
+    // wire**, above the last word: `klogd` is kept off the queue from the
+    // stop's claim on, so without that drain the line is never written.
+    let lines: Vec<&str> = whole.lines().collect();
+    let queued = lines.iter().position(|l| l.contains(QUEUED));
+    let last = lines.iter().position(|l| l.contains(REBOOTING));
+    match (queued, last) {
+        (Some(queued), Some(last)) if queued < last => {}
+        _ => {
+            return Err(format!(
+                "the line queued at the stop is at {queued:?} and the last word at {last:?}: \
+                 a holder's line the stop left in the queue is lost at the reset\n{whole}"
+            ));
+        }
+    }
     if record.in_flight != 0 {
         return Err(format!(
             "the block layer still had {} operation(s) open on a thread this stop had stopped, so \
@@ -2657,7 +2678,7 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
              a controller's registers without settling the command a device was inside"
         ));
     }
-    nothing_after_the_last_word(after.text()).map_err(|why| format!("{path}: {why}"))?;
+    bootlog::nothing_after_the_last_word(after.text()).map_err(|why| format!("{path}: {why}"))?;
     ended_in_a_reset(&mut resets).map_err(|why| format!("{path}: {why}"))?;
 
     // And the machine comes back on the same device. The pass after the chain's
@@ -2668,35 +2689,6 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
     drop(qemu);
     eprintln!("  [power] {path}: {account:?}, and the stick enumerated again");
     Ok(())
-}
-
-/// **`Rebooting.` is the last record, and nothing this boot still holds may
-/// write one after it.**
-///
-/// The runner's deadline kills the job it is watching, which releases the `wait`
-/// its own job loop is inside, and that loop can spawn the next job into the
-/// window between the boot's last word and the reset.
-///
-/// A boot with no such word — a panic — is not asked: it correctly writes none.
-/// The window ends at the next loader pass, because everything that pass prints
-/// is after the reset by construction.
-///
-/// **A spawn record and not every record**, because those are the two different
-/// claims. `quiesce` writes after its own last word by construction — an idle
-/// CPU's `sched:` report can land there — and nothing is left running to take
-/// it anywhere but the console. A *spawn* is a process that was still on a run
-/// queue after the stop said it had stopped every one.
-fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
-    let Some(at) = text.rfind(REBOOTING) else { return Ok(()) };
-    let after = &text[at + REBOOTING.len()..];
-    let window = after.split(bootlog::LOADER_FIRST_LINE).next().unwrap_or(after);
-    match window.lines().find(|line| line.contains(bootlog::SPAWN)) {
-        None => Ok(()),
-        Some(line) => Err(format!(
-            "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
-             metal boot is judged on: {line:?}"
-        )),
-    }
 }
 
 /// The T14's judge for [`usb_reset_hands_devices_back`].
