@@ -1,0 +1,331 @@
+//! Loss recovery (tcp.md §18.12): NewReno on E, RFC 6675 on EF. LR-15's 64-range bound lives
+//! beside the scoreboard in `src/tx.rs`.
+
+mod common;
+
+use common::*;
+use toyos_net_tcp::Counter;
+
+/// B's duplicate ACK in E.
+fn dup() -> S {
+    seg(5001).ack(1001).wnd(65_535)
+}
+
+fn data_only(outs: &[O]) -> Vec<O> {
+    outs.iter().filter(|o| !o.payload.is_empty()).cloned().collect()
+}
+
+#[test]
+fn s_lr_001_newreno_one_loss() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    nothing(&h.input(20, dup()));
+    nothing(&h.input(21, dup()));
+    expect(&h.input(22, dup()), &["SEQ=1001 LEN=1460"]);
+    let info = h.info();
+    assert_eq!((info.ssthresh, info.cwnd), (10_220, 14_600));
+    assert_eq!(h.count(Counter::FastRecovery), 1);
+    for t in 23..29 {
+        nothing(&h.input(t, dup()));
+    }
+    assert_eq!(h.info().cwnd, 23_360);
+    nothing(&h.input(40, seg(5001).ack(15_601)));
+    let info = h.info();
+    assert_eq!(info.cwnd, 2920);
+    assert!(!info.in_recovery);
+    assert_eq!(info.rtx_timer, None);
+}
+
+/// LR-02's opening: 30,000 bytes written, Limited Transmit, then the fast retransmit.
+fn limited_transmit() -> H {
+    let mut h = fixture_e();
+    assert_eq!(h.send(0, 30_000).len(), 10);
+    expect(&h.input(20, dup()), &["SEQ=15601 LEN=1460"]);
+    expect(&h.input(21, dup()), &["SEQ=17061 LEN=1460"]);
+    expect(&h.input(22, dup()), &["SEQ=1001 LEN=1460"]);
+    let info = h.info();
+    assert_eq!((info.ssthresh, info.cwnd), (10_220, 14_600));
+    assert_eq!(h.count(Counter::LimitedTransmit), 2);
+    h
+}
+
+#[test]
+fn s_lr_002_limited_transmit_and_inflation() {
+    let mut h = limited_transmit();
+    nothing(&h.input(23, dup()));
+    nothing(&h.input(24, dup()));
+    expect(&h.input(25, dup()), &["SEQ=18521"]);
+    assert_eq!(h.info().cwnd, 18_980);
+    expect(&h.input(26, dup()), &["SEQ=19981"]);
+    assert_eq!(h.info().cwnd, 20_440);
+}
+
+#[test]
+fn s_lr_003_newreno_partial_ack() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    for t in 20..22 {
+        h.input(t, dup());
+    }
+    expect(&h.input(22, dup()), &["SEQ=1001"]);
+    for t in 23..28 {
+        h.input(t, dup());
+    }
+    assert_eq!(h.info().cwnd, 21_900);
+    expect(&h.input(40, seg(5001).ack(3921)), &["SEQ=3921 LEN=1460"]);
+    let info = h.info();
+    assert_eq!(info.cwnd, 20_440);
+    assert_eq!(info.rtx_timer, Some(h.instant(40 + info.rto.as_millis() as i64)));
+    h.input(50, seg(5001).ack(15_601));
+    assert_eq!(h.info().cwnd, 2920);
+}
+
+#[test]
+fn s_lr_004_full_ack_after_limited_transmit() {
+    let mut h = limited_transmit();
+    for t in 23..27 {
+        h.input(t, dup());
+    }
+    assert_eq!(h.info().snd_nxt.get(), 21_441);
+    h.input(40, seg(5001).ack(15_601));
+    assert_eq!(h.info().cwnd, 7300);
+}
+
+#[test]
+fn s_lr_005_what_is_not_a_duplicate() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    h.input(20, seg(5001).ack(1001).len(10));
+    h.input(21, seg(5011).ack(1001).wnd(60_000));
+    h.input(22, seg(5011).ack(1001).wnd(65_535));
+    nothing(&data_only(&h.input(23, seg(5011).ack(1001))));
+    nothing(&data_only(&h.input(24, seg(5011).ack(1001))));
+    expect(&data_only(&h.input(25, seg(5011).ack(1001))), &["SEQ=1001"]);
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    h.input(20, dup());
+    h.input(21, dup());
+    nothing(&data_only(&h.input(22, dup().fin())));
+    assert_eq!(h.count(Counter::FastRecovery), 0);
+}
+
+#[test]
+fn s_lr_006_no_fast_retransmit_after_a_timeout() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    expect(&h.at(200), &["SEQ=1001"]);
+    for t in 201..204 {
+        nothing(&h.input(t, dup()));
+    }
+    assert_eq!(h.count(Counter::FastRecovery), 0);
+}
+
+#[test]
+fn s_lr_007_inflation_is_capped() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    for t in 20..50 {
+        h.input(t, dup());
+    }
+    assert_eq!(h.info().cwnd, 14_600 + 10 * 1460);
+}
+
+/// EF with 1001 lost: SACKs for 2449 onward, one segment per ACK.
+fn sack_dup(h: &mut H, t: i64, blocks: &[(u32, u32)]) -> Vec<O> {
+    h.input_full(t, seg(5001).ack(1001).sack(blocks))
+}
+
+fn sack_recovery() -> H {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    nothing(&sack_dup(&mut h, 20, &[(2449, 3897)]));
+    nothing(&sack_dup(&mut h, 21, &[(2449, 5345)]));
+    expect(&sack_dup(&mut h, 22, &[(2449, 6793)]), &["SEQ=1001 LEN=1448"]);
+    let info = h.info();
+    assert_eq!((info.ssthresh, info.cwnd), (10_136, 10_136));
+    assert!(info.in_recovery);
+    assert_eq!(h.count(Counter::SackRecovery), 1);
+    h
+}
+
+#[test]
+fn s_lr_008_sack_recovery() {
+    let mut h = sack_recovery();
+    for (t, end) in [(23, 8241), (24, 9689), (25, 11_137), (26, 12_585), (27, 14_033), (28, 15_481)] {
+        nothing(&sack_dup(&mut h, t, &[(2449, end)]));
+    }
+    h.input_full(40, seg(5001).ack(15_481));
+    let info = h.info();
+    assert!(!info.in_recovery);
+    assert_eq!(info.cwnd, 10_136);
+}
+
+#[test]
+fn s_lr_009_is_lost_on_the_first_ack() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&sack_dup(&mut h, 20, &[(2449, 6793)]), &["SEQ=1001"]);
+}
+
+/// Two holes: 5345 goes out as soon as NextSeg names it. RFC 6675 §4's rule 3 names a hole below
+/// the highest SACKed byte even before IsLost holds for it, so that happens on the fourth ACK;
+/// the `mutate-sack-ignored` control reds this.
+#[test]
+fn s_lr_010_a_second_hole() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    nothing(&sack_dup(&mut h, 20, &[(2449, 3897)]));
+    nothing(&sack_dup(&mut h, 21, &[(2449, 5345)]));
+    expect(&sack_dup(&mut h, 22, &[(6793, 8241), (2449, 5345)]), &["SEQ=1001"]);
+    expect(&sack_dup(&mut h, 23, &[(6793, 9689), (2449, 5345)]), &["SEQ=5345 LEN=1448"]);
+    nothing(&sack_dup(&mut h, 24, &[(6793, 11_137), (2449, 5345)]));
+    assert_eq!(h.log.iter().filter(|o| o.seq == 5345 && !o.payload.is_empty()).count(), 2, "sent once, resent once");
+}
+
+/// LR-08 with 30,000 queued. The first two duplicates already sent new data by Limited Transmit
+/// (LR-22), which ssthresh excludes; once SACKs bring pipe a segment below cwnd, each frees one
+/// new segment, in order.
+#[test]
+fn s_lr_011_new_data_during_sack_recovery() {
+    let mut h = fixture_ef();
+    assert_eq!(h.send(0, 30_000).len(), 10);
+    expect(&sack_dup(&mut h, 20, &[(2449, 3897)]), &["SEQ=15481"]);
+    expect(&sack_dup(&mut h, 21, &[(2449, 5345)]), &["SEQ=16929"]);
+    expect(&sack_dup(&mut h, 22, &[(2449, 6793)]), &["SEQ=1001"]);
+    assert_eq!(h.info().ssthresh, 10_136);
+    let mut next = h.info().snd_nxt.get();
+    let mut sent = 0;
+    for (t, end) in [(23, 8241), (24, 9689), (25, 11_137), (26, 12_585), (27, 14_033), (28, 15_481)] {
+        let outs = sack_dup(&mut h, t, &[(2449, end)]);
+        assert!(outs.len() <= 1, "{outs:?}");
+        for o in outs {
+            check(&o, &format!("SEQ={next} LEN=1448"));
+            next += 1448;
+            sent += 1;
+        }
+    }
+    assert_eq!(sent, 4);
+}
+
+#[test]
+fn s_lr_012_rescue_retransmission() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    sack_dup(&mut h, 20, &[(2449, 3897)]);
+    sack_dup(&mut h, 21, &[(2449, 5345)]);
+    expect(&sack_dup(&mut h, 22, &[(2449, 6793)]), &["SEQ=1001"]);
+    for (t, end) in [(23, 8241), (24, 9689), (25, 11_137), (26, 12_585), (27, 14_033)] {
+        nothing(&sack_dup(&mut h, t, &[(2449, end)]));
+    }
+    expect(&h.input_full(30, seg(5001).ack(14_033)), &["SEQ=14033 LEN=1448"]);
+    nothing(&h.input_full(31, seg(5001).ack(14_033)));
+}
+
+#[test]
+fn s_lr_013_the_recovery_point() {
+    let mut h = sack_recovery();
+    h.input_full(30, seg(5001).ack(6793));
+    assert!(h.info().in_recovery);
+    h.input_full(31, seg(5001).ack(15_481));
+    assert!(!h.info().in_recovery);
+}
+
+#[test]
+fn s_lr_014_invalid_blocks_and_dsack() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    sack_dup(&mut h, 20, &[(15_481, 16_929), (2449, 2449)]);
+    assert_eq!(h.count(Counter::SackBlockInvalid), 2);
+    assert_eq!(h.info().sacked_ranges, 0);
+    sack_dup(&mut h, 21, &[(1, 1001)]);
+    assert_eq!(h.count(Counter::DsackRcvd), 1);
+    assert_eq!(h.info().sacked_ranges, 0);
+    sack_dup(&mut h, 22, &[(2449, 3897)]);
+    assert_eq!(h.info().sacked_ranges, 1);
+    assert!(!h.info().in_recovery, "one duplicate, not three");
+}
+
+#[test]
+fn s_lr_016_timeout() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    expect(&h.at(200), &["SEQ=1001 LEN=1460"]);
+    let info = h.info();
+    assert_eq!((info.ssthresh, info.cwnd, info.rto), (10_220, 1460, ms(400)));
+    expect(&h.input(210, seg(5001).ack(2461)), &["SEQ=2461 LEN=1460", "SEQ=3921 LEN=1460"]);
+    assert_eq!(h.info().cwnd, 2920);
+}
+
+#[test]
+fn s_lr_017_a_second_timeout() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    h.at(200);
+    expect(&h.at(600), &["SEQ=1001 LEN=1460"]);
+    let info = h.info();
+    assert_eq!((info.ssthresh, info.cwnd, info.rto), (10_220, 1460, ms(800)));
+}
+
+#[test]
+fn s_lr_018_no_sack_recovery_before_the_timeout_point() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    h.at(200);
+    for (t, end) in [(210, 3897), (211, 5345), (212, 6793)] {
+        sack_dup(&mut h, t, &[(2449, end)]);
+    }
+    assert!(!h.info().in_recovery);
+    assert_eq!(h.count(Counter::SackRecovery), 0);
+}
+
+#[test]
+fn s_lr_019_sacks_after_a_timeout_skip_held_ranges() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(200), &["SEQ=1001"]);
+    let outs = h.input_full(210, seg(5001).ack(2449).sack(&[(1001, 2449), (3897, 15_481)]));
+    expect(&outs, &["SEQ=2449 LEN=1448"]);
+    assert_eq!(h.info().cwnd, 2896);
+    assert_eq!(h.count(Counter::DsackRcvd), 1);
+}
+
+#[test]
+fn s_lr_020_sacked_bytes_stay_queued() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    sack_dup(&mut h, 20, &[(2449, 6793)]);
+    assert_eq!(h.info().queued, 14_480);
+    h.input_full(30, seg(5001).ack(2449).sack(&[(2449, 6793)]));
+    assert_eq!(h.info().queued, 14_480 - 1448);
+    h.input_full(31, seg(5001).ack(6793));
+    assert_eq!(h.info().queued, 14_480 - 5792);
+}
+
+#[test]
+fn s_lr_021_pure_duplicates_without_blocks() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    for t in 20..23 {
+        nothing(&h.input_full(t, seg(5001).ack(1001)));
+    }
+    assert!(!h.info().in_recovery);
+    expect(&h.at(200), &["SEQ=1001"]);
+}
+
+#[test]
+fn s_lr_022_limited_transmit_by_pipe() {
+    let mut h = fixture_ef();
+    assert_eq!(h.send(0, 30_000).len(), 10);
+    expect(&sack_dup(&mut h, 20, &[(2449, 3897)]), &["SEQ=15481 LEN=1448"]);
+}
+
+#[test]
+fn s_lr_023_a_lost_fast_retransmission() {
+    let mut h = limited_transmit();
+    let flight = h.info().snd_nxt.get() - h.info().snd_una.get();
+    let rto = h.info().rto.as_millis() as i64;
+    expect(&h.at(22 + rto), &["SEQ=1001"]);
+    let info = h.info();
+    assert_eq!(info.ssthresh, flight * 7 / 10);
+    assert_eq!(info.cwnd, 1460);
+}

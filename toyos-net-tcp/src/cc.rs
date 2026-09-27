@@ -202,6 +202,57 @@ mod tests {
     }
 
     #[test]
+    fn s_cc_007_slow_start_stops_at_ssthresh() {
+        let mut cc = Cc::new(1460, 0);
+        cc.cwnd = 13_140;
+        cc.ssthresh = 14_000;
+        cc.limited = true;
+        cc.on_ack(at(0), 2920, None);
+        assert_eq!(cc.cwnd, 14_000);
+        assert!(cc.epoch.is_none());
+        cc.limited = true;
+        cc.on_ack(at(10), 1460, None);
+        assert!(cc.epoch.is_some(), "the next ACK is avoidance");
+    }
+
+    #[test]
+    fn s_cc_008_the_epoch_after_a_timeout() {
+        let mut cc = Cc::new(1460, 0);
+        cc.on_timeout(14_600, false);
+        assert_eq!((cc.ssthresh, cc.cwnd), (10_220, 1460));
+        let mut t = 0;
+        while cc.cwnd < cc.ssthresh {
+            t += 1;
+            cc.limited = true;
+            cc.on_ack(at(t), 1460, None);
+        }
+        assert_eq!(cc.cwnd, 10_220);
+        cc.limited = true;
+        cc.on_ack(at(t + 1), 1460, None);
+        let epoch = cc.epoch.unwrap();
+        assert_eq!((epoch.k_us, epoch.w_max), (0, 10_220));
+    }
+
+    #[test]
+    fn s_cc_010_congestion_events() {
+        let mut cc = Cc::new(1460, 0);
+        cc.cwnd = 146_000;
+        cc.on_loss(146_000);
+        assert_eq!((cc.ssthresh, cc.w_max, cc.prior), (102_200, Some(146_000), Some(146_000)));
+        cc.cwnd = 130_000;
+        cc.on_loss(130_000);
+        assert_eq!(cc.w_max, Some(110_500), "fast convergence");
+    }
+
+    #[test]
+    fn s_cc_014_flight_not_cwnd_at_a_timeout() {
+        let mut cc = Cc::new(1460, 0);
+        cc.cwnd = 29_200;
+        cc.on_timeout(14_600, false);
+        assert_eq!((cc.ssthresh, cc.cwnd), (10_220, 1460));
+    }
+
+    #[test]
     fn s_cc_009_cubic_values() {
         let mut cc = avoidance(102_200, 146_000);
         cc.prior = Some(146_000);

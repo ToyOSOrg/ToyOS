@@ -138,7 +138,6 @@ impl Tx {
             }
             newly |= self.insert(left, right);
         }
-        self.sacked.truncate(SACK_RANGES);
         newly
     }
 
@@ -154,6 +153,7 @@ impl Tx {
         let newly = covered < right.since(left);
         let range = merged.iter().fold((left, right), |(a, b), &(start, end)| (a.earlier(start), b.later(end)));
         self.sacked.splice(lo..hi, [range]);
+        self.sacked.truncate(SACK_RANGES);
         newly
     }
 
@@ -200,5 +200,27 @@ impl Tx {
     /// The first SACKed range above `seq`.
     pub fn next_sacked(&self, seq: Seq) -> Option<Seq> {
         self.sacked.iter().map(|&(start, _)| start).find(|start| start.after(seq))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 200 segments outstanding, every other one SACKed: 100 ranges offered, the lowest 64 kept,
+    /// and the lowest hole still leads.
+    #[test]
+    fn s_lr_015_the_scoreboard_keeps_the_lowest_64() {
+        let smss = 1448u32;
+        let una = Seq::new(1001);
+        let mut tx = Tx::new(una, Ring::new(0), false);
+        tx.nxt = una.add(200 * smss);
+        for k in (1..200u32).step_by(2) {
+            tx.insert(una.add(k * smss), una.add((k + 1) * smss));
+        }
+        assert_eq!(tx.sacked().len(), 64);
+        assert_eq!(tx.sacked().first().map(|r| r.0), Some(una.add(smss)));
+        let first = tx.holes(smss).next().unwrap();
+        assert_eq!((first.start, first.end, first.lost), (una, una.add(smss), true));
     }
 }

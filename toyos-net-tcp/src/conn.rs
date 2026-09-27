@@ -367,6 +367,10 @@ impl Sync {
         }
     }
 
+    pub fn in_recovery(&self) -> bool {
+        self.recovery != Recovery::None
+    }
+
     /// Eff.snd.MSS (RFC 9293 §3.7.1): SMSS everywhere below.
     pub fn smss(&self) -> u32 {
         self.cc.smss
@@ -1155,8 +1159,8 @@ impl Sync {
         let in_flight = if self.sack_ok && self.dupacks > 0 { self.tx.pipe(self.tx.una, smss) } else { self.tx.flight() };
         let cwnd = signed(self.cc.cwnd);
         let mut w_cc = cwnd.saturating_sub(signed(in_flight));
-        let limited_transmit = !self.sack_ok && self.lt_budget > 0 && self.recovery == Recovery::None;
-        if limited_transmit {
+        let limited_transmit = self.recovery == Recovery::None && if self.sack_ok { self.dupacks > 0 } else { self.lt_budget > 0 };
+        if limited_transmit && !self.sack_ok {
             w_cc = cwnd.saturating_add(signed(smss.saturating_mul(2))).saturating_sub(signed(in_flight));
         }
         let d = signed(unsent);
@@ -1184,8 +1188,10 @@ impl Sync {
             return None;
         }
         let len = u32::try_from(usable).unwrap_or(0);
-        if limited_transmit && signed(len) > cwnd.saturating_sub(signed(in_flight)) {
-            self.lt_budget = self.lt_budget.saturating_sub(1);
+        if limited_transmit && signed(len) > cwnd.saturating_sub(signed(self.tx.flight())) {
+            if !self.sack_ok {
+                self.lt_budget = self.lt_budget.saturating_sub(1);
+            }
             self.lt_bytes = self.lt_bytes.saturating_add(len);
             ctx.count(Counter::LimitedTransmit);
         }

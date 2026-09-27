@@ -464,6 +464,10 @@ impl H {
         Instant::from_nanos(self.base + (BASE_MS as i64 + t) as u64 * 1_000_000)
     }
 
+    pub fn spec_t(&self, at: Instant) -> i64 {
+        self.spec_time(at)
+    }
+
     fn spec_time(&self, now: Instant) -> i64 {
         ((now.nanos() - self.base) / 1_000_000) as i64 - BASE_MS as i64
     }

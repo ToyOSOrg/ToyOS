@@ -82,3 +82,55 @@ impl Rtt {
         self.rto = rto;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn s_rt_001_first_sample() {
+        let mut rtt = Rtt::new();
+        assert_eq!(rtt.rto(), ms(1000));
+        rtt.sample(ms(100), 1);
+        assert_eq!(rtt.estimate, Some(Estimate { srtt_us: 100_000, rttvar_us: 50_000 }));
+        assert_eq!(rtt.rto(), ms(300));
+    }
+
+    #[test]
+    fn s_rt_002_later_sample() {
+        let mut rtt = Rtt::new();
+        rtt.sample(ms(100), 1);
+        rtt.sample(ms(120), 1);
+        assert_eq!(rtt.estimate, Some(Estimate { srtt_us: 102_500, rttvar_us: 42_500 }));
+        assert_eq!(rtt.rto(), Duration::from_micros(272_500));
+    }
+
+    #[test]
+    fn s_rt_003_the_200_ms_floor() {
+        let mut rtt = Rtt::new();
+        rtt.sample(ms(1), 1);
+        assert_eq!(rtt.estimate, Some(Estimate { srtt_us: 1_000, rttvar_us: 500 }));
+        assert_eq!(rtt.rto(), ms(200));
+    }
+
+    #[test]
+    fn s_rt_004_the_60_s_ceiling() {
+        let mut rtt = Rtt::new();
+        rtt.set_rto(ms(40_000));
+        rtt.back_off();
+        assert_eq!(rtt.rto(), ms(60_000));
+        rtt.back_off();
+        assert_eq!(rtt.rto(), ms(60_000));
+    }
+
+    #[test]
+    fn s_rt_012_appendix_g_weights() {
+        let mut rtt = Rtt { estimate: Some(Estimate { srtt_us: 100_000, rttvar_us: 50_000 }), rto: ms(300), expiries: 0 };
+        rtt.sample(ms(200), 5);
+        assert_eq!(rtt.estimate, Some(Estimate { srtt_us: 102_500, rttvar_us: 52_500 }));
+    }
+}
