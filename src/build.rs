@@ -245,10 +245,15 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
                 crate_dir.display(),
             );
             eprintln!("external deps changed: cleaning {}", crate_dir.display());
-            let _ = Command::new("cargo")
+            // The host's cargo reads the crate's workspace manifest, which for
+            // `userland/` declares a cargo feature it refuses otherwise.
+            let status = Command::new("cargo")
                 .arg("clean")
+                .envs(crate::userlandhost::CARGO_ENV)
                 .current_dir(crate_dir)
-                .status();
+                .status()
+                .unwrap_or_else(|e| panic!("cargo clean in {}: {e}", crate_dir.display()));
+            assert!(status.success(), "cargo clean in {} exited {status}", crate_dir.display());
         }
         Clean::ToyosOnly => {
             for arch in Arch::ALL {

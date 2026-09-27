@@ -81,6 +81,9 @@ declare_flags!(pub CARGO_RUN = {
     pub REGEN_SOUNDFONT = "--regen-soundfont", Next;
     pub WORKTREE = "--worktree", Rest;
     pub CHECK_FORKS = "--check-forks", None;
+    /// Replace `fuchsia/upstream` with that Fuchsia commit's files and pin them
+    /// (`src/fuchsia.rs`). Asks the network.
+    pub SYNC_FUCHSIA = "--sync-fuchsia", Next;
     /// Mint the owner's image-signing key where `signing::owner_key_path`
     /// says, refusing to replace one.
     pub SIGNING_KEY_NEW = "--signing-key-new", None;

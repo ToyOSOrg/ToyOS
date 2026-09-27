@@ -25,6 +25,18 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+/// What a stable cargo reading `userland/Cargo.toml` needs in its environment.
+///
+/// **The workspace gives the Netstack3 mirror's crates, and no other, their own
+/// compiler flags** (`profile-rustflags`, in `userland/Cargo.toml`): lints
+/// capped, `never_type` for the crates that name `!`, and Polonius for
+/// `netstack3-device`. Stable cargo refuses that cargo feature and stable rustc
+/// refuses the two `-Z` flags unless this is set. The guest build's cargo and
+/// rustc are the fork's, which need nothing, so this rides on the processes a
+/// stable toolchain runs over the workspace alone: the host job's userland
+/// tests here, the licence gate's metadata, and the build's `cargo clean`.
+pub const CARGO_ENV: [(&str, &str); 1] = [("RUSTC_BOOTSTRAP", "1")];
+
 /// What [`survey`] found under one `userland/` directory.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Survey {

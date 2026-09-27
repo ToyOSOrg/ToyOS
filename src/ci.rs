@@ -169,8 +169,14 @@ fn summary(text: &str) {
 
 /// `cargo <args>` in `dir`, its output passed straight through.
 fn cargo(dir: &Path, args: &[&str]) -> Result<String, String> {
+    cargo_with(dir, args, &[])
+}
+
+/// [`cargo`], with `env` added to its environment.
+fn cargo_with(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
     let status = Command::new("cargo")
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(dir)
         .status()
         .map_err(|e| format!("cargo: {e}"))?;
@@ -491,7 +497,11 @@ fn host(root: &Path) -> Vec<Step> {
             for name in survey.gated {
                 let manifest = format!("userland/{name}/Cargo.toml");
                 steps.push(step(&format!("userland/{name}"), || {
-                    cargo(root, &["test", "--manifest-path", &manifest, "--target", &host_triple])
+                    cargo_with(
+                        root,
+                        &["test", "--manifest-path", &manifest, "--target", &host_triple],
+                        &crate::userlandhost::CARGO_ENV,
+                    )
                 }));
             }
         }

@@ -67,7 +67,9 @@
 //! architecture is chosen in one place and reached only through the arch
 //! interface. A declared exception is a file row that points at the issue
 //! holding what it owes, and one that no longer holds a needle is refused.
-//! The rust fork's std is `src/forkcheck.rs`'s to govern and is not read here.
+//! The rust fork's std is `src/forkcheck.rs`'s to govern and is not read here,
+//! and no architecture rule reads the Netstack3 mirror, which `src/fuchsia.rs`
+//! holds to upstream's bytes.
 //!
 //! **What none of them reaches is filed rather than implied**, and each table's
 //! own doc names its half: the entries under `issues/build/` say so.
@@ -1525,6 +1527,15 @@ const ARCH_RULES: &[PlaceRule] = &[
     },
 ];
 
+/// Google's files byte for byte, which no architecture rule reads: a spelling
+/// there is upstream's to change, and `src/fuchsia.rs` refuses any edit that
+/// would change it here. Our packaging beside it, `fuchsia/crates/`, is ours and
+/// stays in every rule's scope.
+#[cfg(test)]
+fn in_third_party_mirror(at: &str) -> bool {
+    at.strip_prefix(crate::fuchsia::MIRROR).is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Every `file:line` in `files` that breaks `rule`, as the red names it.
 #[cfg(test)]
 fn place_violations(rule: &PlaceRule, files: &[(String, String)]) -> Vec<String> {
@@ -1533,7 +1544,7 @@ fn place_violations(rule: &PlaceRule, files: &[(String, String)]) -> Vec<String>
     let placed = |at: &str| rule.places.iter().any(|(place, _)| at.starts_with(place));
     let mut found = Vec::new();
     for (at, text) in files {
-        if !in_scope(at) || placed(at) {
+        if !in_scope(at) || placed(at) || in_third_party_mirror(at) {
             continue;
         }
         let arch_lines = if rule.arch_module { arch_module_lines(text) } else { Vec::new() };
@@ -1689,6 +1700,21 @@ mod tests {
             file("toyos/src/lib.rs", "use core::{fmt::{self, arch}, ptr};\nlet s = \"core::arch\";\nuse mycore::arch;\n"),
         ];
         assert_eq!(place_violations(asm, &placed), Vec::<String>::new());
+    }
+
+    /// The mirror alone is exempt: the same spellings in our packaging beside
+    /// it, or in a directory that merely begins with its name, are red.
+    #[test]
+    fn the_third_party_mirror_is_read_by_no_architecture_rule() {
+        let text = "use core::arch as isa;\n#[cfg(target_arch = \"x86_64\")]\nuse core::*;\n";
+        let at = format!("{}/src/connectivity/lib/x/src/lib.rs", crate::fuchsia::MIRROR);
+        for rule in ARCH_RULES {
+            assert_eq!(place_violations(rule, &[file(&at, text)]), Vec::<String>::new(), "{}", rule.name);
+        }
+        for ours in ["fuchsia/crates/fidl_fuchsia_net_common/src/lib.rs", "fuchsia/upstream2/src/lib.rs"] {
+            let asm = rule("assembly lives in an architecture's own module");
+            assert!(!place_violations(asm, &[file(ours, text)]).is_empty(), "{ours} was exempted");
+        }
     }
 
     #[test]

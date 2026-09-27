@@ -20,6 +20,11 @@ a piece's first byte is handled two wrong ways, and neither is refused:
 
 Both are silent: the output links and runs wrong.
 
+**Where it still reaches** (#532): everything that boots links with rust-lld,
+and toyos-ld is frozen. It stays a guest binary only because the in-guest
+toyos-cc links through it until LLD runs on ToyOS, so what this defect can
+mislink now is whatever that compiler links in the guest.
+
 **Seen**: netd built on `wt/toyos-netstack3`, `dhcp::frame` writing an
 EtherType with `f.extend_from_slice(&[0x08, 0x00])`. rustc emits the two-byte
 array as a C string (`"\x08\0"`, in `.rodata.str1.1`) and folds the slice's end
