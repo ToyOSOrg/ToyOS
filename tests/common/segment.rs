@@ -28,14 +28,17 @@ pub struct Tap {
 }
 
 impl Tap {
-    /// Two socket paths of this boot's own, in this thread's scratch directory.
+    /// Two socket paths of this boot's own. **Not the lane directory**: a
+    /// macOS `$TMPDIR` plus this project's own lane path can already leave
+    /// nothing of Darwin's 104-byte `sockaddr_un.sun_path` for a filename
+    /// (`toyos_build::socketpath`), so these sit under `/tmp` directly, named
+    /// for this process and unique per tap.
     pub fn in_lane() -> Self {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = super::lane::dir();
         let tap = Self {
-            into_guest: dir.join(format!("tap-in-{n}.sock")),
-            from_guest: dir.join(format!("tap-out-{n}.sock")),
+            into_guest: toyos_build::socketpath::short("tap-in", n),
+            from_guest: toyos_build::socketpath::short("tap-out", n),
         };
         let _ = std::fs::remove_file(&tap.into_guest);
         let _ = std::fs::remove_file(&tap.from_guest);
@@ -67,6 +70,10 @@ impl Tap {
         };
         let into = connect(&self.into_guest)?;
         let mut from = connect(&self.from_guest)?;
+        // Both ends are open, and nothing else will ever connect to these
+        // names: `/tmp` is not this run's lane, so nothing else sweeps them.
+        let _ = std::fs::remove_file(&self.into_guest);
+        let _ = std::fs::remove_file(&self.from_guest);
         let (tx, frames) = mpsc::channel();
         std::thread::spawn(move || {
             let mut len = [0u8; 4];
