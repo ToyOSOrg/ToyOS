@@ -2647,8 +2647,7 @@ pub struct QemuInstance {
     uart_log: PathBuf,
     nvme: NvmeClaim,
     usb_images: Vec<PathBuf>,
-    qmp_socket: Option<Socket>,
-    segment: Option<super::segment::Tap>,
+    sockets: Sockets,
     screendump: PathBuf,
     /// The image this boot built for itself, which is the only one it may
     /// delete: a [`BootOptions::boot_image`] belongs to the test that staged it
@@ -3157,8 +3156,10 @@ impl QemuInstance {
         let audio_wav = test_dir.join(format!("audio-{seq}.wav"));
         let _ = fs::remove_file(&audio_wav);
 
-        let qmp_socket = options.qmp.then(|| socketpath::short("qmp", seq));
-        let segment = options.segment.then(|| super::segment::Tap::of_boot(seq));
+        let sockets = Sockets {
+            qmp: options.qmp.then(|| socketpath::short("qmp", seq)),
+            segment: options.segment.then(|| super::segment::Tap::of_boot(seq)),
+        };
         let screendump = test_dir.join(format!("screen-{seq}.ppm"));
 
         // Per-instance, not a fixed /tmp path: the audio gate boots dozens of
@@ -3174,8 +3175,7 @@ impl QemuInstance {
             &usb_images,
             &audio_wav,
             &uart_log,
-            qmp_socket.as_ref().map(Socket::path),
-            segment.as_ref(),
+            &sockets,
             &options,
         );
         spawn_and_wait_ready(
@@ -3187,8 +3187,7 @@ impl QemuInstance {
                 uart_log,
                 nvme,
                 usb_images,
-                qmp_socket,
-                segment,
+                sockets,
                 screendump,
                 own_boot_image,
                 carried,
@@ -3206,9 +3205,9 @@ impl QemuInstance {
     /// a report the guest wrote about itself.
     pub fn guest_memory(&mut self, phys: u64, bytes: usize) -> Result<Vec<u8>, String> {
         let socket = self
-            .qmp_socket
-            .as_ref()
-            .map(|s| s.path().to_path_buf())
+            .sockets
+            .qmp()
+            .map(Path::to_path_buf)
             .expect("guest_memory needs BootOptions { qmp: true }");
         // Beside the screendump, which is this instance's own scratch path.
         let out = self.screendump.with_extension(format!("mem-{phys:#x}"));
@@ -3237,9 +3236,9 @@ impl QemuInstance {
     /// own reply.
     pub fn screendump(&mut self) -> super::screen::Ppm {
         let socket = self
-            .qmp_socket
-            .as_ref()
-            .map(|s| s.path().to_path_buf())
+            .sockets
+            .qmp()
+            .map(Path::to_path_buf)
             .expect("screendump needs BootOptions { qmp: true }");
         let out = self.screendump.clone();
         let _ = fs::remove_file(&out);
@@ -3555,12 +3554,12 @@ impl QemuInstance {
     /// The QMP socket this instance opened. Injection needs it, and it needs
     /// `BootOptions { qmp: true }`.
     pub fn qmp_socket(&self) -> &Path {
-        self.qmp_socket.as_ref().map(Socket::path).expect("qmp_socket needs BootOptions { qmp: true }")
+        self.sockets.qmp().expect("qmp_socket needs BootOptions { qmp: true }")
     }
 
     /// Stand on this guest's segment; it needs `BootOptions { segment: true }`.
     pub fn segment(&self) -> Result<super::segment::Segment, String> {
-        self.segment.as_ref().expect("segment needs BootOptions { segment: true }").open()
+        self.sockets.segment.as_ref().expect("segment needs BootOptions { segment: true }").open()
     }
 
     /// [`budget`] for a host-side wait on *this* guest, widened by the guest's
@@ -3621,7 +3620,7 @@ impl QemuInstance {
         self.stdin.flush().expect("Failed to flush QEMU stdin");
 
         let mut fire =
-            |line: &str, socket: Option<&Socket>| step(socket.map(Socket::path), line);
+            |line: &str, socket: Option<&Path>| step(socket, line);
 
         // `run <name> [args...]`, and the markers carry only the binary name.
         let want = name.split_whitespace().next().unwrap_or(name);
@@ -3691,7 +3690,7 @@ impl QemuInstance {
                 Ok(line) => {
                     last_line = Instant::now();
                     lines += 1;
-                    fire(&line, self.qmp_socket.as_ref());
+                    fire(&line, self.sockets.qmp());
                     if dying.is_none()
                         && super::serial::died(&line) == Some(super::serial::Died::Kernel)
                     {
@@ -3834,7 +3833,7 @@ impl Drop for QemuInstance {
         if let Some(image) = &self.own_boot_image {
             let _ = fs::remove_file(image);
         }
-        // The QMP and tap sockets' names go with their fields, after QEMU is reaped.
+        // `sockets` goes with the fields, after QEMU is reaped.
         LIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -4341,8 +4340,8 @@ pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
     let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
     // A sequence no boot reaches, so no live boot's names are touched.
-    let segment = options.segment.then(|| super::segment::Tap::of_boot(u32::MAX));
-    qemu_command(p, p, &usb, p, p, None, segment.as_ref(), options)
+    let sockets = Sockets { qmp: None, segment: options.segment.then(|| super::segment::Tap::of_boot(u32::MAX)) };
+    qemu_command(p, p, &usb, p, p, &sockets, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -4368,8 +4367,7 @@ fn qemu_command(
     usb_images: &[PathBuf],
     audio_wav: &Path,
     uart_log: &Path,
-    qmp_socket: Option<&Path>,
-    segment: Option<&super::segment::Tap>,
+    sockets: &Sockets,
     options: &BootOptions,
 ) -> Command {
     let shape = options.profile.shape();
@@ -4749,7 +4747,7 @@ fn qemu_command(
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
     }
-    if let Some(tap) = segment {
+    if let Some(tap) = &sockets.segment {
         assert!(
             !matches!(shape.nic, Nic::Absent),
             "this profile carries no NIC, so there is no `net0` segment to stand on"
@@ -4803,12 +4801,25 @@ fn qemu_command(
     if options.gdb_stub {
         qemu.arg("-s");
     }
-    if let Some(socket) = qmp_socket {
+    if let Some(socket) = sockets.qmp() {
         qemu.arg("-qmp")
             .arg(format!("unix:{},server,nowait", socket.display()));
     }
 
     qemu
+}
+
+/// A boot's Unix sockets, named under `/tmp` by [`socketpath`] and removed when
+/// this is dropped.
+struct Sockets {
+    qmp: Option<Socket>,
+    segment: Option<super::segment::Tap>,
+}
+
+impl Sockets {
+    fn qmp(&self) -> Option<&Path> {
+        self.qmp.as_ref().map(Socket::path)
+    }
 }
 
 /// Every file one boot owns, so that adding another does not lengthen a
@@ -4819,8 +4830,7 @@ struct Files {
     uart_log: PathBuf,
     nvme: NvmeClaim,
     usb_images: Vec<PathBuf>,
-    qmp_socket: Option<Socket>,
-    segment: Option<super::segment::Tap>,
+    sockets: Sockets,
     screendump: PathBuf,
     own_boot_image: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
@@ -4894,8 +4904,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         uart_log,
         nvme,
         usb_images,
-        qmp_socket,
-        segment,
+        sockets,
         screendump,
         own_boot_image,
         carried,
@@ -4995,8 +5004,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         uart_log,
         nvme,
         usb_images,
-        qmp_socket,
-        segment,
+        sockets,
         screendump,
         own_boot_image,
         boot_log,
