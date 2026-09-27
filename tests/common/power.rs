@@ -910,19 +910,19 @@ fn resets_inside_the_bound(
 }
 
 /// `kernel_params` kills `klogd` on its first instruction, and the machine is
-/// what dies. The verdict is QEMU's reset, never the guest's word: `marker` is
-/// a line both a halting and a recovering kernel write, and a recovered `klogd`
-/// takes the console down with it.
+/// what dies. The verdict is QEMU's reset, never the guest's word: a recovered
+/// `klogd` takes the console down with it, so the boot stops at klogd's spawn
+/// line, the last one a halting and a recovering kernel both write.
 pub fn klogd_death_resets(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
     kernel_params: &'static [&'static str],
-    marker: &'static str,
     said: &[&str],
 ) -> Result<(), String> {
     // `panicked()`'s 16550-only guest: the reset's own line goes to the UART raw.
-    let options = BootOptions { kernel_params, ready_marker: marker, ..panicked() };
+    let options =
+        BootOptions { kernel_params, ready_marker: "kthread: klogd pid=", ..panicked() };
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
     let mut dead = serial::Serial::boot(&qemu);
     let (budget, tail) = resets_inside_the_bound(
