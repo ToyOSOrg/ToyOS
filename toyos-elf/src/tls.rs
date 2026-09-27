@@ -21,6 +21,7 @@
 //! an assertion in the kernel reached from a crafted `PT_TLS`.
 
 use crate::header::Machine;
+use crate::layout::TlsSegment;
 
 /// Which of the psABIs' two TLS layouts a machine uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,19 +149,17 @@ impl Static {
 }
 
 /// `S + A` inside one module's TLS segment, `0..=p_memsz`: made only by
-/// [`TlsOffset::of`].
+/// [`TlsOffset::of`] against a [`TlsSegment`] a parse derived.
 ///
 /// The end is inclusive for the reason [`crate::Extent::offset`]'s is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsOffset(u64);
 
 impl TlsOffset {
-    /// `value + addend`, when it lies inside a segment of `memsz` bytes.
-    /// Crate-private: a TLS offset is a symbol's, reached through
-    /// [`crate::Sym::tls_offset`], never a bound a caller hands in.
-    pub(crate) const fn of(value: u64, addend: i64, memsz: u64) -> Option<TlsOffset> {
+    /// `value + addend`, when it lies inside `segment`.
+    pub(crate) const fn of(value: u64, addend: i64, segment: TlsSegment) -> Option<TlsOffset> {
         match value.checked_add_signed(addend) {
-            Some(at) if at <= memsz => Some(TlsOffset(at)),
+            Some(at) if at <= segment.memsz() => Some(TlsOffset(at)),
             _ => None,
         }
     }

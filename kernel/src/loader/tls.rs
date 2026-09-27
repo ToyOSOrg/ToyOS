@@ -50,6 +50,9 @@ impl TlsBlock {
     pub fn publish(self, pt: &PageTables) -> Option<(MappedPages, u64, usize)> {
         let tp_offset = self.tp_offset;
         let pages = self.frames.publish(pt, crate::mm::paging::Prot::ReadWrite, |frames, at| {
+            if crate::actuator::tls_rebase_window() {
+                rebase_window::hold(frames, at);
+            }
             // SAFETY: `frames` is the block `build_combined` wrote, reachable
             // by no mapping until `publish` maps it after this returns.
             unsafe { rebase(frames, tp_offset, at) }
@@ -159,6 +162,66 @@ unsafe fn rebase(frames: &Unpublished, tp_offset: usize, at: UserAddr) {
     }
 }
 
+/// `tls-rebase-window`: a sibling's store staged between a block being given
+/// an address and its pointers being rebased to it. Only a spawn whose
+/// argument is [`MARK`](rebase_window::MARK) is watched, so the test program
+/// chooses the spawns it races.
+pub(crate) mod rebase_window {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::process::Unpublished;
+    use crate::time::Duration;
+    use crate::UserAddr;
+
+    /// The thread argument that asks for a watched spawn.
+    const MARK: u64 = 0x5eed_c0de_71b0_0001;
+    /// How long a reachable block waits for a sibling's store before it says
+    /// the test staged nothing.
+    const BOUND: Duration = Duration::from_secs(10);
+
+    /// The pid a watched spawn is in flight for, plus one; zero while none is.
+    static WATCHED: AtomicU64 = AtomicU64::new(0);
+
+    /// `spawn_thread` is about to publish a block for a thread given `arg`.
+    pub(crate) fn spawning(arg: u64) {
+        if arg == MARK {
+            WATCHED.store(crate::process::current_process().0 as u64 + 1, Ordering::SeqCst);
+        }
+    }
+
+    pub(super) fn hold(frames: &Unpublished, at: UserAddr) {
+        // `None` while the kernel spawns init, with no thread running.
+        let Some(pid) = crate::arch::percpu::current_pid() else { return };
+        let pid = pid.0 as u64 + 1;
+        if WATCHED.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return;
+        }
+        // SAFETY: DTV slot 0 is inside the DTV `build_combined` wrote at the front of `frames`.
+        let slot = unsafe { frames.ptr().add(super::DTV_HEADER_SIZE) }.cast::<u64>();
+        // SAFETY: as above; a volatile read, since a user store may land there.
+        let written = unsafe { slot.read_volatile() };
+        // `spawn_thread` publishes into the address space this CPU runs.
+        if !crate::mm::paging::present_in_current_tables(at.raw()) {
+            log!("tls-rebase-window: pid {} block at {:#x} is not reachable before its rebase", pid - 1, at.raw());
+            return;
+        }
+        let deadline = crate::clock::now() + BOUND;
+        // SAFETY: as above.
+        while unsafe { slot.read_volatile() } == written {
+            assert!(
+                crate::clock::now() < deadline,
+                "tls-rebase-window: pid {} block at {:#x} was reachable before its rebase and nothing stored into it in {BOUND}",
+                pid - 1,
+                at.raw()
+            );
+            // `IF` is clear in a syscall: a sibling's shootdown is answered here.
+            crate::arch::tlb::poll();
+            core::hint::spin_loop();
+        }
+        log!("tls-rebase-window: pid {} block at {:#x} was reachable before its rebase, and a store landed in it", pid - 1, at.raw());
+    }
+}
+
 /// One combined block for every startup module; `None` when they do not fit, since a missing module would mean relocations resolving against a block that is not there.
 /// The executable's module goes where its linker resolved its own accesses: next to the thread
 /// pointer, last in variant II and first in variant I.
@@ -182,12 +245,14 @@ pub fn build_tls_layout(
             Some((exe_tls_template.map(|buf| buf.slice(tls.template().len() as usize)), memsz, placed, align, 1))
         }
     };
-    let libs = loaded_libs
-        .iter()
-        .filter(|lib| lib.tls_memsz > 0)
-        .zip(2u64..)
-        .map(|(lib, id)| (lib.tls_template, lib.tls_memsz, lib.tls_memsz, lib.tls_align, id));
-    let next_module_id = 2 + loaded_libs.iter().filter(|lib| lib.tls_memsz > 0).count() as u64;
+    let with_tls = || {
+        loaded_libs.iter().filter_map(|lib| Some((lib.tls_template, lib.tls().filter(|t| t.memsz() > 0)?)))
+    };
+    let libs = with_tls().zip(2u64..).map(|((template, tls), id)| {
+        let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);
+        (template, memsz, memsz, align, id)
+    });
+    let next_module_id = 2 + with_tls().count() as u64;
     let order: alloc::vec::Vec<_> = match VARIANT {
         Variant::II => libs.chain(exe).collect(),
         Variant::I => exe.into_iter().chain(libs).collect(),

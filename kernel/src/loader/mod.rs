@@ -18,6 +18,7 @@ pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
 pub(crate) use start::alloc_kernel_stack;
 pub(crate) use crate::arch::entry::{kernel_start, process_start, thread_start};
 pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
+pub(crate) use tls::rebase_window;
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -39,7 +40,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_elf::section::SectionTable;
 use toyos_elf::sym::{self, SymTab};
 use toyos_elf::rela::{FillLattice, Rules, FILL_GRANULE};
-use toyos_elf::{GnuHash, Layout, RelocError, SymIndex, TlsRef};
+use toyos_elf::{GnuHash, Layout, RelocError, TlsRef};
 
 const USER_STACK_SIZE: usize = 4 * PAGE_2M as usize; // 8 MB
 
@@ -186,24 +187,12 @@ struct ExeTables {
     needed: Vec<u64>,
     dynstr: Vec<u8>,
     dynsym: Vec<u8>,
-    symtab_file_off: Option<u64>,
     relas: elf::ParsedRelaEntries,
 }
 
 impl ExeTables {
     fn symbols(&self) -> SymTab<'_> {
         SymTab::new(&self.dynsym, &self.dynstr)
-    }
-
-    /// One symbol read straight off the file.
-    ///
-    /// The index may exceed the `.dynsym` length the loader estimated, so the
-    /// record is fetched directly rather than the estimate trusted.
-    fn symbol(&self, backing: &dyn crate::file_backing::FileBacking, r_sym: SymIndex) -> Option<toyos_elf::Sym> {
-        let off = self
-            .symtab_file_off?
-            .checked_add((r_sym.get() as u64).checked_mul(sym::ENTRY_SIZE as u64)?)?;
-        sym::parse_at(&read_file_range(backing, off, sym::ENTRY_SIZE), 0)
     }
 }
 
@@ -287,7 +276,7 @@ fn read_exe_tables(
         window: (extent.min(), extent.max()),
         sym_count,
         fill: Some(FillLattice { base: extent.min(), granule: FILL_GRANULE }),
-        tls_memsz: layout.tls_memsz(),
+        tls: layout.tls(),
     };
     let relas = elf::parse_rela_entries(&rela_data, &jmprel_data, &rules).map_err(|refused| {
         log!("spawn: {}: {}", path, refused.as_str());
@@ -307,7 +296,7 @@ fn read_exe_tables(
         _ => Vec::new(),
     };
 
-    Ok(ExeTables { needed, dynstr, dynsym, symtab_file_off, relas })
+    Ok(ExeTables { needed, dynstr, dynsym, relas })
 }
 
 /// `.dynsym`'s entry count, from `.gnu.hash` if present, else the `DT_SYMTAB`–`DT_STRTAB` gap.
@@ -479,7 +468,7 @@ pub fn spawn(
             if r_sym.get() == 0 {
                 continue;
             }
-            let Some(sym) = exe.symbol(backing.as_ref(), r_sym) else {
+            let Some(sym) = exe.symbols().get(r_sym.get()) else {
                 continue;
             };
             let name = sym.name_in(&exe.dynstr);
@@ -549,8 +538,8 @@ pub fn spawn(
         return Err(SyscallError::ResourceExhausted.into());
     };
 
-    if let Err(refused) = apply_tls_relocs(&exe, backing.as_ref(), &layout, &loaded_libs.libs,
-        &tls_modules, tls, &mut reloc_index)
+    if let Err(refused) = apply_tls_relocs(&exe, &layout, &loaded_libs.libs, &tls_modules, tls,
+        &mut reloc_index)
     {
         log!("spawn: {}: {}", path, refused.as_str());
         return Err(SyscallError::InvalidArgument.into());
@@ -801,10 +790,8 @@ fn map_libs(
 ///
 /// Libraries' land directly; the executable's go into the relocation index
 /// because its pages do not exist yet.
-#[allow(clippy::too_many_arguments)]
 fn apply_tls_relocs(
     exe: &ExeTables,
-    backing: &dyn crate::file_backing::FileBacking,
     layout: &Layout,
     loaded_libs: &[elf::LoadedLib],
     tls_modules: &[elf::TlsModule],
@@ -829,8 +816,12 @@ fn apply_tls_relocs(
         .iter()
         .find(|m| m.module_id == 1)
         .map_or(0, |m| m.base_offset);
+    // `0` for a symbol no module defines.
     let exe_tpoff = |r: TlsRef| {
-        exe_tpoff(exe, backing, layout, r, exe_base_offset, tls, &tls_info)
+        match elf::resolve_tls_ref(r, exe_base_offset, layout.tls(), exe.symbols(), &tls_info)? {
+            Some((base_offset, at)) => tls.tpoff(base_offset, at).ok_or(RelocError::TpoffOverflows),
+            None => Ok(0),
+        }
     };
     for &(r_offset, r) in &exe.relas.tpoff64 {
         reloc_index.add_u64(r_offset, exe_tpoff(r)? as u64);
@@ -839,35 +830,6 @@ fn apply_tls_relocs(
         reloc_index.add_i32(r_offset, elf::tpoff32_value(exe_tpoff(r)?)?);
     }
     Ok(())
-}
-
-/// One of the executable's `TPOFF` relocations, resolved to a value: `0` for
-/// a symbol no module defines, a refusal for one the file does not hold or
-/// whose `S + A` leaves the defining module's segment. The executable's symbols
-/// are read off the file, but the resolution is `elf::reloc`'s, shared with a
-/// library's.
-#[allow(clippy::too_many_arguments)]
-fn exe_tpoff(
-    exe: &ExeTables,
-    backing: &dyn crate::file_backing::FileBacking,
-    layout: &Layout,
-    r: TlsRef,
-    exe_base_offset: usize,
-    tls: toyos_elf::tls::Static,
-    tls_info: &elf::TlsModuleInfo,
-) -> Result<i64, RelocError> {
-    let resolved = elf::resolve_tls_ref(
-        r,
-        exe_base_offset,
-        layout.tls_memsz(),
-        |i| exe.symbol(backing, i),
-        &exe.dynstr,
-        tls_info,
-    )?;
-    match resolved {
-        Some((base_offset, at)) => tls.tpoff(base_offset, at).ok_or(RelocError::TpoffOverflows),
-        None => Ok(0),
-    }
 }
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every

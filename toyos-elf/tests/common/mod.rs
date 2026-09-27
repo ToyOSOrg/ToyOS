@@ -197,6 +197,17 @@ pub fn extent(min: u64, max: u64) -> toyos_elf::Extent {
         .extent()
 }
 
+/// The `PT_TLS` `Layout::parse` derives for a `memsz`-byte segment: the only
+/// way a test names a [`toyos_elf::TlsSegment`], and so the only bound a
+/// [`toyos_elf::TlsOffset`] is had against.
+pub fn tls_segment(memsz: u64) -> toyos_elf::TlsSegment {
+    let bytes = Elf::honest(0x200).ph(Phdr::tls(0x100, 0, memsz, 8)).build();
+    toyos_elf::Layout::parse(&bytes, toyos_elf::Machine::X86_64)
+        .unwrap()
+        .tls()
+        .unwrap()
+}
+
 /// One `Elf64_Rela`, as bytes.
 pub fn rela(r_offset: u64, r_sym: u32, r_type: u32, r_addend: i64) -> [u8; 24] {
     let mut out = [0u8; 24];

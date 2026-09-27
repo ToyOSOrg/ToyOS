@@ -14,7 +14,7 @@
 //! no writer handles would be checked for a write that never happens.
 
 use crate::header::Machine;
-use crate::layout::{Extent, ImageOffset};
+use crate::layout::{Extent, ImageOffset, TlsSegment};
 use crate::read;
 use crate::sym::SymIndex;
 use crate::tls::TlsOffset;
@@ -152,9 +152,9 @@ pub struct Rules {
     /// `Some` for a chunked writer (the exe), which drops a write crossing a
     /// fill page and so has it refused; `None` for a contiguous one.
     pub fill: Option<FillLattice>,
-    /// The module's own `PT_TLS` `p_memsz`, which a TLS relocation with
-    /// `r_sym == 0` offsets into; `None` for a module with no TLS segment.
-    pub tls_memsz: Option<u64>,
+    /// The module's own `PT_TLS`, which a TLS relocation with `r_sym == 0`
+    /// offsets into; `None` for a module with none.
+    pub tls: Option<TlsSegment>,
 }
 
 /// A relocation whose destination lies in its window and whose value names
@@ -261,8 +261,8 @@ pub fn parse(rela: Rela, rules: &Rules) -> Result<Option<Reloc>, RelocError> {
             return Ok(TlsRef::Symbol(TlsSymRef { sym: sym()?, addend: rela.addend }));
         }
         rules
-            .tls_memsz
-            .and_then(|memsz| TlsOffset::of(0, rela.addend, memsz))
+            .tls
+            .and_then(|segment| TlsOffset::of(0, rela.addend, segment))
             .map(TlsRef::Own)
             .ok_or(RelocError::TlsOutsideSegment)
     };

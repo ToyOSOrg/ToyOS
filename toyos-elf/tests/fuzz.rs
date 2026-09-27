@@ -326,15 +326,16 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
     let sym_range = table(dynamic.symtab, MAX_SYMS * sym::ENTRY_SIZE as u64)?;
     let str_range = table(dynamic.strtab, 0x100)?;
     let symbols = SymTab::new(at(&case.bytes, sym_range), at(&case.bytes, str_range));
-    let tls_memsz = layout.tls_memsz();
-    symbols.bounded(extent, tls_memsz).map_err(|_| ())?;
+    let tls = layout.tls();
+    symbols.bounded(extent, tls).map_err(|_| ())?;
     for (_, s) in symbols.defined() {
         if let Some(off) = s.address(extent) {
             place(off.get());
             reached.symbols += 1;
         } else {
-            let off = s.tls_offset(0, tls_memsz.unwrap()).expect("a TLS symbol `bounded` accepted");
-            assert!(off.get() <= tls_memsz.unwrap());
+            let segment = tls.expect("a TLS symbol `bounded` accepted has a segment");
+            let off = s.tls_offset(0, segment).expect("a TLS symbol `bounded` accepted");
+            assert!(off.get() <= segment.memsz());
         }
     }
 
@@ -363,7 +364,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
         window,
         sym_count: symbols.count(),
         fill: (case.mode == Mode::Exe).then_some(FillLattice { base: extent.min(), granule: 4096 }),
-        tls_memsz,
+        tls,
     };
     let mut relocs = Vec::new();
     for raw in RelaTable::new(rela_bytes, case.machine).iter() {
@@ -375,7 +376,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
     // The thread's static block: this module alone, placed as the kernel's
     // `build_tls_layout` places an executable's.
     let variant = Variant::of(case.machine);
-    let (block, base_offset, memsz) = match layout.tls().filter(|t| t.memsz() > 0) {
+    let (block, base_offset, memsz) = match tls.filter(|t| t.memsz() > 0) {
         Some(t) => {
             let memsz = usize::try_from(t.memsz()).map_err(|_| ())?;
             let align = usize::try_from(t.align()).map_err(|_| ())?;
@@ -411,7 +412,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
             // another module's, which the kernel resolves by name and this
             // image has no other module to find it in.
             TlsRef::Symbol(s) => match symbols.get(s.sym().get()).filter(|d| d.is_defined()) {
-                Some(d) => d.tls_offset(s.addend(), memsz).map(Some).ok_or(()),
+                Some(d) => tls.and_then(|t| d.tls_offset(s.addend(), t)).map(Some).ok_or(()),
                 None => Ok(None),
             },
         }

@@ -28,7 +28,7 @@ use crate::UserAddr;
 use toyos_elf::dynamic::{Dynamic, InitArray};
 use toyos_elf::section::{SectionTable, SHT_DYNSYM};
 use toyos_elf::sym::{Sym, SymTab};
-use toyos_elf::{rela, Extent, GnuHash, ImageRange, Layout, Rela, RelaTable, Reloc, RelocError};
+use toyos_elf::{rela, Extent, GnuHash, ImageRange, Layout, Rela, RelaTable, Reloc, RelocError, TlsSegment};
 
 /// `toyos_elf::MAX_TLS_ALIGN` must equal the kernel's largest page.
 const _: () = assert!(toyos_elf::MAX_TLS_ALIGN == PAGE_2M);
@@ -93,8 +93,6 @@ pub struct LoadedLib {
     dynsym: Option<KernelSlice>,
     dynstr: Option<KernelSlice>,
     pub tls_template: Option<KernelSlice>,
-    pub tls_memsz: usize,
-    pub tls_align: usize,
     rela: Option<KernelSlice>,
     jmprel: Option<KernelSlice>,
     gnu_hash: Option<KernelSlice>,
@@ -237,16 +235,30 @@ impl LoadedLib {
         self.address_of(&symbols.get(idx)?)
     }
 
-    /// A defined `STT_TLS` symbol of this name, as this module holds it.
-    pub fn resolve_tls(&self, name: &str) -> Option<Sym> {
-        self.symbols().find_tls(name)
+    /// This module's `PT_TLS`, as `load_shared_lib` parsed it.
+    pub fn tls(&self) -> Option<TlsSegment> {
+        self.rules.tls
     }
 
-    /// Where a symbol of this module lies once mapped: inside the image, which
-    /// `load_shared_lib` checked every defined one of against its extent.
+    /// Where a defined, non-TLS symbol of this module lies once mapped; `None`
+    /// for an undefined or `STT_TLS` one.
     fn address_of(&self, sym: &Sym) -> Option<UserAddr> {
-        Some(self.user_base + sym.address(self.rules.extent)?.get())
+        if !sym.is_defined() || sym.kind() == toyos_elf::sym::STT_TLS {
+            return None;
+        }
+        match sym.address(self.rules.extent) {
+            Some(at) => Some(self.user_base + at.get()),
+            None => bounded_symbol_outside(),
+        }
     }
+}
+
+/// A defined symbol outside the extent `load_shared_lib` bounded every one of
+/// against: the table moved under the module, which is a kernel bug.
+#[cold]
+#[inline(never)]
+fn bounded_symbol_outside() -> ! {
+    panic!("ELF: a symbol load_shared_lib bounded inside the image lies outside it")
 }
 
 /// A module's tables parsed differently the second time: the bytes moved under
@@ -425,7 +437,7 @@ pub fn load_shared_lib(
         let (syms, strs) = unsafe {
             (dynsym.as_ref().map_or(&[][..], |s| s.as_slice()), dynstr.as_ref().map_or(&[][..], |s| s.as_slice()))
         };
-        SymTab::new(syms, strs).bounded(extent, layout.tls_memsz()).map_err(|e| e.as_str())?;
+        SymTab::new(syms, strs).bounded(extent, layout.tls()).map_err(|e| e.as_str())?;
     }
     let init_array = InitArray::parse(dyn_info.init_array, extent).map_err(|e| e.as_str())?;
 
@@ -459,7 +471,7 @@ pub fn load_shared_lib(
         sym_count,
         // A library's image is written contiguously, with no fill-page edge.
         fill: None,
-        tls_memsz: layout.tls_memsz(),
+        tls: layout.tls(),
     };
     // Every entry is parsed here, and a refusal drops the image this pass has
     // written into: nothing but this function has seen it.
@@ -475,14 +487,7 @@ pub fn load_shared_lib(
         }
     }
 
-    let (tls_template, tls_memsz, tls_align) = match layout.tls() {
-        Some(tls) => (
-            Some(module.at(tls.template())),
-            tls.memsz() as usize,
-            tls.align() as usize,
-        ),
-        None => (None, 0, 0),
-    };
+    let tls_template = layout.tls().map(|tls| module.at(tls.template()));
 
     let t4 = crate::clock::nanos_since_boot();
     log!(
@@ -506,8 +511,6 @@ pub fn load_shared_lib(
             dynsym,
             dynstr,
             tls_template,
-            tls_memsz,
-            tls_align,
             rela,
             jmprel,
             gnu_hash,

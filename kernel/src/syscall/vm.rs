@@ -286,7 +286,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Dlopen);
     });
 
-    let lib_has_tls = lib.tls_memsz > 0;
+    let lib_tls = lib.tls().filter(|t| t.memsz() > 0);
     let data_arc = process::process_data();
     let init_info = {
         let data = data_arc.lock();
@@ -305,7 +305,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             None
         };
         let refused = refused.or_else(|| {
-            lib_has_tls.then(|| crate::elf::apply_dtpoff_relocs(&lib, &tls_info).err()).flatten()
+            lib_tls.and_then(|_| crate::elf::apply_dtpoff_relocs(&lib, &tls_info).err())
         });
         if let Some(refused) = refused {
             log!("dlopen: {}: {}", resolved, refused.as_str());
@@ -346,7 +346,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     // Taken and bumped under the guard that registers, so two names loading at
     // once are two modules: the id a library's `DTPMOD64` relocations carry is
     // no other library's, and `dynamic_tls_blocks` is keyed on it.
-    if lib_has_tls {
+    if let Some(lib_tls) = lib_tls {
         let module_id = data.elf.next_tls_module_id;
         data.elf.next_tls_module_id = module_id + 1;
         let tls_info = crate::elf::TlsModuleInfo {
@@ -356,7 +356,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
         data.elf.tls_modules.push(crate::elf::TlsModule {
             template: lib.tls_template,
-            memsz: lib.tls_memsz,
+            memsz: lib_tls.memsz() as usize,
             base_offset: 0,
             module_id,
             is_static: false,

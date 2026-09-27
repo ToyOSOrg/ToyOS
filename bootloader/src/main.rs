@@ -391,7 +391,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
         window: (0, mem_size as u64),
         sym_count: 0,
         fill: None,
-        tls_memsz: None,
+        tls: None,
     };
     let mut reloc_count = 0u64;
     for section in rela_sections {

@@ -13,8 +13,8 @@
 
 use super::{CachedRelocs, LibMemory, LoadedLib, TlsModule, TlsModuleInfo};
 use crate::UserAddr;
-use toyos_elf::sym::Sym;
-use toyos_elf::{ImageOffset, Op, RelocError, SymIndex, TlsOffset, TlsRef};
+use toyos_elf::sym::{Sym, SymTab};
+use toyos_elf::{ImageOffset, Op, RelocError, SymIndex, TlsOffset, TlsRef, TlsSegment};
 
 impl LoadedLib {
     /// Write a value at a byte offset within this module's kernel mapping.
@@ -52,7 +52,7 @@ impl LoadedLib {
 
     /// Every slot of one kind and what it names — from the cache when a clone
     /// holds one, else scanned off the image, the two never both present.
-    fn tls_entries<'a, T: Copy + 'a>(
+    fn entries<'a, T: Copy + 'a>(
         &'a self,
         of: fn(Op) -> Option<T>,
         pick: fn(&CachedRelocs) -> &alloc::vec::Vec<(u64, T)>,
@@ -65,11 +65,11 @@ impl LoadedLib {
     }
 
     fn bind_entries(&self) -> impl Iterator<Item = (u64, SymIndex)> + '_ {
-        self.tls_entries(|op| match op { Op::Bind(sym) => Some(sym), _ => None }, |c| &c.bind)
+        self.entries(|op| match op { Op::Bind(sym) => Some(sym), _ => None }, |c| &c.bind)
     }
 
     fn dtpmod_entries(&self) -> impl Iterator<Item = (u64, Option<SymIndex>)> + '_ {
-        self.tls_entries(|op| match op { Op::DtpMod64(sym) => Some(sym), _ => None }, |c| &c.dtpmod64)
+        self.entries(|op| match op { Op::DtpMod64(sym) => Some(sym), _ => None }, |c| &c.dtpmod64)
     }
 
     /// Every `RELATIVE` slot and the position in the image it points at.
@@ -159,22 +159,22 @@ pub fn apply_tpoff_relocs(
         Op::Tpoff32(t) => Some(t),
         _ => None,
     };
-    for (_, r) in lib.tls_entries(tpoff64, |c| &c.tpoff64) {
+    for (_, r) in lib.entries(tpoff64, |c| &c.tpoff64) {
         compute_tpoff(lib, r, lib_base_offset, tls, tls_info)?;
     }
-    for (_, r) in lib.tls_entries(tpoff32, |c| &c.tpoff32) {
+    for (_, r) in lib.entries(tpoff32, |c| &c.tpoff32) {
         tpoff32_value(compute_tpoff(lib, r, lib_base_offset, tls, tls_info)?)?;
     }
 
     let mut count64 = 0u64;
-    for (offset, r) in lib.tls_entries(tpoff64, |c| &c.tpoff64) {
+    for (offset, r) in lib.entries(tpoff64, |c| &c.tpoff64) {
         let tpoff = compute_tpoff(lib, r, lib_base_offset, tls, tls_info)?;
         // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<i64>(offset, tpoff) };
         count64 += 1;
     }
     let mut count32 = 0u64;
-    for (offset, r) in lib.tls_entries(tpoff32, |c| &c.tpoff32) {
+    for (offset, r) in lib.entries(tpoff32, |c| &c.tpoff32) {
         let tpoff = tpoff32_value(compute_tpoff(lib, r, lib_base_offset, tls, tls_info)?)?;
         // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<i32>(offset, tpoff) };
@@ -217,11 +217,11 @@ pub fn apply_dtpoff_relocs(lib: &LoadedLib, tls_info: &TlsModuleInfo) -> Result<
         Op::DtpOff64(t) => Some(t),
         _ => None,
     };
-    for (_, r) in lib.tls_entries(dtpoff, |c| &c.dtpoff64) {
+    for (_, r) in lib.entries(dtpoff, |c| &c.dtpoff64) {
         resolve_tls(lib, r, 0, tls_info)?;
     }
     let mut count = 0u64;
-    for (offset, r) in lib.tls_entries(dtpoff, |c| &c.dtpoff64) {
+    for (offset, r) in lib.entries(dtpoff, |c| &c.dtpoff64) {
         let value = resolve_tls(lib, r, 0, tls_info)?.map_or(0, |(_, at)| at.get());
         // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<u64>(offset, value) };
@@ -233,21 +233,21 @@ pub fn apply_dtpoff_relocs(lib: &LoadedLib, tls_info: &TlsModuleInfo) -> Result<
     Ok(())
 }
 
-/// The module in `tls_info` that defines `name`, and the symbol as it defines
-/// it, or `None` if none does.
-pub fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&'a TlsModule, Sym)> {
+/// The module in `tls_info` that defines `name`, its `PT_TLS`, and the symbol
+/// as it defines it, or `None` if none does.
+pub fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&'a TlsModule, TlsSegment, Sym)> {
     for lib in tls_info.libs {
-        if lib.tls_memsz == 0 {
+        let Some(segment) = lib.tls().filter(|t| t.memsz() > 0) else {
             continue;
-        }
-        if let Some(sym) = lib.resolve_tls(name) {
+        };
+        if let Some(sym) = lib.symbols().find_tls(name) {
             // Template pointer is unique per module: each points into a distinct image.
             // No matching module here means inconsistent tables; treated as unresolved, not a bug.
             let module = tls_info
                 .modules
                 .iter()
                 .find(|m| m.template == lib.tls_template)?;
-            return Some((module, sym));
+            return Some((module, segment, sym));
         }
     }
     None
@@ -261,7 +261,7 @@ fn resolve_dtpmod(lib: &LoadedLib, sym: Option<SymIndex>, self_module_id: u64, t
     }
     let name = symbols.name(sym.get());
     match defining_module(name, tls_info) {
-        Some((module, _)) => module.module_id,
+        Some((module, _, _)) => module.module_id,
         None => {
             log!("dtpmod: unresolved TLS symbol: {}", name);
             self_module_id
@@ -270,35 +270,34 @@ fn resolve_dtpmod(lib: &LoadedLib, sym: Option<SymIndex>, self_module_id: u64, t
 }
 
 /// `S + A` for one TLS reference, and the static-block offset of the module it
-/// lies in: the referencing module's own (`own_base_offset`, `own_memsz`), or
+/// lies in: the referencing module's own (`own_base_offset`, `own_tls`), or
 /// the module defining the symbol. `None` is a symbol no module defines, which
 /// is logged; a sum outside the defining module's segment refuses the module.
 ///
-/// `lookup` and `strings` are the referencing module's symbol table however it
-/// is held — a library's in-image `SymTab`, or the executable's read off the
-/// file — so both loaders resolve through this one function.
+/// `symbols` is the referencing module's table — a library's in-image one, or
+/// the executable's read off the file — so both loaders resolve through this
+/// one function.
 pub fn resolve_tls_ref(
     r: TlsRef,
     own_base_offset: usize,
-    own_memsz: Option<u64>,
-    lookup: impl Fn(SymIndex) -> Option<Sym>,
-    strings: &[u8],
+    own_tls: Option<TlsSegment>,
+    symbols: SymTab<'_>,
     tls_info: &TlsModuleInfo,
 ) -> Result<Option<(usize, TlsOffset)>, RelocError> {
     let s = match r {
         TlsRef::Own(at) => return Ok(Some((own_base_offset, at))),
         TlsRef::Symbol(s) => s,
     };
-    let sym = lookup(s.sym()).ok_or(RelocError::SymbolPastTable)?;
+    let sym = symbols.get(s.sym().get()).ok_or(RelocError::SymbolPastTable)?;
     if sym.is_defined() {
-        let memsz = own_memsz.ok_or(RelocError::TlsOutsideSegment)?;
-        let at = sym.tls_offset(s.addend(), memsz).ok_or(RelocError::TlsOutsideSegment)?;
+        let segment = own_tls.ok_or(RelocError::TlsOutsideSegment)?;
+        let at = sym.tls_offset(s.addend(), segment).ok_or(RelocError::TlsOutsideSegment)?;
         return Ok(Some((own_base_offset, at)));
     }
-    let name = sym.name_in(strings);
+    let name = sym.name_in(symbols.strings());
     match defining_module(name, tls_info) {
-        Some((module, defined)) => {
-            let at = defined.tls_offset(s.addend(), module.memsz as u64).ok_or(RelocError::TlsOutsideSegment)?;
+        Some((module, segment, defined)) => {
+            let at = defined.tls_offset(s.addend(), segment).ok_or(RelocError::TlsOutsideSegment)?;
             Ok(Some((module.base_offset, at)))
         }
         None => {
@@ -315,15 +314,7 @@ fn resolve_tls(
     own_base_offset: usize,
     tls_info: &TlsModuleInfo,
 ) -> Result<Option<(usize, TlsOffset)>, RelocError> {
-    let symbols = lib.symbols();
-    resolve_tls_ref(
-        r,
-        own_base_offset,
-        Some(lib.tls_memsz as u64),
-        |i| symbols.get(i.get()),
-        symbols.strings(),
-        tls_info,
-    )
+    resolve_tls_ref(r, own_base_offset, lib.tls(), lib.symbols(), tls_info)
 }
 
 /// `S + A - tp` for one initial-exec reference, or `0` for a symbol no module

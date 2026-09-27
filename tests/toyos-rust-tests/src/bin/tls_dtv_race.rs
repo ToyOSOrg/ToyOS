@@ -1,39 +1,39 @@
-//! C1: a sibling thread must not be able to corrupt the next thread's TLS
-//! block between the kernel mapping it and the kernel finishing its rebase.
+//! C1: no thread of a process may reach a new thread's TLS block before the
+//! kernel has rebased the block's pointers to the address it maps it at.
 //!
-//! At head the kernel rebases the block *before* it maps it, so a sibling never
-//! sees a pointer the kernel has yet to fix. With the review's mutation (`fix`
-//! moved after `map_range` and `drop(space)`), the block is visible while its
-//! DTV still holds physical addresses, and a sibling that stores 0 into a DTV
-//! slot makes the rebase's `entry - phys` underflow — a kernel panic reached
-//! from userland, which is what this test denies.
+//! One worker at a time runs on one reused stack, so the only arena allocation
+//! that churns is the worker's TLS block, placed at one address round after
+//! round. A sibling probes that address with `random` — `BadAddress` while it
+//! is unmapped — and once it is mapped stores 0 into its DTV slot 0, which a
+//! rebase still to come turns into a `p - phys` underflow: a kernel panic
+//! reached from userland.
 //!
-//! The race is arranged so it needs no luck to be *safe*: every store the
-//! sibling makes is gated by a `random` probe that answers `BadAddress` while
-//! the address is unmapped, and the block it targets is either a live worker's
-//! (mapped for that worker's whole life) or, during the window under test, one
-//! the kernel is mapping. The worker's block is reused at one virtual address
-//! round after round — one worker at a time on a fixed stack, so the only
-//! churning arena allocation is the kernel's TLS block — so the sibling can
-//! hammer that address in advance of each spawn.
-//!
-//! Kernel liveness is the verdict: under the mutation the machine panics and
-//! the guest dies; at head every round completes, every worker finds its own
-//! TP and DTV self-consistent, and the heap still walks.
+//! Every spawn after the first, which places the block, carries
+//! `kernel/src/loader/tls.rs`'s `rebase_window::MARK`. A kernel armed with
+//! `tls-rebase-window` holds such a spawn before its rebase until the sibling's
+//! store lands if the block is already reachable, and says it is not if it is
+//! not; `tls_rebase_window` runs this there and reads which. Unarmed, the
+//! window is the scheduler's to hit.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+use std::time::{Duration, Instant};
 use toyos_abi::syscall;
 
+/// `kernel/src/loader/tls.rs`'s `rebase_window::MARK`.
+const MARK: u64 = 0x5eed_c0de_71b0_0001;
 /// 2 MiB, the TLS block's alignment and (for this process's small TLS) its size.
 const BLOCK: u64 = 2 * 1024 * 1024;
-const MASK: u64 = BLOCK - 1;
 /// DTV slot 0 (module 1) sits two words into the block: a generation word, a
 /// length word, then the entries. `kernel/src/loader/tls.rs` owns this layout.
 const DTV_SLOT0: u64 = 16;
+/// Spawn/retire rounds; every one after the first is watched.
+const ROUNDS: u64 = 16;
+/// A liveness bound on another thread's store, never a pace.
+const BOUND: Duration = Duration::from_secs(10);
 
-/// The block base the sibling hammers, or 0 while it must stand down.
+/// The block base the sibling stores into.
 static TARGET: AtomicU64 = AtomicU64::new(0);
-/// The current worker has read its TP and published `TARGET`.
+/// The current worker has published `TARGET`.
 static READY: AtomicBool = AtomicBool::new(false);
 /// The current worker may exit.
 static GO_EXIT: AtomicBool = AtomicBool::new(false);
@@ -44,50 +44,37 @@ static PAUSE: AtomicBool = AtomicBool::new(true);
 static PAUSED_ACK: AtomicBool = AtomicBool::new(false);
 /// The sibling must end.
 static STOP: AtomicBool = AtomicBool::new(false);
-/// A worker found its TP and DTV inconsistent — a corruption the kernel let
-/// through rather than panicking on.
-static INCONSISTENT: AtomicBool = AtomicBool::new(false);
-/// How many times the sibling found the block mapped and hammered it — proof it
-/// engaged a real reused block rather than spinning on an unmapped address.
+/// Rounds in which the sibling found the block mapped and stored into it.
 static ENGAGED: AtomicU64 = AtomicU64::new(0);
 
-/// The self-pointer the psABI puts at the thread pointer (`%fs:0` on variant
-/// II); the block base is that rounded down to the allocation's alignment.
-#[cfg(target_arch = "x86_64")]
-fn fs_base() -> u64 {
-    let tp: u64;
-    // SAFETY: reads the thread-pointer self-word the kernel wrote at TP+0.
-    unsafe { core::arch::asm!("mov {}, fs:0", out(reg) tp, options(nostack, readonly)) };
-    tp
+thread_local! {
+    /// A datum in this program's static TLS, which lies in the thread's block.
+    static ANCHOR: u8 = const { 0 };
 }
 
-/// One worker: publish its block, prove its own TP/DTV consistent, and wait to
-/// be retired. Runs on a fixed stack; only one worker exists at a time.
-extern "C" fn worker(_arg: u64) {
-    let tp = fs_base();
-    let v = tp & !MASK;
-    // TP+8 is the DTV pointer, which the kernel rebased to the block base. A
-    // block the kernel published half-rebased would fail this.
-    // SAFETY: TP+8 is inside this thread's own TCB.
-    let dtv = unsafe { ((tp + 8) as *const u64).read_volatile() };
-    if dtv != v {
-        INCONSISTENT.store(true, SeqCst);
-    }
-    TARGET.store(v, SeqCst);
-    READY.store(true, SeqCst);
-    while !GO_EXIT.load(SeqCst) {
+/// Spin until `done`, or panic naming `what` past [`BOUND`].
+fn until(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + BOUND;
+    while !done() {
+        assert!(Instant::now() < deadline, "tls_dtv_race: {what} did not come within {BOUND:?}");
         core::hint::spin_loop();
     }
+}
+
+/// One worker: publish its block's base and wait to be retired. Runs on a
+/// fixed stack; only one worker exists at a time.
+extern "C" fn worker(_arg: u64) {
+    let block = ANCHOR.with(|anchor| anchor as *const u8 as u64) & !(BLOCK - 1);
+    TARGET.store(block, SeqCst);
+    READY.store(true, SeqCst);
+    until("leave to exit", || GO_EXIT.load(SeqCst));
     syscall::thread_exit(0);
 }
 
-/// Whether `addr` is mapped, by the `random` syscall — it answers `BadAddress`
+/// Whether `v` is mapped, by the `random` syscall — it answers `BadAddress`
 /// while the page is unmapped and writes into it otherwise. The probe writes one
 /// byte at the block's generation word (harmless).
 fn mapped(v: u64) -> bool {
-    // A `&mut [u8]` over memory this thread does not own is the price of using
-    // the mandated mapped-ness probe; nothing here reads it, and the syscall
-    // checks the mapping before any access.
     // SAFETY: on `BadAddress` nothing is touched; the caller stores only after
     // this returns true and only while the block stays mapped (see `sibling`).
     let probe = unsafe { core::slice::from_raw_parts_mut(v as *mut u8, 1) };
@@ -97,18 +84,14 @@ fn mapped(v: u64) -> bool {
 fn sibling() {
     while !STOP.load(SeqCst) {
         if PAUSE.load(SeqCst) {
-            // Idle and past any store: the main thread waits for this before it
-            // frees the block, so no store is ever in flight against a free.
             PAUSED_ACK.store(true, SeqCst);
             core::hint::spin_loop();
             continue;
         }
         PAUSED_ACK.store(false, SeqCst);
         let v = TARGET.load(SeqCst);
-        // Wait for the block to be mapped (a spawn is placing it), then hammer 0
-        // into DTV slot 0 to arm the rebase underflow, in a tight loop with no
-        // syscall so the store lands inside the map-to-rebase window. `PAUSE`
-        // ends the loop before the main thread frees the block.
+        // Wait for the block to be mapped (a spawn is placing it), then store 0
+        // into DTV slot 0 in a tight loop with no syscall, until `PAUSE`.
         if v != 0 && mapped(v) {
             ENGAGED.fetch_add(1, SeqCst);
             while !PAUSE.load(SeqCst) && !STOP.load(SeqCst) {
@@ -120,78 +103,37 @@ fn sibling() {
     }
 }
 
-/// How many spawn/retire rounds to run; each is one race attempt, the sibling
-/// hammering the block's DTV slot 0 through the whole map-to-rebase window, and
-/// the block reused at one address across all of them. Bounded so the run
-/// finishes on the dev host's TCG, where two busy vCPUs and a kernel log per
-/// spawn make each round dear; under the mutation the panic comes in the first
-/// rounds.
-const ROUNDS: u64 = 800;
-
 fn main() {
-    if cfg!(not(target_arch = "x86_64")) {
-        println!("tls_dtv_race: only x86_64 reads %fs:0; skipping");
-        return;
-    }
-
     let sib = std::thread::Builder::new()
         .name("dtv-sibling".into())
         .spawn(sibling)
         .expect("spawn sibling");
 
-    // One reused stack: with a single worker alive at a time, the only arena
-    // allocation that churns is the kernel's per-thread TLS block, so it is
-    // reused at one virtual address — the one the sibling hammers.
     const STACK: usize = 256 * 1024;
     let stack = vec![0u8; STACK].leak();
     let base = stack.as_ptr() as u64;
     let top = (base + STACK as u64) & !15;
+    let entry = (worker as *const ()).expose_provenance() as u64;
 
-    let mut rounds = 0u64;
-    for _ in 0..ROUNDS {
+    for round in 0..ROUNDS {
         READY.store(false, SeqCst);
         GO_EXIT.store(false, SeqCst);
-        // Let the sibling hammer the address a retiring block last held; the
-        // fresh spawn maps that same address, and the window under test is
-        // between that map and the rebase.
         PAUSE.store(false, SeqCst);
+        let arg = if round == 0 { 0 } else { MARK };
         // SAFETY: `worker` is a valid entry; `top`/`base` describe the leaked stack.
-        let entry = (worker as *const ()).expose_provenance() as u64;
-        let tid = unsafe { syscall::thread_spawn(entry, top, 0, base) };
+        let tid = unsafe { syscall::thread_spawn(entry, top, arg, base) };
         assert!(syscall::SyscallError::from_u64(tid).is_none(), "thread_spawn failed: {tid}");
-        while !READY.load(SeqCst) {
-            core::hint::spin_loop();
-        }
-        // Retire the worker with the sibling stood down, so no store can land in
-        // a block the kernel is freeing. Wait for the sibling to acknowledge it
-        // is idle — a store already in flight completes while the block is still
-        // mapped, before the join frees it.
+        until("the worker's start", || READY.load(SeqCst));
+        until("the sibling's store into the block", || ENGAGED.load(SeqCst) > round);
+        // Stood down and acknowledged before the join frees the block, so no
+        // store is in flight against a free.
         PAUSE.store(true, SeqCst);
-        while !PAUSED_ACK.load(SeqCst) {
-            core::hint::spin_loop();
-        }
+        until("the sibling standing down", || PAUSED_ACK.load(SeqCst));
         GO_EXIT.store(true, SeqCst);
-        syscall::thread_join(tid);
-        rounds += 1;
-
-        if rounds % 4096 == 0 {
-            // The heap still walks: allocate, touch, free.
-            let probe = vec![rounds as u8; 4096];
-            assert_eq!(probe[0], rounds as u8);
-        }
+        assert_eq!(syscall::thread_join(tid), 0, "round {round}: join");
     }
 
     STOP.store(true, SeqCst);
     sib.join().expect("join sibling");
-
-    assert!(!INCONSISTENT.load(SeqCst), "a worker's TP and DTV disagreed — the block was corrupted");
-
-    // The kernel is still alive: a plain thread spawns, runs and joins.
-    let n = std::thread::spawn(|| 0xC1u64).join().expect("final thread");
-    assert_eq!(n, 0xC1);
-
-    println!(
-        "tls_dtv_race: {rounds} rounds, {} engaged, kernel alive, TP/DTV consistent",
-        ENGAGED.load(SeqCst)
-    );
+    println!("tls_dtv_race: {ROUNDS} rounds, {} watched, the sibling stored into every one", ROUNDS - 1);
 }

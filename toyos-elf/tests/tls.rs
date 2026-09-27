@@ -5,6 +5,10 @@
 //! kernel-bug assert reached from a crafted `PT_TLS`. The property is proved
 //! here instead, which is what lets the assert go.
 
+#[allow(dead_code)]
+mod common;
+
+use common::tls_segment;
 use toyos_elf::sym;
 use toyos_elf::tls::{self, Static, TlsOffset, Variant};
 
@@ -12,17 +16,17 @@ const TCB: usize = 64;
 const DTV: usize = 16 + 64 * 8;
 const GRANULE: usize = 2 * 1024 * 1024;
 
-/// `S + A` inside a segment of `memsz` bytes, through the only public path to a
-/// [`TlsOffset`]: a crafted `STT_TLS` symbol read as one.
+/// `S + A` inside a parsed `memsz`-byte `PT_TLS`, through the only public path
+/// to a [`TlsOffset`]: a crafted `STT_TLS` symbol read against that segment.
 fn tls_offset(value: u64, addend: i64, memsz: u64) -> Option<TlsOffset> {
     let mut bytes = [0u8; sym::ENTRY_SIZE];
     bytes[4] = (1 << 4) | 6; // STB_GLOBAL, STT_TLS
     bytes[6..8].copy_from_slice(&1u16.to_le_bytes()); // st_shndx: defined
     bytes[8..16].copy_from_slice(&value.to_le_bytes()); // st_value
-    sym::parse_at(&bytes, 0).unwrap().tls_offset(addend, memsz)
+    sym::parse_at(&bytes, 0).unwrap().tls_offset(addend, tls_segment(memsz))
 }
 
-/// A datum `off` bytes into a segment no offset here leaves.
+/// A datum `off` bytes into the largest segment a file can declare.
 fn datum(off: u64) -> TlsOffset {
     tls_offset(off, 0, u64::MAX).unwrap()
 }

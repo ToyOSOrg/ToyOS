@@ -1,10 +1,12 @@
 ---
-status: open
+status: assigned
 kind: finding
 opened: 2026-09-27
 ---
 
 # `LoadedLib::write_at`'s "sole writer" `# Safety` is false in the `dlopen` path (M8)
+
+Held by the orchestrator's ELF-loader track; its next brief carries this.
 
 `LoadedLib::write_at`'s `# Safety` says the caller must be the sole writer of
 the module's image for the call's duration. In `load_shared_lib` that holds: the
@@ -21,7 +23,6 @@ writes go to the private `rw_alloc`, likewise not yet handed out. But the
 `# Safety` contract as written is not the one the `dlopen` caller meets, so it
 cannot be the thing that makes those `unsafe` blocks sound.
 
-This predates the value-checking work in #544 and was noted there rather than
-fixed. Exit condition: either the writes move before `map_into`, or the
+Exit condition: either the writes move before `map_into`, or the
 `# Safety` is restated to the invariant the `dlopen` path actually upholds and
 every call site's `SAFETY:` cites it.

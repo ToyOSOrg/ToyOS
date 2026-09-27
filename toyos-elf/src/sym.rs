@@ -5,7 +5,7 @@
 //! [`ImageOffset`] inside its module ([`Sym::address`]) or a [`TlsOffset`]
 //! inside its module's TLS segment ([`Sym::tls_offset`]).
 
-use crate::layout::{Extent, ImageOffset};
+use crate::layout::{Extent, ImageOffset, TlsSegment};
 use crate::read;
 use crate::tls::TlsOffset;
 use crate::Error;
@@ -80,11 +80,10 @@ impl Sym {
         extent.offset(self.value)
     }
 
-    /// `S + A` for a symbol read as an offset into a TLS segment of `memsz`
-    /// bytes — psABI `st_value` for `STT_TLS` — or `None` when the sum leaves
-    /// the segment.
-    pub fn tls_offset(&self, addend: i64, memsz: u64) -> Option<TlsOffset> {
-        TlsOffset::of(self.value, addend, memsz)
+    /// `S + A` for a symbol read as an offset into `segment` — psABI
+    /// `st_value` for `STT_TLS` — or `None` when the sum leaves it.
+    pub fn tls_offset(&self, addend: i64, segment: TlsSegment) -> Option<TlsOffset> {
+        TlsOffset::of(self.value, addend, segment)
     }
 }
 
@@ -160,16 +159,15 @@ impl<'a> SymTab<'a> {
 
     /// Refuse a table any of whose defined symbols names nothing in its
     /// module: a value outside the image `extent`, or a `STT_TLS` one outside
-    /// a TLS segment of `tls_memsz` bytes (or in a module with none).
+    /// the module's `tls` segment (or in a module with none).
     ///
     /// A loader that has asked this once answers every later lookup through
     /// [`Sym::address`] and [`Sym::tls_offset`] from the same bytes, so none of
     /// those can come back empty for a symbol the table defines.
-    pub fn bounded(&self, extent: Extent, tls_memsz: Option<u64>) -> Result<(), Error> {
+    pub fn bounded(&self, extent: Extent, tls: Option<TlsSegment>) -> Result<(), Error> {
         for (_, sym) in self.defined() {
             if sym.kind() == STT_TLS {
-                tls_memsz
-                    .and_then(|memsz| sym.tls_offset(0, memsz))
+                tls.and_then(|segment| sym.tls_offset(0, segment))
                     .ok_or(Error::TlsSymbolOutsideSegment)?;
             } else {
                 sym.address(extent).ok_or(Error::SymbolOutsideImage)?;

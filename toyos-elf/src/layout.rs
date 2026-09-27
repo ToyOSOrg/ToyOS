@@ -189,7 +189,7 @@ impl Segment {
 /// file-backed template lies inside the image. Absent TLS is `None`, never a
 /// zero `memsz`: a module with a `PT_TLS` of zero size still gets a DTV slot,
 /// and the two cases are not the same question.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsSegment {
     template: ImageRange,
     memsz: u64,
@@ -217,8 +217,8 @@ impl TlsSegment {
 /// `PT_DYNAMIC`, where the file holds it and where the image does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DynamicSegment {
-    pub(crate) file_offset: u64,
-    pub(crate) image: ImageRange,
+    file_offset: u64,
+    image: ImageRange,
 }
 
 impl DynamicSegment {
@@ -441,11 +441,6 @@ impl Layout {
 
     pub const fn tls(&self) -> Option<TlsSegment> {
         self.tls
-    }
-
-    /// The `PT_TLS` `p_memsz`, when the image has a TLS segment.
-    pub fn tls_memsz(&self) -> Option<u64> {
-        self.tls.map(|t| t.memsz)
     }
 
     pub const fn dynamic(&self) -> Option<DynamicSegment> {

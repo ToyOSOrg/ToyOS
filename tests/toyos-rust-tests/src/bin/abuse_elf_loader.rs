@@ -801,8 +801,8 @@ fn f13_cross_module_addend_is_kept() {
     F13_KEEP_TLS.with(|c| c.set(c.get()));
 
     // `defs` loads first so it resolves `refs`'s TPOFF; both held to the read.
-    let defs = write_file("f13_defs.so", &tls_defs_so());
-    let refs = write_file("f13_refs.so", &tls_refs_so(ADDEND));
+    let defs = write_file("f13_defs.so", &tls_defs_so(b"xtls", 0x200));
+    let refs = write_file("f13_refs.so", &tls_refs_so(b"xtls", ADDEND));
     let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen f13_defs.so");
     let lib_refs = unsafe { libloading::Library::new(&refs) }.expect("dlopen f13_refs.so");
 
@@ -823,36 +823,41 @@ fn f13_cross_module_addend_is_kept() {
     drop(lib_defs);
 }
 
-/// Defines `xtls` (`STT_TLS`, offset 8) for a cross-module `TPOFF64`, with a
-/// 0x200-byte `PT_TLS` its addends stay inside.
-fn tls_defs_so() -> Vec<u8> {
+/// Defines `name` (`STT_TLS`, offset 8) for a cross-module `TPOFF64`, in a
+/// `memsz`-byte `PT_TLS`.
+fn tls_defs_so(name: &[u8; 4], memsz: u64) -> Vec<u8> {
     Elf::new(0x2000)
         .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
-        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz: 0x200, align: 8 })
+        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz, align: 8 })
         .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
         .sections(0x1C00, 1, 64)
         .dynamic(0x1000, &[(DT_SYMTAB, 0x1200), (DT_STRTAB, 0x1400), (DT_STRSZ, 0x40)])
-        // sym[1] xtls: defined (st_shndx == 1), STT_TLS, offset 8 in the block.
+        // sym[1] `name`: defined (st_shndx == 1), STT_TLS, offset 8 in the block.
         .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
-        .poke(0x1401, b"xtls\0")
+        .poke(0x1401, name)
         .shdr(0x1C00, SHT_DYNSYM, 0x1200, 48, 24)
         .build()
 }
 
-/// The two apply-time TLS refusals — a `dlopen`ed library's and an
-/// executable's — are new code no other case here reaches, because every other
-/// TLS case uses `r_sym == 0`, which `rela::parse` refuses before either apply
-/// pass runs. Both refuse a *resolved* `S + A` outside the defining module's
-/// `PT_TLS`, named `TLS_OUTSIDE_SEGMENT` in the kernel log the harness checks.
-/// Each references its *own* defined `STT_TLS` symbol, so the module resolved
-/// against is unambiguously this fixture's and not some other loaded module's.
+/// The apply-time TLS refusals, which no `r_sym == 0` case reaches because
+/// `rela::parse` refuses those before either apply pass runs. Each refuses a
+/// *resolved* `S + A` outside the defining module's `PT_TLS`, named
+/// `TLS_OUTSIDE_SEGMENT` beside the file in the kernel log the harness checks.
 fn tls_apply_time_refusals_are_reached() {
-    // dlopen side: `apply_tpoff_relocs` refuses, and the mapping guard takes the
-    // library back down.
+    // dlopen, the module's own symbol: `apply_tpoff_relocs` refuses, and the
+    // mapping guard takes the library back down.
     dlopen_refused("tls_apply_refs.so", &so_tls_ref_past_segment());
 
-    // spawn side: `apply_tls_relocs` refuses during `spawn`.
+    // spawn, the executable's own symbol: `apply_tls_relocs` refuses.
     spawn_refused("tls_apply_spawn", &exe_tls_ref_past_segment());
+
+    // dlopen, another module's symbol: `S + A` (8 + 0x140) leaves the defining
+    // module's 0x20-byte `PT_TLS`. Named apart from f13's `xtls`, which stays
+    // loaded (`dlclose` unloads nothing) and would be the module resolved.
+    let defs = write_file("f13_defs_small.so", &tls_defs_so(b"ytls", 0x20));
+    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen f13_defs_small.so");
+    dlopen_refused("f13_refs_past.so", &tls_refs_so(b"ytls", 0x140));
+    drop(lib_defs);
 }
 
 /// A shared object defining its own `xtls` (`STT_TLS`, offset 8) in a 0x20-byte
@@ -895,9 +900,9 @@ fn exe_tls_ref_past_segment() -> Vec<u8> {
         .build()
 }
 
-/// Two `TPOFF64` relocations against the undefined `xtls`, addends 0 and
+/// Two `TPOFF64` relocations against the undefined `name`, addends 0 and
 /// `addend`, patching exported data `probe0`/`probeN` a reader can difference.
-fn tls_refs_so(addend: i64) -> Vec<u8> {
+fn tls_refs_so(name: &[u8; 4], addend: i64) -> Vec<u8> {
     Elf::new(0x4000)
         .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
         .ph(Phdr::load(0x2000, 0x2000, 0x2000, 0x2000, PF_R | PF_W))
@@ -907,11 +912,12 @@ fn tls_refs_so(addend: i64) -> Vec<u8> {
             (DT_SYMTAB, 0x1200), (DT_STRTAB, 0x1400), (DT_STRSZ, 0x40),
             (DT_RELA, 0x1600), (DT_RELASZ, 48),
         ])
-        // sym[1] xtls undefined (shndx 0) → cross-module; sym[2]/[3] the probes.
+        // sym[1] `name` undefined (shndx 0) → cross-module; sym[2]/[3] the probes.
         .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
         .sym(0x1230, 6, STB_GLOBAL << 4, 2, 0x2000)
         .sym(0x1248, 13, STB_GLOBAL << 4, 2, 0x2008)
-        .poke(0x1401, b"xtls\0probe0\0probeN\0")
+        .poke(0x1401, name)
+        .poke(0x1406, b"probe0\0probeN\0")
         .rela(0x1600, 0x2000, (1u64 << 32) | R_X86_64_TPOFF64, 0)
         .rela(0x1618, 0x2008, (1u64 << 32) | R_X86_64_TPOFF64, addend)
         .shdr(0x1C00, SHT_DYNSYM, 0x1200, 96, 24)

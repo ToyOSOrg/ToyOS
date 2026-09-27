@@ -1535,6 +1535,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // and its store (`copy-meets-a-remap`): the store never reaches the region
     // mapped after it.
     ("user_copy_races_munmap", Sched::Parallel, Tier::Fast),
+    // A sibling's store staged between a thread's TLS block being placed and
+    // its rebase (`tls-rebase-window`): the block is never reachable there.
+    ("tls_rebase_window", Sched::Parallel, Tier::Fast),
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Nightly),
     ("writeback_durability", Sched::Parallel, Tier::Nightly),
@@ -1652,6 +1655,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
+    ("tls_rebase_window", &["test_rs_tls_dtv_race"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
@@ -3500,14 +3504,12 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
 }
 
 /// The reason the loader logs when a resolved TLS `S + A` leaves the defining
-/// module's `PT_TLS` — `RelocError::TlsOutsideSegment`, kept in step with
-/// `toyos-elf/src/rela.rs`.
-const TLS_OUTSIDE_SEGMENT: &str = "ELF: TLS relocation names an offset outside its PT_TLS";
+/// module's `PT_TLS`.
+const TLS_OUTSIDE_SEGMENT: &str = toyos_elf::RelocError::TlsOutsideSegment.as_str();
 
 /// `abuse_elf_loader` plus the reason each apply-time TLS refusal must fire for.
 ///
-/// The two cases (`tls_apply_refs.so` on `dlopen`, `tls_apply_spawn` on
-/// `spawn`) are refused for the right reason only if the kernel names
+/// Each case is refused for the right reason only if the kernel names
 /// [`TLS_OUTSIDE_SEGMENT`] beside the file — a case refused later, for another
 /// reason, would pass the exit-code check alone.
 fn check_abuse_elf_loader(result: &TestResult) -> bool {
@@ -3519,6 +3521,7 @@ fn check_abuse_elf_loader(result: &TestResult) -> bool {
     for (file, what) in [
         ("tls_apply_refs.so", "the dlopen apply-time TLS refusal"),
         ("tls_apply_spawn", "the spawn apply-time TLS refusal"),
+        ("f13_refs_past.so", "the cross-module apply-time TLS refusal"),
     ] {
         let named = log
             .lines()
@@ -3534,6 +3537,12 @@ fn check_abuse_elf_loader(result: &TestResult) -> bool {
     }
     ok
 }
+
+/// `kernel/src/loader/tls.rs`'s `rebase_window` line for a watched spawn's
+/// block the process could not yet reach before its rebase.
+const TLS_BLOCK_UNREACHABLE: &str = "is not reachable before its rebase";
+/// The spawns `tls_dtv_race` watches: every round of its `ROUNDS` but the first.
+const TLS_RACE_WATCHED: usize = 15;
 
 /// What a loader writes when it caches a library under the directory it searched
 /// and did not find it in. Only `dlopen_dedup`'s last arm produces this string.
@@ -11646,6 +11655,28 @@ fn run_machine_test(
             }
             Ok(())
         }
+        // Two CPUs: the held spawn spins in the kernel while its sibling stores
+        // on the other.
+        "tls_rebase_window" => {
+            let options = BootOptions {
+                smp: 2,
+                kernel_params: &["tls-rebase-window"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let result = qemu.run_test("test_rs_tls_dtv_race", Duration::from_secs(30));
+            let log = format!("{}{}", result.before, result.serial);
+            let unreachable = log.lines().filter(|l| l.contains(TLS_BLOCK_UNREACHABLE)).count();
+            if !check_rust_result(&result) || unreachable != TLS_RACE_WATCHED {
+                return Err(format!(
+                    "tls_rebase_window failed: {unreachable} of {TLS_RACE_WATCHED} watched blocks \
+                     unreachable before their rebase:\n{}\nkernel log while it ran:\n{log}",
+                    result.stdout
+                ));
+            }
+            Ok(())
+        }
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.
@@ -18515,9 +18546,6 @@ fn build_test_registry(
             // the slow one: it spends its own patience before reporting, and
             // the report is worth more than the harness's timeout message.
             "inbox_cancel_wakes" => Duration::from_secs(30),
-            // Twenty thousand spawn/retire rounds, each a race attempt against
-            // the TLS-block rebase.
-            "tls_dtv_race" => Duration::from_secs(60),
             _ => Duration::from_secs(5),
         };
         tests.push(TestDef {

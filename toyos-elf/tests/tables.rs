@@ -34,7 +34,7 @@ fn validate(
         window,
         sym_count,
         fill,
-        tls_memsz: Some(u64::MAX),
+        tls: Some(tls_segment(u64::MAX)),
     };
     entries.try_for_each(|r| rela::parse(r, &rules).map(|_| ()))
 }
@@ -404,7 +404,7 @@ fn lookups_skip_undefined_symbols_and_the_null_entry() {
     ]
     .concat();
     let table = SymTab::new(&syms, b"\0tls_var\0");
-    let tls_var = table.find_tls("tls_var").and_then(|s| s.tls_offset(0, 0x100));
+    let tls_var = table.find_tls("tls_var").and_then(|s| s.tls_offset(0, tls_segment(0x100)));
     assert_eq!(tls_var.map(|o| o.get()), Some(0x40));
     assert_eq!(table.find("tls_var").map(|(i, _)| i), Some(2));
     assert_eq!(table.defined().count(), 1);
@@ -738,7 +738,7 @@ fn each_machine_reads_its_own_relocation_numbers() {
         window: (0, 0x100),
         sym_count: 0,
         fill: None,
-        tls_memsz: None,
+        tls: None,
     };
     let parsed = rela::parse(entry, &rules).unwrap().unwrap();
     assert_eq!((parsed.offset(), parsed.op()), (0x10, Op::Relative(rules.extent.offset(4).unwrap())));
