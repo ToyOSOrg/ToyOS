@@ -418,23 +418,32 @@ struct Held {
 /// What GitHub holds under `tag`: nothing, which `gh` says as exactly
 /// `release not found`, or a [`Held`]. Any other failure of `gh` is one.
 fn held(root: &Path, tag: &str) -> Result<Option<Held>, String> {
-    let json = match gh(root, &["release", "view", tag, "--json", "isDraft,assets"]) {
+    held_of(gh(root, &["release", "view", tag, "--json", "isDraft,assets"]))
+}
+
+/// [`held`] of what `gh release view --json isDraft,assets` answered.
+fn held_of(said: Result<String, String>) -> Result<Option<Held>, String> {
+    let json = match said {
         Err(why) if why.ends_with(": release not found") => return Ok(None),
         said => said?,
     };
-    let v: Value = serde_json::from_str(&json).map_err(|e| format!("gh release view {tag}: {e}"))?;
-    let draft = v["isDraft"].as_bool().ok_or_else(|| format!("gh release view {tag} gave no isDraft: {json}"))?;
-    let assets = v["assets"].as_array().ok_or_else(|| format!("gh release view {tag} gave no assets: {json}"))?;
+    let v: Value = serde_json::from_str(&json).map_err(|e| format!("gh release view: {e}: {json}"))?;
+    let draft = v["isDraft"].as_bool().ok_or_else(|| format!("gh release view gave no isDraft: {json}"))?;
+    let assets = v["assets"].as_array().ok_or_else(|| format!("gh release view gave no assets: {json}"))?;
     let image = assets.iter().any(|a| a["name"].as_str() == Some(IMAGE_ASSET));
     Ok(Some(Held { draft, image }))
 }
 
-/// Every release, as (tag, creation time), refusing a listing that filled
-/// [`LISTED`] or an entry without both.
+/// Every release, as (tag, creation time).
 fn listed(root: &Path) -> Result<Vec<(String, String)>, String> {
     let limit = LISTED.to_string();
-    let json = gh(root, &["release", "list", "--limit", &limit, "--json", "tagName,createdAt"])?;
-    let v: Value = serde_json::from_str(&json).map_err(|e| format!("gh release list: {e}"))?;
+    releases(&gh(root, &["release", "list", "--limit", &limit, "--json", "tagName,createdAt"])?)
+}
+
+/// [`listed`] of what `gh release list --json tagName,createdAt` answered,
+/// refusing a listing that filled [`LISTED`] or an entry without both.
+fn releases(json: &str) -> Result<Vec<(String, String)>, String> {
+    let v: Value = serde_json::from_str(json).map_err(|e| format!("gh release list: {e}"))?;
     let all = v.as_array().ok_or_else(|| format!("gh release list gave no list: {json}"))?;
     if all.len() >= LISTED {
         return Err(format!("gh release list gave {} releases, its limit, so some are not in it", all.len()));
@@ -526,6 +535,33 @@ mod tests {
 
     fn notes_of_a_commit() -> String {
         notes(&root(), "image-x86_64-c55189490123", &"c".repeat(40)).unwrap()
+    }
+
+    /// Only `gh`'s own not-found answer reads as nothing published; a failure
+    /// of any other kind is one, and a draft is told from a release.
+    #[test]
+    fn a_gh_failure_is_not_read_as_nothing_published() {
+        let gh = |said: &str| Err(format!("gh release view image-x86_64-c55189490123 exited exit status: 1: {said}"));
+        assert_eq!(held_of(gh("release not found")), Ok(None));
+        let why = held_of(gh("non-200 OK status code: 401 Unauthorized body: \"Bad credentials\"")).unwrap_err();
+        assert!(why.contains("401"), "{why}");
+        let json = |draft: bool| Ok(format!(r#"{{"isDraft":{draft},"assets":[{{"name":"{IMAGE_ASSET}"}}]}}"#));
+        assert_eq!(held_of(json(true)), Ok(Some(Held { draft: true, image: true })));
+        assert_eq!(held_of(json(false)), Ok(Some(Held { draft: false, image: true })));
+        assert_eq!(held_of(Ok(r#"{"isDraft":false,"assets":[]}"#.into())), Ok(Some(Held { draft: false, image: false })));
+        assert!(held_of(Ok(r#"{"assets":[]}"#.into())).is_err());
+    }
+
+    /// A listing that filled its limit, or an entry without a tag and a time,
+    /// is refused rather than read short.
+    #[test]
+    fn a_listing_that_may_have_left_releases_out_is_refused() {
+        let entry = |tag: &str| format!(r#"{{"tagName":"{tag}","createdAt":"2026-09-27T03:00:00Z"}}"#);
+        let list = |n: usize| format!("[{}]", (0..n).map(|i| entry(&format!("t{i}"))).collect::<Vec<_>>().join(","));
+        assert_eq!(releases(&list(LISTED - 1)).unwrap().len(), LISTED - 1);
+        assert!(releases(&list(LISTED)).unwrap_err().contains("its limit"));
+        let why = releases(r#"[{"tagName":"t"}]"#).unwrap_err();
+        assert!(why.contains("without a tag and a time"), "{why}");
     }
 
     #[test]

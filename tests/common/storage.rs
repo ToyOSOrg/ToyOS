@@ -41,13 +41,13 @@ pub fn foreign_disk_untouched(
     let parts = other_systems_disk(&other, USB_BYTES)?;
     let bare = dir.join("bare-stick.img");
     filled(&bare, USB_BYTES, 0x5A)?;
-    let disks = [image.clone(), other.clone(), bare.clone()];
+    let disks = [image, other, bare];
     let before: Vec<Vec<u8>> = disks.iter().map(|disk| whole_device(disk)).collect();
 
     // The premise, checked before the boot rather than assumed: if this volume
     // somehow already parsed as a ToyOS volume, the kernel would mount it and
     // the assertion below would pass for the wrong reason.
-    if front(&image, data_at, 4) == *b"BCFS" {
+    if front(&disks[0], data_at, 4) == *b"BCFS" {
         return Err("the foreign volume starts with a bcachefs superblock".to_string());
     }
 
@@ -57,8 +57,8 @@ pub fn foreign_disk_untouched(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::UsbDiskCrowd,
-            nvme_image: Some(image.clone()),
-            usb_images: vec![other.clone(), bare.clone()],
+            nvme_image: Some(disks[0].clone()),
+            usb_images: disks[1..].to_vec(),
             ..Default::default()
         },
     );
