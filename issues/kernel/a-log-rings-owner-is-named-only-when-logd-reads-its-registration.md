@@ -22,14 +22,12 @@ other `log_` guests and green alone. Its `/log` holds `===READY===`,
 waiting`.
 
 Rates on the dev host (TCG), `cargo test --test toyos-build -- --nightly
-log_`, interleaved in one session:
-- `nightly-green2` (the branch that filed this): 3 red of 9. Each red was
-  this failure.
-- `origin/main` at 1ce71831: 0 of 8.
-
-No mechanism on that branch reaches the ring, init or logd. The window is a
-race on both trees, and the difference between the two rates is not shown to
-be more than chance.
+log_`, interleaved per round against `origin/main`'s kernel and tests:
+- the branch that filed this, `nightly-green2`: 3 red of 14 (3 of 9 before
+  its merge of 16d2e645, one of those in a run before the interleaving
+  began; 0 of 5 after);
+- `origin/main`: 2 red of 13 (0 of 8 at 1ce71831, 2 of 5 at 16d2e645).
+Each red was this failure. The race is on `main`.
 
 The fix belongs where the owner is decided:
 - init names the owner itself, after the spawn and before the frame. That
