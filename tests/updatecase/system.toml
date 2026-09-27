@@ -28,9 +28,10 @@ slots = true
 [programs.test-runner]
 syscap = ["logread"]
 
-# `reboot` is how the host hands the machine to the slot `update` marked.
+# `reboot` is how the host hands the machine to the slot `update` marked, and
+# it asks init through the `power` connector.
 [programs.toybox]
-syscap = ["power"]
+receives = ["power"]
 
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"

@@ -19,7 +19,7 @@
 //! layout ([`vars`]).
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use toyos_build::bootlog;
 use toyos_build::build::{self, Plan};
@@ -56,6 +56,39 @@ const FLOOR_REFUSED: &str = "it is refused rather than read as no floor";
 
 /// The loader's slots' record, on the log partition beside `loader.log`.
 const RECORD_FILE: &str = "attempts";
+
+/// What a wait on the machine spans, which is all that bounds it: `work` of
+/// the guest's own declared bounds, then `boots` boots, each priced as the
+/// harness prices the boot that brought the machine up.
+#[derive(Clone, Copy)]
+struct Spans {
+    work: Duration,
+    boots: u32,
+}
+
+/// The rest of a boot already under way.
+const A_BOOT: Spans = Spans { work: Duration::ZERO, boots: 1 };
+
+/// `reboot` to the reset: the guest's stop, by the bounds it declares — init's
+/// `FLUSH_BOUND` for `logd` (5 s), the kernel's `quiesce::PARK` (a quantum
+/// past one 2 s `block::OPERATION`) and its xHCI `BARRIER` (two of them, 4 s).
+const A_STOP: Spans = Spans { work: Duration::from_secs(5 + 3 + 4), boots: 0 };
+
+/// `reboot` to the next boot: the stop, then the boot after the reset.
+const A_REBOOT: Spans = Spans { work: A_STOP.work, boots: 1 };
+
+/// `reboot` into a kernel that panics once its boot is complete: the stop, that
+/// boot, `panic-reboot-fast`'s 5 s bound on its reset (`FAST_BOUND`,
+/// `kernel/src/panic_reboot.rs`), and the fallback boot.
+const A_DEATH: Spans = Spans { work: Duration::from_secs(5 + 3 + 4 + 5), boots: 2 };
+
+impl Spans {
+    /// A hang bound on `guest`, never a pace, and never past
+    /// [`qemu::GUEST_WEDGED`], the backstop behind every wait on a guest.
+    fn ceiling(self, guest: &QemuInstance) -> Duration {
+        (guest.budget(self.work) + guest.boot_ceiling() * self.boots).min(qemu::GUEST_WEDGED)
+    }
+}
 
 /// One machine: its disk, its firmware variables, the key the host logs in
 /// with, and where the host reaches its sshd.
@@ -190,7 +223,10 @@ impl Rig {
         let mut hold = qemu::QmpHold::arm(guest.qmp_socket());
         let asked = ssh::ssh_fire(HOST, self.port, &self.identity, "reboot")?;
         eprintln!("  [update] `reboot` answered {asked:?}");
-        hold.held(qemu::GUEST_WEDGED)?;
+        if let Err(why) = hold.held(A_STOP.ceiling(guest)) {
+            console.push_str(&guest.take_pending());
+            return Err(since_the_reboot(why, guest, console, from, uart));
+        }
         let guid = self.log_guid()?;
         let mut record = self.record()?;
         edit(&mut record)?;
@@ -199,7 +235,7 @@ impl Rig {
             return Err("the forged record did not read back".into());
         }
         hold.release();
-        await_machine(guest, console, &format!("{marker:?} after the forged reboot"), |c| c[from.min(c.len())..].contains(marker))?;
+        await_machine(guest, console, &format!("{marker:?} after the forged reboot"), A_BOOT, |c| c[from.min(c.len())..].contains(marker))?;
         Ok((from, uart))
     }
 
@@ -223,13 +259,21 @@ impl Rig {
         let (from, uart) = (console.len(), guest.uart_log().len());
         let asked = ssh::ssh_fire(HOST, self.port, &self.identity, "reboot")?;
         eprintln!("  [update] `reboot` answered {asked:?}");
-        await_machine(guest, console, &format!("{marker:?} after the reboot"), |c| c[from.min(c.len())..].contains(marker))
-            .map_err(|why| {
-                let all = guest.uart_log();
-                format!("{why}\nthe 16550 since the reboot:\n{}", &all[uart.min(all.len())..])
-            })?;
+        await_machine(guest, console, &format!("{marker:?} after the reboot"), A_REBOOT, |c| c[from.min(c.len())..].contains(marker))
+            .map_err(|why| since_the_reboot(why, guest, console, from, uart))?;
         Ok((from, uart))
     }
+}
+
+/// `why`, with what the machine said on both channels since the reboot was
+/// asked for: a refused `reboot` is on the console and nowhere else.
+fn since_the_reboot(why: String, guest: &QemuInstance, console: &str, from: usize, uart: usize) -> String {
+    let all = guest.uart_log();
+    format!(
+        "{why}\nthe console since the reboot:\n{}\nthe 16550 since the reboot:\n{}",
+        &console[from.min(console.len())..],
+        &all[uart.min(all.len())..]
+    )
 }
 
 /// Wait until `done` holds of the console, while the machine is talking on
@@ -239,9 +283,11 @@ impl Rig {
 /// between a kernel's reset and the next kernel's first line the machine
 /// talks only on the 16550 — the loader's passes, one of which hashes ROOT —
 /// so a machine working through two of them reads as one gone quiet. Its
-/// bounds are the harness's, [`qemu::GUEST_QUIET`] of silence on both and
-/// [`qemu::GUEST_WEDGED`] in all.
-fn await_machine(guest: &mut QemuInstance, console: &mut String, doing: &str, done: impl Fn(&str) -> bool) -> Result<(), String> {
+/// bounds are [`qemu::GUEST_QUIET`] of silence on both, and in all the
+/// ceiling of what the wait `spans`: a machine idling on a kernel whose
+/// reporter keeps it talking is never quiet.
+fn await_machine(guest: &mut QemuInstance, console: &mut String, doing: &str, spans: Spans, done: impl Fn(&str) -> bool) -> Result<(), String> {
+    let ceiling = spans.ceiling(guest);
     let began = Instant::now();
     let (mut heard, mut grew) = (0usize, Instant::now());
     loop {
@@ -261,8 +307,15 @@ fn await_machine(guest: &mut QemuInstance, console: &mut String, doing: &str, do
                 qemu::GUEST_QUIET.as_secs()
             ));
         }
-        if began.elapsed() >= qemu::GUEST_WEDGED {
-            return Err(format!("{} waiting for {doing}: it never stopped talking and never got there", qemu::STALLED));
+        if began.elapsed() >= ceiling {
+            return Err(format!(
+                "{} waiting for {doing}: it never stopped talking and never got there in {} s, the \
+                 bound of {} s of the guest's own work and {} boot(s)",
+                qemu::STALLED,
+                ceiling.as_secs(),
+                spans.work.as_secs(),
+                spans.boots
+            ));
         }
     }
 }
@@ -308,7 +361,7 @@ pub fn update_boots_the_new_kernel(_: &Path, _: &[(String, Vec<u8>)], _: &[(Stri
         return Err(format!("`update` ended {status:?} saying {said:?}"));
     }
     let (from, uart) = rig.reboot_until(&mut guest, &mut console, &format!("{SLOT_RECORD} B, the one the slot table marks"))?;
-    await_machine(&mut guest, &mut console, "the new slot's ready marker", |c| c[from..].contains(DEFAULT_READY))?;
+    await_machine(&mut guest, &mut console, "the new slot's ready marker", A_BOOT, |c| c[from..].contains(DEFAULT_READY))?;
     let booted = asked.elapsed();
     loader_said(&guest, uart, &format!("Anti-rollback floor: {BASE}, raised from 0 by the boot that proved it"))?;
     loader_said(&guest, uart, &format!("Slot B: {VERIFIED}"))?;
@@ -338,7 +391,7 @@ pub fn update_boots_the_new_kernel(_: &Path, _: &[(String, Vec<u8>)], _: &[(Stri
     };
     let (from, uart) =
         rig.reboot_forging(&mut guest, &mut console, forge, &format!("{SLOT_RECORD} B, the one the slot table marks"))?;
-    await_machine(&mut guest, &mut console, "slot B's ready marker again", |c| c[from..].contains(DEFAULT_READY))?;
+    await_machine(&mut guest, &mut console, "slot B's ready marker again", A_BOOT, |c| c[from..].contains(DEFAULT_READY))?;
     loader_said(&guest, uart, "Anti-rollback floor: not raised, because the proven image is not verified: slot B's signed header is")?;
     loader_said(&guest, uart, &format!("{} (image scope) holds {BASE}", rig.floor_name()?))?;
     let since = guest.uart_log()[uart..].to_string();
@@ -353,7 +406,7 @@ pub fn update_boots_the_new_kernel(_: &Path, _: &[(String, Vec<u8>)], _: &[(Stri
     // image, the floor rises to the update's version, and the slot the machine
     // updated from is below it.
     let (from, uart) = rig.reboot_until(&mut guest, &mut console, &format!("{SLOT_RECORD} B, the one the slot table marks"))?;
-    await_machine(&mut guest, &mut console, "slot B's ready marker a third time", |c| c[from..].contains(DEFAULT_READY))?;
+    await_machine(&mut guest, &mut console, "slot B's ready marker a third time", A_BOOT, |c| c[from..].contains(DEFAULT_READY))?;
     loader_said(&guest, uart, &format!("Anti-rollback floor: {NEXT}, raised from {BASE} by the boot that proved it"))?;
     drop(guest);
     image::restage_table(&rig.image, |t| t.marked = Which::A)?;
@@ -470,15 +523,16 @@ pub fn update_falls_back_from_a_dying_kernel(_: &Path, _: &[(String, Vec<u8>)], 
     let again = format!("{SLOT_RECORD} B, ");
     let (from, uart) = (console.len(), guest.uart_log().len());
     ssh::ssh_fire(HOST, rig.port, &rig.identity, "reboot")?;
-    await_machine(&mut guest, &mut console, "slot A to fall back, or slot B to boot again", |c| {
+    await_machine(&mut guest, &mut console, "slot A to fall back, or slot B to boot again", A_DEATH, |c| {
         let since = &c[from.min(c.len())..];
         since.contains(&fell_back) || since.matches(&again).count() >= 2
-    })?;
+    })
+    .map_err(|why| since_the_reboot(why, &guest, &console, from, uart))?;
     let booted_b = console[from..].matches(&again).count();
     if !console[from..].contains(&fell_back) {
         return Err(format!("slot B booted {booted_b} times after the update and slot A never did"));
     }
-    await_machine(&mut guest, &mut console, "slot A's ready marker", |c| c[from..].contains(DEFAULT_READY))?;
+    await_machine(&mut guest, &mut console, "slot A's ready marker", A_BOOT, |c| c[from..].contains(DEFAULT_READY))?;
     loader_said(&guest, uart, "Previous boot's panic:")?;
     loader_said(&guest, uart, "died on its last boot, so no pass boots it again until an update replaces it")?;
 
@@ -594,7 +648,7 @@ pub fn update_grant_refuses_a_stray_partition(_: &Path, _: &[(String, Vec<u8>)],
             return Err(format!("with slot B naming {what}, `update` ended {status:?} saying {said:?}"));
         }
         let refused = format!("init: update: no slot to grant: {why}");
-        await_machine(&mut guest, &mut console, &format!("init to refuse {what}"), |c| c.contains(&refused))?;
+        await_machine(&mut guest, &mut console, &format!("init to refuse {what}"), A_BOOT, |c| c.contains(&refused))?;
         eprintln!("  [update] slot B naming {what}: init granted nothing, and `update` held nothing");
         drop(guest);
     }
