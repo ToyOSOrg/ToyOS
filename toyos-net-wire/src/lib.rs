@@ -166,21 +166,35 @@ mod compile_fail {
     pub struct raw_payload_takes_no_transport_protocol_and_no_payload_is_forged;
 
     /// ```
-    /// use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
-    /// use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
+    /// use toyos_net_wire::checksum::PseudoHeader;
+    /// use toyos_net_wire::ethernet::{FrameBody, FrameBuilder, IndividualMac, MacAddr};
+    /// use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, Payload, Protocol, TrafficClass, Ttl};
     /// use toyos_net_wire::udp::UdpBuilder;
     /// use toyos_net_wire::Port;
-    /// let builder = Ipv4Builder {
-    ///     source: Ipv4Source::new(std::net::Ipv4Addr::new(192, 0, 2, 1)).unwrap(),
+    /// fn frame<B: FrameBody>(body: &B, out: &mut [u8]) -> usize {
+    ///     let source = IndividualMac::new(MacAddr([0x02, 0, 0, 0, 0, 1])).unwrap();
+    ///     FrameBuilder { destination: MacAddr::BROADCAST, source }.emit(body, out).unwrap().len()
+    /// }
+    /// fn send<P: Payload>(payload: P, out: &mut [u8]) -> usize {
+    ///     let builder = Ipv4Builder {
+    ///         source: Ipv4Source::new(std::net::Ipv4Addr::new(192, 0, 2, 1)).unwrap(),
+    ///         destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
+    ///         ttl: Ttl::DEFAULT,
+    ///         traffic_class: TrafficClass::ZERO,
+    ///         options: &[],
+    ///         payload,
+    ///     };
+    ///     frame(&builder, out)
+    /// }
+    /// let udp = UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" };
+    /// assert_eq!(send(udp, &mut [0xAA; 100]), 60);
+    /// let pseudo = PseudoHeader {
+    ///     source: std::net::Ipv4Addr::new(192, 0, 2, 1),
     ///     destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
-    ///     ttl: Ttl::DEFAULT,
-    ///     traffic_class: TrafficClass::ZERO,
-    ///     options: &[],
-    ///     payload: UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" },
+    ///     protocol: Protocol::Tcp,
+    ///     length: 100,
     /// };
-    /// let source = IndividualMac::new(MacAddr([0x02, 0, 0, 0, 0, 1])).unwrap();
-    /// let mut out = [0u8; 100];
-    /// FrameBuilder { destination: MacAddr::BROADCAST, source }.emit(&builder, &mut out).unwrap();
+    /// let _ = pseudo.accumulator().sum();
     /// ```
     ///
     /// ```compile_fail
@@ -214,25 +228,6 @@ mod compile_fail {
     /// let mut out = [0u8; 100];
     /// let _ = WriteFrameBody::write(&builder, &mut out);
     /// ```
-    #[allow(non_camel_case_types)]
-    pub struct frame_body_cannot_be_forged_or_called_directly;
-
-    /// ```
-    /// use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
-    /// use toyos_net_wire::udp::UdpBuilder;
-    /// use toyos_net_wire::Port;
-    /// let udp = UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" };
-    /// let builder = Ipv4Builder {
-    ///     source: Ipv4Source::new(std::net::Ipv4Addr::new(192, 0, 2, 1)).unwrap(),
-    ///     destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
-    ///     ttl: Ttl::DEFAULT,
-    ///     traffic_class: TrafficClass::ZERO,
-    ///     options: &[],
-    ///     payload: udp,
-    /// };
-    /// let mut out = [0xAA; 100];
-    /// builder.emit(&mut out).unwrap();
-    /// ```
     ///
     /// ```compile_fail
     /// use toyos_net_wire::checksum::PseudoHeader;
@@ -247,32 +242,6 @@ mod compile_fail {
     ///     length: 100,
     /// };
     /// let _ = udp.write(&pseudo, &mut [0xAA; 100]);
-    /// ```
-    #[allow(non_camel_case_types)]
-    pub struct ipv4_payload_cannot_be_called_directly;
-
-    /// ```
-    /// use toyos_net_wire::ethernet::{FrameBody, FrameBuilder, IndividualMac, MacAddr};
-    /// use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, Payload, TrafficClass, Ttl};
-    /// use toyos_net_wire::udp::UdpBuilder;
-    /// use toyos_net_wire::Port;
-    /// fn frame<B: FrameBody>(body: &B, out: &mut [u8]) -> usize {
-    ///     let source = IndividualMac::new(MacAddr([0x02, 0, 0, 0, 0, 1])).unwrap();
-    ///     FrameBuilder { destination: MacAddr::BROADCAST, source }.emit(body, out).unwrap().len()
-    /// }
-    /// fn send<P: Payload>(payload: P, out: &mut [u8]) -> usize {
-    ///     let builder = Ipv4Builder {
-    ///         source: Ipv4Source::new(std::net::Ipv4Addr::new(192, 0, 2, 1)).unwrap(),
-    ///         destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
-    ///         ttl: Ttl::DEFAULT,
-    ///         traffic_class: TrafficClass::ZERO,
-    ///         options: &[],
-    ///         payload,
-    ///     };
-    ///     frame(&builder, out)
-    /// }
-    /// let udp = UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" };
-    /// assert_eq!(send(udp, &mut [0xAA; 100]), 60);
     /// ```
     ///
     /// ```compile_fail
@@ -300,5 +269,5 @@ mod compile_fail {
     /// }
     /// ```
     #[allow(non_camel_case_types)]
-    pub struct payload_and_frame_body_are_bounds_that_cannot_write;
+    pub struct write_payload_and_write_frame_body_are_sealed;
 }
