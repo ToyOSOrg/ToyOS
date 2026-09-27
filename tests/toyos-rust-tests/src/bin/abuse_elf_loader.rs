@@ -308,12 +308,15 @@ fn spawn_refused(name: &str, bytes: &[u8]) {
 }
 
 /// Refused where the kernel opens the file, whose `DT_NEEDED` library is
-/// written beside it; handed its bytes, it is `NotFound`, since an image's
-/// libraries come from `/system/lib` alone.
-fn spawn_refused_beside_its_library(name: &str, bytes: &[u8]) {
+/// written beside it. The image route's answer is the kernel's *first*
+/// refusal on that route: `image_expected` is `NotFound` when nothing rejects
+/// the file before `DT_NEEDED` is walked from `/system/lib` alone and finds
+/// nothing there, `InvalidArgument` when a table check upstream of that walk
+/// — read while the file is still opened directly — refuses first.
+fn spawn_refused_beside_its_library(name: &str, bytes: &[u8], image_expected: SyscallError) {
     refused(name, spawn_result(name, bytes));
     let image = spawn_image(&format!("{DIR}/{name}"), bytes);
-    assert_eq!(image, Err(SyscallError::NotFound), "{name} as an image: its library is not in /system/lib");
+    assert_eq!(image, Err(image_expected), "{name} as an image");
 }
 
 /// Load it and throw it away. These cases are about a *walk* the loader does,
@@ -760,7 +763,9 @@ fn values_are_bounded_by_the_image() {
             .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_FUNC, 1, FAR_VALUE)
             .poke(0x1801, FAR.as_bytes())
             .poke(0x1800 + name_at as usize, dep.as_bytes());
-        spawn_refused_beside_its_library("export_past_image", &exe.build());
+        // The export map is built after `load_needed_libs` (`kernel/src/loader/mod.rs`), so the
+        // image route never reaches it: the dependency missing from `/system/lib` answers first.
+        spawn_refused_beside_its_library("export_past_image", &exe.build(), SyscallError::NotFound);
     }
 
     dlopen_refused("so_relative_addend_past_image.so", &so_with(&[], &[(0x1400, 0, R_X86_64_RELATIVE, i64::MAX)], None));
@@ -925,7 +930,9 @@ fn tls_apply_time_refusals_are_reached() {
         .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
         .poke(0x1801, b"wtls\0")
         .poke(0x1806, dep.as_bytes());
-    spawn_refused_beside_its_library("tpoff_overflow_spawn", &exe.build());
+    // `apply_tls_relocs` (`kernel/src/loader/mod.rs`) runs after `load_needed_libs`, so the image
+    // route never reaches it: the dependency missing from `/system/lib` answers first.
+    spawn_refused_beside_its_library("tpoff_overflow_spawn", &exe.build(), SyscallError::NotFound);
 
     let defs = write_file("tpoff_overflow_defs.so", &tls_defs_so(b"vtls", PAST_I64));
     let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen tpoff_overflow_defs.so");
@@ -952,7 +959,9 @@ fn globdat_past_short_dynsym() {
     )
     .poke(0x1801, dep.as_bytes())
     .poke(0x3000, &gnu_hash);
-    spawn_refused_beside_its_library("globdat_past_dynsym", &exe.build());
+    // `rela::parse` (`toyos-elf/src/rela.rs`) bounds `r_sym` against the exe's own `.dynsym` while
+    // `read_exe_tables` still holds the file open directly, before `load_needed_libs` ever runs.
+    spawn_refused_beside_its_library("globdat_past_dynsym", &exe.build(), SyscallError::InvalidArgument);
 }
 
 /// A shared object defining its own `xtls` (`STT_TLS`, offset 8) in a 0x20-byte
