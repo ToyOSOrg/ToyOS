@@ -35,7 +35,6 @@ fn libc_archive_toyos() -> (PathBuf, PathBuf) {
             let libc_dir = libc_dir();
             let target = super::qemu::SUITE_ARCH.userland();
 
-            let _slot = toyos_build::buildlock::build_slot(&repo_root(), "the libc archive");
             let mut lock = toyos_build::buildlock::shared(&repo_root(), "toyos-libc archive");
             let sysroot = toyos_build::toolchain::ensure(&repo_root(), false, &mut lock);
             // One target directory per sysroot: cargo cannot see that the std
