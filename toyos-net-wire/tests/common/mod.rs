@@ -3,8 +3,7 @@
 use std::net::Ipv4Addr;
 
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
-use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Payload, Ipv4Source, OtherProtocol, Protocol, TrafficClass, Ttl};
-use toyos_net_wire::BuildError;
+use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, OtherProtocol, Protocol, TrafficClass, Ttl};
 
 pub const MAC_A: MacAddr = MacAddr([0x02, 0, 0, 0, 0, 0x0a]);
 pub const MAC_B: MacAddr = MacAddr([0x02, 0, 0, 0, 0, 0x0b]);
@@ -152,7 +151,7 @@ pub fn unassigned(number: u8) -> OtherProtocol {
     }
 }
 
-pub fn datagram<P: Ipv4Payload>(source: Ipv4Addr, destination: Ipv4Addr, payload: P) -> Ipv4Builder<'static, P> {
+pub fn datagram<P>(source: Ipv4Addr, destination: Ipv4Addr, payload: P) -> Ipv4Builder<'static, P> {
     Ipv4Builder {
         source: Ipv4Source::new(source).unwrap(),
         destination,
@@ -163,9 +162,13 @@ pub fn datagram<P: Ipv4Payload>(source: Ipv4Addr, destination: Ipv4Addr, payload
     }
 }
 
-pub fn emit<P: Ipv4Payload>(builder: &Ipv4Builder<'_, P>) -> Result<Vec<u8>, BuildError> {
-    let mut out = junk(builder.length().unwrap_or(0));
-    builder.emit(&mut out).map(<[u8]>::to_vec)
+#[macro_export]
+macro_rules! emit {
+    ($builder:expr) => {{
+        let builder = $builder;
+        let mut out = $crate::common::junk(builder.length().unwrap_or(0));
+        builder.emit(&mut out).map(<[u8]>::to_vec)
+    }};
 }
 
 pub struct Rng(pub u64);

@@ -235,7 +235,7 @@ pub struct FrameBuilder {
 }
 
 impl FrameBuilder {
-    #[allow(private_bounds, reason = "FrameBody is crate-private on purpose: only this crate's own builders may name it")]
+    #[allow(private_bounds)]
     pub fn emit<'b, B: FrameBody>(&self, body: &B, out: &'b mut [u8]) -> Result<&'b [u8], BuildError> {
         let body_len = body.length()?;
         if body_len > MAX_BODY {

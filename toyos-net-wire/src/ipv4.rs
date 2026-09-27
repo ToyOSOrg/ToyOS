@@ -387,12 +387,7 @@ impl<'a> Ipv4Packet<'a> {
     }
 }
 
-pub(crate) mod sealed {
-    pub trait Sealed {}
-}
-
-/// Sealed: every payload names its own protocol and computes its own lengths and checksum.
-pub trait Ipv4Payload: sealed::Sealed {
+pub(crate) trait Ipv4Payload {
     fn protocol(&self) -> Protocol;
 
     fn length(&self, header_len: usize) -> Result<usize, BuildError>;
@@ -405,8 +400,6 @@ pub struct RawPayload<'a> {
     pub protocol: OtherProtocol,
     pub bytes: &'a [u8],
 }
-
-impl sealed::Sealed for RawPayload<'_> {}
 
 impl Ipv4Payload for RawPayload<'_> {
     fn protocol(&self) -> Protocol {
@@ -433,14 +426,14 @@ pub struct Ipv4Builder<'a, P> {
     pub payload: P,
 }
 
+#[allow(private_bounds)]
 impl<P: Ipv4Payload> Ipv4Builder<'_, P> {
     pub fn emit<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], BuildError> {
-        let packet = exact(out, FrameBody::length(self)?)?;
+        let packet = exact(out, self.length()?)?;
         self.write(packet)?;
         Ok(packet)
     }
 
-    /// The exact byte length `emit` writes, so a caller can size its buffer without the crate-private `FrameBody` it cannot forge.
     pub fn length(&self) -> Result<usize, BuildError> {
         FrameBody::length(self)
     }

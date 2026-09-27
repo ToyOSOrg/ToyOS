@@ -135,7 +135,7 @@ fn s_udp_013_source_port_zero() {
 #[test]
 fn s_udp_014_largest_datagram() {
     let data = vec![0x61; 65_507];
-    let bytes = emit(&datagram(IP_A, IP_B, UdpBuilder { source: port(1), destination: port(2), data: &data })).unwrap();
+    let bytes = emit!(&datagram(IP_A, IP_B, UdpBuilder { source: port(1), destination: port(2), data: &data })).unwrap();
     assert_eq!(bytes.len(), 65_535);
     assert_eq!(udp(&bytes).unwrap().payload().len(), 65_507);
 }
@@ -155,13 +155,13 @@ fn s_udp_016_the_one_undetectable_bit_flip() {
     let (data, field) = (0..=u16::MAX)
         .map(|word| word.to_be_bytes())
         .find_map(|data| {
-            let bytes = emit(&datagram(IP_B, IP_A, UdpBuilder { source: port(5000), destination: port(5001), data: &data }))
+            let bytes = emit!(&datagram(IP_B, IP_A, UdpBuilder { source: port(5000), destination: port(5001), data: &data }))
                 .unwrap();
             let field = u16::from_be_bytes([bytes[26], bytes[27]]);
             field.is_power_of_two().then_some((data, field))
         })
         .unwrap();
-    let mut bytes = emit(&datagram(IP_B, IP_A, UdpBuilder { source: port(5000), destination: port(5001), data: &data })).unwrap();
+    let mut bytes = emit!(&datagram(IP_B, IP_A, UdpBuilder { source: port(5000), destination: port(5001), data: &data })).unwrap();
     let flipped = u16::from_be_bytes([bytes[26], bytes[27]]) ^ field;
     bytes[26..28].copy_from_slice(&flipped.to_be_bytes());
     assert_eq!(udp(&bytes).unwrap().checksum(), UdpChecksum::Absent);
@@ -170,7 +170,7 @@ fn s_udp_016_the_one_undetectable_bit_flip() {
 #[test]
 fn s_udp_019_emit_dns_query() {
     let frame = hex(V_UDP_DNS);
-    let built = emit(&datagram(IP_A, IP_DNS, UdpBuilder { source: port(49152), destination: port(53), data: &frame[42..] })).unwrap();
+    let built = emit!(&datagram(IP_A, IP_DNS, UdpBuilder { source: port(49152), destination: port(53), data: &frame[42..] })).unwrap();
     assert_eq!(built[20..], dns_udp());
     assert_eq!(built[26..28], [0xD9, 0x95]);
 }
@@ -178,20 +178,20 @@ fn s_udp_019_emit_dns_query() {
 #[test]
 fn s_udp_020_emit_computed_zero_as_ffff() {
     let vector = hex(V_UDP_FFFF);
-    let built = emit(&datagram(IP_A, IP_B, UdpBuilder { source: port(1000), destination: port(2000), data: &vector[8..] })).unwrap();
+    let built = emit!(&datagram(IP_A, IP_B, UdpBuilder { source: port(1000), destination: port(2000), data: &vector[8..] })).unwrap();
     assert_eq!(built[20..], vector);
 }
 
 #[test]
 fn s_udp_021_always_checksummed() {
-    let built = emit(&datagram(IP_A, IP_B, UdpBuilder { source: port(1000), destination: port(2000), data: &[0, 0] })).unwrap();
+    let built = emit!(&datagram(IP_A, IP_B, UdpBuilder { source: port(1000), destination: port(2000), data: &[0, 0] })).unwrap();
     assert_ne!(built[26..28], [0, 0]);
 }
 
 #[test]
 fn s_udp_022_too_long() {
     let data = vec![0; 65_528];
-    assert_eq!(emit(&datagram(IP_A, IP_B, UdpBuilder { source: port(1), destination: port(2), data: &data })), Err(BuildError::UdpTooLong));
+    assert_eq!(emit!(&datagram(IP_A, IP_B, UdpBuilder { source: port(1), destination: port(2), data: &data })), Err(BuildError::UdpTooLong));
     let frame = FrameBuilder { destination: MAC_B, source: mac_a() };
     let mut out = junk(2000);
     let data = [0; 1473];
@@ -230,7 +230,7 @@ fn s_udp_023_zero_port_cannot_be_built() {
 
 #[test]
 fn s_udp_024_emit_hi() {
-    let built = emit(&datagram(IP_B, IP_A, UdpBuilder { source: port(5000), destination: port(5001), data: b"hi" })).unwrap();
+    let built = emit!(&datagram(IP_B, IP_A, UdpBuilder { source: port(5000), destination: port(5001), data: b"hi" })).unwrap();
     assert_eq!(built, hex(V_UDP_HI));
 }
 
@@ -637,11 +637,11 @@ fn segment<'a>(source: u16, destination: u16, sequence: u32, control: Control<'a
 }
 
 fn a_to_b(segment: TcpBuilder<'_>) -> Vec<u8> {
-    emit(&datagram(IP_A, IP_B, segment)).unwrap()
+    emit!(&datagram(IP_A, IP_B, segment)).unwrap()
 }
 
 fn b_to_a(segment: TcpBuilder<'_>) -> Vec<u8> {
-    emit(&datagram(IP_B, IP_A, segment)).unwrap()
+    emit!(&datagram(IP_B, IP_A, segment)).unwrap()
 }
 
 fn a_syn() -> TcpBuilder<'static> {
@@ -720,7 +720,7 @@ fn s_tser_007_sack_block_limits() {
     let blocks = [block(1, 2), block(3, 4), block(5, 6), block(7, 8), block(9, 10)];
     let with = |timestamps, sack| {
         let control = Control::Ack { acknowledgment: SeqNum::new(1), push: false, fin: false, options: EstablishedOptions { timestamps, sack } };
-        emit(&datagram(IP_B, IP_A, segment(80, 49152, 1, control, 509, &[])))
+        emit!(&datagram(IP_B, IP_A, segment(80, 49152, 1, control, 509, &[])))
     };
     let timestamps = Some(Timestamps { value: 1, echo: 1 });
     assert_eq!(with(timestamps, &blocks[..4]), Err(BuildError::TcpTooManySackBlocks));
@@ -785,6 +785,6 @@ fn s_tser_014_emit_over_junk() {
 fn s_tser_015_too_long() {
     let control = Control::Ack { acknowledgment: SeqNum::new(1), push: false, fin: false, options: EstablishedOptions::default() };
     let data = vec![0; 65_496];
-    assert_eq!(emit(&datagram(IP_A, IP_B, segment(1, 2, 1, control, 1, &data))), Err(BuildError::TcpTooLong));
-    assert!(emit(&datagram(IP_A, IP_B, segment(1, 2, 1, control, 1, &data[1..]))).is_ok());
+    assert_eq!(emit!(&datagram(IP_A, IP_B, segment(1, 2, 1, control, 1, &data))), Err(BuildError::TcpTooLong));
+    assert!(emit!(&datagram(IP_A, IP_B, segment(1, 2, 1, control, 1, &data[1..]))).is_ok());
 }

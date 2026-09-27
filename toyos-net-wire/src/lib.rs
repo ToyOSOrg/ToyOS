@@ -166,12 +166,21 @@ mod compile_fail {
     pub struct raw_payload_takes_no_transport_protocol_and_no_payload_is_forged;
 
     /// ```
-    /// use toyos_net_wire::arp::Arp;
     /// use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
+    /// use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
+    /// use toyos_net_wire::udp::UdpBuilder;
+    /// use toyos_net_wire::Port;
+    /// let builder = Ipv4Builder {
+    ///     source: Ipv4Source::new(std::net::Ipv4Addr::new(192, 0, 2, 1)).unwrap(),
+    ///     destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
+    ///     ttl: Ttl::DEFAULT,
+    ///     traffic_class: TrafficClass::ZERO,
+    ///     options: &[],
+    ///     payload: UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" },
+    /// };
     /// let source = IndividualMac::new(MacAddr([0x02, 0, 0, 0, 0, 1])).unwrap();
-    /// let arp = Arp::probe(source, std::net::Ipv4Addr::new(192, 0, 2, 1));
-    /// let mut out = [0u8; 60];
-    /// FrameBuilder { destination: MacAddr::BROADCAST, source }.emit(&arp, &mut out).unwrap();
+    /// let mut out = [0u8; 100];
+    /// FrameBuilder { destination: MacAddr::BROADCAST, source }.emit(&builder, &mut out).unwrap();
     /// ```
     ///
     /// ```compile_fail
@@ -207,4 +216,77 @@ mod compile_fail {
     /// ```
     #[allow(non_camel_case_types)]
     pub struct frame_body_cannot_be_forged_or_called_directly;
+
+    /// ```
+    /// use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
+    /// use toyos_net_wire::udp::UdpBuilder;
+    /// use toyos_net_wire::Port;
+    /// let udp = UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" };
+    /// let builder = Ipv4Builder {
+    ///     source: Ipv4Source::new(std::net::Ipv4Addr::new(192, 0, 2, 1)).unwrap(),
+    ///     destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
+    ///     ttl: Ttl::DEFAULT,
+    ///     traffic_class: TrafficClass::ZERO,
+    ///     options: &[],
+    ///     payload: udp,
+    /// };
+    /// let mut out = [0xAA; 100];
+    /// builder.emit(&mut out).unwrap();
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_wire::checksum::PseudoHeader;
+    /// use toyos_net_wire::ipv4::{Ipv4Payload, Protocol};
+    /// use toyos_net_wire::udp::UdpBuilder;
+    /// use toyos_net_wire::Port;
+    /// let udp = UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" };
+    /// let pseudo = PseudoHeader {
+    ///     source: std::net::Ipv4Addr::new(192, 0, 2, 1),
+    ///     destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
+    ///     protocol: Protocol::Tcp,
+    ///     length: 100,
+    /// };
+    /// let _ = udp.write(&pseudo, &mut [0xAA; 100]);
+    /// ```
+    #[allow(non_camel_case_types)]
+    pub struct ipv4_payload_cannot_be_called_directly;
+
+    /// ```
+    /// use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
+    /// use toyos_net_wire::udp::UdpBuilder;
+    /// use toyos_net_wire::Port;
+    /// fn relay(p: UdpBuilder<'_>, out: &mut [u8]) {
+    ///     let builder = Ipv4Builder {
+    ///         source: Ipv4Source::new(std::net::Ipv4Addr::new(192, 0, 2, 1)).unwrap(),
+    ///         destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
+    ///         ttl: Ttl::DEFAULT,
+    ///         traffic_class: TrafficClass::ZERO,
+    ///         options: &[],
+    ///         payload: p,
+    ///     };
+    ///     builder.emit(out).unwrap();
+    /// }
+    /// let udp = UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" };
+    /// relay(udp, &mut [0xAA; 100]);
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_wire::checksum::PseudoHeader;
+    /// use toyos_net_wire::ipv4::{Ipv4Payload, Protocol};
+    /// use toyos_net_wire::udp::UdpBuilder;
+    /// use toyos_net_wire::Port;
+    /// fn relay<P: Ipv4Payload>(p: P, out: &mut [u8]) {
+    ///     let pseudo = PseudoHeader {
+    ///         source: std::net::Ipv4Addr::new(192, 0, 2, 1),
+    ///         destination: std::net::Ipv4Addr::new(192, 0, 2, 2),
+    ///         protocol: Protocol::Tcp,
+    ///         length: 100,
+    ///     };
+    ///     let _ = p.write(&pseudo, out);
+    /// }
+    /// let udp = UdpBuilder { source: Port::new(1).unwrap(), destination: Port::new(2).unwrap(), data: b"hi" };
+    /// relay(udp, &mut [0xAA; 100]);
+    /// ```
+    #[allow(non_camel_case_types)]
+    pub struct ipv4_payload_cannot_be_called_through_a_generic_bound;
 }
