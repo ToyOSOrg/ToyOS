@@ -971,6 +971,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("sshd_exec", Sched::Parallel, Tier::Fast),
     ("sshd_files", Sched::Parallel, Tier::Fast),
     ("sshd_key_auth", Sched::Parallel, Tier::Fast),
+    // Its own boot: on a netd that strands a hasty peer, port 22 stays shut for
+    // the rest of it. Every verdict is an exit status or a console line.
+    ("sshd_hasty_peers", Sched::Parallel, Tier::Fast),
     // Serial: it measures netd's 2 s handshake deadline against the host's
     // clock, and counts how many connections survived a 48 ms paced burst
     // before that deadline could expire any of them. Both are wall-clock
@@ -12236,6 +12239,7 @@ fn run_machine_test(
             let boot = group_boot(held, SSHD_LOGIN, || common::ssh::boot(rust_bins));
             common::ssh::key_auth_gate(&mut boot.qemu)
         }
+        "sshd_hasty_peers" => common::ssh::hasty_peers_gate(&mut common::ssh::boot(rust_bins)),
         "console_locale_detect" => console_locale_detect(),
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
