@@ -54,13 +54,13 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 ## Dependencies
 
-Only **Rust** and **QEMU** (for development). The rules: no binary outside those two — a macOS binary is a hard no, and "only for tests" does not soften it; only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; no Python; third-party crates are used as published, and a fork exists only to carry a change being upstreamed and goes when upstream has it. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS?
+Only **Rust** and **QEMU** (for development). The rules: no binary outside those two — a macOS binary is a hard no, and "only for tests" does not soften it; only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; no Python; third-party crates are used as published, and a fork carries a change written to upstream quality and goes when upstream has it. No upstream pull requests are sent for now: ToyOS needs more attention and more contributors before upstream projects take it seriously, and upstreams tend to refuse AI-first projects and their contributions. A third-party source ToyOS cannot build without changing it is carried as an unmodified-source packaging mirror with a byte-identity gate, not as a fork. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS? Self-hosting means ToyOS rebuilds itself on ToyOS and reproduces the host's bytes; a bootstrap from source with no binary seed is out of scope.
 
 Vendor firmware a device verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`, and loaded only by that device's own driver through its IOMMU domain; it never executes on the CPU.
 
 The bar is not yet the tree. The standing failures are declared rather than removed — Python via `rust/x`, `cc` for every host link, four macOS FAT tools. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
 
-- **toyos-ld** — custom linker for bootloader, kernel and all userland. Its output is reproducible, and the container types say so: anything iterated into the output is a `BTreeMap`/`BTreeSet`; a container asked only for membership stays hashed.
+- **toyos-ld** — frozen: everything links with rust-lld, and toyos-ld stays only as the linker inside ToyOS until lld runs there, then goes.
 - **toyos-cc** — minimal C compiler; exists to bootstrap tinycc and compile doomgeneric, not to grow. A layout or linkage construct it does not implement is refused by name — dropping one silently is a miscompilation.
 - **rust/** — Rust compiler/std fork with ToyOS platform support (submodule). Auto-bootstraps; kept current with upstream. Its rules: `src/forkcheck.rs`'s module header.
 

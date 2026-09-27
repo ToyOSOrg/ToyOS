@@ -1,10 +1,20 @@
-use core::alloc::Layout;
 use core::ptr;
 
 // C malloc/free/calloc/realloc route through the Rust global allocator (dlmalloc).
 // We store the allocation size in a header so C's free(ptr) can recover it.
+//
+// Linked beside std (`std-runtime`), std's own C allocator defines all four,
+// and a second definition is a duplicate symbol: this library calls std's.
+#[cfg(feature = "std-runtime")]
+extern "C" {
+    pub fn malloc(size: usize) -> *mut u8;
+    pub fn free(p: *mut u8);
+}
+
+#[cfg(not(feature = "std-runtime"))]
 mod backend {
     use super::*;
+    use core::alloc::Layout;
 
     const HEADER: usize = 16; // 16 for alignment
     const ALIGN: usize = 16;
@@ -45,6 +55,7 @@ mod backend {
 
 // --- C standard memory functions ---
 
+#[cfg(not(feature = "std-runtime"))]
 #[no_mangle]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
     if size == 0 {
@@ -53,6 +64,7 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
     unsafe { backend::alloc(size) }
 }
 
+#[cfg(not(feature = "std-runtime"))]
 #[no_mangle]
 pub unsafe extern "C" fn free(p: *mut u8) {
     if p.is_null() {
@@ -61,6 +73,7 @@ pub unsafe extern "C" fn free(p: *mut u8) {
     unsafe { backend::dealloc(p); }
 }
 
+#[cfg(not(feature = "std-runtime"))]
 #[no_mangle]
 pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
     let total = match count.checked_mul(size) {
@@ -74,6 +87,7 @@ pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
     p
 }
 
+#[cfg(not(feature = "std-runtime"))]
 #[no_mangle]
 pub unsafe extern "C" fn realloc(p: *mut u8, new_size: usize) -> *mut u8 {
     if p.is_null() {

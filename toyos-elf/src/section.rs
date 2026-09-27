@@ -5,12 +5,36 @@
 //! Nothing here refuses a file; a table that cannot be read simply names
 //! nothing.
 
+use core::fmt;
+
 use crate::header::SECTION_HEADER_SIZE;
 use crate::read;
 
 pub const SHT_SYMTAB: u32 = 2;
 pub const SHT_RELA: u32 = 4;
 pub const SHT_DYNSYM: u32 = 11;
+/// Relocations whose addend lives in the destination word.
+pub const SHT_REL: u32 = 9;
+/// Relative relocations packed as a bitmap (`-z pack-relative-relocs`).
+pub const SHT_RELR: u32 = 19;
+
+/// A relocation form a loader that applies `SHT_RELA` alone would leave
+/// unapplied, so an image started with it runs with every pointer it covers
+/// still its link-time one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unapplied {
+    Rel,
+    Relr,
+}
+
+impl fmt::Display for Unapplied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Rel => "SHT_REL",
+            Self::Relr => "SHT_RELR (packed relative relocations)",
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SectionHeader {
@@ -82,6 +106,21 @@ impl<'a> SectionTable<'a> {
         let syms = self.find(kind)?;
         let strs = self.get(syms.link as usize)?;
         Some((syms, strs))
+    }
+
+    /// Every `SHT_RELA` section, for a loader that applies those and nothing
+    /// else: the only way to them, so no such loader can start an image whose
+    /// other relocations it never read. Refused when the table also names one
+    /// of another form.
+    pub fn rela_sections(self) -> Result<impl Iterator<Item = SectionHeader> + 'a, Unapplied> {
+        for sh in self.iter() {
+            match sh.kind {
+                SHT_REL => return Err(Unapplied::Rel),
+                SHT_RELR => return Err(Unapplied::Relr),
+                _ => {}
+            }
+        }
+        Ok(self.iter().filter(|sh| sh.kind == SHT_RELA))
     }
 
     /// The `.rela.dyn` section, for a file with no `PT_DYNAMIC`.

@@ -7,7 +7,7 @@ use core::mem;
 
 use alloc::vec;
 use alloc::alloc::Layout;
-use toyos_elf::section::{SectionTable, SHT_RELA};
+use toyos_elf::section::SectionTable;
 use toyos_elf::{RelaTable, RelocKind};
 use uefi::{
     prelude::*,
@@ -309,14 +309,6 @@ const WATCHDOG_CODE: u64 = 0x0001_0000;
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
-/// `SHT_REL`, the relocation form whose addend lives in the destination word.
-///
-/// Named here rather than taken from `toyos-elf`, which names only the section
-/// types it consumes and consumes no `SHT_REL`: nothing in this tree emits one,
-/// and an image that carried them would otherwise start with every one of them
-/// silently unapplied.
-const SHT_REL: u32 = 9;
-
 /// `[offset, offset + len)` of the file, or `None` when that is not wholly
 /// inside it.
 ///
@@ -362,18 +354,10 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     println!("Kernel stack size: {}", stack_size);
     // `vaddr_max` is the largest `p_vaddr + p_memsz` over the `PT_LOAD`
     // segments, and the image is laid out at its own vaddrs — so it is what the
-    // kernel's memory has to cover before the stack is added to it. The stack
-    // starts on the next page: where the image ends is the linker's choice, and
-    // both ABIs want the stack pointer 16-byte aligned, which AArch64's
-    // `SCTLR_EL1.SA` enforces on every access through it.
-    const PAGE: u64 = 4096;
-    let mem_size = layout
-        .vaddr_max
-        .checked_add(PAGE - 1)
-        .map(|end| end & !(PAGE - 1))
-        .and_then(|stack_base| stack_base.checked_add(stack_size as u64))
-        .and_then(|n| usize::try_from(n).ok())
+    // kernel's memory has to cover before the stack is added after it.
+    let placed = toyos_elf::StackedImage::place(layout.vaddr_max, stack_size as u64)
         .expect("kernel.elf: image plus stack does not fit an allocation");
+    let mem_size = usize::try_from(placed.size).expect("kernel.elf: image plus stack does not fit an allocation");
 
     println!("Kernel memory size: {}", mem_size);
 
@@ -390,13 +374,11 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
         process_mem[vstart..vstart + src.len()].copy_from_slice(src);
     }
 
-    assert!(
-        !sections.iter().any(|section| section.kind == SHT_REL),
-        "kernel.elf: SHT_REL is not supported"
-    );
+    let rela_sections =
+        sections.rela_sections().unwrap_or_else(|form| panic!("kernel.elf: {form} is not supported"));
 
     let mut reloc_count = 0u64;
-    for section in sections.iter().filter(|section| section.kind == SHT_RELA) {
+    for section in rela_sections {
         let table = file_range(kernel_elf_bytes, section.offset, section.size)
             .expect("kernel.elf: SHT_RELA section is past the end of the file");
         for rela in RelaTable::new(table, arch::ELF_MACHINE).iter() {
@@ -427,8 +409,8 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
                         // the 8-byte write lands fully inside `process_mem`'s
                         // allocation. `write_unaligned`, not `write`: an
                         // `r_offset` from the file is not guaranteed 8-byte
-                        // aligned by anything checked here, only by toyos-ld
-                        // always emitting `R_X86_64_RELATIVE` against aligned
+                        // aligned by anything checked here, only by the
+                        // linker emitting `R_X86_64_RELATIVE` against aligned
                         // slots — a fact this reader has no way to verify.
                         process_mem
                             .as_mut_ptr()
@@ -447,7 +429,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     LoadedKernel {
         memory: process_mem,
         entry_offset: layout.entry as usize,
-        stack_offset: mem_size - stack_size,
+        stack_offset: placed.stack as usize,
         stack_size,
     }
 }
@@ -643,24 +625,42 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     //
     // Said before it is applied: a machine this refuses leaves the refusal in
     // `loader.log`, which is the artifact a machine with no console has.
+    // Where firmware loaded this image, which is where the x86-64 switch to
+    // the boot map runs from: the map holds it wherever that is.
+    let loader = {
+        let bs = system_table.boot_services();
+        let image = bs
+            .open_protocol_exclusive::<LoadedImage>(bs.image_handle())
+            .expect("firmware answers LoadedImage for the image it started");
+        let (base, size) = image.info();
+        (base as u64, size)
+    };
     // Firmware's write-back memory, for an architecture whose boot map types
     // pages by it. Before the exit, while the map can still be asked for; the
     // attributes a descriptor carries do not change across it.
     let write_back = write_back_memory(&system_table);
-    let planned =
-        Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)), arch::typing(&write_back));
+    let planned = Plan::new(
+        gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)),
+        loader,
+        arch::typing(&write_back),
+    );
     match &planned {
-        Ok(plan) => match plan.scanout() {
-            Some((at, len)) => println!(
-                "Scanout: {at:#x}+{len:#x} mapped as the scanout in 2 MiB pages at identity and at \
-                 PHYS_OFFSET, in {} page directories",
-                plan.directories().len()
-            ),
-            None => println!("Scanout: this machine has none"),
-        },
-        Err(why) => println!("Scanout: NO BOOT MAP HOLDS IT, {why}"),
+        Ok(plan) => {
+            match plan.scanout() {
+                Some((at, len)) => println!(
+                    "Scanout: {at:#x}+{len:#x} mapped as the scanout in 2 MiB pages at identity and at \
+                     PHYS_OFFSET, in {} page directories",
+                    plan.directories().len()
+                ),
+                None => println!("Scanout: this machine has none"),
+            }
+            let (at, len) = plan.loader();
+            println!("Loader image: {:#x}+{:#x}, mapped at identity as {at:#x}+{len:#x}", loader.0, loader.1);
+        }
+        Err(why) => println!("Boot map: NO MAP HOLDS THIS MACHINE, {why}"),
     }
-    let plan = planned.unwrap_or_else(|why| panic!("the boot map cannot hold the scanout: {why}"));
+    let plan = planned
+        .unwrap_or_else(|why| panic!("the boot map cannot hold the scanout and the loader: {why}"));
 
     // SAFETY: `pt_mem` is the `MAX_PAGES * 4096`-byte, 4096-aligned, zeroed
     // allocation above, and a `Plan` never names more pages than that.
@@ -789,8 +789,10 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 
     let image = (kernel_phys, kernel_args.kernel_memory_size);
     // SAFETY: `kernel_args.boot_pml4_addr` is the table built above,
-    // identity-mapping low memory (so the code and stack a switch to it runs
-    // from stay mapped across it) and mapping the same range at `PHYS_OFFSET`;
+    // identity-mapping low memory and this loader's own image (so the code and
+    // stack a switch to it runs from stay mapped across it; the stack
+    // `kernel_args` lives on was proved inside the low map before the exit) and
+    // mapping the same at `PHYS_OFFSET`;
     // the assert before the exit proved the whole kernel image is inside that
     // range, and `image` is that image, relocated, with its entry at
     // `entry_offset`.
