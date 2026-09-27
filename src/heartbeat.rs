@@ -120,19 +120,25 @@ fn millis(field: &str) -> Option<u64> {
     Some(s.parse::<u64>().ok()? * 1000 + ms.parse::<u64>().ok()?)
 }
 
-/// `tests/metalcase`'s `[boot] start` programs and the line each says it has
-/// finished starting with. The one table: [`done_lines`] holds it against the
-/// config, and a caller reads it through that rather than declaring its own.
-const DONE: &[(&str, &str)] = &[
-    ("logd", "logd: this boot's kernel log is"),
-    ("compositor", "compositor: ready"),
-    ("soundd", "soundd: null sink idle"),
-    ("netd", "exit: netd pid="),
-    ("sshd", "exit: sshd pid="),
-    ("test-runner", "===READY==="),
+/// `tests/metalcase`'s `[boot] start` programs and the lines each says it has
+/// finished starting with — one per process a row starts. The one table:
+/// [`done_lines`] holds it against the config, and a caller reads it through
+/// that rather than declaring its own.
+const DONE: &[(&str, &[&str])] = &[
+    ("logd", &["logd: this boot's kernel log is"]),
+    // Said before the partition table is read, which is done before the DATA
+    // server's own line can be: that server opens its partition through blockd.
+    ("blockd", &["blockd: NVMe up"]),
+    // One process per role in the row.
+    ("fsd", &["fsd: Data serving", "fsd: Log serving", "fsd: Boot serving"]),
+    ("compositor", &["compositor: ready"]),
+    ("soundd", &["soundd: null sink idle"]),
+    ("netd", &["exit: netd pid="]),
+    ("sshd", &["exit: sshd pid="]),
+    ("test-runner", &["===READY==="]),
 ];
 
-/// The done line of each program in `start`, or the disagreement between the
+/// The done lines of the programs in `start`, or the disagreement between the
 /// config and [`DONE`] — a `[boot] start` program with no done line here leaves
 /// its own start-up inside the window, which is the one thing the window exists
 /// to exclude.
@@ -141,11 +147,11 @@ pub fn done_lines(start: &[String]) -> Result<Vec<&'static str>, String> {
     let known: Vec<&str> = DONE.iter().map(|(program, _)| *program).collect();
     if start != known {
         return Err(format!(
-            "`tests/metalcase` starts {start:?} and `src/heartbeat.rs` knows the done line of \
+            "`tests/metalcase` starts {start:?} and `src/heartbeat.rs` knows the done lines of \
              {known:?} — a program without one leaves its start-up inside the window"
         ));
     }
-    Ok(DONE.iter().map(|(_, line)| *line).collect())
+    Ok(DONE.iter().flat_map(|(_, lines)| lines.iter().copied()).collect())
 }
 
 /// Why a capture is not a claim about a settled, running machine's CPUs.
@@ -249,12 +255,21 @@ mod tests {
 
     use super::*;
 
-    /// `tests/metalcase`'s done lines, as the test passes them.
-    fn started() -> Vec<&'static str> {
-        done_lines(&crate::build::boot_start(
+    /// `tests/metalcase`'s `[boot] start`, as the test reads it.
+    fn metalcase() -> Vec<String> {
+        crate::build::boot_start(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase/system.toml"),
-        ))
-        .unwrap()
+        )
+    }
+
+    /// The done lines of the `[boot] start` the recorded captures below were
+    /// booted with, which started no block service and no file server.
+    fn started() -> Vec<&'static str> {
+        const RECORDED: &[&str] = &["logd", "compositor", "soundd", "netd", "sshd", "test-runner"];
+        RECORDED
+            .iter()
+            .flat_map(|p| DONE.iter().find(|(q, _)| q == p).expect("a program DONE knows").1.iter().copied())
+            .collect()
     }
 
     /// Nightly `35072262489`, guest shard 8, suite run: every heartbeat line and
@@ -742,8 +757,9 @@ compositor: ready
     /// program it does not know is refused by name, here and not at the guest.
     #[test]
     fn a_program_the_done_table_does_not_know_is_refused() {
-        let known: Vec<String> = DONE.iter().map(|(program, _)| (*program).to_string()).collect();
-        assert_eq!(done_lines(&known).unwrap(), started());
+        let known = metalcase();
+        let every: Vec<&str> = DONE.iter().flat_map(|(_, lines)| lines.iter().copied()).collect();
+        assert_eq!(done_lines(&known).unwrap(), every);
 
         let mut added = known.clone();
         added.push("sniffer".to_string());
