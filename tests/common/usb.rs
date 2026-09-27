@@ -1006,9 +1006,12 @@ fn optional_flush_keeps_the_log(
 
     let after = super::volumes::newest_log(&image_path, start, len)?.1;
     let after = String::from_utf8_lossy(&after).into_owned();
-    if !after.contains("Shutting down.") {
+    // `/log` ends at init's stop line: the kernel's own last word comes after
+    // the stop of every thread, `logd` among them, and is on the console alone.
+    if toyos_build::bootlog::stopping_line(&after).is_none() {
         return Err(format!(
-            "the shutdown's last line never reached the file: {} bytes",
+            "init's stop line never reached the file, so the log did not survive to the \
+             shutdown: {} bytes",
             after.len()
         ));
     }
@@ -2733,6 +2736,22 @@ fn transport_gives_up(
     }
     gate_ran(&boot, 2)?;
     check_geometry(&boot, bytes, lba)?;
+    // The gate leaves its disk offline and still registered, so ROOT's hold
+    // reads a table that does not answer: it holds ROOT off the boot stick and
+    // names that disk, rather than refusing the boot over it.
+    let Some(held) = boot.lines().find(|l| l.contains("root: holding ")) else {
+        return Err(format!("the boot never held the partition ROOT was read from\n{log}"));
+    };
+    let Some(gate) = boot.lines().find_map(|l| {
+        l.split_once("usb-gate: disk ")?.1.split_once(" designated")?.0.parse::<u32>().ok()
+    }) else {
+        return Err(format!("the gate never said which disk it designated\n{log}"));
+    };
+    // A USB disk's `DeviceId` is 16 past its index (`drivers/usb_storage.rs`).
+    let silent = format!("disks that did not answer: [{}]", 16 + gate);
+    if !held.ends_with(&silent) {
+        return Err(format!("{held:?}: ROOT's hold did not name the gate's disk alone, {silent:?}\n{log}"));
+    }
 
     // The budget is the kernel's declaration, read off the gate's own line.
     let Some(budget) = boot
