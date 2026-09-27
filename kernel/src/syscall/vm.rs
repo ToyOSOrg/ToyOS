@@ -286,7 +286,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Dlopen);
     });
 
-    let lib_tls = crate::elf::occupied_tls(lib.tls());
+    let lib_tls = lib.tls().and_then(toyos_elf::TlsSegment::occupied);
     let data_arc = process::process_data();
     let init_info = {
         let data = data_arc.lock();

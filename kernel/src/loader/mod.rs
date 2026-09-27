@@ -40,7 +40,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_elf::section::SectionTable;
 use toyos_elf::sym::{self, SymTab};
 use toyos_elf::rela::{FillLattice, Rules, FILL_GRANULE};
-use toyos_elf::{GnuHash, Layout, RelocError};
+use toyos_elf::{GnuHash, Layout, RelocError, TlsSegment};
 
 const USER_STACK_SIZE: usize = 4 * PAGE_2M as usize; // 8 MB
 
@@ -265,7 +265,17 @@ fn read_exe_tables(
         Some(vaddr) => Some(file_off(layout, path, "DT_SYMTAB", vaddr)?),
         None => None,
     };
-    let sym_count = exe_sym_count(backing, layout, &dyn_info, path)?;
+    let dynstr = match dyn_info.strtab_table() {
+        Some(t) => {
+            let off = file_off(layout, path, "DT_STRTAB", t.vaddr)?;
+            table(backing, path, "DT_STRSZ", off, t.size as usize)?
+        }
+        None => Vec::new(),
+    };
+    let dynsym = match (symtab_file_off, exe_sym_count(backing, layout, &dyn_info, path)?) {
+        (Some(off), n) if n > 0 => table(backing, path, "symbol count", off, n * sym::ENTRY_SIZE)?,
+        _ => Vec::new(),
+    };
 
     // Parsed like a library's but for the window and the fill page: the
     // executable's writes land anywhere in its own image, one demand-fault page
@@ -274,7 +284,7 @@ fn read_exe_tables(
     let rules = Rules {
         extent,
         window: (extent.min(), extent.max()),
-        sym_count,
+        sym_count: SymTab::new(&dynsym, &dynstr).count(),
         fill: Some(FillLattice { base: extent.min(), granule: FILL_GRANULE }),
         tls: layout.tls(),
     };
@@ -282,19 +292,6 @@ fn read_exe_tables(
         log!("spawn: {}: {}", path, refused.as_str());
         refused.error()
     })?;
-
-    let dynstr = match dyn_info.strtab_table() {
-        Some(t) => {
-            let off = file_off(layout, path, "DT_STRTAB", t.vaddr)?;
-            table(backing, path, "DT_STRSZ", off, t.size as usize)?
-        }
-        None => Vec::new(),
-    };
-
-    let dynsym = match (symtab_file_off, sym_count) {
-        (Some(off), n) if n > 0 => table(backing, path, "symbol count", off, n * sym::ENTRY_SIZE)?,
-        _ => Vec::new(),
-    };
 
     Ok(ExeTables { needed, dynstr, dynsym, relas })
 }
@@ -468,11 +465,7 @@ pub fn spawn(
             if r_sym.get() == 0 {
                 continue;
             }
-            let sym = exe.symbols().at(r_sym).map_err(|refused| {
-                log!("spawn: {}: {}", path, refused.as_str());
-                SyscallError::InvalidArgument
-            })?;
-            let name = sym.name_in(&exe.dynstr);
+            let name = elf::relocated_symbol(exe.symbols(), r_sym).name_in(&exe.dynstr);
             match loaded_libs.libs.iter().find_map(|lib| lib.resolve(name)) {
                 Some(addr) => reloc_index.add_u64(r_offset, addr.raw()),
                 None => log!("dynamic: unresolved exe symbol: {}", name),
@@ -503,7 +496,7 @@ pub fn spawn(
         });
     }
 
-    let exe_tls_template = match elf::occupied_tls(layout.tls()) {
+    let exe_tls_template = match layout.tls().and_then(TlsSegment::occupied) {
         Some(tls) => {
             let Some(tls_file_off) = layout.file_offset_of(tls.template().start()) else {
                 log!("spawn: {}: PT_TLS is in or near no PT_LOAD segment", path);

@@ -27,7 +27,7 @@ use crate::UserAddr;
 use toyos_elf::dynamic::{Dynamic, InitArray};
 use toyos_elf::section::{SectionTable, SHT_DYNSYM};
 use toyos_elf::sym::{Sym, SymTab};
-use toyos_elf::{rela, Extent, GnuHash, ImageRange, Layout, Rela, RelaTable, Reloc, RelocError, TlsSegment};
+use toyos_elf::{rela, Extent, GnuHash, ImageRange, Layout, Rela, RelaTable, Reloc, RelocError, SymIndex, TlsSegment};
 
 /// `toyos_elf::MAX_TLS_ALIGN` must equal the kernel's largest page.
 const _: () = assert!(toyos_elf::MAX_TLS_ALIGN == PAGE_2M);
@@ -73,12 +73,6 @@ pub struct TlsModule {
     /// True for modules present at process startup; a `dlopen`ed module's
     /// block is allocated on demand through `SYS_TLS_ALLOC_BLOCK`.
     pub is_static: bool,
-}
-
-/// The `PT_TLS` a module is given a [`TlsModule`] for: a zero-size one is given
-/// none.
-pub fn occupied_tls(tls: Option<TlsSegment>) -> Option<TlsSegment> {
-    tls.filter(|t| t.memsz() > 0)
 }
 
 /// Everything a cross-module TLS relocation has to resolve against.
@@ -266,6 +260,12 @@ fn bounded_symbol_outside() -> ! {
     panic!("ELF: a symbol load_shared_lib bounded inside the image lies outside it")
 }
 
+/// The symbol a parsed relocation names, in the table whose [`SymTab::count`]
+/// bounded its parse: a miss is a kernel bug.
+pub fn relocated_symbol(symbols: SymTab<'_>, i: SymIndex) -> Sym {
+    symbols.get(i.get()).expect("ELF: a relocation's symbol lies past the table its parse was bounded by")
+}
+
 /// A module's tables parsed differently the second time: the bytes moved under
 /// a module whose tables no writer reaches, which is a kernel bug.
 #[cold]
@@ -432,18 +432,19 @@ pub fn load_shared_lib(
         }
         None => None,
     };
-    let sym_count = dynsym.as_ref().map_or(0, |s| s.size() / toyos_elf::sym::ENTRY_SIZE);
     let dynstr = module.optional(dyn_info.strtab, dyn_info.strsz.unwrap_or(0))?;
     // Every symbol another module or `dlsym` may later ask for is inside this
     // one, and every TLS one inside its segment — or the module is refused now.
-    {
+    let sym_count = {
         // SAFETY: both came from `ModuleImage::slice`'s bounds check; `image`
         // is still exclusively owned here.
         let (syms, strs) = unsafe {
             (dynsym.as_ref().map_or(&[][..], |s| s.as_slice()), dynstr.as_ref().map_or(&[][..], |s| s.as_slice()))
         };
-        SymTab::new(syms, strs).bounded(extent, layout.tls()).map_err(|e| e.as_str())?;
-    }
+        let symbols = SymTab::new(syms, strs);
+        symbols.bounded(extent, layout.tls()).map_err(|e| e.as_str())?;
+        symbols.count()
+    };
     let init_array = InitArray::parse(dyn_info.init_array, extent).map_err(|e| e.as_str())?;
 
     let rela = match dyn_info.rela {

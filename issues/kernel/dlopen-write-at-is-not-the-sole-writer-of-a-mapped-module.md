@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: finding
 opened: 2026-09-27
 ---
@@ -24,3 +24,5 @@ cannot be the thing that makes those `unsafe` blocks sound.
 Exit condition: either the writes move before `map_into`, or the
 `# Safety` is restated to the invariant the `dlopen` path actually upholds and
 every call site's `SAFETY:` cites it.
+
+Held by the orchestrator.

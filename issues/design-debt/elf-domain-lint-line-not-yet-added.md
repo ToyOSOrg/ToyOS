@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: track
 opened: 2026-09-27
 ---
@@ -16,3 +16,5 @@ It is not added.
 
 Exit condition: the line is on `lib.rs`, every site inside it is checked or
 carries a one-clause `#[allow]`, and CI runs clippy on the crate with it.
+
+Held by the orchestrator.

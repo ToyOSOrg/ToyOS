@@ -26,7 +26,7 @@ use toyos_elf::dynamic::{Dynamic, InitArray};
 use toyos_elf::rela::{self, FillLattice, Op, ReadTables, RelaTable, Rules, TlsRef};
 use toyos_elf::sym::{self, SymTab};
 use toyos_elf::tls::{self, Static, TlsOffset, Variant};
-use toyos_elf::{ImageRange, Layout, Machine};
+use toyos_elf::{ImageRange, Layout, Machine, TlsSegment};
 
 /// Images per run: every one of them reaches the relocation parse unless its
 /// own headers are what the mutation broke.
@@ -376,7 +376,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
     // The thread's static block: this module alone, placed as the kernel's
     // `build_tls_layout` places an executable's.
     let variant = Variant::of(case.machine);
-    let (block, base_offset, memsz) = match tls.filter(|t| t.memsz() > 0) {
+    let (block, base_offset, memsz) = match tls.and_then(TlsSegment::occupied) {
         Some(t) => {
             let memsz = usize::try_from(t.memsz()).map_err(|_| ())?;
             let align = usize::try_from(t.align()).map_err(|_| ())?;

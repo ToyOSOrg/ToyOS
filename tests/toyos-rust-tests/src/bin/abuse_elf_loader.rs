@@ -865,9 +865,7 @@ fn tls_apply_time_refusals_are_reached() {
     drop(lib_defs);
 
     // `S + A` (8 + `i64::MAX`) inside a `PT_TLS` declared past 2^63 bytes: only
-    // `S + A - tp` leaves an `i64`. An executable needing the defining library
-    // at startup, then a dlopen. The spawn goes first: a block that size is
-    // refused later for another reason, which only the harness's log check sees.
+    // `S + A - tp` leaves an `i64`.
     const PAST_I64: u64 = 0x8000_0000_0000_0010;
     let dep = "tpoff_overflow_dep.so";
     write_file(dep, &tls_defs_so(b"wtls", PAST_I64));
@@ -886,8 +884,7 @@ fn tls_apply_time_refusals_are_reached() {
 
 /// An executable needing a library, whose `.gnu.hash` counts 1000 symbols
 /// while the file ends 469 entries into `.dynsym`, with a `GLOB_DAT` naming
-/// symbol 999: below the count the relocation parse bounds it by, past the
-/// table the loader read.
+/// symbol 999.
 fn globdat_past_short_dynsym() {
     let dep = "globdat_dep.so";
     write_file(dep, &so_with(&[], &[], None));

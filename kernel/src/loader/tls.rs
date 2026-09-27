@@ -10,7 +10,7 @@ use crate::elf::TlsModule;
 use crate::process::{MappedPages, OwnedAlloc, PageAlloc, PageTables, Unpublished};
 use crate::UserAddr;
 use toyos_elf::tls::{Static, Variant};
-use toyos_elf::Layout;
+use toyos_elf::{Layout, TlsSegment};
 
 /// This machine's TLS layout.
 pub const VARIANT: Variant = Variant::of(crate::arch::ELF_MACHINE);
@@ -232,7 +232,7 @@ pub fn build_tls_layout(
 ) -> Option<(alloc::vec::Vec<TlsModule>, Static, u64)> {
     // (template, memsz, placed bytes, align, module id). Module id 1 is the executable's;
     // libraries start at 2.
-    let exe = match crate::elf::occupied_tls(layout.tls()) {
+    let exe = match layout.tls().and_then(TlsSegment::occupied) {
         None => None,
         Some(tls) => {
             let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);
@@ -246,7 +246,7 @@ pub fn build_tls_layout(
         }
     };
     let with_tls = || {
-        loaded_libs.iter().filter_map(|lib| Some((lib.tls_template, crate::elf::occupied_tls(lib.tls())?)))
+        loaded_libs.iter().filter_map(|lib| Some((lib.tls_template, lib.tls()?.occupied()?)))
     };
     let libs = with_tls().zip(2u64..).map(|((template, tls), id)| {
         let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);

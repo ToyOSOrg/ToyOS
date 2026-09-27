@@ -7,7 +7,6 @@
 
 use crate::layout::{Extent, ImageOffset, TlsSegment};
 use crate::read;
-use crate::rela::RelocError;
 use crate::tls::TlsOffset;
 use crate::Error;
 
@@ -123,12 +122,6 @@ impl<'a> SymTab<'a> {
 
     pub const fn strings(&self) -> &'a [u8] {
         self.strs
-    }
-
-    /// The symbol a relocation names. A [`SymIndex`] is below the count its
-    /// parse was given, and a table read short of that count does not hold it.
-    pub fn at(&self, i: SymIndex) -> Result<Sym, RelocError> {
-        self.get(i.get()).ok_or(RelocError::SymbolPastTable)
     }
 
     pub fn get(&self, i: usize) -> Option<Sym> {

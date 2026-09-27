@@ -254,6 +254,12 @@ fn a_zero_size_tls_segment_is_present_not_absent() {
     assert!(accepted(Elf::honest(0x1000).build()).tls().is_none());
 }
 
+#[test]
+fn only_a_tls_segment_with_bytes_is_occupied() {
+    assert_eq!(tls_segment(0).occupied(), None);
+    assert_eq!(tls_segment(1).occupied(), Some(tls_segment(1)));
+}
+
 // ── The section header table, which is optional ─────────────────────────
 
 #[test]

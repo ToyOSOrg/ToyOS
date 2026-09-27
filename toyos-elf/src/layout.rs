@@ -186,8 +186,7 @@ impl Segment {
 /// A `PT_TLS` segment.
 ///
 /// `align` is zero or a power of two no larger than [`MAX_TLS_ALIGN`], and the
-/// file-backed template lies inside the image. Absent TLS is `None`, never a
-/// zero `memsz`.
+/// file-backed template lies inside the image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsSegment {
     template: ImageRange,
@@ -210,6 +209,12 @@ impl TlsSegment {
 
     pub const fn align(&self) -> u64 {
         self.align
+    }
+
+    /// This segment, or `None` when a zero `memsz` takes no bytes of a thread's
+    /// TLS block and so is given no module there.
+    pub const fn occupied(self) -> Option<TlsSegment> {
+        if self.memsz > 0 { Some(self) } else { None }
     }
 }
 

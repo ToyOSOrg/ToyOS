@@ -11,7 +11,7 @@
 //! process faults on the slot only if it later uses it. A resolved TLS
 //! reference whose `S + A` leaves the defining module's segment is refused.
 
-use super::{occupied_tls, CachedRelocs, LibMemory, LoadedLib, TlsModule, TlsModuleInfo};
+use super::{relocated_symbol, CachedRelocs, LibMemory, LoadedLib, TlsModule, TlsModuleInfo};
 use crate::UserAddr;
 use toyos_elf::sym::{Sym, SymTab};
 use toyos_elf::{ImageOffset, Op, RelocError, SymIndex, TlsOffset, TlsRef, TlsSegment};
@@ -100,7 +100,7 @@ pub fn resolve_dlopen_relocs(lib: &LoadedLib, other_libs: &[LoadedLib]) {
     let mut resolved = 0u64;
     let mut unresolved = 0u64;
     for (offset, sym) in lib.bind_entries() {
-        let name = symbols.name(sym.get());
+        let name = relocated_symbol(symbols, sym).name_in(symbols.strings());
         match other_libs.iter().find_map(|other| other.resolve(name)) {
             Some(addr) => {
                 // SAFETY: rela::tables_outside_window refused any image whose tables meet the window these writes land in.
@@ -127,7 +127,7 @@ pub fn resolve_lib_bind_relocs(
 ) {
     let symbols = lib.symbols();
     for (offset, sym) in lib.bind_entries() {
-        let name = symbols.name(sym.get());
+        let name = relocated_symbol(symbols, sym).name_in(symbols.strings());
         let resolved = exe_sym_map
             .get(name)
             .copied()
@@ -239,7 +239,7 @@ pub fn apply_dtpoff_relocs(lib: &LoadedLib, tls_info: &TlsModuleInfo) -> Result<
 /// as it defines it, or `None` if none does.
 pub fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&'a TlsModule, TlsSegment, Sym)> {
     for lib in tls_info.libs {
-        let Some(segment) = occupied_tls(lib.tls()) else {
+        let Some(segment) = lib.tls().and_then(TlsSegment::occupied) else {
             continue;
         };
         if let Some(sym) = lib.symbols().find_tls(name) {
@@ -258,10 +258,11 @@ pub fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&
 fn resolve_dtpmod(lib: &LoadedLib, sym: Option<SymIndex>, self_module_id: u64, tls_info: &TlsModuleInfo) -> u64 {
     let Some(sym) = sym else { return self_module_id };
     let symbols = lib.symbols();
-    if symbols.get(sym.get()).is_some_and(|s| s.is_defined()) {
+    let named = relocated_symbol(symbols, sym);
+    if named.is_defined() {
         return self_module_id;
     }
-    let name = symbols.name(sym.get());
+    let name = named.name_in(symbols.strings());
     match defining_module(name, tls_info) {
         Some((module, _, _)) => module.module_id,
         None => {
@@ -290,7 +291,7 @@ fn resolve_tls_ref(
         TlsRef::Own(at) => return Ok(Some((own_base_offset, at))),
         TlsRef::Symbol(s) => s,
     };
-    let sym = symbols.at(s.sym())?;
+    let sym = relocated_symbol(symbols, s.sym());
     if sym.is_defined() {
         let segment = own_tls.ok_or(RelocError::TlsOutsideSegment)?;
         let at = sym.tls_offset(s.addend(), segment).ok_or(RelocError::TlsOutsideSegment)?;
@@ -309,8 +310,7 @@ fn resolve_tls_ref(
     }
 }
 
-/// `S + A - tp` for one initial-exec reference, or `0` for a symbol no module
-/// defines: the one rule for a library's relocations and the executable's.
+/// `S + A - tp` for one initial-exec reference, or `0` for a symbol no module defines.
 pub fn compute_tpoff(
     r: TlsRef,
     own_base_offset: usize,
