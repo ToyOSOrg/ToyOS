@@ -20,6 +20,7 @@ Where hardware or anything uncertain is involved, take the cheap measurement bef
 guess. Then build, then test before anyone reviews:
 
 - `cargo test`, never `cargo run`: the run path opens a window on the owner's desktop.
+- Host tests first: put new logic where a host test reaches it. QEMU only for what no host test can answer — boot, hardware, several processes together — and only named tests (`cargo test --test toyos-build -- <test name>`), one at a time, once the host tests are green. Never the full tier: when finished, end with `QEMU TIER REQUESTED: <worktree> <head>`, and the orchestrator runs it.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the job scratchpad the brief

@@ -70,6 +70,7 @@ The testing rules live where they are enforced: instruments and known reds in `s
 
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo test --workspace --exclude toyos-build` runs every host-crate suite.
 - **Agents verify through `cargo test`, never `cargo run`** — the run path opens a QEMU window on the owner's desktop by design; the harness runs headless.
+- **QEMU is the scarce resource; unit tests are the default.** Logic a host test can reach is tested there. An agent runs only named QEMU tests, one at a time, after its host tests are green, and never the full tier: the orchestrator runs that once per finished branch, one at a time, and the harness enforces both (`src/buildlock.rs`). A QEMU test that fails only on a busy host is a defect in the test, never a re-run.
 - **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost. A full boot is under a second; incremental builds finish in seconds.
 
 ## Repository layout

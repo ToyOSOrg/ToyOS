@@ -50,6 +50,8 @@ reviewer and an implementer disagree, ask for the measurement that settles it an
 
 Glance before every merge: the title and body as `main`'s record, the diff's size against the
 brief's fence, tests added or deleted, CI. Then `gh pr ready` and `gh pr merge --auto --merge`.
+
+Full QEMU tiers are yours to run: one per finished branch on its `QEMU TIER REQUESTED` line, one at a time, in landing order. A brief names the QEMU tests its agent may run; anything wider comes back as a request.
 After a landing, sync the primary checkout. A red that is not about the diff is fixed at its
 owner, never re-run away, and nothing but a defect may turn `main` red.
 A fix for a red lands ahead of feature work. A nightly name red three nights running gets an owner
