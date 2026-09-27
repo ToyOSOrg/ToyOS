@@ -9,12 +9,11 @@
 use std::io::Write;
 use std::time::Instant;
 
-/// Lines written, many times the records one log ring holds. Each is
-/// [`WIDTH`] bytes — one record's text, nearly — so the lines `logd` does
-/// take are megabytes a second, more than the readers of the served log it is
-/// also run against can hold unread.
+/// Lines written, many times the records one log ring holds, each [`WIDTH`]
+/// bytes: what fills a ring is its slots, and a narrow line keeps the stop's
+/// flush of a full one inside init's bound.
 const LINES: usize = 16_384;
-const WIDTH: usize = 960;
+const WIDTH: usize = 64;
 
 fn main() {
     let mut out = std::io::stdout().lock();
