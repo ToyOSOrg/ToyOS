@@ -1,6 +1,6 @@
 # The one boot that runs all four owners `inspect` reads: logd, the compositor,
 # soundd and netd, on a machine with a framebuffer, a virtio NIC and a virtio
-# sound card (`Profile::Gop`), whose NVMe disk `tests/common/inspect.rs` crafts
+# sound card (`Profile::GopUsbDisk`), whose USB stick `tests/common/inspect.rs` crafts
 # with one partition nobody holds and one init grants test-runner.
 #
 # test-runner holds no `launcher`, so every binary it runs is spawned directly

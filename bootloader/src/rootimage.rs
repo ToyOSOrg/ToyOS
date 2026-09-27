@@ -21,7 +21,7 @@ use alloc::alloc::Layout;
 use alloc::string::String;
 use core::num::NonZeroU64;
 
-use toyos_gpt::{Guid, Partition, Sectors};
+use toyos_gpt::{Guid, Located, Sectors};
 use toyos_rootimage::chunk;
 use toyos_update::slots::{self, Table};
 use uefi::prelude::*;
@@ -178,29 +178,31 @@ impl<'a> Disk<'a> {
 
     /// The partition `guid` names on this disk, checked against the table as
     /// `toyos_gpt::locate` checks every one.
-    pub fn locate(&mut self, guid: [u8; 16]) -> Result<Partition, String> {
+    pub fn locate(&mut self, guid: [u8; 16]) -> Result<Located, String> {
         toyos_gpt::locate(self, Guid(guid))
-            .map(|located| located.partition)
             .map_err(|e| alloc::format!("partition {} on the boot disk: {e:?}", Guid(guid)))
     }
 
     /// The slot table on this disk's one TOYOS-SLOTS partition.
     pub fn slot_table(&mut self) -> Result<Table, String> {
-        let blank = Partition { index: 0, type_guid: Guid::ZERO, unique_guid: Guid::ZERO, first_lba: 0, last_lba: 0 };
-        let mut found = [blank; 2];
+        let mut found = [None; 2];
         let scan = toyos_gpt::locate_type(self, Guid::TOYOS_SLOTS, &mut found)
             .map_err(|e| alloc::format!("the boot disk's partition table: {e:?}"))?;
-        if scan.matched != 1 {
-            return Err(alloc::format!("the boot disk carries {} slot tables, and a machine has one", scan.matched));
-        }
-        let part = self.locate(found[0].unique_guid.0)?;
+        let listed = match (scan.matched, found[0]) {
+            (1, Some(Ok(listed))) => listed,
+            (1, Some(Err(unplaced))) => {
+                return Err(alloc::format!("the boot disk's slot table entry is no partition on it: {unplaced:?}"));
+            }
+            (n, _) => return Err(alloc::format!("the boot disk carries {n} slot tables, and a machine has one")),
+        };
+        let part = self.locate(listed.unique_guid().0)?.partition();
         let lbas = BLOCK as u64 / u64::from(self.lba_bytes);
-        if part.lba_count() < slots::COPIES * lbas {
+        if part.lba_count().get() < slots::COPIES * lbas {
             return Err(alloc::format!("the slot table's partition is {} blocks, short of its two copies", part.lba_count()));
         }
         let mut copies = [[0u8; BLOCK]; 2];
         for (i, copy) in copies.iter_mut().enumerate() {
-            let at = part.first_lba + i as u64 * lbas;
+            let at = part.first_lba() + i as u64 * lbas;
             self.io
                 .read_blocks(self.media_id, at, self.scratch)
                 .map_err(|e| alloc::format!("the slot table's copy {i} would not read: {:?}", e.status()))?;
@@ -220,8 +222,9 @@ impl<'a> Disk<'a> {
     /// resets the machine, if the firmware honours it. What shows where it
     /// stopped is the slot's line before the read and the attempt count the
     /// next pass reads.
-    pub fn read_root(&mut self, bs: &BootServices, part: &Partition, len: u64) -> Result<RootImage, String> {
-        let capacity = part.lba_count().saturating_mul(u64::from(self.lba_bytes));
+    pub fn read_root(&mut self, bs: &BootServices, part: &Located, len: u64) -> Result<RootImage, String> {
+        let part = part.partition();
+        let capacity = part.lba_count().get().saturating_mul(u64::from(self.lba_bytes));
         if len > capacity || !len.is_multiple_of(BLOCK as u64) {
             return Err(alloc::format!("{len} bytes of ROOT do not fit whole in its {capacity}-byte partition"));
         }
@@ -241,8 +244,8 @@ impl<'a> Disk<'a> {
         let chunk = chunk::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
         let began = crate::tsc();
         let mut device = Firmware { io: &self.io, media_id: self.media_id };
-        let read = chunk::read(&mut device, part.first_lba, self.lba_bytes, chunk, into);
-        let image = RootImage { at, len, partition: part.unique_guid.0, cycles: crate::tsc().wrapping_sub(began) };
+        let read = chunk::read(&mut device, part.first_lba(), self.lba_bytes, chunk, into);
+        let image = RootImage { at, len, partition: part.unique_guid().0, cycles: crate::tsc().wrapping_sub(began) };
         if let Err(failed) = read {
             let why = alloc::format!(
                 "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
@@ -256,7 +259,7 @@ impl<'a> Disk<'a> {
         }
         println!(
             "{READ_AT} {at:#x}+{len:#x} from LBA {}+{}, {chunk} bytes a request (optimal granularity: {}), in {} TSC cycles",
-            part.first_lba,
+            part.first_lba(),
             len / u64::from(self.lba_bytes),
             match granularity {
                 Some(lbas) => alloc::format!("{lbas} block(s)"),

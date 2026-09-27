@@ -3,14 +3,9 @@
 //! verdict.
 //!
 //! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
-//! the merge queue and boots no guest: [`Job::AbiSplit`] runs on both, against
-//! `main` on the pull request and against the group's base in the queue, where
-//! two branches that took one version meet; [`Job::Host`] and then
-//! [`Job::GateStage`] run as `host`, only in the merge queue, where every
-//! branch has already been judged as a pull request. A required check a
-//! workflow skips on the other event still reports, and a skip counts as
-//! passing — that is how `host` enters the queue. Every test that boots no guest
-//! is in [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
+//! the merge queue and boots no guest: [`Job::Host`] and then
+//! [`Job::GateStage`] run as `host`. Every test that boots no guest is in
+//! [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
 //! everything that boots a guest, `host` again to write the cache the merge
 //! queue restores, and portability. `publish.yml` puts a landing's crates on
 //! crates.io.
@@ -40,7 +35,7 @@ use crate::{flags, pr, release, sdkversion};
 /// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
 /// a minimum, never an equality, so a name GitHub requires and this does not
 /// is reported rather than refused.
-pub(crate) const REQUIRED_CHECKS: &[&str] = &["host", "abi-split"];
+pub(crate) const REQUIRED_CHECKS: &[&str] = &["host"];
 
 /// The one issue a red nightly files or comments on, found by title.
 const NIGHTLY_RED: &str = "nightly is red";
@@ -49,7 +44,6 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the host workspace, the
                     licences of what ships, clippy, the model controls, userland
                     and the SDK (ci.yml, nightly)
-  abi-split         the published crates' versions (ci.yml; the name is the required check's)
   gate-stage        what protects main, read back from GitHub (ci.yml)
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
@@ -61,7 +55,6 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Host,
-    AbiSplit,
     GateStage,
     Toolchain,
     Guest(String),
@@ -79,7 +72,6 @@ fn parse(words: &[String]) -> Result<Job, String> {
     };
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
-        Some("abi-split") => Job::AbiSplit,
         Some("gate-stage") => Job::GateStage,
         Some("toolchain") => Job::Toolchain,
         Some("guest") => Job::Guest(shard(words.get(1))?),
@@ -104,9 +96,6 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     let steps = match &job {
         Job::Host => host(root),
-        Job::AbiSplit => {
-            vec![step("the published crates' versions", || abi_split(root))]
-        }
         Job::GateStage => vec![step("what protects main", || gate_stage(root))],
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest(shard) => {
@@ -540,18 +529,6 @@ fn left_behind(tmp: &Path) -> Result<String, String> {
     ))
 }
 
-/// The published crates' versions, on both events, keeping the name branch
-/// protection requires: a pull request is judged against `main`, and a merge
-/// group against the base the queue built it on (`sdkversion::judge_queued`)
-/// — the one place two branches that took the same version meet.
-fn abi_split(root: &Path) -> Result<String, String> {
-    if std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("merge_group") {
-        return sdkversion::judge_queued(root);
-    }
-    pr::git(root, &["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])?;
-    sdkversion::judge(root, "origin/main")
-}
-
 /// What protects `main` is configured outside the repository, so it is read
 /// back: every [`REQUIRED_CHECKS`] name required, deletion and force-push
 /// refused, and merge the only method.
@@ -732,9 +709,8 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     Ok(line)
 }
 
-/// The QEMU every guest in CI runs, and the one this project's recorded numbers
-/// were taken on. Comment lines and blanks are stripped, so the file can explain
-/// itself.
+/// The QEMU every guest in CI runs. Comment lines and blanks are stripped, so
+/// the file can explain itself.
 pub fn declared_qemu_version(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join(".github/qemu-version")).ok()?;
     let version: String = text
@@ -755,8 +731,8 @@ fn parse_qemu_version(text: &str) -> Option<String> {
     (!version.is_empty()).then(|| version.to_string())
 }
 
-/// The line `cargo run` prints when this host is not the instrument the
-/// project's numbers were taken on, and nothing at all when it is.
+/// The line `cargo run` prints when this host's QEMU is not the version
+/// `.github/qemu-version` declares, and nothing at all when it is.
 pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     let want = declared_qemu_version(root)?;
     let out = Command::new(arch.qemu()).arg("--version").output().ok()?;
@@ -764,7 +740,7 @@ pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     (have != want).then(|| {
         format!(
             "Note: this host runs QEMU {have} and .github/qemu-version declares {want} — \
-             CI's guests and tests/audio-baseline.toml are on {want}, and the QEMU version \
+             CI's guests are on {want}, and the QEMU version \
              has been measured to decide test outcomes. Nothing here is broken; a comparison \
              across the two is."
         )
@@ -834,19 +810,13 @@ fn nightly_red() -> Result<String, String> {
     Ok(format!("reported {}", failed.join(" ")))
 }
 
-/// Each of the SDK crates the index does not already hold, in dependency
-/// order, waiting for each to be readable before the next resolves it. Only
-/// `main` publishes: a version is a name taken once.
+/// Each SDK crate, under the version [`sdkversion::plan`] assigns it, in
+/// dependency order, waiting for each to be readable before the next resolves
+/// it. Only a push to `main` publishes, on a runner whose checkout the
+/// rewritten manifests are thrown away with.
 fn publish(root: &Path) -> Result<String, String> {
-    if on_runner() {
-        if std::env::var("GITHUB_REF").ok().as_deref() != Some("refs/heads/main") {
-            return Err("only a push to main publishes".into());
-        }
-    } else {
-        pr::git(root, &["fetch", "--quiet", "origin"])?;
-        if pr::git(root, &["rev-parse", "HEAD"])? != pr::git(root, &["rev-parse", "origin/main"])? {
-            return Err("this checkout is not origin/main, and only main publishes".into());
-        }
+    if !on_runner() || std::env::var("GITHUB_REF").ok().as_deref() != Some("refs/heads/main") {
+        return Err("only a push to main publishes".into());
     }
     if std::env::var("CARGO_REGISTRY_TOKEN").map_or(true, |t| t.is_empty()) {
         return Err(
@@ -855,16 +825,22 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
+    let tip = pr::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
+    at_tip(&tip, &pr::git(root, &["rev-parse", "HEAD"])?)?;
+    let plan = sdkversion::plan(root)?;
+    sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();
-    for (name, version, manifest) in sdkversion::versions(root) {
-        if on_index(name, &version)? {
+    for release in &plan {
+        let (name, version) = (release.krate.name, &release.version);
+        if !release.publish {
             said.push(format!("{name} {version} was there"));
             continue;
         }
-        cargo(root, &["publish", "--manifest-path", &manifest])?;
+        let manifest = format!("{}/Cargo.toml", release.krate.dir);
+        cargo(root, &["publish", "--allow-dirty", "--manifest-path", &manifest])?;
         let mut seen = false;
         for _ in 0..60 {
-            if on_index(name, &version)? {
+            if sdkversion::assign(&sdkversion::index(name)?, &release.key)? == (version.clone(), false) {
                 seen = true;
                 break;
             }
@@ -878,29 +854,16 @@ fn publish(root: &Path) -> Result<String, String> {
     Ok(said.join(", "))
 }
 
-/// Whether the crates.io sparse index holds `name` at `version`, unyanked. A
-/// 404 is a crate never published.
-fn on_index(name: &str, version: &str) -> Result<bool, String> {
-    let url = format!("https://index.crates.io/{}/{}/{name}", &name[..2], &name[2..4]);
-    let out = Command::new("curl")
-        .args(["-sS", "-w", "\n%{http_code}", &url])
-        .output()
-        .map_err(|e| format!("curl: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = text.rsplit_once('\n').unwrap_or(("", ""));
-    match code {
-        "404" => Ok(false),
-        "200" => Ok(indexed(body, version)),
-        other => Err(format!("the crates.io index answered {other:?} for {name}")),
+/// Whether `HEAD` is `main`'s tip as `git ls-remote` printed it: a re-run of an
+/// older push would put older code up under a newer minor.
+fn at_tip(ls_remote: &str, head: &str) -> Result<(), String> {
+    match ls_remote.split_whitespace().next() {
+        Some(tip) if tip == head => Ok(()),
+        tip => Err(format!(
+            "HEAD {head} is not main's tip {tip:?}; a red publish is run again by \
+             workflow_dispatch at the tip"
+        )),
     }
-}
-
-/// Whether one crate's index file holds `version`, unyanked: one JSON object a
-/// line.
-fn indexed(body: &str, version: &str) -> bool {
-    body.lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .any(|v| v["vers"] == version && v["yanked"] != true)
 }
 
 #[cfg(test)]
@@ -1015,13 +978,14 @@ mod tests {
         assert_eq!(verdicts(""), "no suite result line");
     }
 
+    /// Only `main`'s tip publishes: a re-run of an older push is refused.
     #[test]
-    fn the_index_holds_a_version_only_unyanked() {
-        let body = "{\"name\":\"toyos-abi\",\"vers\":\"0.7.0\",\"yanked\":false}\n\
-                    {\"name\":\"toyos-abi\",\"vers\":\"0.8.0\",\"yanked\":true}\n";
-        assert!(indexed(body, "0.7.0"));
-        assert!(!indexed(body, "0.8.0"));
-        assert!(!indexed(body, "0.9.0"));
+    fn only_mains_tip_publishes() {
+        let tip = "0123456789abcdef0123456789abcdef01234567";
+        assert!(at_tip(&format!("{tip}\trefs/heads/main"), tip).is_ok());
+        let refusal = at_tip(&format!("{tip}\trefs/heads/main"), &tip.replace('0', "f")).unwrap_err();
+        assert!(refusal.contains("workflow_dispatch"), "{refusal}");
+        assert!(at_tip("", tip).is_err());
     }
 
     /// Every name `gate-stage` holds the ruleset to is a job `ci.yml` runs on a
