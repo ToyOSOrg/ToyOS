@@ -356,17 +356,9 @@ impl Log {
                     // SAFETY: the kernel moved this handle into this table with
                     // the frame that names it, and nothing else answers for it.
                     let alive = unsafe { Pipe::from_raw(alive) };
-                    if self.origins.len() >= MAX_ORIGINS {
-                        toyos::warn!(
-                            "logd: refusing {name}'s ring: {MAX_ORIGINS} programs' rings are \
-                             already read"
-                        );
-                        toyos_abi::syscall::close(ring);
-                        continue;
-                    }
-                    match Origin::open(registration.tag, registration.pid, ring, alive) {
-                        Ok(origin) => self.origins.push(origin),
-                        Err(why) => toyos::error!("logd: refusing a ring init sent: {why}"),
+                    match &mut self.stall {
+                        Some(stall) if stall.origin == name => stall.held.push((registration.pid, ring, alive)),
+                        _ => self.take(registration.tag, registration.pid, ring, alive),
                     }
                 }
                 RxStep::Frame { msg_type: SWAP, payload_len } => {
@@ -394,6 +386,22 @@ impl Log {
         }
     }
 
+    /// A ring init registered, read from the next round on.
+    fn take(&mut self, tag: Tag<'_>, pid: u32, ring: toyos::RawHandle, alive: Pipe) {
+        if self.origins.len() >= MAX_ORIGINS {
+            toyos::warn!(
+                "logd: refusing {}'s ring: {MAX_ORIGINS} programs' rings are already read",
+                tag.as_str()
+            );
+            toyos_abi::syscall::close(ring);
+            return;
+        }
+        match Origin::open(tag, pid, ring, alive) {
+            Ok(origin) => self.origins.push(origin),
+            Err(why) => toyos::error!("logd: refusing a ring init sent: {why}"),
+        }
+    }
+
     /// One round: every ring, then the kernel's records, then everything
     /// stamped before the round began written in stamp order — every line
     /// held, whatever its stamp, where `all` asks it for a flush. A program
@@ -404,9 +412,6 @@ impl Log {
         let mut read: Vec<Said> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         for (i, origin) in self.origins.iter_mut().enumerate() {
-            if self.stall.as_ref().is_some_and(|s| s.origin == origin.tag) {
-                continue;
-            }
             let counted = origin.read(i, cut, &mut read);
             // The machine stops after a flush: a line begun is said as far as it got.
             if all {
@@ -775,20 +780,19 @@ impl Log {
 
     /// End a `--stall` once any program has said its `--stall-until` line.
     fn release_stall(&mut self, read: &[Said]) {
-        let Some(stall) = &self.stall else { return };
-        if read.iter().any(|r| r.text == stall.until.as_bytes()) {
-            let origin = stall.origin.clone();
-            self.stall = None;
-            let (waiting, slots) = self
-                .origins
-                .iter()
-                .find(|o| o.tag == origin)
-                .map_or((0, 0), |o| o.waiting());
-            say!(
-                "logd: reading {origin} again, as `--stall-until` asked, with {waiting} of its \
-                 ring's {slots} records waiting"
-            );
+        let Some(stall) = self.stall.take_if(|s| read.iter().any(|r| r.text == s.until.as_bytes())) else {
+            return;
+        };
+        let origin = stall.origin;
+        for (pid, ring, alive) in stall.held {
+            self.take(Tag::new(&origin).expect("a name init registered is a tag"), pid, ring, alive);
         }
+        let (waiting, slots) =
+            self.origins.iter().find(|o| o.tag == origin).map_or((0, 0), |o| o.waiting());
+        say!(
+            "logd: reading {origin} again, as `--stall-until` asked, with {waiting} of its \
+             ring's {slots} records waiting"
+        );
     }
 }
 
@@ -807,13 +811,16 @@ fn ahead_note(ahead: u64, tag: &str) -> String {
 struct Stall {
     origin: String,
     until: String,
+    /// Its rings as init registered them, taken only once the stall ends, so
+    /// nothing a ring's writers are kept to rests on this program's reading.
+    held: Vec<(u32, toyos::RawHandle, Pipe)>,
 }
 
 impl Stall {
     fn from_args() -> Option<Stall> {
         let arg = |key: &str| std::env::args().find_map(|a| a.strip_prefix(key).map(str::to_string));
         match (arg("--stall="), arg("--stall-until=")) {
-            (Some(origin), Some(until)) => Some(Stall { origin, until }),
+            (Some(origin), Some(until)) => Some(Stall { origin, until, held: Vec::new() }),
             (None, None) => None,
             (origin, until) => panic!(
                 "logd: `--stall` and `--stall-until` are armed together or not at all, and this \

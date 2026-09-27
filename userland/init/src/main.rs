@@ -184,16 +184,23 @@ struct Log {
 const STDIN_RIGHTS: Rights =
     Rights::READ.union(Rights::WAIT).union(Rights::DUP).union(Rights::TRANSFER);
 
-/// A fresh log ring, laid out before any other process can map it: init's
-/// handle, which a spawn duplicates into the program and [`Log::register`]
-/// moves to `logd`.
-fn new_ring() -> toyos::RawHandle {
+/// A fresh log ring, laid out before any other process can map it, which a
+/// spawn duplicates into the program and [`Log::register`] names it the owner
+/// of. **Owned by no process until then**: the program's pid exists only once
+/// it runs, and a child it spawns may write before init has it.
+fn new_ring() -> SharedMemory {
     let region = SharedMemory::create(RING_BYTES).expect("init: no memory for a log ring");
+    let ring = view(&region);
+    ring.lay_out();
+    ring.own(toyos_abi::Pid::MAX.0);
+    region
+}
+
+fn view(region: &SharedMemory) -> Ring {
     let base = core::ptr::NonNull::new(region.as_ptr()).expect("a mapped region is not null");
-    // SAFETY: `region` maps `RING_BYTES` here and stays mapped until the
-    // handle below is the only one left, which this function returns.
-    unsafe { Ring::at(base) }.lay_out();
-    region.share().expect("init: a log ring would not duplicate")
+    // SAFETY: `region` maps `RING_BYTES` for as long as it is held, and the
+    // view is used only while it is.
+    unsafe { Ring::at(base) }
 }
 
 impl Log {
@@ -217,7 +224,7 @@ impl Log {
         // kernel filled with its console.
         let ring = new_ring();
         for slot in [1, 2] {
-            toyos_abi::syscall::dup2(ring, slot).expect("init: its ring would not take its own slot");
+            toyos_abi::syscall::dup2(ring.as_handle(), slot).expect("init: its ring would not take its own slot");
         }
         let (alive, keep) = toyos::pipe_pair().expect("init: no pipe to say it lives");
         // Held for the machine's life: init's end is the machine's.
@@ -226,12 +233,15 @@ impl Log {
         log
     }
 
-    /// Move `ring`, program `pid`'s log, to `logd` under `name`, with the read
-    /// end of the pipe whose only writer is that program.
-    fn register(&self, name: &str, pid: u32, ring: toyos::RawHandle, alive: Pipe) {
+    /// Name program `pid` the owner of `ring`, its log, and move the ring to
+    /// `logd` under `name`, with the read end of the pipe whose only writer is
+    /// that program.
+    fn register(&self, name: &str, pid: u32, ring: SharedMemory, alive: Pipe) {
         let Some(tag) = Tag::new(name) else {
             panic!("init: `{name}` is not a name a line of the log can carry");
         };
+        view(&ring).own(pid);
+        let ring = ring.share().expect("init: a log ring would not duplicate");
         let mut payload = [0u8; 4 + MAX_TAG];
         let len = Registration { pid, tag }.encode(&mut payload);
         let handles = [ring, alive.into_raw()];
@@ -1985,16 +1995,15 @@ fn start<'a>(
     // the rings reach it on and the one console handle that may write. A
     // launch keeps the slots its caller sent, but for a ring among them —
     // the caller's own log — which is replaced by the program's.
-    let mut ring: Option<toyos::RawHandle> = None;
+    let mut ring: Option<SharedMemory> = None;
     let mut origins: Option<Acceptor> = None;
     let log: &mut Log = match output {
         Output::Boot(log) => {
-            let own = new_ring();
+            let own = ring.insert(new_ring()).as_handle();
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             command.inherit_handle(0, log.stdin.0);
             command.inherit_handle(1, own.0);
             command.inherit_handle(2, own.0);
-            ring = Some(own);
             if program.name == LOGD {
                 let Some(acceptor) = log.acceptor.take() else {
                     panic!("init: `{LOGD}` is started twice, and the log's origins are the first's");
@@ -2014,7 +2023,7 @@ fn start<'a>(
                     && toyos_abi::syscall::fstat(handle)
                         .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
                 if caller_ring {
-                    let own = *ring.get_or_insert_with(new_ring);
+                    let own = ring.get_or_insert_with(new_ring).as_handle();
                     command.inherit_handle(slot, own.0);
                 } else {
                     command.inherit_handle(slot, handle.0);
@@ -2065,9 +2074,6 @@ fn start<'a>(
             }
             if let Some(acceptor) = origins {
                 log.acceptor = Some(acceptor);
-            }
-            if let Some(ring) = ring {
-                toyos_abi::syscall::close(ring);
             }
             Err(e)
         }
