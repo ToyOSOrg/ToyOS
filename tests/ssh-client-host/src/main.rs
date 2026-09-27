@@ -22,7 +22,7 @@
 //! toyos_ssh fire    <host> <port> <key> <command…>
 //!                                                → accepted | refused | closed | silent
 //!                                                  | exited <n>
-//! toyos_ssh put    <host> <port> <key> <local> <remote> → ok <bytes>
+//! toyos_ssh put     <host> <port> <key> <local> <remote> → ok <bytes>
 //! toyos_ssh get     <host> <port> <key> <remote> <local> → ok <bytes>
 //! toyos_ssh list    <host> <port> <key> <remote> → entry <name> <size>…, ok <n>
 //! toyos_ssh swap    <host> <port> <key> <service> <binary> <sha256>

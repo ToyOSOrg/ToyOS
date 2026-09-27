@@ -23,8 +23,7 @@ The mechanism read off the code: `logd` puts a program's line in
 and then a chunk of queued lines per hold of the wire, whatever their age. The
 stop stops every userland thread and writes its last word as a record, which
 `drain_inline` or `klogd`'s next pass puts on the wire; a line still in the
-queue then goes after it, inside `quiesce-late-word`'s window. `main` has no
-queue — a holder wrote the wire itself — so this is the branch's.
+queue then goes after it, inside `quiesce-late-word`'s window.
 
 ## Exit condition
 
@@ -33,7 +32,7 @@ leaves a line in the queue at the stop goes red without that and green with it.
 
 ## The stop now drains the queue
 
-On `nightly-green2` the stop drains the queue on the wire right after
+The stop drains the queue on the wire right after
 `quiesce::stop()`, before `Syncing filesystems...`
 (`log::console::drain_for_the_stop`). `console-queue-at-the-stop` is the
 deterministic stimulus: it queues one line after every holder is stopped and

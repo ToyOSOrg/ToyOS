@@ -171,31 +171,34 @@ pub fn mount() -> Mounted<MemoryImage, ReadOnly> {
 pub fn hold_source() {
     let guid = toyos_abi::part::PartGuid(BOOT.lock().source);
     let sought = crate::gpt::seek(guid);
-    let found = match sought.found {
-        Ok(Some(found)) => found,
-        Ok(None) => return withhold(guid, "it is on no disk that answered", &sought.silent),
-        Err(Unnamed::Ambiguous) => return withhold(guid, "it is carried twice", &sought.silent),
-        Err(Unnamed::Unusable) => return withhold(guid, "its table refuses it", &sought.silent),
+    let held: Result<(crate::gpt::Claimable, Partition), &'static str> = match sought.found {
+        Ok(Some(found)) => {
+            let volume = found.volume;
+            crate::block::open(volume.device)
+                .ok_or(())
+                .and_then(|handle| {
+                    let (first, blocks) =
+                        crate::block::span_blocks(volume.start_lba, volume.blocks, volume.lba_bytes)
+                            .map_err(drop)?;
+                    Partition::of(handle, first, blocks, Holder::Kernel("system")).map_err(drop)
+                })
+                .map(|view| (found, view))
+                .map_err(|()| "it is no span a view can hold")
+        }
+        Ok(None) => Err("it is on no disk that answered"),
+        Err(Unnamed::Ambiguous) => Err("it is carried twice"),
+        Err(Unnamed::Unusable) => Err("its table refuses it"),
     };
-    let volume = found.volume;
-    let view = crate::block::open(volume.device)
-        .ok_or(())
-        .and_then(|handle| {
-            let (first, blocks) =
-                crate::block::span_blocks(volume.start_lba, volume.blocks, volume.lba_bytes)
-                    .map_err(drop)?;
-            Partition::of(handle, first, blocks, Holder::Kernel("system")).map_err(drop)
-        });
-    match view {
-        Ok(view) => {
+    match held {
+        Ok((found, view)) => {
             log!(
                 "root: holding {}, the partition ROOT was read from, on device {}; disks that did \
                  not answer: {:?}",
-                found.unique, volume.device, sought.silent
+                found.unique, found.volume.device, sought.silent
             );
             *SOURCE.lock() = Some(view);
         }
-        Err(()) => withhold(guid, "it is no span a view can hold", &sought.silent),
+        Err(why) => withhold(guid, why, &sought.silent),
     }
 }
 
