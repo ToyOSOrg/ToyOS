@@ -2732,8 +2732,8 @@ const NOT_RUN: &[NotRun] = &[
     },
     NotRun {
         case: "106_versym",
-        stage: Stage::Refused("use of undeclared identifier 'PTHREAD_PROCESS_SHARED'"),
-        why: Why::Declined("pthread condition variables shared across processes, which `pthread.h` does not declare"),
+        stage: Stage::Refused("call to undeclared function 'pthread_condattr_setpshared'"),
+        why: Why::Declined("pthread condition variables shared across processes: `pthread.h` declares neither `pthread_condattr_setpshared` nor `PTHREAD_PROCESS_SHARED`"),
     },
     NotRun {
         case: "108_constructor",

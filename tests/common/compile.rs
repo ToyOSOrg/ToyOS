@@ -29,21 +29,10 @@ pub fn c_sysroot() -> CSysroot {
     .clone()
 }
 
-/// The flags every corpus case is compiled with.
-///
-/// The corpus is TinyCC's `tests2`, written for a compiler that takes implicit
-/// declarations and loose pointer conversions as warnings; clang makes those
-/// errors from C99 on, so each is put back to the warning TinyCC gives. `-w`
-/// because a case is judged by what it prints, and a warning is not a verdict.
-const CORPUS_FLAGS: &[&str] = &[
-    "-O0",
-    "-w",
-    "-Wno-error=implicit-function-declaration",
-    "-Wno-error=implicit-int",
-    "-Wno-error=int-conversion",
-    "-Wno-error=incompatible-pointer-types",
-    "-Wno-error=return-mismatch",
-];
+/// The one flag the corpus is compiled with beyond the target and sysroot:
+/// TinyCC takes a declaration with no type as an implicit `int` and warns, and
+/// clang refuses one from C99 on. `102_alignas` is written with one.
+const CORPUS_FLAGS: &[&str] = &["-Wno-error=implicit-int"];
 
 /// Where `name`'s object or binary is written, in this lane.
 fn scratch(name: &str, what: &str) -> PathBuf {

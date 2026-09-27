@@ -14,9 +14,10 @@
 //! and two worktrees naming the same compiler share one copy.
 //!
 //! **LLVM is built from `src/llvm-project`, and only when its commit moves.**
-//! A compiler's [`source`] names that commit beside its `compiler/`, so a
-//! worktree pinning another LLVM builds a compiler of its own even where its
-//! `compiler/` is the primary's. That build compiles LLVM and clang in its own
+//! The primary records the LLVM commit its `stage2` links beside the
+//! `compiler/` it was built from ([`primary_llvm_record`]), so a worktree
+//! pinning another LLVM builds a compiler of its own even where its `compiler/`
+//! is the primary's. That build compiles LLVM and clang in its own
 //! fork checkout once — bootstrap rebuilds them only when the commit moves, and
 //! then incrementally — unless the primary's compiler was built from the same
 //! LLVM, which it then links against instead of building another
@@ -33,7 +34,8 @@
 //! (`buildlock::keyed_*` with [`Keyed::Compiler`]), with this worktree's build
 //! lock put down, held shared for as long as a sysroot is being made from it;
 //! then, to build, this worktree's exclusively, because its fork build
-//! directory is written.
+//! directory is written; then, where it links the primary's LLVM, the global
+//! one shared, because that is read.
 //!
 //! A compiler no worktree names any more is removed by [`sweep`], which
 //! `--worktree remove` and every placement run: each build records the key it used in its
@@ -121,21 +123,29 @@ fn primary_record(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/toyos-compiler")
 }
 
+/// The primary's record of which LLVM commit its `stage2` links. A file of its
+/// own rather than a word in [`primary_record`], whose text a worktree compares
+/// whole: one on older sources then still finds the primary's compiler.
+pub(crate) fn primary_llvm_record(rust_dir: &Path) -> PathBuf {
+    rust_dir.join("build/toyos-compiler-llvm")
+}
+
+/// Whether the primary's `stage2` links the LLVM `fork` names. No record is an
+/// LLVM nobody built from `src/llvm-project`: the downloaded one this build
+/// system used before it built its own.
+pub(crate) fn primary_links_llvm_of(rust_dir: &Path, fork: &Path) -> bool {
+    fs::read_to_string(primary_llvm_record(rust_dir)).is_ok_and(|built| built.trim() == llvm_commit(fork))
+}
+
 /// Every compiler of a worktree's own on this host.
 pub fn compilers_dir(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/compilers")
 }
 
-/// What `checkout`'s compiler is built from: its `compiler/` — its commit's
-/// tree, and whatever the working tree changes in it, an edit or a file git
-/// does not track yet, which is what a new target spec is before its commit —
-/// and the LLVM commit it links.
+/// What `checkout`'s `compiler/` is: its commit's tree, and whatever the working
+/// tree changes in it — an edit, or a file git does not track yet, which is
+/// what a new target spec is before its commit.
 pub fn source(checkout: &Path) -> String {
-    format!("{} llvm {}", compiler_source(checkout), llvm_commit(checkout))
-}
-
-/// [`source`]'s `compiler/` half.
-fn compiler_source(checkout: &Path) -> String {
     let tree = git_out(checkout, &["rev-parse", "HEAD:compiler"]);
     let mut local = git_bytes(checkout, &["diff", "HEAD", "--", "compiler"]);
     let untracked = git_bytes(checkout, &["ls-files", "-z", "--others", "--exclude-standard", "--", "compiler"]);
@@ -157,10 +167,10 @@ fn compiler_source(checkout: &Path) -> String {
 /// after a toolchain build, and when the record is missing — its compiler stamp
 /// has just said `stage2` is built from what its `rust/` holds.
 pub fn record(rust_dir: &Path) {
-    let at = primary_record(rust_dir);
-    let want = source(rust_dir);
-    if fs::read_to_string(&at).ok().as_deref() != Some(want.as_str()) {
-        fs::write(&at, &want).unwrap_or_else(|e| panic!("write {}: {e}", at.display()));
+    for (at, want) in [(primary_record(rust_dir), source(rust_dir)), (primary_llvm_record(rust_dir), llvm_commit(rust_dir))] {
+        if fs::read_to_string(&at).ok().as_deref() != Some(want.as_str()) {
+            fs::write(&at, &want).unwrap_or_else(|e| panic!("write {}: {e}", at.display()));
+        }
     }
 }
 
@@ -208,7 +218,7 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
             record.display(),
         )
     });
-    if built_from.trim() == source(fork) {
+    if built_from.trim() == source(fork) && primary_links_llvm_of(rust_dir, fork) {
         let _ = fs::remove_file(&recorded);
         return Compiler::primary(rust_dir);
     }
@@ -274,10 +284,8 @@ pub(crate) fn primary_llvm(rust_dir: &Path) -> PathBuf {
 /// Read off the primary's record rather than off its checkout, which a sync
 /// moves before anything is rebuilt from it.
 fn shared_llvm(rust_dir: &Path, fork: &Path) -> Option<PathBuf> {
-    let recorded = fs::read_to_string(primary_record(rust_dir)).ok()?;
-    let (_, llvm) = recorded.trim().rsplit_once(" llvm ")?;
     let built = primary_llvm(rust_dir);
-    (llvm == llvm_commit(fork) && built.join("bin/llvm-config").is_file()).then_some(built)
+    (primary_links_llvm_of(rust_dir, fork) && built.join("bin/llvm-config").is_file()).then_some(built)
 }
 
 /// Bootstrap's build of the compiler in `fork`, into its own build directory,
@@ -635,6 +643,16 @@ mod tests {
         write(&built.join("bin/llvm-config"), "");
         assert_eq!(shared_llvm(&rust_dir, &a.join("rust")), Some(built.clone()));
         assert_eq!(shared_llvm(&rust_dir, &fork), None, "another LLVM commit was given the primary's");
+        // A primary with no LLVM record links the LLVM this build system used
+        // to download, which no fork names: nothing is shared with it, and a
+        // worktree whose sources are the primary's builds its own.
+        fs::remove_file(primary_llvm_record(&rust_dir)).unwrap();
+        assert_eq!(shared_llvm(&rust_dir, &a.join("rust")), None, "an unrecorded LLVM was shared");
+        let before = builds.get();
+        let other = choose(&a, &rust_dir, &a.join("rust"), fake);
+        assert!(!other.primary && builds.get() == before + 1, "a primary of unrecorded LLVM was taken");
+        drop(other);
+
         let config = config_text(&fork.join("build/toyos-compiler"), "h", Some(&built));
         assert!(config.contains(&format!("llvm-config = \"{}\"", built.join("bin/llvm-config").display())), "{config}");
         assert!(!config_text(&fork.join("build/toyos-compiler"), "h", None).contains("llvm-config"));

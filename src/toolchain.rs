@@ -408,10 +408,10 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            // The record says what `stage2` was built from; one that names
-            // another LLVM is a compiler this checkout no longer describes.
-            let moved = fs::read_to_string(rust_dir.join("build/toyos-compiler"))
-                .is_ok_and(|built| built.trim() != crate::compiler::source(&rust_dir));
+            // A `stage2` that links another LLVM than the one `rust/` names —
+            // or one no record says was built from `src/llvm-project` at all —
+            // is a compiler this checkout no longer describes.
+            let moved = !crate::compiler::primary_links_llvm_of(&rust_dir, &rust_dir);
             if stamps::dir_changed(&rust_dir.join("compiler"), &compiler_stamp) || moved || force_rebuild {
                 Some(Bootstrap { invalidate_hosted: true })
             } else if !toolchain_exists {
