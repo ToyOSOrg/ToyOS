@@ -541,15 +541,18 @@ fn s_topt_012_md5_skipped() {
     let mut area = vec![19, 18];
     area.resize(18, 0xAB);
     area.extend_from_slice(&hex("01 01 08 0a 00 00 00 02 00 00 01 00"));
-    assert_eq!(tcp(&options(&area)).unwrap().options().timestamps(), Some(Timestamps { value: 2, echo: 256 }));
+    let bytes = options(&area);
+    let o = tcp(&bytes).unwrap().options();
+    assert_eq!((o.timestamps(), o.md5(), o.fast_open()), (Some(Timestamps { value: 2, echo: 256 }), true, false));
 }
 
 #[test]
 fn s_topt_013_unknown_kinds_skipped() {
-    for area in ["fe 04 12 34", "22 02 01 01"] {
+    for (area, fast_open) in [("fe 04 12 34", false), ("22 02 01 01", true)] {
         let bytes = options(&hex(area));
         let o = tcp(&bytes).unwrap().options();
-        assert_eq!((o.mss(), o.window_scale(), o.sack_permitted(), o.timestamps()), (None, None, false, None), "{area}");
+        let seen = (o.mss(), o.window_scale(), o.sack_permitted(), o.timestamps(), o.md5(), o.fast_open());
+        assert_eq!(seen, (None, None, false, None, false, fast_open), "{area}");
     }
 }
 

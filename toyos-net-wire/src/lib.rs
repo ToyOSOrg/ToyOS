@@ -60,7 +60,7 @@ pub mod udp;
 
 pub use emit::BuildError;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Port(core::num::NonZeroU16);
 
 impl Port {
