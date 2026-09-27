@@ -58,19 +58,32 @@ pub fn stage(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<Staged, String> {
+    stage_armed(config, name, &[], c_bins, rust_bins)
+}
+
+/// [`stage`], its kernel armed with `params`.
+pub fn stage_armed(
+    config: &str,
+    name: &str,
+    params: &[&str],
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<Staged, String> {
     let config = compile::repo_root().join(config);
-    let bytes = qemu::build_boot_image(&config, c_bins, rust_bins, &[]);
+    let bytes = qemu::build_boot_image(&config, c_bins, rust_bins, params);
     let image = super::lane::dir().join(format!("{name}.img"));
     std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
     let (start, len) = volumes::log_extent(&bytes, &image)?;
     Ok(Staged { image, start, len })
 }
 
-/// A boot of `bench` with `logd`'s port forwarded to `port`, up and serving.
+/// A boot of `bench` with `logd`'s port forwarded to `port`, up and serving;
+/// its console a file where `console_file` says ([`BootOptions::console_file`]).
 fn boot(
     bench: Bench,
     staged: &Staged,
     port: u16,
+    console_file: bool,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(QemuInstance, String), String> {
@@ -78,6 +91,7 @@ fn boot(
         profile: bench.profile,
         boot_image: Some(qemu::Staged::Written(staged.image.clone())),
         log_port: Some(port),
+        console_file,
         ..Default::default()
     };
     if !qemu::profile_argv(&options).iter().any(|a| a.contains(bench.device)) {
@@ -175,7 +189,7 @@ pub fn stream(
     let name = format!("logstream-{}", bench.device);
     let staged = stage(bench.config, &name, c_bins, rust_bins)?;
     let port = qemu::free_host_port();
-    let (mut guest, mut console) = boot(bench, &staged, port, c_bins, rust_bins)?;
+    let (mut guest, mut console) = boot(bench, &staged, port, false, c_bins, rust_bins)?;
 
     // Before any reader exists.
     let job = "test_rs_log_origin";
@@ -243,9 +257,9 @@ const LET_GO: &str = "logd: letting ";
 /// **A reader that stops reading costs nobody else anything, and its slot is
 /// not kept.** Every network slot `logd` has is taken by a connection that
 /// never reads, while a program floods its output past every buffer between
-/// them; the file takes every line, `logd` lets each stalled reader go, and a
-/// reader that connects after that is handed the whole boot, the flood's last
-/// line included.
+/// them, until `logd` has let each stalled reader go; a reader that connects
+/// after that is handed the whole boot — every line the file took, to the
+/// kernel's record of each flood's end.
 pub fn stalled_reader(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -253,54 +267,66 @@ pub fn stalled_reader(
     let bench = VIRTIO;
     let staged = stage(bench.config, "logstream-stalled", c_bins, rust_bins)?;
     let port = qemu::free_host_port();
-    let (mut guest, mut console) = boot(bench, &staged, port, c_bins, rust_bins)?;
+    // The flood puts a mebibyte of program lines on the console ahead of the
+    // runner's end marker, which a stdio console under host load drops.
+    let (mut guest, mut console) = boot(bench, &staged, port, true, c_bins, rust_bins)?;
 
     let stalled = (0..NETWORK_READERS)
         .map(|_| never_read(port))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("connect the readers that will not read: {e}"))?;
     let from = console.len();
-    let flood = guest.run_test(super::origin::FLOODER, Duration::from_secs(300));
-    if flood.exit_code != Some(0) {
-        return Err(format!("the flood exited {:?}", flood.exit_code));
-    }
-    console.push_str(&flood.before);
-    console.push_str(&flood.serial);
-    // Every stalled reader's writes stopped being taken during the flood, whose
-    // five megabytes outrun every buffer between it and logd, so each let-go is
-    // owed `STALLED_SECS` after the flood's end at the latest. Twice that,
-    // widened by this host, is logd's promise judged; a guest that stays quiet
-    // past it has broken the promise, which is this test's verdict and not a
-    // stall of the harness.
-    let flood_ended = Instant::now();
-    let deadline = flood_ended + guest.budget(Duration::from_secs(2 * STALLED_SECS));
     let seen = |console: &str| console[from.min(console.len())..].matches(LET_GO).count();
+    // Flooded until every stalled reader is let go, not by an amount: a
+    // reader is owed only what `logd` took of the flood, which is `logd`'s
+    // pace and not this test's, so a fixed flood outruns every buffer between
+    // them only on a host fast enough. Each let-go is owed `STALLED_SECS`
+    // after its reader's writes stop being taken; the flood's own ceiling,
+    // widened by this host, is that promise judged, and a guest past it has
+    // broken it, which is this test's verdict and not a stall of the harness.
+    let began = Instant::now();
+    let deadline = began + guest.budget(FLOOD_CEILING);
+    let mut floods = 0usize;
     while seen(&console) < NETWORK_READERS {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
-        let more = guest.drain_until(left, |line| line.contains(LET_GO));
-        console.push_str(&more);
+        let flood = guest.run_test(super::origin::FLOODER, left);
+        console.push_str(&flood.before);
+        console.push_str(&flood.serial);
+        if flood.exit_code != Some(0) {
+            return Err(format!(
+                "flood {} exited {:?} with {} of the {NETWORK_READERS} stalled readers let go",
+                floods + 1,
+                flood.exit_code,
+                seen(&console)
+            ));
+        }
+        floods += 1;
     }
     let let_go = seen(&console);
     if let_go < NETWORK_READERS {
-        let waited = flood_ended.elapsed().as_secs();
+        let waited = began.elapsed().as_secs();
         let said = match shut_down(guest, &mut console, &staged) {
             Ok(file) => file.iter().filter(|l| l.contains("logd: ")).cloned().collect::<String>(),
             Err(why) => format!("none read: {}", why.lines().next().unwrap_or("")),
         };
         return Err(format!(
-            "logd let {let_go} of the {NETWORK_READERS} readers that stopped reading go in the {waited} s \
-             after the flood ended, and owes each one {STALLED_SECS} s after its writes stop being \
+            "logd let {let_go} of the {NETWORK_READERS} readers that stopped reading go in {waited} s \
+             of {floods} flood(s), and owes each one {STALLED_SECS} s after its writes stop being \
              taken; /log's logd lines:\n{said}"
         ));
     }
     let second = reader(port, "logstream-stalled-second.txt")?;
-    if !second.wait_for(super::origin::FLOOD_DONE, FLOOD_CEILING) {
+    // The kernel's word and not the flood's last line, which its ring may
+    // have had no room for.
+    let ended = format!("exit: {} pid=", super::origin::FLOODER);
+    let every_end = |lines: &[String]| (lines.iter().filter(|l| l.contains(&ended)).count() >= floods).then_some(());
+    if second.wait_until(FLOOD_CEILING, every_end).is_none() {
         return Err(format!(
-            "a reader that connected after the flood, once every stalled reader was let go, did \
-             not receive the flood's last line: {} line(s)",
+            "a reader that connected after the {floods} flood(s), once every stalled reader was let \
+             go, did not receive the kernel's record of each one's end: {} line(s)",
             second.lines().len()
         ));
     }
@@ -311,11 +337,11 @@ pub fn stalled_reader(
     }
     let received = second.lines();
     is_prefix_of(&received, &file)?;
-    let floods = received.iter().filter(|l| l.contains("} flood ")).count();
+    let flooded = received.iter().filter(|l| l.contains("} flood ")).count();
     let let_go = file.iter().filter(|l| l.contains(LET_GO)).count();
     eprintln!(
-        "  [stream] {let_go} reader(s) that never read were let go; a reader after them got {} \
-         line(s), {floods} of them the flood's, each the line /log holds",
+        "  [stream] {let_go} reader(s) that never read were let go over {floods} flood(s); a \
+         reader after them got {} line(s), {flooded} of them the floods', each the line /log holds",
         received.len()
     );
     let _ = std::fs::remove_file(&staged.image);

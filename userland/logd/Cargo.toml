@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
 toyos-logstream = { path = "../../toyos-logstream" }
-# init's words on a swap, read to turn readers away while netd is replaced.
-toyos-swap = { path = "../../toyos-swap" }
+# The per-program allowance: how many records a second a program may put in the log.
+toyos-elide = { path = "../../toyos-elide" }
 toyos-inspect = { path = "../../toyos-inspect" }
 toyos-wallclock = { path = "../../toyos-wallclock" }

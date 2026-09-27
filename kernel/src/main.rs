@@ -590,6 +590,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     #[cfg(feature = "boot-actuators")]
     if actuator::virtio_used_selftest() {
         drivers::virtio::used_selftest();
+        drivers::virtio::wait_selftest();
     }
 
     #[cfg(feature = "boot-actuators")]

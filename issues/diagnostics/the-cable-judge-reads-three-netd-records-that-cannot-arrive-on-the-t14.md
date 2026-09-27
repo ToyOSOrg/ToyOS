@@ -6,10 +6,10 @@ opened: 2026-09-13
 
 # The cable judge reads three netd records that cannot arrive on the T14
 
-`issues/diagnostics/the-log-staged-three-things-it-never-built.md` §1 is the
-cause and owns it: userland stdout and stderr are console writes, and `/log`
-carries kernel records only. This is what that costs the one judge written as
-if it were otherwise.
+The cause was that userland stdout and stderr were console writes and `/log`
+carried kernel records only; every program's lines reach `/log` now, through
+its log ring (`issues/kernel/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md`).
+This is what that cost the one judge written as if it were otherwise.
 
 `tests/common/lan.rs`'s `on_metal` refuses a boot that carries no `netd: MAC …`,
 no `netd: … link up` and no `netd: ready` record, and judges

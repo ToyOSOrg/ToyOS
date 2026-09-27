@@ -50,7 +50,7 @@ fn epoch_secs() -> i64 {
 }
 
 fn mono_nanos() -> u64 {
-    toyos_abi::syscall::clock_nanos()
+    toyos_abi::clock::nanos_since_boot()
 }
 
 // --- Date/time math ---

@@ -68,6 +68,10 @@ impl AddressSpace {
         match self.never {}
     }
 
+    pub fn translate_writable(&self, _vaddr: UserAddr) -> Option<crate::mm::DirectMap> {
+        match self.never {}
+    }
+
     pub fn alloc_region(&mut self, _size: u64, _kind: RegionKind) -> Option<UserAddr> {
         match self.never {}
     }

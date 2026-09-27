@@ -18,6 +18,9 @@ const FR: u64 = 0x018;
 /// `UARTFR.RXFE`: the receive FIFO is empty. `UARTFR.TXFF`: the transmit FIFO is full.
 const FR_RXFE: u32 = 1 << 4;
 const FR_TXFF: u32 = 1 << 5;
+/// Bytes the transmitter takes once [`tx_ready`] says so: `TXFF` clear promises
+/// room for one, whatever the FIFO's depth.
+pub const TX_BURST: usize = 1;
 /// One 4 KiB register frame, which is what both UARTs decode.
 const FRAME: u64 = 0x1000;
 

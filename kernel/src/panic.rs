@@ -11,7 +11,6 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::arch::cpu;
 use crate::arch::percpu::CpuFaultState;
 use crate::drivers::serial;
-use crate::time::{Budget, Duration};
 
 /// Slots in every per-CPU array here: an APIC id masked to six bits.
 const SLOTS: usize = 64;
@@ -338,66 +337,12 @@ pub fn last_words(
     }
 }
 
-/// Time `/system/bin/logd` gets to durably write the panic report before halt;
-/// a `Budget` (not a `Bound`) because expiry degrades gracefully instead of panicking.
-const LOG_FILE_DRAIN: Budget = Budget::of(
-    Duration::from_millis(500),
-    "the report reaches the panel and not /log",
-);
-
-// Read by tests/toyos.rs — keep in sync or its drift check fails.
-const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
-
-/// Whether `/log` still owes this boot the report.
-// True only before durable_ns passes `want` — logd publishes it after fsync returns, never before.
-fn log_file_owed(want: u64) -> bool {
-    crate::log::user::durable_ns() < want
-}
-
-/// Give `/system/bin/logd` a chance to put this report on the stick before the machine stops.
-// The panic path never writes /log directly — every lock a write needs may already be held by the panicking thread itself.
-fn wait_for_log_file() {
-    // Skip when serial exists: panic_flush already got the report off the box, and waiting here would only delay the pager.
-    if serial::has_console() {
-        return;
-    }
-    // INVARIANT: nothing below runs before both facts this wait rests on hold.
-    // The deadline is read off the calibrated clock, so an uncalibrated one
-    // makes it unreachable; and what the wait is owed by is `logd`, which only
-    // a released machine can run. On a boot that crashes before either — the
-    // one this whole path exists for on a machine with no serial port — waiting
-    // costs the seal and buys nothing, so it is skipped and not shortened.
-    if !crate::clock::calibrated() || !crate::arch::smp::is_ready() {
-        return;
-    }
-    // Sampled once — a sibling still logging on its way down must not be able to push this deadline out indefinitely.
-    let want = crate::log::read::newest_committed_at_ns();
-    if !log_file_owed(want) {
-        return;
-    }
-    // Wake siblings first: one may be halted waiting for an interrupt with no timer armed to wake it otherwise.
-    crate::arch::irqchip::kick_all_but_self();
-    let deadline = crate::clock::now() + LOG_FILE_DRAIN.duration();
-    while log_file_owed(want) {
-        if crate::clock::now() >= deadline {
-            // /log has failed to answer, so fold this into the still-unpainted panel snapshot — the panel is the only channel left.
-            crate::log!(
-                "panic: {LOG_DRAIN_EXPIRED} in {}ns; the panel is the only copy",
-                LOG_FILE_DRAIN.nanos()
-            );
-            crate::drivers::panic_console::refresh_capture();
-            return;
-        }
-        core::hint::spin_loop();
-    }
-}
-
 /// Halt all CPUs: stop the others, flush pending log output, then hold this
 /// machine's panel until a key retires the reboot bound or the bound returns it
 /// to firmware. Every fatal path's one funnel.
 // panic_flush bypasses the log-ring and serial locks — once the others are stopped a wedged holder never releases them, so taking them normally could deadlock.
 pub fn halt_all_cpus() -> ! {
-    // Before the wait and the panel: from here this machine holds a report for
+    // Before the halt and the panel: from here this machine holds a report for
     // whoever is in front of it, with interrupts masked and under a bound of its
     // own — which to a hard-lockup sample or a deadline poll is
     // indistinguishable from a wedge, and is the opposite of one. Both bounds,
@@ -405,14 +350,17 @@ pub fn halt_all_cpus() -> ! {
     // this path exists to deliver.
     crate::hardlockup::stand_down();
     crate::deadline::stand_down();
-    wait_for_log_file();
+    // **The other CPUs first, before anything else here runs.** A kernel that
+    // has declared itself corrupt runs no userland again and no write path:
+    // the report reaches the console, the panel and the black box, and
+    // `/log` gets it from the next boot's loader.
     crate::arch::irqchip::stop_other_cpus();
     let bound = crate::panic_reboot::arm(true);
     // Folded into the still-unpainted capture only where the panel is this
-    // boot's only account of itself, exactly as `wait_for_log_file`'s own line
-    // is: a refresh re-freezes the ring, and `screen_late_panic` reads the
-    // panel for a record written *after* `capture()` to prove the paint comes
-    // from the frozen snapshot. A machine with a console gets the arm line on it.
+    // boot's only account of itself: a refresh re-freezes the ring, and
+    // `screen_late_panic` reads the panel for a record written *after*
+    // `capture()` to prove the paint comes from the frozen snapshot. A machine
+    // with a console gets the arm line on it.
     if !serial::has_console() {
         crate::drivers::panic_console::refresh_capture();
     }

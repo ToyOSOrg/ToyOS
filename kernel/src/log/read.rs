@@ -189,8 +189,8 @@ pub fn drain_ordered(cursor: &mut Cursor, out: &mut impl RecordSink) -> usize {
     }
 }
 
-/// The `at_ns` of the newest committed record, or zero if none — clamps
-/// `LogCursor::durable` so a buggy `/system/bin/logd` can't wait forever.
+/// The `at_ns` of the newest committed record, or zero if none: the upper bound
+/// of a snapshot that must not chase records committed while it walks.
 pub fn newest_committed_at_ns() -> u64 {
     let mut newest = 0;
     for shard in super::shards().iter().flatten() {

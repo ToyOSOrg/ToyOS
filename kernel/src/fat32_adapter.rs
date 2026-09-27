@@ -391,9 +391,10 @@ impl FatExtents {
 /// untouched: `fat-mirror-write-refuse` the first two, `quiesce-drain-refuse`
 /// [`mirror_refuse::SHUTDOWN_REFUSALS`] on the thread running the shutdown.
 /// `quiesce-fsync-refuse` refuses the *active* FAT's write in
-/// [`mirror_refuse::FSYNC_REFUSALS`] attempts of a `SYS_FSYNC` made while the
-/// machine is stopping — after `set_fat_entry` wrote the mirror, so the two
-/// FATs stand split until the caller's next attempt.
+/// [`mirror_refuse::FSYNC_REFUSALS`] attempts of a `SYS_FSYNC` of the one file
+/// it stages, [`FSYNC_STAGED`] — after `set_fat_entry` wrote the mirror, so the
+/// two FATs stand split until the caller's next attempt, and a stop asked for
+/// meanwhile meets the caller parked between two of them.
 #[cfg(feature = "boot-actuators")]
 mod mirror_refuse {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -416,18 +417,21 @@ mod mirror_refuse {
     /// Eight, because the ladder parks from attempt 2.
     pub const SHUTDOWN_REFUSALS: u32 = 8;
 
-    /// Enough that the caller's ladder outlasts the shutdown's wait for the
-    /// log, so the second stage of the stop meets it parked.
-    pub const FSYNC_REFUSALS: u32 = 9;
+    /// Enough that the stop's sweeps meet the caller parked between two
+    /// refused attempts, and few enough that the ladder closes inside the
+    /// stop's budget.
+    pub const FSYNC_REFUSALS: u32 = 8;
 
     /// The parks between [`FSYNC_REFUSALS`] refused attempts: none after the
-    /// first, then `RETRY_SOONEST` doubling, never reaching its ceiling.
+    /// first, then `RETRY_SOONEST` doubling, never reaching its ceiling — and
+    /// all of them inside the stop's budget, so the stop waits the update out
+    /// rather than resetting over a half-made one.
     const _: () = assert!(
         crate::block::RETRY_SOONEST.nanos() * ((1 << (FSYNC_REFUSALS - 1)) - 1)
-            > crate::log::SHUTDOWN_DURABLE.nanos()
+            < crate::quiesce::PARK.nanos()
             && crate::block::RETRY_SOONEST.nanos() << (FSYNC_REFUSALS - 2)
                 <= crate::block::RETRY_SLOWEST.nanos(),
-        "quiesce-fsync-refuse: the refused ladder ends before the shutdown stops waiting for /log",
+        "quiesce-fsync-refuse: the refused ladder outlasts the stop's budget",
     );
 
     /// The active FAT's byte range, captured beside the mirror's.
@@ -459,16 +463,14 @@ mod mirror_refuse {
         HI.store(mirror.1, Ordering::Relaxed);
     }
 
+    /// Whether one `SYS_FSYNC` attempt of the staged file holds its flush open.
     pub fn set_in_fsync(on: bool) {
         FSYNC_ATTEMPT_REFUSED.store(false, Ordering::Relaxed);
         IN_FSYNC.store(on, Ordering::Relaxed);
     }
 
     fn fsync_refuses(offset: u64, end: u64) -> Option<Refused> {
-        if !IN_FSYNC.load(Ordering::Relaxed)
-            || !crate::actuator::quiesce_fsync_refuse()
-            || !crate::quiesce::stopping()
-        {
+        if !IN_FSYNC.load(Ordering::Relaxed) || !crate::actuator::quiesce_fsync_refuse() {
             return None;
         }
         let (lo, hi) = (ACTIVE_LO.load(Ordering::Relaxed), ACTIVE_HI.load(Ordering::Relaxed));
@@ -553,10 +555,16 @@ pub(crate) fn leave_drain_flush() {
     mirror_refuse::set_in_drain(false);
 }
 
-/// The same for one `SYS_FSYNC` attempt; called with the VFS lock held.
+/// The one file `quiesce-fsync-refuse` refuses the flush of. Mirrored in
+/// `tests/toyos-rust-tests/src/bin/quiesce_fsync.rs`.
 #[cfg(feature = "boot-actuators")]
-pub(crate) fn enter_fsync_flush() {
-    mirror_refuse::set_in_fsync(true);
+const FSYNC_STAGED: &str = "quiesce-fsync.bin";
+
+/// The same for one `SYS_FSYNC` attempt on `path`; called with the VFS lock
+/// held.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn enter_fsync_flush(path: &str) {
+    mirror_refuse::set_in_fsync(path.ends_with(FSYNC_STAGED));
 }
 
 #[cfg(feature = "boot-actuators")]

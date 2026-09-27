@@ -677,7 +677,7 @@ const INIT_PROGRAM: &str = "init";
 /// declaration to come from. They travel in the manifest so init creates
 /// exactly the ports the build-time gate counted as provided — one producer,
 /// rather than a constant here and a string in init.
-const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT];
+const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT, "power"];
 
 /// Who may hold the two authorities that change what the machine runs:
 /// the swap port, [`toyos_swap::HOLDER`] and nothing else — no other
@@ -2989,6 +2989,25 @@ mod tests {
         }
     }
 
+    /// **An image a user boots serves no log on the network.** `logd` answers
+    /// `toyos_logstream::PORT` to whoever connects, with nothing to authenticate
+    /// them, once it holds a `netd` connector: the test configs that read the
+    /// stream give it one, and these do not.
+    #[test]
+    fn no_shipped_image_serves_the_log_on_the_network() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS.iter().filter(|config| !config.starts_with("tests/")) {
+            let parsed = parse_config(&root.join(config));
+            let logd = parsed.programs.get("logd").expect("every config runs logd");
+            assert!(
+                logd.receives.is_empty(),
+                "{config}: `logd` receives {:?}, and a `netd` connector is what serves this \
+                 machine's log to anyone on its network",
+                logd.receives,
+            );
+        }
+    }
+
     /// Every config renders, so a row the manifest refuses — one that serves a
     /// port and is not marked `service` — reds here rather than at a build.
     #[test]
@@ -3082,7 +3101,8 @@ mod tests {
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/layoutcase/system.toml",
-        "tests/logholdcase/system.toml",
+        "tests/logflushcase/system.toml",
+        "tests/logkeepcase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
         "tests/logstreamcase/system.toml",

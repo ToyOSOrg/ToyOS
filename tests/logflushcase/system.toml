@@ -1,0 +1,22 @@
+# A job list whose one job asks for a stop the kernel refuses
+# (`power-refused-once`), while `logd` holds that stop's flush until init
+# speaks again (`--hold-flush`): init waits the flush out, the stop is refused,
+# and init's resume reaches `logd` with the flush unrun. The last job stops the
+# machine for real. `log_resume_meets_its_flush` reads the verdict off `/log`.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+service = true
+args = ["--hold-flush"]
+syscap = ["logread"]
+
+# `power` because both jobs ask init to stop the machine.
+[programs.test-runner]
+receives = ["power"]
+args = ["test_rs_log_refused_stop", "reboot"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"

@@ -92,18 +92,18 @@ fn main() {
     }
     // The origin for the whole run, taken after the warm-up so the warm-up's
     // own drift is in no later target.
-    let start = syscall::clock_nanos();
+    let start = toyos_abi::clock::nanos_since_boot();
 
     for i in 0..SAMPLES {
         let target = start + (i as u64 + 1) * PERIOD_NS;
-        let now = syscall::clock_nanos();
+        let now = toyos_abi::clock::nanos_since_boot();
         // A target already passed is a wake this loop owes nothing for: the
         // lateness is recorded and the next sleep is skipped rather than
         // negative.
         if let Some(remaining) = target.checked_sub(now).filter(|left| *left > 0) {
             syscall::nanosleep(remaining);
         }
-        let late_us = syscall::clock_nanos().saturating_sub(target) / 1_000;
+        let late_us = toyos_abi::clock::nanos_since_boot().saturating_sub(target) / 1_000;
         worst = worst.max(late_us);
         match usize::try_from(late_us).ok().filter(|us| *us < BUCKETS) {
             Some(bucket) => histogram[bucket] += 1,
