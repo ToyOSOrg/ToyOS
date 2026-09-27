@@ -480,16 +480,40 @@ pub fn unique_guid_of(file: &mut std::fs::File, kind: toyos_gpt::Guid) -> Result
     only_partition(&mut FileSectors(file), kind).map(|part| part.unique_guid().0)
 }
 
+/// Why a scan's `out[0]` and `matched` count did not pick out exactly one
+/// partition, once the table itself was readable.
+pub enum OnePartitionError {
+    /// The one entry of the wanted type is no partition on this disk.
+    Unplaced(toyos_gpt::Stated),
+    /// Not exactly one entry carried the wanted type.
+    Matched(u32),
+}
+
+/// The one partition a [`toyos_gpt::locate_type`] scan found, out of its
+/// [`toyos_gpt::TypeScan`] and the `out[0]` slot it filled — the match shared
+/// by every caller that owes exactly one partition of a type and nothing else.
+pub(crate) fn one_partition_of(
+    scan: toyos_gpt::TypeScan,
+    first: Option<toyos_gpt::Entry>,
+) -> Result<toyos_gpt::Partition, OnePartitionError> {
+    match (scan.matched, first) {
+        (1, Some(Ok(part))) => Ok(part),
+        (1, Some(Err(unplaced))) => Err(OnePartitionError::Unplaced(unplaced)),
+        (matched, _) => Err(OnePartitionError::Matched(matched)),
+    }
+}
+
 /// The one partition of type `kind` on `disk`.
 pub fn only_partition(disk: &mut dyn toyos_gpt::Sectors, kind: toyos_gpt::Guid) -> Result<toyos_gpt::Partition, String> {
     let mut out = [None; 2];
     let scan = toyos_gpt::locate_type(disk, kind, &mut out)
         .map_err(|e| format!("no readable partition table: {e:?}"))?;
-    match (scan.matched, out[0]) {
-        (1, Some(Ok(part))) => Ok(part),
-        (1, Some(Err(unplaced))) => Err(format!("the one entry of type {kind} is no partition: {unplaced:?}")),
-        (n, _) => Err(format!("{n} partitions of type {kind}, where one is owed")),
-    }
+    one_partition_of(scan, out[0]).map_err(|e| match e {
+        OnePartitionError::Unplaced(unplaced) => {
+            format!("the one entry of type {kind} is no partition: {unplaced:?}")
+        }
+        OnePartitionError::Matched(n) => format!("{n} partitions of type {kind}, where one is owed"),
+    })
 }
 
 /// Overwrite the file `name` on the FAT partition `guid` of the disk image at

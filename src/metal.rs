@@ -957,13 +957,12 @@ fn one_partition(
     let mut out = [None; 2];
     let scan = toyos_gpt::locate_type(&mut crate::image::FileSectors(file), guid, &mut out)
         .map_err(|e| Refusal::Table(format!("{e:?}")))?;
-    let part = match (scan.matched, out[0]) {
-        (1, Some(Ok(part))) => part,
-        (1, Some(Err(unplaced))) => {
-            return Err(Refusal::Table(format!("the {what} entry is no partition: {unplaced:?}")))
+    let part = crate::image::one_partition_of(scan, out[0]).map_err(|e| match e {
+        crate::image::OnePartitionError::Unplaced(unplaced) => {
+            Refusal::Table(format!("the {what} entry is no partition: {unplaced:?}"))
         }
-        (matched, _) => return Err(Refusal::Partitions { what, matched }),
-    };
+        crate::image::OnePartitionError::Matched(matched) => Refusal::Partitions { what, matched },
+    })?;
     Ok(Part {
         index: part.index() + 1,
         start: part.first_lba(),
