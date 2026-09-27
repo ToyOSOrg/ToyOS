@@ -584,6 +584,11 @@ impl H {
         self.transmit()
     }
 
+    /// Forgets the fixture 4-tuple's offsets: what A sends next for it belongs to no incarnation.
+    pub fn forget(&mut self) {
+        self.deltas.remove(&(self.local.1, self.peer.0, self.peer.1));
+    }
+
     pub fn id(&self) -> ConnId {
         self.conn.expect("the fixture's connection")
     }

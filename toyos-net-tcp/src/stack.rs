@@ -401,8 +401,9 @@ impl Tcp {
 
     // ---- slab bookkeeping ----
 
+    /// The connection a user holds: after `close` or `abort` the id names nothing.
     fn conn(&mut self, id: ConnId) -> Result<&mut Conn, Error> {
-        slot(&mut self.conns, id.index, id.generation).ok_or(Error::NoSuchSocket)
+        slot(&mut self.conns, id.index, id.generation).filter(|c| c.user == User::Held).ok_or(Error::NoSuchSocket)
     }
 
     /// Re-files a connection's deadline and offers it the next transmit opportunity.
@@ -1064,7 +1065,7 @@ impl Tcp {
 
     pub fn status(&mut self, id: ConnId) -> Result<Status, Error> {
         let in_time_wait = |demux: &BTreeMap<Tuple, Entry>, tuple| matches!(demux.get(tuple), Some(Entry::TimeWait(_)));
-        let conn = slot(&mut self.conns, id.index, id.generation).ok_or(Error::NoSuchSocket)?;
+        let conn = slot(&mut self.conns, id.index, id.generation).filter(|c| c.user == User::Held).ok_or(Error::NoSuchSocket)?;
         let (state, readable, writable, delivery_problem, failure) = match &conn.state {
             Tcb::SynSent(sent) => (State::SynSent, 0, sent.buf.room(), sent.timer.stalled >= 3, None),
             Tcb::SynRcvd(rcvd) => (State::SynReceived, 0, 0, rcvd.timer.stalled >= 3, None),
@@ -1080,6 +1081,7 @@ impl Tcp {
         Ok(Status { state, readable, writable, failure, soft_error: conn.soft, delivery_problem })
     }
 
+    /// Any live connection, orphans included: what inspect lists.
     pub fn info(&mut self, id: ConnId) -> Option<Info> {
         let conn = slot(&mut self.conns, id.index, id.generation)?;
         let Tcb::Sync(sync) = &conn.state else { return None };

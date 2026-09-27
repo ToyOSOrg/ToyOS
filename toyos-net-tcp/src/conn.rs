@@ -1029,6 +1029,7 @@ impl Sync {
         if self.rtx_timer.is_none() && self.persist.is_none() && end != start {
             self.rtx_timer = Some(now.after(self.rtt.rto()));
         }
+        self.refresh(now);
         self.finish(now, start, len, fin, sack)
     }
 
