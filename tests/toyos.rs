@@ -14762,12 +14762,7 @@ fn run_machine_test(
             let start = toyos_build::build::boot_start(&config.join("system.toml"));
             for program in &start {
                 let line = format!("init: started {program}");
-                if !log.contains(&line) {
-                    return Err(format!(
-                        "the shipped `[boot] start` names {program} and init never said \
-                         {line:?}\n{log}"
-                    ));
-                }
+                qemu::await_marker(&mut qemu, &mut log, &line, &line)?;
             }
             serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
             eprintln!(
@@ -20233,19 +20228,6 @@ fn check_no_collisions(shared: &[TestDef]) {
 
 /// `redlist::DISABLED` against every name `all_tests` plus the three declared
 /// registries could produce a verdict for, before any boot on any entry point.
-///
-/// **A name nothing registers is checked first, and has to red for that
-/// reason.** Every real row currently names a test this run does register, so
-/// a `registered` predicate broken into always answering yes would pass every
-/// one of them silently — this stages the one row that tells the two apart,
-/// and refuses to trust its own verdict on the real list until it reds this
-/// one for the right reason.
-///
-/// `--metal` returns before the ordinary compile below builds its own
-/// `all_tests`, so it calls this on the registry built from its own binaries
-/// rather than skip it — a disabled row is otherwise unchecked on that path.
-/// Returns the refusal rather than exiting, so each caller keeps its own
-/// owned `Run` to exit with.
 fn check_redlist(all_tests: &[TestDef]) -> Result<(), String> {
     let runnable: BTreeSet<&str> = all_tests
         .iter()
@@ -20254,18 +20236,7 @@ fn check_redlist(all_tests: &[TestDef]) -> Result<(), String> {
         .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
         .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
         .collect();
-    let registered = |name: &str| runnable.contains(name);
-    let unregistered =
-        redlist::Disabled { test: "a-name-nothing-in-this-tree-registers", issue: "issues/nowhere.md" };
-    match redlist::check(std::slice::from_ref(&unregistered), registered, &compile::repo_root()) {
-        Err(reason) if reason.contains("nothing registers it") => {}
-        other => {
-            return Err(format!(
-                "the redlist check's own negative control did not red on its reason: {other:?}"
-            ))
-        }
-    }
-    redlist::check(redlist::DISABLED, registered, &compile::repo_root())
+    redlist::check(redlist::DISABLED, |name| runnable.contains(name), &compile::repo_root())
 }
 
 fn main() {

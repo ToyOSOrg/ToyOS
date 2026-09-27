@@ -29,7 +29,6 @@ cpu1; the fifth never printed its return and the guest said nothing more for
 instrument, and the owner is the sleep path in `kernel/src/sched` that the
 test's write-up (`tests/toyos.rs`, `short_sleep_livelock`) names.
 
-**Exit condition.** Re-enabled when a reproduction shows the fifth sleeper's
-own exit — whether it returned late, never returned, or returned and never
-printed — with the sleep path's own state at that CPU read at the same moment.
+**Exit condition.** The fifth sleeper's stall is fixed in the sleep path, and
+`short_sleep_livelock` green on CI's KVM `guest` shards.
 Owner: the sleep path, `kernel/src/sched`.

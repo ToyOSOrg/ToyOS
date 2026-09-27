@@ -36,5 +36,6 @@ whether it is the mixer's sum overflowing or the analysis reading a wrapped
 value, and whether a listener would hear it. Nothing in the captured line
 distinguishes those, and the WAV that would is not kept by a CI job.
 
-**Exit condition.** A run that reproduces the peak with the capture retained,
-and one sentence naming which of the three it is.
+**Exit condition.** The full-scale sample's cause is fixed, and
+`doom_sound_flood` green on the KVM `guest` shards where it went red. Owner:
+orchestrator.

@@ -757,7 +757,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     let again = "[kernel 1.503 cpu7] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
     if ceiling_verdict(Some(again), early, CEILING, quiet, 40).as_deref() != Some(panic.as_str()) {
         return Err(format!(
-            "one panic on two boots gives two sentences, so a re-run reads as a second defect:\n\
+            "one panic on two boots gives two sentences:\n\
              {panic}\n{:?}",
             ceiling_verdict(Some(again), early, CEILING, quiet, 40)
         ));

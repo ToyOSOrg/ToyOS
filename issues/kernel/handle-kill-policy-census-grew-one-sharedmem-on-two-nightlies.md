@@ -39,8 +39,7 @@ PR #542's nightly at 059c5de7 (run 36328646395, `guest (9)`), KVM, QEMU
 reports `tlb: shootdowns=89 wait=354978us max=66850us`. The branch changes no
 kernel or guest code.
 
-**Exit condition.** Re-enabled when the census names the owner of a grown kind,
-and the red is attributed or the release is shown to finish before `wait`
-returns. Owner: the census in
-`tests/toyos-rust-tests/src/bin/handle_kill_policy.rs` and the object release
-in `kernel/src/object/mod.rs`; nobody is holding it yet.
+**Exit condition.** A killed process's deferred releases finish before `wait`
+returns, the fix `issues/kernel/deferred-release-outlives-its-syscall.md`
+names under "What to do", and `handle_kill_policy` green on the KVM `guest`
+shards where it went red. Owner: orchestrator.

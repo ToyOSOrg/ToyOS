@@ -20,8 +20,6 @@ Split out of `issues/build/parallel-tests-red-under-other-suites.md`, whose
 rate table was never this test's — CI's single-guest-per-machine shards rule
 out the contention shape that file is about.
 
-**Exit condition.** Re-enabled when a reproduction identifies which of the two
-sides drops the five lines — the writer's own buffering, the console's queue,
-or the harness's capture — with a byte-level trace across the drop. Owner: the
-console path (`tests/toyos-rust-tests/src/bin/console_line_atomicity.rs` and
-the kernel console driver it writes through); nobody is holding it yet.
+**Exit condition.** The lost lines' cause is fixed, and
+`console_line_atomicity` green on CI's `guest` shards, one guest per machine.
+Owner: orchestrator.

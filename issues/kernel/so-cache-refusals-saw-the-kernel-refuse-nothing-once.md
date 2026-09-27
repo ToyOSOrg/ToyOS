@@ -15,8 +15,5 @@ twelve 2 MiB images entered a cache whose test budget refuses at the second.
 
 Owed: a mechanism. Nobody has one.
 
-**Exit condition.** Re-enabled when a run reproduces the kernel refusing
-nothing at the cache's own budget line, with the byte counts that fed the
-budget captured beside it — the mechanism this entry is owed. Owner: the
-so-cache path (`tests/toyos-rust-tests/src/bin/so_cache_policy.rs` and its
-kernel counterpart); nobody is holding it yet.
+**Exit condition.** The cause of the missing refusal is fixed, and
+`so_cache_refusals` green on CI's KVM `guest` shards. Owner: orchestrator.

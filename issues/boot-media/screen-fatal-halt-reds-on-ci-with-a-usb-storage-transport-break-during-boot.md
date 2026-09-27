@@ -30,7 +30,6 @@ runner's stdout blocked on.
 
 **Exit condition.** Re-enabled when a reproduction pins whether the boot
 runner's stdout was blocked behind the usb-storage transport break or the two
-are independent, and either the wait path stops holding the runner's own
-output hostage or the runner is shown to make progress through a broken
-transport. Owner: the usb-storage wait path,
+are independent, and the wait path stops holding the runner's own output
+hostage. Owner: the usb-storage wait path,
 `kernel/src/drivers/xhci/wait/msc.rs`.

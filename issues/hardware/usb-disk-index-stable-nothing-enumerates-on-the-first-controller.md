@@ -16,10 +16,5 @@ probe found, only this one still reds.
 Split out of `issues/hardware/eleven-names-red-on-ci.md`, which covers eleven
 names and has no exit condition for this one in particular.
 
-**Exit condition.** Re-enabled when a reproduction pins whether the first
-controller's device is genuinely not there yet at enumeration time (a boot
-ordering question) or the enumeration itself missed a device that was, with
-the controller's own register state read at the failing enumeration. Owner:
-the USB storage index path (`tests/common/usb.rs`'s
-`usb_disk_index_stable` and `kernel/src/drivers/xhci`); nobody is holding it
-yet.
+**Exit condition.** The cause of the empty first controller is fixed, and
+`usb_disk_index_stable` green on CI's `guest` shards. Owner: orchestrator.

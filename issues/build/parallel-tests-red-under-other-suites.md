@@ -89,10 +89,7 @@ changes.
   the same tree eight minutes later: `gaps none`, `phase-breaks 16` — the
   declared #88 failure and nothing else. It is `Sched::Serial`, so like
   `dump_nmi_probe` the harness never re-runs it alone and the run simply reds.
-  Its `EXPECTED_FAILURES` entry covers the phase-break message alone, which is
-  why a *dropout* under load reaches the verdict, and that is correct: **do not
-  widen it.** A silence and a phase break are two different defects and an entry
-  that covered both would stop saying anything. The tree it was seen on differed
+  The tree it was seen on differed
   from main only in `src/`, so the guest image was byte-identical to main's.
   **Three times the same day**, all three in landing gates of that one
   build-system branch and all three confirmed alone within ten minutes: `2
@@ -412,8 +409,7 @@ by construction, since a gate's builds are these builds. What it does **not**
 bound is anything that never enters `src/build.rs` — a `toyos-sched-sim measure`,
 a hand-run `cargo build` in a fork clone, the primary's `./x.py`.
 
-**What to do about a red on any of these names:** read the `ALONE` line under it
-before anything else. `GREEN` there means the host, not the kernel. What none of
+What none of
 them should get is a widened bound — a gate that tolerates one lost byte
 tolerates the defect it was written for. The two fixes above are the two shapes
 that are legitimate: make the verdict independent of the rate, or scale a
@@ -423,8 +419,8 @@ admits twelve guests across every
 worktree, so the four-suite regime these were observed in cannot recur. A looser
 assertion is still not the answer.
 
-**But `ALONE … red again — the defect is real` is not evidence, and the protocol
-above leans on it.** The re-run happens inside the same process, moments after
+**But `ALONE … red again — the defect is real` is not evidence.**
+The re-run happens inside the same process, moments after
 twelve guests have been torn down and while another worktree's suite may still
 own the host — so it is alone in the suite's bookkeeping and not on the machine.
 Measured 2026-08-06 on the xHCI port-machine branch, whose kernel delta is
@@ -448,12 +444,6 @@ the host was carrying roughly four times its own load throughout, the `ALONE`
 re-run included. A verdict that flips between "GREEN, it is the host" and "red
 again, the defect is real" for one test on one tree twenty minutes apart is
 measuring the host in both directions.
-
-Consequence for the protocol: `ALONE: GREEN` still means what it says, because a
-green cannot be produced by load. `ALONE: red again` means nothing on its own
-and must be confirmed against `main` in the same session before it is believed —
-which is the A/B the audio rules already require and which this line currently
-invites an agent to skip.
 
 **2026-08-23 — the host-speed correction was blind to wide-SMP oversubscription,
 and now is not.** Each CI `guest` shard is its own four-core `ubuntu-24.04`

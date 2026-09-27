@@ -34,7 +34,7 @@ further crossing costs a landing an hour and answers nothing.
 2026-09-01 — every `guest` shard that ran this name, with the runner's
 reported CPU model beside each reading — and the line re-derived from it
 with the same rule; if the readings split by runner model, the gate names
-the model it judges and refuses to judge the rest.
+the model it judges and refuses to judge the rest. Owner: orchestrator.
 
 A second signature: the fast
 tier on PR #524's branch at `235c5a5b` reds `sched_check_build` on `cpu0: 85

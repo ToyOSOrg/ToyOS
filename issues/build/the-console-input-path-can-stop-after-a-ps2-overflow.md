@@ -71,9 +71,9 @@ available on a wedged boot, and the reported `drained 0` *while bytes were
 still being injected* is the ISR side having stopped taking them off the
 controller — not the console having stopped reading the kernel's queue.
 
-Exit: reproduce a wedge with the counter visible and read whether `RX_BYTES` is
-still rising while the panel is frozen. One number decides it, and it is
-already within reach of the armed arm rather than blocked on a new instrument.
+**Exit condition.** The input path is fixed so that no PS/2 overflow stops
+it, the staging above takes every line after the first on twenty boots, and
+`console_locale_detect` is green beside other guests. Owner: orchestrator.
 
 Not a reason to leave `shell_type_once` unpaced: pacing keeps the harness from
 provoking this, and the tracker keeps the defect.

@@ -1,11 +1,10 @@
 # Tests
 
-The mechanics live where the work is: profiles and shapes in `tests/common/`, registration and tiers in `tests/toyos.rs`, disabled tests in `src/redlist.rs`'s `DISABLED`, the fast tier's line in `src/tiers.rs` — read those, not this file, for how the harness works.
+The mechanics live where the work is: profiles and shapes in `tests/common/`, registration and tiers in `tests/toyos.rs`, the fast tier's line in `src/tiers.rs` — read those, not this file, for how the harness works.
 
 ## Caveats that bite every agent
 
 - **The dev host is a laptop that sleeps mid-session, and the suite says so** — a run whose wall clock jumped against the monotonic one reports `INVL` per test and exits 2: re-run. A wild outlier *not* marked that way is a real finding.
-- **A landing-gate red on a test that is green alone is not therefore the host** — `STALL` is red and named apart; none of this re-runs an audio harm verdict away.
 - **A machine-wide kernel panic reds whichever test was running** — that red's name is the workload, never the cause. `QEMU died before ===READY=== (status 0)` is the same thing said silently: a guest that reset itself is a kernel death, and its evidence is the boot log.
 - **A machine-wide death during boot is reproduced by boots, not by suites** — parallel `bootable.img` guests, each waited on its completion marker and never on a fixed timer; the baseline is measured in the same session as the arm; a death counts whether or not a marker printed, so run guests with `-action reboot=shutdown -action shutdown=pause` and read a silent one's registers over QMP; a T14 block that gained a CI container mid-run is discarded, never corrected; a defect whose rate is set by interrupts per unit of guest work is measured on the *slowest* instrument — TCG can be the stronger oracle.
 - **Gate A's thorough tier reds on the dev host, and the fast tier intermittently** — stash and re-run before believing a red is yours; a plain `cargo test` boots no audio config at all; read the nightly's verdict line, not its check status.
@@ -20,7 +19,6 @@ The mechanics live where the work is: profiles and shapes in `tests/common/`, re
 - **A liveness ceiling scales by two host facts** — boot-derived host speed *and* the guest's own `vcpus/cores` oversubscription. Widen a *liveness* guard for this, never a correctness bound.
 - **A wedge verdict needs both the budget spent and the guest gone quiet** — a healthy idle guest can be silent for minutes, and a guest still talking past its budget is slow, not stuck; only a far backstop stands behind a guest that keeps talking.
 - **A measured bound is asserted against the derivation, never against the measurement** — a bound that has to be widened to pass is a finding. A test asserting a kernel `Budget` never expires asserts a bound the kernel does not promise; the red is only the outcome that is neither the answer nor the declared degradation.
-- **A test named as evidence may be disabled, and then it proved nothing** — ask `cargo run -- --known-red <name>` before quoting it.
 - **A crafted-input test asserts the harm before the return value, and never Debug-prints a refused value** — an unrefused one is as large as the input asked for.
 - **A stimulus sent through a channel that can silently lose it is verified before its effect is asserted** — QEMU's PS/2 queue drops the seventeenth byte, so typed input paces against the guest's report (`shell_type_once`); a guest's console reaches the host as whole lines only, so a partial line exists on no channel.
 - **A harness field that can be silently inert is this suite's worst defect class** — where two options can describe the same guest they refuse each other by name, and an image is asked what it is armed with.

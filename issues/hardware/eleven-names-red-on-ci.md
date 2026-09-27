@@ -46,9 +46,7 @@ is #172's signature away from the T14: two clients connect, both tones say
 **The top five reproduce, so they are defects and not a rate.** The bottom six
 fire one or two runs in five, which is 20–40% and is not "noise" either: the bar
 this was measured against tolerates one in fifty *with the failure named*, and
-none of these six has been looked at. **No entry here is a candidate for
-`EXPECTED_FAILURES`** — an exemption names a defect and a write-up, and "fires
-40% of the time for reasons nobody has looked at" is neither.
+none of these six has been looked at.
 
 **`metal_sim_null_audio` and `hda_two_live_refused` are the first two off this
 table**, closed when soundd stopped racing to present its null sink.

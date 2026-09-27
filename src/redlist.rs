@@ -49,7 +49,7 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "quiesce_wakes_on_the_last_exit",
-        issue: "issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md",
+        issue: "issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md",
     },
     Disabled {
         test: "sched_check_build",
@@ -58,10 +58,6 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "screen_fatal_halt",
         issue: "issues/boot-media/screen-fatal-halt-reds-on-ci-with-a-usb-storage-transport-break-during-boot.md",
-    },
-    Disabled {
-        test: "shipped_config_boots",
-        issue: "issues/build/shipped-config-boots-ended-before-init-said-it-started-filepicker.md",
     },
     Disabled {
         test: "short_sleep_livelock",
