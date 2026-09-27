@@ -234,3 +234,29 @@ fn an_initiator_answers_while_it_waits() {
         assert!(s.wait_turn(0, 1, g0, || {}));
     });
 }
+
+/// A serve that an interrupt nests inside another publishes the later
+/// generation, and the outer serve, finishing after it, must not take it back.
+///
+/// Not an interleaving question either: the nesting is one CPU's own schedule,
+/// written out. Reds when `serve` stores what it owes instead of raising to it.
+#[test]
+fn a_nested_serve_is_not_undone_by_the_one_it_interrupted() {
+    model(|| {
+        let s = Shootdown::new();
+        let first = s.issue();
+        let mut later = None;
+        s.serve(1, || {
+            let g = s.issue();
+            s.serve(1, || {});
+            later = Some(g);
+        });
+        let later = later.expect("the nested serve ran");
+        assert!(s.served(1, first));
+        assert!(
+            s.served(1, later),
+            "cpu 1 flushed for the nested shootdown, and the serve it interrupted \
+             published an older generation over it",
+        );
+    });
+}

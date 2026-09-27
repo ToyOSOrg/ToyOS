@@ -48,7 +48,7 @@ pub fn claim_teardown<T: Processes>(table: &mut T, pid: Pid) -> bool {
 /// that exit is the main one.
 ///
 /// The current thread is **not** in `others`, and cannot be: it is executing
-/// the teardown, and `retire_task` returns only when its subject is provably
+/// the teardown, and `await_released` returns only when its subject is provably
 /// off every CPU. Its own CPU time is read separately, which is what
 /// [`ExitSet::current_is_main`] is for — a main thread filtered out of the
 /// retire set would otherwise leave `cpu=0ms` on its own exit line.

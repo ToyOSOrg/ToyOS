@@ -68,6 +68,11 @@ impl Finish {
         Finish { pid, code, tids, next: 0, pc: 0 }
     }
 
+    /// The reaper's: it takes a kill only once every thread is released.
+    fn released((pid, code, tids): (Pid, i32, Vec<Tid>)) -> Self {
+        Finish { pid, code, next: tids.len(), tids, pc: 1 }
+    }
+
     fn enabled(&self, world: &World) -> bool {
         self.pc != 0 || self.next == self.tids.len() || retire_ready(world, self.pid, self.tids[self.next])
     }
@@ -100,7 +105,7 @@ impl Finish {
     }
 }
 
-/// `retire_task`, one section: post the retire, then — blocked until then —
+/// The base's `retire_task`, one section: post the retire, then — blocked until then —
 /// find the thread released. `true` once it is.
 fn retire_step(world: &mut World, pid: Pid, tid: Tid) -> bool {
     if world.is_retired(pid, tid) {
@@ -162,11 +167,12 @@ impl Op {
     /// Whether the op's next section can run, rather than wait.
     fn enabled(&self, world: &World) -> bool {
         match self {
-            Op::Exit { pid, pc: 1, others, next, .. } => {
-                *next == others.len() || retire_ready(world, *pid, others[*next])
+            Op::Exit { pid, pc: 2, others, next, .. } => {
+                *next == others.len() || world.is_retired(*pid, others[*next])
             }
             Op::Kill { inline: Some(finish), .. } => finish.enabled(world),
             Op::Reap { job: Some(finish) } => finish.enabled(world),
+            Op::Reap { job: None } => world.owes_a_released(),
             _ => true,
         }
     }
@@ -206,28 +212,32 @@ impl Op {
                         world.leaving(*pid, *tid);
                         *pc = 1;
                     }
-                    // Phase 2: one `retire_task` per other thread, each with
-                    // the table lock given up.
+                    // Phase 2, with the table lock given up: every other
+                    // thread's retire posted, then each one's release awaited.
                     1 => {
+                        for &other in others.iter() {
+                            world.post_retire(*pid, other);
+                        }
+                        *pc = 2;
+                    }
+                    2 => {
                         if *next < others.len() {
-                            if retire_step(world, *pid, others[*next]) {
-                                *next += 1;
-                            }
+                            *next += 1;
                         } else {
-                            *pc = 2;
+                            *pc = 3;
                         }
                     }
                     // Phase 4: the zombie marks, under the table lock.
-                    2 => {
+                    3 => {
                         if let Some(proc) = world.get_mut(*pid) {
                             teardown::mark_all_zombie(proc, *code);
                         }
-                        *pc = 3;
+                        *pc = 4;
                     }
                     // Phase 5: publish, with the table lock given up.
-                    3 => {
+                    4 => {
                         world.publish_exit(*pid, *code);
-                        *pc = 4;
+                        *pc = 5;
                     }
                     // `exit_current`: the exit pass, one pass later, drops this
                     // thread's payload and `publish_released` posts on its own
@@ -270,7 +280,7 @@ impl Op {
                 }
             }
             Op::Reap { job } => match job {
-                None => *job = Some(Finish::new(world.take_owed().expect("stepped with nothing owed"))),
+                None => *job = Some(Finish::released(world.take_released().expect("enabled with none released"))),
                 Some(finish) => {
                     if finish.step(world) {
                         *job = None;

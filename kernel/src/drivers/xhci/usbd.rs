@@ -3,7 +3,7 @@
 use toyos_sched::task::WaitClass;
 
 use crate::watch;
-use crate::sched::kthread::{self, OnPanic};
+use crate::sched::kthread::{self, OnPanic, OnStop};
 use crate::scheduler;
 use crate::time::Deadline;
 
@@ -13,7 +13,7 @@ const NAME: &str = "usbd";
 /// Start the thread. Called once, from `kernel_main`, beside `klogd`'s.
 pub fn start() {
     // Unconditional: gating this on a controller would give the kernel's thread count a second answer.
-    let _ = kthread::spawn(NAME, body, 0, OnPanic::Recover);
+    let _ = kthread::spawn(NAME, body, 0, OnPanic::Recover, OnStop::Runs);
 }
 
 extern "C" fn body(_arg: u64) -> ! {

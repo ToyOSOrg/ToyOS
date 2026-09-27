@@ -42,23 +42,17 @@
 //! anywhere, which is the case that is *not* under test.
 
 use std::io::{Read, Write};
-use std::os::toyos::process::{ChildExt, CommandExt};
+use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use toyos::process::Process;
 use toyos::{endow, namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SyscallError, SERVE_PREFIX, SVC_LABEL};
-use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_kill_while_blocked";
 const SERVICE: &str = "blocked";
-
-/// The label arm 4's killer finds the spinner under. A local name in one
-/// process's own table, and it names nothing anywhere else.
-const VICTIM_LABEL: &str = "victim";
 
 /// How long arm 4 gives a killed Ring 3 spinner to reach its last exit
 /// boundary, watched from outside the kill.
@@ -75,12 +69,6 @@ const VICTIM_LABEL: &str = "victim";
 /// headroom", which would be true of the interrupt delivery alone — precisely
 /// the part this arm cannot observe from outside the kill, and the part the
 /// window's several scheduler dispatches sit on top of.
-///
-/// **It has to be smaller than `scheduler::retire_task`'s own tripwire, and
-/// that ordering is the whole of the arm's ability to report.** Nothing here
-/// reads that constant or restates its value: what this one needs is only to be
-/// first, and a bound derived from device timeouts and scheduler quanta is not
-/// going to come in under two seconds.
 const ENDS_WITHIN: Duration = Duration::from_secs(2);
 
 fn main() {
@@ -101,8 +89,7 @@ fn test() {
 /// Spawn a child in `role` and wait for it to say it has parked.
 ///
 /// The child's stdin is a pipe this process holds the write end of, which is
-/// what arms 1 and 2 measure afterwards and what releases arm 4's killer at a
-/// moment this process picks.
+/// what arms 1 and 2 measure afterwards.
 fn parked(role: &str, extra: Option<(String, u32)>) -> std::process::Child {
     let mut command = Command::new(SELF_PATH);
     command.arg(role).stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -222,7 +209,7 @@ fn an_acceptor_killed_in_the_accept() {
 /// holds reaches EOF when — and only when — the victim's handles are drained.
 ///
 /// **The clock starts before the kill and not after it.**
-/// What this one bounds is the whole of [go byte → boundary → teardown], so the
+/// What this one bounds is the whole of [kill → boundary → teardown], so the
 /// number is an upper bound on the boundary rather than a measurement of it.
 fn a_ring_three_spinner_ends_at_its_next_exit_boundary() {
     let mut victim = parked("spin", None);
@@ -231,14 +218,7 @@ fn a_ring_three_spinner_ends_at_its_next_exit_boundary() {
     // thing that can ever arrive on it is the end of the victim.
     let mut spun = victim.stdout.take().expect("the spinner's stdout");
 
-    // A duplicate, because `endow` moves what it is handed: this process keeps
-    // its own handle so that dropping the `Child` stays its business.
-    let for_killer =
-        syscall::dup(RawHandle(victim.as_raw_handle())).expect("a second handle to the spinner");
-    let mut killer = parked("kill", Some((VICTIM_LABEL.to_string(), for_killer.0)));
-    let mut go = killer.stdin.take().expect("the killer's stdin");
-
-    /// Nanoseconds from the go byte to EOF, and `u64::MAX` until there is one.
+    /// Nanoseconds from the kill to EOF, and `u64::MAX` until there is one.
     /// Stored by the reader so the answer is the instant it saw rather than the
     /// poll that noticed.
     static GONE_AFTER_NS: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -248,7 +228,7 @@ fn a_ring_three_spinner_ends_at_its_next_exit_boundary() {
         while spun.read(&mut byte).expect("read the spinner's stdout") != 0 {}
         GONE_AFTER_NS.store(started.elapsed().as_nanos() as u64, Ordering::Release);
     });
-    go.write_all(b"g").expect("release the killer");
+    victim.kill().expect("kill the spinning child");
 
     while GONE_AFTER_NS.load(Ordering::Acquire) == u64::MAX && started.elapsed() < ENDS_WITHIN {
         thread::sleep(Duration::from_millis(1));
@@ -263,10 +243,6 @@ fn a_ring_three_spinner_ends_at_its_next_exit_boundary() {
         );
         std::process::exit(1);
     }
-    assert!(
-        killer.wait().expect("wait for the killer").success(),
-        "the spinner ended, but the process that killed it did not agree",
-    );
     println!(
         "  ring 3: a killed spinner reached its last exit boundary in {:?}, with no syscall \
          to cancel",
@@ -286,16 +262,6 @@ fn child(role: &str) -> ! {
                 std::hint::black_box(0u64);
                 std::hint::spin_loop();
             }
-        }
-        "kill" => {
-            let victim: Process = endow::Endowments::get()
-                .take(VICTIM_LABEL)
-                .expect("the parent endowed a handle to the spinner");
-            say("parked in kill");
-            let mut go = [0u8; 1];
-            std::io::stdin().read_exact(&mut go).expect("wait for the parent's go");
-            victim.kill().expect("kill the spinning child");
-            std::process::exit(0);
         }
         "pipe-read" => {
             say("parked in pipe-read");

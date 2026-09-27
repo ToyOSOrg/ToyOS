@@ -301,6 +301,9 @@ fn its_end_completes_a_poll() {
     process.watch_end(&poller, END);
     let mut early = Vec::new();
     poller.wait(0, 0, |token| early.push(token));
+    // Another handle's close ends no process, so it cancels no poll.
+    syscall::close(syscall::dup(RawHandle(child.as_raw_handle())).expect("a handle to close"));
+    poller.wait(0, 0, |token| early.push(token));
     assert!(early.is_empty(), "a running process's handle completed a poll: {early:?}");
 
     drop(release);

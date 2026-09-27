@@ -3,9 +3,8 @@
 //!
 //! Each round the parent hands each child a handle to the other and one shared
 //! word; both spin on the word, the parent sets it, and both call
-//! `SYS_PROCESS_KILL` inside the same few microseconds. A kill that waited for
-//! its victim's threads to leave every CPU waited on a thread that was inside
-//! the other kill, and the kernel panicked at `retire_task`'s tripwire.
+//! `SYS_PROCESS_KILL` inside the same few microseconds. Last, a killer handed
+//! its own handle kills itself, and ends killed rather than exiting.
 
 use std::io::{Read, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
@@ -64,6 +63,15 @@ fn test() {
         );
     }
     println!("mutual_kill: {ROUNDS} rounds of two processes killing each other, every one ended");
+
+    let go = SharedMemory::create(WORD_BYTES).expect("a shared word");
+    let (conn, mut own) = killer_child();
+    arm(&conn, &go, RawHandle(own.as_raw_handle()));
+    armed(&mut own);
+    word(&go).store(1, Ordering::Release);
+    let code = own.wait().expect("wait the self-killer").code();
+    assert_eq!(code, Some(KILLED), "a process that killed itself ended with {code:?}");
+    println!("mutual_kill: a process that killed itself ended {KILLED}");
 }
 
 /// Spawn a killer holding a connector for a fresh port, and accept it.
@@ -114,7 +122,7 @@ fn killer() -> ! {
     assert_eq!(header.msg_type, ARM, "an unexpected frame");
     let [word_handle, victim] = conn.recv_handles_exact::<2>().expect("the word and the victim");
     let go = SharedMemory::adopt(word_handle, WORD_BYTES).expect("map the word");
-    // SAFETY: the parent sent a handle to the other killer, which nothing else here owns.
+    // SAFETY: the parent sent one handle to the victim, which nothing else here owns.
     let victim = unsafe { Process::from_raw(victim) };
 
     let mut out = std::io::stdout();

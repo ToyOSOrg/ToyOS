@@ -276,7 +276,7 @@ fn old_migrate_keeping_the_corpse_is_caught() {
 /// permanently-RT thread that never parks answered yes for ever.
 ///
 /// That shape shipped on this branch between the two fixes, and its failure is
-/// not a slow retire: `scheduler::retire_task` blocks behind a wall-clock
+/// not a slow retire: `scheduler::await_released` blocks behind a wall-clock
 /// tripwire and **panics the kernel**, from a workload that only needs
 /// `Rights::RT` — which `soundd` holds and `SYS_RT_ENTER` never gives back.
 ///
@@ -321,7 +321,7 @@ fn rt_starving_the_corpse_is_caught() {
 /// that workload puts a corpse in transit, and every retire completes well
 /// inside the derived bound.
 ///
-/// The measurement is the point. `retire_task`'s guard is a wall clock two
+/// The measurement is the point. `await_released`'s guard is a wall clock two
 /// orders of magnitude wider than [`toyos_sched_sim::explore::Outcome::retire_bound`],
 /// so what this reports is how much of that budget the protocol actually spends
 /// — and a change that starts spending it shows up here as a number long before

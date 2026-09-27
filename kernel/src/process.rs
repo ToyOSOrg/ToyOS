@@ -993,7 +993,7 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
     // Dropping this `Arc` is the release; every other thread is already retired, so the thread running this line holds the last clone — which is why a lock-free crash-report read can never see a table whose owner is off every CPU.
     proc.symbols = Arc::new(SymbolTable::empty());
 
-    // Whole-process total: retire_threads already folded sibling time into child_threads_cpu_ns.
+    // Whole-process total: fold_retired already folded sibling time into child_threads_cpu_ns.
     let cpu_ms = (main_cpu_ns + child_threads_cpu_ns) / 1_000_000;
     let name = proc.name_str();
     log!("exit: {name} pid={process_pid} code={code} cpu={cpu_ms}ms");
@@ -1001,7 +1001,7 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
     Arc::clone(&proc.object)
 }
 
-/// The accounting a process leaves behind, for `SYS_PROCESS_STATS`. Must run after [`retire_threads`], which folds retired threads' accounting into `ProcessData`.
+/// The accounting a process leaves behind, for `SYS_PROCESS_STATS`. Must run after [`fold_retired`], which folds retired threads' accounting into `ProcessData`.
 fn final_stats(
     process_data_arc: &Arc<Lock<ProcessData>>,
     pid: Pid,
@@ -1050,17 +1050,19 @@ fn scheds(pid: Pid, tids: Vec<Tid>) -> Vec<(Tid, ThreadSched)> {
     tids.into_iter().filter_map(|t| Some((t, thread_sched(pid, t)?))).collect()
 }
 
-/// Retire a set of threads, folding their scheduler accounting into the process's; returns the main thread's CPU time if it was among them (else 0).
-/// `retire` returns only once its thread is fully off the scheduler — the ordering the whole teardown's memory-freeing safety rests on.
-fn retire_threads(
+/// Fold released threads' scheduler accounting into the process's; returns the main thread's CPU time if it was among them (else 0).
+fn fold_retired(
     threads: Vec<(Tid, ThreadSched)>,
     main_tid: Tid,
     process_data_arc: &Arc<Lock<ProcessData>>,
-    retire: fn(&ThreadSched),
 ) -> u64 {
+    // The whole teardown's memory-freeing safety rests on this: what follows frees what these threads ran on.
+    assert!(
+        threads.iter().all(|(_, sched)| sched.handle.released()),
+        "teardown: a thread of the process is still on the scheduler",
+    );
     let mut main_cpu_ns = 0u64;
     for (t, sched) in threads {
-        retire(&sched);
         let cpu_ns = scheduler::task_cpu_ns(&sched);
         let mut pdata = process_data_arc.lock();
         sched.handle.merge_into(&mut pdata.accounting);
@@ -1135,7 +1137,13 @@ fn release_process(code: i32) {
 
     // Phase 2: retire every *other* thread — the current thread can't retire itself.
     let others = scheds(process_pid, set.others);
-    let mut main_cpu_ns = retire_threads(others, main_tid, &process_data_arc, scheduler::retire_task);
+    for (_, sched) in &others {
+        scheduler::post_retire(sched);
+    }
+    for (_, sched) in &others {
+        scheduler::await_released(sched);
+    }
+    let mut main_cpu_ns = fold_retired(others, main_tid, &process_data_arc);
     // Filtered out of the retire set above, so its time is picked up here if it's the main thread.
     if set.current_is_main {
         main_cpu_ns = thread_sched(process_pid, tid)
@@ -1674,10 +1682,21 @@ pub struct Killed {
     threads: Vec<(Tid, ThreadSched)>,
 }
 
-/// The reaper's half of a kill: wait out every thread, then phases 3-5, the same teardown tail as exit.
+impl Killed {
+    /// Whether every thread is off the scheduler, so [`finish_kill`] may run.
+    pub fn released(&self) -> bool {
+        self.threads.iter().all(|(_, sched)| sched.handle.released())
+    }
+
+    pub fn pid(&self) -> Pid {
+        self.pid
+    }
+}
+
+/// The reaper's half of a kill, once [`Killed::released`]: phases 3-5, the same teardown tail as exit.
 pub fn finish_kill(killed: Killed) {
     let Killed { pid, process_data, thread_data, main_tid, threads } = killed;
-    let main_cpu_ns = retire_threads(threads, main_tid, &process_data, scheduler::await_released);
+    let main_cpu_ns = fold_retired(threads, main_tid, &process_data);
     teardown_tail(&process_data, &thread_data, pid, KILLED_EXIT_CODE, main_cpu_ns);
 }
 

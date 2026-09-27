@@ -152,7 +152,7 @@ pub struct ProcState {
 /// I14 should be read on a clock with the RT band's service subtracted out.
 ///
 /// Every step of that was true and the conclusion was a blindfold. The kernel
-/// does not wait on that clock: `scheduler::retire_task` blocks behind a
+/// does not wait on that clock: `scheduler::await_released` blocks behind a
 /// **wall-clock** tripwire and panics when it expires. A model measuring the
 /// same wait on a clock the kernel cannot read is a model that cannot see the
 /// panic — and the unbounded quantity the paragraph named is exactly the defect

@@ -3,7 +3,7 @@
 use toyos_sched::task::WaitClass;
 
 use crate::watch;
-use crate::sched::kthread::{self, OnPanic};
+use crate::sched::kthread::{self, OnPanic, OnStop};
 use crate::scheduler;
 use crate::time::Deadline;
 
@@ -13,7 +13,7 @@ const NAME: &str = "iod";
 /// Spawns the `iod` kthread; call once, from `kernel_main`.
 pub fn start() {
     // Recoverable: unlike klogd's silent loss, a killed iod's stalled write-back is visible to SYS_FSYNC and logd.
-    let _ = kthread::spawn(NAME, body, 0, OnPanic::Recover);
+    let _ = kthread::spawn(NAME, body, 0, OnPanic::Recover, OnStop::Runs);
 }
 
 extern "C" fn body(_arg: u64) -> ! {

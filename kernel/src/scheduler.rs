@@ -501,13 +501,6 @@ pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
     futex::watch_of(phys_addr).post_n(phys_addr.phys(), count) as u64
 }
 
-/// Retire a thread and wait until it is released.
-#[track_caller]
-pub fn retire_task(sched: &ThreadSched) {
-    post_retire(sched);
-    await_released(sched);
-}
-
 /// Set a thread's kill bit and ask its CPU for a safe point; returns at once.
 pub fn post_retire(sched: &ThreadSched) {
     if sched.handle.released() {
@@ -518,6 +511,16 @@ pub fn post_retire(sched: &ThreadSched) {
     });
 }
 
+/// How long a retired thread may take to be released before the kernel panics.
+/// Superseded by the scheduling-reservations design; kept because a
+/// known-wrong constant is still what this kernel runs
+/// (`issues/kernel/scheduler-pass-blocks-in-xhci.md`).
+pub const RETIRE_GIVE_UP: Tripwire = Tripwire::absurd(
+    Duration::from_secs(10),
+    "four pass prologues on xHCI's own 2 s deadline, two quanta, and an unwind \
+     the real-time band may stretch elevenfold; past this the wake was lost",
+);
+
 /// Wait until a retired thread's record — kernel stack and address-space
 /// reference — is released. The state word reading `Dead` is not enough: that
 /// payload is freed by the pass after the one that publishes it.
@@ -525,12 +528,12 @@ pub fn post_retire(sched: &ThreadSched) {
 pub fn await_released(sched: &ThreadSched) {
     // Also on the early-return path below, where no park happens and the two
     // asserts inside the wait would never run.
-    assert_baseline(blocking_baseline());
+    assert_baseline(BASELINE_TRAP);
     if let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) {
         if let Some(handle) = driver::current_shared() {
             assert!(
                 !Arc::ptr_eq(&handle, &sched.shared),
-                "retire_task: cannot retire self ({})",
+                "await_released: cannot retire self ({})",
                 TaskId(pid, tid),
             );
         }
@@ -544,15 +547,7 @@ pub fn await_released(sched: &ThreadSched) {
         Duration::from_millis(50),
         "two hundred re-polls inside the tripwire, on a thread that is otherwise parked",
     );
-    /// Superseded by the scheduling-reservations design; kept because a
-    /// known-wrong constant is still what this kernel runs
-    /// (`issues/kernel/scheduler-pass-blocks-in-xhci.md`).
-    const GIVE_UP: Tripwire = Tripwire::absurd(
-        Duration::from_secs(10),
-        "four pass prologues on xHCI's own 2 s deadline, two quanta, and an unwind \
-         the real-time band may stretch elevenfold; past this the wake was lost",
-    );
-    let give_up = Deadline::at(crate::clock::now() + GIVE_UP.duration());
+    let give_up = Deadline::at(crate::clock::now() + RETIRE_GIVE_UP.duration());
     let parkable = Parkable::at_entry();
     // Uncancellable: a killed retirer cannot propagate a cancel with the
     // retire half done; the tripwire above bounds it instead.
@@ -561,13 +556,13 @@ pub fn await_released(sched: &ThreadSched) {
         sched.shared.key().0,
         WaitClass::Other,
     ) else {
-        panic!("retire_task: no current task to park");
+        panic!("await_released: no current task to park");
     };
     while !sched.handle.released() {
         if give_up.reached(crate::clock::now()) {
             panic!(
-                "retire_task: task not released after {}: {:?}",
-                GIVE_UP.duration(),
+                "await_released: task not released after {}: {:?}",
+                RETIRE_GIVE_UP.duration(),
                 sched.shared.state()
             );
         }

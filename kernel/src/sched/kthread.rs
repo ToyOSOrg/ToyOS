@@ -7,7 +7,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::process::{
     ElfInfo, Endowments, PageFaultTrace, ProcessAccounting, ProcessData, ProcessEntry, ThreadData,
@@ -19,7 +19,6 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
-/// `klogd`, `usbd`, `iod` and `reaper`, plus one `log-storm` thread per shard in the actuator build.
 #[cfg(not(feature = "boot-actuators"))]
 const MAX_KERNEL_TASKS: usize = 4;
 #[cfg(feature = "boot-actuators")]
@@ -32,13 +31,14 @@ const NO_TASK: u64 = u64::MAX;
 /// after the policy word, without another claimant matching the same row.
 const CLAIMING: u64 = u64::MAX - 1;
 
-/// `task` is stored `Release` after `recoverable` and loaded `Acquire` before it,
+/// `task` is stored `Release` after `recoverable` and `stops` and loaded `Acquire` before them,
 /// so a row found by identity never answers with an unwritten policy.
 struct Row {
     task: AtomicU64,
     // `recoverable` exists because `percpu::in_syscall()` is never true for a kernel
     // thread, which would otherwise make every kernel-thread panic halt the machine by default.
     recoverable: AtomicU64,
+    stops: AtomicBool,
 }
 
 /// A row reserved before the table lock and published before `enqueue_new`.
@@ -60,18 +60,28 @@ impl Claim {
     }
 
     /// Payload first, then the identity `Release`.
-    fn publish(self, id: TaskId, on_panic: OnPanic) {
+    fn publish(self, id: TaskId, on_panic: OnPanic, on_stop: OnStop) {
         self.0
             .recoverable
             .store(u64::from(on_panic == OnPanic::Recover), Ordering::Relaxed);
+        self.0.stops.store(on_stop == OnStop::Stops, Ordering::Relaxed);
         self.0.task.store(id.pack(), Ordering::Release);
     }
 }
 
 /// Registered at spawn and never cleared: a dead `Recover` thread's row stays.
-static ROWS: [Row; MAX_KERNEL_TASKS] =
-    [const { Row { task: AtomicU64::new(NO_TASK), recoverable: AtomicU64::new(0) } };
-        MAX_KERNEL_TASKS];
+static ROWS: [Row; MAX_KERNEL_TASKS] = [const {
+    Row { task: AtomicU64::new(NO_TASK), recoverable: AtomicU64::new(0), stops: AtomicBool::new(false) }
+}; MAX_KERNEL_TASKS];
+
+/// Whether the machine's stop (`quiesce`) stops a kernel thread.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OnStop {
+    /// It carries the stop's own work, as `iod` carries the sync to its volume.
+    Runs,
+    /// The work it does is userland's, so it stops with userland.
+    Stops,
+}
 
 /// What a kernel thread's panic does.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,13 +119,26 @@ pub fn is_kernel_task(id: TaskId) -> bool {
     ROWS.iter().any(|row| row.task.load(Ordering::Acquire) == packed)
 }
 
+/// Is `id` a kernel thread declared [`OnStop::Runs`]?
+pub fn runs_through_the_stop(id: TaskId) -> bool {
+    let packed = id.pack();
+    ROWS.iter()
+        .any(|row| row.task.load(Ordering::Acquire) == packed && !row.stops.load(Ordering::Relaxed))
+}
+
 /// Whether a panic on the running task recovers; `None` unless it is a kernel thread.
 pub fn panic_recovers_here() -> Option<bool> {
     Some(current_row()?.recoverable.load(Ordering::Relaxed) != 0)
 }
 
-/// Start a kernel thread running `body(arg)` on its own kernel stack and return its identity and scheduler faces.
-pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPanic) -> (TaskId, ThreadSched) {
+/// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
+pub fn spawn(
+    name: &str,
+    body: extern "C" fn(u64) -> !,
+    arg: u64,
+    on_panic: OnPanic,
+    on_stop: OnStop,
+) -> ThreadSched {
     let (stack, entry_rsp) = crate::loader::alloc_kernel_stack(
         crate::loader::kernel_start,
         body as usize as u64,
@@ -148,7 +171,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
     });
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     // Before `enqueue_new`: from that call the task can run and panic.
-    claim.publish(TaskId(pid, tid), on_panic);
+    claim.publish(TaskId(pid, tid), on_panic, on_stop);
     // The kernel address space, named so one declaration decides every task's `cr3`.
     let (sched, _dst) = scheduler::enqueue_new(
         TaskId(pid, tid),
@@ -174,7 +197,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
             OnPanic::Recover => "kills the thread",
         }
     );
-    (TaskId(pid, tid), sched)
+    sched
 }
 
 /// Every field is the empty value: a kernel thread has no user half.

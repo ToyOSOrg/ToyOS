@@ -3,7 +3,7 @@
 //!
 //! `#[cfg(test)]`, so none of it reaches a kernel build. What it adds beyond
 //! the two traits is the *consequences* a decision hands back and the kernel
-//! performs — a watch's post, a `retire_task`, a `publish_exit`, an idle
+//! performs — a watch's post, a retire, a `publish_exit`, an idle
 //! pass taking an entry — because the laws worth checking are about the order
 //! those happen in, and a model that only held the two states could not see
 //! one.
@@ -72,7 +72,7 @@ pub struct World {
     waiters: BTreeSet<(Watch, Pid, Tid)>,
     /// Waiters a post has released.
     released: BTreeSet<(Watch, Pid, Tid)>,
-    /// Threads `scheduler::retire_task` has taken off every CPU. A thread not
+    /// Threads released off every CPU. A thread not
     /// in here may still be picked and run.
     retired: BTreeSet<(Pid, Tid)>,
     /// Threads past the point of no return but not yet dropped by an exit
@@ -217,7 +217,7 @@ impl World {
         self.waiters.difference(&self.released).copied().collect()
     }
 
-    /// `scheduler::retire_task` — the thread is provably off every CPU, its
+    /// `Hw::release` — the thread is provably off every CPU, its
     /// payload dropped, and `publish_released` has posted on its own
     /// watch.
     ///
@@ -279,9 +279,18 @@ impl World {
         self.owed.push_back((pid, code, tids));
     }
 
-    /// The reaper's pop.
-    pub fn take_owed(&mut self) -> Option<(Pid, i32, Vec<Tid>)> {
-        self.owed.pop_front()
+    /// The reaper's take: the oldest owed kill whose every thread is retired.
+    pub fn take_released(&mut self) -> Option<(Pid, i32, Vec<Tid>)> {
+        let at = self.owed.iter().position(|owed| self.all_retired(owed))?;
+        self.owed.remove(at)
+    }
+
+    pub fn owes_a_released(&self) -> bool {
+        self.owed.iter().any(|owed| self.all_retired(owed))
+    }
+
+    fn all_retired(&self, (pid, _, tids): &(Pid, i32, Vec<Tid>)) -> bool {
+        tids.iter().all(|&tid| self.is_retired(*pid, tid))
     }
 
     pub fn nothing_owed(&self) -> bool {

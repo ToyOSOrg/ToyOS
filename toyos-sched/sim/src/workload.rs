@@ -187,7 +187,7 @@ pub enum AgeShape {
     BoundedDeferral,
     /// The shape this branch shipped between the two fixes: `pick` asks only
     /// `rq.has_rt()`, so a permanently-RT thread that never parks holds the
-    /// dying list closed for ever and `scheduler::retire_task`'s tripwire
+    /// dying list closed for ever and `scheduler::await_released`'s tripwire
     /// panics the kernel. See `scenarios::old_rt_starved_the_corpse`.
     RtOutranksEveryCorpse,
 }

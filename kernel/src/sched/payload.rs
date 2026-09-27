@@ -77,6 +77,9 @@ pub const SCHED_READY: u8 = 1;
 pub const SCHED_BLOCKED: u8 = 2;
 pub const SCHED_UNKNOWN: u8 = 3;
 
+/// Posted after every thread's release, for a waiter on whichever of many threads goes first.
+pub static ANY_RELEASED: Watch = Watch::new();
+
 /// What a thread other than the one running can be asked about; published here since a `CpuSched` is `!Sync` and unreachable remotely.
 pub struct TaskHandle {
     cpu_ns: AtomicU64,
@@ -124,6 +127,7 @@ impl TaskHandle {
         self.released.store(true, Ordering::Release);
         // The retirer arms on this thread's own watch, the same subject a joiner uses.
         self.watch.post();
+        ANY_RELEASED.post();
     }
 
     /// Has `Hw::release` run for this thread? The retire wait's condition.
