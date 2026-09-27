@@ -1,0 +1,141 @@
+//! The transport's two ends on two CPUs, under loom: what no host test that
+//! runs both ends on one thread can reach.
+//!
+//! - **Publication**: a consumer that sees a tail sees every word of the
+//!   entries below it. `publish-relaxed` takes the edge away.
+//! - **A hostile peer** leaves the honest end with entries, nothing, or a
+//!   named violation, and never more entries than the ring holds. `no-clamp`
+//!   believes the peer.
+//!
+//!   cargo test -p toyos-transport --features <control> --test loom
+
+use core::sync::atomic::Ordering;
+
+use loom::sync::atomic::AtomicU32;
+use loom::sync::Arc;
+use toyos_transport::{Consumer, Place, Producer, Untrusted, Violation, Word};
+
+/// A loom atomic as a region word: the trait is this crate's and the type is
+/// loom's, so the two meet through a wrapper.
+struct Shared(AtomicU32);
+
+impl Word for Shared {
+    fn load(&self, order: Ordering) -> u32 {
+        self.0.load(order)
+    }
+    fn store(&self, value: u32, order: Ordering) {
+        self.0.store(value, order)
+    }
+}
+
+const E: usize = 2;
+const D: u32 = 2;
+const WORDS: usize = 2 + E * D as usize;
+const PLACE: Place<E, D, WORDS> = Place::new::<0, 1, 2>();
+
+fn page() -> Arc<[Shared; WORDS]> {
+    Arc::new(core::array::from_fn(|_| Shared(AtomicU32::new(0))))
+}
+
+fn ends(page: &[Shared; WORDS]) -> (Producer<E, D, WORDS>, Consumer<E, D, WORDS>) {
+    (Producer::new(page, PLACE), Consumer::new(page, PLACE))
+}
+
+fn entry(n: u32) -> [u32; E] {
+    [100 + n, 7 * n + 3]
+}
+
+fn plain(words: [Untrusted<u32>; E]) -> [u32; E] {
+    words.map(|w| w.at_most(u32::MAX.into()).unwrap() as u32)
+}
+
+/// Two entries published one at a time, read by the other end as they
+/// arrive: each is whole, in order, and exactly what was written.
+#[test]
+fn a_published_entry_is_read_whole() {
+    loom::model(|| {
+        let page = page();
+        let (mut tx, mut rx) = ends(&page);
+        let consumer_page = Arc::clone(&page);
+        let consumer = loom::thread::spawn(move || {
+            let mut read = Vec::new();
+            while read.len() < 2 {
+                match rx.pop(&consumer_page).expect("the producer keeps the protocol") {
+                    Some(words) => read.push(plain(words)),
+                    None => loom::thread::yield_now(),
+                }
+            }
+            rx.release(&consumer_page);
+            read
+        });
+        for n in 0..2 {
+            assert!(tx.push(&page, entry(n)).unwrap());
+            tx.publish(&page);
+        }
+        let read = consumer.join().expect("the consumer thread");
+        assert_eq!(read, [entry(0), entry(1)], "an entry was read before its words");
+    });
+}
+
+/// A producer that stores a tail past the ring, one behind what was released,
+/// and garbage into the entries and into the consumer's own head: every pop is
+/// an entry, nothing, or [`Violation::TailPastDepth`], and no more than the
+/// ring's depth of entries is taken without a release.
+#[test]
+fn a_hostile_producer_yields_entries_or_a_violation() {
+    loom::model(|| {
+        let page = page();
+        let (_, mut rx) = ends(&page);
+        let hostile_page = Arc::clone(&page);
+        let hostile = loom::thread::spawn(move || {
+            for (at, value) in [(1, D + 1), (3, 9), (0, 5), (1, u32::MAX), (2, 7)] {
+                hostile_page[at].store(value, Ordering::Release);
+            }
+        });
+        let mut taken = 0;
+        for _ in 0..D + 2 {
+            match rx.pop(&page) {
+                Ok(Some(_)) => taken += 1,
+                Ok(None) => {}
+                Err(violation) => {
+                    assert_eq!(violation, Violation::TailPastDepth);
+                    break;
+                }
+            }
+        }
+        hostile.join().unwrap();
+        assert!(taken <= D, "took {taken} entries from a ring of {D} without releasing one");
+    });
+}
+
+/// A consumer that stores a head past what was published, one wrapped far
+/// behind, and garbage into the producer's own tail and the entries: every
+/// push is room, a full ring, or [`Violation::HeadPastTail`], and no more
+/// than the ring's depth is ever pushed ahead of a head that was never moved.
+#[test]
+fn a_hostile_consumer_yields_room_or_a_violation() {
+    loom::model(|| {
+        let page = page();
+        let (mut tx, _) = ends(&page);
+        let hostile_page = Arc::clone(&page);
+        let hostile = loom::thread::spawn(move || {
+            for (at, value) in [(0, 5), (1, 9), (0, u32::MAX), (2, 1), (4, 6)] {
+                hostile_page[at].store(value, Ordering::Release);
+            }
+        });
+        let mut pushed = 0;
+        for n in 0..D + 2 {
+            match tx.push(&page, entry(n)) {
+                Ok(true) => pushed += 1,
+                Ok(false) => {}
+                Err(violation) => {
+                    assert_eq!(violation, Violation::HeadPastTail);
+                    break;
+                }
+            }
+            tx.publish(&page);
+        }
+        hostile.join().unwrap();
+        assert!(pushed <= D, "pushed {pushed} into a ring of {D} nobody released");
+    });
+}

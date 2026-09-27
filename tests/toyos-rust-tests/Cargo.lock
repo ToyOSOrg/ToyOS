@@ -2102,6 +2102,7 @@ name = "toyos-blockring"
 version = "0.1.0"
 dependencies = [
  "toyos-blockhold",
+ "toyos-transport",
 ]
 
 [[package]]
@@ -2172,6 +2173,17 @@ dependencies = [
 
 [[package]]
 name = "toyos-tco"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-transport"
+version = "0.1.0"
+dependencies = [
+ "toyos-untrusted",
+]
+
+[[package]]
+name = "toyos-untrusted"
 version = "0.1.0"
 
 [[package]]

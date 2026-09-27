@@ -219,6 +219,7 @@ const SCHED_LOOM: &[&str] = &["-p", "toyos-sched-loom"];
 const SCHED_SIM: &[&str] = &["-p", "toyos-sched-sim"];
 const PROCLIFE: &[&str] = &["-p", "toyos-proclife"];
 const BLOCKRING: &[&str] = &["-p", "toyos-blockring"];
+const TRANSPORT: &[&str] = &["-p", "toyos-transport"];
 
 const fn red(
     krate: &'static [&'static str],
@@ -364,8 +365,10 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
     ]),
-    red(BLOCKRING, "mutate-ring-publish-relaxed", Some("loom_ring"), &[
-        "a_published_request_is_read_whole ... FAILED",
+    red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
+    red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
+    red(TRANSPORT, "end-keeps-inflight", None, &[
+        "an_end_answers_every_tag_once_and_a_late_completion_nothing ... FAILED",
     ]),
 ];
 
