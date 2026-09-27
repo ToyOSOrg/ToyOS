@@ -1006,9 +1006,12 @@ fn optional_flush_keeps_the_log(
 
     let after = super::volumes::newest_log(&image_path, start, len)?.1;
     let after = String::from_utf8_lossy(&after).into_owned();
-    if !after.contains("Shutting down.") {
+    // `/log` ends at init's stop line: the kernel's own last word comes after
+    // the stop of every thread, `logd` among them, and is on the console alone.
+    if toyos_build::bootlog::stopping_line(&after).is_none() {
         return Err(format!(
-            "the shutdown's last line never reached the file: {} bytes",
+            "init's stop line never reached the file, so the log did not survive to the \
+             shutdown: {} bytes",
             after.len()
         ));
     }

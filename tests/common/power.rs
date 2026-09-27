@@ -2707,11 +2707,21 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
 /// CPU's `sched:` report can land there — and nothing is left running to take
 /// it anywhere but the console. A *spawn* is a process that was still on a run
 /// queue after the stop said it had stopped every one.
+///
+/// **The boot's own word, not the next pass's copy of it**: that pass prints
+/// the boot's newest records under [`bootlog::LOG_TAIL`], newest first, so the
+/// copy of the last word heads records that were written before it.
 fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
-    let Some(at) = text.rfind(REBOOTING) else { return Ok(()) };
-    let after = &text[at + REBOOTING.len()..];
-    let window = after.split(bootlog::LOADER_FIRST_LINE).next().unwrap_or(after);
-    match window.lines().find(|line| line.contains(bootlog::SPAWN)) {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(at) = lines
+        .iter()
+        .rposition(|line| line.contains(REBOOTING) && !line.contains(bootlog::LOG_TAIL))
+    else {
+        return Ok(());
+    };
+    let mut window =
+        lines[at + 1..].iter().take_while(|line| !line.contains(bootlog::LOADER_FIRST_LINE));
+    match window.find(|line| line.contains(bootlog::SPAWN)) {
         None => Ok(()),
         Some(line) => Err(format!(
             "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
