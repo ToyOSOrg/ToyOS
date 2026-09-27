@@ -66,6 +66,7 @@ const DT_GNU_HASH: i64 = 0x6fff_fef5u32 as i32 as i64;
 
 const SHT_DYNSYM: u32 = 11;
 
+const R_X86_64_GLOB_DAT: u64 = 6;
 const R_X86_64_RELATIVE: u64 = 8;
 const R_X86_64_DTPMOD64: u64 = 16;
 const R_X86_64_TPOFF64: u64 = 18;
@@ -549,6 +550,10 @@ fn main() {
     // 19. The apply-time TLS refusals, each named by its reason in the log.
     tls_apply_time_refusals_are_reached();
 
+    // 20. A relocation naming a symbol the executable's short-read `.dynsym` does
+    //     not hold is refused by name.
+    globdat_past_short_dynsym();
+
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.
     let mut blocks: Vec<Vec<u8>> = Vec::new();
@@ -858,6 +863,47 @@ fn tls_apply_time_refusals_are_reached() {
     let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen f13_defs_small.so");
     dlopen_refused("f13_refs_past.so", &tls_refs_so(b"ytls", 0x140));
     drop(lib_defs);
+
+    // `S + A` (8 + `i64::MAX`) inside a `PT_TLS` declared past 2^63 bytes: only
+    // `S + A - tp` leaves an `i64`. A dlopen, then an executable needing the
+    // defining library at startup.
+    const PAST_I64: u64 = 0x8000_0000_0000_0010;
+    let defs = write_file("tpoff_overflow_defs.so", &tls_defs_so(b"vtls", PAST_I64));
+    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen tpoff_overflow_defs.so");
+    dlopen_refused("tpoff_overflow.so", &tls_refs_so(b"vtls", i64::MAX));
+    drop(lib_defs);
+
+    let dep = "tpoff_overflow_dep.so";
+    write_file(dep, &tls_defs_so(b"wtls", PAST_I64));
+    // `.dynstr` at 0x1800 holds "wtls\0<dep>\0".
+    let exe = exe_with(&[(DT_NEEDED, 6)], &[(0x2000, (1u64 << 32) | R_X86_64_TPOFF64, i64::MAX)], None)
+        .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
+        .poke(0x1801, b"wtls\0")
+        .poke(0x1806, dep.as_bytes());
+    spawn_refused("tpoff_overflow_spawn", &exe.build());
+}
+
+/// An executable needing a library, whose `.gnu.hash` counts 1000 symbols
+/// while the file ends 469 entries into `.dynsym`, with a `GLOB_DAT` naming
+/// symbol 999: below the count the relocation parse bounds it by, past the
+/// table the loader read.
+fn globdat_past_short_dynsym() {
+    let dep = "globdat_dep.so";
+    write_file(dep, &so_with(&[], &[], None));
+    // nbuckets 1, symoffset 1000, bloom_size 1, bloom_shift 0, the bloom word
+    // and bucket 0: a bucket below `symoffset` makes `symoffset` the count.
+    let mut gnu_hash = Vec::new();
+    for word in [1u32, 1000, 1, 0, 0, 0, 0] {
+        gnu_hash.extend_from_slice(&word.to_le_bytes());
+    }
+    let exe = exe_with(
+        &[(DT_NEEDED, 1), (DT_GNU_HASH, 0x3000)],
+        &[(0x2000, (999u64 << 32) | R_X86_64_GLOB_DAT, 0)],
+        None,
+    )
+    .poke(0x1801, dep.as_bytes())
+    .poke(0x3000, &gnu_hash);
+    spawn_refused("globdat_past_dynsym", &exe.build());
 }
 
 /// A shared object defining its own `xtls` (`STT_TLS`, offset 8) in a 0x20-byte

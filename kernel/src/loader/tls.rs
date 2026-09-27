@@ -232,7 +232,7 @@ pub fn build_tls_layout(
 ) -> Option<(alloc::vec::Vec<TlsModule>, Static, u64)> {
     // (template, memsz, placed bytes, align, module id). Module id 1 is the executable's;
     // libraries start at 2.
-    let exe = match layout.tls().filter(|t| t.memsz() > 0) {
+    let exe = match crate::elf::occupied_tls(layout.tls()) {
         None => None,
         Some(tls) => {
             let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);
@@ -246,7 +246,7 @@ pub fn build_tls_layout(
         }
     };
     let with_tls = || {
-        loaded_libs.iter().filter_map(|lib| Some((lib.tls_template, lib.tls().filter(|t| t.memsz() > 0)?)))
+        loaded_libs.iter().filter_map(|lib| Some((lib.tls_template, crate::elf::occupied_tls(lib.tls())?)))
     };
     let libs = with_tls().zip(2u64..).map(|((template, tls), id)| {
         let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);

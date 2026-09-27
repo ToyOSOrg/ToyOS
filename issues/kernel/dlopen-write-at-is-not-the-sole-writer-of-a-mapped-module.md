@@ -1,12 +1,10 @@
 ---
-status: assigned
+status: open
 kind: finding
 opened: 2026-09-27
 ---
 
-# `LoadedLib::write_at`'s "sole writer" `# Safety` is false in the `dlopen` path (M8)
-
-Held by the orchestrator's ELF-loader track; its next brief carries this.
+# `LoadedLib::write_at`'s "sole writer" `# Safety` is false in the `dlopen` path
 
 `LoadedLib::write_at`'s `# Safety` says the caller must be the sole writer of
 the module's image for the call's duration. In `load_shared_lib` that holds: the

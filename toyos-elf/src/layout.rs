@@ -187,8 +187,7 @@ impl Segment {
 ///
 /// `align` is zero or a power of two no larger than [`MAX_TLS_ALIGN`], and the
 /// file-backed template lies inside the image. Absent TLS is `None`, never a
-/// zero `memsz`: a module with a `PT_TLS` of zero size still gets a DTV slot,
-/// and the two cases are not the same question.
+/// zero `memsz`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsSegment {
     template: ImageRange,

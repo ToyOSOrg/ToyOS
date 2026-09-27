@@ -250,6 +250,9 @@ const RUST_SKIP: &[&str] = &[
     // It waits for a cue only a kernel armed with `copy-meets-a-remap` gives.
     // `user_copy_races_munmap` runs it.
     "copy_out_races_munmap",
+    // Only a kernel armed with `tls-rebase-window` holds a spawn in the window it probes.
+    // `tls_rebase_window` runs it.
+    "tls_dtv_race",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -3503,33 +3506,30 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
     }
 }
 
-/// The reason the loader logs when a resolved TLS `S + A` leaves the defining
-/// module's `PT_TLS`.
-const TLS_OUTSIDE_SEGMENT: &str = toyos_elf::RelocError::TlsOutsideSegment.as_str();
-
-/// `abuse_elf_loader` plus the reason each apply-time TLS refusal must fire for.
+/// `abuse_elf_loader` plus the reason each apply-time refusal must fire for.
 ///
-/// Each case is refused for the right reason only if the kernel names
-/// [`TLS_OUTSIDE_SEGMENT`] beside the file — a case refused later, for another
-/// reason, would pass the exit-code check alone.
+/// Each case is refused for the right reason only if the kernel names its
+/// [`toyos_elf::RelocError`] beside the file — a case refused later, for
+/// another reason, would pass the exit-code check alone. Every reason is
+/// checked even when the guest failed, so one run shows each case's verdict.
 fn check_abuse_elf_loader(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
+    use toyos_elf::RelocError;
+    let mut ok = check_rust_result(result);
     let log = format!("{}{}", result.before, result.serial);
-    let mut ok = true;
-    for (file, what) in [
-        ("tls_apply_refs.so", "the dlopen apply-time TLS refusal"),
-        ("tls_apply_spawn", "the spawn apply-time TLS refusal"),
-        ("f13_refs_past.so", "the cross-module apply-time TLS refusal"),
+    for (file, refused, what) in [
+        ("tls_apply_refs.so", RelocError::TlsOutsideSegment, "the dlopen apply-time TLS refusal"),
+        ("tls_apply_spawn", RelocError::TlsOutsideSegment, "the spawn apply-time TLS refusal"),
+        ("f13_refs_past.so", RelocError::TlsOutsideSegment, "the cross-module apply-time TLS refusal"),
+        ("tpoff_overflow.so", RelocError::TpoffOverflows, "the dlopen TPOFF overflow"),
+        ("tpoff_overflow_spawn", RelocError::TpoffOverflows, "the spawn TPOFF overflow"),
+        ("globdat_past_dynsym", RelocError::SymbolPastTable, "the executable's GLOB_DAT past .dynsym"),
     ] {
-        let named = log
-            .lines()
-            .any(|l| l.contains(file) && l.contains(TLS_OUTSIDE_SEGMENT));
+        let reason = refused.as_str();
+        let named = log.lines().any(|l| l.contains(file) && l.contains(reason));
         if !named {
             eprintln!(
                 "FAIL rs::abuse_elf_loader: {what} did not fire for its reason — no line names \
-                 {file:?} with {TLS_OUTSIDE_SEGMENT:?}{}",
+                 {file:?} with {reason:?}{}",
                 kernel_account(result)
             );
             ok = false;

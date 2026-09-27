@@ -40,7 +40,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_elf::section::SectionTable;
 use toyos_elf::sym::{self, SymTab};
 use toyos_elf::rela::{FillLattice, Rules, FILL_GRANULE};
-use toyos_elf::{GnuHash, Layout, RelocError, TlsRef};
+use toyos_elf::{GnuHash, Layout, RelocError};
 
 const USER_STACK_SIZE: usize = 4 * PAGE_2M as usize; // 8 MB
 
@@ -468,9 +468,10 @@ pub fn spawn(
             if r_sym.get() == 0 {
                 continue;
             }
-            let Some(sym) = exe.symbols().get(r_sym.get()) else {
-                continue;
-            };
+            let sym = exe.symbols().at(r_sym).map_err(|refused| {
+                log!("spawn: {}: {}", path, refused.as_str());
+                SyscallError::InvalidArgument
+            })?;
             let name = sym.name_in(&exe.dynstr);
             match loaded_libs.libs.iter().find_map(|lib| lib.resolve(name)) {
                 Some(addr) => reloc_index.add_u64(r_offset, addr.raw()),
@@ -502,7 +503,7 @@ pub fn spawn(
         });
     }
 
-    let exe_tls_template = match layout.tls().filter(|t| t.memsz() > 0) {
+    let exe_tls_template = match elf::occupied_tls(layout.tls()) {
         Some(tls) => {
             let Some(tls_file_off) = layout.file_offset_of(tls.template().start()) else {
                 log!("spawn: {}: PT_TLS is in or near no PT_LOAD segment", path);
@@ -816,13 +817,8 @@ fn apply_tls_relocs(
         .iter()
         .find(|m| m.module_id == 1)
         .map_or(0, |m| m.base_offset);
-    // `0` for a symbol no module defines.
-    let exe_tpoff = |r: TlsRef| {
-        match elf::resolve_tls_ref(r, exe_base_offset, layout.tls(), exe.symbols(), &tls_info)? {
-            Some((base_offset, at)) => tls.tpoff(base_offset, at).ok_or(RelocError::TpoffOverflows),
-            None => Ok(0),
-        }
-    };
+    let exe_tpoff =
+        |r| elf::compute_tpoff(r, exe_base_offset, layout.tls(), exe.symbols(), tls, &tls_info);
     for &(r_offset, r) in &exe.relas.tpoff64 {
         reloc_index.add_u64(r_offset, exe_tpoff(r)? as u64);
     }

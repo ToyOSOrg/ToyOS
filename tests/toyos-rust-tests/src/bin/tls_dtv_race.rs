@@ -12,8 +12,7 @@
 //! `kernel/src/loader/tls.rs`'s `rebase_window::MARK`. A kernel armed with
 //! `tls-rebase-window` holds such a spawn before its rebase until the sibling's
 //! store lands if the block is already reachable, and says it is not if it is
-//! not; `tls_rebase_window` runs this there and reads which. Unarmed, the
-//! window is the scheduler's to hit.
+//! not; `tls_rebase_window` runs this there and reads which.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::time::{Duration, Instant};

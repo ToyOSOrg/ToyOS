@@ -17,9 +17,8 @@ mod reloc;
 pub use cache::{cache_loaded_lib, try_clone_cached, CachedRelocs};
 pub use index::{parse_rela_entries, ParsedRelaEntries, RelocationIndex};
 pub use reloc::{
-    apply_dtpmod_relocs, apply_dtpoff_relocs, apply_tpoff_relocs,
-    rebase_relative_relocs, resolve_dlopen_relocs, resolve_lib_bind_relocs, resolve_tls_ref,
-    tpoff32_value,
+    apply_dtpmod_relocs, apply_dtpoff_relocs, apply_tpoff_relocs, compute_tpoff,
+    rebase_relative_relocs, resolve_dlopen_relocs, resolve_lib_bind_relocs, tpoff32_value,
 };
 
 use crate::mm::{align_2m_checked, KernelSlice, MAX_HEAP_ALLOC, PAGE_2M, PAGE_BYTES};
@@ -74,6 +73,12 @@ pub struct TlsModule {
     /// True for modules present at process startup; a `dlopen`ed module's
     /// block is allocated on demand through `SYS_TLS_ALLOC_BLOCK`.
     pub is_static: bool,
+}
+
+/// The `PT_TLS` a module is given a [`TlsModule`] for: a zero-size one is given
+/// none.
+pub fn occupied_tls(tls: Option<TlsSegment>) -> Option<TlsSegment> {
+    tls.filter(|t| t.memsz() > 0)
 }
 
 /// Everything a cross-module TLS relocation has to resolve against.

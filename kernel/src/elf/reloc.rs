@@ -11,7 +11,7 @@
 //! process faults on the slot only if it later uses it. A resolved TLS
 //! reference whose `S + A` leaves the defining module's segment is refused.
 
-use super::{CachedRelocs, LibMemory, LoadedLib, TlsModule, TlsModuleInfo};
+use super::{occupied_tls, CachedRelocs, LibMemory, LoadedLib, TlsModule, TlsModuleInfo};
 use crate::UserAddr;
 use toyos_elf::sym::{Sym, SymTab};
 use toyos_elf::{ImageOffset, Op, RelocError, SymIndex, TlsOffset, TlsRef, TlsSegment};
@@ -159,25 +159,26 @@ pub fn apply_tpoff_relocs(
         Op::Tpoff32(t) => Some(t),
         _ => None,
     };
+    let tpoff = |r| compute_tpoff(r, lib_base_offset, lib.tls(), lib.symbols(), tls, tls_info);
     for (_, r) in lib.entries(tpoff64, |c| &c.tpoff64) {
-        compute_tpoff(lib, r, lib_base_offset, tls, tls_info)?;
+        tpoff(r)?;
     }
     for (_, r) in lib.entries(tpoff32, |c| &c.tpoff32) {
-        tpoff32_value(compute_tpoff(lib, r, lib_base_offset, tls, tls_info)?)?;
+        tpoff32_value(tpoff(r)?)?;
     }
 
     let mut count64 = 0u64;
     for (offset, r) in lib.entries(tpoff64, |c| &c.tpoff64) {
-        let tpoff = compute_tpoff(lib, r, lib_base_offset, tls, tls_info)?;
+        let value = tpoff(r)?;
         // SAFETY: see write_at's `# Safety`.
-        unsafe { lib.write_at::<i64>(offset, tpoff) };
+        unsafe { lib.write_at::<i64>(offset, value) };
         count64 += 1;
     }
     let mut count32 = 0u64;
     for (offset, r) in lib.entries(tpoff32, |c| &c.tpoff32) {
-        let tpoff = tpoff32_value(compute_tpoff(lib, r, lib_base_offset, tls, tls_info)?)?;
+        let value = tpoff32_value(tpoff(r)?)?;
         // SAFETY: see write_at's `# Safety`.
-        unsafe { lib.write_at::<i32>(offset, tpoff) };
+        unsafe { lib.write_at::<i32>(offset, value) };
         count32 += 1;
     }
     if count64 > 0 || count32 > 0 {
@@ -217,12 +218,13 @@ pub fn apply_dtpoff_relocs(lib: &LoadedLib, tls_info: &TlsModuleInfo) -> Result<
         Op::DtpOff64(t) => Some(t),
         _ => None,
     };
+    let resolve = |r| resolve_tls_ref(r, 0, lib.tls(), lib.symbols(), tls_info);
     for (_, r) in lib.entries(dtpoff, |c| &c.dtpoff64) {
-        resolve_tls(lib, r, 0, tls_info)?;
+        resolve(r)?;
     }
     let mut count = 0u64;
     for (offset, r) in lib.entries(dtpoff, |c| &c.dtpoff64) {
-        let value = resolve_tls(lib, r, 0, tls_info)?.map_or(0, |(_, at)| at.get());
+        let value = resolve(r)?.map_or(0, |(_, at)| at.get());
         // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<u64>(offset, value) };
         count += 1;
@@ -237,7 +239,7 @@ pub fn apply_dtpoff_relocs(lib: &LoadedLib, tls_info: &TlsModuleInfo) -> Result<
 /// as it defines it, or `None` if none does.
 pub fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&'a TlsModule, TlsSegment, Sym)> {
     for lib in tls_info.libs {
-        let Some(segment) = lib.tls().filter(|t| t.memsz() > 0) else {
+        let Some(segment) = occupied_tls(lib.tls()) else {
             continue;
         };
         if let Some(sym) = lib.symbols().find_tls(name) {
@@ -277,7 +279,7 @@ fn resolve_dtpmod(lib: &LoadedLib, sym: Option<SymIndex>, self_module_id: u64, t
 /// `symbols` is the referencing module's table — a library's in-image one, or
 /// the executable's read off the file — so both loaders resolve through this
 /// one function.
-pub fn resolve_tls_ref(
+fn resolve_tls_ref(
     r: TlsRef,
     own_base_offset: usize,
     own_tls: Option<TlsSegment>,
@@ -288,7 +290,7 @@ pub fn resolve_tls_ref(
         TlsRef::Own(at) => return Ok(Some((own_base_offset, at))),
         TlsRef::Symbol(s) => s,
     };
-    let sym = symbols.get(s.sym().get()).ok_or(RelocError::SymbolPastTable)?;
+    let sym = symbols.at(s.sym())?;
     if sym.is_defined() {
         let segment = own_tls.ok_or(RelocError::TlsOutsideSegment)?;
         let at = sym.tls_offset(s.addend(), segment).ok_or(RelocError::TlsOutsideSegment)?;
@@ -307,26 +309,17 @@ pub fn resolve_tls_ref(
     }
 }
 
-/// [`resolve_tls_ref`] for a loaded library, whose symbol table is in-image.
-fn resolve_tls(
-    lib: &LoadedLib,
+/// `S + A - tp` for one initial-exec reference, or `0` for a symbol no module
+/// defines: the one rule for a library's relocations and the executable's.
+pub fn compute_tpoff(
     r: TlsRef,
     own_base_offset: usize,
-    tls_info: &TlsModuleInfo,
-) -> Result<Option<(usize, TlsOffset)>, RelocError> {
-    resolve_tls_ref(r, own_base_offset, lib.tls(), lib.symbols(), tls_info)
-}
-
-/// `S + A - tp` for one initial-exec reference, or `0` for a symbol no module
-/// defines.
-fn compute_tpoff(
-    lib: &LoadedLib,
-    r: TlsRef,
-    lib_base_offset: usize,
+    own_tls: Option<TlsSegment>,
+    symbols: SymTab<'_>,
     tls: toyos_elf::tls::Static,
     tls_info: &TlsModuleInfo,
 ) -> Result<i64, RelocError> {
-    match resolve_tls(lib, r, lib_base_offset, tls_info)? {
+    match resolve_tls_ref(r, own_base_offset, own_tls, symbols, tls_info)? {
         Some((base_offset, at)) => tls.tpoff(base_offset, at).ok_or(RelocError::TpoffOverflows),
         None => Ok(0),
     }
