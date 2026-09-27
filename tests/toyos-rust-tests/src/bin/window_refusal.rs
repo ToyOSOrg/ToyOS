@@ -12,8 +12,8 @@
 //! to take now. Instead it creates a port, builds a namespace mapping
 //! `"compositor"` to that port's connector, and spawns a child holding it: the
 //! child's `Window::create` reaches this process and nothing else, no other
-//! process can see the service, and the same four answers are reachable from
-//! one binary. That is the pattern every hostile-server test uses from here.
+//! process can see the service. That is the pattern every hostile-server test
+//! uses from here.
 //!
 //! Roles: no argument is the server; `client` is the child that asks for a
 //! window and decodes what comes back.
@@ -21,6 +21,7 @@
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 
+use toyos::endow::{self, EndowError};
 use toyos::port::Acceptor;
 use toyos::AsHandle;
 use toyos::{ipc, namespace, port};
@@ -29,16 +30,29 @@ use window::{CreateError, Window};
 
 const SELF_PATH: &str = "/system/bin/test_rs_window_refusal";
 
-/// The reply, and the `CreateError` the client must turn it into. `None` is
-/// the "not an answer to this request at all" case.
-const CASES: &[(Option<u32>, CreateError)] = &[
-    (Some(window::REFUSED_AT_CAPACITY), CreateError::AtCapacity),
-    (Some(window::REFUSED_TOO_LARGE), CreateError::TooLarge),
+/// What the stand-in compositor does with one `MSG_CREATE_WINDOW`.
+#[derive(Clone, Copy, Debug)]
+enum Reply {
+    Refuse(u32),
+    /// A frame that answers nothing this request asked.
+    Unrelated,
+    /// No answer: the connection closes.
+    Close,
+    /// `MSG_WINDOW_CREATED` with no buffer sent ahead of it.
+    NoBuffer,
+}
+
+/// The reply, and the `CreateError` the client must turn it into.
+const CASES: &[(Reply, CreateError)] = &[
+    (Reply::Refuse(window::REFUSED_AT_CAPACITY), CreateError::AtCapacity),
+    (Reply::Refuse(window::REFUSED_TOO_LARGE), CreateError::TooLarge),
     // A reason from a newer compositor than this client. It must arrive as a
     // refusal carrying the raw value, not as a protocol error and not as a
     // window.
-    (Some(4242), CreateError::Refused(4242)),
-    (None, CreateError::Protocol(window::MSG_FRAME)),
+    (Reply::Refuse(4242), CreateError::Refused(4242)),
+    (Reply::Unrelated, CreateError::Protocol(window::MSG_FRAME)),
+    (Reply::Close, CreateError::BrokenOff),
+    (Reply::NoBuffer, CreateError::NoHandle),
 ];
 
 fn main() {
@@ -77,7 +91,7 @@ fn server() {
 /// Answer one `MSG_CREATE_WINDOW`, then drop the connection — which is what the
 /// compositor does after a refusal, and the reason the reply has to still be
 /// readable once the writer is gone.
-fn serve_one(acceptor: &Acceptor, reply: Option<u32>) {
+fn serve_one(acceptor: &Acceptor, reply: Reply) {
     let accepted = acceptor.accept().expect("accept a client");
     let handle = accepted.as_handle();
     let header = ipc::recv_header(handle).expect("request header");
@@ -85,12 +99,18 @@ fn serve_one(acceptor: &Acceptor, reply: Option<u32>) {
     let _req: window::CreateWindowRequest =
         ipc::recv_payload(handle, &header).expect("request payload");
     match reply {
-        Some(reason) => {
+        Reply::Refuse(reason) => {
             ipc::send(handle, window::MSG_WINDOW_REFUSED, &window::WindowRefused { reason })
                 .expect("send the refusal");
         }
-        None => {
+        Reply::Unrelated => {
             ipc::signal(handle, window::MSG_FRAME).expect("send a reply that answers nothing");
+        }
+        Reply::Close => {}
+        Reply::NoBuffer => {
+            let info = window::WindowInfo { width: 100, height: 100, stride: 100, pixel_format: 0 };
+            ipc::send(handle, window::MSG_WINDOW_CREATED, &info)
+                .expect("send a window with no buffer");
         }
     }
 }
@@ -107,4 +127,17 @@ fn client() {
         // compositor drops the connection the moment it has answered.
         assert!(!got.to_string().is_empty(), "{got:?} has no message");
     }
+
+    // A port whose queue is full, which the stand-in never drains: the kernel
+    // refuses the connection itself.
+    let mut queued = Vec::new();
+    let refused = loop {
+        match endow::service("compositor") {
+            Ok(conn) => queued.push(conn),
+            Err(EndowError::Refused(e)) => break e,
+            Err(other) => panic!("filling the queue ended in {other:?}"),
+        }
+    };
+    let got = Window::create(100, 100).err();
+    assert_eq!(got, Some(CreateError::Kernel(refused)), "a full queue decoded wrongly");
 }

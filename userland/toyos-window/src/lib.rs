@@ -124,16 +124,18 @@ pub enum CreateError {
     NotEndowed,
     /// The compositor exited: its port is closed for good.
     CompositorGone,
-    /// The kernel refused the connection — a full queue, a full table.
-    ConnectRefused(SyscallError),
+    /// The kernel refused a call of the exchange: the connection, a frame, or
+    /// the map of the region the compositor sent.
+    Kernel(SyscallError),
     /// The exchange broke off: the compositor closed the connection, having
-    /// exited or refused (its log says which), or sent a frame shorter than
-    /// its type.
+    /// exited or refused (its log says which), or sent a frame this client
+    /// cannot read.
     BrokenOff,
     /// The compositor answered, and not with anything this exchange allows.
     Protocol(u32),
-    /// The region the compositor sent would not map here.
-    Unmappable(SyscallError),
+    /// The answer came without the one handle it carries: the compositor sent
+    /// none, or this process had no room to take it.
+    NoHandle,
     /// The compositor is already holding as many windows as it can afford.
     AtCapacity,
     /// The requested size is bigger than the screen it would be drawn on.
@@ -149,17 +151,17 @@ impl std::fmt::Display for CreateError {
         match self {
             Self::NotEndowed => write!(f, "this program was given no compositor"),
             Self::CompositorGone => write!(f, "the compositor is gone"),
-            Self::ConnectRefused(e) => {
-                write!(f, "the kernel refused a connection to the compositor ({e:?})")
+            Self::Kernel(e) => {
+                write!(f, "the kernel refused the exchange with the compositor ({e:?})")
             }
             Self::BrokenOff => write!(f, "the compositor broke off the exchange"),
-            Self::Unmappable(e) => write!(f, "the compositor's region would not map ({e:?})"),
+            Self::NoHandle => write!(f, "the compositor's answer arrived without its handle"),
             Self::AtCapacity => write!(f, "the compositor is at its window limit"),
             Self::TooLarge => write!(f, "the window is larger than the screen"),
             Self::NoMemory => write!(f, "there is no memory for a window that size"),
             Self::Refused(reason) => write!(f, "the compositor refused (reason {reason})"),
             Self::Protocol(msg_type) => {
-                write!(f, "the compositor answered with message type {msg_type}")
+                write!(f, "the compositor's answer (type {msg_type}) is not one this exchange allows")
             }
         }
     }
@@ -172,16 +174,24 @@ impl From<EndowError> for CreateError {
         match e {
             EndowError::NotEndowed => Self::NotEndowed,
             EndowError::ServerGone => Self::CompositorGone,
-            EndowError::Refused(e) => Self::ConnectRefused(e),
+            EndowError::Refused(e) => Self::Kernel(e),
         }
     }
 }
 
 impl From<ipc::IpcError> for CreateError {
-    fn from(_: ipc::IpcError) -> Self {
-        Self::BrokenOff
+    fn from(e: ipc::IpcError) -> Self {
+        match e {
+            ipc::IpcError::Disconnected | ipc::IpcError::Malformed => Self::BrokenOff,
+            ipc::IpcError::Syscall(e) => Self::Kernel(e),
+            ipc::IpcError::TooLarge => {
+                unreachable!("every frame this crate sends is within ipc::MAX_FRAME_LEN")
+            }
+        }
     }
 }
+
+const _: () = assert!(MAX_INLINE_PAYLOAD <= ipc::MAX_FRAME_LEN as usize);
 
 impl CreateError {
     fn from_wire(reason: u32) -> Self {
@@ -450,9 +460,8 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
     if header.msg_type != MSG_COPY_REGION || header.len() != 0 {
         return Err(CreateError::Protocol(header.msg_type));
     }
-    let [region] =
-        conn.recv_handles_exact::<1>().ok_or(CreateError::Protocol(MSG_COPY_REGION))?;
-    let mut region = SharedMemory::adopt(region, bytes.len()).map_err(CreateError::Unmappable)?;
+    let [region] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+    let mut region = SharedMemory::adopt(region, bytes.len()).map_err(CreateError::Kernel)?;
     region.as_mut_slice().copy_from_slice(bytes);
     Ok(conn.signal(MSG_COPY_COMMIT)?)
 }
@@ -529,9 +538,8 @@ impl Window {
         // The buffer crossed ahead of the frame. A compositor that announced a
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
-        let [buffer] =
-            conn.recv_handles_exact::<1>().ok_or(CreateError::Protocol(MSG_WINDOW_CREATED))?;
-        let shm = SharedMemory::adopt(buffer, buf_size).map_err(CreateError::Unmappable)?;
+        let [buffer] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+        let shm = SharedMemory::adopt(buffer, buf_size).map_err(CreateError::Kernel)?;
 
         let poller = Poller::new(1);
         Ok(Self {

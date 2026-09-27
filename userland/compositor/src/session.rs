@@ -990,9 +990,9 @@ impl Session {
         };
         // Moved on its own, so that a refused move leaves `theirs` here to
         // close: once moved, its number is no longer this process's to close.
-        if let Err(e) = syscall::handle_send(conn.as_handle(), &[theirs]) {
+        if syscall::handle_send(conn.as_handle(), &[theirs]).is_err() {
             syscall::close(theirs);
-            mark_dead(&mut self.dead, handle, ipc::TrySendError::Syscall(e).into());
+            mark_dead(&mut self.dead, handle, DropReason::Gone);
             return;
         }
         if let Err(e) = conn.try_signal(window::MSG_COPY_REGION) {

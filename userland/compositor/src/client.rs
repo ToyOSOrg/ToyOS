@@ -249,10 +249,6 @@ pub fn deliver<T: ipc::IpcPayload>(dead: &mut Vec<Dead>, win: &Win, msg_type: u3
 }
 
 /// [`deliver`] for a message whose payload names buffers that travel with it.
-///
-/// The handles are moved whether or not the frame lands, so the caller has
-/// already given them up — and a client dropped here drops the queue holding
-/// them, which is what releases the region.
 pub fn deliver_with_handles<T: ipc::IpcPayload>(
     dead: &mut Vec<Dead>,
     win: &Win,

@@ -11,8 +11,7 @@ opened: 2026-09-27
 then the frame. When `handle_send` itself is refused, the kernel restores every
 handle at its own number (`sys_handle_send` in `kernel/src/syscall/ipc.rs`).
 The compositor drops the client, but it still holds the handle and never
-closes it. The function's doc says the handles are moved whether or not the
-frame lands, and that is false for this refusal.
+closes it.
 
 Each refusal keeps one handle slot and one region. Three sites are affected:
 

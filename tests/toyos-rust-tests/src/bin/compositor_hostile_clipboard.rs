@@ -18,6 +18,10 @@
 //!    nothing else, so a second `MSG_COPY_BEGIN` on it is refused rather than
 //!    answered with another region.
 //! 6. **A begin with bytes past its length.** Refused rather than answered.
+//! 7. **A commit with a payload.** Refused, so a paste has to be the clipboard
+//!    from before it and not the region's text.
+//! 8. **A commit on a window.** A commit names a region held, so a window
+//!    sending one loses its connection.
 //!
 //! Each case ends with a probe the compositor answers from its dispatch, under
 //! a deadline. The host asserts what this side cannot see: no handle fault and
@@ -27,6 +31,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use toyos::endow;
+use toyos::ipc;
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::{AsHandle, Connection};
@@ -54,6 +59,7 @@ const REMARK: Duration = Duration::from_secs(2);
 const CEILING: Duration = Duration::from_secs(30);
 
 const BEFORE: &str = "hostile clipboard: the text before";
+const AFTER: &str = "hostile clipboard: the text after";
 
 fn main() {
     // First, so it has the focus: GUI+V pastes into the focused window.
@@ -108,7 +114,48 @@ fn main() {
     await_hangup(conn.as_handle(), what, "the compositor's refusal");
     probe(what);
 
+    let what = "a commit with a payload";
+    set_inline(what, AFTER);
+    let (conn, region) = begin_copy(what);
+    fill(&region, b'E');
+    conn.send_bytes(COPY_COMMIT, &[0; 4])
+        .unwrap_or_else(|e| fail(what, &format!("no commit: {e:?}")));
+    await_hangup(conn.as_handle(), what, "the compositor's refusal");
+    probe(what);
+    let third = paste(&mut target, what, Some(&second));
+    if third != AFTER.as_bytes() {
+        let len = third.len();
+        fail(what, &format!("the paste was {len} bytes, not the clipboard from before"));
+    }
+
+    // Last: the new window takes the focus the pastes went to.
+    let what = "a commit on a window";
+    let mut committing = Window::create_with_title(64, 64, "commit")
+        .unwrap_or_else(|e| fail(what, &format!("no window: {e}")));
+    ipc::signal(committing.handle(), COPY_COMMIT)
+        .unwrap_or_else(|e| fail(what, &format!("no commit: {e:?}")));
+    let deadline = Instant::now() + CEILING;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            fail(what, &format!("the compositor kept the window {} s", CEILING.as_secs()));
+        }
+        if let Some(Event::Close) = committing.poll_event(left.as_nanos() as u64) {
+            break;
+        }
+    }
+    probe(what);
+
     println!("hostile clipboard: every case survived, compositor still serving");
+}
+
+/// Put `text` on the clipboard inline, and wait for the compositor to be done
+/// with it.
+fn set_inline(what: &str, text: &str) {
+    let conn = connect(what);
+    conn.send_bytes(window::MSG_CLIPBOARD_SET, text.as_bytes())
+        .unwrap_or_else(|e| fail(what, &format!("could not set the clipboard: {e:?}")));
+    await_hangup(conn.as_handle(), what, "the compositor closing the clipboard");
 }
 
 /// A pipe end where the retired message carried a region.
