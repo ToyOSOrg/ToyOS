@@ -24,7 +24,7 @@ impl FileBacking for TmpfsBacking {
         // copy_page_out, not file_cache::read_page: reading through the miss path here would recurse.
         // A hole below the file size, left by a seek-and-write, reads as zero.
         if file_offset >= file_cache::size(self.file_id)
-            || file_cache::copy_page_out(self.file_id, (file_offset / 4096) as u32, buf).is_none()
+            || !file_cache::copy_page_out(self.file_id, (file_offset / 4096) as u32, buf)
         {
             // After the miss: `retire` clears the flag before the pages drop.
             if !self.alive.load(Ordering::Acquire) {
@@ -44,14 +44,14 @@ impl FileBacking for TmpfsBacking {
 /// Ends a file entry's life: cleared first (so every backing fails), pages after.
 fn retire(id: FileId, alive: &AtomicBool) {
     alive.store(false, Ordering::Release);
-    let _ = file_cache::mark_deleted(id);
+    file_cache::mark_deleted(id);
 }
 
 /// One name's one entry — a file or a symlink, never both. A single map keys
 /// every name once, so `create`, `create_symlink`, `rename` and `delete` cannot
 /// each see a different namespace.
 pub(crate) enum Entry {
-    File { id: FileId, mtime: u64, alive: Arc<AtomicBool> },
+    File { id: FileId, alive: Arc<AtomicBool> },
     Symlink { target: String },
 }
 
@@ -130,7 +130,7 @@ impl FileSystem for TmpFs {
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
         match self.entries.get(name) {
-            Some(Entry::File { mtime, .. }) => Ok(*mtime),
+            Some(Entry::File { id, .. }) => Ok(file_cache::mtime(*id)),
             _ => Err(SyscallError::NotFound),
         }
     }
@@ -157,14 +157,9 @@ impl FileSystem for TmpFs {
             return Ok(*id);
         }
         // A dangling symlink of this name is displaced: one name, one entry.
-        let id = file_cache::create_file(false); // non-evictable
-        self.entries
-            .insert(String::from(name), Entry::File { id, mtime, alive: Arc::new(AtomicBool::new(true)) });
+        let id = file_cache::create_file(false, mtime); // non-evictable
+        self.entries.insert(String::from(name), Entry::File { id, alive: Arc::new(AtomicBool::new(true)) });
         Ok(id)
-    }
-
-    fn close_file(&mut self, _file_id: FileId) {
-        // No-op: tmpfs pages already persist in the non-evictable file cache.
     }
 
     fn delete(&mut self, name: &str) -> Result<(), SyscallError> {
@@ -192,27 +187,6 @@ impl FileSystem for TmpFs {
         Err(SyscallError::NotSupported)
     }
 
-    fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {
-        Ok(()) // tmpfs: data is already in the file cache (canonical storage)
-    }
-
-    fn update_metadata(&mut self, file_id: FileId, _size: u64, mtime: u64) -> Result<(), SyscallError> {
-        for entry in self.entries.values_mut() {
-            if let Entry::File { id, mtime: mt, .. } = entry {
-                if *id == file_id {
-                    *mt = mtime;
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Nothing to give back: the pages are the file, and `set_size` dropped them.
-    fn truncate_to(&mut self, _file_id: FileId, _size: u64, _mtime: u64) -> Result<(), SyscallError> {
-        Ok(())
-    }
-
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
         // Displaces whatever answered to this name: one name, one entry.
         if let Some(Entry::File { id, alive, .. }) =
@@ -223,10 +197,6 @@ impl FileSystem for TmpFs {
         Ok(())
     }
 
-    fn sync(&mut self) -> Result<(), SyscallError> {
-        Ok(())
-    }
-
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         match self.entries.get(name) {
             Some(Entry::File { id, alive, .. }) => {
@@ -234,10 +204,5 @@ impl FileSystem for TmpFs {
             }
             _ => Err(SyscallError::NotFound),
         }
-    }
-
-    /// `TmpfsBacking` reads the file cache, so it is never behind it.
-    fn cached_file_id(&mut self, _name: &str) -> Option<FileId> {
-        None
     }
 }

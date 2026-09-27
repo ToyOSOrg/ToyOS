@@ -300,10 +300,6 @@ pub(crate) const CONTROLS: &[Control] = &[
         "a_parking_contender_observes_the_holders_writes ... FAILED",
         "two_holders_never_overlap ... FAILED",
     ]),
-    red(KERNEL_LOOM, "durability-settle-blind", Some("durability"), &[
-        "a_page_marked_clean_is_on_the_device ... FAILED",
-        "a_settled_commit_covers_only_flushed_writes ... FAILED",
-    ]),
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
         "every_message_is_counted_once ... FAILED",
         "one_message_is_one_wake ... FAILED",

@@ -61,7 +61,7 @@ actuators! {
     /// record before it and `screen_early_panel` reads a paint it can attribute.
     test_early_halt = "test-early-halt";
 
-    /// Have `iod` null SS, force a switch, and report whether it reloaded — the
+    /// Have the `probe` thread null SS, force a switch, and report whether it reloaded — the
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";
 
@@ -250,9 +250,6 @@ actuators! {
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
 
-    /// Park `iod` before it drains so a closed file's write-back stays pending.
-    writeback_stall = "writeback-stall";
-
     /// Hold every thread that waits on a watch between reading its condition and
     /// parking, so a post lands in the window its commit must refuse the park over.
     watch_window = "watch-window";
@@ -440,7 +437,7 @@ actuators! {
     /// Give it a present context entry naming an empty second-level table, distinct from an absent context: passthrough would fault identically to the row above.
     iommu_empty_domain = "iommu-empty-domain";
 
-    /// Answer a claimed function's first DMA grant with an address in another driver's pool, which the claimed function's own domain does not map.
+    /// Answer a claimed network function's first DMA grant with an address in another driver's pool, which its own domain does not map.
     iommu_userdev_foreign_dma = "iommu-userdev-foreign-dma";
 
     /// Point a scanout backing at that same page, which the display's own domain does not map.

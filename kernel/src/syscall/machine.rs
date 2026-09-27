@@ -86,11 +86,8 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::arch::watchdog::disarm();
-    // **Before the sync, because the sync is a claim about a machine.** A
-    // process that issues a `write` after `sync_all` returns has dirty pages
-    // nothing will flush. Every userland thread stops here, the log's writer
-    // with the rest: `/system/bin/init` had it flush before it asked for this
-    // stop.
+    // Every userland thread stops here, the log's writer with the rest:
+    // `/system/bin/init` had it flush before it asked for this stop.
     #[cfg(feature = "boot-actuators")]
     crate::quiesce::last::await_the_held_thread();
     let stopped = crate::quiesce::stop();
@@ -105,10 +102,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     if crate::actuator::quiesce_dump() {
         crate::sched::dump::serve_for_the_stop();
     }
-    log!("Syncing filesystems...");
-    // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
-    crate::writeback::drain_all();
-    crate::vfs::lock().sync_all();
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
     crate::drivers::panic_console::log_census();

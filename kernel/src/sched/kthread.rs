@@ -19,9 +19,9 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
-/// `klogd`, `usbd` and `iod`, plus one `log-storm` thread per shard in the actuator build.
+/// `klogd` and `usbd`, plus `probe` and one `log-storm` thread per shard in the actuator build.
 #[cfg(not(feature = "boot-actuators"))]
-const MAX_KERNEL_TASKS: usize = 3;
+const MAX_KERNEL_TASKS: usize = 2;
 #[cfg(feature = "boot-actuators")]
 const MAX_KERNEL_TASKS: usize = 3 + toyos_abi::log::MAX_LOG_SHARDS;
 

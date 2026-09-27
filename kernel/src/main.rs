@@ -45,7 +45,6 @@ mod usb_gate;
 #[cfg(feature = "boot-actuators")]
 mod sched_gate;
 mod block;
-mod durability;
 mod gpt;
 mod inventory;
 mod rollback;
@@ -55,7 +54,6 @@ mod file_cache;
 mod leak_selftest;
 #[cfg(feature = "boot-actuators")]
 mod revoke_selftest;
-mod writeback;
 mod tmpfs;
 mod file_backing;
 mod bcachefs_adapter;
@@ -78,7 +76,6 @@ mod time;
 mod clock;
 
 mod watch;
-mod iod;
 mod object;
 mod inbox;
 mod pipe;
@@ -591,7 +588,10 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     log::console::start();
     // After klogd so their own spawn logs have a drainer.
     drivers::xhci::usbd::start();
-    iod::start();
+    #[cfg(feature = "boot-actuators")]
+    if actuator::sched_operation_nesting() || actuator::sysret_ss_probe() {
+        let _ = sched::kthread::spawn("probe", probe, 0, sched::kthread::OnPanic::Recover);
+    }
 
     smp::set_ready();
 
@@ -614,4 +614,18 @@ fn pre_idle_wedge() -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// The actuators judged on a kernel thread of its own, idle at its entry: its
+/// task word, and a switch away from it. Spawned only when one is armed.
+#[cfg(feature = "boot-actuators")]
+extern "C" fn probe(_arg: u64) -> ! {
+    let parkable = scheduler::Parkable::at_entry();
+    if actuator::sched_operation_nesting() {
+        sched_gate::run("probe");
+    }
+    if actuator::sysret_ss_probe() {
+        hw::sysret_ss_probe(&parkable);
+    }
+    watch::park_forever()
 }

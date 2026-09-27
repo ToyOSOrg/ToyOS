@@ -1660,7 +1660,7 @@ pub fn dma_alloc(
         // After the mapping and never before: the first thing this function may
         // reach has to exist before it may reach anything.
         bound.start_mastering();
-        Ok((memory, foreign_if_armed(first, at), span))
+        Ok((memory, foreign_if_armed(first, &bound.pci, at), span))
     })
 }
 
@@ -1756,15 +1756,17 @@ pub fn dma_unmap(slot: usize, at: u64) -> Result<(), SyscallError> {
     Ok(())
 }
 
-/// The address a grant answers with, or — for a claim's first grant, with the
-/// actuator armed — another driver's pool.
+/// The address a grant answers with, or — for a network function's first
+/// grant, with the actuator armed — another driver's pool.
 ///
 /// The grant is real and mapped; only the address the driver is *told* is one
 /// this function's domain does not have, so what the device is pointed at is a
 /// wrong descriptor rather than a driver written to misbehave.
-fn foreign_if_armed(first: bool, at: u64) -> u64 {
+fn foreign_if_armed(first: bool, pci: &PciDevice, at: u64) -> u64 {
+    // A network function's alone: the staging is netd's, and any other claim
+    // it met would fail beside it and give its slot up.
     #[cfg(feature = "boot-actuators")]
-    if first && crate::actuator::iommu_userdev_foreign_dma() {
+    if first && crate::actuator::iommu_userdev_foreign_dma() && pci.matches_class(0x02, 0x00, None) {
         let foreign =
             crate::drivers::xhci::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
         if foreign != 0 {
@@ -1772,7 +1774,7 @@ fn foreign_if_armed(first: bool, at: u64) -> u64 {
         }
     }
     #[cfg(not(feature = "boot-actuators"))]
-    let _ = first;
+    let _ = (first, pci);
     at
 }
 

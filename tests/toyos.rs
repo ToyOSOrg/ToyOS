@@ -430,12 +430,7 @@ const RUST_SKIP: &[&str] = &[
     // binary* and its `ALONE:` line was about a different test. What the shared
     // copy adds is the binary exiting 0 on a boot that gives it nothing to
     // measure.
-    //
-    // `writeback_reopen` and `writeback_spawn` each need their own boot with
-    // `writeback-stall` armed, and run in `MACHINE_TESTS`, not on the shared
-    // boot.
-    "writeback_reopen",
-    "writeback_spawn",
+
     // What it stages on `/log` — a file
     // unlinked out from under a held descriptor, its clusters handed to the next
     // writer — is only half the claim, and the other half is the volume read
@@ -1494,12 +1489,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
-    // The write-back queue's two negative controls (wall 4 of
-    // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
-    // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator
-    // boot: one holds the queue open across a *handle* re-open, which the file
-    // cache answers, and the other across a *spawn*, whose view of the file
-    // drains the queue itself.
     // The watch's lost-wake window, staged: `watch-window` holds every pipe
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
@@ -1508,8 +1497,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // and its store (`copy-meets-a-remap`): the store never reaches the region
     // mapped after it.
     ("user_copy_races_munmap", Sched::Parallel, Tier::Fast),
-    ("writeback_reopen", Sched::Parallel, Tier::Fast),
-    ("writeback_spawn", Sched::Parallel, Tier::Nightly),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
@@ -1622,8 +1609,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
-    ("writeback_reopen", &["test_rs_writeback_reopen"]),
-    ("writeback_spawn", &["test_rs_writeback_spawn"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
     ("xhci_msi_only", &["test_rs_input_events"]),
     ("metal_sim_input", &["test_rs_input_events"]),
@@ -10542,20 +10527,19 @@ fn blocked_dump() -> Result<(), String> {
         return Err(format!("no parked task was named by pid and tid:\n{report}"));
     }
 
-    // **All three kernel threads, by name.** They are almost always blocked, so
+    // **Both kernel threads, by name.** They are almost always blocked, so
     // the parked lines above carry them as a pid and a tid and nothing else —
-    // and on a machine that has gone quiet the question is *which* of the three
-    // is stuck. `sched::dump`'s census tags a kernel thread whatever it is
-    // doing, which is C6's gate: three kernel threads split the work —
-    // `klogd` the console drain, `usbd` the xHCI port machine, `iod` the
-    // write-back queue — precisely so that one of them wedging does not stop
-    // the other two. A report that cannot tell them apart cannot say which did.
+    // and on a machine that has gone quiet the question is *which* is stuck.
+    // `sched::dump`'s census tags a kernel thread whatever it is doing, which
+    // is C6's gate: `klogd` the console drain and `usbd` the xHCI port machine
+    // split the work precisely so that one wedging does not stop the other. A
+    // report that cannot tell them apart cannot say which did.
     //
     // Matched with the ` cpu=` that follows the name on the census line, because
     // a bare name appears in every one of these programs' own log lines and
     // `/system/bin/init` speaks in a program's name before that program runs
     // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd", "usbd", "iod"]
+    let unnamed: Vec<&str> = ["klogd", "usbd"]
         .into_iter()
         .filter(|name| !report.contains(&format!(" {name} cpu=")))
         .collect();
@@ -11358,9 +11342,6 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
     Ok(())
 }
 
-/// What `iod` says when `writeback-stall` parks it: a write-back test's proof
-/// that the queue it stages was held (`kernel/src/iod.rs`).
-const WRITEBACK_STALLED: &str = "iod: writeback-stall: parked for the boot";
 
 /// Run one machine-shape test. Like `run_screen_test`, each of these owns its
 /// QEMU — the machine shape *is* the test — except for the runs of adjacent
@@ -11489,7 +11470,7 @@ fn run_machine_test(
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
         "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
-        // `sysret-ss-probe` has iod null SS, force a switch, and log whether the
+        // `sysret-ss-probe` has the `probe` thread null SS, force a switch, and log whether the
         // switch reloaded it; a missing `mov ss` turns `reloaded` into `NOT`.
         "sysret_ss_reload" => {
             let options = BootOptions {
@@ -11499,7 +11480,7 @@ fn run_machine_test(
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             // A liveness ceiling, not a pace: a loaded shard once took past a
-            // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
+            // fixed 500 ms drain to run the probe (run 33246638742, alone-green).
             // The T14's readback needs no drain at all — the whole boot's records
             // are on the stick — so the wait is here and the predicate is shared.
             let log = qemu.boot_log().to_string()
@@ -11548,53 +11529,6 @@ fn run_machine_test(
             if !check_rust_result(&result) {
                 return Err(format!(
                     "user_copy_races_munmap failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
-                ));
-            }
-            Ok(())
-        }
-        // The write-back queue's re-open control: `writeback-stall` parks `iod`
-        // before it drains, so the guest can prove a re-open before the flush
-        // reads the pinned pages.
-        "writeback_reopen" => {
-            let options = BootOptions {
-                kernel_params: &["writeback-stall"],
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let boot = qemu.boot_log().to_string();
-            let console = serial::Serial::named("boot console", boot.as_str());
-            console.must_be_clean()?;
-            console.must_say(WRITEBACK_STALLED)?;
-            let result = qemu.run_test("test_rs_writeback_reopen", Duration::from_secs(30));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "writeback_reopen failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
-                ));
-            }
-            Ok(())
-        }
-        // The other half of the same stall, on the path the file cache does not
-        // answer: a spawn takes a view of the file (`Vfs::open_backing`), which
-        // runs the teardown `iod` owes before it reads. Same actuator, and the
-        // same reason it needs its own boot.
-        "writeback_spawn" => {
-            let options = BootOptions {
-                kernel_params: &["writeback-stall"],
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let boot = qemu.boot_log().to_string();
-            let console = serial::Serial::named("boot console", boot.as_str());
-            console.must_be_clean()?;
-            console.must_say(WRITEBACK_STALLED)?;
-            let result = qemu.run_test("test_rs_writeback_spawn", Duration::from_secs(30));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "writeback_spawn failed:\n{}\nkernel log while it ran:\n{}{}",
                     result.stdout, result.before, result.serial
                 ));
             }
@@ -13353,7 +13287,7 @@ fn run_machine_test(
             // names goes through `poison_tid`, the idle loop's `reap_poisoned`
             // and `zombify_poisoned`, none of which had ever seen a task with
             // no user address space. A row that quietly halted the machine
-            // would make `usbd` and `iod` worse than the thread they were
+            // would make `usbd` worse than the thread it was
             // split off from.
             //
             // The verdict is content in the same window and never a timeout:
@@ -16666,7 +16600,7 @@ fn sysret_ss(log: &str) -> Result<(), String> {
         }
         if !log.contains("sysret-ss: reloaded") {
             return Err(format!(
-                "the SS-reload probe never reported — iod may not have run it:\n{log}"
+                "the SS-reload probe never reported — the probe thread may not have run it:\n{log}"
             ));
         }
         eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
@@ -16707,7 +16641,7 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         // with no task uses one slot per CPU, and the two are reached by
         // different arms of `operation_slot` — so a gate that ran in one
         // place would leave the other arm unexecuted by any test at all.
-        for site in ["boot", "iod"] {
+        for site in ["boot", "probe"] {
             let say = |what: &str| -> Result<String, String> {
                 let needle = format!("sched-op: {site} {what}");
                 log.lines()
@@ -16798,7 +16732,7 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
 /// The machine's three kernel threads are hosted, and each claims the panic row
 /// its own loss demands.
 ///
-/// Text in, a verdict out: all three lines are `log!` records, so the T14's
+/// Text in, a verdict out: both lines are `log!` records, so the T14's
 /// readback and a QEMU boot log are judged by this one predicate.
 fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     boot.must_be_clean()?;
@@ -16808,19 +16742,16 @@ fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     }
     eprintln!("  [klogd] {}", line.trim());
 
-    // **The other two threads, and the opposite row.** `usbd` owns the xHCI
-    // port machine and `iod` the write-back queue, so a stuck USB enumeration
-    // cannot stop the log. Their panics are *recoverable* and `klogd`'s
-    // deliberately is not — a killed drainer is the one loss nothing left alive
-    // can report — and this is the one boot in the suite where all three rows
-    // are on the wire together.
-    for name in ["usbd", "iod"] {
-        let line = boot.must_say(&format!("kthread: {name}"))?;
-        if !line.contains("kills the thread") {
-            return Err(format!("{name} is hosted but claims the wrong panic row: {line:?}"));
-        }
-        eprintln!("  [kthread] {}", line.trim());
+    // **The other thread, and the opposite row.** `usbd` owns the xHCI port
+    // machine, so a stuck USB enumeration cannot stop the log. Its panic is
+    // *recoverable* and `klogd`'s deliberately is not — a killed drainer is the
+    // one loss nothing left alive can report — and this is the one boot in the
+    // suite where both rows are on the wire together.
+    let line = boot.must_say("kthread: usbd")?;
+    if !line.contains("kills the thread") {
+        return Err(format!("usbd is hosted but claims the wrong panic row: {line:?}"));
     }
+    eprintln!("  [kthread] {}", line.trim());
     Ok(())
 }
 

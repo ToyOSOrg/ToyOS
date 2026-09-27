@@ -135,15 +135,14 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                 Err(e) => Err(e),
             }
         };
-        built.map(|(file_id, mtime, position)| (target, file_id, mtime, position))
+        built
     };
 
-    let (target, file_id, mtime, position) = match opened {
+    let (file_id, mtime, position) = match opened {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
     };
     let object = KObjectRef::File(FileObject::new(OpenFileState {
-        path: target.into_string(),
         file_id,
         position,
         mtime,
@@ -522,8 +521,8 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
                 return Some(SyscallError::Io.to_u64());
             }
             state.position += written;
-            // Dirty state lives in the cache now, set by `write_page`; the handle keeps only the mtime.
             state.mtime = crate::clock::nanos_since_boot();
+            file_cache::touch(state.file_id, state.mtime);
             Some(written as u64)
         }),
         KObjectRef::PipeWrite(w) => write_pipe(w.id(), buf),
@@ -606,56 +605,14 @@ pub fn fstat(object: &KObjectRef) -> Stat {
     }
 }
 
-/// `SYS_FSYNC`: the file's bytes on the device, and the device told to commit them.
-///
-/// The device-commit step is not optional: `/system/bin/logd` calls a line durable off `fsync`'s result, so a flush that stopped at the page cache would make that a claim about nothing.
+/// `SYS_FSYNC`: a partition claim's writes on its device and the device told to
+/// commit them; a kernel file's pages are the file (`/tmp`) or never written
+/// (ROOT), so it owes nothing.
 pub fn fsync(object: &KObjectRef) -> u64 {
-    let file = match object {
-        KObjectRef::File(file) => file,
-        KObjectRef::Device(claim) => return partition_fsync(claim),
-        _ => return SyscallError::PermissionDenied.to_u64(),
-    };
-    let (path, file_id, mtime) =
-        file.with(|state| (state.path.clone(), state.file_id, state.mtime));
-    // The file's debt or its mount's, not the handle's: another handle's write, and a
-    // device commit an earlier attempt failed to deliver, are both still owed here.
-    if !crate::vfs::lock().durability_owed(&path, file_id) {
-        return 0;
-    }
-    // A refused attempt can leave the two FATs split, and the park between two attempts is where the machine's stop would find this thread.
-    let _update = crate::block::begin_update();
-    // A refused attempt discards nothing — an unsettled debt needs no restoring.
-    let run = until_answered(|| Run::Fsync(file_id), || {
-        // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
-        // Flush and sync share one acquisition so this file cannot be unmounted between them.
-        let mut vfs = crate::vfs::lock();
-        let done = vfs
-            .flush_file(&path, file_id, mtime)
-            .and_then(|()| vfs.sync_for_path(&path));
-        drop(vfs);
-        done
-    });
-    match run {
-        Answered::Answer { answer: Ok(()), attempts, took } => {
-            if attempts > 1 {
-                crate::log!(
-                    "fsync: {path} durable on attempt {attempts} after {took} — a refused \
-                     attempt kept every page dirty and a later one delivered them",
-                );
-            }
-            // `flush_file` settled the file's debt and `sync_for_path` the mount's; there is no per-handle flag to clear.
-            0
-        }
-        // The device's own word (an error status, or a recovery that gave up) is passed through unchanged.
-        Answered::Answer { answer: Err(e), .. } => e.to_u64(),
-        Answered::Killed => SyscallError::WouldBlock.to_u64(),
-        Answered::Deadman { attempts, took } => {
-            crate::log!(
-                "fsync: {path} is not durable after {attempts} attempt(s) in {took} — {}",
-                crate::block::DEADMAN,
-            );
-            SyscallError::Io.to_u64()
-        }
+    match object {
+        KObjectRef::File(_) => 0,
+        KObjectRef::Device(claim) => partition_fsync(claim),
+        _ => SyscallError::PermissionDenied.to_u64(),
     }
 }
 
@@ -676,8 +633,6 @@ pub(crate) enum Answered {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
 pub(crate) enum Run {
-    /// `SYS_FSYNC` on one file.
-    Fsync(file_cache::FileId),
     /// One kind of transfer on one claimed partition; `None` for a claim
     /// whose partition is already let go, whose every attempt answers `Gone`.
     Claim(Option<(crate::block::DeviceId, [u8; 16])>, ClaimOp),
@@ -806,23 +761,11 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     if size > file_cache::MAX_FILE_SIZE {
         return SyscallError::InvalidArgument.to_u64();
     }
-    let file_id = file.with(|state| state.file_id);
-    {
-        // The VFS lock outside `FileObject`'s (fsync's order) is `resize`'s witness.
-        let mut vfs = crate::vfs::lock();
-        // A refused resize changed nothing, so the size stays as it was.
-        // A budget expiry is the caller's own bound and not a fact about the device: retryable.
-        if let Err(e) = file_cache::resize(&mut vfs, file_id, size) {
-            return match e {
-                crate::block::BlockError::BudgetExpired => SyscallError::WouldBlock,
-                crate::block::BlockError::Device => SyscallError::Io,
-            }
-            .to_u64();
-        }
-    }
     // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
     file.with(|state| {
+        file_cache::set_size(state.file_id, size);
         state.mtime = crate::clock::nanos_since_boot();
+        file_cache::touch(state.file_id, state.mtime);
         0
     })
 }

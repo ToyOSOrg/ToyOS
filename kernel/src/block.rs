@@ -95,29 +95,6 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
-/// The running thread is inside a filesystem update whose attempts park in
-/// [`between_attempts`]: a refused attempt leaves the volume half written and
-/// only this thread's next one completes it, so the machine's stop leaves it
-/// running until the guard drops instead of banding it where it parks.
-#[must_use = "the update lasts exactly as long as this guard"]
-pub struct OpenUpdate(Option<Arc<crate::sched::payload::KShared>>);
-
-pub fn begin_update() -> OpenUpdate {
-    let shared = crate::sched::driver::current_shared();
-    if let Some(shared) = &shared {
-        shared.begin_update();
-    }
-    OpenUpdate(shared)
-}
-
-impl Drop for OpenUpdate {
-    fn drop(&mut self) {
-        if let Some(shared) = &self.0 {
-            shared.end_update();
-        }
-    }
-}
-
 /// Operations open right now on a thread the machine's stop stops, and how
 /// many such operations this boot began.
 static OPEN_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);

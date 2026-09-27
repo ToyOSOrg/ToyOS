@@ -6,9 +6,7 @@ use alloc::vec::Vec;
 
 use core::ops::{Deref, DerefMut};
 use toyos_abi::syscall::SyscallError;
-use crate::durability::Owed;
 use crate::file_cache::FileId;
-use crate::mm::PAGE_BYTES;
 use crate::sync::{Lock, LockGuard};
 
 static VFS: Lock<Option<Vfs>> = Lock::new(None);
@@ -54,8 +52,6 @@ pub trait FileSystem: Send {
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>), SyscallError>;
     /// Create an empty file, registered under `name`.
     fn create(&mut self, name: &str, mtime: u64) -> Result<FileId, SyscallError>;
-    /// Release filesystem state for `file_id`, after the file cache dropped its last reference under the VFS lock.
-    fn close_file(&mut self, file_id: FileId);
 
     /// Unlink `name`, or `NotFound` if there was nothing by that name.
     fn delete(&mut self, name: &str) -> Result<(), SyscallError>;
@@ -68,28 +64,10 @@ pub trait FileSystem: Send {
     /// a non-empty directory each by its own error.
     fn remove_dir(&mut self, name: &str) -> Result<(), SyscallError>;
 
-    /// Write one dirty page to the device, allocating its block if needed.
-    fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError>;
-    /// Update file metadata (size, mtime) after flushing dirty pages.
-    fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError>;
-
-    /// Give everything above `size` back before a flush writes its pages:
-    /// [`FileSystem::update_metadata`] sees only the final size, which cannot
-    /// tell a file that shrank and regrew from one that was always that long.
-    fn truncate_to(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError>;
-
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError>;
-
-    /// An implementation of `sync` must not swallow a lower-level failure and report success: the log depends on this call telling the truth about durability.
-    fn sync(&mut self) -> Result<(), SyscallError>;
 
     /// `open_backing` has no default body: an unimplemented one would silently report every file on that mount as missing (the sentinel this trait exists to remove).
     fn open_backing(&mut self, name: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError>;
-
-    /// The `FileId` this mount already minted for `name`, when a device view of
-    /// it could be behind the file cache; `None` from a mount whose backing
-    /// reads the cache itself, and from a name it holds no id for.
-    fn cached_file_id(&mut self, name: &str) -> Option<FileId>;
 }
 
 
@@ -109,10 +87,6 @@ pub const ROOT_ENTRIES: [&str; 9] =
 struct Mount {
     fs: Box<dyn FileSystem>,
     access: UserAccess,
-    names: Vec<&'static str>,
-    /// The device commit this mount still owes: raised by every flush that may
-    /// have reached the device, settled only by a [`FileSystem::sync`] that returned `Ok`.
-    commit: Owed,
 }
 
 /// A name at `/`, and where in its filesystem that name begins.
@@ -140,7 +114,6 @@ pub struct OpenTarget(String);
 
 impl OpenTarget {
     pub fn as_str(&self) -> &str { &self.0 }
-    pub fn into_string(self) -> String { self.0 }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -214,10 +187,10 @@ impl Vfs {
     }
 
     /// Mount one filesystem under `names`, each a [`ROOT_ENTRIES`] name. Several
-    /// names put each under its own directory of it: one filesystem, one sync.
+    /// names put each under its own directory of it.
     pub fn mount(&mut self, names: &[&'static str], fs: Box<dyn FileSystem>, access: UserAccess) {
         let index = self.mounts.len();
-        self.mounts.push(Mount { fs, access, names: names.to_vec(), commit: Owed::new() });
+        self.mounts.push(Mount { fs, access });
         for name in names {
             let prefix = if names.len() == 1 { "" } else { *name };
             let slot = Self::entry(name).expect("a mount name is one of the root's entries");
@@ -453,65 +426,6 @@ impl Vfs {
         fs.create(&fs_path, mtime)
     }
 
-    /// No early return on an empty dirty set: `ftruncate` changes the size without dirtying a page.
-    /// A refused attempt restores nothing, because nothing was cleared: debt is
-    /// settled per page against what was copied, and for the file only past `update_metadata`.
-    pub fn flush_file(&mut self, path: &str, file_id: FileId, mtime: u64) -> Result<(), SyscallError> {
-        let plan = crate::file_cache::begin_flush(file_id);
-        let (mount, file) = self.resolve_path("/", path);
-        if file.is_empty() { return Err(SyscallError::InvalidArgument); }
-        let point = self.point(&mount).ok_or(SyscallError::NotFound)?;
-        // Raised before the first write, not after the last: a flush that failed
-        // half-way may already have reached the device's cache.
-        self.mounts[point.fs].commit.record_write();
-        let fs_path = point.path(&file);
-        let fs = self.mounts[point.fs].fs.as_mut();
-
-        // Before the pages: a page rewritten above the mark must outlive the trim.
-        // Settled by the trim itself and not by the metadata write below, which
-        // may refuse: past this point the device names nothing above the mark,
-        // and a retry that trimmed again would free the pages it just wrote.
-        if let Some(mark) = plan.shrunk_to {
-            fs.truncate_to(file_id, mark, mtime)?;
-            crate::file_cache::settle_shrink(file_id);
-        }
-
-        // On the heap: the idle loop's 16 KiB stack has no guard page.
-        let mut heap = alloc::vec![0u8; PAGE_BYTES].into_boxed_slice();
-        let buf: &mut [u8; PAGE_BYTES] = (&mut heap[..]).try_into().expect("PAGE_BYTES bytes");
-        let mut flushed: Vec<(u32, crate::durability::Settlement)> =
-            Vec::with_capacity(plan.pages.len());
-        for &page_idx in &plan.pages {
-            if let Some(copied) = crate::file_cache::copy_page_out(file_id, page_idx, buf) {
-                fs.write_page(file_id, page_idx, buf)?;
-                flushed.push((page_idx, copied));
-            }
-        }
-        crate::file_cache::settle_pages(file_id, &flushed);
-
-        let size = crate::file_cache::size(file_id);
-        fs.update_metadata(file_id, size, mtime)?;
-        crate::file_cache::settle_file(file_id, plan.file);
-
-        // A refusal is logged, not returned: the bytes are on the device; only evictability is lost.
-        if !crate::file_cache::has_backing(file_id) {
-            match fs.open_backing(&fs_path) {
-                Ok(backing) => crate::file_cache::set_backing(file_id, backing),
-                Err(e) => log!("vfs: {path} was flushed but has no backing to evict through: {e}"),
-            }
-        }
-        Ok(())
-    }
-
-    /// Close a file (release filesystem state when last ref drops).
-    pub fn close_file(&mut self, path: &str, file_id: FileId) {
-        let (mount, file) = self.resolve_path("/", path);
-        if file.is_empty() { return; }
-        if let Some((fs, _fs_path)) = self.resolve_fs(&mount, &file) {
-            fs.close_file(file_id);
-        }
-    }
-
     /// Unlink `path` on its mount.
     pub fn delete_file(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
@@ -628,50 +542,6 @@ impl Vfs {
         self.delete_file(path)
     }
 
-    /// Whether `SYS_FSYNC` still owes this file work: its own flush, or the
-    /// device commit its mount has raised and not settled — which is how a
-    /// failed `sync` keeps the next fsync honest with every page flushed.
-    pub fn durability_owed(&self, path: &str, file_id: FileId) -> bool {
-        if crate::file_cache::flush_owed(file_id) {
-            return true;
-        }
-        let (mount, _) = self.resolve_path("/", path);
-        self.point(&mount).is_some_and(|p| self.mounts[p.fs].commit.is_owed())
-    }
-
-    /// Make one mount point's filesystem durable — and with it every other name
-    /// that reaches it, because one filesystem has one device commit.
-    pub fn sync_mount(&mut self, name: &str) -> Result<(), SyscallError> {
-        let point = self.point(name).ok_or(SyscallError::NotFound)?;
-        let mount = &mut self.mounts[point.fs];
-        let upto = mount.commit.snapshot();
-        mount.fs.sync()?;
-        mount.commit.settle(upto);
-        Ok(())
-    }
-
-    /// `/system/bin/logd` calls a line durable off this call's result, so `sync_for_path` must reach the device's write cache, not stop at the page cache.
-    pub fn sync_for_path(&mut self, path: &str) -> Result<(), SyscallError> {
-        let (mount, _) = self.resolve_path("/", path);
-        // Nothing mounted is not an error: the write being made durable cannot have happened.
-        if self.point(&mount).is_none() {
-            return Ok(());
-        }
-        self.sync_mount(&mount)
-    }
-
-    /// A refusal is logged, not returned, so one mount failing does not stop the rest.
-    pub fn sync_all(&mut self) {
-        for mount in self.mounts.iter_mut() {
-            let upto = mount.commit.snapshot();
-            match mount.fs.sync() {
-                Ok(()) => mount.commit.settle(upto),
-                Err(e) => log!("vfs: {:?} would not sync: {e}", mount.names),
-            }
-        }
-    }
-
-    /// The write-back queue is drained whole, not filtered by path, because it is keyed by the name a handle was opened under, and a symlink, rename, or relative open names the same file differently.
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
         self.open_backing_identified(path).map(|(backing, _)| backing)
     }
@@ -682,22 +552,8 @@ impl Vfs {
         &mut self,
         path: &str,
     ) -> Result<(alloc::sync::Arc<dyn crate::file_backing::FileBacking>, BackingId), SyscallError> {
-        crate::writeback::drain_held(self);
         let target = self.resolve_for_open(path, ResolveIntent::KernelOrRead)?;
-        // A file still open is on no write-back queue, so the drain above cannot
-        // see it and a device view taken now would read round its cache pages.
-        let dirty = {
-            let (fs, fs_path) = self.fs_for_target(&target)?;
-            fs.cached_file_id(&fs_path).filter(|&id| crate::file_cache::flush_owed(id))
-        };
-        if let Some(file_id) = dirty {
-            // The flush's own instant: no one handle's last write is the file's.
-            let mtime = crate::clock::nanos_since_boot();
-            let owner = String::from(target.as_str());
-            self.flush_file(&owner, file_id, mtime)?;
-        }
         let (fs, fs_path) = self.fs_for_target(&target)?;
-        // After the flush, so the identity is the file as this call leaves it.
         let mtime = fs.file_mtime(&fs_path)?;
         let backing = fs.open_backing(&fs_path)?;
         let id = BackingId { size: backing.file_size(), mtime };

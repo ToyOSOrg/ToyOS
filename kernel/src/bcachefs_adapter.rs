@@ -9,7 +9,6 @@ use alloc::vec::Vec;
 
 use bcachefs::{FsError, Mounted, ReadOnly};
 use crate::file_backing::{FileBacking, ReadOnlyBacking};
-use crate::mm::PAGE_BYTES;
 use crate::file_cache::{self, FileId};
 use crate::rootfs::MemoryImage;
 use toyos_abi::syscall::SyscallError;
@@ -101,7 +100,8 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
             return Ok((file_id, Some(backing)));
         }
 
-        let file_id = file_cache::create_file(true);
+        // Its mtime is the volume's (`file_mtime`), never the cache's.
+        let file_id = file_cache::create_file(true, 0);
         file_cache::set_size(file_id, size);
 
         self.name_to_id.insert(String::from(name), file_id);
@@ -114,16 +114,6 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
         Err(SyscallError::PermissionDenied)
     }
 
-    fn close_file(&mut self, file_id: FileId) {
-        let name = self.name_to_id.iter()
-            .find(|(_, &v)| v == file_id)
-            .map(|(k, _)| k.clone());
-        if let Some(name) = name {
-            self.name_to_id.remove(&name);
-        }
-    }
-
-    /// `PermissionDenied`, not `Io`: retrying this write is never right, unlike a device retry.
     fn delete(&mut self, _name: &str) -> Result<(), SyscallError> {
         Err(SyscallError::PermissionDenied)
     }
@@ -142,33 +132,13 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
         Err(SyscallError::NotSupported)
     }
 
-    fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {
-        Err(SyscallError::PermissionDenied)
-    }
-
-    fn update_metadata(&mut self, _file_id: FileId, _size: u64, _mtime: u64) -> Result<(), SyscallError> {
-        Err(SyscallError::PermissionDenied)
-    }
-
-    fn truncate_to(&mut self, _file_id: FileId, _size: u64, _mtime: u64) -> Result<(), SyscallError> {
-        Err(SyscallError::PermissionDenied)
-    }
-
     fn create_symlink(&mut self, _name: &str, _target: &str) -> Result<(), SyscallError> {
         Err(SyscallError::PermissionDenied)
-    }
-
-    fn sync(&mut self) -> Result<(), SyscallError> {
-        Ok(())
     }
 
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         let (extents, size) = present("open_backing", name, self.fs.file_extents(name))?;
         Ok(Arc::new(ReadOnlyBacking::new(*self.fs.io(), extents, size)))
-    }
-
-    fn cached_file_id(&mut self, name: &str) -> Option<FileId> {
-        self.name_to_id.get(name).copied()
     }
 }
 

@@ -426,8 +426,6 @@ wall_clock_zone 9347
 watchdog_fed 23405
 watchdog_resets 9393
 window_refusal 16
-writeback_reopen 4886
-writeback_spawn 8820
 xhci_deaf_registers 21244
 xhci_descriptor_walk 5186
 xhci_flap 8220

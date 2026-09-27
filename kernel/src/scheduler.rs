@@ -336,8 +336,8 @@ pub fn block_on(ticket: Ticket, deadline: Deadline) {
 
 /// Give the CPU up voluntarily, keeping the claim on it: the pass decides
 /// whether anything else deserves the quantum. Asserts the calling context's
-/// own baseline, not a flat trap level, since a kernel thread (`iod`'s
-/// write-back retry) yields at zero and a flat assert would panic it.
+/// own baseline, not a flat trap level, since a kernel thread yields at zero
+/// and a flat assert would panic it.
 #[track_caller]
 pub fn yield_now() {
     assert_baseline(blocking_baseline());

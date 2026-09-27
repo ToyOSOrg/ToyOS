@@ -26,11 +26,8 @@ fn probe(path: &str) {
     if file_cache::write_page(id, 0, 0, &[FILL; 64][..]).is_err() {
         return fail(path, "write");
     }
-    // Released the way `OpenFileState::drop` does, then drained.
-    if let file_cache::Release::TeardownOwed = file_cache::release_to_writeback(id) {
-        crate::writeback::enqueue(id, alloc::string::String::from(path), mtime);
-    }
-    crate::writeback::drain_all();
+    // Released the way `OpenFileState::drop` does.
+    file_cache::release(id);
     let backing = match vfs::lock().open_backing(path) {
         Ok(b) => b,
         Err(e) => return fail(path, &alloc::format!("open_backing: {e:?}")),

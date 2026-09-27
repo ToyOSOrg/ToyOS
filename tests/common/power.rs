@@ -369,7 +369,8 @@ fn woken_by_the_held_thread(
         toyos_quiesce::LAST_THREAD,
     );
     let at = |needle: &str| whole.lines().position(|line| line.contains(needle));
-    let (Some(held_at), Some(synced_at)) = (at(&held), at("Syncing filesystems...")) else {
+    let stopped_at = whole.lines().position(|line| toyos_quiesce::Record::parse(line).is_some());
+    let (Some(held_at), Some(synced_at)) = (at(&held), stopped_at) else {
         return Err(format!("the kernel never held the thread it names ({held:?})\n{whole}"));
     };
     if held_at > synced_at {

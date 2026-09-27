@@ -47,8 +47,7 @@ const SELF_PATH: &str = "/system/bin/test_rs_handle_transfer";
 /// The name the child's namespace carries the connector under.
 const SERVICE: &str = "transfer";
 
-/// A kernel file: tmpfs is the one writable mount the kernel still has, and its
-/// last handle's release runs the same write-back a device's did.
+/// A kernel file: tmpfs is the one writable mount the kernel still has.
 const DIRTY_PATH: &str = "/tmp/handle_transfer_flush.bin";
 const DIRTY_BYTES: &[u8] = b"a file whose last handle went while it was queued";
 
@@ -243,8 +242,7 @@ fn a_senders_exit_does_not_retract_what_it_sent() {
 ///
 /// `HandleQueue` holds arbitrary `HandleEntry`s and `ConnectionEnd` is a
 /// `deferred` row, so its zero-handle hook drops whatever is queued. A `File`
-/// is an `immediate` row, so its destructor runs *there*: `vfs::lock()`,
-/// `flush_file`, the FAT32 adapter and a device round trip, wherever the drain
+/// is an `immediate` row, so its destructor runs *there*, wherever the drain
 /// is running.
 ///
 /// **Which stack that is, is not this test's to choose**, and that is the whole

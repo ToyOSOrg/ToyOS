@@ -2085,7 +2085,7 @@ pub fn userdev_dma_fault(
     // says so: `owner=kernel` here would be a machine that halted, or was about
     // to.
     let handled = log.must_say(FAULT)?;
-    let slot = slot_of(log.text(), "[8086:10d3]")?;
+    let slot = slot_of(log.text(), "[1af4:1041]")?;
     if !handled.contains(&format!("owner=slot{slot} ")) {
         return Err(format!(
             "the unit's fault was recorded against {handled:?}, and the function that faulted \
