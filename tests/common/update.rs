@@ -915,8 +915,7 @@ mod vars {
         walk(&bytes)?
             .0
             .into_iter()
-            .filter(|found| found.vendor == GLOBAL && found.state == VAR_ADDED && found.var.name == name)
-            .last()
+            .rfind(|found| found.vendor == GLOBAL && found.state == VAR_ADDED && found.var.name == name)
             .map(|found| found.var.data)
             .ok_or_else(|| format!("the variable store holds no live {name}"))
     }

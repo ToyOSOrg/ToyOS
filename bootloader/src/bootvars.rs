@@ -86,8 +86,11 @@ pub fn esp(bs: &BootServices, guid: &[u8; 16]) -> Result<Partition, String> {
     Ok(part)
 }
 
+/// A `Boot####` entry: its number and its option's bytes.
+type Entry = (u16, alloc::boxed::Box<[u8]>);
+
 /// Every `Boot####` entry firmware holds, with its option's bytes.
-fn entries(rt: &RuntimeServices) -> Result<Vec<(u16, alloc::boxed::Box<[u8]>)>, String> {
+fn entries(rt: &RuntimeServices) -> Result<Vec<Entry>, String> {
     let keys = rt.variable_keys().map_err(|e| alloc::format!("firmware would not list its variables ({e})"))?;
     let mut out = Vec::new();
     for key in keys.iter().filter(|key| key.vendor == VariableVendor::GLOBAL_VARIABLE) {
@@ -126,7 +129,7 @@ pub fn entry_for(rt: &RuntimeServices, part: &Partition) -> Result<(u16, bool), 
 fn words(rt: &RuntimeServices, name: &CStr16) -> Result<Option<Vec<u16>>, String> {
     match rt.get_variable_boxed(name, &VariableVendor::GLOBAL_VARIABLE) {
         Ok((bytes, _)) if bytes.len() % 2 == 0 && bytes.len() / 2 <= MAX_ORDER => {
-            Ok(Some(bytes.chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])).collect()))
+            Ok(Some(bytes.as_chunks::<2>().0.iter().map(|w| u16::from_le_bytes(*w)).collect()))
         }
         Ok((bytes, _)) => Err(alloc::format!("{name} holds {} bytes, which is no order this loader reads", bytes.len())),
         Err(e) if e.status() == Status::NOT_FOUND => Ok(None),

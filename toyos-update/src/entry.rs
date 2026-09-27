@@ -79,7 +79,7 @@ fn ucs2(text: &str, out: &mut [u8], at: usize) -> Result<usize, Unwritable> {
     let end = at + 2 * (text.len() + 1);
     let room = out.len();
     let span = out.get_mut(at..end).ok_or(Unwritable::TooLong { needs: end.max(room + 1) })?;
-    for (unit, byte) in span.chunks_exact_mut(2).zip(text.bytes().chain(core::iter::once(0))) {
+    for (unit, byte) in span.as_chunks_mut::<2>().0.iter_mut().zip(text.bytes().chain(core::iter::once(0))) {
         unit.copy_from_slice(&u16::from(byte).to_le_bytes());
     }
     Ok(end)

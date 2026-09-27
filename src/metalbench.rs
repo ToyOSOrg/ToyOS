@@ -491,8 +491,8 @@ mod tests {
     /// `logd`, and an earlier boot of another image each name another.
     #[test]
     fn a_boots_log_is_the_one_that_names_its_root() {
-        let dir = std::env::temp_dir().join(format!("metalbench-logs-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let scratch = toyos_tmpdir::TempDir::new("logs");
+        let dir = scratch.to_path_buf();
         let mounted = |root: &str| format!("[kernel 0.2 cpu0] {} 0x1+0x2, filesystem {root}, 9 blocks\n", bootlog::MOUNTED_FROM_MEMORY);
         let files = [
             ("2026-09-27-100000.log", mounted("aaaa")),
@@ -505,12 +505,11 @@ mod tests {
         }
         let mut names: Vec<String> = files.iter().map(|(n, _)| (*n).to_string()).collect();
         names.push("loader.log".to_string());
-        let logs = Logs { dir: dir.clone(), names };
+        let logs = Logs { dir, names };
         let text = kernel_log(&logs, "bbbb").expect("a read");
         assert!(text.contains("filesystem bbbb,") && text.ends_with("the boot's second part\n"), "{text}");
         assert_eq!(kernel_log(&logs, "dddd").expect("a read"), "", "a boot that reached no logd");
         assert!(matches!(logs.read("loader-previous.log"), Err(Refusal::NotThisBoot(_))));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A bench under another loader takes no image**: the line its pass
@@ -518,8 +517,8 @@ mod tests {
     /// refused before it is delivered — as is a bench whose pass named none.
     #[test]
     fn an_image_is_delivered_only_to_the_loader_it_was_built_with() {
-        let dir = std::env::temp_dir().join(format!("metalbench-loader-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let scratch = toyos_tmpdir::TempDir::new("loader");
+        let dir = scratch.to_path_buf();
         let ours = [0x11u8; 32];
         let mut hex = [0u8; 64];
         let line = format!("ToyOS Bootloader 1.0\n{} {}\n", bootlog::LOADER_IS, toyos_update::hex(&ours, &mut hex));
@@ -529,6 +528,5 @@ mod tests {
         assert!(matches!(same_loader(&logs, &[0x12; 32]), Err(Refusal::Undelivered(_))));
         std::fs::write(dir.join(bootlog::LOADER_LOG), "ToyOS Bootloader 1.0\n").expect("a staged file");
         assert!(matches!(same_loader(&logs, &ours), Err(Refusal::Undelivered(_))), "a pass that named no loader");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

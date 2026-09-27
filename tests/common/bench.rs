@@ -95,7 +95,7 @@ pub fn bench_loop_drives_a_toyos_machine(
 
     // **A tampered upload is refused**, by `update` and before the loop: one
     // byte of the kernel past the signed header, whose signature still holds.
-    let mut bent = update.bytes.clone();
+    let mut bent = update.bytes;
     bent[toyos_update::image::SIGNED_BYTES + 100] ^= 0x01;
     let tampered = scratch.join("tampered.update");
     std::fs::write(&tampered, &bent).map_err(|e| format!("write {}: {e}", tampered.display()))?;

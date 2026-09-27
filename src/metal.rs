@@ -2329,7 +2329,7 @@ fn hand_to_the_bench(args: &Args, driver: &Driver, asked: &Path) -> Result<(), R
         return Ok(());
     }
     driver.wait(GOING_DOWN_SECS, "go down", false)?;
-    let scratch = std::env::temp_dir().join(format!("toyos-metal-bench-{}", std::process::id()));
+    let scratch = toyos_tmpdir::TempDir::new("bench");
     crate::metalbench::take_the_machine(&args.target.key, &args.machine, args.wait_secs, &scratch)
 }
 

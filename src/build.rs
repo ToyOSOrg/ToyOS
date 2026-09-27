@@ -3103,6 +3103,8 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
+        "tests/benchcase/system.toml",
+        "tests/benchvirtiocase/system.toml",
         "tests/blockdcase/system.toml",
         "tests/desktopcase/system.toml",
         "tests/desktopaudiocase/system.toml",
