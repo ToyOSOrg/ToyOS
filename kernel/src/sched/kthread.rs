@@ -1,9 +1,7 @@
 //! Kernel threads: ordinary tasks that name `mm::paging::kernel` as their
 //! address space, enter through `loader::kernel_start`, and hold a process-table
 //! entry. One is preempted or stolen only at a preemption point its body reaches,
-//! and a Ring 0 loop reaches none. [`ROWS`] holds every one. A panic inside one
-//! halts the machine: `percpu::in_syscall` is never true for a task that makes
-//! no syscall.
+//! and a Ring 0 loop reaches none. [`ROWS`] holds every one.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -110,7 +108,6 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         )
     });
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
-    // Before `enqueue_new`: from that call the task can run and panic.
     claim.publish(TaskId(pid, tid));
     // The kernel address space, named so one declaration decides every task's `cr3`.
     let (sched, _dst) = scheduler::enqueue_new(

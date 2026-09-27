@@ -1231,8 +1231,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The spawn half alone: one headless boot whose verdict is kernel log
     // lines.
     ("klogd_hosted", Sched::Parallel, Tier::Fast),
-    // The `klogd-panic` actuator boot, split off so the spawn half is per-PR.
     ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("klogd_fault_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
     // over two boots measured 12 s twelve-wide on the dev host**, against
@@ -13392,45 +13392,20 @@ fn run_machine_test(
             );
             klogd_hosted(&serial::Serial::boot(&qemu))
         }
-        "klogd_panic_halts" => {
-            // **A kernel thread's panic halts the machine.**
-            //
-            // The marker is a line of the crash *report* rather than `PANIC:`
-            // itself, because `boot_log` stops at the marker and the name is
-            // printed after the header — a boot stopped at the header would
-            // have nothing left to assert the process table against.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["klogd-panic"],
-                    ready_marker: "Process: klogd",
-                    ..Default::default()
-                },
-            );
-            let mut dead = serial::Serial::boot(&qemu);
-            dead.must_say("PANIC:")?;
-            dead.must_say("klogd-panic: the console drainer died")?;
-            // The process table answered for a task with no *user* address
-            // space — since C6 it names the kernel's, which is what let
-            // `KernelPayload.address_space` stop being an `Option`.
-            dead.must_say("Process: klogd")?;
-
-            // The verdict is the line only `halt_all_cpus` writes. Never the
-            // ready marker's absence: a recovered `klogd` takes the console
-            // down with it, so the machine that recovered says nothing either.
-            // A liveness bound: the line follows the report in the same panic.
-            let armed = format!(
-                "panic: rebooting in {} s unless a key is pressed",
-                toyos_tco::PANIC_BOUND_MS / 1_000
-            );
-            const HALTED: Duration = Duration::from_secs(3);
-            dead.push(&qemu.drain_until(HALTED, |line| line.contains(&armed)));
-            dead.must_say(&armed)?;
-            eprintln!("  [klogd] a kernel thread's panic halted the machine rather than recovering");
-            Ok(())
-        }
+        "klogd_panic_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-panic", "panic-reboot-fast"],
+            &["PANIC:", "klogd-panic: the console drainer died", "Process: klogd"],
+        ),
+        "klogd_fault_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-fault", "panic-reboot-fast"],
+            &["KERNEL PANIC: read unmapped address at 0x0", "console::body"],
+        ),
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
             // the compiler cannot reach, because the container works. Its other

@@ -115,7 +115,7 @@ impl ExceptionContext<'_> {
 
     /// Whose fault it was. See `toyos_userbound::fault`.
     fn blame(&self) -> Blame {
-        blame(self.ring(), self.frame.rip, self.faulted(), percpu::current_tid().is_some())
+        blame(self.ring(), self.frame.rip, self.faulted(), percpu::in_syscall())
     }
 }
 

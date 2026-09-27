@@ -92,10 +92,6 @@ both before any lock conversion; the order is forced, not preferred.
 - **The sleep lock.** A sleep-lock holder stays preemptible and raises no
   preempt count, so the baseline assertion keeps meaning exactly "a spinlock is
   held".
-- **`usbd` and `iod` on the existing kernel-thread machinery.** No housekeeping
-  thread's wait can stop another's, and a panic inside one is recoverable rather
-  than a halted machine. Three threads, not one, because a stuck USB enumeration
-  must not stop the log.
 - **xHCI async, and the four lock conversions.** Inseparable. A CPU never waits
   for a device: the lock is dropped before the park, and a completion is matched
   to its asker by identity, never by arrival order.

@@ -254,7 +254,6 @@ kernel_log_file 13152
 keyboard_claim_close_spares_stdin 4580
 kill_while_blocked 44
 klogd_hosted 5674
-klogd_panic_halts 16658
 lan_dhcp_lease 3029
 lan_no_lease 32709
 lapic_spurious_vector 6829

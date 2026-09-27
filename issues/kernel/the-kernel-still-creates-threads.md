@@ -17,29 +17,18 @@ only for kernel threads. Stopping new uses is not enough.
 **Exit condition:** `kernel/src/sched/kthread.rs` does not exist, and no kernel
 code creates a schedulable task other than the per-CPU idle loop.
 
-**Evidence:** `git grep -n 'kthread::spawn(' -- kernel/src` once K1 has
-landed:
-
-```
-kernel/src/iod.rs:15:    let _ = kthread::spawn(NAME, body, 0);
-kernel/src/log/console.rs:66:    let sched = kthread::spawn(NAME, body, 0);
-kernel/src/log/nested.rs:46:        kthread::spawn("lognest", body, 0);
-kernel/src/log/storm.rs:49:        kthread::spawn("logstorm", body, thread as u64);
-```
+**Evidence:** `git grep -n 'kthread::spawn(' -- kernel/src`.
 
 **Stages:**
 
-- **K1:** delete `usbd`; its body only parks.
 - **K2:** the reaper PR #549 introduces becomes last-thread-out: the victim's
   last thread tears down its own process on its way out of the kernel, and the
   scheduler frees that thread's kernel stack after switching away. Blocked on
   #549 landing.
-- **K3:** the test-only `logstorm`/`lognest` producers move to a userland test
-  program whose threads emit through the syscall path, or are deleted if the log
+- **K3:** the test-only `logstorm`/`lognest` producers are deleted if the log
   gate does not need kernel-context producers. Blocked on nothing.
-- **K4:** `klogd` goes; console output moves to logd under
-  `issues/kernel/every-driver-is-still-in-the-kernel.md`. The inline drain at
-  boot and at panic stays. Blocked on that track moving the console.
-- **K5:** #536 deletes `iod`, with the kernel's write-back queue. Lands with
-  #536.
+- **K4:** `klogd` goes: the owner-approved driver-model design moves the
+  console to logd, and this track owns that move.
+- **K5:** `iod` goes with the kernel's write-back queue; met only when #536
+  lands with no new `kthread::spawn`.
 - **K6:** delete the machinery named above. Blocked on K2–K5.

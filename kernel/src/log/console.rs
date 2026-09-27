@@ -422,6 +422,12 @@ extern "C" fn body(_arg: u64) -> ! {
     if crate::actuator::klogd_panic() {
         panic!("klogd-panic: the console drainer died");
     }
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::klogd_fault() {
+        // SAFETY: unsound by design — a staged Ring 0 null read, only on this actuator's boot.
+        // Volatile: a plain read could be optimized to unreachable, leaving nothing to fault.
+        unsafe { core::ptr::read_volatile(core::ptr::null::<u64>()) };
+    }
 
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("klogd runs as a task");

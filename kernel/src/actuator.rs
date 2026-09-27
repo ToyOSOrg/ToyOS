@@ -458,6 +458,9 @@ actuators! {
     /// Panic inside `klogd` on its first instruction.
     klogd_panic = "klogd-panic";
 
+    /// Read address zero inside `klogd` on its first instruction.
+    klogd_fault = "klogd-fault";
+
     /// Stop the boot dead in phase 3, interrupts off, before any log drain.
     pre_idle_wedge = "pre-idle-wedge";
 

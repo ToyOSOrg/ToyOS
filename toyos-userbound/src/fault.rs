@@ -78,10 +78,10 @@ pub enum Blame {
     /// A Ring 3 frame. The process did it, it holds no kernel lock, and the
     /// ordinary exit path can end it.
     Process,
-    /// Ring 0 code, running on a thread's behalf, faulting on a *user* address:
-    /// a pointer that crossed the syscall boundary. Still the process's, but
-    /// the faulted thread may hold any kernel lock, so it goes out through the
-    /// poison set rather than through the process table.
+    /// Ring 0 code, inside the current thread's syscall, faulting on a *user*
+    /// address: a pointer that crossed the syscall boundary. Still the
+    /// process's, but the faulted thread may hold any kernel lock, so it goes
+    /// out through the poison set rather than through the process table.
     ProcessThroughKernel,
     /// Ring 0, and nothing about it belongs to a process. The machine halts,
     /// after saying so.
@@ -90,8 +90,10 @@ pub enum Blame {
 
 /// Who a fault belongs to.
 ///
-/// `rip` is the faulting frame's instruction pointer and `on_a_thread` is
-/// whether a thread is current on this CPU.
+/// `rip` is the faulting frame's instruction pointer and `in_syscall` is
+/// whether this CPU is inside the current thread's syscall, the question the
+/// panic handler asks: a kernel thread or an interrupt handler faults on no
+/// process's behalf, whichever thread is current.
 ///
 /// **A Ring 0 frame whose `rip` is not a kernel address is the kernel's however
 /// low the faulted address is.** That is the sighting above: broken control
@@ -99,13 +101,13 @@ pub enum Blame {
 /// be dereferencing anything on a thread's behalf. An instruction-fetch fault
 /// needs no separate arm for the same reason: the address it could not fetch is
 /// where `rip` now points, so it fails this test by itself.
-pub fn blame(ring: Ring, rip: u64, faulted: Faulted, on_a_thread: bool) -> Blame {
+pub fn blame(ring: Ring, rip: u64, faulted: Faulted, in_syscall: bool) -> Blame {
     if ring.is_user() {
         return Blame::Process;
     }
     match faulted {
         Faulted::Address(addr)
-            if on_a_thread && !is_user_addr(rip) && is_user_addr(addr) =>
+            if in_syscall && !is_user_addr(rip) && is_user_addr(addr) =>
         {
             Blame::ProcessThroughKernel
         }
@@ -141,9 +143,9 @@ mod tests {
 
     /// The sighting: Ring 0 fetching an instruction from address zero.
     ///
-    /// It must be the kernel's whatever `current_tid()` says, because that is
-    /// the only answer that prints `KERNEL PANIC` and halts. Under the old
-    /// disjunct it was the process's, and the report never arrived.
+    /// It must be the kernel's, because that is the only answer that prints
+    /// `KERNEL PANIC` and halts. Under the old disjunct it was the process's,
+    /// and the report never arrived.
     #[test]
     fn a_ring_0_fault_at_a_low_address_is_the_kernels() {
         assert_eq!(
@@ -156,8 +158,6 @@ mod tests {
             blame(Ring::of_cs(KERNEL_CS), USER_RIP, Faulted::Address(0x1B), true),
             Blame::Kernel,
         );
-        // And with no thread current at all, which is the case the old spelling
-        // did get right.
         assert_eq!(
             blame(Ring::of_cs(KERNEL_CS), 0, Faulted::Address(0), false),
             Blame::Kernel,
@@ -199,10 +199,17 @@ mod tests {
             ),
             Blame::ProcessThroughKernel,
         );
-        // No thread to attribute it to, so there is nothing to kill but the
-        // machine's illusion that it is well.
+    }
+
+    /// The same null dereference with no syscall open: a kernel thread's, or an
+    /// interrupt handler's on top of whichever thread is current. On no
+    /// process's behalf, so the machine halts and no bystander is killed.
+    #[test]
+    fn a_ring_0_fault_outside_a_syscall_is_the_kernels() {
+        let k = Ring::of_cs(KERNEL_CS);
+        assert_eq!(blame(k, KERNEL_RIP, Faulted::Address(0), false), Blame::Kernel);
         assert_eq!(
-            blame(Ring::of_cs(KERNEL_CS), KERNEL_RIP, Faulted::Address(0), false),
+            blame(k, KERNEL_RIP, Faulted::Address(crate::span::USER_TOP - 1), false),
             Blame::Kernel,
         );
     }
