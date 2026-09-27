@@ -146,6 +146,24 @@ pub enum GaveUp {
     ResetFailed(Reset),
 }
 
+impl GaveUp {
+    /// A `kind` reset whose deadline passed with no completion.
+    pub fn never_finished(kind: Reset) -> Self {
+        match kind {
+            Reset::Warm => GaveUp::LinkNeverTrained,
+            Reset::Hot => GaveUp::ResetNeverFinished(Reset::Hot),
+        }
+    }
+
+    /// The reset that was given up on.
+    fn reset(self) -> Reset {
+        match self {
+            GaveUp::ResetNeverFinished(kind) | GaveUp::ResetFailed(kind) => kind,
+            GaveUp::LinkNeverTrained => Reset::Warm,
+        }
+    }
+}
+
 /// What a completed reset means for the port — **the one place that question
 /// is answered**, for [`reset_needed`]'s reason: §4.19.5's failure signature
 /// (PRC set, the port still disabled) must route the boot scan and the
@@ -276,8 +294,8 @@ enum Work {
     /// The driver's belief moved ([`PortState::believe`]) and nothing has read
     /// the register against it since.
     Unread,
-    /// A reset was given up on ([`PortState::give_up`]) and no read has found
-    /// the port's change flags clear since.
+    /// A warm reset was given up on ([`PortState::gave_up`]) and no read has
+    /// found the port's change flags clear since.
     GivenUp,
 }
 
@@ -405,14 +423,26 @@ impl PortState {
         self.work = Work::Unread;
     }
 
-    /// **Attached, so the port is not reset again until a fresh edge moves
-    /// it**, and read once, so a pull is still seen. The change flags that
-    /// read finds are the given-up reset's own; a connect flag among them
-    /// judged as a replug would tear the port down and reset it again every
-    /// debounce for as long as its device stayed in.
+    /// The port was given up on: **attached, so it is not reset again until a
+    /// fresh edge moves it**, and read once, so a pull is still seen.
+    pub fn gave_up(&mut self, why: GaveUp) {
+        match why.reset() {
+            // §4.19.5.1's retrain raises a connect edge of its own, which
+            // nothing tells apart from a replug; judged as one, it would tear
+            // the port down and reset it again every debounce for as long as
+            // its device stayed in.
+            Reset::Warm => {
+                self.attached = true;
+                self.work = Work::GivenUp;
+            }
+            // A hot reset changes no connect state, so a connect flag is a
+            // real replug.
+            Reset::Hot => self.believe(true, self.slot),
+        }
+    }
+
     fn give_up(&mut self, why: GaveUp) -> Step<'static> {
-        self.attached = true;
-        self.work = Work::GivenUp;
+        self.gave_up(why);
         Step::GaveUp(why)
     }
 
@@ -479,10 +509,7 @@ impl PortState {
                 self.work = Work::Resetting { until: now + RESET_DEADLINE_NS, kind: Reset::Warm };
                 return Step::Reset(Reset::Warm, reset_write(Reset::Warm, portsc));
             }
-            return self.give_up(match kind {
-                Reset::Warm => GaveUp::LinkNeverTrained,
-                Reset::Hot => GaveUp::ResetNeverFinished(Reset::Hot),
-            });
+            return self.give_up(GaveUp::never_finished(kind));
         }
 
         if self.flawed(Flaw::AcknowledgeBeforeDeciding) && portsc.any_change() {

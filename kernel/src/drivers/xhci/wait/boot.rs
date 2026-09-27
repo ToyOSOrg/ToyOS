@@ -492,7 +492,7 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
                             unreachable!("a completed reset cannot have never finished")
                         }
                     }
-                    return ctrl.ports[usize::from(port_idx)].enumerated(None);
+                    return ctrl.ports[usize::from(port_idx)].gave_up(why);
                 }
             }
         }
@@ -507,7 +507,7 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
         }
         log!("xHCI: port {} never finished its reset (PORTSC {:#010x}); skipping it",
             port_idx + 1, ctrl.read_portsc(port_idx).raw());
-        return ctrl.ports[usize::from(port_idx)].enumerated(None);
+        return ctrl.ports[usize::from(port_idx)].gave_up(GaveUp::never_finished(kind));
     }
 }
 

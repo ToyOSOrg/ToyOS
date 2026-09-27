@@ -110,6 +110,22 @@ fn a_port_that_never_finishes_its_reset_is_given_up_on_and_left_alone() {
     assert_eq!(driver.did.len(), before, "the port was tried again: {:?}", driver.did);
 }
 
+/// A hot reset raises no connect edge of its own, so the connect flag a hot
+/// give-up leaves is a real replug, and what is in the port now is enumerated.
+#[test]
+fn a_device_replugged_inside_a_hot_reset_given_up_on_is_enumerated() {
+    let mut port = FakePort::occupied(ResetBehaviour::Completes { after: 50_000_000 });
+    let mut driver = Driver::new();
+    driver.run_to(&mut port, 0, DEBOUNCE_NS + 2 * PASS, PASS).unwrap();
+    assert_eq!(driver.did, [Did::Reset(Reset::Hot)]);
+    // The detach ends the reset; the attach finds CSC already set.
+    port.replug();
+    driver
+        .run_to(&mut port, DEBOUNCE_NS + 2 * PASS, 2 * RESET_DEADLINE_NS + 4 * DEBOUNCE_NS, PASS)
+        .unwrap();
+    assert_eq!(driver.enumerations(), 1, "{:?}", driver.did);
+}
+
 /// Four replugs, which is a person fidgeting with a cable. Each must produce
 /// exactly one teardown and one enumeration, and the port must end bound.
 #[test]
