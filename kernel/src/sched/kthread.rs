@@ -19,11 +19,11 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
-/// `klogd`, `usbd` and `iod`, plus one `log-storm` thread per shard in the actuator build.
+/// `klogd`, `usbd`, `iod` and `reaper`, plus one `log-storm` thread per shard in the actuator build.
 #[cfg(not(feature = "boot-actuators"))]
-const MAX_KERNEL_TASKS: usize = 3;
+const MAX_KERNEL_TASKS: usize = 4;
 #[cfg(feature = "boot-actuators")]
-const MAX_KERNEL_TASKS: usize = 3 + toyos_abi::log::MAX_LOG_SHARDS;
+const MAX_KERNEL_TASKS: usize = 4 + toyos_abi::log::MAX_LOG_SHARDS;
 
 /// Collides with no packed id: neither id map issues `u32::MAX`.
 const NO_TASK: u64 = u64::MAX;
@@ -114,8 +114,8 @@ pub fn panic_recovers_here() -> Option<bool> {
     Some(current_row()?.recoverable.load(Ordering::Relaxed) != 0)
 }
 
-/// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
-pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPanic) -> ThreadSched {
+/// Start a kernel thread running `body(arg)` on its own kernel stack and return its identity and scheduler faces.
+pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPanic) -> (TaskId, ThreadSched) {
     let (stack, entry_rsp) = crate::loader::alloc_kernel_stack(
         crate::loader::kernel_start,
         body as usize as u64,
@@ -174,7 +174,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
             OnPanic::Recover => "kills the thread",
         }
     );
-    sched
+    (TaskId(pid, tid), sched)
 }
 
 /// Every field is the empty value: a kernel thread has no user half.

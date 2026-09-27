@@ -1045,18 +1045,22 @@ pub fn stats_from(
     }
 }
 
+/// The scheduler records of `tids`, cloned out of the table.
+fn scheds(pid: Pid, tids: Vec<Tid>) -> Vec<(Tid, ThreadSched)> {
+    tids.into_iter().filter_map(|t| Some((t, thread_sched(pid, t)?))).collect()
+}
+
 /// Retire a set of threads, folding their scheduler accounting into the process's; returns the main thread's CPU time if it was among them (else 0).
-/// `retire_task` proves each thread fully off the scheduler before returning — the ordering the whole teardown's memory-freeing safety rests on.
+/// `retire` returns only once its thread is fully off the scheduler — the ordering the whole teardown's memory-freeing safety rests on.
 fn retire_threads(
-    pid: Pid,
-    tids: impl IntoIterator<Item = Tid>,
+    threads: Vec<(Tid, ThreadSched)>,
     main_tid: Tid,
     process_data_arc: &Arc<Lock<ProcessData>>,
+    retire: fn(&ThreadSched),
 ) -> u64 {
     let mut main_cpu_ns = 0u64;
-    for t in tids {
-        let Some(sched) = thread_sched(pid, t) else { continue };
-        scheduler::retire_task(&sched);
+    for (t, sched) in threads {
+        retire(&sched);
         let cpu_ns = scheduler::task_cpu_ns(&sched);
         let mut pdata = process_data_arc.lock();
         sched.handle.merge_into(&mut pdata.accounting);
@@ -1130,7 +1134,8 @@ fn release_process(code: i32) {
     crate::mm::paging::activate_kernel();
 
     // Phase 2: retire every *other* thread — the current thread can't retire itself.
-    let mut main_cpu_ns = retire_threads(process_pid, set.others, main_tid, &process_data_arc);
+    let others = scheds(process_pid, set.others);
+    let mut main_cpu_ns = retire_threads(others, main_tid, &process_data_arc, scheduler::retire_task);
     // Filtered out of the retire set above, so its time is picked up here if it's the main thread.
     if set.current_is_main {
         main_cpu_ns = thread_sched(process_pid, tid)
@@ -1631,11 +1636,12 @@ fn with_current_symbols(f: impl FnOnce(&crate::symbols::SymbolTable) -> bool) ->
 
 /// Kill the process an object names.
 /// The handle is the whole authorization, not the parent relationship: a `Process` handle carrying `Rights::MANAGE` says who may, and it can be narrowed away or handed on. `Ok` for an already-gone process: the caller asked for it to be dead and it is.
+/// Returns once the victim's retires are posted; the reaper finishes the teardown, and the object's exit is published when it has.
 pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
     let target_pid = object.pid();
 
     // Phase 1: claim teardown (brief table lock)
-    let (process_data_arc, thread_data_arc, main_tid, tids) = {
+    let (process_data, thread_data, main_tid, tids) = {
         let mut guard = PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
 
@@ -1650,13 +1656,29 @@ pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
         (Arc::clone(&proc.process_data), Arc::clone(&main_thread.thread_data), proc.main_tid, tids)
     };
 
-    // Phase 2: retire every thread; a running target is forced to a scheduling boundary and dropped there — never refused.
-    let main_cpu_ns = retire_threads(target_pid, tids, main_tid, &process_data_arc);
-
-    // Phases 3-5: the same teardown tail as exit.
-    teardown_tail(&process_data_arc, &thread_data_arc, target_pid, KILLED_EXIT_CODE, main_cpu_ns);
-
+    // Phase 2, posted and never awaited here: the victim may be killing this caller.
+    let threads = scheds(target_pid, tids);
+    for (_, sched) in &threads {
+        scheduler::post_retire(sched);
+    }
+    crate::reaper::owe(Killed { pid: target_pid, process_data, thread_data, main_tid, threads });
     0
+}
+
+/// A claimed kill whose every retire is posted, waiting for the reaper.
+pub struct Killed {
+    pid: Pid,
+    process_data: Arc<Lock<ProcessData>>,
+    thread_data: Arc<Lock<ThreadData>>,
+    main_tid: Tid,
+    threads: Vec<(Tid, ThreadSched)>,
+}
+
+/// The reaper's half of a kill: wait out every thread, then phases 3-5, the same teardown tail as exit.
+pub fn finish_kill(killed: Killed) {
+    let Killed { pid, process_data, thread_data, main_tid, threads } = killed;
+    let main_cpu_ns = retire_threads(threads, main_tid, &process_data, scheduler::await_released);
+    teardown_tail(&process_data, &thread_data, pid, KILLED_EXIT_CODE, main_cpu_ns);
 }
 
 /// The shell convention for "died on SIGKILL"; kept because every test that reads one already spells it.

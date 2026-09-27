@@ -25,9 +25,7 @@
 //!    and no syscall to cancel. The other three ask what a kill *releases*;
 //!    this one asks whether it **ends** — "a killed thread is never dispatched
 //!    into userland again", the claim about a kill that no other test in this
-//!    tree executes. It is the one arm that does not issue
-//!    its own kill: a `kill` that does not end its target does not return
-//!    either, so the killer is a process of its own and this one only watches.
+//!    tree executes.
 //!
 //! **No census assertion anywhere in this file, and that is the point rather
 //! than an omission.** A live-object count is the one instrument that cannot
@@ -79,10 +77,7 @@ const VICTIM_LABEL: &str = "victim";
 /// window's several scheduler dispatches sit on top of.
 ///
 /// **It has to be smaller than `scheduler::retire_task`'s own tripwire, and
-/// that ordering is the whole of the arm's ability to report.** The process
-/// doing the killing is parked inside that tripwire for as long as the victim
-/// stays in userland, and when it blows the kernel panics and takes the machine
-/// with it — so an arm that had not spoken by then never speaks. Nothing here
+/// that ordering is the whole of the arm's ability to report.** Nothing here
 /// reads that constant or restates its value: what this one needs is only to be
 /// first, and a bound derived from device timeouts and scheduler quanta is not
 /// going to come in under two seconds.
@@ -222,29 +217,11 @@ fn an_acceptor_killed_in_the_accept() {
 /// all. With either miss the child here is preempted, queued in the dying list,
 /// picked straight back off it and returned to Ring 3, once per tick, forever.
 ///
-/// **Three processes, because the killer cannot report.** `Process::kill` is
-/// `scheduler::retire_task`, which parks until the victim's record is released
-/// and panics the kernel at its own tripwire when it never is. On exactly the
-/// tree this arm exists to catch, then, the call does not come back: an arm
-/// that killed and then timed its own `kill` would be *inside* the panic it is
-/// meant to name, and the version of this arm that did so could only ever have
-/// reported on a tree that was already fixed. So the kill is a child of its
-/// own, and the deadline below is held by a process with nothing of the kernel
-/// under it.
-///
 /// **What it watches is the victim's own stdout.** That pipe's write end is in
 /// the victim's handle table and in no other, so the read end this process
 /// holds reaches EOF when — and only when — the victim's handles are drained.
-/// That is `kill_process`'s phase 3, which runs after `retire_task` has seen
-/// the victim released, which the victim publishes from its own pass out of
-/// `leave_ring3_if_due` — the last exit boundary itself. EOF is downstream of the
-/// boundary by a teardown and by nothing that can wait, and it is unreachable
-/// without it.
 ///
-/// **The clock starts before the kill and not after it**, which is the second
-/// half of what was wrong here: the previous shape took its `Instant` once
-/// `kill()` had already returned, and a returned `kill` has already published
-/// the exit — so what it timed was the reap of a zombie and never the boundary.
+/// **The clock starts before the kill and not after it.**
 /// What this one bounds is the whole of [go byte → boundary → teardown], so the
 /// number is an upper bound on the boundary rather than a measurement of it.
 fn a_ring_three_spinner_ends_at_its_next_exit_boundary() {
@@ -281,16 +258,11 @@ fn a_ring_three_spinner_ends_at_its_next_exit_boundary() {
         println!(
             "a child killed while spinning in Ring 3 still held its handles {:?} later — \
              it is being re-dispatched into userland, so nothing on the return path reads \
-             the kill bit, and the process that killed it is parked in retire_task with \
-             nothing it can say",
+             the kill bit",
             started.elapsed(),
         );
         std::process::exit(1);
     }
-    // Bounded by the line above and not a second deadline: EOF is phase 3, and
-    // phases 4 and 5 behind it are straight-line kernel code with no wait in
-    // them, so a killer that produced the EOF has already returned from its
-    // `kill`. What this adds is the killer's own verdict on that call.
     assert!(
         killer.wait().expect("wait for the killer").success(),
         "the spinner ended, but the process that killed it did not agree",
@@ -315,11 +287,6 @@ fn child(role: &str) -> ! {
                 std::hint::spin_loop();
             }
         }
-        // Arm 4's killer. It is a process rather than a thread because
-        // `Process::kill` does not return on the tree that arm is about — it
-        // is `retire_task`, which parks until the victim's record is released
-        // and panics the kernel at its own tripwire when it never is. Nothing
-        // the observer does is behind this call.
         "kill" => {
             let victim: Process = endow::Endowments::get()
                 .take(VICTIM_LABEL)

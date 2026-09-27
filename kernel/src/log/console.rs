@@ -67,7 +67,7 @@ static DRAINED: Published = Published::new();
 /// Start the thread. Called once, from `kernel_main`, before the scheduler starts.
 /// Placement matters: APs spin until the machine is released, so an earlier spawn could not run while the machine has no console.
 pub fn start() {
-    let sched = kthread::spawn(NAME, body, 0, OnPanic::Halt);
+    let (_, sched) = kthread::spawn(NAME, body, 0, OnPanic::Halt);
     // Leaked: `klogd` never exits, and a producer reading this pointer under lock may not touch a refcount.
     let shared: &'static Arc<KShared> = alloc::boxed::Box::leak(alloc::boxed::Box::new(sched.shared));
     KLOGD.store(shared as *const _ as *mut _, Ordering::Release);

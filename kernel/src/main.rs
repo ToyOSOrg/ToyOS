@@ -83,6 +83,7 @@ mod clock;
 
 mod watch;
 mod iod;
+mod reaper;
 mod object;
 mod inbox;
 mod pipe;
@@ -669,6 +670,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // After klogd so their own spawn logs have a drainer.
     drivers::xhci::usbd::start();
     iod::start();
+    reaper::start();
 
     smp::set_ready();
 

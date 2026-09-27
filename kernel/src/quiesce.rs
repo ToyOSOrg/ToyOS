@@ -101,10 +101,15 @@ fn stops(stage: u32) -> bool {
     // A kernel thread reaches this boundary on its first dispatch and has no
     // Ring 3 to be stopped from; `iod` is also what carries the sync to its
     // volume while userland is being stopped around it.
-    if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
+    if exempt(TaskId(pid, tid)) {
         return false;
     }
     must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller())
+}
+
+/// A kernel thread is not stopped, except the reaper: the teardowns it runs are userland's.
+fn exempt(id: TaskId) -> bool {
+    crate::sched::kthread::is_kernel_task(id) && !crate::reaper::is(id)
 }
 
 /// Whether this thread is the one shutdown this boot gets: a second caller's
@@ -227,7 +232,7 @@ fn sweep(caller: ThreadId) -> Sweep {
             if matches!(thread.state(), process::ThreadLocation::Zombie(_)) {
                 continue;
             }
-            if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
+            if exempt(TaskId(pid, tid)) {
                 continue;
             }
             let sched = thread

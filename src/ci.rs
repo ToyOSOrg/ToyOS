@@ -363,6 +363,10 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
         "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
     ]),
+    red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
+        "two_processes_killing_each_other_both_end ... FAILED",
+        "a_kill_chain_of_three_ends ... FAILED",
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         "a_stopped_cpu_stops_taking_work ... FAILED",
     ]),

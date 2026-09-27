@@ -29,8 +29,8 @@ pub struct ProcessObject {
     exit: Lock<Option<Exit>>,
     /// The same fact, without the lock, for a waiter's per-wake predicate.
     finished: AtomicBool,
-    /// What `SYS_PROCESS_WAIT` arms on; holding the `Arc` across the park keeps the watch from outliving its subject.
-    watch: Watch,
+    /// What `SYS_PROCESS_WAIT` and a poll arm on; holding the `Arc` across the park keeps the watch from outliving its subject.
+    watch: Arc<Watch>,
 }
 
 impl ProcessObject {
@@ -40,7 +40,7 @@ impl ProcessObject {
             pid,
             exit: Lock::new(None),
             finished: AtomicBool::new(false),
-            watch: Watch::new(),
+            watch: Arc::new(Watch::new()),
         })
     }
 
@@ -61,7 +61,7 @@ impl ProcessObject {
         self.exit.lock().as_ref().map(|e| e.stats)
     }
 
-    pub fn watch(&self) -> &Watch {
+    pub fn watch(&self) -> &Arc<Watch> {
         &self.watch
     }
 

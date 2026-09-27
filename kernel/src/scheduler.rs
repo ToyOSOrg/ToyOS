@@ -501,14 +501,31 @@ pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
     futex::watch_of(phys_addr).post_n(phys_addr.phys(), count) as u64
 }
 
-/// Retire a thread and wait until its record — kernel stack and
-/// address-space reference — is released. The state word reading `Dead` is
-/// not enough: that payload is freed by the pass after the one that publishes it.
+/// Retire a thread and wait until it is released.
 #[track_caller]
 pub fn retire_task(sched: &ThreadSched) {
+    post_retire(sched);
+    await_released(sched);
+}
+
+/// Set a thread's kill bit and ask its CPU for a safe point; returns at once.
+pub fn post_retire(sched: &ThreadSched) {
+    if sched.handle.released() {
+        return;
+    }
+    preempt_off(|p| {
+        toyos_sched::retire::begin(&sched.shared).post(cpus(), &HW, p);
+    });
+}
+
+/// Wait until a retired thread's record — kernel stack and address-space
+/// reference — is released. The state word reading `Dead` is not enough: that
+/// payload is freed by the pass after the one that publishes it.
+#[track_caller]
+pub fn await_released(sched: &ThreadSched) {
     // Also on the early-return path below, where no park happens and the two
     // asserts inside the wait would never run.
-    assert_baseline(BASELINE_TRAP);
+    assert_baseline(blocking_baseline());
     if let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) {
         if let Some(handle) = driver::current_shared() {
             assert!(
@@ -521,9 +538,6 @@ pub fn retire_task(sched: &ThreadSched) {
     if sched.handle.released() {
         return;
     }
-    preempt_off(|p| {
-        toyos_sched::retire::begin(&sched.shared).post(cpus(), &HW, p);
-    });
     /// Re-poll rate for the liveness backstop; the release wake is what
     /// actually ends the wait.
     const RECHECK: Cadence = Cadence::every(

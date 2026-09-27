@@ -12,7 +12,7 @@
 //! depends on the order, and a model whose counter-example is different every
 //! run is a model nobody can bisect.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -79,6 +79,12 @@ pub struct World {
     /// pass: a claimant inside its own teardown, which cannot retire itself and
     /// will not reach Ring 3 again either.
     leaving: BTreeSet<(Pid, Tid)>,
+    /// Threads a retire was posted on: the kill bit.
+    killed: BTreeSet<(Pid, Tid)>,
+    /// Threads inside a scripted operation, which reach no safe point until it returns.
+    in_kernel: BTreeSet<(Pid, Tid)>,
+    /// Teardowns a kill handed to the reaper, oldest first: the process, its code, its threads.
+    owed: VecDeque<(Pid, i32, Vec<Tid>)>,
     /// Entries an idle pass has taken out of the table.
     reaped: BTreeSet<Pid>,
     /// TLS blocks a spawn's phase 2 mapped and no thread owns yet.
@@ -115,6 +121,9 @@ impl World {
             released: BTreeSet::new(),
             retired: BTreeSet::new(),
             leaving: BTreeSet::new(),
+            killed: BTreeSet::new(),
+            in_kernel: BTreeSet::new(),
+            owed: VecDeque::new(),
             reaped: BTreeSet::new(),
             tls_mapped: BTreeSet::new(),
             next_tls: 0,
@@ -236,6 +245,49 @@ impl World {
         self.retired.contains(&(pid, tid))
     }
 
+    /// `scheduler::post_retire`: the kill bit, and a thread at no safe point
+    /// dies only when its own operation returns.
+    pub fn post_retire(&mut self, pid: Pid, tid: Tid) {
+        if self.is_retired(pid, tid) {
+            return;
+        }
+        assert!(self.killed.insert((pid, tid)), "a second retirer for pid {pid} tid {tid}");
+        if !self.in_kernel.contains(&(pid, tid)) {
+            self.retire(pid, tid);
+        }
+    }
+
+    pub fn is_killed(&self, pid: Pid, tid: Tid) -> bool {
+        self.killed.contains(&(pid, tid))
+    }
+
+    /// A thread starting a scripted operation.
+    pub fn enter_kernel(&mut self, by: (Pid, Tid)) {
+        self.in_kernel.insert(by);
+    }
+
+    /// Its operation returned: the safe point, where a killed thread dies.
+    pub fn leave_kernel(&mut self, by: (Pid, Tid)) {
+        self.in_kernel.remove(&by);
+        if self.killed.contains(&by) {
+            self.retire(by.0, by.1);
+        }
+    }
+
+    /// `reaper::owe`.
+    pub fn owe(&mut self, pid: Pid, code: i32, tids: Vec<Tid>) {
+        self.owed.push_back((pid, code, tids));
+    }
+
+    /// The reaper's pop.
+    pub fn take_owed(&mut self) -> Option<(Pid, i32, Vec<Tid>)> {
+        self.owed.pop_front()
+    }
+
+    pub fn nothing_owed(&self) -> bool {
+        self.owed.is_empty()
+    }
+
     /// Whether this thread can still execute user code.
     fn runnable(&self, pid: Pid, tid: Tid) -> bool {
         !self.retired.contains(&(pid, tid))
@@ -311,8 +363,14 @@ impl World {
     /// to its end. A join that has not been answered *yet* is the ordinary
     /// case, so checking it at every state would report every schedule.
     /// And **L5** — every TLS block a spawn mapped ends owned or released.
+    /// And **L6** — every claimed teardown ends in a published exit.
     pub fn final_faults(&self) -> Vec<String> {
         let mut out = self.faults();
+        for (&pid, proc) in &self.procs {
+            if proc.claims > 0 && !self.published.contains_key(&pid) {
+                out.push(alloc::format!("pid {pid} was claimed for teardown and never published an exit"));
+            }
+        }
         for &block in &self.tls_mapped {
             out.push(alloc::format!(
                 "TLS block {block} is mapped and owned by nobody — a refused spawn dropped it \

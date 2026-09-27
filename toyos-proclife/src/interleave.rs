@@ -35,8 +35,12 @@ pub enum Op {
     /// `process::release_process` + `teardown_tail`: a thread ending its own
     /// process.
     Exit { pid: Pid, tid: Tid, code: i32, pc: u32, others: Vec<Tid>, next: usize },
-    /// `process::kill_process`: a handle holder ending somebody else's.
-    Kill { pid: Pid, code: i32, pc: u32, tids: Vec<Tid>, next: usize },
+    /// `process::kill_process`: a handle holder ending somebody else's. `by` is
+    /// the killing thread when the model holds it; `inline` is the base's kill,
+    /// which finished the teardown itself.
+    Kill { pid: Pid, code: i32, pc: u32, tids: Vec<Tid>, by: Option<(Pid, Tid)>, inline: Option<Finish> },
+    /// The reaper kthread, finishing what kills handed it.
+    Reap { job: Option<Finish> },
     /// `process::spawn_thread`: two lock sections with the whole of a thread
     /// built between them; `block` is the mapped TLS the build carries across.
     Spawn { pid: Pid, pc: u32, block: Option<u32> },
@@ -48,12 +52,85 @@ pub enum Op {
     IdlePass { pc: u32 },
 }
 
+/// A claimed kill's teardown past its claim: wait out every thread's release,
+/// mark, publish.
+#[derive(Clone, Debug)]
+pub struct Finish {
+    pid: Pid,
+    code: i32,
+    tids: Vec<Tid>,
+    next: usize,
+    pc: u32,
+}
+
+impl Finish {
+    fn new((pid, code, tids): (Pid, i32, Vec<Tid>)) -> Self {
+        Finish { pid, code, tids, next: 0, pc: 0 }
+    }
+
+    fn enabled(&self, world: &World) -> bool {
+        self.pc != 0 || self.next == self.tids.len() || retire_ready(world, self.pid, self.tids[self.next])
+    }
+
+    /// One section; `true` once the exit is published.
+    fn step(&mut self, world: &mut World) -> bool {
+        match self.pc {
+            0 => {
+                if self.next < self.tids.len() {
+                    if retire_step(world, self.pid, self.tids[self.next]) {
+                        self.next += 1;
+                    }
+                } else {
+                    self.pc = 1;
+                }
+                false
+            }
+            1 => {
+                if let Some(proc) = world.get_mut(self.pid) {
+                    teardown::mark_all_zombie(proc, self.code);
+                }
+                self.pc = 2;
+                false
+            }
+            _ => {
+                world.publish_exit(self.pid, self.code);
+                true
+            }
+        }
+    }
+}
+
+/// `retire_task`, one section: post the retire, then — blocked until then —
+/// find the thread released. `true` once it is.
+fn retire_step(world: &mut World, pid: Pid, tid: Tid) -> bool {
+    if world.is_retired(pid, tid) {
+        return true;
+    }
+    if !world.is_killed(pid, tid) {
+        world.post_retire(pid, tid);
+    }
+    false
+}
+
+/// Whether [`retire_step`] can move: nothing posted yet, or the thread gone.
+fn retire_ready(world: &World, pid: Pid, tid: Tid) -> bool {
+    !world.is_killed(pid, tid) || world.is_retired(pid, tid)
+}
+
 impl Op {
     pub fn exit(pid: Pid, tid: Tid, code: i32) -> Self {
         Op::Exit { pid, tid, code, pc: 0, others: Vec::new(), next: 0 }
     }
     pub fn kill(pid: Pid, code: i32) -> Self {
-        Op::Kill { pid, code, pc: 0, tids: Vec::new(), next: 0 }
+        Op::Kill { pid, code, pc: 0, tids: Vec::new(), by: None, inline: None }
+    }
+    /// A kill issued by a thread the model holds, which is in the kernel until
+    /// the kill returns.
+    pub fn kill_by(pid: Pid, code: i32, by: (Pid, Tid)) -> Self {
+        Op::Kill { pid, code, pc: 0, tids: Vec::new(), by: Some(by), inline: None }
+    }
+    pub fn reap() -> Self {
+        Op::Reap { job: None }
     }
     pub fn spawn(pid: Pid) -> Self {
         Op::Spawn { pid, pc: 0, block: None }
@@ -68,20 +145,37 @@ impl Op {
         Op::IdlePass { pc: 0 }
     }
 
-    fn done(&self) -> bool {
-        let (Op::Exit { pc, .. }
-        | Op::Kill { pc, .. }
-        | Op::Spawn { pc, .. }
-        | Op::ThreadExit { pc, .. }
-        | Op::Join { pc, .. }
-        | Op::IdlePass { pc, .. }) = self;
-        *pc == DONE
+    /// Whether the op has nothing left to do: the reaper is done whenever
+    /// nothing is owed to it.
+    fn done(&self, world: &World) -> bool {
+        match self {
+            Op::Reap { job } => job.is_none() && world.nothing_owed(),
+            Op::Exit { pc, .. }
+            | Op::Kill { pc, .. }
+            | Op::Spawn { pc, .. }
+            | Op::ThreadExit { pc, .. }
+            | Op::Join { pc, .. }
+            | Op::IdlePass { pc, .. } => *pc == DONE,
+        }
+    }
+
+    /// Whether the op's next section can run, rather than wait.
+    fn enabled(&self, world: &World) -> bool {
+        match self {
+            Op::Exit { pid, pc: 1, others, next, .. } => {
+                *next == others.len() || retire_ready(world, *pid, others[*next])
+            }
+            Op::Kill { inline: Some(finish), .. } => finish.enabled(world),
+            Op::Reap { job: Some(finish) } => finish.enabled(world),
+            _ => true,
+        }
     }
 
     fn label(&self) -> &'static str {
         match self {
             Op::Exit { .. } => "exit",
             Op::Kill { .. } => "kill",
+            Op::Reap { .. } => "reaper",
             Op::Spawn { .. } => "spawn_thread",
             Op::ThreadExit { .. } => "thread_exit",
             Op::Join { .. } => "thread_join",
@@ -116,8 +210,9 @@ impl Op {
                     // the table lock given up.
                     1 => {
                         if *next < others.len() {
-                            world.retire(*pid, others[*next]);
-                            *next += 1;
+                            if retire_step(world, *pid, others[*next]) {
+                                *next += 1;
+                            }
                         } else {
                             *pc = 2;
                         }
@@ -143,32 +238,43 @@ impl Op {
                     }
                 }
             }
-            Op::Kill { pid, code, pc, tids, next } => match *pc {
-                0 => {
+            Op::Kill { pid, code, pc, tids, by, inline } => {
+                if let Some(finish) = inline {
+                    if finish.step(world) {
+                        *pc = DONE;
+                    }
+                } else if *pc == 0 {
                     if !teardown::claim_teardown(world, *pid) {
                         *pc = DONE;
-                        return;
-                    }
-                    *tids = teardown::kill_set(world.get(*pid).expect("just claimed"));
-                    *pc = 1;
-                }
-                1 => {
-                    if *next < tids.len() {
-                        world.retire(*pid, tids[*next]);
-                        *next += 1;
                     } else {
-                        *pc = 2;
+                        *tids = teardown::kill_set(world.get(*pid).expect("just claimed"));
+                        if cfg!(feature = "mutate-kill-waits-for-its-victims") {
+                            *inline = Some(Finish::new((*pid, *code, tids.clone())));
+                        } else {
+                            *pc = 1;
+                        }
                     }
-                }
-                2 => {
-                    if let Some(proc) = world.get_mut(*pid) {
-                        teardown::mark_all_zombie(proc, *code);
+                } else {
+                    // Every retire posted, the wait handed on, and the kill
+                    // returns.
+                    for &tid in tids.iter() {
+                        world.post_retire(*pid, tid);
                     }
-                    *pc = 3;
-                }
-                _ => {
-                    world.publish_exit(*pid, *code);
+                    world.owe(*pid, *code, core::mem::take(tids));
                     *pc = DONE;
+                }
+                if *pc == DONE {
+                    if let Some(by) = *by {
+                        world.leave_kernel(by);
+                    }
+                }
+            }
+            Op::Reap { job } => match job {
+                None => *job = Some(Finish::new(world.take_owed().expect("stepped with nothing owed"))),
+                Some(finish) => {
+                    if finish.step(world) {
+                        *job = None;
+                    }
                 }
             },
             Op::Spawn { pid, pc, block } => match *pc {
@@ -258,25 +364,39 @@ impl Op {
 
 const DONE: u32 = u32::MAX;
 
-/// The first schedule that breaks a law, or `None`.
+/// How many schedules ran, or the first one that breaks a law.
 ///
 /// Depth-first over "which op runs its next lock section", checking
-/// `World::faults` at every state and `World::final_faults` at every leaf. The
-/// returned string is the schedule that produced it, in the order the ops ran.
-pub fn explore(initial: &World, ops: &[Op]) -> Option<String> {
+/// `World::faults` at every state and `World::final_faults` at every leaf; a
+/// state where no unfinished op can move is a deadlock. The returned string is
+/// the schedule that produced it, in the order the ops ran.
+pub fn explore(initial: &World, ops: &[Op]) -> Result<u64, String> {
+    let mut world = initial.clone();
+    for op in ops {
+        if let Op::Kill { by: Some(by), .. } = op {
+            world.enter_kernel(*by);
+        }
+    }
     let mut trace = Vec::new();
-    walk(initial.clone(), ops.to_vec(), &mut trace)
+    let mut schedules = 0;
+    match walk(world, ops.to_vec(), &mut trace, &mut schedules) {
+        Some(found) => Err(found),
+        None => Ok(schedules),
+    }
 }
 
-fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>) -> Option<String> {
-    if ops.iter().all(Op::done) {
+fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>, schedules: &mut u64) -> Option<String> {
+    if ops.iter().all(|op| op.done(&world)) {
+        *schedules += 1;
         let faults = world.final_faults();
         return report(&faults, trace);
     }
+    let mut moved = false;
     for i in 0..ops.len() {
-        if ops[i].done() {
+        if ops[i].done(&world) || !ops[i].enabled(&world) {
             continue;
         }
+        moved = true;
         let mut next_world = world.clone();
         let mut next_ops = ops.clone();
         let before = alloc::format!("{}#{i}", next_ops[i].label());
@@ -287,11 +407,16 @@ fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>) -> Option<String> {
             trace.pop();
             return Some(found);
         }
-        if let Some(found) = walk(next_world, next_ops, trace) {
+        if let Some(found) = walk(next_world, next_ops, trace, schedules) {
             trace.pop();
             return Some(found);
         }
         trace.pop();
+    }
+    if !moved {
+        let stuck: Vec<&str> =
+            ops.iter().filter(|op| !op.done(&world)).map(Op::label).collect();
+        return report(&[alloc::format!("deadlock: {} each wait and none can move", stuck.join(", "))], trace);
     }
     None
 }
@@ -328,7 +453,7 @@ mod tests {
         );
 
         let ops = vec![Op::exit(pid, main, 0), Op::spawn(pid)];
-        if let Some(found) = explore(&world, &ops) {
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -339,8 +464,8 @@ mod tests {
     fn a_kill_racing_a_spawn_leaves_no_unretired_thread() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        let ops = vec![Op::kill(pid, 137), Op::spawn(pid)];
-        if let Some(found) = explore(&world, &ops) {
+        let ops = vec![Op::kill(pid, 137), Op::spawn(pid), Op::reap()];
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -360,8 +485,8 @@ mod tests {
         let pid = world.spawn_process();
         let main = world.main_tid(pid);
         world.spawn_thread(pid);
-        let ops = vec![Op::exit(pid, main, 0), Op::kill(pid, 137)];
-        if let Some(found) = explore(&world, &ops) {
+        let ops = vec![Op::exit(pid, main, 0), Op::kill(pid, 137), Op::reap()];
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -377,7 +502,7 @@ mod tests {
         let waiter = world.spawn_thread(pid);
         let dying = world.spawn_thread(pid);
         let ops = vec![Op::thread_exit(pid, dying, 3), Op::join(pid, dying, waiter)];
-        if let Some(found) = explore(&world, &ops) {
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -399,7 +524,7 @@ mod tests {
             Op::idle_pass(),
             Op::join(pid, dying, joiner),
         ];
-        if let Some(found) = explore(&world, &ops) {
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -412,8 +537,8 @@ mod tests {
     fn a_spawn_racing_a_kill_and_the_pass_that_reaps_it() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        let ops = vec![Op::kill(pid, 137), Op::spawn(pid), Op::idle_pass()];
-        if let Some(found) = explore(&world, &ops) {
+        let ops = vec![Op::kill(pid, 137), Op::spawn(pid), Op::idle_pass(), Op::reap()];
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -434,7 +559,7 @@ mod tests {
             Op::thread_exit(pid, sibling, 3),
             Op::spawn(pid),
         ];
-        if let Some(found) = explore(&world, &ops) {
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -451,7 +576,7 @@ mod tests {
         let pid = world.spawn_process();
         let main = world.main_tid(pid);
         let ops = vec![Op::exit(pid, main, 0), Op::spawn(pid), Op::spawn(pid)];
-        if let Some(found) = explore(&world, &ops) {
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -470,7 +595,7 @@ mod tests {
         spawning.step(&mut world); // phase 2: the block is mapped
 
         let mut exit = Op::exit(pid, main, 0);
-        while !exit.done() {
+        while !exit.done(&world) {
             exit.step(&mut world);
         }
         assert!(
@@ -495,8 +620,8 @@ mod tests {
         let pid = world.spawn_process();
         let target = world.spawn_thread(pid);
         let waiter = world.spawn_thread(pid);
-        let ops = vec![Op::kill(pid, 137), Op::join(pid, target, waiter)];
-        if let Some(found) = explore(&world, &ops) {
+        let ops = vec![Op::kill(pid, 137), Op::join(pid, target, waiter), Op::reap()];
+        if let Err(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
     }
@@ -510,11 +635,16 @@ mod tests {
         let pid = world.spawn_process();
         let sibling = world.spawn_thread(pid);
 
-        // The schedule, run by hand rather than searched for: a kill that runs
-        // to its publish, an idle pass, and only then the sibling's own exit.
+        // The schedule, run by hand rather than searched for: a kill and the
+        // reaper that runs it to its publish, an idle pass, and only then the
+        // sibling's own exit.
         let mut kill = Op::kill(pid, 137);
-        while !kill.done() {
+        while !kill.done(&world) {
             kill.step(&mut world);
+        }
+        let mut reaper = Op::reap();
+        while !reaper.done(&world) {
+            reaper.step(&mut world);
         }
         let mut idle = Op::idle_pass();
         idle.step(&mut world);
@@ -532,13 +662,73 @@ mod tests {
         let mut exit = Op::thread_exit(pid, sibling, 0);
         exit.step(&mut world);
         assert!(
-            !exit.done(),
+            !exit.done(&world),
             "the exit ended at its routing section: a thread whose entry went under it \
              still has to post and retire, and one that stops here is the machine \
              stopping with it",
         );
-        while !exit.done() {
+        while !exit.done(&world) {
             exit.step(&mut world);
+        }
+    }
+
+    /// **`KillEachOther`, K1's shape**: two processes, each one's thread inside
+    /// `SYS_PROCESS_KILL` on the other. A thread in the kernel reaches no safe
+    /// point until its kill returns, so a kill that waited for its victim waits
+    /// on a thread that is waiting on it.
+    ///
+    /// Reds under `mutate-kill-waits-for-its-victims`, the base's kill.
+    #[test]
+    fn two_processes_killing_each_other_both_end() {
+        let mut world = World::new();
+        let p = world.spawn_process();
+        let c = world.spawn_process();
+        let ops = vec![
+            Op::kill_by(c, 137, (p, world.main_tid(p))),
+            Op::kill_by(p, 137, (c, world.main_tid(c))),
+            Op::reap(),
+        ];
+        match explore(&world, &ops) {
+            Ok(schedules) => std::println!("KillEachOther: {schedules} schedules, every one ends"),
+            Err(found) => panic!("a lifecycle law broke:\n{found}"),
+        }
+    }
+
+    /// The cycle at length three: A kills B, B kills C, C kills A.
+    #[test]
+    fn a_kill_chain_of_three_ends() {
+        let mut world = World::new();
+        let a = world.spawn_process();
+        let b = world.spawn_process();
+        let c = world.spawn_process();
+        let ops = vec![
+            Op::kill_by(b, 137, (a, world.main_tid(a))),
+            Op::kill_by(c, 137, (b, world.main_tid(b))),
+            Op::kill_by(a, 137, (c, world.main_tid(c))),
+            Op::reap(),
+        ];
+        if let Err(found) = explore(&world, &ops) {
+            panic!("a lifecycle law broke:\n{found}");
+        }
+    }
+
+    /// A sibling in the cycle and an exit racing it: P's main thread exits
+    /// while P's second thread kills C and C kills P — so the exit's own
+    /// retire waits on a thread that is inside a kill.
+    #[test]
+    fn an_exit_whose_sibling_kills_the_process_killing_it() {
+        let mut world = World::new();
+        let p = world.spawn_process();
+        let killer = world.spawn_thread(p);
+        let c = world.spawn_process();
+        let ops = vec![
+            Op::exit(p, world.main_tid(p), 0),
+            Op::kill_by(c, 137, (p, killer)),
+            Op::kill_by(p, 137, (c, world.main_tid(c))),
+            Op::reap(),
+        ];
+        if let Err(found) = explore(&world, &ops) {
+            panic!("a lifecycle law broke:\n{found}");
         }
     }
 }
