@@ -179,12 +179,7 @@ fn draw_window(
     }
 
     if let Some(b) = content_blit(win, clip) {
-        // SAFETY: the mapping is `shm.len()` bytes and `win` holds it past this
-        // borrow; its client writes it concurrently, which can tear pixels but
-        // never reach outside the mapping.
-        let buffer = unsafe {
-            std::slice::from_raw_parts(win.client.shm.as_ptr(), win.client.shm.len())
-        };
+        let buffer = win.client.shm.as_slice();
         let offset = (b.src_y as usize * win.buf_w as usize + b.src_x as usize) * 4;
         surface.blit(
             b.dst.x0 as usize,

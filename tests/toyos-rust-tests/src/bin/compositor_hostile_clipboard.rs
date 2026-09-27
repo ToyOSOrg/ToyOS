@@ -1,6 +1,3 @@
-//! Two hostile clipboards, and a compositor that must outlive both and keep
-//! only text it validated.
-//!
 //! Needs a live compositor and a host that types GUI+V, which the shared boot
 //! does not have — it is in `RUST_SKIP` and `metal_sim_hostile_clipboard` runs
 //! it on the metal-sim profile.
@@ -10,23 +7,23 @@
 //!    must refuse the client without ever receiving the handle — and the pipe's
 //!    writer, queued on the refused connection, must go back to the kernel
 //!    unused.
-//! 2. **A region rewritten while it is read.** The client commits a copy of
-//!    `A`s and keeps rewriting the region between `A`s and bytes that are not
-//!    UTF-8. The compositor may keep the text or refuse it, and the paste that
-//!    follows has to be one of the two texts it could have validated.
+//! 2. **A copy that is not UTF-8.** The client commits a region of `0xFF`, and
+//!    a paste has to be the clipboard from before it.
 //! 3. **A region rewritten after its commit.** Once the compositor has closed
 //!    the connection the region is the client's own again, and a paste has to
 //!    be what was committed, not what the region holds now.
 //! 4. **A copy never committed.** The client holds its region and says nothing;
-//!    the compositor has to drop it by name rather than hold the region.
+//!    the compositor has to drop it by name.
+//! 5. **A second begin.** A connection holding a region may send its commit and
+//!    nothing else, so a second `MSG_COPY_BEGIN` on it is refused rather than
+//!    answered with another region.
+//! 6. **A begin with bytes past its length.** Refused rather than answered.
 //!
 //! Each case ends with a probe the compositor answers from its dispatch, under
 //! a deadline. The host asserts what this side cannot see: no handle fault and
 //! no compositor exit in the kernel's records, and the refusals named.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
-use std::thread;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use toyos::endow;
@@ -70,22 +67,21 @@ fn main() {
     wrong_typed_handle();
     probe("a wrong-typed handle");
 
-    rewritten_while_read();
-    probe("a region rewritten while it is read");
-    let what = "the paste after a rewrite during the read";
+    let what = "a copy that is not UTF-8";
+    commit_filled(what, 0xFF);
+    probe(what);
     let first = paste(&mut target, what, None);
-    let all_a = first.len() == COPY_LEN && first.iter().all(|&b| b == b'A');
-    if first != BEFORE.as_bytes() && !all_a {
-        fail(what, &describe(&first, b'A'));
+    if first != BEFORE.as_bytes() {
+        let len = first.len();
+        fail(what, &format!("the paste was {len} bytes, not the clipboard from before"));
     }
-    println!(
-        "hostile clipboard: the rewritten copy was {}",
-        if all_a { "kept whole" } else { "refused" }
-    );
 
-    rewritten_after_commit();
-    probe("a region rewritten after its commit");
-    let what = "the paste after a rewrite past the commit";
+    let what = "a region rewritten after its commit";
+    let region = commit_filled(what, b'C');
+    // Text too, so a read of the region at the paste is pasted rather than
+    // refused, and differs from the stale paste `paste` skips.
+    fill(&region, b'D');
+    probe(what);
     let second = paste(&mut target, what, Some(&first));
     if second.len() != COPY_LEN || second.iter().any(|&b| b != b'C') {
         fail(what, &describe(&second, b'C'));
@@ -96,7 +92,23 @@ fn main() {
     await_hangup(conn.as_handle(), what, "the compositor giving up on the commit");
     probe(what);
 
-    println!("hostile clipboard: 4 cases survived, compositor still serving");
+    let what = "a second begin on a copy";
+    let (conn, _region) = begin_copy(what);
+    conn.send(COPY_BEGIN, &window::ClipboardShmMsg { len: COPY_LEN as u32 })
+        .unwrap_or_else(|e| fail(what, &format!("could not begin again: {e:?}")));
+    await_hangup(conn.as_handle(), what, "the compositor's refusal");
+    probe(what);
+
+    let what = "a begin with bytes past its length";
+    let conn = connect(what);
+    let mut begin = (COPY_LEN as u32).to_ne_bytes().to_vec();
+    begin.extend_from_slice(&[0; 4]);
+    conn.send_bytes(COPY_BEGIN, &begin)
+        .unwrap_or_else(|e| fail(what, &format!("could not begin: {e:?}")));
+    await_hangup(conn.as_handle(), what, "the compositor's refusal");
+    probe(what);
+
+    println!("hostile clipboard: every case survived, compositor still serving");
 }
 
 /// A pipe end where the retired message carried a region.
@@ -117,45 +129,14 @@ fn wrong_typed_handle() {
     syscall::close(ends.read);
 }
 
-/// Commit `A`s, then rewrite the region while the compositor copies it.
-fn rewritten_while_read() {
-    let what = "a region rewritten while it is read";
+/// Commit a whole copy of `byte`, and wait for the compositor to be done with
+/// it.
+fn commit_filled(what: &str, byte: u8) -> SharedMemory {
     let (conn, region) = begin_copy(what);
-    for byte in bytes(&region) {
-        byte.store(b'A', Ordering::Relaxed);
-    }
-    let stop = Arc::new(AtomicBool::new(false));
-    let rewriter = {
-        let stop = Arc::clone(&stop);
-        thread::spawn(move || {
-            let mut fill = 0xFF;
-            while !stop.load(Ordering::Relaxed) {
-                for byte in bytes(&region) {
-                    byte.store(fill, Ordering::Relaxed);
-                }
-                fill = if fill == b'A' { 0xFF } else { b'A' };
-            }
-        })
-    };
+    fill(&region, byte);
     conn.signal(COPY_COMMIT).unwrap_or_else(|e| fail(what, &format!("no commit: {e:?}")));
     await_hangup(conn.as_handle(), what, "the compositor closing the copy");
-    stop.store(true, Ordering::Relaxed);
-    rewriter.join().unwrap_or_else(|_| fail(what, "the rewriter panicked"));
-}
-
-/// Commit `C`s, wait for the compositor to be done with them, then overwrite
-/// the region.
-fn rewritten_after_commit() {
-    let what = "a region rewritten after its commit";
-    let (conn, region) = begin_copy(what);
-    for byte in bytes(&region) {
-        byte.store(b'C', Ordering::Relaxed);
-    }
-    conn.signal(COPY_COMMIT).unwrap_or_else(|e| fail(what, &format!("no commit: {e:?}")));
-    await_hangup(conn.as_handle(), what, "the compositor closing the copy");
-    for byte in bytes(&region) {
-        byte.store(0xFF, Ordering::Relaxed);
-    }
+    region
 }
 
 /// A connection holding the region the compositor made for a whole copy.
@@ -165,20 +146,27 @@ fn begin_copy(what: &str) -> (Connection, SharedMemory) {
         .unwrap_or_else(|e| fail(what, &format!("could not begin: {e:?}")));
     await_readable(conn.as_handle(), what, "the compositor's region");
     let header = conn.recv_header().unwrap_or_else(|e| fail(what, &format!("no answer: {e:?}")));
-    if header.msg_type != COPY_REGION {
-        fail(what, &format!("the compositor answered with message type {}", header.msg_type));
-    }
-    let info: window::ClipboardShmMsg = conn
-        .recv_payload(&header)
-        .unwrap_or_else(|e| fail(what, &format!("no length: {e:?}")));
-    if info.len as usize != COPY_LEN {
-        fail(what, &format!("a region of {} bytes for a copy of {COPY_LEN}", info.len));
+    if header.msg_type != COPY_REGION || header.len() != 0 {
+        fail(
+            what,
+            &format!(
+                "the compositor answered with message type {} and {} bytes",
+                header.msg_type,
+                header.len()
+            ),
+        );
     }
     let [region] =
         conn.recv_handles_exact::<1>().unwrap_or_else(|| fail(what, "the answer had no region"));
     let region = SharedMemory::adopt(region, COPY_LEN)
         .unwrap_or_else(|e| fail(what, &format!("the region would not map: {e:?}")));
     (conn, region)
+}
+
+fn fill(region: &SharedMemory, byte: u8) {
+    for b in bytes(region) {
+        b.store(byte, Ordering::Relaxed);
+    }
 }
 
 /// The region as the only type that may alias memory another process reads.
@@ -211,12 +199,11 @@ fn paste(target: &mut Window, what: &str, stale: Option<&[u8]>) -> Vec<u8> {
     }
 }
 
-/// A paste that is neither validated text, summarised — never printed whole.
+/// A paste, summarised — never printed whole.
 fn describe(text: &[u8], fill: u8) -> String {
     let stray = text.iter().position(|&b| b != fill);
     format!(
-        "the paste was {} bytes, UTF-8: {}, first byte that is not {:?} at {stray:?} — the \
-         compositor kept bytes it had not validated",
+        "the paste was {} bytes, UTF-8: {}, first byte that is not {:?} at {stray:?}",
         text.len(),
         std::str::from_utf8(text).is_ok(),
         fill as char

@@ -755,7 +755,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // slow on purpose. Its own boot too: it leaves the pointer somewhere else
     // and the window in a different place than it found them.
     ("metal_sim_window_drag", Sched::Serial, Tier::Nightly),
-    // A client's clipboard, hostile two ways; no clock in any verdict. Its own
+    // A client's clipboard; no clock in any verdict. Its own
     // boot: the compositor it abuses has to be one nothing else has touched.
     ("metal_sim_hostile_clipboard", Sched::Parallel, Tier::Fast),
     // A host-measured drain rate with an 8 s ceiling on a 3.3 s expectation.
@@ -7731,9 +7731,6 @@ fn metal_sim_window_drag(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> 
     Ok(())
 }
 
-/// A client's clipboard sent two hostile ways: a pipe where a region went, and
-/// a region rewritten while the compositor reads it.
-///
 /// The guest runs the cases and asks for a paste after each copy; this half
 /// types GUI+V at every ask and asserts what the guest cannot see. **The
 /// kernel's record is the independent half**: a compositor that maps the pipe
@@ -7789,30 +7786,27 @@ fn metal_sim_hostile_clipboard(rust_bins: &[(String, Vec<u8>)]) -> Result<(), St
             result.exit_code
         ));
     }
-    if !text.contains("hostile clipboard: 4 cases survived") {
-        return Err(format!("the guest did not report its four cases survived:\n{text}"));
+    if !text.contains("hostile clipboard: every case survived") {
+        return Err(format!("the guest did not report that every case survived:\n{text}"));
     }
     if !text.contains("it began a copy and never committed it") {
         return Err(format!(
             "the client that held its region and never committed was not dropped by name:\n{text}"
         ));
     }
-    const REFUSED: &str = "it sent a frame this protocol cannot describe";
-    if !text.lines().any(|l| l.contains("compositor: dropping client") && l.contains(REFUSED)) {
+    // The compositor's `DropReason::Retired`, which no other case produces.
+    const RETIRED: &str = "it sent the retired clipboard region";
+    if !text.lines().any(|l| l.contains("compositor: dropping client") && l.contains(RETIRED)) {
         return Err(format!(
             "the client that sent a pipe where a region went was not refused by name:\n{text}"
         ));
     }
-    if text.contains("hostile clipboard: the rewritten copy was refused")
-        && !text.contains("compositor: refusing a clipboard from client")
-    {
-        return Err(format!(
-            "the rewritten copy never reached the clipboard and the compositor never said \
-             why:\n{text}"
-        ));
+    const NOT_UTF8: [&str; 2] = ["compositor: refusing a clipboard from client", "it is not UTF-8"];
+    if !text.lines().any(|l| NOT_UTF8.iter().all(|s| l.contains(s))) {
+        return Err(format!("the copy that is not UTF-8 was not refused by name:\n{text}"));
     }
     serial::Serial::named("boot console", result.serial.as_str()).must_be_clean()?;
-    eprintln!("  [metal-sim] a pipe refused unused, both rewritten regions read once");
+    eprintln!("  [metal-sim] a pipe refused unused");
     Ok(())
 }
 

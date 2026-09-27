@@ -8,7 +8,6 @@
 //! to the panel.
 
 use std::process::Command;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use toyos::endow;
@@ -17,7 +16,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
 use toyos::{ipc, system, AsHandle, FramebufferDev, Keyboard, Mouse};
-use toyos_abi::syscall::DeviceType;
+use toyos_abi::syscall::{self, DeviceType};
 use toyos_abi::RawHandle;
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
@@ -28,8 +27,8 @@ use window::Screen;
 
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handles, mark_dead, note_closed, note_opened,
-    Client, ClientFrame, ClientRx, Dead, DropReason, PendingConn, Win, HANDSHAKE_TIMEOUT,
-    MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
+    Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Win,
+    HANDSHAKE_TIMEOUT, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::{FrameStats, FrameTotals};
@@ -381,16 +380,16 @@ impl Session {
         let (events, torn) = buf[..n].as_chunks::<EVENT>();
         assert!(torn.is_empty(), "compositor: the keyboard read {n} bytes, not whole events");
         for raw in events {
-            let event = &ipc::decode_payload::<window::KeyEvent>(raw)
+            let event = ipc::decode_payload::<window::KeyEvent>(raw)
                 .expect("a chunk is exactly one event long");
             let focused = self.stack.focused();
             let action =
-                key_action((*event).into(), focused.map(|i| self.stack[i].mode), self.launcher_open);
+                key_action(event.into(), focused.map(|i| self.stack[i].mode), self.launcher_open);
             match action {
                 KeyAction::Ignore => {}
                 KeyAction::Forward => {
                     if let Some(i) = focused {
-                        deliver(&mut self.dead, &self.stack[i], window::MSG_KEY_INPUT, event);
+                        deliver(&mut self.dead, &self.stack[i], window::MSG_KEY_INPUT, &event);
                     }
                 }
                 KeyAction::CloseLauncher => {
@@ -730,7 +729,7 @@ impl Session {
     }
 
     fn dispatch(&mut self, frames: Vec<ClientFrame>) {
-        for frame in frames {
+        for mut frame in frames {
             let handle = frame.handle;
             // A payload filling the kept buffer declared more than any client
             // may inline, so what arrived is a prefix of what was sent.
@@ -743,14 +742,22 @@ impl Session {
                 mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
                 continue;
             }
-            if frame.copy.is_some() && frame.msg_type != window::MSG_COPY_COMMIT {
-                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-                continue;
+            // A connection holding a region may send its commit and nothing
+            // else, and a commit is only ever of a region held.
+            match (frame.copy.take(), frame.msg_type) {
+                (Some(region), window::MSG_COPY_COMMIT) => {
+                    self.copy_commit(frame, region);
+                    continue;
+                }
+                (Some(_), _) | (None, window::MSG_COPY_COMMIT) => {
+                    mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                    continue;
+                }
+                (None, _) => {}
             }
             match frame.msg_type {
                 window::MSG_CREATE_WINDOW => self.create_window(frame),
                 window::MSG_COPY_BEGIN => self.copy_begin(frame),
-                window::MSG_COPY_COMMIT => self.copy_commit(frame),
                 window::MSG_PRESENT => {
                     let Ok(rect) = ipc::decode_payload::<window::Rect>(frame.payload()) else {
                         mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
@@ -773,7 +780,7 @@ impl Session {
                 }
                 window::MSG_CLIPBOARD_SET => self.set_clipboard(handle, frame.payload().to_vec()),
                 window::MSG_RETIRED_CLIPBOARD_SET_SHM => {
-                    mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                    mark_dead(&mut self.dead, handle, DropReason::Retired);
                 }
                 window::MSG_LAYOUT_CHANGED => {
                     // The compositor is the root of the surface tree and
@@ -945,8 +952,10 @@ impl Session {
     /// and hold the connection for its commit.
     fn copy_begin(&mut self, frame: ClientFrame) {
         let handle = frame.handle;
+        // Exactly one `ClipboardShmMsg`: bytes past it are not this protocol.
+        let exact = frame.payload().len() == std::mem::size_of::<window::ClipboardShmMsg>();
         let info = ipc::decode_payload::<window::ClipboardShmMsg>(frame.payload());
-        let (Ok(info), Some(conn)) = (info, frame.conn) else {
+        let (Ok(info), Some(conn), true) = (info, frame.conn, exact) else {
             mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
             return;
         };
@@ -979,7 +988,14 @@ impl Session {
                 return;
             }
         };
-        if let Err(e) = conn.try_send_with_handles(&[theirs], window::MSG_COPY_REGION, &info) {
+        // Moved on its own, so that a refused move leaves `theirs` here to
+        // close: once moved, its number is no longer this process's to close.
+        if let Err(e) = syscall::handle_send(conn.as_handle(), &[theirs]) {
+            syscall::close(theirs);
+            mark_dead(&mut self.dead, handle, ipc::TrySendError::Syscall(e).into());
+            return;
+        }
+        if let Err(e) = conn.try_signal(window::MSG_COPY_REGION) {
             mark_dead(&mut self.dead, handle, e.into());
             return;
         }
@@ -987,20 +1003,18 @@ impl Session {
             conn,
             rx: ClientRx::new(),
             since: Instant::now(),
-            copy: Some(region),
+            copy: Some(CopyRegion::new(region)),
         });
     }
 
-    /// `MSG_COPY_COMMIT`: take the text out of the region once, and let the
-    /// connection close.
-    fn copy_commit(&mut self, frame: ClientFrame) {
-        let handle = frame.handle;
-        let bare = frame.payload().is_empty();
-        let (Some(region), true) = (frame.copy, bare) else {
-            mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+    /// `MSG_COPY_COMMIT` on a connection holding `region`: take the text out
+    /// once, and let the connection close.
+    fn copy_commit(&mut self, frame: ClientFrame, region: CopyRegion) {
+        if !frame.payload().is_empty() {
+            mark_dead(&mut self.dead, frame.handle, DropReason::OutOfProtocol);
             return;
-        };
-        self.set_clipboard(handle, copy_out(&region));
+        }
+        self.set_clipboard(frame.handle, region.take());
     }
 
     /// The clipboard, from bytes that are the compositor's own: validated
@@ -1375,19 +1389,6 @@ fn desk_of(screen: &Screen, font: &font::Font, apps: usize) -> Desk {
         font_w: font.width() as i32,
         apps,
     }
-}
-
-/// Every byte of `region`, each read once.
-///
-/// The client still maps the region and may be writing it, so this copy is
-/// the only read of it and the only thing validated.
-fn copy_out(region: &SharedMemory) -> Vec<u8> {
-    // SAFETY: the mapping is `region.len()` bytes and `region` outlives the
-    // borrow; an atomic is the one type that may alias memory another process
-    // writes.
-    let bytes =
-        unsafe { std::slice::from_raw_parts(region.as_ptr() as *const AtomicU8, region.len()) };
-    bytes.iter().map(|b| b.load(Ordering::Relaxed)).collect()
 }
 
 fn read_sprite(path: &str, size: u32, color: [u8; 3]) -> sprite::Sprite {

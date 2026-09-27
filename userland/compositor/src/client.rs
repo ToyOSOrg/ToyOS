@@ -13,6 +13,7 @@
 //! used it — so every region a client writes is one the compositor made, and a
 //! handle a client sends stays queued until its connection closes.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use toyos::shm::SharedMemory;
@@ -79,7 +80,7 @@ pub struct ClientFrame {
     payload_len: usize,
     pub conn: Option<Connection>,
     /// The connection's [`PendingConn::copy`].
-    pub copy: Option<SharedMemory>,
+    pub copy: Option<CopyRegion>,
 }
 
 impl ClientFrame {
@@ -116,7 +117,25 @@ pub struct PendingConn {
     /// The region a `MSG_COPY_BEGIN` was answered with. A connection holding
     /// one may send `MSG_COPY_COMMIT` and nothing else, within
     /// [`HANDSHAKE_TIMEOUT`] of `since`.
-    pub copy: Option<SharedMemory>,
+    pub copy: Option<CopyRegion>,
+}
+
+/// A region made for one client's copy, which that client maps and may still
+/// be writing.
+///
+/// **Read once, and only by being taken.** Its one method consumes it, so
+/// nothing here can read the region twice or validate it in place.
+pub struct CopyRegion(SharedMemory);
+
+impl CopyRegion {
+    pub fn new(region: SharedMemory) -> Self {
+        Self(region)
+    }
+
+    /// Every byte, each read once, into memory no client can write.
+    pub fn take(self) -> Vec<u8> {
+        self.0.as_atomic().iter().map(|b| b.load(Ordering::Relaxed)).collect()
+    }
 }
 
 /// Why a client is going.
@@ -134,6 +153,9 @@ pub enum DropReason {
     /// A frame no protocol here can produce. The next message boundary is
     /// unlocatable, so there is nothing to resynchronise to.
     OutOfProtocol,
+    /// `window::MSG_RETIRED_CLIPBOARD_SET_SHM`, whose handle this compositor
+    /// never takes.
+    Retired,
     /// Its pipe would not take a whole frame — an entire pipe of messages it
     /// has not read.
     NotReading,
@@ -149,6 +171,7 @@ impl DropReason {
     pub fn why(self) -> &'static str {
         match self {
             Self::OutOfProtocol => "it sent a frame this protocol cannot describe",
+            Self::Retired => "it sent the retired clipboard region, whose handle is never taken",
             Self::NotReading => "its pipe will not take another message and it is not reading",
             Self::Gone => "its connection is gone",
             Self::HandshakeTimeout => "it never finished its first message",
