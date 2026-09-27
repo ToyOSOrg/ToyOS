@@ -2,14 +2,14 @@
 //!
 //! Booted by `common::storage::fsd_restart` on `tests/fsdrestartcase`, whose
 //! file servers end the moment they take a write through a file opened to
-//! append at `/home/fsd_end` and before they answer it, and at the first request
-//! on `/apps` this boot:
+//! append at `/home/fsd_end` and before they answer it, and at the first read
+//! of an installed package's manifest and of its binary this boot:
 //!
-//! - a launch of an `/apps` path is answered though DATA's server ends under
-//!   init's request resolving it: init's retry connects again and waits in the
-//!   port's queue, on its file worker, and init starts the server again while
-//!   it waits — a call from its loop would wait for ever on a server only its
-//!   loop could start;
+//! - a launch of an installed package is answered though DATA's server ends
+//!   under init's read of its manifest and again under the read of its image:
+//!   each call is init's file worker's, whose retry connects again and waits in
+//!   the port's queue while init's loop starts the server again — a call from
+//!   the loop would wait for ever on a server only the loop could start;
 //! - the write the server ended under is answered as the server's end, never
 //!   as done;
 //! - a handle held across an end is answered `Gone`;
@@ -35,8 +35,13 @@ const REPLACING: &[u8] = b"renamed over the file a handle held across the end";
 /// `--end-on`'s path, in `tests/fsdrestartcase/system.toml`.
 const END: &str = "/home/fsd_end";
 
-/// A path under `--end-at-request`'s directory: no package answers for it.
-const LAUNCHED: &str = "/apps/fs_restart/nothing";
+/// The package, whose manifest and binary are `--end-at-read`'s paths.
+const PACKAGE: &str = "fs_restart";
+const MANIFEST: &str = "/apps/fs_restart/manifest.toml";
+const PROGRAM: &str = "/apps/fs_restart/fs_restart";
+const SELF: &str = "/system/bin/test_rs_fs_restart";
+/// What tells this binary it is the package's copy, launched.
+const LAUNCHED: &str = "launched";
 
 /// Mirrored: what `KEPT` holds.
 fn kept() -> Vec<u8> {
@@ -59,12 +64,37 @@ fn end_the_server(n: u32) {
     }
 }
 
+/// This binary installed as a package, by writes alone — no read of either
+/// file before init's — and durable, since an end loses what no sync covered.
+fn install() {
+    fs::create_dir_all(format!("/apps/{PACKAGE}")).expect("make the package's directory");
+    fs::copy(SELF, PROGRAM).unwrap_or_else(|e| panic!("copy {SELF} to {PROGRAM}: {e}"));
+    OpenOptions::new()
+        .write(true)
+        .open(PROGRAM)
+        .and_then(|f| f.sync_all())
+        .unwrap_or_else(|e| panic!("sync {PROGRAM}: {e}"));
+    let manifest = format!(
+        "name = \"{PACKAGE}\"\nversion = \"1\"\ndigest = \"{}\"\nprogram = \"{PROGRAM}\"\n",
+        "0".repeat(64)
+    );
+    let mut f = File::create(MANIFEST).unwrap_or_else(|e| panic!("create {MANIFEST}: {e}"));
+    f.write_all(manifest.as_bytes()).unwrap_or_else(|e| panic!("write {MANIFEST}: {e}"));
+    f.sync_all().unwrap_or_else(|e| panic!("sync {MANIFEST}: {e}"));
+}
+
 fn main() {
-    // End 1: the first request on `/apps` is init's, resolving this launch.
-    match Command::new(LAUNCHED).status() {
-        Err(e) => println!("fs_restart: end 1: the launch of {LAUNCHED} was answered, refused ({e})"),
-        Ok(status) => panic!("{LAUNCHED}, which no package answers for, ran and exited {status}"),
+    if std::env::args().nth(1).as_deref() == Some(LAUNCHED) {
+        println!("fs_restart: running from {PROGRAM}");
+        return;
     }
+
+    // Ends 1 and 2: init's reads of the manifest and of the image.
+    install();
+    let status =
+        Command::new(PROGRAM).arg(LAUNCHED).status().unwrap_or_else(|e| panic!("launch {PROGRAM}: {e}"));
+    assert!(status.success(), "{PROGRAM}, launched across two ends, exited {status}");
+    println!("fs_restart: ends 1 and 2: the launch of {PROGRAM} was answered and it ran");
 
     fs::create_dir_all("/home/fs_restart").expect("make /home/fs_restart");
     let mut f = File::create(KEPT).expect("create the kept file");
@@ -75,29 +105,7 @@ fn main() {
     let mut across = File::create(ACROSS).expect("create the file written across the end");
     across.write_all(BEFORE).expect("write before the end");
     across.sync_all().expect("durable before the end");
-
-    end_the_server(2);
-
-    // The same files, unchanged at their paths, and still `Gone`.
-    match held.read(&mut [0u8; 16]) {
-        Err(e) if e.kind() == ErrorKind::StaleNetworkFileHandle => {}
-        other => panic!("a handle held across the end read {other:?}, not Gone"),
-    }
-    match across.write_all(b"written through a handle held across the end") {
-        Err(e) if e.kind() == ErrorKind::StaleNetworkFileHandle => {}
-        other => panic!("a handle held across the end wrote {other:?}, not Gone"),
-    }
-    drop((held, across));
-    let mut back = Vec::new();
-    File::open(KEPT).and_then(|mut f| f.read_to_end(&mut back)).expect("a new open reads the kept file");
-    assert!(back == kept(), "a new open read {} bytes, not the kept file", back.len());
-    let mut whole = Vec::new();
-    File::open(ACROSS).and_then(|mut f| f.read_to_end(&mut whole)).expect("read the file held across");
-    assert_eq!(whole, BEFORE, "the file held across the end");
-    println!("fs_restart: the server came back; held handles answered Gone, a new open read the flushed file");
-
-    // Another file renamed over the one `across` holds, durably, and then an end.
-    let mut across = OpenOptions::new().write(true).open(ACROSS).expect("hold the file again");
+    // Another file renamed over the one `across` holds, durably.
     let mut replacement = File::create(REPLACEMENT).expect("create the replacement");
     replacement.write_all(REPLACING).expect("write the replacement");
     replacement.sync_all().expect("the replacement is durable");
@@ -107,6 +115,10 @@ fn main() {
 
     end_the_server(3);
 
+    match held.read(&mut [0u8; 16]) {
+        Err(e) if e.kind() == ErrorKind::StaleNetworkFileHandle => {}
+        other => panic!("a handle held across the end read {other:?}, not Gone"),
+    }
     match across.write_all(b"written into whatever is at the path now") {
         Err(e) if e.kind() == ErrorKind::StaleNetworkFileHandle => {
             println!("fs_restart: a handle on a file renamed over is answered Gone ({e})");
@@ -114,6 +126,15 @@ fn main() {
         Err(e) => panic!("a handle on a file renamed over was refused {e} ({:?}), not Gone", e.kind()),
         Ok(()) => panic!("a handle on a file renamed over wrote into the file now at its path"),
     }
+    drop((held, across));
+    let mut back = Vec::new();
+    File::open(KEPT).and_then(|mut f| f.read_to_end(&mut back)).expect("a new open reads the kept file");
+    assert!(back == kept(), "a new open read {} bytes, not the kept file", back.len());
+    let mut whole = Vec::new();
+    File::open(ACROSS).and_then(|mut f| f.read_to_end(&mut whole)).expect("read the file at the held path");
+    assert_eq!(whole, REPLACING, "the file at the path a handle held across the end");
+    println!("fs_restart: the server came back; held handles answered Gone, a new open read the flushed file");
+
     let mut held = File::open(KEPT).expect("hold the kept file for the last end");
 
     end_the_server(4);

@@ -464,6 +464,9 @@ const RUST_SKIP: &[&str] = &[
     // Needs a boot whose file servers are armed to end under its write, and
     // ends DATA's for the rest of the boot. `fsd_restart` runs it.
     "fs_restart",
+    // Holds every DATA client slot while it runs, so no other program may
+    // need DATA on its boot. `fsd_restart` runs it.
+    "fs_client_bound",
     // Needs a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
     "home_overwrite_zero",
     // Needs a boot where the DATA volume is ours and absent; on the shared
@@ -1706,7 +1709,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
     ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
     ("so_cache_refusals", &["test_rs_so_cache_policy"]),
-    ("fsd_restart", &["test_rs_fs_restart"]),
+    ("fsd_restart", &["test_rs_fs_client_bound", "test_rs_fs_restart"]),
     ("esp_filesystem", &["test_rs_esp_files"]),
     ("log_flush_retry", &["test_rs_esp_files"]),
     ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),

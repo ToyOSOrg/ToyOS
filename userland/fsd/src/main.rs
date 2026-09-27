@@ -7,7 +7,7 @@
 //! nothing else of the machine. Argv is the role, and for LOG and BOOT the
 //! unique GUID of the partition the loader named for it when no claim on it
 //! was minted; then the row's own arguments, which are tests' actuators
-//! ([`END_ON`], [`END_AT_REQUEST`]).
+//! ([`END_ON`], [`END_AT_READ`]).
 //!
 //! **A connection is bound to the directory whose port it came in on**, and
 //! every path on it is resolved there (`fsd::resolve`); a write on a read-only
@@ -85,12 +85,13 @@ const RAM_BLOCKS: u64 = 1 << 18;
 /// stages one. Armed by nothing but a boot config's `args`.
 const END_ON: &str = "--end-on";
 
-/// `--end-at-request <dir>`: the first request on `dir`'s port this boot after
-/// a hello ends this process before it is answered — a server killed under a
-/// client that holds a connection, whose retry connects again and waits in the
-/// port's queue, as a test stages one. Once a boot, across restarts: the
-/// kernel's `/tmp` keeps the mark. Armed by nothing but a boot config's `args`.
-const END_AT_REQUEST: &str = "--end-at-request";
+/// `--end-at-read <path>`, repeatable: the first open of `path` on the volume
+/// to read only, this boot, ends this process before it is answered — a
+/// server killed under a client that holds a connection, whose retry connects
+/// again and waits in the port's queue, as a test stages one. Once a boot per
+/// path, across restarts: the kernel's `/tmp` keeps the mark. Armed by nothing
+/// but a boot config's `args`.
+const END_AT_READ: &str = "--end-at-read";
 
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
@@ -177,14 +178,13 @@ fn main() {
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
         panic!("fsd: started with {args:?}; the first argument is a role: data, log or boot")
     });
-    let (mut guid, mut end_on, mut end_at_request) = (None, None, None);
+    let (mut guid, mut end_on, mut end_at_read) = (None, None, Vec::new());
     let mut rest = args.iter().skip(2);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             END_ON => end_on = Some(rest.next().unwrap_or_else(|| panic!("fsd: {END_ON} takes a path")).clone()),
-            END_AT_REQUEST => {
-                end_at_request =
-                    Some(rest.next().unwrap_or_else(|| panic!("fsd: {END_AT_REQUEST} takes a directory")).clone())
+            END_AT_READ => {
+                end_at_read.push(rest.next().unwrap_or_else(|| panic!("fsd: {END_AT_READ} takes a path")).clone())
             }
             flag if flag.starts_with("--") => panic!("fsd: {flag} is no argument of this server"),
             named if guid.is_none() => guid = Some(named),
@@ -210,7 +210,7 @@ fn main() {
         next_stream: 0,
         dirty_since: None,
         end_on,
-        end_at_request,
+        end_at_read,
         probe: Poller::new(caps_len),
         scratch: Vec::new(),
     }
@@ -357,8 +357,8 @@ struct Server {
     dirty_since: Option<Instant>,
     /// [`END_ON`]'s path on the volume.
     end_on: Option<String>,
-    /// [`END_AT_REQUEST`]'s directory.
-    end_at_request: Option<String>,
+    /// [`END_AT_READ`]'s paths on the volume.
+    end_at_read: Vec<String>,
     /// Asks an acceptor whether a connection waits, before [`Server::accept`]
     /// takes it.
     probe: Poller,
@@ -385,21 +385,21 @@ fn stat_reply(meta: Meta) -> Reply {
     Reply { kind: meta.kind.wire(), value2: meta.size, mtime: meta.mtime, ..Reply::ok() }
 }
 
-/// Whether this is [`END_AT_REQUEST`]'s first firing this boot for `dir`: its
+/// Whether this is [`END_AT_READ`]'s first firing this boot for `path`: its
 /// mark is made once in the kernel's `/tmp`, which outlives this process and
 /// not the boot. Looked for and then made, not made exclusively — the std
 /// fork's `create_new` on a kernel path is not exclusive — which one server
 /// of a role at a time makes safe. A mark that can be neither found nor made
 /// is an actuator that cannot do its one job.
-fn first_request_this_boot(dir: &str) -> bool {
-    let mark = format!("/tmp/fsd-end-at-request{}", dir.replace('/', "-"));
+fn first_read_this_boot(path: &str) -> bool {
+    let mark = format!("/tmp/fsd-end-at-read-{}", path.replace('/', "-"));
     match std::fs::metadata(&mark) {
         Ok(_) => false,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::write(&mark, b"").unwrap_or_else(|e| panic!("fsd: {END_AT_REQUEST}: its mark {mark}: {e}"));
+            std::fs::write(&mark, b"").unwrap_or_else(|e| panic!("fsd: {END_AT_READ}: its mark {mark}: {e}"));
             true
         }
-        Err(e) => panic!("fsd: {END_AT_REQUEST}: its mark {mark} would not be looked up: {e}"),
+        Err(e) => panic!("fsd: {END_AT_READ}: its mark {mark} would not be looked up: {e}"),
     }
 }
 
@@ -631,11 +631,6 @@ impl Server {
         if self.clients[&id].window.is_none() {
             return Answer::Drop("it asked before it lent a window");
         }
-        let dir = &self.caps[self.clients[&id].cap].dir;
-        if self.end_at_request.as_ref() == Some(dir) && first_request_this_boot(dir) {
-            println!("fsd: {END_AT_REQUEST}: ending before {dir}'s first request is answered");
-            std::process::exit(1);
-        }
         match self.serve_one(id, op, r) {
             Ok(answer) => answer,
             Err(e) => Answer::Reply(Reply::refused(e)),
@@ -676,6 +671,11 @@ impl Server {
                     Resolved::Absolute(p) => return Ok(self.link(id, &p)),
                     Resolved::Path(p) => p,
                 };
+                let reads_only = r.flags & (O_WRITE | O_APPEND | O_CREATE | O_TRUNCATE | O_CREATE_NEW) == 0;
+                if reads_only && self.end_at_read.contains(&path) && first_read_this_boot(&path) {
+                    println!("fsd: {END_AT_READ}: ending before the first read of {path} is answered");
+                    std::process::exit(1);
+                }
                 if self.clients[&id].fids.len() >= MAX_FIDS {
                     return Err(SyscallError::ResourceExhausted);
                 }

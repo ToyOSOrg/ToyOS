@@ -610,14 +610,17 @@ pub fn home_overwrite_reads_back(
 /// budget, its directories answer `Gone`. Judged off the device.
 ///
 /// `tests/fsdrestartcase` arms every file server to end under a write to
-/// `/home/fsd_end` (`--end-on`) and at the first request on `/apps`
-/// (`--end-at-request`), and `test_rs_fs_restart` ends DATA's four times, the
-/// first under init's own resolution of a launch: the guest asserts what a
-/// client sees, init's and fsd's own lines say who ended and who started
-/// again, and with the machine down the DATA partition is read by this
-/// crate's own build of the `bcachefs` reader over a plain seek-and-read of
-/// the image — nothing the guest executed. The flushed file holds its bytes
-/// there.
+/// `/home/fsd_end` (`--end-on`) and at the first read of an installed
+/// package's manifest and binary (`--end-at-read`), and `test_rs_fs_restart`
+/// ends DATA's four times, the first two under init's own resolution of a
+/// launch and its read of the image: the guest asserts what a client sees,
+/// init's and fsd's own lines say who ended and who started again, and with
+/// the machine down the DATA partition is read by this crate's own build of
+/// the `bcachefs` reader over a plain seek-and-read of the image — nothing the
+/// guest executed. The flushed file holds its bytes there.
+///
+/// `test_rs_fs_client_bound` runs first on the same boot, which nothing else
+/// needs DATA on while it holds every client slot.
 pub fn fsd_restart(
     _test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -642,6 +645,10 @@ pub fn fsd_restart(
     if !boot.contains(MOUNTED) && !boot.contains("formatting it") {
         return Err(format!("fsd served DATA from no partition, so nothing here reaches a device:\n{boot}"));
     }
+    let bound = qemu.run_test("test_rs_fs_client_bound", Duration::from_secs(60));
+    if bound.exit_code != Some(0) || !bound.stdout.contains("fs_client_bound: PASS") {
+        return Err(format!("fs_client_bound guest failed:\n{}\nconsole:\n{}{}", bound.stdout, bound.before, bound.serial));
+    }
     let result = qemu.run_test("test_rs_fs_restart", Duration::from_secs(120));
     let image = qemu.nvme_image().to_path_buf();
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
@@ -649,18 +656,21 @@ pub fn fsd_restart(
     let tail = qemu.drain_serial(Duration::from_secs(20));
     drop(qemu);
     // The console once: `stdout` is the same lines again, unprefixed.
-    let log = format!("{boot}\n{}{}{tail}", result.before, result.serial);
+    let log = format!("{boot}\n{}{}{}{}{tail}", bound.before, bound.serial, result.before, result.serial);
     if result.exit_code != Some(0) || !result.stdout.contains("fs_restart: PASS") {
         return Err(format!("fs_restart guest failed:\n{}\nconsole:\n{log}", result.stdout));
     }
     let console = super::serial::Serial::named("fsd_restart", log.as_str());
     let ended = log.matches("fsd: --end-on: ending with a write done and unanswered").count();
-    if ended != 3 {
-        return Err(format!("fsd said it ended under a write {ended} times, not the guest's 3:\n{log}"));
+    if ended != 2 {
+        return Err(format!("fsd said it ended under a write {ended} times, not the guest's 2:\n{log}"));
     }
-    let at_request = log.matches("fsd: --end-at-request: ending before /apps's first request is answered").count();
-    if at_request != 1 {
-        return Err(format!("fsd said it ended under a request {at_request} times, not the launch's 1:\n{log}"));
+    for read in ["apps/fs_restart/manifest.toml", "apps/fs_restart/fs_restart"] {
+        let said = format!("fsd: --end-at-read: ending before the first read of {read} is answered");
+        let at_read = log.matches(&said).count();
+        if at_read != 1 {
+            return Err(format!("fsd said {said:?} {at_read} times, not the launch's 1:\n{log}"));
+        }
     }
     let restarted = log.lines().filter(|l| l.contains("init: fsd data (pid ") && l.contains("ended; started again")).count();
     if restarted != 3 {
@@ -684,10 +694,10 @@ pub fn fsd_restart(
         }
     }
     eprintln!(
-        "  [fsd] DATA's server ended four times, the first under init's resolution of a launch that \
-         was answered; started again three, every handle held across an end answered Gone, new \
-         opens answered, the fourth closed /home to Gone; {KEPT} and {ACROSS} read back off the \
-         image by the host's own bcachefs reader"
+        "  [fsd] DATA's server ended four times, the first two under init's resolution and image \
+         read of a launch that was answered; started again three, every handle held across an \
+         end answered Gone, new opens answered, the fourth closed /home to Gone; {KEPT} and \
+         {ACROSS} read back off the image by the host's own bcachefs reader"
     );
     Ok(())
 }
