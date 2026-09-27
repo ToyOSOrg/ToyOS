@@ -554,6 +554,8 @@ impl H {
             self.t = self.spec_time(self.now);
             self.tcp.fire(self.now);
             outs.extend(self.transmit());
+            let next = self.tcp.next_deadline();
+            assert!(next.is_none_or(|n| n > self.now), "the timer due at {deadline:?} did not fire");
         }
         self.t = t;
         self.now = self.instant(t);

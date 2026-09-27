@@ -356,17 +356,15 @@ fn s_net_016_a_peer_without_options() {
     assert!(net.wire.iter().filter(|(_, o)| o.flags & SYN == 0).all(|(_, o)| o.ts.is_none() && o.sack.is_empty()));
 }
 
-/// PL-11: 100 connections on one shard each write 64 KiB at once through a device that takes 16
-/// frames a millisecond. Timers start at hand-off, so none fires for a segment still waiting;
-/// the `mutate-egress-push` control makes `tcp.rto-unsent` count.
-#[test]
-fn s_pl_011_many_up() {
+/// 100 connections on one shard each write 64 KiB at once through a device taking `frames` a
+/// millisecond. Returns expiries and retransmissions handed off.
+fn many_up(frames: usize) -> (u64, u64) {
     let mut net = Net::new(10);
     net.connections(100, 80, [64 * 1024, 0]);
-    net.nodes[0].credit_per_ms = Some(16);
+    net.nodes[0].credit_per_ms = Some(frames);
     net.keep_wire = true;
     finish(&mut net);
-    assert_eq!(net.count(0, Counter::RtoUnsent), 0);
+    assert_eq!(net.count(0, Counter::RtoUnsent), 0, "an RTO fired for a segment that had not left");
     let mut highest: HashMap<u16, u32> = HashMap::new();
     let mut retransmissions = 0u64;
     for (from, o) in &net.wire {
@@ -381,7 +379,19 @@ fn s_pl_011_many_up() {
             }
         }
     }
-    assert!(net.count(0, Counter::Rto) <= retransmissions, "{} expiries, {retransmissions} retransmissions", net.count(0, Counter::Rto));
+    let expiries = net.count(0, Counter::Rto);
+    assert!(expiries <= retransmissions, "{expiries} expiries, {retransmissions} retransmissions");
+    (expiries, retransmissions)
+}
+
+/// PL-11, and the same at 4 frames a millisecond. At 16 the backlog a push model builds (an
+/// initial window per connection, 1000 segments) drains in 62 ms, inside the 200 ms RTO floor, so
+/// neither model would fire; at 4 it takes 250 ms, and the `mutate-egress-push` control makes
+/// `tcp.rto-unsent` count.
+#[test]
+fn s_pl_011_many_up() {
+    many_up(16);
+    many_up(4);
 }
 
 #[test]

@@ -126,6 +126,8 @@ pub struct Net {
     /// Applications shut their write side once their stream is written.
     pub auto_shut: bool,
     pending_accepts: Vec<(ListenerId, usize)>,
+    /// When timers last fired: a deadline still due then is a timer that does not fire.
+    fired_at: Option<u64>,
 }
 
 pub fn ns(ms: u64) -> u64 {
@@ -170,6 +172,7 @@ impl Net {
             local_port: None,
             auto_shut: true,
             pending_accepts: Vec::new(),
+            fired_at: None,
         }
     }
 
@@ -365,6 +368,10 @@ impl Net {
     }
 
     fn next_event(&self) -> Option<u64> {
+        for (i, node) in self.nodes.iter().enumerate() {
+            let due = node.tcp.next_deadline().map(|d| d.nanos() - node.offset);
+            assert!(due.is_none_or(|d| d > self.now || self.fired_at != Some(self.now)), "node {i}'s timer due at {due:?} did not fire");
+        }
         let flight = self.in_flight.iter().map(|f| f.at).min();
         let timers = (0..2).filter_map(|i| self.nodes[i].tcp.next_deadline().map(|d| d.nanos() - self.nodes[i].offset)).min();
         let credit = self.nodes.iter().any(|n| n.credit_per_ms.is_some()).then(|| (self.now / 1_000_000 + 1) * 1_000_000);
@@ -386,6 +393,7 @@ impl Net {
             let now = self.instant(node);
             self.nodes[node].tcp.fire(now);
         }
+        self.fired_at = Some(self.now);
         self.drive_apps();
         for node in 0..2 {
             self.transmit(node);

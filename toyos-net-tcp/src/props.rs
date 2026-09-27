@@ -10,13 +10,22 @@ use core::net::Ipv4Addr;
 use core::time::Duration;
 use std::collections::HashMap;
 
-use toyos_net_wire::checksum::{Accumulator, PseudoHeader};
-use toyos_net_wire::ipv4::{Form, Ipv4Builder, Ipv4Packet, Ipv4Source, Protocol, TrafficClass, Ttl};
+use toyos_net_wire::ipv4::{Form, Ipv4Builder, Ipv4Packet, Ipv4Source, TrafficClass, Ttl};
 use toyos_net_wire::tcp::TcpSegment;
 use toyos_net_wire::Port;
 
 use crate::seq::Seq;
 use crate::{Config, ConnId, Endpoint, Error, Event, Instant, Received, Secrets, Tcp, Tuple};
+
+/// RFC 1071, written apart from the wire crate's.
+fn checksum(chunks: &[&[u8]]) -> u16 {
+    let bytes = chunks.concat();
+    let mut sum = bytes.chunks(2).fold(0u32, |s, pair| s + (u32::from(pair[0]) << 8 | u32::from(*pair.get(1).unwrap_or(&0))));
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
 
 const ADDR: [Ipv4Addr; 2] = [Ipv4Addr::new(192, 0, 2, 1), Ipv4Addr::new(192, 0, 2, 2)];
 
@@ -279,6 +288,7 @@ impl Pair {
             for node in 0..2 {
                 let now = self.instant();
                 self.tcp[node].fire(now);
+                assert!(self.tcp[node].next_deadline().is_none_or(|d| d > now), "a timer due at {now:?} did not fire");
             }
             self.check();
             self.deliver_due();
@@ -604,14 +614,14 @@ impl Pair {
         tcp.extend_from_slice(&[0, 0, 0, 0]);
         tcp.extend_from_slice(&options);
         tcp.extend_from_slice(&payload);
-        let pseudo = PseudoHeader { source: tuple.remote.addr, destination: tuple.local.addr, protocol: Protocol::Tcp, length: tcp.len() as u16 };
-        let sum = pseudo.accumulator().feed(&tcp).sum().checksum().to_be_bytes();
+        let length = (tcp.len() as u16).to_be_bytes();
+        let sum = checksum(&[&tuple.remote.addr.octets(), &tuple.local.addr.octets(), &[0, 6], &length, &tcp]).to_be_bytes();
         tcp[16..18].copy_from_slice(&sum);
         let mut ip = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0];
         ip[2..4].copy_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
         ip.extend_from_slice(&tuple.remote.addr.octets());
         ip.extend_from_slice(&tuple.local.addr.octets());
-        let sum = Accumulator::new().feed(&ip).sum().checksum().to_be_bytes();
+        let sum = checksum(&[&ip]).to_be_bytes();
         ip[10..12].copy_from_slice(&sum);
         ip.extend_from_slice(&tcp);
         let packet = Ipv4Packet::parse(&ip).unwrap();
