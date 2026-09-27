@@ -43,7 +43,7 @@ pub const DISABLED: &[Disabled] = &[
     Disabled { test: "hda_tone", issue: "issues/audio/hda-tone-phase-check.md" },
     Disabled {
         test: "i8042_mouse",
-        issue: "issues/hardware/i8042-mouse-loses-a-packet-under-host-contention.md",
+        issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
     },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },

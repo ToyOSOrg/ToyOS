@@ -1,58 +1,67 @@
-//! A Unix-domain socket path short enough for any `$TMPDIR` a host might hand
-//! out.
-//!
-//! Darwin's `sockaddr_un.sun_path` holds 104 bytes, NUL included — Linux's
-//! holds 108 — and a macOS `$TMPDIR`
-//! (`/private/var/folders/<2>/<27ish random>/T`) plus this project's own lane
-//! path (`toyos-tmp-<pid>-<n>/tests-<n>/lane-<n>/`) can already spend every one
-//! of those 104 bytes before a filename is added: seen on `lan_mdns_answer`,
-//! `connect to QEMU's /private/var/folders/.../T/toyos-tmp-55923-0/tests-0/lane-2/tap-out-0.sock:
-//! path must be shorter than SUN_LEN`. [`short`] sits under `/tmp` directly —
-//! not `$TMPDIR`, whose canonicalized macOS form is what grew that deep — so a
-//! caller never inherits the host's own `$TMPDIR` depth.
+//! A Unix-domain socket's name that fits `sockaddr_un.sun_path` on every host,
+//! and is gone when its holder is.
 
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
-/// Darwin's `sockaddr_un.sun_path`, the tighter of the two platforms this
-/// project runs guests on; a path under this fits Linux's 108-byte one too.
-const DARWIN_SUN_PATH: usize = 104;
+/// A socket name under `/tmp`, removed when this is dropped: on a return and on
+/// a panic's unwind alike.
+#[derive(Debug)]
+pub struct Socket(PathBuf);
 
-/// A path for a Unix-domain socket named `label`, this process's `n`th one.
-/// Short on every host: fixed at `/tmp`, never `$TMPDIR`.
-pub fn short(label: &str, n: u32) -> PathBuf {
+impl Socket {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => {}
+            // Whoever was to bind it never ran, or unlinked it on its way out.
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            // A second panic here would abort and lose the first one's message.
+            Err(e) if std::thread::panicking() => eprintln!("remove {}: {e}", self.0.display()),
+            Err(e) => panic!("remove {}: {e}", self.0.display()),
+        }
+    }
+}
+
+/// This process's `n`th socket named `label`. Under `/tmp` and never `$TMPDIR`,
+/// whose depth is the host's to choose.
+pub fn short(label: &str, n: u32) -> Socket {
     let path = PathBuf::from(format!("/tmp/toyos-{label}-{}-{n}.sock", std::process::id()));
-    assert!(
-        path.as_os_str().len() < DARWIN_SUN_PATH,
-        "{path:?} does not fit a {DARWIN_SUN_PATH}-byte sockaddr_un.sun_path"
-    );
-    path
+    // A run killed before its drop left this name, under a pid now reused.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => panic!("remove the stale {}: {e}", path.display()),
+    }
+    Socket(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The exact shape the failure was seen under: a macOS `$TMPDIR` plus this
-    /// project's lane path already fills every byte `sockaddr_un.sun_path`
-    /// gives it, with nothing left for a filename — the old construction this
-    /// module replaces.
-    #[test]
-    fn the_lane_path_a_typical_macos_tmpdir_produced_did_not_fit() {
-        let tmpdir = "/private/var/folders/gr/mr4_fg4n34jb417sx1g5cgxc0000gp/T";
-        let old = format!("{tmpdir}/toyos-tmp-55923-0/tests-0/lane-2/tap-out-0.sock");
-        assert!(
-            old.len() >= DARWIN_SUN_PATH,
-            "{old:?} ({} bytes) was expected to no longer fit, and does",
-            old.len()
-        );
-    }
+    /// Darwin's `sockaddr_un.sun_path`, NUL included; Linux's is 108.
+    const DARWIN_SUN_PATH: usize = 104;
 
-    /// [`short`] never depends on `$TMPDIR`, so a six-digit pid and a sequence
-    /// number both past anything this harness has produced yet still fit.
     #[test]
     fn a_short_path_fits_regardless_of_the_hosts_tmpdir() {
-        let path = short("tap-out", 999_999);
+        let socket = short("tap-out", u32::MAX);
+        let path = socket.path();
         assert!(path.as_os_str().len() < DARWIN_SUN_PATH, "{path:?}");
         assert!(path.starts_with("/tmp"), "{path:?}");
+    }
+
+    #[test]
+    fn a_dropped_socket_takes_its_name_with_it() {
+        let socket = short("drop", u32::MAX);
+        let path = socket.path().to_path_buf();
+        std::fs::write(&path, b"").expect("stand in for the bound socket");
+        drop(socket);
+        assert!(!path.exists(), "{path:?} outlived its holder");
     }
 }

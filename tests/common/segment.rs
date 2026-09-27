@@ -12,37 +12,25 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Instant;
 
 use toyos_build::icmp::checksum;
+use toyos_build::socketpath::{self, Socket};
 
-/// The two sockets QEMU serves the segment on, which [`super::qemu::BootOptions`]
-/// carries into the argv.
-#[derive(Clone, Debug)]
+/// The two sockets QEMU serves the segment on, held by the
+/// [`super::qemu::QemuInstance`] that booted with them.
+#[derive(Debug)]
 pub struct Tap {
-    into_guest: PathBuf,
-    from_guest: PathBuf,
+    into_guest: Socket,
+    from_guest: Socket,
 }
 
 impl Tap {
-    /// Two socket paths of this boot's own. **Not the lane directory**: a
-    /// macOS `$TMPDIR` plus this project's own lane path can already leave
-    /// nothing of Darwin's 104-byte `sockaddr_un.sun_path` for a filename
-    /// (`toyos_build::socketpath`), so these sit under `/tmp` directly, named
-    /// for this process and unique per tap.
-    pub fn in_lane() -> Self {
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let tap = Self {
-            into_guest: toyos_build::socketpath::short("tap-in", n),
-            from_guest: toyos_build::socketpath::short("tap-out", n),
-        };
-        let _ = std::fs::remove_file(&tap.into_guest);
-        let _ = std::fs::remove_file(&tap.from_guest);
-        tap
+    /// The two socket names of boot `seq`.
+    pub fn of_boot(seq: u32) -> Self {
+        Self { into_guest: socketpath::short("tap-in", seq), from_guest: socketpath::short("tap-out", seq) }
     }
 
     /// QEMU's half: two listening sockets, one filter each, both on `net0`. A
@@ -51,11 +39,11 @@ impl Tap {
     pub fn argv(&self) -> [String; 8] {
         [
             "-chardev".into(),
-            format!("socket,id=tapin,path={},server=on,wait=off", self.into_guest.display()),
+            format!("socket,id=tapin,path={},server=on,wait=off", self.into_guest.path().display()),
             "-object".into(),
             "filter-redirector,id=tapinf,netdev=net0,queue=tx,indev=tapin".into(),
             "-chardev".into(),
-            format!("socket,id=tapout,path={},server=on,wait=off", self.from_guest.display()),
+            format!("socket,id=tapout,path={},server=on,wait=off", self.from_guest.path().display()),
             "-object".into(),
             "filter-mirror,id=tapoutf,netdev=net0,queue=rx,outdev=tapout".into(),
         ]
@@ -65,15 +53,11 @@ impl Tap {
     /// sockets before the machine ran, so both connects answer at once; a frame
     /// the guest sent before them is not seen, and QEMU says so on its stderr.
     pub fn open(&self) -> Result<Segment, String> {
-        let connect = |path: &PathBuf| {
+        let connect = |path: &Path| {
             UnixStream::connect(path).map_err(|e| format!("connect to QEMU's {}: {e}", path.display()))
         };
-        let into = connect(&self.into_guest)?;
-        let mut from = connect(&self.from_guest)?;
-        // Both ends are open, and nothing else will ever connect to these
-        // names: `/tmp` is not this run's lane, so nothing else sweeps them.
-        let _ = std::fs::remove_file(&self.into_guest);
-        let _ = std::fs::remove_file(&self.from_guest);
+        let into = connect(self.into_guest.path())?;
+        let mut from = connect(self.from_guest.path())?;
         let (tx, frames) = mpsc::channel();
         std::thread::spawn(move || {
             let mut len = [0u8; 4];

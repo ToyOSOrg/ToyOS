@@ -62,7 +62,7 @@ pub fn dir() -> PathBuf {
 static RUN: OnceLock<PathBuf> = OnceLock::new();
 
 /// This run's hold on its scratch directory, from before the first boot to the
-/// exit: every image, boot log, screendump and socket of every lane is under
+/// exit: every image, boot log and screendump of every lane is under
 /// it, and it is gone when the run is, green or red (`toyos_tmpdir` is the
 /// policy, and what reclaims the directory of a run that was killed).
 ///

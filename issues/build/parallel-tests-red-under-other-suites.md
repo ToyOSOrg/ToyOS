@@ -50,29 +50,6 @@ changes.
   re-run. So it is not a tree difference and it is not gone — one packet in a
   thousand is still being lost, or still being counted wrong, under a host
   carrying two suites.
-  **A third sighting, 2026-09-27**, the orchestrator's Fast-tier run on PR
-  #537's head `06b926b1` (a diff that renames paths only and touches neither
-  the i8042 driver nor this test): `872 pointer events reached userland out of
-  876 packets injected, never more than 4 of them (12 bytes) outstanding
-  against a 16-byte device queue` — the identical shape and the identical
-  bound, four packets short this time rather than one. `cargo run --
-  --known-red i8042_mouse` answered NO. The host was carrying at least three
-  other worktrees' builds at the moment it fired
-  (`[host-builds] … all 4 held by 4 holder(s)`), consistent with this file's
-  keyboard-side finding elsewhere in this tree (`tests/common/qemu.rs`'s
-  `QmpInput::type_burst`): QEMU's PS/2 queue — the same `QEMU_PS2_QUEUE`
-  constant the mouse pacing budgets against — drops what a guest whose vCPU the
-  host has not run for a couple hundred milliseconds has not drained, silently
-  and one byte at a time. `MOUSE_LEAD` bounds what the *host* holds
-  outstanding; nothing bounds how long a starved host leaves it there before
-  the guest is scheduled again, which is a gap the keyboard's own bound does
-  not close either — it is closed by pacing against the guest's echo, which
-  the mouse path does not do. **Not established as this mechanism**: it
-  explains a loss under host contention without contradicting anything in the
-  capture, but nothing here identifies which byte QEMU actually dropped or
-  when. Disabled for this reason in `src/redlist.rs`
-  (`issues/hardware/i8042-mouse-loses-a-packet-under-host-contention.md`)
-  rather than re-run away a third time.
 - **`i8042_absent`** — same session, same shape, and it is `Sched::Serial`
   already, so intra-suite width is not what reaches it. The verdict is the
   guest's own `Boot: complete` on two boots with a 300 ms allowance; the landing
