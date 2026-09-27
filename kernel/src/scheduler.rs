@@ -503,7 +503,7 @@ pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
 
 /// Set a thread's kill bit and ask its CPU for a safe point; returns at once.
 pub fn post_retire(sched: &ThreadSched) {
-    if sched.handle.released() {
+    if !sched.handle.mark_killed() {
         return;
     }
     preempt_off(|p| {

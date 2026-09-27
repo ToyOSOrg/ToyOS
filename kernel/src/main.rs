@@ -672,6 +672,12 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     iod::start();
     reaper::start();
 
+    // Here: the last kernel thread is spawned.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::process_reopen_selftest() {
+        sched::kthread::open_selftest();
+    }
+
     smp::set_ready();
 
     // After the release, because a shootdown waits on CPUs that are not

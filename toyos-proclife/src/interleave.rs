@@ -20,6 +20,7 @@
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use std::collections::HashSet;
 
 use crate::model::World;
 use crate::table::{Lifecycle, Processes};
@@ -30,7 +31,7 @@ use crate::{join, reap, spawn, teardown, Pid, ThreadLocation, Tid, Watch};
 /// Each variant's `pc` is the number of lock sections it has completed, and
 /// every field beside it is a value the real path carries in a local across a
 /// lock release — which is the whole reason a window exists to explore.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Op {
     /// `process::release_process` + `teardown_tail`: a thread ending its own
     /// process.
@@ -54,7 +55,7 @@ pub enum Op {
 
 /// A claimed kill's teardown past its claim: wait out every thread's release,
 /// mark, publish.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finish {
     pid: Pid,
     code: i32,
@@ -150,11 +151,11 @@ impl Op {
         Op::IdlePass { pc: 0 }
     }
 
-    /// Whether the op has nothing left to do: the reaper is done whenever
-    /// nothing is owed to it.
+    /// Whether the op has nothing left to do: the reaper is done once it is
+    /// parked with nothing owed to it.
     fn done(&self, world: &World) -> bool {
         match self {
-            Op::Reap { job } => job.is_none() && world.nothing_owed(),
+            Op::Reap { job } => job.is_none() && world.reaper_asleep() && world.nothing_owed(),
             Op::Exit { pc, .. }
             | Op::Kill { pc, .. }
             | Op::Spawn { pc, .. }
@@ -172,7 +173,7 @@ impl Op {
             }
             Op::Kill { inline: Some(finish), .. } => finish.enabled(world),
             Op::Reap { job: Some(finish) } => finish.enabled(world),
-            Op::Reap { job: None } => world.owes_a_released(),
+            Op::Reap { job: None } => !world.reaper_asleep(),
             _ => true,
         }
     }
@@ -264,13 +265,16 @@ impl Op {
                             *pc = 1;
                         }
                     }
-                } else {
-                    // Every retire posted, the wait handed on, and the kill
-                    // returns.
+                } else if *pc == 1 {
                     for &tid in tids.iter() {
                         world.post_retire(*pid, tid);
                     }
+                    *pc = 2;
+                } else if *pc == 2 {
                     world.owe(*pid, *code, core::mem::take(tids));
+                    *pc = if by.is_some() { 3 } else { DONE };
+                } else {
+                    // The kill returned, and its thread reaches its safe point.
                     *pc = DONE;
                 }
                 if *pc == DONE {
@@ -280,7 +284,7 @@ impl Op {
                 }
             }
             Op::Reap { job } => match job {
-                None => *job = Some(Finish::released(world.take_released().expect("enabled with none released"))),
+                None => *job = world.reaper_takes().map(Finish::released),
                 Some(finish) => {
                     if finish.step(world) {
                         *job = None;
@@ -374,13 +378,14 @@ impl Op {
 
 const DONE: u32 = u32::MAX;
 
-/// How many schedules ran, or the first one that breaks a law.
+/// How many distinct states every schedule reaches, or the first schedule that breaks a law.
 ///
 /// Depth-first over "which op runs its next lock section", checking
 /// `World::faults` at every state and `World::final_faults` at every leaf; a
-/// state where no unfinished op can move is a deadlock. The returned string is
-/// the schedule that produced it, in the order the ops ran.
-pub fn explore(initial: &World, ops: &[Op]) -> Result<u64, String> {
+/// state where no unfinished op can move is a deadlock. A state reached before
+/// is not walked again: every law is a property of the state alone. The
+/// returned string is the schedule that produced it, in the order the ops ran.
+pub fn explore(initial: &World, ops: &[Op]) -> Result<usize, String> {
     let mut world = initial.clone();
     for op in ops {
         if let Op::Kill { by: Some(by), .. } = op {
@@ -388,16 +393,18 @@ pub fn explore(initial: &World, ops: &[Op]) -> Result<u64, String> {
         }
     }
     let mut trace = Vec::new();
-    let mut schedules = 0;
-    match walk(world, ops.to_vec(), &mut trace, &mut schedules) {
+    let mut seen = HashSet::new();
+    match walk(world, ops.to_vec(), &mut trace, &mut seen) {
         Some(found) => Err(found),
-        None => Ok(schedules),
+        None => Ok(seen.len()),
     }
 }
 
-fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>, schedules: &mut u64) -> Option<String> {
+fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>, seen: &mut HashSet<(World, Vec<Op>)>) -> Option<String> {
+    if !seen.insert((world.clone(), ops.clone())) {
+        return None;
+    }
     if ops.iter().all(|op| op.done(&world)) {
-        *schedules += 1;
         let faults = world.final_faults();
         return report(&faults, trace);
     }
@@ -417,7 +424,7 @@ fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>, schedules: &mut u64
             trace.pop();
             return Some(found);
         }
-        if let Some(found) = walk(next_world, next_ops, trace, schedules) {
+        if let Some(found) = walk(next_world, next_ops, trace, seen) {
             trace.pop();
             return Some(found);
         }
@@ -702,7 +709,7 @@ mod tests {
             Op::reap(),
         ];
         match explore(&world, &ops) {
-            Ok(schedules) => std::println!("KillEachOther: {schedules} schedules, every one ends"),
+            Ok(states) => std::println!("KillEachOther: {states} states, every schedule ends"),
             Err(found) => panic!("a lifecycle law broke:\n{found}"),
         }
     }

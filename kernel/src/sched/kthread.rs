@@ -126,6 +126,20 @@ pub fn runs_through_the_stop(id: TaskId) -> bool {
         .any(|row| row.task.load(Ordering::Acquire) == packed && !row.stops.load(Ordering::Relaxed))
 }
 
+/// Control for `process::process_object`'s refusal: no kernel thread's pid names a process a handle could hold.
+#[cfg(feature = "boot-actuators")]
+pub fn open_selftest() {
+    let pids: Vec<_> = ROWS
+        .iter()
+        .map(|row| row.task.load(Ordering::Acquire))
+        .filter(|&task| task != NO_TASK && task != CLAIMING)
+        .map(|task| TaskId::unpack(task).0)
+        .collect();
+    let opened = pids.iter().filter(|&&pid| crate::process::process_object(pid).is_some()).count();
+    let verdict = if !pids.is_empty() && opened == 0 { "PASS" } else { "FAIL" };
+    crate::log!("process-open-kthread: {verdict} ({} kernel threads, {opened} opened)", pids.len());
+}
+
 /// Whether a panic on the running task recovers; `None` unless it is a kernel thread.
 pub fn panic_recovers_here() -> Option<bool> {
     Some(current_row()?.recoverable.load(Ordering::Relaxed) != 0)

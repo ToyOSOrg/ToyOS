@@ -669,10 +669,14 @@ pub fn try_for_each_thread(mut f: impl FnMut(ThreadCensus<'_>)) -> bool {
 }
 
 /// The object a handle to `pid` would name, for a process still in the table.
+/// A kernel thread's pid names none: it has no Ring 3 boundary a kill could end it at.
 pub fn process_object(pid: Pid) -> Option<Arc<crate::object::process::ProcessObject>> {
     let guard = PROCESS_TABLE.lock();
-    let table = guard.as_ref()?;
-    table.get(pid).map(|proc| Arc::clone(proc.object()))
+    let proc = guard.as_ref()?.get(pid)?;
+    if crate::sched::kthread::is_kernel_task(TaskId(pid, proc.main_tid())) {
+        return None;
+    }
+    Some(Arc::clone(proc.object()))
 }
 
 /// Accounting for a process. `None` only in the window between a live process and its published exit (the process being torn down right now).

@@ -17,10 +17,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::table::{Lifecycle, Processes};
-use crate::{Pid, ThreadLocation, Tid, Watch};
+use crate::{teardown, Pid, ThreadLocation, Tid, Watch};
 
 /// One process, as its lifecycle sees it.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ModelProc {
     main_tid: Tid,
     tearing_down: bool,
@@ -61,7 +61,7 @@ impl Lifecycle for ModelProc {
 }
 
 /// The table, plus the effects the kernel would have performed.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct World {
     procs: BTreeMap<Pid, ModelProc>,
     next_pid: Pid,
@@ -85,6 +85,8 @@ pub struct World {
     in_kernel: BTreeSet<(Pid, Tid)>,
     /// Teardowns a kill handed to the reaper, oldest first: the process, its code, its threads.
     owed: VecDeque<(Pid, i32, Vec<Tid>)>,
+    /// The reaper is parked on `ANY_RELEASED` and nothing has posted it since it armed.
+    reaper_asleep: bool,
     /// Entries an idle pass has taken out of the table.
     reaped: BTreeSet<Pid>,
     /// TLS blocks a spawn's phase 2 mapped and no thread owns yet.
@@ -124,6 +126,7 @@ impl World {
             killed: BTreeSet::new(),
             in_kernel: BTreeSet::new(),
             owed: VecDeque::new(),
+            reaper_asleep: true,
             reaped: BTreeSet::new(),
             tls_mapped: BTreeSet::new(),
             next_tls: 0,
@@ -227,9 +230,14 @@ impl World {
     /// — "the same subject a joiner uses, and the reason the release no longer
     /// needs a queue of its own" (`kernel/src/sched/payload.rs`). A model
     /// without it strands joiners the kernel releases.
+    ///
+    /// A killed thread's release also posts `ANY_RELEASED`, the reaper's watch.
     pub fn retire(&mut self, pid: Pid, tid: Tid) {
         self.retired.insert((pid, tid));
         self.post(Watch::Thread(pid, tid));
+        if self.killed.contains(&(pid, tid)) {
+            self.reaper_asleep = false;
+        }
     }
 
     /// A thread that has committed to leaving but whose payload the exit pass
@@ -277,16 +285,18 @@ impl World {
     /// `reaper::owe`.
     pub fn owe(&mut self, pid: Pid, code: i32, tids: Vec<Tid>) {
         self.owed.push_back((pid, code, tids));
+        self.reaper_asleep = false;
     }
 
-    /// The reaper's take: the oldest owed kill whose every thread is retired.
-    pub fn take_released(&mut self) -> Option<(Pid, i32, Vec<Tid>)> {
-        let at = self.owed.iter().position(|owed| self.all_retired(owed))?;
-        self.owed.remove(at)
+    /// The reaper's check, after it armed: the kill it takes, or `None` and it parks.
+    pub fn reaper_takes(&mut self) -> Option<(Pid, i32, Vec<Tid>)> {
+        let at = teardown::next_released(self.owed.iter().map(|owed| self.all_retired(owed)));
+        self.reaper_asleep = at.is_none();
+        self.owed.remove(at?)
     }
 
-    pub fn owes_a_released(&self) -> bool {
-        self.owed.iter().any(|owed| self.all_retired(owed))
+    pub fn reaper_asleep(&self) -> bool {
+        self.reaper_asleep
     }
 
     fn all_retired(&self, (pid, _, tids): &(Pid, i32, Vec<Tid>)) -> bool {
@@ -362,6 +372,12 @@ impl World {
                         ));
                     }
                 }
+            }
+        }
+        // L7. The reaper never sleeps while a kill it could finish is owed.
+        if self.reaper_asleep {
+            if let Some((pid, _, _)) = self.owed.iter().find(|owed| self.all_retired(owed)) {
+                out.push(alloc::format!("the reaper sleeps while pid {pid}'s released kill is owed"));
             }
         }
         out

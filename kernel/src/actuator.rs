@@ -535,7 +535,7 @@ actuators! {
     /// Judged by `partition_claim_gives_up`.
     partclaim_root_withheld = "partclaim-root-withheld";
 
-    /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
+    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 
     /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.

@@ -83,6 +83,13 @@ pub fn kill_set<P: Lifecycle>(proc: &P) -> Vec<Tid> {
     tids
 }
 
+/// Which owed kill the reaper finishes next, given whether each one's threads
+/// are all released, oldest first: the oldest released one, so a victim slow to
+/// leave the CPU holds up no other kill.
+pub fn next_released(released: impl IntoIterator<Item = bool>) -> Option<usize> {
+    released.into_iter().position(|r| r)
+}
+
 /// Where a retired thread's CPU time is charged.
 ///
 /// The two are not interchangeable: the main thread's is what a process's exit

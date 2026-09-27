@@ -16810,18 +16810,21 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The kernel reopens init by pid after the last handle to it has gone.
+/// The kernel reopens init by pid after the last handle to it has gone, and
+/// no kernel thread's pid opens.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn process_reopen(log: &str) -> Result<(), String> {
-        let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
-            return Err(format!("the reopen control never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
+        for control in ["process-reopen:", "process-open-kthread:"] {
+            let Some(verdict) = log.lines().find(|l| l.contains(control)) else {
+                return Err(format!("{control} never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [process] {}", verdict.trim());
         }
-        eprintln!("  [process] {}", verdict.trim());
         Ok(())
 }
 
