@@ -79,16 +79,17 @@ impl Tx {
         self.flight() > 0 || self.unsent() > 0 || self.fin_unsent()
     }
 
-    /// The edge the peer offered: SND.WND counts from the ACK it came with (SND.WL2), which an ACK
-    /// that fails the SND.WL1 test leaves behind SND.UNA; SND.UNA + SND.WND would then lie past
-    /// anything the peer offered.
-    pub fn right_edge(&self) -> Seq {
-        self.wl2.add(self.wnd)
-    }
-
-    /// The window from SND.UNA to the right edge; zero once the edge is at or before SND.UNA.
+    /// The window from SND.UNA to the edge the peer offered: SND.WND counts from the ACK it came
+    /// with (SND.WL2), which an ACK that fails the SND.WL1 test leaves behind SND.UNA, where
+    /// SND.UNA + SND.WND would lie past anything the peer offered. Zero once that edge is at or
+    /// before SND.UNA.
     pub fn window(&self) -> u32 {
         self.wnd.saturating_sub(self.una.since(self.wl2))
+    }
+
+    /// The peer's right edge, never below SND.UNA.
+    pub fn right_edge(&self) -> Seq {
+        self.una.add(self.window())
     }
 
     /// W_rcv of RFC 9293 §3.8.6.2.1: negative once the peer shrank its window below SND.NXT.
@@ -100,13 +101,12 @@ impl Tx {
         usize::try_from(seq.since(self.una)).unwrap_or(usize::MAX)
     }
 
-    /// The reset's sequence number (DIV-1): SND.NXT inside the peer's window, since one outside
-    /// it is dropped; else a shut window's edge, the peer's RCV.NXT, or an open one's edge less
-    /// one, which an RFC 5961 peer answers with the challenge ACK whose reset is exact.
+    /// The reset's sequence number: SND.NXT inside the peer's window, since one outside it is
+    /// dropped; else a shut window's edge, or an open one's edge less one, which an RFC 5961 peer
+    /// answers with the challenge ACK whose reset is exact.
     pub fn reset_seq(&self) -> Seq {
-        let window = self.window();
-        let edge = self.una.add(window);
-        match window {
+        let edge = self.right_edge();
+        match self.window() {
             _ if self.nxt.before(edge) => self.nxt,
             0 => edge,
             _ => edge.sub(1),

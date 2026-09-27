@@ -256,7 +256,7 @@ impl SynSent {
 pub enum Origin {
     /// A listener's child, and the TIME-WAIT it reopened, which it returns to if it never
     /// reaches ESTABLISHED (RFC 9293 MAY-2 (2)).
-    Passive { listener: u32, time_wait: Option<TimeWait> },
+    Passive { time_wait: Option<TimeWait> },
     /// A simultaneous open (MUST-10): the user's queued data and FIN wait for ESTABLISHED.
     Active { buf: Ring, fin: bool },
 }
@@ -288,7 +288,7 @@ pub enum Rcvd {
 }
 
 impl SynRcvd {
-    pub fn passive(iss: Seq, seg: &In<'_>, negotiated: Negotiated, listener: u32, time_wait: Option<TimeWait>) -> Self {
+    pub fn passive(iss: Seq, seg: &In<'_>, negotiated: Negotiated, time_wait: Option<TimeWait>) -> Self {
         Self {
             iss,
             irs: seg.seq,
@@ -298,7 +298,7 @@ impl SynRcvd {
             answer: None,
             ack_owed: false,
             last_unsolicited: None,
-            origin: Origin::Passive { listener, time_wait },
+            origin: Origin::Passive { time_wait },
         }
     }
 

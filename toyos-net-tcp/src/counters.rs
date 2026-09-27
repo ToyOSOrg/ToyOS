@@ -3,6 +3,7 @@
 //! both endpoints; [`RefusalLog`] decides which of those become a log line.
 
 use alloc::vec::Vec;
+use core::net::Ipv4Addr;
 use core::time::Duration;
 
 use crate::{limits, Endpoint, Event, Instant, Tuple};
@@ -160,14 +161,19 @@ impl Log {
     }
 
     /// Past [`limits::EVENTS`] undrained, an event is refused and counted: a peer never grows
-    /// the list. A pending `Reachable` is not repeated: one peer's ACKs never crowd out another's
-    /// refusals.
+    /// the list. A `Reachable` is not repeated while it is the newest advice pending for its
+    /// address: one peer's ACKs never crowd out another's refusals, and [ip] still reads each
+    /// address's advice in order.
     pub fn event(&mut self, event: Event) {
         match event {
-            Event::Reachable(_) if self.events.contains(&event) => {}
+            Event::Reachable(addr) if self.newest_advice(addr) == Some(&event) => {}
             _ if self.events.len() >= limits::EVENTS => self.count(Counter::EventOverflow),
             _ => self.events.push(event),
         }
+    }
+
+    fn newest_advice(&self, addr: Ipv4Addr) -> Option<&Event> {
+        self.events.iter().rev().find(|e| matches!(e, Event::Reachable(a) | Event::Reverify(a) if *a == addr))
     }
 
     pub fn drain(&mut self) -> alloc::vec::Drain<'_, Event> {

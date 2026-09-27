@@ -224,3 +224,33 @@ fn s_div_003_rst_at_snd_nxt_inside_the_window() {
     r.unwrap();
     expect(&outs, &["SEQ=1101 ACK=5001 CTL=RST,ACK"]);
 }
+
+/// AC-20's second half with B's out-of-order segment offering `wnd`: its ACK 1001 fails the
+/// SND.WL1 test at SND.UNA 2461, so the window B offered still counts from 1001.
+fn window_behind_snd_una(wnd: u16) -> H {
+    let mut h = fixture_e();
+    h.input(0, seg(5001).ack(1001).wnd(2920));
+    assert_eq!(h.send(0, 5840).len(), 2);
+    h.input(1, seg(5101).ack(1001).wnd(wnd).len(100));
+    h.input(2, seg(5001).ack(2461).wnd(1460).len(100));
+    let info = h.info();
+    assert_eq!((info.snd_una.get(), info.snd_nxt.get(), info.rcv_nxt.get()), (2461, 3921, 5201));
+    assert_eq!((info.snd_wl1.get(), info.snd_wnd), (5101, u32::from(wnd)));
+    h
+}
+
+#[test]
+fn s_div_002_rst_below_the_offered_edge_behind_snd_una() {
+    let mut h = window_behind_snd_una(2920);
+    let (r, outs) = h.call(3, |tcp, now, id| tcp.abort(now, id));
+    r.unwrap();
+    expect(&outs, &["SEQ=3920 ACK=5201 CTL=RST,ACK"]);
+}
+
+#[test]
+fn s_div_001_rst_never_below_snd_una() {
+    let mut h = window_behind_snd_una(1000);
+    let (r, outs) = h.call(3, |tcp, now, id| tcp.abort(now, id));
+    r.unwrap();
+    expect(&outs, &["SEQ=2461 ACK=5201 CTL=RST,ACK"]);
+}

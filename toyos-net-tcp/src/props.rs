@@ -181,8 +181,7 @@ impl Checker {
 
     /// RT-17 judges what the timer retransmits: the segment that was oldest when it expired
     /// (RFC 6298 (5.4)). What follows it is resending of the rest as cwnd allows, which
-    /// after a spurious expiry resends segments sooner than an RTO after they left; telling a
-    /// spurious expiry is stage 8's (RFC 3522, 5682).
+    /// after a spurious expiry resends segments sooner than an RTO after they left.
     fn record_send(&mut self, node: usize, rto: Duration, now: Instant, o: &O) {
         let start = Seq::new(o.seq);
         let end = start.add(o.len());

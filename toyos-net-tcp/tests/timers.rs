@@ -164,3 +164,22 @@ fn s_gu_006_progress_confirms_the_next_hop() {
     h.input(12, seg(5001).ack(3921));
     assert_eq!(h.events.iter().filter(|e| **e == Event::Reachable(B)).count(), 2);
 }
+
+/// [ip] reads the advice in order: an advance after a pending re-verify confirms the next hop again.
+#[test]
+fn s_gu_006_a_confirmation_after_a_reverify_is_kept() {
+    let mut h = fixture_e();
+    ten_out(&mut h);
+    h.arrive(seg(5001).ack(2461));
+    for _ in 0..3 {
+        let at = h.tcp.next_deadline().expect("the retransmission timer");
+        let t = h.spec_t(at);
+        assert_eq!(h.instant(t), at);
+        h.start(t);
+        h.tcp.fire(at);
+        h.tcp.transmit(at, usize::MAX, |_| {});
+    }
+    h.arrive(seg(5001).ack(3921));
+    let events: Vec<Event> = h.tcp.drain_events().collect();
+    assert_eq!(events, [Event::Reachable(B), Event::Reverify(B), Event::Reachable(B)]);
+}

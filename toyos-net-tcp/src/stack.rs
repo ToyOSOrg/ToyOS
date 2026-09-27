@@ -84,8 +84,8 @@ pub struct Info {
 enum User {
     Held,
     Orphan,
-    /// A listener's child that `accept` has not returned.
-    Child,
+    /// A child that `accept` has not returned, and the listener that returns it.
+    Child { listener: u32 },
 }
 
 struct Ended {
@@ -381,11 +381,10 @@ impl Tcp {
         if matches!(self.demux.get(&conn.tuple), Some(Entry::Conn(i)) if *i == index) {
             self.demux.remove(&conn.tuple);
         }
-        if let Tcb::SynRcvd(rcvd) = &conn.state {
-            if let Origin::Passive { listener, .. } = rcvd.origin {
-                if let Some(l) = value(&mut self.listeners, listener) {
-                    l.pending.retain(|&i| i != index);
-                }
+        if let User::Child { listener } = conn.user {
+            if let Some(l) = value(&mut self.listeners, listener) {
+                l.pending.retain(|&i| i != index);
+                l.ready.retain(|&i| i != index);
             }
         }
     }
@@ -405,13 +404,9 @@ impl Tcp {
                 conn.state = Tcb::Ended(Ended { failure, rx });
             }
             User::Orphan => self.free(index),
-            User::Child => {
-                let listener = self.listeners.iter_mut().filter_map(|s| s.value.as_mut()).find(|l| l.ready.contains(&index));
-                if let Some(l) = listener {
-                    l.ready.retain(|&i| i != index);
-                    if failure.is_some() {
-                        self.log.count(Counter::AcceptResetDropped);
-                    }
+            User::Child { listener } => {
+                if failure.is_some() && value(&mut self.listeners, listener).is_some_and(|l| l.ready.contains(&index)) {
+                    self.log.count(Counter::AcceptResetDropped);
                 }
                 self.free(index);
             }
@@ -682,11 +677,11 @@ impl Tcp {
             ctx.log.count(Counter::EcnNotNegotiated);
         }
         let negotiated = negotiate(seg, &local, 0, &mut ctx);
-        let child = SynRcvd::passive(iss, seg, negotiated, index, time_wait);
+        let child = SynRcvd::passive(iss, seg, negotiated, time_wait);
         let conn = Conn {
             tuple,
             options,
-            user: User::Child,
+            user: User::Child { listener: index },
             soft: None,
             local,
             state: Tcb::SynRcvd(Box::new(child)),
@@ -728,6 +723,7 @@ impl Tcp {
         let Some(conn) = value(&mut self.conns, index) else { return };
         let mut ctx = conn.ctx(now, &mut self.log);
         let tuple = conn.tuple;
+        let user = conn.user;
         match core::mem::replace(&mut conn.state, Tcb::Ended(Ended { failure: None, rx: None })) {
             Tcb::SynSent(sent) => {
                 let (kept, outcome) = sent.receive(seg, &conn.local, &mut ctx);
@@ -752,7 +748,7 @@ impl Tcp {
                     Rcvd::Refused => return self.end(index, Some(Failure::Refused), None),
                     Rcvd::Established | Rcvd::Crossed => {
                         let crossed = outcome == Rcvd::Crossed;
-                        if let Origin::Passive { listener, .. } = rcvd.origin {
+                        if let User::Child { listener } = user {
                             let full = value(&mut self.listeners, listener).is_none_or(|l| l.ready.len() >= limits::LISTEN_READY);
                             if full {
                                 self.log.count(Counter::AcceptQueueFull);

@@ -249,8 +249,8 @@ fn s_op_020_paws() {
     assert_eq!(h.tcp.time_wait_count(), 0, "an old FIN rejected by PAWS does not restart TIME-WAIT");
 }
 
-/// T-4, decided the modern way: a segment without timestamps on a timestamped connection is
-/// dropped (RFC 7323 §3.2), counted and logged; in ESTABLISHED, SYN-RECEIVED and TIME-WAIT.
+/// A segment without timestamps on a timestamped connection is dropped (RFC 7323 §3.2), counted
+/// and logged; in ESTABLISHED, SYN-RECEIVED and TIME-WAIT.
 #[test]
 fn s_op_021_missing_timestamps_are_dropped() {
     let mut h = fixture_ef();

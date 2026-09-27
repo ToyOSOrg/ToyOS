@@ -109,10 +109,11 @@ pub enum Screened {
     Ends,
 }
 
-/// The checks every state from SYN-RECEIVED on makes of an arriving segment, each once: T-4's drop
-/// and PAWS (RFC 7323 §5.3 R1), acceptability (RFC 9293 Table 5), the TS.Recent update (RFC 7323
-/// §4.3), and RFC 5961's exact RST (§3.2) and SYN challenge (§4.2). The receiver stands at `next`
-/// with `window` and TS.Recent `ts`, having last acknowledged `last_ack_sent`.
+/// The checks every state from SYN-RECEIVED on makes of an arriving segment, each once: the drop
+/// of a segment without timestamps (RFC 7323 §3.2) and PAWS (§5.3 R1), acceptability (RFC 9293
+/// Table 5), the TS.Recent update (RFC 7323 §4.3), and RFC 5961's exact RST (§3.2) and SYN
+/// challenge (§4.2). The receiver stands at `next` with `window` and TS.Recent `ts`, having last
+/// acknowledged `last_ack_sent`.
 pub fn screen(seg: &In<'_>, next: Seq, window: u32, last_ack_sent: Seq, ts: Option<&mut Ts>, syn_ends: bool, ctx: &mut Ctx<'_>) -> Screened {
     let now = ctx.now;
     if let Some(recent) = ts.as_deref().filter(|_| !seg.rst()) {
