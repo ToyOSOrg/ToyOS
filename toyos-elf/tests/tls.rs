@@ -160,3 +160,25 @@ fn each_machine_has_its_own_variant() {
     assert_eq!(Variant::of(toyos_elf::Machine::X86_64), Variant::II);
     assert_eq!(Variant::of(toyos_elf::Machine::Aarch64), Variant::I);
 }
+
+/// Variant II's executable ends at the thread pointer at its extent, not its
+/// size: a local-exec access is `sym_offset - round(p_memsz, p_align)`.
+#[test]
+fn the_executables_extent_is_its_size_rounded_to_its_alignment() {
+    assert_eq!(tls::exe_extent(0xa8, 0x40), Some(0xc0));
+    assert_eq!(tls::exe_extent(0xc0, 0x40), Some(0xc0));
+    assert_eq!(tls::exe_extent(0x70, 8), Some(0x70));
+    // No alignment is alignment one.
+    assert_eq!(tls::exe_extent(0x71, 0), Some(0x71));
+    assert_eq!(tls::exe_extent(usize::MAX, 0x40), None);
+
+    // Placed after a library, the extent is what ends at the combined size, so
+    // `tp - base` is the offset the linker subtracted.
+    let (lib_base, cursor) = tls::place_module(0, 0x78, 8).unwrap();
+    assert_eq!(lib_base, 0);
+    let extent = tls::exe_extent(0xa8, 0x40).unwrap();
+    let (exe_base, total) = tls::place_module(cursor, extent, 0x40).unwrap();
+    let s = Static::new(Variant::II, total, 0x40, 8).unwrap();
+    assert_eq!(s.tpoff(exe_base as u64, 0), -0xc0);
+    assert_eq!(exe_base % 0x40, 0);
+}

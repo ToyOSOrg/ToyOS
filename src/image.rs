@@ -3,7 +3,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::Path;
 
-use bcachefs::{BlockBuf, Formatted, FsUuid, Superblock, VecBlockIO};
+use bcachefs::{BlockBuf, BlockIO, BlockNum, Formatted, FsUuid, Superblock, VecBlockIO};
 
 use crate::arch::Arch;
 use sha2::{Digest, Sha256};
@@ -37,14 +37,63 @@ pub fn create_root_image(
     let total_blocks = (1 + overhead + btree_blocks + data_blocks) * 11 / 10;
     let estimate = align_up(total_blocks.max(64), PARTITION_ALIGN / 4096) as u64;
     let spacious = format_root(&files, &symlinks, estimate, quiet);
+    trim_root(spacious)
+}
 
-    // Built again at the blocks the estimate's build used and no more: ROOT is
-    // read-only, and the loader reads and the kernel keeps every block of it,
-    // so a free block is a read and a page for nothing. Fewer blocks need no
-    // more bitmap, so the second build fits in what the first used.
+/// `spacious`, cut to the blocks its own build claimed and no more: ROOT is
+/// read-only, and the loader reads and the kernel keeps every block of it, so
+/// a free block on it is a read and a page for nothing.
+///
+/// Trimmed, never rebuilt at the smaller count: mkfs draws its hash seed from
+/// `block_count` (`Formatted::format`'s "deterministic for reproducible
+/// builds"), so a second mkfs at a different device size keys every name
+/// differently and can shape a bigger btree than the first build's headroom
+/// ever measured — the reformat this replaced ran out by one block on
+/// exactly that, on a file set nothing about its *bytes* explains. Cutting
+/// the same bytes down needs nothing the first build did not already prove:
+/// mkfs never frees a block once claimed, so every allocation sits below
+/// `next_alloc` with no hole beneath it, and everything from there to the
+/// alignment boundary is free to discard but for the one block the trimmed
+/// image's own backup superblock claims.
+fn trim_root(spacious: Vec<u8>) -> Vec<u8> {
     let sb = superblock_of(&spacious);
-    let used = sb.block_count - sb.free_blocks;
-    format_root(&files, &symlinks, align_up(used as usize, PARTITION_ALIGN / 4096) as u64, true)
+    assert!(sb.next_alloc > 0, "an mkfs cursor at zero claims nothing was allocated");
+    let kept = (align_up((sb.next_alloc + 1) as usize, PARTITION_ALIGN / 4096) as u64).min(sb.block_count);
+
+    let mut bytes = spacious;
+    bytes.truncate((kept * 4096) as usize);
+    let io = VecBlockIO::from_vec(bytes);
+
+    // The kept bitmap already marks every block below `next_alloc` used and
+    // was sized for a device at least this large (`Superblock::check` allows
+    // a bitmap bigger than a device needs, never smaller), so the one bit
+    // this trim must still set is the backup superblock's new block: free in
+    // that bitmap, since it sits at or past every allocation mkfs made.
+    let backup = BlockNum::new(kept - 1);
+    let (bitmap_block, byte_off, bit) = bitmap_location(&sb, backup);
+    let mut buf = BlockBuf::zeroed();
+    io.read_block(bitmap_block, &mut buf).expect("read a bitmap block this trim kept");
+    buf.as_bytes_mut()[byte_off] |= 1 << bit;
+    io.write_block(bitmap_block, &buf).expect("write a bitmap block this trim kept");
+
+    let mut trimmed = sb;
+    trimmed.block_count = kept;
+    trimmed.free_blocks = kept - trimmed.next_alloc - 1;
+    trimmed.write(&io).expect("write the trimmed superblock");
+    io.into_vec()
+}
+
+/// Where `block`'s bit lives in `sb`'s bitmap: the bitmap block, the byte
+/// within it, and the bit within that byte. `BitmapAllocator::bit_of` computes
+/// the same triple from the allocator's own fields; this is the version a
+/// caller outside the crate can reach, over an image it did not format.
+fn bitmap_location(sb: &Superblock, block: BlockNum) -> (BlockNum, usize, u8) {
+    let byte_idx = block.raw() / 8;
+    (
+        BlockNum::new(sb.bitmap_start.raw() + byte_idx / 4096),
+        (byte_idx % 4096) as usize,
+        (block.raw() % 8) as u8,
+    )
 }
 
 /// A ROOT volume of `total_blocks`, holding `files` and `symlinks` in the
@@ -1118,6 +1167,31 @@ mod tests {
 
     fn signing(key: &crate::signing::Key) -> Signing<'_> {
         Signing { key, version: 7 }
+    }
+
+    /// A file set whose spacious build's `next_alloc` lands one alignment
+    /// unit's rounding away from `block_count` — the shape that made a second,
+    /// from-scratch mkfs at the smaller size reseed its hashes into a btree
+    /// one block bigger than the first build's slack, and panic with
+    /// `NoSpace` on the last symlink. `trim_root` needs no second mkfs, so it
+    /// keeps whatever tree the first build already proved fits.
+    #[test]
+    fn a_second_build_at_the_boundary_does_not_run_out() {
+        let n = 80u32;
+        let files: Vec<(String, Vec<u8>)> = (0..n)
+            .map(|i| (format!("bin/prog{i:04}"), vec![(i % 251) as u8; 200_000 + i as usize * 17]))
+            .collect();
+        let symlinks: Vec<(String, String)> = (0..n)
+            .map(|i| (format!("bin/alias{i:04}"), format!("/system/bin/prog{i:04}")))
+            .collect();
+
+        let image = create_root_image(&files, &symlinks, true);
+
+        let sb = superblock_of(&image);
+        assert_eq!(sb.block_count * 4096, image.len() as u64);
+        assert!(sb.free_blocks < (PARTITION_ALIGN / 4096) as u64, "{} free blocks", sb.free_blocks);
+        bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(image))
+            .expect("a trimmed image mounts");
     }
 
     /// ROOT carries its contents and less than one alignment unit of free

@@ -165,15 +165,26 @@ pub fn build_tls_layout(
     layout: &Layout,
     exe_tls_template: Option<&OwnedAlloc>,
 ) -> Option<(alloc::vec::Vec<TlsModule>, Static, u64)> {
-    // (template, memsz, align, module id). Module id 1 is the executable's; libraries start at 2.
-    let exe = layout.tls.filter(|t| t.memsz > 0).map(|tls| {
-        (exe_tls_template.map(|buf| buf.slice(tls.filesz as usize)), tls.memsz as usize, tls.align as usize, 1)
-    });
+    // (template, memsz, placed bytes, align, module id). Module id 1 is the executable's;
+    // libraries start at 2.
+    let exe = match layout.tls.filter(|t| t.memsz > 0) {
+        None => None,
+        Some(tls) => {
+            let (memsz, align) = (tls.memsz as usize, tls.align as usize);
+            // Variant II's executable ends at the thread pointer at its extent, not its `memsz`:
+            // its linker fixed every local-exec offset against the rounded size.
+            let placed = match VARIANT {
+                Variant::II => toyos_elf::tls::exe_extent(memsz, align)?,
+                Variant::I => memsz,
+            };
+            Some((exe_tls_template.map(|buf| buf.slice(tls.filesz as usize)), memsz, placed, align, 1))
+        }
+    };
     let libs = loaded_libs
         .iter()
         .filter(|lib| lib.tls_memsz > 0)
         .zip(2u64..)
-        .map(|(lib, id)| (lib.tls_template, lib.tls_memsz, lib.tls_align, id));
+        .map(|(lib, id)| (lib.tls_template, lib.tls_memsz, lib.tls_memsz, lib.tls_align, id));
     let next_module_id = 2 + loaded_libs.iter().filter(|lib| lib.tls_memsz > 0).count() as u64;
     let order: alloc::vec::Vec<_> = match VARIANT {
         Variant::II => libs.chain(exe).collect(),
@@ -183,13 +194,13 @@ pub fn build_tls_layout(
     let mut modules = alloc::vec::Vec::with_capacity(order.len());
     let mut cursor = 0usize;
     let mut max_align = 1usize;
-    for (template, memsz, align, module_id) in order.iter().copied() {
-        let (base_offset, next) = toyos_elf::tls::place_module(cursor, memsz, align)?;
+    for (template, memsz, placed, align, module_id) in order.iter().copied() {
+        let (base_offset, next) = toyos_elf::tls::place_module(cursor, placed, align)?;
         cursor = next;
         max_align = max_align.max(align);
         modules.push(TlsModule { template, memsz, base_offset, module_id, is_static: true });
     }
-    let first_align = order.first().map_or(1, |&(_, _, align, _)| align);
+    let first_align = order.first().map_or(1, |&(_, _, _, align, _)| align);
     let tls = Static::new(VARIANT, cursor, max_align, first_align)?;
     Some((modules, tls, next_module_id))
 }

@@ -21,3 +21,9 @@ on the sibling arm.
 
 **Exit**: a cause for the empty uart on a boot that rebooted as designed, or
 the marker waited for where the boot's reboot cannot race it.
+
+Again in PR #532's fast tier at `a7f423b5`, 399 passed and this one of two reds:
+`QEMU died before ===READY===` (exit status 0), the console through
+`stop: 7 of 7 userland thread(s) stopped ... in 1 ms of a 2010 ms budget`,
+`Rebooting.` and `shutdown: /log did not answer in 2000ms`, the uart
+`nothing at all`; `ALONE ... GREEN`. That branch touches no quiesce path.

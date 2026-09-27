@@ -555,3 +555,11 @@ mechanism for it. `src/redlist.rs` carries the sighting.
   parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
   first mute line names nothing and its second names the sequence, or the
   retirement's clause narrowed to the conditions under which it holds.
+
+- **`swap_netd`, again on its recorded signature.** The rust-lld branch's fast
+  tier at `e4317d3f` (PR #532), on a dev host whose load averages read 39.8,
+  31.1 and 37.5 as it started, from other worktrees: `the stream's redial was
+  turned away 64 time(s), its ceiling of 64, and gave up`, with init's words on
+  netd `["accepted"]` ending in `None`; the one red of 400 besides
+  `lan_mdns_answer`'s `SUN_LEN`, and `ALONE swap_netd: GREEN` in 10 s. The
+  branch touches neither netd, swap nor init. Not investigated here.

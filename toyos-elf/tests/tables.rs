@@ -16,7 +16,7 @@ use common::*;
 use toyos_elf::dynamic::{self, Dynamic};
 use toyos_elf::gnu_hash::{self, GnuHash};
 use toyos_elf::rela::{self, RelaCounts, RelaTable, RelocError, RelocKind};
-use toyos_elf::section::{SectionTable, SHT_DYNSYM, SHT_RELA, SHT_SYMTAB};
+use toyos_elf::section::{SectionTable, Unapplied, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_RELR, SHT_SYMTAB};
 use toyos_elf::sym::SymTab;
 use toyos_elf::Machine;
 
@@ -527,6 +527,26 @@ fn rela_dyn_is_found_by_shape_and_only_by_shape() {
         _ => None,
     };
     assert_eq!(table.rela_dyn(&mut reader), Some((0x400, 72)));
+}
+
+/// A loader that applies `SHT_RELA` alone reaches those sections only through
+/// the refusal of every other relocation form: an lld kernel linked with `-z
+/// pack-relative-relocs` carries its relative relocations in `SHT_RELR` and
+/// none in `SHT_RELA`, so a loader that read past it would apply nothing.
+#[test]
+fn a_relocation_form_a_rela_loader_would_not_apply_is_refused() {
+    let rela_only =
+        [shdr(0, 0, 0, 0, 0), shdr(SHT_RELA, 0x100, 48, 0, 24), shdr(SHT_SYMTAB, 0x200, 48, 0, 24)].concat();
+    let found: Vec<u64> =
+        SectionTable::new(&rela_only).rela_sections().expect("RELA alone").map(|sh| sh.offset).collect();
+    assert_eq!(found, [0x100]);
+
+    let relr = [shdr(0, 0, 0, 0, 0), shdr(SHT_RELA, 0x100, 48, 0, 24), shdr(SHT_RELR, 0x300, 16, 0, 8)].concat();
+    assert_eq!(SectionTable::new(&relr).rela_sections().err(), Some(Unapplied::Relr));
+    let rel = [shdr(0, 0, 0, 0, 0), shdr(SHT_REL, 0x100, 32, 0, 16)].concat();
+    assert_eq!(SectionTable::new(&rel).rela_sections().err(), Some(Unapplied::Rel));
+    // The refusal names the form: it is the loader's last line.
+    assert_eq!(Unapplied::Relr.to_string(), "SHT_RELR (packed relative relocations)");
 }
 
 // ── .gnu.hash ───────────────────────────────────────────────────────────
