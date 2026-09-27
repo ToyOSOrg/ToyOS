@@ -17,16 +17,39 @@ three interleaved runs per arm, the branch that moved DATA to
 | read on the next boot | 84 MiB/s | 41–42 MiB/s |
 | 4 KiB create and fsync, p50 | 1.0–1.3 ms | 3.5–3.6 ms |
 
-The cached read by request size, one run: 47.5 MiB/s at 8 KiB, 91.8 MiB/s at
-256 KiB, 182.6 MiB/s at 2 MiB — so about 160 µs a request and about 5 ns a
-byte. A byte is copied three times, after a zeroing: out of the block cache
-into a buffer the server zeroed (the `READ` arm of `userland/fsd/src/main.rs`,
-through `DataVolume::read`), into the client's window a `u64` at a time
-with a volatile store each (`toyos::fs::window_put`,
-`toyos::volatile::Window::copy_in`), and out of the window a `u64` at a time
-again (`window_take`), where the kernel's page cache copies once.
+## Where a request goes
 
-**Exit**: a cached read within a small factor of the kernel's at the same
-request size — the block copied once into the window, and the window's word
-loops replaced by a copy the compiler may widen — measured by the same
-three-run A/B.
+One guest, the file in fsd's block cache (64 MiB of clean blocks, so all of
+it) and the same bytes in the kernel's `/tmp`, three interleaved passes; fsd's
+`READ` arm timed from inside the server:
+
+| per request | 4 KiB | 256 KiB | 2 MiB |
+|---|---|---|---|
+| kernel `/tmp` | 4.2–4.5 µs | 98–100 µs | 751–771 µs |
+| fsd, at the client | 115–117 µs | 1906–1922 µs | 4603–4727 µs |
+| of which the server's `vec![0; len]` | 3.4 µs | 47–49 µs | 363–490 µs |
+| the block cache into it (`DataVolume::read`) | 6.2–6.4 µs | 108–115 µs | 663–665 µs |
+| `window_put` into the client's window | 3.7 µs | 790–804 µs | 1794 µs |
+| the gap to the next request: reply, the client's `window_take`, the next send | 102–103 µs | 973–989 µs | 1986–1988 µs |
+
+A request that moves no bytes (a one-byte read at the end of the file) costs
+104 µs against the kernel's 2.6 µs: that is the round trip, and it is the
+whole of a small read. At 256 KiB the two word-at-a-time volatile copies
+through the window — `toyos::fs::window_put` in the server and `window_take`
+in the client, 2.9–3.5 ns a byte each at 64 KiB to 1 MiB — are about 87% of
+the request; the zeroing and the cache copy are 8%, and the round trip 5%.
+The same two loops ran at 0.86–0.90 ns a byte on 2 MiB requests and at
+0.69–3.17 ns a byte over local memory: under TCG their price per byte depends
+on the addresses, a mechanism not isolated here. The kernel's copy is one, at
+0.37 ns a byte.
+
+Not the cause: the client holds no cache, but the server's cache answers
+every block (the `DataVolume::read` row); and nothing contends for a lock —
+the reader is one thread and fsd is one thread over a `RefCell`.
+
+The round trip is what a served read is and does not go; the copies are a
+defect. Timings are TCG's: a verdict on their size belongs on metal.
+
+**Exit**: a 256 KiB cached read within a small factor of the kernel's in the
+same guest, the block copied once into the window and the window's copies no
+longer a scalar volatile loop, measured by the same interleaved runs.

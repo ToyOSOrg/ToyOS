@@ -85,6 +85,11 @@ pub const QUARANTINE: &[Quarantined] = &[
         issue: "issues/kernel/deferred-release-outlives-its-syscall.md",
     },
     Quarantined {
+        test: "lan_mdns_answer",
+        says: &["path must be shorter than SUN_LEN"],
+        issue: "issues/build/a-lane-s-tap-socket-path-outgrows-sun-len-on-the-dev-host.md",
+    },
+    Quarantined {
         test: "latency_wake",
         says: &["the p99 landed in the histogram's last bucket"],
         issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md",
