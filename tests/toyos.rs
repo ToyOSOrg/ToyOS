@@ -1228,12 +1228,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // offsets it chose itself.
     ("operation_nesting", Sched::Parallel, Tier::Fast),
     ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
-    // The spawn half alone: one headless boot whose verdict is three kernel
-    // log lines.
+    // The spawn half alone: one headless boot whose verdict is kernel log
+    // lines.
     ("klogd_hosted", Sched::Parallel, Tier::Fast),
-    // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
-    // spawn half is per-PR again; alone they still price over the ceiling,
-    // and sit Nightly.
+    // The `klogd-panic` actuator boot, split off so the spawn half is per-PR.
     ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
@@ -10594,20 +10592,16 @@ fn blocked_dump() -> Result<(), String> {
         return Err(format!("no parked task was named by pid and tid:\n{report}"));
     }
 
-    // **All three kernel threads, by name.** They are almost always blocked, so
+    // **Every kernel thread, by name.** They are almost always blocked, so
     // the parked lines above carry them as a pid and a tid and nothing else —
-    // and on a machine that has gone quiet the question is *which* of the three
-    // is stuck. `sched::dump`'s census tags a kernel thread whatever it is
-    // doing, which is C6's gate: three kernel threads split the work —
-    // `klogd` the console drain, `usbd` the xHCI port machine, `iod` the
-    // write-back queue — precisely so that one of them wedging does not stop
-    // the other two. A report that cannot tell them apart cannot say which did.
+    // and on a machine that has gone quiet the question is *which* one is
+    // stuck. `sched::dump`'s census tags a kernel thread whatever it is doing.
     //
     // Matched with the ` cpu=` that follows the name on the census line, because
     // a bare name appears in every one of these programs' own log lines and
     // `/system/bin/init` speaks in a program's name before that program runs
     // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd", "usbd", "iod"]
+    let unnamed: Vec<&str> = ["klogd", "iod"]
         .into_iter()
         .filter(|name| !report.contains(&format!(" {name} cpu=")))
         .collect();
@@ -13389,8 +13383,7 @@ fn run_machine_test(
             // trampoline that never issues an `iretq`. It gets a process-table
             // entry rather than a bare task, and that is what makes it
             // nameable: without one a crash report would print a pid nothing
-            // in the machine resolves. What each row *means* when the panic
-            // really fires is `klogd_panic_halts`' two actuator boots.
+            // in the machine resolves.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -13400,12 +13393,7 @@ fn run_machine_test(
             klogd_hosted(&serial::Serial::boot(&qemu))
         }
         "klogd_panic_halts" => {
-            // **A kernel thread's panic is not recoverable by accident.**
-            // `syscall_rip` is never cleared, so the ordinary recovery
-            // predicate reads whatever user thread last ran on that CPU, and
-            // a kernel task would recover or halt by accident of work
-            // stealing. The row in `sched::kthread` replaces the accident
-            // with an answer; these two actuator boots walk both branches.
+            // **A kernel thread's panic halts the machine.**
             //
             // The marker is a line of the crash *report* rather than `PANIC:`
             // itself, because `boot_log` stops at the marker and the name is
@@ -13429,53 +13417,18 @@ fn run_machine_test(
             // `KernelPayload.address_space` stop being an `Option`.
             dead.must_say("Process: klogd")?;
 
-            // The verdict. A *recovered* panic kills the thread and lets the
-            // machine carry on into userland, which announces itself; the
-            // fatal branch halts every CPU. The window is a liveness margin
-            // and not a threshold: `klogd` panics as the scheduler starts, and
-            // the arm this must never become reaches the marker a few hundred
-            // milliseconds later — so three seconds is a tenfold margin over
-            // the state it refuses, and it is the whole of this test's fixed
-            // cost against the Fast ceiling.
-            const CARRIED_ON: Duration = Duration::from_secs(3);
-            dead.push(&qemu.drain_serial(CARRIED_ON));
-            dead.must_not_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [klogd] a kernel thread's panic halted the machine rather than recovering");
-
-            drop(qemu);
-
-            // **The same panic on the other row, and it is the direction
-            // nothing had ever taken.** Two rows in one table are one row
-            // until both branches have been walked: before this arm, every
-            // kernel-thread panic this tree had ever run took `OnPanic::Halt`,
-            // so `Recover` was a value rather than a path — and the path it
-            // names goes through `poison_tid`, the idle loop's `reap_poisoned`
-            // and `zombify_poisoned`, none of which had ever seen a task with
-            // no user address space. A row that quietly halted the machine
-            // would make `usbd` and `iod` worse than the thread they were
-            // split off from.
-            //
-            // The verdict is content in the same window and never a timeout:
-            // the boot returns at the crash report's own line, and what the
-            // three seconds after it must contain is the ready marker the
-            // arm above must *not*.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["usbd-panic"],
-                    ready_marker: "Process: usbd",
-                    ..Default::default()
-                },
+            // The verdict is the line only `halt_all_cpus` writes. Never the
+            // ready marker's absence: a recovered `klogd` takes the console
+            // down with it, so the machine that recovered says nothing either.
+            // A liveness bound: the line follows the report in the same panic.
+            let armed = format!(
+                "panic: rebooting in {} s unless a key is pressed",
+                toyos_tco::PANIC_BOUND_MS / 1_000
             );
-            let mut survived = serial::Serial::boot(&qemu);
-            survived.must_say("PANIC:")?;
-            survived.must_say("usbd-panic: the device thread died")?;
-            survived.must_say("Process: usbd")?;
-            survived.push(&qemu.drain_serial(CARRIED_ON));
-            survived.must_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [usbd] a kernel thread's panic killed the thread and the machine booted");
+            const HALTED: Duration = Duration::from_secs(3);
+            dead.push(&qemu.drain_until(HALTED, |line| line.contains(&armed)));
+            dead.must_say(&armed)?;
+            eprintln!("  [klogd] a kernel thread's panic halted the machine rather than recovering");
             Ok(())
         }
         "hash_seed_precedes_every_map" => {
@@ -17147,30 +17100,14 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The machine's three kernel threads are hosted, and each claims the panic row
-/// its own loss demands.
+/// The machine's kernel threads are hosted.
 ///
-/// Text in, a verdict out: all three lines are `log!` records, so the T14's
+/// Text in, a verdict out: every line is a `log!` record, so the T14's
 /// readback and a QEMU boot log are judged by this one predicate.
 fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     boot.must_be_clean()?;
-    let line = boot.must_say("kthread: klogd")?;
-    if !line.contains("halts the machine") {
-        return Err(format!("klogd is hosted but claims the wrong panic row: {line:?}"));
-    }
-    eprintln!("  [klogd] {}", line.trim());
-
-    // **The other two threads, and the opposite row.** `usbd` owns the xHCI
-    // port machine and `iod` the write-back queue, so a stuck USB enumeration
-    // cannot stop the log. Their panics are *recoverable* and `klogd`'s
-    // deliberately is not — a killed drainer is the one loss nothing left alive
-    // can report — and this is the one boot in the suite where all three rows
-    // are on the wire together.
-    for name in ["usbd", "iod"] {
+    for name in ["klogd", "iod"] {
         let line = boot.must_say(&format!("kthread: {name}"))?;
-        if !line.contains("kills the thread") {
-            return Err(format!("{name} is hosted but claims the wrong panic row: {line:?}"));
-        }
         eprintln!("  [kthread] {}", line.trim());
     }
     Ok(())

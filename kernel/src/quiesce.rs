@@ -25,8 +25,8 @@
 //! whatever lock the thread on that CPU was holding, and `sync_all` is the
 //! first thing that would wait on it.
 //!
-//! Kernel threads are exempt by identity, not by accident: `klogd`, `iod` and
-//! `usbd` are in the process table like anything else, and
+//! Kernel threads are exempt by identity, not by accident: `klogd` and `iod`
+//! are in the process table like anything else, and
 //! [`crate::sched::kthread::is_kernel_task`] is what tells them apart.
 //!
 //! # What the stop waits on

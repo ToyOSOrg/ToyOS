@@ -178,9 +178,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // SAFETY: IF is clear on this CPU and every other one halts before anything else can write the port.
     unsafe { drivers::serial::panic_flush(); }
 
-    // Recoverable only when a syscall is what's panicking, or a kthread says its own row's answer.
-    let recoverable = sched::kthread::panic_recovers_here().unwrap_or_else(percpu::in_syscall);
-    if recoverable {
+    if percpu::in_syscall() {
         depth.store(0, core::sync::atomic::Ordering::SeqCst);
         // Discarded here: a stale capture would blame this panic for the next fatal one.
         drivers::panic_console::discard_capture();
@@ -666,8 +664,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.
     log::console::start();
-    // After klogd so their own spawn logs have a drainer.
-    drivers::xhci::usbd::start();
+    // After klogd so its spawn log has a drainer.
     iod::start();
 
     smp::set_ready();

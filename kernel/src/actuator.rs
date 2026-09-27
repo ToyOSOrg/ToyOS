@@ -458,9 +458,6 @@ actuators! {
     /// Panic inside `klogd` on its first instruction.
     klogd_panic = "klogd-panic";
 
-    /// Panic inside `usbd` on its first instruction.
-    usbd_panic = "usbd-panic";
-
     /// Stop the boot dead in phase 3, interrupts off, before any log drain.
     pre_idle_wedge = "pre-idle-wedge";
 

@@ -705,7 +705,7 @@ fn census() -> Census {
         // Blocked and running threads are already the CPUs' lines; skip them here.
         let Some(tag) = tag else { return };
         // Kernel threads don't count against the budget: `MAX_KERNEL_TASKS`
-        // bounds them at three, so counting them can't push these lines off the page.
+        // bounds them, so counting them can't push these lines off the page.
         if !kernel {
             printed += 1;
             if printed > CENSUS_LINES {
