@@ -227,8 +227,8 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
     let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
     let path = bs.open_protocol_exclusive::<DevicePath>(device).ok()?;
-    match bootvars::hard_drive(&path) {
-        Ok((hd, guid)) => Some(BootPartition { guid, start_lba: hd.partition_start(), blocks: hd.partition_size() }),
+    match toyos_update::entry::partition(path.as_bytes()) {
+        Ok(part) => Some(BootPartition { guid: part.guid, start_lba: part.start, blocks: part.size }),
         Err(why) => {
             println!("Boot partition: {why}, so it is ignored");
             None

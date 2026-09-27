@@ -115,32 +115,45 @@ fn device_path(option: &[u8]) -> Option<&[u8]> {
     option.get(at..at.checked_add(path_len)?)
 }
 
-/// The GPT signature of the first HARDDRIVE node in a device path, or `None`
-/// where it has none, names an MBR partition, or a node cannot be stepped
-/// over.
-fn hard_drive_guid(mut path: &[u8]) -> Option<[u8; 16]> {
-    while let Some(node) = path.get(..NODE_HEADER) {
+/// The GPT partition a device path names by its one HARDDRIVE node, or why it
+/// names none. Exactly one node: a path with two describes a partition inside
+/// a partition, and taking either is guessing which one the path means.
+pub fn partition(mut path: &[u8]) -> Result<Partition, &'static str> {
+    let mut found = None;
+    loop {
+        let node = path.get(..NODE_HEADER).ok_or("the device path runs off with no end node")?;
         let len = usize::from(u16::from_le_bytes([node[2], node[3]]));
-        // A node shorter than its own header, or longer than what is left, ends
-        // the walk: neither can be stepped over.
-        let this = path.get(..len).filter(|_| len >= NODE_HEADER)?;
-        if (this[0], this[1]) == END {
-            return None;
-        }
-        if (this[0], this[1]) == HARD_DRIVE {
-            if this.get(40) != Some(&GPT) || this.get(41) != Some(&SIGNATURE_GUID) {
-                return None;
-            }
-            return this.get(24..40)?.try_into().ok();
+        let this = path.get(..len).filter(|_| len >= NODE_HEADER).ok_or("a device-path node cannot be stepped over")?;
+        match (this[0], this[1]) {
+            END => break,
+            HARD_DRIVE if found.is_some() => return Err("the device path has more than one HARDDRIVE node"),
+            HARD_DRIVE => found = Some(this),
+            _ => {}
         }
         path = &path[len..];
     }
-    None
+    let hd = found.ok_or("the device path carries no HARDDRIVE node")?;
+    if hd.len() != HARD_DRIVE_BYTES {
+        return Err("the HARDDRIVE node is malformed");
+    }
+    if hd[40] != GPT {
+        return Err("the HARDDRIVE node names no GPT partition");
+    }
+    if hd[41] != SIGNATURE_GUID {
+        return Err("the HARDDRIVE node names the partition with no GUID signature");
+    }
+    let field = |at: usize| u64::from_le_bytes(hd[at..at + 8].try_into().expect("eight bytes"));
+    Ok(Partition {
+        number: u32::from_le_bytes(hd[4..8].try_into().expect("four bytes")),
+        start: field(8),
+        size: field(16),
+        guid: hd[24..40].try_into().expect("sixteen bytes"),
+    })
 }
 
 /// Whether an option boots off the GPT partition `guid`.
 fn names(option: &[u8], guid: &[u8; 16]) -> bool {
-    device_path(option).and_then(hard_drive_guid).is_some_and(|found| found == *guid)
+    device_path(option).is_some_and(|path| partition(path).is_ok_and(|found| found.guid == *guid))
 }
 
 /// Whether an option is active: the boot manager skips one that is not.
@@ -272,6 +285,23 @@ mod tests {
         let mut unterminated = good;
         unterminated.truncate(8);
         assert!(!names(&unterminated, &[0xE5; 16]), "a description with no end");
+    }
+
+    /// **One HARDDRIVE node, or no partition**: a second one, before or after
+    /// the first, is refused rather than either taken.
+    #[test]
+    fn a_path_names_the_partition_of_its_one_hard_drive_node() {
+        let option = by_hand();
+        let path = device_path(&option).expect("the option's path");
+        assert_eq!(partition(path), Ok(PART));
+        let (hd, rest) = path.split_at(HARD_DRIVE_BYTES);
+        let mut other = hd.to_vec();
+        other[24..40].copy_from_slice(&[0xE6; 16]);
+        for twice in [[&other[..], path].concat(), [hd, &other[..], rest].concat()] {
+            assert_eq!(partition(&twice), Err("the device path has more than one HARDDRIVE node"));
+        }
+        assert_eq!(partition(rest), Err("the device path carries no HARDDRIVE node"));
+        assert_eq!(partition(&path[..path.len() - NODE_HEADER]), Err("the device path runs off with no end node"));
     }
 
     #[test]
