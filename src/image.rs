@@ -473,37 +473,17 @@ pub fn stage_slot(path: &Path, which: toyos_update::slots::Which, update: &[u8],
         .and_then(|_| file.write_all(parts.root))
         .map_err(|e| format!("writing slot {}'s ROOT: {e}", which.letter()))?;
 
-    let (boot_at, boot_len) = partition_extent(&mut file, slot.boot)?;
-    let mut volume = vec![0u8; boot_len as usize];
-    file.seek(SeekFrom::Start(boot_at))
-        .and_then(|_| file.read_exact(&mut volume))
-        .map_err(|e| format!("reading slot {}'s volume: {e}", which.letter()))?;
-    {
-        let time = build_time();
-        let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("slot {}'s volume: {e}", which.letter()))?;
-        fs.create_dir_all("toyos", time).map_err(|e| format!("toyos/: {e}"))?;
-        let mut files: Vec<(&str, &[u8])> = vec![
-            (toyos_update::slots::KERNEL_FILE, parts.kernel),
-            (toyos_update::slots::CMDLINE_FILE, parts.cmdline),
-        ];
-        if signed {
-            files.push((toyos_update::slots::SIGNED_FILE, &parts.signed[..]));
-        }
-        for name in [toyos_update::slots::KERNEL_FILE, toyos_update::slots::CMDLINE_FILE, toyos_update::slots::SIGNED_FILE] {
-            if fs.exists(name).map_err(|e| format!("{name}: {e}"))? {
-                fs.remove(name).map_err(|e| format!("removing {name}: {e}"))?;
-            }
-        }
-        for (name, bytes) in files {
-            let mut f = fs.create(name, time).map_err(|e| format!("creating {name}: {e}"))?;
-            fs.write(&mut f, 0, bytes).map_err(|e| format!("writing {name}: {e}"))?;
-            fs.flush_meta(&mut f, time).map_err(|e| format!("recording {name}: {e}"))?;
-        }
-        fs.sync().map_err(|e| format!("syncing slot {}'s volume: {e}", which.letter()))?;
-    }
-    file.seek(SeekFrom::Start(boot_at))
-        .and_then(|_| file.write_all(&volume))
-        .map_err(|e| format!("writing slot {}'s volume: {e}", which.letter()))?;
+    let signed = signed.then_some(&parts.signed[..]);
+    put_files_on(
+        &mut file,
+        slot.boot,
+        &[
+            (toyos_update::slots::KERNEL_FILE, Some(parts.kernel)),
+            (toyos_update::slots::CMDLINE_FILE, Some(parts.cmdline)),
+            (toyos_update::slots::SIGNED_FILE, signed),
+        ],
+    )
+    .map_err(|why| format!("slot {}'s volume: {why}", which.letter()))?;
 
     let mut next = table;
     next.marked = which;
@@ -585,16 +565,12 @@ pub fn overwrite_file_on(path: &Path, guid: [u8; 16], name: &str, bytes: &[u8]) 
     file.sync_all().map_err(|e| format!("syncing {}: {e}", path.display()))
 }
 
-/// Create the file `name` holding `bytes` on the FAT partition `guid` of the
-/// disk image at `path`, which no guest may be running on.
-pub fn create_file_on(path: &Path, guid: [u8; 16], name: &str, bytes: &[u8]) -> Result<(), String> {
+/// Replace each file `files` names on the FAT partition `guid` of the disk
+/// image `file`, which no guest may be running on: a file named with no bytes
+/// is removed.
+pub fn put_files_on(file: &mut std::fs::File, guid: [u8; 16], files: &[(&str, Option<&[u8]>)]) -> Result<(), String> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    let (start, len) = partition_extent(&mut file, guid)?;
+    let (start, len) = partition_extent(file, guid)?;
     let mut volume = vec![0u8; usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?];
     file.seek(SeekFrom::Start(start))
         .and_then(|_| file.read_exact(&mut volume))
@@ -602,15 +578,24 @@ pub fn create_file_on(path: &Path, guid: [u8; 16], name: &str, bytes: &[u8]) -> 
     {
         let time = build_time();
         let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("the volume does not mount: {e}"))?;
-        let mut created = fs.create(name, time).map_err(|e| format!("creating {name}: {e}"))?;
-        fs.write(&mut created, 0, bytes).map_err(|e| format!("writing {name}: {e}"))?;
-        fs.flush_meta(&mut created, time).map_err(|e| format!("recording {name}: {e}"))?;
+        for &(name, bytes) in files {
+            if fs.exists(name).map_err(|e| format!("{name}: {e}"))? {
+                fs.remove(name).map_err(|e| format!("removing {name}: {e}"))?;
+            }
+            let Some(bytes) = bytes else { continue };
+            if let Some((dir, _)) = name.rsplit_once('/') {
+                fs.create_dir_all(dir, time).map_err(|e| format!("{dir}/: {e}"))?;
+            }
+            let mut created = fs.create(name, time).map_err(|e| format!("creating {name}: {e}"))?;
+            fs.write(&mut created, 0, bytes).map_err(|e| format!("writing {name}: {e}"))?;
+            fs.flush_meta(&mut created, time).map_err(|e| format!("recording {name}: {e}"))?;
+        }
         fs.sync().map_err(|e| format!("syncing the volume: {e}"))?;
     }
     file.seek(SeekFrom::Start(start))
         .and_then(|_| file.write_all(&volume))
         .and_then(|_| file.sync_all())
-        .map_err(|e| format!("writing the volume back to {}: {e}", path.display()))
+        .map_err(|e| format!("writing the volume back: {e}"))
 }
 
 /// The slot table on the disk image `file`, which copy is current, and where

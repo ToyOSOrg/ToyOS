@@ -836,25 +836,22 @@ fn fingerprint(text: &str) -> u64 {
 /// One arm's image, staged in `dir` exactly as [`run`] stages it — its job
 /// list with `reboot` behind it, the boot's own bound, and a talking or
 /// swapping boot's key and service binary beside it — for a rehearsal of the
-/// loop that delivers it. Where it put the image, and the key a talking or
-/// swapping boot authorizes.
-pub fn stage(dir: &Path, arm: &Arm, rust_bins: &[(String, Vec<u8>)]) -> Result<(PathBuf, Option<PathBuf>), String> {
+/// loop that delivers it. Where it put the image.
+pub fn stage(dir: &Path, arm: &Arm, rust_bins: &[(String, Vec<u8>)]) -> Result<PathBuf, String> {
     let root = super::compile::repo_root();
     let mut batch = Batch::of(arm);
     batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
-    let image = build(&root, dir, arm.boot, &batch, rust_bins, &[], true)?;
-    let key = (arm.talk || arm.swap.is_some()).then(|| talk_home(&at(dir, arm.boot)).join("id_ed25519"));
-    Ok((image, key))
+    build(&root, dir, arm.boot, &batch, rust_bins, &[], true)
 }
 
-/// The invocation that turns one image into one readback. Written down in the
-/// staged request and run by [`Mode::Drive`], so the two cannot differ.
 /// Where a talking boot's key lives, beside its image.
 fn talk_home(home: &Path) -> PathBuf {
     home.join("ssh")
 }
 
-fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool, swap: Option<&str>, reach: Reach) -> Vec<String> {
+/// The invocation that turns one image into one readback. Written down in the
+/// staged request and run by [`Mode::Drive`], so the two cannot differ.
+pub fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool, swap: Option<&str>, reach: Reach) -> Vec<String> {
     let mut words = vec![
         "run".to_string(),
         "--bin".to_string(),

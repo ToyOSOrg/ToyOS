@@ -1574,12 +1574,12 @@ const UBUNTUS: &[&Flag] = &[&INSTALL_SUDOERS, &FAT32_CHECK, &DEVICE, &HOST, &RES
 /// the bench a swapping boot is delivered and judged like any other, and the
 /// swap is made by the same loop once the bench has gone down
 /// ([`crate::metalbench::run`]).
-const NOT_A_SWAP: &[&Flag] = &[&DRY_RUN, &FAT32_CHECK, &NIC, &INSTALL_SUDOERS];
+const NOT_A_SWAP: &[&Flag] = &[&DRY_RUN, &NIC];
 
 /// The flags that describe a boot, as against the ones that say which machine
 /// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
 const ABOUT_A_BOOT: &[&Flag] =
-    &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS, &TALK];
+    &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS, &TALK, &RESIDENT];
 
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1791,10 +1791,10 @@ impl Args {
                     .to_string(),
             ));
         }
-        if out.resident && (out.readback.is_some() || out.talk.is_some() || out.nic.is_some()) {
+        if out.resident && (out.readback.is_some() || out.nic.is_some() || out.fat32_check) {
             return Err(Refusal::Usage(
                 "--resident hands the machine to a bench image and judges no boot, so --readback, \
-                 --talk and --nic describe a boot it will not judge"
+                 --nic and --fat32-check describe a boot it will not judge"
                     .to_string(),
             ));
         }
@@ -2757,6 +2757,7 @@ mod tests {
             vec!["--wait-secs", "60"],
             vec!["--nic", "0000:00:1f.6"],
             vec!["--talk", "/tmp/k"],
+            vec!["--resident"],
         ] {
             let mut words = vec!["--via-ubuntu".to_string(), "--install-sudoers".to_string(), "/tmp/pw".to_string()];
             words.extend(flag.iter().map(|w| (*w).to_string()));
@@ -2798,12 +2799,16 @@ mod tests {
         let args = Args::parse(&whole).expect("a whole swap");
         assert_eq!(args.swap.as_deref(), Some("netd"));
 
-        for flag in [vec!["--fat32-check"], vec!["--dry-run"], vec!["--nic", "0000:00:1f.6"]] {
+        for flag in [vec!["--dry-run"], vec!["--nic", "0000:00:1f.6"]] {
             let mut words = whole.to_vec();
             words.extend(flag.iter().map(|w| (*w).to_string()));
             let said = Args::parse(&words).unwrap_err().to_string();
             assert!(said.contains(flag[0]) && said.contains("will not make"), "{said}");
         }
+        let mut checked = whole.to_vec();
+        checked.push("--fat32-check".into());
+        let said = Args::parse(&checked).unwrap_err().to_string();
+        assert!(said.contains("--fat32-check") && said.contains("--via-ubuntu"), "{said}");
         for missing in ["--binary", "--talk", "--readback"] {
             let at = whole.iter().position(|w| w == missing).unwrap();
             let words: Vec<String> = whole
@@ -2856,7 +2861,7 @@ mod tests {
             let words: Vec<String> = swap.iter().chain(image).map(|w| (*w).to_string()).collect();
             assert!(Args::parse(&words).unwrap_err().to_string().contains("no Ubuntu half"), "{image:?}");
         }
-        for beside in [vec!["--readback", "/tmp/r"], vec!["--nic", "0000:00:1f.6"]] {
+        for beside in [vec!["--readback", "/tmp/r"], vec!["--nic", "0000:00:1f.6"], vec!["--fat32-check"]] {
             let mut words = vec!["--via-ubuntu", "--resident", "--image", "b.img"];
             words.extend(beside.iter().copied());
             let words: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();

@@ -57,8 +57,7 @@ pub fn bench_loop_drives_a_toyos_machine(
     let scratch = super::lane::dir().join("bench-loop");
     std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
 
-    let (boot, key) = super::metal::stage(&scratch, &SWAPPING, rust_bins)?;
-    let key = key.ok_or("a swapping boot authorizes a key of its own")?;
+    let boot = super::metal::stage(&scratch, &SWAPPING, rust_bins)?;
     let home = boot.parent().ok_or("the staged image has a directory")?.to_path_buf();
     let update = toyos_build::image::update_of(&boot)?;
 
@@ -76,12 +75,16 @@ pub fn bench_loop_drives_a_toyos_machine(
     // An earlier chain's file, longer than any chain and ending in a line no
     // pass writes: a pass that writes over it rather than deleting it first
     // leaves that tail in every readback after.
-    let mut file = std::fs::File::open(&disk).map_err(|e| format!("{}: {e}", disk.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&disk)
+        .map_err(|e| format!("{}: {e}", disk.display()))?;
     let log_guid = toyos_build::image::unique_guid_of(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC)?;
-    drop(file);
     let mut stale = "an earlier chain's line\n".repeat(16 << 10).into_bytes();
     stale.extend_from_slice(STALE_CHAIN.as_bytes());
-    toyos_build::image::create_file_on(&disk, log_guid, toyos_build::bootlog::LOADER_PREVIOUS_LOG, &stale)?;
+    toyos_build::image::put_files_on(&mut file, log_guid, &[(toyos_build::bootlog::LOADER_PREVIOUS_LOG, Some(&stale))])?;
+    drop(file);
     let vars = scratch.join("OVMF_VARS.fd");
     std::fs::copy(root.join("ovmf/OVMF_VARS-pure-efi.fd"), &vars).map_err(|e| format!("the variable store: {e}"))?;
     let data = scratch.join("data.img");
@@ -133,25 +136,10 @@ pub fn bench_loop_drives_a_toyos_machine(
 
     // **The loop**: the library call `toyos-metal` makes, the machine reached
     // through the forwards.
-    let readback = scratch.join("readback");
-    let words: Vec<String> = [
-        "--image",
-        &boot.display().to_string(),
-        "--readback",
-        &readback.display().to_string(),
-        "--swap",
-        "netd",
-        "--binary",
-        &home.join("netd").display().to_string(),
-        "--talk",
-        &key.display().to_string(),
-        "--hand-back",
-        "--key",
-        &runner.private().display().to_string(),
-    ]
-    .iter()
-    .map(|w| w.to_string())
-    .collect();
+    let mut words = super::metal::invocation(&boot, &home, SWAPPING.nic, SWAPPING.talk, SWAPPING.swap, super::metal::Reach::Bench);
+    let cargo = words.iter().position(|w| w == "--").ok_or("the invocation runs toyos-metal after a `--`")?;
+    words.drain(..=cargo);
+    words.extend(["--key".to_string(), runner.private().display().to_string()]);
     let mut args = Args::parse(&words).map_err(|refusal| refusal.to_string())?;
     args.machine = Machine {
         log: Peer::At(SocketAddr::from((Ipv4Addr::LOCALHOST, log_port))),
@@ -171,11 +159,11 @@ pub fn bench_loop_drives_a_toyos_machine(
     eprintln!("  [bench] the loop's verdict: Boot: complete in {ms:?} ms");
 
     // What the machine itself says about the cycle.
-    let kernel = std::fs::read_to_string(readback.join(metal::READBACK_KERNEL)).map_err(|e| format!("kernel.log: {e}"))?;
+    let kernel = std::fs::read_to_string(home.join(metal::READBACK_KERNEL)).map_err(|e| format!("kernel.log: {e}"))?;
     if !kernel.contains(ONCE_RECORD) {
         return Err(format!("the boot's own log never says {ONCE_RECORD:?}"));
     }
-    let loader = std::fs::read_to_string(readback.join(metal::READBACK_LOADER)).map_err(|e| format!("loader.log: {e}"))?;
+    let loader = std::fs::read_to_string(home.join(metal::READBACK_LOADER)).map_err(|e| format!("loader.log: {e}"))?;
     for owed in [
         "Slot B: asked for once; the table marks A",
         "Request: a boot of slot B once is taken off the slot table",
@@ -192,7 +180,7 @@ pub fn bench_loop_drives_a_toyos_machine(
     if loader.contains(&raised) {
         return Err(format!("a boot of slot B once raised the floor: {raised:?}"));
     }
-    let swapped = std::fs::read_to_string(readback.join(metal::READBACK_SWAP)).map_err(|e| format!("swap.txt: {e}"))?;
+    let swapped = std::fs::read_to_string(home.join(metal::READBACK_SWAP)).map_err(|e| format!("swap.txt: {e}"))?;
     eprintln!("  [bench] swap.txt: {}", swapped.lines().next().unwrap_or_default());
     // And the bench is the bench again: its own slot, still marked.
     let after = &console[console.rfind("boot: slot").ok_or("no slot record at all")?..];

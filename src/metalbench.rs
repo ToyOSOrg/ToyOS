@@ -122,10 +122,10 @@ impl Bench {
         Ok(Logs { dir: into.to_path_buf(), names })
     }
 
-    /// Whether the machine takes this key now: a machine not up, one booting,
-    /// and a boot that authorizes another key are all "not yet".
-    fn answers(&self) -> bool {
-        self.machine.ssh_at().is_ok_and(|at| self.ssh.probe(at, PROBE_SECS).is_ok())
+    /// Whether the machine takes this key now, or why not: a machine not up,
+    /// one booting, and a boot that authorizes another key are all "not yet".
+    fn answers(&self) -> Result<(), String> {
+        self.ssh.probe(self.machine.ssh_at()?, PROBE_SECS)
     }
 
     /// Wait until [`Bench::answers`] is `answering`, within `secs`; how long
@@ -133,13 +133,17 @@ impl Bench {
     /// [`PROBE_SECS`], and the next is asked [`ASK_EVERY`] after it.
     fn wait(&self, secs: u64, what: &'static str, answering: bool) -> Result<u64, Refusal> {
         let began = std::time::Instant::now();
+        let mut last = None;
         while began.elapsed().as_secs() < secs {
-            if self.answers() == answering {
-                return Ok(began.elapsed().as_secs());
+            match self.answers() {
+                Ok(()) if answering => return Ok(began.elapsed().as_secs()),
+                Err(_) if !answering => return Ok(began.elapsed().as_secs()),
+                Ok(()) => last = Some("it still answers".to_string()),
+                Err(why) => last = Some(why),
             }
             std::thread::sleep(ASK_EVERY);
         }
-        Err(Refusal::Silent { what, secs, last: None })
+        Err(Refusal::Silent { what, secs, last })
     }
 
     /// Wait until the machine's `/log` comes back over this key, within
@@ -533,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_that_never_gives_back_its_log_is_refused_with_the_last_ask() {
+    fn a_machine_that_never_answers_is_refused_with_the_last_ask() {
         let scratch = toyos_tmpdir::TempDir::new("silent");
         let root = scratch.to_path_buf();
         let client = crate::build::ssh_client_host(&root);
@@ -547,6 +551,8 @@ mod tests {
             scratch: root.clone(),
         };
         let refused = bench.wait_for_the_log(1, "come back", &root.join("log"), "").err().expect("no machine");
+        assert!(refused.to_string().contains("the last ask of it:  did not resolve"), "{refused}");
+        let refused = bench.wait(1, "answer as the delivered boot", true).expect_err("no machine");
         assert!(refused.to_string().contains("the last ask of it:  did not resolve"), "{refused}");
     }
 
