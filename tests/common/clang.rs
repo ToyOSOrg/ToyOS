@@ -24,7 +24,7 @@ pub fn judge_elf(elf: &[u8]) -> Result<(), String> {
         toyos_build::arch::Arch::Aarch64 => toyos_elf::Machine::Aarch64,
     };
     let layout = toyos_elf::Layout::parse(elf, machine).map_err(|e| format!("the loader's decoder refuses it: {e:?}"))?;
-    if layout.eh_frame_hdr.is_none() {
+    if layout.eh_frame_hdr().is_none() {
         return Err("it has no unwind table header, which the driver asks for".to_string());
     }
     let table = header.program_headers(elf).map_err(|e| format!("its program headers: {e:?}"))?;
