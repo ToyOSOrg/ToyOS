@@ -8,9 +8,7 @@
 //! the bound `find_gap` places in: one no placement window could hold is
 //! `InvalidArgument`, one that could but finds no room is `ResourceExhausted`.
 //! FIXED places at the caller's own address and never searches a gap, so it
-//! rounds with the checked sum alone, uncapped by the window's guard. A sum
-//! that traps under either arm traps under the process-data and
-//! address-space locks, and a recovered syscall panic never releases either.
+//! rounds with the checked sum alone, uncapped by the window's guard.
 //!
 //! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
 //! shoots down and waits, and a sibling thread can be spinning on that same
@@ -44,9 +42,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     // `FIXED` with a null `req_addr` places anywhere, same as the non-FIXED
     // arm below: this is the one condition that decides which placement runs.
     let places_at_req_addr = flags.contains(MmapFlags::FIXED) && req_addr != 0;
-    // It needs no gap search and so no guard headroom; it rounds with the
-    // checked sum alone. Every other request goes through the window
-    // `find_gap` places in, so what passes here can never overflow there.
+    // Refused here, before either lock is taken.
     let Some(aligned) = (if places_at_req_addr {
         (size != 0).then_some(size).and_then(toyos_userbound::align_2m_checked)
     } else {

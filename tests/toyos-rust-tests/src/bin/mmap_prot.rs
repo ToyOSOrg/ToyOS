@@ -18,10 +18,7 @@
 //! still there.
 //!
 //! **A length no placement window could hold is `InvalidArgument`, and the
-//! address space still answers after it.** A sum on such a length that traps
-//! under the process-data and address-space locks strands both — a recovered
-//! syscall panic never releases them — and the next thread to take either
-//! spins the machine into its deadlock halt. So a sibling thread maps and
+//! address space still answers after it.** So a sibling thread maps and
 //! unmaps across the refusals, and must finish a round after them.
 
 use std::process::{Command, Stdio};
