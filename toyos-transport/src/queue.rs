@@ -1,4 +1,4 @@
-//! A single-producer queue of `E`-word entries, `D` deep.
+//! A single-producer queue of `E`-word entries, `D` deep, among `N` words.
 //!
 //! **A producer writes an entry's words, then publishes the tail with
 //! `Release`; a consumer loads the tail with `Acquire`, then reads the words.**
@@ -8,7 +8,7 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::{word, Asleep, Cursors, Untrusted, Violation, Wake, Word};
+use crate::{word, Cursors, Untrusted, Violation, Word, PUBLISH};
 
 /// Where one queue is in a region, in words: its cursors, and its first entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -19,28 +19,35 @@ pub struct Place {
 
 impl Place {
     /// The words of the entry at ring position `at`.
-    fn entry<'a, W, const E: usize, const D: u32>(&self, page: &'a [W], at: u32) -> Result<&'a [W], Violation> {
-        let first = usize::try_from(at & D.wrapping_sub(1))
-            .ok()
-            .and_then(|slot| slot.checked_mul(E))
-            .and_then(|offset| offset.checked_add(self.entries));
-        first.and_then(|first| page.get(first..first.checked_add(E)?)).ok_or(Violation::Region)
+    fn entry<'a, W, const E: usize, const D: u32, const N: usize>(
+        &self,
+        page: &'a [W; N],
+        at: u32,
+    ) -> impl Iterator<Item = &'a W> {
+        // `usize` holds every `u32`, so the slot is exact.
+        #[allow(clippy::as_conversions)]
+        let slot = (at & D.wrapping_sub(1)) as usize;
+        let first = self.entries.wrapping_add(slot.wrapping_mul(E));
+        (0..E).map(move |k| word(page, first.wrapping_add(k)))
     }
 
-    /// Every word the queue uses is in `page`.
-    fn check<W, const E: usize, const D: u32>(&self, page: &[W]) -> Result<(), Violation> {
+    /// Every word the queue uses is below `N`.
+    fn check<const E: usize, const D: u32, const N: usize>(&self) -> Result<(), Violation> {
         const { assert!(D.is_power_of_two() && E > 0, "a queue is a power of two deep, of entries of a word or more") };
-        word(page, self.cursors.head)?;
-        word(page, self.cursors.tail)?;
-        word(page, self.cursors.sleep)?;
-        self.entry::<W, E, D>(page, D.wrapping_sub(1)).map(|_| ())
+        const { assert!(usize::BITS >= u32::BITS, "a ring position is a u32") };
+        let entries_end =
+            usize::try_from(D).ok().and_then(|d| d.checked_mul(E)).and_then(|words| words.checked_add(self.entries));
+        match entries_end {
+            Some(end) if end <= N && self.cursors.head < N && self.cursors.tail < N => Ok(()),
+            _ => Err(Violation::Region),
+        }
     }
 }
 
 /// The end of a queue that writes entries. It holds its cursors and not the
 /// region; every call is given the region's words.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Producer<const E: usize, const D: u32> {
+pub struct Producer<const E: usize, const D: u32, const N: usize> {
     place: Place,
     local: u32,
     published: u32,
@@ -48,16 +55,16 @@ pub struct Producer<const E: usize, const D: u32> {
     room: u32,
 }
 
-impl<const E: usize, const D: u32> Producer<E, D> {
+impl<const E: usize, const D: u32, const N: usize> Producer<E, D, N> {
     /// This end of the queue at `place`, its tail stored 0.
-    pub fn new<W: Word>(page: &[W], place: Place) -> Result<Self, Violation> {
-        place.check::<W, E, D>(page)?;
-        word(page, place.cursors.tail)?.store(0, Ordering::Release);
+    pub fn new<W: Word>(page: &[W; N], place: Place) -> Result<Self, Violation> {
+        place.check::<E, D, N>()?;
+        word(page, place.cursors.tail).store(0, Ordering::Release);
         Ok(Self { place, local: 0, published: 0, room: D })
     }
 
     /// How many entries may be pushed before the consumer frees more.
-    pub fn space<W: Word>(&mut self, page: &[W]) -> Result<u32, Violation> {
+    pub fn space<W: Word>(&mut self, page: &[W; N]) -> Result<u32, Violation> {
         let unreleased = self.place.cursors.unreleased(page, self.published, D)?;
         let pending = self.local.wrapping_sub(self.published);
         self.room = D.saturating_sub(pending.saturating_add(unreleased));
@@ -66,11 +73,11 @@ impl<const E: usize, const D: u32> Producer<E, D> {
 
     /// Write one entry, or answer `false` for a full queue and write nothing.
     /// It is the consumer's once [`Self::publish`] runs.
-    pub fn push<W: Word>(&mut self, page: &[W], words: [u32; E]) -> Result<bool, Violation> {
+    pub fn push<W: Word>(&mut self, page: &[W; N], words: [u32; E]) -> Result<bool, Violation> {
         if self.room == 0 && self.space(page)? == 0 {
             return Ok(false);
         }
-        for (shared, value) in self.place.entry::<W, E, D>(page, self.local)?.iter().zip(words) {
+        for (shared, value) in self.place.entry::<W, E, D, N>(page, self.local).zip(words) {
             shared.store(value, Ordering::Relaxed);
         }
         self.local = self.local.wrapping_add(1);
@@ -78,61 +85,47 @@ impl<const E: usize, const D: u32> Producer<E, D> {
         Ok(true)
     }
 
-    /// Publish every entry pushed so far; `None` if there was none.
-    pub fn publish<W: Word>(&mut self, page: &[W]) -> Result<Option<Wake>, Violation> {
+    /// Publish every entry pushed so far; `false` if there was none.
+    pub fn publish<W: Word>(&mut self, page: &[W; N]) -> bool {
         if self.published == self.local {
-            return Ok(None);
+            return false;
         }
-        let wake = self.place.cursors.publish(page, self.local)?;
+        word(page, self.place.cursors.tail).store(self.local, PUBLISH);
         self.published = self.local;
-        Ok(Some(wake))
+        true
     }
 }
 
 /// The end of a queue that reads entries; like [`Producer`], it holds cursors
 /// and is given the region's words.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Consumer<const E: usize, const D: u32> {
+pub struct Consumer<const E: usize, const D: u32, const N: usize> {
     place: Place,
     local: u32,
     released: u32,
     /// Entries published and not yet popped, as last seen.
     ready: u32,
-    /// This end stored its `sleep` word and has not cleared it.
-    asleep: bool,
 }
 
-impl<const E: usize, const D: u32> Consumer<E, D> {
-    /// This end of the queue at `place`, its head and `sleep` stored 0.
-    pub fn new<W: Word>(page: &[W], place: Place) -> Result<Self, Violation> {
-        place.check::<W, E, D>(page)?;
-        word(page, place.cursors.head)?.store(0, Ordering::Release);
-        place.cursors.awake(page)?;
-        Ok(Self { place, local: 0, released: 0, ready: 0, asleep: false })
-    }
-
-    /// Look at the tail again, and answer it; what of it is not popped is
-    /// `ready`.
-    fn observe<W: Word>(&mut self, page: &[W]) -> Result<u32, Violation> {
-        let published = self.place.cursors.published(page, self.released, D)?;
-        self.ready = published.saturating_sub(self.local.wrapping_sub(self.released));
-        Ok(self.released.wrapping_add(published))
+impl<const E: usize, const D: u32, const N: usize> Consumer<E, D, N> {
+    /// This end of the queue at `place`, its head stored 0.
+    pub fn new<W: Word>(page: &[W; N], place: Place) -> Result<Self, Violation> {
+        place.check::<E, D, N>()?;
+        word(page, place.cursors.head).store(0, Ordering::Release);
+        Ok(Self { place, local: 0, released: 0, ready: 0 })
     }
 
     /// The next published entry, or `None` for none.
-    pub fn pop<W: Word>(&mut self, page: &[W]) -> Result<Option<[Untrusted<u32>; E]>, Violation> {
+    pub fn pop<W: Word>(&mut self, page: &[W; N]) -> Result<Option<[Untrusted<u32>; E]>, Violation> {
         if self.ready == 0 {
-            if self.asleep {
-                self.place.cursors.awake(page)?;
-                self.asleep = false;
-            }
-            self.observe(page)?;
+            let published = self.place.cursors.published(page, self.released, D)?;
+            self.ready = published.saturating_sub(self.local.wrapping_sub(self.released));
             if self.ready == 0 {
                 return Ok(None);
             }
         }
         let mut words = [Untrusted::new(0); E];
-        for (out, shared) in words.iter_mut().zip(self.place.entry::<W, E, D>(page, self.local)?) {
+        for (out, shared) in words.iter_mut().zip(self.place.entry::<W, E, D, N>(page, self.local)) {
             *out = Untrusted::new(shared.load(Ordering::Relaxed));
         }
         self.local = self.local.wrapping_add(1);
@@ -141,30 +134,11 @@ impl<const E: usize, const D: u32> Consumer<E, D> {
     }
 
     /// Give every entry popped so far back to the producer.
-    pub fn release<W: Word>(&mut self, page: &[W]) -> Result<(), Violation> {
+    pub fn release<W: Word>(&mut self, page: &[W; N]) {
         if self.released != self.local {
-            word(page, self.place.cursors.head)?.store(self.local, Ordering::Release);
+            word(page, self.place.cursors.head).store(self.local, Ordering::Release);
             self.released = self.local;
         }
-        Ok(())
-    }
-
-    /// Say this end sleeps, and look once more: `None` if an entry is there
-    /// after all, or where to wait. A producer that publishes after this is
-    /// answered [`Wake::Peer`]; the next [`Self::pop`] says this end is awake.
-    pub fn before_sleep<W: Word>(&mut self, page: &[W]) -> Result<Option<Asleep>, Violation> {
-        if self.ready > 0 {
-            return Ok(None);
-        }
-        self.place.cursors.sleep(page)?;
-        self.asleep = true;
-        let tail = self.observe(page)?;
-        if self.ready > 0 {
-            self.place.cursors.awake(page)?;
-            self.asleep = false;
-            return Ok(None);
-        }
-        Ok(Some(Asleep { word: self.place.cursors.tail, value: tail }))
     }
 }
 
@@ -174,13 +148,14 @@ mod tests {
     use core::sync::atomic::AtomicU32;
 
     const D: u32 = 8;
-    const PLACE: Place = Place { cursors: Cursors { head: 0, tail: 16, sleep: 1 }, entries: 32 };
+    const PLACE: Place = Place { cursors: Cursors { head: 0, tail: 16 }, entries: 32 };
+    const WORDS: usize = 32 + 2 * D as usize;
 
-    fn page() -> Vec<AtomicU32> {
-        (0..32 + 2 * D as usize).map(|_| AtomicU32::new(0)).collect()
+    fn page() -> [AtomicU32; WORDS] {
+        core::array::from_fn(|_| AtomicU32::new(0))
     }
 
-    fn ends(page: &[AtomicU32]) -> (Producer<2, D>, Consumer<2, D>) {
+    fn ends(page: &[AtomicU32; WORDS]) -> (Producer<2, D, WORDS>, Consumer<2, D, WORDS>) {
         (Producer::new(page, PLACE).unwrap(), Consumer::new(page, PLACE).unwrap())
     }
 
@@ -194,8 +169,8 @@ mod tests {
         let (mut tx, mut rx) = ends(&page);
         assert_eq!(tx.push(&page, [3, 4]), Ok(true));
         assert_eq!(rx.pop(&page).map(plain), Ok(None));
-        assert_eq!(tx.publish(&page), Ok(Some(Wake::Busy)));
-        assert_eq!(tx.publish(&page), Ok(None), "nothing new, nothing published");
+        assert!(tx.publish(&page));
+        assert!(!tx.publish(&page), "nothing new, nothing published");
         assert_eq!(rx.pop(&page).map(plain), Ok(Some([3, 4])));
         assert_eq!(rx.pop(&page).map(plain), Ok(None));
     }
@@ -216,13 +191,13 @@ mod tests {
                 }
                 pushed += 1;
             }
-            let _ = tx.publish(&page).unwrap();
+            tx.publish(&page);
             for _ in 0..1 + round % 7 {
                 let Some(words) = plain(rx.pop(&page).unwrap()) else { break };
                 assert_eq!(words, [popped, !popped], "entries come out whole, in the order they went in");
                 popped += 1;
             }
-            rx.release(&page).unwrap();
+            rx.release(&page);
         }
         assert!(pushed > 2 * D, "the ring wrapped");
     }
@@ -286,25 +261,13 @@ mod tests {
     #[test]
     fn a_place_outside_the_words_is_refused() {
         let page = page();
-        let short = &page[..32 + 2 * D as usize - 1];
-        assert_eq!(Producer::<2, D>::new(short, PLACE).err(), Some(Violation::Region));
-        assert_eq!(Consumer::<2, D>::new(short, PLACE).err(), Some(Violation::Region));
-    }
-
-    /// The wake's two halves on one thread: a consumer that said it sleeps is
-    /// woken by the next publish and by no later one once it has popped.
-    #[test]
-    fn a_sleeper_is_woken_once_and_a_busy_one_never() {
-        let page = page();
-        let (mut tx, mut rx) = ends(&page);
-        assert_eq!(rx.before_sleep(&page), Ok(Some(Asleep { word: 16, value: 0 })));
-        tx.push(&page, [1, 1]).unwrap();
-        assert_eq!(tx.publish(&page), Ok(Some(Wake::Peer)));
-        assert!(rx.pop(&page).unwrap().is_some());
-        assert_eq!(rx.pop(&page), Ok(None), "the pop that found nothing said this end is awake");
-        tx.push(&page, [2, 2]).unwrap();
-        assert_eq!(tx.publish(&page), Ok(Some(Wake::Busy)));
-        assert_eq!(rx.before_sleep(&page), Ok(None), "an entry was there after all");
-        assert_eq!(tx.publish(&page), Ok(None));
+        for place in [
+            Place { entries: 33, ..PLACE },
+            Place { cursors: Cursors { head: WORDS, tail: 16 }, ..PLACE },
+            Place { cursors: Cursors { head: 0, tail: WORDS }, ..PLACE },
+        ] {
+            assert_eq!(Producer::<2, D, WORDS>::new(&page, place).err(), Some(Violation::Region));
+            assert_eq!(Consumer::<2, D, WORDS>::new(&page, place).err(), Some(Violation::Region));
+        }
     }
 }

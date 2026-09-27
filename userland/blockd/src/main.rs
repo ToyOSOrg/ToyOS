@@ -318,7 +318,7 @@ impl Service {
                 break;
             };
             let unread = (DEPTH - space) as usize;
-            if s.state.inflight() + unread >= DEPTH as usize || !self.ctrl.has_room() {
+            if s.state.inflight().len() + unread >= DEPTH as usize || !self.ctrl.has_room() {
                 break;
             }
             let words = match s.rings.0.pop(page) {
@@ -333,13 +333,13 @@ impl Service {
             match s.state.take(words) {
                 Taken::Answer(c) => Self::post(s, c),
                 Taken::Issue(req) => {
-                    let owner = Owner::Session { session: id, tag: req.tag, write: req.op == Op::Write };
+                    let write = matches!(req.op, Op::Write(_));
+                    let owner = Owner::Session { session: id, tag: req.tag, write };
                     match req.op {
-                        Op::Read | Op::Write => {
-                            let run = req.run.expect("blockd: a transfer names its run");
+                        Op::Read(run) | Op::Write(run) => {
                             let at = s.device_addr + run.span().offset as u64;
                             let block = s.state.first() + req.lba;
-                            self.ctrl.submit_io(req.op == Op::Write, block, run.count(), at, owner);
+                            self.ctrl.submit_io(write, block, run.count(), at, owner);
                         }
                         Op::Flush if self.ctrl.vwc => self.ctrl.submit_flush(owner),
                         // No volatile cache: every write answered is on the
@@ -352,7 +352,7 @@ impl Service {
                 }
             }
         }
-        s.rings.0.release(s.region.words()).expect("blockd: the region holds every ring word");
+        s.rings.0.release(s.region.words());
     }
 
     /// Publish what each session was answered, and ring its doorbell.
@@ -362,7 +362,7 @@ impl Service {
                 continue;
             }
             s.posted = false;
-            if s.rings.1.publish(s.region.words()).expect("blockd: the region holds every ring word").is_some() {
+            if s.rings.1.publish(s.region.words()) {
                 match s.conn.write_nonblock(&[1]) {
                     Ok(_) | Err(SyscallError::WouldBlock) => {}
                     Err(_) => s.closing = true,
@@ -377,7 +377,7 @@ impl Service {
         let done: Vec<u64> = self
             .sessions
             .iter()
-            .filter(|(_, s)| s.closing && s.state.inflight() == 0)
+            .filter(|(_, s)| s.closing && s.state.inflight().len() == 0)
             .map(|(id, _)| *id)
             .collect();
         for id in done {

@@ -1,11 +1,10 @@
 # A member of the host workspace (root `Cargo.toml`). The one transport every
-# client/server session runs over: the rings, the arena's runs, the tag table
-# and the wake, as decisions over words an adapter hands in. Nothing here maps,
-# copies or blocks.
+# client/server session runs over: the rings, the arena's runs and the tag
+# table, as decisions over words an adapter hands in. Nothing here maps, copies
+# or blocks.
 #
 # Its defects are orders and hostile peers, so `tests/loom.rs` holds the
-# publication edge, the wake and a hostile peer, and `src/model.rs` enumerates
-# a session through crash, restart and a late completion.
+# publication edge and a hostile peer.
 
 [package]
 name = "toyos-transport"
@@ -22,12 +21,6 @@ publish = false
 # A producer publishes its tail `Relaxed`, so a consumer can see the index
 # before the entry's words.
 publish-relaxed = []
-# The producer does not fence between its tail and its load of `sleep`, so it
-# can miss a consumer's `sleep` while the consumer misses its tail.
-no-wake-fence = []
-# The consumer does not fence between its `sleep` and its load of the tail:
-# the same miss, from the other side.
-no-sleep-fence = []
 # A peer's cursor is believed however far it claims to be, so a hostile
 # producer hands the consumer more entries than the ring holds.
 no-clamp = []

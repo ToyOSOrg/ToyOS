@@ -38,7 +38,7 @@ mutate-no-reissue-after-loss = []
 # the server half's bookkeeping, decided where the kernel's block layer decides
 # it today.
 toyos-blockhold = { path = "../toyos-blockhold" }
-# The rings on the session page, and the schema the protocol is to them.
+# The rings on the session page.
 toyos-transport = { path = "../toyos-transport" }
 
 [lints.rust]

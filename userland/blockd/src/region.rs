@@ -31,7 +31,7 @@ impl Region {
     }
 
     /// The ring words, as the rings take them.
-    pub fn words(&self) -> &[AtomicU32] {
+    pub fn words(&self) -> &[AtomicU32; RING_WORDS] {
         let base = self.memory.as_ptr();
         assert!(base as usize % align_of::<AtomicU32>() == 0);
         // SAFETY: the mapping is `SESSION_BYTES` long and lives as long as
@@ -39,7 +39,7 @@ impl Region {
         // `RING_WORDS` words of it are inside it (`layout`'s own assertion);
         // the base is 2 MiB aligned; and an atomic is the one type that may
         // alias memory another process writes.
-        unsafe { core::slice::from_raw_parts(base as *const AtomicU32, RING_WORDS) }
+        unsafe { &*(base as *const [AtomicU32; RING_WORDS]) }
     }
 
     /// The arena blocks of `run`.

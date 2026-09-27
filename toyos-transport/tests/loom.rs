@@ -3,11 +3,6 @@
 //!
 //! - **Publication**: a consumer that sees a tail sees every word of the
 //!   entries below it. `publish-relaxed` takes the edge away.
-//! - **No lost wake**: a consumer that says it sleeps and a producer that
-//!   publishes cannot both miss the other; the futex is a load of the word it
-//!   waits on, and a lost wake is a consumer that slept over a publish that
-//!   answered [`Wake::Busy`]. `no-wake-fence` takes the producer's fence away
-//!   and `no-sleep-fence` the consumer's.
 //! - **A hostile peer** leaves the honest end with entries, nothing, or a
 //!   named violation, and never more entries than the ring holds. `no-clamp`
 //!   believes the peer.
@@ -16,9 +11,9 @@
 
 use core::sync::atomic::Ordering;
 
-use loom::sync::atomic::{fence, AtomicU32};
+use loom::sync::atomic::AtomicU32;
 use loom::sync::Arc;
-use toyos_transport::{Consumer, Cursors, Place, Producer, Untrusted, Violation, Wake, Word};
+use toyos_transport::{Consumer, Cursors, Place, Producer, Untrusted, Violation, Word};
 
 /// A loom atomic as a region word: the trait is this crate's and the type is
 /// loom's, so the two meet through a wrapper.
@@ -31,21 +26,18 @@ impl Word for Shared {
     fn store(&self, value: u32, order: Ordering) {
         self.0.store(value, order)
     }
-    fn fence() {
-        fence(Ordering::SeqCst)
-    }
 }
 
 const E: usize = 2;
 const D: u32 = 2;
-const PLACE: Place = Place { cursors: Cursors { head: 0, tail: 1, sleep: 2 }, entries: 3 };
-const WORDS: usize = 3 + E * D as usize;
+const PLACE: Place = Place { cursors: Cursors { head: 0, tail: 1 }, entries: 2 };
+const WORDS: usize = 2 + E * D as usize;
 
-fn page() -> Arc<Vec<Shared>> {
-    Arc::new((0..WORDS).map(|_| Shared(AtomicU32::new(0))).collect())
+fn page() -> Arc<[Shared; WORDS]> {
+    Arc::new(core::array::from_fn(|_| Shared(AtomicU32::new(0))))
 }
 
-fn ends(page: &[Shared]) -> (Producer<E, D>, Consumer<E, D>) {
+fn ends(page: &[Shared; WORDS]) -> (Producer<E, D, WORDS>, Consumer<E, D, WORDS>) {
     (Producer::new(page, PLACE).unwrap(), Consumer::new(page, PLACE).unwrap())
 }
 
@@ -73,49 +65,22 @@ fn a_published_entry_is_read_whole() {
                     None => loom::thread::yield_now(),
                 }
             }
-            rx.release(&consumer_page).unwrap();
+            rx.release(&consumer_page);
             read
         });
         for n in 0..2 {
             assert!(tx.push(&page, entry(n)).unwrap());
-            let _ = tx.publish(&page).unwrap();
+            tx.publish(&page);
         }
         let read = consumer.join().expect("the consumer thread");
         assert_eq!(read, [entry(0), entry(1)], "an entry was read before its words");
     });
 }
 
-/// A consumer that finds nothing sleeps as a futex does — only while the tail
-/// still holds what it saw — and is woken only when a publish answers
-/// [`Wake::Peer`]. Whatever the schedule, a consumer that slept is woken.
-#[test]
-fn a_publish_and_a_sleep_cannot_both_miss() {
-    loom::model(|| {
-        let page = page();
-        let (mut tx, mut rx) = ends(&page);
-        let consumer_page = Arc::clone(&page);
-        let consumer = loom::thread::spawn(move || {
-            if rx.pop(&consumer_page).unwrap().is_some() {
-                return false;
-            }
-            rx.before_sleep(&consumer_page)
-                .unwrap()
-                .is_some_and(|asleep| consumer_page[asleep.word].load(Ordering::Relaxed) == asleep.value)
-        });
-        assert!(tx.push(&page, entry(1)).unwrap());
-        let wake = tx.publish(&page).unwrap();
-        let slept = consumer.join().expect("the consumer thread");
-        assert!(
-            !slept || wake == Some(Wake::Peer),
-            "the consumer slept over a published entry and the publish answered {wake:?}"
-        );
-    });
-}
-
 /// A producer that stores a tail past the ring, one behind what was released,
-/// and garbage into the entries and into the consumer's own head and `sleep`:
-/// every pop is an entry, nothing, or [`Violation::TailPastDepth`], and no
-/// more than the ring's depth of entries is taken without a release.
+/// and garbage into the entries and into the consumer's own head: every pop is
+/// an entry, nothing, or [`Violation::TailPastDepth`], and no more than the
+/// ring's depth of entries is taken without a release.
 #[test]
 fn a_hostile_producer_yields_entries_or_a_violation() {
     loom::model(|| {
@@ -168,7 +133,7 @@ fn a_hostile_consumer_yields_room_or_a_violation() {
                     break;
                 }
             }
-            let _ = tx.publish(&page).unwrap();
+            tx.publish(&page);
         }
         hostile.join().unwrap();
         assert!(pushed <= D, "pushed {pushed} into a ring of {D} nobody released");

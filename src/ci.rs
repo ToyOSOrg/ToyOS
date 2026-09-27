@@ -369,10 +369,10 @@ pub(crate) const CONTROLS: &[Control] = &[
         "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
     ]),
     red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
-    red(TRANSPORT, "no-wake-fence", Some("loom"), &["a_publish_and_a_sleep_cannot_both_miss ... FAILED"]),
-    red(TRANSPORT, "no-sleep-fence", Some("loom"), &["a_publish_and_a_sleep_cannot_both_miss ... FAILED"]),
     red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
-    red(TRANSPORT, "end-keeps-inflight", None, &["every_tag_is_answered_exactly_once ... FAILED"]),
+    red(TRANSPORT, "end-keeps-inflight", None, &[
+        "an_end_answers_every_tag_once_and_a_late_completion_nothing ... FAILED",
+    ]),
 ];
 
 /// Whether a control's run showed its teeth.

@@ -187,7 +187,7 @@ impl Session {
         let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
         self.region.arena(&run).copy_in(0, data);
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Write, lba, Some(run));
+        self.client.submit(ticket, Op::Write(run), lba);
         self.pending.insert(ticket, Pending::Write);
         Ok(ticket)
     }
@@ -200,7 +200,7 @@ impl Session {
         }
         let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Read, lba, Some(run));
+        self.client.submit(ticket, Op::Read(run), lba);
         self.pending.insert(ticket, Pending::Read { run });
         Ok(ticket)
     }
@@ -211,7 +211,7 @@ impl Session {
             return Err(Unsent::Ended);
         }
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Flush, 0, None);
+        self.client.submit(ticket, Op::Flush, 0);
         self.pending.insert(ticket, Pending::Flush);
         Ok(ticket)
     }
@@ -234,8 +234,8 @@ impl Session {
             let pushed = self.rings.0.push(page, request.encode());
             assert_eq!(pushed, Ok(true), "blockd: a request past the room just counted");
         }
-        self.peak = self.peak.max(self.client.on_the_wire());
-        if self.rings.0.publish(page).expect("blockd: the region holds every ring word").is_some() {
+        self.peak = self.peak.max(self.client.on_the_wire().count());
+        if self.rings.0.publish(page) {
             // A full pipe is a doorbell already rung; a gone one is a server
             // that has ended, which the wait finds.
             let _ = conn.write_nonblock(&[1]);
@@ -302,7 +302,7 @@ impl Session {
                 }
             }
         }
-        self.rings.1.release(page).expect("blockd: the region holds every ring word");
+        self.rings.1.release(page);
         violated
     }
 

@@ -66,9 +66,9 @@ impl ServerSession {
         self.blocks
     }
 
-    /// Requests taken and not yet answered.
-    pub fn inflight(&self) -> usize {
-        self.inflight.len()
+    /// Requests taken and not yet answered, by tag.
+    pub fn inflight(&self) -> impl ExactSizeIterator<Item = (u32, Op)> + '_ {
+        self.inflight.iter().map(|(&tag, &op)| (tag, op))
     }
 
     /// Decide what one entry the client published is.
@@ -103,8 +103,8 @@ impl ServerSession {
         let op = self.inflight.remove(&tag)?;
         let status = match (op, done) {
             (_, false) => Status::Device,
-            (Op::Read, true) => Status::Ok,
-            (Op::Write, true) => {
+            (Op::Read(_), true) => Status::Ok,
+            (Op::Write(_), true) => {
                 holds.wrote(self.writer(), losses);
                 Status::Ok
             }
@@ -137,10 +137,10 @@ mod tests {
     use crate::layout::ARENA;
 
     fn write(tag: u32) -> [Untrusted<u32>; SQE_WORDS] {
-        Request { op: Op::Write, tag, lba: 0, run: ARENA.run(0, 1) }.encode().map(Untrusted::new)
+        Request { op: Op::Write(ARENA.run(0, 1).unwrap()), tag, lba: 0 }.encode().map(Untrusted::new)
     }
     fn flush(tag: u32) -> [Untrusted<u32>; SQE_WORDS] {
-        Request { op: Op::Flush, tag, lba: 0, run: None }.encode().map(Untrusted::new)
+        Request { op: Op::Flush, tag, lba: 0 }.encode().map(Untrusted::new)
     }
 
     #[test]
@@ -158,7 +158,7 @@ mod tests {
         let mut session = ServerSession::new(0, 10);
         assert!(matches!(session.take(write(4)), Taken::Issue(_)));
         assert_eq!(session.take(write(4)), Taken::Answer(Completion { tag: 4, status: Status::Invalid }));
-        assert_eq!(session.inflight(), 1);
+        assert_eq!(session.inflight().len(), 1);
     }
 
     /// A write acknowledged before a reset bumped the loss count is a loss the

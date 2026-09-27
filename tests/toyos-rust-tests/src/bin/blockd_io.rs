@@ -51,9 +51,9 @@ use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::part::PartGuid;
 use toyos_abi::syscall::{DeviceType, PciId, SyscallError, DEV_PREFIX, SERVE_PREFIX, SYSCAP_LABEL};
-use toyos_blockring::layout::{CQ_HEAD, CQ_TAIL, DEPTH, SQ_BASE, SQ_TAIL};
+use toyos_blockring::layout::{ARENA, CQ_HEAD, CQ_TAIL, DEPTH, SQ_BASE, SQ_TAIL};
 use toyos_blockring::wire::{self, Refusal};
-use toyos_blockring::{BLOCK_BYTES, MAX_REQUEST_BLOCKS, PORT};
+use toyos_blockring::{Op, Request, BLOCK_BYTES, MAX_REQUEST_BLOCKS, PORT};
 
 const SELF: &str = "/system/bin/test_rs_blockd_io";
 
@@ -99,8 +99,7 @@ const NARROW: u64 = 128 * 1024 * 1024;
 const AIMED: Duration = Duration::from_secs(10);
 
 /// How long `hostile-head` waits for blockd to withhold its write's answer, and
-/// then for the reset that ends its session: a liveness bound past blockd's
-/// ten seconds of silence.
+/// then for the reset that ends its session: a liveness bound.
 const SILENCE_ENDS: Duration = Duration::from_secs(30);
 
 fn guid(text: &str) -> [u8; 16] {
@@ -549,7 +548,9 @@ fn hostile_head() {
     // A write of the slot's block 0 from arena block 0 under tag 1, as the
     // words a client puts on the request ring, published and rung.
     let words = region.words();
-    for (at, word) in [2, 1, 0, 0, 1, 0, 0, 0].into_iter().enumerate() {
+    let run = ARENA.run(0, 1).unwrap_or_else(|| fail("arena block 0 is no run".into()));
+    let write = Request { op: Op::Write(run), tag: 1, lba: 0 };
+    for (at, word) in write.encode().into_iter().enumerate() {
         words[SQ_BASE + at].store(word, Ordering::Relaxed);
     }
     words[SQ_TAIL].store(1, Ordering::Release);
