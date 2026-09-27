@@ -74,8 +74,7 @@ fn wake(listener: &TcpBound, what: &str) {
     let mut byte = [0u8; 1];
     match listener.notify.read(&mut byte) {
         Ok(1) => {}
-        Ok(0) => panic!("a wake for {what}: netd closed the listener"),
-        Ok(n) => panic!("a wake for {what}: read {n} bytes"),
+        Ok(_) => panic!("a wake for {what}: netd closed the listener"),
         Err(e) => panic!("a wake for {what}: {e:?}"),
     }
 }
