@@ -1,4 +1,4 @@
-Every ACPI table QEMU 11.1.0 published to a Profile::Headless guest, read out
+Every ACPI table QEMU 11.1.1 published to a Profile::Headless guest, read out
 of guest physical memory over QMP `human-monitor-command` `xp/Nxb <addr>` — the
 host's read of the guest's memory, so no byte here came through the decoder
 these fixtures judge.

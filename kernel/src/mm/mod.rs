@@ -34,6 +34,8 @@ pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
 /// The kernel's one user page size and translation granularity.
 pub use toyos_userbound::PAGE_2M;
+/// [`align_2m`] for a size that crossed a trust boundary, beside [`PAGE_2M`] in `toyos_userbound`.
+pub use toyos_userbound::align_2m_checked;
 
 /// The hardware page size; `paging::PAGE_SIZE_BIT` marks a PDE mapping directly at this granularity.
 pub const PAGE_SIZE: u64 = 4096;
@@ -44,14 +46,6 @@ pub const PAGE_BYTES: usize = PAGE_SIZE as usize;
 /// Rounds `size` up to the next 2MB boundary; only for a size the kernel computed, not outside input.
 pub const fn align_2m(size: usize) -> usize {
     (size + PAGE_2M as usize - 1) & !(PAGE_2M as usize - 1)
-}
-
-/// [`align_2m`] for a size that crossed a trust boundary; returns `None` rather than silently wrapping to an undersized allocation.
-pub const fn align_2m_checked(size: usize) -> Option<usize> {
-    match size.checked_add(PAGE_2M as usize - 1) {
-        Some(sum) => Some(sum & !(PAGE_2M as usize - 1)),
-        None => None,
-    }
 }
 
 /// The largest single allocation the kernel heap can serve; untrusted-sized requests must check it themselves, since `KernelAllocator::alloc` only asserts it.

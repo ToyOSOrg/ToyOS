@@ -1,11 +1,9 @@
 //! What a source file is to a build: its token stream, not its text.
 //!
 //! **One definition, read by every question of the form "did this source
-//! change what gets built"**: the version judge (`src/sdkversion.rs`) and the
-//! key a sysroot is filed under (`src/toolchain.rs`). A comment — a doc comment
-//! included — and the whitespace around tokens change no item, no layout and no
-//! code, so a change made only of them is neither a version bump nor a new
-//! sysroot.
+//! change what gets built"**: the key a sysroot is filed under. A comment
+//! — a doc comment included — and the whitespace around tokens change no item,
+//! no layout and no code, so a change made only of them is no new sysroot.
 //!
 //! A `.rs` file is lexed just far enough to find its comments: every string,
 //! raw string and character literal is kept byte for byte, every comment and
@@ -262,14 +260,10 @@ mod tests {
     /// is asked about lexes to a fixed point, and deleting every line of it that
     /// is a doc comment changes nothing.
     #[test]
-    fn every_doc_comment_in_the_published_and_sysroot_crates_is_invisible() {
+    fn every_doc_comment_in_the_sysroot_crates_is_invisible() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
-        for dir in crate::sysroot::SYSROOT_SOURCES
-            .iter()
-            .copied()
-            .chain(crate::sdkversion::PUBLISHED.iter().map(|k| k.dir))
-        {
+        for dir in crate::sysroot::SYSROOT_SOURCES {
             walk(&root.join(dir), &mut files);
         }
         assert!(files.len() > 50, "the corpus walk found {} files", files.len());

@@ -1083,6 +1083,9 @@ pub enum Profile {
     /// the 82574 nor any virtio function does.
     E1000eBesideIgb,
     Gop,
+    /// [`Profile::Gop`] with a second USB stick beside the boot stick, whose
+    /// table the test writes: the bus a stick of somebody else's arrives on.
+    GopUsbDisk,
     /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
     /// machine where a mode change can succeed rather than answering
     /// `NotSupported` ahead of everything a resize does.
@@ -1369,6 +1372,7 @@ impl Profile {
             | Self::E1000eNoServer
             | Self::E1000eBesideIgb
             | Self::Gop
+            | Self::GopUsbDisk
             | Self::VirtioGpu
             | Self::Metal
             | Self::MetalNoUsb
@@ -1797,6 +1801,7 @@ impl Profile {
                 hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
             },
+            Self::GopUsbDisk => Shape { usb_disks: &[UsbDisk::DATA], ..Self::Gop.shape() },
             Self::VirtioGpu => Shape {
                 // No VGA at all: firmware then publishes no GOP, and the one
                 // display the guest has is the one whose mode it can set.

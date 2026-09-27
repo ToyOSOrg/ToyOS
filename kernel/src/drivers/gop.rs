@@ -42,8 +42,8 @@ pub fn init(
          which needs {needed}"
     );
     // A wrapped 2 MiB round-up would register a too-small region while writes continue at the full size.
-    let aligned_size = align_2m_checked(size as usize)
-        .unwrap_or_else(|| panic!("GOP: firmware reports a {size}-byte framebuffer")) as u64;
+    let aligned_size = align_2m_checked(size)
+        .unwrap_or_else(|| panic!("GOP: firmware reports a {size}-byte framebuffer"));
     // SDM Vol. 3A §11.12.4: one physical page can't hold two memory types, so this
     // must match the cache policy used for the client mapping below.
     crate::mm::paging::map_mmio(addr, aligned_size, MmioPolicy::WriteCombining);

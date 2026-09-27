@@ -1,760 +1,330 @@
-//! The crates ToyOS publishes, and the rule that keeps their versions
-//! moving.
+//! The crates ToyOS publishes, and the version each goes up under.
 //!
-//! The winit, softbuffer and cpal forks name `toyos-abi`, `toyos` and
-//! `toyos-window` **by version**, because a path escaping a fork's own
-//! repository cannot resolve once cargo checks it out alone. So those and the
-//! two they pull in are published, and the ABI they carry is unstable by
-//! policy — a built program that breaks, breaks.
+//! crates.io's is assigned by [`plan`] when `main` publishes, and recorded
+//! nowhere but there: `0.N.0+<key>`, the key hashing the crate's git tree and
+//! the version assigned to each published crate it depends on. A crate whose
+//! key is not its newest published version's takes the next minor, so a change
+//! never goes up under a taken version, and a crate keeps its newest only when
+//! the manifest going up is the one already up.
 //!
-//! **That policy is what this gate is for.** None of them is
-//! compatible-by-construction, so a branch that changes what a file under one
-//! of them builds — its `src/identity.rs` identity, so a comment is no change —
-//! bumps its minor, `0.x.0` to `0.(x+1).0`, and every in-tree dependent's
-//! `version` pin with it. A crate *changed* and not republished is worse than
-//! one republished under a taken version, which crates.io refuses: the fork
-//! naming the version still resolves, and silently gets the old code.
-//!
-//! **A fork names them by a range** (`toyos-abi = ">=0.12, <1"`), so the
-//! tree's `[patch.crates-io]` path answers it at whatever version the tree is
-//! on, and a bump here owes no fork a commit. A fork that names one version
-//! instead resolves the published crate beside the tree's, which cargo builds
-//! without a word; so no lockfile in the tree may hold two versions of one of
-//! [`PUBLISHED`], and [`judge`] refuses one that does.
-//!
-//! [`PUBLISHED`]'s order is a dependency order, and it is the order
-//! `cargo run -- --ci publish` takes: a crate cannot go up before the index
-//! holds every version it names.
+//! [`PUBLISHED`]'s order is a dependency order: a crate cannot go up before
+//! the index holds every version it names.
 
 use std::path::Path;
+use std::process::Command;
 
-use crate::identity;
-use crate::pr::git;
-
-/// One published crate: where its manifest is, and which of the others it names
-/// by version.
+/// One published crate: the crates.io name, and its repository-relative
+/// directory.
 pub struct Crate {
-    /// The package name, which is the crates.io name.
     pub name: &'static str,
-    /// The directory the crate is in, repository-relative — also the prefix a
-    /// change to the crate is recognised by.
     pub dir: &'static str,
-    /// The others it depends on, so a bump here has to move their pins there.
-    pub depends_on: &'static [&'static str],
 }
-
-/// The workflow that puts these on crates.io, and so the rule's precondition:
-/// a branch judged against a base that does not hold this has no taken version
-/// to collide with, because nothing of ours is on the registry yet.
-///
-/// `every_row_names_a_crate_the_tree_holds` refuses a tree that has lost it, so
-/// the rule cannot be turned off by deleting the publisher.
-const PUBLISHER: &str = ".github/workflows/publish.yml";
 
 /// The published crates, in the order a publisher must take them.
 pub const PUBLISHED: &[Crate] = &[
-    Crate { name: "toyos-abi", dir: "toyos-abi", depends_on: &[] },
-    Crate { name: "toyos-keymap", dir: "toyos-keymap", depends_on: &[] },
-    Crate { name: "toyos-font", dir: "userland/toyos-font", depends_on: &[] },
-    Crate { name: "toyos", dir: "toyos", depends_on: &["toyos-abi"] },
-    Crate {
-        name: "toyos-window",
-        dir: "userland/toyos-window",
-        depends_on: &["toyos-abi", "toyos-keymap", "toyos-font", "toyos"],
-    },
+    Crate { name: "toyos-abi", dir: "toyos-abi" },
+    Crate { name: "toyos-keymap", dir: "toyos-keymap" },
+    Crate { name: "toyos-font", dir: "userland/toyos-font" },
+    Crate { name: "toyos", dir: "toyos" },
+    Crate { name: "toyos-window", dir: "userland/toyos-window" },
 ];
 
-/// `(name, version, manifest path)` for each of [`PUBLISHED`], in order — what
-/// the publisher takes and the toolchain release's manifest names.
-pub fn versions(root: &Path) -> Vec<(&'static str, String, String)> {
-    PUBLISHED
-        .iter()
-        .map(|krate| {
-            let manifest = format!("{}/Cargo.toml", krate.dir);
-            let text = std::fs::read_to_string(root.join(&manifest))
-                .unwrap_or_else(|e| panic!("read {manifest}: {e}"));
-            let version = package_version(&text)
-                .unwrap_or_else(|| panic!("{manifest} declares no [package] version"));
-            (krate.name, version, manifest)
-        })
-        .collect()
+/// One crate at this tree: the version crates.io has or is owed, whether it is
+/// owed, and the manifest it goes up with.
+pub struct Release {
+    pub krate: &'static Crate,
+    pub key: String,
+    pub version: String,
+    pub publish: bool,
+    pub manifest: String,
 }
 
-/// The `version = "…"` of the `[package]` table. A hand walk and not a parse:
-/// one key of one table, in manifests this repository writes.
-fn package_version(text: &str) -> Option<String> {
-    let mut in_package = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_package = line == "[package]";
-            continue;
-        }
-        if !in_package {
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("version") {
-            let value = value.trim_start().strip_prefix('=')?.trim();
-            return Some(value.trim_matches('"').to_string());
-        }
-    }
-    None
+/// Each of [`PUBLISHED`] at `root`'s `HEAD`, against the crates.io index.
+pub fn plan(root: &Path) -> Result<Vec<Release>, String> {
+    plan_of(PUBLISHED, |krate| source(root, krate), index)
 }
 
-/// Every `<dep> = { … version = "…" … }` line in `text` naming a published crate,
-/// as `(dependency, version)`. One line per dependency is the only spelling
-/// this reaches, which is why [`judge`] states the pin it read.
-fn version_pins(text: &str) -> Vec<(String, String)> {
-    let mut pins = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        let Some((name, rest)) = line.split_once('=') else { continue };
-        let name = name.trim();
-        if !PUBLISHED.iter().any(|k| k.name == name) {
-            continue;
-        }
-        let Some(at) = rest.find("version") else { continue };
-        let Some(value) = rest[at..].split_once('=') else { continue };
-        let version: String =
-            value.1.trim_start().trim_start_matches('"').chars().take_while(|c| *c != '"').collect();
-        if !version.is_empty() {
-            pins.push((name.to_string(), version));
-        }
-    }
-    pins
+/// A crate's `HEAD` tree and its manifest.
+fn source(root: &Path, krate: &Crate) -> Result<(String, String), String> {
+    let tree = crate::pr::git(root, &["rev-parse", &format!("HEAD:{}", krate.dir)])?;
+    Ok((tree, manifest(root, krate)?))
 }
 
-/// A minor bump and nothing else: `0.x.0` becomes `0.(x+1).0`. Every change may
-/// break by policy, so there is no patch level to move and no judgement about
-/// which kind of change this was; anything but `0.x.0` is refused, not guessed.
-fn next_minor(version: &str) -> Option<String> {
-    let mut parts = version.split('.');
-    let major = parts.next()?;
-    let minor: u64 = parts.next()?.parse().ok()?;
-    let patch = parts.next()?;
-    if parts.next().is_some() || patch != "0" {
-        return None;
-    }
-    Some(format!("{major}.{}.0", minor + 1))
-}
-
-/// The rule over a merge queue's group at `root`: its tip is one branch merged
-/// onto the group's base — its first parent, which holds `main` and every
-/// branch queued ahead of it — and the branch is judged against that base.
-///
-/// **Not against `main`**: two branches that each take the same next version
-/// both pass as pull requests, git merges their identical bumps without a
-/// conflict, and the second ships a changed crate under the first's version.
-/// Only the base the queue built it on holds the first's bump.
-pub fn judge_queued(root: &Path) -> Result<String, String> {
-    let line = git(root, &["rev-list", "--parents", "-n", "1", "HEAD"])?;
-    let parents = line.split_whitespace().count().saturating_sub(1);
-    if parents != 2 {
-        return Err(format!(
-            "[sdk] the group's tip has {parents} parent(s), and a group is one merge onto its base, \
-             so there is no base to judge it against"
-        ));
-    }
-    judge(root, "HEAD^1")
-}
-
-/// The rule over the branch at `root` against `base`: the one-line verdict, or
-/// the refusal.
-pub fn judge(root: &Path, base: &str) -> Result<String, String> {
-    let split = split_versions(root)?;
-    if !split.is_empty() {
-        return Err(split.join("\n"));
-    }
-    let merge_base = git(root, &["merge-base", base, "HEAD"])?;
-    if file_at(root, &merge_base, PUBLISHER)?.is_empty() {
-        return Ok(format!("{base} does not publish yet, so no version here is taken."));
-    }
-    let changed = git(root, &["diff", "--name-only", "--no-renames", "-z", &merge_base, "HEAD"])?;
-    let changed: Vec<&str> = changed.split('\0').filter(|p| !p.is_empty()).collect();
-
-    let mut refusals = Vec::new();
-    let mut bumped = Vec::new();
-    for krate in PUBLISHED {
-        let manifest = format!("{}/Cargo.toml", krate.dir);
-        let prefix = format!("{}/", krate.dir);
-        let mut touched = false;
-        for path in changed.iter().filter(|p| p.starts_with(&prefix) && !p.ends_with("Cargo.lock")) {
-            touched |= builds_differently(root, &merge_base, path)?;
-        }
-        if !touched {
-            continue;
-        }
-        let at_head = version_at(root, "HEAD", &manifest)?;
-        let at_base = version_at(root, &merge_base, &manifest)?;
-        if at_head == at_base {
-            let want = next_minor(&at_base).unwrap_or_else(|| {
-                format!("a minor bump of {at_base}, which is not the 0.x.0 this rule knows")
-            });
-            refusals.push(format!(
-                "[sdk] {} changed and its version did not: {manifest} still says {at_base}, and \
-                 the next one is {want}.",
-                krate.name
-            ));
-            continue;
-        }
-        bumped.push((krate, at_base, at_head));
-    }
-
-    // A bump is only half of it: every in-tree dependent resolves the crate by
-    // the `version` beside its `path`, and a pin left behind names a version
-    // the registry will not have.
-    for (krate, _, at_head) in &bumped {
-        for dependent in PUBLISHED.iter().filter(|d| d.depends_on.contains(&krate.name)) {
-            let manifest = format!("{}/Cargo.toml", dependent.dir);
-            let text = file_at(root, "HEAD", &manifest)?;
-            // A commit that does not hold the dependent at all has no pin to be
-            // stale; `every_row_names_a_crate_the_tree_holds` is what refuses a
-            // row whose crate has left the tree.
-            if text.is_empty() {
+/// Each of `crates` in order: its manifest rewritten with its version and each
+/// published dependency's, and the version for its key in its index file.
+fn plan_of(
+    crates: &'static [Crate],
+    source: impl Fn(&Crate) -> Result<(String, String), String>,
+    index: impl Fn(&str) -> Result<String, String>,
+) -> Result<Vec<Release>, String> {
+    let mut plan: Vec<Release> = Vec::new();
+    for krate in crates {
+        let (mut hashed, text) = source(krate)?;
+        let mut manifest: toml::Table =
+            text.parse().map_err(|e| format!("{}'s manifest: {e}", krate.name))?;
+        let deps = manifest.get_mut("dependencies").and_then(|d| d.as_table_mut());
+        for (name, spec) in deps.into_iter().flatten() {
+            if !crates.iter().any(|k| k.name == name.as_str()) {
                 continue;
             }
-            match version_pins(&text).into_iter().find(|(name, _)| name == krate.name) {
-                Some((_, pinned)) if &pinned == at_head => {}
-                Some((_, pinned)) => refusals.push(format!(
-                    "[sdk] {manifest} pins {} at {pinned}, which this branch moved to {at_head}.",
-                    krate.name
-                )),
-                None => refusals.push(format!(
-                    "[sdk] {manifest} depends on {} with no `version` beside its `path`, so the \
-                     published crate names no version at all.",
-                    krate.name
-                )),
-            }
+            let Some(dep) = plan.iter().find(|r| r.krate.name == name.as_str()) else {
+                return Err(format!("{} names {name}, which is not published before it", krate.name));
+            };
+            hashed.push_str(&dep.version);
+            let spec = spec.as_table_mut().ok_or_else(|| format!("{name} is not a path dependency"))?;
+            // A requirement's build metadata is ignored, and cargo warns of it.
+            spec.insert("version".into(), dep.version.split('+').next().unwrap_or(&dep.version).into());
         }
+        let key = crate::release::sha256_hex(hashed.as_bytes())[..16].to_string();
+        let (version, publish) = assign(&index(krate.name)?, &key)?;
+        let package = manifest.get_mut("package").and_then(|p| p.as_table_mut()).ok_or("no [package]")?;
+        package.insert("version".into(), version.clone().into());
+        let manifest = toml::to_string(&manifest).map_err(|e| e.to_string())?;
+        plan.push(Release { krate, key, version, publish, manifest });
     }
-
-    // `cargo publish` re-locks the package's own lockfile and refuses a dirty tree.
-    for lockfile in tracked_lockfiles(root)? {
-        let text = file_at(root, "HEAD", &lockfile)?;
-        for (name, locked, has_source) in lock_packages(&text) {
-            if has_source {
-                continue;
-            }
-            let Some(krate) = PUBLISHED.iter().find(|k| k.name == name) else { continue };
-            let manifest = format!("{}/Cargo.toml", krate.dir);
-            let wants = version_at(root, "HEAD", &manifest)?;
-            if locked != wants {
-                refusals.push(format!(
-                    "[sdk] {lockfile} locks {name} at {locked} with no `source` (a path \
-                     dependency), and {manifest} now declares {wants}: `cargo update -p {name} \
-                     --manifest-path {manifest}` (or the workspace lockfile's equivalent).",
-                ));
-            }
-        }
-    }
-
-    if refusals.is_empty() {
-        return Ok(match bumped.len() {
-            0 => "this branch changes none of the published crates.".to_string(),
-            _ => format!(
-                "bumped: {}",
-                bumped
-                    .iter()
-                    .map(|(k, from, to)| format!("{} {from} -> {to}", k.name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        });
-    }
-    refusals.push(
-        "[sdk] These are on crates.io — resolved by the forks that name them by \
-         version — so a change published under the version it already had is silently \
-         building the old code. Every change \
-         may break by policy: the bump is the minor, and every in-tree dependent's pin moves \
-         with it."
-            .to_string(),
-    );
-    Err(refusals.join("\n"))
+    Ok(plan)
 }
 
-/// Whether `path` builds differently at `HEAD` than at `base`: its
-/// [`identity`] moved, or it came or went.
-fn builds_differently(root: &Path, base: &str, path: &str) -> Result<bool, String> {
-    let at = |commit: &str| -> Result<Option<Vec<u8>>, String> {
-        Ok(blob_at(root, commit, path)?.map(|b| identity::of(Path::new(path), &b).into_owned()))
-    };
-    Ok(at(base)? != at("HEAD")?)
+/// The version for `key` given the crate's index file: the newest published
+/// one if it carries `key` and is not yanked, else the minor after it.
+pub(crate) fn assign(index: &str, key: &str) -> Result<(String, bool), String> {
+    let mut newest: Option<((u64, u64, u64), String, bool)> = None;
+    for line in index.lines() {
+        let entry: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("an index line that is not JSON: {e}"))?;
+        let vers = entry["vers"].as_str().ok_or("an index line with no `vers`")?;
+        let n = numbers(vers).ok_or_else(|| format!("{vers} is not major.minor.patch"))?;
+        if newest.as_ref().is_none_or(|(m, _, _)| n > *m) {
+            newest = Some((n, vers.to_string(), entry["yanked"] == true));
+        }
+    }
+    Ok(match newest {
+        Some((_, vers, false)) if vers.split_once('+').is_some_and(|(_, k)| k == key) => (vers, false),
+        Some(((major, minor, _), _, _)) => (format!("{major}.{}.0+{key}", minor + 1), true),
+        None => (format!("0.1.0+{key}"), true),
+    })
 }
 
-/// `path`'s bytes at `commit`, or `None` where that commit does not hold it.
-/// Bytes and not [`git`]'s text: a lossy decode makes two different binaries
-/// equal.
-fn blob_at(root: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
-    if git(root, &["ls-tree", commit, "--", path])?.is_empty() {
-        return Ok(None);
-    }
-    let out = std::process::Command::new("git")
-        .args(["cat-file", "blob", &format!("{commit}:{path}")])
-        .current_dir(root)
+fn numbers(vers: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = vers.split('+').next()?.split('.').map(|p| p.parse().ok());
+    let n = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(n)
+}
+
+/// The crates.io sparse index's file for `name`: one JSON object a line, empty
+/// for a crate never published.
+pub fn index(name: &str) -> Result<String, String> {
+    let url = format!("https://index.crates.io/{}/{}/{name}", &name[..2], &name[2..4]);
+    let out = Command::new("curl")
+        .args(["-sS", "-w", "\n%{http_code}", &url])
         .output()
-        .map_err(|e| format!("git cat-file in {}: {e}", root.display()))?;
-    if !out.status.success() {
-        let why = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("git cat-file blob {commit}:{path}: {why}"));
+        .map_err(|e| format!("curl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    match text.rsplit_once('\n') {
+        Some((_, "404")) => Ok(String::new()),
+        Some((body, "200")) => Ok(body.to_string()),
+        _ => Err(format!("the crates.io index answered {text:?} for {name}")),
     }
-    Ok(Some(out.stdout))
 }
 
-/// `path`'s `[package] version` at `commit`.
-fn version_at(root: &Path, commit: &str, path: &str) -> Result<String, String> {
-    let text = file_at(root, commit, path)?;
-    package_version(&text).ok_or_else(|| format!("[sdk] {path} at {commit} declares no version"))
-}
-
-/// `path`'s text at `commit`: empty where that commit does not hold it.
-fn file_at(root: &Path, commit: &str, path: &str) -> Result<String, String> {
-    if git(root, &["ls-tree", commit, "--", path])?.is_empty() {
-        return Ok(String::new());
+/// Every crate's manifest under `root` rewritten as it goes up: its version,
+/// and each published dependency's beside its `path`.
+pub fn write_published_manifests(root: &Path, plan: &[Release]) -> Result<(), String> {
+    for release in plan {
+        let path = root.join(release.krate.dir).join("Cargo.toml");
+        std::fs::write(&path, &release.manifest).map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    git(root, &["show", &format!("{commit}:{path}")])
+    Ok(())
 }
 
-/// A refusal for every lockfile at `HEAD` that holds more than one version of
-/// a crate in [`PUBLISHED`].
-fn split_versions(root: &Path) -> Result<Vec<String>, String> {
-    let mut refusals = Vec::new();
-    for lockfile in tracked_lockfiles(root)? {
-        let text = file_at(root, "HEAD", &lockfile)?;
-        for krate in PUBLISHED {
-            let mut versions: Vec<String> = lock_packages(&text)
-                .into_iter()
-                .filter(|(name, _, _)| name == krate.name)
-                .map(|(_, version, _)| version)
-                .collect();
-            versions.sort();
-            versions.dedup();
-            if versions.len() > 1 {
-                refusals.push(format!(
-                    "[sdk] {lockfile} holds {} at {}: something in its graph names a version the \
-                     tree has moved past and resolves the published crate beside the tree's. A \
-                     fork names an SDK crate by a range (`forks.toml`), never by one version.",
-                    krate.name,
-                    versions.join(" and ")
-                ));
-            }
-        }
-    }
-    Ok(refusals)
-}
-
-fn tracked_lockfiles(root: &Path) -> Result<Vec<String>, String> {
-    let out = git(root, &["ls-files", "-z", "*Cargo.lock"])?;
-    Ok(out.split('\0').filter(|p| !p.is_empty() && !p.starts_with("rust/")).map(String::from).collect())
-}
-
-#[derive(Default)]
-struct Block {
-    name: Option<String>,
-    version: Option<String>,
-    has_source: bool,
-}
-
-fn lock_packages(text: &str) -> Vec<(String, String, bool)> {
-    let mut out = Vec::new();
-    let mut block: Option<Block> = None;
-    let flush = |block: &mut Option<Block>, out: &mut Vec<_>| {
-        if let Some(Block { name: Some(name), version: Some(version), has_source }) = block.take() {
-            out.push((name, version, has_source));
-        }
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line == "[[package]]" {
-            flush(&mut block, &mut out);
-            block = Some(Block::default());
-            continue;
-        }
-        if line.starts_with('[') {
-            flush(&mut block, &mut out);
-            block = None;
-            continue;
-        }
-        let Some(current) = &mut block else { continue };
-        if let Some(value) = line.strip_prefix("name").and_then(|v| v.trim_start().strip_prefix('=')) {
-            current.name = Some(value.trim().trim_matches('"').to_string());
-        } else if let Some(value) =
-            line.strip_prefix("version").and_then(|v| v.trim_start().strip_prefix('='))
-        {
-            current.version = Some(value.trim().trim_matches('"').to_string());
-        } else if line.starts_with("source") {
-            current.has_source = true;
-        }
-    }
-    flush(&mut block, &mut out);
-    out
+fn manifest(root: &Path, krate: &Crate) -> Result<String, String> {
+    let path = root.join(krate.dir).join("Cargo.toml");
+    std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr::tests::{commit, repo, sh};
+    use crate::pr::tests::{commit, repo};
+    use std::collections::BTreeMap;
+    use toyos_tmpdir::TempDir;
 
-    /// A manifest for a published crate at `version`, with `pins` written the way
-    /// the tree writes them.
-    fn manifest(name: &str, version: &str, pins: &[(&str, &str)]) -> String {
-        let mut text = format!(
-            "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2021\"\n\
-             license = \"MIT OR Apache-2.0\"\ndescription = \"x\"\n\n[dependencies]\n"
-        );
-        for (dep, at) in pins {
-            text.push_str(&format!("{dep} = {{ path = \"../{dep}\", version = \"{at}\" }}\n"));
+    const TWO: &[Crate] =
+        &[Crate { name: "toyos-abi", dir: "toyos-abi" }, Crate { name: "toyos", dir: "toyos" }];
+    const ABI: &str = "[package]\nname = \"toyos-abi\"\n";
+    const TOYOS: &str =
+        "[package]\nname = \"toyos\"\n\n[dependencies]\ntoyos-abi = { path = \"../toyos-abi\" }\n";
+
+    fn index_of(lines: &[(&str, bool)]) -> String {
+        lines.iter().map(|(v, yanked)| format!("{{\"vers\":\"{v}\",\"yanked\":{yanked}}}\n")).collect()
+    }
+
+    /// A changed crate never goes up under a version crates.io has, and an
+    /// unchanged one does not go up again.
+    #[test]
+    fn a_changed_crate_takes_the_minor_after_the_newest_and_an_unchanged_one_keeps_it() {
+        let by_hand = index_of(&[("0.16.0", false), ("0.9.0", false)]);
+        assert_eq!(assign(&by_hand, "k1").unwrap(), ("0.17.0+k1".into(), true));
+        let published = index_of(&[("0.17.0+k1", false), ("0.16.0", false)]);
+        assert_eq!(assign(&published, "k1").unwrap(), ("0.17.0+k1".into(), false));
+        assert_eq!(assign(&published, "k2").unwrap(), ("0.18.0+k2".into(), true));
+        let reverted = index_of(&[("0.17.0+k1", false), ("0.18.0+k2", false)]);
+        assert_eq!(assign(&reverted, "k1").unwrap(), ("0.19.0+k1".into(), true));
+        let yanked = index_of(&[("0.17.0+k1", true)]);
+        assert_eq!(assign(&yanked, "k1").unwrap(), ("0.18.0+k1".into(), true));
+        assert_eq!(assign("", "k1").unwrap(), ("0.1.0+k1".into(), true));
+        assert!(assign(&index_of(&[("0.1", false)]), "k1").is_err());
+    }
+
+    /// The key moves with any file under the crate or under a published crate
+    /// it depends on, and with nothing else.
+    #[test]
+    fn a_key_moves_with_the_crate_and_its_published_dependencies() {
+        let (_dir, _origin, wt) = repo("sdk-keys");
+        commit(&wt, "toyos-abi/Cargo.toml", ABI, "abi");
+        commit(&wt, "toyos/Cargo.toml", TOYOS, "sdk");
+        let now = || -> Vec<String> {
+            let plan = plan_of(TWO, |k| source(&wt, k), |_| Ok(String::new())).unwrap();
+            plan.into_iter().map(|r| r.key).collect()
+        };
+
+        let base = now();
+        commit(&wt, "kernel/src/lib.rs", "// work\n", "elsewhere");
+        assert_eq!(now(), base);
+        commit(&wt, "toyos/src/lib.rs", "pub struct T;\n", "sdk source");
+        let sdk = now();
+        assert!(sdk[0] == base[0] && sdk[1] != base[1], "{sdk:?} against {base:?}");
+        commit(&wt, "toyos-abi/tests/a.rs", "#[test]\nfn a() {}\n", "abi test");
+        let abi = now();
+        assert!(abi[0] != sdk[0] && abi[1] != sdk[1], "{abi:?} against {sdk:?}");
+    }
+
+    /// A dependent goes up again when its newest names another version of a
+    /// dependency than the one going up: abi went up as B, the run died before
+    /// `toyos`, and the next landing put abi back to A.
+    #[test]
+    fn a_dependent_whose_newest_names_a_stale_dependency_goes_up_again() {
+        let mut index = BTreeMap::from([("toyos-abi", String::new()), ("toyos", String::new())]);
+        let plan = |abi: &str, index: &BTreeMap<&str, String>| {
+            let source = |k: &Crate| {
+                let (tree, text) = if k.name == "toyos" { ("T", TOYOS) } else { (abi, ABI) };
+                Ok((tree.to_string(), text.to_string()))
+            };
+            plan_of(TWO, source, |name| Ok(index[name].clone())).unwrap()
+        };
+        let up = |index: &mut BTreeMap<&str, String>, r: &Release| {
+            index.get_mut(r.krate.name).unwrap().push_str(&index_of(&[(&r.version, false)]))
+        };
+        let first = plan("A", &index);
+        up(&mut index, &first[0]);
+        up(&mut index, &first[1]);
+        let second = plan("B", &index);
+        up(&mut index, &second[0]);
+
+        let again = plan("A", &index);
+        let (abi, toyos) = (&again[0], &again[1]);
+        assert!(abi.publish && toyos.publish, "toyos {} names abi {}", first[1].version, first[0].version);
+        let going: toml::Table = toyos.manifest.parse().unwrap();
+        assert_eq!(going["dependencies"]["toyos-abi"]["version"].as_str(), abi.version.split('+').next());
+        up(&mut index, &again[0]);
+        up(&mut index, &again[1]);
+        assert!(plan("A", &index).iter().all(|r| !r.publish));
+    }
+
+    /// **cargo is the judge**: the tree's manifests as they go up after every
+    /// crate changed, served as crates.io would serve them, resolved offline
+    /// with no registry at all by a consumer naming the three as the forks do.
+    /// Each resolves to its new version and that one alone, so every
+    /// dependent's rewritten requirement names it too.
+    #[test]
+    fn the_published_manifests_resolve_as_the_forks_name_them() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let tmp = TempDir::new("sdk-resolve");
+        let at = |name: &str| -> String {
+            let krate = PUBLISHED.iter().find(|k| k.name == name).unwrap();
+            let table: toml::Table = manifest(root, krate).unwrap().parse().unwrap();
+            table["package"]["version"].as_str().unwrap().to_string()
+        };
+        let source = |k: &Crate| Ok(("fedcba9876543210".to_string(), manifest(root, k)?));
+        let plan = plan_of(PUBLISHED, source, |name| Ok(index_of(&[(&at(name), false)]))).unwrap();
+        for release in &plan {
+            let name = release.krate.name;
+            assert!(release.publish && release.version != at(name), "{name} kept its version");
+            std::fs::create_dir_all(tmp.join(release.krate.dir).join("src")).unwrap();
+            std::fs::write(tmp.join(release.krate.dir).join("src/lib.rs"), "").unwrap();
         }
-        text
-    }
-
-    /// Everything committed so far becomes main's; the branch starts here.
-    fn main_is_here(wt: &Path) {
-        sh(wt, &["branch", "-f", "main", "HEAD"]);
-    }
-
-    /// The base publishes, which is what turns the rule on.
-    fn publishing(wt: &Path) {
-        commit(wt, PUBLISHER, "name: publish\n", "publish these");
-    }
-
-    /// **The judge, and the partial fix it must not pass**: a bump alone, with
-    /// a dependent still naming the old version, publishes a crate whose
-    /// dependency the registry has not got. That half is the test below.
-    #[test]
-    fn a_changed_crate_that_did_not_move_its_version_is_refused_by_name() {
-        let (_dir, _origin, wt) = repo("sdk-unbumped");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
-        publishing(&wt);
-        main_is_here(&wt);
-
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
-        let refusal = judge(&wt, "main").expect_err("a changed crate must bump its version");
-        assert!(refusal.contains("toyos-abi changed and its version did not"), "{refusal}");
-        assert!(refusal.contains("still says 0.1.0, and the next one is 0.2.0"), "{refusal}");
-    }
-
-    /// **A comment is not a change to what the crate builds**, so a branch that
-    /// only rewrites one owes no version; the same crate's signature change in
-    /// the next commit still does.
-    #[test]
-    fn a_comment_only_change_owes_no_bump_and_a_signature_change_still_does() {
-        let (_dir, _origin, wt) = repo("sdk-comment-only");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        commit(&wt, "toyos-abi/src/lib.rs", "/// One.\npub struct A;\n", "abi source");
-        publishing(&wt);
-        main_is_here(&wt);
-
-        commit(
-            &wt,
-            "toyos-abi/src/lib.rs",
-            "//! The crate.\n\n/// One, now said better.\n// And a plain comment.\npub  struct /* here */ A;\n",
-            "abi: reword A's doc",
-        );
-        let verdict = judge(&wt, "main").expect("a comment-only change owes no bump");
-        assert!(verdict.contains("changes none of the published crates"), "{verdict}");
-
-        commit(&wt, "toyos-abi/src/lib.rs", "/// One.\npub struct A(pub u64);\n", "abi: widen A");
-        let refusal = judge(&wt, "main").expect_err("a signature change still owes one");
-        assert!(refusal.contains("toyos-abi changed and its version did not"), "{refusal}");
-    }
-
-    /// **The rule's precondition, which is also this branch's own exemption**:
-    /// the same diff that reds above passes against a base that publishes
-    /// nothing, because there is no taken version on crates.io to collide with.
-    #[test]
-    fn a_base_that_does_not_publish_yet_has_no_taken_version() {
-        let (_dir, _origin, wt) = repo("sdk-unpublished");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
-        main_is_here(&wt);
-
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
-        let verdict = judge(&wt, "main").expect("nothing is published, so nothing is taken");
-        assert!(verdict.contains("does not publish yet"), "{verdict}");
-    }
-
-    /// **Two branches that take one version**: each passes alone as a pull
-    /// request, git merges their identical bumps cleanly, and only the merge
-    /// queue's judge — the second branch against the base the queue built it
-    /// on — refuses the second. The same branch bumped once more passes there.
-    #[test]
-    fn two_branches_that_take_one_version_are_refused_in_the_queue() {
-        let (_dir, _origin, wt) = repo("sdk-queue-collision");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
-        commit(&wt, "toyos-abi/src/b.rs", "pub struct B;\n", "abi source");
-        publishing(&wt);
-        main_is_here(&wt);
-
-        sh(&wt, &["switch", "-q", "-c", "first", "main"]);
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
-        assert!(judge(&wt, "main").expect("the first alone").contains("toyos-abi 0.1.0 -> 0.2.0"));
-
-        sh(&wt, &["switch", "-q", "-c", "second", "main"]);
-        commit(&wt, "toyos-abi/src/b.rs", "pub struct B(pub u64);\n", "abi: widen B");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
-        assert!(judge(&wt, "main").expect("the second alone").contains("toyos-abi 0.1.0 -> 0.2.0"));
-
-        // The first lands; the queue's group for the second is its merge onto that.
-        sh(&wt, &["switch", "-q", "main"]);
-        sh(&wt, &["merge", "-q", "--no-ff", "first", "-m", "the first lands"]);
-        sh(&wt, &["switch", "-q", "--detach", "main"]);
-        sh(&wt, &["merge", "-q", "--no-ff", "second", "-m", "the queue's group for the second"]);
-        let refusal = judge_queued(&wt).expect_err("the second ships its change under the first's version");
-        assert!(refusal.contains("toyos-abi changed and its version did not"), "{refusal}");
-        assert!(refusal.contains("still says 0.2.0, and the next one is 0.3.0"), "{refusal}");
-
-        // What the second owes: main merged in, and the next version.
-        sh(&wt, &["switch", "-q", "second"]);
-        sh(&wt, &["merge", "-q", "--no-edit", "main"]);
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.3.0", &[]), "abi: 0.3.0");
-        sh(&wt, &["switch", "-q", "--detach", "main"]);
-        sh(&wt, &["merge", "-q", "--no-ff", "second", "-m", "the queue's group, again"]);
-        let verdict = judge_queued(&wt).expect("a bump past the first's");
-        assert!(verdict.contains("toyos-abi 0.2.0 -> 0.3.0"), "{verdict}");
-
-        // A tip that is no merge has no base to be judged against.
-        sh(&wt, &["switch", "-q", "--detach", "first"]);
-        assert!(judge_queued(&wt).unwrap_err().contains("has 1 parent(s)"));
-    }
-
-    /// The other half, which a bump alone passes: the dependent's pin.
-    #[test]
-    fn a_bump_that_leaves_a_dependents_pin_behind_is_refused_by_name() {
-        let (_dir, _origin, wt) = repo("sdk-stale-pin");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
-        commit(
-            &wt,
-            "toyos/Cargo.toml",
-            &manifest("toyos", "0.1.0", &[("toyos-abi", "0.1.0")]),
-            "sdk manifest",
-        );
-        publishing(&wt);
-        main_is_here(&wt);
-
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
-        let refusal = judge(&wt, "main").expect_err("a stale pin must be refused");
-        assert!(
-            refusal.contains("toyos/Cargo.toml pins toyos-abi at 0.1.0, which this branch moved \
-                              to 0.2.0"),
-            "{refusal}"
-        );
-
-        // And the whole change. Moving the pin changes `toyos` too, so `toyos`
-        // owes its own bump: a dependent republished under its old version
-        // still names the dependency version the registry has not got.
-        commit(
-            &wt,
-            "toyos/Cargo.toml",
-            &manifest("toyos", "0.2.0", &[("toyos-abi", "0.2.0")]),
-            "sdk: follow the abi",
-        );
-        let verdict = judge(&wt, "main").expect("bump plus pin is the whole rule");
-        assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
-        assert!(verdict.contains("toyos 0.1.0 -> 0.2.0"), "{verdict}");
-    }
-
-    fn lockfile(name: &str, version: &str, source: bool) -> String {
-        let mut text =
-            format!("# generated\nversion = 4\n\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n");
-        if source {
-            text.push_str("source = \"registry+https://github.com/rust-lang/crates.io-index\"\n");
+        write_published_manifests(&tmp, &plan).unwrap();
+        // As crates.io serves it: `cargo publish` drops every `path`.
+        for krate in PUBLISHED {
+            let path = tmp.join(krate.dir).join("Cargo.toml");
+            let mut table: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+            let deps = table.get_mut("dependencies").and_then(|d| d.as_table_mut());
+            for spec in deps.into_iter().flat_map(|d| d.iter_mut().map(|(_, s)| s)).filter_map(|s| s.as_table_mut()) {
+                spec.remove("path");
+            }
+            std::fs::write(&path, toml::to_string(&table).unwrap()).unwrap();
         }
-        text
-    }
 
-    #[test]
-    fn a_lock_only_change_to_a_published_crate_passes_without_a_bump() {
-        let (_dir, _origin, wt) = repo("sdk-lock-only");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
-        publishing(&wt);
-        main_is_here(&wt);
-
-        commit(&wt, "toyos-abi/Cargo.lock", &lockfile("toyos-abi", "0.1.0", false), "abi: re-lock");
-        let verdict = judge(&wt, "main").expect("a lock-only change owes no bump");
-        assert!(verdict.contains("changes none of the published crates"), "{verdict}");
-    }
-
-    #[test]
-    fn a_bump_with_a_stale_path_dependency_lock_entry_is_refused_by_name() {
-        let (_dir, _origin, wt) = repo("sdk-stale-lock");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
-        commit(
-            &wt,
-            "toyos/Cargo.toml",
-            &manifest("toyos", "0.1.0", &[("toyos-abi", "0.1.0")]),
-            "sdk manifest",
+        let patch: String =
+            PUBLISHED.iter().map(|k| format!("{} = {{ path = \"../{}\" }}\n", k.name, k.dir)).collect();
+        std::fs::create_dir_all(tmp.join("fork/src")).unwrap();
+        std::fs::write(tmp.join("fork/src/lib.rs"), "").unwrap();
+        let fork = format!(
+            "[package]\nname = \"fork\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\n\
+             toyos-abi = \">=0.12, <1\"\ntoyos = \">=0.13, <1\"\ntoyos-window = \">=0.15, <1\"\n\n\
+             [patch.crates-io]\n{patch}"
         );
-        commit(&wt, "toyos/Cargo.lock", &lockfile("toyos-abi", "0.1.0", false), "sdk lock");
-        publishing(&wt);
-        main_is_here(&wt);
-
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
-        commit(
-            &wt,
-            "toyos/Cargo.toml",
-            &manifest("toyos", "0.2.0", &[("toyos-abi", "0.2.0")]),
-            "sdk: follow the abi",
-        );
-        let refusal = judge(&wt, "main").expect_err("a stale lock entry must be refused");
-        assert!(
-            refusal.contains(
-                "toyos/Cargo.lock locks toyos-abi at 0.1.0 with no `source` (a path dependency), \
-                 and toyos-abi/Cargo.toml now declares 0.2.0"
-            ),
-            "{refusal}"
-        );
-        assert!(
-            refusal.contains("cargo update -p toyos-abi --manifest-path toyos-abi/Cargo.toml"),
-            "{refusal}"
-        );
-
-        commit(&wt, "toyos/Cargo.lock", &lockfile("toyos-abi", "0.2.0", false), "sdk: re-lock");
-        let verdict = judge(&wt, "main").expect("a lock that agrees passes");
-        assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
+        std::fs::write(tmp.join("fork/Cargo.toml"), fork).unwrap();
+        let out = Command::new("cargo")
+            .args(["metadata", "--offline", "--format-version", "1"])
+            .env("CARGO_HOME", tmp.join("cargo-home"))
+            .current_dir(tmp.join("fork"))
+            .output()
+            .expect("run cargo");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let metadata: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let packages = metadata["packages"].as_array().unwrap();
+        for release in &plan {
+            let resolved: Vec<&str> = packages
+                .iter()
+                .filter(|p| p["name"] == release.krate.name)
+                .map(|p| p["version"].as_str().unwrap())
+                .collect();
+            assert_eq!(resolved, [&*release.version], "{}", release.krate.name);
+        }
     }
 
+    /// The tree's own half: every lockfile answers each published crate from
+    /// its path, never from a registry beside it.
     #[test]
-    fn a_registry_entry_at_the_old_version_passes() {
-        let (_dir, _origin, wt) = repo("sdk-fork-pin");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
-        commit(&wt, "userland/snake/Cargo.lock", &lockfile("toyos-abi", "0.1.0", true), "fork lock");
-        publishing(&wt);
-        main_is_here(&wt);
-
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
-        let verdict = judge(&wt, "main").expect("a fork's registry pin is not this rule's business");
-        assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
-    }
-
-    /// **The lockfile rule**: a fork that names an SDK crate by one version
-    /// resolves the published crate beside the tree's path one, and the branch
-    /// is refused by name whatever else it changed; one version passes.
-    #[test]
-    fn a_lockfile_holding_two_versions_of_a_published_crate_is_refused_by_name() {
-        let (_dir, _origin, wt) = repo("sdk-split-lock");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi manifest");
-        commit(&wt, "userland/Cargo.lock", &lockfile("toyos-abi", "0.2.0", false), "one version");
-        publishing(&wt);
-        main_is_here(&wt);
-
-        commit(&wt, "kernel/src/lib.rs", "// work\n", "kernel: work");
-        let verdict = judge(&wt, "main").expect("one version of each passes");
-        assert!(verdict.contains("changes none of the published crates"), "{verdict}");
-
-        let split = format!(
-            "{}\n{}",
-            lockfile("toyos-abi", "0.2.0", false),
-            lockfile("toyos-abi", "0.1.0", true).replace("# generated\nversion = 4\n\n", "")
-        );
-        commit(&wt, "userland/Cargo.lock", &split, "a fork pins the old abi");
-        let refusal = judge(&wt, "main").expect_err("two versions of the abi in one lockfile");
-        assert!(
-            refusal.contains("userland/Cargo.lock holds toyos-abi at 0.1.0 and 0.2.0"),
-            "{refusal}"
-        );
-    }
-
-    /// A branch that touches none of them is every other branch, and the
-    /// rule has nothing to say about it.
-    #[test]
-    fn a_branch_that_changes_none_of_the_six_passes() {
-        let (_dir, _origin, wt) = repo("sdk-elsewhere");
-        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
-        publishing(&wt);
-        main_is_here(&wt);
-
-        commit(&wt, "kernel/src/lib.rs", "// work\n", "kernel: work");
-        let verdict = judge(&wt, "main").expect("a branch outside the published crates must pass");
-        assert!(verdict.contains("changes none of the published crates"), "{verdict}");
-    }
-
-    /// The arithmetic, and the versions it refuses to guess at.
-    #[test]
-    fn the_bump_is_the_minor_and_nothing_else() {
-        assert_eq!(next_minor("0.1.0").as_deref(), Some("0.2.0"));
-        assert_eq!(next_minor("0.9.0").as_deref(), Some("0.10.0"));
-        assert_eq!(next_minor("1.4.0").as_deref(), Some("1.5.0"));
-        assert_eq!(next_minor("0.1.1"), None);
-        assert_eq!(next_minor("0.1"), None);
-        assert_eq!(next_minor("0.1.0.0"), None);
-    }
-
-    /// The two hand walks, over the spellings these manifests use.
-    #[test]
-    fn the_manifest_walk_reads_the_package_table_and_the_pins() {
-        let text = manifest("toyos-window", "0.3.0", &[("toyos", "0.2.0"), ("toyos-abi", "0.1.0")]);
-        assert_eq!(package_version(&text).as_deref(), Some("0.3.0"));
-        assert_eq!(
-            version_pins(&text),
-            [("toyos".to_string(), "0.2.0".to_string()),
-             ("toyos-abi".to_string(), "0.1.0".to_string())]
-        );
-
-        // A `version` under another table is not the package's, and a
-        // dependency that is not published is not a pin this rule holds.
-        let other = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
-                     serde = { version = \"1.0\" }\n\n[lib]\nversion = \"9.9.9\"\n";
-        assert_eq!(package_version(other).as_deref(), Some("0.1.0"));
-        assert!(version_pins(other).is_empty());
-    }
-
-    /// The order is the one a publisher must
-    /// take: nothing names a crate that comes after it.
-    #[test]
-    fn the_publish_order_is_a_dependency_order() {
-        for (n, krate) in PUBLISHED.iter().enumerate() {
-            for dep in krate.depends_on {
-                let at = PUBLISHED.iter().position(|k| k.name == *dep);
-                assert!(
-                    at.is_some_and(|at| at < n),
-                    "{} names {dep}, which is not published before it",
-                    krate.name
-                );
+    fn every_lockfile_resolves_the_published_crates_from_the_tree() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut seen = 0;
+        for lockfile in crate::pr::git(root, &["ls-files", "*Cargo.lock"]).unwrap().lines() {
+            let lock: toml::Table = std::fs::read_to_string(root.join(lockfile)).unwrap().parse().unwrap();
+            for package in lock.get("package").and_then(|p| p.as_array()).into_iter().flatten() {
+                let name = package["name"].as_str().unwrap();
+                if PUBLISHED.iter().any(|k| k.name == name) {
+                    seen += 1;
+                    assert!(package.get("source").is_none(), "{lockfile} takes {name} from a registry");
+                }
             }
         }
+        assert!(seen > 10, "{seen} published crates across the lockfiles is not the tree");
     }
 
-    /// Each row names a directory the tree holds whose package is the row's
-    /// name, so a crate renamed or moved reds here and not in a publish run.
+    /// The order is the one a publisher must take, and each row names a
+    /// directory whose package is the row's name and carries what crates.io asks.
     #[test]
-    fn every_row_names_a_crate_the_tree_holds() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        assert!(
-            root.join(PUBLISHER).is_file(),
-            "{PUBLISHER} is what puts these on crates.io, and the rule reads its presence on the \
-             base to know a version can be taken at all"
-        );
+    fn every_row_is_a_crate_the_tree_holds_in_dependency_order() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        plan_of(PUBLISHED, |k| Ok((String::new(), manifest(root, k)?)), |_| Ok(String::new())).unwrap();
         for krate in PUBLISHED {
-            let manifest = root.join(krate.dir).join("Cargo.toml");
-            let text = std::fs::read_to_string(&manifest)
-                .unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
-            assert!(
-                text.contains(&format!("name = \"{}\"", krate.name)),
-                "{} does not name the package {}",
-                manifest.display(),
-                krate.name
-            );
-            assert!(
-                package_version(&text).is_some(),
-                "{} declares no version",
-                manifest.display()
-            );
-            for field in ["description", "repository", "license"] {
-                assert!(
-                    text.contains(&format!("{field} = ")),
-                    "{} carries no {field}, which crates.io asks for",
-                    manifest.display()
-                );
+            let table: toml::Table = manifest(root, krate).unwrap().parse().unwrap();
+            let package = table["package"].as_table().unwrap();
+            assert_eq!(package["name"].as_str(), Some(krate.name));
+            for field in ["version", "description", "repository", "license"] {
+                assert!(package.contains_key(field), "{} carries no {field}", krate.dir);
             }
         }
     }

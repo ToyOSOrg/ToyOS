@@ -6,7 +6,7 @@
 //! matches too much is a path in the answer this file did not name, and one
 //! that matches too little is a named path missing from it. Values are judged
 //! where the machine fixes them — QEMU's user network leases `10.0.2.15/24`,
-//! nothing plays audio until `inspect_plays` does, and the NVMe disk this file
+//! nothing plays audio until `inspect_plays` does, and the USB stick this file
 //! crafts has one partition free and one init grants — and read only for shape
 //! elsewhere.
 
@@ -32,6 +32,8 @@ pub const BOUNDS: &str = "inventory_bounds";
 const FREE: &str = "9D1E2F30-4A5B-4C6D-8E7F-0A1B2C3D4E5F";
 /// The one init grants test-runner; mirrored in the config.
 const GRANTED: &str = "B4C5D6E7-F809-4A1B-8C2D-3E4F5A6B7C8D";
+/// An entry whose first block is after its last, which no inventory lists.
+const BACKWARDS: &str = "0D5C4B3A-2918-4F7E-8D6C-5B4A39281706";
 
 /// Every path the reader answers for netd on a virtio NIC with a lease.
 const NET: &[&str] = &[
@@ -57,16 +59,13 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
     if bins.len() != 3 {
         return Err(format!("{DENIED}, {PLAYS} and {BOUNDS} were not all built"));
     }
-    let nvme = super::lane::dir().join("inspect-disk.img");
+    let stick = super::lane::dir().join("inspect-stick.img");
     let mib = 1024 * 1024;
-    super::partclaim::craft_plain_disk(
-        &nvme,
-        &[("free", mib, FREE), ("granted", mib, GRANTED)],
-        96 * mib,
-    )?;
+    super::partclaim::craft_stick(&stick, 8 * mib, &[("free", mib, FREE), ("granted", mib, GRANTED)])?;
+    state_backwards(&stick)?;
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG);
     let options =
-        BootOptions { profile: qemu::Profile::Gop, nvme_image: Some(nvme), ..Default::default() };
+        BootOptions { profile: qemu::Profile::GopUsbDisk, usb_images: vec![stick], ..Default::default() };
     let argv = qemu::profile_argv(&options);
     if !argv.iter().any(|a| a.contains("virtio-net")) || !argv.iter().any(|a| a.contains("virtio-sound")) {
         return Err("this test needs a virtio NIC and a virtio sound card".to_string());
@@ -78,6 +77,24 @@ pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
     await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
     await_marker(&mut qemu, &mut console, "compositor: ready", "the compositor to come up")?;
     Ok(qemu)
+}
+
+/// Write [`BACKWARDS`] into the first free entry of the table of the disk at
+/// `path`, both copies resealed.
+fn state_backwards(path: &Path) -> Result<(), String> {
+    let guid = |text: &str| uuid::Uuid::parse_str(text).map(|u| u.to_bytes_le()).map_err(|e| format!("{text}: {e}"));
+    let (ty, unique) = (guid(super::partclaim::PLAIN_TYPE)?, guid(BACKWARDS)?);
+    let mut image = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let len = image.len();
+    super::volumes::rewrite_gpt(&mut image, len, |entries, entry_bytes| {
+        let free = entries.chunks_mut(entry_bytes).find(|e| e[..16] == [0; 16]).ok_or("the table has no free entry")?;
+        free[..16].copy_from_slice(&ty);
+        free[16..32].copy_from_slice(&unique);
+        free[32..40].copy_from_slice(&500u64.to_le_bytes());
+        free[40..48].copy_from_slice(&400u64.to_le_bytes());
+        Ok(())
+    })?;
+    std::fs::write(path, image).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// The `path = value` lines of a job's output, and nothing else the console
@@ -373,6 +390,13 @@ fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
     expect(line, &got, &format!("{granted}.state"), "claimed")?;
     if holders(&got, granted) != ["test-runner"] {
         return Err(format!("`{line}`: {granted} is held by {:?}, not test-runner", holders(&got, granted)));
+    }
+    if got.values().any(|v| *v == BACKWARDS.to_ascii_lowercase()) {
+        return Err(format!("`{line}` lists {BACKWARDS}, whose first block is after its last"));
+    }
+    let refused = format!("({BACKWARDS}) at LBA 500..=400, whose blocks are no partition on it");
+    if !format!("{}{}", qemu.uart_log(), qemu.boot_log()).contains(&refused) {
+        return Err(format!("the kernel did not say it refused {BACKWARDS}"));
     }
     Ok(())
 }
