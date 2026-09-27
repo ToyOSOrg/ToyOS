@@ -32,11 +32,11 @@ fn validate(
     let rules = Rules {
         extent: extent(0, u64::MAX),
         window,
-        sym_count,
         fill,
         tls: Some(tls_segment(u64::MAX)),
     };
-    entries.try_for_each(|r| rela::parse(r, &rules).map(|_| ()))
+    let syms = vec![0; sym_count * toyos_elf::sym::ENTRY_SIZE];
+    entries.try_for_each(|r| rela::parse(r, &rules, SymTab::new(&syms, &[])).map(|_| ()))
 }
 
 /// `st_info` for a global `STT_FUNC`, and for the data object it is told apart
@@ -328,6 +328,22 @@ fn a_symbol_index_past_the_table_is_refused_except_for_relative() {
 
     let relative = [rela(0x10, u32::MAX, 8, 0)].concat();
     assert_eq!(validate(RelaTable::new(&relative, Machine::X86_64).iter(), window, 0, None), Ok(()));
+}
+
+/// Four whole entries and eight bytes of a fifth: the partial entry is no
+/// symbol a relocation may name.
+#[test]
+fn a_symbol_index_is_bounded_by_the_whole_entries_of_its_table() {
+    let rules = Rules { extent: extent(0, 0x100), window: (0, 0x100), fill: None, tls: None };
+    let syms = [0u8; 4 * 24 + 8];
+    for raw in [6u32, 7, 16, 17, 18, 23] {
+        let parse = |r_sym| {
+            let entry = RelaTable::new(&rela(0x10, r_sym, raw, 0), Machine::X86_64).get(0).unwrap();
+            rela::parse(entry, &rules, SymTab::new(&syms, &[]))
+        };
+        assert_eq!(parse(4), Err(RelocError::SymbolPastTable), "type {raw}");
+        assert!(parse(3).is_ok(), "type {raw}");
+    }
 }
 
 #[test]
@@ -736,10 +752,9 @@ fn each_machine_reads_its_own_relocation_numbers() {
     let rules = Rules {
         extent: extent(0, 0x100),
         window: (0, 0x100),
-        sym_count: 0,
         fill: None,
         tls: None,
     };
-    let parsed = rela::parse(entry, &rules).unwrap().unwrap();
+    let parsed = rela::parse(entry, &rules, SymTab::empty()).unwrap().unwrap();
     assert_eq!((parsed.offset(), parsed.op()), (0x10, Op::Relative(rules.extent.offset(4).unwrap())));
 }

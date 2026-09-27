@@ -883,8 +883,8 @@ fn tls_apply_time_refusals_are_reached() {
 }
 
 /// An executable needing a library, whose `.gnu.hash` counts 1000 symbols
-/// while the file ends 469 entries into `.dynsym`, with a `GLOB_DAT` naming
-/// symbol 999.
+/// while the file ends 469 entries and 8 bytes into `.dynsym`, with a
+/// `GLOB_DAT` naming symbol 469, the first index past the whole entries.
 fn globdat_past_short_dynsym() {
     let dep = "globdat_dep.so";
     write_file(dep, &so_with(&[], &[], None));
@@ -896,7 +896,7 @@ fn globdat_past_short_dynsym() {
     }
     let exe = exe_with(
         &[(DT_NEEDED, 1), (DT_GNU_HASH, 0x3000)],
-        &[(0x2000, (999u64 << 32) | R_X86_64_GLOB_DAT, 0)],
+        &[(0x2000, (469u64 << 32) | R_X86_64_GLOB_DAT, 0)],
         None,
     )
     .poke(0x1801, dep.as_bytes())

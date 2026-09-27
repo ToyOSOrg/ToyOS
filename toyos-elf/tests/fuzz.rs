@@ -362,13 +362,12 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
     let rules = Rules {
         extent,
         window,
-        sym_count: symbols.count(),
         fill: (case.mode == Mode::Exe).then_some(FillLattice { base: extent.min(), granule: 4096 }),
         tls,
     };
     let mut relocs = Vec::new();
     for raw in RelaTable::new(rela_bytes, case.machine).iter() {
-        if let Some(r) = rela::parse(raw, &rules).map_err(|_| ())? {
+        if let Some(r) = rela::parse(raw, &rules, symbols).map_err(|_| ())? {
             relocs.push(r);
         }
     }

@@ -244,9 +244,6 @@ fn tls_alignment_is_a_power_of_two_within_a_page_or_it_is_refused() {
     }
 }
 
-/// Absent TLS is `None`, never a zero `memsz`: a module with a `PT_TLS` of zero
-/// size still gets a DTV slot, and telling the two apart is what the sentinel
-/// could not do.
 #[test]
 fn a_zero_size_tls_segment_is_present_not_absent() {
     let with = Elf::honest(0x1000).ph(Phdr::tls(0, 0, 0, 8)).build();

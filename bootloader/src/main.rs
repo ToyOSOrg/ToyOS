@@ -8,7 +8,7 @@ use core::mem;
 use alloc::vec;
 use alloc::alloc::Layout;
 use toyos_elf::section::SectionTable;
-use toyos_elf::{rela, ImageOffset, Op, RelaTable};
+use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use uefi::{
     prelude::*,
     CStr16,
@@ -389,7 +389,6 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     let rules = rela::Rules {
         extent,
         window: (0, mem_size as u64),
-        sym_count: 0,
         fill: None,
         tls: None,
     };
@@ -398,7 +397,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
         let table = file_range(kernel_elf_bytes, section.offset, section.size)
             .expect("kernel.elf: SHT_RELA section is past the end of the file");
         for raw in RelaTable::new(table, arch::ELF_MACHINE).iter() {
-            let parsed = rela::parse(raw, &rules).unwrap_or_else(|e| panic!("kernel.elf: {e}"));
+            let parsed = rela::parse(raw, &rules, SymTab::empty()).unwrap_or_else(|e| panic!("kernel.elf: {e}"));
             let Some((offset, Op::Relative(target))) = parsed.map(|r| (r.offset(), r.op())) else {
                 panic!("kernel.elf: unsupported relocation type {:?}", raw.kind());
             };

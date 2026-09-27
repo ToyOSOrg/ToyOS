@@ -16,7 +16,7 @@
 use crate::header::Machine;
 use crate::layout::{Extent, ImageOffset, TlsSegment};
 use crate::read;
-use crate::sym::SymIndex;
+use crate::sym::{SymIndex, SymTab};
 use crate::tls::TlsOffset;
 
 /// Bytes in one `Elf64_Rela`.
@@ -147,8 +147,6 @@ pub struct Rules {
     pub extent: Extent,
     /// Where writes may land, `[lo, hi)` in `r_offset`'s own coordinates.
     pub window: (u64, u64),
-    /// Entries in the symbol table `r_sym` indexes.
-    pub sym_count: usize,
     /// `Some` for a chunked writer (the exe), which drops a write crossing a
     /// fill page and so has it refused; `None` for a contiguous one.
     pub fill: Option<FillLattice>,
@@ -229,10 +227,12 @@ impl TlsSymRef {
 /// Parse one entry against the module's [`Rules`]: `Ok(None)` for a type this
 /// loader does not write, the reason for one it must not.
 ///
+/// A [`SymIndex`] in the answer indexes `symbols` and no other table.
+///
 /// The window is the *writable* one rather than the whole image: once the
 /// module is cached its read-only pages are shared between processes, and the
 /// write lands in a private allocation covering only that window.
-pub fn parse(rela: Rela, rules: &Rules) -> Result<Option<Reloc>, RelocError> {
+pub fn parse(rela: Rela, rules: &Rules, symbols: SymTab<'_>) -> Result<Option<Reloc>, RelocError> {
     let Some(width) = rela.kind.write_width() else {
         return match rela.kind {
             RelocKind::TlsDesc => Err(RelocError::TlsDescriptor),
@@ -255,7 +255,7 @@ pub fn parse(rela: Rela, rules: &Rules) -> Result<Option<Reloc>, RelocError> {
         }
     }
 
-    let sym = || SymIndex::below(rela.sym, rules.sym_count).ok_or(RelocError::SymbolPastTable);
+    let sym = || SymIndex::below(rela.sym, symbols.count()).ok_or(RelocError::SymbolPastTable);
     let tls = || -> Result<TlsRef, RelocError> {
         if rela.sym != 0 {
             return Ok(TlsRef::Symbol(TlsSymRef { sym: sym()?, addend: rela.addend }));

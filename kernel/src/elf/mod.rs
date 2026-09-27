@@ -216,7 +216,7 @@ impl LoadedLib {
     /// the process nor a relocation writes them.
     fn relocations(&self) -> impl Iterator<Item = Reloc> + '_ {
         self.raw_relocations()
-            .filter_map(|raw| rela::parse(raw, &self.rules).unwrap_or_else(|e| reparse_refused(e)))
+            .filter_map(|raw| rela::parse(raw, &self.rules, self.symbols()).unwrap_or_else(|e| reparse_refused(e)))
     }
 
     /// One past the last virtual address this module occupies.
@@ -435,16 +435,12 @@ pub fn load_shared_lib(
     let dynstr = module.optional(dyn_info.strtab, dyn_info.strsz.unwrap_or(0))?;
     // Every symbol another module or `dlsym` may later ask for is inside this
     // one, and every TLS one inside its segment — or the module is refused now.
-    let sym_count = {
-        // SAFETY: both came from `ModuleImage::slice`'s bounds check; `image`
-        // is still exclusively owned here.
-        let (syms, strs) = unsafe {
-            (dynsym.as_ref().map_or(&[][..], |s| s.as_slice()), dynstr.as_ref().map_or(&[][..], |s| s.as_slice()))
-        };
-        let symbols = SymTab::new(syms, strs);
-        symbols.bounded(extent, layout.tls()).map_err(|e| e.as_str())?;
-        symbols.count()
+    // SAFETY: both came from `ModuleImage::slice`'s bounds check, and no write
+    // below reaches them: `rela::tables_outside_window` refuses that first.
+    let symbols = unsafe {
+        SymTab::new(dynsym.as_ref().map_or(&[][..], |s| s.as_slice()), dynstr.as_ref().map_or(&[][..], |s| s.as_slice()))
     };
+    symbols.bounded(extent, layout.tls()).map_err(|e| e.as_str())?;
     let init_array = InitArray::parse(dyn_info.init_array, extent).map_err(|e| e.as_str())?;
 
     let rela = match dyn_info.rela {
@@ -474,7 +470,6 @@ pub fn load_shared_lib(
     let rules = rela::Rules {
         extent,
         window,
-        sym_count,
         // A library's image is written contiguously, with no fill-page edge.
         fill: None,
         tls: layout.tls(),
@@ -484,7 +479,7 @@ pub fn load_shared_lib(
     let base_phys = image.phys();
     let mut reloc_count = 0u64;
     for raw in table_entries(&rela).chain(table_entries(&jmprel)) {
-        let Some(r) = rela::parse(raw, &rules).map_err(|e| e.as_str())? else { continue };
+        let Some(r) = rela::parse(raw, &rules, symbols).map_err(|e| e.as_str())? else { continue };
         if let toyos_elf::Op::Relative(target) = r.op() {
             // SAFETY: `module.slice(r.offset(), 8)?` bounds-checks the write
             // independently of the parse; `image` is still exclusively owned.
@@ -497,15 +492,14 @@ pub fn load_shared_lib(
 
     let t4 = crate::clock::nanos_since_boot();
     log!(
-        "dlopen: base={:#x} {}MB alloc={}ms zero={}ms copy={}ms reloc={}ms ({} relocs, {} syms)",
+        "dlopen: base={:#x} {}MB alloc={}ms zero={}ms copy={}ms reloc={}ms ({} relocs)",
         base_phys,
         load_size / (1024 * 1024),
         (t1 - t0) / 1_000_000,
         (t2 - t1) / 1_000_000,
         (t3 - t2) / 1_000_000,
         (t4 - t3) / 1_000_000,
-        reloc_count,
-        sym_count
+        reloc_count
     );
 
     Ok((

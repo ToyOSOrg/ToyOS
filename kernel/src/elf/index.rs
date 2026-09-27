@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use crate::mm::{KernelSlice, MAX_HEAP_ALLOC};
 use toyos_abi::syscall::SyscallError;
 use toyos_elf::rela::{self, ExeRefusal, Rules};
-use toyos_elf::{ImageOffset, Op, RelaCounts, RelaTable, RelocError, SymIndex, TlsRef};
+use toyos_elf::{ImageOffset, Op, RelaCounts, RelaTable, RelocError, SymIndex, SymTab, TlsRef};
 
 /// Relocation entries the loader needs, grouped by what it does with them;
 /// each is `(r_offset, what it names)`, parsed.
@@ -64,6 +64,7 @@ pub fn parse_rela_entries(
     rela_data: &[u8],
     jmprel_data: &[u8],
     rules: &Rules,
+    symbols: SymTab<'_>,
 ) -> Result<ParsedRelaEntries, Refused> {
     let entries = || {
         RelaTable::new(rela_data, crate::arch::ELF_MACHINE)
@@ -82,7 +83,7 @@ pub fn parse_rela_entries(
         tpoff32: Vec::with_capacity(reserve.tpoff32),
     };
     for raw in entries() {
-        let Some(r) = rela::parse(raw, rules).map_err(Refused::Entry)? else { continue };
+        let Some(r) = rela::parse(raw, rules, symbols).map_err(Refused::Entry)? else { continue };
         match r.op() {
             Op::Relative(target) => out.relative.push((r.offset(), target)),
             Op::Bind(sym) => out.glob_dat.push((r.offset(), sym)),

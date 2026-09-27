@@ -276,10 +276,6 @@ fn resolve_dtpmod(lib: &LoadedLib, sym: Option<SymIndex>, self_module_id: u64, t
 /// lies in: the referencing module's own (`own_base_offset`, `own_tls`), or
 /// the module defining the symbol. `None` is a symbol no module defines, which
 /// is logged; a sum outside the defining module's segment refuses the module.
-///
-/// `symbols` is the referencing module's table — a library's in-image one, or
-/// the executable's read off the file — so both loaders resolve through this
-/// one function.
 fn resolve_tls_ref(
     r: TlsRef,
     own_base_offset: usize,

@@ -284,11 +284,10 @@ fn read_exe_tables(
     let rules = Rules {
         extent,
         window: (extent.min(), extent.max()),
-        sym_count: SymTab::new(&dynsym, &dynstr).count(),
         fill: Some(FillLattice { base: extent.min(), granule: FILL_GRANULE }),
         tls: layout.tls(),
     };
-    let relas = elf::parse_rela_entries(&rela_data, &jmprel_data, &rules).map_err(|refused| {
+    let relas = elf::parse_rela_entries(&rela_data, &jmprel_data, &rules, SymTab::new(&dynsym, &dynstr)).map_err(|refused| {
         log!("spawn: {}: {}", path, refused.as_str());
         refused.error()
     })?;
