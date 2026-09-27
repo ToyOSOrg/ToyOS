@@ -20,6 +20,7 @@ use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
 use crate::sync::Lock;
 use crate::vma::{self, Occupancy, Region, RegionKind};
+use toyos_bootmap::ROOT_HIGH_HALF;
 use toyos_userbound::PageSpan;
 use crate::MemoryMapEntry;
 
@@ -381,10 +382,14 @@ impl AddressSpace {
         let kernel_as = kernel().lock();
         let mut pml4 = Box::new(PageTablePage([0; 512]));
 
-        for i in 256..512 {
-            if kernel_as.root[i] & PAGE_PRESENT != 0 {
-                pml4.init_entry(i, kernel_as.root[i]);
-            }
+        for slot in ROOT_HIGH_HALF..512 {
+            let entry = kernel_as.root[slot];
+            assert!(
+                entry & PAGE_PRESENT != 0,
+                "new_user: kernel root slot {slot} is absent, and this space would never see what is \
+                 mapped there: `seal_kernel_half` runs before the first user space"
+            );
+            pml4.init_entry(slot, entry);
         }
 
         Some(Self {
@@ -811,6 +816,11 @@ impl AddressSpace {
         let target = self.root();
 
         if self.root[pml4_idx] & PAGE_PRESENT == 0 {
+            assert!(
+                pml4_idx < ROOT_HIGH_HALF,
+                "ensure_table: kernel root slot {pml4_idx} is absent at {va:#x}, and a user space \
+                 copies the kernel's slots once: `init` and `seal_kernel_half` install every one"
+            );
             let child = Box::new(PageTablePage([0; 512]));
             self.root
                 .write(pml4_idx, va, child.phys() | flags)
@@ -837,6 +847,16 @@ impl AddressSpace {
 
         // SAFETY: same argument as `pdpt` above, one level down.
         unsafe { PageTablePage::from_phys_mut(pdpt[pdpt_idx] & ADDR_MASK) }
+    }
+
+    /// An empty second-level table under the kernel's empty root slot `slot`.
+    fn install_root(&mut self, slot: usize) {
+        let child = Box::new(PageTablePage([0; 512]));
+        let va = crate::mm::PHYS_OFFSET + ((slot - ROOT_HIGH_HALF) as u64) * (1 << 39);
+        self.root
+            .write(slot, va, child.phys() | PAGE_PRESENT | PAGE_WRITE)
+            .expect_install("install_root");
+        self.children.push(child);
     }
 }
 
@@ -908,9 +928,11 @@ pub fn guard_kernel_page(addr: u64) {
 }
 
 /// Build kernel page tables: the direct map in the high half, in 2 MiB pages,
-/// as far as [`toyos_memmap::direct_map_end`] reaches.
-pub(crate) fn init(memory_map: &[MemoryMapEntry]) {
-    let end = toyos_memmap::direct_map_end(memory_map);
+/// as far as [`toyos_bootmap::x86_64::direct_map_end`] reaches, and answer
+/// that end.
+pub(crate) fn init(memory_map: &[MemoryMapEntry]) -> u64 {
+    let end = toyos_bootmap::x86_64::direct_map_end(memory_map)
+        .unwrap_or_else(|refusal| panic!("paging: firmware's memory map: {refusal}"));
 
     let mut kernel = AddressSpace {
         root: Box::new(PageTablePage([0; 512])),
@@ -920,6 +942,11 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry]) {
         pcid: PcidHandle::Kernel,
     };
 
+    // Only the direct map's slots: these tables come from the early heap.
+    let last_slot = indices(crate::mm::DirectMap::from_phys(end - 1).as_ptr::<u8>() as u64).0;
+    for slot in ROOT_HIGH_HALF..=last_slot {
+        kernel.install_root(slot);
+    }
     let mut addr: u64 = 0;
     while addr < end {
         kernel.map_2m(addr, PAGE_PRESENT | PAGE_WRITE);
@@ -942,6 +969,19 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry]) {
     // to self-consistent.
     unsafe {
         cr3.load_flush();
+    }
+    end
+}
+
+/// Install a second-level table under every kernel root slot [`init`] left
+/// empty, from the pmm's heap, before the first user space copies the slots:
+/// one installed after a space was made would be missing from that space.
+pub(crate) fn seal_kernel_half() {
+    let mut kernel = kernel().lock();
+    for slot in ROOT_HIGH_HALF..512 {
+        if kernel.root[slot] & PAGE_PRESENT == 0 {
+            kernel.install_root(slot);
+        }
     }
 }
 

@@ -389,7 +389,7 @@ pub fn stats() -> (u64, u64) {
 }
 
 fn is_usable(entry: &MemoryMapEntry) -> bool {
-    toyos_memmap::is_usable_type(entry.uefi_type)
+    toyos_bootmap::is_usable_type(entry.uefi_type)
 }
 
 fn overlaps_reserved(start: u64, end: u64, reserved: &[Region]) -> bool {

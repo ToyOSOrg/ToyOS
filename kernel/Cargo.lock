@@ -48,7 +48,6 @@ dependencies = [
  "toyos-fat32",
  "toyos-gpt",
  "toyos-hda",
- "toyos-memmap",
  "toyos-pci",
  "toyos-pcid",
  "toyos-proclife",
@@ -98,6 +97,9 @@ version = "0.1.0"
 [[package]]
 name = "toyos-bootmap"
 version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-dma"
@@ -125,13 +127,6 @@ version = "0.1.0"
 [[package]]
 name = "toyos-hda"
 version = "0.1.0"
-
-[[package]]
-name = "toyos-memmap"
-version = "0.1.0"
-dependencies = [
- "toyos-abi",
-]
 
 [[package]]
 name = "toyos-pci"

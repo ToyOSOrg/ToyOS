@@ -141,7 +141,11 @@ pub fn map_mmio(_phys: u64, _size: u64, _policy: MmioPolicy) -> crate::mm::Mmio 
     owed!("the kernel's page tables", "stage 4")
 }
 
-pub(crate) fn init(_memory_map: &[MemoryMapEntry]) {
+pub(crate) fn init(_memory_map: &[MemoryMapEntry]) -> u64 {
+    owed!("the kernel's page tables", "stage 4")
+}
+
+pub(crate) fn seal_kernel_half() {
     owed!("the kernel's page tables", "stage 4")
 }
 

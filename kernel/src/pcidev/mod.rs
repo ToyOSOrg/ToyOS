@@ -1284,11 +1284,6 @@ fn msix_bar(pci: &PciDevice) -> Option<u8> {
 ///
 /// **Every caller has named `at` routed first.** A load no bridge forwards does
 /// not come back on real hardware.
-///
-/// **A refused candidate leaves the direct map's entries over its range
-/// uncacheable, and that is the whole of what it leaves**: the boot map already
-/// covers every physical address, so this takes no address space there is any
-/// giving back of, and a run holds no memory the firmware map described.
 fn probe_dword(at: u64, span: u64, offset: u64) -> u32 {
     crate::mm::paging::map_mmio(at, span, MmioPolicy::Uncacheable).read_u32(offset)
 }

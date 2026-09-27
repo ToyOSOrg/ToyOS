@@ -15,6 +15,15 @@
 //! Pure: the scanout, the loader's image and, where the architecture types
 //! memory by firmware's map, the write-back ranges in; a [`Plan`] out. The
 //! loader allocates the pages and writes the entries.
+//!
+//! What the kernel takes from firmware's map when it builds its own tables is
+//! here too, because it may never map less than this map did: which types the
+//! pmm hands out ([`is_usable_type`]), and how far the direct map reaches
+//! ([`x86_64::direct_map_end`], [`reaches`]). The types are `EFI_MEMORY_TYPE`'s,
+//! and what an OS may do with each after `ExitBootServices` is the UEFI
+//! specification's table under `EFI_BOOT_SERVICES.AllocatePages()` (§7.2).
+//! That table puts no bound on where a range the OS does not use may sit, and
+//! UEFI does not order the map.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -44,6 +53,46 @@ pub const ROOT_HIGH_HALF: usize = 256;
 /// How much physical memory the map covers, at identity and at `PHYS_OFFSET`
 /// alike. Everything the entry jump needs, not everything `KernelArgs` names.
 pub const BOOT_MAP_BYTES: u64 = 4 * GIB;
+
+/// The physical addresses a direct map at root slot [`ROOT_HIGH_HALF`] can
+/// hold: every slot from there to the root's last.
+pub const DIRECT_MAP_WINDOW: u64 = (512 - ROOT_HIGH_HALF as u64) * GIB_PER_PDPT * GIB;
+
+/// Whether every byte of `phys..phys + len` lies inside a direct map of
+/// `0..end`.
+pub const fn reaches(end: u64, phys: u64, len: u64) -> bool {
+    match phys.checked_add(len) {
+        Some(last) => last <= end,
+        None => false,
+    }
+}
+
+const EFI_LOADER_CODE: u32 = 1;
+pub const EFI_LOADER_DATA: u32 = 2;
+const EFI_BOOT_SERVICES_CODE: u32 = 3;
+const EFI_BOOT_SERVICES_DATA: u32 = 4;
+const EFI_CONVENTIONAL_MEMORY: u32 = 7;
+const EFI_ACPI_RECLAIM_MEMORY: u32 = 9;
+const EFI_ACPI_MEMORY_NVS: u32 = 10;
+
+/// Whether a UEFI memory type becomes free RAM the pmm hands out.
+pub const fn is_usable_type(uefi_type: u32) -> bool {
+    matches!(
+        uefi_type,
+        EFI_LOADER_CODE
+            | EFI_LOADER_DATA
+            | EFI_BOOT_SERVICES_CODE
+            | EFI_BOOT_SERVICES_DATA
+            | EFI_CONVENTIONAL_MEMORY
+    )
+}
+
+/// Whether the kernel reads a range of this type as memory: what the pmm hands
+/// out, and the two types ACPI's tables live in. Any other type, one this list
+/// does not know included, is not.
+const fn is_read_as_memory(uefi_type: u32) -> bool {
+    is_usable_type(uefi_type) || matches!(uefi_type, EFI_ACPI_RECLAIM_MEMORY | EFI_ACPI_MEMORY_NVS)
+}
 
 /// One page directory per GiB of [`BOOT_MAP_BYTES`].
 const LOW_DIRECTORIES: usize = (BOOT_MAP_BYTES / GIB) as usize;
@@ -86,6 +135,8 @@ pub enum Refusal {
     /// A 2 MiB page of the low map that is write-back memory in part and not
     /// in the rest: either type is wrong for some of it.
     Mixed(u64),
+    /// Memory that ends here, past [`DIRECT_MAP_WINDOW`].
+    PastWindow(u64),
 }
 
 impl fmt::Display for Refusal {
@@ -108,6 +159,10 @@ impl fmt::Display for Refusal {
                 f,
                 "the 2 MiB page at {phys:#x} is part write-back memory and part not, so no one \
                  memory type is right for all of it"
+            ),
+            Self::PastWindow(end) => write!(
+                f,
+                "memory ends at {end:#x}, past the {DIRECT_MAP_WINDOW:#x} bytes a direct map can hold"
             ),
         }
     }

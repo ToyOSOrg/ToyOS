@@ -1,8 +1,27 @@
 //! x86-64's encoding of a [`Plan`](crate::Plan): Intel SDM Vol. 3A §4.5,
 //! Tables 4-15 (a PML4 or PDPT entry naming a table) and 4-17 (a page
-//! directory entry mapping a 2 MiB page).
+//! directory entry mapping a 2 MiB page); and how far the kernel's own direct
+//! map reaches.
 
-use crate::Cache;
+use toyos_abi::boot::MemoryMapEntry;
+
+use crate::{is_read_as_memory, Cache, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, PAGE_2M};
+
+/// One past the kernel direct map's last byte: [`BOOT_MAP_BYTES`], or the end
+/// of the highest range the kernel reads as memory in whole [`PAGE_2M`] pages,
+/// whichever is higher. Memory past [`DIRECT_MAP_WINDOW`] is refused.
+///
+/// The low [`BOOT_MAP_BYTES`] are mapped whole, registers and holes included,
+/// because x86-64 types those pages by its MTRRs rather than by the entry, and
+/// because the kernel goes on using addresses it took through the boot map.
+pub fn direct_map_end(map: &[MemoryMapEntry]) -> Result<u64, Refusal> {
+    map.iter().filter(|entry| is_read_as_memory(entry.uefi_type)).try_fold(BOOT_MAP_BYTES, |end, entry| {
+        if entry.end > DIRECT_MAP_WINDOW {
+            return Err(Refusal::PastWindow(entry.end));
+        }
+        Ok(end.max(entry.end.next_multiple_of(PAGE_2M)))
+    })
+}
 
 const PRESENT: u64 = 1 << 0;
 const WRITABLE: u64 = 1 << 1;

@@ -37,21 +37,18 @@ pub struct MadtInfo {
     pub source_overrides: Vec<SourceOverride>,
 }
 
-/// x86-64's 52-bit physical-address ceiling; at or above this, `DirectMap`'s unchecked `+ PHYS_OFFSET` would wrap into the user half.
-// CPUID's MAXPHYADDR may be smaller than 52 bits but never larger, so this is a safe bound on every real machine.
-const MAX_PHYS: u64 = 1 << 52;
-
-/// Firmware's physical addresses, read through the direct map.
+/// Firmware's physical addresses, read through the direct map; one it does not
+/// reach is refused, never read.
 #[derive(Clone, Copy)]
 pub struct DirectPhys;
 
 impl Phys for DirectPhys {
     fn readable(self, phys: u64, len: usize) -> bool {
-        phys != 0 && phys.checked_add(len as u64).is_some_and(|end| end <= MAX_PHYS)
+        phys != 0 && DirectMap::reaches(phys, len as u64)
     }
 
     fn byte(self, phys: u64) -> u8 {
-        // SAFETY: `readable` bounded `phys` below `MAX_PHYS`.
+        // SAFETY: `readable` put `phys` inside the direct map.
         unsafe { read_volatile(DirectMap::from_phys(phys).as_ptr::<u8>()) }
     }
 }
@@ -83,7 +80,7 @@ impl Table {
             return None;
         }
         let at = self.0.base() + offset as u64;
-        // SAFETY: `Table::open` bounded the whole declared length below `MAX_PHYS`, and `end <= len` puts this read inside it.
+        // SAFETY: `Table::open` put the whole declared length inside the direct map, and `end <= len` puts this read inside it.
         Some(unsafe { read_unaligned(DirectMap::from_phys(at).as_ptr::<u8>().cast::<T>()) })
     }
 }

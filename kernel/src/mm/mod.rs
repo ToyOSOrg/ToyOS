@@ -107,6 +107,11 @@ impl core::fmt::LowerHex for UserAddr {
 }
 
 
+/// One past the direct map's last byte: the boot map's until `paging::init`
+/// builds the kernel's own, which never reaches less.
+static DIRECT_MAP_END: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(toyos_bootmap::BOOT_MAP_BYTES);
+
 /// Converts between physical addresses and kernel virtual pointers; use only at that boundary, not for storing pointers.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DirectMap(u64);
@@ -129,6 +134,11 @@ impl DirectMap {
     pub fn phys_of<T>(ptr: *const T) -> u64 {
         ptr as u64 - PHYS_OFFSET
     }
+
+    /// Whether every byte of `phys..phys + len` lies inside the direct map.
+    pub fn reaches(phys: u64, len: u64) -> bool {
+        toyos_bootmap::reaches(DIRECT_MAP_END.load(core::sync::atomic::Ordering::Acquire), phys, len)
+    }
 }
 
 impl core::fmt::Display for DirectMap {
@@ -143,12 +153,15 @@ impl core::fmt::Debug for DirectMap {
     }
 }
 
-/// Call once at boot, in order: pmm (physical pages) → paging (direct map) → alloc (heap).
+/// Call once at boot, in order: pmm (physical pages) → paging (direct map) →
+/// alloc (heap) → every kernel root slot, before the first user space copies
+/// them.
 pub fn init(memory_map: &[MemoryMapEntry], reserved: &[Region]) {
     alloc::init_early();
     pmm::init(memory_map, reserved);
-    paging::init(memory_map);
+    DIRECT_MAP_END.store(paging::init(memory_map), core::sync::atomic::Ordering::Release);
     alloc::init();
+    paging::seal_kernel_half();
 }
 
 /// The two memory facts every crash report ends its contexts with: how deep
