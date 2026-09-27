@@ -1288,9 +1288,10 @@ impl NetDaemon {
         let new_handle = socket_set.add(new_listener);
         self.sockets.insert(req.socket_id, SocketKind::TcpListener(new_handle));
 
-        if let Some(pl) = self.piped_listeners.get_mut(&req.socket_id) {
-            pl.handle = new_handle;
-        }
+        self.piped_listeners
+            .get_mut(&req.socket_id)
+            .expect("looked up above; nothing between there and here removes a piped_listeners entry")
+            .handle = new_handle;
 
         msg.client.result(&TcpAcceptPipedResponse {
             socket_id: stream_id,
