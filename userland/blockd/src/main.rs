@@ -50,8 +50,7 @@ use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
 use toyos_abi::syscall::{DEV_PREFIX, SyscallError};
 use toyos_blockhold::Holds;
 use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{arena_byte, DEPTH};
-use toyos_blockring::ring::{self, ServerRings};
+use toyos_blockring::layout::{self, ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::wire::{self, Opened, Refusal};
 use toyos_blockring::{BLOCK_BYTES, PORT, SESSION_BYTES};
@@ -319,7 +318,7 @@ impl Service {
     fn admit(&mut self, opening: Opening, conn: Connection) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let rings = ring::server(opening.region.words());
+        let rings = layout::server(opening.region.words());
         self.sessions.insert(
             id,
             Served {
@@ -346,11 +345,14 @@ impl Service {
         self.holds.release(opening.first);
     }
 
-    /// Put `c` on its session's completion ring.
+    /// Put `c` on its session's completion ring. [`Self::pull`] leaves room for
+    /// every answer, so a ring without it is a client whose head went back or
+    /// past what was posted: the session ends.
     fn post(session: &mut Served, c: Completion) {
-        let page = session.region.words();
-        session.rings.1.push(page, c.encode());
-        session.posted = true;
+        match session.rings.1.push(session.region.words(), c.encode()) {
+            Ok(true) => session.posted = true,
+            Ok(false) | Err(_) => session.closing = true,
+        }
     }
 
     /// Hand one device answer to the session it is for.
@@ -377,11 +379,11 @@ impl Service {
     /// session's completion ring have room for it.
     fn pull(&mut self, id: u64) {
         let s = self.sessions.get_mut(&id).expect("a live session");
-        let page = s.region.words();
         loop {
             if s.closing {
                 break;
             }
+            let page = s.region.words();
             // Room for every answer: what is on the device, and what is posted
             // and not yet read, never exceeds the completion ring.
             let Ok(space) = s.rings.1.space(page) else {
@@ -389,7 +391,7 @@ impl Service {
                 break;
             };
             let unread = (DEPTH - space) as usize;
-            if s.state.inflight() + unread >= DEPTH as usize || !self.ctrl.up().has_room() {
+            if s.state.inflight().len() + unread >= DEPTH as usize || !self.ctrl.up().has_room() {
                 break;
             }
             let words = match s.rings.0.pop(page) {
@@ -402,31 +404,28 @@ impl Service {
             };
             s.requests += 1;
             match s.state.take(words) {
-                Taken::Answer(c) => {
-                    s.rings.1.push(page, c.encode());
-                    s.posted = true;
-                }
+                Taken::Answer(c) => Self::post(s, c),
                 Taken::Issue(req) => {
-                    let owner = Owner::Session { session: id, tag: req.tag, write: req.op == Op::Write };
+                    let write = matches!(req.op, Op::Write { .. });
+                    let owner = Owner::Session { session: id, tag: req.tag, write };
                     match req.op {
-                        Op::Read | Op::Write => {
-                            let at = s.device_addr + arena_byte(req.arena) as u64;
-                            let block = s.state.first() + req.lba;
-                            self.ctrl.up().submit_io(req.op == Op::Write, block, req.blocks, at, owner);
+                        Op::Read { run, lba } | Op::Write { run, lba } => {
+                            let at = s.device_addr + run.span().offset as u64;
+                            let block = s.state.first() + lba;
+                            self.ctrl.up().submit_io(write, block, run.count(), at, owner);
                         }
                         Op::Flush if self.ctrl.up().vwc => self.ctrl.up().submit_flush(owner),
                         // No volatile cache: every write answered is on the
                         // medium already.
                         Op::Flush => {
                             let c = s.state.complete(req.tag, true, &mut self.holds, self.losses);
-                            s.rings.1.push(page, c.expect("just taken").encode());
-                            s.posted = true;
+                            Self::post(s, c.expect("just taken"));
                         }
                     }
                 }
             }
         }
-        s.rings.0.release(page);
+        s.rings.0.release(s.region.words());
     }
 
     /// Publish what each session was answered, and ring its doorbell.
@@ -451,7 +450,7 @@ impl Service {
         let done: Vec<u64> = self
             .sessions
             .iter()
-            .filter(|(_, s)| s.closing && s.state.inflight() == 0)
+            .filter(|(_, s)| s.closing && s.state.inflight().len() == 0)
             .map(|(id, _)| *id)
             .collect();
         for id in done {

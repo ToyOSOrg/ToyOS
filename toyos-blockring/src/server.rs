@@ -15,9 +15,10 @@
 //! own since it last heard. The loss count is the device's, bumped by whoever
 //! resets it.
 
-use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use toyos_blockhold::{Holds, Writer};
+use toyos_transport::Untrusted;
 
 use crate::entry::{Completion, Op, Refused, Request, Status};
 use crate::layout::SQE_WORDS;
@@ -30,8 +31,9 @@ pub struct ServerSession {
     blocks: u64,
     /// The span of the device this session holds, which is its writer.
     first: u64,
-    /// By tag: the op each request in flight asked for.
-    inflight: BTreeMap<u32, Op>,
+    /// Each request in flight, in the order it was taken: a tag is only ever
+    /// compared for equality.
+    inflight: Vec<(u32, Op)>,
 }
 
 /// A request the device is to be asked for.
@@ -47,7 +49,7 @@ impl ServerSession {
     /// A session over the partition at device block `first`, `blocks` long,
     /// which `holds` already holds for it.
     pub fn new(first: u64, blocks: u64) -> Self {
-        Self { blocks, first, inflight: BTreeMap::new() }
+        Self { blocks, first, inflight: Vec::new() }
     }
 
     /// The writer this session's writes and flushes are accounted to.
@@ -65,9 +67,9 @@ impl ServerSession {
         self.blocks
     }
 
-    /// Requests taken and not yet answered.
-    pub fn inflight(&self) -> usize {
-        self.inflight.len()
+    /// Requests taken and not yet answered, in the order they were taken.
+    pub fn inflight(&self) -> impl ExactSizeIterator<Item = (u32, Op)> + '_ {
+        self.inflight.iter().copied()
     }
 
     /// Decide what one entry the client published is.
@@ -75,17 +77,17 @@ impl ServerSession {
     /// A malformed entry, and a tag already in flight, are answered at once
     /// and never reach the device: the second would make one tag two
     /// requests, and the client could not tell which answer was whose.
-    pub fn take(&mut self, words: [u32; SQE_WORDS]) -> Taken {
+    pub fn take(&mut self, words: [Untrusted<u32>; SQE_WORDS]) -> Taken {
         let request = match Request::decode(words, self.blocks) {
             Ok(request) => request,
             Err(Refused::Malformed { tag }) => {
                 return Taken::Answer(Completion { tag, status: Status::Invalid })
             }
         };
-        if self.inflight.contains_key(&request.tag) {
+        if self.inflight.iter().any(|&(tag, _)| tag == request.tag) {
             return Taken::Answer(Completion { tag: request.tag, status: Status::Invalid });
         }
-        self.inflight.insert(request.tag, request.op);
+        self.inflight.push((request.tag, request.op));
         Taken::Issue(request)
     }
 
@@ -99,11 +101,12 @@ impl ServerSession {
         holds: &mut Holds<H>,
         losses: u64,
     ) -> Option<Completion> {
-        let op = self.inflight.remove(&tag)?;
+        let at = self.inflight.iter().position(|&(t, _)| t == tag)?;
+        let (_, op) = self.inflight.remove(at);
         let status = match (op, done) {
             (_, false) => Status::Device,
-            (Op::Read, true) => Status::Ok,
-            (Op::Write, true) => {
+            (Op::Read { .. }, true) => Status::Ok,
+            (Op::Write { .. }, true) => {
                 holds.wrote(self.writer(), losses);
                 Status::Ok
             }
@@ -116,14 +119,10 @@ impl ServerSession {
     }
 
     /// The device was reset under every request in flight: each is answered
-    /// [`Status::Device`], and a late answer from the device for any of them
-    /// finds nothing to complete.
-    pub fn abort_all(&mut self) -> alloc::vec::Vec<Completion> {
-        let answered = self
-            .inflight
-            .keys()
-            .map(|&tag| Completion { tag, status: Status::Device })
-            .collect();
+    /// [`Status::Device`], in the order it was taken, and a late answer from
+    /// the device for any of them finds nothing to complete.
+    pub fn abort_all(&mut self) -> Vec<Completion> {
+        let answered = self.inflight.iter().map(|&(tag, _)| Completion { tag, status: Status::Device }).collect();
         #[cfg(not(feature = "mutate-abort-keeps-inflight"))]
         self.inflight.clear();
         answered
@@ -133,12 +132,13 @@ impl ServerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::ARENA;
 
-    fn write(tag: u32) -> [u32; SQE_WORDS] {
-        Request { op: Op::Write, tag, lba: 0, blocks: 1, arena: 0 }.encode()
+    fn write(tag: u32) -> [Untrusted<u32>; SQE_WORDS] {
+        Request { op: Op::Write { run: ARENA.run(0, 1).unwrap(), lba: 0 }, tag }.encode().map(Untrusted::new)
     }
-    fn flush(tag: u32) -> [u32; SQE_WORDS] {
-        Request { op: Op::Flush, tag, lba: 0, blocks: 0, arena: 0 }.encode()
+    fn flush(tag: u32) -> [Untrusted<u32>; SQE_WORDS] {
+        Request { op: Op::Flush, tag }.encode().map(Untrusted::new)
     }
 
     #[test]
@@ -151,12 +151,24 @@ mod tests {
         assert_eq!(session.complete(1, true, &mut holds, 1), None);
     }
 
+    /// A reset answers in the order the requests were taken, whatever their
+    /// tags' values: nothing orders a tag but its arrival.
+    #[test]
+    fn a_reset_answers_in_the_order_taken() {
+        let mut session = ServerSession::new(0, 10);
+        for tag in [9, 4] {
+            assert!(matches!(session.take(write(tag)), Taken::Issue(_)));
+        }
+        let answered: Vec<u32> = session.abort_all().iter().map(|c| c.tag).collect();
+        assert_eq!(answered, [9, 4]);
+    }
+
     #[test]
     fn a_tag_in_flight_twice_is_refused_unissued() {
         let mut session = ServerSession::new(0, 10);
         assert!(matches!(session.take(write(4)), Taken::Issue(_)));
         assert_eq!(session.take(write(4)), Taken::Answer(Completion { tag: 4, status: Status::Invalid }));
-        assert_eq!(session.inflight(), 1);
+        assert_eq!(session.inflight().len(), 1);
     }
 
     /// A write acknowledged before a reset bumped the loss count is a loss the

@@ -433,8 +433,12 @@ pub fn blockd_serves_partitions(
     Ok(())
 }
 
-/// blockd's two failures, each survived by its client.
+/// blockd's two failures, each survived by its client, and a client that
+/// breaks the protocol, survived by blockd.
 ///
+/// - `hostile-head`: with a write on the device, a client moves its completion
+///   ring's head a ring behind blockd's tail; the answer finds no room, blockd
+///   ends that session, and serves the next.
 /// - `reset`: blockd withholds its second write's answer; the silence ends in
 ///   a controller reset; the withheld write is answered not done; and the
 ///   write acknowledged before it, which the reset may have lost, is on the
@@ -455,6 +459,7 @@ pub fn blockd_survives_its_death(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let (mut qemu, layout, disk, trace, before) = boot(c_bins, rust_bins, "blockd-death", &[])?;
+    let hostile = role(&mut qemu, "hostile-head", Duration::from_secs(120))?;
     let reset = role(&mut qemu, "reset", Duration::from_secs(240))?;
     for want in [
         "blockd: WITHHELD the device's answer to a write",
@@ -478,7 +483,8 @@ pub fn blockd_survives_its_death(
     }
     let tail = partclaim::shut_down(qemu);
     partclaim::no_panic("on the way down", &tail)?;
-    let mut log = Serial::named("blockd_survives_its_death", format!("{}{}", reset.serial, crash.serial));
+    let mut log =
+        Serial::named("blockd_survives_its_death", format!("{}{}{}", hostile.serial, reset.serial, crash.serial));
     log.push(&tail);
     log.must_be_clean()?;
 

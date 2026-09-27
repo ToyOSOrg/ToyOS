@@ -23,10 +23,9 @@ use toyos::poller::{Poller, READABLE};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockring::client::{Client, Outcome, Ticket};
 use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{ARENA_BLOCKS, MAX_REQUEST_BLOCKS};
-use toyos_blockring::ring::{self, ClientRings};
+use toyos_blockring::layout::{self, ClientRings, ARENA, MAX_REQUEST_BLOCKS};
 use toyos_blockring::wire::{self, Opened, Refusal};
-use toyos_blockring::BLOCK_BYTES;
+use toyos_blockring::{Run, BLOCK_BYTES};
 
 use crate::region::Region;
 
@@ -79,10 +78,10 @@ struct Arena {
 
 impl Arena {
     fn new() -> Self {
-        Self { free: vec![true; ARENA_BLOCKS as usize] }
+        Self { free: vec![true; ARENA.slots() as usize] }
     }
 
-    fn alloc(&mut self, blocks: u32) -> Option<u32> {
+    fn alloc(&mut self, blocks: u32) -> Option<Run> {
         let n = blocks as usize;
         let mut run = 0;
         for i in 0..self.free.len() {
@@ -90,22 +89,23 @@ impl Arena {
             if run == n {
                 let first = i + 1 - n;
                 self.free[first..=i].iter_mut().for_each(|b| *b = false);
-                return Some(first as u32);
+                return ARENA.run(first as u32, blocks);
             }
         }
         None
     }
 
-    fn release(&mut self, first: u32, blocks: u32) {
-        for b in &mut self.free[first as usize..(first + blocks) as usize] {
-            assert!(!*b, "blockd: arena block {first}+{blocks} released twice");
+    fn release(&mut self, run: Run) {
+        let first = run.first() as usize;
+        for b in &mut self.free[first..first + run.count() as usize] {
+            assert!(!*b, "blockd: arena run {run:?} released twice");
             *b = true;
         }
     }
 }
 
 enum Pending {
-    Read { arena: u32, blocks: u32 },
+    Read { run: Run },
     Write,
     Flush,
 }
@@ -135,7 +135,7 @@ impl Session {
     /// `names` calls `service`.
     pub fn open(names: Namespace, service: &str, guid: [u8; wire::GUID_BYTES]) -> Result<Self, Error> {
         let region = Region::create().map_err(Error::Kernel)?;
-        let rings = ring::client(region.words());
+        let rings = layout::client(region.words());
         let (conn, opened) = handshake(&names, service, guid, &region)?;
         let mut client = Client::new();
         client.session_started();
@@ -184,10 +184,10 @@ impl Session {
         if self.conn.is_none() {
             return Err(Unsent::Ended);
         }
-        let arena = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
-        self.region.arena(arena, blocks).copy_in(0, data);
+        let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
+        self.region.arena(&run).copy_in(0, data);
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Write, lba, blocks, arena);
+        self.client.submit(ticket, Op::Write { run, lba });
         self.pending.insert(ticket, Pending::Write);
         Ok(ticket)
     }
@@ -198,10 +198,10 @@ impl Session {
         if self.conn.is_none() {
             return Err(Unsent::Ended);
         }
-        let arena = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
+        let run = self.arena.alloc(blocks).ok_or(Unsent::ArenaFull)?;
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Read, lba, blocks, arena);
-        self.pending.insert(ticket, Pending::Read { arena, blocks });
+        self.client.submit(ticket, Op::Read { run, lba });
+        self.pending.insert(ticket, Pending::Read { run });
         Ok(ticket)
     }
 
@@ -211,7 +211,7 @@ impl Session {
             return Err(Unsent::Ended);
         }
         let ticket = self.ticket();
-        self.client.submit(ticket, Op::Flush, 0, 0, 0);
+        self.client.submit(ticket, Op::Flush);
         self.pending.insert(ticket, Pending::Flush);
         Ok(ticket)
     }
@@ -231,9 +231,10 @@ impl Session {
                 Err(_) => break,
             }
             let Some(request) = self.client.next_request() else { break };
-            self.rings.0.push(page, request.encode());
+            let pushed = self.rings.0.push(page, request.encode());
+            assert_eq!(pushed, Ok(true), "blockd: a request past the room just counted");
         }
-        self.peak = self.peak.max(self.client.on_the_wire());
+        self.peak = self.peak.max(self.client.on_the_wire().count());
         if self.rings.0.publish(page) {
             // A full pipe is a doorbell already rung; a gone one is a server
             // that has ended, which the wait finds.
@@ -324,9 +325,9 @@ impl Session {
         for (ticket, outcome) in decided {
             let pending = self.pending.remove(&ticket).expect("blockd: an answer for no ticket");
             let data = match (pending, outcome) {
-                (Pending::Read { arena, blocks }, Outcome::Done) => {
-                    let mut data = vec![0u8; blocks as usize * BLOCK_BYTES];
-                    self.region.arena(arena, blocks).copy_out(0, &mut data);
+                (Pending::Read { run }, Outcome::Done) => {
+                    let mut data = vec![0u8; run.span().len];
+                    self.region.arena(&run).copy_out(0, &mut data);
                     Some(data)
                 }
                 _ => None,
@@ -334,8 +335,8 @@ impl Session {
             answers.push(Answer { ticket, outcome, data });
         }
         let released: Vec<_> = self.client.take_released().collect();
-        for (first, blocks) in released {
-            self.arena.release(first, blocks);
+        for run in released {
+            self.arena.release(run);
         }
     }
 
@@ -355,7 +356,7 @@ impl Session {
         assert!(self.conn.is_none(), "blockd: reconnect while a session is open");
         // Before the region goes to the new server: it must find this end's
         // two indices at zero, as it will set its own.
-        self.rings = ring::client(self.region.words());
+        self.rings = layout::client(self.region.words());
         let (conn, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
         if opened != self.opened {
             return Err(Error::Protocol);
