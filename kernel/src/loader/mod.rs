@@ -287,24 +287,12 @@ fn read_exe_tables(
         fill: Some(FillLattice { base: extent.min(), granule: FILL_GRANULE }),
         tls: layout.tls(),
     };
-    let mut exe = ExeTables {
-        needed,
-        dynstr,
-        dynsym,
-        relas: elf::ParsedRelaEntries {
-            relative: Vec::new(),
-            glob_dat: Vec::new(),
-            tpoff64: Vec::new(),
-            tpoff32: Vec::new(),
-        },
-    };
-    let relas = elf::parse_rela_entries(&rela_data, &jmprel_data, &rules, exe.symbols()).map_err(|refused| {
+    let relas = elf::parse_rela_entries(&rela_data, &jmprel_data, &rules, SymTab::new(&dynsym, &dynstr)).map_err(|refused| {
         log!("spawn: {}: {}", path, refused.as_str());
         refused.error()
     })?;
-    exe.relas = relas;
 
-    Ok(exe)
+    Ok(ExeTables { needed, dynstr, dynsym, relas })
 }
 
 /// `.dynsym`'s entry count, from `.gnu.hash` if present, else the `DT_SYMTAB`–`DT_STRTAB` gap.
