@@ -1,8 +1,4 @@
-# A member of the host workspace (root `Cargo.toml`). Nothing ships it yet: it
-# is the wire-format ring of ToyOS's own TCP/IP stack, and netd takes it when
-# the stack replaces smoltcp (`issues/design-debt/toyos-has-its-own-network-stack.md`).
-# Every byte it parses came off a network, so its tests and its fuzzer run where
-# they cost milliseconds rather than a boot.
+# Host-tested; nothing ships it until the stack replaces smoltcp (issues/design-debt/toyos-has-its-own-network-stack.md).
 
 [package]
 name = "toyos-net-wire"

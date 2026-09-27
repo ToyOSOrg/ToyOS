@@ -1,21 +1,4 @@
 //! TCP segments and their options (RFC 9293 §3.1).
-//!
-//! The checksum covers the pseudo-header with the IPv4 payload length as the
-//! TCP length, and there is no "no checksum" value. No flag combination is
-//! refused: SYN with FIN, or no flags at all, parse faithfully and the state
-//! machine decides what they mean. The window is exposed as sent, never
-//! scaled. The reserved bits are ignored and kept in the bytes.
-//!
-//! Every option in every segment is walked and validated (MUST-5); an option
-//! of illegal length refuses the whole segment, so a forged option drops a
-//! segment rather than resetting a connection (MUST-7 suggests the reset).
-//! Unknown kinds are skipped by their length (MUST-6). A repeated option keeps
-//! its last value.
-//!
-//! A built segment's options are typed by where they may go: a SYN carries MSS,
-//! Window Scale, SACK-Permitted and Timestamps, and an established segment has
-//! no field for any of the first three. They are laid out as deployed stacks
-//! send them, each unit on a 4-byte boundary. URG is never sent.
 
 use crate::checksum::{Checksum, PseudoHeader};
 use crate::emit::{be16x2, put, put_slice, BuildError};
@@ -23,32 +6,22 @@ use crate::ipv4::{Ipv4Packet, Ipv4Payload, Protocol};
 use crate::Port;
 
 pub const MIN_HEADER_LEN: usize = 20;
-/// The largest Window Scale shift that means anything (RFC 7323 §2.3).
 pub const MAX_WINDOW_SHIFT: u8 = 14;
 
 reasons! {
-    /// Why a segment was refused, in the order the checks run.
     TcpError {
-        /// Fewer than 20 bytes.
         Truncated = "tcp.truncated", Malformed;
-        /// A data offset below 5 words.
         DataOffset = "tcp.data-offset", Malformed;
-        /// Fewer bytes than the data offset names.
         HeaderOverrun = "tcp.header-overrun", Malformed;
-        /// A sum over pseudo-header and segment that is not 0xFFFF.
         Checksum = "tcp.checksum", Malformed;
-        /// Source or destination port 0.
         PortZero = "tcp.port-zero", Malformed;
-        /// An option length below 2, or wrong for its kind.
         OptionLength = "tcp.option-length", Malformed;
-        /// An option that runs past the options area.
         OptionOverrun = "tcp.option-overrun", Malformed;
-        /// A SACK option whose blocks are not whole (RFC 2018 §3).
         SackLength = "tcp.sack-length", Malformed;
     }
 }
 
-/// A sequence or acknowledgment number. It wraps, so it has no order here.
+/// It wraps, so it has no order here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SeqNum(u32);
 
@@ -62,11 +35,10 @@ impl SeqNum {
     }
 }
 
-/// The window field as sent: scaling is connection state.
+/// As sent: scaling is connection state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RawWindow(pub u16);
 
-/// The eight flag bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TcpFlags(u8);
 
@@ -102,17 +74,13 @@ impl core::ops::BitOr for TcpFlags {
     }
 }
 
-/// The Timestamps option's two values (RFC 7323 §3.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timestamps {
-    /// TSval.
     pub value: u32,
-    /// TSecr.
     pub echo: u32,
 }
 
 impl Timestamps {
-    /// The option at a 4-byte boundary, after the two bytes `lead`.
     fn unit(self, lead: [u8; 2]) -> [u8; 12] {
         let [v0, v1, v2, v3] = self.value.to_be_bytes();
         let [e0, e1, e2, e3] = self.echo.to_be_bytes();
@@ -121,14 +89,12 @@ impl Timestamps {
     }
 }
 
-/// One SACK block: raw edges, whose meaning is the connection's question.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SackBlock {
     pub left: SeqNum,
     pub right: SeqNum,
 }
 
-/// A received Window Scale shift, as sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowScale(u8);
 
@@ -137,7 +103,6 @@ impl WindowScale {
         self.0
     }
 
-    /// The shift used: a larger one is used as 14 (RFC 7323 §2.3).
     pub const fn effective(self) -> u8 {
         if self.0 > MAX_WINDOW_SHIFT {
             MAX_WINDOW_SHIFT
@@ -147,7 +112,6 @@ impl WindowScale {
     }
 }
 
-/// A Window Scale shift a SYN may be built with: at most 14.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowShift(u8);
 
@@ -165,7 +129,6 @@ impl WindowShift {
     }
 }
 
-/// What a segment's options said; a repeated option kept its last value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TcpOptions<'a> {
     mss: Option<u16>,
@@ -175,7 +138,6 @@ pub struct TcpOptions<'a> {
     sack: &'a [[u8; 8]],
 }
 
-/// `data` as exactly `N` bytes, or the option's length was wrong.
 fn exactly<const N: usize>(data: &[u8]) -> Result<&[u8; N], TcpError> {
     <&[u8; N]>::try_from(data).map_err(|_| TcpError::OptionLength)
 }
@@ -193,6 +155,7 @@ impl<'a> TcpOptions<'a> {
                 _ => {}
             }
             let &length = rest.first().ok_or(TcpError::OptionOverrun)?;
+            // An illegal length drops the segment: MUST-7's reset would let a forged option end a connection.
             if length < 2 {
                 return Err(TcpError::OptionLength);
             }
@@ -229,7 +192,6 @@ impl<'a> TcpOptions<'a> {
         Ok(options)
     }
 
-    /// The MSS as received, 0 included.
     pub const fn mss(&self) -> Option<u16> {
         self.mss
     }
@@ -246,7 +208,6 @@ impl<'a> TcpOptions<'a> {
         self.timestamps
     }
 
-    /// The last SACK option's blocks; none when it had none or there was none.
     pub fn sack_blocks(&self) -> impl ExactSizeIterator<Item = SackBlock> + 'a {
         self.sack.iter().map(|&[l0, l1, l2, l3, r0, r1, r2, r3]| SackBlock {
             left: SeqNum(u32::from_be_bytes([l0, l1, l2, l3])),
@@ -255,7 +216,6 @@ impl<'a> TcpOptions<'a> {
     }
 }
 
-/// A parsed segment, borrowing the bytes it came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TcpSegment<'a> {
     header: &'a [u8; MIN_HEADER_LEN],
@@ -267,7 +227,6 @@ pub struct TcpSegment<'a> {
 }
 
 impl<'a> TcpSegment<'a> {
-    /// Parses the segment `ip` carries, verified against `ip`'s addresses.
     pub fn parse(ip: &Ipv4Packet<'a>) -> Result<Self, TcpError> {
         let bytes = ip.payload();
         let (header, _) = bytes.split_first_chunk::<MIN_HEADER_LEN>().ok_or(TcpError::Truncated)?;
@@ -300,7 +259,6 @@ impl<'a> TcpSegment<'a> {
         SeqNum(u32::from_be_bytes([self.header[4], self.header[5], self.header[6], self.header[7]]))
     }
 
-    /// Present only when ACK is set.
     pub const fn acknowledgment(&self) -> Option<SeqNum> {
         if self.flags().contains(TcpFlags::ACK) {
             Some(SeqNum(u32::from_be_bytes([self.header[8], self.header[9], self.header[10], self.header[11]])))
@@ -309,12 +267,10 @@ impl<'a> TcpSegment<'a> {
         }
     }
 
-    /// The header length the data offset names.
     pub const fn header_len(&self) -> usize {
         MIN_HEADER_LEN.saturating_add(self.options_area.len())
     }
 
-    /// All eight flags as sent.
     pub const fn flags(&self) -> TcpFlags {
         TcpFlags(self.header[13])
     }
@@ -327,7 +283,6 @@ impl<'a> TcpSegment<'a> {
         Checksum::from_field(u16::from_be_bytes([self.header[16], self.header[17]]))
     }
 
-    /// Present only when URG is set.
     pub const fn urgent_pointer(&self) -> Option<u16> {
         if self.flags().contains(TcpFlags::URG) {
             Some(u16::from_be_bytes([self.header[18], self.header[19]]))
@@ -340,12 +295,10 @@ impl<'a> TcpSegment<'a> {
         self.options
     }
 
-    /// The fixed header as received.
     pub const fn header(&self) -> &'a [u8; MIN_HEADER_LEN] {
         self.header
     }
 
-    /// The options area as received, layout and padding included.
     pub const fn options_bytes(&self) -> &'a [u8] {
         self.options_area
     }
@@ -355,7 +308,6 @@ impl<'a> TcpSegment<'a> {
     }
 }
 
-/// The options a SYN or SYN-ACK may carry.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SynOptions {
     pub mss: Option<u16>,
@@ -394,7 +346,6 @@ impl SynOptions {
     }
 }
 
-/// The options any segment after the handshake may carry.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EstablishedOptions<'a> {
     pub timestamps: Option<Timestamps>,
@@ -427,18 +378,14 @@ impl EstablishedOptions<'_> {
     }
 }
 
-/// What a segment does, with the options that may go with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control<'a> {
     Syn(SynOptions),
     SynAck { acknowledgment: SeqNum, options: SynOptions },
-    /// ACK set, with PSH and FIN as asked.
     Ack { acknowledgment: SeqNum, push: bool, fin: bool, options: EstablishedOptions<'a> },
-    /// RST, with ACK when an acknowledgment is given.
     Rst { acknowledgment: Option<SeqNum>, options: EstablishedOptions<'a> },
 }
 
-/// A segment to build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TcpBuilder<'a> {
     pub source: Port,

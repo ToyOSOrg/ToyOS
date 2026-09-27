@@ -1,5 +1,3 @@
-//! IPv4's [wire] scenarios: IP and IPO.
-
 mod common;
 
 use std::net::Ipv4Addr;
@@ -17,7 +15,6 @@ fn parse(bytes: &[u8]) -> Result<Ipv4Packet<'_>, Ipv4Error> {
     Ipv4Packet::parse(bytes)
 }
 
-/// `vector` with `edit` applied and its header checksum fixed.
 fn fixed(vector: &str, edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
     let mut bytes = hex(vector);
     edit(&mut bytes);
@@ -29,7 +26,6 @@ fn set_total(bytes: &mut [u8], total: u16) {
     bytes[2..4].copy_from_slice(&total.to_be_bytes());
 }
 
-/// V-UDP-HI with `options` (a multiple of 4 bytes) in its header.
 fn with_options(options: &[u8]) -> Vec<u8> {
     let hi = hex(V_UDP_HI);
     let mut bytes = hi[..20].to_vec();

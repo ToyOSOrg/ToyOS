@@ -1,5 +1,3 @@
-//! The Internet checksum's scenarios, CK-01 to CK-21.
-
 mod common;
 
 use common::*;
@@ -88,7 +86,6 @@ fn s_ck_011_rfc1624_example_equation_3() {
     assert_eq!(oracle_sum(&[0xDD, 0x2F, 0x55, 0x55, 0xCD, 0x7A]), 0xFFFF);
 }
 
-/// The IPv4 header checksum after `edit` changes the header, both ways.
 fn incremental_equals_scratch(edit: impl Fn(&mut [u8]), update: impl Fn(Checksum) -> Checksum) {
     let mut header = udp_dns_ip()[..20].to_vec();
     let before = Checksum::from_field(u16::from_be_bytes([header[10], header[11]]));
@@ -127,7 +124,6 @@ fn s_ck_015_odd_offset_byte_updates_its_word() {
     assert_ne!(Checksum::from_field(0xB67D).replace([0x11, 0], [0x06, 0]).value(), oracle_checksum(&header));
 }
 
-/// A deterministic generator, so a failing case reproduces.
 struct Rng(u64);
 
 impl Rng {
@@ -164,8 +160,7 @@ fn s_ck_016_incremental_property() {
             checksum = checksum.replace(word(o), word(n));
         }
         if bytes.iter().all(|&b| b == 0) {
-            // RFC 1624 §3 rests on a nonzero byte in the covered data: with
-            // none, equation 3 may give +0 where recomputation gives -0.
+            // RFC 1624 §3 assumes a nonzero byte: over zeros, equation 3 may give +0 where recomputation gives -0.
             assert_eq!(oracle_checksum(&bytes), 0xFFFF);
             assert!(matches!(checksum.value(), 0x0000 | 0xFFFF), "case {case}");
         } else {

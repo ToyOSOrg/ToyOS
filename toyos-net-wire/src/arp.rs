@@ -1,32 +1,18 @@
-//! ARP for Ethernet and IPv4 only (RFC 826), with the probe and announcement
-//! of RFC 5227.
-//!
-//! Every packet is 28 bytes; bytes after the 28th are link padding and ignored
-//! whatever they hold. The hardware and protocol types are checked before the
-//! address lengths, so a foreign pairing is unsupported rather than malformed.
-//! A request's target MAC means nothing and is exposed only so the packet
-//! re-emits byte for byte; ToyOS writes zeros there.
+//! ARP for Ethernet and IPv4 (RFC 826), with RFC 5227's probe and announcement.
 
 use core::net::Ipv4Addr;
 
 use crate::emit::{be16x2, put, BuildError};
 use crate::ethernet::{FrameBody, IndividualMac, MacAddr, TxEtherType};
 
-/// The length of an Ethernet/IPv4 ARP packet.
 pub const LEN: usize = 28;
 
 reasons! {
-    /// Why an ARP packet was refused, in the order the checks run.
     ArpError {
-        /// Fewer than 8 bytes, or fewer than 28 once the types are known.
         Truncated = "arp.truncated", Malformed;
-        /// A hardware type other than 1 (Ethernet); IEEE 802's 6 included.
         HardwareType = "arp.hardware-type", Unsupported;
-        /// A protocol type other than 0x0800.
         ProtocolType = "arp.protocol-type", Unsupported;
-        /// Address lengths other than 6 and 4.
         AddressLength = "arp.address-length", Malformed;
-        /// An operation other than request or reply (RARP, InARP, anything else).
         Operation = "arp.operation", Unsupported;
     }
 }
@@ -37,17 +23,13 @@ pub enum Operation {
     Reply,
 }
 
-/// What a request or reply is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// A request from 0.0.0.0, asking whether an address is in use (RFC 5227 §2.1.1).
     Probe,
-    /// Sender and target IPv4 equal: a claim (RFC 5227 §2.3).
     Announcement,
     Ordinary,
 }
 
-/// An ARP packet: parsed, or to be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Arp {
     pub operation: Operation,
@@ -67,6 +49,7 @@ impl Arp {
         if u16::from_be_bytes([p0, p1]) != 0x0800 {
             return Err(ArpError::ProtocolType);
         }
+        // After the types, so a foreign pairing is unsupported rather than malformed.
         if (hlen, plen) != (6, 4) {
             return Err(ArpError::AddressLength);
         }
@@ -97,7 +80,6 @@ impl Arp {
         }
     }
 
-    /// Who has `target`? Sent to broadcast.
     pub const fn request(sender: IndividualMac, sender_ip: Ipv4Addr, target: Ipv4Addr) -> Self {
         Self {
             operation: Operation::Request,
@@ -108,17 +90,14 @@ impl Arp {
         }
     }
 
-    /// Is `candidate` in use? The sender IPv4 is 0.0.0.0 (RFC 5227 §2.1.1).
     pub const fn probe(sender: IndividualMac, candidate: Ipv4Addr) -> Self {
         Self::request(sender, Ipv4Addr::UNSPECIFIED, candidate)
     }
 
-    /// `claimed` is ours: sender and target IPv4 both name it (RFC 5227 §2.3).
     pub const fn announcement(sender: IndividualMac, claimed: Ipv4Addr) -> Self {
         Self::request(sender, claimed, claimed)
     }
 
-    /// The answer to `request` from the interface `sender` that holds `sender_ip`.
     pub const fn reply(sender: IndividualMac, sender_ip: Ipv4Addr, request: &Self) -> Self {
         Self {
             operation: Operation::Reply,
@@ -129,7 +108,6 @@ impl Arp {
         }
     }
 
-    /// Where the frame goes: a request is broadcast, a reply goes to its target.
     pub const fn frame_destination(&self) -> MacAddr {
         match self.operation {
             Operation::Request => MacAddr::BROADCAST,

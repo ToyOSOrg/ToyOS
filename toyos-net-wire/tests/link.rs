@@ -1,5 +1,3 @@
-//! Ethernet's and ARP's [wire] scenarios: ETH and ARP.
-
 mod common;
 
 use std::net::Ipv4Addr;
@@ -20,7 +18,6 @@ fn arp_request() -> Arp {
     Arp::request(mac_a(), IP_A, IP_B)
 }
 
-/// A frame with `field` as its type field and 46 zero bytes of body.
 fn typed(field: u16) -> Vec<u8> {
     let mut bytes = hex(V_ARP_REQ)[..12].to_vec();
     bytes.extend_from_slice(&field.to_be_bytes());

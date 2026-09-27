@@ -1,57 +1,35 @@
-//! Ethernet II frames (RFC 894) with up to two IEEE 802.1Q/802.1ad tags.
-//!
-//! The frame check sequence never reaches this module. No minimum length is
-//! enforced on receive: 60 bytes is a transmit rule, and virtual devices
-//! deliver shorter frames. The body a parse yields includes any link padding;
-//! the layer above trims by its own length field. A built frame is padded with
-//! zeros to 60 bytes, never carries a tag, and has an EtherType its body
-//! decides, so a length field or an undefined type cannot be expressed.
+//! Ethernet II frames (RFC 894) with up to two IEEE 802.1Q/802.1ad tags; the body a parse yields keeps its link padding.
 
 use crate::emit::{exact, put, BuildError};
 use crate::ipv4::MulticastAddr;
 
-/// Header bytes before the body of an untagged frame.
 pub const HEADER_LEN: usize = 14;
-/// The largest body a built frame carries: netd's device MTU is a 1,514-byte frame.
 pub const MAX_BODY: usize = 1500;
-/// A shorter built body is padded to this, making a 60-byte frame (RFC 894).
 pub const MIN_BODY: usize = 46;
 
 reasons! {
-    /// Why a frame was refused, in the order the checks run.
     EthError {
-        /// Fewer than 14 bytes.
         Truncated = "eth.truncated", Malformed;
-        /// A group source address: IEEE 802 sources are individual.
         GroupSource = "eth.group-source", Malformed;
-        /// A third tag.
         TooManyTags = "eth.too-many-tags", Unsupported;
-        /// A tag identifier without its control field and next type field.
         TruncatedTag = "eth.truncated-tag", Malformed;
-        /// A type field of 0–1500, an IEEE 802.3 length: there is no LLC client.
         LengthFrame = "eth.length-frame", Unsupported;
-        /// A type field of 1501–1535, which means nothing.
         UndefinedTypeField = "eth.undefined-type-field", Malformed;
     }
 }
 
-/// A 48-bit IEEE 802 address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MacAddr(pub [u8; 6]);
 
-/// What an address names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MacClass {
     Individual,
-    /// A group address other than broadcast.
     Group,
-    /// All ones, which is also a group address.
     Broadcast,
 }
 
 impl MacAddr {
     pub const BROADCAST: Self = Self([0xFF; 6]);
-    /// All zeros: an ARP request's target, which names nobody.
     pub const ZERO: Self = Self([0; 6]);
 
     pub const fn class(self) -> MacClass {
@@ -65,20 +43,17 @@ impl MacAddr {
         }
     }
 
-    /// The group address an IPv4 multicast group maps to: 01:00:5e and the
-    /// group's low 23 bits (RFC 1112 §6.4), so 32 groups share each address.
+    /// RFC 1112 §6.4: 01:00:5e and the group's low 23 bits.
     pub const fn multicast(group: MulticastAddr) -> Self {
         let [_, b, c, d] = group.get().octets();
         Self([0x01, 0x00, 0x5E, b & 0x7F, c, d])
     }
 }
 
-/// An individual address: an interface's own, or a frame's source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IndividualMac(MacAddr);
 
 impl IndividualMac {
-    /// `None` for a group address.
     pub const fn new(mac: MacAddr) -> Option<Self> {
         match mac.class() {
             MacClass::Individual => Some(Self(mac)),
@@ -91,12 +66,9 @@ impl IndividualMac {
     }
 }
 
-/// The link destination of an IPv4 datagram that is not unicast. A unicast
-/// destination is resolved by ARP and never sent in a broadcast frame
-/// (RFC 1122 §3.3.6).
+/// A unicast destination has none: ARP resolves it (RFC 1122 §3.3.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupDestination {
-    /// Limited broadcast, or the subnet's directed broadcast.
     Broadcast,
     Multicast(MulticastAddr),
 }
@@ -110,7 +82,6 @@ impl GroupDestination {
     }
 }
 
-/// A type field of 0x0600 or above that is neither IPv4 nor ARP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OtherEtherType(u16);
 
@@ -120,12 +91,10 @@ impl OtherEtherType {
     }
 }
 
-/// The EtherType of a received frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EtherType {
     Ipv4,
     Arp,
-    /// IPv6 (0x86DD), LLDP, 0x9100 and every other type.
     Other(OtherEtherType),
 }
 
@@ -139,19 +108,15 @@ impl EtherType {
     }
 }
 
-/// The EtherTypes ToyOS sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxEtherType {
     Ipv4,
     Arp,
 }
 
-/// Which tag a tag protocol identifier announces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TagProtocol {
-    /// 0x8100, an IEEE 802.1Q customer tag.
     Customer,
-    /// 0x88A8, an IEEE 802.1ad service tag.
     Service,
 }
 
@@ -165,7 +130,6 @@ impl TagProtocol {
     }
 }
 
-/// One tag: its identifier and its 16-bit control field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VlanTag {
     protocol: TagProtocol,
@@ -177,7 +141,6 @@ impl VlanTag {
         self.protocol
     }
 
-    /// The 3-bit priority code point.
     pub const fn priority(self) -> u8 {
         let [high, _] = self.control.to_be_bytes();
         high >> 5
@@ -187,13 +150,11 @@ impl VlanTag {
         self.control & 0x1000 != 0
     }
 
-    /// The 12-bit VLAN identifier; 0 marks a priority-tagged frame.
     pub const fn vlan_id(self) -> u16 {
         self.control & 0x0FFF
     }
 }
 
-/// The tags a frame carried.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tags {
     Untagged,
@@ -201,7 +162,6 @@ pub enum Tags {
     Double { outer: VlanTag, inner: VlanTag },
 }
 
-/// A parsed frame, borrowing the bytes it came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame<'a> {
     header: &'a [u8],
@@ -269,29 +229,23 @@ impl<'a> Frame<'a> {
         self.ether_type
     }
 
-    /// Addresses, tags and the final type field, exactly as received.
     pub const fn header(&self) -> &'a [u8] {
         self.header
     }
 
-    /// Everything after the final type field, link padding included.
     pub const fn body(&self) -> &'a [u8] {
         self.body
     }
 }
 
-/// What a frame carries: it names its own EtherType and writes itself.
 pub trait FrameBody {
     const ETHER_TYPE: TxEtherType;
 
-    /// The body's length in bytes, or why it cannot be built.
     fn length(&self) -> Result<usize, BuildError>;
 
-    /// Writes the body into `out`, which is exactly [`Self::length`] bytes.
     fn write(&self, out: &mut [u8]) -> Result<(), BuildError>;
 }
 
-/// The addresses of a frame to build; the body decides its EtherType.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameBuilder {
     pub destination: MacAddr,
@@ -299,7 +253,6 @@ pub struct FrameBuilder {
 }
 
 impl FrameBuilder {
-    /// Writes the frame at the front of `out` and returns it.
     pub fn emit<'b, B: FrameBody>(&self, body: &B, out: &'b mut [u8]) -> Result<&'b [u8], BuildError> {
         let body_len = body.length()?;
         if body_len > MAX_BODY {

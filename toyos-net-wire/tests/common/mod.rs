@@ -1,7 +1,3 @@
-//! What every scenario test shares: the byte vectors of the stage 1 wire
-//! specification, and an RFC 1071 sum written here rather than taken from the
-//! crate, so a "(checksum fixed)" mutation is fixed by an independent oracle.
-
 #![allow(dead_code)]
 
 use std::net::Ipv4Addr;
@@ -25,13 +21,11 @@ pub fn mac_b() -> IndividualMac {
     IndividualMac::new(MAC_B).unwrap()
 }
 
-/// Bytes from the specification's hex dumps.
 pub fn hex(text: &str) -> Vec<u8> {
     text.split_whitespace().map(|byte| u8::from_str_radix(byte, 16).unwrap()).collect()
 }
 
-/// The ones'-complement sum of `data`, one word at a time into a 32-bit
-/// accumulator, folded until no carry is left (RFC 1071 §4.1's shape).
+/// Written apart from the crate's checksum, so a fixed-up mutation is judged by a second implementation.
 pub fn oracle_sum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     for pair in data.chunks(2) {
@@ -48,7 +42,6 @@ pub fn oracle_checksum(data: &[u8]) -> u16 {
     !oracle_sum(data)
 }
 
-/// The pseudo-header of a transport message.
 pub fn pseudo(source: Ipv4Addr, destination: Ipv4Addr, protocol: u8, length: u16) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&source.octets());
@@ -62,7 +55,6 @@ fn header_len(ip: &[u8]) -> usize {
     usize::from(ip[0] & 0x0F) * 4
 }
 
-/// Recomputes an IPv4 header's checksum in place.
 pub fn fix_ip(ip: &mut [u8]) {
     let len = header_len(ip);
     ip[10..12].copy_from_slice(&[0, 0]);
@@ -70,7 +62,6 @@ pub fn fix_ip(ip: &mut [u8]) {
     ip[10..12].copy_from_slice(&checksum.to_be_bytes());
 }
 
-/// Recomputes a UDP checksum over `udp`'s first length-field bytes.
 pub fn fix_udp(source: Ipv4Addr, destination: Ipv4Addr, udp: &mut [u8]) {
     let length = u16::from_be_bytes([udp[4], udp[5]]);
     udp[6..8].copy_from_slice(&[0, 0]);
@@ -83,7 +74,6 @@ pub fn fix_udp(source: Ipv4Addr, destination: Ipv4Addr, udp: &mut [u8]) {
     udp[6..8].copy_from_slice(&checksum.to_be_bytes());
 }
 
-/// Recomputes a TCP checksum, the TCP length being the whole of `tcp`.
 pub fn fix_tcp(source: Ipv4Addr, destination: Ipv4Addr, tcp: &mut [u8]) {
     tcp[16..18].copy_from_slice(&[0, 0]);
     let mut covered = pseudo(source, destination, 6, tcp.len() as u16);
@@ -92,15 +82,12 @@ pub fn fix_tcp(source: Ipv4Addr, destination: Ipv4Addr, tcp: &mut [u8]) {
     tcp[16..18].copy_from_slice(&checksum.to_be_bytes());
 }
 
-/// Recomputes an ICMP or IGMP checksum over the whole message.
 pub fn fix_message(message: &mut [u8]) {
     message[2..4].copy_from_slice(&[0, 0]);
     let checksum = oracle_checksum(message);
     message[2..4].copy_from_slice(&checksum.to_be_bytes());
 }
 
-/// Recomputes every checksum of an IPv4 datagram: the header's, then its
-/// payload's by protocol.
 pub fn fix_datagram(ip: &mut [u8]) {
     let hlen = header_len(ip);
     let total = usize::from(u16::from_be_bytes([ip[2], ip[3]])).min(ip.len());
@@ -112,10 +99,8 @@ pub fn fix_datagram(ip: &mut [u8]) {
         match protocol {
             1 | 2 if payload.len() >= 4 => fix_message(payload),
             6 if payload.len() >= 20 => fix_tcp(source, destination, payload),
-            17 if payload.len() >= 8 && usize::from(u16::from_be_bytes([payload[4], payload[5]])) <= payload.len() => {
-                if u16::from_be_bytes([payload[4], payload[5]]) >= 8 {
-                    fix_udp(source, destination, payload)
-                }
+            17 if payload.len() >= 8 && (8..=payload.len()).contains(&usize::from(u16::from_be_bytes([payload[4], payload[5]]))) => {
+                fix_udp(source, destination, payload)
             }
             _ => {}
         }
@@ -125,8 +110,7 @@ pub fn fix_datagram(ip: &mut [u8]) {
     }
 }
 
-/// A 20-byte IPv4 header around `payload`, DF, TTL 64, built here and not by
-/// the crate.
+/// Built here, not by the crate.
 pub fn ipv4(source: Ipv4Addr, destination: Ipv4Addr, protocol: u8, payload: &[u8]) -> Vec<u8> {
     let total = (20 + payload.len()) as u16;
     let mut ip = vec![0x45, 0];
@@ -139,18 +123,16 @@ pub fn ipv4(source: Ipv4Addr, destination: Ipv4Addr, protocol: u8, payload: &[u8
     ip
 }
 
-/// The IPv4 datagram inside a frame vector, without link padding.
 pub fn ip_of(frame: &[u8]) -> Vec<u8> {
     let ip = &frame[14..];
     ip[..usize::from(u16::from_be_bytes([ip[2], ip[3]]))].to_vec()
 }
 
-/// The payload of an IPv4 datagram vector.
 pub fn payload_of(ip: &[u8]) -> Vec<u8> {
     ip[header_len(ip)..usize::from(u16::from_be_bytes([ip[2], ip[3]]))].to_vec()
 }
 
-/// A buffer of junk to build into, so a builder that skips a byte shows it.
+/// So a builder that skips a byte shows it.
 pub fn junk(len: usize) -> Vec<u8> {
     vec![0xAA; len]
 }
@@ -400,23 +382,19 @@ pub const V_ICMP_PROTO_UNREACH_GEN: &str = "
 c0 00 02 02 03 02 fc fd 00 00 00 00 45 00 00 14
 00 00 40 00 40 fd b5 e9 c0 00 02 02 c0 00 02 01";
 
-/// Every frame vector.
 pub const FRAMES: &[&str] = &[
     V_ARP_REQ, V_ARP_REPLY, V_ARP_PROBE, V_ARP_ANNOUNCE, V_ETH_8021Q, V_ETH_PRIO, V_ETH_QINQ, V_UDP_DNS, V_TCP_SYN,
     V_TCP_SYNACK, V_TCP_DATA, V_TCP_SACK, V_TCP_RST, V_TCP_FIN, V_IGMP_REPORT, V_IGMP3_JOIN,
 ];
 
-/// Every IPv4 datagram vector.
 pub const DATAGRAMS: &[&str] = &[
     V_TCP_SYN_NOTS, V_TCP_SACK3, V_ICMP_ECHO, V_ICMP_REPLY, V_ICMP_PORT_UNREACH, V_ICMP_FRAG_NEEDED, V_UDP_HI,
     V_ICMP_PORT_UNREACH_GEN, V_ICMP_TIME_EXCEEDED, V_IGMP_QUERY_V2, V_IP_RR, V_IP_NOPS, V_IP_LSRR, V_IP_FRAG_FIRST,
     V_IP_FRAG_LAST, V_IP_DSCP, V_IP_MIN, V_IGMP3_LEAVE, V_IGMP3_CURRENT, V_IGMP3_JOIN_UNSPEC, V_ICMP_PROTO_UNREACH_GEN,
 ];
 
-/// Every vector that is an ICMP message alone.
 pub const ICMP_MESSAGES: &[&str] = &[V_ICMP_PARAM_PROBLEM, V_ICMP_TIMESTAMP_REQ, V_ICMP_REDIRECT];
 
-/// Every vector that is an IGMP message alone.
 pub const IGMP_MESSAGES: &[&str] = &[
     V_IGMP_QUERY_V1, V_IGMP_QUERY_V3, V_IGMP_QUERY_V3_EXP, V_IGMP_QUERY_V3_SRC, V_IGMP_LEAVE, V_IGMP_REPORT_LONG,
 ];

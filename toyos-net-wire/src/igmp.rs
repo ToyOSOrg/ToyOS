@@ -1,17 +1,4 @@
-//! IGMP (RFC 2236; RFC 9776, which obsoletes RFC 3376): every query version,
-//! the version 1 and 2 reports and the leave, parsed; the version 2 messages
-//! and the version 3 report, built.
-//!
-//! The checksum covers the whole IP payload, not only the first 8 bytes. A
-//! query's version is its length and code (RFC 9776 §7.1): 8 bytes with code
-//! 0 is version 1, 8 bytes otherwise version 2, 12 or more version 3, and 9 to
-//! 11 is malformed. Its maximum response code is linear for versions 1 and 2
-//! and floating-point only for version 3. Bytes past a version 2 message's 8,
-//! or past a version 3 query's sources, are ignored. Parsing a version 3
-//! report is not implemented.
-//!
-//! 224.0.0.1 is never reported: [`ReportGroup`] cannot hold it. Every IGMP
-//! message is sent with TTL 1 and a Router Alert ([`datagram`]).
+//! IGMP (RFC 2236, RFC 9776): every query and the version 1 and 2 messages parsed, the version 2 messages and the version 3 report built.
 
 use core::net::Ipv4Addr;
 
@@ -22,46 +9,31 @@ use crate::ipv4::{Form, Ipv4Builder, Ipv4Payload, Ipv4Source, MulticastAddr, Pro
 pub const HEADER_LEN: usize = 8;
 
 reasons! {
-    /// Why a message was refused, in the order the checks run.
     IgmpError {
-        /// Fewer than 8 bytes.
         Truncated = "igmp.truncated", Malformed;
-        /// A sum over the IP payload that is not 0xFFFF.
         Checksum = "igmp.checksum", Malformed;
-        /// A query of 9 to 11 bytes.
         QueryLength = "igmp.query-length", Malformed;
-        /// A query group that is neither 0.0.0.0 nor multicast.
         QueryGroup = "igmp.query-group", Malformed;
-        /// Fewer source addresses than a version 3 query counts.
         QuerySourcesOverrun = "igmp.query-sources-overrun", Malformed;
-        /// A report or leave whose group is not multicast.
         Group = "igmp.group", Malformed;
-        /// A version 3 report, which a host has no use for.
         V3Report = "igmp.v3-report", Unsupported;
-        /// Any other type (RFC 2236 §2.1).
         UnknownType = "igmp.unknown-type", Unsupported;
     }
 }
 
-/// A time in tenths of a second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Deciseconds(pub u16);
 
-/// Which groups a query asks about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryGroup {
     General,
     Specific(MulticastAddr),
 }
 
-/// A version 3 query's fields beyond version 2's (RFC 9776 §4.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V3Query<'a> {
-    /// S: routers suppress their timer updates.
     pub suppress_router_processing: bool,
-    /// QRV, the querier's robustness variable.
     pub robustness: u8,
-    /// QQIC, the querier's query interval code.
     pub interval_code: u8,
     sources: &'a [[u8; 4]],
 }
@@ -94,8 +66,6 @@ pub enum IgmpMessage<'a> {
     Leave(MulticastAddr),
 }
 
-/// A version 3 maximum response code in tenths: linear below 128, and above
-/// `(mant | 0x10) << (exp + 3)` (RFC 9776 §4.1.1).
 fn v3_max_response(code: u8) -> Deciseconds {
     if code < 0x80 {
         Deciseconds(u16::from(code))
@@ -105,7 +75,6 @@ fn v3_max_response(code: u8) -> Deciseconds {
     }
 }
 
-/// A parsed message, borrowing the bytes it came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IgmpPacket<'a> {
     bytes: &'a [u8],
@@ -113,7 +82,6 @@ pub struct IgmpPacket<'a> {
 }
 
 impl<'a> IgmpPacket<'a> {
-    /// Parses the message that is the whole of `bytes`: an IPv4 payload.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, IgmpError> {
         let (&[kind, code, _, _, g0, g1, g2, g3], rest) = bytes.split_first_chunk::<HEADER_LEN>().ok_or(IgmpError::Truncated)?;
         if !Sum::of(bytes).verifies() {
@@ -159,13 +127,11 @@ impl<'a> IgmpPacket<'a> {
         self.message
     }
 
-    /// The message as received.
     pub const fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 }
 
-/// A group a report may name: never 224.0.0.1 (RFC 2236 §6; RFC 9776 §5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReportGroup(MulticastAddr);
 
@@ -183,13 +149,10 @@ impl ReportGroup {
     }
 }
 
-/// An IGMP message to build, which also knows where it is sent.
 pub trait IgmpBody: Ipv4Payload {
     fn destination(&self) -> MulticastAddr;
 }
 
-/// The datagram an IGMP message travels in: to its destination, TTL 1,
-/// atomic, with a Router Alert (RFC 2236 §2; RFC 9776 §4).
 pub fn datagram<M: IgmpBody>(source: Ipv4Source, traffic_class: TrafficClass, message: M) -> Ipv4Builder<'static, M> {
     Ipv4Builder {
         source,
@@ -202,18 +165,13 @@ pub fn datagram<M: IgmpBody>(source: Ipv4Source, traffic_class: TrafficClass, me
     }
 }
 
-/// The version 1 and 2 messages a host sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V2Kind {
-    /// To the group (RFC 2236 §3).
     Report,
-    /// To the group, while a version 1 querier is present (RFC 2236 §4).
     V1Report,
-    /// To 224.0.0.2 (RFC 2236 §3).
     Leave,
 }
 
-/// A version 1 or 2 message to build: 8 bytes, maximum response 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V2Builder {
     pub kind: V2Kind,
@@ -250,16 +208,11 @@ impl IgmpBody for V2Builder {
     }
 }
 
-/// A version 3 group record's type and sources (RFC 9776 §4.2.12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordType<'a> {
-    /// MODE_IS_INCLUDE (1): the answer to a group-and-source query.
     IsInclude(&'a [Ipv4Addr]),
-    /// MODE_IS_EXCLUDE (2) with no sources: the answer to a query.
     IsExclude,
-    /// CHANGE_TO_INCLUDE_MODE (3) with no sources: a leave.
     ToInclude,
-    /// CHANGE_TO_EXCLUDE_MODE (4) with no sources: a join.
     ToExclude,
 }
 
@@ -278,7 +231,6 @@ impl GroupRecord<'_> {
     }
 }
 
-/// A version 3 membership report (RFC 9776 §4.2), sent to 224.0.0.22.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V3ReportBuilder<'a> {
     pub records: &'a [GroupRecord<'a>],

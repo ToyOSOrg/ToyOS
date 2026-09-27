@@ -1,23 +1,4 @@
 //! ICMPv4 messages (RFC 792).
-//!
-//! The checksum covers the whole message and is checked before the type, so a
-//! corrupted message of any type is a checksum failure. Echo and Timestamp
-//! must have code 0. An error message's unassigned code is accepted as
-//! unassigned rather than refused: the error still says a datagram failed.
-//!
-//! An error quotes the start of the datagram that caused it: a version-4
-//! header of its own length and at least 8 bytes after it. The quoted total
-//! length normally exceeds the quote; bytes quoted past it (RFC 4884 padding
-//! and extensions) are not the original payload and are exposed apart. The
-//! quoted header's checksum is not verified: the message's own checksum covers
-//! the quote, and a NAT may have rewritten it.
-//!
-//! Types a modern host has no use for are refused by name: Source Quench
-//! (RFC 6633), router discovery (RFC 1256), and the types RFC 6918 deprecates.
-//!
-//! ToyOS builds echoes and the two unreachable codes a host sends, protocol
-//! and port, each quoting as much of the offending datagram as keeps the error
-//! within 576 bytes (RFC 1812 §4.3.2.3).
 
 use core::net::Ipv4Addr;
 use core::num::NonZeroU16;
@@ -27,37 +8,24 @@ use crate::emit::{be16x2, put, put_slice, BuildError};
 use crate::ipv4::{FragmentOffset, Ipv4Packet, Ipv4Payload, Protocol};
 
 pub const HEADER_LEN: usize = 8;
-/// The most of an offending datagram an error quotes: 576 bytes less a
-/// 20-byte header without options and the 8-byte ICMP header.
+/// 576 bytes (RFC 1812 §4.3.2.3) less a 20-byte header without options and the ICMP header.
 pub const MAX_QUOTE: usize = 548;
 
 reasons! {
-    /// Why a message was refused, in the order the checks run.
     IcmpError {
-        /// Fewer than 8 bytes.
         Truncated = "icmp.truncated", Malformed;
-        /// A sum over the message that is not 0xFFFF.
         Checksum = "icmp.checksum", Malformed;
-        /// A nonzero code on Echo or Timestamp.
         Code = "icmp.code", Malformed;
-        /// A Timestamp message other than 20 bytes.
         TimestampLength = "icmp.timestamp-length", Malformed;
-        /// A quote shorter than its header and 8 bytes after it.
         QuoteTruncated = "icmp.quote-truncated", Malformed;
-        /// A quote that is not an IPv4 header.
         QuoteNotIpv4 = "icmp.quote-not-ipv4", Malformed;
-        /// Source Quench, deprecated by RFC 6633.
         SourceQuench = "icmp.source-quench", Unsupported;
-        /// Router advertisement or solicitation (RFC 1256).
         RouterDiscovery = "icmp.router-discovery", Unsupported;
-        /// A type RFC 6918 deprecates.
         DeprecatedType = "icmp.deprecated-type", Unsupported;
-        /// Any other type (RFC 1122 §3.2.2).
         UnknownType = "icmp.unknown-type", Unsupported;
     }
 }
 
-/// A code the error's type assigns no meaning to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnassignedCode(u8);
 
@@ -67,7 +35,6 @@ impl UnassignedCode {
     }
 }
 
-/// Destination Unreachable's codes (RFC 792; RFC 1122 §3.2.2.1; RFC 1812 §5.2.7.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnreachableCode {
     Net,
@@ -124,28 +91,23 @@ pub enum RedirectCode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimeExceededCode {
-    /// TTL exceeded in transit.
     InTransit,
-    /// Fragment reassembly time exceeded.
     Reassembly,
     Unassigned(UnassignedCode),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParameterProblemCode {
-    /// The pointer indicates the error.
     Pointer,
     MissingOption,
     BadLength,
     Unassigned(UnassignedCode),
 }
 
-/// The start of the datagram an error is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Quote<'a> {
     header: &'a [u8; 20],
     options: &'a [u8],
-    transport: &'a [u8; 8],
     payload: &'a [u8],
     beyond: &'a [u8],
 }
@@ -158,12 +120,14 @@ impl<'a> Quote<'a> {
         }
         let header_len = usize::from(header[0] & 0x0F) << 2;
         let (full_header, after) = body.split_at_checked(header_len).ok_or(IcmpError::QuoteTruncated)?;
-        let (transport, _) = after.split_first_chunk::<8>().ok_or(IcmpError::QuoteTruncated)?;
         let (_, options) = full_header.split_first_chunk::<20>().ok_or(IcmpError::QuoteTruncated)?;
-        let total = usize::from(u16::from_be_bytes([header[2], header[3]]));
-        let (original, beyond) = body.split_at_checked(total.max(header_len).min(body.len())).ok_or(IcmpError::QuoteTruncated)?;
-        let (_, payload) = original.split_at_checked(header_len).ok_or(IcmpError::QuoteTruncated)?;
-        Ok(Self { header, options, transport, payload, beyond })
+        let within = usize::from(u16::from_be_bytes([header[2], header[3]])).checked_sub(header_len);
+        // The first 8 payload bytes are owed, or every one when the datagram has fewer.
+        if after.len() < within.map_or(8, |payload| payload.min(8)) {
+            return Err(IcmpError::QuoteTruncated);
+        }
+        let (payload, beyond) = after.split_at_checked(within.unwrap_or(0).min(after.len())).ok_or(IcmpError::QuoteTruncated)?;
+        Ok(Self { header, options, payload, beyond })
     }
 
     pub const fn total_length(&self) -> u16 {
@@ -190,29 +154,23 @@ impl<'a> Quote<'a> {
         Ipv4Addr::new(self.header[16], self.header[17], self.header[18], self.header[19])
     }
 
-    /// The quoted options, uninterpreted.
     pub const fn options(&self) -> &'a [u8] {
         self.options
     }
 
-    /// The first 8 bytes after the quoted header: TCP's ports and sequence
-    /// number, or UDP's whole header.
-    pub const fn transport(&self) -> &'a [u8; 8] {
-        self.transport
+    pub const fn transport(&self) -> Option<&'a [u8; 8]> {
+        self.payload.first_chunk::<8>()
     }
 
-    /// The quoted bytes after the header that lie within the quoted total length.
     pub const fn payload(&self) -> &'a [u8] {
         self.payload
     }
 
-    /// Quoted bytes past the quoted total length: not the original datagram.
     pub const fn beyond(&self) -> &'a [u8] {
         self.beyond
     }
 }
 
-/// An echo's identifier, sequence number and data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Echo<'a> {
     pub identifier: u16,
@@ -220,7 +178,6 @@ pub struct Echo<'a> {
     pub data: &'a [u8],
 }
 
-/// A Timestamp or Timestamp Reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timestamp {
     pub identifier: u16,
@@ -236,7 +193,6 @@ pub enum IcmpMessage<'a> {
     EchoReply(Echo<'a>),
     DestinationUnreachable {
         code: UnreachableCode,
-        /// With code 4 only, when the router reported one (RFC 1191 §4).
         next_hop_mtu: Option<NonZeroU16>,
         quote: Quote<'a>,
     },
@@ -247,7 +203,6 @@ pub enum IcmpMessage<'a> {
     TimestampReply(Timestamp),
 }
 
-/// A parsed message, borrowing the bytes it came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IcmpPacket<'a> {
     bytes: &'a [u8],
@@ -256,7 +211,6 @@ pub struct IcmpPacket<'a> {
 }
 
 impl<'a> IcmpPacket<'a> {
-    /// Parses the message that is the whole of `bytes`: an IPv4 payload.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, IcmpError> {
         let (&[kind, code, c0, c1, r0, r1, r2, r3], body) = bytes.split_first_chunk::<HEADER_LEN>().ok_or(IcmpError::Truncated)?;
         if !Sum::of(bytes).verifies() {
@@ -340,14 +294,11 @@ impl<'a> IcmpPacket<'a> {
         self.checksum
     }
 
-    /// The message as received.
     pub const fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 }
 
-/// Writes a message: `kind`, `code`, the checksum, four type-specific bytes
-/// and `body`, the checksum over all of it.
 fn write_message(out: &mut [u8], kind: u8, code: u8, word: [u8; 4], body: &[u8]) -> Result<(), BuildError> {
     let (header, rest) = out.split_first_chunk_mut::<HEADER_LEN>().ok_or(BuildError::BufferTooSmall)?;
     put_slice(rest, body)?;
@@ -363,7 +314,6 @@ pub enum EchoKind {
     Reply,
 }
 
-/// An echo to build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EchoBuilder<'a> {
     pub kind: EchoKind,
@@ -373,8 +323,6 @@ pub struct EchoBuilder<'a> {
 }
 
 impl<'a> EchoBuilder<'a> {
-    /// The reply to `request`: its identifier, sequence number and every byte
-    /// of its data (RFC 1122 §3.2.2.6).
     pub const fn reply_to(request: &Echo<'a>) -> Self {
         Self { kind: EchoKind::Reply, identifier: request.identifier, sequence: request.sequence, data: request.data }
     }
@@ -398,14 +346,12 @@ impl Ipv4Payload for EchoBuilder<'_> {
     }
 }
 
-/// The unreachable codes a host sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostUnreachable {
     Protocol,
     Port,
 }
 
-/// A Destination Unreachable about `datagram`, quoting it as received.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnreachableBuilder<'a> {
     pub code: HostUnreachable,
