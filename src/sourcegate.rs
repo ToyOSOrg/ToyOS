@@ -555,15 +555,20 @@ const HOST_SPAWNS: &[Spawn] = &[
     },
     Spawn {
         arg: "arch.qemu()",
-        sites: &[("src/qemu.rs", 1), ("src/ci.rs", 2), ("tests/common/qemu.rs", 1)],
+        sites: &[
+            ("src/qemu.rs", 1),
+            ("src/ci.rs", 2),
+            ("tests/common/qemu.rs", 1),
+            ("tests/common/release.rs", 1),
+        ],
         why: "QEMU, the other half of the bar: `Arch::qemu` names `qemu-system-x86_64` and \
               `qemu-system-aarch64`, and `check_prerequisites` requires the one being booted",
     },
     Spawn {
         arg: "\"gh\"",
         sites: &[],
-        why: "GitHub's CLI, outside the bar: CI's release, protection and nightly-red jobs \
-              (src/ci.rs, src/release.rs) ask GitHub with it. Nothing that builds or boots \
+        why: "GitHub's CLI, outside the bar: CI's releases, protection and nightly-red jobs \
+              (src/ci.rs, src/release.rs, src/imagerelease.rs) ask GitHub with it. Nothing that builds or boots \
               reaches it",
     },
     Spawn {

@@ -14,6 +14,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use toyos_build::arch::Arch;
 use toyos_build::build::{self, Boot};
 use toyos_build::fingerprint::{first_difference, whole_device};
 use toyos_build::imagerelease::Host;
@@ -55,7 +56,11 @@ impl Guest {
     /// `argv` with `extra` after it and no window: the notes' line, headless.
     fn start(argv: &[String], extra: &[String], stderr: PathBuf) -> Result<Guest, String> {
         let err = std::fs::File::create(&stderr).map_err(|e| format!("{}: {e}", stderr.display()))?;
-        let mut child = Command::new(&argv[0])
+        let arch = Arch::X86_64;
+        if argv[0] != arch.qemu() {
+            return Err(format!("a release command line starts {:?}, not {}", argv[0], arch.qemu()));
+        }
+        let mut child = Command::new(arch.qemu())
             .args(&argv[1..])
             .args(extra)
             .args(["-display", "none"])
@@ -63,7 +68,7 @@ impl Guest {
             .stdout(Stdio::piped())
             .stderr(err)
             .spawn()
-            .map_err(|e| format!("{}: {e}", argv[0]))?;
+            .map_err(|e| format!("{}: {e}", arch.qemu()))?;
         let out = child.stdout.take().expect("piped");
         let (send, lines) = mpsc::channel();
         std::thread::spawn(move || {

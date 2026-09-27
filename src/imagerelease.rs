@@ -76,10 +76,10 @@ impl Host {
 
     /// The one of the two this machine is, or why it is neither.
     pub fn this() -> Result<Host, String> {
-        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        if cfg!(target_os = "macos") && Arch::HOST == Some(Arch::Aarch64) {
             return Ok(Host::MacosAppleSilicon);
         }
-        if cfg!(all(target_os = "linux", target_arch = "x86_64")) && Arch::X86_64.accel() == Accel::Kvm {
+        if cfg!(target_os = "linux") && Arch::HOST == Some(Arch::X86_64) && Arch::X86_64.accel() == Accel::Kvm {
             return Ok(Host::LinuxKvm);
         }
         Err("this host is neither an Apple Silicon Mac nor an x86-64 Linux whose /dev/kvm opens, \
@@ -125,7 +125,7 @@ impl Host {
         let accel = self.accel();
         let [code, vars] = self.firmware();
         [
-            "qemu-system-x86_64",
+            Arch::X86_64.qemu(),
             "-nodefaults",
             "-accel",
             accel.name(),
@@ -204,7 +204,7 @@ Download `{IMAGE_ASSET}` and `{SUMS_ASSET}` from this release into one directory
 
 ## Under QEMU
 
-QEMU {qemu} is the version ToyOS is measured with. The firmware is the edk2 build the host's QEMU installation ships.
+QEMU {qemu} is the version ToyOS is measured with. The firmware is edk2, from Homebrew's QEMU on macOS and from Debian's `ovmf` on Linux.
 
 {commands}The kernel's log is on the terminal and the desktop is in QEMU's window. The running system writes to `{IMAGE}` itself, as it would to a stick. `/apps`, `/config`, `/home` and `/state` are kept in memory and are gone at the next boot.
 
@@ -212,16 +212,16 @@ QEMU {qemu} is the version ToyOS is measured with. The firmware is the edk2 buil
 
 The machine has to be an x86-64 PC from 2020 or later, booting UEFI with Secure Boot off. The only hardware ToyOS is known to work on is a Lenovo ThinkPad T14; on anything else it is untried.
 
-Write `{IMAGE}` to the whole stick, not to a partition of it; what the stick held is lost:
+Write `{IMAGE}` to the whole stick, not to a partition of it, as root; what the stick held is lost:
 
     dd if={IMAGE} of=/dev/<the stick> bs=4194304
     sync
 
 What a boot writes on the machine:
 
-- the stick: its log partition and its boot volume;
+- the stick it booted from;
 - the firmware's variable store: the loader's anti-rollback floor, and `BootNext` where a boot entry names the stick;
-- another disk only where it carries a partition of ToyOS's DATA type, `{data}`, which only a disk ToyOS was set up on has. That is where `/apps`, `/config`, `/home` and `/state` live. Every other disk is read for its partition table and never written: `release_writes_no_other_disk` boots this image beside a disk laid out as another operating system's and compares every byte of it.
+- another disk only where it carries a partition of ToyOS's DATA type, `{data}`, a type no other system uses. That is where `/apps`, `/config`, `/home` and `/state` live. Every other disk is read for its partition table and never written: `release_writes_no_other_disk` boots this image beside a disk laid out as another operating system's and compares every byte of it.
 
 ## Terms
 
