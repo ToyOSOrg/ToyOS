@@ -364,7 +364,7 @@ fn an_error_with_options_still_fits_576_bytes() {
     let offending = Ipv4Packet::parse(&offending).unwrap();
     let options = [TxOption::Other { kind: TxOptionKind::new(68).unwrap(), data: &[0; 38] }];
     let unreachable = UnreachableBuilder { code: HostUnreachable::Protocol, datagram: &offending };
-    let built = emit!(&Ipv4Builder { options: &options, ..datagram(IP_A, IP_B, unreachable) }).unwrap();
+    let built = emit(&Ipv4Builder { options: &options, ..datagram(IP_A, IP_B, unreachable) }).unwrap();
     assert_eq!(built.len(), MAX_ERROR_LEN);
     assert_eq!(built[68..], offending.bytes()[..MAX_ERROR_LEN - 68]);
 }

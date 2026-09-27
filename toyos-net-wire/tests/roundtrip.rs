@@ -19,7 +19,7 @@ use toyos_net_wire::tcp::{
     WindowShift,
 };
 use toyos_net_wire::udp::{UdpBuilder, UdpDatagram, UdpError};
-use toyos_net_wire::Port;
+use toyos_net_wire::{BuildError, Port};
 
 const FUZZ_ITERATIONS: usize = 500_000;
 
@@ -138,15 +138,15 @@ struct Header<'a> {
     outer: Option<FrameBuilder>,
 }
 
-macro_rules! emit_under {
-    ($header:expr, $payload:expr) => {{
-        let Header { source, destination, ttl, traffic_class, options, outer } = $header;
-        let builder = Ipv4Builder { source, destination, ttl, traffic_class, options, payload: $payload };
+impl Header<'_> {
+    fn emit<P: toyos_net_wire::ipv4::Payload>(&self, payload: P) -> Result<Vec<u8>, BuildError> {
+        let Self { source, destination, ttl, traffic_class, options, outer } = *self;
+        let builder = Ipv4Builder { source, destination, ttl, traffic_class, options, payload };
         match outer {
-            None => emit!(&builder),
+            None => emit(&builder),
             Some(outer) => outer.emit(&builder, &mut junk(2000)).map(<[u8]>::to_vec),
         }
-    }};
+    }
 }
 
 fn control_of<'a>(s: &TcpSegment<'_>, sack: &'a [SackBlock]) -> Option<Control<'a>> {
@@ -203,13 +203,13 @@ fn rebuild_ip(bytes: &[u8], outer: Option<FrameBuilder>) -> Option<Vec<u8>> {
     let built = match ip.protocol() {
         Protocol::Udp => {
             let u = UdpDatagram::parse(&ip).ok()?;
-            emit_under!(header, UdpBuilder { source: u.source_port()?, destination: u.destination_port(), data: u.payload() })
+            header.emit(UdpBuilder { source: u.source_port()?, destination: u.destination_port(), data: u.payload() })
         }
         Protocol::Tcp => {
             let s = TcpSegment::parse(&ip).ok()?;
             let sack: Vec<SackBlock> = s.options().sack_blocks().collect();
             let control = control_of(&s, &sack)?;
-            emit_under!(header, TcpBuilder {
+            header.emit(TcpBuilder {
                 source: s.source_port(),
                 destination: s.destination_port(),
                 sequence: s.sequence(),
@@ -221,8 +221,8 @@ fn rebuild_ip(bytes: &[u8], outer: Option<FrameBuilder>) -> Option<Vec<u8>> {
         Protocol::Icmp => {
             let packet = IcmpPacket::parse(ip.payload()).ok()?;
             match packet.message() {
-                IcmpMessage::EchoRequest(e) => emit_under!(header, EchoBuilder { kind: EchoKind::Request, ..EchoBuilder::reply_to(&e) }),
-                IcmpMessage::EchoReply(e) => emit_under!(header, EchoBuilder::reply_to(&e)),
+                IcmpMessage::EchoRequest(e) => header.emit(EchoBuilder { kind: EchoKind::Request, ..EchoBuilder::reply_to(&e) }),
+                IcmpMessage::EchoReply(e) => header.emit(EchoBuilder::reply_to(&e)),
                 IcmpMessage::DestinationUnreachable { code, .. } => {
                     let code = match code {
                         UnreachableCode::Protocol => HostUnreachable::Protocol,
@@ -232,7 +232,7 @@ fn rebuild_ip(bytes: &[u8], outer: Option<FrameBuilder>) -> Option<Vec<u8>> {
                     // Only a whole quote within 576 bytes is what the builder would send.
                     let quote = &packet.bytes()[8..];
                     let quoted = Ipv4Packet::parse(quote).ok().filter(|d| d.bytes().len() == quote.len() && ip.bytes().len() <= MAX_ERROR_LEN)?;
-                    emit_under!(header, UnreachableBuilder { code, datagram: &quoted })
+                    header.emit(UnreachableBuilder { code, datagram: &quoted })
                 }
                 _ => return None,
             }
@@ -243,9 +243,9 @@ fn rebuild_ip(bytes: &[u8], outer: Option<FrameBuilder>) -> Option<Vec<u8>> {
                 IgmpMessage::Leave(group) => (V2Kind::Leave, group),
                 IgmpMessage::V1Report(_) | IgmpMessage::Query(_) => return None,
             };
-            emit_under!(header, V2Builder { kind, group: ReportGroup::new(group).ok()? })
+            header.emit(V2Builder { kind, group: ReportGroup::new(group).ok()? })
         }
-        Protocol::Other(protocol) => emit_under!(header, RawPayload { protocol, bytes: ip.payload() }),
+        Protocol::Other(protocol) => header.emit(RawPayload { protocol, bytes: ip.payload() }),
     };
     built.ok()
 }
@@ -420,16 +420,16 @@ fn s_rt_002_canonical_vectors_rebuild() {
         TrafficClass::ZERO,
         V2Builder { kind: V2Kind::Leave, group: ReportGroup::new(group).unwrap() },
     );
-    assert_eq!(emit!(&datagram).unwrap()[24..], leave);
+    assert_eq!(emit(&datagram).unwrap()[24..], leave);
 }
 
 /// A datagram an unreachable may quote.
 fn random_datagram(rng: &mut Rng) -> Vec<u8> {
     let data = rng.bytes(40);
     if rng.chance(70) {
-        emit!(&datagram(IP_B, IP_A, UdpBuilder { source: Port::new(5000).unwrap(), destination: Port::new(5001).unwrap(), data: &data }))
+        emit(&datagram(IP_B, IP_A, UdpBuilder { source: Port::new(5000).unwrap(), destination: Port::new(5001).unwrap(), data: &data }))
     } else {
-        emit!(&datagram(IP_B, IP_A, RawPayload { protocol: unassigned(253), bytes: &data[..data.len().min(12)] }))
+        emit(&datagram(IP_B, IP_A, RawPayload { protocol: unassigned(253), bytes: &data[..data.len().min(12)] }))
     }
     .unwrap()
 }
@@ -498,7 +498,7 @@ fn generated(check: impl Fn(&[u8], &Datagram)) -> (usize, BTreeMap<&'static str,
             0 => {
                 let (source, destination) = (port(&mut rng), port(&mut rng));
                 let expected = Payload::Udp { source: source.get(), destination: destination.get(), data: data.clone() };
-                (emit_under!(header, UdpBuilder { source, destination, data: &data }), 17, expected)
+                (header.emit(UdpBuilder { source, destination, data: &data }), 17, expected)
             }
             1 => {
                 let syn = SynOptions {
@@ -543,7 +543,7 @@ fn generated(check: impl Fn(&[u8], &Datagram)) -> (usize, BTreeMap<&'static str,
                     sack: if is_syn { Vec::new() } else { sack.clone() },
                     data: data.clone(),
                 });
-                (emit_under!(header, builder), 6, expected)
+                (header.emit(builder), 6, expected)
             }
             2 => {
                 let echo = EchoBuilder {
@@ -558,12 +558,12 @@ fn generated(check: impl Fn(&[u8], &Datagram)) -> (usize, BTreeMap<&'static str,
                     sequence: echo.sequence,
                     data: data.clone(),
                 };
-                (emit_under!(header, echo), 1, expected)
+                (header.emit(echo), 1, expected)
             }
             3 => {
                 let (code, expected) = *rng.pick(&[(HostUnreachable::Port, UnreachableCode::Port), (HostUnreachable::Protocol, UnreachableCode::Protocol)]);
                 let expected = Payload::Unreachable { code: expected, quote: quoted.bytes().to_vec() };
-                (emit_under!(header, UnreachableBuilder { code, datagram: &quoted }), 1, expected)
+                (header.emit(UnreachableBuilder { code, datagram: &quoted }), 1, expected)
             }
             4 => {
                 let Ok(group) = ReportGroup::new(random_multicast(&mut rng)) else { continue };
@@ -572,11 +572,11 @@ fn generated(check: impl Fn(&[u8], &Datagram)) -> (usize, BTreeMap<&'static str,
                 } else {
                     (V2Kind::Leave, IgmpMessage::Leave(group.get()))
                 };
-                (emit_under!(header, V2Builder { kind, group }), 2, Payload::Igmp(format!("{message:?}")))
+                (header.emit(V2Builder { kind, group }), 2, Payload::Igmp(format!("{message:?}")))
             }
             _ => {
                 let number = *rng.pick(&[0, 41, 50, 132, 253, 255]);
-                (emit_under!(header, RawPayload { protocol: unassigned(number), bytes: &data }), number, Payload::Raw(data.clone()))
+                (header.emit(RawPayload { protocol: unassigned(number), bytes: &data }), number, Payload::Raw(data.clone()))
             }
         };
         let bytes = match result {

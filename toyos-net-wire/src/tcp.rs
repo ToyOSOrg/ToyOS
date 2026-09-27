@@ -2,7 +2,7 @@
 
 use crate::checksum::PseudoHeader;
 use crate::emit::{be16x2, put, BuildError};
-use crate::ipv4::{Ipv4Packet, Ipv4Payload, Protocol, MAX_LEN};
+use crate::ipv4::{Ipv4Packet, Protocol, WritePayload, MAX_LEN};
 use crate::Port;
 
 pub const MIN_HEADER_LEN: usize = 20;
@@ -398,7 +398,7 @@ impl TcpBuilder<'_> {
     }
 }
 
-impl Ipv4Payload for TcpBuilder<'_> {
+impl WritePayload for TcpBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Tcp
     }

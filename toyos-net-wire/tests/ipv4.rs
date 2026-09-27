@@ -285,7 +285,7 @@ fn s_ip_029_protocol_numbers() {
 fn s_ip_030_emit_udp_datagram() {
     let frame = hex(V_UDP_DNS);
     let udp = UdpBuilder { source: Port::new(49152).unwrap(), destination: Port::new(53).unwrap(), data: &frame[42..] };
-    assert_eq!(emit!(&datagram(IP_A, IP_DNS, udp)).unwrap(), ip_of(&frame));
+    assert_eq!(emit(&datagram(IP_A, IP_DNS, udp)).unwrap(), ip_of(&frame));
 }
 
 #[test]
@@ -293,14 +293,14 @@ fn s_ip_031_emit_router_alert() {
     let group = MulticastAddr::new(Ipv4Addr::new(224, 0, 0, 251)).unwrap();
     let report = V2Builder { kind: V2Kind::Report, group: ReportGroup::new(group).unwrap() };
     let datagram = Ipv4Builder { ttl: Ttl::LINK, options: ROUTER_ALERT, ..datagram(IP_A, group.get(), report) };
-    let built = emit!(&datagram).unwrap();
+    let built = emit(&datagram).unwrap();
     assert_eq!(built, ip_of(&hex(V_IGMP_REPORT)));
     assert_eq!(built[0], 0x46);
-    assert_eq!(emit!(&igmp::datagram(Ipv4Source::new(IP_A).unwrap(), TrafficClass::ZERO, report)).unwrap(), built);
+    assert_eq!(emit(&igmp::datagram(Ipv4Source::new(IP_A).unwrap(), TrafficClass::ZERO, report)).unwrap(), built);
 }
 
 fn with_built_options(options: &[TxOption<'_>]) -> Result<Vec<u8>, BuildError> {
-    emit!(&Ipv4Builder { options, ..datagram(IP_B, IP_A, udp_hi()) })
+    emit(&Ipv4Builder { options, ..datagram(IP_B, IP_A, udp_hi()) })
 }
 
 #[test]
@@ -327,8 +327,8 @@ fn s_ip_033_forty_option_bytes() {
 
 #[test]
 fn s_ip_034_largest_total_length() {
-    assert_eq!(emit!(&datagram(IP_B, IP_A, raw(&[0; 65_515]))).unwrap().len(), 65_535);
-    assert_eq!(emit!(&datagram(IP_B, IP_A, raw(&[0; 65_516]))), Err(BuildError::IpTooLong));
+    assert_eq!(emit(&datagram(IP_B, IP_A, raw(&[0; 65_515]))).unwrap().len(), 65_535);
+    assert_eq!(emit(&datagram(IP_B, IP_A, raw(&[0; 65_516]))), Err(BuildError::IpTooLong));
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn s_ip_038_emit_over_junk() {
 
 #[test]
 fn s_ip_039_atomic_form() {
-    let atomic = emit!(&datagram(IP_B, IP_A, udp_hi())).unwrap();
+    let atomic = emit(&datagram(IP_B, IP_A, udp_hi())).unwrap();
     assert_eq!(atomic[4..8], [0, 0, 0x40, 0]);
 }
 
@@ -372,7 +372,7 @@ fn source_routes_cannot_be_built() {
 #[test]
 fn s_ip_040_emit_dscp_and_ecn() {
     let traffic_class = TrafficClass::new(46, Ecn::Ce).unwrap();
-    assert_eq!(emit!(&Ipv4Builder { traffic_class, ..datagram(IP_B, IP_A, udp_hi()) }).unwrap(), hex(V_IP_DSCP));
+    assert_eq!(emit(&Ipv4Builder { traffic_class, ..datagram(IP_B, IP_A, udp_hi()) }).unwrap(), hex(V_IP_DSCP));
     assert_eq!(TrafficClass::new(64, Ecn::NotEct), None);
 }
 

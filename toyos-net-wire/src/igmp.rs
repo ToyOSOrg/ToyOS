@@ -4,7 +4,7 @@ use core::net::Ipv4Addr;
 
 use crate::checksum::{Accumulator, PseudoHeader, Sum};
 use crate::emit::{be16x2, put, BuildError};
-use crate::ipv4::{Ipv4Builder, Ipv4Payload, Ipv4Source, MulticastAddr, Protocol, TrafficClass, Ttl, ROUTER_ALERT};
+use crate::ipv4::{Ipv4Builder, Ipv4Source, MulticastAddr, Payload, Protocol, TrafficClass, Ttl, WritePayload, ROUTER_ALERT};
 
 pub const HEADER_LEN: usize = 8;
 
@@ -153,11 +153,10 @@ impl ReportGroup {
     }
 }
 
-pub(crate) trait IgmpBody: Ipv4Payload {
+pub trait IgmpBody: Payload {
     fn destination(&self) -> MulticastAddr;
 }
 
-#[allow(private_bounds)]
 pub fn datagram<M: IgmpBody>(source: Ipv4Source, traffic_class: TrafficClass, message: M) -> Ipv4Builder<'static, M> {
     Ipv4Builder {
         source,
@@ -181,7 +180,7 @@ pub struct V2Builder {
     pub group: ReportGroup,
 }
 
-impl Ipv4Payload for V2Builder {
+impl WritePayload for V2Builder {
     fn protocol(&self) -> Protocol {
         Protocol::Igmp
     }
@@ -228,7 +227,7 @@ pub struct V3ReportBuilder<'a> {
     pub records: &'a [GroupRecord],
 }
 
-impl Ipv4Payload for V3ReportBuilder<'_> {
+impl WritePayload for V3ReportBuilder<'_> {
     fn protocol(&self) -> Protocol {
         Protocol::Igmp
     }

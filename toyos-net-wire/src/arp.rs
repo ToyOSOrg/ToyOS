@@ -3,7 +3,7 @@
 use core::net::Ipv4Addr;
 
 use crate::emit::{be16x2, put, BuildError};
-use crate::ethernet::{FrameBody, IndividualMac, MacAddr, TxEtherType};
+use crate::ethernet::{IndividualMac, MacAddr, TxEtherType, WriteFrameBody};
 
 pub const LEN: usize = 28;
 
@@ -116,7 +116,7 @@ impl Arp {
     }
 }
 
-impl FrameBody for Arp {
+impl WriteFrameBody for Arp {
     const ETHER_TYPE: TxEtherType = TxEtherType::Arp;
 
     fn length(&self) -> Result<usize, BuildError> {
