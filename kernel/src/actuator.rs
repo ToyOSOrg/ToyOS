@@ -175,6 +175,18 @@ actuators! {
     /// Judged by `usb_transport_break`.
     usb_transport_break_flushed = "usb-transport-break-flushed";
 
+    /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
+    /// anything is torn down, as a machine with no way to stop refuses it: the
+    /// path on which init tells `logd` the machine runs on. Judged by
+    /// `log_after_a_refused_stop`.
+    power_refused_once = "power-refused-once";
+
+    /// Hold a typed copy into user memory whose destination carries
+    /// `user_ptr::remap_race`'s mark between its translation and its store,
+    /// until its own process has mapped memory again: a sibling's `munmap`
+    /// and `mmap` staged inside the copy. Judged by `user_copy_races_munmap`.
+    copy_meets_a_remap = "copy-meets-a-remap";
+
     /// Stall the bind of a disk that arrives while another is held for its
     /// device, for less than `usb-slow-return` does, and leave every transfer
     /// of the operation the held call sends again on it unanswered, once, each
@@ -436,9 +448,6 @@ actuators! {
 
     /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
-
-    /// Bypass `ConsoleObject`'s line buffer so writes interleave as they arrive.
-    console_unbuffered = "console-unbuffered";
 
     /// Panic inside `klogd` on its first instruction.
     klogd_panic = "klogd-panic";

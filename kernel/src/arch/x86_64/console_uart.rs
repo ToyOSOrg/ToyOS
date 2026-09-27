@@ -12,6 +12,11 @@ const LSR: u16 = PORT + 5;
 const LSR_DATA_READY: u8 = 0x01;
 const LSR_THR_EMPTY: u8 = 0x20;
 
+/// Bytes the transmitter takes once [`tx_ready`] says so: in FIFO mode
+/// `LSR.THRE` reads set only when the 16-byte FIFO is empty (PC16550D data
+/// sheet, FIFO mode; [`init`] enables the FIFO).
+pub const TX_BURST: usize = 16;
+
 /// Program the 16550 and answer whether it is there: hardware with no SuperIO
 /// reads 0xFF on every access, indistinguishable from a ready UART, so a
 /// loopback probe latches the answer once.

@@ -1,23 +1,17 @@
-//! Power the machine off.
+//! Power the machine off, by asking `/system/bin/init`, which has the log made
+//! whole first ([`toyos::power`]).
 //!
-//! **The endowment is the whole of the authority.** `/system/bin/shutdown` is
-//! `/system/bin/toybox` under another name, so what this holds is what the image's
-//! `[programs.toybox]` row declares — a config that does not name `power`
-//! there builds an image whose shutdown applet says it cannot and changes
-//! nothing else. Nothing here asks for the capability: it is either in the
-//! endowment table `/system/bin/init` filled at spawn or it does not exist for this
-//! process.
+//! **The `power` connector is the whole of the authority.** `/system/bin/shutdown`
+//! is `/system/bin/toybox` under another name, so what this holds is what the
+//! image's `[programs.toybox]` row declares — a config that does not have it
+//! receive `power` builds an image whose shutdown applet says it cannot and
+//! changes nothing else.
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::syscap::SysCap;
+use toyos::power::{self, Stop};
 
 pub fn main(_args: Vec<String>) {
-    let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
-        eprintln!("shutdown: this program was endowed no system capability");
-        std::process::exit(1);
-    };
     // Comes back only refused: on the other path the power is already off.
-    let refused = cap.shutdown();
-    eprintln!("shutdown: refused ({refused:?}) — this capability carries no POWER");
+    let refused = power::stop(Stop::Shutdown);
+    eprintln!("shutdown: refused ({refused:?})");
     std::process::exit(1);
 }

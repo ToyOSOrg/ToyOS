@@ -14,7 +14,7 @@ on no queue for as long as `iod`'s attempt lasts, and a second drainer that
 counts in that window counts zero, sees nothing owed, and returns.
 
 The second drainer is the shutdown. `quiesce` calls `writeback::drain_all`
-and then `sync_all`, `Rebooting.`, `wait_for_durable` and the reset. If
+and then `sync_all`, `Rebooting.` and the reset. If
 `iod`'s attempt in that window is refused on budget, the file is still owed
 after the shutdown's drain has said nothing is, `iod` parks in its backoff,
 and the reset lands over dirty pages nothing flushed. An attempt that

@@ -114,11 +114,10 @@ pub fn record_done() {
 
 /// Append to what this boot already sealed, keeping its state.
 ///
-/// **The one channel a reset's own account has.** Everything written after
-/// `log::wait_for_durable` goes to a log volume whose device is itself being
-/// taken down, so a record made there reaches no file — and on a panic there was
-/// never a file. The next loader pass prints these lines under its report of how
-/// the last boot ended.
+/// **The one channel a reset's own account has.** Everything written once the
+/// stop has begun has no process left to carry it to a file, and its volume's
+/// device is being taken down — and on a panic there was never a file. The next
+/// loader pass prints these lines under its report of how the last boot ended.
 ///
 /// `false` where the account has nowhere to go, and the caller does its work
 /// regardless: a boot whose loader claimed no page, and a page holding a

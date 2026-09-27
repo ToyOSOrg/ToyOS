@@ -69,6 +69,9 @@ pub fn setup_combined_tls(modules: &[TlsModule], tls: Static) -> Option<(PageAll
     let tp_user = block_phys + plan.tp_offset as u64;
     // SAFETY: the plan reserves `TCB_SIZE` bytes at `tp_offset` inside `alloc_size`.
     let tp_kernel = unsafe { block.add(plan.tp_offset) } as *mut u64;
+    // The thread's id (`toyos_abi::TCB_TID`) is TP+16 on variant II and TP+8 on
+    // variant I, zero here — a process's first thread is tid 0 — and written by
+    // `process::spawn_thread` for every other.
     // SAFETY: two words of the TCB the plan reserves at `tp_kernel` (`TCB_SIZE`, or
     // variant I's gap of at least 16); `block` is still unpublished.
     unsafe {
@@ -78,7 +81,7 @@ pub fn setup_combined_tls(modules: &[TlsModule], tls: Static) -> Option<(PageAll
                 *tp_kernel = tp_user;
                 *tp_kernel.add(1) = block_phys;
             }
-            // TP+0 the DTV pointer, TP+8 reserved (zeroed above).
+            // TP+0 the DTV pointer, TP+8 the implementation's word, the tid (zeroed above).
             Variant::I => *tp_kernel = block_phys,
         }
     }

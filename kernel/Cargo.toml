@@ -396,6 +396,7 @@ bcachefs = { path = "../bcachefs", default-features = false }
 toyos-abi = { path = "../toyos-abi" }
 toyos-acpi = { path = "../toyos-acpi" }
 toyos-dma = { path = "../toyos-dma" }
+toyos-elide = { path = "../toyos-elide" }
 toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-blockhold = { path = "../toyos-blockhold" }
 toyos-bootmap = { path = "../toyos-bootmap" }

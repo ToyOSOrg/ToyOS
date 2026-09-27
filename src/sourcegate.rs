@@ -122,6 +122,9 @@ const BANS: &[Ban] = &[
         why: "a resource with no giver-back is a leak unless the reason is at \
               the call site",
         allowed: &[
+            // The clock page is mapped read-only into every address space for
+            // the machine's life, so nothing gives its frame back.
+            ("kernel/src/clock.rs", 1),
             // The GPU is never torn down, so the cursor pages outlive every
             // process that could name them.
             ("kernel/src/drivers/gop.rs", 1),
@@ -333,6 +336,9 @@ const RETIRED_ABI_NAMES: &[&str] = &[
     // vocabularies.
     "IORING_OP_CLOSE",
     "OP_CLOSE",
+    // Syscall 8. The monotonic clock is a page every address space maps
+    // read-only (`toyos_abi::clock`), so reading it is no transition at all.
+    "SYS_CLOCK",
 ];
 
 /// Everything this repository compiles into the guest.
@@ -843,8 +849,6 @@ const TEMP_DIR_ALLOWED: &[(&str, usize)] = &[
     // A failed golden comparison leaves its dump for the reader to copy over
     // the golden file: outliving the test is its purpose.
     ("toyos-keymap/tests/tables.rs", 1),
-    // `issues/build/the-release-path-stages-in-tmpdir-outside-the-scratch-guard.md`.
-    ("src/release.rs", 2),
 ];
 
 
@@ -1450,12 +1454,15 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("kernel/src/arch/aarch64/", "the kernel's AArch64 module"),
             ("bootloader/src/arch/", "the loader's architecture module"),
             ("toyos-abi/src/syscall.rs", "toyos-abi's per-architecture syscall entry"),
+            ("toyos-abi/src/arch/", "toyos-abi's per-architecture reads: the counter and the thread's id"),
             ("userland/libc/src/arch/", "libc's architecture modules"),
             ("userland/metalprobe/src/arch/", "metalprobe's architecture modules"),
             ("userland/toyos-window/src/arch/", "toyos-window's architecture modules"),
             ("tests/toyos-rust-tests/src/bin/abuse_kernel_addr.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/abuse_page_straddle.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/abuse_readonly_copyout.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/abuse_tls_alloc.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/copy_out_races_munmap.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/debug_trap.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/demand_paging_sse.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/fault_gate_child.rs", USERLAND_ASM),
@@ -1465,6 +1472,7 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("tests/toyos-rust-tests/src/bin/log_hold.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/mmap_prot.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/nmi_window_spin.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/panic_halts_first.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/partition_claimant.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/process_lifecycle.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/syscall_cost.rs", USERLAND_ASM),
@@ -1483,6 +1491,7 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("kernel/src/arch/aarch64/", "the kernel's AArch64 module"),
             ("bootloader/src/arch/", "the loader's architecture module and its selector"),
             ("toyos-abi/src/syscall.rs", "toyos-abi's per-architecture syscall entry"),
+            ("toyos-abi/src/arch/", "toyos-abi's per-architecture reads: the counter and the thread's id, and their selector"),
             ("src/arch.rs", "the build system's one reading of the host it runs on"),
             (
                 "toyos-cc/src/preprocess/mod.rs",

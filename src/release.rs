@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
+use toyos_tmpdir::TempDir;
 
 use crate::toolchain::HOSTED_ARCH;
 
@@ -129,7 +130,8 @@ pub fn install(root: &Path) -> Result<String, String> {
         )
     })?;
     let token = std::env::var("GH_TOKEN").expect("checked above");
-    let tarball = std::env::temp_dir().join(ASSET);
+    let staging = TempDir::new("toolchain-install");
+    let tarball = staging.join(ASSET);
     let into = root.join("rust/build");
     fs::create_dir_all(&into).map_err(|e| format!("{}: {e}", into.display()))?;
     // The retry is on the transfer and the unpack together: a truncated body is
@@ -204,7 +206,7 @@ pub fn ensure_published(root: &Path) -> Result<String, String> {
              install nowhere"
         ));
     }
-    let tmp = std::env::temp_dir();
+    let tmp = TempDir::new("toolchain-publish");
     let manifest = manifest(root, &tag)?;
     let notes = notes(root, &tag, &manifest)?;
     fs::write(tmp.join("TOOLCHAIN"), &manifest).map_err(|e| e.to_string())?;

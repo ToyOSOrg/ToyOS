@@ -13,9 +13,10 @@
 /// line**, 863 bytes. The record's other fields are 32 bytes fixed, so
 /// [`RECORD_BYTES`] — a power of two by its own derivation — is 32 plus this
 /// constant; 1024 is the smallest power of two past 32 + 863, which makes this
-/// 992, at zero alignment padding. The unbounded case — a demangled backtrace
-/// symbol — is not solved by any fixed bound and is handled separately by
-/// head-and-tail elision at the producer (`kernel/src/log/elide.rs`).
+/// 992, at zero alignment padding. A longer message is cut at its tail and the
+/// cut counted in [`LogRecord::elided`]; the unbounded case — a demangled
+/// backtrace symbol — is elided head-and-tail before it is formatted
+/// (`toyos-elide`).
 pub const MAX_RECORD_MESSAGE: usize = 992;
 
 /// One record on the wire, and one slot in a shard. A power of two so a reader
@@ -31,31 +32,44 @@ pub const RECORD_BYTES: usize = 1024;
 /// disagreement rather than a runtime one.
 pub const MAX_LOG_SHARDS: usize = 8;
 
-/// What a record is, to the one consumer that treats them differently.
+/// How much a record matters, in order: a reader may keep what is at or above
+/// a floor, and one that treats a severity specially compares against it.
 ///
-/// **Three variants because three have callers today.** A finer set is a level
-/// with no reader, which is a field built for a plan. Nothing orders these and
-/// every consumer matches exhaustively — this is not a severity ladder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// **Four because four have writers and readers.** The kernel writes `Info`
+/// (`log!`) and `Alert` (`alert!`); a program's stdout is `Info` and its stderr
+/// `Error`, and its own lines choose. The panel paints `Error` and above red;
+/// `/system/bin/logd` names every one above `Info` in the line, and makes the
+/// volume durable at `Alert` rather than on its interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
-pub enum Level {
-    /// `log!`. Everything reads it.
+pub enum Severity {
     Info = 0,
-    /// `boot_phase!`. The panel repaints on one.
-    Phase = 1,
-    /// `alert!`. The panel paints the row red.
-    Alert = 2,
+    Warn = 1,
+    Error = 2,
+    /// A refusal, a corruption, or a fault.
+    Alert = 3,
 }
 
-impl Level {
-    /// A byte that crossed the syscall boundary, or came out of a persisted
-    /// region, is not a `Level` until this says so.
+impl Severity {
+    /// A byte that crossed a trust boundary, or came out of a persisted
+    /// region, is not a `Severity` until this says so.
     pub const fn from_u8(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Info),
-            1 => Some(Self::Phase),
-            2 => Some(Self::Alert),
+            1 => Some(Self::Warn),
+            2 => Some(Self::Error),
+            3 => Some(Self::Alert),
             _ => None,
+        }
+    }
+
+    /// The word a rendered line carries for it; `Info` carries none.
+    pub const fn word(self) -> Option<&'static str> {
+        match self {
+            Self::Info => None,
+            Self::Warn => Some("warn"),
+            Self::Error => Some("error"),
+            Self::Alert => Some("alert"),
         }
     }
 }
@@ -84,7 +98,7 @@ pub struct LogRecord {
     /// saturating. **Never a silent truncation** — this is the difference
     /// between a bound and a lie.
     pub elided: u16,
-    pub level: u8,
+    pub severity: u8,
     /// [`FLAG_EARLY`] and nothing else yet.
     pub flags: u8,
     pub msg: [u8; MAX_RECORD_MESSAGE],
@@ -121,7 +135,7 @@ impl LogRecord {
         cpu: 0,
         len: 0,
         elided: 0,
-        level: Level::Info as u8,
+        severity: Severity::Info as u8,
         flags: 0,
         msg: [0; MAX_RECORD_MESSAGE],
     };
@@ -161,8 +175,8 @@ impl LogRecord {
         }
     }
 
-    pub fn level(&self) -> Option<Level> {
-        Level::from_u8(self.level)
+    pub fn severity(&self) -> Option<Severity> {
+        Severity::from_u8(self.severity)
     }
 
     pub fn is_early(&self) -> bool {
@@ -251,25 +265,17 @@ pub struct LogCursor {
     /// drift from the ring. It lives here so a reader that ignores loss has to
     /// actively ignore a field it is already passing.
     pub lost: u64,
-    /// In: the timestamp of the newest record the caller has made durable, or
-    /// zero. The kernel takes the maximum, **after clamping it to the newest
-    /// record it actually holds**: this is a number that crossed the trust
-    /// boundary and decides how long a dying kernel waits for its own report,
-    /// and an unclamped `u64::MAX` from a buggy `logd` would lose it silently.
-    /// Clamping cannot lengthen the wait, so the worst a hostile writer does is
-    /// shorten one for its own output.
-    pub durable: u64,
     /// In/out: the next sequence number wanted from each shard.
     pub next: [u64; MAX_LOG_SHARDS],
 }
 
-const _: () = assert!(core::mem::size_of::<LogCursor>() == 24 + 8 * MAX_LOG_SHARDS);
+const _: () = assert!(core::mem::size_of::<LogCursor>() == 16 + 8 * MAX_LOG_SHARDS);
 
 impl LogCursor {
     /// A cursor that has read nothing. The kernel fills `shards` on the first
     /// call.
     pub const fn new() -> Self {
-        Self { shards: 0, _pad: 0, lost: 0, durable: 0, next: [0; MAX_LOG_SHARDS] }
+        Self { shards: 0, _pad: 0, lost: 0, next: [0; MAX_LOG_SHARDS] }
     }
 }
 
@@ -287,7 +293,7 @@ mod tests {
         assert_eq!(core::mem::align_of::<LogRecord>(), 64);
         assert_eq!(core::mem::offset_of!(LogRecord, seq), 0);
         assert_eq!(core::mem::offset_of!(LogRecord, at_ns), 8);
-        assert_eq!(core::mem::size_of::<LogCursor>(), 88);
+        assert_eq!(core::mem::size_of::<LogCursor>(), 80);
     }
 
     /// **The encoder is the wire, so the test decodes the wire.**
@@ -309,7 +315,7 @@ mod tests {
         assert_eq!(u16::from_ne_bytes(b[24..26].try_into().unwrap()), 2);
         assert_eq!(u16::from_ne_bytes(b[26..28].try_into().unwrap()), 5);
         assert_eq!(u16::from_ne_bytes(b[28..30].try_into().unwrap()), 0);
-        assert_eq!(b[30], Level::Info as u8);
+        assert_eq!(b[30], Severity::Info as u8);
         assert_eq!(b[31], 0);
         assert_eq!(&b[32..37], b"hello");
         assert!(b[37..].iter().all(|&x| x == 0));
@@ -324,7 +330,7 @@ mod tests {
             cpu: 2,
             len: msg.len() as u16,
             elided: 0,
-            level: Level::Info as u8,
+            severity: Severity::Info as u8,
             flags: 0,
             msg: [0; MAX_RECORD_MESSAGE],
         };
@@ -385,13 +391,24 @@ mod tests {
         assert_eq!(r.message(), "ok");
     }
 
-    /// A `u8` from the wire is not a `Level` until [`Level::from_u8`] says so —
+    /// A `u8` from the wire is not a `Severity` until [`Severity::from_u8`] says so —
     /// there is no `unsafe` transmute anywhere on this path.
     #[test]
-    fn an_undeclared_level_byte_decodes_to_nothing() {
-        assert_eq!(Level::from_u8(2), Some(Level::Alert));
-        assert_eq!(Level::from_u8(3), None);
-        assert_eq!(record("x").level(), Some(Level::Info));
+    fn an_undeclared_severity_byte_decodes_to_nothing() {
+        assert_eq!(Severity::from_u8(3), Some(Severity::Alert));
+        assert_eq!(Severity::from_u8(4), None);
+        assert_eq!(record("x").severity(), Some(Severity::Info));
+    }
+
+    /// The ladder is ordered, which is what a floor or a durability trigger
+    /// compares against.
+    #[test]
+    fn severities_are_ordered_from_info_to_alert() {
+        assert!(Severity::Info < Severity::Warn);
+        assert!(Severity::Warn < Severity::Error);
+        assert!(Severity::Error < Severity::Alert);
+        assert_eq!(Severity::Info.word(), None);
+        assert_eq!(Severity::Alert.word(), Some("alert"));
     }
 
     #[test]

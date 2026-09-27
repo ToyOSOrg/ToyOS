@@ -1,17 +1,18 @@
 //! soundd plays on while the log reads nothing of what it says.
 //!
-//! Booted on `tests/logstallcase`, where `logd` leaves soundd's pipe unread
-//! until this program says [`RELEASE`]. The pipe is filled first, by soundd's
+//! Booted on `tests/logstallcase`, where `logd` leaves soundd's log ring unread
+//! until this program says [`RELEASE`]. The ring is filled first, by soundd's
 //! own words: this program takes every control connection soundd will hold and
 //! then connects [`FLOOD`] more times, and soundd refuses each with a line. Then
-//! it plays the tone with the pipe full, so every line the mix thread says while
-//! it plays — the client's connect, the resume, the stream start, a stats window
-//! — is said to a pipe nobody reads. A mix thread that waits on its output stops
+//! it plays the tone with the ring full, so every line soundd says while it
+//! plays — the mix thread's into its lane, the control thread's into the ring —
+//! is said where nobody reads. A mix thread that waits on its output stops
 //! there, and the tone with it.
 //!
 //! The verdicts are the host's: the capture carries the tone without a gap, and
 //! once `logd` reads again soundd's lines account for every connection — each
-//! refusal said, or counted among the lines that went unsaid.
+//! refusal said, or counted by `logd` among the records that found the ring
+//! full.
 
 #[path = "../tone.rs"]
 mod tone;
@@ -32,11 +33,10 @@ const RELEASE: &str = "soundd_log_stall: the tone has played, and logd may read 
 const HELD: usize = 63;
 
 /// Connections refused with a line each, closed as they are made; one more is
-/// kept open to hear its refusal. soundd's refusal is 58 bytes, so a pipe of
-/// 2 MiB less its 64-byte header holds 36156 whole ones. The flood is twice that:
-/// soundd drops a line its writer has not caught up with, counted, and the pipe
-/// has to fill all the same.
-const FLOOD: usize = 72_312;
+/// kept open to hear its refusal. Each refusal is one record, and the flood is
+/// several times the records one ring holds, so the ring fills and the rest
+/// are counted.
+const FLOOD: usize = 8_192;
 
 /// A flood that has not been refused in this long has met a soundd that stopped
 /// accepting: its control thread is waiting on something.

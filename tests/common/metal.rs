@@ -310,47 +310,41 @@ impl Readback {
         bootlog::last_record_millis(&self.kernel)
     }
 
-    /// Whether every record this boot committed reached the stick, off the
-    /// kernel's own account of it.
+    /// Whether this boot's log is whole to its stop, and the stop's own tail
+    /// is on the page.
     ///
-    /// **Not a question the file can answer about itself.** A log that stops
-    /// early is a log that says nothing about stopping: `logd`'s give-up line
-    /// and the kernel's `shutdown: /log did not answer` record are both written
-    /// after the volume stopped taking bytes. So the account goes on the
-    /// black-box page under the boot's `DONE` seal and comes back in the next
-    /// loader pass, and this reads it there — for every boot, because the
-    /// suite's whole verdict is read out of that file.
+    /// **The file ends where init had `logd` make it whole.** The stop stops
+    /// `logd` with every other thread, so what the kernel says from there on
+    /// goes on the black-box page under the boot's `DONE` seal and comes back
+    /// in the next loader pass, and this reads it there — for every boot,
+    /// because the suite's whole verdict is read out of those two files.
     pub fn log_reached_the_stick(&self) -> Result<(), String> {
         let after = self.after_the_reset()?;
         let text = after.text();
-        // A boot its own deadline or the lockup detector ended never reached
-        // `quiesce`, so its log stops early by construction and it seals no
-        // account. Owed by the boots that handed the machine back, and only by
-        // them.
+        // A boot its own deadline or the lockup detector ended never finished
+        // `quiesce`, so it seals no tail. Owed by the boots that handed the
+        // machine back, and only by them.
         if !text.contains(bootlog::HANDED_BACK) {
             return Ok(());
         }
-        if text.contains(bootlog::LOG_COMPLETE) {
-            return Ok(());
-        }
-        let short: Vec<&str> =
-            text.lines().filter(|l| l.contains(bootlog::LOG_SHORT)).collect();
-        if short.is_empty() {
+        if bootlog::stopping_line(&self.log).is_none() {
             return Err(format!(
-                "{}'s loader pass after the reset carries neither {:?} nor {:?}: this boot's \
-                 kernel sealed no account of its log, so nothing says whether the file on the \
-                 stick is the whole of it",
+                "{}'s pass after the reset read DONE, and its log carries no {:?} from init: \
+                 nothing made the file whole before the stop",
                 self.label,
-                bootlog::LOG_COMPLETE,
-                bootlog::LOG_SHORT,
+                bootlog::STOPPING,
             ));
         }
-        Err(format!(
-            "{}'s log stopped before the boot did, and the kernel's own account says by how \
-             much:\n{}",
-            self.label,
-            short.join("\n")
-        ))
+        if !text.contains(bootlog::LOG_TAIL_HEAD) || bootlog::handed_back(text).is_err() {
+            return Err(format!(
+                "{}'s pass after the reset carries no {:?} ending in {:?}: this boot's kernel \
+                 sealed no tail of its stop, so nothing says what it did after the file",
+                self.label,
+                bootlog::LOG_TAIL_HEAD,
+                bootlog::REBOOTING,
+            ));
+        }
+        Ok(())
     }
 
     /// How far past its bound this boot's deadline fired, or `None` on a boot
@@ -363,17 +357,14 @@ impl Readback {
 
     /// What the on-screen panel cost this boot, off the kernel's own census.
     ///
-    /// **Two channels, because the panel outlives one of them.** A boot that
-    /// hands the machine back writes the census as an ordinary record and
-    /// `logd` files it; a boot a bound ended has no `logd` left, and its
-    /// kernel seals the same line into the black-box page the loader prints
-    /// back after the reset. The page from *this* boot is the one after the
-    /// separator: an earlier chain's report can sit in the pass before it.
+    /// **Off the page, because no file carries it.** A boot that hands the
+    /// machine back writes the census inside its stop, after `logd` has
+    /// stopped, and seals it among its tail; a boot a bound ended seals it with
+    /// its record. The page from *this* boot is the one after the separator:
+    /// an earlier chain's report can sit in the pass before it.
     pub fn panel(&self) -> Option<bootlog::Panel> {
-        bootlog::panel_census(&self.kernel).or_else(|| {
-            let after = self.after_the_reset().ok()?;
-            bootlog::panel_census(after.text())
-        })
+        let after = self.after_the_reset().ok()?;
+        bootlog::panel_census(after.text())
     }
 
     /// The same for the other bound: how far past its own bound a hard-lockup
@@ -383,11 +374,17 @@ impl Readback {
         toyos_build::metal::lockup_lateness_ms(&self.loader)
     }
 
+    /// The stop's own record, off the page its tail is sealed on: the stop
+    /// writes it after `logd` has stopped, so no file carries it.
+    fn stop_record(&self) -> Option<toyos_quiesce::Record> {
+        toyos_build::metal::park(self.after_the_reset().ok()?.text())
+    }
+
     /// Block-device operations still open where this boot's stop ended.
     /// `None` on a boot that reset without going through `quiesce`. It is the
     /// block layer's own count, so it is what the stop can be wrong against.
     pub fn park_open_operations(&self) -> Option<u64> {
-        toyos_build::metal::park(&self.kernel).map(|park| u64::from(park.in_flight))
+        self.stop_record().map(|park| u64::from(park.in_flight))
     }
 
     /// Whether the stop stopped the machine, as against how long it spent
@@ -398,7 +395,7 @@ impl Readback {
     /// the threads it left running happened to be doing. The shortfall the
     /// record names is the only thing that says the machine was not stopped.
     pub fn stop_completed(&self) -> Result<(), String> {
-        match toyos_build::metal::park(&self.kernel) {
+        match self.stop_record() {
             Some(park) if !park.stopped_the_machine() => Err(format!(
                 "{}'s stop gave up on {} userland thread(s) that never reached a safe point, so \
                  this boot's sync and its last word are claims about a machine that was still \
