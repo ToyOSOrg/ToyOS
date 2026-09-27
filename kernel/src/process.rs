@@ -22,9 +22,7 @@ use crate::sched::payload::ThreadSched;
 use crate::time::{Deadline, Duration};
 use crate::{elf, pipe, scheduler};
 use crate::UserAddr;
-use crate::loader::{
-    setup_tls, setup_combined_tls, alloc_kernel_stack, thread_start, rebase_block,
-};
+use crate::loader::{alloc_kernel_stack, thread_start, TlsBlock};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
@@ -132,6 +130,49 @@ unsafe impl crate::mm::Allocation for PageAlloc {
     fn size(&self) -> usize { PageAlloc::size(self) }
 }
 
+
+/// Frames no user mapping reaches yet.
+///
+/// The kernel builds what a process will see in these while they are its
+/// alone, and [`publish`](Self::publish) is the only way to map them: it
+/// consumes this, and runs the caller's last fix-up — the one that needs the
+/// address the frames will have — under the address-space lock that then maps
+/// them.
+pub struct Unpublished(PageAlloc);
+
+impl Unpublished {
+    pub fn new(frames: PageAlloc) -> Self {
+        Self(frames)
+    }
+
+    /// Kernel pointer to the start, via the direct map; the frames are this
+    /// value's alone, so writes through it race nothing.
+    pub fn ptr(&self) -> *mut u8 {
+        self.0.ptr()
+    }
+
+    pub fn phys(&self) -> u64 {
+        self.0.phys()
+    }
+
+    /// Choose an address in `pt`, hand it to `fix`, then map the frames there
+    /// at `prot` — all under one hold of `pt`'s lock, so no thread of the
+    /// process can reach the frames before `fix` returns. `None`, with the
+    /// frames freed, when `pt` has no room.
+    pub fn publish(self, pt: &PageTables, prot: Prot, fix: impl FnOnce(&Self, UserAddr)) -> Option<MappedPages> {
+        let size = self.0.size() as u64;
+        let phys = self.0.phys();
+        // `alloc_and_map` fuses the reserve and the map with no seam for `fix`,
+        // whose whole point is to run between them under one lock.
+        assert!(phys & (PAGE_2M - 1) == 0, "publish: phys {phys:#x} not 2MB-aligned");
+        let mut space = pt.lock();
+        let at = space.alloc_region(size, crate::vma::RegionKind::Mapped)?;
+        fix(&self, at);
+        space.map_range(at, phys, size, prot, CachePolicy::Normal);
+        drop(space);
+        Some(MappedPages::new(at, self.0))
+    }
+}
 
 /// Pages handed to userland through [`vma_map`], paired with the mapping address so the two are unmapped together; dropping without unmapping is sound only when the address space itself is being destroyed.
 pub struct MappedPages {
@@ -447,10 +488,9 @@ pub struct ElfInfo {
     /// RELATIVE relocation index for demand-paged ELF (applied per-page on fault).
     pub reloc_index: Option<Arc<elf::RelocationIndex>>,
     pub elf_base: UserAddr,
-    /// Executable .eh_frame_hdr vaddr (stated ELF vaddr, before base offset).
-    pub exe_eh_frame_hdr_vaddr: u64,
-    pub exe_eh_frame_hdr_size: u64,
-    /// Executable virtual address extent (elf_base + vaddr_max - vaddr_min).
+    /// The executable's `.eh_frame_hdr` as (address, size), `(0, 0)` without one.
+    pub exe_eh_frame_hdr: (u64, u64),
+    /// One past the executable's last byte.
     pub exe_vaddr_max: u64,
     /// Paths of dlopen'd libraries (parallel to loaded_libs).
     pub lib_paths: Vec<String>,
@@ -468,8 +508,7 @@ impl ElfInfo {
             loaded_libs: Vec::new(),
             reloc_index: None,
             elf_base: UserAddr::new(0),
-            exe_eh_frame_hdr_vaddr: 0,
-            exe_eh_frame_hdr_size: 0,
+            exe_eh_frame_hdr: (0, 0),
             exe_vaddr_max: 0,
             lib_paths: Vec::new(),
         }
@@ -834,28 +873,22 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         (data.elf.tls_modules.clone(), data.elf.tls)
     };
 
-    // Phase 2: allocate TLS outside any lock. An empty module set still gets a DTV+TCB block via `setup_tls(None, 0, ..)`.
-    let (tls_alloc, fs_base) = if !tls_modules.is_empty() {
-        setup_combined_tls(&tls_modules, tls)?
-    } else {
-        setup_tls(None, 0, tls.max_align())?
-    };
-    let (tls_alloc, fs_base, tcb_phys) = {
-        let addr_space = &parent_addr_space;
+    // Phase 2: build the TLS block outside any lock, then publish it into the
+    // running parent — whose other threads may already be touching memory the
+    // block's address is chosen from, so every pointer in it is final before
+    // the mapping exists.
+    let block = TlsBlock::build(&tls_modules, tls)?;
+    let (tls_alloc, fs_base, tp_offset) = {
         let parent_data = process_data_arc.lock();
-        let tls_phys = tls_alloc.phys();
-        // VA exhaustion is a resource failure the process caused, not a kernel bug; `tls_alloc` drops on the way out, returning its pages.
-        let (tls_vaddr, _) = vma_map(addr_space, tls_phys, tls_alloc.size() as u64, Prot::ReadWrite)?;
-        let tls_rebase = tls_vaddr.raw() as i64 - tls_phys as i64;
-        let fs_base = (fs_base as i64 + tls_rebase) as u64;
-        // SAFETY: `tls_alloc` is freshly built and solely owned by this scope; `vma_map` has published only its virtual address, which no not-yet-created thread names yet. Runs under the process-data lock.
-        unsafe {
-            rebase_block(tls_phys, (fs_base - tls_vaddr.raw()) as usize, fs_base, tls_rebase);
+        if crate::actuator::tls_rebase_window() {
+            crate::loader::rebase_window::spawning(arg);
         }
+        // VA exhaustion is a resource failure the process caused, not a kernel bug; the block drops on the way out, returning its pages.
+        let published = block.publish(&parent_addr_space)?;
         drop(parent_data);
-        let tcb_phys = tls_phys + (fs_base - tls_vaddr.raw());
-        (MappedPages::new(tls_vaddr, tls_alloc), fs_base, tcb_phys)
+        published
     };
+    let tls_alloc_tcb = tls_alloc.ptr().wrapping_add(tp_offset);
 
     let (ks_alloc, ks_rsp) = match alloc_kernel_stack(thread_start, entry, stack_ptr, arg) {
         Some(ks) => ks,
@@ -894,12 +927,12 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
     // Before the thread's first instruction, which is the enqueue below: the
     // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
-    // SAFETY: `tcb_phys` is this thread's TCB inside the TLS block the table
-    // now owns, which no thread has run on yet; a 4-byte store inside the
-    // TCB the builder reserved.
+    // SAFETY: `tp_offset` is this thread's TCB inside the TLS block the table
+    // now owns, which no thread has run on yet; a 4-byte volatile store inside
+    // the TCB the builder reserved, and a store is all the kernel does there.
     unsafe {
         core::ptr::write_volatile(
-            crate::DirectMap::from_phys(tcb_phys + toyos_abi::TCB_TID as u64).as_mut_ptr::<u32>(),
+            tls_alloc_tcb.add(toyos_abi::TCB_TID).cast::<u32>(),
             tid.raw(),
         );
     }
