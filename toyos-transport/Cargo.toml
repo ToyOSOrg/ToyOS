@@ -1,0 +1,46 @@
+# A member of the host workspace (root `Cargo.toml`). The one transport every
+# client/server session runs over: the rings, the byte streams, the arena's
+# ownership tokens, the tag table and the wake, as decisions over words an
+# adapter hands in. Nothing here maps, copies or blocks.
+#
+# Its defects are orders and hostile peers, so `tests/loom.rs` holds the
+# publication edge, the wake and a peer that scribbles every word it can reach,
+# and `src/model.rs` enumerates a session through crash, restart and a late
+# completion.
+
+[package]
+name = "toyos-transport"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+rustc-dep-of-std = ["core", "toyos-untrusted/rustc-dep-of-std"]
+# Declared, never enabled by any build that ships: each reverts one decision so
+# the model that refuses it is shown able to red at all. `src/ci.rs`'s
+# `CONTROLS` runs each and demands the named test's own FAILED line.
+#
+# A producer publishes its tail `Relaxed`, so a consumer can see the index
+# before the entry's words.
+publish-relaxed = []
+# Neither side of the wake fences between its store and its load, so a
+# producer can miss a consumer's `sleep` while the consumer misses its tail.
+no-sleep-fence = []
+# A peer's cursor is believed however far it claims to be, so a hostile
+# producer hands the consumer more entries than the ring holds.
+no-clamp = []
+# `Inflight::end` answers nothing and keeps every tag in flight, so a session's
+# requests outlive it unanswered and a late completion answers one.
+end-keeps-inflight = []
+
+[dependencies]
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
+toyos-untrusted = { path = "../toyos-untrusted" }
+
+[dev-dependencies]
+# Already resolved in this workspace for `kernel-loom` and `toyos-sched/loom`.
+loom = "0.7"
+
+[lints.rust]
+warnings = "deny"

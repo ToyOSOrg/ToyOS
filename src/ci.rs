@@ -230,6 +230,7 @@ const SCHED_LOOM: &[&str] = &["-p", "toyos-sched-loom"];
 const SCHED_SIM: &[&str] = &["-p", "toyos-sched-sim"];
 const PROCLIFE: &[&str] = &["-p", "toyos-proclife"];
 const BLOCKRING: &[&str] = &["-p", "toyos-blockring"];
+const TRANSPORT: &[&str] = &["-p", "toyos-transport"];
 
 const fn red(
     krate: &'static [&'static str],
@@ -378,9 +379,16 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
     ]),
-    red(BLOCKRING, "mutate-ring-publish-relaxed", Some("loom_ring"), &[
-        "a_published_request_is_read_whole ... FAILED",
+    // The transport's four: a tail published before its entry, a wake both
+    // sides miss, a peer's cursor believed, and a session's tags outliving it.
+    red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
+    // A lost wake is a consumer parked for good: loom's deadlock, whose unwind
+    // panics again before the harness prints a `FAILED` line.
+    red(TRANSPORT, "no-sleep-fence", Some("loom"), &[
+        "deadlock; threads = [(Id(0), Blocked(Location(None))), (Id(1), Blocked(Location(None)))]",
     ]),
+    red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
+    red(TRANSPORT, "end-keeps-inflight", None, &["every_tag_is_answered_exactly_once ... FAILED"]),
 ];
 
 /// Whether a control's run showed its teeth.

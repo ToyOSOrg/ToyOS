@@ -7,8 +7,8 @@
 //! [`BLOCK_BYTES`] blocks a request names by index and the device moves data
 //! into and out of directly. Nothing on the page is a pointer and nothing on it
 //! is trusted by the end that did not write it: a consumer bounds every index
-//! and every field before it acts ([`entry::Request::decode`],
-//! [`ring::Consumer`]).
+//! and every field before it acts ([`entry::Request::decode`], the
+//! transport's cursor bounds); [`entry::Block`] is the protocol as its schema.
 //!
 //! **A doorbell is a byte on the session's connection**, written after the
 //! entries it announces are published. The connection is also what tells each
@@ -28,9 +28,9 @@
 //! **Requests in flight at once are unordered**, as on the device: a client
 //! that needs one to follow another waits for the first's answer.
 //!
-//! Pure: `alloc` and `toyos-blockhold`, no `unsafe`. The ends that map the
-//! page — `userland/blockd` and its client — hand this crate the page as
-//! words ([`ring::Word`]) and act on what it answers.
+//! Pure: `alloc`, `toyos-blockhold` and `toyos-transport`, no `unsafe`. The
+//! ends that map the page — `userland/blockd` and its client — hand it the
+//! page as words ([`toyos_transport::Word`]) and act on what it answers.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -40,7 +40,6 @@ extern crate alloc;
 pub mod client;
 pub mod entry;
 pub mod layout;
-pub mod ring;
 pub mod server;
 pub mod wire;
 

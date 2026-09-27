@@ -47,8 +47,7 @@ use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
 use toyos_abi::syscall::{DEV_PREFIX, SyscallError};
 use toyos_blockhold::Holds;
 use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{arena_byte, DEPTH};
-use toyos_blockring::ring::{self, ServerRings};
+use toyos_blockring::layout::{self, arena_byte, ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::wire::{self, Opened, Refusal};
 use toyos_blockring::{BLOCK_BYTES, PORT, SESSION_BYTES};
@@ -249,7 +248,7 @@ impl Service {
     fn admit(&mut self, opening: Opening, conn: Connection) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let rings = ring::server(opening.region.words());
+        let rings = layout::server(opening.region.words()).expect("blockd: the region holds every ring word");
         self.sessions.insert(
             id,
             Served {
@@ -276,11 +275,14 @@ impl Service {
         self.holds.release(opening.first);
     }
 
-    /// Put `c` on its session's completion ring.
+    /// Put `c` on its session's completion ring. [`Self::pull`] leaves room for
+    /// every answer, so a ring without it is a client whose head went back or
+    /// past what was posted: the session ends.
     fn post(session: &mut Served, c: Completion) {
-        let page = session.region.words();
-        session.rings.1.push(page, c.encode());
-        session.posted = true;
+        match session.rings.1.push(session.region.words(), c.encode()) {
+            Ok(true) => session.posted = true,
+            Ok(false) | Err(_) => session.closing = true,
+        }
     }
 
     /// Hand one device answer to the session it is for.
@@ -307,11 +309,11 @@ impl Service {
     /// session's completion ring have room for it.
     fn pull(&mut self, id: u64) {
         let s = self.sessions.get_mut(&id).expect("a live session");
-        let page = s.region.words();
         loop {
             if s.closing {
                 break;
             }
+            let page = s.region.words();
             // Room for every answer: what is on the device, and what is posted
             // and not yet read, never exceeds the completion ring.
             let Ok(space) = s.rings.1.space(page) else {
@@ -331,11 +333,8 @@ impl Service {
                 }
             };
             s.requests += 1;
-            match s.state.take(words) {
-                Taken::Answer(c) => {
-                    s.rings.1.push(page, c.encode());
-                    s.posted = true;
-                }
+            match s.state.take_entry(words) {
+                Taken::Answer(c) => Self::post(s, c),
                 Taken::Issue(req) => {
                     let owner = Owner::Session { session: id, tag: req.tag, write: req.op == Op::Write };
                     match req.op {
@@ -349,14 +348,13 @@ impl Service {
                         // medium already.
                         Op::Flush => {
                             let c = s.state.complete(req.tag, true, &mut self.holds, self.losses);
-                            s.rings.1.push(page, c.expect("just taken").encode());
-                            s.posted = true;
+                            Self::post(s, c.expect("just taken"));
                         }
                     }
                 }
             }
         }
-        s.rings.0.release(page);
+        s.rings.0.release(s.region.words()).expect("blockd: the region holds every ring word");
     }
 
     /// Publish what each session was answered, and ring its doorbell.
@@ -366,7 +364,7 @@ impl Service {
                 continue;
             }
             s.posted = false;
-            if s.rings.1.publish(s.region.words()) {
+            if s.rings.1.publish(s.region.words()).expect("blockd: the region holds every ring word").is_some() {
                 match s.conn.write_nonblock(&[1]) {
                     Ok(_) | Err(SyscallError::WouldBlock) => {}
                     Err(_) => s.closing = true,

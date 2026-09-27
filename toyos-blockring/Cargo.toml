@@ -1,15 +1,15 @@
 # A member of the host workspace (root `Cargo.toml`). What lives here is the
 # block protocol between a block service and its client — the shared session
-# page's layout, the two rings on it, the words a request and a completion are,
-# the control frames a session is opened with, and every decision
-# either end makes about what a completion means — with nothing that touches a
-# device, a handle or a mapping. `userland/blockd` serves it and its client
-# glue speaks it; both map the page and hand this crate the words.
+# page's layout, where its two `toyos-transport` rings are, the words a request
+# and a completion are, the control frames a session is opened with, and every
+# decision either end makes about what a completion means — with nothing that
+# touches a device, a handle or a mapping. `userland/blockd` serves it and its
+# client glue speaks it; both map the page and hand this crate the words.
 #
 # Its defects are orders — a completion racing a crash, a flush racing a reset,
 # a reconnect racing a reissue — so `src/model.rs` enumerates every ordering of
-# a scripted client against a server, a device and a crash, and
-# `tests/loom_ring.rs` checks the rings' publication under loom.
+# a scripted client against a server, a device and a crash; the rings'
+# publication is `toyos-transport`'s, and checked under loom there.
 
 [package]
 name = "toyos-blockring"
@@ -32,19 +32,14 @@ mutate-abort-keeps-inflight = []
 # re-issues nothing: writes it had acknowledged are gone and a later flush
 # still says durable.
 mutate-no-reissue-after-loss = []
-# The rings publish a tail with `Relaxed`, so the consumer can see the index
-# before the entry's words.
-mutate-ring-publish-relaxed = []
 
 [dependencies]
 # Whose flush answers for which writes the disk lost, and who holds which span:
 # the server half's bookkeeping, decided where the kernel's block layer decides
 # it today.
 toyos-blockhold = { path = "../toyos-blockhold" }
-
-[dev-dependencies]
-# Already resolved in this workspace for `kernel-loom` and `toyos-sched/loom`.
-loom = "0.7"
+# The rings on the session page, and the schema the protocol is to them.
+toyos-transport = { path = "../toyos-transport" }
 
 [lints.rust]
 warnings = "deny"

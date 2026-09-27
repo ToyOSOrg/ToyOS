@@ -23,8 +23,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockring::client::{Client, Outcome, Ticket};
 use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{ARENA_BLOCKS, MAX_REQUEST_BLOCKS};
-use toyos_blockring::ring::{self, ClientRings};
+use toyos_blockring::layout::{self, ClientRings, ARENA_BLOCKS, MAX_REQUEST_BLOCKS};
 use toyos_blockring::wire::{self, Opened, Refusal};
 use toyos_blockring::BLOCK_BYTES;
 
@@ -135,7 +134,7 @@ impl Session {
     /// `names` calls `service`.
     pub fn open(names: Namespace, service: &str, guid: [u8; wire::GUID_BYTES]) -> Result<Self, Error> {
         let region = Region::create().map_err(Error::Kernel)?;
-        let rings = ring::client(region.words());
+        let rings = layout::client(region.words()).expect("blockd: the region holds every ring word");
         let (conn, opened) = handshake(&names, service, guid, &region)?;
         let mut client = Client::new();
         client.session_started();
@@ -231,10 +230,11 @@ impl Session {
                 Err(_) => break,
             }
             let Some(request) = self.client.next_request() else { break };
-            self.rings.0.push(page, request.encode());
+            let pushed = self.rings.0.push(page, request.encode());
+            assert_eq!(pushed, Ok(true), "blockd: a request past the room just counted");
         }
         self.peak = self.peak.max(self.client.on_the_wire());
-        if self.rings.0.publish(page) {
+        if self.rings.0.publish(page).expect("blockd: the region holds every ring word").is_some() {
             // A full pipe is a doorbell already rung; a gone one is a server
             // that has ended, which the wait finds.
             let _ = conn.write_nonblock(&[1]);
@@ -301,7 +301,7 @@ impl Session {
                 }
             }
         }
-        self.rings.1.release(page);
+        self.rings.1.release(page).expect("blockd: the region holds every ring word");
         violated
     }
 
@@ -355,7 +355,7 @@ impl Session {
         assert!(self.conn.is_none(), "blockd: reconnect while a session is open");
         // Before the region goes to the new server: it must find this end's
         // two indices at zero, as it will set its own.
-        self.rings = ring::client(self.region.words());
+        self.rings = layout::client(self.region.words()).expect("blockd: the region holds every ring word");
         let (conn, opened) = handshake(&self.names, &self.service, self.guid, &self.region)?;
         if opened != self.opened {
             return Err(Error::Protocol);

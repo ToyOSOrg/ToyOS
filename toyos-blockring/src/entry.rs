@@ -4,7 +4,9 @@
 //! request is bounded here against the arena and the partition, and a word
 //! this protocol does not define is a refusal, never a default.
 
-use crate::layout::{ARENA_BLOCKS, CQE_WORDS, MAX_REQUEST_BLOCKS, SQE_WORDS};
+use toyos_transport::{Layout, Schema, Untrusted, Violation};
+
+use crate::layout::{ARENA_BLOCKS, BLOCK_BYTES, CQE_WORDS, MAX_REQUEST_BLOCKS, SQE_WORDS};
 
 /// What a request asks of the partition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -23,15 +25,6 @@ impl Op {
             Self::Read => 1,
             Self::Write => 2,
             Self::Flush => 3,
-        }
-    }
-
-    const fn from_word(word: u32) -> Option<Self> {
-        match word {
-            1 => Some(Self::Read),
-            2 => Some(Self::Write),
-            3 => Some(Self::Flush),
-            _ => None,
         }
     }
 }
@@ -78,35 +71,34 @@ impl Request {
     /// `partition_blocks`: every block it names is inside both the arena and
     /// the partition, a transfer moves at least one block and at most
     /// [`MAX_REQUEST_BLOCKS`], and a flush names nothing.
-    pub fn decode(words: [u32; SQE_WORDS], partition_blocks: u64) -> Result<Self, Refused> {
-        let tag = words[1];
+    pub fn decode(words: [Untrusted<u32>; SQE_WORDS], partition_blocks: u64) -> Result<Self, Refused> {
+        let [op, tag, lba_low, lba_high, blocks, arena, reserved @ ..] = words;
+        let tag = opaque(tag);
         let refused = Refused::Malformed { tag };
-        let op = Op::from_word(words[0]).ok_or(refused)?;
-        let lba = u64::from(words[2]) | (u64::from(words[3]) << 32);
-        let (blocks, arena) = (words[4], words[5]);
-        if words[6] != 0 || words[7] != 0 {
+        let op = [Op::Read, Op::Write, Op::Flush].into_iter().find(|o| op.is(o.word())).ok_or(refused)?;
+        if !reserved.iter().all(|word| word.is(0)) {
             return Err(refused);
         }
-        match op {
-            Op::Flush => {
-                if lba != 0 || blocks != 0 || arena != 0 {
-                    return Err(refused);
-                }
+        let lba = u64::from(opaque(lba_low)) | (u64::from(opaque(lba_high)) << 32);
+        if op == Op::Flush {
+            if lba != 0 || !blocks.is(0) || !arena.is(0) {
+                return Err(refused);
             }
-            Op::Read | Op::Write => {
-                if blocks == 0 || blocks > MAX_REQUEST_BLOCKS {
-                    return Err(refused);
-                }
-                if arena.checked_add(blocks).is_none_or(|end| end > ARENA_BLOCKS) {
-                    return Err(refused);
-                }
-                if lba.checked_add(u64::from(blocks)).is_none_or(|end| end > partition_blocks) {
-                    return Err(refused);
-                }
-            }
+            return Ok(Self { op, tag, lba, blocks: 0, arena: 0 });
+        }
+        let blocks = blocks.at_most(MAX_REQUEST_BLOCKS.into()).ok().filter(|&b| b > 0).ok_or(refused)? as u32;
+        let arena = arena.at_most((ARENA_BLOCKS - blocks).into()).map_err(|_| refused)? as u32;
+        if lba.checked_add(u64::from(blocks)).is_none_or(|end| end > partition_blocks) {
+            return Err(refused);
         }
         Ok(Self { op, tag, lba, blocks, arena })
     }
+}
+
+/// A word every value of which means something: a tag its answer echoes, or
+/// half of an `lba` the partition bounds whole.
+fn opaque(word: Untrusted<u32>) -> u32 {
+    word.at_most(u32::MAX.into()).map_or(0, |word| word as u32)
 }
 
 /// What a completion says of its request.
@@ -135,16 +127,6 @@ impl Status {
             Self::Lost => 3,
         }
     }
-
-    const fn from_word(word: u32) -> Option<Self> {
-        match word {
-            0 => Some(Self::Ok),
-            1 => Some(Self::Invalid),
-            2 => Some(Self::Device),
-            3 => Some(Self::Lost),
-            _ => None,
-        }
-    }
 }
 
 /// One completion.
@@ -161,19 +143,57 @@ impl Completion {
 
     /// `None` for words no server of this protocol writes: the client treats a
     /// server that wrote them as one that broke the session.
-    pub fn decode(words: [u32; CQE_WORDS]) -> Option<Self> {
-        if words[2] != 0 || words[3] != 0 {
+    pub fn decode(words: [Untrusted<u32>; CQE_WORDS]) -> Option<Self> {
+        let [tag, status, reserved @ ..] = words;
+        if !reserved.iter().all(|word| word.is(0)) {
             return None;
         }
-        Some(Self { tag: words[0], status: Status::from_word(words[1])? })
+        let status =
+            [Status::Ok, Status::Invalid, Status::Device, Status::Lost].into_iter().find(|s| status.is(s.word()))?;
+        Some(Self { tag: opaque(tag), status })
+    }
+}
+
+/// The block protocol as a transport schema, over a partition `blocks` long.
+pub struct Block {
+    pub blocks: u64,
+}
+
+impl Schema<SQE_WORDS, CQE_WORDS> for Block {
+    const LAYOUT: Layout = Layout::Region { slot_bytes: BLOCK_BYTES as u32 };
+    type Request = Request;
+    type Reply = Completion;
+    type Refusal = Refused;
+
+    fn decode_request(&self, words: [Untrusted<u32>; SQE_WORDS]) -> Result<Request, Refused> {
+        Request::decode(words, self.blocks)
+    }
+
+    fn decode_reply(&self, words: [Untrusted<u32>; CQE_WORDS]) -> Result<Completion, Violation> {
+        Completion::decode(words).ok_or(Violation::Entry)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::{arena_byte, SESSION_BYTES};
 
     const PARTITION: u64 = 1000;
+
+    fn peer<const N: usize>(words: [u32; N]) -> [Untrusted<u32>; N] {
+        words.map(Untrusted::new)
+    }
+
+    /// The transport's geometry of the schema's layout is this crate's arena,
+    /// block for block.
+    #[test]
+    fn the_schemas_arena_is_the_sessions() {
+        let geometry = toyos_transport::Geometry::decode(Untrusted::new(SESSION_BYTES as u64), Block::LAYOUT).unwrap();
+        assert_eq!(geometry.slots(), ARENA_BLOCKS);
+        let last = geometry.own(ARENA_BLOCKS - 1, 1).unwrap();
+        assert_eq!(last.run().span().offset, arena_byte(ARENA_BLOCKS - 1));
+    }
 
     #[test]
     fn a_request_survives_its_words() {
@@ -182,10 +202,10 @@ mod tests {
             Request { op: Op::Write, tag: u32::MAX, lba: 0, blocks: MAX_REQUEST_BLOCKS, arena: ARENA_BLOCKS - MAX_REQUEST_BLOCKS },
             Request { op: Op::Flush, tag: 0, lba: 0, blocks: 0, arena: 0 },
         ] {
-            assert_eq!(Request::decode(request.encode(), PARTITION), Ok(request));
+            assert_eq!(Request::decode(peer(request.encode()), PARTITION), Ok(request));
         }
         let wide = Request { op: Op::Read, tag: 1, lba: 1 << 40, blocks: 2, arena: 3 };
-        assert_eq!(Request::decode(wide.encode(), u64::MAX), Ok(wide));
+        assert_eq!(Request::decode(peer(wide.encode()), u64::MAX), Ok(wide));
     }
 
     /// Every field a hostile client can set out of range is refused, and the
@@ -207,7 +227,7 @@ mod tests {
         ];
         for (what, words) in cases {
             assert_eq!(
-                Request::decode(words, PARTITION),
+                Request::decode(peer(words), PARTITION),
                 Err(Refused::Malformed { tag: 42 }),
                 "{what} was not refused"
             );
@@ -218,9 +238,9 @@ mod tests {
     fn a_completion_survives_its_words_and_refuses_what_it_does_not_define() {
         for status in [Status::Ok, Status::Invalid, Status::Device, Status::Lost] {
             let c = Completion { tag: 9, status };
-            assert_eq!(Completion::decode(c.encode()), Some(c));
+            assert_eq!(Completion::decode(peer(c.encode())), Some(c));
         }
-        assert_eq!(Completion::decode([1, 4, 0, 0]), None);
-        assert_eq!(Completion::decode([1, 0, 1, 0]), None);
+        assert_eq!(Completion::decode(peer([1, 4, 0, 0])), None);
+        assert_eq!(Completion::decode(peer([1, 0, 1, 0])), None);
     }
 }

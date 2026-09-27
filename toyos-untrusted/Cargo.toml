@@ -15,3 +15,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
+
+[features]
+# `toyos-transport` sits under std, and so does what it bounds with.
+rustc-dep-of-std = ["core"]
+
+[dependencies]
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
