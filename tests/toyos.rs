@@ -250,6 +250,9 @@ const RUST_SKIP: &[&str] = &[
     // It waits for a cue only a kernel armed with `copy-meets-a-remap` gives.
     // `user_copy_races_munmap` runs it.
     "copy_out_races_munmap",
+    // Only a kernel armed with `tls-rebase-window` holds a spawn in the window it probes.
+    // `tls_rebase_window` runs it.
+    "tls_dtv_race",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -1535,6 +1538,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // and its store (`copy-meets-a-remap`): the store never reaches the region
     // mapped after it.
     ("user_copy_races_munmap", Sched::Parallel, Tier::Fast),
+    // A sibling's store staged between a thread's TLS block being placed and
+    // its rebase (`tls-rebase-window`): the block is never reachable there.
+    ("tls_rebase_window", Sched::Parallel, Tier::Fast),
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Nightly),
     ("writeback_durability", Sched::Parallel, Tier::Nightly),
@@ -1652,6 +1658,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
+    ("tls_rebase_window", &["test_rs_tls_dtv_race"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
@@ -3492,11 +3499,50 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "fault_gates" => check_fault_gates,
         "debug_trap" => check_debug_trap,
         "dlopen_dedup" => check_dlopen_dedup,
+        "abuse_elf_loader" => check_abuse_elf_loader,
         "syscall_cost" => check_syscall_cost,
         "exit_wait_storm" => check_exit_wait_storm,
         _ => check_rust_result,
     }
 }
+
+/// `abuse_elf_loader` plus the reason each apply-time refusal must fire for.
+///
+/// Each case is refused for the right reason only if the kernel names its
+/// [`toyos_elf::RelocError`] beside the file — a case refused later, for
+/// another reason, would pass the exit-code check alone. Every reason is
+/// checked even when the guest failed, so one run shows each case's verdict.
+fn check_abuse_elf_loader(result: &TestResult) -> bool {
+    use toyos_elf::RelocError;
+    let mut ok = check_rust_result(result);
+    let log = format!("{}{}", result.before, result.serial);
+    for (file, refused, what) in [
+        ("tls_apply_refs.so", RelocError::TlsOutsideSegment, "the dlopen apply-time TLS refusal"),
+        ("tls_apply_spawn", RelocError::TlsOutsideSegment, "the spawn apply-time TLS refusal"),
+        ("f13_refs_past.so", RelocError::TlsOutsideSegment, "the cross-module apply-time TLS refusal"),
+        ("tpoff_overflow.so", RelocError::TpoffOverflows, "the dlopen TPOFF overflow"),
+        ("tpoff_overflow_spawn", RelocError::TpoffOverflows, "the spawn TPOFF overflow"),
+        ("globdat_past_dynsym", RelocError::SymbolPastTable, "the executable's GLOB_DAT past .dynsym"),
+    ] {
+        let reason = refused.as_str();
+        let named = log.lines().any(|l| l.contains(file) && l.contains(reason));
+        if !named {
+            eprintln!(
+                "FAIL rs::abuse_elf_loader: {what} did not fire for its reason — no line names \
+                 {file:?} with {reason:?}{}",
+                kernel_account(result)
+            );
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// `kernel/src/loader/tls.rs`'s `rebase_window` line for a watched spawn's
+/// block the process could not yet reach before its rebase.
+const TLS_BLOCK_UNREACHABLE: &str = "is not reachable before its rebase";
+/// The spawns `tls_dtv_race` watches: every round of its `ROUNDS` but the first.
+const TLS_RACE_WATCHED: usize = 15;
 
 /// What a loader writes when it caches a library under the directory it searched
 /// and did not find it in. Only `dlopen_dedup`'s last arm produces this string.
@@ -11605,6 +11651,28 @@ fn run_machine_test(
                 return Err(format!(
                     "user_copy_races_munmap failed:\n{}\nkernel log while it ran:\n{}{}",
                     result.stdout, result.before, result.serial
+                ));
+            }
+            Ok(())
+        }
+        // Two CPUs: the held spawn spins in the kernel while its sibling stores
+        // on the other.
+        "tls_rebase_window" => {
+            let options = BootOptions {
+                smp: 2,
+                kernel_params: &["tls-rebase-window"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let result = qemu.run_test("test_rs_tls_dtv_race", Duration::from_secs(30));
+            let log = format!("{}{}", result.before, result.serial);
+            let unreachable = log.lines().filter(|l| l.contains(TLS_BLOCK_UNREACHABLE)).count();
+            if !check_rust_result(&result) || unreachable != TLS_RACE_WATCHED {
+                return Err(format!(
+                    "tls_rebase_window failed: {unreachable} of {TLS_RACE_WATCHED} watched blocks \
+                     unreachable before their rebase:\n{}\nkernel log while it ran:\n{log}",
+                    result.stdout
                 ));
             }
             Ok(())
