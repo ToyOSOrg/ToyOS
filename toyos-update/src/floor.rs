@@ -76,7 +76,8 @@ impl Scope {
         }
     }
 
-    const fn tag(self) -> u8 {
+    /// The letter a floor's name carries after [`PREFIX`] and a dash.
+    pub const fn tag(self) -> u8 {
         match self {
             Self::Machine => b'K',
             Self::Image => b'I',
@@ -97,6 +98,10 @@ const fn eq(a: &[u8], b: &[u8]) -> bool {
     }
     true
 }
+
+/// The vendor GUID every floor is under, minted for this and used for nothing
+/// else.
+pub const VENDOR: &str = "33be3d4a-30e6-49f5-8050-f169d93a20fb";
 
 /// What every floor variable's name begins with.
 pub const PREFIX: &str = "ToyOSImageFloor";

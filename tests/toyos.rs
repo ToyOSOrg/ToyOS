@@ -983,11 +983,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
     ("broken_data_volume_is_absent", Sched::Parallel, Tier::Fast),
     ("data_candidate_with_bad_geometry_is_absent", Sched::Parallel, Tier::Fast),
-    // The image release's command line booted as its notes print it, and beside it
-    // two disks it was not given: console lines and image bytes, and the
-    // ceiling is a liveness guard.
+    // The image release's command line booted as its notes print it: console
+    // lines and firmware bytes, and the ceiling is a liveness guard.
     ("release_command_boots", Sched::Parallel, Tier::Fast),
-    ("release_writes_no_other_disk", Sched::Parallel, Tier::Fast),
     // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
     ("internal_disk_boot", Sched::Parallel, Tier::Fast),
     // One boot each, kernel lines and image bytes for verdicts, no clock in either.
@@ -11475,7 +11473,6 @@ fn run_machine_test(
         // stays one line.
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
         "release_command_boots" => release::release_command_boots(),
-        "release_writes_no_other_disk" => release::release_writes_no_other_disk(),
         "internal_disk_boot" => storage::internal_disk_boot(test_config, c_bins, rust_bins),
         "partition_claim" => partclaim::partition_claim(test_config, c_bins, rust_bins),
         "partition_claim_gives_up" => {

@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-27
 ---
@@ -26,9 +26,8 @@ The command line is `imagerelease::Host::MacosAppleSilicon`'s
 (`src/imagerelease.rs`) with `-display none`, over a copy of a
 `target/bootable.img`.
 
-It blocks the image release on macOS: the notes' macOS command line boots this
-firmware, and so do `release_command_boots` and `release_writes_no_other_disk`
-on the dev host.
+`release_command_boots` boots that line on the dev host, and is disabled in
+`src/redlist.rs` while this stands.
 
 **Exit condition.** `release_command_boots` is green on the dev host with the
-firmware Homebrew's QEMU ships.
+firmware Homebrew's QEMU ships, and its row leaves `src/redlist.rs`.

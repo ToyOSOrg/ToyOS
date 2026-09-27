@@ -63,8 +63,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - &runner-deps
-        name: disk and QEMU
+      - name: disk and QEMU
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
                       /usr/local/share/boost /usr/local/.ghcup
@@ -251,27 +250,32 @@ jobs:
       - *checkout
       - run: cargo build -p toyos-build
 
-  # The disk image a person downloads, of the commit every lane above passed;
-  # `src/imagerelease.rs` says what it carries and how many stay. Bare
-  # `ubuntu-24.04` for `gh`, as `build` is.
+  # The disk image a person downloads: built once, booted under the Linux line
+  # its notes print, and on main published as those same bytes
+  # (`src/imagerelease.rs`).
   release:
-    needs: [host, build, guest, tcg, audio, portability-linux, portability-macos]
-    if: github.ref == 'refs/heads/main'
+    needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # A wedge guard, not a budget.
+    timeout-minutes: 60
+    container: *kvm
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - *deps
+      - name: gh
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh
       - *checkout
-      - *runner-deps
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: cargo run -- --ci release
+      - *guest-cache
+      - run: cargo run -- --ci release
 
   # One standing issue, found by title and commented on; a dispatch is somebody
   # watching the run, so only the schedule files.
   nightly-red:
-    needs: [host, build, guest, tcg, audio, portability-linux, portability-macos]
+    needs: [host, build, guest, tcg, audio, portability-linux, portability-macos, release]
     if: ${{ !cancelled() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:

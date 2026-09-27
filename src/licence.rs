@@ -40,6 +40,11 @@
 //! section. And std's graph is re-locked when the gate runs, not read from a
 //! committed lock, so two runs at one head can resolve it differently.
 //!
+//! **The same walk writes an image's licence notice** ([`notices`]): each
+//! package it reaches with its own licence files, or with the standard texts
+//! of its licence where it publishes none, and each `NOTICE` section over a
+//! file that ships, with the texts that section names.
+//!
 //! The expression grammar is SPDX's (`OR`, `AND`, `WITH`, parentheses) plus
 //! cargo's legacy `/` for `OR`. An identifier outside the allowlist is refused
 //! whether SPDX knows it or not, so no licence list is needed to refuse the
@@ -51,6 +56,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
+use crate::arch::Arch;
 use crate::build::Features;
 
 /// What a shipped crate or file may be under. `OR` passes if any branch does,
@@ -841,9 +847,32 @@ struct Local {
     scripts: BTreeSet<PathBuf>,
 }
 
-/// Judge every package `roots` reach in one metadata document, and return the
-/// path packages among them.
-fn judge_crates(metadata: &Value, roots: &[PathBuf], report: &mut Report) -> Result<Local, String> {
+/// A package the walk reached, as its notice names it.
+struct Reached {
+    name: String,
+    version: String,
+    licence: Option<String>,
+    /// `cargo metadata`'s `source`: `None` for a path package.
+    source: Option<String>,
+    dir: PathBuf,
+    licence_file: Option<String>,
+    authors: Vec<String>,
+    /// The `cfg` or target of every edge into it, `None` for an unconditional
+    /// one and for a root.
+    into: BTreeSet<Option<String>>,
+}
+
+/// Every package the walk reached, by name, version and origin.
+type ReachedBy = BTreeMap<(String, String, String), Reached>;
+
+/// Judge every package `roots` reach in one metadata document, record each in
+/// `reached_by`, and return the path packages among them.
+fn judge_crates(
+    metadata: &Value,
+    roots: &[PathBuf],
+    report: &mut Report,
+    reached_by: &mut ReachedBy,
+) -> Result<Local, String> {
     let graph = Graph::new(metadata)?;
     let ids = roots
         .iter()
@@ -869,10 +898,26 @@ fn judge_crates(metadata: &Value, roots: &[PathBuf], report: &mut Report) -> Res
         let version = str_of(package, "version").unwrap_or("?");
         let manifest = str_of(package, "manifest_path").unwrap_or("?");
         let source = str_of(package, "source");
+        let dir = Path::new(manifest)
+            .parent()
+            .ok_or_else(|| format!("{name}'s manifest {manifest} is in no directory"))?;
+        let authors = package["authors"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        reached_by
+            .entry((name.to_string(), version.to_string(), source.unwrap_or(manifest).to_string()))
+            .or_insert_with(|| Reached {
+                name: name.to_string(),
+                version: version.to_string(),
+                licence: str_of(package, "license").map(String::from),
+                source: source.map(String::from),
+                dir: dir.to_path_buf(),
+                licence_file: str_of(package, "license_file").map(String::from),
+                authors: authors.iter().filter_map(Value::as_str).map(String::from).collect(),
+                into: BTreeSet::new(),
+            })
+            .into
+            .extend(into[dep].iter().cloned());
         if source.is_none() {
-            if let Some(dir) = Path::new(manifest).parent() {
-                local.dirs.insert(dir.to_path_buf());
-            }
+            local.dirs.insert(dir.to_path_buf());
             let targets = package["targets"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             local.scripts.extend(
                 targets
@@ -968,12 +1013,12 @@ fn judge_files(ledger: &[Row], tracked: &[String], shipping: &Shipping, report: 
 /// One `NOTICE` section: its heading, the path the heading starts with, the
 /// SPDX lines it carries, and the files its terms are written in.
 #[derive(Debug, PartialEq)]
-pub(crate) struct Section {
+struct Section {
     heading: String,
-    pub(crate) path: String,
+    path: String,
     spdx: Vec<String>,
     /// The path each `Licence text:` or `Terms:` line starts with.
-    pub(crate) texts: Vec<String>,
+    texts: Vec<String>,
 }
 
 const SPDX_TAG: &str = "SPDX-License-Identifier:";
@@ -982,7 +1027,7 @@ const SPDX_TAG: &str = "SPDX-License-Identifier:";
 const TEXT_TAGS: [&str; 2] = ["Licence text:", "Terms:"];
 
 /// The `-`-underlined sections of `text`, in order.
-pub(crate) fn sections(text: &str) -> Vec<Section> {
+fn sections(text: &str) -> Vec<Section> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out: Vec<Section> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -1189,8 +1234,13 @@ fn ls_files(root: &Path, pathspecs: &[String]) -> Result<Vec<String>, String> {
 
 /// The fork's `library/`, checked out at the commit this tree pins. A checkout
 /// whose `rust/` was never initialised — a CI runner's — fetches that commit
-/// alone.
+/// alone. One whose toolchain was installed fetches it beside `rust/` instead:
+/// a source tree there makes the toolchain the checkout's own to build
+/// (`toolchain::owner`).
 fn std_library(root: &Path) -> Result<PathBuf, String> {
+    if matches!(crate::toolchain::owner(root), crate::toolchain::Owner::Installed) {
+        return fetched_library(root);
+    }
     let fork = crate::sysroot::fork_checkout(root);
     if !fork.join("library/Cargo.toml").exists() {
         run(
@@ -1203,6 +1253,43 @@ fn std_library(root: &Path) -> Result<PathBuf, String> {
     Ok(fork.join("library"))
 }
 
+/// Where the fork is fetched to where `rust/` may hold no source.
+const FETCHED_FORK: &str = "target/licence/fork";
+
+/// The fork's `library/` and its own licence files at the pinned commit, and
+/// nothing else of it.
+fn fetched_library(root: &Path) -> Result<PathBuf, String> {
+    let fork = root.join(FETCHED_FORK);
+    let commit = crate::sysroot::pinned_fork(root);
+    let git = |args: &[&str]| -> Result<Vec<u8>, String> {
+        run(Command::new("git").args(args).current_dir(&fork), &format!("git {}", args.join(" ")))
+    };
+    if fork.join(".git").exists() && git(&["rev-parse", "HEAD"])? == format!("{commit}\n").into_bytes() {
+        return Ok(fork.join("library"));
+    }
+    let url = fork_url(root)?;
+    if fork.exists() {
+        std::fs::remove_dir_all(&fork).map_err(|e| format!("remove {}: {e}", fork.display()))?;
+    }
+    std::fs::create_dir_all(&fork).map_err(|e| format!("create {}: {e}", fork.display()))?;
+    git(&["init", "-q"])?;
+    git(&["fetch", "-q", "--depth", "1", "--filter=blob:none", &url, &commit])?;
+    git(&["sparse-checkout", "set", "--no-cone", "/library/", "/COPYRIGHT", "/LICENSE-*", "/LICENSES/"])?;
+    git(&["checkout", "-q", "FETCH_HEAD"])?;
+    Ok(fork.join("library"))
+}
+
+/// The URL `.gitmodules` gives the fork.
+fn fork_url(root: &Path) -> Result<String, String> {
+    let out = run(
+        Command::new("git")
+            .args(["config", "-f", ".gitmodules", "submodule.rust.url"])
+            .current_dir(root),
+        "git config -f .gitmodules submodule.rust.url",
+    )?;
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
 /// One metadata document, and the shipped crates judged out of it.
 struct Doc {
     metadata: Value,
@@ -1211,13 +1298,22 @@ struct Doc {
     roots: Vec<PathBuf>,
 }
 
-/// The gate `cargo run -- --ci host` runs.
-pub fn judge(root: &Path) -> Result<String, String> {
-    // Cargo names every manifest by its canonical path.
-    let root = &std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
-    let shipped = crate::build::shipped(root)?;
-    let mut report = Report::default();
+/// What the licence walk read out of what ships.
+struct Walk {
+    reached: ReachedBy,
+    /// The fork's `library/` std was resolved from.
+    library: PathBuf,
+    shipping: Shipping,
+    tracked: Vec<String>,
+    sections: Vec<Section>,
+    /// The tracked files each section's path names.
+    files: BTreeMap<String, Vec<String>>,
+}
 
+/// Walk every crate `shipped` names, libc and std, judging each package into
+/// `report`, and read where committed files ship from. `root` is canonical:
+/// cargo names every manifest by its canonical path.
+fn walk(root: &Path, shipped: crate::build::Shipped, report: &mut Report) -> Result<Walk, String> {
     let mut roots: Vec<(PathBuf, Features)> = shipped.crates.into_iter().collect();
     roots.push((
         root.join(crate::libc::CRATE),
@@ -1272,8 +1368,9 @@ pub fn judge(root: &Path) -> Result<String, String> {
     });
 
     let mut local = Local::default();
+    let mut reached = ReachedBy::new();
     for doc in &docs {
-        let found = judge_crates(&doc.metadata, &doc.roots, &mut report)?;
+        let found = judge_crates(&doc.metadata, &doc.roots, report, &mut reached)?;
         local.dirs.extend(found.dirs);
         local.scripts.extend(found.scripts);
     }
@@ -1295,7 +1392,6 @@ pub fn judge(root: &Path) -> Result<String, String> {
             .map_err(|e| format!("read {}: {e}", file.display()))?;
         shipping.named.extend(embeds(&text, script, &names).into_iter().map(String::from));
     }
-    judge_files(COMMITTED_FILES, &tracked, &shipping, &mut report);
 
     let notice =
         std::fs::read_to_string(root.join("NOTICE")).map_err(|e| format!("read NOTICE: {e}"))?;
@@ -1305,9 +1401,212 @@ pub fn judge(root: &Path) -> Result<String, String> {
         let named = ls_files(root, &[format!(":(glob){}", section.path)])?;
         files.insert(section.path.clone(), named);
     }
-    judge_notice(&sections, &files, COMMITTED_FILES, &shipping, &mut report);
+    Ok(Walk { reached, library, shipping, tracked, sections, files })
+}
 
+fn canonical(root: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))
+}
+
+/// The gate `cargo run -- --ci host` runs.
+pub fn judge(root: &Path) -> Result<String, String> {
+    let root = &canonical(root)?;
+    let mut report = Report::default();
+    let walk = walk(root, crate::build::shipped(root)?, &mut report)?;
+    judge_files(COMMITTED_FILES, &walk.tracked, &walk.shipping, &mut report);
+    judge_notice(&walk.sections, &walk.files, COMMITTED_FILES, &walk.shipping, &mut report);
     verdict(report, EXCEPTIONS)
+}
+
+// --- The notice --------------------------------------------------------------
+
+/// Where [`notices`] is on an image's ROOT.
+pub const NOTICES_ON_ROOT: &str = "share/licences.txt";
+
+/// What a file carrying a package's licence is called, lower-cased, at its start.
+const LICENCE_FILES: &[&str] = &["license", "licence", "unlicense", "copying", "copyright", "notice"];
+
+/// The one registry a package's source can be named in.
+const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+/// The files carrying `p`'s licence: every regular file its directory holds
+/// whose name [`LICENCE_FILES`] starts, and the one its `license_file` names.
+/// A package outside a registry with none carries its repository's: those of
+/// the nearest enclosing directory holding any, up to the one holding `.git`.
+fn licence_files(p: &Reached) -> Result<Vec<PathBuf>, String> {
+    let registry = p.source.as_deref().is_some_and(|s| s.starts_with("registry+"));
+    let mut dir = p.dir.clone();
+    loop {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+            let name = file_name(&path.to_string_lossy()).to_lowercase();
+            // The fork's `license-metadata.json` is REUSE's data about its texts, and no text.
+            if LICENCE_FILES.iter().any(|n| name.starts_with(n)) && !name.ends_with(".json") && path.is_file() {
+                found.push(path);
+            }
+        }
+        if let (true, Some(file)) = (dir == p.dir, &p.licence_file) {
+            let file = dir.join(file);
+            if !file.is_file() {
+                return Err(format!("{} {} names {} as its licence file, and it is none", p.name, p.version, file.display()));
+            }
+            found.push(file);
+        }
+        found.sort();
+        found.dedup();
+        if !found.is_empty() {
+            return Ok(found);
+        }
+        if registry || dir.join(".git").exists() || !dir.pop() {
+            return Err(format!("{} {} ({}) carries no licence file", p.name, p.version, p.dir.display()));
+        }
+    }
+}
+
+/// The standard texts of the licences `p` declares, from the fork's
+/// `LICENSES/`, which holds one `<SPDX id>.txt` per licence: each of an `AND`,
+/// an exception with its licence, and of an `OR` the first branch held whole.
+/// `None` where no branch is.
+fn standard_texts(p: &Reached, fork: &Path) -> Option<Vec<PathBuf>> {
+    fn held(expr: &Expr, dir: &Path) -> Option<Vec<PathBuf>> {
+        let text = |id: &str| Some(dir.join(format!("{id}.txt"))).filter(|f| f.is_file());
+        match expr {
+            Expr::Id(id) => Some(vec![text(id)?]),
+            Expr::With(id, exception) => Some(vec![text(id)?, text(exception)?]),
+            Expr::And(parts) => Some(parts.iter().map(|p| held(p, dir)).collect::<Option<Vec<_>>>()?.concat()),
+            Expr::Or(parts) => parts.iter().find_map(|p| held(p, dir)),
+        }
+    }
+    held(&parse(p.licence.as_deref()?).ok()?, &fork.join("LICENSES"))
+}
+
+/// Every licence text a notice carries, each once, by its first carrier.
+#[derive(Default)]
+struct Texts {
+    ids: BTreeMap<String, usize>,
+    listed: Vec<(String, String)>,
+}
+
+impl Texts {
+    fn id(&mut self, file: &Path, carrier: &str) -> Result<usize, String> {
+        let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let next = self.listed.len() + 1;
+        let id = *self.ids.entry(text.clone()).or_insert(next);
+        if id == next {
+            self.listed.push((format!("{carrier}: {}", file_name(&file.to_string_lossy())), text));
+        }
+        Ok(id)
+    }
+
+    fn cite(&mut self, files: &[PathBuf], carrier: &str) -> Result<String, String> {
+        let ids = files.iter().map(|f| self.id(f, carrier).map(|id| format!("[{id}]")));
+        Ok(ids.collect::<Result<Vec<_>, _>>()?.join(" "))
+    }
+}
+
+/// The licence notice of an image built from `shipped`: every package the
+/// walk reaches with its licence, where its source is and the texts it
+/// carries; every `NOTICE` section over a file it ships, with its terms and
+/// texts, less what [`pending_owner`] names; and each text once. Refused while
+/// any package carries no licence text.
+pub fn notices(root: &Path, shipped: crate::build::Shipped) -> Result<String, String> {
+    let root = &canonical(root)?;
+    let walk = walk(root, shipped, &mut Report::default())?;
+    let fork = walk.library.parent().ok_or("std's library/ is in no directory")?;
+    let (url, commit) = (fork_url(root)?, crate::sysroot::pinned_fork(root));
+    let mut texts = Texts::default();
+    let mut refused = Vec::new();
+    let mut out = String::from(
+        "Licence notices\n===============\n\n\
+         Every package in the dependency graphs of this image's kernel, loader and programs,\n\
+         some of them compiled only for other platforms, with its licence, where its source\n\
+         is, and its licence texts; every third-party file on the image, with its terms; and\n\
+         each of those texts once, at the end.\n\n\
+         Packages\n--------\n",
+    );
+    let guest: Vec<&str> = Arch::ALL.iter().flat_map(|a| [a.userland(), a.kernel(), a.loader()]).collect();
+    for p in walk.reached.values() {
+        // A package every edge into which names another target by its triple
+        // is linked on none of ours.
+        let foreign = p.into.iter().all(|edge| {
+            edge.as_deref()
+                .is_some_and(|t| t.split(" | ").all(|t| !t.starts_with("cfg(") && !guest.contains(&t)))
+        });
+        if foreign {
+            continue;
+        }
+        let (files, standard) = match licence_files(p) {
+            Ok(files) => (files, ""),
+            Err(why) => match standard_texts(p, fork) {
+                Some(files) => (files, ", the licences' standard texts, since the package carries none"),
+                None => {
+                    refused.push(format!("{why}, and the fork's LICENSES/ holds no branch of its licence"));
+                    continue;
+                }
+            },
+        };
+        let source = match (&p.source, p.dir.strip_prefix(fork), p.dir.strip_prefix(root)) {
+            (Some(s), ..) if s == CRATES_IO => {
+                format!("https://static.crates.io/crates/{0}/{0}-{1}.crate", p.name, p.version)
+            }
+            (Some(s), ..) => match s.strip_prefix("git+") {
+                Some(git) => git.to_string(),
+                None => return Err(format!("{} {} is from {s}, which no notice names a download in", p.name, p.version)),
+            },
+            (None, Ok(at), _) => format!("{url} at {commit}, {}", at.display()),
+            (None, _, Ok(at)) => format!("the ToyOS source this image was built from, {}", at.display()),
+            (None, ..) => return Err(format!("{} {} is a path package outside {}", p.name, p.version, root.display())),
+        };
+        let carrier = match standard {
+            "" => format!("{} {}", p.name, p.version),
+            _ => "the Rust fork's LICENSES".to_string(),
+        };
+        let cited = texts.cite(&files, &carrier)?;
+        let licence = p.licence.as_deref().unwrap_or("none declared");
+        let authors = match p.authors.as_slice() {
+            [] => String::new(),
+            all => format!("\n    authors: {}", all.join(", ")),
+        };
+        out.push_str(&format!(
+            "\n{} {}\n    licence: {licence}\n    source: {source}{authors}\n    texts: {cited}{standard}\n",
+            p.name, p.version
+        ));
+    }
+    if !refused.is_empty() {
+        return Err(format!("{} shipped package(s) carry no licence text:\n  {}", refused.len(), refused.join("\n  ")));
+    }
+
+    out.push_str("\nFiles\n-----\n");
+    let withheld: Vec<&str> = pending_owner()
+        .filter_map(|s| match s {
+            Subject::Notice(path) | Subject::File(path) => Some(path),
+            Subject::Crate(_) => None,
+        })
+        .collect();
+    for section in &walk.sections {
+        let named = walk.files.get(&section.path).map(Vec::as_slice).unwrap_or(&[]);
+        if withheld.contains(&section.path.as_str()) || !named.iter().any(|f| walk.shipping.ships(f)) {
+            continue;
+        }
+        let files: Vec<PathBuf> = section.texts.iter().map(|t| root.join(t)).collect();
+        let cited = match texts.cite(&files, &section.path)? {
+            cited if cited.is_empty() => cited,
+            cited => format!("\n    texts: {cited}"),
+        };
+        out.push_str(&format!(
+            "\n{}\n    licence: {}{cited}\n",
+            section.heading,
+            section.spdx.join(" AND ")
+        ));
+    }
+
+    out.push_str("\nTexts\n-----\n");
+    for (at, (carrier, text)) in texts.listed.iter().enumerate() {
+        out.push_str(&format!("\n[{}] {carrier}\n\n{}\n", at + 1, text.trim_end()));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1449,7 +1748,7 @@ mod tests {
 
     fn crates(doc: &Value) -> Report {
         let mut report = Report::default();
-        judge_crates(doc, &[PathBuf::from("/t/app")], &mut report).expect("judged");
+        judge_crates(doc, &[PathBuf::from("/t/app")], &mut report, &mut ReachedBy::new()).expect("judged");
         report
     }
 
@@ -1688,7 +1987,7 @@ ub_checks"#;
     fn a_root_the_metadata_does_not_hold_is_refused() {
         let d = doc(&[("other", Some("MIT"), None, None)], &[]);
         let mut report = Report::default();
-        let why = judge_crates(&d, &[PathBuf::from("/t/app")], &mut report).unwrap_err();
+        let why = judge_crates(&d, &[PathBuf::from("/t/app")], &mut report, &mut ReachedBy::new()).unwrap_err();
         assert!(why.contains("/t/app/Cargo.toml"), "{why}");
     }
 
@@ -1938,6 +2237,82 @@ prose.
             if let Standing::PendingOwner(issue) = e.standing {
                 assert!(root.join(issue).is_file(), "{:?} cites {issue}, which is no file", e.subject);
             }
+        }
+    }
+
+    fn reached(dir: &Path, source: Option<&str>, licence_file: Option<&str>) -> Reached {
+        Reached {
+            name: "x".into(),
+            version: "1.0.0".into(),
+            licence: Some("MIT".into()),
+            source: source.map(String::from),
+            dir: dir.to_path_buf(),
+            licence_file: licence_file.map(String::from),
+            authors: Vec::new(),
+            into: BTreeSet::new(),
+        }
+    }
+
+    /// A package's own licence files are read and nothing else of its
+    /// directory; a registry package with none is refused by name, and a path
+    /// package with none carries its repository's, never past `.git`.
+    #[test]
+    fn a_package_carries_its_own_licence_files_or_its_repositorys() {
+        let tmp = toyos_tmpdir::TempDir::new("licence-files");
+        let repo = tmp.join("repo");
+        let package = repo.join("crates/x");
+        std::fs::create_dir_all(package.join("src")).unwrap();
+        std::fs::write(package.join("src/lib.rs"), "").unwrap();
+        std::fs::write(package.join("README.md"), "").unwrap();
+        let why = licence_files(&reached(&package, CRATES_IO, None)).unwrap_err();
+        assert!(why.contains("x 1.0.0") && why.contains("carries no licence file"), "{why}");
+
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        std::fs::write(repo.join("LICENSE-MIT"), "mit").unwrap();
+        std::fs::write(tmp.join("LICENSE"), "outside").unwrap();
+        assert_eq!(licence_files(&reached(&package, None, None)).unwrap(), [repo.join("LICENSE-MIT")]);
+        assert!(licence_files(&reached(&package, CRATES_IO, None)).is_err(), "a registry package walked up");
+
+        for name in ["COPYING", "Licence.txt", "NOTICE", "UNLICENSE"] {
+            std::fs::write(package.join(name), name).unwrap();
+        }
+        std::fs::write(package.join("terms.txt"), "").unwrap();
+        let files = licence_files(&reached(&package, CRATES_IO, Some("terms.txt"))).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| file_name(f.to_str().unwrap())).collect();
+        assert_eq!(names, ["COPYING", "Licence.txt", "NOTICE", "UNLICENSE", "terms.txt"]);
+        let why = licence_files(&reached(&package, CRATES_IO, Some("gone.txt"))).unwrap_err();
+        assert!(why.contains("gone.txt"), "{why}");
+    }
+
+    /// The release's notice: every package its walk reaches carries a licence
+    /// text, the loader's MPL crates name where their source is, std carries
+    /// the fork's texts, and every third-party file the release ships is there
+    /// while nothing pending the owner is.
+    #[test]
+    fn the_release_notice_carries_every_package_and_file_it_ships() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let parts = crate::build::Boot::release(root).parts(root).unwrap();
+        let text = notices(root, parts).unwrap_or_else(|why| panic!("{why}"));
+        let block = |head: &str| -> &str {
+            let at = text.find(&format!("\n{head}")).unwrap_or_else(|| panic!("no {head:?} in the notice"));
+            text[at + 1..].split("\n\n").next().unwrap()
+        };
+        let uefi = block("uefi ");
+        assert!(uefi.contains("licence: MPL-2.0"), "{uefi}");
+        assert!(uefi.contains("source: https://static.crates.io/crates/uefi/uefi-"), "{uefi}");
+        let std = block("std ");
+        assert!(std.contains("source: https://github.com/ToyOSOrg/rust.git at "), "{std}");
+        assert!(text.contains(": COPYRIGHT\n\nShort version for non-lawyers:"), "std carries no fork COPYRIGHT");
+        for shipped in ["assets/JetBrainsMono-Regular.ttf", "assets/icons/*.svg", "assets/fonts/OpenSans-*.ttf"] {
+            assert!(block(&format!("{shipped} — ")).contains("texts: ["), "{shipped}");
+        }
+        let listed = &text[..text.find("\nTexts\n-----\n").expect("no texts")];
+        for withheld in pending_owner() {
+            let head = match withheld {
+                Subject::Crate(name) => format!("\n{name} "),
+                Subject::Notice(path) | Subject::File(path) => format!("\n{path} "),
+            };
+            assert!(!listed.contains(&head), "the release's notice lists {withheld:?}");
         }
     }
 }

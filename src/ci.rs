@@ -7,8 +7,8 @@
 //! [`Job::GateStage`] run as `host`. Every test that boots no guest is in
 //! [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
 //! everything that boots a guest, `host` again to write the cache the merge
-//! queue restores, and portability, and publishes `main`'s image once all of
-//! that is green ([`Job::Release`]). `publish.yml` puts a landing's crates on
+//! queue restores, portability, and the image release, which boots the image it
+//! publishes ([`Job::Release`]). `publish.yml` puts a landing's crates on
 //! crates.io.
 //!
 //! A host job runs every step and reds if any failed; a guest job stops at the
@@ -50,7 +50,7 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
   tcg               one test on an emulated CPU (nightly)
   audio <i>/<n>     one shard of gate A (nightly)
-  release           publish main's image once its nightly is green (nightly)
+  release           build the release image, boot it, and on main publish it (nightly)
   nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -103,17 +103,13 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::GateStage => vec![step("what protects main", || gate_stage(root))],
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest(shard) => {
-            guest(root, &suite_args(&["--shard", shard, "--jobs", "1", "--nightly"]))
+            guest(root, "the suite", || suite(root, &suite_args(&["--shard", shard, "--jobs", "1", "--nightly"])))
         }
-        Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
-        Job::Audio(shard) => guest(root, &suite_args(&["--audio-gate", "30", "--shard", shard])),
-        Job::Release => {
-            let mut steps = vec![step("the toolchain", || release::install(root))];
-            if steps.iter().all(|s| s.verdict.is_ok()) {
-                steps.push(step("the image release", || imagerelease::publish(root)));
-            }
-            steps
+        Job::Tcg => guest(root, "the suite", || suite(root, &suite_args(&["--jobs", "1", "process_stats"]))),
+        Job::Audio(shard) => {
+            guest(root, "the suite", || suite(root, &suite_args(&["--audio-gate", "30", "--shard", shard])))
         }
+        Job::Release => guest(root, "the image release", || imagerelease::release(root)),
         Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
@@ -627,7 +623,7 @@ fn suite_args(args: &[&str]) -> Vec<String> {
 /// A guest job's own `$TMPDIR`, same rule as [`host`]: nothing the suite
 /// writes past a `toyos_tmpdir::TempDir` — the harness's own `Run`, its lanes,
 /// every boot image — survives past the last step, which reds on it.
-fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
+fn guest(root: &Path, label: &str, boots: impl FnOnce() -> Result<String, String>) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-guest");
     // Before any thread, same as `host`: every child this process spawns below
     // inherits this, and nothing here reads the environment concurrently with
@@ -640,21 +636,24 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
         steps.push(step("the toolchain", || release::install(root)));
     }
     if steps.iter().all(|s| s.verdict.is_ok()) {
-        steps.push(step("the suite", || {
-            let args: Vec<&str> = suite.iter().map(String::as_str).collect();
-            let (green, log) = cargo_logged(root, &args)?;
-            let said = verdicts(&log);
-            if green {
-                Ok(said)
-            } else {
-                Err(said)
-            }
-        }));
+        steps.push(step(label, boots));
     }
     // Unconditional: whatever stopped earlier, this $TMPDIR is still this
     // process's own to judge, and a leak past a failing suite is still a leak.
     steps.push(step("nothing left in $TMPDIR", || left_behind(&tmp)));
     steps
+}
+
+/// `cargo <suite>`, judged by its exit and summarised by [`verdicts`].
+fn suite(root: &Path, suite: &[String]) -> Result<String, String> {
+    let args: Vec<&str> = suite.iter().map(String::as_str).collect();
+    let (green, log) = cargo_logged(root, &args)?;
+    let said = verdicts(&log);
+    if green {
+        Ok(said)
+    } else {
+        Err(said)
+    }
 }
 
 /// The suite's own count line and every line naming a verdict worth reading

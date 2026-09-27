@@ -1026,8 +1026,10 @@ pub struct Boot {
     public: bool,
 }
 
-/// What [`Boot::release`] writes.
+/// What [`Boot::release`] writes: the image, and its licence notice
+/// ([`crate::licence::notices`]), which is also on its ROOT.
 pub const RELEASE_IMAGE: &str = "target/bootable-release.img";
+pub const RELEASE_NOTICES: &str = "target/bootable-release-licences.txt";
 
 impl Boot {
     /// **The one naming rule**: the artifact is named after the directory
@@ -1091,6 +1093,26 @@ impl Boot {
         Self { image: PathBuf::from(RELEASE_IMAGE), public: true, ..Self::shipped(root) }
     }
 
+    /// [`Shipped`] for this boot's image, read out of its config the way
+    /// [`build`] reads it.
+    ///
+    /// **A config that ships the hosted compiler is refused**: its dependencies
+    /// are the rust fork's `compiler/` workspace, which no reader of this
+    /// answer walks.
+    pub fn parts(&self, root: &Path) -> Result<Shipped, String> {
+        let config = self.system();
+        if config.hosted_rustc {
+            return Err(format!(
+                "{} sets hosted-rustc, and nothing reads the licences of the compiler it ships",
+                self.config.display()
+            ));
+        }
+        Ok(Shipped {
+            crates: config_crates(root, &config).into_iter().map(|c| (c.dir, c.features)).collect(),
+            assets: config.assets.iter().map(|dir| root.join(dir)).collect(),
+        })
+    }
+
     /// The config declares no `devices`, so nothing started there claims the
     /// framebuffer and the kernel's last boot checkpoint stays on screen.
     /// `screen_diag_boot` boots this same config, so the tested image and the
@@ -1140,34 +1162,24 @@ impl Boot {
     }
 }
 
-/// What the three modes' images are built from, besides std: every crate
-/// [`config_crates`] names for one of them with the features the build gives
-/// it, and the asset directories their configs copy onto ROOT. A case's config
-/// is a test image and is not here.
+/// What images are built from, besides std: every crate [`config_crates`]
+/// names for them with the features the build gives it, and the asset
+/// directories their configs copy onto ROOT. A case's config is a test image
+/// and is not here.
 pub struct Shipped {
     pub crates: BTreeSet<(PathBuf, Features)>,
     pub assets: BTreeSet<PathBuf>,
 }
 
-/// [`Shipped`], read out of the modes' configs the way [`build`] reads them.
-///
-/// **A config that ships the hosted compiler is refused**: its dependencies are
-/// the rust fork's `compiler/` workspace, which no reader of this answer walks.
+/// [`Boot::parts`] of the three modes together.
 pub fn shipped(root: &Path) -> Result<Shipped, String> {
-    let mut crates = BTreeSet::new();
-    let mut assets = BTreeSet::new();
+    let mut all = Shipped { crates: BTreeSet::new(), assets: BTreeSet::new() };
     for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
-        let config = parse_config(&boot.config);
-        if config.hosted_rustc {
-            return Err(format!(
-                "{} sets hosted-rustc, and nothing reads the licences of the compiler it ships",
-                boot.config.display()
-            ));
-        }
-        crates.extend(config_crates(root, &config).into_iter().map(|c| (c.dir, c.features)));
-        assets.extend(config.assets.iter().map(|dir| root.join(dir)));
+        let parts = boot.parts(root)?;
+        all.crates.extend(parts.crates);
+        all.assets.extend(parts.assets);
     }
-    Ok(Shipped { crates, assets })
+    Ok(all)
 }
 
 /// The parameters an image built for flashing may carry: the kernel's own boot
@@ -1908,7 +1920,17 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
         )
     };
 
-    let root_bytes = build_and_assemble(root, &config, &env, &[], false, arch);
+    let mut extra = Vec::new();
+    if boot.public {
+        let notices = boot
+            .parts(root)
+            .and_then(|parts| crate::licence::notices(root, parts))
+            .unwrap_or_else(|why| panic!("the release's licence notice: {why}"));
+        let at = root.join(RELEASE_NOTICES);
+        fs::write(&at, &notices).unwrap_or_else(|e| panic!("write {}: {e}", at.display()));
+        extra.push((crate::licence::NOTICES_ON_ROOT.to_string(), notices.into_bytes()));
+    }
+    let root_bytes = build_and_assemble(root, &config, &env, &extra, false, arch);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
     (kernel_bytes, bl_bytes, root_bytes)

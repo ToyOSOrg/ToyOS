@@ -16,8 +16,12 @@ use toyos_build::fingerprint::{first_difference, whole_device};
 
 use super::qemu::{self, BootOptions, QemuInstance};
 
-/// Boot the guest against a disk that belongs to somebody else, and prove it
-/// comes back untouched.
+/// Boot the guest against three disks that belong to somebody else, and prove
+/// each comes back untouched: an NVMe disk whose TOYOS-DATA partition holds
+/// another system's volume, a USB disk whose table names only other systems'
+/// partitions, and a USB stick with no table. The two USB disks ride USB
+/// because the kernel drives one NVMe controller, and that one carries the
+/// first.
 ///
 /// Lives here so the registration hunk in `toyos.rs` stays one line: every
 /// agent edits that file.
@@ -27,12 +31,18 @@ pub fn foreign_disk_untouched(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     const BYTES: u64 = 128 * 1024 * 1024;
-    // The same directory `boot_with_options` uses, named here because this
-    // image has to exist before the boot that must not touch it.
+    const USB_BYTES: u64 = 64 * 1024 * 1024;
+    // The same directory `boot_with_options` uses, named here because these
+    // images have to exist before the boot that must not touch them.
     let dir = super::lane::dir();
     let image = dir.join("foreign-disk.img");
     let (data_at, _) = foreign_disk_image(&image, BYTES);
-    let before = whole_device(&image);
+    let other = dir.join("other-systems-disk.img");
+    let parts = other_systems_disk(&other, USB_BYTES)?;
+    let bare = dir.join("bare-stick.img");
+    filled(&bare, USB_BYTES, 0x5A)?;
+    let disks = [image.clone(), other.clone(), bare.clone()];
+    let before: Vec<Vec<u8>> = disks.iter().map(|disk| whole_device(disk)).collect();
 
     // The premise, checked before the boot rather than assumed: if this volume
     // somehow already parsed as a ToyOS volume, the kernel would mount it and
@@ -46,8 +56,9 @@ pub fn foreign_disk_untouched(
         c_bins,
         rust_bins,
         BootOptions {
-            profile: qemu::Profile::Metal,
+            profile: qemu::Profile::UsbDiskCrowd,
             nvme_image: Some(image.clone()),
+            usb_images: vec![other.clone(), bare.clone()],
             ..Default::default()
         },
     );
@@ -79,25 +90,80 @@ pub fn foreign_disk_untouched(
         return Err(format!("the kernel decided to format a disk it was not given\n{log}"));
     }
 
-    // Shut down rather than kill: `PageCache::sync` at shutdown is the only
-    // thing that moves a format from the cache to the device, so a killed QEMU
-    // fingerprints an image a formatting kernel would also have left untouched.
+    // Shut down rather than kill, and wait for QEMU to exit: `PageCache::sync`
+    // at shutdown is the only thing that moves a format from the cache to the
+    // device, so a killed QEMU fingerprints an image a formatting kernel would
+    // also have left untouched.
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
-    let tail = qemu.drain_serial(Duration::from_secs(20));
+    let tail = qemu.await_exit(Duration::from_secs(20))?;
     for bad in ["PANIC:", "panicked at"] {
         if tail.contains(bad) {
             return Err(format!("{bad:?} during shutdown\n{tail}"));
         }
     }
     drop(qemu);
-
-    let after = whole_device(&image);
-    if let Some(diff) = first_difference(&before, &after) {
-        return Err(format!("the kernel wrote to a disk it was not given: {diff}"));
+    // The USB disks were read, so the comparison below is about disks the
+    // kernel saw.
+    let said = format!("{log}{tail}");
+    for read in [format!("has {parts} partitions and none of them is ours"), "has no partition table we can use".into()] {
+        if !said.contains(&read) {
+            return Err(format!("the kernel never said {read:?}, so it never read that disk\n{said}"));
+        }
     }
-    let _ = std::fs::remove_file(&image);
+
+    for (disk, before) in disks.iter().zip(&before) {
+        if let Some(diff) = first_difference(before, &whole_device(disk)) {
+            return Err(format!("the kernel wrote to {}, a disk it was not given: {diff}", disk.display()));
+        }
+    }
+    for disk in &disks {
+        let _ = std::fs::remove_file(disk);
+    }
     Ok(())
+}
+
+/// `len` bytes of `fill`, so a write of anything, zeros included, moves the
+/// fingerprint.
+fn filled(path: &Path, len: u64, fill: u8) -> Result<(), String> {
+    let len = usize::try_from(len).map_err(|e| format!("{len} bytes: {e}"))?;
+    std::fs::write(path, vec![fill; len]).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A filled disk whose table names an EFI system partition, a Microsoft basic
+/// data partition and a Linux filesystem, and none of ToyOS's types. Answers
+/// how many partitions it carries.
+fn other_systems_disk(path: &Path, len: u64) -> Result<usize, String> {
+    use gpt::partition_types::{BASIC, EFI, LINUX_FS};
+    filled(path, len, 0xA5)?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let sectors = u32::try_from(len / 512 - 1).map_err(|e| format!("{len} bytes: {e}"))?;
+    gpt::mbr::ProtectiveMBR::with_lb_size(sectors)
+        .overwrite_lba0(&mut file)
+        .map_err(|e| format!("protective MBR: {e}"))?;
+    let mut disk = gpt::GptConfig::default()
+        .initialized(false)
+        .writable(true)
+        .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
+        .create_from_device(Box::new(file), None)
+        .map_err(|e| format!("a table on {}: {e}", path.display()))?;
+    disk.update_partitions(std::collections::BTreeMap::new())
+        .map_err(|e| format!("an empty table: {e}"))?;
+    let layout = [("EFI system partition", EFI), ("Basic data partition", BASIC), ("Linux filesystem", LINUX_FS)];
+    let parts = layout.len();
+    for (name, kind) in layout {
+        disk.add_partition(name, 16 << 20, kind, 0, Some(2048)).map_err(|e| format!("add {name}: {e}"))?;
+    }
+    disk.write().map_err(|e| format!("write the table: {e}"))?;
+    // The premise, by the parser the kernel selects DATA with.
+    if toyos_build::image::data_partition_of(path).is_ok() {
+        return Err(format!("{} carries a TOYOS-DATA partition", path.display()));
+    }
+    Ok(parts)
 }
 
 /// The volume is genuine and the disk is not: block 0 here carries the magic,

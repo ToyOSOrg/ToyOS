@@ -162,7 +162,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # nothing new is fetched — but `cargo run` did not compile it before this.
 sha2 = "0.10"
 # The image release's compressed asset, which every stock macOS and Linux
-# unpacks (`src/imagerelease.rs`). Already resolved here through `bcachefs`.
+# unpacks (`src/imagerelease.rs`).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]

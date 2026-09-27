@@ -17,14 +17,12 @@ use alloc::vec::Vec;
 use toyos_update::floor::{self, Read, Scope, Stored};
 use uefi::prelude::*;
 use uefi::table::runtime::{VariableAttributes, VariableVendor};
-use uefi::{guid, CString16};
+use uefi::{CString16, Guid};
 
 /// Whose images this loader's floor holds, as its build decided.
 const SCOPE: Scope = Scope::from_word(env!("TOYOS_IMAGE_FLOOR"));
 
-/// The vendor every floor is under: `33BE3D4A-30E6-49F5-8050-F169D93A20FB`,
-/// minted for this and used for nothing else.
-const VENDOR: VariableVendor = VariableVendor(guid!("33be3d4a-30e6-49f5-8050-f169d93a20fb"));
+const VENDOR: VariableVendor = VariableVendor(Guid::parse_or_panic(floor::VENDOR));
 
 /// The only attributes the floor is written with.
 const ATTRIBUTES: VariableAttributes =

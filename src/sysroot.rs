@@ -201,7 +201,7 @@ pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> String {
 
 /// The commit this checkout's tree pins the std fork at: the index's, so a
 /// staged gitlink counts as the tree's.
-fn pinned_fork(root: &Path) -> String {
+pub(crate) fn pinned_fork(root: &Path) -> String {
     let entry = git_out(root, &["ls-files", "-s", "--", "rust"]);
     let mut words = entry.split_whitespace();
     match (words.next(), words.next()) {

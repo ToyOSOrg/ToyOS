@@ -43,7 +43,7 @@ pub mod metal;
 pub mod origin;
 #[allow(dead_code)]
 pub mod partclaim;
-/// The image release's command lines, and the disks its image was not given.
+/// The image release's command line for this host.
 pub mod release;
 #[allow(dead_code)]
 pub mod passcost;

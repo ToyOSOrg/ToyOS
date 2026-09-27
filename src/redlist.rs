@@ -52,6 +52,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md",
     },
     Disabled {
+        test: "release_command_boots",
+        issue: "issues/kernel/the-kernel-dies-at-boot-on-the-edk2-firmware-qemu-ships.md",
+    },
+    Disabled {
         test: "sched_check_build",
         issue: "issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",
     },

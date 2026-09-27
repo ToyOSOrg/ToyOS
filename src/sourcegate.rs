@@ -559,7 +559,7 @@ const HOST_SPAWNS: &[Spawn] = &[
             ("src/qemu.rs", 1),
             ("src/ci.rs", 2),
             ("tests/common/qemu.rs", 1),
-            ("tests/common/release.rs", 1),
+            ("src/imagerelease.rs", 1),
         ],
         why: "QEMU, the other half of the bar: `Arch::qemu` names `qemu-system-x86_64` and \
               `qemu-system-aarch64`, and `check_prerequisites` requires the one being booted",
@@ -568,8 +568,8 @@ const HOST_SPAWNS: &[Spawn] = &[
         arg: "\"gh\"",
         sites: &[],
         why: "GitHub's CLI, outside the bar: CI's releases, protection and nightly-red jobs \
-              (src/ci.rs, src/release.rs, src/imagerelease.rs) ask GitHub with it. Nothing that builds or boots \
-              reaches it",
+              (src/ci.rs, src/release.rs, src/imagerelease.rs) ask GitHub with it. No build and no \
+              boot calls it",
     },
     Spawn {
         arg: "\"curl\"",
@@ -726,14 +726,19 @@ const CI_PACKAGES: &[Package] = &[
               src/release.rs and src/ci.rs ask GitHub and the crates.io index with it",
     },
     Package {
+        name: "gh",
+        why: "GitHub's CLI, which the image release publishes with (src/imagerelease.rs), in the \
+              one container job that publishes",
+    },
+    Package {
         name: "git",
         why: "the version control this repository is, and `REQUIRED` in src/main.rs",
     },
     Package {
         name: "ovmf",
         why: "the edk2 firmware Debian's QEMU boots a UEFI guest with: the image release notes' \
-              Linux command line names it, and the guest suite boots that line \
-              (src/imagerelease.rs)",
+              Linux command line names it, and the release job and `release_command_boots` \
+              boot that line (src/imagerelease.rs)",
     },
     Package {
         name: "python3",
