@@ -829,7 +829,11 @@ impl Tcp {
                 }
             }
             Tcb::Sync(mut sync) => {
+                let una = sync.tx.una;
                 let verdict = sync.receive(seg, &mut ctx);
+                if sync.tx.una != una {
+                    conn.soft = None;
+                }
                 return self.after_sync(index, tuple, sync, verdict, now);
             }
             ended @ Tcb::Ended(_) => conn.state = ended,

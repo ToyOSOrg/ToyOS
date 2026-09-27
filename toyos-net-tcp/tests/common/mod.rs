@@ -13,6 +13,8 @@
 
 #![allow(dead_code)]
 
+pub mod net;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -749,5 +751,38 @@ impl H {
     pub fn arrive_full(&mut self, s: S) {
         let s = b_full(self, s);
         self.arrive(s);
+    }
+}
+
+impl H {
+    /// An ICMP error about the fixture's connection, quoting `seq` in the test's numbers.
+    pub fn icmp(&mut self, t: i64, kind: toyos_net_tcp::IcmpKind, seq: u32) -> Vec<O> {
+        let mut outs = self.at(t);
+        let error = toyos_net_tcp::IcmpError {
+            local: ep(self.local.0, self.local.1),
+            remote: ep(self.peer.0, self.peer.1),
+            sequence: toyos_net_tcp::Seq::new(self.real(seq)),
+            kind,
+        };
+        let now = self.now();
+        self.tcp.icmp(now, error);
+        outs.extend(self.transmit());
+        outs
+    }
+}
+
+/// A destination-unreachable code as the wire crate parses it off a real message.
+pub fn unreachable(code: u8) -> toyos_net_wire::icmp::UnreachableCode {
+    let mut quote = vec![0x45, 0, 0, 40, 0, 0, 0x40, 0, 64, 6, 0, 0];
+    quote.extend_from_slice(&A.octets());
+    quote.extend_from_slice(&B.octets());
+    quote.extend_from_slice(&[0; 8]);
+    let mut icmp = vec![3, code, 0, 0, 0, 0, 0, 0];
+    icmp.extend_from_slice(&quote);
+    let sum = oracle_sum(&[&icmp]);
+    icmp[2..4].copy_from_slice(&sum.to_be_bytes());
+    match toyos_net_wire::icmp::IcmpPacket::parse(&icmp).unwrap().message() {
+        toyos_net_wire::icmp::IcmpMessage::DestinationUnreachable { code, .. } => code,
+        other => panic!("{other:?}"),
     }
 }

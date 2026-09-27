@@ -74,9 +74,6 @@ impl Ring {
         let n = n.min(self.len);
         self.head = self.at(n);
         self.len = self.len.saturating_sub(n);
-        if self.len == 0 {
-            self.head = 0;
-        }
     }
 
     /// The held bytes in `[offset, offset + len)`, clamped to what is held, in at most two parts.
