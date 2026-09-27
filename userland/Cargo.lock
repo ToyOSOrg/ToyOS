@@ -4058,6 +4058,7 @@ name = "toyos-blockring"
 version = "0.1.0"
 dependencies = [
  "toyos-blockhold",
+ "toyos-transport",
 ]
 
 [[package]]
@@ -4148,6 +4149,17 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-tmpdir"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-transport"
+version = "0.1.0"
+dependencies = [
+ "toyos-untrusted",
+]
+
+[[package]]
+name = "toyos-untrusted"
 version = "0.1.0"
 
 [[package]]
