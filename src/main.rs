@@ -267,6 +267,22 @@ fn main() {
         toyos_build::ensure_submodules(&root);
     }
 
+    if let Some(keys) = CARGO_RUN.value(&args, &flags::BENCH_IMAGE) {
+        let authorized = std::fs::read_to_string(keys).unwrap_or_else(|e| panic!("--bench-image {keys}: {e}"));
+        let config = root.join(toyos_build::build::BENCH_CONFIG);
+        let version = toyos_build::image::version_now();
+        let bytes = toyos_build::build::bench_image(&root, &config, &authorized, version, toyos_build::build::BENCH_ROOT_ROOM, false)
+            .unwrap_or_else(|why| panic!("--bench-image {keys}: {why}"));
+        let out = root.join("target/bench.img");
+        std::fs::write(&out, bytes).unwrap_or_else(|e| panic!("write {}: {e}", out.display()));
+        println!(
+            "Bench image: {} at version {version}, signed with {}, its sshd authorizing {keys}",
+            out.display(),
+            toyos_build::signing::key().fingerprint()
+        );
+        return;
+    }
+
     // Toolchain included: `build` holds the build lock across both, so no other
     // agent's clean or bootstrap can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);

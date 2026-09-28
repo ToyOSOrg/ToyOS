@@ -1,8 +1,13 @@
-//! `toyos-metal` — the loop that flashes ToyOS to the T14's stick, boots it
+//! `toyos-metal` — the loop that puts one ToyOS image on the T14, boots it
 //! once, and answers with [`crate::bootlog`]'s verdict on what that boot wrote
-//! to the log partition.
+//! to its log.
 //!
-//! It runs on the development host and reaches the machine over `ssh`.
+//! **Two paths, one named.** By default the machine runs ToyOS alone — the
+//! bench — and each boot is delivered to it and read back over its own sshd
+//! ([`crate::metalbench`]). `--via-ubuntu` is the old path this file carries
+//! the rest of: Ubuntu flashes the stick and reads the log partition off it.
+//!
+//! The old path runs on the development host and reaches Ubuntu over `ssh`.
 //! [`Target::words`] is the one place a root command line is written — the
 //! installed `/etc/sudoers.d/toyos-metal` and every argv are rendered from it —
 //! so the loop constructs no command outside [`JOBS`] but the one that puts
@@ -27,7 +32,7 @@ use crate::image::LBA;
 const CONNECT_SECS: u64 = 10;
 
 /// How long the machine has to go quiet after `reboot`.
-const GOING_DOWN_SECS: u64 = 120;
+pub(crate) const GOING_DOWN_SECS: u64 = 120;
 
 /// What the machine spends getting back to `sshd` once a ToyOS boot is over:
 /// the firmware's pass and Ubuntu's own boot.
@@ -71,7 +76,7 @@ const PING_WAIT_MS: u64 = 1_000;
 /// **`ssh` stops answering before the network does**: `reboot` takes `sshd` down
 /// first and the interface seconds later, so a reply before the silence is the
 /// operating system that is leaving rather than the image this loop wrote.
-const PING_SILENCE_SECS: u64 = 5;
+pub(crate) const PING_SILENCE_SECS: u64 = 5;
 
 /// How long the boot stick gets to be there again once Ubuntu is up.
 ///
@@ -149,8 +154,9 @@ pub enum Refusal {
     Wire { nic: String, why: String },
     /// This host could not run the probe, which is a fact about the host.
     Probe { why: String },
-    /// The machine did not go down, or did not come back.
-    Silent { what: &'static str, secs: u64 },
+    /// The machine did not go down, or did not come back; `last` is what the
+    /// last ask of it came to, where one was made.
+    Silent { what: &'static str, secs: u64, last: Option<String> },
     /// The machine came back and the boot stick did not: the boot before this
     /// left a USB device its next host cannot enumerate.
     Stick { node: String, secs: u64 },
@@ -187,6 +193,14 @@ pub enum Refusal {
     /// afterwards, each finding by name.
     Swap(Vec<String>),
     Usage(String),
+    /// **The machine running ToyOS would not take the image**: `update`
+    /// refused it, or was not reached. The image or the loop, never the boot:
+    /// nothing was rebooted.
+    Undelivered(String),
+    /// **What the machine kept is not this boot's**: the loader's passes it
+    /// kept name another image, so the boot this loop delivered is not the
+    /// one whose account came back.
+    NotThisBoot(String),
 }
 
 impl Refusal {
@@ -204,6 +218,7 @@ impl Refusal {
                 | Self::Talk(_)
                 | Self::Swap(_)
                 | Self::Wedge { .. }
+                | Self::NotThisBoot(_)
         )
     }
 }
@@ -299,12 +314,15 @@ impl fmt::Display for Refusal {
                 "this host could not ask the one question this loop can put to a boot that is \
                  still up: {why}"
             ),
-            Self::Silent { what, secs } => write!(
-                f,
-                "the machine did not {what} within {secs} s, which is longer than every watchdog \
-                 a boot runs under plus the time coming back costs; why it did not is what the \
-                 panel and the log partition say, and neither is readable from here"
-            ),
+            Self::Silent { what, secs, last } => {
+                write!(
+                    f,
+                    "the machine did not {what} within {secs} s, which is longer than every watchdog \
+                     a boot runs under plus the time coming back costs; why it did not is what the \
+                     panel and the log partition say, and neither is readable from here"
+                )?;
+                last.as_ref().map_or(Ok(()), |last| write!(f, "; the last ask of it: {last}"))
+            }
             Self::Stick { node, secs } => write!(
                 f,
                 "the machine came back and {node} did not, within {secs} s: the boot that just \
@@ -345,6 +363,8 @@ impl fmt::Display for Refusal {
                 findings.join("\n  ")
             ),
             Self::Usage(why) => write!(f, "{why}"),
+            Self::Undelivered(why) => write!(f, "the machine did not take the image, and nothing was rebooted: {why}"),
+            Self::NotThisBoot(why) => write!(f, "the machine came back, and {why}"),
         }
     }
 }
@@ -549,10 +569,10 @@ fn shell_word(word: &str) -> String {
 
 /// Where the loop runs and what it may touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Target {
+pub(crate) struct Target {
     user: String,
     host: String,
-    key: PathBuf,
+    pub(crate) key: PathBuf,
     node: Node,
     /// The image's ESP, the partition the firmware is pointed at.
     esp_part: u32,
@@ -567,7 +587,7 @@ struct Target {
 
 impl Target {
     /// The T14 as the track names it, with the runner key this host holds.
-    fn t14() -> Result<Self, Refusal> {
+    pub(crate) fn t14() -> Result<Self, Refusal> {
         let home = std::env::var_os("HOME").ok_or(Refusal::NoHome)?;
         Ok(Self {
             user: "t14".to_string(),
@@ -701,7 +721,7 @@ impl Target {
 /// One partition of the image, in [`LBA`]-byte sectors — the unit `/sys`
 /// reports `start` and `size` for a disk in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Part {
+pub(crate) struct Part {
     index: u32,
     start: u64,
     sectors: u64,
@@ -709,7 +729,7 @@ struct Part {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Flashable {
+pub(crate) struct Flashable {
     path: PathBuf,
     bytes: u64,
     esp: Part,
@@ -876,7 +896,7 @@ pub fn flash_ruling(name: &str) -> Option<Flash> {
 /// The pre-flash gate: what the image is armed with, judged before it is
 /// written. Read off the image's own ESP, so it answers about the artifact
 /// rather than about whoever built it.
-fn arms_are_admissible(path: &Path) -> Result<Vec<String>, Refusal> {
+pub(crate) fn arms_are_admissible(path: &Path) -> Result<Vec<String>, Refusal> {
     let armed = crate::image::params_of(path)
         .map_err(|why| Refusal::File { path: path.display().to_string(), why })?;
     judge_arms(&armed)?;
@@ -916,7 +936,7 @@ pub fn judge_arms(armed: &[String]) -> Result<(), Refusal> {
 
 /// Whole sectors, `EFI PART` in the *final* one, and exactly one partition of
 /// each of the three types at the numbers the installed rule names.
-fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
+pub(crate) fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
     let sector = u64::from(LBA);
     let unreadable = |why: String| Refusal::File { path: path.display().to_string(), why };
     let mut file = std::fs::File::open(path).map_err(|e| unreadable(e.to_string()))?;
@@ -1094,7 +1114,7 @@ fn brief_address(iface: &str, text: &str) -> Result<std::net::Ipv4Addr, String> 
 /// [`crate::bootlog::MARGIN`]'s first three seconds come from; a round trip
 /// longer than that, or a host clock that stepped backwards inside it, is
 /// refused rather than spent.
-fn clock_skew(before: u64, said: &str, after: u64) -> Result<i64, String> {
+pub(crate) fn clock_skew(before: u64, said: &str, after: u64) -> Result<i64, String> {
     let took = after.checked_sub(before).ok_or_else(|| {
         format!("this host's clock read {before} before the machine's and {after} after it")
     })?;
@@ -1121,7 +1141,7 @@ pub struct Reply {
     pub at: u64,
 }
 
-struct Ping {
+pub(crate) struct Ping {
     first: std::sync::Arc<std::sync::Mutex<Result<Option<Reply>, String>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: std::thread::JoinHandle<()>,
@@ -1129,7 +1149,7 @@ struct Ping {
 
 impl Ping {
     /// Begin, now: the caller has just watched the machine stop answering `ssh`.
-    fn start(addr: std::net::Ipv4Addr) -> Self {
+    pub(crate) fn start(addr: std::net::Ipv4Addr) -> Self {
         let first = std::sync::Arc::new(std::sync::Mutex::new(Ok(None)));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (mine, theirs) = (std::sync::Arc::clone(&first), std::sync::Arc::clone(&stop));
@@ -1166,7 +1186,7 @@ impl Ping {
     }
 
     /// Stop probing, and answer what the first reply after the silence was.
-    fn end(self) -> Result<Option<Reply>, Refusal> {
+    pub(crate) fn end(self) -> Result<Option<Reply>, Refusal> {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.thread.join();
         let answer = self.first.lock().expect("the ping's answer").clone();
@@ -1174,7 +1194,7 @@ impl Ping {
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("a host clock before 1970 is a host to fix")
@@ -1424,7 +1444,7 @@ impl Driver {
                 return Ok(began.elapsed().as_secs());
             }
         }
-        Err(Refusal::Silent { what, secs })
+        Err(Refusal::Silent { what, secs, last: None })
     }
 
     /// The loader's own file, and then everything `logd` wrote, in name order:
@@ -1537,17 +1557,25 @@ declare_flags!(METAL = {
     SWAP = "--swap", Next;
     BINARY = "--binary", Next;
     HAND_BACK = "--hand-back", None;
+    VIA_UBUNTU = "--via-ubuntu", None;
+    RESIDENT = "--resident", None;
 });
 
-/// The flags a swap of a running machine's service refuses beside it: it
-/// flashes nothing and reboots nothing, so each of these describes a boot it
-/// will not make.
-const NOT_A_SWAP: &[&Flag] = &[&DRY_RUN, &FAT32_CHECK, &NIC, &INSTALL_SUDOERS, &IMAGE];
+/// The flags only Ubuntu carries out: each is refused without [`VIA_UBUNTU`]
+/// rather than dropped.
+const UBUNTUS: &[&Flag] = &[&INSTALL_SUDOERS, &FAT32_CHECK, &DEVICE, &HOST, &RESIDENT];
+
+/// The flags a swap of a running machine's service refuses beside it: each
+/// describes a boot the swap does not judge. `--image` is not among them: on
+/// the bench a swapping boot is delivered and judged like any other, and the
+/// swap is made by the same loop once the bench has gone down
+/// ([`crate::metalbench::run`]).
+const NOT_A_SWAP: &[&Flag] = &[&DRY_RUN, &NIC];
 
 /// The flags that describe a boot, as against the ones that say which machine
 /// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
 const ABOUT_A_BOOT: &[&Flag] =
-    &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS, &TALK];
+    &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS, &TALK, &RESIDENT];
 
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1558,9 +1586,9 @@ pub struct Args {
     /// in one worktree was a 184 MB image with no job list and no bound. There
     /// is nothing to fall through to now, and the gate below would refuse that
     /// image anyway — the loop flashes metal-staged images and nothing else.
-    image: Option<PathBuf>,
-    target: Target,
-    dry_run: bool,
+    pub(crate) image: Option<PathBuf>,
+    pub(crate) target: Target,
+    pub(crate) dry_run: bool,
     /// Where the account's password is read from, once, to install the rule.
     ///
     /// **An action of its own, and it touches no disk.** It installs, checks
@@ -1573,11 +1601,11 @@ pub struct Args {
     /// The boot-describing flags this command line named, in the order given —
     /// so a refusal can say which ones rather than that there were some.
     about_a_boot: Vec<&'static str>,
-    wait_secs: u64,
+    pub(crate) wait_secs: u64,
     /// Where the stick's two files and this boot's own facts are written, for a
     /// judge that is not this process. Absent leaves the run's only account its
     /// standard output, which no per-test predicate can be held to.
-    readback: Option<PathBuf>,
+    pub(crate) readback: Option<PathBuf>,
     /// Read the log partition whole off the stick and hand it to
     /// `toyos-fat32-check`. The outside judge, and the only reader of that
     /// volume in this tree that is not the family of code that wrote it.
@@ -1586,27 +1614,48 @@ pub struct Args {
     /// spelling. **A boot names it or the cable is not asked at all**: the reads
     /// cost four `ssh` round trips and a boot whose judges read no cable would
     /// be refused for a fact none of them looks at.
-    nic: Option<String>,
+    pub(crate) nic: Option<String>,
     /// The private key the image authorizes, and the ask to talk to the boot
     /// over its cable: once the machine has gone down, read the log it serves
     /// at `toyos-t14.local` from its first line, ping it, run one command on it
     /// and tell it to reboot. **Nothing in the image names this host**: the
     /// machine answers for its own name, and this host asks for it.
-    talk: Option<PathBuf>,
+    pub(crate) talk: Option<PathBuf>,
     /// **Replace a running service's binary, and flash and reboot nothing.**
     /// The service's key; [`Args::binary`] is the new binary, `--talk` the key
     /// the running machine authorizes — asked for it by name at
     /// `toyos-t14.local`, so no image needs naming — and `--readback` where the
     /// stream and the swap's facts are written.
-    swap: Option<String>,
+    pub(crate) swap: Option<String>,
     binary: Option<PathBuf>,
     /// After the swap is judged, whichever way, ask the machine to `reboot`
     /// over ssh: the host saying it is done with a boot held for it. Absent
     /// leaves the machine running, which is the development loop.
     hand_back: bool,
+    /// **The old path, named**: flash the stick through Ubuntu, choose the
+    /// next boot with `efibootmgr` and read the log partition off the stick.
+    /// Absent is the machine running ToyOS and nothing else
+    /// ([`crate::metalbench`]).
+    pub via_ubuntu: bool,
+    /// **Flash a bench image and hand the machine to it** (`--via-ubuntu`
+    /// only): the image is armed with nothing, boots once through Ubuntu's
+    /// `efibootmgr --bootnext`, and is then asked over its own sshd to put its
+    /// entry first in the firmware's order — after which the machine boots
+    /// ToyOS and Ubuntu does not run.
+    pub resident: bool,
+    /// Where the machine running ToyOS is reached: `toyos-t14.local`.
+    pub machine: Machine,
 }
 
 impl Args {
+    /// What `--swap` asks, or why this command line asks no whole swap.
+    pub(crate) fn swap_ask<'a>(&'a self, service: &'a str) -> Result<SwapAsk<'a>, Refusal> {
+        let (Some(key), Some(_), Some(binary)) = (&self.talk, &self.readback, &self.binary) else {
+            return Err(Refusal::Usage("--swap wants --talk, --readback and --binary".into()));
+        };
+        Ok(SwapAsk { service, binary, key, hand_back: self.hand_back })
+    }
+
     pub fn parse(args: &[String]) -> Result<Self, Refusal> {
         let line = METAL.walk(args);
         if let Some(word) = line.unknown.or_else(|| line.positionals.first().copied()) {
@@ -1638,6 +1687,9 @@ impl Args {
             swap: value(&SWAP).map(str::to_string),
             binary: value(&BINARY).map(PathBuf::from),
             hand_back: METAL.present(args, &HAND_BACK),
+            via_ubuntu: METAL.present(args, &VIA_UBUNTU),
+            resident: METAL.present(args, &RESIDENT),
+            machine: Machine::t14(),
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host.split_once('@').ok_or_else(|| {
@@ -1713,16 +1765,85 @@ impl Args {
                 }
             }
         }
+        if !out.via_ubuntu {
+            let ubuntus: Vec<&str> = line
+                .seen
+                .iter()
+                .map(|seen| seen.flag.name)
+                .filter(|name| UBUNTUS.iter().any(|flag| flag.name == *name))
+                .collect();
+            if !ubuntus.is_empty() {
+                return Err(Refusal::Usage(format!(
+                    "{} reach the machine through Ubuntu, and this run reaches a machine that runs \
+                     ToyOS; name --via-ubuntu for the old path",
+                    ubuntus.join(" and ")
+                )));
+            }
+        }
+        if out.via_ubuntu && out.swap.is_some() {
+            return Err(Refusal::Usage(
+                "--swap asks a running ToyOS over its own sshd, and --via-ubuntu names the path that \
+                 flashes through Ubuntu; a swap has no Ubuntu half"
+                    .to_string(),
+            ));
+        }
+        if out.resident && (out.readback.is_some() || out.nic.is_some() || out.fat32_check) {
+            return Err(Refusal::Usage(
+                "--resident hands the machine to a bench image and judges no boot, so --readback, \
+                 --nic and --fat32-check describe a boot it will not judge"
+                    .to_string(),
+            ));
+        }
         Ok(out)
+    }
+}
+
+/// Where a machine that runs ToyOS is reached from this host: the log it
+/// serves, and its sshd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Machine {
+    /// Its log stream, which a talking boot and a swap read.
+    pub log: crate::metaltalk::Peer,
+    /// Its sshd, where that is not port 22 of the address its name answers
+    /// with: a forward onto a guest.
+    pub ssh: Option<std::net::SocketAddr>,
+}
+
+impl Machine {
+    /// The T14 as every ToyOS image's netd names it: `toyos-t14.local`.
+    pub fn t14() -> Self {
+        Self {
+            log: crate::metaltalk::Peer::Named {
+                host: format!("{}.local", crate::lan::HOSTNAME),
+                port: toyos_logstream::PORT,
+            },
+            ssh: None,
+        }
+    }
+
+    /// Its sshd, asked now: a name is resolved at every ask, because the
+    /// machine answering for it is whichever image booted last.
+    pub fn ssh_at(&self) -> Result<std::net::SocketAddr, String> {
+        use std::net::ToSocketAddrs;
+        match (&self.ssh, &self.log) {
+            (Some(at), _) => Ok(*at),
+            (None, crate::metaltalk::Peer::At(at)) => Ok(std::net::SocketAddr::from((at.ip(), crate::metaltalk::SSH_PORT))),
+            (None, crate::metaltalk::Peer::Named { host, .. }) => (host.as_str(), crate::metaltalk::SSH_PORT)
+                .to_socket_addrs()
+                .map_err(|e| format!("{host} did not resolve: {e}"))?
+                .find(std::net::SocketAddr::is_ipv4)
+                .ok_or_else(|| format!("{host} resolved to no IPv4 address")),
+        }
     }
 }
 
 /// This host's half of the cable: the client and the key, checked before the
 /// flash, and the stream and the conversation, started once the machine has
 /// gone down.
-struct Talking {
-    ssh: crate::metaltalk::Ssh,
+pub(crate) struct Talking {
+    pub(crate) ssh: crate::metaltalk::Ssh,
     dir: PathBuf,
+    machine: Machine,
 }
 
 /// Where the stream is written as it arrives, beside the stick's files.
@@ -1730,12 +1851,12 @@ pub const READBACK_STREAM: &str = "stream.log";
 
 impl Talking {
     /// Everything that can refuse before the machine is touched.
-    fn prepare(key: &Path, dir: &Path) -> Result<Self, Refusal> {
+    pub(crate) fn prepare(key: &Path, dir: &Path, machine: &Machine) -> Result<Self, Refusal> {
         std::fs::create_dir_all(dir)
             .map_err(|e| Refusal::File { path: dir.display().to_string(), why: e.to_string() })?;
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let ssh = crate::metaltalk::Ssh::at(root, key.to_path_buf()).map_err(Refusal::Cable)?;
-        Ok(Self { ssh, dir: dir.to_path_buf() })
+        Ok(Self { ssh, dir: dir.to_path_buf(), machine: machine.clone() })
     }
 
     /// Ask for the log the booting machine serves under its name, then talk
@@ -1745,7 +1866,7 @@ impl Talking {
     ///
     /// **Called once the machine has gone down**, so the name is asked of the
     /// boot this loop flashed and not of the operating system it replaced.
-    fn start(
+    pub(crate) fn start(
         &self,
         by: std::time::Duration,
     ) -> Result<
@@ -1770,25 +1891,24 @@ impl Talking {
     > {
         let stream = self.connect(file, by)?;
         let (theirs, ssh, scratch) = (stream.clone(), self.ssh.clone(), self.dir.join(scratch));
+        // A machine reached through a forward is reached through nothing ICMP
+        // crosses: QEMU's user-mode network carries TCP and UDP alone.
+        let (ssh_at, ping) = (self.machine.ssh, self.machine.ssh.is_none());
         let talking = std::thread::Builder::new()
             .name("metal-talk".into())
-            .spawn(move || crate::metaltalk::converse(&theirs, &ssh, None, true, &scratch))
+            .spawn(move || crate::metaltalk::converse(&theirs, &ssh, ssh_at, ping, &scratch))
             .expect("the metal loop's conversation could not be started");
         Ok((stream, talking))
     }
 
-    /// The stream itself, asked of the machine's name, for a caller that runs
-    /// its own protocol on it rather than [`Talking::start`]'s ping/command/
-    /// reboot conversation — a swap's own exchange
-    /// ([`crate::metalswap::swap`]).
+    /// The stream itself, asked of the machine, for a caller that runs its own
+    /// protocol on it rather than [`Talking::start`]'s ping/command/reboot
+    /// conversation — a swap's own exchange ([`crate::metalswap::swap`]).
     ///
     /// A swap of the netd carrying it is followed across by
     /// [`crate::metalswap::swap`] itself ([`crate::metaltalk::Stream::redial`]).
     fn connect(&self, file: &str, by: std::time::Duration) -> Result<crate::metaltalk::Stream, Refusal> {
-        let peer = crate::metaltalk::Peer::Named {
-            host: format!("{}.local", crate::lan::HOSTNAME),
-            port: toyos_logstream::PORT,
-        };
+        let peer = self.machine.log.clone();
         println!("asking for {peer:?}'s log");
         let at = self.dir.join(file);
         crate::metaltalk::Stream::connect(peer, &at, true, by, crate::metalswap::TURNED_AWAY_CEILING)
@@ -1810,19 +1930,38 @@ pub const READBACK_SWAP: &str = "swap.txt";
 /// started before that machine has booted or long after — and read on across
 /// a swap of netd itself ([`crate::metalswap::swap`]).
 fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
-    let (Some(key), Some(dir), Some(binary)) = (&args.talk, &args.readback, &args.binary) else {
-        return Err(Refusal::Usage("--swap wants --talk, --readback and --binary".into()));
-    };
-    // Before anything can refuse: a swap file left standing is one a judge
-    // reads as this swap's.
+    let ask = args.swap_ask(service)?;
+    let dir = args.readback.as_deref().expect("`swap_ask` refuses a swap with no readback");
+    clear_swap(dir)?;
+    swap_on(&args.machine, &ask, dir, std::time::Duration::from_secs(args.wait_secs))
+}
+
+/// What a swap asks: the service, its new binary, the key the running machine
+/// authorizes, and whether the machine is handed back after it.
+#[derive(Debug, Clone)]
+pub(crate) struct SwapAsk<'a> {
+    pub(crate) service: &'a str,
+    pub(crate) binary: &'a Path,
+    pub(crate) key: &'a Path,
+    pub(crate) hand_back: bool,
+}
+
+/// Take the last swap's file away before anything can refuse: a swap file
+/// left standing is one a judge reads as this swap's.
+pub(crate) fn clear_swap(dir: &Path) -> Result<(), Refusal> {
     let at = dir.join(READBACK_SWAP);
     match std::fs::remove_file(&at) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Refusal::File { path: at.display().to_string(), why: e.to_string() }),
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Refusal::File { path: at.display().to_string(), why: e.to_string() }),
     }
-    let cable = Talking::prepare(key, dir)?;
-    let by = std::time::Duration::from_secs(args.wait_secs);
+}
+
+/// [`swap_running`]'s exchange, for whichever caller found the moment to
+/// start it: the machine is dialled from now until `by`.
+pub(crate) fn swap_on(machine: &Machine, ask: &SwapAsk<'_>, dir: &Path, by: std::time::Duration) -> Result<(), Refusal> {
+    let (service, binary) = (ask.service, ask.binary);
+    let cable = Talking::prepare(ask.key, dir, machine)?;
     let stream = cable.connect(READBACK_SWAP_STREAM, by)?;
     let scratch = dir.join("swap");
     std::fs::create_dir_all(&scratch)
@@ -1831,7 +1970,7 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     let swapped = crate::metalswap::swap(
         &stream,
         &cable.ssh,
-        None,
+        machine.ssh,
         &crate::metalswap::Ask { service, binary, named: None },
         by,
         &scratch,
@@ -1850,12 +1989,13 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     let judged = crate::metalswap::judge(&swapped, crate::metalswap::Expect::InService);
     // Whichever way it was judged: a boot held for this host is handed back
     // either way, over a connection held until the machine drops it.
-    if args.hand_back {
-        let at = match stream.peer() {
-            Some(std::net::SocketAddr::V4(peer)) => std::net::SocketAddr::from((*peer.ip(), crate::metaltalk::SSH_PORT)),
-            _ => std::net::SocketAddr::from((swapped.peer, crate::metaltalk::SSH_PORT)),
+    if ask.hand_back {
+        let at = match (machine.ssh, stream.peer()) {
+            (Some(at), _) => at,
+            (None, Some(std::net::SocketAddr::V4(peer))) => std::net::SocketAddr::from((*peer.ip(), crate::metaltalk::SSH_PORT)),
+            (None, _) => std::net::SocketAddr::from((swapped.peer, crate::metaltalk::SSH_PORT)),
         };
-        let asked = cable.ssh.exec(at, crate::metaltalk::REBOOT, &scratch);
+        let asked = cable.ssh.fire(at, crate::metaltalk::REBOOT);
         println!("handed back: `{}` at {at} answered {asked:?}", crate::metaltalk::REBOOT);
     }
     for line in judged.map_err(Refusal::Swap)? {
@@ -1944,7 +2084,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         install_sudoers(&args.target, password)?;
         return Ok(None);
     }
-    if let Some(service) = &args.swap {
+    if let (Some(service), None) = (&args.swap, &args.image) {
         return swap_running(args, service).map(|()| None);
     }
     let driver = Driver { target: args.target.clone(), dry_run: args.dry_run };
@@ -1956,6 +2096,19 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
              boots nothing could fall through to",
         )));
     };
+    if !args.via_ubuntu {
+        let Some(dir) = &args.readback else {
+            return Err(Refusal::Usage(
+                "a boot of a machine running ToyOS is read back over its sshd into --readback, and this \
+                 names none"
+                    .to_string(),
+            ));
+        };
+        return crate::metalbench::run(args, asked, dir);
+    }
+    if args.resident {
+        return hand_to_the_bench(args, &driver, asked).map(|()| None);
+    }
     let image = admit(asked, &args.target)?;
     // **Before the flash, and before anything can refuse.** Every refusal below
     // returns without reaching `write_readback`, so a directory left holding the
@@ -1981,7 +2134,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     println!("image {}: armed with {armed:?}", image.path.display());
     // The client and its key before the machine is asked anything.
     let cable = match (&args.talk, &args.readback) {
-        (Some(key), Some(dir)) => Some(Talking::prepare(key, dir)?),
+        (Some(key), Some(dir)) => Some(Talking::prepare(key, dir, &args.machine)?),
         _ => None,
     };
 
@@ -2095,6 +2248,16 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         write_readback(dir, &loader, &log, back, stick, wire.as_ref(), replied)?;
         println!("readback written to {}", dir.display());
     }
+    judge(&armed, &loader, &log, heard.as_ref())
+}
+
+/// What a talking boot's conversation came to, and the stream it read.
+pub(crate) type Heard = (Result<crate::metaltalk::Conversation, String>, Vec<String>);
+
+/// **The verdict on one boot, whichever path read it**: the loader's passes of
+/// it and every `logd` file it wrote, judged against what the image is armed
+/// with, and the conversation where it talked.
+pub(crate) fn judge(armed: &[String], loader: &str, log: &str, heard: Option<&Heard>) -> Result<Option<u64>, Refusal> {
     // **Named by evidence, before the boot record is missed.** A boot that
     // never happened and a boot that failed both leave no `Boot: complete`,
     // and `Unfit::NoBootRecord` says the second where it is often the first.
@@ -2108,7 +2271,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) {
         return Err(Refusal::HungWithoutARecord);
     }
-    if let Some(said) = reported_and_booted_nothing(&loader, &log) {
+    if let Some(said) = reported_and_booted_nothing(loader, log) {
         return Err(Refusal::ReportedAndBootedNothing { said });
     }
     // **An image armed to stop itself is judged by the record its own bound
@@ -2118,19 +2281,50 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // it was not flashed as. *Which* bound sealed it is the page's to say
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
-    let ms = if stages_a_wedge(&armed) {
-        wedged_boot(&loader, &log)?
+    let ms = if stages_a_wedge(armed) {
+        wedged_boot(loader, log)?
     } else {
-        let ms = bootlog::verdict(&log).map_err(Refusal::Log)?;
-        bootlog::handed_back(&loader).map_err(Refusal::Log)?;
+        let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
+        bootlog::handed_back(loader).map_err(Refusal::Log)?;
         ms
     };
     // After the stick's own verdict, which stays the one that names a boot
     // that never reached its network.
-    if let Some((heard, lines)) = &heard {
+    if let Some((heard, lines)) = heard {
         talk_verdict(heard, lines)?;
     }
     Ok(Some(ms))
+}
+
+/// **Hand the machine to a bench image, once, through Ubuntu**: the image is
+/// armed with nothing — it is the machine's own from here on, with no job list
+/// and no bound, as every image the owner runs — flashed, booted once with
+/// `efibootmgr --bootnext`, and then asked over its own sshd to put its entry
+/// first in the firmware's order ([`crate::metalbench::take_the_machine`]).
+/// Ubuntu is not booted again by the firmware after this.
+fn hand_to_the_bench(args: &Args, driver: &Driver, asked: &Path) -> Result<(), Refusal> {
+    let image = admit(asked, &args.target)?;
+    let armed = crate::image::params_of(asked).map_err(|why| Refusal::File { path: asked.display().to_string(), why })?;
+    if let Some(name) = armed.first() {
+        return Err(Refusal::Armed {
+            name: name.clone(),
+            why: "a bench image is the machine's own, and is armed with nothing",
+        });
+    }
+    driver.require_sudo()?;
+    let identity = Identity::parse(&driver.ssh("reading the disk", &args.target.identity())?)?;
+    identity.check(&STICK)?;
+    driver.flash(&image)?;
+    let entry = driver.boot_entry(&image.esp)?;
+    driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
+    driver.as_root("rebooting", Job::Reboot, None, None)?;
+    if driver.dry_run {
+        println!("dry run: nothing was written and the machine was not rebooted");
+        return Ok(());
+    }
+    driver.wait(GOING_DOWN_SECS, "go down", false)?;
+    let scratch = toyos_tmpdir::TempDir::new("bench");
+    crate::metalbench::take_the_machine(&args.target.key, &args.machine, args.wait_secs, &scratch)
 }
 
 /// Where a conversation's facts are written, beside the stick's files.
@@ -2140,7 +2334,7 @@ pub const READBACK_TALK: &str = "talk.txt";
 /// reason — a human's line; a judge reads the absence of a conversation.
 const TALK_UNOPENED: &str = "talk_unopened";
 
-fn write_talk(
+pub(crate) fn write_talk(
     dir: &Path,
     heard: &Result<crate::metaltalk::Conversation, String>,
 ) -> Result<(), Refusal> {
@@ -2153,7 +2347,7 @@ fn write_talk(
         .map_err(|e| Refusal::File { path: at.display().to_string(), why: e.to_string() })
 }
 
-fn talk_verdict(
+pub(crate) fn talk_verdict(
     heard: &Result<crate::metaltalk::Conversation, String>,
     lines: &[String],
 ) -> Result<(), Refusal> {
@@ -2183,7 +2377,7 @@ fn talk_verdict(
 /// other can reach first, and the T14 read back a `hard-lockup-probe` boot as a
 /// failure for exactly that reason — this judge knew one line and the page
 /// carried the other.
-fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
+pub(crate) fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
     if bootlog::handed_back(loader).is_ok() {
         return Err(Refusal::Wedge {
             why: "it reached the shutdown's own last word, so nothing about it was wedged",
@@ -2285,8 +2479,14 @@ pub const PING_AT_KEY: &str = "ping_at";
 
 /// Every file a readback directory carries, so a run that writes none of them
 /// leaves none of the last run's behind.
-pub const READBACK_FILES: &[&str] =
-    &[READBACK_LOADER, READBACK_KERNEL, READBACK_BOOT, READBACK_VOLUME, READBACK_STREAM, READBACK_TALK];
+pub const READBACK_FILES: &[&str] = &[
+    READBACK_LOADER,
+    READBACK_KERNEL,
+    READBACK_BOOT,
+    READBACK_VOLUME,
+    READBACK_STREAM,
+    READBACK_TALK,
+];
 
 /// Empty a readback directory, before this run can leave any of it standing.
 ///
@@ -2313,7 +2513,7 @@ pub fn clear_readback(dir: &Path) -> Result<(), Refusal> {
     Ok(())
 }
 
-fn write_readback(
+pub(crate) fn write_readback(
     dir: &Path,
     loader: &str,
     log: &str,
@@ -2540,7 +2740,7 @@ mod tests {
     /// with no job list and no bound.
     #[test]
     fn installing_the_rule_is_not_also_a_boot() {
-        let alone = ["--install-sudoers", "/tmp/pw"].map(String::from);
+        let alone = ["--via-ubuntu", "--install-sudoers", "/tmp/pw"].map(String::from);
         let args = Args::parse(&alone).expect("installing the rule alone");
         assert!(args.install_sudoers.is_some());
         assert!(args.about_a_boot.is_empty());
@@ -2553,8 +2753,9 @@ mod tests {
             vec!["--wait-secs", "60"],
             vec!["--nic", "0000:00:1f.6"],
             vec!["--talk", "/tmp/k"],
+            vec!["--resident"],
         ] {
-            let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
+            let mut words = vec!["--via-ubuntu".to_string(), "--install-sudoers".to_string(), "/tmp/pw".to_string()];
             words.extend(flag.iter().map(|w| (*w).to_string()));
             let refusal = Args::parse(&words).unwrap_err();
             let said = refusal.to_string();
@@ -2566,7 +2767,7 @@ mod tests {
 
         // The flags that say *which machine* are not a boot, and the rule needs
         // them: an install against another host or key is still an install.
-        let hosted = ["--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
+        let hosted = ["--via-ubuntu", "--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
             .map(String::from);
         assert!(Args::parse(&hosted).is_ok());
     }
@@ -2582,10 +2783,10 @@ mod tests {
         assert!(!refusal.about_the_boot());
     }
 
-    /// **A swap flashes nothing and reboots nothing**, so every flag that
-    /// describes a boot is refused beside it — `--image` among them, since the
-    /// machine is found by its name and not by the image it is running — and
-    /// it is refused without the three things it acts with. A `--binary` or a
+    /// **A swap judges no boot of its own**, so every flag that describes one
+    /// is refused beside it — but `--image`, which on the bench is the boot
+    /// the same loop delivers and swaps in — and it is refused without the
+    /// three things it acts with. A `--binary` or a
     /// `--hand-back` with no swap is no swap.
     #[test]
     fn a_swap_is_not_a_boot_and_names_what_it_acts_with() {
@@ -2594,17 +2795,16 @@ mod tests {
         let args = Args::parse(&whole).expect("a whole swap");
         assert_eq!(args.swap.as_deref(), Some("netd"));
 
-        for flag in [
-            vec!["--fat32-check"],
-            vec!["--dry-run"],
-            vec!["--nic", "0000:00:1f.6"],
-            vec!["--image", "x.img"],
-        ] {
+        for flag in [vec!["--dry-run"], vec!["--nic", "0000:00:1f.6"]] {
             let mut words = whole.to_vec();
             words.extend(flag.iter().map(|w| (*w).to_string()));
             let said = Args::parse(&words).unwrap_err().to_string();
             assert!(said.contains(flag[0]) && said.contains("will not make"), "{said}");
         }
+        let mut checked = whole.to_vec();
+        checked.push("--fat32-check".into());
+        let said = Args::parse(&checked).unwrap_err().to_string();
+        assert!(said.contains("--fat32-check") && said.contains("--via-ubuntu"), "{said}");
         for missing in ["--binary", "--talk", "--readback"] {
             let at = whole.iter().position(|w| w == missing).unwrap();
             let words: Vec<String> = whole
@@ -2615,6 +2815,11 @@ mod tests {
                 .collect();
             assert!(Args::parse(&words).is_err(), "a swap without {missing} was taken");
         }
+        // On the bench a swapping boot is one invocation: the image it
+        // delivers, and the swap the same loop makes once the bench is down.
+        let mut boot = whole.to_vec();
+        boot.extend(["--image", "x.img"].map(String::from));
+        assert!(Args::parse(&boot).is_ok(), "a bench's swapping boot");
         let lone = ["--binary", "n"].map(String::from);
         assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
         let lone = ["--hand-back"].map(String::from);
@@ -2626,6 +2831,44 @@ mod tests {
         bent[1] = "../netd".to_string();
         assert!(Args::parse(&bent).unwrap_err().to_string().contains("no service"));
     }
+
+    /// **A flag only Ubuntu carries out is refused, never dropped**, on a run
+    /// that reaches a machine running ToyOS; a swap has no Ubuntu half; a bench
+    /// handed the machine is judged by nothing; and a boot of a machine running
+    /// ToyOS is read into a readback or not run.
+    #[test]
+    fn the_ubuntu_path_is_named_and_nothing_falls_back_to_it() {
+        for flag in [
+            vec!["--install-sudoers", "/tmp/pw"],
+            vec!["--fat32-check"],
+            vec!["--device", "/dev/sdb"],
+            vec!["--host", "t14@t14"],
+            vec!["--resident"],
+        ] {
+            let words: Vec<String> = flag.iter().map(|w| (*w).to_string()).collect();
+            let said = Args::parse(&words).unwrap_err().to_string();
+            assert!(said.contains(flag[0]) && said.contains("--via-ubuntu"), "{said}");
+            let mut named = vec!["--via-ubuntu".to_string()];
+            named.extend(words);
+            assert!(Args::parse(&named).is_ok(), "{flag:?} beside --via-ubuntu");
+        }
+        let swap = ["--via-ubuntu", "--swap", "netd", "--binary", "n", "--talk", "/tmp/k", "--readback", "/tmp/r"];
+        for image in [&[][..], &["--image", "x.img"][..]] {
+            let words: Vec<String> = swap.iter().chain(image).map(|w| (*w).to_string()).collect();
+            assert!(Args::parse(&words).unwrap_err().to_string().contains("no Ubuntu half"), "{image:?}");
+        }
+        for beside in [vec!["--readback", "/tmp/r"], vec!["--nic", "0000:00:1f.6"], vec!["--fat32-check"]] {
+            let mut words = vec!["--via-ubuntu", "--resident", "--image", "b.img"];
+            words.extend(beside.iter().copied());
+            let words: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();
+            assert!(Args::parse(&words).unwrap_err().to_string().contains("judges no boot"), "{beside:?}");
+        }
+        let unread = ["--image", "x.img"].map(String::from);
+        let refusal = run(&Args::parse(&unread).expect("a boot of the bench")).unwrap_err();
+        assert!(refusal.to_string().contains("--readback"), "{refusal}");
+        assert!(!refusal.about_the_boot());
+    }
+
 
     /// **There is nothing to fall through to.** A default image was what let the
     /// fall-through reach a disk at all; a command line that names none is
@@ -3132,7 +3375,7 @@ mod tests {
         assert!(Refusal::Wedge { why: "x" }.about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
-        assert!(Refusal::Silent { what: "come back", secs: return_secs() }.about_the_boot());
+        assert!(Refusal::Silent { what: "come back", secs: return_secs(), last: None }.about_the_boot());
         assert!(!Refusal::Node("/dev/nvme0n1p1".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
@@ -3188,7 +3431,7 @@ mod tests {
         assert_eq!(args.wait_secs, return_secs());
         assert!(!args.dry_run);
 
-        let words: Vec<String> = ["--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
+        let words: Vec<String> = ["--via-ubuntu", "--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
             .iter()
             .map(|w| (*w).to_string())
             .collect();
@@ -3198,9 +3441,9 @@ mod tests {
         assert_eq!(args.target.user, "runner");
         assert_eq!(args.target.host, "box");
 
-        let nvme = ["--device".to_string(), "/dev/nvme0n1".to_string()];
+        let nvme = ["--via-ubuntu", "--device", "/dev/nvme0n1"].map(String::from);
         assert_eq!(Args::parse(&nvme).unwrap().target.node.whole(), "/dev/nvme0n1");
-        let part = ["--device".to_string(), "/dev/nvme0n1p2".to_string()];
+        let part = ["--via-ubuntu", "--device", "/dev/nvme0n1p2"].map(String::from);
         assert_eq!(Args::parse(&part), Err(Refusal::Node("/dev/nvme0n1p2".to_string())));
         assert!(matches!(Args::parse(&["--image".to_string()]), Err(Refusal::Usage(_))));
         assert!(matches!(Args::parse(&["--flash".to_string()]), Err(Refusal::Usage(_))));

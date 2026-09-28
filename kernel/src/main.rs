@@ -336,6 +336,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     match params::slot(cmdline) {
         (Some(slot), None) => log!("{} {slot}, the one the slot table marks", params::SLOT_RECORD),
         (Some(slot), Some(refused)) => match refused.split_once(':') {
+            Some((marked, toyos_abi::boot::SLOT_ONCE)) => log!("{} {slot}, once, as the running system asked; the slot table marks {marked}", params::SLOT_RECORD),
             Some((marked, why)) => log!("{} {slot}, because the marked slot {marked} was refused: {why}", params::SLOT_RECORD),
             None => log!("{} {slot}, because the marked slot was refused: {refused}", params::SLOT_RECORD),
         },

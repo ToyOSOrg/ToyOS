@@ -13,7 +13,7 @@ use uefi::{
     prelude::*,
     CStr16,
     proto::console::gop::{GraphicsOutput, PixelFormat},
-    proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
+    proto::device_path::DevicePath,
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
     table::{boot::{MemoryAttribute, MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
@@ -42,9 +42,11 @@ mod arch;
 mod attempt;
 mod blackbox;
 mod bootnext;
+mod bootvars;
 mod floor;
 mod gcd;
 mod loaderlog;
+mod request;
 mod rootbridge;
 mod rootimage;
 mod slot;
@@ -135,6 +137,42 @@ fn load_file_bytes(handle: Handle, system_table: &SystemTable<Boot>, path: &CStr
     bytes
 }
 
+/// Held to the host's spelling by `toyos_build::bootlog`'s gate.
+const LOADER_IS: &str = "Loader: the removable-media file on this ESP hashes to";
+
+/// Held to the host's spelling by `toyos_build::bootlog`'s gate.
+const BOOT_PARAMETER: &str = "Boot parameter:";
+
+/// This loader's own file, at the removable-media path of the volume firmware
+/// loaded it from — where every ToyOS image puts it — or why it would not read.
+/// Not [`load_file_bytes`], which dies on a missing file: a loader that cannot
+/// name itself still boots.
+fn own_file(handle: Handle, system_table: &SystemTable<Boot>) -> Result<vec::Vec<u8>, alloc::string::String> {
+    let mut fs = system_table
+        .boot_services()
+        .get_image_file_system(handle)
+        .map_err(|e| alloc::format!("its volume ({e})"))?;
+    let path = uefi::CString16::try_from(arch::REMOVABLE_PATH).expect("the removable path is ASCII");
+    let mut file = fs
+        .open_volume()
+        .map_err(|e| alloc::format!("its volume ({e})"))?
+        .open(&path, FileMode::Read, FileAttribute::default())
+        .map_err(|e| alloc::format!("{} ({e})", arch::REMOVABLE_PATH))?
+        .into_regular_file()
+        .ok_or_else(|| alloc::format!("{} is a directory", arch::REMOVABLE_PATH))?;
+    let info = file.get_boxed_info::<FileInfo>().map_err(|e| alloc::format!("its size ({e})"))?;
+    let size = info.file_size();
+    if size > MAX_ESP_FILE {
+        return Err(alloc::format!("{size} bytes, past the {MAX_ESP_FILE}-byte bound"));
+    }
+    let mut bytes = alloc_uninit(size as usize);
+    let read = file.read(&mut bytes).map_err(|e| alloc::format!("{} ({e})", arch::REMOVABLE_PATH))?;
+    if read != bytes.len() {
+        return Err(alloc::format!("a short read: {read} of {size} bytes"));
+    }
+    Ok(bytes)
+}
+
 /// A buffer to be filled by a read, allocated *without* zeroing it first.
 /// The caller must check that the read filled the whole buffer.
 ///
@@ -189,34 +227,13 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
     let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
     let path = bs.open_protocol_exclusive::<DevicePath>(device).ok()?;
-
-    let is_hard_drive = |node: &&DevicePathNode| {
-        node.full_type() == (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE)
-    };
-    // Exactly one, not the last one. A path with two HARDDRIVE nodes describes
-    // a partition inside a partition, and picking either is guessing which of
-    // the two the kernel's block device will be looking at.
-    let mut nodes = path.node_iter().filter(is_hard_drive);
-    let node = nodes.next()?;
-    if nodes.next().is_some() {
-        println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
-        return None;
+    match toyos_update::entry::partition(path.as_bytes()) {
+        Ok((_, part)) => Some(BootPartition { guid: part.guid, start_lba: part.start, blocks: part.size }),
+        Err(why) => {
+            println!("Boot partition: {why}, so it is ignored");
+            None
+        }
     }
-
-    let hd: &uefi::proto::device_path::media::HardDrive = node.try_into().ok()?;
-    if hd.partition_format() != PartitionFormat::GPT {
-        println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
-        return None;
-    }
-    let PartitionSignature::Guid(guid) = hd.partition_signature() else {
-        println!("Boot partition: firmware named it with no GUID signature, so it is ignored");
-        return None;
-    };
-    Some(BootPartition {
-        guid: guid.to_bytes(),
-        start_lba: hd.partition_start(),
-        blocks: hd.partition_size(),
-    })
 }
 
 /// Name the partition the kernel's log goes on, without reading it.
@@ -830,9 +847,8 @@ fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
 /// a pass that does not hand off leaves nothing registered in the firmware — and
 /// the reset is what makes that invariant not have to be complete: the next
 /// operating system comes up on firmware this image has never run on, for one
-/// reboot. `BootNext` was consumed by this pass and this pass sets none, so the
-/// firmware's own order takes the machine, and the page was cleared as it was
-/// read, so a boot that does come back here boots normally.
+/// reboot. The page was cleared as it was read, so a boot that does come back
+/// here boots normally.
 fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
     println!("{}", loaderlog::ENDS_AT_CHAIN);
     loaderlog::close_without_a_kernel();
@@ -843,6 +859,38 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
         let _ = system_table.boot_services().close_event(event);
     }
     system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS, None)
+}
+
+/// A failed pass hands the machine to the entry after this one, or powers it
+/// off where there is none, never resetting into the same failure.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    static PANICKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if PANICKED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+    println!("[PANIC]: {info}");
+    let system_table = uefi_services::system_table();
+    let rt = system_table.runtime_services();
+    let ours = bootnext::our_partition(system_table.boot_services().image_handle(), &system_table);
+    let fell = bootvars::after_this_one(rt, ours.as_ref()).and_then(|(current, next)| {
+        let next = next.ok_or_else(|| alloc::format!("BootOrder holds no entry after Boot{current:04X}"))?;
+        bootvars::boot_next(rt, next).map(|()| (current, next))
+    });
+    let reset = match fell {
+        Ok((current, next)) => {
+            println!("{} this pass failed, so BootNext=Boot{next:04X}, the entry after Boot{current:04X} in BootOrder", bootvars::HEAD);
+            ResetType::WARM
+        }
+        Err(why) => {
+            println!("{} this pass failed, and there is no entry to fall to, so the machine powers off: {why}", bootvars::HEAD);
+            ResetType::SHUTDOWN
+        }
+    };
+    loaderlog::close_without_a_kernel();
+    rt.reset(reset, Status::ABORTED, None)
 }
 
 #[entry]
@@ -952,6 +1000,27 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             Err(why) => println!("Anti-rollback floor: not raised, because the proven image is not verified: {why}"),
         }
     }
+    if let Some(tried) = accounted.tried {
+        println!(
+            "Anti-rollback floor: not raised, because slot {}'s image was booted once and is not the one the machine keeps",
+            tried.slot.letter()
+        );
+    }
+    // Which loader this is, by its file's bytes: the one part of a machine no
+    // update installs, so a host delivering an image holds the image's loader
+    // to this one.
+    match own_file(handle, &system_table) {
+        Ok(bytes) => {
+            let mut hex = [0u8; 64];
+            println!("{LOADER_IS} {}", toyos_update::hex(&toyos_update::sha256(&bytes), &mut hex));
+        }
+        Err(why) => println!("{LOADER_IS} unknown: {why}"),
+    }
+    // Before either end of the chain below: a request the running system left
+    // is due at the next pass, and a report pass is that pass as often as not.
+    println!("{}", bootvars::state(system_table.runtime_services()));
+    let ours = bootnext::our_partition(handle, &system_table);
+    let fired = request::firmware(handle, &system_table, ours.as_ref());
     if retry {
         // **The hang, and the only bound there is on one.** The last boot of
         // this image was handed the machine and never reported — no panic, no
@@ -976,6 +1045,11 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             // The last boot is accounted for, so this pass boots no kernel.
             end_this_pass(&system_table, exit_event);
         }
+    }
+    if let request::Fired::Next = fired {
+        // The firmware boots the entry the running system asked for at this
+        // reset, and deletes `BootNext` as it does.
+        end_this_pass(&system_table, exit_event);
     }
     match firmware_watchdog {
         Ok(()) => println!(
@@ -1011,9 +1085,15 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // is one the chosen slot's signed header names. ROOT is read before the
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.
-    let chosen = slot::choose(handle, &system_table, image_floor.value, &record)
+    let once = request::once(handle, &system_table);
+    let chosen = slot::choose(handle, &system_table, image_floor.value, &record, once)
         .unwrap_or_else(|why| panic!("Slots: {why}"));
-    record.booted = Some(Booted { slot: chosen.which, version: chosen.version, digest: chosen.digest });
+    record.booted = Some(Booted {
+        slot: chosen.which,
+        version: chosen.version,
+        digest: chosen.digest,
+        once: chosen.once.is_some(),
+    });
     match attempt::write_chosen(&log_guid, &record) {
         Ok(()) => println!("{ATTEMPTS} slot {}'s image is written down as the one this pass boots", chosen.which.letter()),
         Err(why) => println!(
@@ -1038,12 +1118,15 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     if let Some((refused, why)) = chosen.refused {
         append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, refused.letter(), why.word()));
     }
+    if let Some(marked) = chosen.once {
+        append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, marked.letter(), toyos_abi::boot::SLOT_ONCE));
+    }
     if let Some(word) = blackbox::param(page) {
         append(&word);
     }
     let params = core::str::from_utf8(&cmdline)
         .unwrap_or_else(|e| panic!("slot {}'s cmdline is not UTF-8: {e}", chosen.which.letter()));
-    println!("Boot parameter: {params:?}");
+    println!("{BOOT_PARAMETER} {params:?}");
 
     let root_image = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WITHHOLD_ROOT_PARAM) {
         println!("ROOT: withheld on {}; the kernel is handed no image", toyos_abi::boot::WITHHOLD_ROOT_PARAM);

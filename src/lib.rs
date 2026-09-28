@@ -28,6 +28,7 @@ pub mod lan;
 pub mod libc;
 pub mod licence;
 pub mod metal;
+pub mod metalbench;
 pub mod metaldevices;
 pub mod metalimage;
 pub mod metalprofile;

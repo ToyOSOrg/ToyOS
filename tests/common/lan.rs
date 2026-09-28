@@ -608,7 +608,7 @@ pub fn lan_talk(
         &case,
         &[],
         &[],
-        &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
+        &[(toyos_build::build::AUTHORIZED_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
         &[],
     );
     let image = super::lane::dir().join("lan-talk.img");
@@ -710,7 +710,7 @@ impl TalkBoot {
             &case,
             &[],
             &[],
-            &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
+            &[(toyos_build::build::AUTHORIZED_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
             actuators,
         );
         let image = super::lane::dir().join(format!("{name}.img"));

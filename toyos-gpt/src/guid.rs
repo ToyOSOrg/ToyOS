@@ -104,6 +104,29 @@ impl Guid {
     }
 }
 
+impl Guid {
+    /// The text [`Display`](fmt::Display) prints, read back, in either case.
+    pub fn parse(text: &str) -> Option<Self> {
+        const DASHES: [usize; 4] = [8, 13, 18, 23];
+        let bytes = text.as_bytes();
+        if bytes.len() != 36 || DASHES.iter().any(|&at| bytes.get(at) != Some(&b'-')) {
+            return None;
+        }
+        let mut digits = bytes
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !DASHES.contains(at))
+            .map(|(_, &b)| char::from(b).to_digit(16));
+        let mut hex = [0u8; 16];
+        for out in hex.iter_mut() {
+            let (high, low) = (digits.next()??, digits.next()??);
+            *out = u8::try_from(high.checked_mul(16)?.checked_add(low)?).ok()?;
+        }
+        let h = hex;
+        Some(Self([h[3], h[2], h[1], h[0], h[5], h[4], h[7], h[6], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]]))
+    }
+}
+
 impl fmt::Display for Guid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let b = &self.0;
@@ -155,6 +178,22 @@ mod tests {
         let text = heapless_format(Guid::TOYOS_BOOT);
         assert_eq!(&text[..], Guid::TOYOS_BOOT_TEXT.as_bytes());
         assert_ne!(Guid::TOYOS_ROOT, Guid::TOYOS_DATA);
+    }
+
+    #[test]
+    fn the_text_it_prints_parses_back() {
+        for guid in [Guid::EFI_SYSTEM, Guid::TOYOS_SLOTS, Guid([0xA5; 16])] {
+            let text = heapless_format(guid);
+            let text = core::str::from_utf8(&text).unwrap();
+            assert_eq!(Guid::parse(text), Some(guid), "{text}");
+            let mut lower = [0u8; 36];
+            lower.copy_from_slice(text.as_bytes());
+            lower.make_ascii_lowercase();
+            assert_eq!(Guid::parse(core::str::from_utf8(&lower).unwrap()), Some(guid), "{text}");
+        }
+        assert_eq!(Guid::parse("C12A7328F81F-11D2-BA4B-00A0C93EC93B0"), None);
+        assert_eq!(Guid::parse("C12A7328-F81F-11D2-BA4B-00A0C93EC93"), None);
+        assert_eq!(Guid::parse("G12A7328-F81F-11D2-BA4B-00A0C93EC93B"), None);
     }
 
     #[test]

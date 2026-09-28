@@ -4274,6 +4274,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-fat32",
+ "toyos-gpt",
  "toyos-update",
 ]
 

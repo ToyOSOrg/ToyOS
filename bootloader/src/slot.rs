@@ -2,7 +2,9 @@
 //! owner's signature before it is.
 //!
 //! The slot table marks one slot; that one is tried first and the other only
-//! when the marked one is refused (`toyos_update::policy::order`). A slot is
+//! when the marked one is refused (`toyos_update::policy::order`) — unless the
+//! running system asked for the other once, which is then tried first, booted
+//! as the trial it is, and the marked one behind it. A slot is
 //! booted only once, in this order: its signed header is on its FAT
 //! partition, the signature is [`KEY`]'s, its image did not die on its last
 //! boot, its version is at or above the floor a boot has proven, and its
@@ -52,6 +54,9 @@ pub struct Chosen {
     pub root: RootImage,
     /// The slot tried before this one, and why it was refused.
     pub refused: Option<(Which, Refusal)>,
+    /// It is booted once, on the running system's request, and is not the
+    /// slot the table marks, which is.
+    pub once: Option<Which>,
 }
 
 /// The slot to boot, or every refusal and why there is nothing to boot.
@@ -60,6 +65,7 @@ pub fn choose(
     system_table: &SystemTable<Boot>,
     floor: u64,
     record: &Record,
+    once: Option<Which>,
 ) -> Result<Chosen, String> {
     let bs = system_table.boot_services();
     let disk = crate::rootimage::boot_disk(handle, bs)?;
@@ -74,13 +80,24 @@ pub fn choose(
     );
     let mut refused: Option<(Which, Refusal)> = None;
     let mut dead: alloc::vec::Vec<Which> = alloc::vec::Vec::new();
-    for which in policy::order(&table).into_iter().flatten() {
+    // Once, and only where it is not the marked slot anyway: a trial of the
+    // image the machine keeps is an ordinary boot of it.
+    let once = once.filter(|w| *w != table.marked);
+    if let Some(which) = once {
+        println!(
+            "{HEAD} {}: asked for once; the table marks {}, which the boots after this one take",
+            which.letter(),
+            table.marked.letter()
+        );
+    }
+    let told = |chosen: Chosen, refused: Option<(Which, Refusal)>| {
+        let (once, refused) = policy::told(table.marked, once, chosen.which, refused);
+        Chosen { once, refused, ..chosen }
+    };
+    for which in policy::order(&table, once).into_iter().flatten() {
         let slot = table.slot(which).expect("`order` names only slots the table carries");
         match verify(bs, &mut disk, which, slot, floor, Some(record)) {
-            Ok(mut chosen) => {
-                chosen.refused = refused;
-                return Ok(chosen);
-            }
+            Ok(chosen) => return Ok(told(chosen, refused)),
             Err(why) => {
                 println!("{HEAD} {}: REFUSED, {why}", which.letter());
                 if why == Refusal::Died {
@@ -96,12 +113,7 @@ pub fn choose(
         let slot = table.slot(which).expect("a slot `order` named");
         println!("{HEAD} {}: no slot verifies but this one, whose image died on its last boot; it boots again", which.letter());
         match verify(bs, &mut disk, which, slot, floor, None) {
-            Ok(mut chosen) => {
-                if which != table.marked {
-                    chosen.refused = refused;
-                }
-                return Ok(chosen);
-            }
+            Ok(chosen) => return Ok(told(chosen, refused)),
             Err(why) => println!("{HEAD} {}: REFUSED, {why}", which.letter()),
         }
     }
@@ -153,7 +165,7 @@ fn verify(
         return Err(Refusal::Hash("root"));
     }
     println!("{HEAD} {letter}: kernel, cmdline and ROOT are the bytes the signed header names");
-    Ok(Chosen { which, version: header.version, digest, kernel, cmdline, root, refused: None })
+    Ok(Chosen { which, version: header.version, digest, kernel, cmdline, root, refused: None, once: None })
 }
 
 /// `slot`'s signed header, held to [`KEY`], and its SHA-256.

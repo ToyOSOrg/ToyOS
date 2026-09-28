@@ -1,5 +1,6 @@
 mod cat;
 mod cp;
+mod date;
 mod echo;
 mod free;
 mod grep;
@@ -30,7 +31,7 @@ macro_rules! commands {
     };
 }
 
-commands!(cat, cp, echo, free, grep, hexdump, locale, ls, mkdir, mv, net, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone);
+commands!(cat, cp, date, echo, free, grep, hexdump, locale, ls, mkdir, mv, net, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

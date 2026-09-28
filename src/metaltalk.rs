@@ -72,7 +72,7 @@ const MDNS_PORT: u16 = 5353;
 const FOREVER: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// Where the stream is asked for.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Peer {
     /// A name this host's resolver answers — `toyos-t14.local`, over multicast
     /// DNS — asked again until the machine answers for it, and asked of the
@@ -794,6 +794,28 @@ impl Ssh {
         };
         let stdout = std::fs::read(&out).map_err(|e| format!("{}: {e}", out.display()))?;
         Ok(Exec { stdout, status })
+    }
+
+    /// Whether the machine at `at` takes this key within `secs`: a machine not
+    /// up, one whose sshd is not up and one that authorizes another key are one
+    /// answer to a caller waiting for the one that authorizes this.
+    pub fn probe(&self, at: SocketAddr, secs: u64) -> Result<(), String> {
+        let (host, port) = (at.ip().to_string(), at.port().to_string());
+        self.run(&["probe", &host, &port, path_str(&self.key)?, &secs.to_string()]).map(|_| ())
+    }
+
+    /// Every file of the machine's directory `remote`, onto this host under
+    /// `local`, over one session: the names fetched, each with its size.
+    pub fn fetch(&self, at: SocketAddr, remote: &str, local: &Path) -> Result<Vec<(String, u64)>, String> {
+        let (host, port) = (at.ip().to_string(), at.port().to_string());
+        let said = self.run(&["fetch", &host, &port, path_str(&self.key)?, remote, path_str(local)?])?;
+        said.lines()
+            .filter_map(|line| line.strip_prefix("entry "))
+            .map(|entry| {
+                let (name, size) = entry.rsplit_once(' ').ok_or_else(|| format!("the client fetched {entry:?}"))?;
+                Ok((name.to_string(), size.parse().map_err(|_| format!("the client fetched {entry:?}"))?))
+            })
+            .collect()
     }
 
     /// Ask for `command` and answer the machine's reply to the request, without

@@ -6,6 +6,11 @@ use toyos_bootmap::Typing;
 /// The machine the kernel image must be built for: the loader's own.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::Aarch64;
 
+/// The removable-media path firmware boots an EFI system partition by when no
+/// entry names a file on it (UEFI 2.10 §3.5.1.1): what every ToyOS image puts
+/// its loader at, and what an entry this loader writes for an ESP names.
+pub const REMOVABLE_PATH: &str = r"\EFI\BOOT\BOOTAA64.EFI";
+
 /// How the boot map's descriptors are encoded.
 pub use toyos_bootmap::aarch64 as encoding;
 

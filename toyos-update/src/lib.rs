@@ -25,10 +25,15 @@
 //! signing key ([`floor`]); the updater refuses an image older than what the
 //! machine runs. Neither can defend a machine whose firmware variables anyone
 //! with the machine in hand can reset.
+//!
+//! **What the running system asks of the loader** is the slot table's too
+//! ([`slots::Request`]): a slot booted once, and the firmware's boot variables
+//! it cannot write itself, as [`entry`] decides them.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod entry;
 pub mod floor;
 pub mod image;
 pub mod policy;

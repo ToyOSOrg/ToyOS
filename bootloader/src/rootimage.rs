@@ -23,9 +23,10 @@ use core::num::NonZeroU64;
 
 use toyos_gpt::{Guid, Located, Sectors};
 use toyos_rootimage::chunk;
+use toyos_update::entry;
 use toyos_update::slots::{self, Table};
 use uefi::prelude::*;
-use uefi::proto::device_path::{DevicePath, DevicePathNode, DeviceSubType, DeviceType};
+use uefi::proto::device_path::DevicePath;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::block::{BlockIO, BlockIoProtocol};
 use uefi::table::boot::{AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
@@ -89,8 +90,8 @@ impl RootImage {
 }
 
 /// The whole-disk block device carrying the partition firmware loaded this
-/// image from: the one handle whose device path is the partition's without
-/// its last node, the HARDDRIVE one.
+/// image from: the one handle whose device path is the disk
+/// `toyos_update::entry::partition` cuts from the partition's.
 pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
     let image = bs
         .open_protocol_exclusive::<LoadedImage>(handle)
@@ -98,13 +99,8 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
     let device = image.device().ok_or("firmware names no device this image was loaded from")?;
     let path = try_get_protocol::<DevicePath>(bs, device)
         .map_err(|e| alloc::format!("the boot device's path: {e:?}"))?;
-    let nodes: alloc::vec::Vec<&DevicePathNode> = path.node_iter().collect();
-    let Some((last, disk_nodes)) = nodes.split_last() else {
-        return Err("the boot device's path is empty".into());
-    };
-    if last.full_type() != (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE) {
-        return Err("the boot device is not a partition, so there is no disk to find the slots on".into());
-    }
+    let (disk_path, _) = entry::partition(path.as_bytes())
+        .map_err(|why| alloc::format!("the boot device's path: {why}, so there is no disk to find the slots on"))?;
 
     let handles = bs
         .find_handles::<BlockIO>()
@@ -117,7 +113,7 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
         .filter(|&candidate| candidate != device)
         .filter(|&candidate| {
             let Ok(path) = try_get_protocol::<DevicePath>(bs, candidate) else { return false };
-            path.node_iter().eq(disk_nodes.iter().copied())
+            path.as_bytes().strip_suffix(&entry::END_NODE) == Some(disk_path)
         })
         .collect();
     match disks[..] {
@@ -126,7 +122,7 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
     }
 }
 
-fn try_get_protocol<P: uefi::proto::ProtocolPointer + ?Sized>(
+pub(crate) fn try_get_protocol<P: uefi::proto::ProtocolPointer + ?Sized>(
     bs: &BootServices,
     handle: Handle,
 ) -> uefi::Result<ScopedProtocol<'_, P>> {
@@ -143,6 +139,13 @@ fn try_get_protocol<P: uefi::proto::ProtocolPointer + ?Sized>(
             OpenProtocolAttributes::GetProtocol,
         )
     }
+}
+
+/// The slot table as read, and where its current copy is.
+pub struct TableAt {
+    pub table: Table,
+    copy: usize,
+    first_lba: u64,
 }
 
 /// The boot disk, read through the firmware's block I/O.
@@ -185,6 +188,12 @@ impl<'a> Disk<'a> {
 
     /// The slot table on this disk's one TOYOS-SLOTS partition.
     pub fn slot_table(&mut self) -> Result<Table, String> {
+        self.table_at().map(|at| at.table)
+    }
+
+    /// The slot table, and where its current copy is: what a writer of the
+    /// next copy needs.
+    pub fn table_at(&mut self) -> Result<TableAt, String> {
         let mut found = [None; 2];
         let scan = toyos_gpt::locate_type(self, Guid::TOYOS_SLOTS, &mut found)
             .map_err(|e| alloc::format!("the boot disk's partition table: {e:?}"))?;
@@ -209,8 +218,21 @@ impl<'a> Disk<'a> {
             copy.copy_from_slice(self.scratch);
         }
         slots::current([&copies[0], &copies[1]])
-            .map(|(table, _)| table)
+            .map(|(table, copy)| TableAt { table, copy, first_lba: part.first_lba() })
             .map_err(|why| alloc::format!("the slot table's partition holds {why}"))
+    }
+
+    /// Make `next` the table, as every writer does (`slots::next_write`): the
+    /// copy that is not current, one sequence past it, flushed before this
+    /// answers — a request consumed is consumed only once it is on the disk.
+    pub fn write_table(&mut self, at: &TableAt, next: Table) -> Result<(), String> {
+        let (copy, block) = slots::next_write((at.table, at.copy), next);
+        let lbas = BLOCK as u64 / u64::from(self.lba_bytes);
+        self.scratch.copy_from_slice(&block);
+        self.io
+            .write_blocks(self.media_id, at.first_lba + copy as u64 * lbas, self.scratch)
+            .map_err(|e| alloc::format!("the slot table's copy {copy} would not write: {:?}", e.status()))?;
+        self.io.flush_blocks().map_err(|e| alloc::format!("the slot table's copy {copy} would not flush: {:?}", e.status()))
     }
 
     /// The first `len` bytes of `part`, in chunks of at most [`CHUNK_BOUND`],

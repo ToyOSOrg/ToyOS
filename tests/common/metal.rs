@@ -75,12 +75,13 @@ pub struct Arm {
     /// judge reads the stick alone.
     pub talk: bool,
     /// **The boot has one of its services swapped while it runs**, with no
-    /// reboot: its image is staged as a talking boot's is, the invocation
-    /// that flashes it is not told `--talk`, and a second invocation —
-    /// `toyos-metal --swap <this service>`, started beside the first — dials
-    /// the machine under its own name, sends the build's own binary of that
-    /// service and writes [`toyos_build::metal::READBACK_SWAP`] beside the
-    /// stick's files.
+    /// reboot: its image is staged as a talking boot's is, and the swap sends
+    /// the build's own binary of that service and writes
+    /// [`toyos_build::metal::READBACK_SWAP`] beside the boot's files. On the
+    /// bench the invocation that delivers the boot makes the swap too, once
+    /// the delivered boot answers as itself; through Ubuntu a second
+    /// invocation — `toyos-metal --swap <this service>`, started beside the
+    /// first — dials the machine under its own name.
     pub swap: Option<&'static str>,
 }
 
@@ -541,6 +542,17 @@ pub enum Mode {
     Offline,
 }
 
+/// Which way the invocations reach the machine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reach {
+    /// The bench: a T14 running ToyOS, each boot delivered with `update
+    /// --once` and read back over its sshd.
+    Bench,
+    /// The old path: the stick flashed through Ubuntu and its log partition
+    /// read off it, the outside FAT judge among the readers.
+    ViaUbuntu,
+}
+
 /// One image, and every test that rides it.
 struct Batch {
     config: &'static str,
@@ -558,6 +570,21 @@ struct Batch {
 }
 
 impl Batch {
+    /// The boot `arm` rides, with no job on it yet.
+    fn of(arm: &Arm) -> Self {
+        Batch {
+            config: arm.config,
+            params: arm.params.to_vec(),
+            features: arm.features,
+            jobs: Vec::new(),
+            files: Vec::new(),
+            links: Vec::new(),
+            nic: arm.nic,
+            talk: arm.talk,
+            swap: arm.swap,
+        }
+    }
+
     fn add(&mut self, jobs: impl IntoIterator<Item = String>) {
         for job in jobs {
             if !self.jobs.contains(&job) {
@@ -611,17 +638,7 @@ fn batches(
     for (name, decl) in tests {
         let Metal::Runs { arms, .. } = decl else { continue };
         for arm in *arms {
-            let batch = out.entry(arm.boot.to_string()).or_insert_with(|| Batch {
-                config: arm.config,
-                params: arm.params.to_vec(),
-                features: arm.features,
-                jobs: Vec::new(),
-                files: Vec::new(),
-                links: Vec::new(),
-                nic: arm.nic,
-                talk: arm.talk,
-                swap: arm.swap,
-            });
+            let batch = out.entry(arm.boot.to_string()).or_insert_with(|| Batch::of(arm));
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
@@ -795,7 +812,7 @@ fn build(
     // host is in it: the loop finds the machine by its name.
     if batch.talk || batch.swap.is_some() {
         let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
-        extra.push((super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
+        extra.push((toyos_build::build::AUTHORIZED_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
     }
     let plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
@@ -816,14 +833,25 @@ fn fingerprint(text: &str) -> u64 {
     h.finish()
 }
 
-/// The invocation that turns one image into one readback. Written down in the
-/// staged request and run by [`Mode::Drive`], so the two cannot differ.
+/// One arm's image, staged in `dir` exactly as [`run`] stages it — its job
+/// list with `reboot` behind it, the boot's own bound, and a talking or
+/// swapping boot's key and service binary beside it — for a rehearsal of the
+/// loop that delivers it. Where it put the image.
+pub fn stage(dir: &Path, arm: &Arm, rust_bins: &[(String, Vec<u8>)]) -> Result<PathBuf, String> {
+    let root = super::compile::repo_root();
+    let mut batch = Batch::of(arm);
+    batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
+    build(&root, dir, arm.boot, &batch, rust_bins, &[], true)
+}
+
 /// Where a talking boot's key lives, beside its image.
 fn talk_home(home: &Path) -> PathBuf {
     home.join("ssh")
 }
 
-fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<String> {
+/// The invocation that turns one image into one readback. Written down in the
+/// staged request and run by [`Mode::Drive`], so the two cannot differ.
+pub fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool, swap: Option<&str>, reach: Reach) -> Vec<String> {
     let mut words = vec![
         "run".to_string(),
         "--bin".to_string(),
@@ -833,12 +861,16 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
         image.display().to_string(),
         "--readback".to_string(),
         home.display().to_string(),
-        // Always: the outside judge on the volume the boot left costs one
-        // read of the partition, and a suite that only ever reads a mounted
-        // `/log` has no reader of those bytes that is not the family of code
-        // that wrote them.
-        "--fat32-check".to_string(),
     ];
+    if reach == Reach::ViaUbuntu {
+        // Always, on the one path that can: the outside judge on the volume
+        // the boot left costs one read of the partition, and a suite that
+        // only ever reads a mounted `/log` has no reader of those bytes that
+        // is not the family of code that wrote them. The bench has that
+        // volume mounted, so no read of it there is a quiescent one.
+        words.push("--via-ubuntu".to_string());
+        words.push("--fat32-check".to_string());
+    }
     if let Some(nic) = nic {
         words.push("--nic".to_string());
         words.push(nic.to_string());
@@ -846,6 +878,16 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
     if talk {
         words.push("--talk".to_string());
         words.push(talk_home(home).join("id_ed25519").display().to_string());
+    }
+    // On the bench the one loop makes the swap too, once the bench has gone
+    // down: a second process dialling the machine's name from the start would
+    // reach the bench first.
+    if let (Some(service), Reach::Bench) = (swap, reach) {
+        for word in ["--swap", service, "--binary", &home.join(service).display().to_string(), "--talk"] {
+            words.push(word.to_string());
+        }
+        words.push(talk_home(home).join("id_ed25519").display().to_string());
+        words.push("--hand-back".to_string());
     }
     words
 }
@@ -922,6 +964,7 @@ pub enum Verdict {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     mode: Mode,
+    reach: Reach,
     dir: &Path,
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
@@ -994,7 +1037,7 @@ pub fn run(
     if !judging {
         // The key a talking boot authorizes is minted by the harness's own ssh
         // client, which the suite builds only on its QEMU path.
-        if batches.values().any(|b| b.talk || b.swap.is_some()) {
+        if reach == Reach::Bench || batches.values().any(|b| b.talk || b.swap.is_some()) {
             toyos_build::build::build_host_judges(&root, quiet);
         }
         for (label, batch) in &batches {
@@ -1024,9 +1067,9 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
+                invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk, batches[*label].swap, reach).join(" ")
             ));
-            if let Some(service) = batches[*label].swap {
+            if let (Some(service), Reach::ViaUbuntu) = (batches[*label].swap, reach) {
                 request.push_str(&format!(
                     "  and beside it, started first:\n  cargo {}\n",
                     swap_invocation(&at(dir, label), service).join(" ")
@@ -1057,11 +1100,11 @@ pub fn run(
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if mode == Mode::Drive {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
+            let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk, batches[*label].swap, reach);
             // A swapping boot's second invocation is started first: it dials
             // the machine under its own name for as long as it takes, and
             // waits for the boot.
-            let beside = batches[*label].swap.map(|service| {
+            let beside = batches[*label].swap.filter(|_| reach == Reach::ViaUbuntu).map(|service| {
                 let words = swap_invocation(&at(dir, label), service);
                 eprintln!("[metal] {label}, beside it: cargo {}", words.join(" "));
                 Command::new("cargo").args(&words).current_dir(&root).spawn()
