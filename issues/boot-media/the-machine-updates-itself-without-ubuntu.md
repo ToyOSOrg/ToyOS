@@ -39,9 +39,13 @@ stdin — and the machine installs nothing the owner did not sign.
 ## Stage 2 — the T14 installs ToyOS on its NVMe
 
 The machine boots the stick and installs onto its own NVMe, then takes
-`ssh t14 update < image` for every change after. Taking Ubuntu out of
-`toyos-metal`'s loop is
-`issues/boot-media/the-loader-does-only-what-must-precede-the-handover.md`'s.
+`ssh t14 update < image` for every change after. It waits on stage 5 of
+`issues/boot-media/the-loader-does-only-what-must-precede-the-handover.md`,
+whose `update --boot-first` puts the NVMe loader's entry first; taking Ubuntu
+out of `toyos-metal`'s loop is that track's too.
+
+**Exit**: with the stick pulled, the T14 boots ToyOS off its NVMe, and a
+kernel change sent with `ssh t14 update < image` boots at the next reset.
 
 ## Later stages — the end state, which no earlier stage may block
 
