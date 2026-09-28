@@ -17,6 +17,7 @@
 
 [package]
 name = "toyos-pcid"
+description = "Which PCID a new address space gets, and when a returned one may be reissued, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

@@ -25,15 +25,6 @@ disk. On the T14 that is `logd`'s `SYS_FSYNC`, which reaches
     kernel::arch::syscall::gate::syscall_entry
 ```
 
-The panic lands in a syscall, so `percpu::in_syscall` makes it recoverable:
-`try_recover_from_panic` ends that thread and returns to the scheduler, where
-`deadline::wedge_if_staged` folds the CPU into the wedge. `apic::halt_all_cpus`
-is therefore never reached, and neither is `deadline::stand_down` — which is why
-the boot deadline and not the panic path's own bound ends the machine. That
-composition is correct; what is not is that a boot staged to measure a *device*
-silently loses its log writer, and the only account of it is a `PANIC` record in
-a ring tail nobody was draining.
-
 Two things are true and neither is decided here:
 
 - The detector firing is right in general — a lock held for ever by a CPU that
@@ -46,7 +37,7 @@ Two things are true and neither is decided here:
 
 Any actuator that stops a CPU inside a driver — today the `usb-wedge-*` arms,
 which are QEMU registrations and reach no flashed image. It does not change
-their verdicts, but it adds a panic, a dead `logd`, and a page of dropped
+their verdicts, but it adds a panic and a page of dropped
 records to every one of them.
 
 ## Exit condition

@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use crate::iommu::Delivery;
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use crate::log;
 use crate::mm::Mmio;
 use crate::sync::Lock;

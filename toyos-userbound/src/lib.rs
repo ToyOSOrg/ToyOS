@@ -4,15 +4,9 @@
 //! address userland's, is the object at it aligned for the type being read, and
 //! does it lie wholly inside one mapping? **Before a placement**: can a length
 //! userland asked for be placed at all, and where does it go? **After a trap**:
-//! which side did the frame come from, and whose fault was it?
+//! which side did the frame come from?
 //!
-//! [`span`] answers the first, [`place`] the second and [`fault`] the third —
-//! and the third is written in terms of the first. A fault is classified
-//! against the same [`USER_TOP`] the accessors refuse an address above, not
-//! against a copy of it, and that is why those two are one crate rather than
-//! two: a second constant is a second
-//! thing to get wrong, and [`blame`]'s whole argument is that the bound it
-//! reads is the kernel's own.
+//! [`span`] answers the first, [`place`] the second and [`fault`] the third.
 //!
 //! Pure. No I/O, no allocation, no `unsafe`, nothing read from a device and
 //! nothing named outside this crate. The kernel is the only caller —
@@ -33,7 +27,7 @@ pub mod fault;
 pub mod place;
 pub mod span;
 
-pub use fault::{blame, Blame, Faulted, Ring};
+pub use fault::Ring;
 pub use place::{PageSpan, Window};
 pub use span::{
     align_2m_checked, contiguous, in_user_half, is_user_addr, is_user_object, rebase_base, Access,

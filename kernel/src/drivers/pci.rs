@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use toyos_pci::{bar, bridge, caps, msi, msix};
 
 use crate::mm::Mmio;
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use crate::log;
 
 const VENDOR_ID: u64 = 0x00;

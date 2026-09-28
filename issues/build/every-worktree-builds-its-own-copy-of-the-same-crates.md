@@ -10,7 +10,7 @@ Twenty-four linked worktrees hold twenty-four copies of one compilation. The
 primary checkout's `target/` is 16 GB, and cargo's share of it is 12.5 GB
 (`du`, 2026-08-19): `debug` 11 GB, `x86_64-unknown-toyos` 895 MB, `release`
 286 MB, `aarch64-apple-darwin` 285 MB. The remaining 3.5 GB — `bootable*.img`,
-`nvme.img` 1.0 GB, the staged `kernel-*`/`bootloader.efi-*` copies, `stamps/` —
+`nvme.img` 1.0 GB, the staged `kernel-*`/`bootloader.efi-*` copies, `target/stamps/` —
 is the build system's own output and is **per-worktree by design**: `kernel_key`
 hashes profile and features and not content, and `buildlock::artifact` is a lock
 under `<worktree>/.build-locks`. Only cargo's 12.5 GB is a candidate for

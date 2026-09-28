@@ -384,13 +384,11 @@ pub(super) fn deaf_window() {
             // `rdtsc`, not `nanos_since_boot`: the latter calls into
             // `compiler_builtins`, which would misname where a stuck CPU is.
             let until = crate::clock::tsc_deadline(DEAF_NS);
-            // Not an `IrqGuard`: this must unconditionally set IF on exit, and
-            // panic recovery may already have left IF clear.
-            crate::arch::cpu::disable_interrupts();
+            let deaf = crate::arch::IrqGuard::close();
             while crate::arch::cpu::counter() < until {
                 core::hint::spin_loop();
             }
-            crate::arch::cpu::enable_interrupts();
+            drop(deaf);
             // The victim's own log line is what proves the NMI interrupted it
             // rather than killed it.
             let deaf_ms = (crate::clock::nanos_since_boot() - began) / 1_000_000;
@@ -705,7 +703,7 @@ fn census() -> Census {
         // Blocked and running threads are already the CPUs' lines; skip them here.
         let Some(tag) = tag else { return };
         // Kernel threads don't count against the budget: `MAX_KERNEL_TASKS`
-        // bounds them at three, so counting them can't push these lines off the page.
+        // bounds them, so counting them can't push these lines off the page.
         if !kernel {
             printed += 1;
             if printed > CENSUS_LINES {

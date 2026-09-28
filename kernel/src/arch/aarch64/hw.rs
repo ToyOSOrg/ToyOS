@@ -24,8 +24,6 @@ impl Kicker for KernelHw {
 }
 
 impl Machine for KernelHw {
-    type IrqGuard = crate::arch::IrqGuard;
-
     fn now(&self) -> Nanos {
         Nanos(crate::clock::nanos_since_boot())
     }
@@ -36,10 +34,6 @@ impl Machine for KernelHw {
 
     fn stop_timer(&self) {
         owed!("the timer", "stage 4")
-    }
-
-    fn irq_guard(&self) -> crate::arch::IrqGuard {
-        crate::arch::IrqGuard::close()
     }
 
     fn halt(&self) {

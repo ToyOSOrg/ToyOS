@@ -16,7 +16,7 @@ interrupt: it is polled from the timer entry."
 `poll` says the narrower thing (`deadline.rs:185-186`): "Whether this
 machine's bound has passed; the timer interrupt entry's, in both rings, and
 nothing else's." Its call sites are exactly two, both in
-`kernel/src/arch/idt/timer.rs`: the Ring 0 naked entry's `call {deadline}`
+`kernel/src/arch/x86_64/idt/timer.rs`: the Ring 0 naked entry's `call {deadline}`
 (`:71`, `deadline = sym crate::deadline::poll` at `:79`, placed there because
 "a CPU spinning on a ticket still takes this interrupt", `:61-63`) and
 `timer_handler`, which opens at `:92`: its first statement is

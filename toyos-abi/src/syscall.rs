@@ -788,9 +788,9 @@ pub fn debug_with(action: u64, arg: u64) -> u64 {
 pub mod debug_action {
     /// Panic the kernel. Kills the caller's machine, deliberately.
     pub const PANIC: u64 = 0;
-    /// Read through a null pointer in Ring 0.
+    /// Read, in Ring 0, the address the argument names.
     pub const NULL_READ: u64 = 1;
-    /// Hold a kernel lock across a scheduler entry. Armed once per boot.
+    /// Hold a kernel lock across a scheduler entry.
     pub const LOCK_ACROSS_SWITCH: u64 = 2;
     /// Halt every CPU.
     pub const FATAL_HALT: u64 = 3;

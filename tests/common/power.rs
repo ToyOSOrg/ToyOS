@@ -885,19 +885,100 @@ pub fn panic_reboots(
     // Not `must_be_clean`: this boot panics on purpose, and the arm line is
     // what says the panic path — not something else — is holding the machine.
     let line = boot.must_say(&panic_armed())?.to_string();
+    let watch = watch_the_bound(&qemu);
+    let (budget, _) = resets_inside_the_bound(&mut qemu, watch, PANICKED_AND_STAYED_UP)?;
+    eprintln!("  [power] the panicked guest reset itself inside {budget:?} of: {}", line.trim());
+    Ok(())
+}
 
+/// QEMU's `SHUTDOWN` event, subscribed to for the fast bound plus what a reset
+/// costs. Opened before whatever starts the bound: QMP delivers no event
+/// emitted before its client connected.
+fn watch_the_bound(qemu: &QemuInstance) -> (qemu::QmpShutdown, Duration) {
     let budget = qemu.budget(Duration::from_secs(PANIC_FAST_SECS) + RESET_ALLOWANCE);
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), budget);
+    (qemu::QmpShutdown::open(qemu.qmp_socket(), budget), budget)
+}
+
+/// QEMU's own `guest-reset` on `watch`, and the serial the guest wrote after
+/// its boot log; `never` is what a guest that did not stop means to the caller.
+fn resets_inside_the_bound(
+    qemu: &mut QemuInstance,
+    (mut stop, budget): (qemu::QmpShutdown, Duration),
+    never: &str,
+) -> Result<(Duration, String), String> {
     let reason = stop.reason();
     // A guest that came back to firmware pays none of this: `-no-reboot` exits and the reader disconnects.
     let tail = qemu.drain_serial(WAIT);
-    returned_to_firmware(reason, PANICKED_AND_STAYED_UP, &tail)?;
+    returned_to_firmware(reason, never, &tail)?;
 
     let drain = serial::Serial::named("panic reboot drain", tail.as_str());
     drain.must_say(PANIC_REBOOTING)?;
+    Ok((budget, tail))
+}
 
-    eprintln!("  [power] the panicked guest reset itself inside {budget:?} of: {}", line.trim());
-    Ok(())
+/// `kernel_params` kills `klogd` on its first instruction, and the machine is
+/// what dies. The verdict is QEMU's reset, never the guest's word.
+pub fn klogd_death_resets(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    kernel_params: &'static [&'static str],
+    said: &[&str],
+) -> Result<(), String> {
+    // `panicked()`'s 16550-only guest: the reset's own line goes to the UART raw.
+    let options =
+        BootOptions { kernel_params, ready_marker: "kthread: klogd pid=", ..panicked() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let dead = serial::Serial::boot(&qemu);
+    let watch = watch_the_bound(&qemu);
+    let never = "QEMU never reported stopping: klogd died and the machine carried on without it";
+    died_and_reset(&mut qemu, watch, dead, never, said).map(drop)
+}
+
+/// `SYS_DEBUG` `action` ends the kernel inside its caller's syscall, and the
+/// machine is what dies, never only the caller. The verdict is QEMU's reset, as
+/// [`klogd_death_resets`]'s is; what the guest said is returned for the caller
+/// to read further.
+pub fn syscall_death_resets(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    action: u64,
+    said: &[&str],
+) -> Result<String, String> {
+    let options = BootOptions {
+        kernel_params: &["panic-reboot-fast"],
+        ready_marker: qemu::DEFAULT_READY,
+        ..panicked()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let dead = serial::Serial::boot(&qemu);
+    let watch = watch_the_bound(&qemu);
+    writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child {action}")
+        .expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let never = "QEMU never reported stopping: the kernel died inside a syscall and the machine \
+                 carried on without its caller";
+    died_and_reset(&mut qemu, watch, dead, never, said)
+}
+
+/// QEMU's reset inside the bound, then what the dead guest said, `said` and the
+/// arm line among it.
+fn died_and_reset(
+    qemu: &mut QemuInstance,
+    watch: (qemu::QmpShutdown, Duration),
+    mut dead: serial::Serial,
+    never: &str,
+    said: &[&str],
+) -> Result<String, String> {
+    let (budget, tail) = resets_inside_the_bound(qemu, watch, never)?;
+    dead.push(&tail);
+    for want in said {
+        dead.must_say(want)?;
+    }
+    dead.must_say(&panic_armed())?;
+    eprintln!("  [power] {said:?}: QEMU reset the machine inside {budget:?}");
+    Ok(dead.text().to_string())
 }
 
 /// A panic inside `percpu::init_bsp`, one statement after it loads the IDT,

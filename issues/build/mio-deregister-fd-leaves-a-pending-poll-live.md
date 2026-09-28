@@ -6,7 +6,7 @@ opened: 2026-08-16
 
 # mio's ToyOS selector deregisters a token but not the kernel's poll on it
 
-`src/sys/toyos/selector.rs` in the mio fork (currently pinned at `e8068c2`,
+`mio/src/sys/toyos/selector.rs` in the mio fork (currently pinned at `e8068c2`,
 `userland/Cargo.lock`) keeps its own registration list rather than asking the
 kernel to track interest:
 
@@ -32,7 +32,7 @@ notification for a resource it was promised was gone.
 
 ## Why there is nothing to cancel with
 
-There used to be an ABI op for this. `toyos-abi/src/io_uring.rs` op code 2 was
+There used to be an ABI op for this. `toyos-abi/src/inbox.rs` op code 2 was
 `IORING_OP_POLL_REMOVE`, retired in PR #89 (`c41b831`,
 "abi: four names retired, and the number each one held") as caller-less. The
 retirement's own reasoning is recorded at the site:

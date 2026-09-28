@@ -5,6 +5,7 @@ name = "toyos-net-tcp"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "ToyOS's TCP, pure: the caller hands in the time, the secrets, parsed segments and user calls."
 publish = false
 
 [dependencies]

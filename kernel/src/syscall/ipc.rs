@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 
 use crate::watch;
-use crate::mm::paging::Prot;
+use crate::mm::policy::Prot;
 use crate::object::{ops, port, KObjectRef};
 use crate::time::Deadline;
 use crate::user_ptr::SyscallContext;

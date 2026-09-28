@@ -9,7 +9,7 @@
 use core::convert::Infallible;
 
 use crate::mm::UserAddr;
-pub use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
+use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
 use crate::sync::Lock;
 use crate::vma::{Occupancy, Region, RegionKind};
 use crate::MemoryMapEntry;
