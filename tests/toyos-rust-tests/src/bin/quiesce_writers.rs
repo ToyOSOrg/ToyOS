@@ -14,7 +14,6 @@
 use std::fs::File;
 use std::io::Write;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use toyos::power::Stop;
 
@@ -25,13 +24,6 @@ const WRITERS: usize = 6;
 /// Bytes per write: over a page, so each one is a real block-layer operation
 /// rather than a page-cache touch.
 const CHUNK: usize = 8192;
-
-/// How long the writers get to reach their loop before this boot gives up on
-/// being a machine with anything to stop.
-///
-/// Inside the host's own wait for this guest to stop, so the line below reaches
-/// the console it is read from rather than a budget ending the boot first.
-const SPIN_UP: Duration = Duration::from_secs(5);
 
 /// What a writer says every pass.
 const WRITING: &str = "quiesce-writer:";
@@ -82,12 +74,15 @@ fn main() {
             })
             .expect("spawn a writer");
     }
+    // The writers hold the only senders: a writer that failed is a closed
+    // channel here once it is the last.
+    drop(in_the_loop);
 
-    let give_up = Instant::now() + SPIN_UP;
+    // No deadline: a writer that never reaches its loop is a hang the harness
+    // ceiling reds.
     for reached in 0..WRITERS {
-        let left = give_up.saturating_duration_since(Instant::now());
-        if first_passes.recv_timeout(left).is_err() {
-            eprintln!("quiesce_writers: {reached} of {WRITERS} writers reached their loop in {SPIN_UP:?}");
+        if first_passes.recv().is_err() {
+            eprintln!("quiesce_writers: {reached} of {WRITERS} writers reached their loop");
             std::process::exit(1);
         }
     }

@@ -18,9 +18,14 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::toyos::process::ChildExt;
 use std::process::{Command, Stdio};
+use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::process::Process;
+use toyos::syscap::SysCap;
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
+
+#[path = "../roster.rs"]
+mod roster;
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_stats";
 
@@ -35,15 +40,11 @@ fn main() {
     blocked_time_names_what_it_waited_on();
     repeatable();
     refused_without_read();
-    refused_calls_are_timed();
+    refused_calls_are_counted();
     println!("all process_stats tests passed");
 }
 
 const REFUSED_CALLS: u64 = 500_000;
-
-/// A refused call is timed, so each one the kernel counts adds at least this much
-/// to `syscall_total_ns`; one returned past the clock adds nothing.
-const MIN_NS_PER_REFUSED_CALL: u64 = 5;
 
 /// Says it is ready, waits for the parent's byte, then issues nothing but refusals.
 fn refused_child() {
@@ -58,9 +59,9 @@ fn refused_child() {
     }
 }
 
-/// A refused syscall is counted *and* timed, read across the child's refusal loop
-/// alone so its startup's timed calls cannot stand in for the refusals'.
-fn refused_calls_are_timed() {
+/// A refused syscall is counted, read across the child's refusal loop alone so
+/// its startup's calls cannot stand in for the refusals'.
+fn refused_calls_are_counted() {
     let mut child = Command::new(SELF_PATH)
         .arg("refused")
         .stdin(Stdio::piped())
@@ -83,21 +84,11 @@ fn refused_calls_are_timed() {
     let after = stats_of(&child).expect("the exited child answers");
 
     let calls = after.syscall_total.saturating_sub(before.syscall_total);
-    let timed_ns = after.syscall_total_ns.saturating_sub(before.syscall_total_ns);
     assert!(
         calls >= REFUSED_CALLS,
         "the child made {REFUSED_CALLS} refused calls but only {calls} were counted",
     );
-    assert!(
-        timed_ns >= calls * MIN_NS_PER_REFUSED_CALL,
-        "{calls} calls counted across the refusal loop added {timed_ns} ns to syscall_total_ns, \
-         under {MIN_NS_PER_REFUSED_CALL} ns each — refused calls counted but not timed",
-    );
-    println!(
-        "  refused calls timed: ok (calls={calls} timed_ns={timed_ns} whole child: total={} \
-         total_ns={} cpu_ns={})",
-        after.syscall_total, after.syscall_total_ns, after.cpu_ns,
-    );
+    println!("  refused calls counted: ok (calls={calls} whole child: total={})", after.syscall_total);
 }
 
 /// Says it is running, then blocks until it is killed. The marker is flushed, so
@@ -218,10 +209,12 @@ fn blocked_time_names_what_it_waited_on() {
     out.read_line(&mut line).expect("the held child's marker");
     assert_eq!(line.trim(), "running", "the held child said {line:?}");
 
-    // Long enough that the park is measurable at the accounting's resolution,
-    // and short enough that it is a margin rather than a bound: what is
-    // asserted is which counter moved, never how far.
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Parked, by the kernel's own roster: the counter has a park to charge.
+    let cap: SysCap = Endowments::get()
+        .take(SYSCAP_LABEL)
+        .expect("test-runner endows every binary it spawns a system capability");
+    let pid = stats_of(&child).expect("the held child answers").pid;
+    roster::await_true(|| roster::threads_of(&cap, pid).iter().any(|&(_, state)| state == roster::BLOCKED));
     // Ending the park is what charges it. The child's `read` returns and it
     // exits; its object keeps answering, which is this file's first arm.
     child

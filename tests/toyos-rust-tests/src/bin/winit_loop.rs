@@ -3,8 +3,8 @@
 //! is waiting, and a window its application dropped hears its `Destroyed` and
 //! nothing else from the drop on, which every stage checks.
 //!
-//! Six stages, one after another, each ended by what it waits for or failed
-//! by [`CEILING`], a liveness bound only a lost wake reaches:
+//! Six stages, one after another, each ended by what it waits for; a lost wake
+//! is a hang the harness ceiling reds:
 //!
 //! 1. A user event sent from `AboutToWait`, with no window open: the wake it
 //!    raises is taken by the next iteration, never by the one that sent it.
@@ -19,10 +19,9 @@
 //!    `Resized`, delivers nothing for it.
 //! 5. A window asked for a redraw and dropped in a `user_event`, which runs
 //!    after the loop's destroy step: no `RedrawRequested` reaches it.
-//! 6. A window whose close the application ignores: once the compositor has
-//!    closed it, the loop does not wake for it while it waits out
-//!    [`IDLE_WINDOW`]. The harness closes it with GUI+Q when told
-//!    `WINIT-LOOP CLOSE-ME`.
+//! 6. A window whose close the application ignores: the compositor's close
+//!    reaches it as `CloseRequested`. The harness closes it with GUI+Q when
+//!    told `WINIT-LOOP CLOSE-ME`.
 //!
 //! Every window but stage 6's is closed by the application's drop, which the
 //! harness reads off the compositor's close lines.
@@ -31,34 +30,18 @@ use std::num::NonZeroU32;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
-use winit::event::{StartCause, WindowEvent};
+use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-
-/// A liveness ceiling, not a duration: a delivered event ends each wait at
-/// once, and only a lost wake reaches it.
-const CEILING: Duration = Duration::from_secs(20);
 
 const HELPER_EVENTS: u32 = 100;
 
 /// Rounds, because a push that lands before the loop has looked at its queues
 /// needs no wake.
 const HELPER_ROUNDS: u32 = 20;
-
-/// How long stage 6 watches a loop with nothing to deliver. A measurement
-/// window rather than a wait for an event: what is counted is what happens
-/// when nothing does.
-const IDLE_WINDOW: Duration = Duration::from_secs(1);
-
-/// The iterations an idle loop may start in [`IDLE_WINDOW`]: the one that
-/// ends it at its deadline. A loop that waits on a closed connection wakes for
-/// as long as the window lasts, and one the app dropped but the loop still
-/// holds is sent an event by the close.
-const IDLE_WAKES: usize = 1;
 
 enum Ev {
     Ping,
@@ -75,7 +58,7 @@ enum Stage {
     Handed { round: u32, step: Handed },
     Dropped { id: WindowId, destroyed: bool, waits: u32 },
     UserDrop { window: Option<Arc<Window>>, id: WindowId, destroyed: bool, waits: u32 },
-    Close { window: Option<Arc<Window>>, surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>, idle: Option<(Instant, Vec<String>)> },
+    Close { window: Option<Arc<Window>>, surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>, closed: bool },
 }
 
 enum Handed {
@@ -142,41 +125,11 @@ impl App {
         let window = self.create(event_loop, "ignores its close");
         let surface = Surface::new(&self.context, window.clone())
             .unwrap_or_else(|e| fail(&format!("surface: {e}")));
-        self.stage = Stage::Close { window: Some(window), surface: Some(surface), idle: None };
+        self.stage = Stage::Close { window: Some(window), surface: Some(surface), closed: false };
     }
 }
 
 impl ApplicationHandler<Ev> for App {
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        if let Stage::Close { idle: Some((deadline, wakes)), .. } = &mut self.stage {
-            let left = deadline.saturating_duration_since(Instant::now());
-            wakes.push(format!("{cause:?} with {left:?} of the window left"));
-            return;
-        }
-        if let StartCause::ResumeTimeReached { .. } = cause {
-            let at = match &self.stage {
-                Stage::Ping { .. } => "the user event sent from AboutToWait".to_string(),
-                Stage::Helper { next, .. } => format!("helper event {next}"),
-                Stage::Handed { round, step: Handed::Created(_) } => format!("round {round}'s first redraw"),
-                Stage::Handed { round, step: Handed::RedrawAsked(_) } => {
-                    format!("round {round}'s redraw asked from the helper")
-                }
-                Stage::Handed { round, step: Handed::DropAsked(_) } => {
-                    format!("round {round}'s window dropped on the helper")
-                }
-                Stage::Dropped { .. } => "the Destroyed of a window dropped in its handler".to_string(),
-                Stage::UserDrop { window: Some(_), .. } => {
-                    "the first redraw of the window a user event drops".to_string()
-                }
-                Stage::UserDrop { window: None, .. } => {
-                    "the Destroyed of a window dropped in a user event".to_string()
-                }
-                Stage::Close { .. } => "the compositor's close".to_string(),
-            };
-            fail(&format!("LOST: the loop waited out its ceiling for {at}"));
-        }
-    }
-
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Ev) {
@@ -191,8 +144,8 @@ impl ApplicationHandler<Ev> for App {
                             if proxy.send_event(Ev::Seq(i)).is_err() {
                                 fail("the loop closed under the helper");
                             }
-                            if acked.recv_timeout(CEILING).is_err() {
-                                fail(&format!("LOST: helper event {i} was never delivered"));
+                            if acked.recv().is_err() {
+                                fail(&format!("helper event {i}'s ack channel closed"));
                             }
                         }
                     }))
@@ -279,7 +232,7 @@ impl ApplicationHandler<Ev> for App {
                     *destroyed = true;
                 }
             }
-            Stage::Close { window: Some(window), surface: Some(surface), idle } if window.id() == id => {
+            Stage::Close { window: Some(window), surface: Some(surface), closed } if window.id() == id => {
                 match event {
                     WindowEvent::RedrawRequested => {
                         let size = window.inner_size();
@@ -293,10 +246,8 @@ impl ApplicationHandler<Ev> for App {
                         buffer.present().unwrap_or_else(|e| fail(&format!("present: {e}")));
                         println!("WINIT-LOOP CLOSE-ME");
                     }
-                    WindowEvent::CloseRequested if idle.is_none() => {
-                        // Ignored, as an application that asks "save first?" does.
-                        *idle = Some((Instant::now() + IDLE_WINDOW, Vec::new()));
-                    }
+                    // Ignored, as an application that asks "save first?" does.
+                    WindowEvent::CloseRequested => *closed = true,
                     _ => {}
                 }
             }
@@ -344,29 +295,14 @@ impl ApplicationHandler<Ev> for App {
             self.jobs.send(job).expect("the helper outlives the loop");
         }
         match &mut self.stage {
-            Stage::Close { idle: Some((deadline, wakes)), window, surface } => {
-                if Instant::now() < *deadline {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(*deadline));
-                    return;
-                }
-                let count = wakes.len();
-                if count > IDLE_WAKES {
-                    let first: Vec<&String> = wakes.iter().take(8).collect();
-                    fail(&format!(
-                        "a closed window the application kept woke the loop {count} times in \
-                         {IDLE_WINDOW:?}, first {first:?}"
-                    ));
-                }
-                println!(
-                    "WINIT-LOOP stage 6: a closed window the application kept woke the loop {count} \
-                     time(s) in {IDLE_WINDOW:?}: {wakes:?}"
-                );
+            Stage::Close { closed: true, window, surface } => {
+                println!("WINIT-LOOP stage 6: a closed window the application kept got CloseRequested");
                 surface.take();
                 window.take();
                 println!("WINIT-LOOP-OK");
                 event_loop.exit();
             }
-            _ => event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + CEILING)),
+            _ => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }

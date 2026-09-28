@@ -44,3 +44,10 @@ No test today covers that owner decision in `Ring::push`
 `ring.own(pid)`, passes every test in the tree, so the exit's test must turn
 both mutations red. Owner: `toyos/src/log/region.rs`'s `Ring::push`; held by
 the orchestrator.
+
+**Unrun since it was disabled**: PR #562 changed this test's verdict on the
+flush. An answered flush is no longer inferred from the kernel's sync starting
+a flush bound after init's stop line; the flush is unanswered when init says
+it waited one out (`FLUSH_WAITED_OUT`, on the console or in `/log`) or its stop
+line never reached `/log`. That change has never run: the test's first run
+back is also that change's.

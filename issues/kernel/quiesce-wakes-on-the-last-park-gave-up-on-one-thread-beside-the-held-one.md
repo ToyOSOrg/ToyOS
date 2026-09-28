@@ -47,8 +47,6 @@ records cannot exclude, and it sits on the same `/log` fsync path the writers
 issue owns.
 
 **What no enabled guest test checks while this is disabled.**
-`woken_by_its_threads` (`tests/common/power.rs`) has no enabled caller. So no
-enabled test checks any of these:
 
 - that a band, a park or an exit wakes the stop, rather than its deadline;
 - `in_flight == 0` with `begun > 0`;
@@ -58,9 +56,7 @@ enabled test checks any of these:
   `quiesce_wakes_on_the_last_teardown`'s only claim, and the only enabled
   guest check of it, disabled by this same issue.
 
-`quiesce_refuses_a_second_shutdown` stays green over a lost post. It judges the
-stop only by `stopped_the_machine`, so a stop that spends its budget and then
-finds everything stopped passes it.
+`quiesce_refuses_a_second_shutdown` stays green over a lost post.
 
 **Exit**:
 
@@ -73,3 +69,12 @@ finds everything stopped passes it.
 - an enabled guest test checking each claim listed above.
 
 Owner: the stop path, `kernel/src/quiesce.rs`; held by the orchestrator.
+
+**Unrun since it was disabled**: PR #562 deleted the stop's completion from
+every QEMU verdict: `stopped_boot`'s `stopped_the_machine` check, whose message
+the sightings above quote, and `woken_by_its_threads`. The stop gives up at a
+budget of the kernel's own clock, so on metal alone
+(`metal::Readback::stop_completed`) does a stop that gave up red. This test now
+judges the held thread before the sync and more than one sweep, and the failure
+quoted above no longer reds it. That change has never run: the test's first run
+back is also that change's.

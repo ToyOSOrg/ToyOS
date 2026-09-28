@@ -9,10 +9,9 @@
 //! is said where nobody reads. A mix thread that waits on its output stops
 //! there, and the tone with it.
 //!
-//! The verdicts are the host's: the capture carries the tone without a gap, and
-//! once `logd` reads again soundd's lines account for every connection — each
-//! refusal said, or counted by `logd` among the records that found the ring
-//! full.
+//! The verdict is `/log`'s: once `logd` reads again soundd's lines account for
+//! every connection — each refusal said, or counted by `logd` among the records
+//! that found the ring full.
 
 #[path = "../tone.rs"]
 mod tone;

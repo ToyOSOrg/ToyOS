@@ -362,11 +362,59 @@ ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 measured = 1254
 
 [[number]]
+name = "boot.logstallcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.foreignrecord.complete_ms"
+
+[[number]]
+name = "boot.testcases-deaf.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.foreignrecord.complete_ms"
+
+[[number]]
+name = "boot.testcases-window.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.foreignrecord.complete_ms"
+
+[[number]]
+name = "boot.testcases-debug.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.foreignrecord.complete_ms"
+
+[[number]]
 name = "boot.foreignrecord.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
 measured = 44
+
+[[number]]
+name = "boot.logstallcase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.foreignrecord.back_secs"
+
+[[number]]
+name = "boot.testcases-deaf.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.foreignrecord.back_secs"
+
+[[number]]
+name = "boot.testcases-window.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.foreignrecord.back_secs"
+
+[[number]]
+name = "boot.testcases-debug.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.foreignrecord.back_secs"
 
 [[number]]
 name = "boot.foreignrecord.stick_secs"
@@ -381,6 +429,30 @@ measured = 0
 # `boot-deadline` is what ends it. Its three ordinary numbers are priced against
 # that bound rather than against the runner's, because the runner never reaches
 # its own.
+
+[[number]]
+name = "boot.logstallcase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.testcases-deaf.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.testcases-window.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.testcases-debug.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
 
 [[number]]
 name = "boot.deadlinewedge.complete_ms"
@@ -625,6 +697,30 @@ ceiling = 1400
 ceiling_from = "as list.testcases.job_ms"
 
 [[number]]
+name = "list.logstallcase.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.testcases-deaf.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "as list.lancase.job_ms — the same one job"
+
+[[number]]
+name = "list.testcases-window.job_ms"
+unit = "ms"
+ceiling = 27000
+ceiling_from = "as list.latencycase.job_ms: one job each of whose pipe waits the actuator may hold for its window"
+
+[[number]]
+name = "list.testcases-debug.job_ms"
+unit = "ms"
+ceiling = 2900
+ceiling_from = "as list.shared-debug.job_ms: one of the same eight binaries"
+
+[[number]]
 name = "list.deadlinewedge.job_ms"
 unit = "ms"
 ceiling = 1400
@@ -863,6 +959,30 @@ ceiling = 16667
 ceiling_from = "as boot.testcases.panel_max_us"
 
 [[number]]
+name = "boot.logstallcase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.testcases-deaf.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.testcases-window.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.testcases-debug.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
 name = "boot.deadlinewedge.panel_max_us"
 unit = "us"
 ceiling = 16667
@@ -986,6 +1106,30 @@ ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 
 [[number]]
+name = "boot.logstallcase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.testcases-deaf.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.testcases-window.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.testcases-debug.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
 name = "boot.deadlinewedge.panel_us"
 unit = "us"
 ceiling = 100000
@@ -1096,6 +1240,30 @@ ceiling_from = "as boot.testcases.park_open_operations"
 
 [[number]]
 name = "boot.foreignrecord.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.logstallcase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.testcases-deaf.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.testcases-window.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.testcases-debug.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"

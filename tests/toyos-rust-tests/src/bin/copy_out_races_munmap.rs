@@ -15,7 +15,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use toyos_abi::syscall::{self, MmapFlags, MmapProt, OpenFlags, SYS_FSTAT};
 
@@ -27,9 +26,6 @@ const SELF_PATH: &str = "/system/bin/test_rs_copy_out_races_munmap";
 const PAGE_2M: usize = 2 * 1024 * 1024;
 /// Past `Stat`, which is what `fstat` stores.
 const CHECKED: usize = 64;
-/// A liveness bound on the kernel's cue, never a pace: the held thread is
-/// already inside its syscall when the main thread starts waiting.
-const CUE_BOUND: Duration = Duration::from_secs(10);
 
 /// `fstat` into an address, which the typed wrapper cannot take.
 fn fstat_into(handle: u64, addr: u64) -> u64 {
@@ -79,12 +75,9 @@ fn main() {
         thread::spawn(move || ret.store(fstat_into(fd, addr), Ordering::SeqCst))
     };
 
-    let began = Instant::now();
+    // No deadline: a kernel that never holds the marked copy leaves this spinning,
+    // and the harness ceiling reds it.
     while unsafe { words.add(1).read_volatile() } != HELD {
-        assert!(
-            began.elapsed() < CUE_BOUND,
-            "the kernel never held the marked copy in {CUE_BOUND:?}: is copy-meets-a-remap armed?"
-        );
         std::hint::spin_loop();
     }
     unsafe { syscall::munmap(victim, PAGE_2M) }.expect("munmap the copy's destination");
