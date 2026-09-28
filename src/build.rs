@@ -1878,7 +1878,6 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
     let kernel_features = plan.features.join(",");
     let arch = plan.arch;
 
-    // The notice asks the network, so it is written before any lock is taken.
     let mut extra = Vec::new();
     if boot.public {
         let notices = boot
@@ -1886,7 +1885,9 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
             .and_then(|parts| crate::licence::notices(root, parts, &crate::licence::std_library(root)?))
             .unwrap_or_else(|why| panic!("the release's licence notice: {why}"));
         let at = root.join(RELEASE_NOTICES);
+        let held = buildlock::licence(root);
         fs::write(&at, &notices).unwrap_or_else(|e| panic!("write {}: {e}", at.display()));
+        drop(held);
         extra.push((crate::licence::NOTICES_ON_ROOT.to_string(), notices.into_bytes()));
     }
 

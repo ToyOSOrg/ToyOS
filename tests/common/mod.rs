@@ -43,7 +43,7 @@ pub mod metal;
 pub mod origin;
 #[allow(dead_code)]
 pub mod partclaim;
-/// The image release's command line for this host.
+/// The image release's macOS command line, which `--release-command` boots.
 pub mod release;
 #[allow(dead_code)]
 pub mod passcost;

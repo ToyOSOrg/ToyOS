@@ -217,11 +217,12 @@ pub fn artifact(root: &Path) -> Guard {
     exclusive(&root.join(LOCK_DIR).join("artifact"), "artifact lock", "artifact staging")
 }
 
-/// This worktree's one fetch of the std fork's licence sources
-/// (`licence::fetched_library`). It waits on the network, so it is taken with
-/// no other lock held.
-pub fn fork_fetch(root: &Path) -> Guard {
-    exclusive(&root.join(LOCK_DIR).join("fork-fetch"), "fork fetch lock", "fetching std's licence sources")
+/// This worktree's licence files: the std fork's fetch
+/// (`licence::fetched_library`), the walk's scratch `Cargo.lock` and the
+/// release's notice. It waits on the network, so it is taken with no other lock
+/// held.
+pub fn licence(root: &Path) -> Guard {
+    exclusive(&root.join(LOCK_DIR).join("licence"), "licence lock", "writing the licence files")
 }
 
 /// The integration lock: one process at a time moves this host's `main`.

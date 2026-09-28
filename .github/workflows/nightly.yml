@@ -62,6 +62,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: disk and QEMU
         run: |
@@ -238,6 +239,9 @@ jobs:
           sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
+      # The image release notes' macOS line (`src/imagerelease.rs`), booted as
+      # they print it: this runner is the Apple Silicon Mac it names.
+      - run: env -u GITHUB_ACTIONS -u CI cargo test --test toyos-build -- --release-command
 
   # The declared Windows frontier
   # (`issues/build/the-build-system-does-not-compile-on-windows.md`): red
@@ -280,11 +284,12 @@ jobs:
           retention-days: 1
 
   # The one job that writes releases, publishing on main what `release` booted
-  # once its digest is the one `release` answered. No cache and nothing built
-  # but the build system, and the token only in the publishing step: the
-  # checkout keeps no credential, and the build step has none.
+  # on a night the guest suite passed, once its digest is the one `release`
+  # answered. No cache and nothing built but the build system, and the token
+  # only in the publishing step: the checkout keeps no credential, and the
+  # build step has none.
   release-publish:
-    needs: release
+    needs: [build, guest, tcg, release]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -313,7 +318,9 @@ jobs:
       contents: read
       issues: write
     steps:
-      - *checkout
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - env:
           GH_TOKEN: ${{ github.token }}
           NEEDS: ${{ toJSON(needs) }}

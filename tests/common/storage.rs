@@ -22,8 +22,7 @@ use super::qemu::{self, BootOptions, QemuInstance};
 /// partitions, and a USB stick with no table.
 ///
 /// Two boots, one per USB disk, each beside the NVMe disk: the boot stick
-/// takes one of the USB driver's two disks, so a machine carries one more
-/// (`Profile::UsbDiskCrowd`'s third is never served).
+/// takes one of the USB driver's two disks, so a machine carries one more.
 ///
 /// Lives here so the registration hunk in `toyos.rs` stays one line: every
 /// agent edits that file.

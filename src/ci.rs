@@ -884,6 +884,7 @@ fn at_tip(ls_remote: &str, head: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     /// A deterministic control on `host`'s `std::env::set_var("TMPDIR", ...)`:
@@ -1071,9 +1072,43 @@ mod tests {
         assert!(writers.iter().all(|(f, _)| f == "nightly.yml"), "{writers:?}");
     }
 
+    /// The value of `key` at `indent` in `block`: the rest of its line and the
+    /// lines nested under it, comments left out.
+    fn yaml_value(block: &str, indent: &str, key: &str) -> Option<String> {
+        let head = format!("{indent}{key}:");
+        let nested = format!("{indent}  ");
+        let mut lines = block
+            .lines()
+            .skip_while(|l| !l.strip_prefix(head.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')));
+        let first = lines.next()?;
+        let rest = lines.take_while(|l| l.starts_with(nested.as_str()) || l.trim().is_empty());
+        let value = std::iter::once(&first[head.len()..])
+            .chain(rest)
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .map(|l| l.split(" #").next().unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(value)
+    }
+
+    /// A job's steps, each its own lines.
+    fn job_steps(body: &str) -> Vec<String> {
+        let mut steps: Vec<String> = Vec::new();
+        for line in yaml_value(body, "    ", "steps").unwrap_or_default().lines() {
+            if line.starts_with("      - ") {
+                steps.push(String::new());
+            }
+            if let Some(step) = steps.last_mut() {
+                step.push_str(&format!("{line}\n"));
+            }
+        }
+        steps
+    }
+
     /// A job whose token writes restores no cache, since a cache is a tree a
-    /// job running third-party code wrote, and hands `GH_TOKEN` to a step
-    /// rather than to every step.
+    /// job running third-party code wrote; leaves no credential in the
+    /// checkout's `.git/config`, where every later step's code reads it; and
+    /// hands `GH_TOKEN` to a step rather than to every step.
     #[test]
     fn a_token_that_writes_meets_no_cache_and_only_the_step_that_needs_it() {
         let dir = repo_root().join(".github/workflows");
@@ -1082,13 +1117,6 @@ mod tests {
             let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
             let file = entry.file_name().to_string_lossy().into_owned();
             let (head, jobs) = text.split_once("\njobs:\n").expect("a workflow has jobs");
-            let lines: Vec<&str> = text.lines().collect();
-            let restoring: Vec<String> = lines
-                .windows(2)
-                .filter(|w| w[1].contains("actions/cache/restore@"))
-                .filter_map(|w| w[0].trim_start().strip_prefix("- &"))
-                .map(|anchor| format!("*{anchor}"))
-                .collect();
             let mut chunks: Vec<(String, String)> = Vec::new();
             for line in jobs.lines() {
                 let key = line.strip_prefix("  ").and_then(|l| l.strip_suffix(':'));
@@ -1101,18 +1129,37 @@ mod tests {
                     }
                 }
             }
+            let mut anchors = BTreeMap::new();
+            for (_, body) in &chunks {
+                for step in job_steps(body) {
+                    let first = step.lines().next().unwrap_or_default().trim_start();
+                    if let Some(anchor) = first.strip_prefix("- &") {
+                        anchors.insert(anchor.trim().to_string(), step.clone());
+                    }
+                }
+            }
+            let workflow = yaml_value(head, "", "permissions");
             for (job, body) in &chunks {
-                let permissions = if body.contains("\n    permissions:\n") { body.as_str() } else { head };
-                if !permissions.contains(": write") {
+                let permissions = yaml_value(body, "    ", "permissions").or_else(|| workflow.clone());
+                if !permissions.is_some_and(|p| p.contains("write")) {
                     continue;
                 }
                 writing += 1;
-                let restores = body.contains("actions/cache/restore@") || restoring.iter().any(|a| body.contains(a.as_str()));
+                // A `- *anchor` step is the step anchored `&anchor`.
+                let own = job_steps(body);
+                let steps: Vec<&String> = own
+                    .iter()
+                    .map(|step| match step.trim_start().strip_prefix("- *") {
+                        Some(alias) => anchors.get(alias.trim()).unwrap_or_else(|| panic!("{file}: no step is anchored &{alias}")),
+                        None => step,
+                    })
+                    .collect();
+                let restores = steps.iter().any(|s| s.contains("actions/cache/restore@"));
                 assert!(!restores, "{file}: {job} restores a cache with a token that writes");
-                let job_env = body.split("\n    env:\n").nth(1).map(|env| {
-                    env.lines().take_while(|l| l.starts_with("      ")).any(|l| l.contains("GH_TOKEN"))
-                });
-                assert_ne!(job_env, Some(true), "{file}: {job} hands a token that writes to every step");
+                let persists = steps.iter().any(|s| s.contains("actions/checkout@") && !s.contains("persist-credentials: false"));
+                assert!(!persists, "{file}: {job} keeps a token that writes in its checkout");
+                let job_env = yaml_value(body, "    ", "env").is_some_and(|env| env.contains("GH_TOKEN"));
+                assert!(!job_env, "{file}: {job} hands a token that writes to every step");
             }
         }
         assert!(writing > 0, "no job's token writes, so this checked nothing");

@@ -26,8 +26,9 @@ The command line is `imagerelease::Host::MacosAppleSilicon`'s
 (`src/imagerelease.rs`) with `-display none`, over a copy of a
 `target/bootable.img`.
 
-`release_command_boots` boots that line on the dev host, and is disabled in
-`src/redlist.rs` while this stands.
+`release_command_boots` (`cargo test --test toyos-build -- --release-command`,
+which the nightly's `portability-macos` runs) boots that line, and is disabled
+in `src/redlist.rs` while this stands.
 
 **Exit condition.** `release_command_boots` is green on the dev host with the
 firmware Homebrew's QEMU ships, and its row leaves `src/redlist.rs`.

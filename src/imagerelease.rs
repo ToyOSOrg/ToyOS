@@ -489,10 +489,6 @@ fn create(root: &Path, tag: &str, commit: &str, staged: &Path) -> Result<(), Str
     let assets: Vec<String> = ASSETS.iter().map(|a| staged.join(a).display().to_string()).collect();
     args.extend(assets.iter().map(String::as_str));
     gh(root, &args)?;
-    let drafted = held(root, tag)?;
-    if drafted != Some(Held { draft: true, image: true }) {
-        return Err(format!("{tag} was created as a draft carrying {IMAGE_ASSET}, and GitHub holds {drafted:?}"));
-    }
     gh(root, &["release", "edit", tag, "--draft=false", "--latest"])?;
     Ok(())
 }

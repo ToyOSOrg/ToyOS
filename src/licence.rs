@@ -1241,8 +1241,14 @@ const FETCHED_FORK: &str = ".licence-fork";
 const FETCHING: &str = "target/licence/fork.partial";
 const REPLACED: &str = "target/licence/fork.replaced";
 
-/// What of the fork is checked out: its `library/` and its licence texts.
-const SPARSE: [&str; 4] = ["/library/", "/COPYRIGHT", "/LICENSE-*", "/LICENSES/"];
+/// What of the fork is checked out: its `library/`, and every top-level entry
+/// whose name [`LICENCE_FILES`] starts, in any case.
+fn sparse() -> Vec<String> {
+    let any_case = |name: &str| -> String { name.chars().map(|c| format!("[{c}{}]", c.to_ascii_uppercase())).collect() };
+    std::iter::once("/library/".to_string())
+        .chain(LICENCE_FILES.iter().map(|name| format!("/{}*", any_case(name))))
+        .collect()
+}
 
 /// The fork's `library/` and its own licence files at the pinned commit, and
 /// nothing else of it. Fetched beside its place and renamed into it, so what
@@ -1254,7 +1260,8 @@ fn fetched_library(root: &Path) -> Result<PathBuf, String> {
     let git = |dir: &Path, args: &[&str]| -> Result<Vec<u8>, String> {
         run(Command::new("git").args(args).current_dir(dir), &format!("git {}", args.join(" ")))
     };
-    let sparse: String = SPARSE.iter().map(|p| format!("{p}\n")).collect();
+    let patterns = sparse();
+    let sparse: String = patterns.iter().map(|p| format!("{p}\n")).collect();
     let pinned = || -> Result<bool, String> {
         Ok(fork.is_dir()
             && git(&fork, &["rev-parse", "HEAD"])? == format!("{commit}\n").into_bytes()
@@ -1263,7 +1270,7 @@ fn fetched_library(root: &Path) -> Result<PathBuf, String> {
     if pinned()? {
         return Ok(fork.join("library"));
     }
-    let _fetching = crate::buildlock::fork_fetch(root);
+    let _fetching = crate::buildlock::licence(root);
     if pinned()? {
         return Ok(fork.join("library"));
     }
@@ -1278,7 +1285,9 @@ fn fetched_library(root: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&partial).map_err(|e| format!("create {}: {e}", partial.display()))?;
     git(&partial, &["init", "-q"])?;
     git(&partial, &["fetch", "-q", "--depth", "1", "--filter=blob:none", &url, &commit])?;
-    git(&partial, &[&["sparse-checkout", "set", "--no-cone"][..], &SPARSE].concat())?;
+    let mut set = vec!["sparse-checkout", "set", "--no-cone"];
+    set.extend(patterns.iter().map(String::as_str));
+    git(&partial, &set)?;
     git(&partial, &["checkout", "-q", "FETCH_HEAD"])?;
     let rename = |from: &Path, to: &Path| {
         std::fs::rename(from, to).map_err(|e| format!("rename {} to {}: {e}", from.display(), to.display()))
@@ -1368,6 +1377,7 @@ fn walk(
     let scratch = root.join("target/licence");
     std::fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
     let lock = scratch.join("Cargo.lock");
+    let held = crate::buildlock::licence(root);
     std::fs::copy(library.join("Cargo.lock"), &lock)
         .map_err(|e| format!("copy std's Cargo.lock: {e}"))?;
     let lockfile = format!("resolver.lockfile-path={:?}", lock.display().to_string());
@@ -1379,6 +1389,7 @@ fn walk(
         &args,
         &[("RUSTC_BOOTSTRAP", "1")],
     )?;
+    drop(held);
     docs.push(Doc {
         members: members(&std_doc)?,
         metadata: std_doc,
@@ -2331,9 +2342,10 @@ prose.
     }
 
     /// The fetched fork is a whole fetch or nothing: one that failed leaves
-    /// nothing a later call refuses on, only `library/` and the licence texts
-    /// are checked out, a whole fetch is reused without the network, and a new
-    /// pin replaces it.
+    /// nothing a later call refuses on, only `library/` and every top-level
+    /// file a name in [`LICENCE_FILES`] starts, in either case, are checked
+    /// out, a whole fetch is reused without the network, and a new pin
+    /// replaces it.
     #[test]
     fn a_fetch_cut_short_is_fetched_again_and_a_new_pin_replaces_the_fork() {
         let tmp = toyos_tmpdir::TempDir::new("fetched-fork");
@@ -2349,6 +2361,10 @@ prose.
             ("x.py", ""),
             ("src/lib.rs", ""),
         ];
+        // Two per name, which a case-insensitive disk still holds apart.
+        let licences: Vec<String> =
+            LICENCE_FILES.iter().flat_map(|name| [format!("{}-A", name.to_uppercase()), format!("{name}-b")]).collect();
+        let files = files.into_iter().chain(licences.iter().map(|file| (file.as_str(), "text")));
         for (file, text) in files {
             std::fs::write(remote.join(file), text).unwrap();
         }
@@ -2369,7 +2385,8 @@ prose.
         pinning(&root, &url, &first);
         let library = fetched_library(&root).unwrap_or_else(|why| panic!("{why}"));
         let fork = library.parent().unwrap();
-        for file in ["library/Cargo.toml", "COPYRIGHT", "LICENSE-MIT", "LICENSES/MIT.txt"] {
+        let wanted = ["library/Cargo.toml", "COPYRIGHT", "LICENSE-MIT", "LICENSES/MIT.txt"];
+        for file in wanted.into_iter().chain(licences.iter().map(String::as_str)) {
             assert!(fork.join(file).is_file(), "{file} was not checked out");
         }
         assert!(!fork.join("x.py").exists() && !fork.join("src").exists(), "more than the licence sources was checked out");
@@ -2404,16 +2421,16 @@ prose.
         assert_eq!(given("Zlib OR MIT OR BSD-3-Clause"), ["MIT.txt"]);
     }
 
-    /// The release's notice, with std fetched the way the release job fetches
-    /// it: every package its walk reaches carries a licence text, the loader's
-    /// MPL crates name where their source is, std carries the fork's texts, and
-    /// every third-party file the release ships is there while nothing pending
-    /// the owner is.
+    /// The release's notice, with std where the build takes it from: every
+    /// package its walk reaches carries a licence text, the loader's MPL crates
+    /// name where their source is, std carries the fork's texts, and every
+    /// third-party file the release ships is there while nothing pending the
+    /// owner is.
     #[test]
     fn the_release_notice_carries_every_package_and_file_it_ships() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let parts = crate::build::Boot::release(root).parts(root).unwrap();
-        let library = fetched_library(root).unwrap_or_else(|why| panic!("{why}"));
+        let library = std_library(root).unwrap_or_else(|why| panic!("{why}"));
         let text = notices(root, parts, &library).unwrap_or_else(|why| panic!("{why}"));
         let block = |head: &str| -> &str {
             let at = text.find(&format!("\n{head}")).unwrap_or_else(|| panic!("no {head:?} in the notice"));

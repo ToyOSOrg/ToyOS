@@ -162,6 +162,9 @@ declare_flags!(pub SUITE = {
     /// machine is not touched**: the run builds the images and writes down what
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
+    /// The image release's macOS command line, booted as its notes print it:
+    /// one test outside every tier, and the only way to run it.
+    pub RELEASE_COMMAND = "--release-command", None;
 });
 
 /// Validate the harness's argv and return the run's filter.
@@ -197,6 +200,13 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
     }
 
     let has = |want| SUITE.present(args, want);
+    if has(&RELEASE_COMMAND) && args.len() > 1 {
+        return Err(
+            "--release-command runs one test in no tier and takes no other word, which it \
+             would drop in silence"
+                .to_string(),
+        );
+    }
     if has(&JOBS) && has(&JOBS_SHORT) {
         return Err(
             "--jobs and -j are two spellings of one width, and the run would read one of \
@@ -283,6 +293,15 @@ mod tests {
             parse_owned(&["--jobs=4", "futex", "--show-output"]).unwrap().as_deref(),
             Some("futex")
         );
+    }
+
+    #[test]
+    fn the_release_command_takes_no_other_word() {
+        assert_eq!(parse_owned(&["--release-command"]).unwrap(), None);
+        for other in ["release_command_boots", "--nightly", "--shard=1/2"] {
+            let refusal = parse_owned(&["--release-command", other]).unwrap_err();
+            assert!(refusal.contains("takes no other word"), "{other}: {refusal}");
+        }
     }
 
     #[test]

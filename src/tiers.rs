@@ -12,10 +12,8 @@
 //! time, or because it shares a boot with one that is slow, stays where it is
 //! whatever it measures.
 //!
-//! The local tier is the third, and CI never runs it: its guests are of an
-//! architecture no hosted runner has been measured to boot. The Apple Silicon
-//! tier is the fourth, and CI never runs it either: its tests boot a command
-//! line only an Apple Silicon Mac has, so no other host runs them.
+//! The local tier is the third, and the only one CI never runs: its guests are
+//! of an architecture no hosted runner has been measured to boot.
 
 /// Which run a registered test belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,8 +27,6 @@ pub enum Tier {
     /// (`issues/kernel/toyos-runs-on-arm64.md`) measures the runners and
     /// moves these rows to `Fast` or `Nightly`.
     Local,
-    /// Every unsharded `cargo test` on an Apple Silicon Mac.
-    AppleSilicon,
 }
 
 impl Tier {
@@ -41,9 +37,6 @@ impl Tier {
             Self::Fast => true,
             Self::Nightly => nightly,
             Self::Local => !sharded,
-            Self::AppleSilicon => {
-                !sharded && cfg!(target_os = "macos") && crate::arch::Arch::HOST == Some(crate::arch::Arch::Aarch64)
-            }
         }
     }
 }

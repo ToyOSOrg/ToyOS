@@ -4,9 +4,12 @@
 use toyos_build::build::{self, Boot};
 use toyos_build::imagerelease::{self, Host};
 
+/// The name `src/redlist.rs` knows this test by.
+pub const NAME: &str = "release_command_boots";
+
 /// The notes' Apple Silicon line boots the release image to a painting
-/// desktop and leaves both firmware files as they were. Registered in the
-/// Apple Silicon tier, so no other host runs it.
+/// desktop and leaves both firmware files as they were. Run by the suite's
+/// `--release-command` and by nothing else.
 pub fn release_command_boots() -> Result<(), String> {
     let host = Host::MacosAppleSilicon;
     let root = super::compile::repo_root();
