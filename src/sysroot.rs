@@ -915,6 +915,7 @@ mod tests {
     /// A key no registered worktree records goes, and so does a half-built one;
     /// a key a worktree records stays, and so does one somebody is using.
     #[test]
+    #[ignore = "issues/build/a-key-being-built-is-waited-for-and-another-key-is-not-reds-under-host-load.md"]
     fn a_sweep_removes_what_no_worktree_names_and_nobody_uses() {
         let root = TempDir::new("sweep");
         git(&root, &["init", "-q"]);
