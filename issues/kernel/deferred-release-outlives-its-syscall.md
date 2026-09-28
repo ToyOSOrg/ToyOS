@@ -183,8 +183,6 @@ at all.** It belongs with that track, not beside it.
 
 ### What "give the batch an owner" costs, worked out 2026-08-20
 
-An owner has to be the *thread*, not the CPU.
-
 A per-thread list cannot live behind `ThreadData`'s lock either:
 `teardown_resources` holds `ProcessData` across `close_all`, and its own first
 line is that the two locks are never held together. So the list has to be on the

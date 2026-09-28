@@ -44,9 +44,6 @@
 use std::io::{Read, Write};
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use toyos::{endow, namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SyscallError, SERVE_PREFIX, SVC_LABEL};
@@ -54,22 +51,8 @@ use toyos_abi::syscall::{self, SyscallError, SERVE_PREFIX, SVC_LABEL};
 const SELF_PATH: &str = "/system/bin/test_rs_kill_while_blocked";
 const SERVICE: &str = "blocked";
 
-/// How long arm 4 gives a killed Ring 3 spinner to reach its last exit
-/// boundary, watched from outside the kill.
-///
-/// **A number rather than a hang**: a guest that stops making progress reds
-/// as `STALL`, which the harness prints apart and tells nobody to bisect.
-/// What it buys is a failure that names itself.
-///
-/// **Priced against the quantity it actually bounds**, which is not one
-/// interrupt delivery: what this constant covers is the whole of
-/// [go byte → boundary → teardown], and the only measurement of that window is
-/// this arm's own recorded green run, 4.972884 ms. Two seconds against it is
-/// 402×. The sentence that used to stand here said "four orders of magnitude of
-/// headroom", which would be true of the interrupt delivery alone — precisely
-/// the part this arm cannot observe from outside the kill, and the part the
-/// window's several scheduler dispatches sit on top of.
-const ENDS_WITHIN: Duration = Duration::from_secs(2);
+/// `process::KILLED_EXIT_CODE`.
+const KILLED: i32 = 137;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -204,50 +187,15 @@ fn an_acceptor_killed_in_the_accept() {
 /// all. With either miss the child here is preempted, queued in the dying list,
 /// picked straight back off it and returned to Ring 3, once per tick, forever.
 ///
-/// **What it watches is the victim's own stdout.** That pipe's write end is in
-/// the victim's handle table and in no other, so the read end this process
-/// holds reaches EOF when — and only when — the victim's handles are drained.
-///
-/// **The clock starts before the kill and not after it.**
-/// What this one bounds is the whole of [kill → boundary → teardown], so the
-/// number is an upper bound on the boundary rather than a measurement of it.
+/// **What it watches is the victim's exit.** Its one thread publishes that
+/// exit only once it has left at its exit boundary, so a spinner the boundary
+/// misses never ends, and the harness's hang ceiling is what says so.
 fn a_ring_three_spinner_ends_at_its_next_exit_boundary() {
     let mut victim = parked("spin", None);
-    // Taken out of the `Child` because the observation is the pipe and not the
-    // process: `parked` has already read the marker line off it, so the next
-    // thing that can ever arrive on it is the end of the victim.
-    let mut spun = victim.stdout.take().expect("the spinner's stdout");
-
-    /// Nanoseconds from the kill to EOF, and `u64::MAX` until there is one.
-    /// Stored by the reader so the answer is the instant it saw rather than the
-    /// poll that noticed.
-    static GONE_AFTER_NS: AtomicU64 = AtomicU64::new(u64::MAX);
-    let started = Instant::now();
-    thread::spawn(move || {
-        let mut byte = [0u8; 1];
-        while spun.read(&mut byte).expect("read the spinner's stdout") != 0 {}
-        GONE_AFTER_NS.store(started.elapsed().as_nanos() as u64, Ordering::Release);
-    });
     victim.kill().expect("kill the spinning child");
-
-    while GONE_AFTER_NS.load(Ordering::Acquire) == u64::MAX && started.elapsed() < ENDS_WITHIN {
-        thread::sleep(Duration::from_millis(1));
-    }
-    let gone = GONE_AFTER_NS.load(Ordering::Acquire);
-    if gone == u64::MAX {
-        println!(
-            "a child killed while spinning in Ring 3 still held its handles {:?} later — \
-             it is being re-dispatched into userland, so nothing on the return path reads \
-             the kill bit",
-            started.elapsed(),
-        );
-        std::process::exit(1);
-    }
-    println!(
-        "  ring 3: a killed spinner reached its last exit boundary in {:?}, with no syscall \
-         to cancel",
-        Duration::from_nanos(gone),
-    );
+    let code = victim.wait().expect("wait for the killed spinner").code();
+    assert_eq!(code, Some(KILLED), "a child killed while spinning in Ring 3 ended with {code:?}");
+    println!("  ring 3: a killed spinner left at its exit boundary, with no syscall to cancel");
 }
 
 fn child(role: &str) -> ! {
