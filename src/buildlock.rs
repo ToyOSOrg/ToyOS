@@ -966,18 +966,15 @@ pub(crate) mod tests {
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "ex\nsh\n");
     }
 
-    /// [`Elsewhere::release`] returns only once the holder's lock is free. The
-    /// probe is opened first because every other assertion after a release
-    /// asks git for the lock directory, and that spawn outlasts the holder's
-    /// exit.
+    /// [`Elsewhere::release`] returns only once the holder has exited and been
+    /// reaped: a zombie still answers `kill(pid, 0)`.
     #[test]
-    fn a_released_holder_has_let_go() {
+    fn a_released_holder_is_gone() {
         let root = scratch("released");
-        let probe = open_lock_file(&keyed_lock_path(&root, Keyed::Sysroot, "k"));
         let user = sysroot_used_elsewhere(&root, "k");
-        assert!(!try_lock(&probe, LOCK_EX), "the holder did not hold its key");
+        let pid = user.id() as i32;
         user.release();
-        assert!(try_lock(&probe, LOCK_EX), "release returned before the holder let go");
+        assert!(!alive(pid), "release returned before the holder was reaped");
     }
 
     /// **One key is built once, and two keys never meet.** A second process
