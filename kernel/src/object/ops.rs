@@ -678,7 +678,7 @@ pub(crate) enum Answered {
 
 /// Whose run of attempts [`until_answered`] makes: what `fsync-budget-spent`
 /// refuses the first attempt of, once.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
 pub(crate) enum Run {
     /// `SYS_FSYNC` on one file.
@@ -689,7 +689,7 @@ pub(crate) enum Run {
 }
 
 /// A partition claim's kinds of transfer, each refused once on its own.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ClaimOp {
     Read,
     Write,
@@ -698,12 +698,21 @@ pub(crate) enum ClaimOp {
 
 /// Whether `run`'s first attempt goes under an operation already over: once
 /// per run, so a writer whose every flush leaves records to flush (`logd`)
-/// is refused once and not on every flush it will ever make.
+/// is refused once and not on every flush it will ever make. Each refusal it
+/// stages is a record naming its run.
 #[cfg(feature = "boot-actuators")]
 fn staged_spent(run: impl Fn() -> Run) -> bool {
     static REFUSED: crate::sync::Lock<alloc::collections::BTreeSet<Run>> =
         crate::sync::Lock::new(alloc::collections::BTreeSet::new());
-    crate::actuator::fsync_budget_spent() && REFUSED.lock().insert(run())
+    if !crate::actuator::fsync_budget_spent() {
+        return false;
+    }
+    let run = run();
+    let staged = REFUSED.lock().insert(run);
+    if staged {
+        crate::log!("fsync-budget-spent: staged a spent budget on {run:?}");
+    }
+    staged
 }
 
 /// `attempt` run until it answers anything but `WouldBlock` — a budget that

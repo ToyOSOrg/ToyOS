@@ -609,23 +609,26 @@ pub fn home_budget_refusal_retried(
             return Err(format!("{bad:?} on the way down\n{tail}"));
         }
     }
-    // And the refusal was one per file, not one per flush: `logd` flushes every
-    // round it wrote a line in, and a refused flush is lines of its own, so a
-    // refusal on every flush retries `/log` again and again until the shutdown
-    // ends it. The whole boot, shutdown included, is the span: no path retries
-    // twice in it.
+    // And the staged refusal was one per run, not one per flush: `logd` flushes
+    // every round it wrote a line in, and a refused flush is lines of its own,
+    // so a refusal staged on every flush refuses `/log` again and again until
+    // the shutdown ends it. Only the refusals the actuator names are counted: a
+    // budget that expired on its own is the device's, and says nothing here.
+    const STAGED: &str = "fsync-budget-spent: staged a spent budget on ";
     let whole = format!("{log}{tail}");
-    let mut retried_paths: Vec<&str> = Vec::new();
-    for line in whole.lines().filter(|l| l.contains("durable on attempt")) {
-        let Some((_, rest)) = line.split_once("fsync: ") else { continue };
-        let path = rest.split_once(" durable on attempt").map_or(rest, |(p, _)| p);
-        if retried_paths.contains(&path) {
+    let mut staged_runs: Vec<&str> = Vec::new();
+    for line in whole.lines() {
+        let Some((_, run)) = line.split_once(STAGED) else { continue };
+        if staged_runs.contains(&run) {
             return Err(format!(
-                "{path} was retried to durable twice, the second at {line:?}: every flush is \
-                 being refused, and each refusal's records are the next flush\n{whole}"
+                "`fsync-budget-spent` staged a second refusal on {run}, at {line:?}: every \
+                 flush is being refused, and each refusal's records are the next flush\n{whole}"
             ));
         }
-        retried_paths.push(path);
+        staged_runs.push(run);
+    }
+    if staged_runs.is_empty() {
+        return Err(format!("`fsync-budget-spent` named no refusal it staged:\n{whole}"));
     }
 
     let io = FileBlocks::open(&image)?;
