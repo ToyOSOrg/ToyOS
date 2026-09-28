@@ -1023,7 +1023,7 @@ pub fn stats_from(
 /// The last thread out's teardown of its process, on its own stack: free what the process holds, then publish its exit. Every other thread has left, so none can run in what is freed.
 /// The thread is in the process until the bookkeeping marks it, so a machine stop waits for every record and release here.
 /// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
-/// Publish happens after the table lock is released — `teardown_bookkeeping`'s wake needs that — and once published the entry is reapable, so nothing may read the table for this pid after.
+/// Publish happens after the table lock is released, and once published the entry is reapable, so nothing may read the table for this pid after.
 fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<ProcessData>>) {
     let main_thread_data = {
         let guard = PROCESS_TABLE.lock();

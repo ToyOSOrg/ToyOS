@@ -3053,7 +3053,7 @@ fn check_rust_result(result: &TestResult) -> bool {
     let test_name = result.name.strip_prefix("test_rs_").unwrap_or(&result.name);
 
     if let Some(err) = &result.error {
-        eprintln!("FAIL rs::{test_name}: {err}{}", kernel_account(result));
+        eprintln!("FAIL rs::{test_name}: {err}\nstdout:\n{}{}", result.stdout, kernel_account(result));
         return false;
     }
 

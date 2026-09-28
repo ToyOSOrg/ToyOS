@@ -7,10 +7,6 @@
 //! `wait` below never returns; the harness's deadline is what says so.
 //! `kill_while_blocked` holds the pipe, connection and accept waits, and
 //! `mutual_kill` a kill inside a kill.
-//!
-//! The marker is printed immediately before the wait, so a kill that lands in
-//! the few instructions between the two ends the child at that syscall's exit
-//! instead, and the arm passes without its wait under test.
 
 use std::io::{Read, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
@@ -51,6 +47,7 @@ fn test() {
             (WAITED.to_string(), dup.0)
         });
         let mut child = spawn(role, endow);
+        println!("  {role}: killing");
         child.kill().expect("kill the parked child");
         let code = child.wait().expect("wait for the killed child").code();
         assert_eq!(code, Some(KILLED), "a child killed in its {role} wait ended with {code:?}");
