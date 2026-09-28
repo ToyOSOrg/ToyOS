@@ -85,6 +85,11 @@ pub enum Peer {
     At(SocketAddr),
 }
 
+/// How many dials a stream's first dial may have turned away — a failed
+/// connect, or a connection closed before a line — before it gives up and the
+/// boot is red. A redial has none ([`Stream::redial`]).
+pub const TURNED_AWAY_CEILING: usize = 64;
+
 /// The log as this host reads it: this host dials `logd`'s port and reads until
 /// the connection ends.
 ///
@@ -122,10 +127,9 @@ struct State {
     /// How many dials ended with no line: a connection `logd` turned away,
     /// one nothing on the machine's side took, or a connect that failed.
     turned_away: usize,
-    /// Those of them since the first dial or the latest redial began, and its
-    /// ceiling.
-    turned_since_dial: usize,
-    ceiling: usize,
+    /// How many of them the first dial gives up at, and `None` once a redial
+    /// has begun: a redial ends at its bound alone.
+    ceiling: Option<usize>,
     /// The connection being read, kept so [`Stream::redial`] can end it.
     current: Option<TcpStream>,
     /// How the latest admitted connection ended, once it has and none has been
@@ -133,9 +137,8 @@ struct State {
     end: Option<End>,
     /// Why the latest dial ended with no connection that carried a line.
     unopened: Option<String>,
-    /// A redial asked for and not yet begun: the instant it gives up by, and
-    /// how many dials turned away it gives up at.
-    redial: Option<(Instant, usize)>,
+    /// A redial asked for and not yet begun: the instant it gives up by.
+    redial: Option<Instant>,
     /// Lines a connection's end cut short, discarded rather than kept: the next
     /// connection's replay carries the same content whole.
     torn: usize,
@@ -177,7 +180,7 @@ impl Stream {
         ceiling: usize,
     ) -> Result<Self, String> {
         let out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
-        let state = State { ceiling, ..State::default() };
+        let state = State { ceiling: Some(ceiling), ..State::default() };
         let shared = Arc::new(Shared { state: Mutex::new(state), moved: Condvar::new() });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -239,18 +242,23 @@ impl Stream {
     }
 
     /// End the current connection, and dial again until a connection carries a
-    /// line, `by` has passed, or `ceiling` dials were turned away: every dial
-    /// is a wait on the machine's answer, and one it turns away — a connect
-    /// that failed, or a connection closed before a line — is asked again and
-    /// counted ([`Stream::turned_away`]). A redial that reaches its ceiling
-    /// gives up and says so ([`Stream::unopened`]).
+    /// line or `by` has passed: every dial is a wait on the machine's answer,
+    /// and one it turns away — a connect that failed, or a connection closed
+    /// before a line — is asked again at once and counted
+    /// ([`Stream::turned_away`]), never judged. A redial whose bound passes
+    /// says so ([`Stream::unopened`]).
+    ///
+    /// **The admitted dial is the event, and `by` its only bound**: nothing the
+    /// machine sends says when `logd` admits a reader again, so how many dials
+    /// that takes is the length of the machine's gap and no verdict — the
+    /// recorded compromise `issues/diagnostics/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`.
     ///
     /// **For a connection this host knows is going**: a swap of the netd
     /// carrying it ends it with no FIN and no reset, so nothing but this host
     /// ever says it has ended.
-    pub fn redial(&self, by: Duration, ceiling: usize) {
+    pub fn redial(&self, by: Duration) {
         let mut state = self.state();
-        state.redial = Some((Instant::now() + by, ceiling));
+        state.redial = Some(Instant::now() + by);
         if let Some(conn) = state.current.take() {
             let _ = conn.shutdown(std::net::Shutdown::Both);
         }
@@ -341,16 +349,19 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
                     println!("  stream: reading {peer:?} at {:?}", conn.peer_addr().ok());
                 }
                 let carried = read(conn, shared, &mut out, echo);
-                // A connection `logd` turned away, while the redial it answers
-                // is still inside its bounds: asked again at once, the refusal
-                // being the event.
-                if !carried && again && Instant::now() < until {
+                // A connection `logd` turned away on a redial: asked again at
+                // once inside the redial's bound, the refusal being the event,
+                // and the redial's end once past it.
+                if !carried && again {
                     let mut state = shared.state.lock().expect("the stream's state");
-                    if state.turned_since_dial >= state.ceiling {
-                        state.unopened = Some(past_ceiling(&state, "the latest connection ended before a line"));
+                    if !state.stop && state.redial.is_none() {
+                        if Instant::now() < until {
+                            continue;
+                        }
+                        state.unopened = Some(format!(
+                            "{peer:?} admitted no connection by the redial's bound: the latest ended before a line"
+                        ));
                         shared.moved.notify_all();
-                    } else if !state.stop && state.redial.is_none() {
-                        continue;
                     }
                 }
             }
@@ -360,12 +371,11 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
             if state.stop {
                 return;
             }
-            if let Some((by, ceiling)) = state.redial.take() {
+            if let Some(by) = state.redial.take() {
                 until = by;
                 again = true;
                 state.unopened = None;
-                state.turned_since_dial = 0;
-                state.ceiling = ceiling;
+                state.ceiling = None;
                 break;
             }
             state = shared.moved.wait(state).expect("the stream's state");
@@ -373,13 +383,16 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
     }
 }
 
-/// Count one dial that failed against the ceiling, and why the dial gives up
-/// where that reaches it.
+/// Count one dial that failed, and why the first dial gives up where that
+/// reaches its ceiling: the count is the first dial's own, nothing being
+/// dialled before it.
 fn count_or_give_up(shared: &Shared, last: &str) -> Option<String> {
     let mut state = shared.state.lock().expect("the stream's state");
     state.turned_away += 1;
-    state.turned_since_dial += 1;
-    (state.turned_since_dial >= state.ceiling).then(|| past_ceiling(&state, last))
+    state
+        .ceiling
+        .filter(|&ceiling| state.turned_away >= ceiling)
+        .map(|ceiling| format!("turned away {ceiling} time(s), which is the first dial's ceiling: {last}"))
 }
 
 /// A connect that ended this way may be taken once the machine is up: it was
@@ -409,7 +422,8 @@ fn open(reach: &dyn Reach, peer: &Peer, until: Instant, shared: &Shared) -> Resu
         let addrs = match peer {
             // No wait between dials: an address carries no name to ask the link
             // for, and the only event a forward can give is a dial it takes, so
-            // the dial ceiling, not a wait, bounds a forward that refuses.
+            // the first dial's ceiling or a redial's bound, never a wait, bounds
+            // a forward that refuses.
             Peer::At(at) => vec![*at],
             Peer::Named { host, port } if on_the_link => match reach.ask(host, until)? {
                 Some(ip) => vec![SocketAddr::from((ip, *port))],
@@ -670,18 +684,9 @@ fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -
     }
     if !carried {
         state.turned_away += 1;
-        state.turned_since_dial += 1;
     }
     shared.moved.notify_all();
     carried
-}
-
-/// Why a dial gave up at its ceiling.
-fn past_ceiling(state: &State, last: &str) -> String {
-    format!(
-        "turned away {} time(s) since the dial began, which is its ceiling: {last}",
-        state.turned_since_dial
-    )
 }
 
 /// How a stream's connection ended.
@@ -1449,7 +1454,7 @@ mod tests {
         let mut first = accepted(&server, "the first dial");
         writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
         assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
-        stream.redial(Duration::from_secs(5), 8);
+        stream.redial(Duration::from_secs(5));
         drop(accepted(&server, "the redial"));
         let mut third = accepted(&server, "the dial after a connection turned away");
         writeln!(third, "[kernel 0.001 cpu0] before the swap").unwrap();
@@ -1469,12 +1474,14 @@ mod tests {
         );
     }
 
-    /// A machine whose first dial is taken and whose every later one is turned
-    /// away before a connection exists: refused and reset in turn, the two
-    /// answers a SYN gets from a machine whose listener is gone or going,
-    /// depending on when it went.
+    /// A machine whose first dial is taken, whose dials after it are turned
+    /// away before a connection exists until `taken_from`, and whose dials from
+    /// then on are taken: refused and reset in turn, the two answers a SYN gets
+    /// from a machine whose listener is gone or going, depending on when it
+    /// went.
     struct TurnedAway {
         dials: std::sync::atomic::AtomicUsize,
+        taken_from: usize,
     }
 
     impl Reach for TurnedAway {
@@ -1488,64 +1495,95 @@ mod tests {
 
         fn dial(&self, at: SocketAddr) -> std::io::Result<TcpStream> {
             match self.dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-                0 => TcpStream::connect(at),
+                n if n == 0 || n >= self.taken_from => TcpStream::connect(at),
                 n if n % 2 == 1 => Err(std::io::ErrorKind::ConnectionRefused.into()),
                 _ => Err(std::io::Error::from_raw_os_error(libc::ECONNRESET)),
             }
         }
     }
 
-    /// **A redial counts every dial refused or reset, and gives up at its
-    /// ceiling saying so.** Staged through [`Reach`], so each dial's answer is
-    /// the one this test gives it and arrives at once: exactly the ceiling's
-    /// number are counted, and the redial ends long before its time bound.
-    #[test]
-    fn a_redial_counts_every_refusal_and_reset_and_gives_up_at_its_ceiling() {
-        const CEILING: usize = 3;
-        let dir = toyos_tmpdir::TempDir::new("metaltalk-refused");
-        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    /// A reader through `reach` whose first connection from `server` has
+    /// carried a line, and that connection.
+    fn read_first(server: &TcpListener, reach: Arc<dyn Reach>, dir: &Path) -> (Stream, TcpStream) {
         let at = server.local_addr().unwrap();
-        let reach: Arc<dyn Reach> = Arc::new(TurnedAway { dials: 0.into() });
         let stream = Stream::through(reach, Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
             .expect("a loopback reader");
-        let mut first = accepted(&server, "the first dial");
+        let mut first = accepted(server, "the first dial");
         writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
         assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
-        stream.redial(Duration::from_secs(60), CEILING);
-        assert_eq!(stream.wait_for_connection(1, Duration::from_secs(5)), None, "nothing listens");
-        let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
-        assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
-        assert_eq!(stream.turned_away(), CEILING, "every refused or reset dial, and no more");
+        (stream, first)
     }
 
-    /// **A redial counts a dial that closes before a line, not only a
-    /// refusal, and gives up at its ceiling.** The listener admits every
-    /// connection and drops it before a byte, as a swapped netd's own
-    /// listener does while nothing on the machine side has yet queued a
-    /// line: each is turned away and counted, and the redial ends at its
-    /// ceiling rather than spinning until its time bound.
+    /// `server` dropping the next `closed` connections before a byte, as
+    /// QEMU's forward does while `logd` turns readers away, and replaying the
+    /// boot on the one after, with one line past it.
+    fn close_then_replay(server: &TcpListener, closed: usize) {
+        let server = server.try_clone().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..closed {
+                drop(server.accept());
+            }
+            let (mut conn, _) = server.accept().unwrap();
+            writeln!(conn, "[kernel 0.001 cpu0] before the swap").unwrap();
+            writeln!(conn, "[kernel 9.000 cpu0] after the swap").unwrap();
+        });
+    }
+
+    /// **A redial asks past every dial refused or reset, however many, until
+    /// one is taken.** Staged through [`Reach`], so each dial's answer is the
+    /// one this test gives it and arrives at once: far more dials than the
+    /// first dial's ceiling are turned away, and every one is counted.
     #[test]
-    fn a_redial_counts_every_close_before_a_line_and_gives_up_at_its_ceiling() {
-        const CEILING: usize = 3;
+    fn a_redial_asks_past_every_refusal_and_reset_until_a_dial_is_taken() {
+        const TURNED: usize = 1000;
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-refused");
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let reach = Arc::new(TurnedAway { dials: 0.into(), taken_from: TURNED + 1 });
+        let (stream, _first) = read_first(&server, reach, &dir);
+        close_then_replay(&server, 0);
+        stream.redial(Duration::from_secs(60));
+        assert!(stream.wait_for("after the swap", Duration::from_secs(5)), "{:?}", stream.unopened());
+        assert_eq!(stream.turned_away(), TURNED, "every refused or reset dial, and no more");
+        assert_eq!(stream.connections(), 2);
+    }
+
+    /// **A redial asks past every connection closed before a line, however
+    /// many, until one carries a line**, and counts each.
+    #[test]
+    fn a_redial_asks_past_every_close_before_a_line_until_one_carries_a_line() {
+        const CLOSED: usize = 200;
         let dir = toyos_tmpdir::TempDir::new("metaltalk-closed");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
-        let at = server.local_addr().unwrap();
-        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
-            .expect("a loopback reader");
-        let mut first = accepted(&server, "the first dial");
-        writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
-        assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
-        let dropper = server.try_clone().unwrap();
-        std::thread::spawn(move || {
-            while let Ok((conn, _)) = dropper.accept() {
-                drop(conn);
-            }
-        });
-        stream.redial(Duration::from_secs(60), CEILING);
-        assert_eq!(stream.wait_for_connection(1, Duration::from_secs(5)), None, "every dial closed before a line");
-        let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
-        assert!(why.contains("ceiling") && why.contains("ended before a line"), "{why}");
-        assert_eq!(stream.turned_away(), CEILING, "every closed dial, and no more");
+        let (stream, _first) = read_first(&server, Arc::new(Net), &dir);
+        close_then_replay(&server, CLOSED);
+        stream.redial(Duration::from_secs(60));
+        assert!(stream.wait_for("after the swap", Duration::from_secs(5)), "{:?}", stream.unopened());
+        assert_eq!(stream.turned_away(), CLOSED, "every closed dial, and no more");
+        assert_eq!(stream.connections(), 2);
+    }
+
+    /// **A redial ends at its bound alone, and says so**: dials refused, and
+    /// connections closed before a line, are asked again until the bound
+    /// passes, and the reader then names the end rather than going quiet.
+    #[test]
+    fn a_redial_ends_at_its_bound_alone_and_says_so() {
+        const BOUND: Duration = Duration::from_millis(50);
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-bound");
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let reach = Arc::new(TurnedAway { dials: 0.into(), taken_from: usize::MAX });
+        let (refused, _first) = read_first(&server, reach, &dir);
+        refused.redial(BOUND);
+        assert_eq!(refused.wait_for_connection(1, Duration::from_secs(5)), None, "nothing is taken");
+        let why = refused.unopened().expect("the redial ended within 5 s and said why");
+        assert!(why.contains("by the bound"), "{why}");
+
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (closed, _first) = read_first(&server, Arc::new(Net), &dir);
+        close_then_replay(&server, usize::MAX);
+        closed.redial(BOUND);
+        assert_eq!(closed.wait_for_connection(1, Duration::from_secs(5)), None, "every dial closed before a line");
+        let why = closed.unopened().expect("the redial ended within 5 s and said why");
+        assert!(why.contains("redial's bound") && why.contains("ended before a line"), "{why}");
     }
 
     /// A reply macOS's mDNSResponder sent this host's legacy question for its

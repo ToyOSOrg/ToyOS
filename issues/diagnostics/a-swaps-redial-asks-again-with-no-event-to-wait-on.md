@@ -16,12 +16,10 @@ forward, accepted and closed before a line — is asked again at once. On a LAN
 that is a question for the name on the link, which the old netd answers at
 once, and a `connect` per round trip for the whole gap.
 
-What bounds it: every dial turned away is counted, refusals included
-(`Stream::turned_away`), and a redial gives up at
-`metalswap::TURNED_AWAY_CEILING`, which the swap's judge reds on by name
-(`a_redial_counts_every_refusal_and_gives_up_at_its_ceiling`). The T14 is
-unmeasured, and a refusal there costs a LAN round trip rather than QEMU's
-forward's.
+What bounds it: the swap's window alone, `Stream::redial`'s `by`; every dial
+turned away is counted and reported (`Stream::turned_away`), never judged.
+The T14 is unmeasured, and a refusal there costs a LAN round trip rather than
+QEMU's forward's.
 
 ## Exit condition
 
@@ -30,4 +28,4 @@ machine sends when `logd` can admit a reader again after a swap of netd —
 for example `logd` keeping its listener across the swap and holding the
 connections it accepts until the new netd serves, or netd announcing its
 exit on a channel that outlives it — and `Stream::redial` dials once per
-such event, with the ceiling and the count deleted.
+such event, with the count deleted.

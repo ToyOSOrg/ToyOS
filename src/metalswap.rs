@@ -46,14 +46,6 @@ const REFUSED_WORD: Duration = Duration::from_secs(10);
 /// a missing line is a red verdict rather than a longer wait.
 const CARRIER_WORD: Duration = Duration::from_millis(toyos_swap::ANSWER_MS);
 
-/// How many dials a stream's first dial, or a swap's redial, may have turned
-/// away — a failed connect, or a connection closed before a line — before it
-/// gives up and the boot or the swap is red. Nothing the machine sends says
-/// when `logd` listens again after a swap, so a redial asks again at once and
-/// this ceiling is the one thing that stops it spinning unseen: the recorded
-/// compromise `issues/diagnostics/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`.
-pub const TURNED_AWAY_CEILING: usize = 64;
-
 /// What asking for one swap came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Swapped {
@@ -133,7 +125,7 @@ fn settled(lines: &[String], mark: usize, service: &str) -> Option<()> {
 /// `Err` is a boot that never opened the stream within `window`, a binary this
 /// host cannot read, or a swap of the stream's own carrier whose `logd` never
 /// said it would turn readers away before `swap` let the swap go without
-/// this side.
+/// this side, or admitted none of this side's dials again within `window`.
 pub fn swap(
     stream: &Stream,
     ssh: &Ssh,
@@ -211,7 +203,22 @@ pub fn swap(
         }
     }
     if accepted && service == toyos_logstream::CARRIER {
-        stream.redial(window, TURNED_AWAY_CEILING);
+        let (left, seen, redialed) = (window.saturating_sub(began.elapsed()), stream.connections(), Instant::now());
+        stream.redial(left);
+        if stream.wait_for_connection(seen, left).is_none() {
+            return Err(format!(
+                "`logd` admitted no dial of the stream's within the {} s window of the swap of {service}: \
+                 turned away {} time(s) from the ask, {}",
+                window.as_secs(),
+                stream.turned_away() - away,
+                stream.unopened().unwrap_or_else(|| "the latest dial unanswered at the bound".to_string())
+            ));
+        }
+        println!(
+            "  swap: `logd` admitted the stream again {} ms after the redial, turned away {} time(s) from the ask",
+            redialed.elapsed().as_millis(),
+            stream.turned_away() - away
+        );
     }
     let mut outcome_ms = None;
     if let Some(until) = until {
@@ -319,13 +326,7 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
             heard.connections.1
         )),
     }
-    if heard.turned_away >= TURNED_AWAY_CEILING {
-        bad.push(format!(
-            "the stream's redial was turned away {} time(s), its ceiling of {TURNED_AWAY_CEILING}, \
-             and gave up",
-            heard.turned_away
-        ));
-    } else if heard.service == toyos_logstream::CARRIER {
+    if heard.service == toyos_logstream::CARRIER {
         said.push(format!(
             "the stream's dials were turned away {} time(s), refusals included, from the ask to \
              the end",
@@ -605,8 +606,8 @@ mod tests {
         elsewhere.words.last_mut().unwrap().1 = "/tmp/swap/other/netd as pid 12".into();
         assert!(judge(&elsewhere, Expect::InService).is_err());
         let mut spun = heard(Expect::InService);
-        spun.turned_away = TURNED_AWAY_CEILING;
-        assert!(judge(&spun, Expect::InService).is_err(), "a redial that reached its ceiling");
+        spun.turned_away = 10_000;
+        assert!(judge(&spun, Expect::InService).is_ok(), "how many dials were turned away is no verdict");
     }
 
     #[test]
