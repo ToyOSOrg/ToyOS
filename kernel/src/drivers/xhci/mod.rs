@@ -973,8 +973,6 @@ impl XhciController {
             }
             return;
         };
-        #[cfg(feature = "boot-actuators")]
-        let code = self.devices[at].stage_break(code);
         let dev = &mut self.devices[at];
         if code == CC_SUCCESS || code == CC_SHORT_PACKET {
             dev.failures = 0;

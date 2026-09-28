@@ -6,8 +6,7 @@ opened: 2026-09-25
 
 # A `quiesce_writers` writer's first write-and-fsync pass outlasts the job's 5 s spin-up
 
-`quiesce_dump_holds_the_stopped` and `quiesce_stops_the_machine` both boot
-`quiesce_writers`. It asks for the reset only once each of its six writers has
+It asks for the reset only once each of its six writers has
 finished one pass: a create, 64 KiB of writes and an fsync. If a writer is
 still in its first pass after 5 s, the job prints `quiesce_writers: <n> of 6
 writers reached their loop in 5s` and exits 1 without asking, so no stop
