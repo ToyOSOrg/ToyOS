@@ -51,8 +51,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, MmapFlags, MmapProt};
 use toyos_abi::RawHandle;
+
+#[path = "../roster.rs"]
+mod roster;
 
 /// Two futex words in one page, `FUTEX_BUCKETS * 4` bytes apart, so
 /// `(phys >> 2) % 64` is the same for both.
@@ -71,6 +76,8 @@ static WORDS: SameBucket = SameBucket {
 
 static WORD_RETURNED: AtomicU32 = AtomicU32::new(0);
 static SIBLING_RETURNED: AtomicU32 = AtomicU32::new(0);
+/// [`counts`]' waiters that have reached their `futex_wait`.
+static COUNTS_ARMED: AtomicU32 = AtomicU32::new(0);
 
 /// This binary's own path. The sweeper is another *process* asking about
 /// frames this one freed, which is the whole of what the third arm is about,
@@ -103,7 +110,10 @@ fn main() {
         Some(LET_GO) => return let_go(),
         _ => {}
     }
-    counts();
+    let cap: SysCap = Endowments::get()
+        .take(SYSCAP_LABEL)
+        .expect("test-runner endows every binary it spawns a system capability");
+    counts(&cap);
     claim_semantics();
     orphaned_by_unmap();
     revoked_while_still_mapped();
@@ -145,10 +155,15 @@ fn timeout_is_its_own_answer() {
 }
 
 /// A count-limited wake names its word and answers how many it woke.
-fn counts() {
+///
+/// **Parked by the kernel's roster, not by a probe**: a probe is a wake, and
+/// the waiters it claims are still on their way back to the word when the
+/// first wake below looks for them.
+fn counts(cap: &SysCap) {
     let waiters: Vec<_> = (0..2)
         .map(|_| {
             thread::spawn(|| {
+                COUNTS_ARMED.fetch_add(1, Ordering::SeqCst);
                 // Returns only once the word has actually changed: the kernel's
                 // `futex_wait` re-reads it after every wake, which is what makes
                 // "was this thread told" observable at all.
@@ -158,11 +173,20 @@ fn counts() {
         })
         .collect();
     let sibling = thread::spawn(|| {
+        COUNTS_ARMED.fetch_add(1, Ordering::SeqCst);
         unsafe { syscall::futex_wait(WORDS.sibling.as_ptr(), 0, None) };
         SIBLING_RETURNED.fetch_add(1, Ordering::SeqCst);
     });
-    wait_until_parked(&WORDS.word, 2);
-    wait_until_parked(&WORDS.sibling, 1);
+    // Each waiter counts itself in with nothing but its `futex_wait` after, so
+    // once all three have, a blocked one is blocked there.
+    roster::await_true(|| {
+        COUNTS_ARMED.load(Ordering::SeqCst) == 3
+            && roster::my_threads(cap)
+                .iter()
+                .filter(|&&(is_thread, state)| is_thread && state == roster::BLOCKED)
+                .count()
+                == 3
+    });
 
     // The word changes first, so a waiter that is told goes home instead of
     // re-parking — otherwise it would re-arm and be counted twice.
