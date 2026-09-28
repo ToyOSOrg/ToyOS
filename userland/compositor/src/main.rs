@@ -14,6 +14,8 @@
 //! What is left in this file is the policy the other three read: the numbers
 //! that are decisions rather than derivations.
 
+#![forbid(unsafe_code)]
+
 mod client;
 mod render;
 mod session;

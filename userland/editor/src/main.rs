@@ -1610,13 +1610,20 @@ fn handle_key(editor: &mut Editor, key: &KeyPress, fb: &mut Framebuffer) {
             }
             Some('c') => {
                 if let Some(text) = editor.selected_text() {
-                    window::clipboard_set(&text).ok();
+                    if let Err(e) = window::clipboard_set(&text) {
+                        eprintln!("editor: nothing was copied — {e}");
+                    }
                 }
             }
             Some('x') => {
                 if let Some(text) = editor.selected_text() {
-                    window::clipboard_set(&text).ok();
-                    editor.delete_selection();
+                    // A cut whose copy was refused keeps its text.
+                    match window::clipboard_set(&text) {
+                        Ok(()) => {
+                            editor.delete_selection();
+                        }
+                        Err(e) => eprintln!("editor: nothing was cut — {e}"),
+                    }
                 }
             }
             Some('v') => {} // Paste handled via ClipboardPaste event
