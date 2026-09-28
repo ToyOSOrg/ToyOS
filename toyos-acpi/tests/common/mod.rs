@@ -3,7 +3,7 @@
 //! A machine's physical memory as a list of regions, and the builders that lay
 //! crafted tables out in one.
 
-use toyos_acpi::Phys;
+use toyos_acpi::{Memory, Phys};
 
 #[derive(Clone, Copy)]
 pub struct Machine<'a> {
@@ -32,6 +32,12 @@ impl Phys for Machine<'_> {
             Some(bytes) => bytes[0],
             None => panic!("the decoder read {phys:#x}, an address in no region"),
         }
+    }
+}
+
+impl Memory for Machine<'_> {
+    fn byte(self, phys: u64) -> u8 {
+        Phys::byte(self, phys)
     }
 }
 

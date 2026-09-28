@@ -953,6 +953,7 @@ name = "toyos-acpi"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+ "toyos-bootmap",
 ]
 
 [[package]]
@@ -974,6 +975,9 @@ dependencies = [
 [[package]]
 name = "toyos-bootmap"
 version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-build"

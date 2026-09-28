@@ -23,8 +23,7 @@ use toyos_tco::{
 use uefi::prelude::*;
 use uefi::table::boot::{MemoryDescriptor, PAGE_SIZE};
 
-/// x86-64's 52-bit physical-address ceiling, as `kernel/src/drivers/acpi.rs`
-/// bounds the same reads.
+/// x86-64's 52-bit physical-address ceiling.
 const MAX_PHYS: u64 = 1 << 52;
 
 /// What of the ECAM window this reads: bus 0's thirty-two devices, eight
