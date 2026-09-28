@@ -1610,7 +1610,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("ftruncate_flush_race", &["test_rs_ftruncate_flush_race", "test_rs_fs_rename_durable"]),
     ("log_backing_read_error", &["test_rs_log_volume_reread"]),
     ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
-    ("writeback_durability", &["test_rs_writeback_durability", "test_rs_fat_backing_revoked"]),
+    ("writeback_durability", &["test_rs_writeback_durability"]),
     ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
@@ -19896,6 +19896,13 @@ fn main() {
         run.exit(1);
     }
 
+    // Every row against the catalogue before `--list` and before any boot, so a
+    // name the suite did not build is refused here and not by whichever worker
+    // reaches it.
+    for (_, names) in CARRIES {
+        qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
+    }
+
     // --list: every test at its tier, and exit
     if list_mode {
         for (name, tier) in schedule.iter() {
@@ -19954,11 +19961,6 @@ fn main() {
     }
 
     check_metal_only_unshared(&rust_bins, &c_bins);
-    // Every row against the catalogue before any boot, so a name the suite did
-    // not build is refused here and not by whichever worker reaches it.
-    for (_, names) in CARRIES {
-        qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
-    }
     check_shard_partition(&all_tests);
 
     // The tier filter, and it is not conditional on the name filter: a rule with
