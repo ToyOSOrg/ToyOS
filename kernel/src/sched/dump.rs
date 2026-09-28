@@ -15,6 +15,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+pub use super::dump_request::Entered;
 use super::dump_request::{DumpRequest, Left};
 
 use crate::arch::{irqchip, percpu, smp};
@@ -142,27 +143,9 @@ fn online_cpus() -> usize {
     (smp::cpu_count() as usize).min(MAX_CPUS)
 }
 
-/// How the pass that met a request was entered: the whole of what decides whether it may serve.
-#[derive(Clone, Copy)]
-pub enum Entered {
-    /// `driver::pass`, by the preempt depth it was entered at, before it raised its own level.
-    Pass { depth: u32 },
-    /// `driver::pass_block`, inside a wait ticket's registration window at every depth.
-    Blocking,
-}
-
 impl Entered {
     fn under_nothing(self) -> Option<UnderNothing> {
-        matches!(self, Self::Pass { depth: 0 }).then_some(UnderNothing(()))
-    }
-}
-
-impl core::fmt::Display for Entered {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Blocking => write!(f, "a blocking pass"),
-            Self::Pass { depth } => write!(f, "a pass entered at preempt depth {depth}"),
-        }
+        self.may_serve().then_some(UnderNothing(()))
     }
 }
 
@@ -172,21 +155,6 @@ struct UnderNothing(());
 /// Ctrl+Alt+D pressed. Recorded, not run: the caller holds its driver's guard.
 pub fn file_request() {
     REQUEST.file();
-}
-
-/// `quiesce-dump`: the report a keystroke asks for, served by the thread
-/// running the shutdown once its stop holds every thread it named. That
-/// thread is at its syscall's entry depth with no lock under it, which is
-/// what a pass entered at zero proves and what `Parkable::at_entry` asserts.
-#[cfg(feature = "boot-actuators")]
-pub fn serve_for_the_stop() {
-    let _nothing_under_it = crate::scheduler::Parkable::at_entry();
-    // Filed and taken in one exchange: a sibling's pass entered at zero would take a request filed alone.
-    assert!(
-        REQUEST.file_and_take(),
-        "quiesce-dump: a report was already running when the stop asked for its own"
-    );
-    report_until_nothing_pending(&UnderNothing(()));
 }
 
 /// Ctrl+Alt+D's request, from `drain_irqs` on every pass.
@@ -207,11 +175,7 @@ fn serve(proof: &UnderNothing) {
     if !REQUEST.pending() || !REQUEST.take() {
         return;
     }
-    report_until_nothing_pending(proof);
-}
-
-/// The caller took the request: report until a report ends with nothing filed during it.
-fn report_until_nothing_pending(proof: &UnderNothing) {
+    // Until a report ends with nothing filed during it.
     loop {
         report(proof);
         if !REQUEST.end_report() {

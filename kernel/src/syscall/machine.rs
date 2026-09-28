@@ -101,10 +101,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
         assert!(queued, "console-queue-at-the-stop: the queue had no room for its one line");
     }
     crate::log::console::drain_for_the_stop();
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::quiesce_dump() {
-        crate::sched::dump::serve_for_the_stop();
-    }
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
     crate::writeback::drain_all();
