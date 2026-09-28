@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-27
 ---
@@ -28,6 +28,7 @@ log_`, interleaved per round against `origin/main`'s kernel and tests:
   began; 0 of 5 after);
 - `origin/main`: 2 red of 13 (0 of 8 at 1ce71831, 2 of 5 at 16d2e645).
 Each red was this failure. The race is on `main`.
+Also red on the orchestrator's Fast tier for PR #563 at `d6716fc7`, 2026-09-28: the same failure, `563r4-fast.log`. Disabled for this reason in `src/redlist.rs`.
 
 The fix belongs where the owner is decided:
 - init names the owner itself, after the spawn and before the frame. That
