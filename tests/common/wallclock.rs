@@ -25,9 +25,10 @@
 //! and everything downstream of it shipped code.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::fwvars;
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
 use super::volumes::{self, Entry};
@@ -80,7 +81,6 @@ fn names(entries: &[&Entry]) -> String {
     entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
-/// The clock lines from a boot log, for a failure message that says why.
 /// What `wall_clock_now` printed for `SYS_CLOCK_EPOCH`.
 fn probed_epoch(log: &str) -> Option<i64> {
     let line = log.lines().find(|l| l.contains("wall-clock: epoch="))?;
@@ -116,6 +116,7 @@ fn boot_and_read(
     image_name: &str,
     params: &'static [&'static str],
     stage: &[(String, Vec<u8>)],
+    firmware_vars: Option<PathBuf>,
 ) -> Result<(Vec<Entry>, String), String> {
     let image_path = super::lane::dir().join(image_name);
     let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, params);
@@ -136,6 +137,7 @@ fn boot_and_read(
             boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: params,
             rtc_base: Some(RTC_BASE),
+            firmware_vars,
             ..Default::default()
         },
     );
@@ -155,7 +157,6 @@ fn boot_and_read(
     writeln!(qemu.stdin_mut(), "run echo {WINDOW_MARKER}")
         .map_err(|e| format!("stage the between-tests window: {e}"))?;
     qemu.flush_stdin();
-    // What the two clock syscalls answer, which nothing on the volume can show.
     let probe = qemu.run_test("test_rs_wall_clock_now", Duration::from_secs(30));
     log.push_str(&probe.before);
     log.push_str(&probe.stdout);
@@ -187,21 +188,57 @@ fn boot_and_read(
     Ok((entries, log))
 }
 
-/// The RTC keeps UTC: the file name, its FAT stamp and `SYS_CLOCK_EPOCH` all
-/// sit on the staged instant.
+/// `PcatRealTimeClockRuntimeDxe`'s `FILE_GUID`, `378D7B65-8DA9-4773-B6E4-A47826A833E1`,
+/// in the byte order `EFI_GUID` stores: the vendor of the `RTC` variable its
+/// `PcRtcInit` reads `EFI_TIME::TimeZone` out of (edk2
+/// `PcAtChipsetPkg/PcatRealTimeClockRuntimeDxe/PcRtc.c`).
+const PC_RTC_VENDOR: [u8; 16] =
+    [0x65, 0x7b, 0x8d, 0x37, 0xa9, 0x8d, 0x73, 0x47, 0xb6, 0xe4, 0xa4, 0x78, 0x26, 0xa8, 0x33, 0xe1];
+/// `EFI_VARIABLE_NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS`, what
+/// `PcRtcSetTime` stores the zone with.
+const PC_RTC_ATTRIBUTES: u32 = 0x7;
+/// UTC+2 in `EFI_TIME::TimeZone`, whose relation is `Localtime = UTC - TimeZone`.
+const FIRMWARE_ZONE_MINUTES: i16 = -120;
+
+/// How far `h:m:s` is past the staged instant's own time of day; the base is
+/// far enough from midnight that no boot crosses one.
+fn past_the_base(h: &str, m: &str, s: &str) -> Option<i64> {
+    let [h, m, s] = [h, m, s].map(|field| field.parse::<i64>().ok());
+    Some(h? * 3_600 + m? * 60 + s? - RTC_BASE_SECS.rem_euclid(86_400))
+}
+
+/// What `wall_clock_now` printed for `SYS_CLOCK_REALTIME`, past the base.
+fn probed_realtime(log: &str) -> Option<i64> {
+    let line = log.lines().find(|l| l.contains("wall-clock: epoch="))?;
+    let hms = line.split("realtime=").nth(1)?.split_whitespace().next()?;
+    let [h, m, s] = hms.split(':').collect::<Vec<_>>()[..] else { return None };
+    past_the_base(h, m, s)
+}
+
 pub fn rtc_is_utc(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (entries, log) =
-        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-utc.img", &[], &[])?;
+    let vars = super::lane::dir().join("wall-clock-utc-vars.fd");
+    toyos_build::firmware::of(qemu::Profile::Metal.arch())?.fresh_vars(&vars)?;
+    let zone = u32::from(FIRMWARE_ZONE_MINUTES as u16).to_le_bytes();
+    fwvars::plant(&vars, &PC_RTC_VENDOR, "RTC", PC_RTC_ATTRIBUTES, &zone)?;
+    let booted =
+        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-utc.img", &[], &[], Some(vars.clone()));
+    let _ = std::fs::remove_file(&vars);
+    let (entries, log) = booted?;
     let logs = logs(&entries);
 
     let [only] = logs.as_slice() else {
         return Err(format!("the volume holds {} logs, wanted one: {}", logs.len(), names(&logs)));
     };
-    if !only.name.starts_with(RTC_BASE_DATE) {
+    let named = only.name.strip_prefix(RTC_BASE_DATE).and_then(|hms| hms.strip_suffix(".log")).and_then(|hms| {
+        let (h, ms) = hms.split_at_checked(2)?;
+        let (m, s) = ms.split_at_checked(2)?;
+        past_the_base(h, m, s)
+    });
+    if !named.is_some_and(|drift| (0..=MAX_BOOT_DRIFT_SECS).contains(&drift)) {
         return Err(format!(
             "the log is {} and the host staged {RTC_BASE}\n{}",
             only.name,
@@ -229,7 +266,24 @@ pub fn rtc_is_utc(
             clock_lines(&log)
         ));
     }
-    eprintln!("  [clock] {} and epoch {epoch} sit on the staged instant", only.name);
+    let Some(realtime_drift) = probed_realtime(&log) else {
+        return Err(format!(
+            "the guest never printed what `SYS_CLOCK_REALTIME` answered\n{}",
+            clock_lines(&log)
+        ));
+    };
+    if !(0..=MAX_BOOT_DRIFT_SECS).contains(&realtime_drift) {
+        return Err(format!(
+            "`SYS_CLOCK_REALTIME` answered a time of day {realtime_drift}s from the staged \
+             instant's\n{}",
+            clock_lines(&log)
+        ));
+    }
+    eprintln!(
+        "  [clock] with firmware naming {FIRMWARE_ZONE_MINUTES} minutes, {}, its FAT stamp, epoch \
+         {epoch} and the time of day sit on the staged instant",
+        only.name
+    );
     Ok(())
 }
 
@@ -243,7 +297,7 @@ pub fn undated(
     params: &'static [&'static str],
     because: &str,
 ) -> Result<(), String> {
-    let (entries, log) = boot_and_read(test_config, c_bins, rust_bins, image_name, params, &[])?;
+    let (entries, log) = boot_and_read(test_config, c_bins, rust_bins, image_name, params, &[], None)?;
     let logs = logs(&entries);
 
     // The refusal, by name and with its reason. A kernel that silently took
@@ -310,7 +364,7 @@ pub fn no_century(
     // ignoring it gives 2133.
     const PARAMS: &[&str] = &["rtc-no-century", "rtc-century-next"];
     let (entries, log) =
-        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-no-century.img", PARAMS, &[])?;
+        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-no-century.img", PARAMS, &[], None)?;
     let logs = logs(&entries);
 
     if !log.contains("ACPI: the FADT names no RTC century register") {
@@ -351,7 +405,7 @@ pub fn century_from_the_register(
 ) -> Result<(), String> {
     const PARAMS: &[&str] = &["rtc-century-next"];
     let (entries, log) =
-        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-century.img", PARAMS, &[])?;
+        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-century.img", PARAMS, &[], None)?;
     let logs = logs(&entries);
 
     let [only] = logs.as_slice() else {

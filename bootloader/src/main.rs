@@ -519,7 +519,7 @@ fn tsc() -> u64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: Option<rootimage::RootImage>, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], layout: u32, root_image: Option<rootimage::RootImage>, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -641,6 +641,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         boot_partition_guid,
         boot_partition_present,
         log_partition_guid,
+        layout,
         cmdline_addr: cmdline.as_ptr() as u64,
         cmdline_len: cmdline.len() as u64,
         root_bridge_window_count,
@@ -660,9 +661,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 
     kernel_args.loader_handoff_tsc = tsc();
     println!(
-        "Loader TSC: {entry_tsc} at entry, {} at the handoff; {}",
+        "Loader TSC: {entry_tsc} at entry, {} at the handoff",
         kernel_args.loader_handoff_tsc,
-        arch::counter_origin(),
     );
 
     // Last, and after every line above: a console write, a FAT write and a
@@ -956,6 +956,13 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         .unwrap_or_else(|e| panic!("slot {}'s cmdline is not UTF-8: {e}", chosen.which.letter()));
     println!("Boot parameter: {params:?}");
 
+    let layout = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WRITE_NO_LAYOUT_PARAM) {
+        println!("Kernel arguments: layout 0 on {}", toyos_abi::boot::WRITE_NO_LAYOUT_PARAM);
+        0
+    } else {
+        toyos_abi::boot::LAYOUT
+    };
+
     let root_image = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WITHHOLD_ROOT_PARAM) {
         println!("ROOT: withheld on {}; the kernel is handed no image", toyos_abi::boot::WITHHOLD_ROOT_PARAM);
         chosen.root.free(system_table.boot_services());
@@ -981,5 +988,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, root_image, entry_tsc, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, layout, root_image, entry_tsc, system_table);
 }

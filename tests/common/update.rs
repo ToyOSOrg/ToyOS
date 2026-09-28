@@ -16,7 +16,7 @@
 //! What the running system can write and the loader must not trust — the
 //! slots' record, the slot table — the host writes into the image between or
 //! beneath boots, and the variable store it reads and plants in by EDK2's own
-//! layout ([`vars`]).
+//! layout ([`fwvars`]).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -29,6 +29,7 @@ use toyos_update::floor::{self as floors, Scope};
 use toyos_update::record::{Booted, Record};
 use toyos_update::slots::Which;
 
+use super::fwvars;
 use super::qemu::{self, BootOptions, QemuInstance, Staged, DEFAULT_READY};
 use super::ssh::{self, Identity, HOST};
 
@@ -615,8 +616,8 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
     let fresh = || toyos_build::firmware::of(toyos_build::arch::Arch::X86_64)?.fresh_vars(&rig.vars);
 
     fresh()?;
-    vars::plant(&rig.vars, &owner, floors::ATTRIBUTES, &u64::MAX.to_le_bytes())?;
-    vars::plant(&rig.vars, &other, floors::ATTRIBUTES, &u64::MAX.to_le_bytes())?;
+    fwvars::plant(&rig.vars, &FLOOR_VENDOR, &owner, floors::ATTRIBUTES, &u64::MAX.to_le_bytes())?;
+    fwvars::plant(&rig.vars, &FLOOR_VENDOR, &other, floors::ATTRIBUTES, &u64::MAX.to_le_bytes())?;
     let (mut guest, mut console) = rig.boot()?;
     owed(&console, 0, &format!("{SLOT_RECORD} A, the one the slot table marks"))?;
     loader_said(&guest, 0, &format!("Anti-rollback floor: {other} is no floor this image loader keeps; deleted"))?;
@@ -625,7 +626,7 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
     loader_said(&guest, uart, &format!("Anti-rollback floor: {BASE}, raised from 0 by the boot that proved it"))?;
     drop(guest);
 
-    let stored = vars::live(&rig.vars)?;
+    let stored = fwvars::live(&rig.vars, &FLOOR_VENDOR)?;
     let value = |name: &str| stored.iter().filter(|v| v.name == name).map(|v| v.data.clone()).collect::<Vec<_>>();
     let want = [(&owner, vec![u64::MAX.to_le_bytes().to_vec()]), (&own, vec![BASE.to_le_bytes().to_vec()]), (&other, vec![])];
     for (name, holds) in want {
@@ -636,7 +637,7 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
     eprintln!("  [update] the owner's floor and another image's held this one to nothing; the other's went, the owner's stayed");
 
     fresh()?;
-    vars::plant(&rig.vars, &own, floors::ATTRIBUTES, &[1; 9])?;
+    fwvars::plant(&rig.vars, &FLOOR_VENDOR, &own, floors::ATTRIBUTES, &[1; 9])?;
     let refused = rig.launch(FLOOR_REFUSED);
     said(refused.boot_log(), &[&format!("Anti-rollback floor: {own}: it holds 9 bytes where this loader writes 8")])?;
     drop(refused);
@@ -644,108 +645,6 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
     Ok(())
 }
 
-/// The firmware's variable store, as OVMF keeps it in its `VARS` file: a
-/// firmware volume holding an authenticated variable store, read and written
-/// by the layout EDK2 declares for it (`MdeModulePkg/Include/Guid/
-/// VariableFormat.h`) and not by anything the loader shares — only the
-/// floor's vendor GUID, which the store is asked for.
-mod vars {
-    use std::path::Path;
-
-    /// The floor's vendor, `33BE3D4A-30E6-49F5-8050-F169D93A20FB`, in the
-    /// byte order `EFI_GUID` stores.
-    const VENDOR: [u8; 16] = [0x4a, 0x3d, 0xbe, 0x33, 0xe6, 0x30, 0xf5, 0x49, 0x80, 0x50, 0xf1, 0x69, 0xd9, 0x3a, 0x20, 0xfb];
-    /// `EFI_FIRMWARE_VOLUME_HEADER`: its signature and its header's length.
-    const FV_SIGNATURE: (usize, &[u8]) = (0x28, b"_FVH");
-    const FV_HEADER_LEN_AT: usize = 0x30;
-    /// `VARIABLE_STORE_HEADER`: signature GUID, size, format, state, reserved.
-    const STORE_HEADER: usize = 16 + 4 + 1 + 1 + 2 + 4;
-    /// `AUTHENTICATED_VARIABLE_HEADER`: start id, state, reserved, attributes,
-    /// monotonic count, time stamp, public key index, name size, data size,
-    /// vendor GUID.
-    const HEADER: usize = 2 + 1 + 1 + 4 + 8 + 16 + 4 + 4 + 4 + 16;
-    const START_ID: u16 = 0x55AA;
-    const VAR_ADDED: u8 = 0x3F;
-    /// `VAR_ADDED & VAR_IN_DELETED_TRANSITION`: still the variable until the
-    /// copy replacing it is added.
-    const IN_TRANSITION: u8 = 0x3E;
-
-    pub struct Var {
-        pub name: String,
-        pub data: Vec<u8>,
-    }
-
-    /// Where the variables begin and where the store ends.
-    fn store(bytes: &[u8]) -> Result<(usize, usize), String> {
-        let (at, sig) = FV_SIGNATURE;
-        if bytes.get(at..at + sig.len()) != Some(sig) {
-            return Err("the variable file is no firmware volume".into());
-        }
-        let header = u16::from_le_bytes([bytes[FV_HEADER_LEN_AT], bytes[FV_HEADER_LEN_AT + 1]]) as usize;
-        let size = u32::from_le_bytes(bytes[header + 16..header + 20].try_into().expect("four bytes")) as usize;
-        Ok((header + STORE_HEADER, header + size))
-    }
-
-    /// One variable header in the store.
-    struct Found {
-        state: u8,
-        vendor: [u8; 16],
-        var: Var,
-    }
-
-    /// Every variable header in the store, and where the erased space after
-    /// them begins.
-    fn walk(bytes: &[u8]) -> Result<(Vec<Found>, usize), String> {
-        let (mut at, end) = store(bytes)?;
-        let mut out = Vec::new();
-        while at + HEADER <= end && u16::from_le_bytes([bytes[at], bytes[at + 1]]) == START_ID {
-            let word = |off: usize| u32::from_le_bytes(bytes[at + off..at + off + 4].try_into().expect("four bytes")) as usize;
-            let (name_len, data_len) = (word(36), word(40));
-            let vendor: [u8; 16] = bytes[at + 44..at + 60].try_into().expect("sixteen bytes");
-            let name_at = at + HEADER;
-            let units: Vec<u16> = bytes[name_at..name_at + name_len]
-                .chunks(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .take_while(|&u| u != 0)
-                .collect();
-            let data = bytes[name_at + name_len..name_at + name_len + data_len].to_vec();
-            out.push(Found { state: bytes[at + 2], vendor, var: Var { name: String::from_utf16_lossy(&units), data } });
-            at = (name_at + name_len + data_len).next_multiple_of(4);
-        }
-        Ok((out, at))
-    }
-
-    /// The live variables under the floor's vendor.
-    pub fn live(path: &Path) -> Result<Vec<Var>, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(walk(&bytes)?
-            .0
-            .into_iter()
-            .filter(|found| found.vendor == VENDOR && (found.state == VAR_ADDED || found.state == IN_TRANSITION))
-            .map(|found| found.var)
-            .collect())
-    }
-
-    /// Add `name` under the floor's vendor with `attributes` and `data`, as
-    /// the firmware would have added it.
-    pub fn plant(path: &Path, name: &str, attributes: u32, data: &[u8]) -> Result<(), String> {
-        let mut bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let (_, end) = store(&bytes)?;
-        let (_, at) = walk(&bytes)?;
-        let mut units: Vec<u8> = name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
-        let mut var = vec![0u8; HEADER];
-        var[..2].copy_from_slice(&START_ID.to_le_bytes());
-        var[2] = VAR_ADDED;
-        var[4..8].copy_from_slice(&attributes.to_le_bytes());
-        var[36..40].copy_from_slice(&(units.len() as u32).to_le_bytes());
-        var[40..44].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        var[44..60].copy_from_slice(&VENDOR);
-        var.append(&mut units);
-        var.extend_from_slice(data);
-        if at + var.len() > end || bytes[at..at + var.len()].iter().any(|&b| b != 0xFF) {
-            return Err(format!("no erased room for {name} at byte {at} of the variable store"));
-        }
-        bytes[at..at + var.len()].copy_from_slice(&var);
-        std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
-    }
-}
+/// The floor's vendor, `33BE3D4A-30E6-49F5-8050-F169D93A20FB`, in the byte
+/// order `EFI_GUID` stores.
+const FLOOR_VENDOR: [u8; 16] = [0x4a, 0x3d, 0xbe, 0x33, 0xe6, 0x30, 0xf5, 0x49, 0x80, 0x50, 0xf1, 0x69, 0xd9, 0x3a, 0x20, 0xfb];

@@ -55,6 +55,11 @@ pub struct KernelArgs {
     /// Naming the partition is all this does. Whether one with that GUID is on
     /// the disk is the kernel's question, and its answer there may well be no.
     pub log_partition_guid: [u8; 16],
+    /// The layout the loader wrote this struct in: [`LAYOUT`] from a loader built
+    /// with this file. The kernel refuses any other value before it reads a
+    /// field after this one, so every field before it keeps its offset in every
+    /// layout.
+    pub layout: u32,
     /// The boot parameter, as ASCII with no terminator: comma-separated tokens
     /// read out of `\toyos\cmdline` on the volume the bootloader loaded itself
     /// from. [`root_uuid`] and [`actuators`] are the two readings of it.
@@ -104,6 +109,16 @@ pub struct KernelArgs {
     pub loader_handoff_tsc: u64,
     pub root_read_tsc: u64,
 }
+
+/// [`KernelArgs::layout`] for the struct this file declares, bumped by any
+/// change to its layout. Never within -1440..=1440 as an `i32`: a loader older
+/// than the word wrote a firmware zone in minutes at its offset.
+pub const LAYOUT: u32 = 0x5459_0001;
+
+/// The boot parameter on which the loader writes 0 as [`KernelArgs::layout`],
+/// what an older loader writes there on firmware that names no zone: the
+/// negative control on the kernel's refusal, and read by both of them.
+pub const WRITE_NO_LAYOUT_PARAM: &str = "loader-writes-no-layout";
 
 /// The boot parameter on which the loader hands the kernel no ROOT image: the
 /// negative control on the kernel's refusal, and read by both of them.
@@ -201,6 +216,7 @@ const _: () = {
     assert!(offset_of!(KernelArgs, boot_partition_guid) == 128);
     assert!(offset_of!(KernelArgs, boot_partition_present) == 144);
     assert!(offset_of!(KernelArgs, log_partition_guid) == 148);
+    assert!(offset_of!(KernelArgs, layout) == 164);
     assert!(offset_of!(KernelArgs, cmdline_addr) == 168);
     assert!(offset_of!(KernelArgs, cmdline_len) == 176);
     assert!(offset_of!(KernelArgs, root_bridge_window_count) == 184);
@@ -212,6 +228,7 @@ const _: () = {
     assert!(offset_of!(KernelArgs, loader_handoff_tsc) == 1256);
     assert!(offset_of!(KernelArgs, root_read_tsc) == 1264);
     assert!(size_of::<KernelArgs>() == 1272);
+    assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
     assert!(align_of::<RootBridgeWindow>() == 8);
@@ -293,6 +310,7 @@ mod tests {
         boot_partition_guid: [0; 16],
         boot_partition_present: 0,
         log_partition_guid: [0; 16],
+        layout: LAYOUT,
         cmdline_addr: 0,
         cmdline_len: 0,
         root_bridge_window_count: 0,
