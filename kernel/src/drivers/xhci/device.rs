@@ -784,7 +784,6 @@ fn bind_hid(
         prev_report: [0; 8],
         broke_with: None,
         failures: 0,
-        completions: 0,
     };
 
     dev.requeue(&ctrl.db_base);

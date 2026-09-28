@@ -26,10 +26,6 @@ pub struct Disabled {
 /// Every disabled test.
 pub const DISABLED: &[Disabled] = &[
     Disabled {
-        test: "console_line_atomicity",
-        issue: "issues/build/console-line-atomicity-loses-five-of-a-thousand-lines-on-ci.md",
-    },
-    Disabled {
         test: "console_locale_detect",
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
     },
@@ -65,16 +61,8 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
     },
     Disabled {
-        test: "quiesce_dump_holds_the_stopped",
-        issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
-    },
-    Disabled {
         test: "quiesce_stops_the_machine",
         issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
-    },
-    Disabled {
-        test: "quiesce_wakes_on_the_last_exit",
-        issue: "issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md",
     },
     Disabled {
         test: "quiesce_wakes_on_the_last_park",
@@ -93,20 +81,12 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/short-sleep-livelock-stalls-on-ci-with-one-sleeper-never-returning.md",
     },
     Disabled {
-        test: "so_cache_refusals",
-        issue: "issues/kernel/so-cache-refusals-saw-the-kernel-refuse-nothing-once.md",
-    },
-    Disabled {
         test: "swap_crash_rolls_back",
         issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
     },
     Disabled {
         test: "swap_netd",
         issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
-    },
-    Disabled {
-        test: "usb_disk_index_stable",
-        issue: "issues/hardware/usb-disk-index-stable-nothing-enumerates-on-the-first-controller.md",
     },
     Disabled {
         test: "usb_transport_break",
