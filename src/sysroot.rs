@@ -969,8 +969,10 @@ mod tests {
         git(&base, &["init", "-q"]);
         let compiler = primary_compiler(&base, true);
         let made = std::cell::Cell::new(0);
-        let make = |dir: &Path| {
+        // `most` bounds the makes so far, so a make that loops fails rather than hangs.
+        let make = |dir: &Path, most: usize| {
             made.set(made.get() + 1);
+            assert!(made.get() <= most, "a sysroot that was not whole was made again");
             publish(&compiler, dir, |partial| {
                 write(&partial.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib"), "std");
                 "found\n".to_string()
@@ -978,7 +980,7 @@ mod tests {
         };
 
         let fresh = sysroots_dir(&base.join("rust")).join("fresh");
-        let said = refusal(|| drop(held(&base, "fresh", &fresh, || make(&fresh))));
+        let said = refusal(|| drop(held(&base, "fresh", &fresh, || make(&fresh, 1))));
         assert!(said.contains("is missing cargo") && said.contains("`cargo run -- --build-only`"), "{said}");
         assert!(!fresh.exists() && !fresh.with_extension("partial").exists(), "a sysroot was published from a stage2 without cargo");
         assert_eq!(made.get(), 1);
@@ -987,12 +989,12 @@ mod tests {
         clone_tree(&compiler.stage2, &dir);
         write(&dir.join(SOURCES), "found\n");
         toolchain::provision_toolchain_cargo(&compiler.stage2);
-        let using = held(&base, "found", &dir, || make(&dir));
+        let using = held(&base, "found", &dir, || make(&dir, 2));
         assert_eq!(made.get(), 2, "a sysroot without its cargo was trusted because it has SOURCES");
         assert_eq!(toolchain::toolchain_defect(&dir), None);
         assert!(dir.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib").is_file());
         drop(using);
-        drop(held(&base, "found", &dir, || make(&dir)));
+        drop(held(&base, "found", &dir, || make(&dir, 2)));
         assert_eq!(made.get(), 2, "a whole sysroot was made again");
     }
 
