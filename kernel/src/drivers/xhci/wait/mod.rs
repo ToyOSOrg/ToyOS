@@ -41,7 +41,7 @@ use super::{deadline, enqueue_control, log_unrecoverable, Completion, Trb, TrbRi
 use super::{XhciController, EVENT_TRANSFER, EVENT_CMD_COMPLETE, USB_TIMEOUT_NS};
 use super::{CC_SUCCESS, CC_SHORT_PACKET};
 use toyos_xhci::call::NotTaken;
-use toyos_xhci::job::Await;
+use toyos_xhci::job::{Await, CC_STALL};
 use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
 use toyos_xhci::scan;
 
@@ -482,7 +482,7 @@ impl XhciController {
     /// Take EP0 back out of Halted where `code` says the device stalled the
     /// transfer, before the failure reaches a caller likely to send another one.
     fn recover_after(&mut self, slot: u8, ctx_block: usize, ring: &mut TrbRing, code: u32) {
-        if code != super::CC_STALL {
+        if code != CC_STALL {
             return;
         }
         if !self.restart_control_endpoint(slot, ctx_block, ring) {

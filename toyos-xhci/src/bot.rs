@@ -17,7 +17,7 @@
 //! touches a ring, so a driver that waits in place and one that gives the CPU
 //! back between transfers drive the same order.
 
-use crate::job::{CC_SHORT_PACKET, CC_SUCCESS};
+use crate::job::{CC_SHORT_PACKET, CC_STALL, CC_SUCCESS};
 use crate::ladder::{self, Left};
 use crate::reset_recovery::Pipe;
 use crate::scsi::Cdb;
@@ -104,9 +104,6 @@ impl core::fmt::Display for Phase {
     }
 }
 
-/// Completion code 6 (xHCI 1.2 Table 6-90): the device STALLed the transfer.
-pub const CC_STALL: u32 = 6;
-
 pub const CBW_LEN: usize = 31;
 pub const CSW_LEN: usize = 13;
 const CBW_SIGNATURE: u32 = 0x4342_5355;
@@ -155,9 +152,8 @@ pub enum Broke<W> {
     Stall { phase: Phase },
     /// CSW status 2, which leaves both endpoints Running.
     PhaseError,
-    /// The CSW named somebody else's transfer; the status and residue are the
-    /// rest of what the device said, and tell a status made for an abandoned
-    /// command from one made for nothing.
+    /// A CSW status §5.2 reserves, which is no meaningful CSW (§6.3.2).
+    Reserved { status: u8 },
     Csw { what: &'static str, got: u32, want: u32, status: u8, residue: u32 },
     /// More bytes claimed unmoved than the transfer had; believing it would
     /// underflow the byte count every caller uses.
@@ -174,7 +170,9 @@ impl<W> Broke<W> {
             | Self::Gone { phase }
             | Self::Stall { phase }
             | Self::Short { phase, .. } => *phase,
-            Self::PhaseError | Self::Csw { .. } | Self::Residue { .. } => Phase::Status,
+            Self::PhaseError | Self::Reserved { .. } | Self::Csw { .. } | Self::Residue { .. } => {
+                Phase::Status
+            }
         };
         ladder::left(phase, data_out)
     }
@@ -340,7 +338,8 @@ pub struct CswDue {
 }
 
 impl CswDue {
-    /// Every field checked (§6.3), never believed.
+    /// Every field checked (§6.3), never believed. Status 2 is meaningful
+    /// whatever the residue; 0 and 1 only with one no larger than the transfer.
     pub fn judge<W>(self, csw: &[u8; CSW_LEN]) -> Result<Bot, Broke<W>> {
         let word = |at: usize| u32::from_le_bytes([csw[at], csw[at + 1], csw[at + 2], csw[at + 3]]);
         let (signature, tag, residue, status) = (word(0), word(4), word(8), csw[12]);
@@ -352,15 +351,14 @@ impl CswDue {
         if tag != self.tag {
             return Err(Broke::Csw { what: "tag", got: tag, want: self.tag, status, residue });
         }
-        if residue > self.data_len {
-            return Err(Broke::Residue { unmoved: residue, of: self.data_len });
-        }
         match status {
+            2 => Err(Broke::PhaseError),
+            0 | 1 if residue > self.data_len => Err(Broke::Residue { unmoved: residue, of: self.data_len }),
             // Neither account is trusted alone: a caller may read only what
             // both the device and the controller say arrived.
             0 => Ok(Bot::Done { delivered: self.moved.min(self.data_len - residue) }),
             1 => Ok(Bot::Failed),
-            _ => Err(Broke::PhaseError),
+            status => Err(Broke::Reserved { status }),
         }
     }
 }
@@ -526,6 +524,11 @@ mod tests {
         assert_eq!(walk(read(1), 512, short, csw(TAG, 0, 0)).end, Ok(Bot::Done { delivered: 412 }));
         assert_eq!(walk(read(1), 512, |_| WHOLE, csw(TAG, 200, 0)).end, Ok(Bot::Done { delivered: 312 }));
         assert_eq!(walk(read(1), 512, short, csw(TAG, 50, 0)).end, Ok(Bot::Done { delivered: 412 }));
+        let overrun = |act| match act {
+            Act::Data(_) => Answer::Moved { code: CC_SHORT_PACKET, residue: 600 },
+            _ => WHOLE,
+        };
+        assert_eq!(walk(read(1), 512, overrun, csw(TAG, 0, 0)).end, Ok(Bot::Done { delivered: 0 }));
     }
 
     /// §6.7.2: the device STALLs a data phase it will not finish, and the
@@ -542,6 +545,46 @@ mod tests {
             Act::Command,
             Act::Data(Pipe::In),
             Act::Restart { pipe: Pipe::In, then: Phase::Data },
+            Act::Status,
+        ]));
+        assert_eq!(walk.end, Ok(Bot::Failed));
+    }
+
+    /// A stalled data phase's residue is the controller's account, and a
+    /// status after the restart is the device's: neither alone.
+    #[test]
+    fn a_stalled_data_phase_delivers_what_both_the_controller_and_the_device_say_arrived() {
+        let stalls_leaving = |unmoved| {
+            move |act| match act {
+                Act::Data(_) => Answer::Moved { code: CC_STALL, residue: unmoved },
+                Act::Restart { .. } => Answer::Restarted(true),
+                _ => WHOLE,
+            }
+        };
+        assert_eq!(walk(read(1), 512, stalls_leaving(100), csw(TAG, 0, 0)).end, Ok(Bot::Done { delivered: 412 }));
+        assert_eq!(walk(read(1), 512, stalls_leaving(600), csw(TAG, 0, 0)).end, Ok(Bot::Done { delivered: 0 }));
+    }
+
+    /// §5.3.3's one status retry is the status phase's, whatever the data
+    /// phase before it needed.
+    #[test]
+    fn a_status_stalled_after_a_data_stall_is_still_asked_for_again() {
+        let mut status_stalls = 1;
+        let walk = walk(read(1), 512, |act| match act {
+            Act::Data(_) => Answer::Moved { code: CC_STALL, residue: 512 },
+            Act::Status if status_stalls > 0 => {
+                status_stalls -= 1;
+                Answer::Moved { code: CC_STALL, residue: CSW_LEN as u32 }
+            }
+            Act::Restart { .. } => Answer::Restarted(true),
+            _ => WHOLE,
+        }, csw(TAG, 512, 1));
+        assert!(walk.acts().eq([
+            Act::Command,
+            Act::Data(Pipe::In),
+            Act::Restart { pipe: Pipe::In, then: Phase::Data },
+            Act::Status,
+            Act::Restart { pipe: Pipe::In, then: Phase::StatusOwed },
             Act::Status,
         ]));
         assert_eq!(walk.end, Ok(Bot::Failed));
@@ -635,8 +678,9 @@ mod tests {
         }
     }
 
-    /// §6.3: valid means the signature and the tag, meaningful means a status
-    /// the class defines and a residue no larger than the transfer.
+    /// §6.3.1: valid means the signature and the tag. §6.3.2: meaningful means
+    /// status 0 or 1 with a residue no larger than the transfer, or status 2
+    /// whatever the residue; §5.2 reserves every other status.
     #[test]
     fn a_csw_is_believed_only_when_it_is_valid_and_meaningful() {
         let judged = |csw: [u8; CSW_LEN]| walk(read(1), 512, |_| WHOLE, csw).end;
@@ -648,10 +692,13 @@ mod tests {
             Err(Broke::Csw { what: "tag", got: TAG + 1, want: TAG, status: 1, residue: 7 })
         );
         assert_eq!(judged(csw(TAG, 513, 0)), Err(Broke::Residue { unmoved: 513, of: 512 }));
+        assert_eq!(judged(csw(TAG, 513, 1)), Err(Broke::Residue { unmoved: 513, of: 512 }));
         assert_eq!(judged(csw(TAG, 512, 0)), Ok(Bot::Done { delivered: 0 }));
         assert_eq!(judged(csw(TAG, 0, 1)), Ok(Bot::Failed));
-        for status in 2..=u8::MAX {
-            assert_eq!(judged(csw(TAG, 0, status)), Err(Broke::PhaseError), "status {status}");
+        assert_eq!(judged(csw(TAG, 0, 2)), Err(Broke::PhaseError));
+        assert_eq!(judged(csw(TAG, 513, 2)), Err(Broke::PhaseError));
+        for status in 3..=u8::MAX {
+            assert_eq!(judged(csw(TAG, 0, status)), Err(Broke::Reserved { status }), "status {status}");
         }
     }
 
@@ -669,6 +716,7 @@ mod tests {
         assert_eq!(gone.event(), None);
         for status in [
             Broke::<Why>::PhaseError,
+            Broke::Reserved { status: 3 },
             Broke::Residue { unmoved: 2, of: 1 },
             Broke::Csw { what: "tag", got: 0, want: 1, status: 0, residue: 0 },
             Broke::Silence { phase: Phase::Status, why: Why },

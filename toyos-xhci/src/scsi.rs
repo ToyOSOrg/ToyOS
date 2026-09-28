@@ -6,13 +6,8 @@
 //! device answers is checked and never believed**, and a refusal is by name: a
 //! size this driver cannot address, a block size that does not divide the host
 //! block, a peripheral that is not a disk.
-//!
-//! [`BringUp`] has [`crate::enumerate`]'s shape and for its reason: it is
-//! driven to its end in place today, and a driver that gives a scheduler pass
-//! back between acts drives the same order.
 
-/// Nanoseconds since boot.
-pub type Nanos = u64;
+use crate::Nanos;
 
 /// The block size everything above this driver is written in; a device whose
 /// sectors do not divide it is refused, not approximated.
@@ -118,7 +113,7 @@ impl core::fmt::Display for Sense {
 
 /// One SCSI command, after the transport's own recovery.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Outcome {
+pub enum Reply {
     Ok { delivered: u32 },
     /// Understood and declined: an optional command's caller must tell "I will
     /// not" from "I cannot".
@@ -138,19 +133,32 @@ pub enum Fail {
     Budget,
 }
 
-/// What a disk is, from its READ CAPACITY.
+/// What a disk is, from its READ CAPACITY. Only the bring-up sizes one, so
+/// every sector it addresses fits READ(10).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Geometry {
-    pub sector_bytes: u32,
-    pub sectors: u64,
-    pub sectors_per_block: u32,
-    /// Whole [`HOST_BLOCK`]s.
-    pub blocks: u64,
+    sector_bytes: u32,
+    sectors: u64,
+    sectors_per_block: u32,
+    blocks: u64,
 }
 
 impl Geometry {
     /// A disk not yet asked its size, which no transfer fits.
     pub const NONE: Self = Self { sector_bytes: 0, sectors: 0, sectors_per_block: 0, blocks: 0 };
+
+    pub fn sector_bytes(&self) -> u32 {
+        self.sector_bytes
+    }
+
+    pub fn sectors(&self) -> u64 {
+        self.sectors
+    }
+
+    /// Whole [`HOST_BLOCK`]s.
+    pub fn blocks(&self) -> u64 {
+        self.blocks
+    }
 }
 
 /// A caller's transfer that runs past the disk.
@@ -237,20 +245,20 @@ impl Transfer {
         })
     }
 
-    /// What `outcome` of `batch` comes to. **Only the first batch may answer
+    /// What `reply` to `batch` comes to. **Only the first batch may answer
     /// "ask again"**: blocks already moved are on the device with no way to
     /// resume.
-    pub fn answered(&mut self, batch: &Batch, outcome: Outcome) -> Moved {
+    pub fn answered(&mut self, batch: &Batch, reply: Reply) -> Moved {
         let first = self.done == 0;
-        match outcome {
-            Outcome::Ok { delivered } if delivered as usize == batch.bytes => {
+        match reply {
+            Reply::Ok { delivered } if delivered as usize == batch.bytes => {
                 self.done += batch.blocks;
                 Moved::Whole
             }
-            Outcome::Ok { delivered } => Moved::Short { delivered },
-            Outcome::Refused(sense) => Moved::Refused(sense),
-            Outcome::Budget if first => Moved::Ended(Fail::Budget),
-            Outcome::Broken | Outcome::Budget => Moved::Ended(Fail::Device),
+            Reply::Ok { delivered } => Moved::Short { delivered },
+            Reply::Refused(sense) => Moved::Refused(sense),
+            Reply::Budget if first => Moved::Ended(Fail::Budget),
+            Reply::Broken | Reply::Budget => Moved::Ended(Fail::Device),
         }
     }
 }
@@ -267,13 +275,13 @@ pub enum Flushed {
     Ended(Fail),
 }
 
-pub fn flushed(outcome: Outcome) -> Flushed {
-    match outcome {
-        Outcome::Refused(sense) if sense.unimplemented() => Flushed::NoCache,
-        Outcome::Ok { .. } => Flushed::Emptied,
-        Outcome::Refused(sense) => Flushed::Refused(sense),
-        Outcome::Broken => Flushed::Ended(Fail::Device),
-        Outcome::Budget => Flushed::Ended(Fail::Budget),
+pub fn flushed(reply: Reply) -> Flushed {
+    match reply {
+        Reply::Refused(sense) if sense.unimplemented() => Flushed::NoCache,
+        Reply::Ok { .. } => Flushed::Emptied,
+        Reply::Refused(sense) => Flushed::Refused(sense),
+        Reply::Broken => Flushed::Ended(Fail::Device),
+        Reply::Budget => Flushed::Ended(Fail::Budget),
     }
 }
 
@@ -384,7 +392,6 @@ pub enum Refusal {
     Unanswered(Query),
     /// INQUIRY's peripheral device type, not 0 (direct access).
     NotADisk(u8),
-    /// A sector size that does not divide [`HOST_BLOCK`]; zero among them.
     SectorSize(u32),
     /// A last LBA past what READ(10)'s 32 bits address: serving the first
     /// 2 TiB of a bigger disk would silently truncate it.
@@ -494,6 +501,8 @@ impl BringUp {
 
 /// The disk a READ CAPACITY describes, or why it is not one this driver serves.
 fn geometry(last_lba: u64, sector_bytes: u32) -> Up {
+    // This driver's set and not SBC-3's, which allows any length: 256 divides
+    // the host block and is refused.
     if !matches!(sector_bytes, 512 | 1024 | 2048 | 4096) {
         return Up::Refused(Refusal::SectorSize(sector_bytes));
     }
@@ -588,6 +597,9 @@ mod tests {
         assert!(past(19, 1).is_ok());
         let empty = past(u64::MAX, 0).expect("nothing to move");
         assert_eq!(empty.next(), None);
+        let no_size = Transfer::new(0, 1, false, &Geometry::NONE, 8);
+        assert_eq!(no_size, Err(PastTheEnd { lba: 0, count: 1, blocks: 0 }));
+        assert_eq!(Transfer::new(0, 0, false, &Geometry::NONE, 8).expect("nothing to move").next(), None);
     }
 
     /// Batches of at most `most` blocks, each at its own sector and offset,
@@ -600,9 +612,9 @@ mod tests {
             let Some(batch) = transfer.next() else { break };
             *slot = Some((batch.cdb, batch.blocks, batch.offset, batch.block));
             let bytes = batch.bytes as u32;
-            assert_eq!(transfer.answered(&batch, Outcome::Ok { delivered: bytes - 1 }), Moved::Short { delivered: bytes - 1 });
+            assert_eq!(transfer.answered(&batch, Reply::Ok { delivered: bytes - 1 }), Moved::Short { delivered: bytes - 1 });
             assert_eq!(transfer.next(), Some(batch), "a short batch is not moved past");
-            assert_eq!(transfer.answered(&batch, Outcome::Ok { delivered: bytes }), Moved::Whole);
+            assert_eq!(transfer.answered(&batch, Reply::Ok { delivered: bytes }), Moved::Whole);
         }
         assert_eq!(seen, [
             Some((Cdb::transfer(true, 16, 64), 8, 0, 2)),
@@ -618,13 +630,13 @@ mod tests {
     fn only_the_first_batch_may_answer_ask_again() {
         let mut transfer = Transfer::new(0, 16, false, &STICK, 8).expect("fits");
         let first = transfer.next().expect("a batch");
-        assert_eq!(transfer.answered(&first, Outcome::Budget), Moved::Ended(Fail::Budget));
-        assert_eq!(transfer.answered(&first, Outcome::Broken), Moved::Ended(Fail::Device));
+        assert_eq!(transfer.answered(&first, Reply::Budget), Moved::Ended(Fail::Budget));
+        assert_eq!(transfer.answered(&first, Reply::Broken), Moved::Ended(Fail::Device));
         let sense = Sense { key: 3, asc: 0x11, ascq: 0 };
-        assert_eq!(transfer.answered(&first, Outcome::Refused(sense)), Moved::Refused(sense));
-        assert_eq!(transfer.answered(&first, Outcome::Ok { delivered: 8 * 4096 }), Moved::Whole);
+        assert_eq!(transfer.answered(&first, Reply::Refused(sense)), Moved::Refused(sense));
+        assert_eq!(transfer.answered(&first, Reply::Ok { delivered: 8 * 4096 }), Moved::Whole);
         let second = transfer.next().expect("a batch");
-        assert_eq!(transfer.answered(&second, Outcome::Budget), Moved::Ended(Fail::Device));
+        assert_eq!(transfer.answered(&second, Reply::Budget), Moved::Ended(Fail::Device));
         assert!(Moved::Whole.reported() && Moved::Short { delivered: 1 }.reported());
         assert!(!Moved::Refused(sense).reported() && !Moved::Ended(Fail::Budget).reported());
     }
@@ -633,11 +645,11 @@ mod tests {
     fn a_flush_the_device_does_not_implement_is_no_failure_and_every_other_refusal_is() {
         let unimplemented = Sense { key: 0x05, asc: 0x20, ascq: 0 };
         let failed = Sense { key: 0x04, asc: 0x44, ascq: 0 };
-        assert_eq!(flushed(Outcome::Refused(unimplemented)), Flushed::NoCache);
-        assert_eq!(flushed(Outcome::Refused(failed)), Flushed::Refused(failed));
-        assert_eq!(flushed(Outcome::Ok { delivered: 0 }), Flushed::Emptied);
-        assert_eq!(flushed(Outcome::Broken), Flushed::Ended(Fail::Device));
-        assert_eq!(flushed(Outcome::Budget), Flushed::Ended(Fail::Budget));
+        assert_eq!(flushed(Reply::Refused(unimplemented)), Flushed::NoCache);
+        assert_eq!(flushed(Reply::Refused(failed)), Flushed::Refused(failed));
+        assert_eq!(flushed(Reply::Ok { delivered: 0 }), Flushed::Emptied);
+        assert_eq!(flushed(Reply::Broken), Flushed::Ended(Fail::Device));
+        assert_eq!(flushed(Reply::Budget), Flushed::Ended(Fail::Budget));
     }
 
     fn inquiry(peripheral: u8) -> [u8; 36] {
@@ -818,10 +830,14 @@ mod tests {
         assert_eq!(bring_up(disk(&cdrom, &fine), MS).up, Up::Refused(Refusal::NotADisk(0x05)));
         // The qualifier bits are not the type.
         assert!(matches!(bring_up(disk(&inquiry(0x20), &fine), MS).up, Up::Ready(_)));
-        for bytes in [0, 520, 8192, 256] {
+        for bytes in [0, 520, 8192] {
             let odd = capacity10(8191, bytes);
             assert_eq!(bring_up(disk(&disk_inquiry, &odd), MS).up, Up::Refused(Refusal::SectorSize(bytes)));
         }
+        // No oracle but the driver's own set: SBC-3 allows 256, which divides
+        // the host block.
+        let small = capacity10(8191, 256);
+        assert_eq!(bring_up(disk(&disk_inquiry, &small), MS).up, Up::Refused(Refusal::SectorSize(256)));
         let tiny = capacity10(6, 512);
         assert_eq!(
             bring_up(disk(&disk_inquiry, &tiny), MS).up,

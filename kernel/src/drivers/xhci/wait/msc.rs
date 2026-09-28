@@ -4,11 +4,6 @@
 //! controller: `with_disk` holds the controller lock for the whole of it.
 //! Everything here comes off the wire and is checked, never trusted; refusal
 //! is by name, never a panic.
-//!
-//! **Every decision is the crate's**: the round trip is
-//! `toyos_xhci::bot::RoundTrip`, the SCSI above it `toyos_xhci::scsi`, the
-//! recovery `toyos_xhci::ladder`. This module does the transfers they ask for,
-//! waits for them in place, and says what happened.
 
 use crate::mm::Dma;
 
@@ -34,7 +29,7 @@ use toyos_xhci::identity::{self, Identity, Serial, UsbId};
 use toyos_xhci::ladder::{self, AfterReset, Left, PortStep, Run, Rung};
 use toyos_xhci::port;
 use toyos_xhci::reset_recovery::{self, Answered, GaveUp, Look, Pipe, Quiescing, SlotGoes, Step};
-use toyos_xhci::scsi::{self, BringUp, Cdb, Fail, Flushed, Geometry, Heard, Moved, Outcome, Printable};
+use toyos_xhci::scsi::{self, BringUp, Cdb, Fail, Flushed, Geometry, Heard, Moved, Printable, Reply};
 use toyos_xhci::scsi::{Refusal, Sense, Transfer, HOST_BLOCK};
 
 /// A region, not an address: the CBW's length is the region's own size, so
@@ -190,8 +185,8 @@ impl MscDevice {
 
     pub fn geometry(&self) -> StorageGeometry {
         StorageGeometry {
-            logical_block_bytes: self.geometry.sector_bytes,
-            blocks: self.geometry.blocks,
+            logical_block_bytes: self.geometry.sector_bytes(),
+            blocks: self.geometry.blocks(),
         }
     }
 
@@ -271,6 +266,9 @@ impl core::fmt::Display for Told<'_> {
                 write!(f, "the {phase} phase stalled and the endpoint reset did not clear it")
             }
             Broke::PhaseError => f.write_str("the device reported a phase error"),
+            Broke::Reserved { status } => {
+                write!(f, "the CSW carries status {status:#04x}, which the class reserves")
+            }
             Broke::Csw { what, got, want, status, residue } => write!(
                 f,
                 "CSW {what} {got:#x}, not {want:#x} (status {status}, {residue} B unmoved)"
@@ -883,8 +881,8 @@ impl XhciController {
             }
             let cdb = Cdb::SYNCHRONIZE_CACHE;
             let issued = ctrl.scsi(dev, &cdb, None, until);
-            let outcome = flush_sense().map_or(issued, Outcome::Refused);
-            match scsi::flushed(outcome) {
+            let reply = flush_sense().map_or(issued, Reply::Refused);
+            match scsi::flushed(reply) {
                 Flushed::NoCache => {
                     dev.no_write_cache = true;
                     log!("usb-storage: disk {number} does not implement SYNCHRONIZE CACHE \
@@ -941,8 +939,8 @@ impl XhciController {
             if let Host::From(src) = &host {
                 dma.copy_from(dev.block + MSC_DATA, &src[offset..offset + bytes]);
             }
-            let outcome = self.scsi(dev, &batch.cdb, Some(data.subview(0, bytes)), until);
-            let moved = transfer.answered(&batch, outcome);
+            let reply = self.scsi(dev, &batch.cdb, Some(data.subview(0, bytes)), until);
+            let moved = transfer.answered(&batch, reply);
             if moved.reported() {
                 dev.wrote(write);
             }
@@ -984,7 +982,7 @@ impl XhciController {
     /// by whoever the call is — [`served`] for a block operation, the bind for
     /// each of its commands — so a later command of the same operation spends
     /// what the break left it, and no call inherits another's.
-    fn scsi(&mut self, dev: &mut MscDevice, cdb: &Cdb, data: DataPhase, until: Deadline) -> Outcome {
+    fn scsi(&mut self, dev: &mut MscDevice, cdb: &Cdb, data: DataPhase, until: Deadline) -> Reply {
         let opcode = cdb.opcode();
         let data_out = data.is_some() && !cdb.data_in();
         // Named per line so a multi-disk boot's retry log attributes to the
@@ -1000,24 +998,24 @@ impl XhciController {
                 Err(NotIssued::Operation) => {
                     log!("usb-storage: {slot} SCSI {opcode:#04x} not issued: {}",
                         crate::block::OPERATION);
-                    return Outcome::Budget;
+                    return Reply::Budget;
                 }
                 // A command re-issued with nothing left would have every wait
                 // cut at once, and count against the device a break that was
                 // the budget's.
                 Err(NotIssued::Call(why)) => {
                     log!("usb-storage: {slot} SCSI {opcode:#04x} not issued again: {why}");
-                    return Outcome::Budget;
+                    return Reply::Budget;
                 }
             }
             match self.bot(dev, cdb, data, Asks::Command) {
                 Ok(Bot::Done { delivered }) => {
                     self.transport_came_back(dev, opcode);
-                    return Outcome::Ok { delivered };
+                    return Reply::Ok { delivered };
                 }
                 Ok(Bot::Failed) => {
                     self.transport_came_back(dev, opcode);
-                    return Outcome::Refused(self.request_sense(dev));
+                    return Reply::Refused(self.request_sense(dev));
                 }
                 // Not a transport that broke: a device that is no longer on
                 // the bus. Its port's own teardown gives the slot and the pool
@@ -1032,7 +1030,7 @@ impl XhciController {
                     // A hold for its device is part of this call, from the
                     // wait that saw it go.
                     self.after_break.open(self.bulk_began, AFTER_BREAK);
-                    return Outcome::Broken;
+                    return Reply::Broken;
                 }
                 Err(why) => {
                     self.after_break.open(self.bulk_began, AFTER_BREAK);
@@ -1040,7 +1038,7 @@ impl XhciController {
                     log!("usb-storage: {slot} transport broke on SCSI {opcode:#04x}: {broke}; \
                          break {} of {MAX_TRANSPORT_BREAKS} running", dev.run.breaks().saturating_add(1));
                     if !self.climb_until_in_step(dev, why.event(), why.left(data_out)) {
-                        return Outcome::Broken;
+                        return Reply::Broken;
                     }
                 }
             }
@@ -1371,10 +1369,6 @@ impl XhciController {
         #[cfg(not(feature = "boot-actuators"))]
         let _ = asks;
         #[cfg(feature = "boot-actuators")]
-        if staged == Some(staged::Fault::PortGone) {
-            return Err(Broke::Gone { phase: Phase::Command });
-        }
-        #[cfg(feature = "boot-actuators")]
         if staged == Some(staged::Fault::Unanswered) {
             let began = crate::clock::nanos_since_boot();
             // The staged wait is the wait a break opens the call from.
@@ -1418,14 +1412,19 @@ impl XhciController {
             let answer = match act {
                 bot::Act::Command => {
                     #[cfg(feature = "boot-actuators")]
-                    let withheld = staged == Some(staged::Fault::NoCbw);
+                    let staged_answer = match staged {
+                        Some(staged::Fault::NoCbw) => Some(bot::Answer::Moved { code: CC_SUCCESS, residue: 0 }),
+                        Some(staged::Fault::PortGone) => Some(completed(Err(Quiet::Gone))),
+                        _ => None,
+                    };
                     #[cfg(not(feature = "boot-actuators"))]
-                    let withheld = false;
-                    if withheld {
-                        bot::Answer::Moved { code: CC_SUCCESS, residue: 0 }
-                    } else {
-                        let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
-                        completed(self.bulk(dev, false, cbw_phys, CBW_LEN as u32, Phase::Command, &open))
+                    let staged_answer = None;
+                    match staged_answer {
+                        Some(answer) => answer,
+                        None => {
+                            let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
+                            completed(self.bulk(dev, false, cbw_phys, CBW_LEN as u32, Phase::Command, &open))
+                        }
                     }
                 }
                 bot::Act::Data(pipe) => {
@@ -1969,8 +1968,8 @@ pub(in crate::drivers::xhci) fn bind(
         log!("usb-storage: disk {index} came back on port {} slot {slot_id} as the same device \
              (USB {:04x}:{:04x}, serial number {}, {} blocks of {} B), msc_block +{:#x}; its \
              volume carries on{}",
-            u32::from(port_idx) + 1, usb.vendor, usb.product, dev.identity.serial, dev.geometry.blocks,
-            dev.geometry.sector_bytes, block,
+            u32::from(port_idx) + 1, usb.vendor, usb.product, dev.identity.serial, dev.geometry.blocks(),
+            dev.geometry.sector_bytes(), block,
             if owed { OWED_A_FLUSH } else { "" });
         ctrl.msc[at].disk = Some(Disk { index, dev });
         return Bind::Bound;
@@ -1979,9 +1978,9 @@ pub(in crate::drivers::xhci) fn bind(
     log!(
         "usb-storage: disk {index} ready on slot {slot_id}, {} blocks of {} B \
          ({} MiB), msc_block +{:#x}",
-        dev.geometry.blocks,
-        dev.geometry.sector_bytes,
-        dev.geometry.blocks * u64::from(HOST_BLOCK) / (1024 * 1024),
+        dev.geometry.blocks(),
+        dev.geometry.sector_bytes(),
+        dev.geometry.blocks() * u64::from(HOST_BLOCK) / (1024 * 1024),
         block
     );
     ctrl.msc[at].disk = Some(Disk { index, dev });
@@ -2079,18 +2078,18 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> Up {
                 scratch.zero();
                 // `subview` refuses a command asking for more than the scratch
                 // buffer holds. Each command of a bind is a call of its own.
-                let outcome = ctrl.scsi(dev, &cdb, Some(scratch.subview(0, len)), until);
+                let reply = ctrl.scsi(dev, &cdb, Some(scratch.subview(0, len)), until);
                 ctrl.after_break = AfterBreak::CLOSED;
-                match outcome {
-                    Outcome::Ok { delivered } => {
+                match reply {
+                    Reply::Ok { delivered } => {
                         dma.copy_to(dev.block + MSC_SCRATCH, &mut read[..len]);
                         Heard::Data { bytes: &read[..len], delivered }
                     }
-                    Outcome::Refused(sense) => {
+                    Reply::Refused(sense) => {
                         log_refusal(&cdb, sense);
                         Heard::Unanswered
                     }
-                    Outcome::Broken | Outcome::Budget => Heard::Unanswered,
+                    Reply::Broken | Reply::Budget => Heard::Unanswered,
                 }
             }
         };
@@ -2111,8 +2110,8 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> Up {
         return match end {
             scsi::Up::Ready(geometry) => {
                 dev.geometry = geometry;
-                dev.identity.sectors = geometry.sectors;
-                dev.identity.sector_bytes = geometry.sector_bytes;
+                dev.identity.sectors = geometry.sectors();
+                dev.identity.sector_bytes = geometry.sector_bytes();
                 Up::Ready
             }
             scsi::Up::Unready { sense, offline } => {
