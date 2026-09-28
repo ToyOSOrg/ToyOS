@@ -7,6 +7,7 @@
 
 [package]
 name = "toyos-acpi"
+description = "ACPI table decoding over firmware-supplied bytes: a decoded value or a named refusal, never a panic."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

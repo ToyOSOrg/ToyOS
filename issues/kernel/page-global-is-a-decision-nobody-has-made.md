@@ -2,7 +2,6 @@
 status: open
 kind: track
 opened: 2026-08-19
-decided: 2026-08-20
 ---
 
 # There is no `PAGE_GLOBAL` anywhere, and the owner decided: turn it on
@@ -18,7 +17,7 @@ the KVM instrument so the improvement is a number against a number. TCG
 cannot price it (tests/CLAUDE.md: the local guest has no such cache model),
 which is one more reason it rides the measured era.
 
-`CR4.PGE` is absent from `kernel/src/arch/control_regs.rs`'s declaration and no
+`CR4.PGE` is absent from `kernel/src/arch/x86_64/control_regs.rs`'s declaration and no
 `PAGE_GLOBAL` exists in `kernel/src/mm/`. With PCID active, every address space
 therefore caches a private copy of the kernel's direct map, and every
 `flush_tlb_all` — which is `INVPCID` all-context — throws away the kernel's own
@@ -30,7 +29,7 @@ affected and this kernel has no KPTI, so global kernel pages are available.
 place, and the bits left out are as much of the declaration as the bits in —
 means `PGE`'s absence should be *stated* whichever way it goes.
 
-**What the answer would have to revisit.** `kernel/src/mm/paging.rs` now derives
+**What the answer would have to revisit.** `kernel/src/arch/x86_64/paging.rs` now derives
 every invalidation from the entry a write replaced and discharges it with
 `INVPCID` type 0 or `INVLPG`. Neither touches a global translation, which is
 sound only because no entry in this kernel is global; the module header says so

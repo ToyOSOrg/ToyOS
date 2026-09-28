@@ -9,7 +9,7 @@ opened: 2026-08-15
 A live `mmap` is recorded twice. `ProcessData::mmap_regions`
 (`kernel/src/process.rs`) holds an `MmapRegion` — address, length, and the
 `PageAlloc` that owns the physical memory. `AddressSpace::regions`
-(`kernel/src/mm/paging.rs`) holds a `Region` at the same address with the same
+(`kernel/src/arch/x86_64/paging.rs`) holds a `Region` at the same address with the same
 length — and that one is the source of truth for placement: `find_gap` reads it
 and nothing else.
 
@@ -32,7 +32,7 @@ exactly the same defect, and no test would see it until a placement collided.
 the only ledger. What that has to answer first:
 
 - **Accounting.** `alloc_count`, `free_count` and `peak_memory` are summed over
-  `mmap_regions` at `kernel/src/arch/syscall.rs`, and `SYS_SYSINFO`'s per-process
+  `mmap_regions` at `kernel/src/syscall/machine.rs`, and `SYS_SYSINFO`'s per-process
   memory line sums `_pages` over it under a `try_lock` on the process data —
   a `try_lock` the crash report depends on, so that reader may not move to a
   lock it can block on.
@@ -53,10 +53,9 @@ next person to add a placement path should find this before writing it.
 **2026-08-25, promoted to `defect`.** Both ledgers are still live and still
 agree only because two functions are read carefully: `ProcessData::mmap_regions`
 at `kernel/src/process.rs:742` and `AddressSpace::regions` at
-`kernel/src/mm/paging.rs:546`. The paths in this file predate the syscall split —
-the writers are now `kernel/src/arch/syscall/vm.rs` and the `SYS_SYSINFO`
-accounting sum is `kernel/src/arch/syscall/machine.rs:266`, not
-`kernel/src/arch/syscall.rs`. An invariant with no checker and an open extension
+`kernel/src/arch/x86_64/paging.rs:546`. The writers are
+`kernel/src/syscall/vm.rs`, and the `SYS_SYSINFO` accounting sum is
+`kernel/src/syscall/machine.rs:266`. An invariant with no checker and an open extension
 point is a defect in the shape and it already produced one kernel panic; the
 consolidation this file specifies is the fix. Owed by whoever next adds a
 placement path or a fourth `sys_mmap` arm.

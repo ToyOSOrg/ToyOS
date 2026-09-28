@@ -1,5 +1,6 @@
 [package]
 name = "toyos-inspect"
+description = "The inspect protocol: what a running owner of a device or service says about its own state, now."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

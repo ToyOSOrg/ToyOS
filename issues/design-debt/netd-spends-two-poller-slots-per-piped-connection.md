@@ -21,5 +21,5 @@ or more is held to 111.
 Exit condition: one registration per connection. netd's side of a
 connection is one kernel `Connection` object, which `read_source` and
 `write_source` both resolve (`kernel/src/object/ops.rs`), so one `OP_WATCH`
-carries `READABLE | WRITABLE` (`kernel/src/inbox.rs`, `process_watch`), and
+carries `READABLE | WRITABLE` (`kernel/src/inbox/mod.rs`, `process_watch`), and
 `POLL_HANDLES_PER_PIPED` is deleted.

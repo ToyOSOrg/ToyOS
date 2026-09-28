@@ -11,7 +11,7 @@ opened: 2026-09-16
 register that ends the machine, and each stops every xHCI controller
 ([`stop::before_reset`]) before it does". Five paths reach those two:
 
-- `sys_reboot` (`kernel/src/arch/syscall/machine.rs:113`) → `quiesce` (`:121`)
+- `sys_reboot` (`kernel/src/syscall/machine.rs:113`) → `quiesce` (`:121`)
   → `acpi::reboot` (`:122`; `acpi.rs:283`) → `reset_now` (`acpi.rs:290`);
 - `sys_shutdown` (`machine.rs:103`) → `quiesce` (`:107`) → `acpi::shutdown`
   (`:108`; `acpi.rs:325`);

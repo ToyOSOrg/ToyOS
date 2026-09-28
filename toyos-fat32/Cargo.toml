@@ -16,6 +16,7 @@
 
 [package]
 name = "toyos-fat32"
+description = "FAT32 driver, read and write, over a byte-addressed volume; no format path by design."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
