@@ -916,7 +916,8 @@ pub fn iommu_context_absent(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (log, blocked) = fault_boot(test_config, c_bins, rust_bins, &["iommu-context-absent"])?;
+    let (log, blocked) =
+        fault_boot(test_config, c_bins, rust_bins, &["iommu-context-absent", "panic-reboot-fast"])?;
 
     // Which function the actuator left out is decided in the guest by class
     // code; which function that *is* on this machine is read here from the PCI
@@ -969,7 +970,8 @@ pub fn iommu_empty_domain(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (log, blocked) = fault_boot(test_config, c_bins, rust_bins, &["iommu-empty-domain"])?;
+    let (log, blocked) =
+        fault_boot(test_config, c_bins, rust_bins, &["iommu-empty-domain", "panic-reboot-fast"])?;
 
     let nvme = class_function(&log, "0108").ok_or_else(|| {
         format!("this machine enumerated no NVMe controller to strand\n{}", log.text())
@@ -1797,7 +1799,6 @@ fn fault_boot(
         rust_bins,
         BootOptions {
             profile: Profile::Metal,
-            qmp: true,
             kernel_params: params,
             ready_marker: FAULT,
             ..Default::default()
@@ -1805,9 +1806,15 @@ fn fault_boot(
     );
     let mut log = Serial::boot(&qemu);
     // Past the fault, because the claim is that the machine stopped there: the
-    // handler halts every CPU, and the capture is judged once QEMU shows it has.
+    // handler takes the fatal path, and the capture is judged once its reset
+    // has ended QEMU.
     let mut after = String::new();
-    qemu::await_halted(&mut qemu, &mut after, "the fault to halt every CPU", &["Boot: complete", qemu::DEFAULT_READY])?;
+    qemu::await_reset(
+        &mut qemu,
+        &mut after,
+        "the fault's fatal path to reset the machine",
+        &["Boot: complete", qemu::DEFAULT_READY],
+    )?;
     log.push(&after);
     log.must_not_say("Boot: complete")?;
     log.must_not_say(qemu::DEFAULT_READY)?;

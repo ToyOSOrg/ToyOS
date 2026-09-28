@@ -856,7 +856,7 @@ fn resets_inside_the_bound(
     returned_to_firmware(reason, never, &tail)?;
 
     let drain = serial::Serial::named("panic reboot drain", tail.as_str());
-    drain.must_say(PANIC_REBOOTING)?;
+    drain.must_say(qemu::PANIC_REBOOTING)?;
     Ok((budget, tail))
 }
 
@@ -983,10 +983,6 @@ const PANIC_HELD_HEAD: &str = "panic: holding this panel";
 /// before it writes the register, and the host seeing QEMU's event. Scaled by
 /// [`QemuInstance::budget`] at the call site.
 const RESET_ALLOWANCE: Duration = Duration::from_secs(20);
-
-/// The panic path's second line, written raw because the log is already drained
-/// by then (`kernel/src/panic_reboot.rs`'s `reboot_now`).
-const PANIC_REBOOTING: &str = "panic: no key inside the bound, so nobody is here";
 
 /// A line of the first boot's own report, which has to come back out of DRAM on
 /// the boot after it: the panic's message, so what is recovered is the crash

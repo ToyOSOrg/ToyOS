@@ -11983,9 +11983,8 @@ fn run_machine_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    kernel_params: &["test-late-panic", "fault-in-report"],
+                    kernel_params: &["test-late-panic", "fault-in-report", "panic-reboot-fast"],
                     ready_marker: "RECURSIVE",
-                    qmp: true,
                     ..Default::default()
                 },
             );
@@ -12005,11 +12004,11 @@ fn run_machine_test(
             // head. `KERNEL PANIC:` is `crash_report_exception`'s own header;
             // the stack scan is `double_fault_handler`'s, which is the
             // escalation and not the report. Judged past the marker, over the
-            // capture the halt closes: `boot_log` stops at `RECURSIVE` and the
-            // report would follow it there.
+            // capture the fatal path's reset closes: `boot_log` stops at
+            // `RECURSIVE` and the report would follow it there.
             const REPORTS: [&str; 2] = ["KERNEL PANIC:", "Scanning kernel stack at"];
             let mut tail = String::new();
-            qemu::await_halted(&mut qemu, &mut tail, "every CPU halted", &REPORTS)?;
+            qemu::await_reset(&mut qemu, &mut tail, "the fatal path to reset the machine", &REPORTS)?;
             nested.push(&tail);
             for report in REPORTS {
                 nested.must_not_say(report)?;
@@ -16596,40 +16595,35 @@ fn hda_two_live_refused(
 /// other CPU running userland under it. `test_rs_panic_halts_first` keeps three
 /// siblings making kernel records while its main thread goes fatal.
 ///
-/// **Order is the verdict, and no clock is in it.** The fatal path's own line
-/// after the stop is `panic_reboot::arm`'s, so a sibling record the console
-/// carries after it was made past the stop — one per sibling may have been in
-/// flight when the stop was sent, and a second is a CPU the stop did not stop.
-/// The capture is closed by QEMU showing every vCPU [`qemu::halted_for_good`],
-/// which a sibling left running never is.
+/// **QEMU is the judge, and no clock is in it.** Once the fatal path has said
+/// its line past the stop, `panic_reboot::arm`'s, every vCPU but the one that
+/// went fatal must show [`qemu::stopped_cpus`]' `cli; hlt`. The fatal one holds
+/// its panel under the shipped minute, so the machine is still there to ask.
 fn panic_halts_the_others_first(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
+    const SMP: usize = 4;
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
         rust_bins,
-        BootOptions { smp: 4, kernel_features: ACTUATOR_KERNEL, qmp: true, ..Default::default() },
+        BootOptions {
+            smp: SMP as u32,
+            kernel_features: ACTUATOR_KERNEL,
+            qmp: true,
+            ..Default::default()
+        },
     );
     writeln!(qemu.stdin_mut(), "run test_rs_panic_halts_first").map_err(|e| format!("stdin: {e}"))?;
     qemu.flush_stdin();
     let mut console = String::new();
-    let socket = qemu.qmp_socket().to_path_buf();
-    let monitor = std::cell::RefCell::new(qemu::QmpMonitor::open(&socket));
-    await_guest(&mut qemu, &mut console, "every CPU halted after the fatal path", |c| {
-        records_past_the_stop(c).is_some_and(|past| {
-            past.values().any(|records| records.len() > 1)
-                || qemu::halted_for_good(&monitor.borrow_mut().human("info registers -a"))
-        })
+    await_guest(&mut qemu, &mut console, "the fatal path's line past the stop", |c| {
+        fatal_past_the_stop(c).is_some()
     })?;
-    let fatal = console
-        .lines()
-        .find(|l| l.contains(FATAL_HALT_NONCE))
-        .and_then(record_cpu)
-        .ok_or_else(|| format!("no stamped {FATAL_HALT_NONCE:?} record on the console\n{console}"))?;
-    let before = &console[..console.find(FATAL_HALT_NONCE).unwrap_or(0)];
+    let fatal = fatal_past_the_stop(&console).expect("awaited above");
+    let before = &console[..console.find(FATAL_HALT_NONCE).expect("awaited above")];
     // Non-vacuity: another CPU was making records up to the fatal one.
     if !before.lines().any(|l| l.contains(RETIRED_RECORD) && record_cpu(l).is_some_and(|cpu| cpu != fatal)) {
         return Err(format!(
@@ -16637,20 +16631,24 @@ fn panic_halts_the_others_first(
              to be stopped\n{console}"
         ));
     }
-    let past = records_past_the_stop(&console)
-        .ok_or_else(|| format!("the fatal path never said its line past the stop\n{console}"))?;
-    if let Some((cpu, records)) = past.iter().find(|(_, records)| records.len() > 1) {
-        return Err(format!(
-            "cpu{cpu} made {} records after the fatal path on cpu{fatal} stopped the other CPUs: \
-             the fatal path let it run\n  {}",
-            records.len(),
-            records.join("\n  ")
-        ));
+    let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+    // A guard and never a verdict: a vCPU the host has not run yet has not
+    // taken the stop, and this is how long it is waited for.
+    let give_up = Instant::now() + qemu::GUEST_QUIET;
+    loop {
+        let stopped = qemu::stopped_cpus(&monitor.human("info registers -a"));
+        if stopped.len() == SMP && stopped.iter().filter(|&&cpu| cpu).count() >= SMP - 1 {
+            break;
+        }
+        if Instant::now() >= give_up {
+            return Err(format!(
+                "{STALLED} waiting for the other CPUs to halt after the fatal path on cpu{fatal} \
+                 stopped them — QEMU shows each vCPU in `cli; hlt` as {stopped:?}\n{console}"
+            ));
+        }
+        console.push_str(&qemu.drain_serial(Duration::from_millis(200)));
     }
-    eprintln!(
-        "  [panic] {} sibling record(s) after the stop, none past the one in flight",
-        past.values().map(Vec::len).sum::<usize>()
-    );
+    eprintln!("  [panic] the fatal path on cpu{fatal} left every other CPU in `cli; hlt`");
     Ok(())
 }
 
@@ -16663,25 +16661,17 @@ fn record_cpu(line: &str) -> Option<u32> {
     head.split_once(" cpu")?.1.split(' ').next()?.parse().ok()
 }
 
-/// The other CPUs' [`RETIRED_RECORD`]s the console carries after the fatal
-/// path's own line past `stop_other_cpus` — `panic_reboot::arm`'s, in either of
-/// its two words — by CPU; `None` while that line has not arrived.
-fn records_past_the_stop(console: &str) -> Option<BTreeMap<u32, Vec<&str>>> {
+/// The CPU that went fatal, once the console carries its line past
+/// `stop_other_cpus` — `panic_reboot::arm`'s, in either of its two words.
+fn fatal_past_the_stop(console: &str) -> Option<u32> {
     const PAST_THE_STOP: [&str; 2] = ["panic: rebooting in", "panic: holding this panel"];
     let lines: Vec<&str> = console.lines().collect();
     let nonce = lines.iter().position(|l| l.contains(FATAL_HALT_NONCE))?;
     let fatal = record_cpu(lines[nonce])?;
-    let stop = nonce
-        + lines[nonce..].iter().position(|l| {
-            record_cpu(l) == Some(fatal) && PAST_THE_STOP.iter().any(|word| l.contains(word))
-        })?;
-    let mut past: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
-    for line in lines[stop + 1..].iter().filter(|l| l.contains(RETIRED_RECORD)) {
-        if let Some(cpu) = record_cpu(line).filter(|&cpu| cpu != fatal) {
-            past.entry(cpu).or_default().push(line);
-        }
-    }
-    Some(past)
+    lines[nonce..]
+        .iter()
+        .any(|l| record_cpu(l) == Some(fatal) && PAST_THE_STOP.iter().any(|word| l.contains(word)))
+        .then_some(fatal)
 }
 
 /// A blown ceiling stays red, and is named apart from a failed assertion.

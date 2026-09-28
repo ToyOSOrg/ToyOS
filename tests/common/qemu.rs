@@ -1007,40 +1007,70 @@ pub fn await_marker_new(
     await_guest(qemu, log, doing, |log| log[from.min(log.len())..].contains(marker))
 }
 
-/// Whether `info registers -a` shows every vCPU halted with interrupts off: the
-/// fatal path's `cli; hlt`, which no interrupt ends. An idle CPU halts with
-/// `IF` set, so a machine with nothing to do is not this.
-pub fn halted_for_good(registers: &str) -> bool {
-    let cpus: Vec<&str> = registers.split("CPU#").skip(1).collect();
-    !cpus.is_empty()
-        && cpus.iter().all(|cpu| {
+/// Per vCPU in `info registers -a`, whether it is halted with interrupts off:
+/// the stop's `cli; hlt`, which no interrupt ends. An idle CPU halts with `IF`
+/// set, and a running one is not halted, so neither is this.
+pub fn stopped_cpus(registers: &str) -> Vec<bool> {
+    registers
+        .split("CPU#")
+        .skip(1)
+        .map(|cpu| {
             let field = |name: &str| -> Option<String> {
                 Some(cpu.split(name).nth(1)?.chars().take_while(char::is_ascii_hexdigit).collect())
             };
             let flags = field("RFL=").and_then(|f| u64::from_str_radix(&f, 16).ok());
             field("HLT=").as_deref() == Some("1") && flags.is_some_and(|f| f & (1 << 9) == 0)
         })
+        .collect()
 }
 
-/// Drain the console into `log` until QEMU shows every vCPU [`halted_for_good`]
-/// or the console says one of `refused`: the end of a fatal path, after which
-/// this guest writes nothing more, so a line it must never write is judged over
-/// a capture that is whole — and one it wrote ends the wait at once. A machine
-/// that gets to neither is what the hang ceiling reds. Needs `BootOptions {
-/// qmp: true }`, and the socket to itself while it waits.
-pub fn await_halted(
+/// The fatal path's last line, which `panic_reboot::reboot_now` writes to the
+/// 16550 raw just before it resets the machine.
+pub const PANIC_REBOOTING: &str = "panic: no key inside the bound, so nobody is here";
+
+/// Drain the console into `log` until QEMU exits on the fatal path's reset, or
+/// the console says one of `refused`: a line this guest must never write ends
+/// the wait at once, and the exit closes a capture that is then whole.
+///
+/// **The reset and not a halt**: the CPU that went fatal never halts. It holds
+/// its panel under `panic_reboot`'s bound, and the bound's reset is the path's
+/// last act, which `-no-reboot` turns into QEMU's exit. So the boot passes
+/// `panic-reboot-fast`: its five seconds of silence sit inside [`GUEST_QUIET`],
+/// and the shipped minute does not.
+pub fn await_reset(
     qemu: &mut QemuInstance,
     log: &mut String,
     doing: &str,
     refused: &[&str],
 ) -> Result<(), String> {
     let from = log.len();
-    let socket = qemu.qmp_socket().to_path_buf();
-    let monitor = std::cell::RefCell::new(QmpMonitor::open(&socket));
-    await_guest(qemu, log, doing, |log| {
-        refused.iter().any(|line| log[from..].contains(line))
-            || halted_for_good(&monitor.borrow_mut().human("info registers -a"))
-    })
+    let mut live = guest_liveness();
+    loop {
+        if refused.iter().any(|line| log[from..].contains(line)) {
+            return Ok(());
+        }
+        match qemu.rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                log.push_str(&line);
+                log.push('\n');
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if !live.working(log) {
+            return Err(format!("{STALLED} waiting for {doing} — {}", live.why()));
+        }
+    }
+    let status = qemu.child.wait().map_err(|e| format!("QEMU could not be waited for: {e}"))?;
+    // On a machine with a console the line is only in the 16550's own log.
+    let said = format!("{}{}", &log[from..], qemu.uart_log());
+    if !status.success() || !said.contains(PANIC_REBOOTING) {
+        return Err(format!(
+            "QEMU exited {status} waiting for {doing}, and not on the fatal path's reset: no \
+             {PANIC_REBOOTING:?}\n{said}"
+        ));
+    }
+    Ok(())
 }
 
 /// The hardware shape QEMU presents to the guest.
