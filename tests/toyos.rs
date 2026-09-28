@@ -182,7 +182,8 @@ const RUST_SKIP: &[&str] = &[
     // `quiesce_refuses_a_second_shutdown` runs it.
     "quiesce_twice",
     // The same, and its verdict is the stop record of a boot staged around it.
-    // `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_exit` run it.
+    // `quiesce_wakes_on_the_last_park`, `quiesce_wakes_on_the_last_exit` and
+    // `quiesce_wakes_on_the_last_teardown` run it.
     "quiesce_last",
     // The same, and its verdict is the log volume the stop leaves.
     // `quiesce_leaves_the_volume_whole` runs it.
@@ -1000,6 +1001,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // record that boot writes.
     ("quiesce_wakes_on_the_last_park", Sched::Parallel, Tier::Fast),
     ("quiesce_wakes_on_the_last_exit", Sched::Parallel, Tier::Fast),
+    ("quiesce_wakes_on_the_last_teardown", Sched::Parallel, Tier::Fast),
     // Its own boot: it ends the machine, and its verdict is a dump served
     // inside that boot's stop.
     ("quiesce_dump_holds_the_stopped", Sched::Parallel, Tier::Fast),
@@ -1741,6 +1743,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
     ("quiesce_wakes_on_the_last_exit", &["test_rs_quiesce_last"]),
+    ("quiesce_wakes_on_the_last_teardown", &["test_rs_quiesce_last"]),
     ("quiesce_dump_holds_the_stopped", &["test_rs_quiesce_writers"]),
     ("quiesce_leaves_the_volume_whole", &["test_rs_quiesce_fsync"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
@@ -11331,6 +11334,7 @@ fn run_machine_test(
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
         "quiesce_wakes_on_the_last_park" => power::quiesce_wakes_on_the_last_park(test_config, c_bins, rust_bins),
         "quiesce_wakes_on_the_last_exit" => power::quiesce_wakes_on_the_last_exit(test_config, c_bins, rust_bins),
+        "quiesce_wakes_on_the_last_teardown" => power::quiesce_wakes_on_the_last_teardown(test_config, c_bins, rust_bins),
         "quiesce_dump_holds_the_stopped" => power::quiesce_dump_holds_the_stopped(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),

@@ -67,15 +67,14 @@ enum Out {
     /// `process::leave`'s table section.
     Leave,
     /// The last one out: `teardown_resources`, the process's mappings and handles.
-    Free { code: i32 },
+    Free { code: i32, mark: i32 },
+    /// The last one out: `teardown_bookkeeping`'s table section, which marks it dead.
+    Mark { code: i32, mark: i32 },
     /// The last one out: `ProcessObject::publish_exit`.
     Publish { code: i32 },
     /// `thread_exit`'s post on its own watch.
     Post,
-    /// The exit pass switches away from the thread.
-    Switch,
-    /// The next pass on that CPU frees the payload, kernel stack and all.
-    Release,
+    /// The exit pass: the thread never runs again.
     Gone,
 }
 
@@ -104,10 +103,6 @@ pub struct World {
     in_kernel: BTreeSet<(Pid, Tid)>,
     /// Threads on their way out, and how far each is.
     departing: BTreeMap<(Pid, Tid), Departure>,
-    /// Threads the scheduler has switched away from for the last time.
-    switched: BTreeSet<(Pid, Tid)>,
-    /// Threads whose kernel stack has been freed.
-    stacks_freed: BTreeSet<(Pid, Tid)>,
     /// Threads whose own TLS block is still mapped in their process.
     mapped: BTreeSet<(Pid, Tid)>,
     /// Threads whose entry went, and its mapped TLS block with it, while a
@@ -150,8 +145,6 @@ impl World {
             killed: BTreeSet::new(),
             in_kernel: BTreeSet::new(),
             departing: BTreeMap::new(),
-            switched: BTreeSet::new(),
-            stacks_freed: BTreeSet::new(),
             mapped: BTreeSet::new(),
             unmapped_under_siblings: BTreeSet::new(),
             frees: BTreeMap::new(),
@@ -311,12 +304,16 @@ impl World {
         let chosen = departure.chosen;
         let next = match departure.at {
             Out::Leave => match teardown::leave(self, pid, tid, chosen) {
-                Leave::Last { code } => Out::Free { code },
+                Leave::Last { code, mark } => Out::Free { code, mark },
                 Leave::NotLast => Out::Post,
             },
-            Out::Free { code } => {
+            Out::Free { code, mark } => {
                 *self.frees.entry(pid).or_insert(0) += 1;
                 self.mapped.retain(|&(p, _)| p != pid);
+                Out::Mark { code, mark }
+            }
+            Out::Mark { code, mark } => {
+                teardown::torn_down(self, pid, tid, mark);
                 Out::Publish { code }
             }
             Out::Publish { code } => {
@@ -327,14 +324,6 @@ impl World {
                 if chosen.is_some() {
                     self.post(Watch::Thread(pid, tid));
                 }
-                Out::Switch
-            }
-            Out::Switch => {
-                self.switched.insert((pid, tid));
-                Out::Release
-            }
-            Out::Release => {
-                self.free_stack(pid, tid);
                 Out::Gone
             }
             Out::Gone => unreachable!("a thread that is gone has no step left"),
@@ -342,16 +331,17 @@ impl World {
         self.departing.get_mut(&(pid, tid)).expect("inserted above").at = next;
     }
 
-    /// `Hw::release`: the payload goes, and the kernel stack with it.
-    pub fn free_stack(&mut self, pid: Pid, tid: Tid) {
-        self.stacks_freed.insert((pid, tid));
-    }
-
     /// Whether this thread can still execute user code.
     fn runnable(&self, pid: Pid, tid: Tid) -> bool {
-        !self.stacks_freed.contains(&(pid, tid))
-            && !self.departing.contains_key(&(pid, tid))
-            && !self.killed.contains(&(pid, tid))
+        !self.departing.contains_key(&(pid, tid)) && !self.killed.contains(&(pid, tid))
+    }
+
+    /// The thread tearing `pid` down, from its leaving to its mark.
+    fn tearing_down(&self, pid: Pid) -> Option<Tid> {
+        self.departing
+            .iter()
+            .find(|(&(p, _), d)| p == pid && matches!(d.at, Out::Free { .. } | Out::Mark { .. }))
+            .map(|(&(_, tid), _)| tid)
     }
 
     /// `ProcessObject::publish_exit`, assertion and all: two publishes mean two
@@ -391,21 +381,27 @@ impl World {
                 out.push(alloc::format!("pid {pid}: its resources were freed {frees} times"));
             }
             // L2. Nothing a thread can still run in is freed or published
-            // before every thread has left.
+            // before every thread but the one tearing it down has left.
+            let tearing = self.tearing_down(pid);
             if frees > 0 || self.published.contains_key(&pid) {
                 for (&tid, &at) in &proc.threads {
-                    if !at.is_zombie() {
+                    if !at.is_zombie() && Some(tid) != tearing {
                         out.push(alloc::format!(
                             "pid {pid} was torn down with tid {tid} still in it",
                         ));
                     }
                 }
             }
-        }
-        // L3. A thread's stack is freed only once the scheduler has switched
-        // away from it.
-        for id in self.stacks_freed.difference(&self.switched) {
-            out.push(alloc::format!("pid {} tid {}: its stack was freed while it ran on it", id.0, id.1));
+            // L3. A teardown in flight keeps its thread in the process, where
+            // the machine's stop counts it as running.
+            if let Some(tid) = tearing {
+                if proc.location(tid).is_none_or(ThreadLocation::is_zombie) {
+                    out.push(alloc::format!(
+                        "pid {pid} tid {tid} is tearing its process down and the table has it out, \
+                         so a stop would not wait for it",
+                    ));
+                }
+            }
         }
         // L8. No thread's mappings go while a sibling can still run in them.
         for (pid, tid) in &self.unmapped_under_siblings {
@@ -431,7 +427,8 @@ impl World {
             }
         }
         for &(pid, tid) in &self.killed {
-            if !self.stacks_freed.contains(&(pid, tid)) && self.procs.get(&pid).is_some_and(|p| p.location(tid).is_some()) {
+            let gone = self.departing.get(&(pid, tid)).is_some_and(|d| d.at == Out::Gone);
+            if !gone && self.procs.get(&pid).is_some_and(|p| p.location(tid).is_some()) {
                 out.push(alloc::format!("pid {pid} tid {tid} was killed and never left"));
             }
         }
@@ -466,24 +463,5 @@ impl World {
             }
         }
         out
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The teeth behind L3: a stack freed before the switch is what it reports.
-    /// Run by hand, since no kernel path the model scripts frees one early.
-    #[test]
-    fn a_stack_freed_before_the_switch_is_what_l3_reports() {
-        let mut world = World::new();
-        let pid = world.spawn_process();
-        world.free_stack(pid, world.main_tid(pid));
-        let faults = world.faults();
-        assert!(
-            faults.iter().any(|f| f.contains("freed while it ran on it")),
-            "L3 cannot see a stack freed under its thread: {faults:?}",
-        );
     }
 }

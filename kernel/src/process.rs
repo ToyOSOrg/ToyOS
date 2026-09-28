@@ -767,17 +767,14 @@ pub fn current_address_space() -> PageTables {
 }
 
 
-/// Get the current thread's ThreadData Arc (brief table lock); exits silently if the entry is gone.
+/// Get the current thread's ThreadData Arc (brief table lock).
 pub fn current_data() -> Arc<Lock<ThreadData>> {
     let guard = PROCESS_TABLE.lock();
-    let table = guard.as_ref().unwrap();
-    match table.get(current_process()).and_then(|p| p.threads.get(current_tid())) {
-        Some(thread) => Arc::clone(&thread.thread_data),
-        None => {
-            drop(guard);
-            scheduler::exit_current();
-        }
-    }
+    let thread = guard.as_ref().unwrap()
+        .get(current_process())
+        .and_then(|p| p.threads.get(current_tid()))
+        .expect("current_data: an entry outlives every thread that has not left it");
+    Arc::clone(&thread.thread_data)
 }
 
 /// Set the name of the currently running thread.
@@ -794,14 +791,10 @@ pub fn set_current_thread_name(name: &[u8]) {
 /// Get the process-level ProcessData Arc (brief table lock); shared by every thread of the process.
 pub fn process_data() -> Arc<Lock<ProcessData>> {
     let guard = PROCESS_TABLE.lock();
-    let table = guard.as_ref().unwrap();
-    match table.get(current_process()) {
-        Some(proc) => Arc::clone(&proc.process_data),
-        None => {
-            drop(guard);
-            scheduler::exit_current();
-        }
-    }
+    let proc = guard.as_ref().unwrap()
+        .get(current_process())
+        .expect("process_data: an entry outlives every thread that has not left it");
+    Arc::clone(&proc.process_data)
 }
 
 /// Access the current thread's ThreadData mutably; the table lock is not held during the closure.
@@ -979,10 +972,10 @@ fn teardown_resources(
     (syscall_total, syscall_total_ns)
 }
 
-/// Table-side teardown bookkeeping: drop the symbol table and total the CPU time of every thread still in the table.
-/// Caller must hold `PROCESS_TABLE`, be the last thread out and have freed the resources. Returns the object whose exit the caller publishes once the table lock is given up, with that total.
+/// Table-side teardown bookkeeping: drop the symbol table, total the CPU time of every thread still in the table, and mark the last thread out dead with `mark`.
+/// Caller must hold `PROCESS_TABLE`, be that thread and have freed the resources. Returns the object whose exit the caller publishes once the table lock is given up, with that total.
 #[must_use = "the exit must be published on the object returned"]
-fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32)
+fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, tid: Tid, code: i32, mark: i32)
                         -> (Arc<crate::object::process::ProcessObject>, u64) {
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
@@ -990,7 +983,9 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32)
     let cpu_ns: u64 = proc.threads.iter().map(|(_, t)| t.sched().map_or(0, scheduler::task_cpu_ns)).sum();
     let name = proc.name_str();
     log!("exit: {name} pid={process_pid} code={code} cpu={}ms", cpu_ns / 1_000_000);
-    (Arc::clone(&proc.object), cpu_ns)
+    let object = Arc::clone(&proc.object);
+    proclife::torn_down(table, process_pid, tid, mark);
+    (object, cpu_ns)
 }
 
 /// One `ProcessStats`, from a process's own data; written once, since `SYS_PROCESS_STATS` samples a live process through the same fields the teardown snapshots.
@@ -1025,19 +1020,23 @@ pub fn stats_from(
     }
 }
 
-/// The last thread out's teardown of its process, on its own stack: free what the process holds, then publish its exit. Every thread has left, so none of this process can run in what is freed.
+/// The last thread out's teardown of its process, on its own stack: free what the process holds, then publish its exit. Every other thread has left, so none can run in what is freed.
+/// The thread is in the process until the bookkeeping marks it, so a machine stop waits for every record and release here.
+/// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
 /// Publish happens after the table lock is released — `teardown_bookkeeping`'s wake needs that — and once published the entry is reapable, so nothing may read the table for this pid after.
-fn teardown(pid: Pid, code: i32, process_data: &Arc<Lock<ProcessData>>) {
+fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<ProcessData>>) {
     let main_thread_data = {
         let guard = PROCESS_TABLE.lock();
-        let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread just left");
+        let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread is in");
         Arc::clone(&proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread").thread_data)
     };
     let (syscall_total, syscall_total_ns) = teardown_resources(process_data, &main_thread_data, pid);
     let (object, cpu_ns) = {
         let mut guard = PROCESS_TABLE.lock();
-        teardown_bookkeeping(guard.as_mut().unwrap(), pid, code)
+        teardown_bookkeeping(guard.as_mut().unwrap(), pid, tid, code, mark)
     };
+    // The table says zombie now, which a sweep counts as nothing left to stop.
+    crate::quiesce::note_progress();
     let stats = stats_from(&process_data.lock(), pid, cpu_ns, syscall_total, syscall_total_ns);
     object.publish_exit(crate::object::process::Exit { code, stats });
 }
@@ -1053,10 +1052,14 @@ pub fn leave(chosen: Option<i32>) {
         let mut guard = PROCESS_TABLE.lock();
         proclife::leave(guard.as_mut().unwrap(), pid, tid, chosen)
     };
-    // The table says zombie now, which a sweep counts as nothing left to stop.
-    crate::quiesce::note_progress();
-    if let proclife::Leave::Last { code } = out {
-        teardown(pid, code, &process_data);
+    match out {
+        // The table says zombie now, which a sweep counts as nothing left to stop.
+        proclife::Leave::NotLast => crate::quiesce::note_progress(),
+        proclife::Leave::Last { code, mark } => {
+            #[cfg(feature = "boot-actuators")]
+            crate::quiesce::last::hold(crate::quiesce::last::Last::Teardown);
+            teardown(pid, tid, code, mark, &process_data);
+        }
     }
 }
 

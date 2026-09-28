@@ -53,6 +53,11 @@ mutate-kill-waits-for-its-victims = []
 # `interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down` must
 # red under this.
 mutate-first-out-tears-down = []
+# `teardown::leave` marks the last one out dead before its teardown runs, so
+# the machine's stop finds nothing running while that teardown frees and logs.
+# `interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done`
+# must red under this.
+mutate-last-out-leaves-before-its-teardown = []
 # `join::collect_zombie` gives up a thread of a process being torn down, whose
 # mappings its siblings may still run in.
 # `interleave::tests::a_join_racing_the_kill_that_takes_its_target` must red

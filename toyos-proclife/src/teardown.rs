@@ -57,15 +57,17 @@ pub fn retire_set<P: Lifecycle>(proc: &P, caller: Option<Tid>) -> Vec<Tid> {
 #[must_use = "the last thread out owes its process's teardown"]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Leave {
-    /// It emptied a claimed process: it tears the process down and publishes
-    /// `code`.
-    Last { code: i32 },
+    /// It is emptying a claimed process: it tears the process down, publishes
+    /// `code`, and stays in the process until [`torn_down`] marks it dead with
+    /// `mark`, so the machine's stop counts its teardown as running.
+    Last { code: i32, mark: i32 },
     /// Some thread is still in the process, or nobody has claimed it.
     NotLast,
 }
 
 /// Take `tid` out of `pid`: dead with the code it chose, else its process's
-/// for the main thread and [`TORN_DOWN_THREAD_CODE`] for any other.
+/// for the main thread and [`TORN_DOWN_THREAD_CODE`] for any other. The last
+/// one out of a claimed process is not marked here: [`torn_down`] marks it.
 ///
 /// Panics for a thread that is not in its process's entry or has left already:
 /// an entry outlives every thread that has not left it.
@@ -77,24 +79,44 @@ pub fn leave<T: Processes>(table: &mut T, pid: Pid, tid: Tid, chosen: Option<i32
         "leave: pid {pid} tid {tid} is not a thread still in its process",
     );
     let claimed = proc.teardown_code();
-    let code = match chosen {
+    let mark = match chosen {
         Some(code) => code,
         None if tid == proc.main_tid() => {
             claimed.expect("leave: a main thread leaves only a process somebody claimed")
         }
         None => TORN_DOWN_THREAD_CODE,
     };
-    proc.set_location(tid, ThreadLocation::Zombie(code));
-    let mut still_in = false;
-    proc.each_thread(&mut |_, at| still_in |= !at.is_zombie());
+    let mut others_in = false;
+    proc.each_thread(&mut |other, at| others_in |= other != tid && !at.is_zombie());
     // The mutation this feature stages: every thread that leaves a claimed
     // process tears it down, the first one out included.
     #[cfg(feature = "mutate-first-out-tears-down")]
-    let still_in = false;
+    let others_in = false;
     match claimed {
-        Some(code) if !still_in => Leave::Last { code },
-        _ => Leave::NotLast,
+        Some(code) if !others_in => {
+            // The mutation this feature stages: the last one out is marked
+            // dead before its teardown runs.
+            #[cfg(feature = "mutate-last-out-leaves-before-its-teardown")]
+            proc.set_location(tid, ThreadLocation::Zombie(mark));
+            Leave::Last { code, mark }
+        }
+        _ => {
+            proc.set_location(tid, ThreadLocation::Zombie(mark));
+            Leave::NotLast
+        }
     }
+}
+
+/// The last one out has torn its process down: it is dead with `mark`.
+pub fn torn_down<T: Processes>(table: &mut T, pid: Pid, tid: Tid, mark: i32) {
+    let proc = table.get_mut(pid).expect("torn_down: a process is in the table until its exit is published");
+    #[cfg(not(feature = "mutate-last-out-leaves-before-its-teardown"))]
+    assert_eq!(
+        proc.location(tid),
+        Some(ThreadLocation::Scheduled),
+        "torn_down: pid {pid} tid {tid} is not the last one out",
+    );
+    proc.set_location(tid, ThreadLocation::Zombie(mark));
 }
 
 /// Which of the two exits a `SYS_THREAD_EXIT` is.
@@ -193,7 +215,13 @@ mod tests {
         assert_eq!(leave(&mut world, pid, t2, Some(5)), Leave::NotLast);
         assert!(claim_teardown(&mut world, pid, 42));
         assert_eq!(leave(&mut world, pid, main, None), Leave::NotLast);
-        assert_eq!(leave(&mut world, pid, t1, None), Leave::Last { code: 42 });
+        assert_eq!(leave(&mut world, pid, t1, None), Leave::Last { code: 42, mark: TORN_DOWN_THREAD_CODE });
+        assert_eq!(
+            world.get(pid).unwrap().location(t1),
+            Some(ThreadLocation::Scheduled),
+            "the last one out is in its process until its teardown is done",
+        );
+        torn_down(&mut world, pid, t1, TORN_DOWN_THREAD_CODE);
 
         let proc = world.get(pid).unwrap();
         assert_eq!(proc.location(main), Some(ThreadLocation::Zombie(42)));

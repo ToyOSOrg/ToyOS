@@ -221,8 +221,6 @@ fn sweep(caller: ThreadId) -> Sweep {
             if !must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller) {
                 continue;
             }
-            // A zombie has already written its `exit:` record and holds no
-            // task; there is nothing left of it to stop.
             if matches!(thread.state(), process::ThreadLocation::Zombie(_)) {
                 continue;
             }
@@ -245,11 +243,12 @@ fn sweep(caller: ThreadId) -> Sweep {
     out
 }
 
-/// `quiesce-last-park` and `quiesce-last-exit`: one thread, named
-/// [`toyos_quiesce::LAST_THREAD`], held inside its syscall until the stop's
-/// latest sweep counts it as the one thread still running, so the park or the
-/// exit it makes next is the last transition the stop sees. Without them no
-/// boot can tell whether that transition's post is what wakes the stop.
+/// `quiesce-last-park`, `quiesce-last-exit` and `quiesce-last-teardown`: one
+/// thread, named [`toyos_quiesce::LAST_THREAD`], held inside its syscall until
+/// the stop's latest sweep counts it as the one thread still running, so the
+/// park, the exit or the process teardown it makes next is the last transition
+/// the stop sees. Without them no boot can tell whether that transition's post
+/// is what wakes the stop.
 #[cfg(feature = "boot-actuators")]
 pub mod last {
     use core::sync::atomic::{
@@ -267,6 +266,8 @@ pub mod last {
     pub enum Last {
         Park,
         Exit,
+        /// The last thread out of its process, between its leaving and its teardown.
+        Teardown,
     }
 
     impl Last {
@@ -274,6 +275,7 @@ pub mod last {
             match self {
                 Last::Park => crate::actuator::quiesce_last_park(),
                 Last::Exit => crate::actuator::quiesce_last_exit(),
+                Last::Teardown => crate::actuator::quiesce_last_teardown(),
             }
         }
 
@@ -281,6 +283,7 @@ pub mod last {
             match self {
                 Last::Park => "quiesce-last-park",
                 Last::Exit => "quiesce-last-exit",
+                Last::Teardown => "quiesce-last-teardown",
             }
         }
     }
@@ -305,7 +308,7 @@ pub mod last {
     }
 
     fn armed() -> Option<Last> {
-        [Last::Park, Last::Exit].into_iter().find(|last| last.armed())
+        [Last::Park, Last::Exit, Last::Teardown].into_iter().find(|last| last.armed())
     }
 
     /// Hold the running thread here if it is the one `last` stages.

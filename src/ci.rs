@@ -360,6 +360,10 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
         "a_join_racing_the_kill_that_takes_its_target ... FAILED",
     ]),
+    red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
+        "the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED",
+        "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         "a_stopped_cpu_stops_taking_work ... FAILED",
     ]),

@@ -122,6 +122,9 @@ actuators! {
     /// The same inside `SYS_THREAD_EXIT`: its exit is then the stop's last transition.
     quiesce_last_exit = "quiesce-last-exit";
 
+    /// The same for the last thread out of its process, between its leaving and its teardown: that teardown is then the stop's last transition.
+    quiesce_last_teardown = "quiesce-last-teardown";
+
     /// Serve a blocked-task dump from the shutdown once its first stage has stopped the machine: the report Ctrl+Alt+D gives on a shutdown stuck in its stop.
     quiesce_dump = "quiesce-dump";
 

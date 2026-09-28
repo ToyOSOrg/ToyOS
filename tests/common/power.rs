@@ -347,7 +347,20 @@ pub fn quiesce_wakes_on_the_last_exit(
     woken_by_the_held_thread(&["quiesce-last-exit", LATE_WORD], rust_bins)
 }
 
-/// One of the two `quiesce-last-*` boots: its actuator first, the late word beside it.
+/// **A process teardown that is the stop's last transition is waited for.**
+/// The same, with `quiesce-last-teardown` holding the last thread out of a
+/// process between its leaving and its teardown: a stop that counted it as
+/// gone would return at its first sweep while that teardown still frees and
+/// logs.
+pub fn quiesce_wakes_on_the_last_teardown(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    woken_by_the_held_thread(&["quiesce-last-teardown", LATE_WORD], rust_bins)
+}
+
+/// One of the `quiesce-last-*` boots: its actuator first, the late word beside it.
 fn woken_by_the_held_thread(
     armed: &'static [&'static str; 2],
     rust_bins: &[(String, Vec<u8>)],

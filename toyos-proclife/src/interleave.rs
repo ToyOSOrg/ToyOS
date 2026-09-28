@@ -549,6 +549,18 @@ mod tests {
         );
     }
 
+    /// A process's one thread exits: it claims, leaves and tears the process
+    /// down, and it is in the process for all of the teardown.
+    ///
+    /// Reds under `mutate-last-out-leaves-before-its-teardown`.
+    #[test]
+    fn the_last_one_out_is_in_its_process_until_its_teardown_is_done() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let main = world.main_tid(pid);
+        holds(&world, vec![Op::exit(pid, main, 0)]);
+    }
+
     /// A thread killing its own process, with a sibling: it retires itself and
     /// leaves when its kill returns.
     #[test]

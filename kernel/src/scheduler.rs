@@ -380,10 +380,7 @@ pub fn leave_ring3_if_due() {
             unreachable!("leave_ring3_if_due: a stopped task was dispatched again");
         }
         SafePoint::Exit => {
-            // A syscall's own depth: the last thread out tears its process down here, and that parks.
-            crate::preempt::disable();
             process::leave(None);
-            crate::preempt::enable_no_resched();
             driver::pass(Dispose::Exit);
             unreachable!("leave_ring3_if_due: returned from the exit pass");
         }
