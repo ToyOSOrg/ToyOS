@@ -118,6 +118,7 @@ use arch::{cpu, percpu, smp};
 pub(crate) use arch::hw;
 use drivers::{acpi, gop, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_rootimage::handoff::{held, Descriptor};
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -355,7 +356,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         "boot: the loader put the stack at image+{:#x}+{:#x}, past the {:#x}-byte image",
         kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size, kernel_args.kernel_memory_size
     );
-    let reserved = [
+    let loader = [
         mm::Region { start: kernel_args.kernel_memory_addr, end: kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size },
         mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
         // The loader's black-box page, which is ordinary `LoaderData` and so
@@ -365,19 +366,26 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         // ROOT's image, `LoaderData` like the black box's page. Empty on a
         // boot the loader handed none.
         root_image,
-        // Last: the one region the loader did not allocate.
-        arch::boot::reserved(),
     ];
     // A region the loader did not allocate withholds memory nothing uses, so one the firmware map does not hold as `LoaderData` is refused.
-    for region in reserved[..reserved.len() - 1].iter().filter(|r| r.start < r.end) {
+    // Block 1: the ELF region (`kernel_elf_addr`+`kernel_elf_size`) is not page-aligned.
+    for region in loader.iter().filter(|r| r.start < r.end) {
         assert!(
-            maps.iter().any(|e| {
-                e.uefi_type == toyos_bootmap::EFI_LOADER_DATA && e.start <= region.start && region.end <= e.end
-            }),
+            held(
+                maps.iter().map(|e| Descriptor { ty: e.uefi_type, start: e.start, end: e.end }),
+                toyos_bootmap::EFI_LOADER_DATA,
+                region.start,
+                region.end - region.start,
+                1,
+            )
+            .is_some(),
             "boot: reserving {:#x}..{:#x}, which no LoaderData descriptor in the firmware map holds",
             region.start, region.end
         );
     }
+    // The architecture's own page (the AP trampoline on x86-64, empty on AArch64) is not a
+    // loader allocation, so it is named here rather than folded into `loader` above.
+    let reserved = [loader[0], loader[1], loader[2], loader[3], arch::boot::reserved()];
 
     // The last point before the first hash container (`mm::init`'s address
     // space), and not earlier: seeding fails only by panicking, and a panic
