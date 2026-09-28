@@ -947,6 +947,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // init refuses the restart by name and /home answers Gone. Body in
     // `tests/common/storage.rs`.
     ("fsd_claim_held", Sched::Parallel, Tier::Fast),
+    // DATA on a stick and on NVMe, one partition per source: fsd refuses both
+    // by name, serves DATA absent, and the stick is untouched. Body in
+    // `tests/common/storage.rs`.
+    ("fsd_two_data", Sched::Parallel, Tier::Fast),
     // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
     ("home_overwrite_reads_back", Sched::Parallel, Tier::Fast),
     // One filesystem under two paths: the guest writes under each of /apps and
@@ -11301,6 +11305,7 @@ fn run_machine_test(
         "fsd_restart" => storage::fsd_restart(test_config, c_bins, rust_bins),
         "fsd_end_at_mount" => storage::fsd_end_at_mount(test_config, c_bins, rust_bins),
         "fsd_claim_held" => storage::fsd_claim_held(test_config, c_bins, rust_bins),
+        "fsd_two_data" => storage::fsd_two_data(test_config, c_bins, rust_bins),
         "home_overwrite_reads_back" => {
             storage::home_overwrite_reads_back(test_config, c_bins, rust_bins)
         }

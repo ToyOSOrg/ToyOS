@@ -755,7 +755,8 @@ pub fn fsd_end_at_mount(
 /// and the role's paths are then Gone: no server answers them.
 ///
 /// DATA is on a USB stick the kernel drives, so its server holds the
-/// partition's claim. `tests/fsdclaimcase` arms `--let-go-at-read`, and
+/// partition's claim, and the NVMe disk carries no table, so the stick's is
+/// the machine's one DATA. `tests/fsdclaimcase` arms `--let-go-at-read`, and
 /// `test_rs_fs_claim_held` takes the claim the server let go, ends the server,
 /// and holds the claim until init has answered the role's restart.
 pub fn fsd_claim_held(
@@ -783,7 +784,12 @@ pub fn fsd_claim_held(
         &config,
         c_bins,
         rust_bins,
-        BootOptions { profile: qemu::Profile::UsbDisk, usb_images: vec![stick.clone()], ..Default::default() },
+        BootOptions {
+            profile: qemu::Profile::UsbDisk,
+            usb_images: vec![stick.clone()],
+            nvme_image: Some(super::partclaim::tableless_nvme("fsd-claim-held-nvme.img")?),
+            ..Default::default()
+        },
     );
     let boot = qemu.boot_log().to_string();
     // The premise: DATA's first server holds the stick's partition.
@@ -808,6 +814,57 @@ pub fn fsd_claim_held(
     console.must_be_clean()?;
     let _ = std::fs::remove_file(&stick);
     eprintln!("  [fsd] {}", refused.trim());
+    Ok(())
+}
+
+/// Two DATA partitions, one on a stick the kernel drives and one on the NVMe
+/// disk blockd serves, are refused by name and never guessed between: DATA is
+/// absent, nothing stands in from memory, and neither is formatted — the
+/// stick is held byte for byte against what it carried before the boot.
+pub fn fsd_two_data(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const DATA: &str = "5A1C0E2B-3D4F-4A6B-8C9D-0E1F2A3B4C5D";
+    const MIB: u64 = 1024 * 1024;
+    const REFUSED: &str = "fsd: this machine has 2 DATA partitions, 1 on the kernel's disks and 1 the block \
+                           service serves, and a volume is one; DATA is absent this boot";
+
+    let stick = super::lane::dir().join("fsd-two-data.img");
+    let data = ("ToyOS data", 96 * MIB, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA, super::partclaim::ALIGNED);
+    let (mut device, spans) = super::partclaim::table(&stick, 100 * MIB, &[data])?;
+    super::partclaim::designate(&mut *device, spans[0])?;
+    device.flush().map_err(|e| format!("flush the stick: {e}"))?;
+    drop(device);
+    let before = whole_device(&stick);
+
+    // The lane's blank NVMe image is the second: a designated DATA partition.
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::UsbDisk, usb_images: vec![stick.clone()], ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    // Shut down rather than kill: a format sitting in a server's cache reaches
+    // the device at the stop's sync, and the stick is judged after it.
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    let log = format!("{boot}\n{tail}");
+    let console = super::serial::Serial::named("fsd_two_data", log.as_str());
+    console.must_say(REFUSED)?;
+    data_absent(&log)?;
+    console.must_not_say(IN_MEMORY)?;
+    console.must_not_say("formatting it")?;
+    console.must_be_clean()?;
+    if let Some(diff) = first_difference(&before, &whole_device(&stick)) {
+        return Err(format!("a DATA partition of two was written: {diff}\n{log}"));
+    }
+    let _ = std::fs::remove_file(&stick);
+    eprintln!("  [fsd] two DATA partitions, one per source, refused by name; the stick untouched");
     Ok(())
 }
 

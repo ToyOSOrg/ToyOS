@@ -8,8 +8,7 @@
 // `SYS_DEBUG` actions a `test-actuators` kernel provides. The first two take
 // one kernel heap allocation each and release it again — at
 // `mm::MAX_HEAP_ALLOC`, and at `MAX_HEAP_ALLOC` with 4096-byte alignment; the
-// last lowers `SYS_SYSINFO`'s thread bound to the machine's live threads plus
-// 16.
+// last lowers `SYS_SYSINFO`'s thread bound to the machine's live threads.
 use toyos_abi::syscall::debug_action::{
     HEAP_AT_CEILING, HEAP_AT_CEILING_PAGE_ALIGNED, LOWER_SYSINFO_BOUND,
 };
@@ -32,7 +31,7 @@ fn main() {
 /// ask the heap for more than `MAX_HEAP_ALLOC` and trip the assert three
 /// functions above — from any process, with no privilege.
 ///
-/// [`LOWER_SYSINFO_BOUND`] puts the machine's live threads plus 16 in
+/// [`LOWER_SYSINFO_BOUND`] puts the machine's live threads in
 /// `MAX_SYSINFO_THREADS`'s place, because 65,536 threads is 8 GiB of kernel
 /// stacks and no guest can make them. The count, the comparison and the
 /// refusal are the shipped ones.

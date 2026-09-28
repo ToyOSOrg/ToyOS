@@ -1972,7 +1972,14 @@ fn start<'a>(
             // has none" is a configuration and every other answer is a fault,
             // and one sentence for all six sends whoever reads the line looking
             // in the wrong place.
-            Err(e) => say!("init: {}: {}", program.name, refused(name, e)),
+            Err(e) => {
+                say!("init: {}: {}", program.name, refused(name, e));
+                // A block service is told, so the partitions on a controller
+                // the machine has are refused and never taken for none.
+                if e != SyscallError::NotFound && program.serves.iter().any(|s| s == toyos_blockring::PORT) {
+                    command.args(["--claim-refused", name.as_str()]);
+                }
+            }
         }
     }
     // The idle slot, for the one program whose row asks for it: minted here,
@@ -2240,13 +2247,13 @@ fn guid_text(guid: [u8; 16]) -> String {
 /// A storage row's arguments and claims for one start.
 ///
 /// A block service is told the ROOT the machine runs from, which it serves no
-/// session on. A file server is told its role, and gets its partition as a
-/// claim when a disk the kernel drives carries it — the stick, until usbd
-/// serves it — and otherwise the partition's GUID, which it opens through the
-/// block service; DATA it finds by type there itself. A log or boot role the
-/// loader named no partition for, a claim the kernel refuses, and a role two
-/// partitions on the kernel's disks carry each refuse the start: the role is
-/// then absent, never served from memory.
+/// session on. A file server is told its role, and gets a claim on every
+/// partition of its role a disk the kernel drives carries — the stick, until
+/// usbd serves it — and otherwise the partition's GUID, which it opens through
+/// the block service; DATA it finds by type there itself, and counts with its
+/// claims. A log or boot role the loader named no partition for, and a claim
+/// the kernel refuses, each refuse the start: the role is then absent, never
+/// served from memory.
 fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> Result<Storage, StartError> {
     use toyos_abi::inventory::{Record, Role};
     let mut storage = Storage::default();
@@ -2283,27 +2290,17 @@ fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> 
         }
         other => panic!("init: `{other}` is no role; the build refuses it"),
     };
-    match kernel.as_slice() {
-        [guid] => {
-            let request = toyos_abi::syscall::DeviceRequest::Partition(toyos_abi::part::PartGuid(*guid));
-            let mut buf = [0u8; toyos_abi::syscall::DeviceRequest::MAX_NAME];
-            let name = request.write_name(&mut buf).to_string();
-            match syscap.claim_partition::<toyos::Device>(toyos_abi::part::PartGuid(*guid)) {
-                Ok(claim) => storage.claims.push((format!("{DEV_PREFIX}{name}"), claim)),
-                Err(e) => return Err(StartError::Partition(refused(&name, e))),
-            }
+    for guid in &kernel {
+        let request = toyos_abi::syscall::DeviceRequest::Partition(toyos_abi::part::PartGuid(*guid));
+        let mut buf = [0u8; toyos_abi::syscall::DeviceRequest::MAX_NAME];
+        let name = request.write_name(&mut buf).to_string();
+        match syscap.claim_partition::<toyos::Device>(toyos_abi::part::PartGuid(*guid)) {
+            Ok(claim) => storage.claims.push((format!("{DEV_PREFIX}{name}"), claim)),
+            Err(e) => return Err(StartError::Partition(refused(&name, e))),
         }
-        [] => {
-            if let Some(guid) = named {
-                storage.args.push(guid_text(guid));
-            }
-        }
-        many => {
-            return Err(StartError::Partition(format!(
-                "the kernel's disks carry {} partitions for the `{role}` role, and a role is one",
-                many.len()
-            )))
-        }
+    }
+    if let (Some(guid), []) = (named, kernel.as_slice()) {
+        storage.args.push(guid_text(guid));
     }
     Ok(storage)
 }

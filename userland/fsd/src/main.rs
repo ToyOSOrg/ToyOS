@@ -2,9 +2,11 @@
 //! of that role as capabilities.
 //!
 //! **What it holds**: the acceptor of each directory its role serves, endowed
-//! by init under `serve:fs:<dir>`; for its volume, a claim on a partition of a
-//! disk the kernel drives, or blockd's `block` connector in its namespace; and
-//! nothing else of the machine. Argv is the role, and for LOG and BOOT the
+//! by init under `serve:fs:<dir>`; for its volume, a claim on each partition
+//! of its role a disk the kernel drives carries, and blockd's `block`
+//! connector in its namespace; and nothing else of the machine. DATA is one
+//! partition counted over both, and two are refused by name, never guessed
+//! between (`fsd::data::find`). Argv is the role, and for LOG and BOOT the
 //! unique GUID of the partition the loader named for it when no claim on it
 //! was minted; then the row's own arguments, which are tests' actuators
 //! ([`END_ON`], [`END_AT_READ`], [`END_AT_MOUNT`]).
@@ -28,7 +30,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use fsd::absent::Absent;
-use fsd::data::{DataVolume, Probed};
+use fsd::data::{DataVolume, Located, Probed};
 use fsd::disk::{Claimed, Disk, Ram, Served};
 use fsd::fat::FatVolume;
 use fsd::resolve::{self, Found, Refusal as Escape, Resolved};
@@ -267,19 +269,17 @@ fn capabilities(role: Role) -> Vec<Capability> {
     caps
 }
 
-/// The partition claim init minted, when the role's partition is on a disk
+/// The partition claims init minted: one per partition of the role on a disk
 /// the kernel drives.
-fn claimed() -> Option<Claimed> {
+fn claims() -> Vec<toyos::PartitionDev> {
     let prefix = format!("{DEV_PREFIX}part:");
-    let label = Endowments::get().labels().find(|l| l.starts_with(&prefix))?.to_string();
-    let claim: toyos::PartitionDev = Endowments::get().take(&label)?;
-    match Claimed::new(claim) {
-        Ok(disk) => Some(disk),
-        Err(why) => {
-            println!("fsd: the partition claim would not describe itself: {why:?}");
-            None
-        }
-    }
+    let labels: Vec<String> =
+        Endowments::get().labels().filter(|l| l.starts_with(&prefix)).map(str::to_string).collect();
+    labels.iter().map(|l| Endowments::get().take(l).expect("fsd: the claim its label names")).collect()
+}
+
+fn describe(claim: toyos::PartitionDev) -> Result<Claimed, String> {
+    Claimed::new(claim).map_err(|why| format!("the partition claim would not describe itself ({why:?})"))
 }
 
 /// A session on the partition blockd serves under `guid`.
@@ -312,26 +312,35 @@ fn data_partitions() -> Result<Vec<[u8; 16]>, String> {
 fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume> {
     match role {
         Role::Data => {
-            if let Some(disk) = claimed() {
-                return data_on(disk, roots);
-            }
-            match data_partitions().as_deref() {
-                Ok([one]) => match served(*one) {
-                    Some(disk) => data_on(disk, roots),
-                    None => Box::new(Absent::new(roots, "the DATA partition would not open".into())),
+            let mut claims = claims();
+            let found = fsd::data::find(claims.len(), data_partitions().as_deref().map_err(String::clone));
+            let absent = |why: String| -> Box<dyn Volume> {
+                println!("fsd: {why}; DATA is absent this boot");
+                Box::new(Absent::new(roots, why))
+            };
+            match found {
+                Located::Nowhere => ram(roots, "this machine has no DATA partition"),
+                Located::Claimed => match describe(claims.pop().expect("one claim")) {
+                    Ok(disk) => data_on(disk, roots),
+                    Err(why) => absent(why),
                 },
-                Ok([]) => ram(roots, "this machine has no DATA partition"),
-                Ok(many) => ram(roots, &format!("this machine has {} DATA partitions, and a volume is one", many.len())),
-                Err(why) => {
-                    println!("fsd: {why}; DATA is absent this boot");
-                    Box::new(Absent::new(roots, why.clone()))
-                }
+                Located::Served(guid) => match served(guid) {
+                    Some(disk) => data_on(disk, roots),
+                    None => absent("the DATA partition would not open".into()),
+                },
+                Located::Refused(why) => absent(why),
             }
         }
         Role::Log | Role::Boot => {
             let writable = role == Role::Log;
-            let mounted = match claimed() {
-                Some(disk) => Ok(fat_on(disk, writable)),
+            let mut claims = claims();
+            let mounted = match claims.pop() {
+                Some(claim) => {
+                    // init claims by the loader's GUID, which the kernel
+                    // refuses when two partitions carry it.
+                    assert!(claims.is_empty(), "fsd: init handed the {role:?} server two claims");
+                    Ok(describe(claim).and_then(|disk| fat_on(disk, writable)))
+                }
                 // init starts this role with its partition's claim or its GUID, never neither.
                 None => {
                     let guid = guid.unwrap_or_else(|| {

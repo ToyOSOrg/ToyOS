@@ -25,7 +25,7 @@
 //! here, where the table and the `system.toml` naming it are both written.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::qemu::{self, BootOptions, QemuInstance, Staged};
@@ -167,6 +167,7 @@ pub fn partition_claim(
             profile: qemu::Profile::UsbDisk,
             boot_image: Some(Staged::Pristine(boot_image.clone())),
             usb_images: vec![crafted.clone()],
+            nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
             ..Default::default()
         },
     );
@@ -255,6 +256,7 @@ pub fn partition_claim_gives_up(
             BootOptions {
                 profile: qemu::Profile::UsbDisk,
                 usb_images: vec![crafted.clone()],
+                nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
                 kernel_params: params,
                 ..Default::default()
             },
@@ -301,6 +303,7 @@ fn root_withheld(
             profile: qemu::Profile::UsbDisk,
             boot_image: Some(Staged::Pristine(image.clone())),
             usb_images: vec![crafted.to_path_buf()],
+            nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -732,6 +735,17 @@ fn craft_disk(path: &Path, twin: &str) -> Result<Layout, String> {
     designate(&mut *device, layout.data)?;
     device.flush().map_err(|e| format!("flush the disk: {e}"))?;
     Ok(layout)
+}
+
+/// An NVMe disk with no partition table, named `name` in the lane: beside a
+/// stick carrying DATA, the machine's one DATA partition is the stick's, where
+/// the lane's blank NVMe image would carry a second and DATA be refused.
+pub(super) fn tableless_nvme(name: &str) -> Result<PathBuf, String> {
+    let path = super::lane::dir().join(name);
+    std::fs::File::create(&path)
+        .and_then(|file| file.set_len(qemu::NVME_SMALL))
+        .map_err(|e| format!("make {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// The designation on `data`: fsd formats a DATA only on this consent.

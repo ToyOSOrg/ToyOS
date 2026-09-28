@@ -23,6 +23,11 @@
 //! A partition whose range is not whole 4 KiB blocks, or whose GUID the table
 //! carries twice, is listed and refused by name.
 //!
+//! **A controller its row names that is on the machine and whose claim the
+//! kernel refused is not an absent one**: its starter names it
+//! (`--claim-refused <name>`), and a listing and every open are refused
+//! `ClaimRefused`, so a file server says so rather than finding no disk.
+//!
 //! **The partition the machine runs from is refused to every session**: its
 //! starter names it (`--running <guid>`, the ROOT the loader read), because a
 //! writer there changes the image under the kernel that booted from it.
@@ -77,6 +82,10 @@ const SILENCE_WRITE: &str = "--silence-write";
 /// Argv, followed by a unique GUID: the partition the machine runs from, which
 /// no session opens.
 const RUNNING: &str = "--running";
+
+/// Argv, followed by a device name of this service's row: on this machine, and
+/// its claim refused.
+const CLAIM_REFUSED: &str = "--claim-refused";
 
 const TOKEN_IRQ: u64 = 0;
 const TOKEN_ACCEPT: u64 = 1;
@@ -203,6 +212,9 @@ enum Drive {
     /// refused `Unusable`, so a file server says the disk failed rather than
     /// that there is none.
     Unusable,
+    /// A controller this row names is on this machine and its claim was
+    /// refused: a listing and an open are refused `ClaimRefused`.
+    ClaimRefused,
 }
 
 impl Drive {
@@ -211,14 +223,16 @@ impl Drive {
     fn up(&mut self) -> &mut Controller {
         match self {
             Drive::Up(ctrl, _) => ctrl,
-            Drive::Absent | Drive::Unusable => unreachable!("blockd: a session with no controller"),
+            Drive::Absent | Drive::Unusable | Drive::ClaimRefused => {
+                unreachable!("blockd: a session with no controller")
+            }
         }
     }
 
     fn oldest(&self) -> Option<Instant> {
         match self {
             Drive::Up(ctrl, _) => ctrl.oldest(),
-            Drive::Absent | Drive::Unusable => None,
+            Drive::Absent | Drive::Unusable | Drive::ClaimRefused => None,
         }
     }
 }
@@ -258,6 +272,7 @@ impl Service {
             }
             Drive::Absent => Ok(Vec::new()),
             Drive::Unusable => Err(Refusal::Unusable),
+            Drive::ClaimRefused => Err(Refusal::ClaimRefused),
         }
     }
 
@@ -267,6 +282,7 @@ impl Service {
             Drive::Up(_, parts) => parts,
             Drive::Absent => return Err(Refusal::NotFound),
             Drive::Unusable => return Err(Refusal::Unusable),
+            Drive::ClaimRefused => return Err(Refusal::ClaimRefused),
         };
         let part = parts.iter().find(|p| p.unique == guid && guid != [0; 16]);
         let (first, blocks) = match part.map(|p| &p.span) {
@@ -502,8 +518,7 @@ impl Service {
     }
 }
 
-/// The PCI function this process was endowed, or `None` on a machine that
-/// has none its row names: init says which, and starts it anyway.
+/// The PCI function this process was endowed.
 fn claim() -> Option<toyos::PciDev> {
     let label = Endowments::get()
         .labels()
@@ -526,7 +541,17 @@ fn main() {
             .map(|guid| guid.0)
             .unwrap_or_else(|| panic!("blockd: {RUNNING} takes the running ROOT's unique GUID"))
     });
+    let refused = args.iter().position(|a| a == CLAIM_REFUSED).map(|at| {
+        args.get(at + 1).unwrap_or_else(|| panic!("blockd: {CLAIM_REFUSED} takes the device its claim was refused on"))
+    });
     let acceptor = endow::acceptor(PORT).unwrap_or_else(|| panic!("blockd: started serving no `{PORT}` port"));
+    if let Some(name) = refused {
+        println!(
+            "blockd: NOT SERVING — {name} is on this machine and the kernel refused this service its \
+             claim; every partition on it is refused"
+        );
+        serve(&mut Service::new(Drive::ClaimRefused, running), &acceptor);
+    }
     let Some(dev) = claim() else {
         println!("blockd: no NVMe controller this row names is on this machine; serving no partition");
         serve(&mut Service::new(Drive::Absent, running), &acceptor);
@@ -716,15 +741,19 @@ fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usiz
 mod tests {
     use super::*;
 
-    /// A controller this service cannot use is a disk that failed and never a
-    /// machine without one: its listing and its open are refused `Unusable`,
-    /// where an absent controller's listing is empty and its open `NotFound`.
+    /// A controller this service cannot use, or one whose claim was refused,
+    /// is a disk there and never a machine without one: its listing and its
+    /// open are refused by that word, where an absent controller's listing is
+    /// empty and its open `NotFound`.
     #[test]
-    fn an_unusable_controller_is_refused_and_an_absent_one_lists_nothing() {
+    fn an_unusable_or_unclaimed_controller_is_refused_and_an_absent_one_lists_nothing() {
         let guid = [7; 16];
         let mut unusable = Service::new(Drive::Unusable, None);
         assert_eq!(unusable.listing(), Err(Refusal::Unusable));
         assert_eq!(unusable.place(guid), Err(Refusal::Unusable));
+        let mut unclaimed = Service::new(Drive::ClaimRefused, None);
+        assert_eq!(unclaimed.listing(), Err(Refusal::ClaimRefused));
+        assert_eq!(unclaimed.place(guid), Err(Refusal::ClaimRefused));
         let mut absent = Service::new(Drive::Absent, None);
         assert_eq!(absent.listing(), Ok(Vec::new()));
         assert_eq!(absent.place(guid), Err(Refusal::NotFound));

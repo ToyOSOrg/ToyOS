@@ -265,6 +265,7 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
         &log,
         super::https::VIRTIO.claims,
         "neither its MSI-X nor its MSI could be armed",
+        &[],
     )?;
     // And it reached userland rather than stopping at a log line.
     exited?;
@@ -296,7 +297,7 @@ pub fn claim_caps_truncated() -> Result<(), String> {
 
     // Refused by the reason that is true of it: what the list holds past that
     // link was never read — not "it has no table".
-    refused_claim(&log, bench.claims, "its capability list ends at a link the PCI spec forbids")?;
+    refused_claim(&log, bench.claims, "its capability list ends at a link the PCI spec forbids", &[])?;
     // And it reached userland rather than stopping at a log line.
     exited?;
     // And the machine is otherwise whole: one claim refused costs networking
@@ -398,18 +399,20 @@ fn netd_answered(mut qemu: QemuInstance) -> (Serial, Result<(), String>) {
 /// **The claim on [`CLAIMED_AT`] was refused for `why`, and the refusal spent
 /// nothing**: no BAR of that function moved, neither of its two message
 /// mechanisms is armed, `claims` reached no holder, and init said so in the
-/// boot config's own spelling.
+/// boot config's own spelling. `beside` is every other function this machine
+/// refuses, each judged by its own caller.
 ///
 /// The three arms that refuse a claim read this one judge, so a kernel that
 /// answered a refusal by logging it and handing the function over anyway is red
 /// wherever the refusal is reached. `slot_space` put back below `place_bars`
 /// reds on the two unspent lines.
-pub fn refused_claim(log: &Serial, claims: &str, why: &str) -> Result<(), String> {
+pub fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Result<(), String> {
     let refused = functions_named(log, "NOT HANDED OVER")?;
-    if refused.is_empty() || refused.iter().any(|at| *at != CLAIMED_AT) {
+    let others: std::collections::BTreeSet<&str> = refused.iter().copied().filter(|at| *at != CLAIMED_AT).collect();
+    if !refused.contains(&CLAIMED_AT) || others != beside.iter().copied().collect() {
         return Err(format!(
-            "the claim this judges is the one on {CLAIMED_AT}; this console refused \
-             {refused:?}:\n{}",
+            "the claim this judges is the one on {CLAIMED_AT}, beside {beside:?}; this console \
+             refused {refused:?}:\n{}",
             log.text()
         ));
     }

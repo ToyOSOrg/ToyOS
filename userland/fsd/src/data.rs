@@ -79,6 +79,39 @@ pub enum Probed<D: Disk> {
     Foreign,
 }
 
+/// Where DATA's partition is, counted over both sources at once: the claims
+/// init minted on the kernel's disks and the TOYOS-DATA partitions the block
+/// service lists, or why it would not list them.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Located {
+    /// This machine has none: memory stands in.
+    Nowhere,
+    /// The one claim init minted.
+    Claimed,
+    /// The one partition the block service serves, by its unique GUID.
+    Served([u8; 16]),
+    /// Two or more, never guessed between, or none countable: DATA is absent.
+    Refused(String),
+}
+
+pub fn find(claims: usize, served: Result<&[[u8; 16]], String>) -> Located {
+    let served = match served {
+        Ok(served) => served,
+        Err(why) => return Located::Refused(why),
+    };
+    match (claims, served) {
+        (0, []) => Located::Nowhere,
+        (1, []) => Located::Claimed,
+        (0, [one]) => Located::Served(*one),
+        (claims, served) => Located::Refused(format!(
+            "this machine has {} DATA partitions, {claims} on the kernel's disks and {} the block \
+             service serves, and a volume is one",
+            claims + served.len(),
+            served.len()
+        )),
+    }
+}
+
 fn io(e: &FsError) -> SyscallError {
     match e {
         FsError::NotFound => SyscallError::NotFound,
@@ -747,6 +780,27 @@ mod tests {
 
     const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
     const PLAIN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
+
+    /// Two DATA partitions are refused wherever each is, and a block service
+    /// that would not list what it has leaves DATA absent even beside a claim:
+    /// memory stands in only where both sources say there is none.
+    #[test]
+    fn data_is_one_partition_counted_over_both_sources() {
+        let (a, b) = ([1; 16], [2; 16]);
+        assert_eq!(find(0, Ok(&[])), Located::Nowhere);
+        assert_eq!(find(1, Ok(&[])), Located::Claimed);
+        assert_eq!(find(0, Ok(&[a])), Located::Served(a));
+        let two = |claims, served: &[[u8; 16]]| match find(claims, Ok(served)) {
+            Located::Refused(why) => why,
+            other => panic!("{claims} claims and {} served located {other:?}", served.len()),
+        };
+        assert!(two(1, &[a]).starts_with("this machine has 2 DATA partitions, 1 on the kernel's disks and 1"));
+        assert!(two(2, &[]).starts_with("this machine has 2 DATA partitions, 2 on the kernel's disks and 0"));
+        assert!(two(0, &[a, b]).starts_with("this machine has 2 DATA partitions, 0 on the kernel's disks and 2"));
+        for claims in [0, 1] {
+            assert_eq!(find(claims, Err("unlisted".into())), Located::Refused("unlisted".into()));
+        }
+    }
 
     #[test]
     fn a_file_reads_back_what_was_written_across_pages_and_holes() {

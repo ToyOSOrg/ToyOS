@@ -778,6 +778,10 @@ pub fn iommu_virtio_platform(
     declining_is_not_free(test_config, c_bins, rust_bins)
 }
 
+/// The slot QEMU's `-device` order puts `tests/netcase`'s NVMe controller on,
+/// the one its blockd row claims.
+const NVME_AT: &str = "00:02.0";
+
 /// **A machine with no unit hands no function to a process**, and says so
 /// three times over.
 ///
@@ -787,17 +791,25 @@ pub fn iommu_virtio_platform(
 /// physical address is an arbitrary read and write over all of memory. So the
 /// kernel refuses the claim by name, init says which device it could not mint,
 /// and netd exits rather than driving anything — and the machine finishes
-/// booting, which is the half a refusal that panicked would fail.
+/// booting, which is the half a refusal that panicked would fail. The NVMe
+/// controller is refused the same, and DATA with it by name: a disk that is
+/// there and cannot be used is never answered with memory.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
+    const NO_DOMAIN: &str = "it would have no address space of its own";
     // The same judge the two arms in `faults` read, so a refusal that spent
     // something is red wherever it is reached. netd's own exit is the third
     // saying, and is not read here: it speaks after the ready marker this
     // capture ends at.
-    super::faults::refused_claim(
-        log,
-        super::https::VIRTIO.claims,
-        "it would have no address space of its own",
+    super::faults::refused_claim(log, super::https::VIRTIO.claims, NO_DOMAIN, &[NVME_AT])?;
+    log.must_say(&format!("pcidev: PCI {NVME_AT} NOT HANDED OVER — {NO_DOMAIN}"))?;
+    log.must_say("init: blockd: pci:1b36:0010 is on this machine and could not be handed over")?;
+    log.must_say(
+        "blockd: NOT SERVING — pci:1b36:0010 is on this machine and the kernel refused this service its claim",
     )?;
+    log.must_say(
+        "fsd: the block service would not list its partitions (Refused(ClaimRefused)); DATA is absent this boot",
+    )?;
+    log.must_not_say(super::storage::IN_MEMORY)?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
     // given an address space for.

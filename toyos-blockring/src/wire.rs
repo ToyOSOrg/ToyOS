@@ -100,6 +100,10 @@ pub enum Refusal {
     Malformed,
     /// The service is holding as many sessions as it serves.
     Exhausted,
+    /// The controller is on this machine and the kernel would not hand the
+    /// service its claim: nothing on it is served, and a listing is refused
+    /// the same.
+    ClaimRefused,
 }
 
 impl Refusal {
@@ -110,6 +114,7 @@ impl Refusal {
             Self::Unusable => 3,
             Self::Malformed => 4,
             Self::Exhausted => 5,
+            Self::ClaimRefused => 6,
         }
     }
 
@@ -120,6 +125,7 @@ impl Refusal {
             3 => Some(Self::Unusable),
             4 => Some(Self::Malformed),
             5 => Some(Self::Exhausted),
+            6 => Some(Self::ClaimRefused),
             _ => None,
         }
     }
@@ -154,7 +160,14 @@ mod tests {
         let opened = Opened { blocks: u64::MAX - 3, unique: [7; GUID_BYTES] };
         assert_eq!(Opened::decode(&opened.encode()), Some(opened));
         assert_eq!(Opened::decode(&opened.encode()[1..]), None);
-        for r in [Refusal::NotFound, Refusal::Held, Refusal::Unusable, Refusal::Malformed, Refusal::Exhausted] {
+        for r in [
+            Refusal::NotFound,
+            Refusal::Held,
+            Refusal::Unusable,
+            Refusal::Malformed,
+            Refusal::Exhausted,
+            Refusal::ClaimRefused,
+        ] {
             assert_eq!(Refusal::decode(&r.encode()), Some(r));
         }
         assert_eq!(Refusal::decode(&0u32.to_le_bytes()), None);
