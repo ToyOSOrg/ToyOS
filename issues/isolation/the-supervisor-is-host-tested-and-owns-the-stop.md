@@ -14,7 +14,9 @@ Every guest test this track names is registered at `Tier::Fast` or
 `Tier::Nightly` with no `src/redlist.rs` row. A deleted or disabled test covers
 nothing.
 
-1. **The rename**, one mechanical PR, first after #536. It touches `toyos/src`,
+1. **The rename**, one mechanical PR, first after #536. Before stage 1 is
+   briefed, the exit's search below runs once over the `rust/` fork's delta as
+   well as the superproject, so its hits are known going in. It touches `toyos/src`,
    `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, so it is
    briefed as an ABI brief, and its `CLAUDE.md` edits are placed in the same PR
    by an agent briefed for them. Issue slugs carrying an old name are renamed
@@ -39,15 +41,12 @@ nothing.
      `blockd`, `fsd`, `sshd`, excluding, case-insensitively, an identifier
      containing `klogd`, `blockdev`, `VirtioSoundDev`, `netdev`, `netdb`,
      `ENETDOWN` or `fsdir`;
-   - a case-insensitive search for `init` followed by no lowercase letter and
-     preceded by a letter only where it starts with a capital `I` (so
-     `spawn_init`, `struct Init`, `SpawnInit`, `TimerInit`, `InitPort` and
-     "asks init" all hit). A match stays only where `init` means initialise,
-     initial or the CPU's INIT signal (a function, method or field named
-     `init`, an identifier of that meaning, ELF's init arrays, bring-up prose,
-     a log string a test matches such as `init budget`), or where it sits in
-     third-party text (`tests/testcases/`, the C ports); every other match
-     names the program and goes.
+   - a case-insensitive search for `init` followed by no lowercase letter
+     other than one `s` (so `inits` hits alongside `init`) and preceded by a
+     letter only where it starts with a capital `I` (so `spawn_init`,
+     `struct Init`, `SpawnInit`, `TimerInit`, `InitPort` and "asks init" all
+     hit). A match goes where it names the program and stays otherwise;
+     third-party text (`tests/testcases/tinycc/`, the C ports) stays.
 2. **Decisions in a pure crate.** The supervisor's decisions live in
    `toyos-supervisor`, with host tests; `userland/supervisor` keeps only
    handles, spawns and the loop. The decisions: namespace and claim selection
@@ -83,10 +82,7 @@ nothing.
 
 ## Open with the owner
 
-- The new names of `fsd`, `soundd` and `blockd`. The orchestrator's candidate
-  for `fsd` is `fileserver`. `mixer` and `disks` are refused: both are words
-  the tree already uses (`flush_disks`), so a search for either program would
-  be as ambiguous as one for `init` is today.
+- The new names of `fsd`, `soundd` and `blockd`.
 - Before stage 3: the ask's ABI (no syscall is proposed); whether a program
   started through `launcher` is asked or only stopped; whether
   `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.
