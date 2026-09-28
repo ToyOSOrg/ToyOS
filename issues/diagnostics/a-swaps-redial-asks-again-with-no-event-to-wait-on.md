@@ -1,10 +1,12 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-25
 ---
 
 # A swap's redial asks again with no event to wait on
+
+Held by the orchestrator.
 
 A swap of netd ends the host's log stream with no FIN and no reset, and
 `src/metaltalk.rs`'s `Stream::redial` dials `logd` again. Nothing the machine
@@ -21,6 +23,10 @@ QEMU's forward's. Its redial asks the name on the link again after every dial
 turned away, as soon as the old netd answers the last ask, so its questions
 may go out faster than RFC 6762 §5.2's floor between two queries
 (`ASK_WAIT`); that rate is unmeasured on metal.
+
+The forward's cost is measured: a hold-green run turned away 8125 dials in
+7019 ms, and the guest logged 16231 of its 19034 interrupts over that boot, all
+on cpu0.
 
 ## Exit condition
 
