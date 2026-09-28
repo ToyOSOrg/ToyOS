@@ -51,16 +51,6 @@ mod slot;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
-///
-/// Nothing here has a caller to return an error to and nothing has run that
-/// could recover, so every check in this file ends in a named panic rather
-/// than an error path. This one exists so that a corrupt or hostile directory
-/// entry is a refusal that says what it refused, instead of a firmware pool
-/// request sized by whatever the ESP claimed.
-///
-/// Policy, and generous: `kernel.elf` is the largest file ToyOS puts on the
-/// ESP, and this bound is orders of magnitude above it while still far below
-/// what a UEFI implementation would serve in one allocation.
 const MAX_ESP_FILE: u64 = 1024 * 1024 * 1024;
 
 /// Descriptors of room held above what the map measured, for the descriptors
@@ -182,8 +172,7 @@ struct BootPartition {
 /// `None` is a machine, not a failure: PXE, an unpartitioned device, and a
 /// signature type firmware chose not to fill in all land here, and the kernel
 /// is expected to boot on all of them knowing it has no partition of its own.
-/// Every early-return below is one of those, so none of them panics — which
-/// makes this the one function in this file that does not.
+/// Every early-return below is one of those, so none of them panics.
 fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<BootPartition> {
     let bs = system_table.boot_services();
     let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
@@ -276,19 +265,6 @@ fn file_range(bytes: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
 }
 
 fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
-    // `toyos-elf` is the tree's one ELF decoder: the crate the kernel reads
-    // every program image with reads the kernel's own image here. Refused by
-    // name before anything is allocated — ELF32, big-endian, a version that is
-    // not `EV_CURRENT`, an `e_type` that is not `ET_DYN`, a machine that is not
-    // this loader's own, no program headers or a table outside the file, more than
-    // `toyos_elf::MAX_LOAD_SEGMENTS` `PT_LOAD`s or none at all, a `PT_LOAD`
-    // with `p_filesz > p_memsz` or a `p_vaddr + p_memsz` or `p_offset +
-    // p_filesz` that overflows, and an `e_entry` no segment covers.
-    //
-    // `p_filesz <= p_memsz` matters for the same reason it does in the kernel's
-    // loader: the pair is a (copy length, destination size) pair here too, as
-    // the image is sized from every `p_memsz` and each segment is then copied
-    // in at `p_filesz`.
     let layout = toyos_elf::Layout::parse(kernel_elf_bytes, arch::ELF_MACHINE)
         .unwrap_or_else(|e| panic!("kernel.elf: {e}"));
 
@@ -573,10 +549,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
-    // Before the exit: `_print` unwraps a system table uefi-services nulls in its exit callback, so `println!` past it panics.
-    //
-    // Said before it is applied: a machine this refuses leaves the refusal in
-    // `loader.log`, which is the artifact a machine with no console has.
     // Where firmware loaded this image, which is where the x86-64 switch to
     // the boot map runs from: the map holds it wherever that is.
     let loader = {
@@ -776,14 +748,6 @@ fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
 /// `SIGNAL_EXIT_BOOT_SERVICES` callback that lives here; the next operating
 /// system signals that group from inside its own `ExitBootServices`, and
 /// firmware calls into memory that is no longer ours.
-///
-/// So the event is closed *and* the pass resets. Closing it is the invariant —
-/// a pass that does not hand off leaves nothing registered in the firmware — and
-/// the reset is what makes that invariant not have to be complete: the next
-/// operating system comes up on firmware this image has never run on, for one
-/// reboot. `BootNext` was consumed by this pass and this pass sets none, so the
-/// firmware's own order takes the machine, and the page was cleared as it was
-/// read, so a boot that does come back here boots normally.
 fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
     println!("{}", loaderlog::ENDS_AT_CHAIN);
     loaderlog::close_without_a_kernel();
@@ -800,10 +764,6 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // First: the TSC counts from reset, so this is what firmware took.
     let entry_tsc = tsc();
-    // The event is kept, not discarded: it is a callback *inside this image*
-    // that firmware holds until it is closed, and a pass that returns to the
-    // boot manager is a pass whose image the boot manager then unloads. See
-    // `end_this_pass`.
     let exit_event = uefi_services::init(&mut system_table).unwrap();
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
