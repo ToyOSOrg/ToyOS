@@ -50,7 +50,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 **CPU state** — a CPU's control registers come from one declaration, applied by the BSP and by every AP and asserted on each; no read-modify-write decides what either holds.
 
-**Firmware** — ToyOS calls no UEFI runtime service; every UEFI call ToyOS makes is the loader's.
+**Firmware** — the kernel calls no UEFI service; every UEFI call ToyOS makes is the loader's, before ExitBootServices.
 
 **Input** — the kernel delivers key *transitions*, never what one types; a surface turns one into the other. Translation, layouts, dead keys and escape sequences live in userland, one translator per surface.
 
