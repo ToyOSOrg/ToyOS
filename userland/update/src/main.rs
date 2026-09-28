@@ -49,7 +49,7 @@ use toyos::endow::Endowments;
 use toyos::PartitionDev;
 use toyos_abi::part::{Block, BLOCK_BYTES, MAX_BLOCKS_PER_CALL};
 use toyos_update::image::{Header, HEADER_BYTES, SIGNED_BYTES};
-use toyos_update::slots::{self, Next, Table, Which};
+use toyos_update::slots::{self, Table, Which};
 use toyos_fat32::BlockAccess as _;
 use toyos_update::{policy, sig};
 
@@ -134,6 +134,9 @@ fn run(asked: Asked, began: Instant) -> Result<String, String> {
         .find(|&w| table.slot(w).is_some_and(|s| s.boot == boot_guid && s.root == root_info.unique_guid))
         .ok_or("the partitions this process holds are no slot the table names")?;
     let running = table.slot(idle.other()).ok_or("the table carries no running slot")?;
+    let request = table.request.install(idle, once).map_err(|guid| {
+        format!("EFI system partition {} is asked for once, and --once would drop that boot unmade", toyos_gpt::Guid(guid))
+    })?;
 
     let mut input = std::io::stdin().lock();
     let mut signed = [0u8; SIGNED_BYTES];
@@ -175,15 +178,11 @@ fn run(asked: Asked, began: Instant) -> Result<String, String> {
     root.sync().map_err(|e| format!("slot {}'s ROOT is not durable: {e:?}", idle.letter()))?;
     boot.sync().map_err(|e| format!("slot {}'s volume is not durable: {e:?}", idle.letter()))?;
 
-    let mut next = table;
+    let mut next = Table { request, ..table };
     let mut slot = table.slot(idle).expect("the idle slot is in the table");
     slot.version = header.version;
     next.slots[idle.index()] = Some(slot);
-    // A slot asked for once before this install is answered by it: the idle
-    // slot is marked now, or is the one asked for.
-    next.request.next = next.request.next.filter(|n| matches!(n, Next::Esp(_)));
     let when = if once {
-        next.request.next = Some(Next::Slot(idle));
         format!("it boots once at the next reboot, and slot {} at every boot after", table.marked.letter())
     } else {
         next.marked = idle;

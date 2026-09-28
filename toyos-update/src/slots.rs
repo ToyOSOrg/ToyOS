@@ -139,6 +139,20 @@ impl Request {
             Some(Next::Esp(_)) | None => Ok(Self { next: Some(Next::Esp(guid)), ..self }),
         }
     }
+
+    /// This request once an image is installed into `idle`, booted `once` or
+    /// marked: a slot asked for once before is answered by the install, and a
+    /// boot of another ESP is kept, or refused by its GUID where `once` would
+    /// replace it unmade.
+    pub fn install(self, idle: Which, once: bool) -> Result<Self, [u8; 16]> {
+        let next = match (self.next, once) {
+            (Some(Next::Esp(guid)), true) => return Err(guid),
+            (Some(Next::Esp(guid)), false) => Some(Next::Esp(guid)),
+            (Some(Next::Slot(_) | Next::Trial(_)) | None, true) => Some(Next::Slot(idle)),
+            (Some(Next::Slot(_) | Next::Trial(_)) | None, false) => None,
+        };
+        Ok(Self { next, ..self })
+    }
 }
 
 /// One copy of the table.
@@ -501,6 +515,18 @@ mod tests {
         assert_eq!(Request::NONE.boot_next([2; 16]), Ok(Request { next: esp([2; 16]), first: false }));
         for (next, which) in [(Next::Slot(Which::B), Which::B), (Next::Trial(Which::A), Which::A)] {
             assert_eq!(Request { next: Some(next), first: false }.boot_next([2; 16]), Err(which));
+        }
+    }
+
+    #[test]
+    fn an_install_answers_a_slot_asked_once_and_never_drops_an_esp() {
+        let asked = Request { next: Some(Next::Esp([1; 16])), first: true };
+        assert_eq!(asked.install(Which::B, false), Ok(asked));
+        assert_eq!(asked.install(Which::B, true), Err([1; 16]));
+        for next in [None, Some(Next::Slot(Which::A)), Some(Next::Trial(Which::B))] {
+            let asked = Request { next, first: true };
+            assert_eq!(asked.install(Which::B, false), Ok(Request { next: None, first: true }));
+            assert_eq!(asked.install(Which::B, true), Ok(Request { next: Some(Next::Slot(Which::B)), first: true }));
         }
     }
 
