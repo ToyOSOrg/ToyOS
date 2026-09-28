@@ -500,9 +500,6 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         },
     );
 
-    // Completes a toolchain whose bootstrap was stopped before `reassemble`
-    // finished it; every other build decides there is nothing to do, and takes
-    // no lock.
     lock.act_if(
         Scope::Global,
         "complete the toyos toolchain",

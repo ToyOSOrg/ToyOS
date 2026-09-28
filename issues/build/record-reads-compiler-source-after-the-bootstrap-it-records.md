@@ -15,11 +15,6 @@ the record even though `stage2` was built without it, so the next build sees
 `primary_is_current` return true for a `stage2` that does not contain the edit,
 and skips a bootstrap that is actually owed.
 
-Main has the same order (`record`'s only caller runs it after the build, and
-main's predecessor — the `compiler.stamp` mtime plus the `moved` comparison —
-had the identical property), so this is not a regression of this branch; it is
-carried forward unchanged.
-
 Exit condition: `record` (or whoever calls it) captures `source(rust_dir)`
 before the bootstrap starts, not after, and a test edits `compiler/` mid-build
 (a `bootstrap` closure that writes a file before returning) and asserts the
