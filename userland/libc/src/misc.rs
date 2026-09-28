@@ -5,8 +5,6 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_abi::syscall;
 
-// errno (shared with other modules)
-
 const ENOSYS: i32 = 38;
 const ECHILD: i32 = 10;
 
@@ -95,13 +93,13 @@ pub unsafe extern "C" fn getegid() -> u32 { 0 }
 
 #[no_mangle]
 pub unsafe extern "C" fn fork() -> i32 {
-    super::stdio::errno = ENOSYS;
+    crate::errno::set(ENOSYS);
     -1
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn execvp(_file: *const u8, _argv: *const *const u8) -> i32 {
-    super::stdio::errno = ENOSYS;
+    crate::errno::set(ENOSYS);
     -1
 }
 
@@ -119,7 +117,7 @@ pub unsafe extern "C" fn execvp(_file: *const u8, _argv: *const *const u8) -> i3
 /// compat layer is for; faking it over an empty set is not.
 #[no_mangle]
 pub unsafe extern "C" fn waitpid(_pid: i32, _status: *mut i32, _options: i32) -> i32 {
-    super::stdio::errno = ECHILD;
+    crate::errno::set(ECHILD);
     -1
 }
 

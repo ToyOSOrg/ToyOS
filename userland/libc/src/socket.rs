@@ -114,7 +114,7 @@ fn alloc_socket(entry: SocketEntry) -> i32 {
 }
 
 fn set_errno(e: i32) {
-    unsafe { super::stdio::errno = e; }
+    crate::errno::set(e);
 }
 
 // netd error conversion

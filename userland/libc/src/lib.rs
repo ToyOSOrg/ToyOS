@@ -1,9 +1,11 @@
 #![no_std]
+#![feature(thread_local)]
 
 extern crate alloc;
 
 mod arch;
 mod ctype;
+mod errno;
 mod math;
 mod memory;
 mod misc;
