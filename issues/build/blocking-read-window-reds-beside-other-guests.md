@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: finding
 opened: 2026-09-26
 ---
@@ -30,6 +30,13 @@ Sightings, all on 2026-09-26:
   and each arm's one red is this sentence (`only 26 of 500` on `main`, `only 27
   of 500` on the branch; the branch's red spent `cpu=1568ms` and `cpu=1532ms`
   of its window). The rate is the same on both arms, so no branch moved it.
+- **The orchestrator's Fast tier and nightly for PR #536, both, at `5235eda7`:
+  2 of 2 red**, `blocking_read_stress: only 28 of 500 round trips completed
+  inside 3s — a wake was not delivered`.
+- **The round-13 reviewer's finding on #536**: the PR leaves the wake and the
+  pipe path alone, and the two ends spent about 1580 ms of CPU each,
+  consistent with the actuator's 50 ms holds running out rather than with a
+  lost wake.
 
 **What the red runs' own logs say against the sentence.** In the 26-of-500
 run the two processes spent `cpu=1639ms` and `cpu=1998ms` of the 3.5 s they ran
@@ -43,3 +50,6 @@ wake does.
 progress over the window, not only the count at its end), and a cause for these
 runs — a lost wake, or a 3 s budget a starved host cannot meet, and if it is
 the budget, the bound derived rather than measured.
+
+This verdict rests on a 3 s duration inside a QEMU test, which the owner rules
+is metal-only; PR #562 is removing such verdicts.

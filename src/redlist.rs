@@ -26,6 +26,10 @@ pub struct Disabled {
 /// Every disabled test.
 pub const DISABLED: &[Disabled] = &[
     Disabled {
+        test: "blocking_read_window",
+        issue: "issues/build/blocking-read-window-reds-beside-other-guests.md",
+    },
+    Disabled {
         test: "console_line_atomicity",
         issue: "issues/build/console-line-atomicity-loses-five-of-a-thousand-lines-on-ci.md",
     },
