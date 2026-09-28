@@ -50,6 +50,8 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 **CPU state** — a CPU's control registers come from one declaration, applied by the BSP and by every AP and asserted on each; no read-modify-write decides what either holds.
 
+**Firmware** — no firmware code runs on the CPU after ExitBootServices; every firmware call ToyOS makes is the loader's.
+
 **Input** — the kernel delivers key *transitions*, never what one types; a surface turns one into the other. Translation, layouts, dead keys and escape sequences live in userland, one translator per surface.
 
 **POSIX** — the kernel ABI and SDK are Rust-native and capability-shaped. POSIX lives in `userland/libc` (ours, not a fork) with explicitly relaxed rules. That layer may be ugly; the kernel may not.

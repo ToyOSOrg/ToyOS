@@ -36,34 +36,17 @@ stdin — and the machine installs nothing the owner did not sign.
   (`--owner-key`, `--update-image`, minted by `--signing-key-new`) for an image
   installed on the owner's machine, whose loader keeps the machine's floor.
 
-## Stage 2 — the T14 installs ToyOS on its NVMe and updates without Ubuntu
+## Stage 2 — the T14 installs ToyOS on its NVMe
 
-What `toyos-metal` still runs Ubuntu for, each of which this stage replaces:
-
-1. **Writing the image** — `wipefs` and `dd of=/dev/sda` under a sudoers rule.
-   Replaced by the machine booting the stick and installing onto its own NVMe,
-   then `ssh t14 update < image` for every change after.
-2. **Choosing the next boot** — `efibootmgr --create-only`, `--delete-bootnum`,
-   `--bootnext`. The loader already points `BootNext` at itself; an install
-   writes its own entry once.
-3. **Reading a boot's verdict** — `dd if=/dev/sda3` and `mount -o ro` of the log
-   partition. Replaced by `logd`'s record stream and `ssh … cat`.
-4. **Reboots and liveness** — `reboot`, `true`, `date -u +%s`, the `/sys`
-   identity reads of the stick, and the loop's wait for Ubuntu's sshd to come
-   back after every ToyOS boot.
-5. **The runner key and `ssh t14`** themselves reach Ubuntu's sshd, not ToyOS's.
-
-**Exit**: a kernel change reaches the T14 and boots with Ubuntu never started;
-a slot with a flipped byte, no signature or a lower version is refused and the
-other boots; a boot that dies falls back on its own — each on the T14.
+The machine boots the stick and installs onto its own NVMe, then takes
+`ssh t14 update < image` for every change after. Taking Ubuntu out of
+`toyos-metal`'s loop is
+`issues/boot-media/the-loader-does-only-what-must-precede-the-handover.md`'s.
 
 ## Later stages — the end state, which no earlier stage may block
 
 - **An image-based, read-only system**: `/system` is the signed ROOT and
   nothing else, and nothing the machine runs is outside an image or a package.
-- **A/B slots with automatic rollback**: stage 1's fallback, plus a boot that
-  confirms itself healthy before the floor rises (today the floor rises only on
-  a boot that hands the machine back on purpose).
 - **A verified boot chain**: UEFI Secure Boot with the owner's key over the
   loader. Until then the loader is the one binary no signature covers, and a
   writable ESP is the gap.
