@@ -39,7 +39,6 @@ the two `Builder::check` helpers:
 |---|---|---|
 | `kernel-loom` `dump_request` `a_request_filed_during_a_report_is_reported` | `DumpRequest::update`'s load | 16 |
 | `dump_request` `one_request_is_taken_once` | `update`'s load | 28 |
-| `dump_request` `the_asker_owns_the_report_it_asks_for` | `update`'s load | 19 |
 | `dump_request` `a_request_is_announced_at_most_once` | `update`'s load | 5777 |
 | `dump_request` `a_request_left_during_a_report_is_still_taken_by_its_end` | `update`'s load; joined at once | 1 |
 | `log_ring` `a_published_record_is_whole_and_read_once` | `push`'s `tail_then_head` | 1442 |
