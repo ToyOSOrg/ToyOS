@@ -8,27 +8,38 @@
 struct seen {
     int at_start;
     int after_failure;
-    int *slot;
+    int differs;
+};
+
+struct child_arg {
+    struct seen *seen;
+    int *main_errno;
 };
 
 static void *child(void *arg)
 {
-    struct seen *seen = arg;
+    struct child_arg *in = arg;
+    struct seen *seen = in->seen;
     seen->at_start = errno;
     /* No child exists, so this fails with ECHILD. */
     waitpid(-1, NULL, 0);
     seen->after_failure = errno;
-    seen->slot = &errno;
+    /* Compared here, while this thread's TLS is still alive: a pointer into
+     * it is indeterminate once the thread has exited (C11 6.2.4p2). */
+    seen->differs = (&errno != in->main_errno);
     return NULL;
 }
 
 int main(void)
 {
     struct seen seen;
+    struct child_arg arg;
     pthread_t thread;
 
     errno = ERANGE;
-    if (pthread_create(&thread, NULL, child, &seen) != 0)
+    arg.seen = &seen;
+    arg.main_errno = &errno;
+    if (pthread_create(&thread, NULL, child, &arg) != 0)
         return 1;
     pthread_join(thread, NULL);
     int mine = errno;
@@ -36,6 +47,6 @@ int main(void)
     printf("the new thread's errno starts at %d\n", seen.at_start);
     printf("its failure sets it to ECHILD: %s\n", seen.after_failure == ECHILD ? "yes" : "no");
     printf("main's errno is still ERANGE: %s\n", mine == ERANGE ? "yes" : "no");
-    printf("the two are different objects: %s\n", seen.slot != &errno ? "yes" : "no");
+    printf("the two are different objects: %s\n", seen.differs ? "yes" : "no");
     return 0;
 }

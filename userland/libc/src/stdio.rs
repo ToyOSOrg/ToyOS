@@ -85,7 +85,7 @@ const MODE_UNSET: i32 = -1;
 /// kernel in a single call cannot be split. Buffering is what makes a line one
 /// call. C requires it anyway; this was a conformance gap, not a workaround.
 ///
-/// Not thread-safe: there is no `flockfile`, matching the rest of this libc.
+/// Not thread-safe: there is no `flockfile`.
 /// Concurrent writes to one stream can interleave inside a line.
 pub struct FILE {
     fd: i32,

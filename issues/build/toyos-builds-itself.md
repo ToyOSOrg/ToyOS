@@ -47,7 +47,7 @@ and the network stack under it (`issues/hardware/the-lan-is-not-yet-production-g
 gigabyte of toolchain, and threads and `mmap` mature enough for LLVM
 (`issues/kernel/std-and-libc-drop-the-answer-thread-join-gives.md`). M3 needs
 locale support or libc++'s no-localization build, and
-`dl_iterate_phdr` in libc. M4 needs git in the guest, storage durable and fast
+`dl_iterate_phdr` in libc (`issues/build/libc-has-no-dl-iterate-phdr.md`). M4 needs git in the guest, storage durable and fast
 enough for an LLVM build tree
 (`issues/filesystem/storage-is-layers-and-a-role-is-a-filesystem.md`), and
 memory beyond what 2 MiB process pages allow

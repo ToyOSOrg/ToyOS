@@ -13,7 +13,6 @@ pub extern "C" fn __errno_location() -> *mut i32 {
     ERRNO.as_ptr()
 }
 
-/// Set the calling thread's `errno`.
 pub(crate) fn set(code: i32) {
     ERRNO.set(code);
 }
