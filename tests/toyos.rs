@@ -3064,33 +3064,18 @@ fn check_c_result(result: &TestResult) -> bool {
     }
 }
 
+/// Every red prints the test's own lines, a ceiling's too: a hang is named by
+/// the last thing the test said.
 fn check_rust_result(result: &TestResult) -> bool {
     let test_name = result.name.strip_prefix("test_rs_").unwrap_or(&result.name);
-
-    if let Some(err) = &result.error {
-        eprintln!("FAIL rs::{test_name}: {err}{}", kernel_account(result));
-        return false;
-    }
-
-    match result.exit_code {
-        Some(0) => true,
-        Some(code) => {
-            eprintln!(
-                "FAIL rs::{test_name}: exit code {code}\nstdout:\n{}{}",
-                result.stdout,
-                kernel_account(result)
-            );
-            false
-        }
-        None => {
-            eprintln!(
-                "FAIL rs::{test_name}: no exit code\nstdout:\n{}{}",
-                result.stdout,
-                kernel_account(result)
-            );
-            false
-        }
-    }
+    let why = match (&result.error, result.exit_code) {
+        (None, Some(0)) => return true,
+        (Some(err), _) => err.to_string(),
+        (None, Some(code)) => format!("exit code {code}"),
+        (None, None) => "no exit code".to_string(),
+    };
+    eprintln!("FAIL rs::{test_name}: {why}\nstdout:\n{}{}", result.stdout, kernel_account(result));
+    false
 }
 
 /// The kernel names the frames of a process it loaded off a **disk**.
