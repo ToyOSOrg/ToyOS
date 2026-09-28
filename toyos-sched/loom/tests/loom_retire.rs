@@ -8,6 +8,8 @@
 //! plus a message, so the cases worth checking are exactly the orderings of
 //! that bit and that node.
 
+use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
+
 use loom::sync::Arc;
 use toyos_sched_loom::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, RunToken, SchedPass};
 use toyos_sched_loom::fair::{FairShare, Frontier, ShareState};
@@ -156,9 +158,14 @@ fn a_retire_racing_the_park_commit_always_leaves_someone_to_reap() {
 /// The chase: the home CPU consumed the retire, found the task gone, and
 /// re-posts the *same* node to wherever the word now points.
 /// Racing that with the migration itself must still produce exactly one
-/// message and must never link the node twice.
+/// message and must never link the node twice. An exploration that never runs
+/// the chase on both sides of the migration never races them, so the model
+/// reds on one.
 #[test]
 fn the_retire_chase_reuses_one_node_under_a_racing_migration() {
+    static AHEAD: AtomicBool = AtomicBool::new(false);
+    static BEHIND: AtomicBool = AtomicBool::new(false);
+
     model(|| {
         let (world, mut rx) = world();
         let task = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Ready(CPU0)));
@@ -193,7 +200,19 @@ fn the_retire_chase_reuses_one_node_under_a_racing_migration() {
             "the chase follows the word: {chased:?}",
         );
         assert!(!task.retire_node().in_flight(), "the node is free again");
+        if chased == Some(CPU0) {
+            AHEAD.store(true, StdOrdering::Relaxed);
+        } else {
+            BEHIND.store(true, StdOrdering::Relaxed);
+        }
     });
+
+    let (ahead, behind) = (AHEAD.load(StdOrdering::Relaxed), BEHIND.load(StdOrdering::Relaxed));
+    assert!(
+        ahead && behind,
+        "the chase ran ahead of the migration: {ahead}, behind it: {behind}; \
+         an exploration missing either never raced them",
+    );
 }
 
 /// The kill bit is sticky and set before the message is posted, so whichever

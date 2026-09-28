@@ -42,6 +42,8 @@
 //! `two_holders_never_overlap` by name — the contended park and mutual
 //! exclusion, the two the *ordering* breaks rather than the arithmetic.
 
+use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
+
 use kernel_loom::scheduler::{become_task, Parkable, TaskId};
 use kernel_loom::sleeplock::SleepLock;
 use loom::sync::Arc;
@@ -55,9 +57,12 @@ const TWO: TaskId = TaskId(1, 2);
 ///
 /// The mirror of `ticket_lock.rs`'s first model, on the type that replaces it
 /// where the holder may be descheduled. Neither thread parks, so what this one
-/// isolates is the edge alone.
+/// isolates is the edge alone. An exploration in which no `try_lock` follows
+/// the writer's release never takes that edge, so the model reds on one.
 #[test]
 fn try_lock_observes_the_previous_holders_writes() {
+    static FOLLOWED: AtomicBool = AtomicBool::new(false);
+
     loom::model(|| {
         let lock = Arc::new(SleepLock::new(0u32));
 
@@ -78,10 +83,18 @@ fn try_lock_observes_the_previous_holders_writes() {
                 seen == 0 || seen == 42,
                 "try_lock handed out a value nobody wrote: {seen}",
             );
+            if seen == 42 {
+                FOLLOWED.store(true, StdOrdering::Relaxed);
+            }
         }
 
         writer.join().unwrap();
     });
+
+    assert!(
+        FOLLOWED.load(StdOrdering::Relaxed),
+        "no try_lock followed the writer's release, so the release edge was never checked",
+    );
 }
 
 /// **The model that did not exist before this type did.** A contender that had

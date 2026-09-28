@@ -217,6 +217,11 @@ loom = "0.7"
 # so it compiles into the model unchanged.
 toyos-abi = { path = "../toyos-abi" }
 
+[dev-dependencies]
+# `tests/loom_exploration.rs`'s oracle: a model checker that shares no code
+# with loom, enumerating the same probes' schedules depth-first.
+shuttle = "0.9"
+
 # **The models are compiled with optimisation, and that is a stack decision.**
 # `generator`, which loom's coroutines are built on, gives each one 32 KiB —
 # and a `LogRecord` is a kilobyte, so a debug build's per-temporary copies of a
