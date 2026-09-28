@@ -112,6 +112,11 @@ underruns. The counters print every 2 s while a client exists.
 
 Measured harm — 26 ms / 9 periods of silence with a client streaming, plus a
 tone-phase wake-lateness cluster the recorded sample never reaches — makes
-this a defect under the audio law rather than a comparability note. Owed to
-whoever next gives gate A a doom-plus-resume workload and settles `armed_on`
-against `target` in `signal_clients`.
+this a defect under the audio law rather than a comparability note.
+
+## Exit condition
+
+`armed_on` is settled against `target` in `signal_clients`, and on the T14 a
+`METAL` row streams a client while `tone` restarts beside it, as the session
+above did, with soundd reporting `underruns=0` in every window a client holds,
+across repeated boots. Owner: the metal suite (`tests/toyos.rs`'s `METAL`).

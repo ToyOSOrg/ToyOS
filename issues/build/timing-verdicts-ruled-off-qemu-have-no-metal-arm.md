@@ -16,7 +16,12 @@ their clocks, and no `METAL` row judges them.
   (`audio_tone_load`). `desktop_audio_client`'s three verdicts: a desktop client
   through the null sink exits, a second is taken up while the first streams,
   and the desktop still answers afterwards. A null sink drains a client at the
-  audio rate (`metal_sim_null_audio`).
+  audio rate (`metal_sim_null_audio`). soundd submits at least a period for
+  every period's worth of frames a client handed it
+  (`inspect_reads_its_owners`: `sound.periods.submitted × sound.period_frames`
+  against what `inspect_plays` proved taken).
+- **Boot.** The loader's and the kernel's TSC account of a boot agrees with the
+  host's clock over the same boot (`boot_from_power_on`).
 - **Scheduling.** Every CPU reaches a scheduler pass each heartbeat period, and
   no window between two heartbeats hides a death (`kernel_heartbeat`). A
   scheduler pass's cost distribution (`sched_check_build`; no metal arm boots
@@ -61,8 +66,8 @@ their clocks, and no `METAL` row judges them.
 **Premises: a QEMU test still waits on a clock that decides no verdict**, where
 the event it stands for has no word a test can read:
 
-- Paces that give a stimulus time to land: `futex_wake_counts`' `SETTLE`, the
-  input pacing of `metal_sim_window_drag` and of the i8042 keyboard arms,
+- Paces that give a stimulus time to land: the input pacing of
+  `metal_sim_window_drag` and of the i8042 keyboard arms,
   `metal_sim_pointer_churn`'s `SETTLE`, the xHCI hotplug and flap sleeps in
   `tests/common/usb.rs`, `sched_stress`'s connect-storm pace, `locale_gate`'s
   poll, the compositor and IPC probes' paces, `ftruncate_flush_race`'s
@@ -76,7 +81,12 @@ the event it stands for has no word a test can read:
   `timeout=0` before the TCO expires, and the stop's 2010 ms budget (a stop
   that gives up is not judged in QEMU).
 
+**A clock that decides a verdict**: `census_wait::settled` takes the census
+once two readings 10 ms apart agree. On a starved host the first can be read
+mid-release, so a leak check anchored on it (`handle_kill_policy`,
+`handle_lifetime`, `shm_release_reclaims`) can pass wrongly.
+
 **Exit**: each owed line is judged by a `METAL` row or ruled not owed by the
-owner, and each premise waits on the event it stands for or is ruled
-acceptable. Owner: the metal suite (`tests/toyos.rs`'s `METAL`); held by the
-orchestrator.
+owner, each premise waits on the event it stands for or is ruled acceptable,
+and the census is read on the release it stands for. Owner: the metal suite
+(`tests/toyos.rs`'s `METAL`); held by the orchestrator.
