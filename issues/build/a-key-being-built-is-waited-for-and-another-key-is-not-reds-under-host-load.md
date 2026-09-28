@@ -16,5 +16,9 @@ transitions against wall-clock sleeps and deadlines (`appeared`,
 window the test assumed was empty.
 
 **Exit**: reproduce under synthetic host load (parallel `cargo build`s pinned
-to the same cores) to find which wait the contention defeats, then widen that
-wait or replace the polled read with the event itself.
+to the same cores) to find which wait the contention defeats, then replace
+the polled read with the event itself.
+
+## Owner
+
+Held by the orchestrator.

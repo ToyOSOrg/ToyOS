@@ -706,8 +706,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // slow on purpose. Its own boot too: it leaves the pointer somewhere else
     // and the window in a different place than it found them.
     ("metal_sim_window_drag", Sched::Serial, Tier::Nightly),
-    // A client's clipboard. Its own
-    // boot: the compositor it abuses has to be one nothing else has touched.
+    // Its own boot: the compositor it abuses has to be one nothing else has
+    // touched.
     ("metal_sim_hostile_clipboard", Sched::Parallel, Tier::Fast),
     // A host-measured drain rate with an 8 s ceiling on a 3.3 s expectation.
     // Not gate A, but the same instrument: what it measures is how fast a
