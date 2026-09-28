@@ -67,9 +67,9 @@ finds everything stopped passes it.
 - an instrument that names each thread still running when the stop gives up,
   with its name, tid, cpu and scheduler state;
 - the mechanism it names fixed;
-- this test green in a Fast tier beside other guests;
+- this test green beside other guests;
 - `quiesce_wakes_on_the_last_teardown` — the stop waits for a teardown in
-  flight — green in a Fast tier beside other guests;
+  flight — green beside other guests;
 - an enabled guest test checking each claim listed above.
 
 Owner: the stop path, `kernel/src/quiesce.rs`; held by the orchestrator.

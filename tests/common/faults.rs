@@ -579,12 +579,7 @@ fn hex(line: &str, field: &str) -> Option<u64> {
 /// that carries on.
 ///
 /// **One boot, and the two negative controls are `syscall_window_nmi_controls`'s
-/// two.** All three used to be one name and it priced at 19,740 ms on the hosted
-/// lane against a 10,000 ms ceiling — three Metal boots of 3,000 NMIs each. What
-/// belongs per pull request is the property: the window is reachable, arrivals
-/// land in it, and the machine survives them. What the controls establish is that
-/// the property is not vacuous, which is a claim about the *instrument* and moves
-/// to the nightly tier.
+/// two.**
 ///
 /// **The window.** `SYSCALL` switches no stack, so `arch::syscall`'s entry runs
 /// three instructions at CPL 0 with the user's `rsp` and its exit one more

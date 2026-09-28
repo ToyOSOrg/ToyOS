@@ -14,10 +14,6 @@ until the stop waits on it alone`, `stop: 4 of 7 userland thread(s) stopped
 ok` and `Rebooting.`, then `shutdown: /log did not answer in 2000ms`; the uart
 captured `nothing at all`. The harness's re-run alone was green in 2 s.
 
-The same shape as
-`issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md`,
-on the sibling arm.
-
 **Exit**: a cause for the empty uart on a boot that rebooted as designed, or
 the marker waited for where the boot's reboot cannot race it.
 

@@ -249,12 +249,12 @@ fn sweep(caller: ThreadId) -> Sweep {
     out
 }
 
-/// `quiesce-last-park`, `quiesce-last-exit` and `quiesce-last-teardown`: one
-/// thread, named [`toyos_quiesce::LAST_THREAD`], held inside its syscall until
-/// the stop's latest sweep counts it as the one thread still running, so the
-/// park, the exit or the process teardown it makes next is the last transition
-/// the stop sees. Without them no boot can tell whether that transition's post
-/// is what wakes the stop.
+/// `quiesce-last-park` and `quiesce-last-teardown`: one thread, named
+/// [`toyos_quiesce::LAST_THREAD`], held inside its `SYS_NANOSLEEP` or between
+/// leaving its process and tearing it down, until the stop's latest sweep
+/// counts it as the one thread still running, so the park or the process
+/// teardown it makes next is the last transition the stop sees. Without them no
+/// boot can tell whether that transition's post is what wakes the stop.
 #[cfg(feature = "boot-actuators")]
 pub mod last {
     use core::sync::atomic::{
@@ -271,7 +271,6 @@ pub mod last {
     #[derive(Clone, Copy)]
     pub enum Last {
         Park,
-        Exit,
         /// The last thread out of its process, between its leaving and its teardown.
         Teardown,
     }
@@ -280,7 +279,6 @@ pub mod last {
         fn armed(self) -> bool {
             match self {
                 Last::Park => crate::actuator::quiesce_last_park(),
-                Last::Exit => crate::actuator::quiesce_last_exit(),
                 Last::Teardown => crate::actuator::quiesce_last_teardown(),
             }
         }
@@ -288,7 +286,6 @@ pub mod last {
         fn name(self) -> &'static str {
             match self {
                 Last::Park => "quiesce-last-park",
-                Last::Exit => "quiesce-last-exit",
                 Last::Teardown => "quiesce-last-teardown",
             }
         }
@@ -323,7 +320,7 @@ pub mod last {
     }
 
     fn armed() -> Option<Last> {
-        [Last::Park, Last::Exit, Last::Teardown].into_iter().find(|last| last.armed())
+        [Last::Park, Last::Teardown].into_iter().find(|last| last.armed())
     }
 
     /// Hold the running thread here if it is the one `last` stages.

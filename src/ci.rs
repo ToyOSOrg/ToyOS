@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::{flags, pr, release, sdkversion};
+use crate::{flags, pr, release, sdkversion, testargs};
 
 /// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
 /// a minimum, never an equality, so a name GitHub requires and this does not
@@ -40,13 +40,18 @@ pub(crate) const REQUIRED_CHECKS: &[&str] = &["host"];
 /// The one issue a red nightly files or comments on, found by title.
 const NIGHTLY_RED: &str = "nightly is red";
 
+/// `nightly.yml`'s two schedules: the nightly reach six nights a week, the weekly
+/// reach on the seventh.
+const NIGHTLY_CRON: &str = "0 3 * * 1-6";
+const WEEKLY_CRON: &str = "0 3 * * 0";
+
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
-  host              every host test: the build system, the host workspace, the
-                    licences of what ships, clippy, the model controls, userland
-                    and the SDK (ci.yml, nightly)
+  host              every host test: the build system, the harness's own checks,
+                    the host workspace, the licences of what ships, clippy, the
+                    model controls, userland and the SDK (ci.yml, nightly)
   gate-stage        what protects main, read back from GitHub (ci.yml)
   toolchain         publish this tree's toolchain if nobody has (nightly)
-  guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
+  guest <i>/<n>     one shard of the guest suite at the reach its schedule names (nightly)
   tcg               one test on an emulated CPU (nightly)
   audio <i>/<n>     one shard of gate A (nightly)
   nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
@@ -98,9 +103,10 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::Host => host(root),
         Job::GateStage => vec![step("what protects main", || gate_stage(root))],
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
-        Job::Guest(shard) => {
-            guest(root, &suite_args(&["--shard", shard, "--jobs", "1", "--nightly"]))
-        }
+        Job::Guest(shard) => match guest_reach() {
+            Ok(reach) => guest(root, &suite_args(&["--shard", shard, "--jobs", "1", reach])),
+            Err(refusal) => vec![step("the reach", || Err(refusal))],
+        },
         Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
         Job::Audio(shard) => guest(root, &suite_args(&["--audio-gate", "30", "--shard", shard])),
         Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
@@ -449,6 +455,7 @@ fn host(root: &Path) -> Vec<Step> {
     let host_triple = crate::toolchain::host_triple();
     let mut steps = vec![
         step("the build system", || cargo(root, &["test", "--lib"])),
+        step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
@@ -628,6 +635,42 @@ fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 }
 
 // --- The guest jobs ------------------------------------------------------------
+
+/// The reach flag of the run that started this job: the weekly one on the weekly
+/// schedule, and the nightly one on the other schedule, on a dispatch and off a
+/// runner.
+fn guest_reach() -> Result<&'static str, String> {
+    reach_of_event(std::env::var("GITHUB_EVENT_NAME").ok().as_deref(), || {
+        let path = std::env::var("GITHUB_EVENT_PATH").map_err(|_| {
+            "a scheduled run with no $GITHUB_EVENT_PATH names no schedule".to_string()
+        })?;
+        std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+    })
+}
+
+/// [`guest_reach`] over the event's name and a reader of its payload, which
+/// only a scheduled run asks for.
+fn reach_of_event(
+    name: Option<&str>,
+    payload: impl FnOnce() -> Result<String, String>,
+) -> Result<&'static str, String> {
+    if name != Some("schedule") {
+        return Ok(testargs::NIGHTLY.name);
+    }
+    let event: serde_json::Value =
+        serde_json::from_str(&payload()?).map_err(|e| format!("the schedule event: {e}"))?;
+    reach_of_schedule(event["schedule"].as_str())
+}
+
+fn reach_of_schedule(cron: Option<&str>) -> Result<&'static str, String> {
+    match cron {
+        Some(NIGHTLY_CRON) => Ok(testargs::NIGHTLY.name),
+        Some(WEEKLY_CRON) => Ok(testargs::WEEKLY.name),
+        other => Err(format!(
+            "a scheduled run of {other:?}, which is neither schedule nightly.yml declares"
+        )),
+    }
+}
 
 fn suite_args(args: &[&str]) -> Vec<String> {
     let mut all = vec!["test", "--test", "toyos-build", "--"];
@@ -953,6 +996,44 @@ mod tests {
         assert!(parse(&words("host extra")).is_err());
         assert!(parse(&words("smoke")).is_err());
         assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn each_schedule_names_its_reach_and_another_is_refused() {
+        let nightly = reach_of_schedule(Some(NIGHTLY_CRON));
+        let weekly = reach_of_schedule(Some(WEEKLY_CRON));
+        assert_eq!(nightly, Ok("--nightly"), "the nightly schedule's reach");
+        assert_eq!(weekly, Ok("--weekly"), "the weekly schedule's reach");
+        for stray in [Some("0 4 * * *"), None] {
+            let refusal = reach_of_schedule(stray).unwrap_err();
+            assert!(refusal.contains(&format!("{stray:?}")), "{refusal}");
+        }
+    }
+
+    /// Only a scheduled run reads its payload, and every other run is a nightly one.
+    #[test]
+    fn a_run_no_schedule_started_reaches_nightly() {
+        for name in [None, Some("workflow_dispatch"), Some("push")] {
+            let reach = reach_of_event(name, || panic!("{name:?} read a schedule payload"));
+            assert_eq!(reach, Ok("--nightly"), "a {name:?} run");
+        }
+        let weekly = format!(r#"{{"schedule":"{WEEKLY_CRON}"}}"#);
+        assert_eq!(reach_of_event(Some("schedule"), || Ok(weekly)), Ok("--weekly"));
+        let unread = reach_of_event(Some("schedule"), || Err("no payload".into()));
+        assert_eq!(unread, Err("no payload".into()));
+    }
+
+    /// The schedules `nightly.yml` declares are exactly the two a reach is
+    /// named for, so no scheduled run reaches the refusal above.
+    #[test]
+    fn nightly_yml_declares_the_two_schedules() {
+        let text = std::fs::read_to_string(repo_root().join(".github/workflows/nightly.yml"))
+            .expect("nightly.yml is readable");
+        let crons: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("- cron: '")?.strip_suffix('\''))
+            .collect();
+        assert_eq!(crons, [NIGHTLY_CRON, WEEKLY_CRON]);
     }
 
     /// Teeth for the controls' judge: a green negative control, a control that
