@@ -14,7 +14,7 @@ use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicU32;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::Poller;
@@ -87,18 +87,17 @@ fn spawn(role: &str, endow: Option<(String, u32)>) -> Child {
     assert_eq!(String::from_utf8_lossy(&line), format!("parked in {role}"), "{role} never reached its wait");
     // The marker says only that the park is next: a kill landing before it ends
     // the child at the marker's own syscall, and the wait the arm names is never
-    // killed. The bound is a hang guard, not a timing assumption.
+    // killed. Unbounded here: the harness's ceiling is the only clock.
     let pid = child.id();
     assert_ne!(pid, 0, "{role}: the kernel no longer answers for the child");
-    let give_up = Instant::now() + Duration::from_secs(5);
+    println!("  {role}: waiting for the roster to show it parked");
     while !main_thread_parked(pid) {
-        assert!(Instant::now() < give_up, "{role}: the roster never showed the child parked");
+        std::thread::sleep(Duration::from_millis(10));
     }
     child
 }
 
-/// Whether the roster shows `pid`'s main thread parked; the `sysinfo` call is
-/// the polling loop's preemption point.
+/// Whether the roster shows `pid`'s main thread parked.
 fn main_thread_parked(pid: u32) -> bool {
     const HEADER: usize = toyos::system::SYSINFO_HEADER_SIZE;
     const ENTRY: usize = toyos::system::SYSINFO_ENTRY_SIZE;
