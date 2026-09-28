@@ -9,11 +9,11 @@ cd toyos
 cargo run
 ```
 
-One command, and a complete OS boots. No Make, no CMake, no Docker, no LLVM to
-install, no cross-toolchain to assemble, no system linker. Everything that
-boots is built by a toolchain in this repository.
+One command, and a complete OS boots. No Make, no Docker, no LLVM to install,
+no cross-toolchain to assemble, no system linker. Everything that boots is
+built by a toolchain in this repository.
 
-Rust and QEMU, plus the two things `rustc`'s own bootstrap needs on every
+Rust and QEMU, plus the four things `rustc`'s own bootstrap needs on every
 platform — [Prerequisites](#prerequisites) says exactly what they are and why
 nothing that boots goes near them.
 
@@ -28,10 +28,11 @@ booted, tested, and booted again, in seconds, on a laptop.
 
 Two things follow from that, and they are the point of the project:
 
-**The toolchain is ours.** Our own linker lays out the UEFI bootloader, the
-kernel and every userland program. Our own C compiler builds Doom. The Rust
-target and its `std` live in our fork of the compiler. Nothing you install
-touches anything that boots.
+**The toolchain is ours.** One LLVM, built from our fork of it, is both
+rustc's code generator and the clang that builds Doom's C, and its `lld` links
+the UEFI bootloader, the kernel and every userland program. The ToyOS target
+lives in that fork and in our fork of the Rust compiler, with its `std`.
+Nothing you install touches anything that boots.
 
 **Kernel decisions live outside the kernel.** The scheduler's policy, the xHCI
 port state machine, the HD Audio codec graph, FAT32, GPT, keyboard layouts, the
@@ -66,7 +67,7 @@ itself on its own hardware and reproduces, byte for byte, what the host built.
 | | |
 |---|---|
 | ✅ | **One linker, `rust-lld`** — the UEFI bootloader as PE32+, the kernel and all userland as position-independent ELF |
-| ✅ | **Our own C compiler** — preprocessor through codegen, Cranelift instead of LLVM |
+| ✅ | **C through clang** — ToyOS is a target in our fork of LLVM, and clang builds Doom |
 | ✅ | **A real Rust target** with a real `std`: threads, `dlopen`, unwinding, symbolized backtraces |
 | ✅ | The Rust ecosystem, mostly unmodified — crates.io crates compile and run as published |
 | ✅ | `rustc` itself built for ToyOS and shipped inside the image |
@@ -153,19 +154,21 @@ itself on its own hardware and reproduces, byte for byte, what the host built.
 
 ## Along the way
 
-**Our own C compiler.** `toyos-cc` is preprocessor, lexer, parser, type system
-and Cranelift as its backend. It compiles the platform-independent translation
-units of doomgeneric — 56,726 lines of C descended from id Software's Doom —
-into `x86_64-unknown-toyos` objects in about four seconds, and that archive is
-the `/system/bin/doom` in the desktop image. It also takes cases from TinyCC's own
-`tests2` corpus all the way to running ToyOS processes, comparing each one's
-output against TinyCC's expectations.
+**clang, from our own LLVM.** `ToyOSOrg/llvm-project` is the LLVM rustc is
+built with, from source, plus the two things upstream does not have:
+`x86_64-unknown-toyos` and `aarch64-unknown-toyos` in LLVM's target triples, and
+a clang driver that links a ToyOS program with `lld` against our C library. The
+clang of that build ships in the toolchain beside `rustc`. It compiles
+doomgeneric — 56,726 lines of C descended from id Software's Doom — into the
+`/system/bin/doom` in the desktop image, and takes TinyCC's own `tests2` corpus
+all the way to running ToyOS processes, comparing each one's output against
+TinyCC's expectations.
 
 **LLVM's linker.** `rust-lld`, the one the Rust toolchain carries, links
 everything that runs on ToyOS, plus everything that runs before it: the UEFI
 bootloader as PE32+, the kernel and every userland program as
 position-independent ELF. `toyos-ld`, the linker this project wrote, is frozen:
-it is what `toyos-cc` links through inside ToyOS until LLD runs there.
+it is the one linker that runs inside ToyOS, until LLD does.
 
 **A real Rust target.** `x86_64-unknown-toyos` lives in ToyOS's fork of the
 compiler, with a prebuilt `std` in the sysroot. One `rustc` invocation turns an
@@ -222,18 +225,22 @@ same font the kernel blits.
 - Rust, with rustup
 - QEMU
 - A C compiler on `PATH` as `cc`, and a Python 3
+- CMake and Ninja
 
-The last line is `rustc`'s and not ToyOS's, and nothing that boots touches it.
-`rustc` links every **host** binary through `cc`, which rustup does not
-install. And `rust/x`, the entry point to rustc's own bootstrap, is a shell
-script whose whole job is to find a Python to run `bootstrap.py` with — so a
-clean clone needs one, and so does every toolchain change.
+The last two lines are `rustc`'s and not ToyOS's, and nothing that boots touches
+them. `rustc` links every **host** binary through `cc`, which rustup does not
+install. `rust/x`, the entry point to rustc's own bootstrap, is a shell script
+whose whole job is to find a Python to run `bootstrap.py` with — so a clean
+clone needs one, and so does every toolchain change. And that bootstrap builds
+LLVM and clang from source with CMake and Ninja, whenever the LLVM commit
+`rust/` names has not been built on the machine before.
 
-Nothing in the OS goes near either. `bootloader/`, `kernel/` and `userland/`
-all link with the toolchain's `rust-lld`, and no image contains a C toolchain
-or a Python. On
-macOS both arrive with the Xcode Command Line Tools; on Debian and Ubuntu they
-are `build-essential` and `python3`.
+Nothing in the OS goes near any of them. `bootloader/`, `kernel/` and
+`userland/` all link with the toolchain's `rust-lld`, and no image contains a C
+toolchain or a Python. On macOS `cc` and Python arrive with the Xcode Command
+Line Tools, and CMake and Ninja come from Homebrew (`brew install cmake
+ninja`); on Debian and Ubuntu they are `build-essential`, `python3`, `cmake`
+and `ninja-build`.
 
 `cargo run` names anything it needs and cannot find, before it does anything
 else — including the Python that only the toolchain bootstrap runs, which

@@ -84,6 +84,41 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         .unwrap_or_else(|e| panic!("Failed to write {}: {e}", dest.display()));
 }
 
+/// Lay out `arch`'s C sysroot in `toolchain` (`clang::CSysroot`).
+///
+/// **Its `libtoyos_c.a` is libc's `staticlib`, and not the Rust sysroot's
+/// archive of the same name.** That one ([`build`]) is libc with `std-runtime`,
+/// linked into std, and carries no entry, allocator or panic handler because
+/// std brings its own. A C program has no Rust crate to bring them, and the
+/// `staticlib` carries all three — `_start` among them, which is why the driver
+/// needs no start file — and the compiler's runtime builtins with them.
+pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
+    let target = arch.userland();
+    let output = Command::new("cargo")
+        .args(["rustc", "--release", "--target", target, "--crate-type", "staticlib", "--manifest-path"])
+        .arg(root.join(CRATE).join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target_dir)
+        .env("RUSTUP_TOOLCHAIN", toolchain)
+        .env_remove("RUSTFLAGS")
+        .env_remove("RUSTC")
+        .current_dir(root.join("userland"))
+        .output()
+        .unwrap_or_else(|e| panic!("run cargo for toyos-libc's staticlib: {e}"));
+    assert!(
+        output.status.success(),
+        "toyos-libc's staticlib for {target} did not build:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let c = crate::clang::CSysroot::of(toolchain, arch).dir;
+    let lib = c.join("lib");
+    fs::create_dir_all(&lib).unwrap_or_else(|e| panic!("create {}: {e}", lib.display()));
+    let archive = target_dir.join(format!("{target}/release/libtoyos_libc.a"));
+    fs::copy(&archive, lib.join("libtoyos_c.a"))
+        .unwrap_or_else(|e| panic!("copy {} into {}: {e}", archive.display(), lib.display()));
+    crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.join("include"));
+}
+
 /// Extract .o files from rlibs and merge them into a single GNU-format ar archive.
 fn merge_rlibs(rlib_paths: &[std::path::PathBuf]) -> Vec<u8> {
     let mut members: Vec<(String, Vec<u8>)> = Vec::new();
