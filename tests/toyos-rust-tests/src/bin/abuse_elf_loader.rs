@@ -312,7 +312,7 @@ fn spawn_refused(name: &str, bytes: &[u8]) {
 /// refusal on that route: `image_expected` is `NotFound` when nothing rejects
 /// the file before `DT_NEEDED` is walked from `/system/lib` alone and finds
 /// nothing there, `InvalidArgument` when a table check upstream of that walk
-/// — read while the file is still opened directly — refuses first.
+/// refuses first.
 fn spawn_refused_beside_its_library(name: &str, bytes: &[u8], image_expected: SyscallError) {
     refused(name, spawn_result(name, bytes));
     let image = spawn_image(&format!("{DIR}/{name}"), bytes);
@@ -959,8 +959,8 @@ fn globdat_past_short_dynsym() {
     )
     .poke(0x1801, dep.as_bytes())
     .poke(0x3000, &gnu_hash);
-    // `rela::parse` (`toyos-elf/src/rela.rs`) bounds `r_sym` against the exe's own `.dynsym` while
-    // `read_exe_tables` still holds the file open directly, before `load_needed_libs` ever runs.
+    // `rela::parse` (`toyos-elf/src/rela.rs`) bounds `r_sym` against the exe's own `.dynsym`
+    // before `load_needed_libs` ever runs.
     spawn_refused_beside_its_library("globdat_past_dynsym", &exe.build(), SyscallError::InvalidArgument);
 }
 

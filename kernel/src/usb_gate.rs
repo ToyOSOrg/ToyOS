@@ -2,9 +2,6 @@
 //!
 //! Verifies blocks the host wrote and writes blocks the host can check, so
 //! neither half of the driver certifies itself.
-//!
-//! Never writes to a disk without the block-0 stamp `bcachefs_adapter::probe`
-//! requires before formatting `/home`.
 
 use alloc::vec;
 

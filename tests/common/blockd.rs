@@ -100,8 +100,8 @@ fn craft_blockd_disk(path: &Path) -> Result<Layout, String> {
     Ok(layout)
 }
 
-/// A boot with both disks crafted fresh, the actuators `params` armed, and
-/// QEMU tracing NVMe to `trace`.
+/// A boot with the actuators `params` armed, and QEMU tracing NVMe to
+/// `trace`.
 fn boot(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -111,7 +111,7 @@ fn boot(
     let config = super::compile::repo_root().join(CONFIG);
     let blockd_disk = super::lane::dir().join(format!("{name}-blockd.img"));
     let layout = craft_blockd_disk(&blockd_disk)?;
-    let before =std::fs::read(&blockd_disk).map_err(|e| format!("read the crafted disk: {e}"))?;
+    let before = std::fs::read(&blockd_disk).map_err(|e| format!("read the crafted disk: {e}"))?;
     let trace = super::lane::dir().join(format!("{name}-nvme.trace"));
     let _ = std::fs::remove_file(&trace);
     let qemu = QemuInstance::boot_with_options(

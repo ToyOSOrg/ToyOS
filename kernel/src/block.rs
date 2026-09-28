@@ -644,7 +644,7 @@ pub mod census {
         &SLOTS[DEVICES - 1]
     }
 
-    /// Every command a storage driver has put to a disk, NVMe or USB, counted
+    /// Every command a storage driver has put to a disk, counted
     /// where each driver hands one to its transport: the one number that says a
     /// stretch of the boot needed no disk.
     static COMMANDS: AtomicU64 = AtomicU64::new(0);
