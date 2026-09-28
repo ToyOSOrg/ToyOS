@@ -74,8 +74,9 @@ Each stage lands on its own, in this order.
      floor. What stays behind is one variable per key that has booted the
      machine, and only a loader, before the handover, writes one.
 
-   The cost: a machine refuses an image older than one its key has already
-   booted there, as it already does for the owner's key.
+   The owner's ruling: one floor per signing key; the cost — that an older
+   image from the same checkout is refused on a machine that has booted a
+   newer one until the floor is deliberately reset — is accepted.
 
    **Exit**: the guest tests run the scope the owner's machine runs.
    `update_floor_is_the_images_own` is rewritten to check two things: this
