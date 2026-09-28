@@ -7,7 +7,10 @@
 use toyos::syscap::SysCap;
 use toyos_abi::syscall;
 
-/// `sched::payload::SCHED_BLOCKED` — the state column `ps` prints.
+/// `sched::payload::SCHED_RUNNING` — the state column `ps` prints.
+pub const RUNNING: u8 = 0;
+
+/// `sched::payload::SCHED_BLOCKED`.
 pub const BLOCKED: u8 = 2;
 
 /// `SCHED_UNKNOWN`, which `sys_sysinfo` also answers for a thread whose entry
@@ -42,9 +45,7 @@ pub fn threads_of(cap: &SysCap, pid: u32) -> Vec<(bool, u8)> {
 }
 
 /// Poll until `cond` holds, with no deadline: a state the kernel never reaches
-/// is a hang the harness ceiling reds. The roster call inside `cond` is the
-/// loop's preemption point (`thread::yield_now` is a spin hint on this
-/// platform).
+/// is a hang the harness ceiling reds.
 pub fn await_true(cond: impl Fn() -> bool) {
     while !cond() {}
 }
