@@ -45,9 +45,6 @@ clear — the wait parks — or a held call's CPU may bind within its bound with
 making the bind the caller's cost. Either is the owner's ruling to revisit.
 
 Related records — `usb_transport_break`'s three other open red modes, not this
-one: `issues/kernel/a-shutdown-on-a-held-usb-disk-left-a-cpu-deaf-to-a-tlb-shootdown.md`
-(a shutdown on a held disk left a CPU deaf to a TLB shootdown and the kernel
-panicked), `issues/build/usb-transport-break-flushedstick-can-break-after-the-reboot.md`
-(the FlushedStick case can stage its break after the boot's last word), and
-`issues/boot-media/a-disk-whose-port-went-away-panics-the-boot-at-roots-hold.md`
-(a disk whose port went away panics the boot at ROOT's hold).
+one: `issues/kernel/a-shutdown-on-a-held-usb-disk-left-a-cpu-deaf-to-a-tlb-shootdown.md`,
+`issues/build/usb-transport-break-flushedstick-can-break-after-the-reboot.md`, and
+`issues/boot-media/a-disk-whose-port-went-away-panics-the-boot-at-roots-hold.md`.
