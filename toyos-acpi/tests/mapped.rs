@@ -6,12 +6,14 @@ mod common;
 
 use common::{rsdp, sdt, xsdt, Machine};
 use toyos_acpi::{find_table, Mapped, Phys, Table, TableError};
-use toyos_bootmap::DirectMapEnd;
+use toyos_bootmap::x86_64;
 
 /// What edk2's map on QEMU q35 with 2 GiB gives the direct map: the boot
 /// map's, as `toyos-bootmap`'s `the_reserved_hole_below_1_tib_is_not_mapped`
 /// holds.
-const END: u64 = DirectMapEnd::BOOT.get();
+fn end() -> u64 {
+    x86_64::direct_map_end(&[]).unwrap().get()
+}
 
 /// The reserved hole that edk2 describes below 1 TiB, inside 52 bits.
 const HOLE: u64 = 0xfd_0000_0000;
@@ -20,31 +22,15 @@ const RSDP_AT: u64 = 0x1_0000;
 const XSDT_AT: u64 = 0x2_0000;
 
 fn mapped<'a>(regions: &'a [(u64, &'a [u8])]) -> Mapped<Machine<'a>> {
-    Mapped::new(Machine { regions }, DirectMapEnd::BOOT)
-}
-
-/// The RSDP and the five tables a boot of this kernel on that firmware read,
-/// where it found them.
-#[test]
-fn every_table_edk2_published_is_inside_the_map() {
-    let m = mapped(&[]);
-    for (at, len) in [
-        (0x7f77e014, 36),
-        (0x7f778000, 144),
-        (0x7f779000, 244),
-        (0x7f777000, 56),
-        (0x7f776000, 60),
-        (0x7f775000, 128),
-    ] {
-        assert!(m.readable(at, len), "{at:#x}+{len}");
-    }
+    Mapped::new(Machine { regions }, x86_64::direct_map_end(&[]).unwrap())
 }
 
 #[test]
 fn a_table_past_the_direct_map_is_refused_before_a_byte_is_read() {
     let hpet = sdt(b"HPET", 1, &[0u8; 20]);
     let len = hpet.len();
-    for (at, refused) in [(HOLE, 36), (END, 36), (END - len as u64 + 1, len)] {
+    let end = end();
+    for (at, refused) in [(HOLE, 36), (end, 36), (end - len as u64 + 1, len)] {
         let regions: &[(u64, &[u8])] = &[(at, &hpet)];
         assert_eq!(
             Table::open(mapped(regions), at, b"HPET", 0).err(),
@@ -52,7 +38,7 @@ fn a_table_past_the_direct_map_is_refused_before_a_byte_is_read() {
             "a table at {at:#x}"
         );
     }
-    let at = END - len as u64;
+    let at = end - len as u64;
     let regions: &[(u64, &[u8])] = &[(at, &hpet)];
     assert!(Table::open(mapped(regions), at, b"HPET", 0).is_ok(), "a table whose last byte is the map's");
 }

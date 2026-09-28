@@ -59,20 +59,16 @@ pub const BOOT_MAP_BYTES: u64 = 4 * GIB;
 /// hold: every slot from there to the root's last.
 pub const DIRECT_MAP_WINDOW: u64 = (512 - ROOT_HIGH_HALF as u64) * GIB_PER_PDPT * GIB;
 
-/// One past the kernel direct map's last byte. Made only here, by
-/// [`x86_64::direct_map_end`] or as [`DirectMapEnd::BOOT`], so no reader can
-/// be handed a wider map than one that was built.
+/// One past the kernel direct map's last byte. Made only by
+/// [`x86_64::direct_map_end`].
 ///
 /// ```compile_fail,E0603
 /// let _ = toyos_bootmap::DirectMapEnd(1 << 52);
 /// ```
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy)]
 pub struct DirectMapEnd(u64);
 
 impl DirectMapEnd {
-    /// The boot map's, which the kernel's own never reaches less than.
-    pub const BOOT: Self = Self(BOOT_MAP_BYTES);
-
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -83,7 +79,7 @@ impl DirectMapEnd {
 pub struct DirectMapEndCell(AtomicU64);
 
 impl DirectMapEndCell {
-    /// Holding [`DirectMapEnd::BOOT`].
+    /// Holding [`BOOT_MAP_BYTES`], until the kernel's own map decides wider.
     pub const fn boot() -> Self {
         Self(AtomicU64::new(BOOT_MAP_BYTES))
     }
