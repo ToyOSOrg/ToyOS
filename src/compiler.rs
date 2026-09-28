@@ -489,7 +489,7 @@ mod tests {
 
         // Found again, not rebuilt; and still both there.
         let again = choose(&a, &rust_dir, &a.join("rust"), fake);
-        assert_eq!((again.stage2.clone(), builds.get()), (ca.stage2.clone(), 2));
+        assert_eq!((again.stage2, builds.get()), (ca.stage2.clone(), 2));
         assert!(ca.stage2.join("bin/rustc").is_file() && cb.stage2.join("bin/rustc").is_file());
 
         // An uncommitted file in `compiler/` is a new compiler too, and
@@ -501,7 +501,7 @@ mod tests {
         git(&a.join("rust"), &["add", "-A"]);
         git(&a.join("rust"), &["commit", "-qm", "the target, committed"]);
         let committed = choose(&a, &rust_dir, &a.join("rust"), fake);
-        assert_eq!((committed.stage2.clone(), builds.get()), (ca2.stage2.clone(), 3), "a commit rebuilt the compiler");
+        assert_eq!((committed.stage2, builds.get()), (ca2.stage2.clone(), 3), "a commit rebuilt the compiler");
         git(&a.join("rust"), &["checkout", "-q", &pinned]);
 
         // The primary's own: nothing under its `build/` but `compilers/` moved.
