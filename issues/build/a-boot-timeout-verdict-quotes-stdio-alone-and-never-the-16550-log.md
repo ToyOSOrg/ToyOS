@@ -6,10 +6,6 @@ opened: 2026-09-28
 
 # A boot timeout's verdict quotes stdio alone, so an early kernel panic that only reached the 16550 log is invisible in it
 
-A boot waiting on the default marker never takes that arm, so when the boot
-timeout fires (`start.elapsed() > boot_timeout`) its panic quotes only `seen`,
-the lines collected from stdio, and never the 16550 file.
-
 Evidence: PR #572's control run at `87629411`. The 16550 log held `EARLY
 PANIC: panicked at library/alloc/src/alloc.rs:659:9: memory allocation of
 4096 bytes failed`, and the verdict said "Boot timed out waiting for
