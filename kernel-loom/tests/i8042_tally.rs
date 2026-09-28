@@ -41,26 +41,11 @@
 //! does; the guest suite can supply neither, because a rate is not falsified by
 //! a green boot.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as StdOrdering};
+use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
 
 use kernel_loom::i8042_tally::{Carried, Counts, Tally};
 use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::Arc;
-
-/// `loom::model`, refusing a model that explored one execution: loom races a pending store only
-/// against the word's last access, which `Tally::record`'s own saturation load overwrites, so a
-/// read made before the ISR ran is never moved after its write. Every model here spawns the
-/// reader and runs the ISR on its own thread.
-fn explored(f: impl Fn() + Sync + Send + 'static) {
-    let runs = std::sync::Arc::new(AtomicUsize::new(0));
-    let counted = runs.clone();
-    loom::model(move || {
-        counted.fetch_add(1, StdOrdering::Relaxed);
-        f();
-    });
-    let runs = runs.load(StdOrdering::Relaxed);
-    assert!(runs > 1, "loom explored {runs} execution, so no interleaving was checked");
-}
 
 /// An interrupt the ISR found nothing behind is never counted as one that
 /// carried a byte — at the settled end, and at every instant on the way there.
@@ -70,16 +55,18 @@ fn explored(f: impl Fn() + Sync + Send + 'static) {
 /// is not synchronized against it by anything.
 #[test]
 fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
-    explored(|| {
+    static READ_AFTER_RECORD: AtomicBool = AtomicBool::new(false);
+
+    loom::model(|| {
         let tally = Arc::new(Tally::new());
 
-        // The verdict's own question: "did anything arrive to decode?"
-        let reader = {
+        let isr = {
             let tally = tally.clone();
-            loom::thread::spawn(move || tally.read())
+            loom::thread::spawn(move || tally.record(Carried::Nothing))
         };
-        tally.record(Carried::Nothing);
-        let mid = reader.join().unwrap();
+
+        // The verdict's own question: "did anything arrive to decode?"
+        let mid = tally.read();
         assert_eq!(
             mid.carried, 0,
             "a reader saw {mid:?} while the only interrupt on the machine carried nothing — \
@@ -87,12 +74,22 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
         );
         // And the total it prints alongside can never exceed what happened.
         assert!(mid.irqs() <= 1, "a reader saw {mid:?}, which is more interrupts than were taken");
+        if mid.irqs() == 1 {
+            READ_AFTER_RECORD.store(true, StdOrdering::Relaxed);
+        }
+
+        isr.join().unwrap();
         assert_eq!(
             tally.read(),
             Counts { carried: 0, empty: 1 },
             "the settled pair does not account for the one interrupt that was taken",
         );
     });
+
+    assert!(
+        READ_AFTER_RECORD.load(StdOrdering::Relaxed),
+        "no reader ran after the ISR recorded the interrupt, so no counted read was checked",
+    );
 }
 
 /// The property the fix must not cost: an interrupt that delivered bytes *is*
@@ -107,35 +104,44 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
 /// count that already said a byte had arrived.
 #[test]
 fn a_counted_interrupt_carries_its_bytes_with_it() {
-    explored(|| {
+    static COUNTED: AtomicBool = AtomicBool::new(false);
+
+    loom::model(|| {
         let tally = Arc::new(Tally::new());
         let published = Arc::new(AtomicU32::new(0));
 
-        let reader = {
+        let isr = {
             let (tally, published) = (tally.clone(), published.clone());
             loom::thread::spawn(move || {
-                let seen = tally.read();
-                (seen, published.load(Ordering::Relaxed))
+                // Everything the interrupt did, before it says it happened.
+                published.store(1, Ordering::Relaxed);
+                tally.record(Carried::Bytes);
             })
         };
-        // Everything the interrupt did, before it says it happened.
-        published.store(1, Ordering::Relaxed);
-        tally.record(Carried::Bytes);
 
-        let (seen, behind) = reader.join().unwrap();
+        let seen = tally.read();
         if seen.carried > 0 {
             assert_eq!(
-                behind, 1,
+                published.load(Ordering::Relaxed),
+                1,
                 "a reader counted an interrupt as having delivered a byte and could not see the \
                  byte: the report would say `0 bytes` about one that had arrived",
             );
+            COUNTED.store(true, StdOrdering::Relaxed);
         }
+
+        isr.join().unwrap();
         assert_eq!(
             tally.read(),
             Counts { carried: 1, empty: 0 },
             "an interrupt that delivered bytes was not counted as one",
         );
     });
+
+    assert!(
+        COUNTED.load(StdOrdering::Relaxed),
+        "no reader saw the interrupt counted, so the bytes behind a count were never checked",
+    );
 }
 
 /// The shape this replaced, kept as the model's own negative control.
@@ -178,7 +184,10 @@ impl TornTally {
 /// Asserted by collecting rather than by failing, so this stays a passing test
 /// that proves a failure is reachable — the flag is an ordinary `std` atomic and
 /// therefore outlives loom's executions, and the assertion after `loom::model`
-/// is the whole verdict.
+/// is the whole verdict. If a future loom, or a future edit to the model's
+/// shape, stops scheduling a reader inside the ISR's window, **this reds** and
+/// says so: at that point the two models above are passing because nothing is
+/// being explored, which is the one failure a gate must not have.
 #[test]
 fn the_split_counters_this_replaced_are_read_torn() {
     static TORN: AtomicBool = AtomicBool::new(false);

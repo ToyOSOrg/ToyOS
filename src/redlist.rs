@@ -31,6 +31,7 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
     Disabled { test: "doom_sound_flood", issue: "issues/audio/doom-sound-flood-played-full-scale-once.md" },
+    Disabled { test: "handle_basic", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
         test: "handle_kill_policy",
         issue: "issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md",
@@ -47,6 +48,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
     },
     Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },
+    Disabled {
+        test: "log_ring_keeps_the_owners_slots",
+        issue: "issues/kernel/a-log-rings-owner-is-named-only-when-logd-reads-its-registration.md",
+    },
     Disabled {
         test: "partition_claim_departure",
         issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
