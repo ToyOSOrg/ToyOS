@@ -71,6 +71,7 @@ The testing rules live where they are enforced: known reds in `src/redlist.rs`, 
 
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo test --workspace --exclude toyos-build` runs every host-crate suite.
 - **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time, and an agent reports only once nothing it started is still running.
+- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started, removes the worktrees and scratch build output it no longer needs, and never leaves an emulator, a build or a watcher running.
 - **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost. A full boot is under a second; incremental builds finish in seconds.
 
 ## Repository layout
