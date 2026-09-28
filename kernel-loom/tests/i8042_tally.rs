@@ -55,6 +55,8 @@ use loom::sync::Arc;
 /// is not synchronized against it by anything.
 #[test]
 fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
+    static READ_AFTER_RECORD: AtomicBool = AtomicBool::new(false);
+
     loom::model(|| {
         let tally = Arc::new(Tally::new());
 
@@ -72,6 +74,9 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
         );
         // And the total it prints alongside can never exceed what happened.
         assert!(mid.irqs() <= 1, "a reader saw {mid:?}, which is more interrupts than were taken");
+        if mid.irqs() == 1 {
+            READ_AFTER_RECORD.store(true, StdOrdering::Relaxed);
+        }
 
         isr.join().unwrap();
         assert_eq!(
@@ -80,6 +85,11 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
             "the settled pair does not account for the one interrupt that was taken",
         );
     });
+
+    assert!(
+        READ_AFTER_RECORD.load(StdOrdering::Relaxed),
+        "no reader ran after the ISR recorded the interrupt, so no counted read was checked",
+    );
 }
 
 /// The property the fix must not cost: an interrupt that delivered bytes *is*
@@ -92,16 +102,10 @@ fn an_empty_interrupt_is_never_counted_as_one_that_carried() {
 /// empty. **This is the direction that reds on the old shape**: with the two
 /// counters back in `tally.rs` it failed here too, `published` still 0 under a
 /// count that already said a byte had arrived.
-///
-/// **It is not a gate on the release/acquire pair, and saying so is the point.**
-/// Measured: with `record`'s release and `read`'s acquire both weakened to
-/// `Relaxed`, all three models still passed. Loom 0.7 does not distinguish the
-/// weakening — which is why this crate's other negative control removes `SeqCst`
-/// *fences* rather than weakening an ordering. The pair rests on the argument in
-/// `tally.rs`, and on x86 it is the same instruction either way, so no guest can
-/// ask the question either.
 #[test]
 fn a_counted_interrupt_carries_its_bytes_with_it() {
+    static COUNTED: AtomicBool = AtomicBool::new(false);
+
     loom::model(|| {
         let tally = Arc::new(Tally::new());
         let published = Arc::new(AtomicU32::new(0));
@@ -123,6 +127,7 @@ fn a_counted_interrupt_carries_its_bytes_with_it() {
                 "a reader counted an interrupt as having delivered a byte and could not see the \
                  byte: the report would say `0 bytes` about one that had arrived",
             );
+            COUNTED.store(true, StdOrdering::Relaxed);
         }
 
         isr.join().unwrap();
@@ -132,6 +137,11 @@ fn a_counted_interrupt_carries_its_bytes_with_it() {
             "an interrupt that delivered bytes was not counted as one",
         );
     });
+
+    assert!(
+        COUNTED.load(StdOrdering::Relaxed),
+        "no reader saw the interrupt counted, so the bytes behind a count were never checked",
+    );
 }
 
 /// The shape this replaced, kept as the model's own negative control.
