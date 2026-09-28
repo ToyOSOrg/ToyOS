@@ -5097,6 +5097,10 @@ fn wait_for_ready(
     let (onum, oden) = oversubscription(options.smp);
     let boot_timeout =
         Duration::from_secs(10) * WIDTH.load(Ordering::SeqCst).max(2) * num / den * onum / oden;
+    // A guest that dies before virtio-console init never reaches stdio at all;
+    // the UART file is the only channel it has, whether QEMU is still up or not.
+    let on_the_uart =
+        || !panic_aborts && fs::read_to_string(uart_log).is_ok_and(|s| s.contains(ready));
     let start = Instant::now();
     let mut seen = String::new();
     loop {
@@ -5162,17 +5166,16 @@ fn wait_for_ready(
                 seen.push('\n');
                 continue;
             }
-            // A guest that dies before virtio-console init never reaches
-            // stdio at all; the UART file is the only channel it has.
             Err(RecvTimeoutError::Timeout) => {
-                if !panic_aborts
-                    && fs::read_to_string(uart_log).is_ok_and(|s| s.contains(ready))
-                {
+                if on_the_uart() {
                     break;
                 }
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => {
+                if on_the_uart() {
+                    break;
+                }
                 let status = child.wait();
                 let uart = fs::read_to_string(uart_log).unwrap_or_default();
                 panic!(
