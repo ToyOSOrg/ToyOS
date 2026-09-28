@@ -62,11 +62,11 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "quiesce_dump_holds_the_stopped",
-        issue: "issues/kernel/quiesce-dump-holds-the-stopped-reds-wide-with-usb-transport-breaks.md",
+        issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
     },
     Disabled {
         test: "quiesce_stops_the_machine",
-        issue: "issues/kernel/quiesce-stops-the-machine-stayed-up-beside-other-guests.md",
+        issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
     },
     Disabled {
         test: "quiesce_wakes_on_the_last_exit",
@@ -74,7 +74,7 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "quiesce_wakes_on_the_last_park",
-        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-two-parked-threads.md",
+        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-threads-running-beside-the-held-one.md",
     },
     Disabled {
         test: "sched_check_build",
