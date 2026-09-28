@@ -626,7 +626,7 @@ const HOST_SPAWNS: &[Spawn] = &[
     },
     Spawn {
         arg: "std::env::current_exe().unwrap()",
-        sites: &[("src/buildlock.rs", 2), ("toyos-tmpdir/tests/reclaim.rs", 1)],
+        sites: &[("src/buildlock.rs", 1), ("toyos-tmpdir/tests/reclaim.rs", 1)],
         why: "a test binary re-running itself: the build system under the lock, and a \
               scratch holder whose death is what is judged",
     },
