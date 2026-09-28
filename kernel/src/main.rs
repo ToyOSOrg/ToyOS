@@ -304,7 +304,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Split into six records: KernelArgs' derived Debug is the one message that exceeds the log's per-record bound.
     log!(
-        "boot: memory map {:#x}+{:#x}, kernel {:#x}+{:#x}, stack {:#x}+{:#x}",
+        "boot: memory map {:#x}+{:#x}, kernel {:#x}+{:#x}, stack image+{:#x}+{:#x}",
         kernel_args.memory_map_addr, kernel_args.memory_map_size,
         kernel_args.kernel_memory_addr, kernel_args.kernel_memory_size,
         kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size
@@ -348,11 +348,16 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     );
     let kernel_args = &kernel_args;
 
+    // `kernel_stack_addr` is an offset into the image, so the image's region is what keeps the stack.
+    assert!(
+        kernel_args.kernel_stack_addr.checked_add(kernel_args.kernel_stack_size)
+            .is_some_and(|end| end <= kernel_args.kernel_memory_size),
+        "boot: the loader put the stack at image+{:#x}+{:#x}, past the {:#x}-byte image",
+        kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size, kernel_args.kernel_memory_size
+    );
     let reserved = [
         mm::Region { start: kernel_args.kernel_memory_addr, end: kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size },
         mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
-        mm::Region { start: kernel_args.kernel_stack_addr, end: kernel_args.kernel_stack_addr + kernel_args.kernel_stack_size },
-        arch::boot::reserved(),
         // The loader's black-box page, which is ordinary `LoaderData` and so
         // memory the allocator would otherwise hand out. Empty on a boot whose
         // parameter line names none.
@@ -360,7 +365,19 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         // ROOT's image, `LoaderData` like the black box's page. Empty on a
         // boot the loader handed none.
         root_image,
+        // Last: the one region the loader did not allocate.
+        arch::boot::reserved(),
     ];
+    // A region the loader did not allocate withholds memory nothing uses, so one the firmware map does not hold as `LoaderData` is refused.
+    for region in reserved[..reserved.len() - 1].iter().filter(|r| r.start < r.end) {
+        assert!(
+            maps.iter().any(|e| {
+                e.uefi_type == toyos_bootmap::EFI_LOADER_DATA && e.start <= region.start && region.end <= e.end
+            }),
+            "boot: reserving {:#x}..{:#x}, which no LoaderData descriptor in the firmware map holds",
+            region.start, region.end
+        );
+    }
 
     // The last point before the first hash container (`mm::init`'s address
     // space), and not earlier: seeding fails only by panicking, and a panic
