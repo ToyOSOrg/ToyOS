@@ -66,11 +66,19 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "quiesce_dump_holds_the_stopped",
-        issue: "issues/kernel/quiesce-dump-holds-the-stopped-reds-wide-with-usb-transport-breaks.md",
+        issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
+    },
+    Disabled {
+        test: "quiesce_stops_the_machine",
+        issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
     },
     Disabled {
         test: "quiesce_wakes_on_the_last_exit",
         issue: "issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md",
+    },
+    Disabled {
+        test: "quiesce_wakes_on_the_last_park",
+        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
     },
     Disabled {
         test: "sched_check_build",
