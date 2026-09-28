@@ -26,7 +26,7 @@
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
@@ -427,6 +427,8 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// host triple for the same reason.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
+    let short = Path::new(toyos_tmpdir::SHORT_BASE);
+    let before = toyos_tmpdir::gone_roots(short);
     // Before any thread: nothing in this process reads the environment
     // concurrently with the write, and every child inherits it.
     std::env::set_var("TMPDIR", tmp.path());
@@ -491,18 +493,19 @@ fn host(root: &Path) -> Vec<Step> {
     steps.push(step("the toyos SDK", || {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
-    steps.push(step("nothing left in $TMPDIR", || left_behind(&tmp)));
+    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
 }
 
-/// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, as a refusal.
+/// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
+/// under `short` whose process is gone that `before` does not name.
 ///
 /// Refuses if `tmp` holds no [`toyos_tmpdir::GLOBAL`] at all: every step above
 /// makes at least one `toyos_tmpdir::TempDir`, which always writes that lock
 /// file first, so its absence means this `$TMPDIR` never saw the steps at
 /// all — the guard reading an empty directory it was never given, rather than
 /// one every test actually cleaned.
-fn left_behind(tmp: &Path) -> Result<String, String> {
+fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf]) -> Result<String, String> {
     let mut left: Vec<String> = std::fs::read_dir(tmp)
         .map_err(|e| format!("read {}: {e}", tmp.display()))?
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
@@ -518,15 +521,28 @@ fn left_behind(tmp: &Path) -> Result<String, String> {
     }
     left.retain(|name| name != toyos_tmpdir::GLOBAL);
     left.sort();
-    if left.is_empty() {
+    let mut dead: Vec<String> = toyos_tmpdir::gone_roots(short)
+        .into_iter()
+        .filter(|root| !before.contains(root))
+        .map(|root| root.display().to_string())
+        .collect();
+    dead.sort();
+    let mut said = Vec::new();
+    if !left.is_empty() {
+        said.push(format!(
+            "left in {} by the steps above, each written past a `toyos_tmpdir::TempDir` or held \
+             past its test: {}",
+            tmp.display(),
+            left.join(", ")
+        ));
+    }
+    if !dead.is_empty() {
+        said.push(format!("left by a process that died during the steps above: {}", dead.join(", ")));
+    }
+    if said.is_empty() {
         return Ok("every test took its scratch with it".into());
     }
-    Err(format!(
-        "left in {} by the steps above, each written past a `toyos_tmpdir::TempDir` or held past \
-         its test: {}",
-        tmp.display(),
-        left.join(", ")
-    ))
+    Err(said.join("; "))
 }
 
 /// What protects `main` is configured outside the repository, so it is read
@@ -610,6 +626,8 @@ fn suite_args(args: &[&str]) -> Vec<String> {
 /// every boot image — survives past the last step, which reds on it.
 fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-guest");
+    let short = Path::new(toyos_tmpdir::SHORT_BASE);
+    let before = toyos_tmpdir::gone_roots(short);
     // Before any thread, same as `host`: every child this process spawns below
     // inherits this, and nothing here reads the environment concurrently with
     // the write.
@@ -634,7 +652,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     }
     // Unconditional: whatever stopped earlier, this $TMPDIR is still this
     // process's own to judge, and a leak past a failing suite is still a leak.
-    steps.push(step("nothing left in $TMPDIR", || left_behind(&tmp)));
+    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
 }
 
@@ -861,7 +879,6 @@ fn at_tip(ls_remote: &str, head: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     /// A deterministic control on `host`'s `std::env::set_var("TMPDIR", ...)`:
     /// delete that line and every child writes to the real `$TMPDIR` instead of
@@ -870,7 +887,9 @@ mod tests {
     #[test]
     fn left_behind_refuses_a_tmpdir_that_never_saw_the_lock() {
         let tmp = toyos_tmpdir::TempDir::new("left-behind-blind");
-        let refusal = left_behind(&tmp).expect_err("an untouched $TMPDIR is a red, not a pass");
+        let short = toyos_tmpdir::TempDir::new("left-behind-blind-short");
+        let refusal =
+            left_behind(&tmp, &short, &[]).expect_err("an untouched $TMPDIR is a red, not a pass");
         assert!(refusal.contains(toyos_tmpdir::GLOBAL), "{refusal}");
     }
 
@@ -878,11 +897,29 @@ mod tests {
     #[test]
     fn the_host_job_names_what_its_tests_left_behind() {
         let tmp = toyos_tmpdir::TempDir::new("left-behind");
+        let short = toyos_tmpdir::TempDir::new("left-behind-short");
         std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
-        assert!(left_behind(&tmp).is_ok());
+        assert!(left_behind(&tmp, &short, &[]).is_ok());
         std::fs::create_dir(tmp.join("forkcheck-1-current")).unwrap();
-        let refusal = left_behind(&tmp).expect_err("a directory left behind is a red");
+        let refusal = left_behind(&tmp, &short, &[]).expect_err("a directory left behind is a red");
         assert!(refusal.contains("forkcheck-1-current"), "{refusal}");
+    }
+
+    /// A short root whose process died while the steps ran is named; one already
+    /// dead before them is not the steps'.
+    #[test]
+    fn the_job_names_a_short_root_a_step_left_when_it_died() {
+        let tmp = toyos_tmpdir::TempDir::new("left-behind-died");
+        let short = toyos_tmpdir::TempDir::new("left-behind-died-short");
+        std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
+        let earlier = format!("{}1-0", toyos_tmpdir::ROOT_PREFIX);
+        std::fs::create_dir(short.join(&earlier)).unwrap();
+        let before = toyos_tmpdir::gone_roots(&short);
+        assert!(left_behind(&tmp, &short, &before).is_ok());
+        let died = format!("{}2-0", toyos_tmpdir::ROOT_PREFIX);
+        std::fs::create_dir(short.join(&died)).unwrap();
+        let refusal = left_behind(&tmp, &short, &before).expect_err("a dead step's root is a red");
+        assert!(refusal.contains(&died) && !refusal.contains(&earlier), "{refusal}");
     }
 
     fn repo_root() -> PathBuf {

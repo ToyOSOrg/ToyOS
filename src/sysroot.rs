@@ -50,10 +50,11 @@ use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
 /// and `toyos`, and `libtoyos_c.a` is `userland/libc`.
-pub const SYSROOT_SOURCES: [&str; 3] = ["toyos-abi/src", "toyos/src", "userland/libc/src"];
+pub const SYSROOT_SOURCES: [&str; 4] =
+    ["toyos-abi/src", "toyos/src", "userland/libc/src", "userland/libc/include"];
 
 /// Their manifests, whose features and versions decide the same build.
-const SYSROOT_MANIFESTS: [&str; 3] =
+pub(crate) const SYSROOT_MANIFESTS: [&str; 3] =
     ["toyos-abi/Cargo.toml", "toyos/Cargo.toml", "userland/libc/Cargo.toml"];
 
 /// The file a finished sysroot carries last, naming what it was built from.
@@ -63,7 +64,8 @@ const SOURCES: &str = "SOURCES";
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, \
-                      libtoyos_c merged, libraries from the stamp, linked by rust-lld; 3";
+                      libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
+                      a C sysroot of libc's staticlib and headers per target; 4";
 
 /// Where each build records the key it compiled against, for [`sweep`].
 const RECORD: &str = "target/toyos-sysroot-key";
@@ -351,6 +353,7 @@ fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
     let libc_target = dir.with_extension("libc-target");
     for arch in Arch::ALL {
         crate::libc::build(root, &partial, &libc_target, arch);
+        crate::libc::build_c(root, &partial, &libc_target, arch);
     }
     let _ = fs::remove_dir_all(&libc_target);
 
@@ -692,6 +695,12 @@ mod tests {
         write(&abi, "/// A.\npub struct A(pub u64);\n");
         assert_ne!(k(), base, "a signature change kept the old sysroot");
         write(&abi, "/// A.\npub struct A;\n");
+        assert_eq!(k(), base);
+
+        let header = root.join("userland/libc/include/stdio.h");
+        write(&header, "int puts(const char *);\n");
+        assert_ne!(k(), base, "a header the C sysroot carries kept the old sysroot");
+        fs::remove_file(&header).unwrap();
         assert_eq!(k(), base);
 
         let std = fork.join("library/std/src/lib.rs");

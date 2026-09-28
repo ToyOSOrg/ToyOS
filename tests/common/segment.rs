@@ -12,34 +12,24 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Instant;
 
 use toyos_build::icmp::checksum;
 
-/// The two sockets QEMU serves the segment on, which [`super::qemu::BootOptions`]
-/// carries into the argv.
-#[derive(Clone, Debug)]
+/// The two sockets QEMU serves the segment on, in the socket directory of the
+/// [`super::qemu::QemuInstance`] that booted with them.
+#[derive(Debug)]
 pub struct Tap {
     into_guest: PathBuf,
     from_guest: PathBuf,
 }
 
 impl Tap {
-    /// Two socket paths of this boot's own, in this thread's scratch directory.
-    pub fn in_lane() -> Self {
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = super::lane::dir();
-        let tap = Self {
-            into_guest: dir.join(format!("tap-in-{n}.sock")),
-            from_guest: dir.join(format!("tap-out-{n}.sock")),
-        };
-        let _ = std::fs::remove_file(&tap.into_guest);
-        let _ = std::fs::remove_file(&tap.from_guest);
-        tap
+    /// The two sockets' names in a boot's socket directory `dir`.
+    pub fn in_dir(dir: &Path) -> Self {
+        Self { into_guest: dir.join("tap-in.sock"), from_guest: dir.join("tap-out.sock") }
     }
 
     /// QEMU's half: two listening sockets, one filter each, both on `net0`. A
