@@ -522,9 +522,15 @@ pub fn lan_no_lease(
     // until netd gives up on its own clock, which every wait in this harness
     // reads as a machine that stopped. The ceiling is the harness's.
     let gave_up = format!("{NO_LEASE}{HOSTNAME} in ");
-    console.push_str(&guest.drain_until(qemu::GUEST_WEDGED, |line| line.contains(&gave_up)));
-    if !console.contains(&gave_up) {
-        return Err(format!("{} waiting for {gave_up:?}\n{console}", qemu::STALLED));
+    let given_up = std::cell::Cell::new(false);
+    let served = std::cell::Cell::new(false);
+    console.push_str(&guest.drain_until(qemu::GUEST_WEDGED, |line| {
+        given_up.set(given_up.get() || line.contains(&gave_up));
+        served.set(given_up.get() && line.contains(READY));
+        served.get()
+    }));
+    if !served.get() {
+        return Err(format!("{} waiting for {gave_up:?} and then {READY:?}\n{console}", qemu::STALLED));
     }
     let log = serial::Serial::named("the lan boot with no server", console.as_str());
     if let Ok(lease) = lease_in(log.text()) {
