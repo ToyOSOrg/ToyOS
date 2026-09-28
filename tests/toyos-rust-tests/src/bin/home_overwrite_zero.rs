@@ -31,6 +31,11 @@ fn main() {
     let first = payload(0x11);
     let second = payload(0x22);
     recorded_shape(&first, &second);
+    // The volume and every write so far on the device, so the pinned file's
+    // writes are the ones only the stop's sync carries there.
+    File::open(LOOPED)
+        .and_then(|f| f.sync_all())
+        .unwrap_or_else(|e| panic!("fsync {LOOPED}: {e}"));
     pinned_overwrite(&first, &second);
     println!("all home overwrite tests passed");
 }
@@ -76,7 +81,6 @@ fn pinned_overwrite(first: &[u8], second: &[u8]) {
     // Before any verdict: the host holds this count against the device, and needs it on the failing arm.
     println!("HOME-OVERWRITE {PINNED} read back {lowest} bytes");
 
-    // Dropped first, so `SYS_SHUTDOWN`'s drain carries the overwrite to the device whatever the name answered.
     drop(writer);
 
     assert_eq!(lowest, LEN as u64, "the same-length overwrite read back short");
