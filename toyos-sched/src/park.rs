@@ -155,8 +155,7 @@ pub enum Cancel {
     /// it unwinds.
     Answers,
     /// The park a kill may not end. The caller cannot propagate a cancel and
-    /// is bounded by something else — the retirer waiting for its victim's
-    /// release is the one.
+    /// is bounded by something else.
     Ignores,
 }
 

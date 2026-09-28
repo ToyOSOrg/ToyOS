@@ -76,7 +76,7 @@ pub use toyos_abi::{Pid, Tid};
 ///
 /// For a live thread the scheduler is authoritative about running, ready or
 /// blocked — `scheduler::task_sched_state()` has that detail.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ThreadLocation {
     /// Alive: running, ready, or blocked. The scheduler owns the detail.
     Scheduled,
@@ -106,7 +106,7 @@ impl ThreadLocation {
 /// whole of the distinction a real defect turned on: `process::thread_exit`
 /// posted one wake and it was always the process's main thread, so a non-main
 /// thread joining a sibling was owed a wake nobody sent.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Watch {
     /// One thread's exit. `SYS_THREAD_JOIN` arms here.
     Thread(Pid, Tid),

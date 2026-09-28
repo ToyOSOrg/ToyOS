@@ -3,7 +3,7 @@
 //!
 //! `#[cfg(test)]`, so none of it reaches a kernel build. What it adds beyond
 //! the two traits is the *consequences* a decision hands back and the kernel
-//! performs — a watch's post, a `retire_task`, a `publish_exit`, an idle
+//! performs — a watch's post, a retire, a `publish_exit`, an idle
 //! pass taking an entry — because the laws worth checking are about the order
 //! those happen in, and a model that only held the two states could not see
 //! one.
@@ -17,13 +17,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::table::{Lifecycle, Processes};
+use crate::teardown::{self, Leave};
 use crate::{Pid, ThreadLocation, Tid, Watch};
 
 /// One process, as its lifecycle sees it.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ModelProc {
     main_tid: Tid,
-    tearing_down: bool,
+    teardown_code: Option<i32>,
     threads: BTreeMap<Tid, ThreadLocation>,
     next_tid: Tid,
     /// How many times a claim was raised on this process. Counted here because
@@ -35,11 +36,11 @@ impl Lifecycle for ModelProc {
     fn main_tid(&self) -> Tid {
         self.main_tid
     }
-    fn tearing_down(&self) -> bool {
-        self.tearing_down
+    fn teardown_code(&self) -> Option<i32> {
+        self.teardown_code
     }
-    fn begin_teardown(&mut self) {
-        self.tearing_down = true;
+    fn begin_teardown(&mut self, code: i32) {
+        self.teardown_code = Some(code);
         self.claims += 1;
     }
     fn location(&self, tid: Tid) -> Option<ThreadLocation> {
@@ -60,8 +61,32 @@ impl Lifecycle for ModelProc {
     }
 }
 
+/// Where a thread is on its way out, one lock section or pass per step.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Out {
+    /// `process::leave`'s table section.
+    Leave,
+    /// The last one out: `teardown_resources`, the process's mappings and handles.
+    Free { code: i32, mark: i32 },
+    /// The last one out: `teardown_bookkeeping`'s table section, which marks it dead.
+    Mark { code: i32, mark: i32 },
+    /// The last one out: `ProcessObject::publish_exit`.
+    Publish { code: i32 },
+    /// `thread_exit`'s post on its own watch.
+    Post,
+    /// The exit pass: the thread never runs again.
+    Gone,
+}
+
+/// A thread leaving: the code it chose, and how far it is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct Departure {
+    chosen: Option<i32>,
+    at: Out,
+}
+
 /// The table, plus the effects the kernel would have performed.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct World {
     procs: BTreeMap<Pid, ModelProc>,
     next_pid: Pid,
@@ -72,15 +97,19 @@ pub struct World {
     waiters: BTreeSet<(Watch, Pid, Tid)>,
     /// Waiters a post has released.
     released: BTreeSet<(Watch, Pid, Tid)>,
-    /// Threads `scheduler::retire_task` has taken off every CPU. A thread not
-    /// in here may still be picked and run.
-    retired: BTreeSet<(Pid, Tid)>,
-    /// Threads past the point of no return but not yet dropped by an exit
-    /// pass: a claimant inside its own teardown, which cannot retire itself and
-    /// will not reach Ring 3 again either.
-    leaving: BTreeSet<(Pid, Tid)>,
-    /// Entries an idle pass has taken out of the table.
-    reaped: BTreeSet<Pid>,
+    /// Threads a retire was posted on: the kill bit.
+    killed: BTreeSet<(Pid, Tid)>,
+    /// Threads inside a scripted operation, which reach no safe point until it returns.
+    in_kernel: BTreeSet<(Pid, Tid)>,
+    /// Threads on their way out, and how far each is.
+    departing: BTreeMap<(Pid, Tid), Departure>,
+    /// Threads whose own TLS block is still mapped in their process.
+    mapped: BTreeSet<(Pid, Tid)>,
+    /// Threads whose entry went, and its mapped TLS block with it, while a
+    /// sibling was still in the process.
+    unmapped_under_siblings: BTreeSet<(Pid, Tid)>,
+    /// How many times each process's resources were freed.
+    frees: BTreeMap<Pid, u32>,
     /// TLS blocks a spawn's phase 2 mapped and no thread owns yet.
     tls_mapped: BTreeSet<u32>,
     next_tls: u32,
@@ -113,9 +142,12 @@ impl World {
             published: BTreeMap::new(),
             waiters: BTreeSet::new(),
             released: BTreeSet::new(),
-            retired: BTreeSet::new(),
-            leaving: BTreeSet::new(),
-            reaped: BTreeSet::new(),
+            killed: BTreeSet::new(),
+            in_kernel: BTreeSet::new(),
+            departing: BTreeMap::new(),
+            mapped: BTreeSet::new(),
+            unmapped_under_siblings: BTreeSet::new(),
+            frees: BTreeMap::new(),
             tls_mapped: BTreeSet::new(),
             next_tls: 0,
         }
@@ -150,22 +182,24 @@ impl World {
             pid,
             ModelProc {
                 main_tid: Tid(0),
-                tearing_down: false,
+                teardown_code: None,
                 threads,
                 next_tid: Tid(1),
                 claims: 0,
             },
         );
+        self.mapped.insert((pid, Tid(0)));
         pid
     }
 
     /// Insert a thread the way `spawn_thread`'s phase 3 does — in the table and
-    /// enqueued in the scheduler, so it is alive and unretired.
+    /// enqueued in the scheduler, so it is alive and in the process.
     pub fn spawn_thread(&mut self, pid: Pid) -> Tid {
         let proc = self.procs.get_mut(&pid).expect("spawn_thread on a live process");
         let tid = proc.next_tid;
         proc.next_tid = Tid(tid.0 + 1);
         proc.threads.insert(tid, ThreadLocation::Scheduled);
+        self.mapped.insert((pid, tid));
         tid
     }
 
@@ -177,6 +211,23 @@ impl World {
         if let Some(proc) = self.procs.get_mut(&pid) {
             proc.set_location(tid, to);
         }
+    }
+
+    /// The `ThreadEntry` a join collected is dropped, and whatever its
+    /// `ThreadData` still maps goes back with it.
+    pub fn drop_collected(&mut self, pid: Pid, tid: Tid) {
+        let mut still_in = false;
+        if let Some(proc) = self.procs.get(&pid) {
+            proc.each_thread(&mut |_, at| still_in |= !at.is_zombie());
+        }
+        if self.mapped.remove(&(pid, tid)) && still_in {
+            self.unmapped_under_siblings.insert((pid, tid));
+        }
+    }
+
+    /// `release_thread`: a thread's own exit unmaps its TLS block before it leaves.
+    pub fn unmap_own(&mut self, pid: Pid, tid: Tid) {
+        self.mapped.remove(&(pid, tid));
     }
 
     /// `watch::wait_until` — a waiter registered on a subject's watch.
@@ -202,43 +253,95 @@ impl World {
         self.waiters.difference(&self.released).copied().collect()
     }
 
-    /// `scheduler::retire_task` — the thread is provably off every CPU, its
-    /// payload dropped, and `publish_released` has posted on its own
-    /// watch.
-    ///
-    /// **The post is not an extra the model added.** `KernelPayload`'s release
-    /// sink runs exactly once per task and ends with
-    /// `TaskHandle::publish_released`, whose post is on the thread's own watch
-    /// — "the same subject a joiner uses, and the reason the release no longer
-    /// needs a queue of its own" (`kernel/src/sched/payload.rs`). A model
-    /// without it strands joiners the kernel releases.
-    pub fn retire(&mut self, pid: Pid, tid: Tid) {
-        self.retired.insert((pid, tid));
-        self.post(Watch::Thread(pid, tid));
+    /// `scheduler::post_retire`: the kill bit. A thread in Ring 3 leaves at its
+    /// next exit boundary, one in a scripted operation when the operation returns.
+    pub fn post_retire(&mut self, pid: Pid, tid: Tid) {
+        assert!(self.killed.insert((pid, tid)), "a second retirer for pid {pid} tid {tid}");
     }
 
-    /// A thread that has committed to leaving but whose payload the exit pass
-    /// has not dropped yet — a teardown claimant, running the teardown on its
-    /// own kernel stack. It will not reach Ring 3 again, so it is as unable to
-    /// touch a freed mapping as a retired thread; what it has not done yet is
-    /// release anybody.
-    pub fn leaving(&mut self, pid: Pid, tid: Tid) {
-        self.leaving.insert((pid, tid));
+    /// A thread starting a scripted operation.
+    pub fn enter_kernel(&mut self, by: (Pid, Tid)) {
+        self.in_kernel.insert(by);
     }
 
-    pub fn is_retired(&self, pid: Pid, tid: Tid) -> bool {
-        self.retired.contains(&(pid, tid))
+    /// Its operation returned.
+    pub fn leave_kernel(&mut self, by: (Pid, Tid)) {
+        self.in_kernel.remove(&by);
+    }
+
+    /// A thread in a scripted operation starting its own way out.
+    pub fn depart(&mut self, pid: Pid, tid: Tid, chosen: Option<i32>) {
+        assert!(
+            self.departing.insert((pid, tid), Departure { chosen, at: Out::Leave }).is_none(),
+            "pid {pid} tid {tid} started out twice",
+        );
+        self.in_kernel.remove(&(pid, tid));
+    }
+
+    /// Every thread with a step of its way out it can take now: one already on
+    /// its way, and a killed one at its exit boundary.
+    pub fn ready_departures(&self) -> Vec<(Pid, Tid)> {
+        let mut ready: Vec<(Pid, Tid)> = self
+            .departing
+            .iter()
+            .filter(|(_, d)| d.at != Out::Gone)
+            .map(|(&id, _)| id)
+            .collect();
+        for &(pid, tid) in &self.killed {
+            let at_boundary = !self.in_kernel.contains(&(pid, tid))
+                && !self.departing.contains_key(&(pid, tid))
+                && self.procs.get(&pid).and_then(|p| p.location(tid)) == Some(ThreadLocation::Scheduled);
+            if at_boundary {
+                ready.push((pid, tid));
+            }
+        }
+        ready
+    }
+
+    /// One step of a thread's way out.
+    pub fn depart_step(&mut self, pid: Pid, tid: Tid) {
+        let departure = self.departing.entry((pid, tid)).or_insert(Departure { chosen: None, at: Out::Leave });
+        let chosen = departure.chosen;
+        let next = match departure.at {
+            Out::Leave => match teardown::leave(self, pid, tid, chosen) {
+                Leave::Last { code, mark } => Out::Free { code, mark },
+                Leave::NotLast => Out::Post,
+            },
+            Out::Free { code, mark } => {
+                *self.frees.entry(pid).or_insert(0) += 1;
+                self.mapped.retain(|&(p, _)| p != pid);
+                Out::Mark { code, mark }
+            }
+            Out::Mark { code, mark } => {
+                teardown::torn_down(self, pid, tid, mark);
+                Out::Publish { code }
+            }
+            Out::Publish { code } => {
+                self.publish_exit(pid, code);
+                Out::Post
+            }
+            Out::Post => {
+                if chosen.is_some() {
+                    self.post(Watch::Thread(pid, tid));
+                }
+                Out::Gone
+            }
+            Out::Gone => unreachable!("a thread that is gone has no step left"),
+        };
+        self.departing.get_mut(&(pid, tid)).expect("inserted above").at = next;
     }
 
     /// Whether this thread can still execute user code.
     fn runnable(&self, pid: Pid, tid: Tid) -> bool {
-        !self.retired.contains(&(pid, tid))
-            && !self.leaving.contains(&(pid, tid))
-            && self
-                .procs
-                .get(&pid)
-                .and_then(|p| p.location(tid))
-                .is_some_and(|at| !at.is_zombie())
+        !self.departing.contains_key(&(pid, tid)) && !self.killed.contains(&(pid, tid))
+    }
+
+    /// The thread tearing `pid` down, from its leaving to its mark.
+    fn tearing_down(&self, pid: Pid) -> Option<Tid> {
+        self.departing
+            .iter()
+            .find(|(&(p, _), d)| p == pid && matches!(d.at, Out::Free { .. } | Out::Mark { .. }))
+            .map(|(&(_, tid), _)| tid)
     }
 
     /// `ProcessObject::publish_exit`, assertion and all: two publishes mean two
@@ -251,15 +354,14 @@ impl World {
         self.post(Watch::Process(pid));
     }
 
+    pub fn published(&self, pid: Pid) -> Option<i32> {
+        self.published.get(&pid).copied()
+    }
+
     /// The idle pass taking an entry, which is what `reap_finished` returns for
     /// the caller to drop.
     pub fn reap(&mut self, pid: Pid) {
         self.procs.remove(&pid);
-        self.reaped.insert(pid);
-    }
-
-    pub fn was_reaped(&self, pid: Pid) -> bool {
-        self.reaped.contains(&pid)
     }
 
     /// **The laws, checked at every state a step leaves behind.**
@@ -269,33 +371,43 @@ impl World {
     pub fn faults(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (&pid, proc) in &self.procs {
-            // L1. One process, one teardown, one exit. `publish_exit` asserts
-            // the other half of this; this is the half that can be seen before
-            // the publish happens.
+            // L1. One process, one claim, one teardown. `publish_exit` asserts
+            // the publish half.
             if proc.claims > 1 {
                 out.push(alloc::format!("pid {pid}: {} teardown claims succeeded", proc.claims));
             }
-            if self.published.contains_key(&pid) {
+            let frees = self.frees.get(&pid).copied().unwrap_or(0);
+            if frees > 1 {
+                out.push(alloc::format!("pid {pid}: its resources were freed {frees} times"));
+            }
+            // L2. Nothing a thread can still run in is freed or published
+            // before every thread but the one tearing it down has left.
+            let tearing = self.tearing_down(pid);
+            if frees > 0 || self.published.contains_key(&pid) {
                 for (&tid, &at) in &proc.threads {
-                    // L2. An exit is published only once every thread of the
-                    // process is dead.
-                    if !at.is_zombie() {
+                    if !at.is_zombie() && Some(tid) != tearing {
                         out.push(alloc::format!(
-                            "pid {pid} published its exit with tid {tid} still Scheduled",
-                        ));
-                    }
-                    // L3. **And only once every thread is provably off every
-                    // CPU.** The stronger half, and the one a thread inserted
-                    // behind a retire sweep breaks: the marks are a table write
-                    // and reach a thread the sweep never named, the retire is
-                    // what stops it running.
-                    if !self.retired.contains(&(pid, tid)) && !self.leaving.contains(&(pid, tid)) {
-                        out.push(alloc::format!(
-                            "pid {pid} published its exit with tid {tid} never retired",
+                            "pid {pid} was torn down with tid {tid} still in it",
                         ));
                     }
                 }
             }
+            // L3. A teardown in flight keeps its thread in the process, where
+            // the machine's stop counts it as running.
+            if let Some(tid) = tearing {
+                if proc.location(tid).is_none_or(ThreadLocation::is_zombie) {
+                    out.push(alloc::format!(
+                        "pid {pid} tid {tid} is tearing its process down and the table has it out, \
+                         so a stop would not wait for it",
+                    ));
+                }
+            }
+        }
+        // L8. No thread's mappings go while a sibling can still run in them.
+        for (pid, tid) in &self.unmapped_under_siblings {
+            out.push(alloc::format!(
+                "pid {pid} tid {tid}: its entry and its mapped TLS went while a sibling was still in the process",
+            ));
         }
         out
     }
@@ -305,8 +417,21 @@ impl World {
     /// to its end. A join that has not been answered *yet* is the ordinary
     /// case, so checking it at every state would report every schedule.
     /// And **L5** — every TLS block a spawn mapped ends owned or released.
+    /// And **L6** — every claimed process is torn down: its exit published,
+    /// every killed thread gone.
     pub fn final_faults(&self) -> Vec<String> {
         let mut out = self.faults();
+        for (&pid, proc) in &self.procs {
+            if proc.claims > 0 && !self.published.contains_key(&pid) {
+                out.push(alloc::format!("pid {pid} was claimed for teardown and never published an exit"));
+            }
+        }
+        for &(pid, tid) in &self.killed {
+            let gone = self.departing.get(&(pid, tid)).is_some_and(|d| d.at == Out::Gone);
+            if !gone && self.procs.get(&pid).is_some_and(|p| p.location(tid).is_some()) {
+                out.push(alloc::format!("pid {pid} tid {tid} was killed and never left"));
+            }
+        }
         for &block in &self.tls_mapped {
             out.push(alloc::format!(
                 "TLS block {block} is mapped and owned by nobody — a refused spawn dropped it \

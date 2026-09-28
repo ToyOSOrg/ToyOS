@@ -47,10 +47,6 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
     },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
-    Disabled {
-        test: "lan_swap",
-        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
-    },
     Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },
     Disabled {
         test: "log_ring_keeps_the_owners_slots",
@@ -77,6 +73,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
     },
     Disabled {
+        test: "quiesce_wakes_on_the_last_teardown",
+        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
+    },
+    Disabled {
         test: "root_chunk_refused_on_a_usb_stick",
         issue: "issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md",
     },
@@ -91,14 +91,6 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "short_sleep_livelock",
         issue: "issues/kernel/short-sleep-livelock-stalls-on-ci-with-one-sleeper-never-returning.md",
-    },
-    Disabled {
-        test: "swap_crash_rolls_back",
-        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
-    },
-    Disabled {
-        test: "swap_netd",
-        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
     },
     Disabled {
         test: "syscall_window_nmi",

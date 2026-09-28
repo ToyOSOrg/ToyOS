@@ -356,6 +356,20 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
         "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
     ]),
+    red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
+        "two_processes_killing_each_other_both_end ... FAILED",
+        "a_kill_chain_of_three_ends ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-first-out-tears-down", None, &[
+        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
+        "a_join_racing_the_kill_that_takes_its_target ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
+        "the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED",
+        "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         "a_stopped_cpu_stops_taking_work ... FAILED",
     ]),

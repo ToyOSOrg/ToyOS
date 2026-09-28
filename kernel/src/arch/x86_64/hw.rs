@@ -466,12 +466,8 @@ impl Hw for KernelHw {
     }
 
     /// Reached once per task, from a later pass running on another stack, so dropping `payload`
-    /// here never frees the stack this call stands on; `publish_released` must be last — a
-    /// retirer's wait ends only once this drop has happened.
+    /// here never frees the stack this call stands on.
     fn release(&self, _key: TaskKey, payload: KernelPayload, acct: TaskAccounting) {
-        let handle = payload.handle.clone();
-        handle.finalize(acct);
-        drop(payload);
-        handle.publish_released();
+        payload.handle.finalize(acct);
     }
 }
