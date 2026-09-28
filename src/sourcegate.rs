@@ -744,10 +744,11 @@ const CI_PACKAGES: &[Package] = &[
               toolchain runner",
     },
     Package {
-        name: "ovmf",
-        why: "the UEFI firmware Debian's QEMU declares for q35 through its descriptors \
+        name: "ovmf-generic",
+        why: "the package that carries the descriptor Debian's QEMU declares for q35 \
               (src/firmware.rs): Debian's edk2 build, named rather than left to \
-              `qemu-system-x86`'s Recommends",
+              `qemu-system-x86`'s Recommends or pulled in by the `ovmf` metapackage, whose \
+              amdsev/inteltdx siblings contribute only memory-mapped descriptors this reader skips",
     },
     Package {
         name: "python3",

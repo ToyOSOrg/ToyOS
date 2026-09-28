@@ -1,10 +1,9 @@
 //! The machines ToyOS runs on.
 //!
 //! Every target triple, QEMU binary, guest CPU and accelerator the build
-//! system and the harness name is a function of one [`Arch`]; its firmware is
-//! whatever the host's QEMU declares (`crate::firmware`). Neither architecture
-//! is the reference: a new question about a machine is a new method here that
-//! both variants answer, or it does not compile.
+//! system and the harness name is a function of one [`Arch`]. Neither
+//! architecture is the reference: a new question about a machine is a new
+//! method here that both variants answer, or it does not compile.
 
 use std::path::Path;
 
@@ -111,6 +110,16 @@ impl Arch {
         }
     }
 
+    /// The `-machine` alias this architecture's guests boot on, and (with
+    /// x86_64's PC lineage prefixed `pc-`) the family a firmware descriptor's
+    /// `machines` glob is matched against.
+    pub const fn machine(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "q35",
+            Arch::Aarch64 => "virt",
+        }
+    }
+
     /// QEMU's `-boot` for this machine's firmware, if it needs one. AAVMF
     /// waits its platform boot timeout, five seconds, for a key before it boots
     /// unless QEMU hands it a menu wait through fw_cfg, which only `menu=on`
@@ -192,6 +201,12 @@ mod tests {
             }
             assert!(arch.qemu().ends_with(arch.name()));
         }
+    }
+
+    #[test]
+    fn each_arch_names_its_own_qemu_machine() {
+        assert_eq!(Arch::X86_64.machine(), "q35");
+        assert_eq!(Arch::Aarch64.machine(), "virt");
     }
 
     #[test]

@@ -15,8 +15,6 @@ Each section names its terms on one `SPDX-License-Identifier:` line, which
 agrees with the licence column of `COMMITTED_FILES` in `src/licence.rs` for
 every file both name, and that file judges what an image ships by them.
 
-Every hash is `shasum -a 256`, taken 2026-08-08.
-
 **If you redistribute a ToyOS image, read the DOOM1.WAD entry.** It is the one
 that constrains what you may do with a build.
 

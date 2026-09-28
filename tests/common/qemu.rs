@@ -4402,15 +4402,15 @@ fn qemu_command(
     // needs the userspace half of the irqchip, and a machine with no unit has
     // no reason to be built differently from the one it has always been.
     let mut machine = match arch {
-        Arch::X86_64 => String::from("q35"),
+        Arch::X86_64 => arch.machine().to_string(),
         Arch::Aarch64 => {
             // `virt` has no i8042 to take away, and the unit a profile declares
             // is VT-d, which it has none of either.
             assert!(options.i8042 && shape.iommu.is_none(), "`virt` has neither an i8042 nor VT-d");
-            String::from(match options.profile {
-                Profile::VirtEl2 => "virt,gic-version=3,virtualization=on",
-                _ => "virt,gic-version=3",
-            })
+            match options.profile {
+                Profile::VirtEl2 => format!("{},gic-version=3,virtualization=on", arch.machine()),
+                _ => format!("{},gic-version=3", arch.machine()),
+            }
         }
     };
     if !options.i8042 {

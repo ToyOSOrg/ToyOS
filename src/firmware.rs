@@ -2,10 +2,11 @@
 //! declares, never a file this tree carries or a path read off one machine.
 //!
 //! Found the way QEMU's interop spec (`docs/interop/firmware.json`) tells
-//! management software to: the `firmware/*.json` descriptors under every data
-//! directory QEMU reports (`-L help`), taken in file-name order, a name in an
-//! earlier directory hiding the same name in a later one, and the first that
-//! fits the machine wins. Nothing fits, and the boot is refused by name.
+//! management software to: the `firmware/*.json` descriptors under the user's
+//! override directory, then the system's, then every data directory QEMU
+//! reports (`-L help`), taken in that order, a name in an earlier directory
+//! hiding the same name in a later one, and the first that fits the machine
+//! wins. Nothing fits, and the boot is refused by name.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,8 +33,13 @@ impl Firmware {
     /// A fresh variable store at `to`, from the template.
     pub fn fresh_vars(&self, to: &Path) -> Result<(), String> {
         std::fs::copy(&self.vars, to)
-            .map(drop)
-            .map_err(|e| format!("copy the firmware's variable store {} to {}: {e}", self.vars.display(), to.display()))
+            .map_err(|e| format!("copy the firmware's variable store {} to {}: {e}", self.vars.display(), to.display()))?;
+        // `fs::copy` carries the template's mode. A read-only template (a 0444
+        // store, as on Nix) would leave the boot's own copy unwritable to QEMU
+        // and the next boot's copy over it failing the same way.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o644))
+            .map_err(|e| format!("make the firmware variable store copy {} writable: {e}", to.display()))
     }
 
     /// The two `-drive` values that give a guest this firmware, with `vars` as
@@ -63,12 +69,28 @@ fn find(arch: Arch) -> Result<Firmware, String> {
     if !out.status.success() {
         return Err(format!("{} -L help: {}: {}", arch.qemu(), out.status, String::from_utf8_lossy(&out.stderr)));
     }
-    let dirs: Vec<PathBuf> =
-        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(|l| Path::new(l).join("firmware")).collect();
+    let datadirs = String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(|l| Path::new(l).join("firmware")).collect();
+    let dirs = search_dirs(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref().map(Path::new),
+        std::env::var_os("HOME").as_deref().map(Path::new),
+        datadirs,
+    );
     select(arch, &machine_type(arch, &version), &descriptors(&dirs)?).map_err(|why| {
         let searched: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
-        format!("{why}; searched {} (QEMU {version}'s data directories)", searched.join(", "))
+        format!("{why}; searched {} (QEMU {version}'s data directories among them)", searched.join(", "))
     })
+}
+
+/// The directories `descriptors` reads, in the precedence
+/// `docs/interop/firmware.json` gives: the user's override
+/// (`$XDG_CONFIG_HOME`, else `$HOME/.config`), then the system's, then every
+/// data directory QEMU itself reports (`-L help`, `datadirs`).
+fn search_dirs(xdg_config_home: Option<&Path>, home: Option<&Path>, datadirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let user_config = xdg_config_home.map(Path::to_path_buf).or_else(|| home.map(|h| h.join(".config")));
+    let mut dirs: Vec<PathBuf> = user_config.map(|c| c.join("qemu/firmware")).into_iter().collect();
+    dirs.push(PathBuf::from("/etc/qemu/firmware"));
+    dirs.extend(datadirs);
+    dirs
 }
 
 /// Every `*.json` under `dirs`, read, in file-name order, a name in an earlier
@@ -98,13 +120,15 @@ fn descriptors(dirs: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
 
 /// The versioned machine type `arch`'s machine resolves to under QEMU
 /// `version`: what a descriptor's `machines` globs are matched against.
+/// x86_64's PC lineage versions its type under a `pc-` prefix the `q35` alias
+/// itself does not carry; aarch64's `virt` carries none.
 fn machine_type(arch: Arch, version: &str) -> String {
     let release: Vec<&str> = version.split('.').take(2).collect();
-    let family = match arch {
-        Arch::X86_64 => "pc-q35",
-        Arch::Aarch64 => "virt",
+    let prefix = match arch {
+        Arch::X86_64 => "pc-",
+        Arch::Aarch64 => "",
     };
-    format!("{family}-{}", release.join("."))
+    format!("{prefix}{}-{}", arch.machine(), release.join("."))
 }
 
 /// The first of `descriptors`, in the order given, that declares UEFI firmware
@@ -143,24 +167,16 @@ fn select(arch: Arch, machine: &str, descriptors: &[(PathBuf, Vec<u8>)]) -> Resu
     ))
 }
 
-/// Whether `pattern` matches `name`, `*` matching any run. The spec's globs
-/// are fnmatch's; one using more than `*` is refused rather than misread.
+/// Whether `pattern` matches `name`. Every glob measured across Homebrew's
+/// and Debian's descriptors is a plain prefix with at most one trailing `*`;
+/// anything else — a non-trailing `*`, or another fnmatch metacharacter — is
+/// refused by name rather than misread.
 fn glob(pattern: &str, name: &str) -> Result<bool, String> {
-    if pattern.contains(['?', '[', '\\']) {
-        return Err(format!("the machine glob {pattern:?} uses more than `*`, which this reader does not match"));
+    match pattern.strip_suffix('*') {
+        Some(prefix) if !prefix.contains(['*', '?', '[', '\\']) => Ok(name.starts_with(prefix)),
+        None if !pattern.contains(['?', '[', '\\']) => Ok(pattern == name),
+        _ => Err(format!("the machine glob {pattern:?} is not a prefix with at most one trailing `*`, which this reader does not match")),
     }
-    let mut parts = pattern.split('*');
-    let first = parts.next().expect("split yields at least one part");
-    let Some(mut rest) = name.strip_prefix(first) else { return Ok(false) };
-    let parts: Vec<&str> = parts.collect();
-    let Some((last, middle)) = parts.split_last() else { return Ok(rest.is_empty()) };
-    for part in middle {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return Ok(false),
-        }
-    }
-    Ok(rest.ends_with(last))
 }
 
 /// The fields of `docs/interop/firmware.json`'s `Firmware` this reader decides by.
@@ -228,6 +244,21 @@ mod tests {
             ("55-i440fx.json", descriptor("x86_64", r#""pc-i440fx-*""#, "", "/i440fx.fd")),
             ("56-arm.json", descriptor("aarch64", r#""virt-*""#, "", "/arm.fd")),
             ("58-hidden.json", Vec::new()),
+            // Fedora-style non-secure descriptors ahead of the raw ones: each
+            // fits every rule but the one it is named for, and must stay
+            // refused by that rule alone.
+            (
+                "58a-qcow2.json",
+                br#"{"interface-types":["uefi"],"mapping":{"device":"flash","executable":{"filename":"/qcow2.fd","format":"qcow2"},"nvram-template":{"filename":"/qcow2.fd.vars","format":"raw"}},"targets":[{"architecture":"x86_64","machines":["pc-q35-*"]}],"features":[]}"#.to_vec(),
+            ),
+            (
+                "58b-smm.json",
+                descriptor("x86_64", r#""pc-q35-*""#, r#""requires-smm""#, "/smm.fd"),
+            ),
+            (
+                "59-combined.json",
+                br#"{"interface-types":["uefi"],"mapping":{"device":"flash","mode":"combined","executable":{"filename":"/combined.fd","format":"raw"},"nvram-template":{"filename":"/combined.fd.vars","format":"raw"}},"targets":[{"architecture":"x86_64","machines":["pc-q35-*"]}],"features":[]}"#.to_vec(),
+            ),
             ("60-plain.json", descriptor("x86_64", r#""pc-i440fx-*","pc-q35-*""#, r#""acpi-s3","amd-sev""#, "/plain.fd")),
             ("70-later.json", descriptor("x86_64", r#""pc-q35-*""#, "", "/later.fd")),
         ]);
@@ -284,13 +315,43 @@ mod tests {
     }
 
     #[test]
-    fn a_glob_matches_by_star_and_refuses_what_it_cannot_read() {
+    fn a_glob_matches_a_trailing_star_as_a_prefix_and_refuses_anything_else() {
         assert_eq!(glob("pc-q35-*", "pc-q35-11.1"), Ok(true));
         assert_eq!(glob("pc-q35-*", "pc-i440fx-11.1"), Ok(false));
-        assert_eq!(glob("pc-*-11.*", "pc-q35-11.1"), Ok(true));
         assert_eq!(glob("pc-q35-11.0", "pc-q35-11.1"), Ok(false));
         assert_eq!(glob("pc-q35-11.1", "pc-q35-11.1"), Ok(true));
         assert_eq!(glob("*", "virt-11.1"), Ok(true));
+        assert!(glob("pc-*-11.*", "pc-q35-11.1").is_err());
         assert!(glob("pc-q35-1?.*", "pc-q35-11.1").is_err());
+    }
+
+    #[test]
+    fn the_users_and_the_systems_directories_come_before_qemus_own() {
+        let dirs = search_dirs(Some(Path::new("/x/cfg")), Some(Path::new("/x/home")), vec![PathBuf::from("/data/firmware")]);
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("/x/cfg/qemu/firmware"), PathBuf::from("/etc/qemu/firmware"), PathBuf::from("/data/firmware")]
+        );
+        let dirs = search_dirs(None, Some(Path::new("/x/home")), vec![]);
+        assert_eq!(dirs[0], PathBuf::from("/x/home/.config/qemu/firmware"));
+        let dirs = search_dirs(None, None, vec![PathBuf::from("/data/firmware")]);
+        assert_eq!(dirs, vec![PathBuf::from("/etc/qemu/firmware"), PathBuf::from("/data/firmware")]);
+    }
+
+    #[test]
+    fn a_read_only_templates_copy_is_still_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = toyos_tmpdir::TempDir::new("firmware-vars");
+        let template = tmp.path().join("template.fd");
+        std::fs::write(&template, b"vars").unwrap();
+        std::fs::set_permissions(&template, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let firmware = Firmware { descriptor: PathBuf::new(), code: PathBuf::new(), vars: template };
+        let to = tmp.path().join("copy.fd");
+        firmware.fresh_vars(&to).unwrap();
+        let mode = std::fs::metadata(&to).unwrap().permissions().mode() & 0o777;
+        assert_ne!(mode & 0o200, 0, "the copy must be owner-writable: {mode:04o}");
+        // A second boot copies over the same file: still possible only because
+        // the first copy did not inherit the template's read-only mode.
+        firmware.fresh_vars(&to).unwrap();
     }
 }
