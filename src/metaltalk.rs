@@ -1309,18 +1309,35 @@ mod tests {
     /// **A first dial refused is asked again, counted, and ends at its
     /// ceiling**: a machine still coming up refuses until `logd` listens, and
     /// one that never does is named at the ceiling rather than waited on to
-    /// the bound.
+    /// the bound. The refusals are staged through [`Reach`]: a listener this
+    /// process drops still takes connects while any child it is spawning holds
+    /// the fd.
     #[test]
     fn a_refused_first_dial_is_asked_again_up_to_its_ceiling() {
         let dir = toyos_tmpdir::TempDir::new("metaltalk-first-refused");
-        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
-        let at = probe.local_addr().unwrap();
-        drop(probe);
-        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(60)).unwrap();
+        let at = Peer::At(SocketAddr::from((Ipv4Addr::LOCALHOST, toyos_logstream::PORT)));
+        let stream = Stream::through(Arc::new(Refusing), at, &dir.join("s.log"), false, Duration::from_secs(60)).unwrap();
         assert!(stream.wait_connected(Duration::from_secs(5)).is_none(), "nothing listens");
         let why = stream.unopened().expect("the dial gave up within 5 s of its 60 and said why");
         assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
         assert_eq!(stream.turned_away(), TURNED_AWAY_CEILING, "every refused dial, and no more");
+    }
+
+    /// An address nothing listens on: every dial is refused.
+    struct Refusing;
+
+    impl Reach for Refusing {
+        fn resolve(&self, _: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+            unreachable!("an address is dialled, never resolved")
+        }
+
+        fn ask(&self, _: &str, _: Instant) -> Result<Option<Ipv4Addr>, String> {
+            unreachable!("an address is dialled, never asked for")
+        }
+
+        fn dial(&self, _: SocketAddr) -> std::io::Result<TcpStream> {
+            Err(std::io::ErrorKind::ConnectionRefused.into())
+        }
     }
 
     /// A machine rebooting behind the address this host's resolver still
@@ -1524,15 +1541,26 @@ mod tests {
         });
     }
 
-    /// `server` dropping every connection before a byte until the returned
-    /// call, which ends the thread doing it.
-    fn close_every(server: &TcpListener) -> impl FnOnce() {
+    /// Returns once this host's clock has reached `at`. A bound's passing is
+    /// the event, and only the clock says so.
+    fn past(at: Instant) {
+        while let Some(left) = at.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()) {
+            std::thread::sleep(left);
+        }
+    }
+
+    /// `server` closing every connection before a byte, each once `held` has
+    /// passed since it was taken, until the returned call, which ends the
+    /// thread doing it.
+    fn close_every(server: &TcpListener, held: Duration) -> impl FnOnce() {
         let (at, server) = (server.local_addr().unwrap(), server.try_clone().unwrap());
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let theirs = Arc::clone(&done);
         let closer = std::thread::spawn(move || {
             while !theirs.load(std::sync::atomic::Ordering::SeqCst) {
-                drop(server.accept());
+                let taken = server.accept();
+                past(Instant::now() + held);
+                drop(taken);
             }
         });
         move || {
@@ -1580,6 +1608,11 @@ mod tests {
     /// **A redial ends at its bound alone, and says so**: dials refused on a
     /// name, and connections closed before a line, are asked again until the
     /// bound passes, and the reader then names the end rather than going quiet.
+    ///
+    /// Whether the reader dials inside a 50 ms bound at all is the host
+    /// scheduler's, and a redial that did not says so too. A connection is
+    /// closed only once the bound has passed since it was taken, so a redial
+    /// that dialled ends on its first close, which is past its bound.
     #[test]
     fn a_redial_ends_at_its_bound_alone_and_says_so() {
         const BOUND: Duration = Duration::from_millis(50);
@@ -1595,11 +1628,15 @@ mod tests {
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
         let (closed, _first) = read_first(&server, Arc::new(Net), Peer::At(at), &dir);
-        let stop_closing = close_every(&server);
+        let stop_closing = close_every(&server, BOUND);
         closed.redial(BOUND);
         assert_eq!(closed.wait_for_connection(1, Duration::from_secs(5)), None, "every dial closed before a line");
         let why = closed.unopened().expect("the redial ended within 5 s and said why");
-        assert!(why.contains("redial's bound") && why.contains("ended before a line"), "{why}");
+        match closed.turned_away() {
+            0 => assert!(why.ends_with("by the bound: never asked"), "{why}"),
+            1 => assert!(why.contains("redial's bound") && why.contains("ended before a line"), "{why}"),
+            n => panic!("{n} dials counted, where the first was closed past the bound: {why}"),
+        }
         stop_closing();
     }
 

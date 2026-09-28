@@ -17,8 +17,7 @@ Unmeasured hypothesis: a `flock` belongs to the open file description, so a
 child that another test in the same process is spawning shares `using`'s
 lock until its exec closes the fd. `drop(using)` then releases nothing yet.
 The same mechanism was measured for a dropped TCP listener, whose accepts
-outlive its drop
-(`issues/build/a-first-dials-ceiling-test-dials-a-dropped-listener-a-spawned-child-still-holds.md`).
+outlive its drop.
 
 ## Exit condition
 
