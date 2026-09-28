@@ -1,8 +1,9 @@
 //! The loop the kernel runs, with the effects replaced by a record of them.
 //!
 //! Deliberately the *shape* the kernel takes and not a convenience: drain the
-//! controller's answers, act on whatever is finished, read the register, ask the
-//! machine, do the one thing it says, read again. A simulator whose loop differs
+//! controller's answers, act on whatever is finished, and where
+//! [`port::due`] says so read the register, ask the machine, do the one thing
+//! it says, read again. A simulator whose loop differs
 //! from the driver's tests a driver nobody ships.
 //!
 //! **Nothing here can wait**, and that is the property under test as much as any
@@ -43,6 +44,9 @@ pub enum Stuck {
     /// a future instant. A live-lock is a failure whatever it looks like from
     /// inside.
     NoProgress,
+    /// A pass left the port with work of its own and no instant to come back
+    /// at, so the kernel would not step it again until some other event.
+    Unwoken,
 }
 
 /// What the loop must never do, whatever sequence produced it.
@@ -121,6 +125,7 @@ pub struct Driver {
     /// an enumeration would do. The enumeration drains the event ring, so this
     /// is reachable rather than hypothetical.
     reenter: bool,
+    pull_as_it_enumerates: bool,
     /// Enumerate and tear down without asking whether the controller still owes
     /// an answer, which is the negative gate for the deferral.
     never_defers: bool,
@@ -178,6 +183,7 @@ impl Driver {
             slot: Some(1),
             spent: None,
             reenter: false,
+            pull_as_it_enumerates: false,
             never_defers: false,
             never_cancels: false,
             function: enumerate::Function::BootHid,
@@ -233,6 +239,13 @@ impl Driver {
     /// Stage a caller that re-enters the machine from inside an effect.
     pub fn reentrant(mut self) -> Self {
         self.reenter = true;
+        self
+    }
+
+    /// Stage a device pulled between the step that says enumerate and the
+    /// enumeration's first read of the port.
+    pub fn pulled_as_it_enumerates(mut self) -> Self {
+        self.pull_as_it_enumerates = true;
         self
     }
 
@@ -310,10 +323,22 @@ impl Driver {
     /// Everything the driver has to do at `now`, with every step checked
     /// against the word that produced it.
     pub fn pump(&mut self, port: &mut FakePort, now: Nanos) -> Result<(), Stuck> {
+        self.pass(port, now)?;
+        if self.state.outstanding() && self.wake_at.is_none() {
+            return Err(Stuck::Unwoken);
+        }
+        Ok(())
+    }
+
+    fn pass(&mut self, port: &mut FakePort, now: Nanos) -> Result<(), Stuck> {
         port.tick(now);
         self.collect(now);
         self.advance(now)?;
         self.recover(port, now);
+        if !port::due(port.take_event(), core::slice::from_ref(&self.state)) {
+            self.wake_at = self.outstanding.wake_at();
+            return Ok(());
+        }
         for _ in 0..STEP_BUDGET {
             let read = port.read();
             if !read.connected() || read.connect_changed() {
@@ -341,11 +366,7 @@ impl Driver {
                     self.wake_at = Some(at);
                     return Ok(());
                 }
-                Step::GaveUp(why) => {
-                    self.did.push(Did::GaveUp(why));
-                    self.wake_at = self.outstanding.wake_at();
-                    return Ok(());
-                }
+                Step::GaveUp(why) => self.did.push(Did::GaveUp(why)),
                 Step::Write(write) => port.write(write.raw(), now),
                 Step::Reset(kind, write) => {
                     self.did.push(Did::Reset(kind));
@@ -390,6 +411,9 @@ impl Driver {
                             return Err(Stuck::Broke(bad));
                         }
                     }
+                    if core::mem::take(&mut self.pull_as_it_enumerates) {
+                        port.detach();
+                    }
                     if self.outstanding.busy() {
                         return Err(Stuck::Order(Broke::ActedWithAnAnswerOutstanding));
                     }
@@ -405,6 +429,12 @@ impl Driver {
                         return Err(Stuck::Broke(bad));
                     }
                     port.write(ack.raw(), now);
+                    // `device::begin`'s refusal of a port its acknowledge left
+                    // disabled: no command is spent, and the port is read again.
+                    if !port.read().enabled() {
+                        self.enumerated(after.is_none());
+                        continue;
+                    }
                     // Submitted and left, exactly as the teardown is: the port
                     // stays inside the effect until the last act is answered,
                     // and the check above catches a step taken meanwhile.
