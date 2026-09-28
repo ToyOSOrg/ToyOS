@@ -2,7 +2,6 @@
 //! happens before there is a scheduler; every wait here runs in place.
 
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
 
 use crate::log;
 use crate::time::{Budget, Cadence, Duration};
@@ -21,7 +20,7 @@ use super::super::{IR0_ERDP, IR0_ERSTBA, IR0_ERSTSZ, IR0_IMAN, IR0_IMOD};
 use super::super::{OFF_CMD_RING, OFF_DCBAA, OFF_ERST, OFF_EVT_RING};
 use super::super::{OP_CONFIG, OP_CRCR, OP_DCBAAP, OP_PAGESIZE, OP_PORT_BASE, OP_USBCMD, OP_USBSTS};
 use super::super::{USBCMD_HCRST, USBCMD_RS, USBSTS_CNR, USBSTS_HCH};
-use super::super::{PORTSC_PP, PORT_REG_SIZE, PORT_WORK_AT, XHCI};
+use super::super::{PORTSC_PP, PORT_REG_SIZE, XHCI};
 use super::super::{controller_answers, PORT_DEBOUNCE_NS};
 use super::settles;
 use toyos_xhci::port::{self, GaveUp, Reset, ResetOutcome};
@@ -140,8 +139,6 @@ pub fn init(devices: &[PciDevice]) {
         }
         return;
     }
-    // Safe to zero: the boot scan acted on every port it looked at, so nothing is outstanding.
-    PORT_WORK_AT.store(0, Ordering::Relaxed);
     let hid: usize = controllers.iter().map(|c| c.devices.len()).sum();
     log!("xHCI: {} controller(s), {} HID device(s)", controllers.len(), hid);
     log!("usb-storage: {} device(s)", storage_count());
@@ -161,6 +158,7 @@ pub fn init(devices: &[PciDevice]) {
             ctrl.max_ports,
         );
     }
+    // No scheduler pass runs before `smp::set_ready`, so the scan's interrupt record is first polled with `XHCI` published.
     *XHCI.lock() = controllers;
 }
 
@@ -483,17 +481,16 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
                             "xHCI: port {} is SuperSpeed and its link would not train, warm \
                              reset included (PORTSC {:#010x}); skipping it",
                             port_idx + 1, ctrl.read_portsc(port_idx).raw()),
-                        GaveUp::ResetFailed(k) => log!(
-                            "xHCI: port {} completed its {} reset without enabling \
+                        GaveUp::ResetFailed => log!(
+                            "xHCI: port {} completed its hot reset without enabling \
                              (PORTSC {:#010x}); skipping it",
                             port_idx + 1,
-                            match k { Reset::Hot => "hot", Reset::Warm => "warm" },
                             ctrl.read_portsc(port_idx).raw()),
-                        GaveUp::ResetNeverFinished(_) => {
+                        GaveUp::ResetNeverFinished => {
                             unreachable!("a completed reset cannot have never finished")
                         }
                     }
-                    return ctrl.port_bound(port_idx, None);
+                    return ctrl.ports[usize::from(port_idx)].gave_up(why);
                 }
             }
         }
@@ -508,7 +505,7 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
         }
         log!("xHCI: port {} never finished its reset (PORTSC {:#010x}); skipping it",
             port_idx + 1, ctrl.read_portsc(port_idx).raw());
-        return ctrl.port_bound(port_idx, None);
+        return ctrl.ports[usize::from(port_idx)].gave_up(GaveUp::never_finished(kind));
     }
 }
 

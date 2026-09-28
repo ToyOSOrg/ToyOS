@@ -21,6 +21,8 @@
 
 #![cfg(feature = "loom")]
 
+use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
+
 use kernel_loom::sync::Lock;
 use loom::sync::Arc;
 
@@ -31,6 +33,8 @@ use loom::sync::Arc;
 /// previous owner acquired by.
 #[test]
 fn try_lock_observes_the_previous_owners_writes() {
+    static FOLLOWED: AtomicBool = AtomicBool::new(false);
+
     loom::model(|| {
         let lock = Arc::new(Lock::new(0u32));
 
@@ -49,10 +53,18 @@ fn try_lock_observes_the_previous_owners_writes() {
                 seen == 0 || seen == 42,
                 "try_lock handed out a value nobody wrote: {seen}",
             );
+            if seen == 42 {
+                FOLLOWED.store(true, StdOrdering::Relaxed);
+            }
         }
 
         writer.join().unwrap();
     });
+
+    assert!(
+        FOLLOWED.load(StdOrdering::Relaxed),
+        "no try_lock followed the writer's release, so the release edge was never checked",
+    );
 }
 
 /// Two `try_lock`s never hold the lock at once, and the loser leaves the ticket
