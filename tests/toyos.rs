@@ -945,6 +945,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // init starts it again and the boot reaches ready with the session home.
     // Body in `tests/common/storage.rs`.
     ("fsd_end_at_mount", Sched::Parallel, Tier::Fast),
+    // DATA's partition claim held by the guest across its server's restart:
+    // init refuses the restart by name and /home answers Gone. Body in
+    // `tests/common/storage.rs`.
+    ("fsd_claim_held", Sched::Parallel, Tier::Fast),
     // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
     ("home_overwrite_reads_back", Sched::Parallel, Tier::Fast),
     // One filesystem under two paths: the guest writes under each of /apps and
@@ -1661,6 +1665,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
     ("so_cache_refusals", &["test_rs_so_cache_policy"]),
     ("fsd_restart", &["test_rs_fs_client_bound", "test_rs_fs_restart"]),
+    ("fsd_claim_held", &["test_rs_fs_claim_held"]),
     ("esp_filesystem", &["test_rs_esp_files"]),
     ("log_flush_retry", &["test_rs_esp_files"]),
     ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),
@@ -11297,6 +11302,7 @@ fn run_machine_test(
         "so_cache_refusals" => storage::so_cache_refusals(test_config, c_bins, rust_bins),
         "fsd_restart" => storage::fsd_restart(test_config, c_bins, rust_bins),
         "fsd_end_at_mount" => storage::fsd_end_at_mount(test_config, c_bins, rust_bins),
+        "fsd_claim_held" => storage::fsd_claim_held(test_config, c_bins, rust_bins),
         "home_overwrite_reads_back" => {
             storage::home_overwrite_reads_back(test_config, c_bins, rust_bins)
         }

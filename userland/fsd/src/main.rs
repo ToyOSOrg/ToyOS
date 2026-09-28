@@ -97,6 +97,14 @@ const END_AT_READ: &str = "--end-at-read";
 /// boot config's `args`.
 const END_AT_MOUNT: &str = "--end-at-mount";
 
+/// `--let-go-at-read <path>`: the first open of `path` on the volume to read
+/// only, this boot, syncs the volume, lets its partition go (its claim closed,
+/// the volume absent from then on) and is refused; that client's next request
+/// ends this process before it is answered. So a test can take the partition's
+/// claim before init starts this role again. Once a boot, as [`END_AT_READ`]
+/// is. Armed by nothing but a boot config's `args`.
+const LET_GO_AT_READ: &str = "--let-go-at-read";
+
 /// How long [`END_AT_MOUNT`] waits for the connection it ends under.
 const END_AT_MOUNT_WAIT: Duration = Duration::from_secs(60);
 
@@ -185,13 +193,18 @@ fn main() {
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
         panic!("fsd: started with {args:?}; the first argument is a role: data, log or boot")
     });
-    let (mut guid, mut end_on, mut end_at_read, mut end_at_mount) = (None, None, Vec::new(), None);
+    let (mut guid, mut end_on, mut end_at_read, mut end_at_mount, mut let_go_at_read) =
+        (None, None, Vec::new(), None, None);
     let mut rest = args.iter().skip(2);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             END_ON => end_on = Some(rest.next().unwrap_or_else(|| panic!("fsd: {END_ON} takes a path")).clone()),
             END_AT_READ => {
                 end_at_read.push(rest.next().unwrap_or_else(|| panic!("fsd: {END_AT_READ} takes a path")).clone())
+            }
+            LET_GO_AT_READ => {
+                let_go_at_read =
+                    Some(rest.next().unwrap_or_else(|| panic!("fsd: {LET_GO_AT_READ} takes a path")).clone())
             }
             END_AT_MOUNT => {
                 end_at_mount = Some(
@@ -226,6 +239,8 @@ fn main() {
         writeback: WriteBack::default(),
         end_on,
         end_at_read,
+        let_go_at_read,
+        let_go_client: None,
         probe: Poller::new(caps_len),
         scratch: Vec::new(),
     }
@@ -315,23 +330,27 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume
         }
         Role::Log | Role::Boot => {
             let writable = role == Role::Log;
-            let mounted = if let Some(disk) = claimed() {
-                Some(fat_on(disk, writable))
-            } else {
-                guid.and_then(toyos_abi::part::PartGuid::parse).and_then(|g| served(g.0)).map(|disk| fat_on(disk, writable))
+            let mounted = match claimed() {
+                Some(disk) => Ok(fat_on(disk, writable)),
+                // init starts this role with its partition's claim or its GUID, never neither.
+                None => {
+                    let guid = guid.unwrap_or_else(|| {
+                        panic!("fsd: the {role:?} server was started with neither its partition's claim nor its GUID")
+                    });
+                    let parsed = toyos_abi::part::PartGuid::parse(guid)
+                        .unwrap_or_else(|| panic!("fsd: {guid} is no partition GUID"));
+                    served(parsed.0).map(|disk| fat_on(disk, writable)).ok_or(guid)
+                }
             };
             match mounted {
-                Some(Ok(volume)) => volume,
-                Some(Err(why)) => {
+                Ok(Ok(volume)) => volume,
+                Ok(Err(why)) => {
                     println!("fsd: the {role:?} partition does not mount: {why}");
                     Box::new(Absent::new(roots, why))
                 }
-                None => Box::new(Absent::new(
+                Err(guid) => Box::new(Absent::new(
                     roots,
-                    match guid {
-                        Some(guid) => format!("the {role:?} partition {guid} is on no disk this server reaches"),
-                        None => format!("the loader named no {role:?} partition"),
-                    },
+                    format!("the {role:?} partition {guid} is on no disk this server reaches"),
                 )),
             }
         }
@@ -374,6 +393,10 @@ struct Server {
     end_on: Option<String>,
     /// [`END_AT_READ`]'s paths on the volume.
     end_at_read: Vec<String>,
+    /// [`LET_GO_AT_READ`]'s path on the volume.
+    let_go_at_read: Option<String>,
+    /// The client whose next request ends this server, once [`LET_GO_AT_READ`] fired.
+    let_go_client: Option<u64>,
     /// Asks an acceptor whether a connection waits, before [`Server::accept`]
     /// takes it.
     probe: Poller,
@@ -686,6 +709,10 @@ impl Server {
     }
 
     fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, SyscallError> {
+        if self.let_go_client == Some(id) {
+            println!("fsd: {LET_GO_AT_READ}: ending at its client's next request");
+            std::process::exit(1);
+        }
         let changes = matches!(op, WRITE | TRUNCATE | MKDIR | RMDIR | UNLINK | RENAME | SYMLINK | STREAM)
             || (op == OPEN && r.flags & (O_WRITE | O_APPEND | O_CREATE | O_TRUNCATE | O_CREATE_NEW) != 0);
         if changes && !self.volume.writable() {
@@ -705,6 +732,18 @@ impl Server {
                 if reads_only && self.end_at_read.contains(&path) && first_this_boot(&format!("end-at-read-{path}")) {
                     println!("fsd: {END_AT_READ}: ending before the first read of {path} is answered");
                     std::process::exit(1);
+                }
+                if reads_only
+                    && self.let_go_at_read.as_deref() == Some(path.as_str())
+                    && first_this_boot(&format!("let-go-at-read-{path}"))
+                {
+                    let unwritten = self.volume.sync()?;
+                    assert!(unwritten.is_empty(), "fsd: {LET_GO_AT_READ}: {unwritten:?} did not sync");
+                    let roots: Vec<&str> = self.caps.iter().map(|c| c.root.as_str()).collect();
+                    self.volume = Box::new(Absent::new(&roots, format!("{LET_GO_AT_READ} let the partition go")));
+                    self.let_go_client = Some(id);
+                    println!("fsd: {LET_GO_AT_READ}: {path}: the partition is let go");
+                    return Err(SyscallError::NotFound);
                 }
                 if self.clients[&id].fids.len() >= MAX_FIDS {
                     return Err(SyscallError::ResourceExhausted);

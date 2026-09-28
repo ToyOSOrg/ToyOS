@@ -598,7 +598,7 @@ impl<'a> Service<'a> {
         connectors: &BTreeMap<&str, Connector>,
         dirs: &BTreeMap<String, Connector>,
         log: &mut Log,
-    ) -> std::io::Result<u32> {
+    ) -> Result<u32, StartError> {
         // **Checked again at every start, not only on arrival**: the installed
         // file lives in an ambient directory, so what init verified when it
         // wrote it is not a claim about what is there now. This narrows the
@@ -617,7 +617,7 @@ impl<'a> Service<'a> {
             0 => Served::Keep(&kept.acceptors),
             _ => Served::Restart { acceptors: &kept.acceptors, owed },
         };
-        let storage = storage_endowment(self.program, self.role, syscap).map_err(std::io::Error::other)?;
+        let storage = storage_endowment(self.program, self.role, syscap)?;
         let (child, devices) = start(
             Command::new(path),
             self.program,
@@ -658,6 +658,29 @@ impl<'a> Service<'a> {
         match self.role {
             Some(role) => format!("{} {role}", self.program.name),
             None => self.program.name.clone(),
+        }
+    }
+}
+
+/// Why a service did not start.
+enum StartError {
+    /// The partition its file-server role is on was refused, so the role is
+    /// absent: its ports close and nothing serves its paths from memory.
+    Partition(String),
+    Other(std::io::Error),
+}
+
+impl From<std::io::Error> for StartError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Partition(why) => f.write_str(why),
+            Self::Other(e) => e.fmt(f),
         }
     }
 }
@@ -767,8 +790,13 @@ impl<'a> Init<'a> {
                 let mut service = Service::new(program, role, kept, wake);
                 let started =
                     service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.dirs, &mut self.log);
-                if let Err(e) = started {
-                    panic!("init: cannot start {}: {e}", program.name);
+                match started {
+                    Ok(_) => {}
+                    Err(StartError::Partition(why)) => {
+                        service.kept.lock().expect("init: a service's state is poisoned").acceptors.clear();
+                        say!("init: {} did not start ({why}); its ports are closed this boot", service.label());
+                    }
+                    Err(e) => panic!("init: cannot start {}: {e}", program.name),
                 }
                 self.services.push(service);
             }
@@ -2215,15 +2243,18 @@ fn guid_text(guid: [u8; 16]) -> String {
 /// session on. A file server is told its role, and gets its partition as a
 /// claim when a disk the kernel drives carries it — the stick, until usbd
 /// serves it — and otherwise the partition's GUID, which it opens through the
-/// block service; DATA it finds by type there itself.
-fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> Result<Storage, String> {
+/// block service; DATA it finds by type there itself. A log or boot role the
+/// loader named no partition for, a claim the kernel refuses, and a role two
+/// partitions on the kernel's disks carry each refuse the start: the role is
+/// then absent, never served from memory.
+fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> Result<Storage, StartError> {
     use toyos_abi::inventory::{Record, Role};
     let mut storage = Storage::default();
     let is_block = program.serves.iter().any(|s| s == toyos_blockring::PORT);
     if !is_block && role.is_none() {
         return Ok(storage);
     }
-    let records = inventory(syscap)?;
+    let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
     if is_block {
         if let Some(root) = loaded(&records, Role::Root) {
             storage.args.extend(["--running".to_string(), guid_text(root)]);
@@ -2245,10 +2276,10 @@ fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> 
         "data" => (on_kernel_disk(&|p| p.type_guid == toyos_gpt::Guid::TOYOS_DATA.0), None),
         "log" | "boot" => {
             let which = if role == "log" { Role::Log } else { Role::Boot };
-            match loaded(&records, which) {
-                Some(guid) => (on_kernel_disk(&|p| p.unique_guid == guid), Some(guid)),
-                None => (Vec::new(), None),
-            }
+            let Some(guid) = loaded(&records, which) else {
+                return Err(StartError::Partition(format!("the loader named no `{role}` partition")));
+            };
+            (on_kernel_disk(&|p| p.unique_guid == guid), Some(guid))
         }
         other => panic!("init: `{other}` is no role; the build refuses it"),
     };
@@ -2259,7 +2290,7 @@ fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> 
             let name = request.write_name(&mut buf).to_string();
             match syscap.claim_partition::<toyos::Device>(toyos_abi::part::PartGuid(*guid)) {
                 Ok(claim) => storage.claims.push((format!("{DEV_PREFIX}{name}"), claim)),
-                Err(e) => say!("init: {}: {}", program.name, refused(&name, e)),
+                Err(e) => return Err(StartError::Partition(refused(&name, e))),
             }
         }
         [] => {
@@ -2267,11 +2298,12 @@ fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> 
                 storage.args.push(guid_text(guid));
             }
         }
-        many => say!(
-            "init: {}: the kernel's disks carry {} partitions for the `{role}` role, and a role is one",
-            program.name,
-            many.len()
-        ),
+        many => {
+            return Err(StartError::Partition(format!(
+                "the kernel's disks carry {} partitions for the `{role}` role, and a role is one",
+                many.len()
+            )))
+        }
     }
     Ok(storage)
 }

@@ -735,7 +735,7 @@ fn craft_disk(path: &Path, twin: &str) -> Result<Layout, String> {
 }
 
 /// The designation on `data`: fsd formats a DATA only on this consent.
-fn designate(device: &mut dyn gpt::DiskDevice, data: Span) -> Result<(), String> {
+pub(super) fn designate(device: &mut dyn gpt::DiskDevice, data: Span) -> Result<(), String> {
     let mut stamp = [0u8; BLOCK as usize];
     stamp[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);
     let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;

@@ -751,6 +751,67 @@ pub fn fsd_end_at_mount(
     Ok(())
 }
 
+/// A partition claim held elsewhere refuses its file server's restart by name,
+/// and the role's paths are then Gone, never served from memory.
+///
+/// DATA is on a USB stick the kernel drives, so its server holds the
+/// partition's claim. `tests/fsdclaimcase` arms `--let-go-at-read`, and
+/// `test_rs_fs_claim_held` takes the claim the server let go, ends the server,
+/// and holds the claim until init has answered the role's restart.
+pub fn fsd_claim_held(
+    _test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/fs_claim_held.rs`.
+    const DATA: &str = "7E2B4C6D-8F1A-4B3C-9D5E-6F7A8B9C0D1E";
+    const MIB: u64 = 1024 * 1024;
+    const LET_GO: &str = "fsd: --let-go-at-read: home/fsd_let_go: the partition is let go";
+    const ENDED: &str = "fsd: --let-go-at-read: ending at its client's next request";
+    const REFUSED: &str = "init: fsd data ended and would not start again (";
+    const HELD: &str = "is already claimed); its ports are closed";
+
+    let stick = super::lane::dir().join("fsd-claim-held.img");
+    let data = ("ToyOS data", 96 * MIB, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA, super::partclaim::ALIGNED);
+    let (mut device, spans) = super::partclaim::table(&stick, 100 * MIB, &[data])?;
+    super::partclaim::designate(&mut *device, spans[0])?;
+    device.flush().map_err(|e| format!("flush the stick: {e}"))?;
+    drop(device);
+
+    let config = super::compile::repo_root().join("tests/fsdclaimcase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::UsbDisk, usb_images: vec![stick.clone()], ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    // The premise: DATA's first server holds the stick's partition.
+    if !boot.contains("fsd: block 0 designates this partition for ToyOS; formatting it") {
+        return Err(format!("fsd never formatted DATA off the stick, so no server held its claim:\n{boot}"));
+    }
+    let result = qemu.run_test("test_rs_fs_claim_held", Duration::from_secs(60));
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    let log = format!("{boot}\n{}{}{tail}", result.before, result.serial);
+    if result.exit_code != Some(0) || !result.stdout.contains("fs_claim_held: PASS") {
+        return Err(format!("fs_claim_held guest failed:\n{}\nconsole:\n{log}", result.stdout));
+    }
+    let console = super::serial::Serial::named("fsd_claim_held", log.as_str());
+    console.must_say(LET_GO)?;
+    console.must_say(ENDED)?;
+    let Some(refused) = log.lines().find(|l| l.contains(REFUSED) && l.contains(HELD)) else {
+        return Err(format!("init never said DATA's restart was refused for the held claim:\n{log}"));
+    };
+    console.must_not_say(IN_MEMORY)?;
+    console.must_be_clean()?;
+    let _ = std::fs::remove_file(&stick);
+    eprintln!("  [fsd] {}", refused.trim());
+    Ok(())
+}
+
 /// `/apps` and `/home` are two paths into one filesystem, judged off the device.
 ///
 /// The guest writes one file under each and shuts down; the host then finds
