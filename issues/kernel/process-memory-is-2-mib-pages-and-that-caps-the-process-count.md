@@ -18,9 +18,6 @@ IOMMU's superpages, the kernel's own mappings. One paging design serves both,
 on x86-64 and on the ARM64 the tree is kept portable for
 (`issues/kernel/toyos-runs-on-arm64.md`).
 
-**Blocked on:** the owner's word to start. Recorded, not started, at the
-owner's instruction.
-
 **The constraint that makes this a track, measured on the T14** (run 29
 readback, `PMM: 100/16038MB used` at 11 s with four user processes and three
 kernel threads live; the same record's rows: stack 16 pages held, init-tls 5,
@@ -38,3 +35,40 @@ longer shares a 2 MiB page with a neighbour's registers, so the relocation
 that `kernel/src/pcidev/` does before a hand-over is no longer needed for a
 window firmware placed apart from its neighbours. Placing a window inside the
 host bridge's firmware-reported apertures stays correct under either page size.
+
+## Stages
+
+Each lands alone and leaves `main` whole. **Commit is strict**: a mapping
+reserves its frame count when it is made and is refused by name then, never
+killed at a fault. No promotion (the kernel has no thread to do it) and no
+live split of a user leaf.
+
+1. **Scatter-gather user copies.** A user window is the physical runs its
+   pages sit in, each pinned; a buffer's copy is cut at their seams instead of
+   refused. Exit: `toyos-userbound`'s segment tests over shuffled 4 KiB frames
+   and the guest `user_copy_spans_windows` green; `abuse_page_straddle`
+   unchanged, because a typed value still lies inside one 2 MiB page.
+2. **Superframe frame allocator.** 4 KiB frames carved from 2 MiB
+   superframes; the pin rule held per superframe, so no pinned frame is
+   reissued and no superframe holding one is handed out whole; a watermark
+   refuses an allocation before the machine runs dry. Exit: host tests of
+   carve, free, pin and the refusal; every 2 MiB caller of the PMM unchanged.
+3. **4 KiB user leaves.** A software `OWNED` bit in the leaf is the ledger of
+   the frames a process owns, with per-process counts; stacks are demand-zero
+   and TLS is 4 KiB. A typed syscall value crossing a page is served in
+   segments, so `is_user_object` stops refusing a straddle and
+   `abuse_page_straddle`'s refusals become delivery verdicts. Exit: a
+   process's floor on the T14 against the 10 to 14 MB above.
+4. **Demand-zero anonymous `mmap`.** A fault installs a 2 MiB leaf only for a
+   whole aligned 2 MiB span of the mapping; unmapping a range no thread touched
+   sends no IPI; `munmap` refuses a size that is not the whole mapping. Exit:
+   `mmap` of more than the watermark allows refused at `mmap`, and a guest that
+   touches one page of a large mapping holds one frame.
+5. **File-backed faults at 4 KiB.** ROOT's read-only text is shared
+   zero-copy. Exit: two processes of one binary hold its text once.
+6. **`/apps` image sharing.** The design is the owner's decision, owed when
+   this stage is reached.
+7. **Retire 2 MiB where it no longer pays.** Exit: every remaining 2 MiB user
+   leaf is a stage-4 whole span or a device or DMA grant.
+8. **Optional: PCID-scoped remote flush.** Exit: a measured shootdown cost
+   that pays for it.

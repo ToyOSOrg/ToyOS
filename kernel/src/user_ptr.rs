@@ -7,6 +7,8 @@
 //! for the copy's life — a typed value's as much as a [`UserBytes`]/
 //! [`UserBytesMut`] buffer's — so a sibling's `munmap` cannot reissue the
 //! backing between the translation and the copy, nor under a copy across a park.
+//! A window is the physical runs its pages sit in, and a buffer's copy is cut at
+//! their seams; a typed value lies inside one 2 MiB page, so in one run.
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
 
@@ -16,6 +18,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use toyos_abi::syscall::SyscallError;
+use toyos_userbound::Segment;
 
 use crate::UserAddr;
 
@@ -90,13 +93,25 @@ pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm
 
 /// A `T` at `ptr` as a pinned window; `is_user_object` keeps it aligned and
 /// inside one 2 MiB page.
-fn object<T: UserSafe>(ptr: UserAddr, access: Access) -> Result<(*mut T, FramePin), SyscallError> {
-    let size = core::mem::size_of::<T>();
-    if !toyos_userbound::is_user_object(ptr.raw(), size as u64, core::mem::align_of::<T>() as u64) {
+fn object<T: UserSafe>(ptr: UserAddr, access: Access) -> Result<(*mut T, FramePins), SyscallError> {
+    let (kptr, pins) = object_run(ptr, core::mem::size_of::<T>(), core::mem::align_of::<T>(), access)?;
+    Ok((kptr.cast(), pins))
+}
+
+fn object_run(ptr: UserAddr, size: usize, align: usize, access: Access) -> Result<(*mut u8, FramePins), SyscallError> {
+    if !toyos_userbound::is_user_object(ptr.raw(), size as u64, align as u64) {
         return Err(SyscallError::BadAddress);
     }
-    let (kptr, pin) = window(ptr, size, access).ok_or(SyscallError::BadAddress)?;
-    Ok((kptr.cast(), pin))
+    let pins = window(ptr, size, access).ok_or(SyscallError::BadAddress)?;
+    let [run] = pins.0[..] else { object_split(ptr, size, pins.0.len()) };
+    Ok((crate::mm::DirectMap::from_phys(run.phys).as_mut_ptr(), pins))
+}
+
+/// A 2 MiB page is one frame in order, so an object inside one is one run.
+#[cold]
+#[inline(never)]
+fn object_split(ptr: UserAddr, size: usize, runs: usize) -> ! {
+    panic!("a {size}-byte value at {:#x} inside one 2 MiB page lies in {runs} physical runs", ptr.raw())
 }
 
 /// Context for a single syscall invocation; the lifetime `'a` keeps validated references from escaping it.
@@ -113,24 +128,12 @@ impl<'a> SyscallContext<'a> {
 
     /// A bulk buffer the kernel reads out of and never borrows.
     pub fn user_bytes(&self, ptr: UserAddr, len: u64) -> Option<UserBytes<'a>> {
-        let len = len as usize;
-        if len == 0 {
-            let kptr = core::ptr::NonNull::<u8>::dangling().as_ptr() as *const u8;
-            return Some(UserBytes { kptr, len, _pin: None, _scope: PhantomData });
-        }
-        let (kptr, pin) = window(ptr, len, Access::Read)?;
-        Some(UserBytes { kptr: kptr as *const u8, len, _pin: Some(pin), _scope: PhantomData })
+        Some(UserBytes(View::window(ptr, len, Access::Read)?))
     }
 
     /// A bulk buffer the kernel writes into and never borrows.
     pub fn user_bytes_mut(&self, ptr: UserAddr, len: u64) -> Option<UserBytesMut<'a>> {
-        let len = len as usize;
-        if len == 0 {
-            let kptr = core::ptr::NonNull::<u8>::dangling().as_ptr();
-            return Some(UserBytesMut { kptr, len, _pin: None, _scope: PhantomData });
-        }
-        let (kptr, pin) = window(ptr, len, Access::Write)?;
-        Some(UserBytesMut { kptr, len, _pin: Some(pin), _scope: PhantomData })
+        Some(UserBytesMut(View::window(ptr, len, Access::Write)?))
     }
 
     /// Copy a user string of at most [`MAX_USER_STR`] bytes into kernel memory; an over-long or non-UTF-8 string is `InvalidArgument`, not `BadAddress`.
@@ -144,14 +147,14 @@ impl<'a> SyscallContext<'a> {
 
     /// Read a typed value out of user memory, copied rather than borrowed.
     pub fn copy_in<T: UserSafe>(&self, ptr: UserAddr) -> Result<T, SyscallError> {
-        let (kptr, _pin) = object::<T>(ptr, Access::Read)?;
-        // SAFETY: `object::<T>` validated size/align inside one page and pinned the frame until `_pin` drops; `T: UserSafe` makes every bit pattern valid; `read_volatile` guards against a concurrent write from another thread of the same process.
+        let (kptr, _pins) = object::<T>(ptr, Access::Read)?;
+        // SAFETY: `object::<T>` validated size/align inside one run and pinned its frames until `_pins` drops; `T: UserSafe` makes every bit pattern valid; `read_volatile` guards against a concurrent write from another thread of the same process.
         Ok(unsafe { kptr.read_volatile() })
     }
 
     /// Write a typed value into user memory.
     pub fn copy_out<T: UserSafe>(&self, ptr: UserAddr, value: &T) -> Result<(), SyscallError> {
-        let (kptr, _pin) = object::<T>(ptr, Access::Write)?;
+        let (kptr, _pins) = object::<T>(ptr, Access::Write)?;
         if crate::actuator::copy_meets_a_remap() {
             remap_race::hold(kptr.cast(), core::mem::size_of::<T>());
         }
@@ -169,92 +172,115 @@ impl<'a> SyscallContext<'a> {
     }
 }
 
-/// A bulk buffer the kernel copies out of and never borrows: no reference exists because another thread of the same process can rewrite the bytes at any time; not volatile per byte, since the missing reference already stops the compiler assuming stability.
-pub struct UserBytes<'a> {
-    kptr: *const u8,
-    len: usize,
-    /// Holds the frames covered pinned for this window's life; `None` for the empty window and for a [`sub`](UserBytes::sub) view, which borrows its parent's pin through the returned lifetime.
-    _pin: Option<FramePin>,
-    _scope: PhantomData<&'a ()>,
+/// Where a window's bytes are: the runs it pinned itself, or its parent's for a
+/// [`sub`](UserBytes::sub) view, which borrows the parent's pins through the
+/// returned lifetime.
+enum Runs<'a> {
+    Pinned(FramePins),
+    Borrowed(&'a [Segment]),
 }
+
+/// `len` bytes starting `off` bytes into `runs`: the one shape both window types are.
+struct View<'a> {
+    runs: Runs<'a>,
+    off: usize,
+    len: usize,
+}
+
+impl View<'_> {
+    fn window(ptr: UserAddr, len: u64, access: Access) -> Option<Self> {
+        let len = len as usize;
+        let pins = match len {
+            0 => FramePins(Vec::new()),
+            _ => window(ptr, len, access)?,
+        };
+        Some(View { runs: Runs::Pinned(pins), off: 0, len })
+    }
+
+    fn runs(&self) -> &[Segment] {
+        match &self.runs {
+            Runs::Pinned(pins) => &pins.0,
+            Runs::Borrowed(runs) => runs,
+        }
+    }
+
+    /// Hands `copy` each piece of bytes `[off, off + len)` of this view as a
+    /// direct-map pointer and the piece's offset in that range; panics if out of
+    /// bounds — the kernel's own arithmetic, never user input.
+    fn pieces(&self, what: &str, off: usize, len: usize, mut copy: impl FnMut(*mut u8, usize, usize)) {
+        assert!(
+            off.checked_add(len).is_some_and(|end| end <= self.len),
+            "{what} {off}+{len} past a {}-byte window",
+            self.len
+        );
+        toyos_userbound::pieces(self.runs(), (self.off + off) as u64, len as u64, |phys, at, n| {
+            copy(crate::mm::DirectMap::from_phys(phys).as_mut_ptr(), at as usize, n as usize)
+        });
+    }
+
+    fn sub(&self, what: &str, off: usize, len: usize) -> View<'_> {
+        assert!(
+            off.checked_add(len).is_some_and(|end| end <= self.len),
+            "{what} {off}+{len} past a {}-byte window",
+            self.len
+        );
+        View { runs: Runs::Borrowed(self.runs()), off: self.off + off, len }
+    }
+}
+
+/// A bulk buffer the kernel copies out of and never borrows: no reference exists because another thread of the same process can rewrite the bytes at any time; not volatile per byte, since the missing reference already stops the compiler assuming stability.
+pub struct UserBytes<'a>(View<'a>);
 
 impl UserBytes<'_> {
     pub fn len(&self) -> usize {
-        self.len
+        self.0.len
     }
 
     /// Copy `dst.len()` bytes out of the window at `off`; panics if out of bounds — the kernel's own arithmetic, never user input.
     pub fn read_at(&self, off: usize, dst: &mut [u8]) {
-        assert!(
-            off.checked_add(dst.len()).is_some_and(|end| end <= self.len),
-            "UserBytes::read_at {off}+{} past a {}-byte window",
-            dst.len(),
-            self.len
-        );
-        // SAFETY: the assert proves `off + dst.len() <= self.len`, and `window` proved the range is one physically contiguous mapping; `dst` is an owned `&mut`, so the ranges cannot overlap.
-        unsafe {
-            core::ptr::copy_nonoverlapping(self.kptr.add(off), dst.as_mut_ptr(), dst.len());
-        }
+        let into = dst.as_mut_ptr();
+        self.0.pieces("UserBytes::read_at", off, dst.len(), |run, at, n| {
+            // SAFETY: `pieces` bounds `[at, at + n)` inside `dst` and `run..+n` inside one run `window` pinned; `dst` is an owned `&mut`, so the ranges cannot overlap.
+            unsafe { core::ptr::copy_nonoverlapping(run, into.add(at), n) }
+        });
     }
 
     /// Copy the window at `off` into one ring run; panics if out of bounds, as
     /// [`read_at`](Self::read_at) does. `copy` for [`UserBytesMut::write_run`]'s
     /// reason.
     pub fn read_run(&self, off: usize, dst: &mut toyos_abi::ring::Dst<'_>) {
-        assert!(
-            off.checked_add(dst.len()).is_some_and(|end| end <= self.len),
-            "UserBytes::read_run {off}+{} past a {}-byte window",
-            dst.len(),
-            self.len
-        );
-        // SAFETY: as `UserBytesMut::write_run`, mirrored.
-        unsafe {
-            core::ptr::copy(self.kptr.add(off), dst.as_mut_ptr(), dst.len());
-        }
+        let into = dst.as_mut_ptr();
+        self.0.pieces("UserBytes::read_run", off, dst.len(), |run, at, n| {
+            // SAFETY: as `UserBytesMut::write_run`, mirrored.
+            unsafe { core::ptr::copy(run, into.add(at), n) }
+        });
     }
 
     /// The `len`-byte window at `off` inside this one.
     pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
-        assert!(
-            off.checked_add(len).is_some_and(|end| end <= self.len),
-            "UserBytes::sub {off}+{len} past a {}-byte window",
-            self.len
-        );
-        // SAFETY: the assert proves `off + len <= self.len`, so the result stays inside the window `window` validated.
-        UserBytes { kptr: unsafe { self.kptr.add(off) }, len, _pin: None, _scope: PhantomData }
+        UserBytes(self.0.sub("UserBytes::sub", off, len))
     }
 }
 
 /// A bulk buffer the kernel copies into and never reads back, so it cannot act on a value another thread substituted.
-pub struct UserBytesMut<'a> {
-    kptr: *mut u8,
-    len: usize,
-    /// As [`UserBytes::_pin`]: the frames stay pinned for this window's life.
-    _pin: Option<FramePin>,
-    _scope: PhantomData<&'a mut ()>,
-}
+pub struct UserBytesMut<'a>(View<'a>);
 
 impl UserBytesMut<'_> {
     pub fn len(&self) -> usize {
-        self.len
+        self.0.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.0.len == 0
     }
 
     /// Copy `src` into the window at `off`; panics if out of bounds, for the same reason as [`UserBytes::read_at`].
     pub fn write_at(&mut self, off: usize, src: &[u8]) {
-        assert!(
-            off.checked_add(src.len()).is_some_and(|end| end <= self.len),
-            "UserBytesMut::write_at {off}+{} past a {}-byte window",
-            src.len(),
-            self.len
-        );
-        // SAFETY: the assert proves `off + src.len() <= self.len`, and `window` proved the range is one physically contiguous mapping.
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), self.kptr.add(off), src.len());
-        }
+        let from = src.as_ptr();
+        self.0.pieces("UserBytesMut::write_at", off, src.len(), |run, at, n| {
+            // SAFETY: `pieces` bounds `[at, at + n)` inside `src` and `run..+n` inside one run `window` pinned and proved writable.
+            unsafe { core::ptr::copy_nonoverlapping(from.add(at), run, n) }
+        });
     }
 
     /// Copy one ring run into the window at `off`; panics if out of bounds, as
@@ -262,38 +288,24 @@ impl UserBytesMut<'_> {
     /// `copy_nonoverlapping`**: `SYS_PIPE_MAP` maps the ring's page into the
     /// caller, which may then name it as this window.
     pub fn write_run(&mut self, off: usize, src: &toyos_abi::ring::Src<'_>) {
-        assert!(
-            off.checked_add(src.len()).is_some_and(|end| end <= self.len),
-            "UserBytesMut::write_run {off}+{} past a {}-byte window",
-            src.len(),
-            self.len
-        );
-        // SAFETY: the assert proves `off + src.len() <= self.len`, `window` proved the range is one physically contiguous mapping, and `Ring::read` proved the run is inside its own data region. Neither side is a reference, so nothing here claims either range is exclusive.
-        unsafe {
-            core::ptr::copy(src.as_ptr(), self.kptr.add(off), src.len());
-        }
+        let from = src.as_ptr();
+        self.0.pieces("UserBytesMut::write_run", off, src.len(), |run, at, n| {
+            // SAFETY: `pieces` bounds `[at, at + n)` inside the ring run, which `Ring::read` proved is inside its own data region, and `run..+n` inside one run `window` pinned and proved writable. Neither side is a reference, so nothing here claims either range is exclusive.
+            unsafe { core::ptr::copy(from.add(at), run, n) }
+        });
     }
 
     /// Zero `len` bytes of the window at `off`.
     pub fn fill_zero(&mut self, off: usize, len: usize) {
-        assert!(
-            off.checked_add(len).is_some_and(|end| end <= self.len),
-            "UserBytesMut::fill_zero {off}+{len} past a {}-byte window",
-            self.len
-        );
-        // SAFETY: same bound as `write_at`, with a constant zero byte instead of a slice.
-        unsafe { core::ptr::write_bytes(self.kptr.add(off), 0, len) };
+        self.0.pieces("UserBytesMut::fill_zero", off, len, |run, _, n| {
+            // SAFETY: as `write_at`, with a constant zero byte instead of a slice.
+            unsafe { core::ptr::write_bytes(run, 0, n) }
+        });
     }
 
     /// The `len`-byte window at `off` inside this one.
     pub fn sub(&mut self, off: usize, len: usize) -> UserBytesMut<'_> {
-        assert!(
-            off.checked_add(len).is_some_and(|end| end <= self.len),
-            "UserBytesMut::sub {off}+{len} past a {}-byte window",
-            self.len
-        );
-        // SAFETY: [`UserBytes::sub`]'s argument exactly.
-        UserBytesMut { kptr: unsafe { self.kptr.add(off) }, len, _pin: None, _scope: PhantomData }
+        UserBytesMut(self.0.sub("UserBytesMut::sub", off, len))
     }
 }
 
@@ -323,20 +335,19 @@ impl ByteSource for UserBytes<'_> {
     }
 }
 
-/// A pin on the physical frames a user-copy window covers: the PMM reissues none of them while it lives, so the window's direct-map pointer stays backed even after a sibling unmaps and frees the range across a park.
-struct FramePin {
-    phys: u64,
-    len: usize,
-}
+/// A pin on every physical run a user-copy window covers: the PMM reissues none of their frames while it lives, so the window's direct-map pointers stay backed even after a sibling unmaps and frees the range across a park.
+struct FramePins(Vec<Segment>);
 
-impl Drop for FramePin {
+impl Drop for FramePins {
     fn drop(&mut self) {
-        crate::mm::pmm::unpin_range(self.phys, self.len);
+        for run in &self.0 {
+            crate::mm::pmm::unpin_range(run.phys, run.len as usize);
+        }
     }
 }
 
-/// Validate `[ptr, ptr+len)` as one physically contiguous user window, pin every frame it covers, and return its direct-map address with the pin. The pin is taken under the address-space lock over a translation that still names the frame, so a concurrent `munmap` — which needs that same lock to free the range — cannot reissue a frame between the confirmation and the pin.
-fn window(ptr: UserAddr, len: usize, access: Access) -> Option<(*mut u8, FramePin)> {
+/// Validate `[ptr, ptr+len)` as a user window, walked page by page into its physical runs, and pin every frame they cover. The pins are taken under the address-space lock over a translation that still names each frame, so a concurrent `munmap` — which needs that same lock to free the range — cannot reissue a frame between the confirmation and the pin.
+fn window(ptr: UserAddr, len: usize, access: Access) -> Option<FramePins> {
     if !toyos_userbound::in_user_half(ptr.raw(), len as u64) {
         return None;
     }
@@ -351,14 +362,21 @@ fn window(ptr: UserAddr, len: usize, access: Access) -> Option<(*mut u8, FramePi
     }
     let pt = crate::process::current_address_space();
     let guard = pt.lock();
-    let phys = toyos_userbound::contiguous(start, len as u64, access, |at| {
-        translate_now(&guard, UserAddr::new(at), access).map(|dm| dm.phys())
-    })?;
-    if !crate::mm::pmm::pin_range(phys, len) {
+    let mut runs = Vec::new();
+    toyos_userbound::segments(
+        start,
+        len as u64,
+        |at| translate_now(&guard, UserAddr::new(at), access).map(|dm| dm.phys()),
+        |run| runs.push(run),
+    )?;
+    // Cut back to the runs already pinned on a refusal, which the drop then unpins.
+    if let Some(refused) = runs.iter().position(|run| !crate::mm::pmm::pin_range(run.phys, run.len as usize)) {
+        runs.truncate(refused);
+        drop(FramePins(runs));
         return None;
     }
     drop(guard);
-    Some((crate::mm::DirectMap::from_phys(phys).as_mut_ptr(), FramePin { phys, len }))
+    Some(FramePins(runs))
 }
 
 /// `copy-meets-a-remap`: a sibling's `munmap` and `mmap` staged between a

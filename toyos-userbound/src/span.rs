@@ -89,43 +89,8 @@ pub enum Access {
     Write,
 }
 
-/// The grain a split window grants rights at.
+/// The smallest leaf, and the grain a user window is walked at.
 pub const PAGE_4K: u64 = 4096;
-
-/// Where `[start, start + len)` begins in physical memory, if the whole range is
-/// one physically contiguous run that grants `access`. `leaf` is the page walk:
-/// the physical address one user address translates to where it grants
-/// `access`, and `None` where it does not.
-///
-/// **A write is asked at every 4 KiB page, a read at every 2 MiB page**, both
-/// at the first and the last byte. A split window is one 2 MiB frame in order,
-/// so contiguity can break only at a 2 MiB boundary and every present page is
-/// readable; but it grants writes page by page, so a read-only page between
-/// two writable ones is a hole that the ends alone would pass.
-pub fn contiguous(
-    start: u64,
-    len: u64,
-    access: Access,
-    mut leaf: impl FnMut(u64) -> Option<u64>,
-) -> Option<u64> {
-    if len == 0 || !in_user_half(start, len) {
-        return None;
-    }
-    let phys = leaf(start)?;
-    let step = match access {
-        Access::Read => PAGE_2M,
-        Access::Write => PAGE_4K,
-    };
-    let end = start + len;
-    let mut at = (start & !(step - 1)) + step;
-    while at < end {
-        if leaf(at)? != phys + (at - start) {
-            return None;
-        }
-        at += step;
-    }
-    (len == 1 || leaf(end - 1)? == phys + (len - 1)).then_some(phys)
-}
 
 #[cfg(test)]
 mod tests {
@@ -205,54 +170,6 @@ mod tests {
             assert!(!is_user_object(USER_TOP + PAGE_2M, size, align), "{name} above the bound");
             assert!(!is_user_object(u64::MAX - size + 1, size, align), "{name} wrapping");
         }
-    }
-
-    /// A split window at `PAGE_2M` over frame `FRAME`: every page present,
-    /// and page `ro` readable but not writable.
-    const FRAME: u64 = 0x4000_0000;
-
-    fn split_with_one_read_only(ro: u64) -> impl Fn(u64, Access) -> Option<u64> {
-        move |at, access| {
-            if !(PAGE_2M..2 * PAGE_2M).contains(&at) {
-                return None;
-            }
-            let page = (at - PAGE_2M) / PAGE_4K;
-            (access == Access::Read || page != ro).then_some(FRAME + (at - PAGE_2M))
-        }
-    }
-
-    #[test]
-    fn a_write_across_a_read_only_page_between_writable_ones_is_refused() {
-        let walk = split_with_one_read_only(2);
-        let start = PAGE_2M + PAGE_4K;
-        let len = 3 * PAGE_4K;
-        assert_eq!(
-            contiguous(start, len, Access::Write, |at| walk(at, Access::Write)),
-            None,
-            "a write window over pages 1..4 with page 2 read-only was granted"
-        );
-        assert_eq!(contiguous(start, len, Access::Read, |at| walk(at, Access::Read)), Some(FRAME + PAGE_4K));
-        assert_eq!(
-            contiguous(start, PAGE_4K, Access::Write, |at| walk(at, Access::Write)),
-            Some(FRAME + PAGE_4K),
-            "page 1 alone is writable"
-        );
-    }
-
-    #[test]
-    fn a_window_across_two_frames_that_do_not_follow_is_refused() {
-        let walk = |at: u64| Some(if at < 2 * PAGE_2M { FRAME + at } else { 8 * FRAME + at });
-        for access in [Access::Read, Access::Write] {
-            assert_eq!(contiguous(2 * PAGE_2M - 8, 16, access, walk), None, "{access:?}");
-            assert_eq!(contiguous(2 * PAGE_2M - 8, 8, access, walk), Some(FRAME + 2 * PAGE_2M - 8));
-        }
-    }
-
-    #[test]
-    fn an_empty_or_kernel_window_is_refused_before_the_walk() {
-        let never = |_: u64| -> Option<u64> { panic!("walked") };
-        assert_eq!(contiguous(PAGE_2M, 0, Access::Read, never), None);
-        assert_eq!(contiguous(USER_TOP - 8, 16, Access::Write, never), None);
     }
 
     #[test]

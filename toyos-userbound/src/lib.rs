@@ -2,11 +2,14 @@
 //!
 //! **Before a dereference**: is this
 //! address userland's, is the object at it aligned for the type being read, and
-//! does it lie wholly inside one mapping? **Before a placement**: can a length
+//! does it lie wholly inside one mapping? **Before a copy**: which physical runs
+//! hold a user window, and which of them does each piece of the copy land in?
+//! **Before a placement**: can a length
 //! userland asked for be placed at all, and where does it go? **After a trap**:
 //! which side did the frame come from?
 //!
-//! [`span`] answers the first, [`place`] the second and [`fault`] the third.
+//! [`span`] answers the first, [`segment`] the second, [`place`] the third and
+//! [`fault`] the fourth.
 //!
 //! Pure. No I/O, no allocation, no `unsafe`, nothing read from a device and
 //! nothing named outside this crate. The kernel is the only caller —
@@ -25,11 +28,13 @@
 
 pub mod fault;
 pub mod place;
+pub mod segment;
 pub mod span;
 
 pub use fault::Ring;
 pub use place::{PageSpan, Window};
+pub use segment::{pieces, segments, Segment};
 pub use span::{
-    align_2m_checked, contiguous, in_user_half, is_user_addr, is_user_object, rebase_base, Access,
-    PAGE_2M, PAGE_4K, USER_TOP,
+    align_2m_checked, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M,
+    PAGE_4K, USER_TOP,
 };
