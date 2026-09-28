@@ -54,8 +54,7 @@ pub fn main_thread_blocked(pid: u32) -> bool {
 }
 
 /// Poll until `cond` holds. The bound is a hang guard and not a timing
-/// assumption: every caller waits for a state the kernel has already decided,
-/// and the `sysinfo` call inside `cond` is the loop's preemption point
+/// assumption: the `sysinfo` call inside `cond` is the loop's preemption point
 /// (`thread::yield_now` is a spin hint on this platform).
 pub fn await_true(what: &str, cond: impl Fn() -> bool) {
     let give_up = Instant::now() + Duration::from_secs(5);

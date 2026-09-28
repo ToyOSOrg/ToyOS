@@ -937,8 +937,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // by name, serves DATA absent, and the stick is untouched. Body in
     // `tests/common/storage.rs`.
     ("fsd_two_data", Sched::Parallel, Tier::Fast),
-    // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
-    ("home_overwrite_reads_back", Sched::Parallel, Tier::Weekly),
+    // A same-length overwrite on /home, the guest's read held against the image, and the only guest control on init's stop sync. Body in `tests/common/storage.rs`.
+    ("home_overwrite_reads_back", Sched::Parallel, Tier::Nightly),
     // One filesystem under two paths: the guest writes under each of /apps and
     // /home, the host finds both in one volume on the image. Body in
     // `tests/common/storage.rs`.

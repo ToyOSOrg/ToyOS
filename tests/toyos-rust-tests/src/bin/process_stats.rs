@@ -299,8 +299,6 @@ fn a_wait_to_write_a_full_connection_is_ipc() {
     );
 }
 
-/// Runs `role` on a connection to this process, `release`s it once the
-/// roster has its main thread blocked, and answers the exited child's numbers.
 fn parked_on_a_connection(role: &str, release: impl FnOnce(&Connection)) -> ProcessStats {
     let (acceptor, connector) = port::create().expect("a port");
     let names = namespace::build().add(HELD_SERVICE, &connector).finish().expect("a namespace");
@@ -337,8 +335,6 @@ fn held_ipc() {
     assert_eq!(n, 1, "held-ipc: the parent's answer");
 }
 
-/// Fills the connection its namespace names, says it is running, then blocks
-/// writing one more byte until the parent reads.
 fn held_ipc_write() {
     let conn = toyos::endow::service(HELD_SERVICE).expect("held-ipc-write: the parent's port");
     let chunk = [0u8; 65536];

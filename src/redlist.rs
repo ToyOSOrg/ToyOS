@@ -61,10 +61,6 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
     },
     Disabled {
-        test: "quiesce_leaves_the_volume_whole",
-        issue: "issues/build/quiesce-leaves-the-volume-whole-needs-its-flush-to-close-inside-the-stops-budget.md",
-    },
-    Disabled {
         test: "quiesce_stops_the_machine",
         issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
     },

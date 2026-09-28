@@ -352,10 +352,10 @@ pub fn quiesce_wakes_on_the_last_park(
     );
     let at = |needle: &str| whole.lines().position(|line| line.contains(needle));
     let stopped_at = whole.lines().position(|line| toyos_quiesce::Record::parse(line).is_some());
-    let (Some(held_at), Some(synced_at)) = (at(&held), stopped_at) else {
+    let (Some(held_at), Some(stopped_at)) = (at(&held), stopped_at) else {
         return Err(format!("the kernel never held the thread it names ({held:?})\n{whole}"));
     };
-    if held_at > synced_at {
+    if held_at > stopped_at {
         return Err(format!("the thread was held after the stop was over\n{whole}"));
     }
     // More than one sweep: the stop found the held thread running and had
