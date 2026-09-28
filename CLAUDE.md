@@ -50,6 +50,8 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 **CPU state** — a CPU's control registers come from one declaration, applied by the BSP and by every AP and asserted on each; no read-modify-write decides what either holds.
 
+**Firmware** — the kernel calls no UEFI service; every UEFI call ToyOS makes is the loader's, before ExitBootServices.
+
 **Input** — the kernel delivers key *transitions*, never what one types; a surface turns one into the other. Translation, layouts, dead keys and escape sequences live in userland, one translator per surface.
 
 **POSIX** — the kernel ABI and SDK are Rust-native and capability-shaped. POSIX lives in `userland/libc` (ours, not a fork) with explicitly relaxed rules. That layer may be ugly; the kernel may not.
@@ -70,8 +72,9 @@ The bar is not yet the tree. The standing failures are declared rather than remo
 The testing rules live where they are enforced: known reds in `src/redlist.rs`, tiers in `src/tiers.rs`, the PR gate and the nightly in `.github/workflows/`. Operationally:
 
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo test --workspace --exclude toyos-build` runs every host-crate suite.
-- **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time, and an agent reports only once nothing it started is still running.
+- **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time.
 - **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost. A full boot is under a second; incremental builds finish in seconds.
+- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started, removes the worktrees and scratch build output it no longer needs, and never leaves an emulator, a build or a watcher running.
 
 ## Repository layout
 
