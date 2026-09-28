@@ -1,8 +1,9 @@
 //! A thread killed inside any wait the kernel has for it leaves, and its
 //! process ends.
 //!
-//! One child per wait, each killed after it says it is about to park: a futex,
-//! a poll ring, a process's end, a thread's end and a sleep. A wait the kill
+//! One child per wait, each killed once it has said it is about to park and the
+//! kernel's roster shows its main thread parked: a futex, a poll ring, a
+//! process's end, a thread's end and a sleep. A wait the kill
 //! cannot end keeps the child's last thread in its process for ever, and
 //! `wait` below never returns; the harness's deadline is what says so.
 //! `kill_while_blocked` holds the pipe, connection and accept waits, and
@@ -12,11 +13,13 @@ use std::io::{Read, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicU32;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-use toyos::endow::Endowments;
+use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::Poller;
 use toyos::process::Process;
+use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
@@ -28,6 +31,9 @@ const WAITED: &str = "waited";
 
 /// `process::KILLED_EXIT_CODE`.
 const KILLED: i32 = 137;
+
+/// `sched::payload::SCHED_BLOCKED`, the state column of the roster.
+const BLOCKED: u8 = 2;
 
 // `sleep` runs before `process-wait` and `thread-join`: both of those arms also
 // sleep underneath (the waited process's `nanosleep`, the joined thread's
@@ -64,7 +70,7 @@ fn test() {
     println!("kill_ends_every_wait: every wait a kill reached, it ended");
 }
 
-/// Spawn a child in `role` and read its marker: it is about to park.
+/// Spawn a child in `role`, read its marker, and return once it is parked.
 fn spawn(role: &str, endow: Option<(String, u32)>) -> Child {
     let mut command = Command::new(SELF_PATH);
     command.arg(role).stdout(Stdio::piped());
@@ -79,7 +85,35 @@ fn spawn(role: &str, endow: Option<(String, u32)>) -> Child {
         line.push(byte[0]);
     }
     assert_eq!(String::from_utf8_lossy(&line), format!("parked in {role}"), "{role} never reached its wait");
+    // The marker says only that the park is next: a kill landing before it ends
+    // the child at the marker's own syscall, and the wait the arm names is never
+    // killed. The bound is a hang guard, not a timing assumption.
+    let pid = child.id();
+    assert_ne!(pid, 0, "{role}: the kernel no longer answers for the child");
+    let give_up = Instant::now() + Duration::from_secs(5);
+    while !main_thread_parked(pid) {
+        assert!(Instant::now() < give_up, "{role}: the roster never showed the child parked");
+    }
     child
+}
+
+/// Whether the roster shows `pid`'s main thread parked; the `sysinfo` call is
+/// the polling loop's preemption point.
+fn main_thread_parked(pid: u32) -> bool {
+    const HEADER: usize = toyos::system::SYSINFO_HEADER_SIZE;
+    const ENTRY: usize = toyos::system::SYSINFO_ENTRY_SIZE;
+    static CAP: OnceLock<SysCap> = OnceLock::new();
+    let cap = CAP.get_or_init(|| {
+        Endowments::get()
+            .take(SYSCAP_LABEL)
+            .expect("test-runner endows every binary it spawns a system capability")
+    });
+    let mut buf = vec![0u8; HEADER + ENTRY * 256];
+    let n = cap.roster(&mut buf);
+    assert!((HEADER..=buf.len()).contains(&n), "sysinfo answered {n}");
+    buf[HEADER..n].chunks_exact(ENTRY).any(|entry| {
+        u32::from_le_bytes(entry[0..4].try_into().unwrap()) == pid && entry[9] == 0 && entry[8] == BLOCKED
+    })
 }
 
 fn child(role: &str) -> ! {
