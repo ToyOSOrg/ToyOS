@@ -46,6 +46,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
     },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
+    Disabled {
+        test: "lan_swap",
+        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
+    },
     Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },
     Disabled {
         test: "partition_claim_departure",
@@ -76,8 +80,20 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/so-cache-refusals-saw-the-kernel-refuse-nothing-once.md",
     },
     Disabled {
+        test: "swap_crash_rolls_back",
+        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
+    },
+    Disabled {
+        test: "swap_netd",
+        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
+    },
+    Disabled {
         test: "usb_disk_index_stable",
         issue: "issues/hardware/usb-disk-index-stable-nothing-enumerates-on-the-first-controller.md",
+    },
+    Disabled {
+        test: "usb_transport_break",
+        issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
     },
     Disabled {
         test: "xhci_flap",
