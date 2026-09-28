@@ -113,7 +113,7 @@ use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{NoCapability, PciDevice, Unarmed};
 use crate::iommu::{DeviceSpace, IommuError};
-use crate::mm::paging::{CachePolicy, MmioPolicy};
+use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
 use crate::sync::Lock;

@@ -71,46 +71,11 @@ enum Sched {
 /// *waiting* — for a marker, for a debounce, for a device — which is why this is
 /// a measurement and not a division.
 ///
-/// **Twelve is the number for one suite on this host**, and [`HostSlots`] is
-/// what stops four agents at twelve being 48 guests on 14 cores.
+/// **Twelve is the number for one suite on this host.**
 /// An earlier table said eight; it was taken while `drain_serial` was still
 /// width-scaled and
 /// `metal_sim_pointer_churn`'s twenty-four paced drains *were* the phase.
 const DEFAULT_WIDTH: usize = 12;
-
-/// This run's claim on the host's guest budget.
-///
-/// [`DEFAULT_WIDTH`] is a number for *one* suite, and nothing was handing out
-/// the cores that two suites both spend.
-/// A second suite on this machine is not a slower first suite, it
-/// is a wrong one: `screen_fatal_halt` red at 11 s against 3.3 s alone, and an
-/// agent's hour spent chasing that as a regression.
-///
-/// **One slot per task, never per boot.** A worker holds at most one and never
-/// waits for a second while holding one, which is what makes the semaphore
-/// deadlock-free rather than lucky: several tests hold two guests at once, and a
-/// slot each would let twelve workers each hold one and each wait for another.
-///
-/// The wait sits outside the task, so it lands in the phase's wall clock and in
-/// no test's duration — a `PASS` time, and the profile [`longest_first`] orders
-/// on, both stay measurements of the test rather than of the queue.
-struct HostSlots {
-    root: std::path::PathBuf,
-    /// The name this run answers to in another run's waiting message. A pid
-    /// alone is not enough to act on: an agent needs to know which worktree.
-    label: String,
-    /// Zero is the semaphore off. It is the only way to measure a suite against
-    /// one that has it, which is what `--host-slots 0` is for.
-    budget: usize,
-}
-
-impl HostSlots {
-    fn take(&self, what: &str) -> Option<toyos_build::buildlock::Guard> {
-        let budget = self.budget;
-        (budget > 0)
-            .then(|| toyos_build::buildlock::guest_slot(&self.root, budget, &format!("{}: {what}", self.label)))
-    }
-}
 
 /// Which tier the shared boot's discovered members are in: one boot, so one
 /// tier. Declared beside [`SHARED_BLOCK`] rather than assumed, for the same
@@ -152,10 +117,6 @@ const SHARED_BLOCK: Sched = Sched::Parallel;
 /// second of guest time between its members, and what these need is a syscall
 /// number the other 150 must not have.
 const ACTUATOR_TESTS: &[&str] = &[
-    // Actions 0, 1 and 2: a kernel `panic!`, a null read in kernel context, and
-    // a spinlock held across a scheduler entry. Each kills the caller and the
-    // machine has to survive it, which is the whole verdict.
-    "panic_recovery",
     // Actions 10 and 11: the address of sixteen bytes of kernel memory and
     // whether they still hold what the kernel put there. A guest cannot read the
     // kernel's address space, so without them a kernel that still made the write
@@ -253,7 +214,6 @@ const RUST_SKIP: &[&str] = &[
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
-    "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
@@ -304,15 +264,16 @@ const RUST_SKIP: &[&str] = &[
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
     // `netd_slow_reader`, `netd_held_open`, `netd_stalled_peer`,
-    // `netd_udp_refused`, `netd_udp_any_address` and `netd_refused_pipes` run
-    // them on `tests/netcase`, and `netd_lookup_let_go` on it with its frames
-    // held.
+    // `netd_udp_refused`, `netd_udp_any_address`, `netd_refused_pipes` and
+    // `netd_refused_accept` run them on `tests/netcase`, and
+    // `netd_lookup_let_go` on it with its frames held.
     "netd_slow_reader",
     "netd_held_open",
     "netd_stalled_peer",
     "netd_udp_refused",
     "netd_udp_any_address",
     "netd_refused_pipes",
+    "netd_refused_accept",
     "netd_lookup_let_go",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
@@ -325,8 +286,7 @@ const RUST_SKIP: &[&str] = &[
     // and the runner's bound is the fallback. `lan_swap` rides it.
     "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
-    // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
-    // which is also what makes its claim about *the recovered CPU* precise.
+    // `heap_ceiling_bounds` boots the `test-actuators` kernel for it.
     "heap_ceiling",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
@@ -564,11 +524,6 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // the desktop's next repaint — which only where that wait lands decides,
     // so it is timer-anchored despite being a screendump-content check.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
-    ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
-    // The other half of the recovery branch: the test above reads the screen
-    // either side of a survived panic, which holds whether or not the discard
-    // did anything.
-    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
     ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
@@ -883,6 +838,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // round trip after each case, a named line per refusal and a clean
     // console; its clocks are liveness guards.
     ("netd_refused_pipes", Sched::Parallel, Tier::Fast),
+    // The netcase boot again: an accept netd refuses for room leaves its owner
+    // a wake for the connection it left, once room returns. The verdict
+    // is the guest's wake or its absence.
+    ("netd_refused_accept", Sched::Parallel, Tier::Fast),
     // The netcase boot again: bytes held back past a full pipe move on the
     // pipe's room alone, the peer holding the connection open and silent. The
     // verdict is the guest's byte-for-byte comparison; its clocks are
@@ -1194,13 +1153,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // offsets it chose itself.
     ("operation_nesting", Sched::Parallel, Tier::Fast),
     ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
-    // The spawn half alone: one headless boot whose verdict is three kernel
-    // log lines.
+    // The spawn half alone: one headless boot whose verdict is kernel log
+    // lines.
     ("klogd_hosted", Sched::Parallel, Tier::Fast),
-    // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
-    // spawn half is per-PR again; alone they still price over the ceiling,
-    // and sit Nightly.
     ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("klogd_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("lock_across_switch_halts", Sched::Parallel, Tier::Nightly),
+    ("heap_over_ceiling_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
     // over two boots measured 12 s twelve-wide on the dev host**, against
@@ -1513,7 +1474,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
     ("fs_dirs_durable", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
-    ("heap_ceiling_recovery", Sched::Parallel, Tier::Nightly),
+    ("heap_ceiling_bounds", Sched::Parallel, Tier::Nightly),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
@@ -1616,7 +1577,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("gsbase_locked", &["test_rs_gsbase_locked"]),
     ("sched_check_build", &["test_rs_sched_stress"]),
     ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
-    ("heap_ceiling_recovery", &["test_rs_heap_ceiling"]),
+    ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
     ("i8042_health_cadence", &["test_rs_i8042_keyboard"]),
     ("i8042_health", &["test_rs_i8042_keyboard"]),
@@ -1634,6 +1595,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_listener_forgery", &["test_rs_netd_listener_forgery"]),
     ("netd_slow_reader", &["test_rs_netd_slow_reader"]),
     ("netd_refused_pipes", &["test_rs_netd_refused_pipes"]),
+    ("netd_refused_accept", &["test_rs_netd_refused_accept"]),
     ("netd_held_open", &["test_rs_netd_held_open"]),
     ("netd_stalled_peer", &["test_rs_netd_stalled_peer"]),
     ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
@@ -1698,6 +1660,10 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
+    ("syscall_panic_halts", &["test_rs_test_panic_child"]),
+    ("syscall_fault_halts", &["test_rs_test_panic_child"]),
+    ("lock_across_switch_halts", &["test_rs_test_panic_child"]),
+    ("heap_over_ceiling_halts", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
     ("dump_nmi_probe", &["test_rs_dump_stage_load"]),
     ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
@@ -1740,8 +1706,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
-    ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
-    ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
 
 /// The clients every `tests/metalcase` desktop boot carries: the group shares
@@ -2930,7 +2894,7 @@ const MAX_KERNEL_LINES: usize = 60;
 /// The kernel's own account of a test that died, which `stdout` cannot carry.
 ///
 /// **`exit code Some(-1)` is the kernel saying it killed the process** —
-/// `recover_or_halt` answers a Ring 3 fault with `kill_process(-1)` — and every
+/// `fatal_exception` answers a Ring 3 fault with `kill_process(-1)` — and every
 /// word of *why* is a `log!`: the vector, `rip`, `cr2`, the resolved symbol.
 /// `run_test_paced` files kernel lines under `serial` and keeps them out of
 /// `stdout`, which is right for a test that passed and leaves a killed one with
@@ -3031,42 +2995,9 @@ fn check_rust_result(result: &TestResult) -> bool {
     }
 }
 
-/// Checks both exit code and serial diagnostics for panic recovery.
-fn check_panic_recovery(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
-
-    let checks: &[(&str, &str)] = &[
-        ("PANIC:", "expected PANIC header"),
-        ("SYS_DEBUG", "expected SYS_DEBUG in panic message"),
-        ("Syscall: num=92", "expected syscall context in panic report"),
-        ("User backtrace:", "expected user backtrace in panic report"),
-        ("Registers:", "expected register dump from kernel fault"),
-        ("SEGFAULT tid=", "expected SEGFAULT header"),
-        ("deliberate_null_deref", "expected deliberate_null_deref in segfault backtrace"),
-        ("+0x", "expected symbolized backtraces"),
-    ];
-
-    let mut ok = true;
-    for (needle, msg) in checks {
-        if !result.serial.contains(needle) {
-            eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-            ok = false;
-        }
-    }
-    if let Err(msg) = check_tripwire_attribution(&result.serial) {
-        eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-        ok = false;
-    }
-    ok & check_symbols_were_read("panic_recovery", &result.serial)
-}
-
 /// The kernel names the frames of a process it loaded off a **disk**.
 ///
-/// `null_deref_run_from_disk` is this child's alone, so a `contains` over the
-/// capture window cannot be satisfied by `segfault_child` running in the same
-/// boot.
+/// `null_deref_run_from_disk` is this child's alone.
 fn check_disk_backtrace(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
@@ -3108,13 +3039,6 @@ fn check_disk_backtrace(result: &TestResult) -> bool {
 /// task's own record — so the two reasons left are a CPU inside a scheduler pass
 /// and a CPU running nothing, and either one in a report is a finding rather
 /// than weather.
-///
-/// The measured before/after on the dev host under a twelve-wide suite, which is
-/// what makes that a claim — N = 12 rounds of `fault_gates` + `panic_recovery`
-/// an arm, 2026-08-22: 3 of 12 conceded with the table lookup, 0 of 12 without
-/// it, and 1 of 12 with the lookup put back on the same base, that third arm
-/// being the control that says the first two are about the code and not about
-/// the day.
 fn check_symbols_were_read(test: &str, serial: &str) -> bool {
     const CONCEDED: &str = "<symbol unread:";
     let lines: Vec<&str> = serial.lines().filter(|l| l.contains(CONCEDED)).collect();
@@ -3134,11 +3058,9 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
 /// A whole-buffer `contains("syscall/dispatch.rs")` certifies none of that: the
-/// same boot's `test_syscall_panic` panics in that file too, so the needle is
-/// already present before the tripwire runs. Scope it instead to the window
-/// between this panic's header and its message — `panicked at <location>` is
-/// the only thing in there, and the backtrace that names every frame comes
-/// after the message, so it cannot supply the answer either.
+/// backtrace names every frame, that file's included. Scope it instead to the
+/// window between this panic's header and its message — `panicked at
+/// <location>` is the only thing in there.
 fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
     const MSG: &str = "scheduler entered while a lock is held";
     const HEADER: &str = "PANIC:";
@@ -3154,6 +3076,28 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
             "expected the tripwire to name the guilty call site, not scheduler.rs; got: {}",
             location.trim()
         ));
+    }
+    Ok(())
+}
+
+/// The kernel's Ring 0 read of the address `test_panic_child` named halted on
+/// that address as **unmapped**. A read that demand paging filled for the
+/// caller re-executes into SMAP's protection fault instead, so the word is what
+/// says nothing was mapped into the current process.
+fn check_ring0_read_unmapped(serial: &str) -> Result<(), String> {
+    const READ_OF: &str = "SYS_DEBUG: a Ring 0 read of ";
+    let at = serial.find(READ_OF).ok_or("expected the kernel to name the address it read")?;
+    let named = serial[at + READ_OF.len()..].split_whitespace().next().unwrap_or_default();
+    let addr = named
+        .strip_prefix("0x")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| format!("the address the kernel read is not a number: {named:?}"))?;
+    if addr == 0 {
+        return Err("expected the demand-paged window, not the null read".to_string());
+    }
+    let want = format!("KERNEL PANIC: read unmapped address at {addr:#x}");
+    if !serial.contains(&want) {
+        return Err(format!("expected `{want}`: the read did not fault as unmapped at {addr:#x}"));
     }
     Ok(())
 }
@@ -3236,6 +3180,8 @@ fn check_fault_gates(result: &TestResult) -> bool {
             "fault_gate_child::divide_by_zero",
             "expected the faulting function in the #DE backtrace",
         ),
+        ("SEGFAULT tid=", "expected a SEGFAULT header for the null read"),
+        ("fault_gate_child::read_null", "expected the faulting function in the #PF backtrace"),
     ];
 
     let mut ok = true;
@@ -3412,7 +3358,6 @@ fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
 /// Select check function by test name convention.
 fn check_for(name: &str) -> fn(&TestResult) -> bool {
     match name {
-        "panic_recovery" => check_panic_recovery,
         "disk_backtrace" => check_disk_backtrace,
         "audio_idle_suspend" => check_audio_idle_suspend,
         "null_sink_client_exits" => check_null_sink_client_exits,
@@ -6818,143 +6763,6 @@ fn run_screen_test(
                  desktop repainted: {}",
                 back.rows()[row].trim()
             );
-            Ok(())
-        }
-        "screen_recoverable_untouched" => {
-            // The negative of screen_fatal_halt: a panic the kernel recovers
-            // from must not paint its report over a live display. Action 0
-            // panics in syscall context, which the handler recovers from, so it
-            // never reaches halt_all_cpus. **Every screen across the recovery,
-            // not two endpoints**: a report painted and then painted over is
-            // gone by any endpoint — the fatal fill is looked for on each dump
-            // from the command until well after the child is reaped.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    // Action 0 is a `SYS_DEBUG` arm, and a kernel that ships
-                    // has none: the child would be answered `InvalidArgument`
-                    // and exit 0, which is this test's own red for a reason
-                    // that is not about the screen at all.
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            let before = qemu.screendump();
-            let from = qemu.console_stream().mark();
-            writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child").map_err(|e| format!("{e}"))?;
-            qemu.flush_stdin();
-            const ENDED: &str = "===TEST_END test_rs_test_panic_child exit=";
-            // Past the child's end by this much: a paint the recovery made late
-            // is still looked for.
-            const AFTER_END: Duration = Duration::from_millis(1500);
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(15));
-            let mut ended_at: Option<Instant> = None;
-            let mut dumps = 0usize;
-            loop {
-                let dump = qemu.screendump();
-                dumps += 1;
-                if dump.fill() == FILL_FATAL {
-                    return Err(format!(
-                        "recovering panic painted its report over the display, on dump {dumps} \
-                         across the recovery\ndecoded screen:\n{}",
-                        dump.text()
-                    ));
-                }
-                if ended_at.is_none() && qemu.console_stream().since(from).contains(ENDED) {
-                    ended_at = Some(Instant::now());
-                }
-                if ended_at.is_some_and(|at| at.elapsed() >= AFTER_END) {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "the recoverable panic never completed\nserial:\n{}",
-                        qemu.console_stream().since(from)
-                    ));
-                }
-            }
-            // The premise, not a formality: a child that never panicked leaves
-            // every dump boot-filled and this test green.
-            let said = qemu.console_stream().since(from);
-            if !said.contains("SYS_DEBUG: kernel panic triggered by userspace") {
-                return Err(format!("no kernel panic in the child's output\nserial:\n{said}"));
-            }
-            if said.contains(&format!("{ENDED}0===")) {
-                return Err("recoverable panic did not kill the child".to_string());
-            }
-            // A screen that was blank to begin with would pass the fill for
-            // the wrong reason.
-            let text = before.text();
-            print_screen(name, &format!("{dumps} dumps across the recovery, none fatal\n{text}"));
-            if !text.contains("Boot: complete") {
-                return Err(format!("nothing on screen to preserve\ndecoded screen:\n{text}"));
-            }
-            Ok(())
-        }
-        "screen_survived_panic_not_blamed" => {
-            // `discard_capture` told from a no-op: `capture` freezes a report on
-            // every panic and the recovery branch drops it, so two deaths in one
-            // boot and the panel must name the second. Action 0 panics in
-            // syscall context, which the handler recovers from.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
-            let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
-            if let Some(err) = &survived.error {
-                return Err(format!("the survivable panic never completed: {err}"));
-            }
-            if survived.exit_code == Some(0) {
-                return Err("the survivable panic did not kill the child".to_string());
-            }
-            if !survived.serial.contains(USERSPACE_PANIC) {
-                return Err(format!(
-                    "no kernel panic in the child's output, so there is no capture to \
-                     discard and the rest of this test would pass vacuously\nserial:\n{}",
-                    survived.serial
-                ));
-            }
-            // The machine walked away from it: that is what makes this a second death.
-            if !qemu.command_until(
-                "run test_rs_test_panic_child 3",
-                FATAL_HALT_NONCE,
-                Duration::from_secs(15),
-            ) {
-                return Err(format!(
-                    "{FATAL_HALT_NONCE:?} never reached the console, so the guest did not \
-                     survive the first panic and there is no second death to read"
-                ));
-            }
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            // The nonce is logged after the first panic's snapshot was frozen,
-            // so a snapshot the discard failed to drop cannot carry it.
-            if !text.contains(FATAL_HALT_NONCE) {
-                return Err(format!(
-                    "the panel does not name the fatal halt: the survived panic's frozen \
-                     report was painted as the cause of death, so `discard_capture` did not \
-                     drop it\ndecoded screen:\n{text}"
-                ));
-            }
-            if dump.fill() != FILL_FATAL {
-                return Err(format!(
-                    "the report is on screen but the fill is {:?}, not the fatal {FILL_FATAL:?}",
-                    dump.fill()
-                ));
-            }
             Ok(())
         }
         other => Err(format!("unknown screen test {other}")),
@@ -10466,6 +10274,22 @@ fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
+/// An accept netd refuses for room leaves its owner a wake for the connection
+/// it left: the guest's wakes are the verdict. This side carries that netd named the
+/// refusal for room and that no program panicked.
+fn netd_refused_accept(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let HostRun { result, console, .. } = netcase_against_host(rust_bins, "netd_refused_accept", true, "")?;
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_refused_accept: ok")) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    if !console.contains("netd: refusing accept, ") {
+        return Err(format!("netd refused an accept for room without saying so:\n{console}"));
+    }
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] an accept refused for room left a wake once room returned");
+    Ok(())
+}
+
 /// Ctrl+Alt+D at a live desktop: every CPU answers, and the two halves of the
 /// report agree.
 ///
@@ -10560,19 +10384,16 @@ fn blocked_dump() -> Result<(), String> {
         return Err(format!("no parked task was named by pid and tid:\n{report}"));
     }
 
-    // **Both kernel threads, by name.** They are almost always blocked, so
+    // **Every kernel thread, by name.** They are almost always blocked, so
     // the parked lines above carry them as a pid and a tid and nothing else —
-    // and on a machine that has gone quiet the question is *which* is stuck.
-    // `sched::dump`'s census tags a kernel thread whatever it is doing, which
-    // is C6's gate: `klogd` the console drain and `usbd` the xHCI port machine
-    // split the work precisely so that one wedging does not stop the other. A
-    // report that cannot tell them apart cannot say which did.
+    // and on a machine that has gone quiet the question is *which* one is
+    // stuck. `sched::dump`'s census tags a kernel thread whatever it is doing.
     //
     // Matched with the ` cpu=` that follows the name on the census line, because
     // a bare name appears in every one of these programs' own log lines and
     // `/system/bin/init` speaks in a program's name before that program runs
     // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd", "usbd"]
+    let unnamed: Vec<&str> = ["klogd"]
         .into_iter()
         .filter(|name| !report.contains(&format!(" {name} cpu=")))
         .collect();
@@ -13274,8 +13095,7 @@ fn run_machine_test(
             // trampoline that never issues an `iretq`. It gets a process-table
             // entry rather than a bare task, and that is what makes it
             // nameable: without one a crash report would print a pid nothing
-            // in the machine resolves. What each row *means* when the panic
-            // really fires is `klogd_panic_halts`' two actuator boots.
+            // in the machine resolves.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -13284,84 +13104,49 @@ fn run_machine_test(
             );
             klogd_hosted(&serial::Serial::boot(&qemu))
         }
-        "klogd_panic_halts" => {
-            // **A kernel thread's panic is not recoverable by accident.**
-            // `syscall_rip` is never cleared, so the ordinary recovery
-            // predicate reads whatever user thread last ran on that CPU, and
-            // a kernel task would recover or halt by accident of work
-            // stealing. The row in `sched::kthread` replaces the accident
-            // with an answer; these two actuator boots walk both branches.
-            //
-            // The marker is a line of the crash *report* rather than `PANIC:`
-            // itself, because `boot_log` stops at the marker and the name is
-            // printed after the header — a boot stopped at the header would
-            // have nothing left to assert the process table against.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["klogd-panic"],
-                    ready_marker: "Process: klogd",
-                    ..Default::default()
-                },
-            );
-            let mut dead = serial::Serial::boot(&qemu);
-            dead.must_say("PANIC:")?;
-            dead.must_say("klogd-panic: the console drainer died")?;
-            // The process table answered for a task with no *user* address
-            // space — since C6 it names the kernel's, which is what let
-            // `KernelPayload.address_space` stop being an `Option`.
-            dead.must_say("Process: klogd")?;
-
-            // The verdict. A *recovered* panic kills the thread and lets the
-            // machine carry on into userland, which announces itself; the
-            // fatal branch halts every CPU. The window is a liveness margin
-            // and not a threshold: `klogd` panics as the scheduler starts, and
-            // the arm this must never become reaches the marker a few hundred
-            // milliseconds later — so three seconds is a tenfold margin over
-            // the state it refuses, and it is the whole of this test's fixed
-            // cost against the Fast ceiling.
-            const CARRIED_ON: Duration = Duration::from_secs(3);
-            dead.push(&qemu.drain_serial(CARRIED_ON));
-            dead.must_not_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [klogd] a kernel thread's panic halted the machine rather than recovering");
-
-            drop(qemu);
-
-            // **The same panic on the other row, and it is the direction
-            // nothing had ever taken.** Two rows in one table are one row
-            // until both branches have been walked: before this arm, every
-            // kernel-thread panic this tree had ever run took `OnPanic::Halt`,
-            // so `Recover` was a value rather than a path — and the path it
-            // names goes through `poison_tid`, the idle loop's `reap_poisoned`
-            // and `zombify_poisoned`, none of which had ever seen a task with
-            // no user address space. A row that quietly halted the machine
-            // would make `usbd` worse than the thread it was
-            // split off from.
-            //
-            // The verdict is content in the same window and never a timeout:
-            // the boot returns at the crash report's own line, and what the
-            // three seconds after it must contain is the ready marker the
-            // arm above must *not*.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["usbd-panic"],
-                    ready_marker: "Process: usbd",
-                    ..Default::default()
-                },
-            );
-            let mut survived = serial::Serial::boot(&qemu);
-            survived.must_say("PANIC:")?;
-            survived.must_say("usbd-panic: the device thread died")?;
-            survived.must_say("Process: usbd")?;
-            survived.push(&qemu.drain_serial(CARRIED_ON));
-            survived.must_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [usbd] a kernel thread's panic killed the thread and the machine booted");
-            Ok(())
+        "klogd_panic_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-panic", "panic-reboot-fast"],
+            &["klogd-panic: the console drainer died", "Process: klogd"],
+        ),
+        "klogd_fault_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-fault", "panic-reboot-fast"],
+            &["KERNEL PANIC: read unmapped address at 0x0", "console::body"],
+        ),
+        "syscall_panic_halts" | "syscall_fault_halts" | "lock_across_switch_halts"
+        | "heap_over_ceiling_halts" => {
+            use toyos_abi::syscall::{debug_action as da, SYS_DEBUG};
+            let syscall = format!("Syscall: num={SYS_DEBUG}");
+            let syscall = syscall.as_str();
+            let (action, said): (u64, &[&str]) = match name {
+                "syscall_panic_halts" => (
+                    da::PANIC,
+                    &["SYS_DEBUG: kernel panic triggered by userspace", syscall, "User backtrace:"],
+                ),
+                // A Ring 0 read of a user address is the kernel's, inside a syscall too.
+                "syscall_fault_halts" => (da::NULL_READ, &[syscall, "User backtrace:"]),
+                "lock_across_switch_halts" => (da::LOCK_ACROSS_SWITCH, &[syscall]),
+                // The message, not `mm/alloc.rs`: it names the ceiling rather
+                // than the page source's own request.
+                "heap_over_ceiling_halts" => {
+                    (da::HEAP_OVER_CEILING, &["exceeds MAX_HEAP_ALLOC", syscall])
+                }
+                other => unreachable!("{other} is not a syscall-death row"),
+            };
+            let said = power::syscall_death_resets(test_config, c_bins, rust_bins, action, said)?;
+            // With the capture: this guest's 16550 is its stdio, so no
+            // `uart-*.log` keeps what it said.
+            match name {
+                "lock_across_switch_halts" => check_tripwire_attribution(&said),
+                "syscall_fault_halts" => check_ring0_read_unmapped(&said),
+                _ => Ok(()),
+            }
+            .map_err(|e| format!("{e}\n{said}"))
         }
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
@@ -13672,57 +13457,19 @@ fn run_machine_test(
             eprintln!("  [sleep] {}", result.stdout.lines().last().unwrap_or("").trim());
             Ok(())
         }
-        "heap_ceiling_recovery" => {
-            // A panic inside the kernel allocator's own lock left the heap
-            // locked for the rest of the boot: the panicking thread never
-            // unwinds, so `now` never advances, and the CPU that recovered
-            // spun `Lock::lock` to its 500M-spin deadline on its next `alloc`
-            // or `free` — then panicked again, forever. The fix moved the
-            // ceiling check to `KernelAllocator::alloc`, before the lock.
-            //
-            // `smp: 1` is what makes the claim precise. The property is that
-            // *the recovered CPU* survives its next allocation; on a wider
-            // machine `/system/bin/echo` could run somewhere else and pass without
-            // touching it. With one CPU there is nowhere else.
-            //
-            // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `syscall/dispatch.rs`: routes
-            // past the ceiling do still exist,
-            // and each of them holds the VFS lock when it dies, so the
-            // machine wedges either way and the allocator's recovery cannot
-            // be observed on its own.
-            let options = BootOptions {
-                smp: 1,
-                kernel_features: ACTUATOR_KERNEL,
-                ..Default::default()
-            };
+        "heap_ceiling_bounds" => {
+            // Its own boot: `LOWER_SYSINFO_BOUND` stays lowered for the rest of it.
+            let options = BootOptions { kernel_features: ACTUATOR_KERNEL, ..Default::default() };
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             serial::Serial::boot(&qemu).must_be_clean()?;
 
             let result = qemu.run_test("test_rs_heap_ceiling", Duration::from_secs(30));
             if let Some(err) = &result.error {
-                // The wedge's signature. Before the fix this is where the test
-                // ends: the child's panic strands the allocator, the guest
-                // stops answering, and `run_test` runs out of window.
-                return Err(format!(
-                    "the guest stopped answering after the over-ceiling panic: {err}\n\
-                     serial:\n{}",
-                    result.serial
-                ));
+                return Err(format!("heap_ceiling did not finish: {err}\nserial:\n{}", result.serial));
             }
             if !check_rust_result(&result) {
                 return Err(format!("heap_ceiling failed:\n{}", result.stdout));
             }
-
-            // The panic must be the one this test asked for, and it must have
-            // fired where the fix put it. `mm/alloc.rs` appears in the report
-            // either way — the old assert was in the same file — so the needle
-            // is the message, which names the ceiling rather than the page
-            // source's own request.
-            let serial = serial::Serial::named("test serial", result.serial.as_str());
-            serial.must_say("PANIC:")?;
-            let line = serial.must_say("exceeds MAX_HEAP_ALLOC")?;
-            eprintln!("  [heap] {}", line.trim());
             Ok(())
         }
         "xhci_slot_exhaustion" => {
@@ -15713,6 +15460,7 @@ fn run_machine_test(
         }
         "netd_slow_reader" => netd_slow_reader(rust_bins),
         "netd_refused_pipes" => netd_refused_pipes(rust_bins),
+        "netd_refused_accept" => netd_refused_accept(rust_bins),
         "netd_held_open" => netd_held_open(rust_bins),
         "netd_stalled_peer" => netd_stalled_peer(rust_bins),
         "netd_udp_refused" => netd_udp_refused(rust_bins),
@@ -16782,28 +16530,13 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The machine's three kernel threads are hosted, and each claims the panic row
-/// its own loss demands.
+/// The machine's kernel thread is hosted.
 ///
-/// Text in, a verdict out: both lines are `log!` records, so the T14's
+/// Text in, a verdict out: its line is a `log!` record, so the T14's
 /// readback and a QEMU boot log are judged by this one predicate.
 fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     boot.must_be_clean()?;
     let line = boot.must_say("kthread: klogd")?;
-    if !line.contains("halts the machine") {
-        return Err(format!("klogd is hosted but claims the wrong panic row: {line:?}"));
-    }
-    eprintln!("  [klogd] {}", line.trim());
-
-    // **The other thread, and the opposite row.** `usbd` owns the xHCI port
-    // machine, so a stuck USB enumeration cannot stop the log. Its panic is
-    // *recoverable* and `klogd`'s deliberately is not — a killed drainer is the
-    // one loss nothing left alive can report — and this is the one boot in the
-    // suite where both rows are on the wire together.
-    let line = boot.must_say("kthread: usbd")?;
-    if !line.contains("kills the thread") {
-        return Err(format!("usbd is hosted but claims the wrong panic row: {line:?}"));
-    }
     eprintln!("  [kthread] {}", line.trim());
     Ok(())
 }
@@ -18102,7 +17835,6 @@ fn build_test_registry(
 
     for name in discover_rust_tests(rust_bins) {
         let timeout = match name.as_str() {
-            "panic_recovery" => Duration::from_secs(10),
             // Writes the child's whole image through bcachefs before it can run
             // it, which is the only thing here that is not a spawn.
             "disk_backtrace" => Duration::from_secs(15),
@@ -18788,10 +18520,7 @@ fn one_vocabulary() -> Result<(), String> {
 /// What the declaration itself has to be, before any of it means anything.
 /// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
 ///
-/// A name reaches the syscall directly, or through a child it spawns —
-/// `panic_recovery`'s three actions are all `test_panic_child`'s, and a rule
-/// that only read the test's own source would miss the one test in the list
-/// whose whole subject is the syscall.
+/// A name reaches the syscall directly, or through a child it spawns.
 fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<String> {
     // The fourth spelling is the argument-taking form: every action that
     // carries a payload (TLB_ACK_DELAY_ARM, CENSUS_KIND, LOWER_SYSINFO_BOUND,
@@ -18824,14 +18553,12 @@ fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<
 /// `SYS_DEBUG`, and the binaries are what is asked.
 ///
 /// **What this does not cover, stated because the hole is real:** a machine or
-/// screen test that *drives* one of those binaries on a boot of its own.
-/// `screen_recoverable_untouched` was the instance — it runs
-/// `test_rs_test_panic_child` on a featureless kernel, where action 0 is answered
-/// `InvalidArgument` and the child exits 0 — and no static rule here can say
-/// which `BootOptions` a `run_test` call belongs to. What answers it instead is
-/// the guest: `test_panic_child` names `InvalidArgument` as *this kernel carries
-/// no actuators* rather than reporting a kernel that failed to kill anybody, so
-/// the red says what is wrong wherever it happens.
+/// screen test that *drives* one of those binaries on a boot of its own. No
+/// static rule here can say which `BootOptions` a `run_test` call belongs to.
+/// What answers it instead is the guest: `test_panic_child` names
+/// `InvalidArgument` as *this kernel carries no actuators* rather than reporting
+/// a kernel that failed to stop, so the red says what is wrong wherever it
+/// happens.
 ///
 /// **Both directions are the point.** A binary that gains a `debug()` call and
 /// no entry would run on the shipping kernel, where the syscall answers
@@ -19363,7 +19090,6 @@ fn run_phase(
     tasks: Vec<Task<'_>>,
     width: usize,
     bins: &Bins<'_>,
-    slots: &HostSlots,
 ) -> Vec<Outcome> {
     if tasks.is_empty() {
         return Vec::new();
@@ -19383,7 +19109,6 @@ fn run_phase(
                     let next =
                         queue.lock().expect("a worker panicked holding the queue").pop_front();
                     let Some(task) = next else { return };
-                    let _slot = slots.take(&task.names().join(" "));
                     run_task(task, bins, &tx);
                 }
             });
@@ -19936,33 +19661,6 @@ fn main() {
     // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
-    // How many guests may be up on the *host* at once, across every worktree.
-    // `--jobs` is this run's demand; this is what the machine will supply, and
-    // zero turns it off.
-    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or(
-        toyos_build::buildlock::HOST_GUESTS,
-        |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
-    );
-
-    // And how many of this host's *compiles* may run at once, across every
-    // worktree. A worker holds a guest slot from the moment it takes a task and
-    // spends the first part of it building a kernel variant, so twelve workers
-    // are twelve concurrent `cargo build`s and no guest at all.
-    if let Some(n) = SUITE.value(&args, &testargs::HOST_BUILDS) {
-        toyos_build::buildlock::set_host_builds(
-            n.parse().unwrap_or_else(|_| panic!("--host-builds: {n:?} is not a budget")),
-        );
-    }
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-
-    let slots = HostSlots {
-        label: repo_root
-            .file_name()
-            .map_or_else(|| "this worktree".to_string(), |n| n.to_string_lossy().into_owned()),
-        root: repo_root,
-        budget: host_budget,
-    };
-
     check_registration();
 
     if nocapture || debug_mode {
@@ -20100,12 +19798,6 @@ fn main() {
             );
         }
         let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
-        // One slot for the whole tier: it boots one guest at a time for the
-        // length of it, so one slot is what it occupies. The owner has ruled
-        // that gate A does not get a quiet host (CLAUDE.md, 2026-08-04), so it
-        // takes its share of the machine like everything else and does not
-        // reserve it.
-        let _slot = slots.take("gate A, thorough");
         let ok = run_audio_gate(
             iterations,
             &load_audio_baseline(),
@@ -20302,7 +19994,7 @@ fn main() {
         longest_first(&mut parallel, &known);
         eprintln!("  --- parallel, {width} wide ---");
         let started = std::time::Instant::now();
-        let outcomes = run_phase(parallel, width, &bins, &slots);
+        let outcomes = run_phase(parallel, width, &bins);
         eprintln!("  --- parallel done in {:.1?} ---", started.elapsed());
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
@@ -20310,7 +20002,7 @@ fn main() {
     if !serial.is_empty() {
         eprintln!("  --- serial ---");
         let started = std::time::Instant::now();
-        let outcomes = run_phase(serial, 1, &bins, &slots);
+        let outcomes = run_phase(serial, 1, &bins);
         eprintln!("  --- serial done in {:.1?} ---", started.elapsed());
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
@@ -20334,7 +20026,6 @@ fn main() {
             for &smp in AUDIO_SMP {
                 let label = format!("{name} (smp={smp})");
                 let baseline = config_baseline(&audio_baseline, name, smp);
-                let _slot = slots.take(&label);
                 let start = common::clock::mark();
                 // A boot that never reaches its marker panics, and gate A is the
                 // last thing the suite runs: unwrapped, that panic took the

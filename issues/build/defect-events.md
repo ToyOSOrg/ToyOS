@@ -56,8 +56,8 @@ ledger was written.
   (`PS2_QUEUE_SIZE`) and past it drops one byte at a time with no signal,
   reproduced deterministically on QEMU 11.1 by putting 22 transitions through
   one `input-send-event`. Closed
-  `issues/kernel/two-i8042-verdicts-red-together-on-one-ci-shard.md` and
-  `issues/build/i8042-keyboard-pays-a-lost-sentinel-and-reds-the-durations-gate.md`,
+  `2cbb3e0d^:issues/kernel/two-i8042-verdicts-red-together-on-one-ci-shard.md` and
+  `2cbb3e0d^:issues/build/i8042-keyboard-pays-a-lost-sentinel-and-reds-the-durations-gate.md`,
   retired two redlist rows.
 
 - **The census lag** — origin: pre-existing. discoverer: automated gate
@@ -113,7 +113,7 @@ ledger was written.
   screendump` mode, `kernel_heartbeat`'s clean-exit-before-`===READY===`
   family, PR #202's direction-flag silent reset) to W^X, to the
   NX bit, or to the boot-time CPU-feature assertion at
-  `kernel/src/arch/control_regs.rs:238-242` that panics if a CPU lacks the NX
+  `kernel/src/arch/x86_64/control_regs.rs:238-242` that panics if a CPU lacks the NX
   bit W^X depends on. Whoever placed this row in the brief holds the citation
   this entry is missing; append it here rather than re-deriving it once
   found.

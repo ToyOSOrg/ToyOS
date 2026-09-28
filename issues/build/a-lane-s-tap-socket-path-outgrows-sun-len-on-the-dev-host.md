@@ -1,22 +1,35 @@
 ---
-status: expected-red
-kind: defect
+status: open
+kind: tooling
 opened: 2026-09-26
 ---
 
 # A lane's tap socket path outgrows `SUN_LEN` on the dev host
 
-`lan_mdns_answer` reds wide and alone with `connect to QEMU's
-/private/var/folders/gr/mr4_fg4n34jb417sx1g5cgxc0000gp/T/toyos-tmp-70685-0/tests-0/lane-7/tap-out-0.sock:
-path must be shorter than SUN_LEN`. `common::segment::Tap::in_lane` puts the
-two sockets in the lane's scratch directory, and on this macOS host that
-directory sits under `$TMPDIR`, so the path is 104 bytes, past the 103 a
-`sockaddr_un` holds before its terminating NUL on macOS.
+`lan_mdns_answer` reds on the macOS dev host, wide and alone:
 
-Seen in the fast tier twice in one session: at `origin/main` checked out in
-the `toyos-guiplat` worktree (alone with this message, wide as `QEMU died
-before ===READY===`), and at PR #528's head after it merged `e48604c0` (this
-message wide and alone).
+```
+connect to QEMU's /private/var/folders/gr/mr4_fg4n34jb417sx1g5cgxc0000gp/T/toyos-tmp-89085-0/tests-0/lane-3/tap-out-0.sock: path must be shorter than SUN_LEN
+```
+
+That path is 104 bytes, past the 103 a `sockaddr_un` holds before its
+terminating NUL on macOS. `tests/common/segment.rs`'s `Tap::in_lane` puts both
+sockets in `lane::dir()`, which since `toyos-tmpdir` is
+`$TMPDIR/toyos-tmp-<pid>-<n>/tests-<n>/lane-<i>/`, and the dev host's
+`$TMPDIR` resolves to 57 bytes (`/private/var/folders/…/T/`) before any of
+that. A five-digit pid is enough to cross the limit.
+
+Seen three times on 2026-09-26, each on a tree whose diff touches neither the
+lane nor the tap:
+
+- on `wt/toyos-layout` after it merged `origin/main` at `e48604c0` (pid 89085,
+  `lane-3`, the capture above);
+- in the fast tier at `origin/main` checked out in the `toyos-guiplat`
+  worktree: alone with this message, wide as `QEMU died before ===READY===`;
+- in the fast tier at PR #528's head after it merged `e48604c0` (pid 70685,
+  `lane-7`), this message wide and alone.
+
+`cargo run -- --known-red lan_mdns_answer` answers NO.
 
 ## Two shapes, one length
 
@@ -35,12 +48,7 @@ the default reds with the first shape on both, a `$TMPDIR` three bytes
 longer reds with the second on both, and a `$TMPDIR` under the worktree's
 `target/` passes on both.
 
-The first shape is quarantined in `src/redlist.rs`. The second is not
-and cannot be: its failure text is the harness's boot-death framing and
-nothing of this defect, so a row quoting it would excuse every guest
-death of this test. A wide run that lands the test on lane 10 or 11 on
-this host reds the suite.
+## Exit condition
 
-**Exit**: the socket paths fit a `sockaddr_un` wherever the scratch
-directory is, with `lan_mdns_answer` green on this host and its row gone
-from `src/redlist.rs`.
+A tap socket's path fits `sun_path` on every host the suite runs on, wherever
+the scratch directory is, and `lan_mdns_answer` is green on the dev host.

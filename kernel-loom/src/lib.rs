@@ -196,9 +196,6 @@ pub mod dump_request;
 #[path = "../../kernel/src/pcidev/record.rs"]
 pub mod device_irq;
 
-#[path = "../../kernel/src/sched/poison.rs"]
-pub mod poison;
-
 /// A poll ring's one-shot answer. It names atomics and nothing else, and that
 /// narrowness is load-bearing: a file that named a ring's page or a watch could
 /// not be compiled here at all, and the race would stop being checked by

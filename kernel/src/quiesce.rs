@@ -23,8 +23,7 @@
 //! the boot's last word needs. Freezing CPUs inside a pass instead would strand
 //! whatever lock the thread on that CPU was holding.
 //!
-//! Kernel threads are exempt by identity, not by accident: `klogd` and
-//! `usbd` are in the process table like anything else, and
+//! Kernel threads are exempt by identity, not by accident:
 //! [`crate::sched::kthread::is_kernel_task`] is what tells them apart.
 //!
 //! # What the stop waits on

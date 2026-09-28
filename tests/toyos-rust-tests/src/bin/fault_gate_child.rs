@@ -18,6 +18,7 @@ fn main() {
         "mf" => x87_exception(),
         "xm" => simd_exception(),
         "ac" => alignment_check(),
+        "pf" => read_null(),
         other => panic!("unknown fault kind {other}"),
     }
     println!("survived {kind}");
@@ -141,6 +142,13 @@ fn simd_exception() {
         );
     }
     println!("  MXCSR after 0.0/0.0 with IM unmasked: {after:#010x}");
+}
+
+/// #PF (14). A read of address 0, which lies in no region.
+#[inline(never)]
+fn read_null() {
+    // SAFETY: none — the fault is the point, and it ends this process.
+    unsafe { core::ptr::read_volatile(core::ptr::null::<u64>()) };
 }
 
 /// #AC (17). RFLAGS.AC plus a misaligned load. CR0.AM gates it as well and is

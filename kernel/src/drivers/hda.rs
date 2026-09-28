@@ -16,7 +16,7 @@ use toyos_hda::stream;
 
 use super::pci::PciDevice;
 use crate::log;
-use crate::mm::paging::{CachePolicy, MmioPolicy};
+use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::Mmio;
 use crate::object::shm::Region;
 use crate::sync::Lock;

@@ -8,7 +8,7 @@ use crate::iommu::{DeviceSpace, IommuError};
 use crate::mm::{Dma, Unaligned, PAGE_2M};
 use crate::gpu::{FLAG_HARDWARE_CURSOR, Gpu, GpuInfo};
 use crate::log;
-use crate::mm::paging::CachePolicy;
+use crate::mm::policy::CachePolicy;
 use crate::object::shm::{Pages, Region};
 
 const VIRTIO_VENDOR: u16 = 0x1AF4;

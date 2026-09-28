@@ -336,13 +336,11 @@ impl Kicker for Silent {
 }
 
 impl Machine for Silent {
-    type IrqGuard = ();
     fn now(&self) -> Nanos {
         NOW
     }
     fn set_timer(&self, _deadline: Nanos) {}
     fn stop_timer(&self) {}
-    fn irq_guard(&self) {}
     fn halt(&self) {}
     fn need_resched(&self, _cpu: CpuId) {}
     fn trace(&self, _ev: TraceEvent) {}

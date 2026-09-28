@@ -37,7 +37,7 @@ the `lan_lease_report` metal row in `tests/toyos.rs` with `LANLEASECASE` and
 and netd's `--exit-with-lease` with `tests/e1000leasecase` and the
 `lan_lease_report` QEMU registration, the arm that proves the channel.
 
-An earlier form of this arm, `--exit-with-phy-outcome` on `tests/lanphycase`,
+An earlier form of this arm, `--exit-with-phy-outcome` on `d409139f^:tests/lanphycase`,
 ended right after the bring-up with the PHY's outcome; its codes are still
 `Verdict::NotLeased`'s, so a code read off one of its boots means what
 `toyos_i219::phy::Outcome` says.

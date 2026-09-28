@@ -1,5 +1,6 @@
 [package]
 name = "toyos-libc-copies"
+description = "A host differential test of userland libc's architecture module: its copies, fills and square roots against core's."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

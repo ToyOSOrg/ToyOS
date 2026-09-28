@@ -11,12 +11,12 @@ opened: 2026-09-14
 > Make the last CPU a shootdown waits for answer `arg` nanoseconds late, and
 > take it away again.
 
-The kernel arm no longer picks a CPU by arithmetic. `kernel/src/arch/tlb.rs`'s
+The kernel arm no longer picks a CPU by arithmetic. `kernel/src/arch/x86_64/tlb.rs`'s
 `debug_arm_ack_delay` holds each other CPU's acknowledgement back for `arg`
 nanoseconds in turn, takes one shootdown against each, and returns the smallest
 wait any of them cost the initiator; the arming is then left standing against
 every other CPU until a disarm or the end of a fresh `ARM_WINDOW_NANOS`
-(`kernel/src/arch/tlb.rs:230`, two seconds), whichever comes first. So the one
+(`kernel/src/arch/x86_64/tlb.rs:230`, two seconds), whichever comes first. So the one
 sentence userland reads to learn what action 12 does describes a selection the
 kernel does not make, omits the answer it returns, and says nothing about how
 long what it leaves behind lasts.

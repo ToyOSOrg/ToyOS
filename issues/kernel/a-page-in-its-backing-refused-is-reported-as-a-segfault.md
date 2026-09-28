@@ -11,7 +11,7 @@ one line and leaves the fault unhandled (`kernel/src/process.rs`, the
 `FileBacked` arm of the demand-page fill: "`<addr>` is backed by a file byte
 `<n>` that the device would not read; leaving the fault unhandled"). The
 exception path then reports the program's own fault
-(`kernel/src/arch/idt/exceptions.rs`, the `theirs` arm): `SEGFAULT tid=…:
+(`kernel/src/arch/x86_64/idt/exceptions.rs`, the `theirs` arm): `SEGFAULT tid=…:
 execute unmapped address at …` for a text page, `read unmapped address` for
 data. The process dies as a program bug would, and its exit is the one a
 wild pointer gives, so a supervisor, a test or a user reading the crash
@@ -33,7 +33,7 @@ own wild pointer.
 ## Owner
 
 The demand-fault path in `kernel/src/process.rs` and the exception report in
-`kernel/src/arch/idt/exceptions.rs`.
+`kernel/src/arch/x86_64/idt/exceptions.rs`.
 
 ## Exit condition
 

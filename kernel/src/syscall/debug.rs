@@ -4,12 +4,8 @@
 
 use toyos_abi::syscall::SyscallError;
 
-/// `SYS_DEBUG` action 2's lock only — once taken it is never released.
+/// `SYS_DEBUG` action 2's lock only.
 pub(super) static LOCK_ACROSS_SWITCH: crate::sync::Lock<()> = crate::sync::Lock::new(());
-
-/// Flips false after action 2's one trip, refusing a second call into the lock that never releases.
-pub(super) static LOCK_ACROSS_SWITCH_ARMED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(true);
 
 /// Screen-test sync signal — `halt_all_cpus` paints before it flushes serial.
 pub(super) const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
