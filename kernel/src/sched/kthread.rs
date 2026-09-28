@@ -75,6 +75,23 @@ pub fn is_kernel_task(id: TaskId) -> bool {
     ROWS.iter().any(|row| row.load(Ordering::Relaxed) == packed)
 }
 
+/// Control for `process::process_object`'s refusal: no kernel thread's pid names a process a handle could hold.
+#[cfg(feature = "boot-actuators")]
+pub fn open_selftest() {
+    let pids: Vec<_> = ROWS
+        .iter()
+        .map(|row| row.load(Ordering::Relaxed))
+        .filter(|&task| task != NO_TASK)
+        .map(|task| {
+            assert_ne!(task, CLAIMING, "kthread: a row is still being claimed after the last spawn");
+            TaskId::unpack(task).0
+        })
+        .collect();
+    let opened = pids.iter().filter(|&&pid| crate::process::process_object(pid).is_some()).count();
+    let verdict = if !pids.is_empty() && opened == 0 { "PASS" } else { "FAIL" };
+    crate::log!("process-open-kthread: {verdict} ({} kernel threads, {opened} opened)", pids.len());
+}
+
 /// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
 pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched {
     let (stack, entry_rsp) = crate::loader::alloc_kernel_stack(
