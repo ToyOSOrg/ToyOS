@@ -281,7 +281,7 @@ fn loader_said(guest: &QemuInstance, from: usize, what: &str) -> Result<(), Stri
     if since.contains(what) {
         return Ok(());
     }
-    let loader: Vec<&str> = since.lines().filter(|l| !l.starts_with("[kernel ")).collect();
+    let loader: Vec<&str> = since.lines().filter(|l| !qemu::is_kernel_line(l)).collect();
     Err(format!("the loader never said {what:?}; it said:\n{}", loader.join("\n")))
 }
 

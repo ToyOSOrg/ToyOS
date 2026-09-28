@@ -2391,10 +2391,11 @@ pub struct BootOptions {
     /// a driver put on it, which no line the guest prints can be. Refused by
     /// name on a profile with no data disk, where it would record nothing.
     pub usb_pcap: Option<PathBuf>,
-    /// Fail with EIO every read of the boot stick that covers this 512-byte
-    /// sector, through QEMU's `blkdebug` under the stick's raw format: a disk
-    /// error at a place the test chose, which no well-formed image can stage.
-    pub stick_read_error: Option<u64>,
+    /// Fail with EIO every read of the boot disk that covers this 512-byte
+    /// sector, through QEMU's `blkdebug` under the boot image's raw format, on
+    /// whichever bus the profile puts that disk: a disk error at a place the
+    /// test chose, which no well-formed image can stage.
+    pub boot_read_error: Option<u64>,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.
     ///
@@ -2521,7 +2522,7 @@ impl Default for BootOptions {
             boot_image: None,
             usb_images: Vec::new(),
             usb_pcap: None,
-            stick_read_error: None,
+            boot_read_error: None,
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
@@ -4442,7 +4443,7 @@ fn qemu_command(
         .arg("-drive")
         .arg(format!(
             "if=none,id=stick,{}{}",
-            stick_file(boot_image, options.stick_read_error),
+            stick_file(boot_image, options.boot_read_error),
             // **What a `Staged::Pristine` boot is made of.** QEMU keeps this
             // drive's writes in a temporary file and drops it when the guest
             // exits, so the staged image is never written and the boot after it

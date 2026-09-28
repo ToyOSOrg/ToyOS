@@ -20,11 +20,16 @@ shrink-mark work and against the same tree with that kernel change reverted:
 | kernel change reverted | alone | 3 | 1 fail, then 2 pass (attempt 0, 358.0 and 356.3 ms) |
 | branch | full nightly tier | 3 | 2 fail, 1 pass |
 | kernel change reverted | full nightly tier | 1 | pass |
+| stock edk2, #572 at `9082d6b4`, a later session | alone | 5 | 2 fail (runs 1 and 3), 3 pass |
 
 Both arms fail and both pass, and the only same-configuration comparison with
 more than one sample per side is the *alone* one, where the branch is 6 for 6
 and the reverted arm failed once. So the numbers say intermittent; they do not
 name a cause and they do not point at a diff.
+
+In each of the two red runs at `9082d6b4` all 10 attempts missed, so each
+failed all-or-nothing within its boot: ten `STALLED WINDOW HELD` lines about
+410 ms apart, each followed by its flusher thread's exit, then the panic.
 
 **No mechanism is established, and one plausible reading is already refuted.**
 `STALLED WINDOW HELD` is not evidence that the truncate arrived after the

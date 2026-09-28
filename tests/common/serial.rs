@@ -252,7 +252,7 @@ impl Serial {
     pub fn interleaved(&self) -> Option<&str> {
         self.text
             .lines()
-            .find(|l| !is_kernel_line(l) && l.contains("[kernel "))
+            .find(|l| !is_kernel_line(l) && l.contains(toyos_build::kernelconsole::HEAD))
     }
 
     /// The channel carried something the kernel wrote.

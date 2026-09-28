@@ -3254,11 +3254,28 @@ pub fn root_named_twice(
 /// seven past ROOT's middle, so the chunk that fails is not the first. The
 /// loader reads ROOT in chunks, so the refusal names a chunk that holds the
 /// sector and starts where the bytes read before it end.
-///
-/// The boot disk is NVMe, not a USB stick: stock edk2's read of that sector
-/// off a USB stick does not return, and its watchdog does not reset the machine
-/// (`issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md`).
 pub fn root_chunk_refused(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    root_chunk_refused_on(qemu::Profile::InternalDisk, test_config, c_bins, rust_bins)
+}
+
+/// [`root_chunk_refused`] with the boot image on a USB stick: stock edk2's
+/// read of that sector does not return, and its watchdog does not reset the
+/// machine
+/// (`issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md`).
+pub fn root_chunk_refused_on_a_usb_stick(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    root_chunk_refused_on(qemu::Profile::Headless, test_config, c_bins, rust_bins)
+}
+
+fn root_chunk_refused_on(
+    profile: qemu::Profile,
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -3274,9 +3291,9 @@ pub fn root_chunk_refused(
         c_bins,
         rust_bins,
         BootOptions {
-            profile: qemu::Profile::InternalDisk,
+            profile,
             boot_image: Some(qemu::Staged::Written(path.clone())),
-            stick_read_error: Some(bad),
+            boot_read_error: Some(bad),
             ready_marker: CHUNK_REFUSED,
             ..Default::default()
         },

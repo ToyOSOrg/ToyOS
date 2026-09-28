@@ -15,6 +15,9 @@ use std::borrow::Cow;
 pub const HEAD: &str = "[kernel ";
 
 /// A console's bytes as they arrive, withheld until the kernel's first record.
+///
+/// Of a QEMU process's first boot only: a guest reset does not re-arm it
+/// (`issues/build/the-kernel-console-split-does-not-re-arm-across-a-guest-reset.md`).
 pub struct KernelConsole {
     /// The withheld tail that could still begin [`HEAD`]; `None` once the
     /// kernel has begun.
@@ -97,5 +100,9 @@ mod tests {
     #[test]
     fn nothing_before_the_kernel_passes() {
         assert_eq!(passed(FIRMWARE, &[5, 200]), "");
+        let mut console = KernelConsole::default();
+        assert!(console.pass(FIRMWARE.as_bytes()).is_empty());
+        let held = console.held.as_ref().expect("the kernel has not begun").len();
+        assert!(held < HEAD.len(), "{held} bytes withheld, more than could begin the head");
     }
 }
