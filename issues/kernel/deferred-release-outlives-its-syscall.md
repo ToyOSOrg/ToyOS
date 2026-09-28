@@ -237,9 +237,7 @@ So the two constraints meet. **The hook queue may not park, and the row that
 would want to is not on the hook queue but in a `Drop` that also may not.**
 Moving `File` to `deferred` swaps one illegal site for another. The second shape
 above is still right for the `deferred` rows, and by itself it reaches neither
-`File` nor `close_all` — that one is also called from `recover_or_halt`'s
-`Blame::Process` arm (`arch/idt/exceptions.rs:348`), which has no syscall to
-return through.
+`File` nor `close_all`.
 
 The track carries this as **wall 4**, with the three shapes the owner has to
 choose between. Nothing here should be built before that choice, because all

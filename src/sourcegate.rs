@@ -1242,24 +1242,6 @@ fn used_actions(text: &str) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// Every `.rs` file `git` tracks under `tree`, repository-relative — the list
-/// the walks above are held against, read from something that is not a walk.
-#[cfg(test)]
-fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<String> {
-    let out = std::process::Command::new("git")
-        .args(["ls-files", "-z", "--", tree])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|e| panic!("git ls-files {tree}: {e}"));
-    assert!(out.status.success(), "git ls-files {tree} failed");
-    String::from_utf8(out.stdout)
-        .expect("git ls-files is not UTF-8")
-        .split('\0')
-        .filter(|p| p.ends_with(".rs"))
-        .map(str::to_string)
-        .collect()
-}
-
 // ── Architecture rules ──────────────────────────────────────────────────────
 
 /// One architecture rule, stated as where its spellings may appear: a set of
@@ -2075,7 +2057,8 @@ mod tests {
             rust_files(&root.join(tree), &mut files);
             let walked: std::collections::BTreeSet<String> =
                 files.iter().map(|p| rel(&root, p)).collect();
-            let tracked = tracked_rust_files(&root, tree);
+            let tracked: std::collections::BTreeSet<String> =
+                crate::sysroot::tracked_files(&root, &[tree]).unwrap_or_else(|e| panic!("{e}")).into_iter().filter(|p| p.ends_with(".rs")).collect();
             assert!(
                 tracked.len() > 1,
                 "git tracks {} .rs file(s) under {tree}, so this floor is not one",
@@ -2497,16 +2480,10 @@ mod tests {
     #[test]
     fn every_committed_binary_file_is_declared() {
         let root = repo_root();
-        let out = std::process::Command::new("git")
-            .args(["ls-files", "-z"])
-            .current_dir(&root)
-            .output()
-            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
-        assert!(out.status.success(), "git ls-files failed");
-        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
+        let listing = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
 
         let mut found: Vec<(String, String)> = Vec::new();
-        for name in listing.split('\0').filter(|s| !s.is_empty()) {
+        for name in &listing {
             let Ok(bytes) = std::fs::read(root.join(name)) else { continue };
             if !is_binary(&bytes) && !name.starts_with("assets/") {
                 continue;
@@ -2564,15 +2541,8 @@ mod tests {
         let licence_path = format!("{CORPUS}/LICENSE");
         let licence = std::fs::read_to_string(root.join(&licence_path))
             .unwrap_or_else(|e| panic!("{licence_path}: {e}"));
-        let out = std::process::Command::new("git")
-            .args(["ls-files", "-z"])
-            .current_dir(&root)
-            .output()
-            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
-        assert!(out.status.success(), "git ls-files failed");
-        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
-        let tracked: Vec<&str> = listing.split('\0').filter(|s| !s.is_empty()).collect();
-        let under_corpus: Vec<&&str> =
+        let tracked = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
+        let under_corpus: Vec<&String> =
             tracked.iter().filter(|f| f.starts_with(&format!("{CORPUS}/"))).collect();
         assert!(
             under_corpus.len() > CORPUS_OURS.len(),
@@ -2595,7 +2565,7 @@ mod tests {
             }
         }
         for file in &under_corpus {
-            let attributed = CORPUS_OURS.contains(file)
+            let attributed = CORPUS_OURS.contains(&file.as_str())
                 || CORPUS_POPULATIONS
                     .iter()
                     .any(|p| file.starts_with(&format!("{CORPUS}/{p}/")));

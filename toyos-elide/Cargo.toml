@@ -13,6 +13,7 @@
 
 [package]
 name = "toyos-elide"
+description = "Log elision decisions: what a too-wide value keeps, and which records past a site's allowance are left out, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

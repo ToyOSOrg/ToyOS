@@ -9,7 +9,7 @@ opened: 2026-09-26
 The owner's ruling of 2026-09-26 puts every `asm!`, `global_asm!`,
 `naked_asm!`, naked function and `core::arch::*` intrinsic inside an
 architecture's own module: `kernel/src/arch/<arch>/`, the bootloader's
-`src/arch/`, and `toyos-abi`'s per-arch syscall entry. `src/sourcegate.rs`'s
+`bootloader/src/arch/`, and `toyos-abi`'s per-arch syscall entry. `src/sourcegate.rs`'s
 `ARCH_RULES` enforces it. The kernel and the loader now hold none outside
 those; what is left is declared in that table as an exception, each row
 pointing here:

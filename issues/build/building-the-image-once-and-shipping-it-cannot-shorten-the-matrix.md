@@ -53,7 +53,7 @@ attempts of run `31389081797`.
 
 **What is still on the floor and is not this.** The 52–59 s `deps` step is a
 package install repeated in every guest job on every run, and it is not a build
-at all: `.github/ci-image/Dockerfile` bakes those packages into a published
+at all: `35383398^:.github/ci-image/Dockerfile` bakes those packages into a published
 image, and the cutover retires the step once the first published digest exists
 for the guest workflows to pin.
 

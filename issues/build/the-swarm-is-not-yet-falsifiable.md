@@ -213,14 +213,14 @@ issues/hardware/the-bot-scsi-machine-is-still-hand-written-in-the-kernel.md
 issues/hardware/the-t14-touchpad-is-i2c-hid-and-unbuilt.md
 issues/hardware/there-is-no-wifi.md
 issues/isolation/the-power-broker-authority-with-a-human-in-the-loop.md
-issues/kernel/arm64-is-a-decision-nobody-has-made.md
+8a277bb2^:issues/kernel/arm64-is-a-decision-nobody-has-made.md
 issues/kernel/cpu-time-is-a-band-and-not-a-reservation.md
 issues/kernel/every-driver-is-still-in-the-kernel.md
 issues/kernel/every-interrupt-lands-on-the-boot-cpu.md
 issues/kernel/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md
 issues/kernel/nothing-charges-kernel-memory-to-a-process.md
 issues/kernel/page-global-is-a-decision-nobody-has-made.md
-issues/kernel/scheduler-policy-behavior-has-no-quantified-suite.md
+b68e2328^:issues/kernel/scheduler-policy-behavior-has-no-quantified-suite.md
 issues/kernel/the-capability-end-state-is-twelve-answers.md
 issues/kernel/the-iommu-refuses-nothing-yet.md
 issues/kernel/the-kernel-still-parses-what-userland-writes.md

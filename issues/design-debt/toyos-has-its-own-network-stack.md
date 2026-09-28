@@ -16,6 +16,8 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 - Stage 5: netd on one shard, pipe ABI unchanged; smoltcp leaves netd, `Cargo.toml` and `userland/Cargo.lock` in the same PR.
 - Then multi-core, netring (blocked on the owner's ABI ruling), TCP and IP hardening, IPv6, offloads, soak.
 
+The listener defects are this track's: `issues/hardware/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/hardware/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/hardware/an-accept-that-never-reaches-netd-strands-its-listener.md`, in std's accept.
+
 Owed from the wire specification by stages 3–5: ETH-32, whose subnet broadcast needs the subnet `toyos-net-ip` holds; and those whose layer tags are `[ip]`, `[shell]` or `[udp]`: ETH-11, 12, 22–25, 33; ARP-16–18; IP-25, 26, 35; IPP-01–13; ICMP-32–46; IGMP-23–25, 29; UDP-17, 18; and the policy halves of ETH-10, 14, 19, IP-02, 20–23, 29, IPO-15, 16, ICMP-23, 24, 26 and UDP-22.
 
 What `toyos-net-wire` does not yet meet:

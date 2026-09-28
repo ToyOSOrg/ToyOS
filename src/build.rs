@@ -2753,7 +2753,7 @@ mod tests {
                 // other is a miscomputed base address. No suite builds it, so a
                 // full run pays nothing and a boot storm asks for it by name.
                 "heap-tripwire",
-                // The five below cost no kernel build at all, for
+                // The four below cost no kernel build at all, for
                 // `wake-fence-off`'s reason: each is declared only so `cfg`
                 // checking knows the name, and turned on only by
                 // `kernel-loom`, one at a time, to relax the single edge its
@@ -2764,7 +2764,6 @@ mod tests {
                 // `heap-lockspin`'s other arm: the same visit to the pass path,
                 // for the same span, without the allocator's lock.
                 "pass-spin",
-                "poison-overwrite",
                 // `wake-fence-off`'s twin, for a poll ring's one-shot answer:
                 // turned on only by `kernel-loom`, to split `inbox/once.rs`'s
                 // exchange and prove `poll_once` reds without it.

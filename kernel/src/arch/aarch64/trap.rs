@@ -186,10 +186,6 @@ pub(crate) const fn frame_interrupts_enabled(spsr: u64) -> bool {
 /// Nothing to report: the vectors run on the stack they interrupted.
 pub(crate) fn report_fault_stack() {}
 
-pub(crate) fn try_recover_from_panic() -> ! {
-    owed!("recovering a syscall's panic", "stage 7")
-}
-
 pub fn kernel_exit_to_user_check() {
     owed!("the return to user mode", "stage 7")
 }

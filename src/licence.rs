@@ -1216,22 +1216,6 @@ fn metadata(
     serde_json::from_slice(&out).map_err(|e| format!("cargo metadata printed no JSON: {e}"))
 }
 
-/// The tracked files `pathspecs` name, root-relative.
-fn ls_files(root: &Path, pathspecs: &[String]) -> Result<Vec<String>, String> {
-    let out = run(
-        Command::new("git")
-            .args(["ls-files", "-z", "--"])
-            .args(pathspecs)
-            .current_dir(root),
-        "git ls-files",
-    )?;
-    Ok(String::from_utf8_lossy(&out)
-        .split('\0')
-        .filter(|f| !f.is_empty())
-        .map(String::from)
-        .collect())
-}
-
 /// The fork's `library/` at the commit this tree pins: a linked worktree's
 /// fork checkout, `rust/library` where this checkout holds it, and everywhere
 /// else — a runner, an installed toolchain — [`fetched_library`]. Asks the
@@ -1416,7 +1400,7 @@ fn walk(
         packages: local.dirs.iter().filter_map(|d| relative(d)).filter(|d| !d.is_empty()).collect(),
         named: BTreeSet::new(),
     };
-    let tracked = ls_files(root, &[])?;
+    let tracked = crate::sysroot::tracked_files(root, &[])?;
     let names: BTreeSet<&str> = COMMITTED_FILES.iter().map(|(p, ..)| file_name(p)).collect();
     let sources = tracked.iter().filter(|f| under(&shipping.packages, f) && f.ends_with(".rs"));
     let read = sources
@@ -1433,7 +1417,7 @@ fn walk(
     let sections = sections(&notice);
     let mut files = BTreeMap::new();
     for section in &sections {
-        let named = ls_files(root, &[format!(":(glob){}", section.path)])?;
+        let named = crate::sysroot::tracked_files(root, &[&format!(":(glob){}", section.path)])?;
         files.insert(section.path.clone(), named);
     }
     Ok(Walk { reached, library, shipping, tracked, sections, files })

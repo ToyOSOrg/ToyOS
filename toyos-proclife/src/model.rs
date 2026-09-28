@@ -179,12 +179,6 @@ impl World {
         }
     }
 
-    pub fn forget_thread(&mut self, pid: Pid, tid: Tid) {
-        if let Some(proc) = self.procs.get_mut(&pid) {
-            proc.forget_thread(tid);
-        }
-    }
-
     /// `watch::wait_until` — a waiter registered on a subject's watch.
     pub fn arm(&mut self, on: Watch, waiter: (Pid, Tid)) {
         self.waiters.insert((on, waiter.0, waiter.1));

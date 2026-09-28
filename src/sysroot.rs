@@ -584,23 +584,42 @@ fn path_str(path: &Path) -> &str {
     path.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", path.display()))
 }
 
-pub(crate) fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+/// `Err` names the command, the directory and what git said.
+fn git_try(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
         .output()
-        .unwrap_or_else(|e| panic!("run git in {}: {e}", dir.display()));
-    assert!(
-        out.status.success(),
-        "git {args:?} in {}: {}",
-        dir.display(),
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    out.stdout
+        .map_err(|e| format!("run git in {}: {e}", dir.display()))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git {args:?} in {}: {}", dir.display(), stderr.trim()));
+    }
+    Ok(out.stdout)
+}
+
+pub(crate) fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+    git_try(dir, args).unwrap_or_else(|e| panic!("{e}"))
 }
 
 pub(crate) fn git_out(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&git_bytes(dir, args)).into_owned()
+}
+
+/// The files `git` tracks under `dir` that `pathspecs` name, every one when
+/// there are none, relative to `dir`. A name that is not UTF-8 is refused by
+/// name rather than rewritten into one git does not track.
+pub(crate) fn tracked_files(dir: &Path, pathspecs: &[&str]) -> Result<Vec<String>, String> {
+    let args = [&["ls-files", "-z", "--"][..], pathspecs].concat();
+    let listing = git_try(dir, &args)?;
+    let names = listing.split(|b| *b == 0).filter(|f| !f.is_empty());
+    names
+        .map(|f| {
+            String::from_utf8(f.to_vec()).map_err(|_| {
+                format!("git tracks {:?} in {}, a name that is not UTF-8", String::from_utf8_lossy(f), dir.display())
+            })
+        })
+        .collect()
 }
 
 fn git_run(dir: &Path, args: &[&str]) {
