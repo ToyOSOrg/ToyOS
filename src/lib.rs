@@ -12,6 +12,7 @@ pub mod clippy;
 pub mod compiler;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
+pub mod firmware;
 pub mod flags;
 pub mod forkcheck;
 pub mod heartbeat;

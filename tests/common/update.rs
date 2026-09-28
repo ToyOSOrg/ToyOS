@@ -108,9 +108,8 @@ impl Rig {
         );
         let image = scratch.join("machine.img");
         std::fs::write(&image, disk).map_err(|e| format!("write {}: {e}", image.display()))?;
-        let vars = scratch.join("OVMF_VARS.fd");
-        std::fs::copy(root.join("ovmf/OVMF_VARS-pure-efi.fd"), &vars)
-            .map_err(|e| format!("copy the firmware's variable store: {e}"))?;
+        let vars = scratch.join("vars.fd");
+        toyos_build::firmware::of(toyos_build::arch::Arch::X86_64)?.fresh_vars(&vars)?;
         Ok(Self { scratch, image, vars, identity, port: qemu::free_host_port(), base_kernel: parts.kernel.len() })
     }
 
@@ -613,8 +612,7 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
     let own = rig.floor_name()?;
     let owner = floors::name(Scope::Machine, &key.public(), &[0; 16]).as_str().to_string();
     let other = floors::name(Scope::Image, &key.public(), &[0x55; 16]).as_str().to_string();
-    let template = super::compile::repo_root().join("ovmf/OVMF_VARS-pure-efi.fd");
-    let fresh = || std::fs::copy(&template, &rig.vars).map(|_| ()).map_err(|e| format!("{}: {e}", rig.vars.display()));
+    let fresh = || toyos_build::firmware::of(toyos_build::arch::Arch::X86_64)?.fresh_vars(&rig.vars);
 
     fresh()?;
     vars::plant(&rig.vars, &owner, floors::ATTRIBUTES, &u64::MAX.to_le_bytes())?;

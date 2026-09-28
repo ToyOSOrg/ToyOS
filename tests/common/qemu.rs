@@ -2347,10 +2347,10 @@ pub struct BootOptions {
     /// before it left — and a guest with it set runs until the harness kills it.
     pub takes_the_reset: bool,
     /// Keep the firmware's variables in this file, writable, instead of the
-    /// shared read-only template: a copy the test made, so what one boot's
-    /// loader writes — the anti-rollback floor, `BootNext` — is what the next
-    /// boot of the same machine reads. `None` is every other boot, whose
-    /// variables live in firmware memory and die with the guest.
+    /// boot's own fresh copy of the template: a copy the test made, so what one
+    /// boot's loader writes — the anti-rollback floor, `BootNext` — is what the
+    /// next boot of the same machine reads. `None` is every other boot, whose
+    /// copy dies with the guest.
     pub firmware_vars: Option<PathBuf>,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
@@ -2642,6 +2642,9 @@ pub struct QemuInstance {
     /// delete: a [`BootOptions::boot_image`] belongs to the test that staged it
     /// and is often read back after the guest is gone.
     own_boot_image: Option<PathBuf>,
+    /// The variable store this boot copied for itself, on the same terms as
+    /// `own_boot_image`: a [`BootOptions::firmware_vars`] is the test's.
+    own_vars: Option<PathBuf>,
     boot_log: String,
     /// Whether this boot armed `i8042-trace`, which is the only channel a
     /// windowed shell has for saying it took a burst out of the device.
@@ -3155,6 +3158,17 @@ impl QemuInstance {
         let _ = fs::remove_file(&uart_log);
         let console_file = options.console_file.then(|| ConsoleFile::of(&uart_log).made());
 
+        let (firmware_vars, own_vars) = match &options.firmware_vars {
+            Some(vars) => (vars.clone(), None),
+            None => {
+                let vars = test_dir.join(format!("vars-{seq}.fd"));
+                toyos_build::firmware::of(options.profile.arch())
+                    .and_then(|firmware| firmware.fresh_vars(&vars))
+                    .unwrap_or_else(|why| panic!("[qemu] {why}"));
+                (vars.clone(), Some(vars))
+            }
+        };
+
         let qemu = qemu_command(
             &boot_image,
             nvme.path(),
@@ -3162,6 +3176,7 @@ impl QemuInstance {
             &audio_wav,
             &uart_log,
             &sockets.dir,
+            &firmware_vars,
             &options,
         );
         spawn_and_wait_ready(
@@ -3176,6 +3191,7 @@ impl QemuInstance {
                 sockets,
                 screendump,
                 own_boot_image,
+                own_vars,
                 carried,
                 console_file,
             },
@@ -3805,8 +3821,8 @@ impl Drop for QemuInstance {
         let _ = fs::remove_file(&self.screendump);
         // A per-boot image is hundreds of megabytes and a full run makes ~76 of
         // them; the shared name used to make that one file.
-        if let Some(image) = &self.own_boot_image {
-            let _ = fs::remove_file(image);
+        for own in [&self.own_boot_image, &self.own_vars].into_iter().flatten() {
+            let _ = fs::remove_file(own);
         }
         // `sockets` goes with the fields, after QEMU is reaped.
         LIVE.fetch_sub(1, Ordering::SeqCst);
@@ -4314,7 +4330,7 @@ impl QmpDevices {
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
     let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
-    qemu_command(p, p, &usb, p, p, p, options)
+    qemu_command(p, p, &usb, p, p, p, p, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -4334,6 +4350,7 @@ fn stick_file(image: &Path, read_error: Option<u64>) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn qemu_command(
     boot_image: &Path,
     nvme_image: &Path,
@@ -4341,6 +4358,7 @@ fn qemu_command(
     audio_wav: &Path,
     uart_log: &Path,
     socket_dir: &Path,
+    firmware_vars: &Path,
     options: &BootOptions,
 ) -> Command {
     let (qmp_socket, segment) = socket_names(socket_dir, options);
@@ -4356,8 +4374,9 @@ fn qemu_command(
     );
 
     let arch = options.profile.arch();
-    let repo = compile::repo_root();
-    let [firmware_code, firmware_vars] = arch.pflash(&repo);
+    let [firmware_code, firmware_vars] = toyos_build::firmware::of(arch)
+        .unwrap_or_else(|why| panic!("[qemu] {why}"))
+        .drives(firmware_vars);
 
     let mut qemu = Command::new(arch.qemu());
     if let Some(boot) = arch.boot() {
@@ -4423,10 +4442,7 @@ fn qemu_command(
         .arg("-drive")
         .arg(firmware_code)
         .arg("-drive")
-        .arg(match &options.firmware_vars {
-            Some(vars) => format!("if=pflash,format=raw,unit=1,file={},readonly=off", vars.display()),
-            None => firmware_vars,
-        })
+        .arg(firmware_vars)
         .arg("-drive")
         .arg(format!(
             "if=none,id=stick,{}{}",
@@ -4820,6 +4836,7 @@ struct Files {
     sockets: Sockets,
     screendump: PathBuf,
     own_boot_image: Option<PathBuf>,
+    own_vars: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
     console_file: Option<ConsoleFile>,
 }
@@ -4894,6 +4911,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         sockets,
         screendump,
         own_boot_image,
+        own_vars,
         carried,
         console_file,
     } = files;
@@ -4994,6 +5012,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         sockets,
         screendump,
         own_boot_image,
+        own_vars,
         boot_log,
         console,
         i8042_trace: options.kernel_params.contains(&"i8042-trace"),

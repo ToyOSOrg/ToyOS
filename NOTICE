@@ -15,10 +15,7 @@ Each section names its terms on one `SPDX-License-Identifier:` line, which
 agrees with the licence column of `COMMITTED_FILES` in `src/licence.rs` for
 every file both name, and that file judges what an image ships by them.
 
-Provenance below was established by inspecting content, not by trusting
-memory: `assets/` and `ovmf/` both entered in the initial squashed commit and
-carry no attribution of their own. Every hash is `shasum -a 256`, taken
-2026-08-08.
+Every hash is `shasum -a 256`, taken 2026-08-08.
 
 **If you redistribute a ToyOS image, read the DOOM1.WAD entry.** It is the one
 that constrains what you may do with a build.
@@ -235,63 +232,6 @@ tests/iced-counter/src/bin/iced-counter.rs — iced's own counter example, MIT
 `toolkit_iced` builds it and carries it into `tests/toolkitcase`; no image a
 `system.toml` builds ships it.
 
-
-ovmf/*.fd — EDK II firmware, BSD-2-Clause-Patent
-------------------------------------------------
-
-    OVMF_CODE-pure-efi.fd  1,966,080 bytes
-      sha256 9de33971d47958f42af86584b502f83256120b2482e4f7ed14db32fd68e92922
-    OVMF_VARS-pure-efi.fd    131,072 bytes
-      sha256 c653de93db67e4f2213a35598efb379a13ef4a12c241e003699d4d7afd193635
-    DEBUGX64_OVMF.fd       4,194,304 bytes
-      sha256 800ff5af1220d1232d4da7173ccddbb74a9217600bd8935903d9d534801778b4
-
-    Copyright (c) 2019, TianoCore and contributors
-    Licence text: licenses/BSD-2-Clause-Patent-EDK2.txt
-    SPDX-License-Identifier: BSD-2-Clause-Patent
-
-Third-party builds of Tianocore EDK II, read out of the binaries' own build
-paths: the two `-pure-efi` files were built on a Jenkins worker from
-`edk2-gf0064ac3af`, and `DEBUGX64_OVMF.fd` from a different tree (`/src/edk2`,
-`DEBUG_GCC5`). No `LICENSE`, version record or build recipe came with them.
-
-`OVMF_CODE`/`OVMF_VARS` are load-bearing — `src/qemu.rs:101` and
-`tests/common/qemu.rs:2207` point QEMU's pflash at them, so every boot on the
-dev host uses them. **`DEBUGX64_OVMF.fd` is referenced by nothing**: it is
-4,194,304 bytes of firmware no code path reaches. The audit missed it, calling
-all three load-bearing; whether to keep it is the owner's.
-
-Two open questions for the owner: whether to record a real upstream and version
-for these, and whether to take the firmware from QEMU's own installation
-instead — which would put it inside the "comes with QEMU" allowance and delete
-6,291,456 bytes from the repository.
-
-
-
-aavmf/*.fd — EDK II firmware for QEMU `virt`, BSD-2-Clause-Patent AND Apache-2.0
-------------------------------------------------------------
-
-    AAVMF_CODE.fd  67,108,864 bytes
-      sha256 47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d
-    AAVMF_VARS.fd  67,108,864 bytes
-      sha256 b3b855c5a80310168051164986855692d1bdb06e67619856177965cd87c6774f
-
-    Copyright (c) 2019, TianoCore and contributors
-    Licence text: licenses/BSD-2-Clause-Patent-EDK2.txt
-    Copyright 1995-2023 The OpenSSL Project Authors
-    Licence text: licenses/Apache-2.0-OpenSSL.txt
-    SPDX-License-Identifier: BSD-2-Clause-Patent AND Apache-2.0
-
-QEMU's own prebuilt ArmVirtQemu firmware, unmodified: `edk2-aarch64-code.fd`
-and `edk2-arm-vars.fd` as QEMU 11.1.1 installs them under `share/qemu/`,
-whose version string reads `edk2-stable202408-prebuilt.qemu.org` (a
-`DEBUG_GCC5` build of 2024-09-12). The variable store is the template: every
-boot gives it a writable snapshot QEMU discards, because this `DEBUG` build
-asserts on a read-only store. QEMU builds it with `NETWORK_TLS_ENABLE`
-(`roms/edk2-build.config`, `[opts.common]`), and edk2-stable202408's
-ArmVirtQemu links edk2's bundled OpenSSL either way (`OpensslLib` with TLS,
-`OpensslLibCrypto` without): OpenSSL 3.0.9, whose `LICENSE.txt` is the
-Apache-2.0 text above and which carries no `NOTICE`.
 
 tests/fixtures/gbae-v0.2.0-* — gbae, MIT
 -----------------------------------------

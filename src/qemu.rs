@@ -141,7 +141,15 @@ pub fn launch(opts: &Options) {
     }
     qemu.arg("-cpu").arg(arch.cpu(accel));
 
-    let [code, vars] = arch.pflash(std::path::Path::new("."));
+    // Remade every launch, beside the image it boots: what one session's
+    // firmware wrote is never the next one's premise.
+    let vars = std::path::Path::new("target/firmware-vars.fd");
+    let [code, vars] = toyos_build::firmware::of(arch)
+        .and_then(|firmware| firmware.fresh_vars(vars).map(|()| firmware.drives(vars)))
+        .unwrap_or_else(|why| {
+            eprintln!("Error: {why}");
+            std::process::exit(1)
+        });
     if let Some(boot) = arch.boot() {
         qemu.arg("-boot").arg(boot);
     }
