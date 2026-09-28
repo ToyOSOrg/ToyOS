@@ -17,7 +17,7 @@ the dial gave up within 5 s of its 60 and said why
 ```
 
 The test gives three refused dials 5 s of wall clock (`wait_connected(5 s)`)
-to reach the ceiling. Under that load, the third dial had not been turned away
+to reach the ceiling. Under that load, the dial had not given up
 by then. The other 199 runs passed.
 
 No host-test counterpart of `src/redlist.rs` disables it, so it still runs in
