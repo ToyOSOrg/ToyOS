@@ -310,6 +310,9 @@ const RUST_SKIP: &[&str] = &[
     // Same again, and it also needs a host injecting pointer packets:
     // `metal_sim_window_drag` runs it.
     "window_drag",
+    // Same again, and it also needs a host typing GUI+V:
+    // `metal_sim_hostile_clipboard` runs it.
+    "compositor_hostile_clipboard",
     // Needs a compositor, a terminal and a shell: `desktop_window_child`
     // launches it from that shell.
     "window_child",
@@ -704,6 +707,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // slow on purpose. Its own boot too: it leaves the pointer somewhere else
     // and the window in a different place than it found them.
     ("metal_sim_window_drag", Sched::Serial, Tier::Nightly),
+    // Its own boot: the compositor it abuses has to be one nothing else has
+    // touched.
+    ("metal_sim_hostile_clipboard", Sched::Parallel, Tier::Fast),
     // A host-measured drain rate with an 8 s ceiling on a 3.3 s expectation.
     // Not gate A, but the same instrument: what it measures is how fast a
     // client's audio leaves the machine.
@@ -1678,6 +1684,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("metal_sim_compositor_stall", METAL_SIM_CLIENTS),
     ("metal_sim_client_death", METAL_SIM_CLIENTS),
     ("metal_sim_window_drag", &["test_rs_window_drag"]),
+    ("metal_sim_hostile_clipboard", &["test_rs_compositor_hostile_clipboard"]),
     ("desktop_window_child", &["test_rs_window_child"]),
     ("toolkit_window_wake", &["test_rs_window_wake"]),
     ("toolkit_winit_loop", &["test_rs_winit_loop"]),
@@ -7540,6 +7547,85 @@ fn metal_sim_window_drag(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> 
     Ok(())
 }
 
+/// The guest runs the cases and asks for a paste after each copy; this half
+/// types GUI+V at every ask and asserts what the guest cannot see. **The
+/// kernel's record is the independent half**: a compositor that maps the pipe
+/// is ended by the kernel with a handle fault, whatever the compositor believed
+/// it was doing, so no such record may appear — and each refusal the guest
+/// caused must be named by the compositor.
+fn metal_sim_hostile_clipboard(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    /// The guest's `PASTE_MARKER`.
+    const PASTE: &str = "===HOSTILE_CLIPBOARD_PASTE===";
+    let bins: Vec<(String, Vec<u8>)> = rust_bins
+        .iter()
+        .filter(|(name, _)| name == "compositor_hostile_clipboard")
+        .cloned()
+        .collect();
+    if bins.is_empty() {
+        return Err("the compositor_hostile_clipboard client was not built".to_string());
+    }
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase");
+    let options =
+        BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() };
+    metal_sim_argv_check(&qemu::profile_argv(&options))?;
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+
+    let result = qemu.run_test_paced(
+        "test_rs_compositor_hostile_clipboard",
+        Duration::from_secs(240),
+        |socket, line| {
+            if line.contains(PASTE) {
+                let socket = socket.expect("this boot was made with QMP");
+                qemu::QmpInput::open(socket).keys(&[
+                    ("meta_l", true),
+                    ("v", true),
+                    ("v", false),
+                    ("meta_l", false),
+                ]);
+            }
+        },
+    );
+    let text = format!("{}\n{}", result.stdout, result.serial);
+
+    for death in ["handle fault:", "exit: compositor"] {
+        if let Some(line) = text.lines().find(|l| l.contains(death)) {
+            return Err(format!("the kernel ended the compositor: {}\n{text}", line.trim()));
+        }
+    }
+    if result.error.is_some() || result.exit_code != Some(0) {
+        let why = match &result.error {
+            Some(err) => err.to_string(),
+            None => String::from("it finished and its exit code is the finding"),
+        };
+        return Err(format!(
+            "compositor_hostile_clipboard exited {:?}: {why}\n{text}",
+            result.exit_code
+        ));
+    }
+    if !text.contains("hostile clipboard: every case survived") {
+        return Err(format!("the guest did not report that every case survived:\n{text}"));
+    }
+    if !text.contains("it began a copy and never committed it") {
+        return Err(format!(
+            "the client that held its region and never committed was not dropped by name:\n{text}"
+        ));
+    }
+    // The compositor's `DropReason::Retired`, which no other case produces.
+    const RETIRED: &str = "it sent the retired clipboard region";
+    if !text.lines().any(|l| l.contains("compositor: dropping client") && l.contains(RETIRED)) {
+        return Err(format!(
+            "the client that sent a pipe where a region went was not refused by name:\n{text}"
+        ));
+    }
+    const NOT_UTF8: [&str; 2] = ["compositor: refusing a clipboard from client", "it is not UTF-8"];
+    if !text.lines().any(|l| NOT_UTF8.iter().all(|s| l.contains(s))) {
+        return Err(format!("the copy that is not UTF-8 was not refused by name:\n{text}"));
+    }
+    serial::Serial::named("boot console", result.serial.as_str()).must_be_clean()?;
+    eprintln!("  [metal-sim] a pipe refused unused");
+    Ok(())
+}
+
 /// How far above its content the host reaches for a window's title bar.
 ///
 /// Not the compositor's title-bar height — this is a probe, and what it needs
@@ -11280,14 +11366,20 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
         ));
     }
 
-    // The one case whose verdict is a line rather than survival: a payload
-    // past what any client may inline is refused by name, because storing the
-    // prefix a frame reader keeps is the silent half of the same event.
     const OVERSIZE: &str = "compositor: refusing an inline payload past";
     if !result.stdout.contains(OVERSIZE) {
         return Err(format!(
             "an over-long inline clipboard was not refused by name, so nothing here separates \
              a refusal from a truncation:\n{}",
+            result.stdout
+        ));
+    }
+    // A copy's length sizes the region the compositor makes, so a length past
+    // the clipboard is refused before any region exists.
+    const LONG_COPY: &str = "compositor: refusing a copy of 4294967295 bytes";
+    if !result.stdout.contains(LONG_COPY) {
+        return Err(format!(
+            "a copy longer than any clipboard was not refused by name:\n{}",
             result.stdout
         ));
     }
@@ -15188,6 +15280,7 @@ fn run_machine_test(
             Ok(())
         }
         "metal_sim_window_drag" => metal_sim_window_drag(rust_bins),
+        "metal_sim_hostile_clipboard" => metal_sim_hostile_clipboard(rust_bins),
         "metal_sim_pointer_churn" => {
             // The owner froze his desktop twice by plugging a mouse in and
             // pulling it out again, and the second freeze landed on the fourth
