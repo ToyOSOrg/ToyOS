@@ -12,7 +12,7 @@ use crate::sysroot::{self, Sysroot, SYSROOT_SOURCES};
 /// separates "the compiler changed" from "the rustup link is missing": only the
 /// first makes the ToyOS-hosted rustc stale, and rebuilding that one costs
 /// minutes.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct Bootstrap {
     invalidate_hosted: bool,
 }
@@ -347,7 +347,7 @@ pub(crate) fn assert_toolchain_is_honest(stage2: &Path) {
 /// `stage2`'s cargo and clang, or the host target in the hosted rustc's sysroot.
 fn incomplete(rust_dir: &Path) -> bool {
     let stage2 = stage2(rust_dir);
-    cargo_link_stale(&stage2) || crate::clang::missing(&stage2) || host_target_missing(rust_dir)
+    cargo_link_stale(&stage2) || crate::clang::defect(&stage2).is_some() || host_target_missing(rust_dir)
 }
 
 /// Give the primary's toolchain what [`incomplete`] finds missing.
@@ -356,7 +356,7 @@ fn complete(rust_dir: &Path) {
     if cargo_link_stale(&stage2) {
         provision_toolchain_cargo(&stage2);
     }
-    if crate::clang::missing(&stage2) {
+    if crate::clang::defect(&stage2).is_some() {
         crate::clang::provision(&stage2);
     }
     if host_target_missing(rust_dir) {
@@ -373,6 +373,26 @@ fn complete(rust_dir: &Path) {
 fn reassemble(rust_dir: &Path, bootstrap: impl FnOnce()) {
     bootstrap();
     complete(rust_dir);
+}
+
+/// [`reassemble`] the primary's compiler with `bootstrap`, with nothing recording
+/// which compiler `stage2` is until it is whole: a bootstrap that is stopped is
+/// run again by the primary, and refused by name in every linked worktree.
+fn rebuild_compiler(rust_dir: &Path, bootstrap: impl FnOnce()) {
+    crate::compiler::forget(rust_dir);
+    reassemble(rust_dir, bootstrap);
+    crate::compiler::record(rust_dir);
+}
+
+/// What the primary bootstraps: a new compiler when asked to or when `stage2`
+/// is not the one its `compiler/` names, and the same one again when rustup has
+/// no `toyos` toolchain to run.
+fn bootstrap(force_rebuild: bool, current: bool, toolchain_exists: bool) -> Option<Bootstrap> {
+    if force_rebuild || !current {
+        Some(Bootstrap { invalidate_hosted: true })
+    } else {
+        (!toolchain_exists).then_some(Bootstrap { invalidate_hosted: false })
+    }
 }
 
 /// Complete a toolchain whose bootstrap was stopped before [`reassemble`]
@@ -449,9 +469,6 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         || {
             // Asked first, so an LLVM edit no commit holds is refused before any build.
             let current = crate::compiler::primary_is_current(&rust_dir);
-            if force_rebuild || !current {
-                return Some(Bootstrap { invalidate_hosted: true });
-            }
             let toolchain_exists = Command::new("rustup")
                 .args(["run", "toyos", "rustc", "--version"])
                 .stdout(std::process::Stdio::null())
@@ -459,12 +476,11 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            (!toolchain_exists).then_some(Bootstrap { invalidate_hosted: false })
+            bootstrap(force_rebuild, current, toolchain_exists)
         },
         |kind| {
             eprintln!("Building full toolchain (this takes a while on first run)...");
-            reassemble(&rust_dir, || full_bootstrap(root, &rust_dir));
-            crate::compiler::record(&rust_dir);
+            rebuild_compiler(&rust_dir, || full_bootstrap(root, &rust_dir));
             if kind.invalidate_hosted {
                 let _ = fs::remove_file(&hosted_stamp);
             }
@@ -1085,13 +1101,16 @@ mod tests {
 
         reassemble(&rust_dir, || {
             // What bootstrap leaves: `stage2` made again, with `rustc` and the
-            // LLVM tools it assembles, and neither cargo nor clang.
+            // LLVM tools it assembles, and neither cargo nor clang; and the
+            // hosted rustc's sysroot without the host target.
             let _ = fs::remove_dir_all(&stage2);
             let lld = rust_lld(&stage2);
             for file in [stage2.join("bin/rustc"), lld.clone(), lld.with_file_name("llvm-ar")] {
                 fs::create_dir_all(file.parent().unwrap()).unwrap();
                 fs::write(file, b"").unwrap();
             }
+            let hosted = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
+            fs::create_dir_all(&hosted).unwrap();
         });
         assert!(
             !incomplete(&rust_dir),
@@ -1099,6 +1118,44 @@ mod tests {
              build then queues for behind every sysroot build"
         );
         assert_eq!(toolchain_defect(&stage2), None, "a bootstrap let its exclusive hold go with stage2 not whole");
+    }
+
+    /// **A stopped bootstrap is run again**: nothing records which compiler
+    /// `stage2` is while one runs, so the primary's next build is not told the
+    /// old one is current.
+    #[test]
+    fn a_stopped_bootstrap_leaves_no_record() {
+        let rust_dir = TempDir::new("stopped");
+        let record = crate::compiler::primary_record(&rust_dir);
+        fs::create_dir_all(record.parent().unwrap()).unwrap();
+        fs::write(&record, "the compiler before").unwrap();
+        let stopped = std::panic::catch_unwind(|| rebuild_compiler(&rust_dir, || panic!("stopped")));
+        assert!(stopped.is_err());
+        assert!(!record.exists(), "a stopped bootstrap left the record of the compiler before it");
+    }
+
+    /// **The primary bootstraps a new compiler exactly when asked to or when its
+    /// `stage2` is not current, and otherwise only when rustup has none.**
+    #[test]
+    fn the_primary_bootstraps_when_asked_stale_or_missing() {
+        let new = Some(Bootstrap { invalidate_hosted: true });
+        let again = Some(Bootstrap { invalidate_hosted: false });
+        for (force_rebuild, current, toolchain_exists, want) in [
+            (false, true, true, None),
+            (false, true, false, again),
+            (false, false, true, new),
+            (false, false, false, new),
+            (true, true, true, new),
+            (true, true, false, new),
+            (true, false, true, new),
+            (true, false, false, new),
+        ] {
+            assert_eq!(
+                bootstrap(force_rebuild, current, toolchain_exists),
+                want,
+                "force_rebuild {force_rebuild}, current {current}, toolchain_exists {toolchain_exists}"
+            );
+        }
     }
 
     /// The negative control is the defect itself: this is verbatim what cargo

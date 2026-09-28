@@ -3,11 +3,9 @@
 //!
 //! **Every worktree builds with the compiler its own fork checkout names.** The
 //! primary's `stage2` is built from what the primary's `rust/compiler/` holds,
-//! and [`record`] writes which that is; the primary bootstraps exactly when its
-//! `compiler/` is no longer that ([`primary_is_current`]). A linked worktree
-//! whose fork checkout holds the same `compiler/` ([`source`]) compiles with
-//! that one. One whose `compiler/` differs — a new target spec, a codegen
-//! change — gets its own:
+//! and [`record`] writes which that is. A linked worktree whose fork checkout
+//! holds the same `compiler/` ([`source`]) compiles with that one. One whose
+//! `compiler/` differs — a new target spec, a codegen change — gets its own:
 //! built by bootstrap in its own fork checkout, under that checkout's
 //! `build/toyos-compiler/`, and placed at `rust/build/compilers/<key>/`, where
 //! the key ([`key`]) is the identity (`src/identity.rs`) of the checkout's
@@ -113,7 +111,7 @@ impl Compiler {
 }
 
 /// The primary's record of which `compiler/` its `stage2` was built from.
-fn primary_record(rust_dir: &Path) -> PathBuf {
+pub(crate) fn primary_record(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/toyos-compiler")
 }
 
@@ -155,6 +153,16 @@ pub fn record(rust_dir: &Path) {
     let want = source(rust_dir);
     if fs::read_to_string(&at).ok().as_deref() != Some(want.as_str()) {
         fs::write(&at, &want).unwrap_or_else(|e| panic!("write {}: {e}", at.display()));
+    }
+}
+
+/// Remove the record of which compiler the primary's `stage2` is. The primary
+/// calls this before a toolchain build.
+pub fn forget(rust_dir: &Path) {
+    let at = primary_record(rust_dir);
+    match fs::remove_file(&at) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("remove {}: {e}", at.display()),
+        _ => {}
     }
 }
 
@@ -242,18 +250,16 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     fs::create_dir_all(recorded.parent().expect("a file under target/")).ok();
     fs::write(&recorded, &key).unwrap_or_else(|e| panic!("write {}: {e}", recorded.display()));
     let mut placed = false;
-    let using = loop {
-        let using = buildlock::keyed_using(root, Keyed::Compiler, &key);
-        if dir.join(SOURCE).is_file() {
-            break using;
-        }
-        drop(using);
-        let _building = buildlock::keyed_building(root, Keyed::Compiler, &key);
-        if !dir.join(SOURCE).is_file() {
+    let using = buildlock::keyed_made(
+        root,
+        Keyed::Compiler,
+        &key,
+        || (!dir.join(SOURCE).is_file()).then(|| format!("{} carries no {SOURCE}", dir.display())),
+        || {
             place(root, fork, &key, &dir, &build);
             placed = true;
-        }
-    };
+        },
+    );
     // A compiler edit loop places one per edit, and the one this replaced is
     // named by nobody now; the one in use is held, so the sweep leaves it.
     if placed {

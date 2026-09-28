@@ -286,6 +286,33 @@ pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
     Guard { file, records_holder: false }
 }
 
+/// What `key` names, held in use and whole: made by `make` under
+/// [`keyed_building`] while `defect`, which says why it is not whole, says it is
+/// not. A `make` that leaves it not whole is refused by that defect rather than
+/// run again.
+pub fn keyed_made(
+    root: &Path,
+    kind: Keyed,
+    key: &str,
+    defect: impl Fn() -> Option<String>,
+    mut make: impl FnMut(),
+) -> Guard {
+    loop {
+        let using = keyed_using(root, kind, key);
+        if defect().is_none() {
+            return using;
+        }
+        drop(using);
+        let _building = keyed_building(root, kind, key);
+        if defect().is_some() {
+            make();
+            if let Some(defect) = defect() {
+                panic!("{} {key} was made, and is not whole: {defect}", kind.name());
+            }
+        }
+    }
+}
+
 /// What `key` names, exclusively and only if nobody is making or using it: what
 /// a sweep holds while it removes one.
 pub fn keyed_idle(root: &Path, kind: Keyed, key: &str) -> Option<Guard> {

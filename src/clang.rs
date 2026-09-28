@@ -115,11 +115,6 @@ fn absent(toolchain: &Path) -> Vec<String> {
     gone
 }
 
-/// Whether `toolchain` lacks any of the C toolchain.
-pub(crate) fn missing(toolchain: &Path) -> bool {
-    !absent(toolchain).is_empty()
-}
-
 /// Why `toolchain` cannot compile C, if it cannot.
 pub(crate) fn defect(toolchain: &Path) -> Option<String> {
     let gone = absent(toolchain);
@@ -208,13 +203,13 @@ mod tests {
         write(&bin(&stage2).join("rust-lld"), "lld");
         write(&bin(&stage2).join("llvm-ar"), "the archiver");
 
-        assert!(missing(&stage2));
+        assert!(defect(&stage2).is_some());
         let refused = std::panic::catch_unwind(|| assert_present(&stage2)).expect_err("no clang, and not refused");
         let said = refused.downcast_ref::<String>().expect("a formatted refusal");
         assert!(said.contains("clang") && said.contains("ld.lld") && said.contains("include"), "{said}");
 
         provision(&stage2);
-        assert!(!missing(&stage2));
+        assert_eq!(defect(&stage2), None);
         assert_eq!(fs::read_to_string(bin(&stage2).join("clang")).unwrap(), "the clang");
         assert!(!fs::symlink_metadata(bin(&stage2).join("clang")).unwrap().file_type().is_symlink(), "clang is a copy, not the link");
         assert_eq!(fs::read_link(bin(&stage2).join("ld.lld")).unwrap(), Path::new("rust-lld"));
@@ -231,6 +226,6 @@ mod tests {
         assert_eq!(fs::read_to_string(resource_parent(&stage2).join("23/include/stddef.h")).unwrap(), "v23");
 
         fs::remove_file(bin(&stage2).join("llvm-ar")).unwrap();
-        assert!(missing(&stage2), "a missing llvm-ar went unnoticed");
+        assert!(defect(&stage2).is_some(), "a missing llvm-ar went unnoticed");
     }
 }
