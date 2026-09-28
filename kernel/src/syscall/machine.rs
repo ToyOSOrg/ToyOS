@@ -98,10 +98,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
         assert!(queued, "console-queue-at-the-stop: the queue had no room for its one line");
     }
     crate::log::console::drain_for_the_stop();
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::quiesce_dump() {
-        crate::sched::dump::serve_for_the_stop();
-    }
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
     crate::drivers::panic_console::log_census();

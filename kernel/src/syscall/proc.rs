@@ -22,8 +22,6 @@ use super::cancelled;
 use super::handles::{demand_syscap, handle_result};
 
 pub(super) fn sys_thread_exit(code: i32) -> u64 {
-    #[cfg(feature = "boot-actuators")]
-    crate::quiesce::last::hold(crate::quiesce::last::Last::Exit);
     process::thread_exit(code);
 }
 
@@ -154,26 +152,15 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
     // None means never existed or already collected; the predicate below answers both.
     let target = process::thread_sched(caller, tid);
     let parkable = crate::scheduler::Parkable::at_entry();
-    // Collecting takes the zombie out of the table, so the first answer is kept: asked
-    // again, the same join finds no such thread.
-    let answer = core::cell::Cell::new(None);
-    let settled = || {
-        answer.get().is_some()
-            || match process::wait_thread_zombie(tid, caller) {
-                Ok(None) => false,
-                Ok(Some(_)) => {
-                    answer.set(Some(0));
-                    true
-                }
-                Err(()) => {
-                    answer.set(Some(SyscallError::NotFound.to_u64()));
-                    true
-                }
-            }
-    };
-    while !settled() {
+    let join = toyos_proclife::join::Join::default();
+    let ask = || process::ask_join(&join, tid, caller);
+    loop {
+        // Both refusals are one answer here; `JoinRefused` keeps them apart because they aren't the same fact.
+        if let Some(answer) = ask() {
+            return answer.map_or(SyscallError::NotFound.to_u64(), |_| 0);
+        }
         let Some(sched) = target.as_ref() else {
-            // Nothing to arm on and no zombie: wait_thread_zombie will never answer differently.
+            // Nothing to arm on and no zombie: the join will never answer differently.
             return SyscallError::NotFound.to_u64();
         };
         // Arms on the target thread's own watch, not a wake-by-name to the main thread.
@@ -183,19 +170,18 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
             tid.raw() as u64,
             WaitClass::Other,
             Deadline::never(),
-            settled,
+            || ask().is_some(),
         )
         .is_err()
         {
             return cancelled();
         }
     }
-    answer.get().expect("a settled join holds its answer")
 }
 
 pub(super) fn sys_nanosleep(nanos: u64) -> u64 {
     #[cfg(feature = "boot-actuators")]
-    crate::quiesce::last::hold(crate::quiesce::last::Last::Park);
+    crate::quiesce::last::hold();
     // The ABI's relative span becomes an absolute Deadline here, and only here.
     let deadline = Deadline::at(crate::clock::now() + Duration::from_nanos(nanos));
     // Armed on its own thread with no subject: nothing posts, only the deadline fires it.

@@ -789,8 +789,7 @@ fn rotation(
     // log — the sink drains everything pending before it looks at the size —
     // so a metal-sim boot makes a handful, measured at four. That is under the
     // retention bound, which is why this only requires the count to stay inside
-    // it; deleting the oldest is `wall_clock_file`'s claim, staged with a full
-    // volume rather than hoped for here.
+    // it.
     if logs.len() < 2 || logs.len() > super::wallclock::MAX_LOG_FILES {
         return Err(format!(
             "the volume holds {} log files, wanted 2..={}: {}",

@@ -33,13 +33,6 @@ const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
     ("kbd-close", kbd_close::run),
 ];
 
-/// Jobs started holding this program's console as stdin rather than a pipe:
-/// a job whose subject is the console object has no other way to hold one, its
-/// stdout being this program's log ring. The kernel mints the job a console of its
-/// own from this one, and a job that never reads it takes none of the serial
-/// commands.
-const CONSOLE_JOBS: &[&str] = &["test_rs_console_line_atomicity"];
-
 /// The job the runner is inside, and whether the list got through: written by
 /// the loop, read by the deadline watching it.
 static RUNNING: Mutex<String> = Mutex::new(String::new());
@@ -278,13 +271,9 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
         return Ran::Builtin(code);
     }
 
-    // Piped stdin so the child does not consume the serial commands, but for
-    // a job in `CONSOLE_JOBS`.
+    // Piped stdin so the child does not consume the serial commands.
     let mut command = Command::new(&path);
-    command.args(args);
-    if !CONSOLE_JOBS.contains(&name) {
-        command.stdin(Stdio::piped());
-    }
+    command.args(args).stdin(Stdio::piped());
     // **A refused dup is an answer and not a failure — but only one
     // refusal is.** `duplicate` needs `DUP` on the capability, which a
     // manifest grants by name, so `PermissionDenied` says this cap is one

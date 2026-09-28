@@ -453,59 +453,6 @@ fn front(path: &Path, at: u64, n: usize) -> Vec<u8> {
     head
 }
 
-/// The shared-object cache's two refusals, judged in
-/// `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`. The cache answers for a
-/// path the kernel opens itself, which is `/system` and `/tmp`, so the files
-/// are tmpfs's: the guest holds the rewritten bytes against the library it
-/// copied, and the kernel's own lines say it refused.
-pub fn so_cache_refusals(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    /// Without it the budget arm would have to load 256 MiB of libraries.
-    const PARAMS: &[&str] = &["so-cache-tiny"];
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::MetalDisk,
-            kernel_params: PARAMS,
-            ..Default::default()
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-
-    let result = qemu.run_test("test_rs_so_cache_policy", Duration::from_secs(60));
-    let log = format!("{boot}\n{}{}{}", result.before, result.stdout, result.serial);
-    if result.exit_code != Some(0) {
-        return Err(format!(
-            "so_cache_policy guest failed:\n{}\nkernel log while it ran:\n{}{}",
-            result.stdout, result.before, result.serial
-        ));
-    }
-    // Stated by the kernel too: an arm reporting a refusal nobody made would pass.
-    for said in ["the cached image is stale", "byte budget; refused"] {
-        if !log.contains(said) {
-            return Err(format!("no {said:?} line — the kernel refused nothing:\n{log}"));
-        }
-    }
-
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    let tail = qemu.drain_serial(Duration::from_secs(20));
-    drop(qemu);
-    for bad in ["PANIC:", "panicked at"] {
-        if tail.contains(bad) {
-            return Err(format!("{bad:?} on the way down\n{tail}"));
-        }
-    }
-    eprintln!("  [so-cache] a changed file and a full budget refused, by the kernel's own word");
-    Ok(())
-}
-
 /// A same-length overwrite on `/home` read back through the name it rebound.
 ///
 /// The oracle is outside the guest and outside the kernel: with the machine

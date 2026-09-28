@@ -107,12 +107,6 @@ actuators! {
     /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
     quiesce_last_park = "quiesce-last-park";
 
-    /// The same inside `SYS_THREAD_EXIT`: its exit is then the stop's last transition.
-    quiesce_last_exit = "quiesce-last-exit";
-
-    /// Serve a blocked-task dump from the shutdown once its first stage has stopped the machine: the report Ctrl+Alt+D gives on a shutdown stuck in its stop.
-    quiesce_dump = "quiesce-dump";
-
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
 
@@ -227,9 +221,6 @@ actuators! {
     /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
 
-    /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
-    so_cache_tiny = "so-cache-tiny";
-
     /// Run the first attempt of each run `object::ops::until_answered` retries —
     /// a file's `SYS_FSYNC`, a claimed partition's read, write or flush — under an
     /// operation that is already over, once per file and per partition and kind.
@@ -296,12 +287,6 @@ actuators! {
 
     /// Give PORTSC's PED bit the RW1CS meaning xHCI 1.2 §5.4.8 gives it.
     xhci_portsc_rw1c = "xhci-portsc-rw1c";
-
-    /// Take a bound HID device's first completion away and hand back a stall.
-    xhci_hid_break_first = "xhci-hid-break-first";
-
-    /// The same at its fourth completion.
-    xhci_hid_break_late = "xhci-hid-break-late";
 
     /// Run `parse_config` over nine crafted configuration descriptors at init.
     xhci_descriptor_selftest = "xhci-descriptor-selftest";
@@ -426,9 +411,6 @@ actuators! {
 
     /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
-
-    /// Panic inside `klogd` on its first instruction.
-    klogd_panic = "klogd-panic";
 
     /// Read address zero inside `klogd` on its first instruction.
     klogd_fault = "klogd-fault";

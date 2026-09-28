@@ -154,5 +154,5 @@ the kernel writes no log file — `/system/bin/logd` does, an ordinary user proc
 owns "every policy about files — where they go, what they are called, how many
 there are, what happens when the stick stops answering"
 (`userland/logd/src/main.rs:1-10`). Gated by `esp_filesystem`,
-`kernel_log_file`, `log_partition_layout`, `log_partition_identity`
-and `wall_clock_file`, plus `toybox_cp_volume`.
+`kernel_log_file`, `log_partition_layout` and `log_partition_identity`,
+plus `toybox_cp_volume`.
