@@ -66,6 +66,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
     },
     Disabled {
+        test: "quiesce_leaves_the_volume_whole",
+        issue: "issues/build/quiesce-leaves-the-volume-whole-needs-its-flush-to-close-inside-the-stops-budget.md",
+    },
+    Disabled {
         test: "quiesce_stops_the_machine",
         issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
     },
@@ -104,6 +108,10 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "usb_transport_break",
         issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
+    },
+    Disabled {
+        test: "user_copy_races_munmap",
+        issue: "issues/kernel/copy-meets-a-remap-holds-a-cpu-the-thread-it-waits-on-may-be-queued-behind.md",
     },
 ];
 
