@@ -47,10 +47,7 @@ stdin — and the machine installs nothing the owner did not sign.
    file servers (#536), since the kernel owns the only NVMe controller today.
    `--via-ubuntu` goes with it.
 3. **The owner's last resort**, where no slot and no entry behind it boots: a
-   stick written on the Mac by this tree's own tooling — `cargo run --
-   --write-stick /dev/diskN`, which unmounts the stick's volumes through
-   DiskArbitration, refuses an internal disk or one of an unexpected size by
-   name, writes the image and reads it back. Never `dd` or `diskutil`. Not
+   stick written by this tree's own tooling. Not
    built; until it is, the last resort is the firmware's boot menu and the
    Ubuntu still on the NVMe.
 
