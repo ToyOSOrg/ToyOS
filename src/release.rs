@@ -1,9 +1,7 @@
 //! The toolchain release: the tag a tree's toolchain is published under, the
 //! tarball it ships as, and how a runner installs one.
 //!
-//! **The tag is the content hash of everything the tarball's bytes depend on**
-//! — [`TREES`]: the rust fork, whose LLVM is also the `rust-lld` it carries, the
-//! three trees compiled into the sysroot, and this file, which is the packaging. A tree
+//! **The tag is the content hash of [`trees`].** A tree
 //! whose toolchain somebody already built finds it published; a tree that moved
 //! any of them asks for a tag nobody has, and `cargo run -- --ci toolchain`
 //! builds it. Publishing is idempotent because the tag *is* the content.
@@ -24,13 +22,13 @@ use crate::toolchain::HOSTED_ARCH;
 
 /// What the tag hashes, as `git rev-parse HEAD:<tree>` names them. The last is
 /// this file.
-pub const TREES: [&str; 5] = [
-    "rust",
-    "toyos-abi/src",
-    "toyos/src",
-    "userland/libc/src",
-    "src/release.rs",
-];
+fn trees() -> Vec<&'static str> {
+    std::iter::once("rust")
+        .chain(crate::sysroot::SYSROOT_SOURCES)
+        .chain(crate::sysroot::SYSROOT_MANIFESTS)
+        .chain([crate::clang::SOURCE, file!()])
+        .collect()
+}
 
 /// The one asset a release carries.
 const ASSET: &str = "toyos-toolchain.tar.zst";
@@ -43,11 +41,11 @@ const HOST: &str = "x86_64-unknown-linux-gnu";
 const GLIBC_FLOOR: (u32, u32) = (2, 39);
 
 /// `toolchain-linux-x86_64-<16 hex>`: the first 16 hex digits of the SHA-256 of
-/// what `git rev-parse` prints for [`TREES`], newline-terminated lines and all.
+/// what `git rev-parse` prints for [`trees`], newline-terminated lines and all.
 pub fn tag(root: &Path) -> Result<String, String> {
     let out = Command::new("git")
         .arg("rev-parse")
-        .args(TREES.iter().map(|t| format!("HEAD:{t}")))
+        .args(trees().iter().map(|t| format!("HEAD:{t}")))
         .current_dir(root)
         .output()
         .map_err(|e| format!("git rev-parse: {e}"))?;
@@ -228,8 +226,8 @@ pub fn ensure_published(root: &Path) -> Result<String, String> {
 /// Bootstrap, check the glibc floor, package, publish, and wait for the asset.
 fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     run(Command::new("git").args(["submodule", "update", "--init", "rust"]).current_dir(root))?;
-    // Bootstrap takes `HEAD^1` as the upstream commit whose LLVM to fetch when
-    // it sees GitHub Actions; in this fork that is our own merge, which
+    // Bootstrap takes `HEAD^1` as the upstream commit whose artifacts to fetch
+    // when it sees GitHub Actions; in this fork that is our own merge, which
     // rust-lang's CI never built.
     run(Command::new("cargo")
         .args(["run", "--", "--build-only"])
@@ -300,11 +298,13 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
 }
 
 /// Every `GLIBC_x.y` the shipped host binaries and libraries name, as the
-/// newest. A byte scan: it can only over-report, so its failure is a refused
-/// publish.
+/// newest: `rustc` and its libraries, and the `rust-lld`, clang and LLVM tools
+/// beside them. A byte scan: it can only over-report, so its failure is a
+/// refused publish.
 fn shipped_glibc(stage2: &Path) -> Result<(u32, u32), String> {
     let mut files: Vec<PathBuf> = Vec::new();
-    for (dir, lib) in [(stage2.join("bin"), false), (stage2.join("lib"), true)] {
+    let tools = stage2.join(format!("lib/rustlib/{HOST}/bin"));
+    for (dir, lib) in [(stage2.join("bin"), false), (stage2.join("lib"), true), (tools, false)] {
         let entries = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         for entry in entries.flatten() {
             let path = entry.path();
@@ -385,6 +385,10 @@ fn notes(root: &Path, tag: &str, manifest: &str) -> Result<String, String> {
 
 rustc's ToyOS target names `rust-lld` as its linker, and the toolchain carries it where rustc looks for it, so nothing goes on `PATH`. The `cargo` symlink is not shipped because its path would be the publisher's.
 
+## C
+
+`lib/rustlib/{HOST}/bin/clang` is the clang of the LLVM this `rustc` is built with, from ToyOSOrg/llvm-project, which knows `x86_64-unknown-toyos`. Its C sysroot — the ToyOS C library's headers and its `staticlib` — is `lib/rustlib/x86_64-unknown-toyos/c`, so `clang --target=x86_64-unknown-toyos --sysroot=toyos-toolchain/{HOST}/stage2/lib/rustlib/x86_64-unknown-toyos/c hello.c` builds a ToyOS program, linked by the `ld.lld` beside clang.
+
 ## glibc
 
 The host binaries name **GLIBC_{major}.{minor}** at most, so any distribution with glibc {major}.{minor} or newer runs them. A build that needed more is refused rather than published.
@@ -438,12 +442,68 @@ mod tests {
     /// The packaging is one of the trees its own tag hashes.
     #[test]
     fn the_tag_hashes_this_file() {
-        assert_eq!(TREES.last(), Some(&file!()));
-        for tree in TREES {
+        assert_eq!(trees().last(), Some(&file!()));
+        for tree in trees() {
             assert!(
                 Path::new(env!("CARGO_MANIFEST_DIR")).join(tree).exists(),
                 "{tree} is hashed into the tag and is not in the tree"
             );
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(["-c", "init.defaultBranch=main"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A commit to the C toolchain's declarations or headers moves the tag.
+    #[test]
+    fn the_tag_moves_with_the_c_toolchain() {
+        let repo = TempDir::new("release-tag");
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let write = |path: &str, text: &str| {
+            let path = repo.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        git(&repo, &["init", "-q"]);
+        for tree in trees() {
+            match tree {
+                "rust" => git(&repo, &["update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,rust"]),
+                file if here.join(file).is_file() => write(file, &fs::read_to_string(here.join(file)).unwrap()),
+                dir => write(&format!("{dir}/placeholder"), "x"),
+            }
+        }
+        fs::create_dir_all(repo.join("rust")).unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "the tree"]);
+        let mut before = tag(&repo).unwrap();
+
+        let clang = fs::read_to_string(here.join(crate::clang::SOURCE)).unwrap();
+        let tools = r#"const TOOLS: [&str; 3] = ["llvm-ar", "clang", "ld.lld"];"#;
+        let objdump = r#"const TOOLS: [&str; 4] = ["llvm-ar", "clang", "ld.lld", "llvm-objdump"];"#;
+        let targets = r#"targets = \"AArch64;X86\""#;
+        let riscv = r#"targets = \"AArch64;RISCV;X86\""#;
+        assert!(clang.contains(tools) && clang.contains(targets), "src/clang.rs no longer declares what this mutates");
+        let with_objdump = clang.replace(tools, objdump);
+        let mutations = [
+            (crate::clang::SOURCE, with_objdump.clone()),
+            (crate::clang::SOURCE, with_objdump.replace(targets, riscv)),
+            ("userland/libc/include/placeholder", "y".to_string()),
+        ];
+        for (path, text) in mutations {
+            write(path, &text);
+            git(&repo, &["add", "-A"]);
+            git(&repo, &["commit", "-qm", "a mutation"]);
+            let after = tag(&repo).unwrap();
+            assert_ne!(after, before, "a commit to {path} kept the tag");
+            before = after;
         }
     }
 

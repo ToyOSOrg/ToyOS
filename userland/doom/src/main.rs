@@ -1,4 +1,5 @@
 mod ffi;
+mod frames;
 mod input;
 mod sound;
 
@@ -159,7 +160,11 @@ pub extern "C" fn DG_Init() {
 }
 
 #[no_mangle]
-pub extern "C" fn DG_DrawFrame() {}
+pub extern "C" fn DG_DrawFrame() {
+    boundary("DG_DrawFrame", (), || unsafe {
+        frames::drawn(std::slice::from_raw_parts(DG_ScreenBuffer, SRC_W * SRC_H));
+    })
+}
 
 #[no_mangle]
 pub extern "C" fn DG_SleepMs(ms: u32) {
@@ -210,6 +215,12 @@ fn main() {
     // `tests/toyos-rust-tests/src/bin/doom_music.rs`.
     if std::env::args().any(|arg| arg == "--music-check") {
         std::process::exit(sound::music_check());
+    }
+
+    // What the renderer draws, as one hash over a demo's frames, with no window
+    // in the way. Driven by `tests/toyos-rust-tests/src/bin/doom_frames.rs`.
+    if std::env::args().any(|arg| arg == "--frame-check") {
+        frames::frame_check();
     }
 
     let event_loop = EventLoop::new().expect("failed to create event loop");

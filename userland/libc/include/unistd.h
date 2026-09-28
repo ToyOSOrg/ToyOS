@@ -20,7 +20,7 @@ char *getcwd(char *buf, size_t size);
 int chdir(const char *path);
 int access(const char *path, int mode);
 unsigned int sleep(unsigned int seconds);
-int usleep(unsigned long usec);
+int usleep(unsigned int usec);
 int isatty(int fd);
 int execvp(const char *file, char *const argv[]);
 int fork(void);
