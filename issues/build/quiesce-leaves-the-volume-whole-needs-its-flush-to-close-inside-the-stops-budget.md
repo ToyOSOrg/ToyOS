@@ -32,10 +32,7 @@ Attempt 9 was due at about 1944 ms (a 640 ms park after 1304). It closed at
 2705 ms, two milliseconds after the stop's own deadline wake, which fired
 27 ms late. A single stall of the whole guest from before 1944 ms to past
 2676 ms explains both late wakes firing together. Nothing in the guest was
-waiting on the other. Nothing here is PR #562's doing either: on that branch
-the kernel paths this boot runs (`quiesce.rs`, `block.rs`, `fat32_adapter.rs`)
-are the same as on `main`. The one change to `quiesce_fsync.rs` removes a
-deadline the guest only reached on a hang.
+waiting on the other.
 
 ## Exit condition
 

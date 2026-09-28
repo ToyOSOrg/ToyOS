@@ -2086,6 +2086,16 @@ pub fn userdev_dma_fault(
         ));
     }
 
+    // netd's answer to the refusal is its own end: `Card::begin_pass` panics
+    // on the claim's `Io`, and it exits 101. Awaited so that the capture below
+    // is the machine's after netd, and a claim that stops refusing reds here.
+    let mut end = String::new();
+    qemu::await_guest(&mut qemu, &mut end, "netd's end on its refused claim", |end| {
+        end.contains("netd: this NIC's claim refused an interrupt read: Io")
+            && end.lines().any(|l| l.contains("exit: netd pid=") && l.contains(" code=101 "))
+    })
+    .map_err(|e| format!("{e}\n{end}\n{}", log.text()))?;
+
     // And the machine is running. This is the assertion the whole stage is
     // for: a guest that answers here is one whose scheduler, spawn path and
     // IPC all survived a device being refused mid-flight.

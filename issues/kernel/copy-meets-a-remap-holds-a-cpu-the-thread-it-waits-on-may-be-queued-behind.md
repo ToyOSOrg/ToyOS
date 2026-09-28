@@ -31,12 +31,6 @@ neither CPU. Queued behind the spin on cpu0 is the reading that fits all of
 this. Nothing in the capture proves it: no line says which queue held the
 thread.
 
-This is not PR #562's doing. On that branch `kernel/src/user_ptr.rs` and the
-scheduler are the same as on `main`. The one change to
-`copy_out_races_munmap.rs` removes a 10 s assert from the main thread's cue
-loop, and that assert only fires when the main thread is running, in which
-case it sees the cue and maps.
-
 ## Exit condition
 
 The hold cannot strand the thread it waits for. For example: the racing thread
