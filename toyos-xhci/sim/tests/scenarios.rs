@@ -94,7 +94,7 @@ fn a_port_that_never_finishes_its_reset_is_given_up_on_and_left_alone() {
     driver
         .run_to(&mut port, 0, DEBOUNCE_NS + RESET_DEADLINE_NS + PASS, PASS)
         .unwrap();
-    assert_eq!(driver.did, [Did::Reset(Reset::Hot), Did::GaveUp(GaveUp::ResetNeverFinished(Reset::Hot))], "{:?}", driver.did);
+    assert_eq!(driver.did, [Did::Reset(Reset::Hot), Did::GaveUp(GaveUp::ResetNeverFinished)], "{:?}", driver.did);
 
     // And it stays given up on: a port retried every pass is a port that costs
     // the machine a reset per pass for as long as the device stays in it.

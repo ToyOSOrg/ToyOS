@@ -1241,14 +1241,10 @@ impl XhciController {
                 Step::Wait(at) => return Some(at),
                 Step::GaveUp(why) => {
                     match why {
-                        GaveUp::ResetNeverFinished(kind) => log!(
-                            "xHCI: port {} never finished its {} reset (PORTSC {:#010x}); \
+                        GaveUp::ResetNeverFinished => log!(
+                            "xHCI: port {} never finished its hot reset (PORTSC {:#010x}); \
                              skipping it",
                             port_idx + 1,
-                            match kind {
-                                Reset::Hot => "hot",
-                                Reset::Warm => "warm",
-                            },
                             portsc.raw()
                         ),
                         // §4.19.1.2 has nothing further after a warm reset — this is the port's end.
@@ -1259,14 +1255,10 @@ impl XhciController {
                             portsc.raw(),
                             portsc.link_state()
                         ),
-                        GaveUp::ResetFailed(kind) => log!(
-                            "xHCI: port {} completed its {} reset without enabling \
+                        GaveUp::ResetFailed => log!(
+                            "xHCI: port {} completed its hot reset without enabling \
                              (PORTSC {:#010x}); skipping it",
                             port_idx + 1,
-                            match kind {
-                                Reset::Hot => "hot",
-                                Reset::Warm => "warm",
-                            },
                             portsc.raw()
                         ),
                     }

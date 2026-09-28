@@ -134,16 +134,16 @@ pub fn due(signalled: bool, ports: &[PortState]) -> bool {
 /// Why a port stopped being worked on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GaveUp {
-    /// A reset was written and no completion came.
-    ResetNeverFinished(Reset),
+    /// A hot reset was written and no completion came.
+    ResetNeverFinished,
     /// A USB3 link was warm-reset as well and still did not come up.
     /// §4.19.1.2 has nothing beyond a warm reset, so this is the end of the
     /// road for the port rather than one step short of it.
     LinkNeverTrained,
-    /// The reset *completed* with the port still disabled, where §4.19.5
+    /// The hot reset *completed* with the port still disabled, where §4.19.5
     /// offers no escalation ("USB2 protocol ports never fail"): a controller
     /// misbehaving, not a link a warm reset could retrain.
-    ResetFailed(Reset),
+    ResetFailed,
 }
 
 impl GaveUp {
@@ -151,15 +151,7 @@ impl GaveUp {
     pub fn never_finished(kind: Reset) -> Self {
         match kind {
             Reset::Warm => GaveUp::LinkNeverTrained,
-            Reset::Hot => GaveUp::ResetNeverFinished(Reset::Hot),
-        }
-    }
-
-    /// The reset that was given up on.
-    fn reset(self) -> Reset {
-        match self {
-            GaveUp::ResetNeverFinished(kind) | GaveUp::ResetFailed(kind) => kind,
-            GaveUp::LinkNeverTrained => Reset::Warm,
+            Reset::Hot => GaveUp::ResetNeverFinished,
         }
     }
 }
@@ -180,7 +172,7 @@ pub fn reset_outcome(kind: Reset, protocol: Option<Protocol>, portsc: Portsc) ->
     }
     ResetOutcome::GaveUp(match kind {
         Reset::Warm => GaveUp::LinkNeverTrained,
-        Reset::Hot => GaveUp::ResetFailed(Reset::Hot),
+        Reset::Hot => GaveUp::ResetFailed,
     })
 }
 
@@ -426,18 +418,18 @@ impl PortState {
     /// The port was given up on: **attached, so it is not reset again until a
     /// fresh edge moves it**, and read once, so a pull is still seen.
     pub fn gave_up(&mut self, why: GaveUp) {
-        match why.reset() {
+        match why {
             // §4.19.5.1's retrain raises a connect edge of its own, which
             // nothing tells apart from a replug; judged as one, it would tear
             // the port down and reset it again every debounce for as long as
             // its device stayed in.
-            Reset::Warm => {
+            GaveUp::LinkNeverTrained => {
                 self.attached = true;
                 self.work = Work::GivenUp;
             }
             // A hot reset changes no connect state, so a connect flag is a
             // real replug.
-            Reset::Hot => self.believe(true, self.slot),
+            GaveUp::ResetNeverFinished | GaveUp::ResetFailed => self.believe(true, None),
         }
     }
 

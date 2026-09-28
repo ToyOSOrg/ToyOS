@@ -141,7 +141,7 @@ fn a_usb2_port_is_never_warm_reset() {
     assert_eq!(driver.resets(), [Reset::Hot], "{:?}", driver.did);
     assert_eq!(
         driver.did.last(),
-        Some(&Did::GaveUp(GaveUp::ResetNeverFinished(Reset::Hot))),
+        Some(&Did::GaveUp(GaveUp::ResetNeverFinished)),
         "{:?}",
         driver.did
     );
@@ -302,7 +302,7 @@ fn a_usb2_completed_failure_is_refused_not_warm_reset() {
         .unwrap();
     assert_eq!(driver.resets(), [Reset::Hot], "{:?}", driver.did);
     assert!(
-        driver.did.contains(&Did::GaveUp(GaveUp::ResetFailed(Reset::Hot))),
+        driver.did.contains(&Did::GaveUp(GaveUp::ResetFailed)),
         "{:?}",
         driver.did
     );

@@ -482,13 +482,12 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
                             "xHCI: port {} is SuperSpeed and its link would not train, warm \
                              reset included (PORTSC {:#010x}); skipping it",
                             port_idx + 1, ctrl.read_portsc(port_idx).raw()),
-                        GaveUp::ResetFailed(k) => log!(
-                            "xHCI: port {} completed its {} reset without enabling \
+                        GaveUp::ResetFailed => log!(
+                            "xHCI: port {} completed its hot reset without enabling \
                              (PORTSC {:#010x}); skipping it",
                             port_idx + 1,
-                            match k { Reset::Hot => "hot", Reset::Warm => "warm" },
                             ctrl.read_portsc(port_idx).raw()),
-                        GaveUp::ResetNeverFinished(_) => {
+                        GaveUp::ResetNeverFinished => {
                             unreachable!("a completed reset cannot have never finished")
                         }
                     }
