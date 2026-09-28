@@ -327,8 +327,9 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
     // first dial, where that close is `logd`'s answer, and always on a redial,
     // which is made while the machine's network is coming back.
     let mut again = false;
+    let mut last = String::from("never asked");
     loop {
-        match open(reach, peer, until, shared, again) {
+        match open(reach, peer, until, shared, again, last) {
             Err(why) => {
                 let mut state = shared.state.lock().expect("the stream's state");
                 state.unopened = Some(why);
@@ -338,20 +339,14 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
                 if echo {
                     println!("  stream: reading {peer:?} at {:?}", conn.peer_addr().ok());
                 }
-                let carried = read(conn, shared, &mut out, echo);
                 // A connection `logd` turned away on a redial: asked again at
-                // once inside the redial's bound, the refusal being the event,
-                // and the redial's end once past it.
-                if !carried && again {
-                    let mut state = shared.state.lock().expect("the stream's state");
+                // once, the refusal being the event, and named by the dial
+                // after it should the redial's bound end that one.
+                if let Some(how) = read(conn, shared, &mut out, echo).filter(|_| again) {
+                    let state = shared.state.lock().expect("the stream's state");
                     if !state.stop && state.redial.is_none() {
-                        if Instant::now() < until {
-                            continue;
-                        }
-                        state.unopened = Some(format!(
-                            "{peer:?} admitted no connection by the redial's bound: the latest ended before a line"
-                        ));
-                        shared.moved.notify_all();
+                        last = format!("the latest connection ended before a line: {how}");
+                        continue;
                     }
                 }
             }
@@ -364,6 +359,7 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
             if let Some(by) = state.redial.take() {
                 until = by;
                 again = true;
+                last = String::from("never asked");
                 state.unopened = None;
                 break;
             }
@@ -396,15 +392,22 @@ fn not_yet_reachable(e: &std::io::Error) -> bool {
         || matches!(e.raw_os_error(), Some(libc::EHOSTDOWN | libc::EHOSTUNREACH | libc::ENETUNREACH))
 }
 
-/// The connection, or why there is none by `until`.
+/// The connection, or why there is none by `until`, `last` naming what the
+/// dial before this one got.
 ///
 /// **The ceiling counts dials, not asks.** A connect that failed is counted,
 /// and so is a connection closed before a line (`read`); an ask of the name is
 /// a wait on the machine's answer, bounded by `until` alone, and one that
 /// returns at once is no ask at all and ends the dial.
-fn open(reach: &dyn Reach, peer: &Peer, until: Instant, shared: &Shared, again: bool) -> Result<TcpStream, String> {
+fn open(
+    reach: &dyn Reach,
+    peer: &Peer,
+    until: Instant,
+    shared: &Shared,
+    again: bool,
+    mut last: String,
+) -> Result<TcpStream, String> {
     let stopped = || shared.state.lock().expect("the stream's state").stop;
-    let mut last = String::from("never asked");
     // Set by the first failed dial: the resolver's answer may be the one its
     // cache kept, so the name is asked of the machine from then on.
     let mut on_the_link = false;
@@ -609,14 +612,14 @@ fn dns_name(bytes: &[u8], at: usize) -> Option<(String, usize)> {
     }
 }
 
-/// Read one connection's lines into the stream until it ends, and whether it
-/// carried one.
+/// Read one connection's lines into the stream until it ends, and how it ended
+/// where it carried none.
 ///
 /// **Every connection replays the boot from its first line** (`logd`'s
 /// `serve.rs`): the lines this reader already has are skipped rather than kept
 /// twice, and a line the connection ends inside is dropped rather than kept, so
 /// the same content lands whole on the next connection.
-fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -> bool {
+fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -> Option<String> {
     let opened = Instant::now();
     let at = conn.peer_addr().ok();
     let mut skip = {
@@ -624,7 +627,7 @@ fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -
         // A redial asked for while this connection was being made wants a
         // connection made after the ask, and this is not one.
         if state.stop || state.redial.is_some() {
-            return false;
+            return Some("this reader dropped it, made before the latest ask".to_string());
         }
         state.current = conn.try_clone().ok();
         state.lines.len()
@@ -666,6 +669,7 @@ fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -
     if echo {
         println!("  stream: ended {} ms after it opened, {}: {}", end.after_ms, if carried { "admitted" } else { "turned away" }, end.how);
     }
+    let turned_away = (!carried).then(|| end.how.clone());
     let mut state = shared.state.lock().expect("the stream's state");
     state.current = None;
     // A connection never admitted leaves the latest admitted one's account as
@@ -673,11 +677,11 @@ fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -
     if carried || state.admitted == 0 {
         state.end = Some(end);
     }
-    if !carried {
+    if turned_away.is_some() {
         state.turned_away += 1;
     }
     shared.moved.notify_all();
-    carried
+    turned_away
 }
 
 /// How a stream's connection ended.
@@ -1169,6 +1173,7 @@ pub fn judge(heard: &Heard, stream: &[String]) -> Result<Vec<String>, Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Shutdown;
 
     fn heard(exec: Result<Exec, String>, reboot: Result<String, String>) -> Heard {
         let said = Conversation {
@@ -1445,6 +1450,12 @@ mod tests {
             .unwrap()
     }
 
+    /// Ends `conn` for its reader: a drop alone does not while a child spawned
+    /// between its accept and its close-on-exec holds a copy.
+    fn close(conn: TcpStream) {
+        conn.shutdown(Shutdown::Both).unwrap();
+    }
+
     /// **A redial ends the connection it replaces, asks again past every
     /// connection turned away before a line, and keeps each line once.** The
     /// first connection is left open, as a swapped netd leaves it; the second
@@ -1462,7 +1473,7 @@ mod tests {
         writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
         assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
         stream.redial(Duration::from_secs(5));
-        drop(accepted(&server, "the redial"));
+        close(accepted(&server, "the redial"));
         let mut third = accepted(&server, "the dial after a connection turned away");
         writeln!(third, "[kernel 0.001 cpu0] before the swap").unwrap();
         writeln!(third, "[kernel 9.000 cpu0] after the swap").unwrap();
@@ -1533,7 +1544,7 @@ mod tests {
         let server = server.try_clone().unwrap();
         std::thread::spawn(move || {
             for _ in 0..closed {
-                drop(server.accept());
+                close(server.accept().unwrap().0);
             }
             let (mut conn, _) = server.accept().unwrap();
             writeln!(conn, "[kernel 0.001 cpu0] before the swap").unwrap();
@@ -1557,10 +1568,13 @@ mod tests {
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let theirs = Arc::clone(&done);
         let closer = std::thread::spawn(move || {
-            while !theirs.load(std::sync::atomic::Ordering::SeqCst) {
-                let taken = server.accept();
+            loop {
+                let (taken, _) = server.accept().unwrap();
+                if theirs.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
                 past(Instant::now() + held);
-                drop(taken);
+                close(taken);
             }
         });
         move || {
@@ -1612,7 +1626,8 @@ mod tests {
     /// Whether the reader dials inside a 50 ms bound at all is the host
     /// scheduler's, and a redial that did not says so too. A connection is
     /// closed only once the bound has passed since it was taken, so a redial
-    /// that dialled ends on its first close, which is past its bound.
+    /// that dialled ends on its first close, which is past its bound, and
+    /// names that close rather than saying it never asked.
     #[test]
     fn a_redial_ends_at_its_bound_alone_and_says_so() {
         const BOUND: Duration = Duration::from_millis(50);
@@ -1634,7 +1649,7 @@ mod tests {
         let why = closed.unopened().expect("the redial ended within 5 s and said why");
         match closed.turned_away() {
             0 => assert!(why.ends_with("by the bound: never asked"), "{why}"),
-            1 => assert!(why.contains("redial's bound") && why.contains("ended before a line"), "{why}"),
+            1 => assert!(why.contains("by the bound: the latest connection ended before a line"), "{why}"),
             n => panic!("{n} dials counted, where the first was closed past the bound: {why}"),
         }
         stop_closing();
