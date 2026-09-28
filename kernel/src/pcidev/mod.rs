@@ -140,17 +140,8 @@ const MAX_GRANT_BYTES: u64 = 8 * 1024 * 1024;
 /// window its lent regions are placed in ([`Space::lend`]).
 const MAX_GRANT_TOTAL: u64 = 32 * 1024 * 1024;
 
-/// Where the fixed platform devices start on a PC: the I/O APIC, the HPET and
-/// the LAPIC window are at and above this, so a 32-bit window may not reach it.
-const PLATFORM_MMIO: u64 = 0xFEC0_0000;
-
 /// The unit every run in this module's records is said in.
 const MIB: u64 = 1024 * 1024;
-
-/// How much address space the windows may take, above what firmware assigned:
-/// every BAR of every function this machine can hand out, at one 2 MiB page
-/// each.
-const WINDOW_SPAN: u64 = (MAX_FUNCTIONS * BARS) as u64 * PAGE_2M;
 
 /// A function's own configuration space, which is all a claim may read of it
 /// (PCIe base spec §7.2.2: 4 KiB per function under ECAM).
@@ -314,11 +305,10 @@ struct Machine {
     /// Requester ids the kernel's own drivers bound. A claim on one of them
     /// would be two drivers on one device.
     kernel_driven: Vec<u16>,
-    /// Where this module may ask the machine about an address: runs below
-    /// 4 GiB for a 32-bit BAR, and above everything firmware assigned for a
-    /// 64-bit one. Separate because a 32-bit BAR cannot hold an address a
-    /// 64-bit one can, and each shortens as [`placement::reserve`] hands an
-    /// address out of it.
+    /// Where this module may ask the machine about an address
+    /// ([`placement::free_runs`]), one list per BAR width. Separate because a
+    /// 32-bit BAR cannot hold an address a 64-bit one can, and each shortens as
+    /// [`placement::reserve`] hands an address out of it.
     ///
     /// **A run is where the machine may be asked, never where a BAR is put.**
     /// What the firmware map, this bus's assigned BARs and its bridges'
@@ -460,19 +450,10 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// **Before any driver `init`**, because the sizing probe below takes memory
 /// decode off the function it is probing for the length of the probe, and a
 /// driver mid-transfer must not meet that.
-///
-/// **The high run is above everything firmware described**, which is every BAR
-/// it assigned *and* every entry of the memory map it handed the loader — RAM,
-/// its own runtime services, the ACPI regions and the fixed platform apertures
-/// alike. Below 4 GiB there is no such address: the platform's fixed MMIO is at
-/// [`PLATFORM_MMIO`] and the memory map reaches it, so the low runs are the
-/// gaps *between* what those sources describe ([`free_runs_below_4g`]).
 pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
-    let mut wide_end = 0u64;
     let mut decoded = Vec::new();
-    for entry in maps {
-        wide_end = wide_end.max(entry.end);
-    }
+    let mut taken: Vec<Window> =
+        maps.iter().map(|entry| Window { start: entry.start, end: entry.end }).collect();
     for device in devices {
         // Bounded by the header's own declaration: a bridge has two BAR slots
         // and four registers past them that are not BARs, and `bar_size` below
@@ -489,26 +470,39 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
                 let size = device.bar_size(index).unwrap_or(0).max(1);
                 let end = memory.address().saturating_add(size);
                 decoded.push((requester(device), memory.address(), end));
-                wide_end = wide_end.max(end);
+                taken.push(Window { start: memory.address(), end });
             }
             // A 64-bit BAR's high half is the next register and is not a BAR:
             // decoding it would read an address out of address bits.
             index += if wide { 2 } else { 1 };
         }
+        for forwarded in device.forwarded() {
+            log!(
+                "pcidev: PCI {:02x}:{:02x}.{} forwards {:#x}..{:#x} to its secondary bus",
+                device.bus,
+                device.dev,
+                device.func,
+                forwarded.start,
+                forwarded.end,
+            );
+            taken.push(forwarded);
+        }
     }
     account_for(firmware, &decoded);
-    let low = free_runs_below_4g(devices, maps, &decoded);
-    let high = match window(wide_end, u64::MAX) {
-        (0, _) => Vec::new(),
-        (start, end) => alloc::vec![Window { start, end }],
+    let mut runs = |wide| -> Vec<Window> {
+        placement::free_runs(&mut taken, wide)
+            .filter(|run| run.end - run.start >= PAGE_2M)
+            .collect()
     };
+    let (low, high) = (runs(false), runs(true));
     log!(
-        "pcidev: {} functions; {} run(s) of {} MiB or more below {PLATFORM_MMIO:#x} and {} above \
-         everything firmware described",
+        "pcidev: {} functions; {} run(s) of {} MiB or more below {:#x} and {} from {:#x}",
         devices.len(),
         low.len(),
         PAGE_2M / MIB,
+        placement::PLATFORM_MMIO,
         high.len(),
+        placement::WIDE_FLOOR,
     );
     for run in low.iter().chain(high.iter()) {
         log!("pcidev:   {:#x}..{:#x} ({} MiB)", run.start, run.end, (run.end - run.start) / MIB);
@@ -554,79 +548,6 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
             );
         }
     }
-}
-
-/// What is left below 4 GiB, after everything this machine could be asked about
-/// itself.
-///
-/// **Below 4 GiB there is no address above everything firmware described** —
-/// the platform's fixed MMIO is at [`PLATFORM_MMIO`] and the memory map reaches
-/// it — so a 32-bit window is a run *between* things rather than a span above
-/// them, and this is the subtraction that finds one.
-///
-/// It accounts for exactly three things and each is *read*: the firmware memory
-/// map, the BARs this bus has assigned, and every range a bridge forwards to a
-/// secondary bus. None of the three says an address reaches the bus, which is
-/// why a run here is only where [`place_bar`] *may* ask.
-fn free_runs_below_4g(
-    devices: &[PciDevice],
-    maps: &[MemoryMapEntry],
-    decoded: &[(u16, u64, u64)],
-) -> Vec<Window> {
-    let mut taken: Vec<(u64, u64)> = Vec::new();
-    let mut note = |start: u64, end: u64| {
-        let (start, end) = (start.min(PLATFORM_MMIO), end.min(PLATFORM_MMIO));
-        if start < end {
-            taken.push((start, end));
-        }
-    };
-    for entry in maps {
-        note(entry.start, entry.end);
-    }
-    for (_, start, end) in decoded {
-        note(*start, *end);
-    }
-    for device in devices {
-        for forwarded in device.forwarded_below_4g() {
-            log!(
-                "pcidev: PCI {:02x}:{:02x}.{} forwards {:#x}..{:#x} to its secondary bus",
-                device.bus,
-                device.dev,
-                device.func,
-                forwarded.start,
-                forwarded.end,
-            );
-            note(forwarded.start, forwarded.end);
-        }
-    }
-    taken.sort_unstable();
-    let mut free: Vec<Window> = Vec::new();
-    let mut at = 0u64;
-    for (start, end) in taken {
-        if start > at {
-            free.push(Window { start: at, end: start });
-        }
-        at = at.max(end);
-    }
-    if at < PLATFORM_MMIO {
-        free.push(Window { start: at, end: PLATFORM_MMIO });
-    }
-    free.retain(|run| run.end - run.start >= PAGE_2M);
-    free
-}
-
-/// The span above `assigned` this module may hand out, or an empty one where
-/// there is no room under `ceiling`.
-fn window(assigned: u64, ceiling: u64) -> (u64, u64) {
-    if assigned == 0 {
-        return (0, 0);
-    }
-    let base = align_2m(assigned as usize) as u64;
-    let top = base.saturating_add(WINDOW_SPAN);
-    if base >= ceiling || top > ceiling {
-        return (0, 0);
-    }
-    (base, top)
 }
 
 /// Why a function could not be handed over. Carried rather than collapsed: one
@@ -688,8 +609,8 @@ impl core::fmt::Display for Refusal {
             ),
             Self::NoRun { wide: true } => write!(
                 f,
-                "this machine has no 2 MiB-aligned 64-bit address space both above what firmware \
-                 assigned and inside a window firmware declared to offer its BAR"
+                "nothing from 4 GiB up is both free of the firmware map, this bus's assigned \
+                 BARs and its bridges' forwarded ranges and inside a window firmware declared"
             ),
             Self::NoRun { wide: false } => write!(
                 f,
@@ -1284,11 +1205,6 @@ fn msix_bar(pci: &PciDevice) -> Option<u8> {
 ///
 /// **Every caller has named `at` routed first.** A load no bridge forwards does
 /// not come back on real hardware.
-///
-/// **A refused candidate leaves the direct map's entries over its range
-/// uncacheable, and that is the whole of what it leaves**: the boot map already
-/// covers every physical address, so this takes no address space there is any
-/// giving back of, and a run holds no memory the firmware map described.
 fn probe_dword(at: u64, span: u64, offset: u64) -> u32 {
     crate::mm::paging::map_mmio(at, span, MmioPolicy::Uncacheable).read_u32(offset)
 }

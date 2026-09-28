@@ -1,4 +1,5 @@
-# doom, soundd and the assets doom's music is made of.
+# doom, soundd and the assets doom's music is made of — and the WAD whose demo
+# `doom_frames` replays, hashing every tic's frame.
 #
 # `tests/doomcase` is deliberately asset-free — its actuator synthesises its own
 # sound and opens neither the WAD nor the SoundFont — and this one is the
@@ -6,7 +7,8 @@
 # `assets/DOOM1.WAD` reach ROOT and that doom finds both. So the two cannot
 # share a config, and this one pays 19 MiB of ROOT that no other test should.
 #
-# No compositor: `/system/bin/doom --music-check` never opens a window.
+# No compositor: `/system/bin/doom --music-check` and `--frame-check` never open
+# a window.
 
 assets = ["assets"]
 

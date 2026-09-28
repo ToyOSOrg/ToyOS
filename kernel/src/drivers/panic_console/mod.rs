@@ -397,7 +397,7 @@ const fn framebuffer_is_reclaimed_ram(
     let mut i = 0;
     while i < maps.len() {
         let entry = &maps[i];
-        if entry.start < end && phys < entry.end && mm::pmm::is_usable_type(entry.uefi_type) {
+        if entry.start < end && phys < entry.end && toyos_bootmap::is_usable_type(entry.uefi_type) {
             return Some(entry.uefi_type);
         }
         i += 1;

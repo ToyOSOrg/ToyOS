@@ -13,7 +13,6 @@ extern "C" {
 
 #[cfg(not(feature = "std-runtime"))]
 mod backend {
-    use super::*;
     use core::alloc::Layout;
 
     const HEADER: usize = 16; // 16 for alignment

@@ -3,7 +3,7 @@ name = "toyos-ld"
 version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "The linker toyos-cc links through inside ToyOS. Frozen: everything the host builds links through rust-lld, and this goes when LLD runs on ToyOS."
+description = "The one linker that runs inside ToyOS. Frozen: everything the host builds links through rust-lld, and this goes when LLD runs on ToyOS."
 repository = "https://github.com/ToyOSOrg/ToyOS"
 # Off crates.io: no Rust target names it any more.
 publish = false

@@ -645,13 +645,12 @@ pub fn carrier_forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u
 /// by byte from RFC 826, 791, 768 and 1035 §4.1, and not by `toyos_mdns`,
 /// which is what wrote the answer.
 pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let tap = segment::Tap::in_lane();
-    let options = BootOptions { profile: VIRTIO.profile, segment: Some(tap.clone()), ..Default::default() };
+    let options = BootOptions { profile: VIRTIO.profile, segment: true, ..Default::default() };
     let config = compile::repo_root().join(VIRTIO.config);
     let mut guest = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
     let mut console = guest.boot_log().to_string();
     qemu::await_marker(&mut guest, &mut console, "netd: DHCP: lease ", "netd's lease")?;
-    let mut wire = tap.open()?;
+    let mut wire = guest.segment()?;
     let deadline = || Instant::now() + Duration::from_secs(10);
 
     wire.send(&segment::arp_request(NEIGHBOUR_MAC, NEIGHBOUR, GUEST))?;

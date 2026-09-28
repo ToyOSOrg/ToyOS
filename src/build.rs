@@ -159,9 +159,9 @@ impl ProgramConfig {
     /// `-p` selects a package from and whose `target/` holds the result.
     /// Programs with explicit paths or special flags are built from their own
     /// directory instead — which is not the same as being built into it:
-    /// `toyos-ld` and `toyos-cc` have explicit paths and are members of the
-    /// *host* workspace, so cargo writes them to the repository root's
-    /// `target/`. `hostws::target_dir` is what answers that, never this.
+    /// `toyos-ld` has an explicit path and is a member of the *host*
+    /// workspace, so cargo writes it to the repository root's `target/`.
+    /// `hostws::target_dir` is what answers that, never this.
     fn is_workspace_member(&self) -> bool {
         self.path.is_none() && !self.no_default_features
     }
@@ -219,11 +219,11 @@ fn external_fingerprint(toolchain: &Path) -> String {
 #[derive(Clone, Copy)]
 enum Clean {
     All,
-    /// Crates with explicit paths (toyos-ld, toyos-cc) also have host builds
-    /// that must survive: the host toyos-cc compiles doom's C. Both are
-    /// host-workspace members, so the directory this empties is the
+    /// A crate with an explicit path (toyos-ld) is a host-workspace member,
+    /// and the workspace's `target/` holds the build system's own host build
+    /// beside it, which must survive; so the directory this empties is the
     /// workspace's `target/<userland triple>` for every architecture — the
-    /// guest halves of the two, and nothing the host builds.
+    /// guest half, and nothing the host builds.
     ToyosOnly,
 }
 
@@ -233,10 +233,8 @@ fn stale(root: &Path, crate_dir: &Path, fingerprint: &str) -> bool {
 }
 
 fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
-    // Where cargo actually wrote it. `toyos-ld` and `toyos-cc` are members of
-    // the host workspace, so their guest builds land in the root's `target/`
-    // and both answer with the same directory: the second clean of a pass finds
-    // it already gone and does nothing, which is the right amount of work.
+    // Where cargo actually wrote it. `toyos-ld` is a member of the host
+    // workspace, so its guest build lands in the root's `target/`.
     let target = hostws::target_dir(root, crate_dir);
     match kind {
         Clean::All => {
@@ -800,8 +798,9 @@ const NOT_YET_BUILT: &[(Arch, &str, &str)] = &[
     (
         Arch::Aarch64,
         "doom",
-        "its C is compiled by toyos-cc, which no AArch64 build has run, and softbuffer's toyos \
-         fork stops it first (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)",
+        "softbuffer's toyos fork stops it \
+         (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md); its C compiles for \
+         AArch64 with the toolchain's clang",
     ),
 ];
 
@@ -850,6 +849,11 @@ fn build_programs(
 
     let ws_target = userland_dir.join(format!("target/{target}/{PROFILE}"));
 
+    // Every userland crate that compiles C compiles it with the toolchain's
+    // clang against libc's C sysroot.
+    let cc_env = crate::clang::CSysroot::of(&env.toolchain, arch).cc_env();
+    let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
     // the same reason: a program's path is keyed on (crate, target, profile)
     // alone, so every config in this run writes and reads the same
@@ -864,11 +868,11 @@ fn build_programs(
             extra.push("-p");
             extra.push(pkg);
         }
-        cargo_build(&userland_dir, target, &extra, env, &[], quiet);
+        cargo_build(&userland_dir, target, &extra, env, &cc_env, quiet);
     }
 
     for c in programs.iter().filter(|c| c.built == Built::Standalone) {
-        cargo_build(&c.dir, target, &c.features.args(), env, &[], quiet);
+        cargo_build(&c.dir, target, &c.features.args(), env, &cc_env, quiet);
     }
 
     for c in &programs {
