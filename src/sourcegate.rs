@@ -205,9 +205,9 @@ const BANS: &[Ban] = &[
         allowed: &[
             // Cache lines to walk, not bytes.
             ("kernel/src/arch/x86_64/control_regs.rs", 1),
-            // Two guard-page sizes: the mapping is 4 KiB because a guard is one
-            // hardware page, and `PAGE_SIZE` is 2 MiB territory here.
-            ("kernel/src/arch/x86_64/percpu.rs", 2),
+            // A guard page's size: a guard is one hardware page, and
+            // `PAGE_SIZE` is 2 MiB territory here.
+            ("kernel/src/arch/x86_64/percpu.rs", 1),
             // A device's TX buffer.
             ("kernel/src/drivers/virtio_console.rs", 1),
             // A VT-d table is 4 KiB by the specification, not by this kernel.

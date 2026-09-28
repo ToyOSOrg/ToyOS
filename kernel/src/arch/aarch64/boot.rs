@@ -33,6 +33,11 @@ use crate::mm::Region;
 pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
     core::arch::naked_asm!(
         "mov x19, x0",
+        // `ID_AA64PFR0_EL1.GIC`: no GICv3 system-register interface, and the
+        // `ICC_SRE` writes below are undefined instructions.
+        "mrs x1, id_aa64pfr0_el1",
+        "ubfx x1, x1, #24, #4",
+        "cbz x1, {refuse_gic}",
         // x20 = the stack's top, physical: kernel image + stack offset + stack size.
         "ldr x20, [x19, #{kernel_memory}]",
         "ldr x1, [x19, #{stack_offset}]",
@@ -61,7 +66,12 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "msr tcr_el1, x2",
         "msr ttbr0_el1, x3",
         "msr ttbr1_el1, x3",
-        "msr cpacr_el1, xzr",
+        "ldr x1, ={cpacr}",
+        "msr cpacr_el1, x1",
+        "mov x1, #{cntkctl}",
+        "msr cntkctl_el1, x1",
+        "mov x1, #{icc_sre}",
+        "msr S3_0_C12_C12_5, x1",
         "tlbi vmalle1",
         "dsb nsh",
         "isb",
@@ -79,11 +89,20 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "mrs x6, hcr_el2",
         "cmp x6, x1",
         "b.ne {refuse_hcr}",
+        // `ICC_SRE_EL2` before `ICC_SRE_EL1`: its `Enable` is what lets EL1's be written at all.
+        "mov x1, #{icc_sre_el2}",
+        "msr S3_4_C12_C9_5, x1",
+        "isb",
         "msr mair_el1, x4",
         "msr tcr_el1, x2",
         "msr ttbr0_el1, x3",
         "msr ttbr1_el1, x3",
-        "msr cpacr_el1, xzr",
+        "ldr x1, ={cpacr}",
+        "msr cpacr_el1, x1",
+        "mov x1, #{cntkctl}",
+        "msr cntkctl_el1, x1",
+        "mov x1, #{icc_sre}",
+        "msr S3_0_C12_C12_5, x1",
         "msr sctlr_el1, x5",
         "mov x1, #{cnthctl}",
         "msr cnthctl_el2, x1",
@@ -128,6 +147,11 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         refuse_hcr = sym refused_hcr_el2_readback,
         cnthctl = const regs::CNTHCTL_EL2,
         cptr = const regs::CPTR_EL2,
+        cpacr = const regs::CPACR,
+        cntkctl = const regs::CNTKCTL,
+        icc_sre = const regs::ICC_SRE,
+        icc_sre_el2 = const regs::ICC_SRE_EL2,
+        refuse_gic = sym refused_no_gicv3,
         spsr = const regs::SPSR_EL2_TO_EL1,
         phys_offset = const crate::PHYS_OFFSET,
         entry_el = sym regs::ENTRY_EL,
@@ -145,6 +169,16 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
 #[unsafe(naked)]
 #[no_mangle]
 unsafe extern "C" fn refused_hcr_el2_readback() -> ! {
+    core::arch::naked_asm!("1:", "wfe", "b 1b")
+}
+
+/// Where a CPU whose `ID_AA64PFR0_EL1.GIC` names no GICv3 system-register
+/// interface halts, before the first `ICC_` write would be an undefined
+/// instruction under firmware's vectors: this kernel's interrupt controller is
+/// a GICv3. Silent for [`refused_hcr_el2_readback`]'s reason.
+#[unsafe(naked)]
+#[no_mangle]
+unsafe extern "C" fn refused_no_gicv3() -> ! {
     core::arch::naked_asm!("1:", "wfe", "b 1b")
 }
 
@@ -238,37 +272,52 @@ pub fn reserved() -> Region {
     Region { start: 0, end: 0 }
 }
 
-/// What the boot learns bringing interrupts up and hands later steps.
-pub struct Platform {
-    never: core::convert::Infallible,
+/// What the boot learns bringing interrupts up and hands later steps: nothing
+/// yet, since the other CPUs the MADT names are the port's stage 5's to read.
+pub struct Platform;
+
+/// Interrupt delivery: this CPU's per-CPU block, the GIC and the timer's
+/// interrupt, and interrupts unmasked. The syscall gate is the vectors' own.
+pub fn interrupts(rsdp_addr: u64) -> Platform {
+    super::percpu::init_bsp();
+    super::irqchip::init(rsdp_addr);
+    super::cpu::enable_interrupts();
+    Platform
 }
 
-/// Interrupt delivery, this CPU's per-CPU block and the syscall gate.
-pub fn interrupts(_rsdp_addr: u64) -> Platform {
-    owed!("interrupt delivery", "stage 4")
-}
-
-/// The clock: the generic timer's counter at `CNTFRQ_EL0`.
+/// The clock: the generic timer's count, at the rate firmware states in
+/// `CNTFRQ_EL0`, which the Arm ARM makes firmware's to program and which is
+/// what the counter counts at. No wall clock: `super::rtc` says why.
 pub fn clock(_args: &KernelArgs) {
-    owed!("the clock", "stage 4")
+    let hz = super::cpu::stated_counter_hz().expect("clock: CNTFRQ_EL0 states no rate for the generic timer");
+    crate::clock::set_counter(super::cpu::counter(), 1_000_000_000_000_000 / hz);
+    log!("clock: the generic timer counts at {hz} Hz; no wall clock is read on this architecture");
 }
 
-/// The per-CPU timer.
+/// The per-CPU timer counts the clock's own ticks, so there is nothing to
+/// calibrate: it stays stopped until the scheduler first arms it.
 pub fn timer() {
-    owed!("the timer", "stage 4")
+    log!("timer: the EL1 virtual timer, PPI {}, stopped until the scheduler arms it", super::irqchip::timer_intid());
 }
 
 /// The platform's own devices that are not PCI functions: none this kernel
 /// drives on an ACPI Arm machine.
 pub fn platform_devices(_rsdp_addr: u64) {}
 
-/// Every other CPU, running.
-pub fn start_other_cpus(platform: &Platform, _args: &KernelArgs) {
-    match platform.never {}
+/// Every other CPU, running: the port's stage 5, which starts each with PSCI
+/// `CPU_ON`. Until then the boot CPU runs alone.
+pub fn start_other_cpus(_platform: &Platform, _args: &KernelArgs) {
+    log!("smp: the boot CPU runs alone; the other CPUs are the port's stage 5 (PSCI CPU_ON)");
 }
 
 /// The interrupt-controller selftests an actuator asks for.
 #[cfg(feature = "boot-actuators")]
 pub fn interrupt_selftests() {
-    owed!("the interrupt controller", "stage 4")
+    if crate::actuator::irq_storm() {
+        super::trap::storm::run();
+    }
+    assert!(
+        !crate::actuator::lapic_spurious_selftest() && !crate::actuator::unclaimed_vector_selftest(),
+        "the local APIC's selftests are x86-64's, and this machine has a GIC"
+    );
 }

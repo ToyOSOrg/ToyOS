@@ -609,15 +609,17 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         register_gpu(gpu_driver, gpu_info);
     } else if kernel_args.gop_framebuffer != 0 {
         log!("GPU: using UEFI GOP");
-        let (gpu_driver, gpu_info) = gop::init(
+        match gop::init(
             kernel_args.gop_framebuffer,
             kernel_args.gop_framebuffer_size,
             kernel_args.gop_width,
             kernel_args.gop_height,
             kernel_args.gop_stride,
             kernel_args.gop_pixel_format,
-        );
-        register_gpu(gpu_driver, gpu_info);
+        ) {
+            Some((gpu_driver, gpu_info)) => register_gpu(gpu_driver, gpu_info),
+            None => log!("GPU: none this boot, running headless"),
+        }
     } else {
         log!("GPU: none found, running headless");
     }

@@ -305,7 +305,7 @@ actuators! {
     /// Storm the CPU spinning on `syscall` from Ring 3 with NMIs.
     syscall_window_nmi = "syscall-window-nmi";
 
-    /// Take the IST index off vector 2's gate — the negative control on the row above: the CPU builds the NMI frame at whatever `rsp` holds and takes a `#DF`.
+    /// Take the IST index off vector 2's gate — the negative control on the row above: the CPU builds the NMI frame at whatever the stack pointer holds and takes a `#DF`.
     nmi_without_ist = "nmi-without-ist";
 
     /// Return from the NMI handler via `iretq` with a second NMI already pending.
@@ -346,6 +346,10 @@ actuators! {
 
     /// Raise a vector no `idt_vectors!` row claims on this CPU once.
     unclaimed_vector_selftest = "unclaimed-vector-selftest";
+
+    /// Tick the timer at a fixed period while this CPU floods itself with
+    /// interrupts, and say whether any tick went a whole period untaken.
+    irq_storm = "irq-storm";
 
     /// Hold a flush of `truncate-race.bin` inside its metadata window and say whether a truncate got in.
     ftruncate_flush_stall = "ftruncate-flush-stall";

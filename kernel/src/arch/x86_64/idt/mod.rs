@@ -347,35 +347,7 @@ extern "sysv64" fn common_entry() {
 
 /// Deferred-preempt epilogue; caller must have IF=0 on entry and it returns with IF=0.
 pub(crate) extern "sysv64" fn kernel_exit_to_user_check() {
-    flush_ring0_timer_fires_to_trace();
-    loop {
-        // A killed or stopped thread returns to Ring 3 exactly once more: never.
-        crate::scheduler::leave_ring3_if_due();
-        // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
-        if !crate::preempt::need_resched() {
-            #[cfg(feature = "boot-actuators")]
-            if crate::actuator::dump_in_blocking_pass() {
-                crate::sched::dump::staged::note_return_to_ring3();
-            }
-            return;
-        }
-        assert!(!crate::scheduler::in_schedule_self(),
-            "exit-to-user inside a scheduler pass");
-        // Not an IrqGuard: both loop exits must set IF, not restore a saved value.
-        cpu::enable_interrupts();
-        crate::scheduler::do_preempt();
-        cpu::disable_interrupts();
-        flush_ring0_timer_fires_to_trace();
-    }
-}
-
-fn flush_ring0_timer_fires_to_trace() {
-    let cur = percpu::ring0_timer_fires();
-    let missed = cur.wrapping_sub(percpu::last_seen_ring0_fires());
-    if missed > 0 {
-        crate::trace::trace(crate::trace::Kind::TimerFireBurst, missed);
-        percpu::set_last_seen_ring0_fires(cur);
-    }
+    crate::scheduler::exit_to_user();
 }
 
 /// Routes by vector to the appropriate handler; #DF and #MC get dedicated arms because they are aborts with no instruction to return to.

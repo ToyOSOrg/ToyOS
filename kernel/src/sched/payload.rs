@@ -40,12 +40,13 @@ pub type KShare = FairShare<KernelLock<ShareState>>;
 /// The core's wait ticket; blocking sites use `driver::Ticket`, which wraps it in the needed preempt guard.
 pub type RawTicket = WaitTicket<KMsg>;
 
-/// The saved callee context; everything `Hw::switch` must load without dereferencing anything else.
+/// The saved callee context; everything `Hw::switch` must load without dereferencing anything else, named
+/// by role because every architecture's switch loads it.
 pub struct KernelCtx {
     /// Saved kernel stack pointer, written by the `context_switch` asm.
-    pub rsp: u64,
+    pub sp: u64,
     pub root: Root,
-    pub fs_base: u64,
+    pub thread_pointer: u64,
     pub kernel_stack_top: u64,
     /// `None` is this CPU's idle context.
     pub id: Option<TaskId>,

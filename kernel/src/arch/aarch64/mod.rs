@@ -3,14 +3,13 @@
 //!
 //! Every `unsafe` block here carries a one-line `SAFETY:` comment, enforced by the lint above.
 //!
-//! **What exists and what is owed.** The boot reaches its console: the entry
-//! drops from EL2, applies the control-register declaration, turns on the
-//! loader's tables and installs the exception vectors; the PL011 is found
-//! through SPCR. Everything the kernel does after the console — the interrupt
-//! controller, the timer, its own page tables, other CPUs, user mode — is
-//! owed by a stage of the port (`issues/kernel/toyos-runs-on-arm64.md`), and
-//! each item that stands for it here is an [`owed!`] that panics naming it. A kernel that reaches
-//! one stops loudly on its panel; none of them returns a guess.
+//! **What exists and what is owed.** One CPU runs the kernel and user mode:
+//! its own page tables, the GICv3 and the generic timer, preemption, and the
+//! entry from EL0. Other CPUs, the IOMMU, an MSI and the platform's own
+//! devices are owed by a stage of the port (`issues/kernel/toyos-runs-on-arm64.md`)
+//! or by none yet, and each item that stands for one here is an [`owed!`]
+//! that panics naming it, or a refusal a caller reports by name. None of them
+//! returns a guess.
 
 /// Stands for work the port owes: panics naming what and which stage of the
 /// track owns it (`issues/kernel/toyos-runs-on-arm64.md`), or that none does yet.
@@ -39,6 +38,7 @@ pub mod pio;
 pub mod pmu;
 pub mod rtc;
 pub mod smp;
+pub mod switch;
 pub mod syscall;
 pub mod tlb;
 pub mod trap;
@@ -48,10 +48,13 @@ pub mod watchdog;
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::Aarch64;
 
 /// A message-signalled interrupt's address and data for `vector` on CPU
-/// `dest`. On AArch64 the doorbell is an ITS's `GITS_TRANSLATER`, one per ITS
-/// the MADT names, and the data is an event the ITS maps: stage 4 builds both.
-pub fn msi_message(_dest: u32, _vector: u8) -> (u32, u32) {
-    owed!("an MSI doorbell (the GICv3 ITS)", "stage 4")
+/// `dest`, which this machine does not give: the doorbell is an ITS's
+/// `GITS_TRANSLATER` and the data an event the ITS maps, and nothing here
+/// drives an ITS. Every function that would take one is a driver the
+/// small-kernel track moves out of the kernel, or a claimed function the
+/// SMMUv3 of the port's stage 6 must translate first; each is refused by name.
+pub fn msi_message(_dest: u32, _vector: u8) -> Result<(u32, u32), &'static str> {
+    Err("AArch64 delivers no message-signalled interrupt to this kernel: the GICv3 ITS is unported")
 }
 
 /// Interrupts masked on this CPU for as long as the guard lives, and then put

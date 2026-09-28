@@ -293,17 +293,17 @@ pub fn global_min_vruntime() -> u64 {
 pub fn enqueue_new(
     id: TaskId,
     kernel_stack: crate::process::OwnedAlloc,
-    entry_rsp: u64,
+    entry_sp: u64,
     address_space: crate::process::PageTables,
-    fs_base: u64,
+    thread_pointer: u64,
     symbols: alloc::sync::Arc<crate::symbols::SymbolTable>,
 ) -> (ThreadSched, CpuId) {
     driver::spawn(NewTask {
         id,
         kernel_stack,
-        entry_rsp,
+        entry_sp,
         address_space,
-        fs_base,
+        thread_pointer,
         share: share_for(id.0),
         symbols,
     })
@@ -348,7 +348,7 @@ pub fn may_yield() -> bool {
     crate::preempt::count() == blocking_baseline()
 }
 
-/// Unified preempt entry: the Ring 3 timer path, `kernel_exit_to_user_check`
+/// Unified preempt entry: the Ring 3 timer path, [`exit_to_user`]
 /// and the `preempt::enable` slow path all funnel through here.
 #[track_caller]
 pub fn do_preempt() {
@@ -368,7 +368,7 @@ pub fn do_preempt() {
 }
 
 /// The last thing a thread does before returning to Ring 3, if either mark it
-/// can carry says it never does. `kernel_exit_to_user_check` is the one caller;
+/// can carry says it never does. [`exit_to_user`] is the one caller;
 /// `kernel/src/quiesce.rs`'s header says why that boundary is the safe point.
 ///
 /// **One call and one match, so the two marks have no order to disagree
@@ -398,6 +398,41 @@ pub fn leave_ring3_if_due() {
     }
 }
 
+
+/// The deferred-preempt epilogue every return to user mode runs last, with
+/// interrupts masked on entry and on return: a killed or stopped thread leaves
+/// here, and a reschedule owed since the entry is served before the thread
+/// sees user mode again.
+pub fn exit_to_user() {
+    flush_ring0_timer_fires_to_trace();
+    loop {
+        // A killed or stopped thread returns to Ring 3 exactly once more: never.
+        leave_ring3_if_due();
+        // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
+        if !crate::preempt::need_resched() {
+            #[cfg(feature = "boot-actuators")]
+            if crate::actuator::dump_in_blocking_pass() {
+                crate::sched::dump::staged::note_return_to_ring3();
+            }
+            return;
+        }
+        assert!(!in_schedule_self(), "exit-to-user inside a scheduler pass");
+        // Not an IrqGuard: both loop exits must set IF, not restore a saved value.
+        crate::arch::cpu::enable_interrupts();
+        do_preempt();
+        crate::arch::cpu::disable_interrupts();
+        flush_ring0_timer_fires_to_trace();
+    }
+}
+
+fn flush_ring0_timer_fires_to_trace() {
+    let cur = percpu::ring0_timer_fires();
+    let missed = cur.wrapping_sub(percpu::last_seen_ring0_fires());
+    if missed > 0 {
+        crate::trace::trace(crate::trace::Kind::TimerFireBurst, missed);
+        percpu::set_last_seen_ring0_fires(cur);
+    }
+}
 /// The exit pass of a thread that has left its process (`process::leave`).
 #[track_caller]
 pub fn exit_current() -> ! {

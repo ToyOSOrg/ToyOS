@@ -138,4 +138,5 @@ pub fn interrupt_selftests() {
     if crate::actuator::unclaimed_vector_selftest() {
         idt::unclaimed::selftest();
     }
+    assert!(!crate::actuator::irq_storm(), "irq-storm is the GIC's selftest, and this machine has a local APIC");
 }

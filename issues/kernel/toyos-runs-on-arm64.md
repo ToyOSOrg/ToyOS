@@ -243,8 +243,7 @@ before any aarch64 file exists, with x86 as its only user:
 
 Each is its own issue, owned by the stage that removes it:
 
-- `issues/kernel/the-saved-kernel-context-names-x86-registers.md` (stage 4)
-- `issues/kernel/msi-and-pin-routing-take-an-x86-vector-and-apic-id.md` (stage 4)
+- `issues/kernel/msi-and-pin-routing-take-an-x86-vector-and-apic-id.md` (stage 6)
 - `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md` (stage 4)
 - `issues/kernel/the-crash-evidence-records-x86-fault-registers.md` (stage 5)
 - `issues/kernel/the-aarch64-kernel-builds-with-dead-code-allowed.md` (stage 7)
@@ -298,6 +297,26 @@ Each stage names its exit; "measured" means a number from a run.
    one stays green in `virt_el2_drop`, because stage 3 reads no counter and
    runs no FP. This stage's timer and FP tests run under that EL2 profile too,
    and each of the three deletions is shown red.
+   **Built on one CPU, ahead of small-kernel stage 6 by the owner's word:**
+   the kernel's own tables (`TTBR1_EL1` holding memory and nothing else, each
+   user space on `TTBR0_EL1` under a 16-bit ASID from `toyos-pcid`), the
+   GICv3's SGIs and the virtual timer's PPI, the EL0 entry, and the context
+   switch carrying FP/SIMD; `virt_user_mode`, `virt_timer_preempts` and
+   `virt_irq_storm` judge it under the EL2 profile, emulated, because HVF
+   exposes no RNDR and the kernel's hash seed refuses there until stage 6's
+   virtio-rng. Owed before the exit holds: the interrupts-off window against
+   x86's (the storm reports the latest tick it took; x86 has no counterpart
+   instrument); `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md`,
+   whose `KernelArgs` rename waits on the loader's change to that struct; and
+   the three deletions shown red. The ITS moves to stage 6: a claimed function
+   is its only consumer the small-kernel track leaves, and it needs that
+   stage's SMMUv3 first. Stubbed on AArch64, each owned by the small-kernel
+   track, which moves the driver out of the kernel:
+   - `arch::msi_message` refuses, so the kernel's xHCI (`virt`'s boot stick),
+     NVMe, HDA, virtio-sound, virtio-console and virtio-gpu drivers each
+     refuse their function by name.
+   - `drivers::gop` refuses a scanout that is not whole 2 MiB pages of its
+     own, which a `ramfb` scanout carved out of RAM need not be.
 
 5. **SMP through PSCI.** `CPU_ON` from MADT GICC entries, SGIs as the IPI,
    broadcast TLBI behind the machine-wide invalidation contract. **Exit**:

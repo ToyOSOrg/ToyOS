@@ -547,7 +547,7 @@ pub fn spawn(
     };
 
     log!("spawn: TLS {} modules, total_memsz={}", tls_modules.len(), tls.total_memsz());
-    let Some((tls_pages, fs_base, _)) =
+    let Some((tls_pages, thread_pointer, _)) =
         tls::TlsBlock::build(&tls_modules, tls).and_then(|b| b.publish(&child_pt))
     else {
         log!("spawn: {}: failed to allocate TLS ({} bytes)", path, tls.total_memsz());
@@ -566,7 +566,7 @@ pub fn spawn(
     );
     let sym_bytes = syms.resident_bytes();
 
-    let (ks_alloc, ks_rsp) = match alloc_kernel_stack(process_start, entry, sp, 0) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(process_start, entry, sp, 0) {
         Some(ks) => ks,
         None => {
             log!("spawn: {}: failed to allocate kernel stack", path);
@@ -642,9 +642,9 @@ pub fn spawn(
     let (sched, dst) = scheduler::enqueue_new(
         scheduler::TaskId(pid, tid),
         ks_alloc,
-        ks_rsp,
+        ks_sp,
         child_pt.clone(),
-        fs_base,
+        thread_pointer,
         syms,
     );
     table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);

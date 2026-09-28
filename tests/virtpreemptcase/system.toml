@@ -1,0 +1,19 @@
+# One CPU, one job that never yields, and the runner's deadline thread: the
+# thread wakes on a tick or not at all, so a job list that ends is a timer
+# that preempts. `--bound-ms` is from boot, and long enough for `spin` to hold
+# the CPU for seconds before the deadline falls.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]
+receives = ["power"]
+args = ["--bound-ms=45000", "spin"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/spin" = "/system/bin/toybox"

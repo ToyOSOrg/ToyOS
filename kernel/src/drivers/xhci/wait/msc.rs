@@ -889,7 +889,7 @@ fn block_witness_holds(dev: &MscDevice, entered: BlockWitness) {
         "USB BOT WITNESS: MscDevice::block changed inside one round trip — the field at \
          {at:#018x} held {:#018x} and now holds {:#018x} (the frame moved by {}). This CPU's \
          Ring 3 entry stack is {top:#018x}, so the field stands {} bytes below it and the \
-         running rsp is {:#018x}. `with_storage` copies the device onto this stack, so a \
+         running stack pointer is {:#018x}. `with_storage` copies the device onto this stack, so a \
          kernel text value here is a return address something else pushed.",
         entered.was,
         dev.block,

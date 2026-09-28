@@ -1,18 +1,20 @@
 //! Other CPUs: PSCI `CPU_ON` for each GICC the MADT names, the port's stage 5.
-//! Until then the boot CPU is the only one running, and the machine is never
-//! released to the scheduler.
+//! Until then the boot CPU is the only one the roster holds.
 
+use crate::smp_roster::Roster;
 
-/// CPUs running: the boot CPU alone.
+static ROSTER: Roster = Roster::new();
+
 pub fn cpu_count() -> u32 {
-    1
+    ROSTER.count()
 }
 
+/// Release the machine to the scheduler: with one CPU, nothing waits on it.
 pub fn set_ready() {
-    owed!("other CPUs", "stage 5")
+    ROSTER.release();
 }
 
-/// Never: the boot ends before the machine is released.
+/// Whether [`set_ready`] has run.
 pub fn is_ready() -> bool {
-    false
+    ROSTER.released()
 }

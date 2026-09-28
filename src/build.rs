@@ -3142,6 +3142,7 @@ mod tests {
         "tests/testcases/system.toml",
         "tests/toolkitcase/system.toml",
         "tests/updatecase/system.toml",
+        "tests/virtpreemptcase/system.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {

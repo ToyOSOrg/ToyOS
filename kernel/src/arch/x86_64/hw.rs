@@ -137,7 +137,7 @@ pub fn report_contexts(rsp: u64, subject: Option<u64>) {
             None => crate::log!(
                 "  cpu{cpu} is on ctx {held:#x} (its idle context) stack_top={top:#018x} \
                  saved_rsp={:#018x}{}{}",
-                ctx.rsp,
+                ctx.sp,
                 if same { "  <== THE SAME CONTEXT" } else { "" },
                 if top == 0 { "" } else { "  <== AN IDLE CONTEXT'S STACK TOP IS ZERO BY CONSTRUCTION" },
             ),
@@ -146,7 +146,7 @@ pub fn report_contexts(rsp: u64, subject: Option<u64>) {
                  saved_rsp={:#018x}{}{}",
                 id.0.raw(),
                 id.1.raw(),
-                ctx.rsp,
+                ctx.sp,
                 if same { "  <== THE SAME CONTEXT" } else { "" },
                 if on_its_stack { "  <== AND THIS CRASH IS ON THAT STACK" } else { "" },
             ),
@@ -159,7 +159,7 @@ pub fn report_contexts(rsp: u64, subject: Option<u64>) {
 #[cold]
 #[inline(never)]
 fn switch_frame_is_wrong(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> ! {
-    let rsp = ctx.rsp;
+    let rsp = ctx.sp;
     let (pid, tid) = ctx.id.map_or((u32::MAX, u32::MAX), |id| (id.0.raw(), id.1.raw()));
     crate::log!(
         "CONTEXT SWITCH ONTO A FRAME THAT IS NOT ONE: cpu={} pid={pid} tid={tid} \
@@ -171,7 +171,7 @@ fn switch_frame_is_wrong(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> ! 
         ctx.kernel_stack_top,
         ctx.kernel_stack_top.wrapping_sub(rsp) as i64,
         ctx.preempt,
-        ctx.fs_base,
+        ctx.thread_pointer,
         token.incoming().map(|k| k.0),
         token.outgoing().map(|k| k.0),
     );
@@ -193,11 +193,11 @@ fn switch_frame_is_wrong(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> ! 
     );
 }
 
-/// Returns the validated `rsp` — callers must use this value; re-reading `ctx.rsp` here would be a second, unguarded load after `cr3.activate()`'s memory clobber.
+/// Returns the validated `rsp` — callers must use this value; re-reading `ctx.sp` here would be a second, unguarded load after `cr3.activate()`'s memory clobber.
 #[inline]
 #[must_use]
 fn check_switch_frame(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> u64 {
-    let rsp = ctx.rsp;
+    let rsp = ctx.sp;
     if !crate::mm::is_kernel_addr(rsp) || !rsp.is_multiple_of(8) {
         switch_frame_is_wrong(ctx, token);
     }
@@ -288,7 +288,7 @@ pub(crate) unsafe extern "C" fn switch_witness_verify(rsp: u64) {
         *word = unsafe { core::ptr::read_volatile((rsp + (i as u64) * 8) as *const u64) };
     }
     // SAFETY: `shadow.ctx` is a live `KernelCtx` from this kernel's own pass.
-    let field = unsafe { core::ptr::read_volatile(&raw const (*shadow.ctx).rsp) };
+    let field = unsafe { core::ptr::read_volatile(&raw const (*shadow.ctx).sp) };
     if rsp == shadow.rsp && field == shadow.rsp && now == shadow.words {
         return;
     }
@@ -351,7 +351,7 @@ unsafe fn switch_witness_mutate(restore: *const KernelCtx) {
         return;
     }
     // SAFETY: `restore` is a live `KernelCtx` from this kernel's own pass.
-    let rsp = unsafe { (*restore).rsp };
+    let rsp = unsafe { (*restore).sp };
     #[cfg(feature = "switch-witness-mutate-frame")]
     // SAFETY: the `rbx` slot of the frame `check_switch_frame` has just validated.
     unsafe {
@@ -362,7 +362,7 @@ unsafe fn switch_witness_mutate(restore: *const KernelCtx) {
     // the report and not by a different crash.
     // SAFETY: as above, and the field is this context's own.
     unsafe {
-        core::ptr::write_volatile(&raw const (*restore).rsp as *mut u64, rsp + 8)
+        core::ptr::write_volatile(&raw const (*restore).sp as *mut u64, rsp + 8)
     };
 }
 
@@ -418,12 +418,12 @@ impl Hw for KernelHw {
     unsafe fn switch(&self, token: RunToken<KernelPayload>) {
         let save = token.save_ptr();
         let restore = token.restore_ptr();
-        // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.fs_base` is this kernel's own canonical value for the thread being installed.
+        // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` is this kernel's own canonical value for the thread being installed.
         unsafe {
-            (*save).fs_base = cpu::read_fs_base();
+            (*save).thread_pointer = cpu::read_fs_base();
             (*save).preempt = crate::preempt::count();
             let incoming: &KernelCtx = &*restore;
-            // The only load of `incoming.rsp`: reading it again after `cr3.activate()`'s clobber would be a second, unguarded load.
+            // The only load of `incoming.sp`: reading it again after `cr3.activate()`'s clobber would be a second, unguarded load.
             let rsp = check_switch_frame(incoming, &token);
             #[cfg(any(
                 feature = "switch-witness-mutate-frame",
@@ -442,7 +442,7 @@ impl Hw for KernelHw {
                     crate::heartbeat::note_dispatch();
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.root.activate();
-                    cpu::write_fs_base(incoming.fs_base);
+                    cpu::write_fs_base(incoming.thread_pointer);
                 }
                 // idle's stack top is per-CPU, unknowable at boot-time init, so it is read here instead.
                 None => {
@@ -461,7 +461,7 @@ impl Hw for KernelHw {
                 ds = in(reg) percpu::KERNEL_DS as u64,
                 options(nomem, nostack, preserves_flags),
             );
-            context_switch(&raw mut (*save).rsp, rsp);
+            context_switch(&raw mut (*save).sp, rsp);
         }
     }
 

@@ -57,6 +57,14 @@ pub fn thread_pointer() -> u64 {
     tp
 }
 
+/// Install the thread pointer the next return to EL0 runs with.
+/// # Safety
+/// `tp` is the thread's own, which the kernel computed for it.
+pub unsafe fn write_thread_pointer(tp: u64) {
+    // SAFETY: `TPIDR_EL0` is EL0's register; the kernel never reads through it.
+    unsafe { asm!("msr tpidr_el0, {}", in(reg) tp, options(nomem, nostack, preserves_flags)) };
+}
+
 /// Unmask interrupts on this CPU: `DAIF.I` and `DAIF.F`.
 pub fn enable_interrupts() {
     // SAFETY: writes two `DAIF` bits; a compiler barrier, so no access moves across it.

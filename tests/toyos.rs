@@ -554,6 +554,9 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("virt_early_panic", Sched::Parallel, Tier::Local),
     ("virt_early_fault", Sched::Parallel, Tier::Local),
     ("virt_el2_drop", Sched::Parallel, Tier::Local),
+    ("virt_user_mode", Sched::Parallel, Tier::Local),
+    ("virt_timer_preempts", Sched::Parallel, Tier::Local),
+    ("virt_irq_storm", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -5923,6 +5926,112 @@ fn run_screen_test(
             print_screen(name, &text);
             if !text.contains("EARLY PANIC:") || !text.contains("undefined instruction") {
                 return Err(format!("the fault's report is not on the ramfb panel\ndecoded screen:\n{text}"));
+            }
+            Ok(())
+        }
+        "virt_user_mode" => {
+            // The port's stage 4 on one CPU, under the EL2 profile whose
+            // entry also writes what the drop leaves EL2 holding: the kernel's
+            // own tables, the GIC and the timer, and a process at EL0 — init,
+            // whose every page arrives by a demand fault and whose spawn of
+            // `logd` is a syscall the kernel answered. Emulated, and not under
+            // HVF, which exposes no RNDR for the kernel's hash seed.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::VirtEl2,
+                    ready_marker: "control registers: SCTLR_EL1=",
+                    ..Default::default()
+                },
+            );
+            const SPAWNED: &str = "spawn: /system/bin/logd pid=";
+            let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(SPAWNED));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            for want in [
+                "paging: the direct map holds memory below",
+                "percpu: BSP cpu_id=0",
+                "GIC: v",
+                "clock: the generic timer counts at",
+                "spawned /system/bin/init pid=",
+                SPAWNED,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            Ok(())
+        }
+        "virt_timer_preempts" => {
+            // After its first line `spin` makes no syscall, yet on this
+            // machine's one CPU the runner's deadline thread wakes — at a
+            // tick, the only thing that can take the CPU from `spin` — and
+            // ends it. The CPU time `spin` had by then says it held the CPU.
+            let config = compile::repo_root().join("tests/virtpreemptcase/system.toml");
+            let case = config.parent().expect("system.toml has a directory");
+            let mut qemu = QemuInstance::boot_with_options(
+                case,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::VirtEl2,
+                    ready_marker: "control registers: SCTLR_EL1=",
+                    ..Default::default()
+                },
+            );
+            let exited = format!("{}spin pid=", bootlog::EXIT);
+            let rest = qemu.drain_until(Duration::from_secs(300), |l| l.contains(&exited));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            let said = format!("{} spin", bootlog::JOB_DEADLINE_SAID);
+            for want in ["===TEST_START spin===", said.as_str(), exited.as_str()] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            let line = serial.lines().find(|l| l.contains(&exited)).expect("the exit line was just found");
+            let cpu_ms: u64 = line
+                .split("cpu=")
+                .nth(1)
+                .and_then(|rest| rest.strip_suffix("ms"))
+                .and_then(|ms| ms.trim().parse().ok())
+                .ok_or_else(|| format!("no cpu=<n>ms on the exit line: {line:?}"))?;
+            // Seconds, where a preemption that never came would leave `spin`
+            // no CPU time taken from the deadline thread, and a deadline thread
+            // that never ran would leave no exit line at all.
+            const HELD_MS: u64 = 5_000;
+            if cpu_ms < HELD_MS {
+                return Err(format!(
+                    "spin ran {cpu_ms} ms before the deadline thread ended it, under the {HELD_MS} ms \
+                     that shows it held the CPU\nserial:\n{serial}"
+                ));
+            }
+            eprintln!("  [virt] spin held the one CPU for {cpu_ms} ms until a tick handed it to the deadline thread");
+            Ok(())
+        }
+        "virt_irq_storm" => {
+            // The timer ticking at a fixed period while the CPU floods itself
+            // with SGIs: every SGI sent is taken, and no tick goes a whole
+            // period untaken, which is what losing one would be.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::VirtEl2,
+                    kernel_params: &["irq-storm"],
+                    ready_marker: "control registers: SCTLR_EL1=",
+                    ..Default::default()
+                },
+            );
+            let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains("irq-storm: "));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            let Some(verdict) = serial.lines().find(|l| l.contains("irq-storm: ")) else {
+                return Err(format!("the storm never reported\nserial:\n{serial}"));
+            };
+            eprintln!("  [virt] {verdict}");
+            if !verdict.contains("irq-storm: PASS") {
+                return Err(format!("{verdict}\nserial:\n{serial}"));
             }
             Ok(())
         }
