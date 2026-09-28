@@ -38,7 +38,7 @@ what survives it is a different question.
 
 **Answered 2026-08-24, in the review-completion wave:**
 
-- `arch/syscall.rs` → `kernel/src/arch/syscall/` (12 files; `dispatch.rs` is
+- `arch/syscall.rs` → `kernel/src/syscall/` (12 files; `dispatch.rs` is
   where every user pointer the ABI takes is decoded — the seam the note asked
   for). A move-proof regenerated every new file from the original's line ranges;
   no function body changed. The split made two facts visible and filed:

@@ -179,9 +179,7 @@ fn draw_window(
     }
 
     if let Some(b) = content_blit(win, clip) {
-        let buffer = unsafe {
-            std::slice::from_raw_parts(win.client.shm.as_ptr(), win.client.shm.len())
-        };
+        let buffer = win.client.shm.as_slice();
         let offset = (b.src_y as usize * win.buf_w as usize + b.src_x as usize) * 4;
         surface.blit(
             b.dst.x0 as usize,
@@ -333,27 +331,22 @@ pub fn scale_wallpaper(
 /// Render the cursor sprite (RGBA) into a 64x64 BGRA hardware cursor buffer.
 pub fn upload_cursor(
     fb: &toyos::FramebufferDev,
-    cursor_buf: *mut u8,
+    cursor_buf: &mut [u8],
     sprite: &sprite::Sprite,
     hw_cursor: bool,
 ) {
     let data = sprite.data();
     let w = sprite.width();
     let h = sprite.height();
-    unsafe {
-        core::ptr::write_bytes(cursor_buf, 0, 64 * 64 * 4);
-    }
+    cursor_buf[..64 * 64 * 4].fill(0);
     for y in 0..h.min(64) {
         for x in 0..w.min(64) {
             let si = (y * w + x) * 4;
             let di = (y * 64 + x) * 4;
-            unsafe {
-                let dst = cursor_buf.add(di);
-                *dst = data[si + 2];
-                *dst.add(1) = data[si + 1];
-                *dst.add(2) = data[si];
-                *dst.add(3) = data[si + 3];
-            }
+            cursor_buf[di] = data[si + 2];
+            cursor_buf[di + 1] = data[si + 1];
+            cursor_buf[di + 2] = data[si];
+            cursor_buf[di + 3] = data[si + 3];
         }
     }
     if hw_cursor {

@@ -2,7 +2,6 @@ mod device;
 mod hid;
 mod legacy;
 pub mod stop;
-pub mod usbd;
 mod wait;
 
 use wait::msc;
@@ -316,10 +315,14 @@ pub(crate) const AFTER_BREAK: toyos_xhci::call::Bounds = toyos_xhci::call::AFTER
 const _: () = assert!(AFTER_BREAK.wait == USB_TIMEOUT_NS);
 
 /// Everything one disk call may spin for from the start of the wait its transport broke on.
-pub(crate) const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of(
+const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of(
     crate::time::Duration::from_nanos(AFTER_BREAK.whole()),
     "every wait is clipped to where the rungs still ahead of it begin, so the last rung runs whatever was spent before it and the call ends here",
 );
+
+// A disk call spins with interrupts off, so one that outlasted this tripwire
+// would panic another CPU over a device.
+const _: () = assert!(CALL_AFTER_BREAK.nanos() < crate::time::DEAF_CPU.nanos());
 
 
 // A disk whose device left under the port rung's reset is waited for no longer than the rungs from that reset on were given to spend on it.
@@ -970,8 +973,6 @@ impl XhciController {
             }
             return;
         };
-        #[cfg(feature = "boot-actuators")]
-        let code = self.devices[at].stage_break(code);
         let dev = &mut self.devices[at];
         if code == CC_SUCCESS || code == CC_SHORT_PACKET {
             dev.failures = 0;
@@ -1188,11 +1189,6 @@ impl XhciController {
         }
     }
 
-    /// Record what the boot scan's enumeration left behind, so hot-plug starts from it; recorded even with no device, since a successful Enable Slot is the controller's resource regardless.
-    fn port_bound(&mut self, port_idx: u8, slot: Option<u8>) {
-        self.ports[port_idx as usize].adopt(slot.and_then(NonZeroU8::new));
-    }
-
     /// Step every port that is not where the driver left it, and say when it wants to be looked at again.
     ///
     /// One step per call, no wait; the enumeration it eventually starts is submit-and-return too.
@@ -1242,14 +1238,10 @@ impl XhciController {
                 Step::Wait(at) => return Some(at),
                 Step::GaveUp(why) => {
                     match why {
-                        GaveUp::ResetNeverFinished(kind) => log!(
-                            "xHCI: port {} never finished its {} reset (PORTSC {:#010x}); \
+                        GaveUp::ResetNeverFinished => log!(
+                            "xHCI: port {} never finished its hot reset (PORTSC {:#010x}); \
                              skipping it",
                             port_idx + 1,
-                            match kind {
-                                Reset::Hot => "hot",
-                                Reset::Warm => "warm",
-                            },
                             portsc.raw()
                         ),
                         // §4.19.1.2 has nothing further after a warm reset — this is the port's end.
@@ -1260,18 +1252,14 @@ impl XhciController {
                             portsc.raw(),
                             portsc.link_state()
                         ),
-                        GaveUp::ResetFailed(kind) => log!(
-                            "xHCI: port {} completed its {} reset without enabling \
+                        GaveUp::ResetFailed => log!(
+                            "xHCI: port {} completed its hot reset without enabling \
                              (PORTSC {:#010x}); skipping it",
                             port_idx + 1,
-                            match kind {
-                                Reset::Hot => "hot",
-                                Reset::Warm => "warm",
-                            },
                             portsc.raw()
                         ),
                     }
-                    return None;
+                    // No return: the port is left to be read, and nothing else wakes a pass for it.
                 }
                 Step::Write(write) => self.write_portsc(port_idx, write),
                 Step::Reset(kind, write) => {
@@ -1316,8 +1304,7 @@ impl XhciController {
                         log!("xHCI: port {} connected, link already trained", port_idx + 1);
                     }
                     device::begin(self, port_idx, after);
-                    // Either enumeration is under way and the port waits, or it refused before spending a command.
-                    return self.outstanding.wake_at();
+                    // No return: a `begin` that refused before Enable Slot left the port to be read, and a begun one is caught above as working.
                 }
             }
         }
@@ -1522,7 +1509,7 @@ impl XhciController {
 
         // Nothing below reads the event ring: every step `service_ports` takes is a submit, so one advance is enough.
         let mut wake_at = None;
-        if self.ports_dirty || self.ports.iter().any(PortState::outstanding) {
+        if portmachine::due(self.ports_dirty, &self.ports) {
             self.ports_dirty = false;
             wake_at = self.service_ports();
         }

@@ -10,7 +10,7 @@ Twenty-four linked worktrees hold twenty-four copies of one compilation. The
 primary checkout's `target/` is 16 GB, and cargo's share of it is 12.5 GB
 (`du`, 2026-08-19): `debug` 11 GB, `x86_64-unknown-toyos` 895 MB, `release`
 286 MB, `aarch64-apple-darwin` 285 MB. The remaining 3.5 GB — `bootable*.img`,
-`nvme.img` 1.0 GB, the staged `kernel-*`/`bootloader.efi-*` copies, `stamps/` —
+`nvme.img` 1.0 GB, the staged `kernel-*`/`bootloader.efi-*` copies, `target/stamps/` —
 is the build system's own output and is **per-worktree by design**: `kernel_key`
 hashes profile and features and not content, and `buildlock::artifact` is a lock
 under `<worktree>/.build-locks`. Only cargo's 12.5 GB is a candidate for
@@ -53,9 +53,8 @@ fingerprint, so it compiles nothing and runs the other branch's binaries. The
 was opened on were mtime coincidences, not content agreement — the 3 were the
 files that branch had edited recently enough.
 
-The blast radius is the whole tree, not one rlib: `toyos-ld` and `toyos-cc` are
-host-workspace members, and they are the linker and C compiler every guest
-binary is built with.
+The blast radius is the whole tree, not one rlib: the build system itself is
+a host-workspace member, and so is every crate it reads a guest decision from.
 
 ## Correct sharing exists, is measured, and is nightly
 
@@ -94,8 +93,7 @@ crate's output", and it is the only place the answer should be derived —
 `<primary>/target` via `primary_checkout()`, degenerating to `<root>/target`
 where there are no worktrees. Two sites build the path themselves and would have
 to go through it: `src/build.rs`'s `stage_artifact` and `src/pr.rs`'s merge-file
-directory. One more is a target-directory computation in disguise:
-`toolchain::toyos_cc_binary`.
+directory.
 
 It also needs an absolute `build.target-dir` in each worktree's gitignored
 `.cargo/config.toml`, because agents type `cargo test` by hand. Measured: such a

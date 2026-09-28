@@ -35,9 +35,7 @@ use crate::vm::{FairEpoch, Vm, IPI_LATENCY_NS, RUN_CHUNK_NS, UNWIND_NS};
 /// been the whole unwind, once per killed task, turning this
 /// bound into a statement about how long a kernel teardown takes. The second
 /// attempt served it strictly *after* `rq` and had no term at all — at the price
-/// of a corpse that never runs under a saturated RT band, which is
-/// `scheduler::retire_task`'s tripwire and a kernel panic from a legal
-/// `Rights::RT` workload.
+/// of a corpse that never runs under a saturated RT band.
 ///
 /// What ships is neither absolute. `CpuSched::pick` takes the dying list ahead
 /// of the RT band only once its head has waited
@@ -65,9 +63,8 @@ fn rt_latency_bound(max_kernel_section: u64) -> u64 {
 }
 
 /// How long a retire may take to reach `Hw::release` (invariant I14), measured
-/// on the **wall clock** — the one `scheduler::retire_task`'s own tripwire
-/// reads, and see [`crate::vm::Killed`] for why there is no second clock any
-/// more.
+/// on the **wall clock** — see [`crate::vm::Killed`] for why there is no
+/// second clock any more.
 ///
 /// Hop by hop, from the claim to the call:
 ///
@@ -86,9 +83,7 @@ fn rt_latency_bound(max_kernel_section: u64) -> u64 {
 ///    CPU's *zombie*, because a pass cannot free the stack it is standing on;
 ///    the payload is released by the **next** pass on that CPU
 ///    (`SchedPass::begin`), and if that CPU dispatched another task its next
-///    pass is that task's quantum expiry. `retire_task`'s own doc states the
-///    same hop from the other side, and the wait is for the release, not for
-///    the word.
+///    pass is that task's quantum expiry.
 ///
 /// plus `2 × RUN_CHUNK_NS`, invariant I4's granularity term: the model observes
 /// each hop up to one execution chunk late.
@@ -99,18 +94,6 @@ fn rt_latency_bound(max_kernel_section: u64) -> u64 {
 /// otherwise would price the machine rather than the protocol. `peers` is the
 /// greatest number of *other* corpses that CPU has held since this retire was
 /// claimed.
-///
-/// **Where the shape comes from, in the model and in the kernel, and they are
-/// not the same.** This model's `Vm::teardown` posts a retire for every sibling
-/// of a torn-down process in one op with no wait between them, so a batched
-/// single-process teardown is what drives `peers` above zero here. The kernel
-/// cannot produce that: both of its teardown loops call `retire_task` per tid
-/// and it blocks until the victim is released, so one process teardown holds at
-/// most one corpse at a time. What produces `peers > 0` there is *concurrent
-/// independent retirers* — separate killer threads retiring separate victims
-/// that share a CPU — and nothing bounds how many. The model's shape is the
-/// cheaper way to reach the same queue depth, and the bound is about the depth
-/// rather than about who made it.
 fn retire_latency_bound(max_kernel_section: u64, peers: usize) -> u64 {
     2 * QUANTUM_NS
         + IPI_LATENCY_NS
@@ -129,11 +112,6 @@ fn retire_latency_bound(max_kernel_section: u64, peers: usize) -> u64 {
 /// It is charged unconditionally because a bound is a worst case, and it is a
 /// *finite* factor rather than the unbounded term the previous form of this
 /// derivation declined to price at all.
-///
-/// The same factor is a term of `scheduler::retire_task`'s `GIVE_UP`
-/// derivation, and `toyos_sched`'s own
-/// `an_unwind_under_saturated_rt_is_stretched_by_the_age_ratio` is what stops
-/// the two drifting apart.
 fn rt_deferral_stretch() -> u64 {
     (DYING_AGE_NS + DYING_CHUNK_NS) / DYING_CHUNK_NS
 }
@@ -311,8 +289,7 @@ fn check_sleeping_cpus(vm: &mut Vm<'_>) {
 /// adopt carries `Urgency::Normal`, which by design sends no IPI to a busy CPU
 /// — so a CPU that hands on a task it knows is dead trades an unwind it could
 /// start in this pass for a wait on another CPU's next voluntary one. **And a
-/// retire completes within [`retire_latency_bound`]**, which is the statement
-/// the kernel's `retire_task` makes with a wall clock and a panic.
+/// retire completes within [`retire_latency_bound`]**.
 ///
 /// **Both halves survive the cancellable kill and only one of them
 /// changed.** It makes a killed task *run* rather than be reaped where it
@@ -393,7 +370,7 @@ fn check_retires(vm: &mut Vm<'_>) {
         if elapsed > bound {
             problems.push(format!(
                 "I14: {key:?} was retired {elapsed} ns ago and is still {:?} \
-                 (bound {bound} ns, on the wall clock `retire_task` reads)",
+                 (bound {bound} ns, on the wall clock)",
                 vm.shared[&key].state(),
             ));
         }
@@ -420,8 +397,7 @@ fn owner_of(state: TaskState) -> Option<usize> {
     }
 }
 
-/// How long this retire has been outstanding, on the clock
-/// `scheduler::retire_task`'s own tripwire reads: the wall clock, every CPU's
+/// How long this retire has been outstanding: the wall clock, every CPU's
 /// and no CPU's, with nothing subtracted from it.
 ///
 /// [`crate::vm::Killed`] carries why there is no second clock any more.

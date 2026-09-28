@@ -3,6 +3,7 @@
 
 [package]
 name = "toyos-tmpdir"
+description = "A scratch directory that is gone when its holder is, on every way out."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

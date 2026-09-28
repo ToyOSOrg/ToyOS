@@ -32,9 +32,4 @@ Its other two shapes have owners now. The boot timeout (`screen_fatal_halt`,
 the host-staged timing window the guest slid past (`late_storage_connect`
 refusing rather than measuring an ordinary boot) are both
 `issues/build/parallel-tests-red-under-other-suites.md`'s class, which carries
-the sightings and the two legitimate fix shapes. And the premise the entry
-closed on — "the fix is the counting semaphore and nothing yet hands out slots"
-— is false: `buildlock::guest_slot` bounds guests to twelve and
-`buildlock::build_slot` bounds compiles to four, across every worktree, each
-announcing its wait. What neither reaches is stated at `src/buildlock.rs`'s
-module header.
+the sightings and the two legitimate fix shapes.

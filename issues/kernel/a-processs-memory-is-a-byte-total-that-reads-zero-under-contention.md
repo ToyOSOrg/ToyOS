@@ -16,7 +16,7 @@ tree cannot do honestly today.
 a plateau.**
 
 `SYS_SYSINFO` carries a live per-process byte total: `demand_pages + mmap_regions
-+ dynamic_tls_blocks + loaded_libs`, summed at `kernel/src/arch/syscall/machine.rs:146-156`
++ dynamic_tls_blocks + loaded_libs`, summed at `kernel/src/syscall/machine.rs:146-156`
 into the entry's `memory` word. A userland `mmap` becomes an `mmap_regions`
 entry, so a leaked thread stack is inside that number. **But the sum is taken
 under `try_lock`, and the failure arm writes `0`** (`machine.rs:155-157`). A
@@ -29,7 +29,7 @@ the two fault counts. Subtracting frees from allocations would not give a live
 count even if `free_count` were exported, and it is not (`kernel/src/process.rs:502`,
 absent from the ABI struct) — **the two counters count different populations.**
 `alloc_count` is bumped at four sites including the demand-page fill
-(`kernel/src/arch/syscall/vm.rs:117`, `:142`, `:374`, `kernel/src/process.rs:1432`);
+(`kernel/src/syscall/vm.rs:117`, `:142`, `:374`, `kernel/src/process.rs:1432`);
 `free_count` at two, `munmap` and TLS teardown (`vm.rs:161`, `process.rs:189`).
 Demand-page release is never counted at all — `demand_pages` is cleared wholesale
 at teardown (`process.rs:965`) — so the difference folds in every demand fill ever

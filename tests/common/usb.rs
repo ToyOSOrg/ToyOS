@@ -506,141 +506,6 @@ pub fn usb_short_read(
     Ok(())
 }
 
-/// A disk plugged into a **different controller** must not renumber the one a
-/// mount is holding.
-///
-/// The machine-wide disk index was `storage.len()` summed across controllers,
-/// and that vector grows on every bind — hot-plug included. The T14 has two
-/// xHCIs, the Thunderbolt block's at 00:0d.0 ahead of the PCH's at 00:14.0, and
-/// it boots off a stick in a PCH port: with nothing on the first controller the
-/// boot stick is disk 0, and plugging any USB storage into the USB-C side made
-/// the *new* drive disk 0 and the boot stick disk 1. `FatDevice` holds its
-/// `UsbBlockDevice` for the life of the mount and that handle is an index, so
-/// every later `/log` append went into the middle of the new drive and every
-/// `/boot` read served its bytes as the ESP's.
-///
-/// **The actuator is QEMU's own `device_add` and nothing about the driver is
-/// modified.** Both verdicts are host-side and neither is a log line: the disk
-/// that arrives late is a file the harness staged as zeros and must find as
-/// zeros, and `/log/kernel.log` is read out of the boot image's own partition
-/// and must carry a line the guest printed *after* the plug.
-pub fn usb_disk_index_stable(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    /// The disk that arrives late: 48 GiB, sparse, and no size any other
-    /// device in this suite reports.
-    const LATE_BYTES: u64 = 48 * 1024 * 1024 * 1024;
-    /// The line the guest prints once the late disk is up, which is therefore a
-    /// line `/log` can only carry if it was still reaching the boot stick after
-    /// the plug.
-    const LATE_READY: &str = "usb-storage: disk 1 ready on slot";
-
-    // The boot stick is on the second controller and the first carries
-    // nothing, which is the laptop exactly — and the arrangement in which the
-    // boot stick is disk 0 with a free controller ahead of it.
-    let options = BootOptions {
-        profile: Profile::MetalXhciSecond,
-        qmp: true,
-        ..Default::default()
-    };
-    let argv = qemu::profile_argv(&options);
-    if !argv.iter().any(|a| a.contains("usb-storage,bus=xhci1.0")) {
-        return Err(format!("the boot stick is not on the second controller: {argv:?}"));
-    }
-    if argv.iter().any(|a| a.starts_with("usb-storage,bus=xhci.0")) {
-        return Err(format!("the first controller already carries storage: {argv:?}"));
-    }
-
-    // Built here rather than by the boot, because `/log` has to be read off the
-    // partition afterwards and the image gets a fresh GUID every time it is
-    // built.
-    let image_path = test_dir().join("usb-index-stable.img");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
-
-    let late = test_dir().join("usb-index-late.img");
-    drop(sparse(&late, LATE_BYTES));
-    let before = fingerprint(&late, LATE_BYTES);
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            boot_image: Some(qemu::Staged::Written(image_path.clone())),
-            ..options
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-    if !boot.contains("usb-storage: disk 0 ready on slot") {
-        return Err(format!("the boot stick did not come up as disk 0\n{boot}"));
-    }
-
-    let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
-    devices.blockdev_add("latedisk", &late);
-    devices.add("usb-storage", "xhci.0", "latedisk0", &[("drive", "latedisk")]);
-    drop(devices);
-    // The driver's debounce is 100 ms and the enumeration behind it is
-    // microseconds under TCG; this is that with room.
-    thread::sleep(Duration::from_millis(1200));
-
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    let log = format!("{boot}{}", qemu.drain_serial(Duration::from_secs(20)));
-    drop(qemu);
-    for bad in ["PANIC:", "panicked at"] {
-        if log.contains(bad) {
-            return Err(format!("{bad:?} after a disk arrived on the other controller\n{log}"));
-        }
-    }
-
-    // The plug happened at all. Without this both host-side claims below hold
-    // trivially on a boot where nothing was added.
-    if !log.contains(LATE_READY) {
-        return Err(format!(
-            "nothing enumerated on the first controller; there is no renumbering to survive\n{log}"
-        ));
-    }
-
-    // **The disk that arrived is not the disk anything was mounted on.** The
-    // harness made this file and the guest was never told it was writable, so
-    // a single changed byte is `/boot` or `/log` writing through a handle that
-    // now names the wrong device.
-    if fingerprint(&late, LATE_BYTES) != before {
-        return Err(
-            "the guest wrote to the disk plugged into the other controller — the index a mount \
-             was holding moved onto it"
-                .to_string(),
-        );
-    }
-
-    // **And the log kept reaching the stick.** Read off the boot image's own
-    // `/log` partition, so this is the device's view and not the guest's. The
-    // sink names one file per boot, so the newest on the volume is this one's.
-    let (name, on_device) = super::volumes::newest_log(&image_path, start, len)?;
-    let on_device = String::from_utf8_lossy(&on_device).into_owned();
-    if !on_device.contains(LATE_READY) {
-        return Err(format!(
-            "/log/{name} stops at {} bytes and never carries {LATE_READY:?} — the appends after \
-             the plug went somewhere else\n{log}",
-            on_device.len()
-        ));
-    }
-    let _ = std::fs::remove_file(&late);
-    let _ = std::fs::remove_file(&image_path);
-
-    eprintln!(
-        "  [usb] a {LATE_BYTES} B disk plugged into the empty first controller: it comes back \
-         byte-identical, and {} bytes of /log/{name} on the boot stick carry the lines printed \
-         after it",
-        on_device.len()
-    );
-    Ok(())
-}
-
 /// More disks on one controller than its DMA pool has blocks for.
 ///
 /// `MSC_BLOCKS` is 2 and the boot stick takes one, so the second data disk on
@@ -3347,531 +3212,6 @@ pub fn xhci_full_speed_device(
     Ok(())
 }
 
-/// A HID interrupt endpoint whose transfer completes with a code the driver did
-/// not expect.
-///
-/// `dispatch_event` requeued a bound device's interrupt TRB only for Success and
-/// Short Packet. **Every other code was dropped where it was read** — no log
-/// line, no requeue, no fault — and that endpoint carries exactly one TRB, so
-/// the device went silent for the rest of the boot with every bind-time line
-/// reading perfectly. A Logitech mouse hot-plugged into the T14 did exactly
-/// that: `HID mouse ready on slot 6 … merges as source 1` at 30.485 s and not
-/// one motion event until it was unplugged at 58.659 s.
-///
-/// Both timings, because they are different states of the driver and neither is
-/// a weaker version of the other: the **fourth** completion is a device that has
-/// been delivering and stops, and the **first** is a freshly configured endpoint
-/// that never delivered at all — which is the shape the T14 showed and the one
-/// whose recovery has to work before any report has ever arrived.
-///
-/// The actuator is a boot parameter and `xhci/hid.rs`'s `stage_break` says why
-/// nothing on the host side can reach it. What it replaces is the completion
-/// code **and the report that transfer delivered**: QEMU really moved a mouse
-/// report into the buffer, so a driver that dispatched it despite the error
-/// would publish a delta it never earned and this gate would pass against the
-/// defect it names. Everything the recovery reads is the controller's own — the
-/// Endpoint State out of the output device context, and three commands the
-/// controller really answers.
-///
-/// Ground truth is host-side: the keys and the pointer delta injected **after**
-/// the staged failure arrive in the guest's own event stream, on a machine
-/// (`i8042=off`, boot-time HID absolute-only) where no other device can produce
-/// either.
-pub fn xhci_hid_break(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    for (features, which) in [
-        (
-            &["xhci-hid-break-first"][..],
-            "the very first completion, before the device ever delivered",
-        ),
-        (
-            &["xhci-hid-break-late"][..],
-            "the fourth completion, after the device had been delivering",
-        ),
-    ] {
-        hid_break_boot(test_config, c_bins, rust_bins, features, which)?;
-    }
-    Ok(())
-}
-
-/// One boot of [`xhci_hid_break`], with the break staged at whichever
-/// completion `feature` names.
-fn hid_break_boot(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    params: &'static [&'static str],
-    which: &str,
-) -> Result<(), String> {
-    /// The delta the assertion is about, injected after the break is spent.
-    /// Neither component is a number any other move in this boot produces.
-    const DX: i32 = 40;
-    const DY: i32 = -30;
-    /// Typed after the break is spent, and nowhere else in the boot.
-    const WORD: [&str; 5] = ["h", "e", "l", "l", "o"];
-    /// Both QEMU HID devices carry one IN interrupt endpoint at address 1, so
-    /// this is the device's own number for it and the controller's, and a line
-    /// naming either wrongly stops matching.
-    const ENDPOINT: &str = "interrupt endpoint 0x81 (dci 3)";
-
-    let options = BootOptions {
-        profile: Profile::MetalHotplug,
-        qmp: true,
-        // The only keyboard on the machine has to be the one plugged in, or
-        // QEMU delivers the keystrokes over PS/2 and every assertion below
-        // passes with the interrupt endpoint dead.
-        i8042: false,
-        kernel_params: params,
-        ..Default::default()
-    };
-    let argv = qemu::profile_argv(&options);
-    let usb = crate::usb_argv(&argv);
-    for absent in ["usb-kbd", "usb-mouse"] {
-        if usb.iter().any(|d| d.starts_with(absent)) {
-            return Err(format!("{absent} is on the bus at boot; argv has {usb:?}"));
-        }
-    }
-    if !argv.iter().any(|a| a.contains("i8042=off")) {
-        return Err("the i8042 is on; a PS/2 keyboard could deliver instead".to_string());
-    }
-
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-    let boot = qemu.boot_log().to_string();
-    let Some((scale_x, scale_y)) = crate::parse_rel_scale(&boot) else {
-        return Err(format!("the kernel never said what pointer scale it used:\n{boot}"));
-    };
-
-    let result = qemu.run_test_hooked(
-        "test_rs_input_events",
-        Duration::from_secs(60),
-        "===INPUT_READY===",
-        move |socket| {
-            let mut devices = qemu::QmpDevices::open(socket);
-            devices.add("usb-mouse", "xhci1.0", "hidmouse", &[]);
-            devices.add("usb-kbd", "xhci1.0", "hidkbd", &[]);
-            drop(devices);
-            thread::sleep(Duration::from_millis(800));
-
-            // Spend the break. Ten pointer completions and six keyboard ones,
-            // against an injection that strikes the first or the fourth: the
-            // margin is for QEMU coalescing rel events it has not been polled
-            // for, which can only make the count smaller.
-            let mut input = qemu::QmpInput::open(socket);
-            for _ in 0..10 {
-                input.mouse(4, 4, None);
-                thread::sleep(Duration::from_millis(60));
-            }
-            for key in ["a", "b", "c"] {
-                input.keys(&[(key, true), (key, false)]);
-                thread::sleep(Duration::from_millis(60));
-            }
-            drop(input);
-            thread::sleep(Duration::from_millis(300));
-
-            // And the measured phase, every event of which is after the break.
-            let mut input = qemu::QmpInput::open(socket);
-            // The accumulated position clamps at 0, so a move up or left from
-            // the origin is invisible — and with the first completion eaten the
-            // pointer may still be sitting there.
-            input.mouse(200, 200, None);
-            thread::sleep(Duration::from_millis(150));
-            input.mouse(DX, DY, None);
-            thread::sleep(Duration::from_millis(150));
-            for key in WORD {
-                input.keys(&[(key, true), (key, false)]);
-                thread::sleep(Duration::from_millis(30));
-            }
-            crate::input_events_end(&mut input);
-            drop(input);
-            thread::sleep(Duration::from_millis(200));
-        },
-    );
-    if let Some(err) = &result.error {
-        return Err(format!("{err}\n{}\n{}", result.serial, result.stdout));
-    }
-    let log = format!("{boot}{}", result.serial);
-    for bad in ["PANIC:", "panicked at"] {
-        if log.contains(bad) {
-            return Err(format!("{bad:?} with the break staged at {which}\n{log}"));
-        }
-    }
-
-    // **Delivery first**, because it is what the gate is about and what the
-    // pre-fix driver cannot do: an endpoint whose completion was dropped holds
-    // no TRB and nothing ever puts one back, so everything injected after the
-    // break stays on the host side of the wire.
-    let word: String = WORD.concat();
-    hotplug_delivered(&result.stdout, &word, (DX * scale_x, DY * scale_y)).map_err(|e| {
-        format!("with the break staged at {which}, input never came back: {e}\n{log}")
-    })?;
-
-    // Then that a break was staged at all, and that the line names the device,
-    // the endpoint and the code. Without this the boot above is one where
-    // nothing failed — and the line itself is the instrument: the T14's log
-    // cannot name the code its mouse died of, because the driver discarded it.
-    let named: Vec<&str> = log.lines().filter(|l| l.contains(ENDPOINT)).collect();
-    let want = format!("{ENDPOINT} completed with code 6 (Stall Error); failure 1 of 8");
-    let staged: Vec<&&str> = named.iter().filter(|l| l.contains(want.as_str())).collect();
-    if staged.len() != 2 {
-        return Err(format!(
-            "{} endpoint(s) reported a broken completion, want the mouse and the \
-             keyboard: {named:?}\n{log}",
-            staged.len()
-        ));
-    }
-    // Which two devices those were, by the controller they are on and the slot
-    // they hold on it — and both halves are needed. **A slot id is one
-    // controller's numbering and this machine has two**: the boot disk is slot 1
-    // on `00:02.0` and the mouse plugged in below is slot 1 on `00:03.0`.
-    let mut broken: Vec<(&str, &str)> = Vec::new();
-    for line in &staged {
-        broken.push(hid_broke_on(line)?);
-    }
-    for kind in ["pointer", "keyboard"] {
-        if !broken.iter().any(|(k, _)| *k == kind) {
-            return Err(format!("no {kind:?} among the broken completions {broken:?}\n{log}"));
-        }
-    }
-    if broken[0].1 == broken[1].1 {
-        return Err(format!(
-            "both broken completions are on {}, so this boot broke one device twice rather \
-             than the mouse and the keyboard once each\n{log}",
-            broken[0].1
-        ));
-    }
-
-    // The endpoint state the recovery had to be chosen for, read out of the
-    // controller's own output device context. The transfer really completed, so
-    // the endpoint really is Running — `Halted` here would mean the injection
-    // staged a shape this boot cannot produce and everything above proves
-    // something else.
-    //
-    // **Once for each of the two devices the injection struck, and no longer a
-    // count over the whole boot.** `endpoint 3` is the first IN endpoint of
-    // *every* USB device — the boot disk's bulk IN as much as a HID interrupt
-    // endpoint — so one transport recovery on the boot disk anywhere in the boot
-    // used to red this test with a failure about HID: three CI runs did exactly
-    // that (`31405969578` shard 10, `31424496450`, `31601325987`), and in the
-    // first the disk's own `slot 1 endpoint 3` and `slot 1 endpoint 4` at
-    // 2.639 s — a `SCSI 0x35` status-phase break on a shard measured at 2.16x
-    // boot width — were counted beside the mouse's and the keyboard's.
-    let mut recovered: Vec<(&str, usize)> = Vec::new();
-    for (_, who) in &broken {
-        let running = format!("xHCI: {who} endpoint 3 is Running, recovering");
-        recovered.push((who, log.matches(running.as_str()).count()));
-    }
-    if recovered.iter().any(|(_, n)| *n != 1) {
-        let states: Vec<&str> = log.lines().filter(|l| l.contains(", recovering")).collect();
-        return Err(format!(
-            "the two devices the injection struck were found Running {recovered:?} time(s), \
-             want once each; every recovery this boot: {states:?}\n{log}"
-        ));
-    }
-
-    // `run_command` logs only refusals, so each of these is the controller
-    // declining a command the endpoint's state did not permit.
-    for illegal in [
-        "Reset Endpoint failed",
-        "Stop Endpoint failed",
-        "Set TR Dequeue failed",
-        "would not clear the halt",
-        "is being let go",
-    ] {
-        if log.contains(illegal) {
-            return Err(format!("{illegal:?} after a single staged failure\n{log}"));
-        }
-    }
-    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
-
-    eprintln!(
-        "  [xhci] a HID interrupt endpoint broken at {which}: {broken:?} named the code, were \
-         each found Running once and restarted (of {} recoveries in the boot), and {word:?} \
-         plus a {:?} pointer delta crossed them afterwards",
-        log.matches("is Running, recovering").count(),
-        (DX * scale_x, DY * scale_y)
-    );
-    Ok(())
-}
-
-/// Which device an `xHCI: USB <kind> on <bdf> slot <n>: interrupt endpoint …`
-/// line is about, as the kind and the device.
-///
-/// **Refused rather than widened if the line stops naming one.** Recovery lines
-/// carry `<bdf> slot <n>` and nothing else that identifies a device, so a test
-/// that cannot read this pair off the completion has no way to tell its own
-/// device's recovery from another device's — and the only alternative to
-/// refusing is the count over every device that reddened this test three times.
-fn hid_broke_on(line: &str) -> Result<(&str, &str), String> {
-    line.split_once("xHCI: USB ")
-        .and_then(|(_, rest)| rest.split_once(": interrupt endpoint"))
-        .and_then(|(who, _)| who.split_once(" on "))
-        .ok_or_else(|| {
-            format!("{line:?} does not name the device and the controller its endpoint broke \
-                    on, so nothing can tell that device's recovery from another's")
-        })
-}
-
-/// Devices plugged in **after** the machine has booted.
-///
-/// The driver enumerated once, from `init`, and `dispatch_event` advanced past
-/// every TRB that was not a transfer completion — Port Status Change Events
-/// included. So the set of USB devices was whatever was connected at boot,
-/// forever, and a keyboard plugged into a machine with no input did nothing at
-/// all: no port line, no slot, no event, and a compositor already holding a
-/// keyboard claim that would never produce anything. That machine is
-/// indistinguishable from hung, and it is the first thing a person tries.
-///
-/// **The actuator is QEMU's own `device_add`, and nothing about the driver is
-/// modified to run this.** A USB device attached at runtime goes through the
-/// same `usb_device_attach` → `xhci_port_update` → `xhci_port_notify` path a
-/// device attached at startup does, so what the guest sees is a real Port
-/// Status Change Event with a real device behind it. That is the whole
-/// difference from `xhci_slow_connect`, which needs an actuator because
-/// it has to aim at a window the boot opens and closes in milliseconds; here
-/// the window is the entire life of the machine.
-///
-/// Every claim below is host-side in the sense that matters:
-///
-/// - **the keyboard** is the only one on the machine — `i8042=off`, and the
-///   profile's boot-time HID is a tablet — so a keystroke that reaches
-///   userland can only have crossed a device that was added after the boot;
-/// - **the pointer** is the only *relative* one, so QEMU has no handler for an
-///   injected `rel` event until it is plugged in, and the boot-time tablet
-///   cannot stand in for it;
-/// - **the disk's block count** is the size of a file the harness made, which
-///   the guest can only have learned by running READ CAPACITY over the wire.
-pub fn xhci_hotplug(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    /// The disk that arrives late: 48 GiB, which is no other device in this
-    /// suite and no round number the driver could have printed by accident.
-    /// Sparse, so the host pays for nothing.
-    const HOT_DISK_BYTES: u64 = 48 * 1024 * 1024 * 1024;
-    /// What the boot-time tablet takes, so what a late pointer must not.
-    const BOOT_SOURCE: u32 = 1;
-    const LATE_SOURCE: u32 = 2;
-    const DX: i32 = 40;
-    const DY: i32 = -30;
-
-    let options = BootOptions {
-        profile: Profile::MetalHotplug,
-        qmp: true,
-        // With an i8042 on the machine QEMU would deliver the injected
-        // keystrokes over PS/2 and every assertion below would pass with the
-        // hot-plug path dead.
-        i8042: false,
-        ..Default::default()
-    };
-    // The claim is about what is *not* on the machine at boot, and argv is the
-    // only place absence is visible: no console line distinguishes "the driver
-    // never enumerated a keyboard" from "there was never one to enumerate".
-    let argv = qemu::profile_argv(&options);
-    let usb = crate::usb_argv(&argv);
-    for absent in ["usb-kbd", "usb-mouse"] {
-        if usb.iter().any(|d| d.starts_with(absent)) {
-            return Err(format!("{absent} is on the bus at boot; argv has {usb:?}"));
-        }
-    }
-    if !usb.iter().any(|d| d.starts_with("usb-tablet")) {
-        return Err(format!("this gate needs the boot-time tablet, argv has {usb:?}"));
-    }
-    if !argv.iter().any(|a| a.contains("i8042=off")) {
-        return Err("the i8042 is on; a PS/2 keyboard could deliver instead".to_string());
-    }
-
-    let image = test_dir().join("usb-hotplug.img");
-    drop(sparse(&image, HOT_DISK_BYTES));
-
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-    let boot = qemu.boot_log().to_string();
-
-    // Both controllers came up and exactly one of them found nothing — the
-    // T14's Thunderbolt xHC exactly, and the controller everything below is
-    // plugged into. Without this the test could not tell a device enumerated
-    // late from one enumerated at boot on a port nobody looked at.
-    let found = boot.matches("xHCI: found at PCI ").count();
-    if found != 2 {
-        return Err(format!("{found} controller(s) initialised, want 2:\n{boot}"));
-    }
-    let empty = boot.matches("xHCI: no HID devices on the controller").count();
-    if empty != 1 {
-        return Err(format!(
-            "{empty} controller(s) reported an empty bus at boot, want the second one only:\n{boot}"
-        ));
-    }
-    let at_boot = crate::parse_xhci_binds(&boot);
-    if at_boot.len() != 1 || at_boot[0].kind != "tablet" {
-        return Err(format!("want exactly the tablet bound at boot, got {at_boot:?}\n{boot}"));
-    }
-    let booted: Vec<u32> = crate::parse_pointer_sources(&boot).iter().map(|(_, s)| *s).collect();
-    if booted != vec![BOOT_SOURCE] {
-        return Err(format!(
-            "the boot-time tablet did not take source {BOOT_SOURCE} alone: {booted:?}\n{boot}"
-        ));
-    }
-    let Some((scale_x, scale_y)) = crate::parse_rel_scale(&boot) else {
-        return Err(format!("the kernel never said what pointer scale it used:\n{boot}"));
-    };
-
-    let hot_image = image.clone();
-    let result = qemu.run_test_hooked(
-        "test_rs_input_events",
-        Duration::from_secs(60),
-        "===INPUT_READY===",
-        move |socket| {
-            // One monitor at a time: a `-qmp unix:…,server` socket serves one
-            // connection, so each phase opens, does its work and closes.
-            let mut devices = qemu::QmpDevices::open(socket);
-            devices.blockdev_add("hotdisk", &hot_image);
-            devices.add("usb-mouse", "xhci1.0", "hotmouse", &[]);
-            devices.add("usb-kbd", "xhci1.0", "hotkbd", &[]);
-            devices.add("usb-storage", "xhci1.0", "hotdisk0", &[("drive", "hotdisk")]);
-            drop(devices);
-            // The driver's own debounce is 100 ms and the enumeration behind it
-            // is microseconds under TCG; this is that with room, not a settling
-            // time the assertions depend on.
-            thread::sleep(Duration::from_millis(800));
-
-            let mut input = qemu::QmpInput::open(socket);
-            // Off the origin first: the accumulated position clamps at 0, so a
-            // move up or left from there is invisible.
-            input.mouse(100, 100, None);
-            thread::sleep(Duration::from_millis(100));
-            input.mouse(DX, DY, None);
-            thread::sleep(Duration::from_millis(100));
-            for key in ["h", "e", "l", "l", "o"] {
-                input.keys(&[(key, true), (key, false)]);
-                thread::sleep(Duration::from_millis(20));
-            }
-            drop(input);
-            thread::sleep(Duration::from_millis(200));
-
-            let mut devices = qemu::QmpDevices::open(socket);
-            devices.del("hotmouse");
-            devices.del("hotdisk0");
-            drop(devices);
-            thread::sleep(Duration::from_millis(800));
-
-            // The keyboard is still there, and still the only one.
-            let mut input = qemu::QmpInput::open(socket);
-            for key in ["w", "o", "r", "l", "d"] {
-                input.keys(&[(key, true), (key, false)]);
-                thread::sleep(Duration::from_millis(20));
-            }
-            drop(input);
-
-            // And a pointer plugged in where the last one was unplugged, which
-            // is the only thing that can show the button-table entry came back:
-            // a driver that leaked it binds this one as source 3.
-            let mut devices = qemu::QmpDevices::open(socket);
-            devices.add("usb-mouse", "xhci1.0", "hotmouse2", &[]);
-            drop(devices);
-            thread::sleep(Duration::from_millis(800));
-            crate::input_events_end(&mut qemu::QmpInput::open(socket));
-        },
-    );
-    if let Some(err) = &result.error {
-        return Err(format!("{err}\n{}\n{}", result.serial, result.stdout));
-    }
-    let log = format!("{boot}{}", result.serial);
-    for bad in ["PANIC:", "panicked at"] {
-        if log.contains(bad) {
-            return Err(format!("{bad:?} while devices came and went\n{log}"));
-        }
-    }
-
-    hotplug_bound(&log)?;
-    hotplug_delivered(&result.stdout, "hello", (DX * scale_x, DY * scale_y))?;
-    hotplug_unbound(&log)?;
-    // The keyboard was untouched by the mouse's teardown, and the merge it
-    // shares with the pointer that went away still works. `world` is typed
-    // after the unplug and nothing else in this boot can produce it.
-    let typed: String = crate::parse_key_events(&result.stdout)
-        .iter()
-        .filter(|e| e.modifiers & 0x10 == 0)
-        .map(|e| e.translated.as_str())
-        .collect();
-    if !typed.contains("world") {
-        return Err(format!(
-            "typed {typed:?} — the keyboard beside the unplugged pointer stopped delivering\n{}",
-            result.stdout
-        ));
-    }
-
-    // The replug. Source 2 twice is the assertion: an entry that is leaked and
-    // one that is handed back read the same from every other angle.
-    let sources: Vec<u32> = crate::parse_pointer_sources(&log).iter().map(|(_, s)| *s).collect();
-    if sources != vec![BOOT_SOURCE, LATE_SOURCE, LATE_SOURCE] {
-        return Err(format!(
-            "pointer sources were {sources:?}, want the boot tablet's {BOOT_SOURCE} and then \
-             {LATE_SOURCE} twice — the second late pointer took a fresh entry, so the first \
-             one's was never given back\n{log}"
-        ));
-    }
-
-    let _ = std::fs::remove_file(&image);
-    eprintln!(
-        "  [xhci] after boot: a keyboard, a pointer and a {HOT_DISK_BYTES} B disk enumerated on a \
-         controller that had nothing on it; typed keys and a {:?} pointer delta delivered \
-         host-side; unplug released source {LATE_SOURCE}, disabled the slots and took the disk \
-         offline; the replug took source {LATE_SOURCE} again",
-        (DX * scale_x, DY * scale_y)
-    );
-    Ok(())
-}
-
-/// Everything the guest has to say about three devices that were not there
-/// when it booted.
-fn hotplug_bound(log: &str) -> Result<(), String> {
-    // 48 GiB in the 4 KiB blocks the driver counts in, which is a number that
-    // exists only because the guest asked the device.
-    let geometry = format!("{} blocks of 512 B", 48u64 * 1024 * 1024 * 1024 / 4096);
-    for want in [
-        "xHCI: USB keyboard ready on slot",
-        "xHCI: USB mouse ready on slot",
-        "usb-storage: disk 1 ready on slot",
-        geometry.as_str(),
-    ] {
-        if !log.contains(want) {
-            return Err(format!("nothing enumerated after the boot: no {want:?}\n{log}"));
-        }
-    }
-    Ok(())
-}
-
-/// That the devices which arrived late are the ones delivering.
-fn hotplug_delivered(stdout: &str, word: &str, want: (i32, i32)) -> Result<(), String> {
-    let typed: String = crate::parse_key_events(stdout)
-        .iter()
-        .filter(|e| e.modifiers & 0x10 == 0)
-        .map(|e| e.translated.as_str())
-        .collect();
-    if !typed.contains(word) {
-        return Err(format!(
-            "typed {typed:?}, want it to contain {word:?} — this machine has no keyboard but the \
-             one plugged in after it booted\n{stdout}"
-        ));
-    }
-    let pointer = crate::parse_mouse_events(stdout);
-    let deltas: Vec<(i32, i32)> = pointer
-        .windows(2)
-        .map(|w| (w[1].x as i32 - w[0].x as i32, w[1].y as i32 - w[0].y as i32))
-        .collect();
-    if !deltas.contains(&want) {
-        return Err(format!(
-            "no pointer event moved by {want:?}; deltas seen: {deltas:?} — the boot-time tablet \
-             is absolute, so a relative move can only have come from the mouse that was plugged \
-             in\n{stdout}"
-        ));
-    }
-    Ok(())
-}
-
 /// A device pulled and pushed back before the driver has looked at the port
 /// twice — which is what a person replugging a mouse does.
 ///
@@ -3911,6 +3251,7 @@ pub fn xhci_flap(
     /// ordinary events, and never the state under test. Measured: the first
     /// shape of this gate walked ports 5, 6, 7, 8 and staged nothing.
     const PORT: &str = "1";
+    const COLLAPSED: &str = "was unplugged and plugged back in between two looks";
 
     let options = BootOptions {
         profile: Profile::MetalHotplug,
@@ -3923,47 +3264,46 @@ pub fn xhci_flap(
     let Some((scale_x, scale_y)) = crate::parse_rel_scale(&boot) else {
         return Err(format!("the kernel never said what pointer scale it used:\n{boot}"));
     };
+    let bound = |line: &str| !crate::parse_pointer_sources(line).is_empty();
 
-    let result = qemu.run_test_hooked(
-        "test_rs_input_events",
-        Duration::from_secs(60),
-        "===INPUT_READY===",
-        move |socket| {
-            let mut devices = qemu::QmpDevices::open(socket);
-            devices.add("usb-mouse", "xhci1.0", "flap0", &[("port", PORT)]);
-            drop(devices);
-            thread::sleep(Duration::from_millis(600));
-
-            for cycle in 0..CYCLES {
-                let mut devices = qemu::QmpDevices::open(socket);
-                // No sleep between the two: both edges have to land inside one
+    // Each move waits for the guest to print the one before it.
+    let (mut ready, mut binds, mut mev) = (false, 0usize, 0usize);
+    let mut input: Option<qemu::QmpInput> = None;
+    let result = qemu.run_test_paced("test_rs_input_events", Duration::from_secs(60), |socket, line| {
+        let qmp = || socket.expect("xhci_flap needs BootOptions { qmp: true }");
+        if line.contains("===INPUT_READY===") {
+            ready = true;
+            qemu::QmpDevices::open(qmp()).add("usb-mouse", "xhci1.0", "flap0", &[("port", PORT)]);
+            return;
+        }
+        if ready && bound(line) {
+            binds += 1;
+            if binds <= CYCLES {
+                let cycle = binds - 1;
+                let mut devices = qemu::QmpDevices::open(qmp());
+                // No wait between the two: both edges have to land inside one
                 // 100 ms debounce, which is the whole point. A fresh id each
                 // cycle because `device_del` releases the old one
                 // asynchronously and a reused one races with that.
                 devices.del(&format!("flap{cycle}"));
-                devices.add(
-                    "usb-mouse",
-                    "xhci1.0",
-                    &format!("flap{}", cycle + 1),
-                    &[("port", PORT)],
-                );
-                drop(devices);
-                // Long enough for the driver to finish acting on the cycle
-                // before the next one starts, so what the log shows is
-                // CYCLES collapsed replugs and not one long blur.
-                thread::sleep(Duration::from_millis(600));
+                devices.add("usb-mouse", "xhci1.0", &format!("flap{}", cycle + 1), &[("port", PORT)]);
+            } else if binds == CYCLES + 1 {
+                // The pointer that is in the port now has to work. Off the
+                // origin first: the accumulated position clamps at 0.
+                input.insert(qemu::QmpInput::open(qmp())).mouse(100, 100, None);
             }
-
-            // The pointer that is in the port now has to work. Off the origin
-            // first: the accumulated position clamps at 0.
-            let mut input = qemu::QmpInput::open(socket);
-            input.mouse(100, 100, None);
-            thread::sleep(Duration::from_millis(100));
-            input.mouse(DX, DY, None);
-            thread::sleep(Duration::from_millis(200));
-            crate::input_events_end(&mut input);
-        },
-    );
+            return;
+        }
+        let Some(input) = input.as_mut() else { return };
+        if line.contains("mev buttons=") {
+            mev += 1;
+            match mev {
+                1 => input.mouse(DX, DY, None),
+                2 => crate::input_events_end(input),
+                _ => {}
+            }
+        }
+    });
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}\n{}", result.serial, result.stdout));
     }
@@ -3974,26 +3314,31 @@ pub fn xhci_flap(
         }
     }
 
+    // **Every cycle's device bound before the next cycle's edges went in**, so
+    // a cycle that never bound is named by the last thing its port did.
+    if binds != CYCLES + 1 {
+        let last = log.lines().rfind(|l| l.contains("xHCI: port ") || bound(l));
+        let why = match last {
+            _ if binds > CYCLES + 1 => "more binds than plugs",
+            Some(line) if line.contains(COLLAPSED) => {
+                "a collapsed replug was torn down and its port never looked at again"
+            }
+            _ => "the device in the port never bound",
+        };
+        return Err(format!(
+            "{why}: {binds} bind(s) for {} plugs before the guest's input window closed; the \
+             port's last line was {last:?}\n{log}",
+            CYCLES + 1
+        ));
+    }
+
     // The race was actually staged. Without this the gate would pass on a run
     // where every replug happened to be seen as two distinct states, which is
     // the easy case and not the one under test.
-    let collapsed = log.matches("was unplugged and plugged back in between two looks").count();
+    let collapsed = log.matches(COLLAPSED).count();
     if collapsed == 0 {
-        // The two ways this fires read alike and are not alike, so the counts
-        // that tell them apart are in the message. A driver that saw every
-        // cycle as a distinct disconnect enumerated once per cycle; one that
-        // could not see a collapsed replug at all enumerated **once**, left the
-        // slot bound to the device that had gone, and delivered nothing — which
-        // is what the pre-fix driver does here, and a good deal worse than the
-        // slot march the same defect produces when the replugs are slow enough
-        // to be seen.
         return Err(format!(
-            "no replug collapsed inside a debounce, so this run never staged the race. The guest \
-             bound {} pointer(s) across {CYCLES} cycles and delivered {} pointer event(s): one \
-             bind and no events is a dead port, one bind per cycle is a run whose replugs were \
-             all seen as distinct.\n{log}",
-            crate::parse_pointer_sources(log).len(),
-            crate::parse_mouse_events(&result.stdout).len(),
+            "no replug collapsed inside a debounce, so this run never staged the race.\n{log}"
         ));
     }
 
@@ -4028,9 +3373,6 @@ pub fn xhci_flap(
     // **Sources reclaimed.** One pointer is in the port at a time, so every
     // bind must print the same button-table entry. A leak marches 2, 3, 4, 5.
     let sources: Vec<u32> = crate::parse_pointer_sources(log).iter().map(|(_, s)| *s).collect();
-    if sources.is_empty() {
-        return Err(format!("no pointer bound during the flap at all\n{log}"));
-    }
     if sources.iter().any(|s| *s != sources[0]) {
         return Err(format!(
             "pointer sources were {sources:?} — a replugged pointer took a fresh button-table \
@@ -4104,32 +3446,6 @@ fn take_one(pool: &mut Vec<u8>, id: u8) -> bool {
         }
         None => false,
     }
-}
-
-/// Everything a device that has been pulled has to leave behind.
-fn hotplug_unbound(log: &str) -> Result<(), String> {
-    for want in [
-        "xHCI: port ",
-        "disconnected",
-        "unplugged from port",
-        "source 2 released",
-        "xHCI: slot ",
-        "disabled",
-        "usb-storage: disk 1 unplugged",
-        "it is offline",
-    ] {
-        if !log.contains(want) {
-            return Err(format!("an unplugged device left {want:?} unsaid\n{log}"));
-        }
-    }
-    // The teardown ran the commands the controller's state permits. Every one
-    // of these lines is `run_command` reporting one it refused.
-    for illegal in ["Disable Slot failed", "Disable Slot timed out"] {
-        if log.contains(illegal) {
-            return Err(format!("{illegal:?} during the teardown\n{log}"));
-        }
-    }
-    Ok(())
 }
 
 /// A disk the driver refuses, on the port the controller enumerates *first*.

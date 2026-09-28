@@ -6,7 +6,7 @@ opened: 2026-09-24
 
 # Every random byte is one RDRAND, with no generator behind it
 
-`SYS_RANDOM` (`kernel/src/arch/syscall/io.rs`) answers every request with
+`SYS_RANDOM` (`kernel/src/syscall/io.rs`) answers every request with
 `RDRAND` values copied straight to the caller. The kernel has no random
 generator of its own. Every key sshd mints, every future TLS session and every
 nonce therefore rests on one instruction from one vendor. There is no second

@@ -15,9 +15,9 @@ is not the gap; the gap is below.
 
 **What exists, and why it is not enough.** `debug_action::HEAP_AT_CEILING_PAGE_ALIGNED`
 (a `pub const` in `toyos-abi/src/syscall.rs`'s `debug_action` module, `:709` and `:723`;
-dispatched at `kernel/src/arch/syscall/dispatch.rs:538`) drives `debug_heap_alloc` at
+dispatched at `kernel/src/syscall/dispatch.rs:538`) drives `debug_heap_alloc` at
 `MAX_HEAP_ALLOC` with 4096-byte alignment, which the page source cannot back;
-`kernel/src/arch/syscall/debug.rs:25-27` reports the null as
+`kernel/src/syscall/debug.rs:25-27` reports the null as
 `ResourceExhausted` rather than unwrapping it, and
 `tests/toyos-rust-tests/src/bin/heap_ceiling.rs:131` asserts exactly that. So a
 test-only actuator does exist, a shipped test does read it, and the claim that

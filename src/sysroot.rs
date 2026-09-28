@@ -51,10 +51,11 @@ use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
 /// and `toyos`, and `libtoyos_c.a` is `userland/libc`.
-pub const SYSROOT_SOURCES: [&str; 3] = ["toyos-abi/src", "toyos/src", "userland/libc/src"];
+pub const SYSROOT_SOURCES: [&str; 4] =
+    ["toyos-abi/src", "toyos/src", "userland/libc/src", "userland/libc/include"];
 
 /// Their manifests, whose features and versions decide the same build.
-const SYSROOT_MANIFESTS: [&str; 3] =
+pub(crate) const SYSROOT_MANIFESTS: [&str; 3] =
     ["toyos-abi/Cargo.toml", "toyos/Cargo.toml", "userland/libc/Cargo.toml"];
 
 /// The file a finished sysroot carries last, naming what it was built from.
@@ -64,7 +65,8 @@ const SOURCES: &str = "SOURCES";
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, \
-                      libtoyos_c merged, libraries from the stamp, linked by rust-lld; 3";
+                      libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
+                      a C sysroot of libc's staticlib and headers per target; 4";
 
 /// Where each build records the key it compiled against, for [`sweep`].
 const RECORD: &str = "target/toyos-sysroot-key";
@@ -355,6 +357,7 @@ fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
         let libc_target = dir.with_extension("libc-target");
         for arch in Arch::ALL {
             crate::libc::build(root, partial, &libc_target, arch);
+            crate::libc::build_c(root, partial, &libc_target, arch);
         }
         let _ = fs::remove_dir_all(&libc_target);
 
@@ -383,8 +386,8 @@ fn publish(stage2: &Path, dir: &Path, fill: impl FnOnce(&Path) -> String) {
     }
     clone_tree(stage2, &partial);
     toolchain::provision_toolchain_cargo(&partial);
-    let sources = fill(&partial);
     toolchain::assert_toolchain_is_honest(&partial);
+    let sources = fill(&partial);
     fs::write(partial.join(SOURCES), sources)
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCES).display()));
     if dir.exists() {
@@ -401,20 +404,16 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
     let host = host_triple();
     let build_dir = fork.join("build/toyos-std");
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
+    forget_another_compiler(&build_dir, &host, &compiler.identity());
     // Bootstrap reuses what it built before and does not see a path dependency
     // outside the fork move, so each target's std starts from nothing.
     for target in GUEST_TARGETS {
-        let _ = fs::remove_dir_all(build_dir.join(&host).join("stage0-std").join(target));
+        remove(&build_dir.join(&host).join("stage0-std").join(target));
     }
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, std_config(&compiler.stage2, &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
-    // Bootstrap re-locks `library/Cargo.lock` to this worktree's `toyos-abi` and
-    // `toyos` versions. What it writes follows from their manifests, which the
-    // key already names, so the fork's own file is put back as it was: the
-    // checkout stays clean, and the key stays the one it was built for.
-    let _lock = Restore::holding(&fork.join("library/Cargo.lock"));
     let targets = GUEST_TARGETS.join(",");
     let args = ["build", "library", "--stage", "0", "--config", path_str(&config), "--warnings", "warn",
                 "--target", &targets];
@@ -425,6 +424,51 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
         toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std").join(arch.userland()));
     }
     build_dir.join(&host).join("stage0-std")
+}
+
+/// Empty the std build directory `build_dir` of all but what bootstrap
+/// downloaded unless `identity` ([`Compiler::identity`]) is the compiler its
+/// `compiled-by` records as having compiled the rest, then record `identity`
+/// there.
+///
+/// Cargo keys what it reuses on `rustc -vV`, which every ToyOS compiler prints
+/// alike, so another compiler's rlibs stay fresh and the next crate that does
+/// recompile is refused against them (`E0463 can't find crate`). The removal
+/// comes before the record, so an interrupted switch removes again.
+fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
+    let record = build_dir.join("compiled-by");
+    if fs::read_to_string(&record).is_ok_and(|by| by == identity) {
+        return;
+    }
+    let kept = [(build_dir.to_path_buf(), &["cache", host, "compiled-by"][..]),
+                (build_dir.join(host), &["ci-llvm", "rustfmt"][..])];
+    for (dir, kept) in kept {
+        let entries = match fs::read_dir(&dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            entries => entries.unwrap_or_else(|e| panic!("read {}: {e}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+            if !kept.iter().any(|name| entry.file_name() == *name) {
+                remove(&entry.path());
+            }
+        }
+    }
+    fs::write(&record, identity).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
+}
+
+/// Remove `path`, a directory with all it holds or anything else; that nothing
+/// is there is not an error.
+fn remove(path: &Path) {
+    let removed = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(e) => Err(e),
+    };
+    match removed {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("remove {}: {e}", path.display()),
+        _ => {}
+    }
 }
 
 /// The stamp bootstrap wrote naming every library it built for `target` under
@@ -532,26 +576,6 @@ fn bootstrap_cargo() -> PathBuf {
     cargo
 }
 
-/// A file put back to its bytes when this drops, however the scope ends.
-pub(crate) struct Restore {
-    path: PathBuf,
-    bytes: Vec<u8>,
-}
-
-impl Restore {
-    pub(crate) fn holding(path: &Path) -> Self {
-        let bytes = fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        Self { path: path.to_path_buf(), bytes }
-    }
-}
-
-impl Drop for Restore {
-    fn drop(&mut self) {
-        fs::write(&self.path, &self.bytes)
-            .unwrap_or_else(|e| panic!("restore {}: {e}", self.path.display()));
-    }
-}
-
 /// Copy `from` to `to`, a symbolic link as a link: `stage2`'s own point at
 /// things that outlive it. `fs::copy` clones on APFS and reflinks where Linux
 /// can, so a sysroot costs the bytes its own libraries differ by.
@@ -608,23 +632,42 @@ fn path_str(path: &Path) -> &str {
     path.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", path.display()))
 }
 
-pub(crate) fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+/// `Err` names the command, the directory and what git said.
+fn git_try(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
         .output()
-        .unwrap_or_else(|e| panic!("run git in {}: {e}", dir.display()));
-    assert!(
-        out.status.success(),
-        "git {args:?} in {}: {}",
-        dir.display(),
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    out.stdout
+        .map_err(|e| format!("run git in {}: {e}", dir.display()))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git {args:?} in {}: {}", dir.display(), stderr.trim()));
+    }
+    Ok(out.stdout)
+}
+
+pub(crate) fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+    git_try(dir, args).unwrap_or_else(|e| panic!("{e}"))
 }
 
 pub(crate) fn git_out(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&git_bytes(dir, args)).into_owned()
+}
+
+/// The files `git` tracks under `dir` that `pathspecs` name, every one when
+/// there are none, relative to `dir`. A name that is not UTF-8 is refused by
+/// name rather than rewritten into one git does not track.
+pub(crate) fn tracked_files(dir: &Path, pathspecs: &[&str]) -> Result<Vec<String>, String> {
+    let args = [&["ls-files", "-z", "--"][..], pathspecs].concat();
+    let listing = git_try(dir, &args)?;
+    let names = listing.split(|b| *b == 0).filter(|f| !f.is_empty());
+    names
+        .map(|f| {
+            String::from_utf8(f.to_vec()).map_err(|_| {
+                format!("git tracks {:?} in {}, a name that is not UTF-8", String::from_utf8_lossy(f), dir.display())
+            })
+        })
+        .collect()
 }
 
 fn git_run(dir: &Path, args: &[&str]) {
@@ -699,6 +742,12 @@ mod tests {
         write(&abi, "/// A.\npub struct A;\n");
         assert_eq!(k(), base);
 
+        let header = root.join("userland/libc/include/stdio.h");
+        write(&header, "int puts(const char *);\n");
+        assert_ne!(k(), base, "a header the C sysroot carries kept the old sysroot");
+        fs::remove_file(&header).unwrap();
+        assert_eq!(k(), base);
+
         let std = fork.join("library/std/src/lib.rs");
         write(&std, "//! std, documented\npub fn exit() {}\n");
         assert_eq!(k(), base, "a comment in the std fork made a new sysroot");
@@ -723,6 +772,83 @@ mod tests {
 
         write(&rust_dir.join("build/toyos-compiler"), "tree-2");
         assert_ne!(k(), base, "another compiler kept the old sysroot");
+    }
+
+    /// **What one compiler compiled in a std build directory is never another's**:
+    /// all but the downloads goes when the compiler changes, or when nothing
+    /// says which compiler made it, and stays while it does not; the downloads
+    /// stay either way.
+    #[test]
+    fn another_compiler_s_std_build_goes_and_the_same_one_s_stays() {
+        let base = TempDir::new("compiled-by");
+        let (_root, rust_dir, _fork) = keyed(&base);
+        let build = base.join("toyos-std");
+        let compiled = [
+            build.join("bootstrap/debug/deps/libserde-1.rlib"),
+            build.join("host/stage0-std/dist/build/std/build-script-build"),
+            build.join("host/a-directory-bootstrap-adds/lib.rlib"),
+            build.join("tmp/cc-rs-out-dir/out.o"),
+            build.join("host/a-stamp-bootstrap-writes"),
+        ];
+        let downloaded = [
+            build.join("cache/llvm-1/llvm.tar.xz"),
+            build.join("host/ci-llvm/lib/libLLVM.dylib"),
+            build.join("host/rustfmt/bin/rustfmt"),
+        ];
+        let lay = || {
+            for file in compiled.iter().chain(&downloaded) {
+                write(file, "built");
+            }
+        };
+        let identity = || Compiler::primary(&rust_dir).identity();
+
+        lay();
+        forget_another_compiler(&build, "host", &identity());
+        for file in &compiled {
+            assert!(!file.exists(), "{} was kept, and no record names a compiler for it", file.display());
+        }
+        assert!(downloaded.iter().all(|f| f.is_file()), "a download went");
+
+        lay();
+        forget_another_compiler(&build, "host", &identity());
+        assert!(compiled.iter().all(|f| f.is_file()), "the same compiler's build went");
+
+        write(&rust_dir.join("build/toyos-compiler"), "tree-2");
+        forget_another_compiler(&build, "host", &identity());
+        for file in &compiled {
+            assert!(!file.exists(), "{} was kept for another compiler", file.display());
+        }
+        assert!(downloaded.iter().all(|f| f.is_file()), "a download went");
+    }
+
+    /// **A switch that cannot remove the other compiler's build fails and does
+    /// not record the new compiler**, so the next call removes it.
+    #[test]
+    fn a_switch_that_cannot_remove_records_nothing_and_the_next_one_removes() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = TempDir::new("compiled-by-stuck");
+        let (_root, rust_dir, _fork) = keyed(&base);
+        let build = base.join("toyos-std");
+        let identity = || Compiler::primary(&rust_dir).identity();
+        fs::create_dir_all(&build).unwrap();
+        forget_another_compiler(&build, "host", &identity());
+        let deps = build.join("bootstrap/debug/deps");
+        write(&deps.join("libserde-1.rlib"), "built");
+        write(&rust_dir.join("build/toyos-compiler"), "tree-2");
+        let mode = |bits| fs::set_permissions(&deps, fs::Permissions::from_mode(bits)).unwrap();
+
+        mode(0o555);
+        let stuck = std::panic::catch_unwind(|| forget_another_compiler(&build, "host", &identity()));
+        mode(0o755);
+        let refusal = stuck.expect_err("a build that could not be removed was taken for removed");
+        let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
+        assert!(refusal.starts_with(&format!("remove {}", build.join("bootstrap").display())), "{refusal}");
+        assert_ne!(fs::read_to_string(build.join("compiled-by")).unwrap(), identity(),
+                   "the new compiler was recorded over a build it did not remove");
+
+        forget_another_compiler(&build, "host", &identity());
+        assert!(!build.join("bootstrap").exists(), "the next call kept the build the stuck one could not remove");
+        assert_eq!(fs::read_to_string(build.join("compiled-by")).unwrap(), identity());
     }
 
     /// A primary with the fork as its `rust` submodule at `C1`, the fork's `C2`
@@ -813,22 +939,27 @@ mod tests {
     /// **A sysroot is whole, or it is made again**: one published from a
     /// `stage2` whose `bin/` has no cargo — what bootstrap leaves until the
     /// primary finishes it — has its cargo all the same, and one found with its
-    /// `SOURCES` and without its cargo, as `5dc157f7fac727be` was, is rebuilt
-    /// rather than trusted, once.
+    /// `SOURCES` and without its cargo is rebuilt rather than trusted, once.
     #[test]
     fn a_sysroot_is_whole_or_it_is_made_again() {
         let base = TempDir::new("whole");
         git(&base, &["init", "-q"]);
         let stage2 = base.join("stage2");
         write(&stage2.join("bin/rustc"), "rustc");
-        write(&toolchain::rust_lld(&stage2), "lld");
-        let dir = sysroots_dir(&base.join("rust")).join("5dc157f7fac727be");
+        let lld = toolchain::rust_lld(&stage2);
+        write(&lld, "lld");
+        // The C toolchain `src/clang.rs` provisions beside it.
+        for tool in ["llvm-ar", "clang", "ld.lld"] {
+            write(&lld.with_file_name(tool), tool);
+        }
+        write(&lld.parent().unwrap().parent().unwrap().join("lib/clang/22/include/stddef.h"), "stddef");
+        let dir = sysroots_dir(&base.join("rust")).join("found");
         let made = std::cell::Cell::new(0);
         let make = |dir: &Path| {
             made.set(made.get() + 1);
             publish(&stage2, dir, |partial| {
                 write(&partial.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib"), "std");
-                "5dc157f7fac727be\n".to_string()
+                "found\n".to_string()
             })
         };
 
@@ -841,14 +972,14 @@ mod tests {
         );
 
         clone_tree(&stage2, &dir);
-        write(&dir.join(SOURCES), "5dc157f7fac727be\n");
+        write(&dir.join(SOURCES), "found\n");
         let before = made.get();
-        let using = held(&base, "5dc157f7fac727be", &dir, || make(&dir));
+        let using = held(&base, "found", &dir, || make(&dir));
         assert_eq!(made.get(), before + 1, "a sysroot without its cargo was trusted because it has SOURCES");
         assert_eq!(toolchain::toolchain_defect(&dir), None);
         assert!(dir.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib").is_file());
         drop(using);
-        drop(held(&base, "5dc157f7fac727be", &dir, || make(&dir)));
+        drop(held(&base, "found", &dir, || make(&dir)));
         assert_eq!(made.get(), before + 1, "a whole sysroot was made again");
     }
 

@@ -13,7 +13,7 @@ then reclaims the killed run's directory — the very images those QEMU
 processes still have open — and unlinks it while the guest is still alive,
 holding the disk invisibly until the guest itself exits.
 
-This is not a regression: the retired `src/scratch.rs` design (kept a killed
+This is not a regression: the retired `96c2f83d^:src/scratch.rs` design (kept a killed
 run's directory for 24 hours) had the identical gap for a killed run's QEMU
 children, so #529 (which replaced that design) found it and correctly did not
 block on it. It is unfixed either way and worth its own entry.

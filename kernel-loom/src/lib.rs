@@ -196,9 +196,6 @@ pub mod dump_request;
 #[path = "../../kernel/src/pcidev/record.rs"]
 pub mod device_irq;
 
-#[path = "../../kernel/src/sched/poison.rs"]
-pub mod poison;
-
 /// Durability debt as generations. Pure `core`, so it compiles here unshimmed;
 /// `tests/durability.rs` drives the kernel's flush protocol over it.
 #[path = "../../kernel/src/durability.rs"]

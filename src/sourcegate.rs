@@ -531,9 +531,8 @@ struct Spawn {
 /// A spawn that is not `Command` — `libc::system`, `execvp`, `posix_spawn` —
 /// which `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md` carries.
 /// A binary a third-party crate runs for us: `userland/doom/build.rs` drives
-/// `cc::Build`, which compiles and archives with whatever `cc` and `ar` it
-/// finds in `PATH`, and the `cc` half is one of the three standing failures
-/// `CLAUDE.md` declares. And an alias no one line spells, which the
+/// `cc::Build`, which compiles and archives with the toolchain's clang and
+/// `llvm-ar` because `src/build.rs` names them in `cc`'s own variables. And an alias no one line spells, which the
 /// not-`Command` record carries under its own heading. A workflow or a
 /// container image is [`CI_PACKAGES`] and [`CI_ACTIONS`], not this.
 const HOST_SPAWNS: &[Spawn] = &[
@@ -555,7 +554,7 @@ const HOST_SPAWNS: &[Spawn] = &[
     },
     Spawn {
         arg: "arch.qemu()",
-        sites: &[("src/qemu.rs", 1), ("src/ci.rs", 2), ("tests/common/qemu.rs", 1)],
+        sites: &[("src/qemu.rs", 1), ("src/ci.rs", 1), ("src/firmware.rs", 1), ("tests/common/qemu.rs", 1)],
         why: "QEMU, the other half of the bar: `Arch::qemu` names `qemu-system-x86_64` and \
               `qemu-system-aarch64`, and `check_prerequisites` requires the one being booted",
     },
@@ -635,20 +634,15 @@ const HOST_SPAWNS: &[Spawn] = &[
               scratch holder whose death is what is judged",
     },
     Spawn {
-        arg: "env!(\"CARGO_BIN_EXE_toyos-cc\")",
-        sites: &[("toyos-cc/tests/determinism.rs", 1), ("toyos-cc/tests/pp_corpus.rs", 1)],
-        why: "our own compiler, built by cargo for its own tests",
-    },
-    Spawn {
         arg: "env!(\"CARGO_BIN_EXE_toyos-ld\")",
         sites: &[("toyos-ld/tests/common/mod.rs", 2), ("toyos-ld/tests/determinism.rs", 1)],
-        why: "our own linker, the same way",
+        why: "our own linker, built by cargo for its own tests",
     },
     Spawn {
-        arg: "&rust_lld",
-        sites: &[("tests/common/compile.rs", 1)],
-        why: "the toolchain's own `rust-lld`, which rustc links every guest binary with, \
-              linking the C tests that have no Rust crate for rustc to link",
+        arg: "&c.clang",
+        sites: &[("tests/common/compile.rs", 2), ("tests/common/clang.rs", 1)],
+        why: "the toolchain's own clang, from the LLVM rustc is built with, compiling and \
+              linking the C programs the harness runs",
     },
     Spawn {
         arg: "toyos_build::build::https_fetch_host(&compile::repo_root())",
@@ -716,6 +710,17 @@ const CI_PACKAGES: &[Package] = &[
               no binary anything here runs",
     },
     Package {
+        name: "cmake",
+        why: "CMake, which rustc's bootstrap configures LLVM and clang with — a declared host \
+              tool (`ALSO_USED` in src/main.rs, issues/build/python-and-cc-are-declared.md), \
+              unpinned where a portability job installs its platform's own",
+    },
+    Package {
+        name: "cmake=3.28.3-1build7",
+        why: "the same CMake, pinned to the version Ubuntu 24.04 released, on the nightly's \
+              toolchain runner, whose LLVM build is the one a release ships",
+    },
+    Package {
         name: "curl",
         why: "outside the bar, and declared by nothing else: it fetches rustup-init.sh, and \
               src/release.rs and src/ci.rs ask GitHub and the crates.io index with it",
@@ -723,6 +728,27 @@ const CI_PACKAGES: &[Package] = &[
     Package {
         name: "git",
         why: "the version control this repository is, and `REQUIRED` in src/main.rs",
+    },
+    Package {
+        name: "ninja",
+        why: "Ninja, what CMake builds LLVM and clang with under rustc's bootstrap, under \
+              Homebrew's formula name; declared beside CMake",
+    },
+    Package {
+        name: "ninja-build",
+        why: "the same Ninja under Debian's package name, unpinned on the portability job",
+    },
+    Package {
+        name: "ninja-build=1.11.1-2",
+        why: "the same Ninja, pinned to the version Ubuntu 24.04 released, on the nightly's \
+              toolchain runner",
+    },
+    Package {
+        name: "ovmf-generic",
+        why: "the package that carries the descriptor Debian's QEMU declares for q35 \
+              (src/firmware.rs): Debian's edk2 build, named rather than left to \
+              `qemu-system-x86`'s Recommends or pulled in by the `ovmf` metapackage, whose \
+              amdsev/inteltdx siblings contribute only memory-mapped descriptors this reader skips",
     },
     Package {
         name: "python3",
@@ -1225,24 +1251,6 @@ fn used_actions(text: &str) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// Every `.rs` file `git` tracks under `tree`, repository-relative — the list
-/// the walks above are held against, read from something that is not a walk.
-#[cfg(test)]
-fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<String> {
-    let out = std::process::Command::new("git")
-        .args(["ls-files", "-z", "--", tree])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|e| panic!("git ls-files {tree}: {e}"));
-    assert!(out.status.success(), "git ls-files {tree} failed");
-    String::from_utf8(out.stdout)
-        .expect("git ls-files is not UTF-8")
-        .split('\0')
-        .filter(|p| p.ends_with(".rs"))
-        .map(str::to_string)
-        .collect()
-}
-
 // ── Architecture rules ──────────────────────────────────────────────────────
 
 /// One architecture rule, stated as where its spellings may appear: a set of
@@ -1494,10 +1502,6 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("toyos-abi/src/arch/", "toyos-abi's per-architecture reads: the counter and the thread's id, and their selector"),
             ("src/arch.rs", "the build system's one reading of the host it runs on"),
             (
-                "toyos-cc/src/preprocess/mod.rs",
-                "the C compiler's default target is its host's, when the command line names none",
-            ),
-            (
                 "src/licence.rs",
                 "the licence gate resolves a dependency's `cfg(target_arch = ...)` against the target an image is built for: the architecture is the data it reads, not a choice it makes",
             ),
@@ -1589,12 +1593,13 @@ const CORPUS: &str = "tests/testcases";
 
 /// The populations that licence attributes, each the directory its count counts.
 #[cfg(test)]
-const CORPUS_POPULATIONS: &[&str] = &["tinycc", "pp_tcc"];
+const CORPUS_POPULATIONS: &[&str] = &["tinycc"];
 
 /// The corpus files that are this repository's own, so a tracked file under
 /// [`CORPUS`] that is in no population and is none of these is an arrival.
 #[cfg(test)]
-const CORPUS_OURS: &[&str] = &["tests/testcases/LICENSE", "tests/testcases/system.toml"];
+const CORPUS_OURS: &[&str] =
+    &["tests/testcases/LICENSE", "tests/testcases/system.toml", "tests/testcases/hello.c"];
 
 /// `NOTICE`: "Do not re-import it." A re-import arrives as new bytes under a new
 /// digest, so the file name is the thing that can be refused.
@@ -2058,7 +2063,8 @@ mod tests {
             rust_files(&root.join(tree), &mut files);
             let walked: std::collections::BTreeSet<String> =
                 files.iter().map(|p| rel(&root, p)).collect();
-            let tracked = tracked_rust_files(&root, tree);
+            let tracked: std::collections::BTreeSet<String> =
+                crate::sysroot::tracked_files(&root, &[tree]).unwrap_or_else(|e| panic!("{e}")).into_iter().filter(|p| p.ends_with(".rs")).collect();
             assert!(
                 tracked.len() > 1,
                 "git tracks {} .rs file(s) under {tree}, so this floor is not one",
@@ -2480,16 +2486,10 @@ mod tests {
     #[test]
     fn every_committed_binary_file_is_declared() {
         let root = repo_root();
-        let out = std::process::Command::new("git")
-            .args(["ls-files", "-z"])
-            .current_dir(&root)
-            .output()
-            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
-        assert!(out.status.success(), "git ls-files failed");
-        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
+        let listing = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
 
         let mut found: Vec<(String, String)> = Vec::new();
-        for name in listing.split('\0').filter(|s| !s.is_empty()) {
+        for name in &listing {
             let Ok(bytes) = std::fs::read(root.join(name)) else { continue };
             if !is_binary(&bytes) && !name.starts_with("assets/") {
                 continue;
@@ -2547,15 +2547,8 @@ mod tests {
         let licence_path = format!("{CORPUS}/LICENSE");
         let licence = std::fs::read_to_string(root.join(&licence_path))
             .unwrap_or_else(|e| panic!("{licence_path}: {e}"));
-        let out = std::process::Command::new("git")
-            .args(["ls-files", "-z"])
-            .current_dir(&root)
-            .output()
-            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
-        assert!(out.status.success(), "git ls-files failed");
-        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
-        let tracked: Vec<&str> = listing.split('\0').filter(|s| !s.is_empty()).collect();
-        let under_corpus: Vec<&&str> =
+        let tracked = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
+        let under_corpus: Vec<&String> =
             tracked.iter().filter(|f| f.starts_with(&format!("{CORPUS}/"))).collect();
         assert!(
             under_corpus.len() > CORPUS_OURS.len(),
@@ -2578,7 +2571,7 @@ mod tests {
             }
         }
         for file in &under_corpus {
-            let attributed = CORPUS_OURS.contains(file)
+            let attributed = CORPUS_OURS.contains(&file.as_str())
                 || CORPUS_POPULATIONS
                     .iter()
                     .any(|p| file.starts_with(&format!("{CORPUS}/{p}/")));

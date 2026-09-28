@@ -15,6 +15,10 @@
 //! the `src/llvm-project` commit, and [`RECIPE`]. Nothing writes that directory after its [`SOURCE`] file exists,
 //! and two worktrees naming the same compiler share one copy.
 //!
+//! **LLVM is built from `src/llvm-project`.**
+//! [`source`] names that commit, so another LLVM is another compiler, and an
+//! LLVM checkout holding what no commit does names none.
+//!
 //! **A compiler of a worktree's own never touches what the others build with**:
 //! not the primary's `stage2`, not its record, not the machine-global rustup
 //! `toyos` link — a sysroot is named by its directory, never by a toolchain
@@ -41,18 +45,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::buildlock::{self, Guard, Held, Keyed};
-use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity, Restore};
+use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is none of them: the
 /// build below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned; 3";
+const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM and clang from src/llvm-project; 4";
 
 /// What a compiler's key is the identity of, in its fork checkout.
 const KEYED: [&str; 5] = ["compiler", "src/bootstrap", "src/tools", "src/stage0", "Cargo.lock"];
 
 /// The submodule a compiler is built against by commit: its LLVM, which
-/// bootstrap takes prebuilt for that commit, so its content is never read.
+/// bootstrap builds from that commit, so its content is never read.
 const LLVM: &str = "src/llvm-project";
 
 /// The file a finished compiler carries last, naming what it was built from. A
@@ -118,10 +122,15 @@ pub fn compilers_dir(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/compilers")
 }
 
+/// [`compiler_source`] and the LLVM commit it links.
+pub fn source(checkout: &Path) -> String {
+    format!("{} llvm {}", compiler_source(checkout), llvm_commit(checkout))
+}
+
 /// What `checkout`'s `compiler/` is: its commit's tree, and whatever the working
 /// tree changes in it — an edit, or a file git does not track yet, which is
 /// what a new target spec is before its commit.
-pub fn source(checkout: &Path) -> String {
+fn compiler_source(checkout: &Path) -> String {
     let tree = git_out(checkout, &["rev-parse", "HEAD:compiler"]);
     let mut local = git_bytes(checkout, &["diff", "HEAD", "--", "compiler"]);
     let untracked = git_bytes(checkout, &["ls-files", "-z", "--others", "--exclude-standard", "--", "compiler"]);
@@ -155,7 +164,8 @@ pub fn record(rust_dir: &Path) {
 /// **The source's content, never its files' times**: a checkout that rewrites a
 /// file with the bytes it had is no new compiler.
 fn primary_is(rust_dir: &Path, checkout: &Path) -> Result<bool, std::io::Error> {
-    Ok(fs::read_to_string(primary_record(rust_dir))?.trim() == source(checkout))
+    let names = source(checkout);
+    Ok(fs::read_to_string(primary_record(rust_dir))?.trim() == names)
 }
 
 /// Whether the primary's `stage2` is built from what its own `rust/compiler/`
@@ -175,18 +185,28 @@ pub fn key(fork: &Path) -> String {
     short(parts.join("\n\0\n").as_bytes())
 }
 
-/// The LLVM commit `fork` builds against: the one its index records and, where
-/// the submodule is checked out, the one it has, which a local checkout of
-/// another commit moves.
+/// The LLVM commit `fork` builds against: the one its `HEAD` records, which is
+/// the one bootstrap checks out and builds whatever the submodule holds. An
+/// LLVM change is a commit there and a gitlink here, so a checkout holding
+/// anything no commit does is refused rather than named by its commit.
 fn llvm_commit(fork: &Path) -> String {
-    let recorded = git_out(fork, &["ls-files", "--stage", "--", LLVM]);
     let checkout = fork.join(LLVM);
-    let held = if checkout.join(".git").exists() {
-        git_out(&checkout, &["rev-parse", "HEAD"])
-    } else {
-        String::new()
-    };
-    format!("{} {}", recorded.trim(), held.trim())
+    // Exactly what bootstrap's LLVM stamp hashes beyond the commit; the untracked
+    // cache spares each call a walk of the whole tree.
+    let status = ["-c", "core.untrackedCache=true", "status", "--porcelain", "--untracked-files=normal"];
+    let edited = checkout.join(".git").exists() && !git_bytes(&checkout, &status).is_empty();
+    assert!(
+        !edited,
+        "{} holds changes no commit does, and a compiler is keyed on the commit its gitlink \
+         names: commit them there and record that commit in {}",
+        checkout.display(),
+        fork.display(),
+    );
+    let recorded = git_out(fork, &["ls-tree", "HEAD", LLVM]);
+    match recorded.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["160000", "commit", sha, _] => sha.to_string(),
+        _ => panic!("{} records no {LLVM} gitlink: `git ls-tree HEAD {LLVM}` said {recorded:?}", fork.display()),
+    }
 }
 
 /// The compiler `root`'s fork checkout at `fork` names: the primary's where its
@@ -269,7 +289,8 @@ fn place(root: &Path, fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path)
 }
 
 /// Bootstrap's build of the compiler in `fork`, into its own build directory,
-/// and the `stage2` it made, with the cargo every toolchain directory carries.
+/// and the `stage2` it made, with the cargo and the clang every toolchain
+/// directory carries.
 fn build_in_fork(fork: &Path) -> PathBuf {
     crate::ensure_submodule(fork, "library/backtrace");
     let host = host_triple();
@@ -278,10 +299,6 @@ fn build_in_fork(fork: &Path) -> PathBuf {
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, config_text(&build_dir, &host)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
-    // Bootstrap re-locks both lockfiles to this worktree's `toyos-abi` and
-    // `toyos`; the fork's own are put back, so the checkout stays clean and the
-    // key stays the one it was built for.
-    let _locks = (Restore::holding(&fork.join("Cargo.lock")), Restore::holding(&fork.join("library/Cargo.lock")));
     let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library"];
     let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
     toolchain::refuse_on_compile_error(&log, "the compiler");
@@ -289,6 +306,7 @@ fn build_in_fork(fork: &Path) -> PathBuf {
     let stage2 = build_dir.join(&host).join("stage2");
     assert!(stage2.join("bin/rustc").is_file(), "the compiler build left no {}", stage2.join("bin/rustc").display());
     toolchain::provision_toolchain_cargo(&stage2);
+    crate::clang::provision(&stage2);
     toolchain::assert_toolchain_is_honest(&stage2);
     stage2
 }
@@ -306,6 +324,9 @@ build-dir = "{build_dir}"
 host = ["{host}"]
 target = ["{host}"]
 
+[llvm]
+{llvm}
+
 [rust]
 incremental = true
 lld = true
@@ -314,6 +335,7 @@ lld = true
 {pin}
 "#,
         build_dir = build_dir.display(),
+        llvm = crate::clang::LLVM_CONFIG,
         pin = toolchain::HOST_LINKER_PIN,
     )
 }
@@ -395,6 +417,10 @@ mod tests {
         out
     }
 
+    /// The LLVM commits the fixtures' forks record. Nothing reads their content.
+    const LLVM_A: &str = "1111111111111111111111111111111111111111";
+    const LLVM_B: &str = "2222222222222222222222222222222222222222";
+
     /// A primary whose `rust` pins fork commit `C0` and has built a compiler
     /// from it, and three linked worktrees: `same` pins `C0`, `a` and `b` each
     /// pin a commit whose `compiler/` is its own.
@@ -411,6 +437,9 @@ mod tests {
         write(&fork.join("library/std/src/lib.rs"), "pub fn a() {}\n");
         write(&fork.join(".gitignore"), "/build\n");
         git(&fork, &["add", "-A"]);
+        git(&fork, &["update-index", "--add", "--cacheinfo", &format!("160000,{LLVM_A},{LLVM}")]);
+        // What an uninitialised submodule leaves, so `commit -a` keeps the gitlink.
+        fs::create_dir_all(fork.join(LLVM)).unwrap();
         git(&fork, &["commit", "-qm", "C0"]);
         let c0 = git(&fork, &["rev-parse", "HEAD"]);
         let mut pins = Vec::new();
@@ -559,17 +588,10 @@ mod tests {
         let (_primary, rust_dir, _) = estate(&scratch);
         assert!(primary_is_current(&rust_dir), "the compiler just recorded is not current");
 
-        let mut files = Vec::new();
-        let mut stack = vec![rust_dir.join("compiler")];
-        while let Some(at) = stack.pop() {
-            for entry in fs::read_dir(&at).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() { stack.push(path) } else { files.push(path) }
-            }
-        }
+        let files = snapshot(&rust_dir.join("compiler"));
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
-        for file in &files {
-            fs::write(file, fs::read(file).unwrap()).unwrap();
+        for (file, bytes) in &files {
+            fs::write(file, bytes).unwrap();
             fs::File::options().write(true).open(file).unwrap().set_modified(later).unwrap();
             assert_eq!(fs::metadata(file).unwrap().modified().unwrap(), later);
         }
@@ -594,6 +616,66 @@ mod tests {
         assert!(!primary_is_current(&rust_dir), "a stage2 nothing recorded was taken for current");
     }
 
+    /// `fork`'s LLVM checked out at a commit of its own.
+    fn llvm_checkout(fork: &Path) -> PathBuf {
+        let llvm = fork.join(LLVM);
+        git(&llvm, &["init", "-q"]);
+        write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core;\n");
+        git(&llvm, &["add", "-A"]);
+        git(&llvm, &["commit", "-qm", "LLVM"]);
+        llvm
+    }
+
+    /// What `f` panicked with; `expect` if it returned.
+    fn refusal(expect: &str, f: impl FnOnce()) -> String {
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err(expect);
+        refused.downcast_ref::<String>().cloned().unwrap_or_default()
+    }
+
+    /// An LLVM checkout holding what no commit does, an edit or a file git does
+    /// not track, names no compiler of a worktree's.
+    #[test]
+    fn an_uncommitted_llvm_edit_is_refused() {
+        let scratch = TempDir::new("compiler-llvm-edit");
+        let (_primary, rust_dir, [same, _, _]) = estate(&scratch);
+        let fork = same.join("rust");
+        let llvm = llvm_checkout(&fork);
+        let committed = key(&fork);
+        let builds = Cell::new(0);
+        let fake = |fork: &Path| {
+            builds.set(builds.get() + 1);
+            fork.join("build/toyos-compiler/stage2")
+        };
+
+        write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core_edited;\n");
+        let said = refusal("an uncommitted LLVM edit named a compiler", || {
+            choose(&same, &rust_dir, &fork, fake);
+        });
+        assert!(said.contains("holds changes no commit does"), "{said}");
+        git(&llvm, &["commit", "-qam", "the edit"]);
+        assert_eq!(key(&fork), committed, "the key read the submodule's commit rather than the gitlink");
+
+        write(&llvm.join("llvm/lib/IR/Untracked.cpp"), "int untracked;\n");
+        let said = refusal("an untracked file in LLVM named a compiler", || {
+            choose(&same, &rust_dir, &fork, fake);
+        });
+        assert!(said.contains("holds changes no commit does"), "{said}");
+        assert_eq!(builds.get(), 0, "an LLVM checkout no commit holds built a compiler");
+    }
+
+    /// The primary records no LLVM edit as the commit it is an edit of.
+    #[test]
+    fn the_primary_records_no_uncommitted_llvm_edit() {
+        let scratch = TempDir::new("compiler-llvm-primary");
+        let (_primary, rust_dir, _) = estate(&scratch);
+        let llvm = llvm_checkout(&rust_dir);
+        let before = fs::read_to_string(primary_record(&rust_dir)).unwrap();
+        write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core_edited;\n");
+        let said = refusal("the primary recorded an uncommitted LLVM edit as its commit", || record(&rust_dir));
+        assert!(said.contains("holds changes no commit does"), "{said}");
+        assert_eq!(fs::read_to_string(primary_record(&rust_dir)).unwrap(), before);
+    }
+
     /// Every source a compiler is built from moves its key: LLVM by commit,
     /// the tools by content.
     #[test]
@@ -605,7 +687,41 @@ mod tests {
         write(&fork.join("src/tools/lld-wrapper/src/main.rs"), "fn main() { 1; }\n");
         let tools = key(&fork);
         assert_ne!(tools, before, "a tool's source did not move the key");
-        git(&fork, &["update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,src/llvm-project"]);
+        git(&fork, &["update-index", "--add", "--cacheinfo", &format!("160000,{LLVM_B},{LLVM}")]);
+        assert_eq!(key(&fork), tools, "a gitlink staged and not committed moved the key; bootstrap builds HEAD's");
+        git(&fork, &["commit", "-qm", "another LLVM"]);
         assert_ne!(key(&fork), tools, "another LLVM commit did not move the key");
+    }
+
+    /// A primary record naming another LLVM, or none, is another compiler.
+    #[test]
+    fn another_llvm_is_another_compiler() {
+        let scratch = TempDir::new("compiler-llvm");
+        let (_primary, rust_dir, [same, _, _]) = estate(&scratch);
+        let builds = Cell::new(0);
+        let fake = |fork: &Path| {
+            builds.set(builds.get() + 1);
+            let stage2 = fork.join("build/toyos-compiler/stage2");
+            write(&stage2.join("bin/rustc"), "a rustc");
+            write(&stage2.join("lib/librustc_driver-2.dylib"), "a driver");
+            stage2
+        };
+        let fork = same.join("rust");
+        assert!(choose(&same, &rust_dir, &fork, fake).primary, "the primary's own compiler/ and LLVM built one");
+
+        let record = primary_record(&rust_dir);
+        let recorded = fs::read_to_string(&record).unwrap();
+        let (compiler, llvm) = recorded.rsplit_once(" llvm ").expect("the record names its LLVM");
+        assert_eq!(llvm, LLVM_A);
+        fs::write(&record, compiler).unwrap();
+        assert!(!choose(&same, &rust_dir, &fork, fake).primary, "a record naming no LLVM was taken for this one");
+        assert_eq!(builds.get(), 1);
+        fs::write(&record, &recorded).unwrap();
+
+        git(&fork, &["update-index", "--add", "--cacheinfo", &format!("160000,{LLVM_B},{LLVM}")]);
+        git(&fork, &["commit", "-qm", "the ToyOS LLVM"]);
+        let mine = choose(&same, &rust_dir, &fork, fake);
+        assert!(!mine.primary, "a worktree pinning another LLVM took the primary's compiler");
+        assert_eq!(builds.get(), 2);
     }
 }

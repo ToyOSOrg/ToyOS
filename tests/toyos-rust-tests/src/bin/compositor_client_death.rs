@@ -20,9 +20,9 @@
 //! each one used to take a process with it.
 //!
 //! Each case leaves its damage standing and then asks the compositor a
-//! question **with a deadline**, exactly as `compositor_stall` does — the host
-//! asserts the other half, that the desktop is still painting and that every
-//! client dropped on the way was named with its pid.
+//! question it answers from its dispatch — the host asserts the other half,
+//! that the desktop is still painting and that every client dropped on the way
+//! was named with its pid.
 
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
@@ -30,9 +30,8 @@ use std::process::{exit, Command, Stdio};
 
 use toyos::endow;
 use toyos::AsHandle;
-use toyos::shm::SharedMemory;
 use toyos::{ipc, Connection};
-use toyos_abi::syscall::{self, SyscallError};
+use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use window::Window;
 
@@ -45,21 +44,8 @@ const RELAY_SOCKET: RawHandle = RawHandle(3);
 /// reaped. Nothing is ever read off it but the hang-up.
 const RELAY_GO: RawHandle = RawHandle(4);
 
-/// `MSG_GET_RESOLUTION` is answered from the compositor's dispatch, so a reply
-/// proves the event loop reached the end of a pass rather than merely that the
-/// process still exists.
-const PROBE_POLLS: u32 = 500;
-const PROBE_POLL_NS: u64 = 10_000_000;
-
-/// How many events a closed window is asked for.
-///
-/// Two would do — `Close`, then `None` — and this is a handful more so the
-/// failure prints a stream rather than a single wrong answer. Each poll past
-/// the close costs nothing: the handle is ready, so none of them waits.
-const POLLS_AFTER_CLOSE: usize = 8;
-/// Long enough that a compositor still on its way to closing the connection is
-/// waited for rather than raced.
-const POLL_TIMEOUT_NS: u64 = 2_000_000_000;
+/// `timeout_nanos` for a wait with no clock (`syscall::inbox_submit`).
+const FOREVER: u64 = u64::MAX;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -106,23 +92,25 @@ fn run() {
     // A window is a connection promoted by its first frame, so a second
     // `MSG_CREATE_WINDOW` on one arrives with nothing to promote. The
     // compositor read that as its own bug.
+    waiting("a second create on a live window", "its window");
     let doubled = Window::create(64, 64).expect("a window to send a second create on");
     write_handle(doubled.handle(), &create_frame(), "a second create");
     probe("a second create on a live window");
 
-    // A clipboard frame with no region sent ahead of it. The receive is not a
-    // poll — a short batch is a peer that sent its frame first — so this must
-    // cost the client its connection and nothing else.
-    clipboard_shm(None, 64, "a clipboard frame with no region");
-    probe("a clipboard frame with no region");
+    // A commit with no copy begun: there is no region for it to name, so this
+    // must cost the client its connection and nothing else.
+    let commit = endow::service("compositor").expect("a connection to commit on");
+    ipc::signal(commit.as_handle(), window::MSG_COPY_COMMIT).expect("send the commit");
+    probe("a commit with no copy begun");
 
-    // A region really sent, with a length no region can satisfy. The length
-    // decides how much of the region is read as clipboard text, so it is the
-    // compositor's to bound rather than the client's to choose.
-    let region = SharedMemory::create(4096).expect("a region of our own");
-    let shared = region.share().expect("a second handle to it");
-    clipboard_shm(Some(shared), u32::MAX, "a clipboard longer than any region");
-    probe("a clipboard longer than any region");
+    // A copy no region is made for. The length decides how large a region the
+    // compositor makes, so it is the compositor's to bound rather than the
+    // client's to choose.
+    let begin = endow::service("compositor").expect("a connection to begin on");
+    begin
+        .send(window::MSG_COPY_BEGIN, &window::ClipboardShmMsg { len: u32::MAX })
+        .expect("send the begin");
+    probe("a copy longer than any clipboard");
 
     // An inline clipboard one byte past what any client may inline. The
     // compositor keeps that one byte, so the frame is refusable here instead of
@@ -139,41 +127,33 @@ fn run() {
     // `MSG_DESTROY_WINDOW` makes the compositor drop the connection, after
     // which the handle is permanently read-ready at EOF — so a `poll_event` that
     // did not latch answered `Close` for as long as anybody kept asking, and a
-    // client draining until `None` never got out. Two calls decide it.
+    // client draining until `None` never got out. Two calls decide it, and
+    // the second waits for nothing: a latched window answers `None` at once,
+    // and an unlatched one reads the end of the stream at once.
+    let what = "a window closed from the inside";
+    waiting(what, "its window");
     let mut ending = Window::create(64, 64).expect("a window to close from the inside");
     ipc::signal(ending.handle(), window::MSG_DESTROY_WINDOW)
         .expect("ask the compositor to destroy this window");
-    // Named rather than kept, because `Event` is not `Debug` and a failure
-    // here has to print the whole sequence it saw.
-    let mut seen: Vec<&'static str> = Vec::new();
-    for _ in 0..POLLS_AFTER_CLOSE {
-        let name = match ending.poll_event(POLL_TIMEOUT_NS) {
-            None => "none",
-            Some(window::Event::Close) => "close",
+    waiting(what, "the window's Close");
+    loop {
+        match ending.poll_event(FOREVER) {
+            Some(window::Event::Close) => break,
             // A frame the compositor had already sent can arrive first. It is
             // not what this case is about, and skipping it is not a weakening:
             // what follows still has to be close and then nothing.
-            Some(_) => "other",
-        };
-        seen.push(name);
-        if name == "none" {
-            break;
+            Some(_) => {}
+            None => fail(&format!("[{what}] the connection went and the window never said so")),
         }
     }
-    let sequence = seen.join(",");
-    let Some(closed_at) = seen.iter().position(|n| *n == "close") else {
+    waiting(what, "the latched poll answering None");
+    if ending.poll_event(FOREVER).is_some() {
         fail(&format!(
-            "[a window closed from the inside] the connection went and the window never said \
-             so: {sequence}"
-        ));
-    };
-    if seen.get(closed_at + 1) != Some(&"none") {
-        fail(&format!(
-            "[a window closed from the inside] the poll after Close answered again: {sequence} \
-             — a client that drains until None cannot leave"
+            "[{what}] the poll after Close answered again — a client that drains until None \
+             cannot leave"
         ));
     }
-    probe("a window closed from the inside");
+    probe(what);
 
     println!("compositor client death: 6 deaths survived, compositor still serving");
 }
@@ -234,17 +214,6 @@ fn create_frame() -> Vec<u8> {
     frame
 }
 
-fn clipboard_shm(region: Option<toyos_abi::RawHandle>, len: u32, what: &str) {
-    let conn = endow::service("compositor")
-        .unwrap_or_else(|e| fail(&format!("[{what}] the compositor is not serving: {e:?}")));
-    let msg = window::ClipboardShmMsg { len };
-    let sent = match region {
-        Some(h) => conn.send_with_handles(&[h], window::MSG_CLIPBOARD_SET_SHM, &msg),
-        None => conn.send(window::MSG_CLIPBOARD_SET_SHM, &msg),
-    };
-    sent.unwrap_or_else(|e| fail(&format!("[{what}] could not send: {e:?}")));
-}
-
 /// Every write here fits in the pipe it goes into, so a blocking `write` can
 /// only be the compositor's problem, never this binary's.
 fn write_handle(handle: toyos_abi::RawHandle, bytes: &[u8], what: &str) {
@@ -257,32 +226,28 @@ fn write_handle(handle: toyos_abi::RawHandle, bytes: &[u8], what: &str) {
     }
 }
 
-/// Ask the compositor something it always answers, and give it a deadline.
+/// Ask the compositor something it always answers from its dispatch, so an
+/// answer proves the event loop reached the end of a pass rather than merely
+/// that the process still exists.
 fn probe(what: &str) {
     let conn: Connection = endow::service("compositor")
         .unwrap_or_else(|e| fail(&format!("[{what}] the compositor is not serving: {e:?}")));
     if let Err(e) = ipc::signal(conn.as_handle(), window::MSG_GET_RESOLUTION) {
         fail(&format!("[{what}] could not ask the compositor for its resolution: {e:?}"));
     }
-    let mut buf = [0u8; 16];
-    let mut got = 0;
-    for _ in 0..PROBE_POLLS {
-        match conn.read_nonblock(&mut buf[got..]) {
-            Ok(0) => fail(&format!("[{what}] the compositor closed the probe unanswered")),
-            Ok(n) => {
-                got += n;
-                if got == buf.len() {
-                    return;
-                }
-            }
-            Err(SyscallError::WouldBlock) => syscall::nanosleep(PROBE_POLL_NS),
-            Err(e) => fail(&format!("[{what}] the probe could not be read: {e:?}")),
-        }
+    waiting(what, "the compositor's answer to a probe");
+    let header = conn
+        .recv_header()
+        .unwrap_or_else(|e| fail(&format!("[{what}] the probe went unanswered: {e:?}")));
+    if header.msg_type != window::MSG_RESOLUTION_CHANGED {
+        fail(&format!("[{what}] the probe was answered with message type {}", header.msg_type));
     }
-    fail(&format!(
-        "[{what}] the compositor did not answer in {} ms — it is gone or its loop is parked",
-        PROBE_POLLS as u64 * PROBE_POLL_NS / 1_000_000,
-    ));
+}
+
+/// Said before each wait on the compositor: the line a missing event leaves
+/// last.
+fn waiting(what: &str, awaited: &str) {
+    println!("compositor client death: [{what}] waiting for {awaited}");
 }
 
 fn fail(msg: &str) -> ! {

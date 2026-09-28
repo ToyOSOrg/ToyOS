@@ -154,9 +154,9 @@ impl ProgramConfig {
     /// `-p` selects a package from and whose `target/` holds the result.
     /// Programs with explicit paths or special flags are built from their own
     /// directory instead — which is not the same as being built into it:
-    /// `toyos-ld` and `toyos-cc` have explicit paths and are members of the
-    /// *host* workspace, so cargo writes them to the repository root's
-    /// `target/`. `hostws::target_dir` is what answers that, never this.
+    /// `toyos-ld` has an explicit path and is a member of the *host*
+    /// workspace, so cargo writes it to the repository root's `target/`.
+    /// `hostws::target_dir` is what answers that, never this.
     fn is_workspace_member(&self) -> bool {
         self.path.is_none() && !self.no_default_features
     }
@@ -214,11 +214,13 @@ fn external_fingerprint(toolchain: &Path) -> String {
 #[derive(Clone, Copy)]
 enum Clean {
     All,
-    /// Crates with explicit paths (toyos-ld, toyos-cc) also have host builds
-    /// that must survive: the host toyos-cc compiles doom's C. Both are
-    /// host-workspace members, so the directory this empties is the
-    /// workspace's `target/<userland triple>` for every architecture — the
-    /// guest halves of the two, and nothing the host builds.
+    /// A crate with an explicit path (toyos-ld) is a host-workspace member,
+    /// and the workspace's `target/` holds the build system's own host build
+    /// beside it, which must survive; so what this empties is what the guest
+    /// build wrote there: `target/<userland triple>` for every architecture, and
+    /// `target/<PROFILE>`, its host half — proc-macros and their rlibs, which the
+    /// sysroot's compiler built and cargo, keying them on a `rustc -vV` every
+    /// ToyOS compiler prints alike, would keep for the next one.
     ToyosOnly,
 }
 
@@ -228,10 +230,8 @@ fn stale(root: &Path, crate_dir: &Path, fingerprint: &str) -> bool {
 }
 
 fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
-    // Where cargo actually wrote it. `toyos-ld` and `toyos-cc` are members of
-    // the host workspace, so their guest builds land in the root's `target/`
-    // and both answer with the same directory: the second clean of a pass finds
-    // it already gone and does nothing, which is the right amount of work.
+    // Where cargo actually wrote it. `toyos-ld` is a member of the host
+    // workspace, so its guest build lands in the root's `target/`.
     let target = hostws::target_dir(root, crate_dir);
     match kind {
         Clean::All => {
@@ -245,17 +245,19 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
                 crate_dir.display(),
             );
             eprintln!("external deps changed: cleaning {}", crate_dir.display());
-            let _ = Command::new("cargo")
+            let status = Command::new("cargo")
                 .arg("clean")
                 .current_dir(crate_dir)
-                .status();
+                .status()
+                .unwrap_or_else(|e| panic!("run cargo clean in {}: {e}", crate_dir.display()));
+            assert!(status.success(), "cargo clean in {} exited {status}", crate_dir.display());
         }
         Clean::ToyosOnly => {
-            for arch in Arch::ALL {
-                let toyos_dir = target.join(arch.userland());
-                if toyos_dir.exists() {
-                    eprintln!("external deps changed: cleaning {}", toyos_dir.display());
-                    fs::remove_dir_all(&toyos_dir).ok();
+            let guest = Arch::ALL.iter().map(|arch| target.join(arch.userland()));
+            for dir in guest.chain([target.join(PROFILE)]) {
+                if dir.exists() {
+                    eprintln!("external deps changed: cleaning {}", dir.display());
+                    fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("remove {}: {e}", dir.display()));
                 }
             }
         }
@@ -793,8 +795,9 @@ const NOT_YET_BUILT: &[(Arch, &str, &str)] = &[
     (
         Arch::Aarch64,
         "doom",
-        "its C is compiled by toyos-cc, which no AArch64 build has run, and softbuffer's toyos \
-         fork stops it first (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)",
+        "softbuffer's toyos fork stops it \
+         (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md); its C compiles for \
+         AArch64 with the toolchain's clang",
     ),
 ];
 
@@ -843,6 +846,11 @@ fn build_programs(
 
     let ws_target = userland_dir.join(format!("target/{target}/{PROFILE}"));
 
+    // Every userland crate that compiles C compiles it with the toolchain's
+    // clang against libc's C sysroot.
+    let cc_env = crate::clang::CSysroot::of(&env.toolchain, arch).cc_env();
+    let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
     // the same reason: a program's path is keyed on (crate, target, profile)
     // alone, so every config in this run writes and reads the same
@@ -857,11 +865,11 @@ fn build_programs(
             extra.push("-p");
             extra.push(pkg);
         }
-        cargo_build(&userland_dir, target, &extra, env, &[], quiet);
+        cargo_build(&userland_dir, target, &extra, env, &cc_env, quiet);
     }
 
     for c in programs.iter().filter(|c| c.built == Built::Standalone) {
-        cargo_build(&c.dir, target, &c.features.args(), env, &[], quiet);
+        cargo_build(&c.dir, target, &c.features.args(), env, &cc_env, quiet);
     }
 
     for c in &programs {
@@ -1830,11 +1838,6 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
     let kernel_features = plan.features.join(",");
     let arch = plan.arch;
 
-    // Before every build lock, which is the order `buildlock`'s header fixes.
-    // What it bounds is the host: ten agents' builds spend the same fourteen
-    // cores, and nothing was counting them.
-    let _slot = buildlock::build_slot(root, "cargo run");
-
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
@@ -2069,14 +2072,6 @@ pub fn build_test_parts(
     // outside the charge because every execution needs one.
     let build_timer = ArtifactBuildTimer::start();
 
-    // **Below the memo's early return, so a boot that builds nothing queues for
-    // nothing.** Above every build lock, per the module header. This is the
-    // acquisition the eight-landing day was about: twelve suite workers each
-    // hold a guest slot and the first thing each does is compile its kernel
-    // variant, so the semaphore that bounds guests was bounding the phase that
-    // was not scarce.
-    let _slot = buildlock::build_slot(root, "a test image");
-
     // Held to the end of the function: the staged artifacts below are read
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
@@ -2127,7 +2122,6 @@ pub fn build_test_parts(
 /// a *second* implementation, and a second implementation's dependency graph is
 /// not the harness's to resolve.
 pub fn build_host_judges(root: &Path, quiet: bool) {
-    let _slot = buildlock::build_slot(root, "the network judges' host binaries");
     for (dir, _) in HOST_JUDGES {
         let at = root.join(dir);
         let mut cmd = Command::new("cargo");
@@ -2196,7 +2190,6 @@ fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
 /// and over the name of whatever gets it next.
 pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool) -> Vec<(String, Vec<u8>)> {
     let target = arch.userland();
-    let _slot = buildlock::build_slot(root, "the test binaries");
     let mut lock = buildlock::shared(root, "test binaries");
     let sysroot = crate::toolchain::ensure(root, false, &mut lock);
     let env = GuestEnv::new(&sysroot);
@@ -2379,6 +2372,50 @@ mod tests {
                 shipped.crates
             );
         }
+    }
+
+    /// **A standalone crate's clean takes all its guest build wrote — the
+    /// host half too, whose proc-macros and rlibs the sysroot's compiler built
+    /// — and nothing the host workspace built.**
+    #[test]
+    fn a_standalone_clean_takes_the_guest_builds_host_half_and_leaves_the_hosts() {
+        let root = toyos_tmpdir::TempDir::new("toyos-only-clean");
+        let file = |rel: &str| {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "built").unwrap();
+            path
+        };
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"ld\"]\n").unwrap();
+        let mut guest: Vec<PathBuf> =
+            Arch::ALL.iter().map(|arch| file(&format!("target/{}/{PROFILE}/ld", arch.userland()))).collect();
+        guest.push(file(&format!("target/{PROFILE}/deps/libsyn-1.rlib")));
+        let host = file("target/debug/toyos-build");
+
+        clean(&root, &root.join("ld"), Clean::ToyosOnly, "fingerprint");
+        for gone in &guest {
+            assert!(!gone.exists(), "{} survived a clean of what the guest build wrote", gone.display());
+        }
+        assert!(host.is_file(), "the host workspace's own build went");
+        assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), "fingerprint");
+    }
+
+    /// **A `cargo clean` that fails stops the build and stamps nothing**: a
+    /// stamp over a target it did not clean calls another compiler's build
+    /// current.
+    #[test]
+    fn a_failed_cargo_clean_panics_and_stamps_nothing() {
+        let root = toyos_tmpdir::TempDir::new("failed-clean");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let kernel = root.join("kernel");
+        fs::create_dir_all(kernel.join("target")).unwrap();
+        fs::write(kernel.join("Cargo.toml"), "[package\n").unwrap();
+
+        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, Clean::All, "fingerprint"));
+        let refusal = failed.expect_err("a cargo clean that failed was taken for one that ran");
+        let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
+        assert!(refusal.starts_with(&format!("cargo clean in {} exited", kernel.display())), "{refusal}");
+        assert!(!kernel.join("target/.deps-stamp").exists(), "a clean that failed stamped the target");
     }
 
     #[test]
@@ -2647,7 +2684,7 @@ mod tests {
                 // other is a miscomputed base address. No suite builds it, so a
                 // full run pays nothing and a boot storm asks for it by name.
                 "heap-tripwire",
-                // The five below cost no kernel build at all, for
+                // The four below cost no kernel build at all, for
                 // `wake-fence-off`'s reason: each is declared only so `cfg`
                 // checking knows the name, and turned on only by
                 // `kernel-loom`, one at a time, to relax the single edge its
@@ -2658,7 +2695,6 @@ mod tests {
                 // `heap-lockspin`'s other arm: the same visit to the pass path,
                 // for the same span, without the allocator's lock.
                 "pass-spin",
-                "poison-overwrite",
                 // `wake-fence-off`'s twin, for a poll ring's one-shot answer:
                 // turned on only by `kernel-loom`, to split `inbox/once.rs`'s
                 // exchange and prove `poll_once` reds without it.

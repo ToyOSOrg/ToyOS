@@ -12,6 +12,7 @@
 
 [package]
 name = "toyos-i219"
+description = "Every decision the Intel I219 network driver makes, and none of the instructions that carry them out."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

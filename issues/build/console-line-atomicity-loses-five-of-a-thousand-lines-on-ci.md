@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: defect
 opened: 2026-08-20
 ---
@@ -20,6 +20,8 @@ Split out of `issues/build/parallel-tests-red-under-other-suites.md`, whose
 rate table was never this test's — CI's single-guest-per-machine shards rule
 out the contention shape that file is about.
 
-**Exit condition.** The lost lines' cause is fixed, and
-`console_line_atomicity` green on CI's `guest` shards, one guest per machine.
+**Exit condition.** The lost lines' cause is fixed, shown against
+`console_line_atomicity` as it stands at `1808fb8d` (its binary, the test
+runner's `CONSOLE_JOBS` stdin and its harness arm), restored and green on CI's
+`guest` shards, one guest per machine.
 Owner: orchestrator.

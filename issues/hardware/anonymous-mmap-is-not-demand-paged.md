@@ -13,7 +13,7 @@ blast radius.
 
 **`sys_mmap` allocates and maps the whole region up front.** `PageAlloc::new` is
 called for the full rounded size before anything is mapped, and
-`alloc_and_map` maps every 2 MiB page of it (`kernel/src/arch/syscall.rs`'s
+`alloc_and_map` maps every 2 MiB page of it (`kernel/src/syscall/vm.rs`'s
 `sys_mmap`). So a first touch of a fresh anonymous mapping is an ordinary store
 and never a `#PF`, and a program that reserves a large region pays for all of it
 immediately. Measured: `syscall_cost` mapping 128 MiB and touching one byte per

@@ -11,6 +11,7 @@
 
 [package]
 name = "toyos-dma"
+description = "Every bound and alignment a DMA view or a device register window checks, pure, forbid(unsafe_code)."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

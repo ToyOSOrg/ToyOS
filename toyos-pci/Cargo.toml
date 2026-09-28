@@ -8,6 +8,7 @@
 
 [package]
 name = "toyos-pci"
+description = "A PCI function's BARs and its MSI and MSI-X capabilities, decoded as pure functions."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

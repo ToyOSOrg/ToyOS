@@ -33,8 +33,7 @@
 //!    the only wrong-typed handle in the ABI that does**: an `add` entry's
 //!    connector is routinely one a *peer* transferred — a `provides` name is
 //!    exactly that — so presenting the wrong one may be reporting a peer's bug
-//!    rather than your own. `/system/bin/init`'s launcher is why, and
-//!    `launcher_refusals` is the other end of the same property.
+//!    rather than your own. `/system/bin/init`'s launcher is why.
 //! 3. **A handle number from another process's table names nothing here.** The
 //!    victim prints the raw number of a live acceptor of its own; the thief
 //!    presenting it is ended, and the victim's port is still serving afterwards.

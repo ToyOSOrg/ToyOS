@@ -5,6 +5,7 @@
 
 [package]
 name = "toyos-sched"
+description = "The scheduler core: a sans-IO state machine the kernel and the host simulator drive through one Hw boundary."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

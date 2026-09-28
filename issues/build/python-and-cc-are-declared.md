@@ -4,7 +4,7 @@ kind: tooling
 opened: 2026-08-08
 ---
 
-# Every toolchain build runs Python, and every host link runs `cc`
+# Every toolchain build runs Python, CMake and Ninja, and every host link runs `cc`
 
 **The owner ruled on 2026-08-08: *"its required by rusts toolchain i guess we can
 be transparent about that."*** Both are named in the README's Prerequisites
@@ -40,7 +40,7 @@ Rust bootstrap again as an incidental fix; do not soften the entry either.
 
 `src/toolchain.rs:749` picks `./x` when `rust/x` exists, which it does. That file
 is a `/bin/sh` script whose whole job is `SEARCH="python3 python py python2 uv"`,
-and it execs `x.py` → `src/bootstrap/bootstrap.py` (55,550 bytes). So a clean
+and it execs `x.py` → `rust/src/bootstrap/bootstrap.py` (55,550 bytes). So a clean
 clone cannot build a toolchain without Python 3. It is upstream's bootstrap and
 not our code, which is why it is stated rather than blamed — but the bar has no
 upstream exemption, and `bootstrap.py` can never run inside ToyOS.
@@ -49,10 +49,23 @@ Separately, and measured with `rustup run toyos rustc --print link-args` on a
 trivial host binary: rustc invokes `"cc"` and sets
 `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk`. rustup installs
 neither. Every *host* binary goes through it — the build system, the harness,
-`toyos-ld`, `toyos-cc`, rustc stage2. **No guest binary does**: both
-`.cargo/config.toml`s under `bootloader/` and `kernel/` set
-`linker = "toyos-ld"`, so nothing that boots is touched.
+`toyos-ld`, rustc stage2, clang. **No guest binary does**: every guest binary
+links through the toolchain's `rust-lld`, so nothing that boots is touched.
 
 The cheap half of the fix — a preflight and a README that say what the machine
 actually needs — is done. `REQUIRED` carries `cc` and `ALSO_USED` carries the
 Python search list (`src/main.rs:18`, `:28`). The expensive half is untouched.
+
+**CMake and Ninja joined the list on 2026-09-27, by the owner's ruling**: rustc's
+LLVM is built from source, from `ToyOSOrg/llvm-project`, with clang beside it,
+and rustc's bootstrap builds LLVM with CMake driving Ninja. Both are declared
+where the others are — `ALSO_USED` in `src/main.rs`, because a build whose
+LLVM commit this host has already built runs neither — and in the README's
+Prerequisites. On macOS they come from Homebrew (`brew install cmake ninja`),
+with no workaround; on the nightly's toolchain runner at the versions
+`.github/workflows/nightly.yml` pins from Ubuntu 24.04's archive (`cmake
+3.28.3-1build7`, `ninja-build 1.11.1-2`); the two portability jobs install
+their platform's own, which is their premise. Neither reaches a guest. The
+exit condition is Python's: they go when the build no longer needs a host,
+which is the self-hosting track's last stage
+(`issues/build/toyos-builds-itself.md`).

@@ -7,10 +7,12 @@ pub mod bootlog;
 pub mod build;
 pub mod buildlock;
 pub mod ci;
+pub mod clang;
 pub mod clippy;
 pub mod compiler;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
+pub mod firmware;
 pub mod flags;
 pub mod forkcheck;
 pub mod heartbeat;
@@ -18,6 +20,7 @@ pub mod hostws;
 pub mod icmp;
 pub mod identity;
 pub mod image;
+pub mod kernelconsole;
 pub mod signing;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
 /// but its own tests.
@@ -41,7 +44,6 @@ pub mod soundfont;
 /// build system at all.
 #[cfg(test)]
 pub mod sourcegate;
-pub mod stamps;
 pub mod sysroot;
 pub mod testargs;
 pub mod tiers;

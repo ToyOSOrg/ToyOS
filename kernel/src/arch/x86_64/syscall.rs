@@ -172,8 +172,6 @@ extern "sysv64" fn syscall_entry() {
 }
 
 /// The syscall bracket: the entry's diagnostic stores stay readable only while [`percpu::in_syscall`] is true.
-///
-/// Not a guard type: a panic here does not unwind, so the panic handler must find the bracket still open to decide whether to kill the process.
 extern "sysv64" fn syscall_handler(num: u64, a1: u64, a2: u64, _: u64, a3: u64, a4: u64) -> u64 {
     #[cfg(feature = "df-witness")]
     cpu::df_witness("syscall_handler");

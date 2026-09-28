@@ -781,8 +781,7 @@ fn rotation(
     // log — the sink drains everything pending before it looks at the size —
     // so a metal-sim boot makes a handful, measured at four. That is under the
     // retention bound, which is why this only requires the count to stay inside
-    // it; deleting the oldest is `wall_clock_file`'s claim, staged with a full
-    // volume rather than hoped for here.
+    // it.
     if logs.len() < 2 || logs.len() > super::wallclock::MAX_LOG_FILES {
         return Err(format!(
             "the volume holds {} log files, wanted 2..={}: {}",
@@ -3250,11 +3249,32 @@ pub fn root_named_twice(
 }
 
 /// **A chunk of ROOT the disk will not read refuses the boot, naming that
-/// chunk.** The boot stick fails with EIO every read covering the sector
+/// chunk.** The boot disk fails with EIO every read covering the sector
 /// seven past ROOT's middle, so the chunk that fails is not the first. The
 /// loader reads ROOT in chunks, so the refusal names a chunk that holds the
 /// sector and starts where the bytes read before it end.
 pub fn root_chunk_refused(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    root_chunk_refused_on(qemu::Profile::InternalDisk, test_config, c_bins, rust_bins)
+}
+
+/// [`root_chunk_refused`] with the boot image on a USB stick: stock edk2's
+/// read of that sector does not return, and its watchdog does not reset the
+/// machine
+/// (`issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md`).
+pub fn root_chunk_refused_on_a_usb_stick(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    root_chunk_refused_on(qemu::Profile::Headless, test_config, c_bins, rust_bins)
+}
+
+fn root_chunk_refused_on(
+    profile: qemu::Profile,
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -3270,12 +3290,9 @@ pub fn root_chunk_refused(
         c_bins,
         rust_bins,
         BootOptions {
+            profile,
             boot_image: Some(qemu::Staged::Written(path.clone())),
-            stick_read_error: Some(bad),
-            // The read's own line and not the refusal after it: the stick
-            // QEMU fails a read on answers the loader's next write to
-            // `loader.log` with nothing, and the console line before that
-            // write is the last this boot says.
+            boot_read_error: Some(bad),
             ready_marker: CHUNK_REFUSED,
             ..Default::default()
         },
@@ -3401,7 +3418,7 @@ pub fn root_named_twice_on_the_boot_disk(
         rust_bins,
         BootOptions { boot_image: Some(qemu::Staged::Written(path.clone())), ..Default::default() },
     );
-    let log = format!("{}{}", qemu.uart_log(), qemu.boot_log());
+    let log = qemu.uart_log();
     drop(qemu);
     let _ = std::fs::remove_file(&path);
 

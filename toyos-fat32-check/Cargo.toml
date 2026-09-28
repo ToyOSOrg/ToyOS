@@ -8,6 +8,7 @@
 
 [package]
 name = "toyos-fat32-check"
+description = "FAT32 volume checker written from Microsoft's fatgen103, the outside judge for every volume this project writes."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
