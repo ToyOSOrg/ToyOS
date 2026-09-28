@@ -2,7 +2,6 @@ mod device;
 mod hid;
 mod legacy;
 pub mod stop;
-pub mod usbd;
 mod wait;
 
 use wait::msc;

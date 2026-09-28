@@ -23,7 +23,6 @@ members = [
     "toyos-blockhold",
     "toyos-blockring",
     "toyos-bootmap",
-    "toyos-cc",
     "toyos-desktop",
     "toyos-dns",
     "toyos-dma",
@@ -143,7 +142,7 @@ toyos-swap = { path = "toyos-swap" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "toyos-tco" }
-# The one scratch directory under `$TMPDIR`: the harness's run takes one, and so does
+# The one scratch directory, under `$TMPDIR` or, for a socket, `/tmp`: the harness's run takes one, and so does
 # every test here; `--ci host` holds the host tests to leaving nothing behind.
 toyos-tmpdir = { path = "toyos-tmpdir" }
 toyos-blackbox = { path = "toyos-blackbox" }
@@ -164,7 +163,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 sha2 = "0.10"
 
 [dev-dependencies]
-toyos-cc = { path = "toyos-cc" }
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
 toyos-userbound = { path = "toyos-userbound" }
@@ -196,14 +194,6 @@ tar = "0.4"
 [profile.release]
 opt-level = 2
 
-# The host tool every build runs is built `--release` by `src/toolchain.rs`,
-# and `[profile.release]` above would otherwise drop it from the default
-# `opt-level = 3` to 2 now that it is a member here rather than a workspace root
-# of its own. The compiler runs once per translation unit and does not pay for
-# the harness's compile-time tradeoff.
-[profile.release.package.toyos-cc]
-opt-level = 3
-
 # The test harness is a compute-bound host program, not a debug build of the
 # thing under test: it decodes a 2.07 M-pixel screendump per poll and formats a
 # 300 MB disk image per boot. Nothing here is cross-compiled — the kernel,
@@ -233,9 +223,6 @@ opt-level = 3
 [profile.dev]
 opt-level = 2
 
-[profile.dev.package.toyos-cc]
-opt-level = 3
-
 [profile.dev.package.toyos-ld]
 opt-level = 3
 
@@ -246,11 +233,10 @@ opt-level = 3
 # an overflow check. `--release` would turn the last two off silently, so this
 # build system no longer has the flag.
 #
-# It is declared here rather than in `toyos-cc/Cargo.toml` and
-# `toyos-ld/Cargo.toml` because cargo ignores `[profile]` in a workspace member
-# and those two are members now. They are the only members the profile reaches:
-# both are `[programs]` in `system.toml` as well as host tools, so
-# `src/build.rs` builds each of them a second time for
+# It is declared here rather than in `toyos-ld/Cargo.toml` because cargo
+# ignores `[profile]` in a workspace member and that is one now. It is the only
+# member the profile reaches: it is a `[programs]` entry in `system.toml` as
+# well as a host crate, so `src/build.rs` builds it a second time for
 # `x86_64-unknown-toyos`. `kernel/`, `bootloader/` and `userland/` are excluded
 # from this workspace and each declares its own copy.
 #
@@ -269,10 +255,7 @@ debug-assertions = true
 overflow-checks = true
 
 # Cargo does not carry the profile's `strip` onto a package with an override of
-# its own, and these two have one in `dev`.
-[profile.toyos.package.toyos-cc]
-strip = "debuginfo"
-
+# its own, and this one has one in `dev`.
 [profile.toyos.package.toyos-ld]
 strip = "debuginfo"
 
@@ -280,6 +263,3 @@ strip = "debuginfo"
 name = "toyos-build"
 path = "tests/toyos.rs"
 harness = false
-
-[patch.crates-io]
-target-lexicon = { git = "https://github.com/ToyOSOrg/target-lexicon", branch = "toyos" }

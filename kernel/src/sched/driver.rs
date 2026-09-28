@@ -711,14 +711,12 @@ extern "C" fn idle_loop() -> ! {
         if crate::actuator::syscall_window_nmi() {
             crate::arch::syscall::window_storm();
         }
-        // Here, not from a syscall: the panic handler recovers, not paints, when a userland
-        // thread is current, and the idle loop has none.
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");
         }
         crate::scheduler::log_health();
-        crate::scheduler::reap_poisoned();
+        crate::scheduler::reap_finished();
         // `pass` below covers this too; here as well so a CPU that
         // halts immediately has still run every hook first.
         crate::object::drain_zero_handles();

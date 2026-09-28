@@ -520,8 +520,6 @@ pub fn enable_interrupts() {
     cpu::enable_interrupts();
 }
 
-pub(crate) use exceptions::try_recover_from_panic;
-
 /// The crash report for a panic, from the frame pointer the panic handler stood on.
 pub(crate) fn report_panic(message: &core::panic::PanicInfo, frame: u64) {
     exceptions::crash_report(&exceptions::CrashInfo::Panic { message, rbp: frame });

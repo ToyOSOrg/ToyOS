@@ -7,10 +7,6 @@
 //! It holds the wire ([`serial::wire`]) with interrupts on and
 //! preemption allowed, and the registers only for one burst at a time.
 //!
-//! `klogd`'s row in `sched::kthread` is [`OnPanic::Halt`]: it is the only
-//! console drainer, and its death must not go silent. Records keep committing
-//! to their shards regardless of `klogd`; only the live console is lost while
-//! it is down.
 //! [`Drain::Inline`] and [`Drain::Thread`] are phases, not fallbacks: exactly
 //! one is active, and `Drain::Inline` *is* [`KLOGD`] being null.
 
@@ -25,7 +21,7 @@ use toyos_sched::park::notify;
 use crate::drivers::serial::{self, BackendGuard, MAX_CONSOLE_LINE};
 use crate::hw::HW;
 use crate::sched::driver::{cpus, irq_off};
-use crate::sched::kthread::{self, OnPanic};
+use crate::sched::kthread;
 use crate::sleeplock::SleepGuard;
 use crate::watch;
 use crate::sched::payload::KShared;
@@ -67,7 +63,7 @@ static DRAINED: Published = Published::new();
 /// Start the thread. Called once, from `kernel_main`, before the scheduler starts.
 /// Placement matters: APs spin until the machine is released, so an earlier spawn could not run while the machine has no console.
 pub fn start() {
-    let sched = kthread::spawn(NAME, body, 0, OnPanic::Halt);
+    let sched = kthread::spawn(NAME, body, 0);
     // Leaked: `klogd` never exits, and a producer reading this pointer under lock may not touch a refcount.
     let shared: &'static Arc<KShared> = alloc::boxed::Box::leak(alloc::boxed::Box::new(sched.shared));
     KLOGD.store(shared as *const _ as *mut _, Ordering::Release);
@@ -425,6 +421,12 @@ extern "C" fn body(_arg: u64) -> ! {
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::klogd_panic() {
         panic!("klogd-panic: the console drainer died");
+    }
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::klogd_fault() {
+        // SAFETY: unsound by design — a staged Ring 0 null read, only on this actuator's boot.
+        // Volatile: a plain read could be optimized to unreachable, leaving nothing to fault.
+        unsafe { core::ptr::read_volatile(core::ptr::null::<u64>()) };
     }
 
     let parkable = scheduler::Parkable::at_entry();

@@ -39,7 +39,15 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md",
     },
     Disabled { test: "handle_transfer", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
+    Disabled {
+        test: "i8042_mouse",
+        issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
+    },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
+    Disabled {
+        test: "partition_claim_departure",
+        issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
+    },
     Disabled {
         test: "quiesce_dump_holds_the_stopped",
         issue: "issues/kernel/quiesce-dump-holds-the-stopped-reds-wide-with-usb-transport-breaks.md",

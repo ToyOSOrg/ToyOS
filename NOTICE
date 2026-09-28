@@ -118,7 +118,7 @@ userland/doom — GPL-2.0
 
 `/system/bin/doom` links doomgeneric, so the program is GPL-2.0. The C sources are not
 committed: `userland/doom/build.rs` fetches upstream commit `fc60163` into a
-gitignored directory and `toyos-cc` compiles it. `forks.toml` `[doomgeneric]`
+gitignored directory and the toolchain's clang compiles it. `forks.toml` `[doomgeneric]`
 records the pin and why it is a pin.
 
 The licence text is carried here because the fetch does not bring it: the
@@ -338,9 +338,10 @@ tests/testcases/ — TinyCC's corpus, LGPL-2.1, and picoc, BSD-3-Clause
 
     SPDX-License-Identifier: LGPL-2.1-or-later AND BSD-3-Clause AND (MIT OR Apache-2.0)
 
-The C cases `toyos-cc` is tested against are mostly TinyCC's `tests/tests2` and
-`tests/pp`. They are compiler *input* — data, not linked code — so their terms
-do not reach this repository's own code, but they must still be attributed.
+The C cases the toolchain's clang and the C library are tested against are
+mostly TinyCC's `tests/tests2`. They are compiler *input* — data, not linked
+code — so their terms do not reach this repository's own code, but they must
+still be attributed.
 `tests/testcases/LICENSE` is the attribution, and it says file by file what is
 whose, with the counts it was established from.
 
@@ -359,7 +360,9 @@ upstream, pinned base and licence. The audit read all fourteen fork manifests
 and found them permissive throughout: Apache-2.0, MIT, or MIT OR Apache-2.0.
 
 `rust/` is a submodule of a fork of the Rust compiler and standard library, and
-carries upstream's own licensing.
+carries upstream's own licensing. Its `src/llvm-project` is ToyOSOrg's fork of
+rust-lang/llvm-project, Apache-2.0 WITH LLVM-exception like upstream's; the
+toolchain release carries the clang, `lld` and LLVM tools built from it.
 
 
 bcachefs/tests/fixtures/ — volumes upstream's tools wrote

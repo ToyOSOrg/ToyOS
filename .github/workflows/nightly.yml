@@ -57,18 +57,19 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Full history: bootstrap walks back to the newest bors commit for the
-      # prebuilt LLVM it downloads.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - name: disk and QEMU
+      # CMake and Ninja are what bootstrap builds LLVM and clang with, pinned to
+      # the versions Ubuntu 24.04 released (src/main.rs's `ALSO_USED`).
+      - name: disk, QEMU, CMake and Ninja
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
                       /usr/local/share/boost /usr/local/.ghcup
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 zstd
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 zstd \
+                      cmake=3.28.3-1build7 ninja-build=1.11.1-2
 
       - env:
           GH_TOKEN: ${{ github.token }}
@@ -189,7 +190,7 @@ jobs:
           for attempt in 1 2 3; do
             apt-get update -qq > /tmp/apt.log 2>&1 \
               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates \
-                   build-essential qemu-system-x86 python3 >> /tmp/apt.log 2>&1 \
+                   build-essential qemu-system-x86 python3 cmake ninja-build >> /tmp/apt.log 2>&1 \
               && break
             [ "$attempt" = 3 ] && { cat /tmp/apt.log; exit 1; }
             sleep 20
@@ -201,8 +202,6 @@ jobs:
 
       - *checkout
 
-      # A fresh machine has neither variable, and bootstrap under them takes
-      # our own merge commit as the upstream one whose LLVM to fetch.
       - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
 
   portability-macos:
@@ -211,8 +210,9 @@ jobs:
     steps:
       - *checkout
       # Homebrew keeps one QEMU; `cargo run` notes it if it is not the declared one.
+      # CMake and Ninja build LLVM and clang, from Homebrew as on the dev host.
       - run: |
-          brew install qemu
+          brew install qemu cmake ninja
       - run: |
           curl --proto '=https' --tlsv1.2 -sSf -o "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
           sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
