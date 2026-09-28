@@ -651,15 +651,6 @@ impl std::fmt::Display for WaitVerdict {
 /// and its full backtrace four lines above that sentence, on a guest that died
 /// at 1.450 s of its own uptime.
 ///
-/// A kernel panic does not end the wait *by itself*, and that is deliberate:
-/// the same handler recovers a panic taken in syscall context, killing the
-/// caller and leaving the machine running, which is exactly what
-/// `panic_recovery`, `heap_ceiling` and `screen_recoverable_untouched` assert.
-/// Silence is what separates the two, and it is the separation the harness
-/// already trusts everywhere else ([`GUEST_QUIET`]): a recovering guest keeps
-/// talking — the test's own `===TEST_END` arrives in milliseconds — and a
-/// halted one cannot.
-///
 /// **The wall clock is not the wedge; silence is.** A test's `ceiling` is the
 /// budgeted wall clock (`budget_smp`-scaled, so it already carries #256's
 /// `vcpus/cores` oversubscription widening), and until this it ended the wait
@@ -984,9 +975,7 @@ pub fn await_guest(
     doing: &str,
     done: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
-    // Where this wait's own evidence starts. The capture is the caller's and
-    // outlives every wait on it, so a panic the machine recovered from ten
-    // probes ago must not be handed to this one as its cause.
+    // Where this wait's own evidence starts.
     let from = log.len();
     let mut live = guest_liveness();
     while !done(log) && live.working(log) {

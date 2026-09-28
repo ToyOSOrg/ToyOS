@@ -2,8 +2,8 @@
 //! and `READY` -> `READING` once and for good.
 //!
 //! **`READING` is terminal.** Every writer transition here demands `EMPTY` or
-//! `READY`, so once a fatal reader has entered, no capture, refresh or discard
-//! runs on this snapshot again and the reader's borrow of it cannot be aliased.
+//! `READY`, so once a fatal reader has entered, no capture or refresh runs
+//! on this snapshot again and the reader's borrow of it cannot be aliased.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -65,20 +65,6 @@ impl CaptureAccess {
         #[cfg(feature = "loom")]
         let changed = self.state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
             READY | READING => Some(READING),
-            _ => None,
-        });
-        changed.is_ok()
-    }
-
-    pub fn discard(&self) -> bool {
-        #[cfg(not(feature = "loom"))]
-        let changed = self.state.try_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
-            EMPTY | READY => Some(EMPTY),
-            _ => None,
-        });
-        #[cfg(feature = "loom")]
-        let changed = self.state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
-            EMPTY | READY => Some(EMPTY),
             _ => None,
         });
         changed.is_ok()

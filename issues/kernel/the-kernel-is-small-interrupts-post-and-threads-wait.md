@@ -21,8 +21,7 @@ times:
   `Source` enum with two hand-written dispatches, and ad-hoc wake paths.
 - **USB with three concurrency models:** a state machine inside the scheduler
   pass, disk I/O spinning with interrupts off for up to 4.75 s under one global
-  lock, and boot discovery calling a blocking bind from a scheduler pass. The
-  thread reserved to own the controller, `usbd`, only parks.
+  lock, and boot discovery calling a blocking bind from a scheduler pass.
 - **Storage done busy-waiting under spinlocks:** one global VFS lock, NVMe with
   one command outstanding and polled, and a 2 s operation budget "with
   preemption off" that budgets audio stalls. That budget drags a refusal chain
@@ -138,7 +137,7 @@ times:
        `/log` survives usbd killed mid-batch, the keyboard keeps working while
        a stick misbehaves, and Ctrl+Alt+D on the machine's own keyboard files
        the dump with usbd killed.
-5. **USB owned by its thread, then by userland**, with discovery and recovery
+5. **USB by userland**, with discovery and recovery
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
    stick misbehaves.

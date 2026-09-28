@@ -14,7 +14,7 @@ tip — came back after **187 s**, so its boot spent the whole
 **That narrows it past the hang this branch already fixed.** A deadline that
 fires is a machine where some CPU was still taking a timer interrupt, so this is
 not the all-CPUs-deaf shape of
-`kernel/src/hw.rs`'s missing re-arm; and `crate::hardlockup` sealed nothing, so
+`kernel/src/arch/x86_64/hw.rs`'s missing re-arm; and `crate::hardlockup` sealed nothing, so
 no CPU sat with `IF` clear for half the bound either. What is left is a CPU
 spinning with interrupts enabled, or a wait that never returns, while the timer
 goes on ticking — a lock nobody releases, a retry loop with no end, or a device
@@ -22,7 +22,7 @@ wait that re-arms its own bound.
 
 It is intermittent **across job lists**: `ccorpus` had passed, `testcases-mkdir`
 hung in run 22, `metaldevicecase` in run 20 showed the same span of
-`LOCK CONTENTION ... at src/vfs.rs:32` under stick writes.
+`LOCK CONTENTION` at `kernel/src/vfs.rs:32` under stick writes.
 
 **The record exists and could not be read.** The deadline seals `EXPIRED` and
 the tail of the log ring into the black box, and the next loader pass prints it

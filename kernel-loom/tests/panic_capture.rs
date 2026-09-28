@@ -79,7 +79,7 @@ fn the_owner_refreshes_and_a_second_captor_stays_out() {
 
 /// A released latch hands the next captor a write ordered after the last owner's.
 #[test]
-fn a_recovered_panic_hands_the_snapshot_to_the_next_captor() {
+fn a_released_latch_hands_the_snapshot_to_the_next_captor() {
     loom::model(|| {
         let latch = Arc::new(CaptureLatch::new());
         let snapshot = Arc::new(UnsafeCell::new(0u32));
@@ -140,53 +140,6 @@ fn a_reader_and_refresh_never_overlap_on_the_snapshot() {
         let read = reader.join().unwrap();
         refresh.join().unwrap();
         assert!(read == [2, 2] || read == [22, 22] || read == [9, 9]);
-    });
-}
-
-#[test]
-fn discard_cannot_admit_a_writer_under_a_fatal_reader() {
-    loom::model(|| {
-        let latch = Arc::new(CaptureLatch::new());
-        let access = Arc::new(CaptureAccess::new());
-        let snapshot = Arc::new(UnsafeCell::new([0u8; 2]));
-
-        assert_eq!(latch.claim(2), Claim::Fresh);
-        assert!(access.begin_capture());
-        snapshot.with_mut(|p| unsafe { *p = [2, 2] });
-        access.publish(true);
-
-        let reader = {
-            let (access, snapshot) = (access.clone(), snapshot.clone());
-            thread::spawn(move || {
-                if access.read() {
-                    snapshot.with(|p| unsafe { *p })
-                } else {
-                    [9, 9]
-                }
-            })
-        };
-        let discard = {
-            let (latch, access) = (latch.clone(), access.clone());
-            thread::spawn(move || {
-                if latch.owned_by(2) && access.discard() {
-                    assert!(latch.release(2));
-                }
-            })
-        };
-        let next = {
-            thread::spawn(move || {
-                if latch.claim(3) == Claim::Fresh && access.begin_capture() {
-                    snapshot.with_mut(|p| unsafe { (*p)[0] = 3 });
-                    snapshot.with_mut(|p| unsafe { (*p)[1] = 3 });
-                    access.publish(true);
-                }
-            })
-        };
-
-        let read = reader.join().unwrap();
-        discard.join().unwrap();
-        next.join().unwrap();
-        assert!(read == [2, 2] || read == [3, 3] || read == [9, 9]);
     });
 }
 

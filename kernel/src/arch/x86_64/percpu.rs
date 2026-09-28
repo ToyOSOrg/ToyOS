@@ -759,7 +759,6 @@ pub fn leave_syscall() {
 }
 
 /// Whether the task this CPU is running is inside a syscall right now, comparing identity rather than a flag since the word is per-CPU but the question is per-thread.
-/// Errs false on a migrated/resumed syscall, so a panic there halts rather than hiding.
 pub fn in_syscall() -> bool {
     let recorded = gs::read_u64::<OFF_SYSCALL_TASK>();
     recorded != NO_SYSCALL

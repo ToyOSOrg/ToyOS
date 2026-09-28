@@ -3,7 +3,7 @@
 //! plus `DSB ISH` once the kernel owns its page tables, the port's stage 4.
 
 
-pub use crate::invalidation::Origin;
+use crate::invalidation::Origin;
 
 pub fn log_census() {
     owed!("TLB invalidation", "stage 4")

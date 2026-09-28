@@ -6,9 +6,9 @@ opened: 2026-09-14
 
 # A fatal event stands down both bounds, and on a machine that cannot reset itself nothing is left to end the boot
 
-`apic::halt_all_cpus` (`kernel/src/arch/apic.rs:228`) calls
+`apic::halt_all_cpus` (`kernel/src/arch/x86_64/apic.rs:228`) calls
 `crate::hardlockup::stand_down()` and `crate::deadline::stand_down()` before it
-holds the panel (`kernel/src/arch/apic.rs:235-236`). That is deliberate and the
+holds the panel (`kernel/src/arch/x86_64/apic.rs:235-236`). That is deliberate and the
 deadline's own header says so — "a panic in progress, which is not a gap but a
 stand-down: `apic::halt_all_cpus` calls `stand_down` before it holds the panel,
 so a panic report is never replaced by an expiry"

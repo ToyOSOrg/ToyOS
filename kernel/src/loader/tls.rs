@@ -49,7 +49,7 @@ impl TlsBlock {
     /// when `pt` has no room.
     pub fn publish(self, pt: &PageTables) -> Option<(MappedPages, u64, usize)> {
         let tp_offset = self.tp_offset;
-        let pages = self.frames.publish(pt, crate::mm::paging::Prot::ReadWrite, |frames, at| {
+        let pages = self.frames.publish(pt, crate::mm::policy::Prot::ReadWrite, |frames, at| {
             if crate::actuator::tls_rebase_window() {
                 rebase_window::hold(frames, at);
             }

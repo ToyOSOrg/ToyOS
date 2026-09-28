@@ -44,7 +44,7 @@ pub enum Op {
     ThreadExit { pid: Pid, tid: Tid, code: i32, pc: u32, post: Option<Watch> },
     /// `sys_thread_join`: collect or arm, then re-check.
     Join { pid: Pid, target: Tid, waiter: Tid, pc: u32 },
-    /// The idle loop's `reap_poisoned`, reap half.
+    /// The idle loop's `reap_finished`.
     IdlePass { pc: u32 },
 }
 

@@ -11,7 +11,7 @@ reference and multiplies every liveness ceiling by the result; every shard print
 it (`host: fastest boot N ms against the reference 1320 ms — liveness ceilings
 paid at Wx width`). The proposal was to spend the same factor on the *duration
 profile*: divide each shard's measured prices by its width in
-`src/durations.rs`'s merge, so `src/tiers.rs`'s ceiling compares like with like
+`35383398^:src/durations.rs`'s merge, so `src/tiers.rs`'s ceiling compares like with like
 across shards of different speed, with timer-anchored names exempt because a
 fixed wait does not shrink on a fast host.
 
@@ -132,7 +132,7 @@ renormalize.
 ## What is still true and is not this
 
 The two-*machine* gap — twelve hosted EPYC shards against one T14 lane,
-1.35–1.37x apart on an idle host, recorded in `src/durations.rs`'s header with
+1.35–1.37x apart on an idle host, recorded in `35383398^:src/durations.rs`'s header with
 the committed profile's `shards=` column naming which partition took each
 price — is untouched by any of the above: that measurement is a gap between
 machines, not a within-lane shard factor. This file says only that the
