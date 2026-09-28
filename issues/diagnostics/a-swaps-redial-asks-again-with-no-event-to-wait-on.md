@@ -16,10 +16,11 @@ forward, accepted and closed before a line — is asked again at once. On a LAN
 that is a question for the name on the link, which the old netd answers at
 once, and a `connect` per round trip for the whole gap.
 
-What bounds it: the swap's window alone, `Stream::redial`'s `by`; every dial
-turned away is counted and reported (`Stream::turned_away`), never judged.
 The T14 is unmeasured, and a refusal there costs a LAN round trip rather than
-QEMU's forward's.
+QEMU's forward's. Its redial asks the name on the link again after every dial
+turned away, as soon as the old netd answers the last ask, so its questions
+may go out faster than RFC 6762 §5.2's floor between two queries
+(`ASK_WAIT`); that rate is unmeasured on metal.
 
 ## Exit condition
 
@@ -28,4 +29,5 @@ machine sends when `logd` can admit a reader again after a swap of netd —
 for example `logd` keeping its listener across the swap and holding the
 connections it accepts until the new netd serves, or netd announcing its
 exit on a channel that outlives it — and `Stream::redial` dials once per
-such event, with the count deleted.
+such event, with the count deleted, so no redial asks the link faster than
+§5.2's floor.

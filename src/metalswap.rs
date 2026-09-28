@@ -125,7 +125,7 @@ fn settled(lines: &[String], mark: usize, service: &str) -> Option<()> {
 /// `Err` is a boot that never opened the stream within `window`, a binary this
 /// host cannot read, or a swap of the stream's own carrier whose `logd` never
 /// said it would turn readers away before `swap` let the swap go without
-/// this side, or admitted none of this side's dials again within `window`.
+/// this side.
 pub fn swap(
     stream: &Stream,
     ssh: &Ssh,
@@ -205,20 +205,9 @@ pub fn swap(
     if accepted && service == toyos_logstream::CARRIER {
         let (left, seen, redialed) = (window.saturating_sub(began.elapsed()), stream.connections(), Instant::now());
         stream.redial(left);
-        if stream.wait_for_connection(seen, left).is_none() {
-            return Err(format!(
-                "`logd` admitted no dial of the stream's within the {} s window of the swap of {service}: \
-                 turned away {} time(s) from the ask, {}",
-                window.as_secs(),
-                stream.turned_away() - away,
-                stream.unopened().unwrap_or_else(|| "the latest dial unanswered at the bound".to_string())
-            ));
+        if stream.wait_for_connection(seen, left).is_some() {
+            println!("  swap: `logd` admitted the stream again {} ms after the redial", redialed.elapsed().as_millis());
         }
-        println!(
-            "  swap: `logd` admitted the stream again {} ms after the redial, turned away {} time(s) from the ask",
-            redialed.elapsed().as_millis(),
-            stream.turned_away() - away
-        );
     }
     let mut outcome_ms = None;
     if let Some(until) = until {

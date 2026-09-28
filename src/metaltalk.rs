@@ -88,7 +88,7 @@ pub enum Peer {
 /// How many dials a stream's first dial may have turned away — a failed
 /// connect, or a connection closed before a line — before it gives up and the
 /// boot is red. A redial has none ([`Stream::redial`]).
-pub const TURNED_AWAY_CEILING: usize = 64;
+const TURNED_AWAY_CEILING: usize = 64;
 
 /// The log as this host reads it: this host dials `logd`'s port and reads until
 /// the connection ends.
@@ -127,9 +127,6 @@ struct State {
     /// How many dials ended with no line: a connection `logd` turned away,
     /// one nothing on the machine's side took, or a connect that failed.
     turned_away: usize,
-    /// How many of them the first dial gives up at, and `None` once a redial
-    /// has begun: a redial ends at its bound alone.
-    ceiling: Option<usize>,
     /// The connection being read, kept so [`Stream::redial`] can end it.
     current: Option<TcpStream>,
     /// How the latest admitted connection ended, once it has and none has been
@@ -166,22 +163,14 @@ impl Stream {
     ///
     /// **A machine not yet reachable is asked again**: a dial refused, or
     /// answered with its host or network down or unreachable, is counted, and
-    /// the dial gives up at `ceiling` of them ([`Stream::unopened`]).
-    pub fn connect(peer: Peer, file: &Path, echo: bool, by: Duration, ceiling: usize) -> Result<Self, String> {
-        Self::through(Arc::new(Net), peer, file, echo, by, ceiling)
+    /// the dial gives up at `TURNED_AWAY_CEILING` of them ([`Stream::unopened`]).
+    pub fn connect(peer: Peer, file: &Path, echo: bool, by: Duration) -> Result<Self, String> {
+        Self::through(Arc::new(Net), peer, file, echo, by)
     }
 
-    fn through(
-        reach: Arc<dyn Reach>,
-        peer: Peer,
-        file: &Path,
-        echo: bool,
-        by: Duration,
-        ceiling: usize,
-    ) -> Result<Self, String> {
+    fn through(reach: Arc<dyn Reach>, peer: Peer, file: &Path, echo: bool, by: Duration) -> Result<Self, String> {
         let out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
-        let state = State { ceiling: Some(ceiling), ..State::default() };
-        let shared = Arc::new(Shared { state: Mutex::new(state), moved: Condvar::new() });
+        let shared = Arc::new(Shared { state: Mutex::new(State::default()), moved: Condvar::new() });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("metal-stream".into())
@@ -245,8 +234,9 @@ impl Stream {
     /// line or `by` has passed: every dial is a wait on the machine's answer,
     /// and one it turns away — a connect that failed, or a connection closed
     /// before a line — is asked again at once and counted
-    /// ([`Stream::turned_away`]), never judged. A redial whose bound passes
-    /// says so ([`Stream::unopened`]).
+    /// ([`Stream::turned_away`]), never judged. A redial whose bound passes,
+    /// or whose [`Peer::At`] forward fails a connect, says so
+    /// ([`Stream::unopened`]).
     ///
     /// **The admitted dial is the event, and `by` its only bound**: nothing the
     /// machine sends says when `logd` admits a reader again, so how many dials
@@ -338,7 +328,7 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
     // which is made while the machine's network is coming back.
     let mut again = false;
     loop {
-        match open(reach, peer, until, shared) {
+        match open(reach, peer, until, shared, again) {
             Err(why) => {
                 let mut state = shared.state.lock().expect("the stream's state");
                 state.unopened = Some(why);
@@ -375,7 +365,6 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
                 until = by;
                 again = true;
                 state.unopened = None;
-                state.ceiling = None;
                 break;
             }
             state = shared.moved.wait(state).expect("the stream's state");
@@ -383,16 +372,20 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
     }
 }
 
-/// Count one dial that failed, and why the first dial gives up where that
-/// reaches its ceiling: the count is the first dial's own, nothing being
-/// dialled before it.
-fn count_or_give_up(shared: &Shared, last: &str) -> Option<String> {
+/// Count one dial that failed, and why the dial gives up there: a first dial
+/// at its ceiling, the count being its own with nothing dialled before it,
+/// and a redial of a forward at once, since a forward takes every connect for
+/// as long as QEMU lives.
+fn count_or_give_up(shared: &Shared, peer: &Peer, again: bool, last: &str) -> Option<String> {
     let mut state = shared.state.lock().expect("the stream's state");
     state.turned_away += 1;
-    state
-        .ceiling
-        .filter(|&ceiling| state.turned_away >= ceiling)
-        .map(|ceiling| format!("turned away {ceiling} time(s), which is the first dial's ceiling: {last}"))
+    match peer {
+        Peer::At(_) if again => Some(format!("{last}; a forward fails a connect only once QEMU has exited")),
+        _ if !again && state.turned_away >= TURNED_AWAY_CEILING => {
+            Some(format!("turned away {TURNED_AWAY_CEILING} time(s), which is the first dial's ceiling: {last}"))
+        }
+        _ => None,
+    }
 }
 
 /// A connect that ended this way may be taken once the machine is up: it was
@@ -409,7 +402,7 @@ fn not_yet_reachable(e: &std::io::Error) -> bool {
 /// and so is a connection closed before a line (`read`); an ask of the name is
 /// a wait on the machine's answer, bounded by `until` alone, and one that
 /// returns at once is no ask at all and ends the dial.
-fn open(reach: &dyn Reach, peer: &Peer, until: Instant, shared: &Shared) -> Result<TcpStream, String> {
+fn open(reach: &dyn Reach, peer: &Peer, until: Instant, shared: &Shared, again: bool) -> Result<TcpStream, String> {
     let stopped = || shared.state.lock().expect("the stream's state").stop;
     let mut last = String::from("never asked");
     // Set by the first failed dial: the resolver's answer may be the one its
@@ -421,9 +414,7 @@ fn open(reach: &dyn Reach, peer: &Peer, until: Instant, shared: &Shared) -> Resu
         }
         let addrs = match peer {
             // No wait between dials: an address carries no name to ask the link
-            // for, and the only event a forward can give is a dial it takes, so
-            // the first dial's ceiling or a redial's bound, never a wait, bounds
-            // a forward that refuses.
+            // for, and the only event a forward can give is a dial it takes.
             Peer::At(at) => vec![*at],
             Peer::Named { host, port } if on_the_link => match reach.ask(host, until)? {
                 Some(ip) => vec![SocketAddr::from((ip, *port))],
@@ -459,7 +450,7 @@ fn open(reach: &dyn Reach, peer: &Peer, until: Instant, shared: &Shared) -> Resu
                         _ => format!("{at} was not reachable: {e}"),
                     };
                     on_the_link = true;
-                    if let Some(why) = count_or_give_up(shared, &last) {
+                    if let Some(why) = count_or_give_up(shared, peer, again, &last) {
                         return Err(why);
                     }
                 }
@@ -1253,7 +1244,7 @@ mod tests {
         let dir = toyos_tmpdir::TempDir::new("metaltalk-cut");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
-        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
             .expect("a loopback reader");
         drop(server.accept().unwrap());
         assert!(stream.wait_ended(Duration::from_secs(5)), "the close is read as an end");
@@ -1298,7 +1289,7 @@ mod tests {
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
         let peer = Peer::Named { host: "localhost".to_string(), port };
-        let stream = Stream::connect(peer, &file, false, Duration::from_secs(10), 8).unwrap();
+        let stream = Stream::connect(peer, &file, false, Duration::from_secs(10)).unwrap();
         let (mut conn, _) = server.accept().unwrap();
         for i in 0..100 {
             writeln!(conn, "[kernel 0.{i:03} cpu0] line {i}").unwrap();
@@ -1321,16 +1312,15 @@ mod tests {
     /// the bound.
     #[test]
     fn a_refused_first_dial_is_asked_again_up_to_its_ceiling() {
-        const CEILING: usize = 3;
         let dir = toyos_tmpdir::TempDir::new("metaltalk-first-refused");
         let probe = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = probe.local_addr().unwrap();
         drop(probe);
-        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(60), CEILING).unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(60)).unwrap();
         assert!(stream.wait_connected(Duration::from_secs(5)).is_none(), "nothing listens");
         let why = stream.unopened().expect("the dial gave up within 5 s of its 60 and said why");
         assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
-        assert_eq!(stream.turned_away(), CEILING, "every refused dial, and no more");
+        assert_eq!(stream.turned_away(), TURNED_AWAY_CEILING, "every refused dial, and no more");
     }
 
     /// A machine rebooting behind the address this host's resolver still
@@ -1389,7 +1379,7 @@ mod tests {
         });
         let peer = Peer::Named { host: "toyos-t14.local".to_string(), port: at.port() };
         let reach: Arc<dyn Reach> = net.clone();
-        let stream = Stream::through(reach, peer, &dir.join("s.log"), false, Duration::from_secs(5), 8).unwrap();
+        let stream = Stream::through(reach, peer, &dir.join("s.log"), false, Duration::from_secs(5)).unwrap();
         let mut conn = accepted(&server, "the dial after the name answered");
         writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
         assert_eq!(stream.wait_connected(Duration::from_secs(5)), Some(at), "{:?}", stream.unopened());
@@ -1409,7 +1399,7 @@ mod tests {
         let dir = toyos_tmpdir::TempDir::new("metaltalk-quiet");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
-        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
             .expect("a loopback reader");
         let (mut conn, _) = server.accept().unwrap();
         writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
@@ -1449,7 +1439,7 @@ mod tests {
         let dir = toyos_tmpdir::TempDir::new("metaltalk-again");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
-        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
             .expect("a loopback reader");
         let mut first = accepted(&server, "the first dial");
         writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
@@ -1474,23 +1464,24 @@ mod tests {
         );
     }
 
-    /// A machine whose first dial is taken, whose dials after it are turned
-    /// away before a connection exists until `taken_from`, and whose dials from
-    /// then on are taken: refused and reset in turn, the two answers a SYN gets
-    /// from a machine whose listener is gone or going, depending on when it
-    /// went.
+    /// A machine on the link whose first dial is taken, whose dials after it
+    /// are turned away before a connection exists until `taken_from`, and whose
+    /// dials from then on are taken: refused and reset in turn, the two answers
+    /// a SYN gets from a machine whose listener is gone or going, depending on
+    /// when it went. Its name is answered at once, by the resolver and on the
+    /// link alike.
     struct TurnedAway {
         dials: std::sync::atomic::AtomicUsize,
         taken_from: usize,
     }
 
     impl Reach for TurnedAway {
-        fn resolve(&self, _: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
-            unreachable!("the stream is dialled by address")
+        fn resolve(&self, _: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, port))])
         }
 
         fn ask(&self, _: &str, _: Instant) -> Result<Option<Ipv4Addr>, String> {
-            unreachable!("the stream is dialled by address")
+            Ok(Some(Ipv4Addr::LOCALHOST))
         }
 
         fn dial(&self, at: SocketAddr) -> std::io::Result<TcpStream> {
@@ -1502,12 +1493,16 @@ mod tests {
         }
     }
 
-    /// A reader through `reach` whose first connection from `server` has
-    /// carried a line, and that connection.
-    fn read_first(server: &TcpListener, reach: Arc<dyn Reach>, dir: &Path) -> (Stream, TcpStream) {
-        let at = server.local_addr().unwrap();
-        let stream = Stream::through(reach, Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
-            .expect("a loopback reader");
+    /// `server`'s port, asked for by name.
+    fn named(server: &TcpListener) -> Peer {
+        Peer::Named { host: "toyos-t14.local".to_string(), port: server.local_addr().unwrap().port() }
+    }
+
+    /// A reader of `peer` through `reach` whose first connection from `server`
+    /// has carried a line, and that connection.
+    fn read_first(server: &TcpListener, reach: Arc<dyn Reach>, peer: Peer, dir: &Path) -> (Stream, TcpStream) {
+        let stream =
+            Stream::through(reach, peer, &dir.join("s.log"), false, Duration::from_secs(5)).expect("a loopback reader");
         let mut first = accepted(server, "the first dial");
         writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
         assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
@@ -1529,6 +1524,25 @@ mod tests {
         });
     }
 
+    /// `server` dropping every connection before a byte until the returned
+    /// call, which ends the thread doing it.
+    fn close_every(server: &TcpListener) -> impl FnOnce() {
+        let (at, server) = (server.local_addr().unwrap(), server.try_clone().unwrap());
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let theirs = Arc::clone(&done);
+        let closer = std::thread::spawn(move || {
+            while !theirs.load(std::sync::atomic::Ordering::SeqCst) {
+                drop(server.accept());
+            }
+        });
+        move || {
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Ends the accept the closer may be blocked in.
+            drop(TcpStream::connect(at));
+            closer.join().unwrap();
+        }
+    }
+
     /// **A redial asks past every dial refused or reset, however many, until
     /// one is taken.** Staged through [`Reach`], so each dial's answer is the
     /// one this test gives it and arrives at once: far more dials than the
@@ -1539,7 +1553,7 @@ mod tests {
         let dir = toyos_tmpdir::TempDir::new("metaltalk-refused");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let reach = Arc::new(TurnedAway { dials: 0.into(), taken_from: TURNED + 1 });
-        let (stream, _first) = read_first(&server, reach, &dir);
+        let (stream, _first) = read_first(&server, reach, named(&server), &dir);
         close_then_replay(&server, 0);
         stream.redial(Duration::from_secs(60));
         assert!(stream.wait_for("after the swap", Duration::from_secs(5)), "{:?}", stream.unopened());
@@ -1554,7 +1568,8 @@ mod tests {
         const CLOSED: usize = 200;
         let dir = toyos_tmpdir::TempDir::new("metaltalk-closed");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
-        let (stream, _first) = read_first(&server, Arc::new(Net), &dir);
+        let at = server.local_addr().unwrap();
+        let (stream, _first) = read_first(&server, Arc::new(Net), Peer::At(at), &dir);
         close_then_replay(&server, CLOSED);
         stream.redial(Duration::from_secs(60));
         assert!(stream.wait_for("after the swap", Duration::from_secs(5)), "{:?}", stream.unopened());
@@ -1562,28 +1577,47 @@ mod tests {
         assert_eq!(stream.connections(), 2);
     }
 
-    /// **A redial ends at its bound alone, and says so**: dials refused, and
-    /// connections closed before a line, are asked again until the bound
-    /// passes, and the reader then names the end rather than going quiet.
+    /// **A redial ends at its bound alone, and says so**: dials refused on a
+    /// name, and connections closed before a line, are asked again until the
+    /// bound passes, and the reader then names the end rather than going quiet.
     #[test]
     fn a_redial_ends_at_its_bound_alone_and_says_so() {
         const BOUND: Duration = Duration::from_millis(50);
         let dir = toyos_tmpdir::TempDir::new("metaltalk-bound");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let reach = Arc::new(TurnedAway { dials: 0.into(), taken_from: usize::MAX });
-        let (refused, _first) = read_first(&server, reach, &dir);
+        let (refused, _first) = read_first(&server, reach, named(&server), &dir);
         refused.redial(BOUND);
         assert_eq!(refused.wait_for_connection(1, Duration::from_secs(5)), None, "nothing is taken");
         let why = refused.unopened().expect("the redial ended within 5 s and said why");
         assert!(why.contains("by the bound"), "{why}");
 
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
-        let (closed, _first) = read_first(&server, Arc::new(Net), &dir);
-        close_then_replay(&server, usize::MAX);
+        let at = server.local_addr().unwrap();
+        let (closed, _first) = read_first(&server, Arc::new(Net), Peer::At(at), &dir);
+        let stop_closing = close_every(&server);
         closed.redial(BOUND);
         assert_eq!(closed.wait_for_connection(1, Duration::from_secs(5)), None, "every dial closed before a line");
         let why = closed.unopened().expect("the redial ended within 5 s and said why");
         assert!(why.contains("redial's bound") && why.contains("ended before a line"), "{why}");
+        stop_closing();
+    }
+
+    /// **A redial of a forward that fails a connect ends at that failure**:
+    /// QEMU's forward takes every connect while QEMU lives, so a refusal is
+    /// its exit, named at once rather than dialled until the bound.
+    #[test]
+    fn a_redial_on_a_forward_that_refuses_ends_at_the_refusal() {
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-forward-gone");
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let (stream, first) = read_first(&server, Arc::new(Net), Peer::At(at), &dir);
+        drop((server, first));
+        stream.redial(Duration::from_secs(60));
+        assert_eq!(stream.wait_for_connection(1, Duration::from_secs(5)), None);
+        let why = stream.unopened().expect("a refusing forward ends the redial at once");
+        assert!(why.contains("refused"), "{why}");
+        assert_eq!(stream.turned_away(), 1);
     }
 
     /// A reply macOS's mDNSResponder sent this host's legacy question for its
