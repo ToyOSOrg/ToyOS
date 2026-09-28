@@ -12,7 +12,6 @@ The owner's bounds:
 - the hardware clock keeps UTC;
 - the kernel calls no UEFI service, and every UEFI call ToyOS makes is the
   loader's, before `ExitBootServices` (root `CLAUDE.md`);
-- ToyOS ends at least as secure as it starts;
 - the anti-rollback floor counts a signed security version, raised only by a
   release that fixes a security hole.
 
@@ -43,7 +42,7 @@ PR #539 does not land. Its pieces:
   `update_no_slot_boots_the_recovery_stick`, and the harness's
   `recovery_stick` and `RECOVERY_STICK_*`; the `bootvars::state` line;
   `policy::order`'s once and `policy::told`, whose rules `pass::decide` takes;
-  `record.rs`' `once`, with the attempts file; `SLOT_ONCE`, because stage 4's
+  `record.rs`' `once`, with the attempts file; `SLOT_ONCE`, because stage 5's
   `KernelArgs` carries a once boot as a field; `LOADER_IS`, because the
   loader names no hash of its own file.
 
@@ -100,11 +99,17 @@ Each stage lands on its own, in this order.
 
 3. **One floor per key, on a security version.**
    - The signed header's `version` is the security version: one constant in
-     the tree. It is raised by a reviewed PR that edits that constant alone,
-     and the reviewer checks that the PR names the security fix it ships;
-     this stage adds that check to `.claude/agents/reviewer.md`.
-     `image::version_now` goes. The header's `FORMAT` rises, so a header
-     carrying a build time is refused by name.
+     the tree, `toyos_update::SECURITY_VERSION`. It is raised by a reviewed PR
+     that edits that constant alone. This stage adds this line to
+     `.claude/agents/reviewer.md`'s "What to look for":
+
+     ```markdown
+     - **Security version.** A branch that raises `toyos_update::SECURITY_VERSION` changes nothing else and names in its body the security fix it ships, or it is a BLOCKER.
+     ```
+
+     `image::version_now` goes, and `Plan::version` defaults to the constant.
+     The header's `FORMAT` rises, so a header carrying a build time is
+     refused by name.
    - `floor::Scope` goes. Every loader keeps one floor per signing key, named
      for the key alone, under a prefix no build-time floor carries. `stale`
      and its deletions go.
@@ -115,8 +120,9 @@ Each stage lands on its own, in this order.
      store keeps one 8-byte variable per key that has booted the machine.
    - `policy::installable` admits an image at or above the running image's
      and the idle slot's security version.
-   - This stage deletes the throwaway-key bullet of
-     `issues/boot-media/the-anti-rollback-floor-is-a-firmware-variable.md` and
+   - This stage deletes the throwaway-key bullet and the
+     "`/system/bin/update`'s own check — newer than the running image" line of
+     `issues/boot-media/the-anti-rollback-floor-is-a-firmware-variable.md`, and
      the per-image floor in stage 1 of
      `issues/boot-media/the-machine-updates-itself-without-ubuntu.md`. The floor
      issue's TPM 2.0 NV counter stays its exit: `TPM2_NV_Increment` moves one
@@ -138,22 +144,25 @@ Each stage lands on its own, in this order.
    - `uefi` and `uefi-raw` move to their current releases, and `uefi-services`
      goes. The unsafe `BlockIO` media cast in `rootimage.rs` goes with the old
      layout.
-   - The loader's own `#[panic_handler]` writes the panic through `loaderlog`,
-     then powers the machine off. It never resets: a panic with a fixed cause
-     would reset into itself.
+   - The loader's own `#[panic_handler]` writes `loader: panicked at
+     <file>:<line>: <message>` through `loaderlog`, then powers the machine
+     off. It never resets: a panic with a fixed cause would reset into itself.
+     The refused-floor site stops writing its reason to `loader.log` before
+     its `panic!`: the handler writes it.
    - `alloc_kernel_memory` stops building a `Vec<u8>` over a 2 MiB-aligned
      allocation. Both relocation unsafes go. `blackbox::Page` is not `Copy`, so
      `bytes()` mints no second `&'static mut`.
-   - `KernelArgs` is typed: `repr(C)` sub-structs, and `#[repr(C, u32)]` enums
-     for the optional parts in place of `u32` presence flags and zero
-     sentinels. Every field before the layout word keeps its offset. The
-     slot booted and why (the one the table chose, the other one after a
-     refusal and its reason, or once on the running system's request) and the
-     black-box page are fields, not `boot-slot=`, `slot-refused=` and
-     `blackbox=` text. `params.rs`' last-one-wins and kernel `main.rs`' branch
-     for a format never emitted go. `kernel_stack_addr` is renamed for the
-     offset it holds. x86's `_start` reads by `const offset_of!`, and the hand
-     offset asserts go.
+   - The layout word and every field before it keep their offsets, each
+     pinned by a compile-time `offset_of!` assert, so moving `layout` fails to
+     build. That prefix stays flat. After the word, `KernelArgs` is typed:
+     `repr(C)` sub-structs, and `#[repr(C, u32)]` enums for the optional parts
+     in place of `u32` presence flags and zero sentinels; a field the typing
+     changes moves after the word. The slot booted and why (the one the table
+     chose, or the other one after a refusal and its reason) and the black-box
+     page are fields, not `boot-slot=`, `slot-refused=` and `blackbox=` text.
+     `params.rs`' last-one-wins and kernel `main.rs`' branch for a format
+     never emitted go. `kernel_stack_addr` is renamed for the offset it
+     holds. x86's `_start` reads by `const offset_of!`.
    - `LAYOUT` rises to `0x5459_0002`. `LAST_LAYOUT` pins `0x5459_0001` as a
      literal, and the `loader-writes-the-last-layout` actuator makes the
      loader write it. This stage is an ABI change.
@@ -161,12 +170,14 @@ Each stage lands on its own, in this order.
 
    **Exit**: `bootloader/Cargo.toml` names no `uefi-services`.
    `loader_panic_powers_off` plants this key's floor in 9 bytes. It finds the
-   loader's panic in `loader.log`, and QEMU reports `guest-shutdown`. It fails
-   under `uefi::helpers`' handler, which writes no `loader.log`.
+   handler's `loader: panicked at bootloader/src/` line in `loader.log`, which
+   no other code writes, and QEMU reports `guest-shutdown`. It fails under
+   `uefi::helpers`' handler, which writes no `loader.log`.
    `kernel_args_last_layout_refused` boots with
    `loader-writes-the-last-layout` and finds the kernel's refusal naming both
    words before any `black box:` record. Leaving `LAYOUT` at `0x5459_0001`
-   makes it fail. The tests that read `KernelArgs` pass: `boot_from_power_on`,
+   makes it fail. Moving `layout` after `root_read_tsc` fails to build. The
+   tests that read `KernelArgs` pass: `boot_from_power_on`,
    `bar_placement_is_proven`, `root_withheld_refused`, `blackbox_*` and
    `update_*`.
 
@@ -180,20 +191,24 @@ Each stage lands on its own, in this order.
      above the kept slot's, whatever the slot held before.
    - A pass boots the highest-priority slot that verifies and is good or has
      tries left. A slot out of tries and never good is not booted again.
-   - A signed kernel the loader cannot load (not an ELF, another machine's, or
-     carrying a relocation the loader does not apply) is refused inside
-     `verify`, like a bad signature, and the pass falls to the other slot.
+   - Any failure after `verify` in `start_kernel` that the image causes is a
+     refusal of that slot, like a bad signature, and the pass falls to the
+     other slot.
    - The loader spends a try of an untried slot before it hands over. That
      write, with sealing `ARMED`, is the pass's last, after every refusal
      `start_kernel` can make, so a loader refusal is never booked as the
      image's. Where the decrement cannot be persisted, that slot is not booted.
    - Where no slot can boot, the loader says so on the panel and in
      `loader.log`, and powers the machine off.
-   - The running system marks its slot good once the image's health gate is
-     up. Init runs `update --good` once every service the image's
-     `system.toml` names is up; it holds the `slots` claim's table and writes
-     the running slot's good flag and nothing else. Init starting is not the
-     gate.
+   - The health gate: `system.toml`'s `[boot] up` names the services that
+     make the image up. The tree has no readiness signal (a swap's probation
+     only asks whether a process still runs), so this stage adds the smallest
+     one: init endows each named service the write end of a pipe under the
+     label `ready`, and the service writes one byte to it once it serves. A
+     read end that closes with no byte is a service that never came up.
+   - Init runs `update --good` once every service `[boot] up` names has
+     written its byte; `update` holds the `slots` claim's table and writes the
+     running slot's good flag and nothing else.
    - An image whose `system.toml` grants no program the `slots` claim is never
      good, so each boot spends a try and it boots three times. Today only
      `system.toml` and `tests/updatecase/system.toml` grant it.
@@ -208,7 +223,9 @@ Each stage lands on its own, in this order.
      and saved before it is acted on, and ignored where the save fails.
    - `update --once` asks for the idle slot once and leaves it at priority 0,
      so its good flag is never read. The kept slot boots after it, and no floor
-     rises for it.
+     rises for it. `KernelArgs`' slot field gains the once variant, `LAYOUT`
+     rises to `0x5459_0003` and `LAST_LAYOUT` to `0x5459_0002`; this stage is
+     an ABI change.
    - `update --boot-first` writes only the request. The loader writes its own
      `HD(…)/File(…)` entry and puts it first. Once stage 7 deletes
      `bootnext.rs`, that is the only boot-variable write.
@@ -233,8 +250,10 @@ Each stage lands on its own, in this order.
    - Skipping the countdown fails `update_hang_kills_an_unproven_image`.
    - Raising the floor on any pass that boots a slot fails
      `update_floor_waits_for_good`. It installs into B an image at the running
-     security version + 1 whose kernel hangs. B spends its tries and A boots,
-     and `fwvars::live` reads the floor at A's version.
+     security version + 1 whose kernel hangs, signed by
+     `tests/common/update.rs`' `Rig::update` at the version it is handed. B
+     spends its tries and A boots, and `fwvars::live` reads the floor at A's
+     version.
    - An install that leaves the good flag set, or its priority below the kept
      slot's, fails `update_over_a_good_slot_starts_it_untried`. It updates
      into B and boots B to good, then updates over A, which was good, with a
@@ -247,9 +266,14 @@ Each stage lands on its own, in this order.
      `update_readonly_stick_boots_nothing`. It boots a fresh image off a
      read-only stick: nothing boots, the no-bootable-slot line is on the
      console, and QEMU reports `guest-shutdown`.
-   - Turning `verify`'s refusal of an unloadable kernel back into a panic
-     fails `update_unloadable_kernel_boots_the_other_slot`, which updates B
-     with a signed non-ELF kernel and finds A booted.
+   - Turning the refusal of an unloadable kernel back into a panic fails
+     `update_unloadable_kernel_boots_the_other_slot`, which updates B with a
+     signed non-ELF kernel, finds the loader's refusal of B naming a kernel
+     that is not an ELF, and finds A booted.
+   - Running `update --good` right after init spawns `[boot] start` fails
+     `update_dead_service_is_never_good`. It updates B with an image whose
+     `[boot] up` names a service that exits at start. B boots three times,
+     its good flag never set, and then A boots.
    - Acting on a request before taking it off the table fails
      `update_boot_first_puts_the_loader_first`.
 
