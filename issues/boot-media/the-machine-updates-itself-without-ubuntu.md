@@ -38,22 +38,6 @@ stdin — and the machine installs nothing the owner did not sign.
 
 ## Stage 2 — the T14 updates without Ubuntu, and installs ToyOS on its NVMe
 
-**Built, and proven in QEMU on an emulated stick:**
-
-- **The loader writes the firmware's boot variables** on a request the running
-  system leaves in the slot table, since nothing after `ExitBootServices`
-  writes one: `update --boot-first` puts its own entry first in `BootOrder`,
-  `update --boot-next <esp guid>` boots another ESP once, and `update --once
-  < image` boots the idle slot once and never marks it. Each is taken off the
-  table before it is acted on.
-- **A machine with no slot to boot falls to the entry after its own** in
-  `BootOrder` — its recovery stick.
-- **The bench**: `toyos-metal` delivers each boot to a T14 running ToyOS alone
-  (`tests/benchcase`, `cargo run -- --bench-image <runner key>`) with `update
-  --once`, reboots it over ssh, and reads the boot back over the bench's sshd
-  — the loader's passes of it and its `logd` files — for the same judges.
-  `--via-ubuntu` is the old path, beside it until the installer.
-
 **Owed:**
 
 1. **The T14 switched over**: the bench handed the machine through Ubuntu once

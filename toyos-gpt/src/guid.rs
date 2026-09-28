@@ -102,9 +102,7 @@ impl Guid {
     pub const fn is_zero(&self) -> bool {
         u128::from_ne_bytes(self.0) == 0
     }
-}
 
-impl Guid {
     /// The text [`Display`](fmt::Display) prints, read back, in either case.
     pub fn parse(text: &str) -> Option<Self> {
         const DASHES: [usize; 4] = [8, 13, 18, 23];
@@ -117,12 +115,11 @@ impl Guid {
             .enumerate()
             .filter(|(at, _)| !DASHES.contains(at))
             .map(|(_, &b)| char::from(b).to_digit(16));
-        let mut hex = [0u8; 16];
-        for out in hex.iter_mut() {
+        let mut h = [0u8; 16];
+        for out in h.iter_mut() {
             let (high, low) = (digits.next()??, digits.next()??);
             *out = u8::try_from(high.checked_mul(16)?.checked_add(low)?).ok()?;
         }
-        let h = hex;
         Some(Self([h[3], h[2], h[1], h[0], h[5], h[4], h[7], h[6], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]]))
     }
 }
