@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: tooling
 opened: 2026-09-28
 ---
