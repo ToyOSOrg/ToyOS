@@ -43,8 +43,17 @@ this decides what to measure; this entry is the rate and the refutation, not a
 design.
 
 Red again in the orchestrator's nightly for PR #572 at `87629411`: "the
-truncate did not serialise with the stalled flush". #572's diff is a firmware
-selection change; it does not touch the VFS.
+truncate did not serialise with the stalled flush".
 
-A flaky test is disabled at once: `src/redlist.rs` now carries this test, and
-`cargo run -- --known-red ftruncate_flush_race` says `YES, disabled`.
+## Exit condition
+
+The capture holds when `set_len` entered the kernel relative to the stall's
+start, so a short `waited` is machine-distinguishable from a retry, and
+`ftruncate_flush_race` is green against that instrument on the dev host across
+the counts in the table above. Then this file and its `src/redlist.rs` row are
+deleted.
+
+## Owner
+
+The `ftruncate-flush-stall` actuator, `tests/common/volumes.rs`; held by the
+orchestrator.
