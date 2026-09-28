@@ -3250,10 +3250,14 @@ pub fn root_named_twice(
 }
 
 /// **A chunk of ROOT the disk will not read refuses the boot, naming that
-/// chunk.** The boot stick fails with EIO every read covering the sector
+/// chunk.** The boot disk fails with EIO every read covering the sector
 /// seven past ROOT's middle, so the chunk that fails is not the first. The
 /// loader reads ROOT in chunks, so the refusal names a chunk that holds the
 /// sector and starts where the bytes read before it end.
+///
+/// The boot disk is NVMe, not a USB stick: stock edk2's read of that sector
+/// off a USB stick does not return, and its watchdog does not reset the machine
+/// (`issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md`).
 pub fn root_chunk_refused(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3270,12 +3274,9 @@ pub fn root_chunk_refused(
         c_bins,
         rust_bins,
         BootOptions {
+            profile: qemu::Profile::InternalDisk,
             boot_image: Some(qemu::Staged::Written(path.clone())),
             stick_read_error: Some(bad),
-            // The read's own line and not the refusal after it: the stick
-            // QEMU fails a read on answers the loader's next write to
-            // `loader.log` with nothing, and the console line before that
-            // write is the last this boot says.
             ready_marker: CHUNK_REFUSED,
             ..Default::default()
         },
