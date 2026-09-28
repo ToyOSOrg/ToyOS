@@ -47,9 +47,10 @@ use kernel_loom::i8042_tally::{Carried, Counts, Tally};
 use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::Arc;
 
-/// `loom::model`, refusing a model that explored one execution: loom 0.7 explores nothing but the
-/// first schedule when the spawned thread's first operation is a load, which `Tally::record`'s
-/// saturation check is, so every model here spawns the reader and runs the ISR on its own thread.
+/// `loom::model`, refusing a model that explored one execution: loom races a pending store only
+/// against the word's last access, which `Tally::record`'s own saturation load overwrites, so a
+/// read made before the ISR ran is never moved after its write. Every model here spawns the
+/// reader and runs the ISR on its own thread.
 fn explored(f: impl Fn() + Sync + Send + 'static) {
     let runs = std::sync::Arc::new(AtomicUsize::new(0));
     let counted = runs.clone();
