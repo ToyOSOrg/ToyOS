@@ -304,12 +304,20 @@ Each stage names its exit; "measured" means a number from a run.
    switch carrying FP/SIMD; `virt_user_mode`, `virt_timer_preempts` and
    `virt_irq_storm` judge it under the EL2 profile, emulated, because HVF
    exposes no RNDR and the kernel's hash seed refuses there until stage 6's
-   virtio-rng. Owed before the exit holds: the interrupts-off window against
-   x86's (the storm reports the latest tick it took; x86 has no counterpart
-   instrument); `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md`,
-   whose `KernelArgs` rename waits on the loader's change to that struct; and
-   the three deletions shown red. The ITS moves to stage 6: a claimed function
-   is its only consumer the small-kernel track leaves, and it needs that
+   virtio-rng. Each judges an event, never a rate: no QEMU test measures time.
+   Owed before the exit holds: the interrupts-off window against x86's, a
+   measurement only metal can make, with no instrument on either arch yet;
+   `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md`, whose
+   `KernelArgs` rename waits on the loader's change to that struct; and the
+   three deletions shown red, which **no QEMU test can do**: QEMU 11.1.1
+   resets `CNTHCTL_EL2` to 3 and `CNTVOFF_EL2` to 0, the declared values, and
+   `CPTR_EL2` to 0, whose `TFP` is as clear as the declaration's
+   (`target/arm/helper.c`); each deletion, and the fourth, of `ICC_SRE_EL2`
+   (constant `0xf` in QEMU, `hw/intc/arm_gicv3_cpuif.c`), stayed green in
+   `virt_user_mode` at `57382f78`. They are shown red on a machine whose
+   firmware leaves the registers otherwise, or by a loader that writes the
+   opposite values before the handoff. The ITS moves to stage 6: a claimed
+   function is its only consumer the small-kernel track leaves, and it needs that
    stage's SMMUv3 first. Stubbed on AArch64, each owned by the small-kernel
    track, which moves the driver out of the kernel:
    - `arch::msi_message` refuses, so the kernel's xHCI (`virt`'s boot stick),

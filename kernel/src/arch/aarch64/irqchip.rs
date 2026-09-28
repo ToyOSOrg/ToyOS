@@ -90,7 +90,7 @@ fn settles(per_second: u64, what: &str, done: impl Fn() -> bool) {
 
 fn read_sysreg_pmr() -> u64 {
     let v: u64;
-    // SAFETY: reads `ICC_PMR_EL1`, which `ICC_SRE_EL1.SRE` (the declaration) makes accessible.
+    // SAFETY: reads `ICC_PMR_EL1`, which `ICC_SRE_EL1.SRE` ([`init`]) makes accessible.
     unsafe { core::arch::asm!("mrs {}, S3_0_C4_C6_0", out(reg) v, options(nomem, nostack, preserves_flags)) };
     v
 }
@@ -173,10 +173,27 @@ pub fn init(rsdp_addr: u64) {
     let enabled = enabled | 1 << u32::from(super::trap::LOG_NEST_VECTOR) | 1 << SGI_STORM;
     redistributor.write_u32(GICR_ISENABLER0, enabled);
 
+    // The CPU interface in system registers, as the declaration says.
+    // SAFETY: writes `ICC_SRE_EL1`, which touches no memory.
+    unsafe {
+        core::arch::asm!(
+            "msr S3_0_C12_C12_5, {}",
+            "isb",
+            in(reg) super::control_regs::ICC_SRE,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    let sre: u64;
+    // SAFETY: reads `ICC_SRE_EL1`.
+    unsafe { core::arch::asm!("mrs {}, S3_0_C12_C12_5", out(reg) sre, options(nomem, nostack, preserves_flags)) };
+    // `SRE` alone: `DFB` and `DIB` are RAO/WI or RAZ/WI as the implementation,
+    // or a hypervisor under it, chooses, and this kernel uses neither bypass.
+    assert!(sre & 1 != 0, "GIC: ICC_SRE_EL1 reads {sre:#x}, so the CPU interface is not in system registers");
+
     // The CPU interface: the priority mask open above `PRIORITY`, one
     // priority drop and deactivation per EOI, Group 1 on.
-    // SAFETY: GICv3 CPU interface registers, which the declaration's
-    // `ICC_SRE_EL1.SRE` makes system registers; none touches memory.
+    // SAFETY: GICv3 CPU interface registers, which `ICC_SRE_EL1.SRE` makes
+    // system registers; none touches memory.
     unsafe {
         core::arch::asm!(
             "msr S3_0_C4_C6_0, {pmr}",
@@ -349,13 +366,4 @@ pub(super) fn rearm() {
         0 => stop_timer_hardware(),
         ticks => arm_ticks(ticks),
     }
-}
-
-/// How many counter ticks past its comparator the timer is being taken.
-#[cfg(feature = "boot-actuators")]
-pub(super) fn lateness() -> u64 {
-    let cval: u64;
-    // SAFETY: reads the EL1 virtual timer's comparator.
-    unsafe { core::arch::asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack, preserves_flags)) };
-    cpu::counter().saturating_sub(cval)
 }

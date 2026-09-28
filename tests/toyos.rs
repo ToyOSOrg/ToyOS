@@ -5964,10 +5964,12 @@ fn run_screen_test(
             Ok(())
         }
         "virt_timer_preempts" => {
-            // After its first line `spin` makes no syscall, yet on this
-            // machine's one CPU the runner's deadline thread wakes — at a
-            // tick, the only thing that can take the CPU from `spin` — and
-            // ends it. The CPU time `spin` had by then says it held the CPU.
+            // `preempt` on this machine's one CPU: one thread counts in a loop
+            // that enters the kernel only when an interrupt takes it there, and
+            // the other yields until it has seen the count move twice. It runs
+            // between those reads only when a tick took the CPU from the
+            // counting thread, so a timer that never preempts leaves the line
+            // unsaid, and the ceiling here is the only clock.
             let config = compile::repo_root().join("tests/virtpreemptcase/system.toml");
             let case = config.parent().expect("system.toml has a directory");
             let mut qemu = QemuInstance::boot_with_options(
@@ -5980,39 +5982,21 @@ fn run_screen_test(
                     ..Default::default()
                 },
             );
-            let exited = format!("{}spin pid=", bootlog::EXIT);
-            let rest = qemu.drain_until(Duration::from_secs(300), |l| l.contains(&exited));
+            // Spelled in `userland/toybox/src/preempt.rs`.
+            const PREEMPTED: &str = "preempt: the counting thread was preempted twice";
+            let rest = qemu.drain_until(Duration::from_secs(300), |l| l.contains(PREEMPTED));
             let serial = format!("{}\n{rest}", qemu.boot_log());
-            let said = format!("{} spin", bootlog::JOB_DEADLINE_SAID);
-            for want in ["===TEST_START spin===", said.as_str(), exited.as_str()] {
-                if !serial.contains(want) {
-                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
-                }
+            match serial.lines().find(|l| l.contains(PREEMPTED)) {
+                Some(line) => eprintln!("  [virt] {line}"),
+                None => return Err(format!("{PREEMPTED:?} not on the PL011\nserial:\n{serial}")),
             }
-            let line = serial.lines().find(|l| l.contains(&exited)).expect("the exit line was just found");
-            let cpu_ms: u64 = line
-                .split("cpu=")
-                .nth(1)
-                .and_then(|rest| rest.strip_suffix("ms"))
-                .and_then(|ms| ms.trim().parse().ok())
-                .ok_or_else(|| format!("no cpu=<n>ms on the exit line: {line:?}"))?;
-            // Seconds, where a preemption that never came would leave `spin`
-            // no CPU time taken from the deadline thread, and a deadline thread
-            // that never ran would leave no exit line at all.
-            const HELD_MS: u64 = 5_000;
-            if cpu_ms < HELD_MS {
-                return Err(format!(
-                    "spin ran {cpu_ms} ms before the deadline thread ended it, under the {HELD_MS} ms \
-                     that shows it held the CPU\nserial:\n{serial}"
-                ));
-            }
-            eprintln!("  [virt] spin held the one CPU for {cpu_ms} ms until a tick handed it to the deadline thread");
             Ok(())
         }
         "virt_irq_storm" => {
-            // The timer ticking at a fixed period while the CPU floods itself
-            // with SGIs: every SGI sent is taken, and no tick goes a whole
-            // period untaken, which is what losing one would be.
+            // The CPU floods itself with SGIs until the timer has fired a
+            // thousand times through the flood, then waits for every SGI it
+            // sent. A tick lost or never re-armed, or an SGI lost, leaves the
+            // storm running and the verdict unsaid.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 &[],

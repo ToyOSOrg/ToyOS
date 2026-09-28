@@ -9,6 +9,7 @@ mod ls;
 mod mkdir;
 mod mv;
 mod net;
+mod preempt;
 mod ps;
 mod pwd;
 mod reboot;
@@ -30,7 +31,7 @@ macro_rules! commands {
     };
 }
 
-commands!(cat, cp, echo, free, grep, hexdump, locale, ls, mkdir, mv, net, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone);
+commands!(cat, cp, echo, free, grep, hexdump, locale, ls, mkdir, mv, net, preempt, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

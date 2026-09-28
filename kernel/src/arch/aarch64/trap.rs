@@ -138,8 +138,6 @@ fn irq(from_el0: bool) {
         return;
     };
     if intid == irqchip::timer_intid() {
-        #[cfg(feature = "boot-actuators")]
-        let late = irqchip::lateness();
         // Before anything that can take a lock or panic: a timer left
         // asserted re-fires forever, and one left stopped never fires again.
         irqchip::rearm();
@@ -148,7 +146,7 @@ fn irq(from_el0: bool) {
         // on one still takes this interrupt, which is why the poll is here.
         crate::deadline::poll();
         #[cfg(feature = "boot-actuators")]
-        storm::tick(late);
+        storm::tick();
         if from_el0 {
             // Only an EL0 tick reaches here, so the interrupted context is user
             // code and holds no `Lock`.
@@ -515,13 +513,12 @@ pub(crate) fn provoke_double_fault() -> ! {
     panic!("SYS_DEBUG: AArch64 has no double fault to provoke");
 }
 
-/// `irq-storm`: the timer ticking at a known period while this CPU floods
-/// itself with SGIs. A tick is lost when its expiry goes a whole period
-/// untaken — the next one would have been due before it — or when it never
-/// comes, so the verdict is the latest any tick was taken and how many came,
-/// beside every SGI sent being taken. Each tick is armed from when the last
-/// was taken, so the count falls short of the span's periods by the latency
-/// they add up to, and nine in ten is the floor that leaves room for it.
+/// `irq-storm`: this CPU floods itself with SGIs until the timer has fired
+/// `TICKS_OWED` times through the flood, then waits for every SGI it
+/// sent to be taken. A tick lost, or never re-armed, leaves the flood running
+/// and an SGI lost leaves the wait running, so neither says anything: the
+/// harness's ceiling is the only clock this judges by, and the one verdict
+/// the storm can say is `FAIL` for an SGI taken that was never sent.
 #[cfg(feature = "boot-actuators")]
 pub(crate) mod storm {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -531,14 +528,11 @@ pub(crate) mod storm {
 
     static RUNNING: AtomicBool = AtomicBool::new(false);
     static TICKS: AtomicU64 = AtomicU64::new(0);
-    static LATEST: AtomicU64 = AtomicU64::new(0);
     static SGIS: AtomicU64 = AtomicU64::new(0);
 
-    /// One tick, `late` counter ticks past its comparator.
-    pub(super) fn tick(late: u64) {
+    pub(super) fn tick() {
         if RUNNING.load(Relaxed) {
             TICKS.fetch_add(1, Relaxed);
-            LATEST.fetch_max(late, Relaxed);
         }
     }
 
@@ -546,42 +540,33 @@ pub(crate) mod storm {
         SGIS.fetch_add(1, Relaxed);
     }
 
-    /// The timer's period.
+    /// The timer's period, which each tick re-arms.
     const PERIOD_NS: u64 = 1_000_000;
-    /// How long the storm lasts: two thousand periods.
-    const SPAN_NS: u64 = 2_000 * PERIOD_NS;
+    /// The ticks the flood lasts for.
+    const TICKS_OWED: u64 = 1_000;
 
-    /// Run the storm, with interrupts open on this CPU for its length, and
-    /// say what it counted.
+    /// Run the storm, with interrupts open on this CPU until it ends, and say
+    /// what it counted.
     pub fn run() {
         let _guard = crate::arch::IrqGuard::close();
         TICKS.store(0, Relaxed);
-        LATEST.store(0, Relaxed);
         SGIS.store(0, Relaxed);
         irqchip::arm_one_shot(PERIOD_NS);
         RUNNING.store(true, Relaxed);
-        let start = crate::clock::nanos_since_boot();
         let mut sent = 0u64;
         crate::arch::cpu::enable_interrupts();
-        while crate::clock::nanos_since_boot() - start < SPAN_NS {
+        while TICKS.load(Relaxed) < TICKS_OWED {
             irqchip::send_self(irqchip::SGI_STORM as u8);
             sent += 1;
         }
-        crate::arch::cpu::disable_interrupts();
         RUNNING.store(false, Relaxed);
         irqchip::stop_timer();
+        while SGIS.load(Relaxed) < sent {
+            core::hint::spin_loop();
+        }
+        crate::arch::cpu::disable_interrupts();
         let (ticks, taken) = (TICKS.load(Relaxed), SGIS.load(Relaxed));
-        let latest_ns = crate::clock::nanos_of_ticks(LATEST.load(Relaxed));
-        // The last SGI sent may still be in flight when the mask closes on it.
-        let sgis_whole = taken + 1 >= sent && taken <= sent;
-        let owed = SPAN_NS / PERIOD_NS;
-        let verdict = if sgis_whole && ticks >= owed * 9 / 10 && latest_ns < PERIOD_NS { "PASS" } else { "FAIL" };
-        log!(
-            "irq-storm: {verdict} sgis={taken}/{sent} ticks={ticks} of {owed} over {} ms at a {} us period, \
-             the latest taken {} us past its expiry",
-            SPAN_NS / 1_000_000,
-            PERIOD_NS / 1_000,
-            latest_ns / 1_000,
-        );
+        let verdict = if taken == sent { "PASS" } else { "FAIL" };
+        log!("irq-storm: {verdict} sgis={taken}/{sent} ticks={ticks}: the timer fired through the flood, and every SGI sent was taken");
     }
 }

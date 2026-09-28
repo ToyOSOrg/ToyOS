@@ -33,11 +33,6 @@ use crate::mm::Region;
 pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
     core::arch::naked_asm!(
         "mov x19, x0",
-        // `ID_AA64PFR0_EL1.GIC`: no GICv3 system-register interface, and the
-        // `ICC_SRE` writes below are undefined instructions.
-        "mrs x1, id_aa64pfr0_el1",
-        "ubfx x1, x1, #24, #4",
-        "cbz x1, {refuse_gic}",
         // x20 = the stack's top, physical: kernel image + stack offset + stack size.
         "ldr x20, [x19, #{kernel_memory}]",
         "ldr x1, [x19, #{stack_offset}]",
@@ -70,8 +65,6 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "msr cpacr_el1, x1",
         "mov x1, #{cntkctl}",
         "msr cntkctl_el1, x1",
-        "mov x1, #{icc_sre}",
-        "msr S3_0_C12_C12_5, x1",
         "tlbi vmalle1",
         "dsb nsh",
         "isb",
@@ -89,10 +82,18 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "mrs x6, hcr_el2",
         "cmp x6, x1",
         "b.ne {refuse_hcr}",
-        // `ICC_SRE_EL2` before `ICC_SRE_EL1`: its `Enable` is what lets EL1's be written at all.
+        // `ICC_SRE_EL2`, whose `Enable` lets EL1 write its own `ICC_SRE_EL1`
+        // (`super::irqchip::init`). Skipped where `ID_AA64PFR0_EL1.GIC` names
+        // no system-register interface: there the write is an undefined
+        // instruction under firmware's vectors and ends the boot silently,
+        // while EL1's own access fails under this kernel's, which report it.
+        "mrs x1, id_aa64pfr0_el1",
+        "ubfx x1, x1, #24, #4",
+        "cbz x1, 4f",
         "mov x1, #{icc_sre_el2}",
         "msr S3_4_C12_C9_5, x1",
         "isb",
+        "4:",
         "msr mair_el1, x4",
         "msr tcr_el1, x2",
         "msr ttbr0_el1, x3",
@@ -101,8 +102,6 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "msr cpacr_el1, x1",
         "mov x1, #{cntkctl}",
         "msr cntkctl_el1, x1",
-        "mov x1, #{icc_sre}",
-        "msr S3_0_C12_C12_5, x1",
         "msr sctlr_el1, x5",
         "mov x1, #{cnthctl}",
         "msr cnthctl_el2, x1",
@@ -149,9 +148,7 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         cptr = const regs::CPTR_EL2,
         cpacr = const regs::CPACR,
         cntkctl = const regs::CNTKCTL,
-        icc_sre = const regs::ICC_SRE,
         icc_sre_el2 = const regs::ICC_SRE_EL2,
-        refuse_gic = sym refused_no_gicv3,
         spsr = const regs::SPSR_EL2_TO_EL1,
         phys_offset = const crate::PHYS_OFFSET,
         entry_el = sym regs::ENTRY_EL,
@@ -169,16 +166,6 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
 #[unsafe(naked)]
 #[no_mangle]
 unsafe extern "C" fn refused_hcr_el2_readback() -> ! {
-    core::arch::naked_asm!("1:", "wfe", "b 1b")
-}
-
-/// Where a CPU whose `ID_AA64PFR0_EL1.GIC` names no GICv3 system-register
-/// interface halts, before the first `ICC_` write would be an undefined
-/// instruction under firmware's vectors: this kernel's interrupt controller is
-/// a GICv3. Silent for [`refused_hcr_el2_readback`]'s reason.
-#[unsafe(naked)]
-#[no_mangle]
-unsafe extern "C" fn refused_no_gicv3() -> ! {
     core::arch::naked_asm!("1:", "wfe", "b 1b")
 }
 

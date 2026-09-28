@@ -3,7 +3,7 @@
 //! [`super::boot`]'s entry writes every register here whole, from these
 //! constants, before the MMU is on; [`check`] reads the EL1 ones back and
 //! refuses a CPU whose registers say anything else. Nothing else writes any
-//! of them.
+//! of them, bar [`ICC_SRE`].
 //!
 //! Field positions are Arm ARM K.a, chapter D24 (the register descriptions),
 //! and the GIC architecture specification (IHI 0069H), chapter 12, for the
@@ -57,7 +57,10 @@ pub const CPACR: u64 = 0b11 << 20;
 pub const CNTKCTL: u64 = 1 << 1;
 
 /// `ICC_SRE_EL1`: the GICv3 CPU interface through system registers (`SRE`),
-/// with FIQ and IRQ bypass disabled (`DFB`, `DIB`); [`check`] reads back `SRE`.
+/// with FIQ and IRQ bypass disabled (`DFB`, `DIB`). Written and read back by
+/// `super::irqchip::init`, not the entry: on a CPU with no such interface the
+/// access is an undefined instruction, which this kernel's vectors report and
+/// firmware's, still installed at the entry, do not.
 pub const ICC_SRE: u64 = 0b111;
 
 /// `HCR_EL2` when entered at EL2: `RW`, so EL1 is AArch64, and nothing else —
@@ -116,17 +119,13 @@ pub fn check() {
     for (name, live, value) in declared {
         assert_eq!(live, value, "control registers: {name} holds {live:#x}, and the declaration says {value:#x}");
     }
-    // `SRE` alone: `DFB` and `DIB` are RAO/WI or RAZ/WI as the implementation,
-    // or a hypervisor under it, chooses, and this kernel uses neither bypass.
-    let sre = read!("S3_0_C12_C12_5");
-    assert!(sre & 1 != 0, "control registers: ICC_SRE_EL1 reads {sre:#x}, so the GICv3 CPU interface is not in system registers");
     // What the drop from EL2 left, or the EL1 entry kept: EL1, on `SP_EL1`.
     let (el, spsel) = (read!("CurrentEL") >> 2 & 3, read!("SPSel") & 1);
     assert_eq!((el, spsel), (1, 1), "control registers: running at EL{el} on SP_EL{spsel}, not EL1 on SP_EL1");
     let el = ENTRY_EL.load(Ordering::Relaxed);
     log!(
         "control registers: SCTLR_EL1={SCTLR:#x} TCR_EL1={:#x} MAIR_EL1={:#x} CPACR_EL1={CPACR:#x} \
-         CNTKCTL_EL1={CNTKCTL:#x} ICC_SRE_EL1.SRE=1, as declared; entered at EL{el}{}",
+         CNTKCTL_EL1={CNTKCTL:#x}, as declared; entered at EL{el}{}",
         tcr(),
         MAIR,
         if el == 2 {
