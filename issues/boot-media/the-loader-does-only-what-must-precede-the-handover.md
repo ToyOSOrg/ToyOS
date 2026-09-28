@@ -56,11 +56,13 @@ Each stage lands on its own, in this order.
      `clock::utc_secs`.
    - `rootbridge.rs`' hex dump goes, with `toyos-acpi`'s `Walk::bytes`.
    - Ten loader and `toyos-update` comments go, each named in #583's commits.
-   - `KernelArgs::layout`, at offset 164, carries `LAYOUT` (`0x5459_0001`).
-     The kernel compares it right after arming the panel and before
-     `blackbox::arm`, and refuses any other value by name. `update` never
-     replaces the ESP loader, so a slot's kernel can meet a loader built to
-     another layout. Every field before the word keeps its offset in every
+   - `KernelArgs::layout`, at offset 164, carries `LAYOUT`: `0x5459_0000 |
+     size_of::<KernelArgs>() as u32`, so a size change moves the word with no
+     literal to remember. At this stage that is `0x5459_0000 | 1272`, the size
+     PR #583 asserts. The kernel compares it right after arming the panel and
+     before `blackbox::arm`, and refuses any other value by name. `update`
+     never replaces the ESP loader, so a slot's kernel can meet a loader built
+     to another layout. Every field before the word keeps its offset in every
      layout.
    - The kernel logs `boot: IA32_TSC_ADJUST` beside its power-on report, and
      the loader no longer reads it. aarch64's `counter_origin` is deleted.
@@ -163,9 +165,17 @@ Each stage lands on its own, in this order.
      `params.rs`' last-one-wins and kernel `main.rs`' branch for a format
      never emitted go. `kernel_stack_addr` is renamed for the offset it
      holds. x86's `_start` reads by `const offset_of!`.
-   - `LAYOUT` rises to `0x5459_0002`. `LAST_LAYOUT` pins `0x5459_0001` as a
-     literal, and the `loader-writes-the-last-layout` actuator makes the
-     loader write it. This stage is an ABI change.
+   - The derived `LAYOUT` moves on its own once `size_of::<KernelArgs>()`
+     does. `LAST_LAYOUT` pins stage 1's derived value, `0x5459_0000 | 1272`,
+     as a literal, and the `loader-writes-the-last-layout` actuator makes the
+     loader write it. A size change moves the word, and
+     `kernel_args_last_layout_refused` catches it; a moved prefix field fails
+     the prefix `offset_of!` asserts above; a change that keeps the size and
+     lands after the word — a reorder, a type swap of equal size — moves
+     neither, so every field after the word keeps its own `offset_of!` assert
+     too, and `const _: () = assert!(LAYOUT != LAST_LAYOUT);` fails the build
+     on a same-size stage until it bumps the word itself. This stage is an ABI
+     change.
    - `toyos-update`'s slot table takes `toyos-gpt`'s CRC32 and loses its own.
 
    **Exit**: `bootloader/Cargo.toml` names no `uefi-services`.
@@ -175,9 +185,12 @@ Each stage lands on its own, in this order.
    `uefi::helpers`' handler, which writes no `loader.log`.
    `kernel_args_last_layout_refused` boots with
    `loader-writes-the-last-layout` and finds the kernel's refusal naming both
-   words before any `black box:` record. Leaving `LAYOUT` at `0x5459_0001`
-   makes it fail. Moving `layout` after `root_read_tsc` fails to build. The
-   tests that read `KernelArgs` pass: `boot_from_power_on`,
+   words before any `black box:` record. Moving `layout` after
+   `root_read_tsc` fails to build, and so does padding `KernelArgs` back to
+   1272 bytes: `size_of::<KernelArgs>()` is then stage 1's size again, the
+   derived `LAYOUT` collapses onto the literal `LAST_LAYOUT`
+   (`0x5459_0000 | 1272`), and `assert!(LAYOUT != LAST_LAYOUT)` fails the
+   build. The tests that read `KernelArgs` pass: `boot_from_power_on`,
    `bar_placement_is_proven`, `root_withheld_refused`, `blackbox_*` and
    `update_*`.
 
@@ -193,7 +206,9 @@ Each stage lands on its own, in this order.
      tries left. A slot out of tries and never good is not booted again.
    - Any failure after `verify` in `start_kernel` that the image causes is a
      refusal of that slot, like a bad signature, and the pass falls to the
-     other slot.
+     other slot. Stage 5's PR lists which `start_kernel` refusals count as the
+     image's — every `load_kernel_elf` refusal of the kernel's bytes — and
+     which count as the loader's own.
    - The loader spends a try of an untried slot before it hands over. That
      write, with sealing `ARMED`, is the pass's last, after every refusal
      `start_kernel` can make, so a loader refusal is never booked as the
@@ -223,9 +238,15 @@ Each stage lands on its own, in this order.
      and saved before it is acted on, and ignored where the save fails.
    - `update --once` asks for the idle slot once and leaves it at priority 0,
      so its good flag is never read. The kept slot boots after it, and no floor
-     rises for it. `KernelArgs`' slot field gains the once variant, `LAYOUT`
-     rises to `0x5459_0003` and `LAST_LAYOUT` to `0x5459_0002`; this stage is
-     an ABI change.
+     rises for it. `KernelArgs`' slot field gains the once variant. The kernel
+     reads the field's discriminant as a raw `u32` and refuses one it does not
+     name, so an unrecognized value is a refusal rather than an out-of-range
+     `#[repr(C, u32)]` read, which is UB. The once variant keeps the struct's
+     size and every field's offset, so `size_of::<KernelArgs>()` alone would
+     leave the derived `LAYOUT` sitting at stage 4's value; this stage instead
+     bumps a layout-version component the formula also ORs in, so `LAYOUT`
+     differs from `LAST_LAYOUT` (stage 4's derived value, pinned as a literal)
+     and `assert!(LAYOUT != LAST_LAYOUT)` builds. This stage is an ABI change.
    - `update --boot-first` writes only the request. The loader writes its own
      `HD(…)/File(…)` entry and puts it first. Once stage 7 deletes
      `bootnext.rs`, that is the only boot-variable write.
@@ -272,8 +293,10 @@ Each stage lands on its own, in this order.
      that is not an ELF, and finds A booted.
    - Running `update --good` right after init spawns `[boot] start` fails
      `update_dead_service_is_never_good`. It updates B with an image whose
-     `[boot] up` names a service that exits at start. B boots three times,
-     its good flag never set, and then A boots.
+     `[boot] up` names a live service beside one that exits at start; the live
+     service writes its byte and the dead one never does. B boots three
+     times, its good flag never set because one named service never wrote,
+     and then A boots.
    - Acting on a request before taking it off the table fails
      `update_boot_first_puts_the_loader_first`.
 
