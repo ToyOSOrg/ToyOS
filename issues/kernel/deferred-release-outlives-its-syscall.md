@@ -88,6 +88,19 @@ recorded mechanism through the census instrument on the hosted shard — the
 first sighting of this class off the dev host. Its redlist row cites this
 paragraph.
 
+**A witness, PR #564 at `4919fbd7`.** `handle_basic` red at
+`tests/toyos-rust-tests/src/bin/handle_basic.rs:305` — sixteen more rounds of
+handle churn left one extra live `PipeWrite` behind (`[("PipeWrite", 5, 6)]`),
+`PipeRead` unchanged. CI run 33266767478, job 99138099030 reds the same
+assertion on `wt/toyos-wv-fs` at `b10c4daf`, green when run alone. `PipeWrite`
++1 with `PipeRead` unchanged is the last round's `drop(write)` still in the
+release queue at the second census reading: this issue's defect.
+While `handle_basic` is disabled, four of its assertions run in no gate at all —
+a closed slot reissued at generation+1, a superset of rights refused, `dup2`
+answering generation 0, then 1, and keeping it across a live replace, and a
+spent slot retiring with the table exactly one slot smaller — so this issue's
+exit brings them back by re-enabling it.
+
 ## A syscall answering the wrong word, 2026-08-20
 
 **The three witnesses above are quantities that settle. This one is not.**

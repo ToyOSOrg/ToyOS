@@ -16,10 +16,6 @@
 //! ```
 //!
 //! splits the exchange into a load and a store, and this file must red.
-//!
-//! Every side is a spawned thread, for the reason `log_wake.rs` gives: loom runs
-//! the model's own thread first, so a side written there never sees the others
-//! not having run.
 
 #![cfg(feature = "loom")]
 
