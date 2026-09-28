@@ -20,6 +20,8 @@ mod madt;
 mod resource;
 mod spcr;
 
+use toyos_bootmap::DirectMapEnd;
+
 pub use fadt::{
     century_of, dsdt_address, iapc_boot_arch, reset_register, rtc_century, Century, Reset,
     CMOS_RAM, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,
@@ -41,6 +43,41 @@ pub trait Phys: Copy {
     fn readable(self, phys: u64, len: usize) -> bool;
     /// One byte at `phys`.
     fn byte(self, phys: u64) -> u8;
+}
+
+/// Physical memory as a kernel reads it through its direct map, one byte at a
+/// time.
+///
+/// # Contract
+/// [`Mapped`] calls [`byte`](Memory::byte) only inside a range its
+/// [`readable`](Phys::readable) accepted.
+pub trait Memory: Copy {
+    fn byte(self, phys: u64) -> u8;
+}
+
+/// [`Memory`] bounded by the direct map it is read through: a range with a byte
+/// at or past its [`DirectMapEnd`], or at address zero, is refused and never
+/// read.
+#[derive(Clone, Copy)]
+pub struct Mapped<M> {
+    memory: M,
+    end: DirectMapEnd,
+}
+
+impl<M: Memory> Mapped<M> {
+    pub fn new(memory: M, end: DirectMapEnd) -> Self {
+        Self { memory, end }
+    }
+}
+
+impl<M: Memory> Phys for Mapped<M> {
+    fn readable(self, phys: u64, len: usize) -> bool {
+        phys != 0 && phys.checked_add(len as u64).is_some_and(|last| last <= self.end.get())
+    }
+
+    fn byte(self, phys: u64) -> u8 {
+        self.memory.byte(phys)
+    }
 }
 
 /// Why a firmware table cannot be used; each variant is a distinct instruction to the caller.

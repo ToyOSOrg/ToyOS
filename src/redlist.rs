@@ -37,8 +37,20 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "handle_transfer", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled { test: "hda_tone", issue: "issues/audio/hda-tone-phase-check.md" },
+    Disabled {
+        test: "i8042_mouse",
+        issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
+    },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
+    Disabled {
+        test: "lan_swap",
+        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
+    },
     Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },
+    Disabled {
+        test: "partition_claim_departure",
+        issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
+    },
     Disabled {
         test: "sched_check_build",
         issue: "issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",
@@ -50,6 +62,18 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "short_sleep_livelock",
         issue: "issues/kernel/short-sleep-livelock-stalls-on-ci-with-one-sleeper-never-returning.md",
+    },
+    Disabled {
+        test: "swap_crash_rolls_back",
+        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
+    },
+    Disabled {
+        test: "swap_netd",
+        issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
+    },
+    Disabled {
+        test: "usb_transport_break",
+        issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
     },
     Disabled {
         test: "xhci_flap",

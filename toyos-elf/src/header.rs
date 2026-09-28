@@ -157,6 +157,7 @@ pub struct ProgramHeader {
 
 pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
+pub const PT_INTERP: u32 = 3;
 pub const PT_TLS: u32 = 7;
 pub const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
 
