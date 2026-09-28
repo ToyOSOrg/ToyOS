@@ -55,8 +55,8 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
             };
             match ops::try_write(object, buf) {
                 Some(n) => Ok((n, ops::pipe_id_write(object))),
-                None => Err(match ops::pipe_id_write(object) {
-                    Some(id) => WriteBlock::Pipe(id, pipe_wait(object)),
+                None => Err(match ops::pipe_write(object) {
+                    Some((id, class)) => WriteBlock::Pipe(id, class),
                     None => WriteBlock::Refused(SyscallError::NotFound.to_u64()),
                 }),
             }
@@ -90,16 +90,6 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
     }
 }
 
-/// A connection's pipe is waited on for its peer's answer, which is IPC; a
-/// bare pipe's is a pipe wait, the one class `watch-window` holds.
-fn pipe_wait(object: &KObjectRef) -> WaitClass {
-    if matches!(object, KObjectRef::Connection(_)) {
-        WaitClass::Ipc
-    } else {
-        WaitClass::Pipe
-    }
-}
-
 /// Only these four device classes block; the rest answer `NotFound` on an
 /// empty blocking read.
 fn read_block_device(claim: &crate::object::device::DeviceClaim) -> ReadBlock {
@@ -123,8 +113,8 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
             );
             ReadBlock::Console(Deadline::at(crate::clock::now() + CONSOLE_REPOLL.duration()))
         }
-        _ => match ops::pipe_id_read(object).and_then(|id| {
-            pipe::read_watch(id).map(|end| ReadBlock::Pipe(end, id, pipe_wait(object)))
+        _ => match ops::pipe_read(object).and_then(|(id, class)| {
+            pipe::read_watch(id).map(|end| ReadBlock::Pipe(end, id, class))
         }) {
             Some(block) => block,
             None => ReadBlock::Refused(SyscallError::NotFound.to_u64()),

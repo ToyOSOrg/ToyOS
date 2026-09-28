@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError};
+use toyos_sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;
@@ -202,9 +203,19 @@ pub fn close_all(table: &mut HandleTable) {
 }
 
 pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
+    pipe_read(object).map(|(id, _)| id)
+}
+
+pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
+    pipe_write(object).map(|(id, _)| id)
+}
+
+/// The pipe a blocking read of `object` parks on, and the class its wait is
+/// charged to: a connection's is its peer's answer, which is IPC.
+pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
     match object {
-        KObjectRef::PipeRead(r) => Some(r.id()),
-        KObjectRef::Connection(c) => Some(c.rx()),
+        KObjectRef::PipeRead(r) => Some((r.id(), WaitClass::Pipe)),
+        KObjectRef::Connection(c) => Some((c.rx(), WaitClass::Ipc)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
@@ -213,10 +224,11 @@ pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
     }
 }
 
-pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
+/// [`pipe_read`]'s answer for a blocking write.
+pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
     match object {
-        KObjectRef::PipeWrite(w) => Some(w.id()),
-        KObjectRef::Connection(c) => Some(c.tx()),
+        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe)),
+        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)

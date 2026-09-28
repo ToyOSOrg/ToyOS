@@ -28,15 +28,17 @@ use std::io::Read;
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::endow::Endowments;
 use toyos::AsHandle;
 use toyos::process::Process;
-use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
+
+#[path = "../roster.rs"]
+mod roster;
+
+use roster::{await_true, cap};
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_lifecycle";
 
@@ -196,20 +198,6 @@ fn an_unrelated_wake_does_not_end_the_wait() {
     println!("  a wake meant for something else does not end a wait");
 }
 
-/// Poll until `cond` holds. The bound is a hang guard and not a timing
-/// assumption: both callers wait for a state the kernel has already decided and
-/// reaches in microseconds, and the `sysinfo` call inside `cond` is the loop's
-/// preemption point (`thread::yield_now` is a spin hint on this platform).
-fn await_true(what: &str, cond: fn() -> bool) {
-    let give_up = Instant::now() + Duration::from_secs(5);
-    while !cond() {
-        assert!(Instant::now() < give_up, "{what}");
-    }
-}
-
-/// `sched::payload::SCHED_BLOCKED` — the state column `ps` prints.
-const BLOCKED: u8 = 2;
-
 /// `SCHED_UNKNOWN`, which `sys_sysinfo` also answers for a thread whose entry
 /// is a zombie. A live thread's scheduler record is installed under the same
 /// table lock that inserts its entry, so a thread of ours reading this has
@@ -217,46 +205,12 @@ const BLOCKED: u8 = 2;
 const ZOMBIE: u8 = 3;
 
 fn main_thread_is_parked() -> bool {
-    my_threads().iter().any(|&(is_thread, state)| !is_thread && state == BLOCKED)
+    roster::main_thread_blocked(syscall::getpid().raw())
 }
 
 fn a_thread_of_mine_has_exited() -> bool {
-    my_threads().iter().any(|&(is_thread, state)| is_thread && state == ZOMBIE)
-}
-
-/// The estate's system capability, taken once.
-///
-/// **Once, because taking is a swap**: a second `take` of the same label finds
-/// `HANDLE_INVALID` and answers `None`, and two arms here want the same cap —
-/// one for the `MANAGE` refusal, one for the roster below.
-fn cap() -> &'static SysCap {
-    static CAP: OnceLock<SysCap> = OnceLock::new();
-    CAP.get_or_init(|| {
-        Endowments::get()
-            .take(SYSCAP_LABEL)
-            .expect("test-runner endows every binary it spawns a system capability")
-    })
-}
-
-/// This process's threads as the kernel publishes them: `(is a child thread,
-/// scheduler state)`.
-///
-/// Even one's own threads arrive in the machine-wide roster, which is
-/// `Rights::ROSTER` on a `SysCap` — there is no narrower question in the ABI,
-/// and `tests/testcases` names `roster` on the test-runner row for this.
-fn my_threads() -> Vec<(bool, u8)> {
-    const HEADER: usize = toyos::system::SYSINFO_HEADER_SIZE;
-    const ENTRY: usize = toyos::system::SYSINFO_ENTRY_SIZE;
-    let mut buf = vec![0u8; HEADER + ENTRY * 256];
-    let n = cap().roster(&mut buf);
-    assert!((HEADER..=buf.len()).contains(&n), "sysinfo answered {n}");
     let me = syscall::getpid().raw();
-    (HEADER..)
-        .step_by(ENTRY)
-        .take_while(|pos| pos + ENTRY <= n)
-        .filter(|&pos| u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) == me)
-        .map(|pos| (buf[pos + 9] != 0, buf[pos + 8]))
-        .collect()
+    roster::roster().iter().any(|e| e.pid == me && e.is_thread && e.state == ZOMBIE)
 }
 
 /// A second handle is a second name for one object, and the object is where the

@@ -20,9 +20,9 @@ writer queued behind it, then parks, and the writer runs. The idle CPU's steal
 probe cannot break it, because `answer_steal_requests` hands over nothing at
 `fair_len() <= 1` and at most one of the pair is runnable at any pass. The
 recorded reds fit it: `only 27 of 500 round trips completed inside 3s` is
-about 111 ms a round trip, two lapsed holds. In that run (#536 at `06c6195f`,
-`orch-runs/ab-brw-536-7.log`) the echo child made 28 reads and spent
-`cpu=1471ms`, about 50 ms each; the parent spent `cpu=1665ms`.
+about 111 ms a round trip, two lapsed holds. In that run (#536 at
+`06c6195f`) the echo child made 28 reads and spent `cpu=1471ms`, about
+50 ms each; the parent spent `cpu=1665ms`.
 
 Neither that the pair shared a CPU nor how it came to was observed; the guest
 prints no placement for it. This is read from the code and one run's numbers,
