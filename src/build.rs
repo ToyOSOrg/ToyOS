@@ -216,9 +216,11 @@ enum Clean {
     All,
     /// A crate with an explicit path (toyos-ld) is a host-workspace member,
     /// and the workspace's `target/` holds the build system's own host build
-    /// beside it, which must survive; so the directory this empties is the
-    /// workspace's `target/<userland triple>` for every architecture — the
-    /// guest half, and nothing the host builds.
+    /// beside it, which must survive; so what this empties is what the guest
+    /// build wrote there: `target/<userland triple>` for every architecture, and
+    /// `target/<PROFILE>`, its host half — proc-macros and their rlibs, which the
+    /// sysroot's compiler built and cargo, keying them on a `rustc -vV` every
+    /// ToyOS compiler prints alike, would keep for the next one.
     ToyosOnly,
 }
 
@@ -249,11 +251,11 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
                 .status();
         }
         Clean::ToyosOnly => {
-            for arch in Arch::ALL {
-                let toyos_dir = target.join(arch.userland());
-                if toyos_dir.exists() {
-                    eprintln!("external deps changed: cleaning {}", toyos_dir.display());
-                    fs::remove_dir_all(&toyos_dir).ok();
+            let guest = Arch::ALL.iter().map(|arch| target.join(arch.userland()));
+            for dir in guest.chain([target.join(PROFILE)]) {
+                if dir.exists() {
+                    eprintln!("external deps changed: cleaning {}", dir.display());
+                    fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("remove {}: {e}", dir.display()));
                 }
             }
         }
@@ -2368,6 +2370,32 @@ mod tests {
                 shipped.crates
             );
         }
+    }
+
+    /// **A standalone crate's clean takes all its guest build wrote — the
+    /// host half too, whose proc-macros and rlibs the sysroot's compiler built
+    /// — and nothing the host workspace built.**
+    #[test]
+    fn a_standalone_clean_takes_the_guest_builds_host_half_and_leaves_the_hosts() {
+        let root = toyos_tmpdir::TempDir::new("toyos-only-clean");
+        let file = |rel: &str| {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "built").unwrap();
+            path
+        };
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"ld\"]\n").unwrap();
+        let mut guest: Vec<PathBuf> =
+            Arch::ALL.iter().map(|arch| file(&format!("target/{}/{PROFILE}/ld", arch.userland()))).collect();
+        guest.push(file(&format!("target/{PROFILE}/deps/libsyn-1.rlib")));
+        let host = file("target/debug/toyos-build");
+
+        clean(&root, &root.join("ld"), Clean::ToyosOnly, "fingerprint");
+        for gone in &guest {
+            assert!(!gone.exists(), "{} survived a clean of what the guest build wrote", gone.display());
+        }
+        assert!(host.is_file(), "the host workspace's own build went");
+        assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), "fingerprint");
     }
 
     #[test]

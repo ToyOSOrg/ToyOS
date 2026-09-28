@@ -573,8 +573,9 @@ fn link_stale(stage2: &Path) -> bool {
     rustup_link().is_none_or(|current| current != stage2)
 }
 
-/// Run bootstrap, streaming its output where it was going anyway and keeping a
-/// copy.
+/// Run bootstrap in the fork checkout `rust_dir`, streaming its output where it
+/// was going anyway and keeping a copy, with the checkout's lockfiles held
+/// ([`sysroot::lockfiles_held`]).
 ///
 /// `.status()` was enough while the only question was the exit code. It is not
 /// enough for the question [`refuse_on_compile_error`] asks, which is what the
@@ -583,6 +584,7 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
     use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::{Arc, Mutex};
 
+    let _locks = sysroot::lockfiles_held(rust_dir);
     // Two literals and not one variable: `src/sourcegate::every_binary_the_host_runs_is_declared`
     // reads the argument, and a name assembled at run time is a name nobody declared.
     let (x, mut command) = if rust_dir.join("x").exists() {

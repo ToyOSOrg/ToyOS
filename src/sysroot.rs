@@ -380,6 +380,7 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
     let host = host_triple();
     let build_dir = fork.join("build/toyos-std");
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
+    forget_another_compiler(&build_dir, &host, &compiler.identity());
     // Bootstrap reuses what it built before and does not see a path dependency
     // outside the fork move, so each target's std starts from nothing.
     for target in GUEST_TARGETS {
@@ -389,11 +390,6 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
     fs::write(&config, std_config(&compiler.stage2, &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
-    // Bootstrap re-locks `library/Cargo.lock` to this worktree's `toyos-abi` and
-    // `toyos` versions. What it writes follows from their manifests, which the
-    // key already names, so the fork's own file is put back as it was: the
-    // checkout stays clean, and the key stays the one it was built for.
-    let _lock = Restore::holding(&fork.join("library/Cargo.lock"));
     let targets = GUEST_TARGETS.join(",");
     let args = ["build", "library", "--stage", "0", "--config", path_str(&config), "--warnings", "warn",
                 "--target", &targets];
@@ -404,6 +400,34 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
         toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std").join(arch.userland()));
     }
     build_dir.join(&host).join("stage0-std")
+}
+
+/// Where a std build directory names the compiler ([`Compiler::identity`]) that
+/// compiled what it holds.
+const COMPILED_BY: &str = "compiled-by";
+
+/// Remove what a compiler compiled under the std build directory `build_dir` —
+/// bootstrap itself and the libraries — unless `identity` is the compiler
+/// recorded as having compiled it, then record `identity`.
+///
+/// Cargo keys what it reuses on `rustc -vV`, which every ToyOS compiler prints
+/// alike, so another compiler's rlibs stay fresh and the next crate that does
+/// recompile is refused against them (`E0463 can't find crate`). The removal
+/// comes before the record, so an interrupted switch removes again.
+fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
+    let record = build_dir.join(COMPILED_BY);
+    if fs::read_to_string(&record).is_ok_and(|by| by == identity) {
+        return;
+    }
+    for compiled in [build_dir.join("bootstrap"), build_dir.join(host).join("stage0-std")] {
+        match fs::remove_dir_all(&compiled) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                panic!("remove {}: {e}", compiled.display())
+            }
+            _ => {}
+        }
+    }
+    fs::write(&record, identity).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
 }
 
 /// The stamp bootstrap wrote naming every library it built for `target` under
@@ -511,6 +535,16 @@ fn bootstrap_cargo() -> PathBuf {
     cargo
 }
 
+/// Both of the fork checkout `fork`'s lockfiles, put back as they were when
+/// this drops, however the build that holds it ends.
+///
+/// Bootstrap re-locks them against this worktree's `toyos-abi` and `toyos`;
+/// putting them back keeps the checkout clean, and a key read from it the one
+/// that was built.
+pub(crate) fn lockfiles_held(fork: &Path) -> [Restore; 2] {
+    [Restore::holding(&fork.join("Cargo.lock")), Restore::holding(&fork.join("library/Cargo.lock"))]
+}
+
 /// A file put back to its bytes when this drops, however the scope ends.
 pub(crate) struct Restore {
     path: PathBuf,
@@ -518,7 +552,7 @@ pub(crate) struct Restore {
 }
 
 impl Restore {
-    pub(crate) fn holding(path: &Path) -> Self {
+    fn holding(path: &Path) -> Self {
         let bytes = fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         Self { path: path.to_path_buf(), bytes }
     }
@@ -727,6 +761,72 @@ mod tests {
 
         write(&rust_dir.join("build/toyos-compiler"), "tree-2");
         assert_ne!(k(), base, "another compiler kept the old sysroot");
+    }
+
+    /// **What one compiler compiled in a std build directory is never another's**:
+    /// bootstrap's own build and the libraries go when the compiler changes,
+    /// or when nothing says which compiler made them, and stay while it does
+    /// not; what no compiler compiled stays either way.
+    #[test]
+    fn another_compiler_s_std_build_goes_and_the_same_one_s_stays() {
+        let base = TempDir::new("compiled-by");
+        let (_root, rust_dir, _fork) = keyed(&base);
+        let build = base.join("toyos-std");
+        let compiled = [
+            build.join("bootstrap/debug/deps/libserde-1.rlib"),
+            build.join("host/stage0-std/dist/build/std/build-script-build"),
+        ];
+        let downloaded = build.join("host/ci-llvm/lib/libLLVM.dylib");
+        let lay = || {
+            for file in compiled.iter().chain([&downloaded]) {
+                write(file, "built");
+            }
+        };
+        let identity = || Compiler::primary(&rust_dir).identity();
+
+        lay();
+        forget_another_compiler(&build, "host", &identity());
+        assert!(compiled.iter().all(|f| !f.exists()), "a build no record names a compiler for was kept");
+        assert!(downloaded.is_file(), "what no compiler compiled went");
+
+        lay();
+        forget_another_compiler(&build, "host", &identity());
+        assert!(compiled.iter().all(|f| f.is_file()), "the same compiler's build went");
+
+        write(&rust_dir.join("build/toyos-compiler"), "tree-2");
+        forget_another_compiler(&build, "host", &identity());
+        assert!(compiled.iter().all(|f| !f.exists()), "another compiler's build was kept");
+        assert!(downloaded.is_file(), "what no compiler compiled went");
+    }
+
+    /// **A bootstrap run leaves both of the fork's lockfiles as it found them**,
+    /// however it ends.
+    #[test]
+    fn a_held_fork_leaves_both_lockfiles_as_they_were() {
+        let base = TempDir::new("lockfiles");
+        let (_root, _rust_dir, fork) = keyed(&base);
+        let locks = [fork.join("Cargo.lock"), fork.join("library/Cargo.lock")];
+        for lock in &locks {
+            write(lock, "# as committed\n");
+        }
+        let relock = || {
+            for lock in &locks {
+                write(lock, "# re-locked to the published toyos-abi\n");
+            }
+        };
+        {
+            let _held = lockfiles_held(&fork);
+            relock();
+        }
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = lockfiles_held(&fork);
+            relock();
+            panic!("the build failed");
+        }));
+        assert!(failed.is_err());
+        for lock in &locks {
+            assert_eq!(fs::read_to_string(lock).unwrap(), "# as committed\n", "{} was left re-locked", lock.display());
+        }
     }
 
     /// A primary with the fork as its `rust` submodule at `C1`, the fork's `C2`
