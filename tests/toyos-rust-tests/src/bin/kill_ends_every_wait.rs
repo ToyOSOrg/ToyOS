@@ -35,6 +35,9 @@ const KILLED: i32 = 137;
 /// `sched::payload::SCHED_BLOCKED`, the state column of the roster.
 const BLOCKED: u8 = 2;
 
+/// `sched::payload::SCHED_UNKNOWN`, the state a zombied thread's entry carries.
+const ZOMBIE: u8 = 3;
+
 // `sleep` runs before `process-wait` and `thread-join`: both of those arms also
 // sleep underneath (the waited process's `nanosleep`, the joined thread's
 // `std::thread::sleep`), so a mutation that breaks sleep would otherwise surface
@@ -91,14 +94,30 @@ fn spawn(role: &str, endow: Option<(String, u32)>) -> Child {
     let pid = child.id();
     assert_ne!(pid, 0, "{role}: the kernel no longer answers for the child");
     println!("  {role}: waiting for the roster to show it parked");
-    while !main_thread_parked(pid) {
-        std::thread::sleep(Duration::from_millis(10));
+    loop {
+        match main_thread_status(pid) {
+            RosterStatus::Parked => break,
+            RosterStatus::NotParked => std::thread::sleep(Duration::from_millis(10)),
+            RosterStatus::Gone => {
+                panic!("{role}: the main thread is absent from the roster or zombied before the wait under test parked it")
+            }
+        }
     }
     child
 }
 
-/// Whether the roster shows `pid`'s main thread parked.
-fn main_thread_parked(pid: u32) -> bool {
+/// What the roster says about `pid`'s main thread.
+enum RosterStatus {
+    /// In the roster, blocked: parked in the wait under test.
+    Parked,
+    /// In the roster, not blocked yet.
+    NotParked,
+    /// Not in the roster, or in it as a zombie: no wait under test can still be ahead of it.
+    Gone,
+}
+
+/// What the roster says about `pid`'s main thread.
+fn main_thread_status(pid: u32) -> RosterStatus {
     const HEADER: usize = toyos::system::SYSINFO_HEADER_SIZE;
     const ENTRY: usize = toyos::system::SYSINFO_ENTRY_SIZE;
     static CAP: OnceLock<SysCap> = OnceLock::new();
@@ -110,9 +129,20 @@ fn main_thread_parked(pid: u32) -> bool {
     let mut buf = vec![0u8; HEADER + ENTRY * 256];
     let n = cap.roster(&mut buf);
     assert!((HEADER..=buf.len()).contains(&n), "sysinfo answered {n}");
-    buf[HEADER..n].chunks_exact(ENTRY).any(|entry| {
-        u32::from_le_bytes(entry[0..4].try_into().unwrap()) == pid && entry[9] == 0 && entry[8] == BLOCKED
-    })
+    let header = toyos_abi::syscall::SysinfoHeader::decode(buf[..HEADER].try_into().unwrap());
+    assert!(
+        header.entries as usize <= 256,
+        "the roster holds {} threads, more than the 256-entry buffer this test reads can carry",
+        header.entries
+    );
+    buf[HEADER..n]
+        .chunks_exact(ENTRY)
+        .find(|entry| u32::from_le_bytes(entry[0..4].try_into().unwrap()) == pid && entry[9] == 0)
+        .map_or(RosterStatus::Gone, |entry| match entry[8] {
+            BLOCKED => RosterStatus::Parked,
+            ZOMBIE => RosterStatus::Gone,
+            _ => RosterStatus::NotParked,
+        })
 }
 
 fn child(role: &str) -> ! {
