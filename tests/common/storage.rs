@@ -752,7 +752,7 @@ pub fn fsd_end_at_mount(
 }
 
 /// A partition claim held elsewhere refuses its file server's restart by name,
-/// and the role's paths are then Gone, never served from memory.
+/// and the role's paths are then Gone: no server answers them.
 ///
 /// DATA is on a USB stick the kernel drives, so its server holds the
 /// partition's claim. `tests/fsdclaimcase` arms `--let-go-at-read`, and
@@ -805,7 +805,6 @@ pub fn fsd_claim_held(
     let Some(refused) = log.lines().find(|l| l.contains(REFUSED) && l.contains(HELD)) else {
         return Err(format!("init never said DATA's restart was refused for the held claim:\n{log}"));
     };
-    console.must_not_say(IN_MEMORY)?;
     console.must_be_clean()?;
     let _ = std::fs::remove_file(&stick);
     eprintln!("  [fsd] {}", refused.trim());

@@ -414,6 +414,10 @@ const RUST_SKIP: &[&str] = &[
     // Holds every DATA client slot while it runs, so no other program may
     // need DATA on its boot. `fsd_restart` runs it.
     "fs_client_bound",
+    // Needs DATA on a stick the kernel drives and a server armed with
+    // `--let-go-at-read`, which only `tests/fsdclaimcase` boots.
+    // `fsd_claim_held` runs it there.
+    "fs_claim_held",
     // Needs a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
     "home_overwrite_zero",
     // Needs a boot where the DATA volume is ours and absent; on the shared
