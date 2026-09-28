@@ -26,11 +26,11 @@
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::{flags, pr, release, sdkversion};
+use crate::{flags, pr, release, sdkversion, testargs};
 
 /// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
 /// a minimum, never an equality, so a name GitHub requires and this does not
@@ -40,13 +40,18 @@ pub(crate) const REQUIRED_CHECKS: &[&str] = &["host"];
 /// The one issue a red nightly files or comments on, found by title.
 const NIGHTLY_RED: &str = "nightly is red";
 
+/// `nightly.yml`'s two schedules: the nightly reach six nights a week, the weekly
+/// reach on the seventh.
+const NIGHTLY_CRON: &str = "0 3 * * 1-6";
+const WEEKLY_CRON: &str = "0 3 * * 0";
+
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
-  host              every host test: the build system, the host workspace, the
-                    licences of what ships, clippy, the model controls, userland
-                    and the SDK (ci.yml, nightly)
+  host              every host test: the build system, the harness's own checks,
+                    the host workspace, the licences of what ships, clippy, the
+                    model controls, userland and the SDK (ci.yml, nightly)
   gate-stage        what protects main, read back from GitHub (ci.yml)
   toolchain         publish this tree's toolchain if nobody has (nightly)
-  guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
+  guest <i>/<n>     one shard of the guest suite at the reach its schedule names (nightly)
   tcg               one test on an emulated CPU (nightly)
   audio <i>/<n>     one shard of gate A (nightly)
   nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
@@ -98,9 +103,10 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::Host => host(root),
         Job::GateStage => vec![step("what protects main", || gate_stage(root))],
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
-        Job::Guest(shard) => {
-            guest(root, &suite_args(&["--shard", shard, "--jobs", "1", "--nightly"]))
-        }
+        Job::Guest(shard) => match guest_reach() {
+            Ok(reach) => guest(root, &suite_args(&["--shard", shard, "--jobs", "1", reach])),
+            Err(refusal) => vec![step("the reach", || Err(refusal))],
+        },
         Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
         Job::Audio(shard) => guest(root, &suite_args(&["--audio-gate", "30", "--shard", shard])),
         Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
@@ -246,9 +252,6 @@ pub(crate) const CONTROLS: &[Control] = &[
         "a_lost_try_lock_leaves_the_lock_held ... FAILED",
         "two_writers_never_overlap ... FAILED",
     ]),
-    red(KERNEL_LOOM, "poison-overwrite", Some("poison_set"), &[
-        "a_second_death_banks_beside_the_first ... FAILED",
-    ]),
     red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
         "a_claim_sees_the_enrolled_work ... FAILED",
     ]),
@@ -353,6 +356,20 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
         "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
     ]),
+    red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
+        "two_processes_killing_each_other_both_end ... FAILED",
+        "a_kill_chain_of_three_ends ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-first-out-tears-down", None, &[
+        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
+        "a_join_racing_the_kill_that_takes_its_target ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
+        "the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED",
+        "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         "a_stopped_cpu_stops_taking_work ... FAILED",
     ]),
@@ -430,12 +447,15 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// host triple for the same reason.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
+    let short = Path::new(toyos_tmpdir::SHORT_BASE);
+    let before = toyos_tmpdir::gone_roots(short);
     // Before any thread: nothing in this process reads the environment
     // concurrently with the write, and every child inherits it.
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
     let mut steps = vec![
         step("the build system", || cargo(root, &["test", "--lib"])),
+        step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
@@ -494,18 +514,19 @@ fn host(root: &Path) -> Vec<Step> {
     steps.push(step("the toyos SDK", || {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
-    steps.push(step("nothing left in $TMPDIR", || left_behind(&tmp)));
+    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
 }
 
-/// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, as a refusal.
+/// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
+/// under `short` whose process is gone that `before` does not name.
 ///
 /// Refuses if `tmp` holds no [`toyos_tmpdir::GLOBAL`] at all: every step above
 /// makes at least one `toyos_tmpdir::TempDir`, which always writes that lock
 /// file first, so its absence means this `$TMPDIR` never saw the steps at
 /// all — the guard reading an empty directory it was never given, rather than
 /// one every test actually cleaned.
-fn left_behind(tmp: &Path) -> Result<String, String> {
+fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf]) -> Result<String, String> {
     let mut left: Vec<String> = std::fs::read_dir(tmp)
         .map_err(|e| format!("read {}: {e}", tmp.display()))?
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
@@ -521,15 +542,28 @@ fn left_behind(tmp: &Path) -> Result<String, String> {
     }
     left.retain(|name| name != toyos_tmpdir::GLOBAL);
     left.sort();
-    if left.is_empty() {
+    let mut dead: Vec<String> = toyos_tmpdir::gone_roots(short)
+        .into_iter()
+        .filter(|root| !before.contains(root))
+        .map(|root| root.display().to_string())
+        .collect();
+    dead.sort();
+    let mut said = Vec::new();
+    if !left.is_empty() {
+        said.push(format!(
+            "left in {} by the steps above, each written past a `toyos_tmpdir::TempDir` or held \
+             past its test: {}",
+            tmp.display(),
+            left.join(", ")
+        ));
+    }
+    if !dead.is_empty() {
+        said.push(format!("left by a process that died during the steps above: {}", dead.join(", ")));
+    }
+    if said.is_empty() {
         return Ok("every test took its scratch with it".into());
     }
-    Err(format!(
-        "left in {} by the steps above, each written past a `toyos_tmpdir::TempDir` or held past \
-         its test: {}",
-        tmp.display(),
-        left.join(", ")
-    ))
+    Err(said.join("; "))
 }
 
 /// What protects `main` is configured outside the repository, so it is read
@@ -602,14 +636,45 @@ fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 
 // --- The guest jobs ------------------------------------------------------------
 
-/// The harness's arguments for a CI lane: a runner is a whole host with one
-/// suite on it, so the host's guest slots arbitrate nothing there.
+/// The reach flag of the run that started this job: the weekly one on the weekly
+/// schedule, and the nightly one on the other schedule, on a dispatch and off a
+/// runner.
+fn guest_reach() -> Result<&'static str, String> {
+    reach_of_event(std::env::var("GITHUB_EVENT_NAME").ok().as_deref(), || {
+        let path = std::env::var("GITHUB_EVENT_PATH").map_err(|_| {
+            "a scheduled run with no $GITHUB_EVENT_PATH names no schedule".to_string()
+        })?;
+        std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+    })
+}
+
+/// [`guest_reach`] over the event's name and a reader of its payload, which
+/// only a scheduled run asks for.
+fn reach_of_event(
+    name: Option<&str>,
+    payload: impl FnOnce() -> Result<String, String>,
+) -> Result<&'static str, String> {
+    if name != Some("schedule") {
+        return Ok(testargs::NIGHTLY.name);
+    }
+    let event: serde_json::Value =
+        serde_json::from_str(&payload()?).map_err(|e| format!("the schedule event: {e}"))?;
+    reach_of_schedule(event["schedule"].as_str())
+}
+
+fn reach_of_schedule(cron: Option<&str>) -> Result<&'static str, String> {
+    match cron {
+        Some(NIGHTLY_CRON) => Ok(testargs::NIGHTLY.name),
+        Some(WEEKLY_CRON) => Ok(testargs::WEEKLY.name),
+        other => Err(format!(
+            "a scheduled run of {other:?}, which is neither schedule nightly.yml declares"
+        )),
+    }
+}
+
 fn suite_args(args: &[&str]) -> Vec<String> {
     let mut all = vec!["test", "--test", "toyos-build", "--"];
     all.extend(args);
-    if on_runner() {
-        all.extend(["--host-slots", "0"]);
-    }
     all.into_iter().map(String::from).collect()
 }
 
@@ -618,6 +683,8 @@ fn suite_args(args: &[&str]) -> Vec<String> {
 /// every boot image — survives past the last step, which reds on it.
 fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-guest");
+    let short = Path::new(toyos_tmpdir::SHORT_BASE);
+    let before = toyos_tmpdir::gone_roots(short);
     // Before any thread, same as `host`: every child this process spawns below
     // inherits this, and nothing here reads the environment concurrently with
     // the write.
@@ -642,7 +709,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     }
     // Unconditional: whatever stopped earlier, this $TMPDIR is still this
     // process's own to judge, and a leak past a failing suite is still a leak.
-    steps.push(step("nothing left in $TMPDIR", || left_behind(&tmp)));
+    steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
 }
 
@@ -668,17 +735,13 @@ fn verdicts(log: &str) -> String {
     }
 }
 
-/// The QEMU on `PATH` against `.github/qemu-version`, and whether `/dev/kvm`
-/// opens where it is present — the two things a guest verdict must be read
-/// against.
+/// The QEMU on `PATH` against `.github/qemu-version`, the firmware it declares,
+/// and whether `/dev/kvm` opens where it is present — the three things a guest
+/// verdict must be read against.
 fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     let want = declared_qemu_version(root).ok_or(".github/qemu-version declares no version")?;
-    let out = Command::new(arch.qemu())
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("{}: {e}", arch.qemu()))?;
-    let said = String::from_utf8_lossy(&out.stdout).into_owned();
-    let have = parse_qemu_version(&said).ok_or_else(|| format!("QEMU said {said:?}"))?;
+    let have = qemu_version(arch)?;
+    let firmware = crate::firmware::of(arch)?;
     let node = Path::new("/dev/kvm").exists();
     let accelerated = arch.accel().is_hardware();
     let accel = match (node, accelerated) {
@@ -695,7 +758,10 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
         })
         .unwrap_or_else(|| "an unnamed CPU".to_string());
     let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
-    let line = format!("QEMU {have}, {accel}, {cpu}, {cores} core(s)");
+    let line = format!(
+        "QEMU {have}, firmware {}, {accel}, {cpu}, {cores} core(s)",
+        firmware.code.display()
+    );
     if have != want {
         return Err(format!(
             "{line}: this runs QEMU {have} and .github/qemu-version declares {want}. The \
@@ -723,6 +789,16 @@ pub fn declared_qemu_version(root: &Path) -> Option<String> {
     (!version.is_empty()).then_some(version)
 }
 
+/// The version the QEMU on `PATH` that boots `arch` says it is.
+pub fn qemu_version(arch: Arch) -> Result<String, String> {
+    let out = Command::new(arch.qemu())
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("{}: {e}", arch.qemu()))?;
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    parse_qemu_version(&said).ok_or_else(|| format!("QEMU said {said:?}"))
+}
+
 /// `QEMU emulator version 11.0.3 (Debian 1:11.0.3+ds-1)` → `11.0.3`.
 fn parse_qemu_version(text: &str) -> Option<String> {
     let first = text.lines().next()?;
@@ -735,8 +811,7 @@ fn parse_qemu_version(text: &str) -> Option<String> {
 /// `.github/qemu-version` declares, and nothing at all when it is.
 pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     let want = declared_qemu_version(root)?;
-    let out = Command::new(arch.qemu()).arg("--version").output().ok()?;
-    let have = parse_qemu_version(&String::from_utf8_lossy(&out.stdout))?;
+    let have = qemu_version(arch).ok()?;
     (have != want).then(|| {
         format!(
             "Note: this host runs QEMU {have} and .github/qemu-version declares {want} — \
@@ -869,7 +944,6 @@ fn at_tip(ls_remote: &str, head: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     /// A deterministic control on `host`'s `std::env::set_var("TMPDIR", ...)`:
     /// delete that line and every child writes to the real `$TMPDIR` instead of
@@ -878,7 +952,9 @@ mod tests {
     #[test]
     fn left_behind_refuses_a_tmpdir_that_never_saw_the_lock() {
         let tmp = toyos_tmpdir::TempDir::new("left-behind-blind");
-        let refusal = left_behind(&tmp).expect_err("an untouched $TMPDIR is a red, not a pass");
+        let short = toyos_tmpdir::TempDir::new("left-behind-blind-short");
+        let refusal =
+            left_behind(&tmp, &short, &[]).expect_err("an untouched $TMPDIR is a red, not a pass");
         assert!(refusal.contains(toyos_tmpdir::GLOBAL), "{refusal}");
     }
 
@@ -886,11 +962,29 @@ mod tests {
     #[test]
     fn the_host_job_names_what_its_tests_left_behind() {
         let tmp = toyos_tmpdir::TempDir::new("left-behind");
+        let short = toyos_tmpdir::TempDir::new("left-behind-short");
         std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
-        assert!(left_behind(&tmp).is_ok());
+        assert!(left_behind(&tmp, &short, &[]).is_ok());
         std::fs::create_dir(tmp.join("forkcheck-1-current")).unwrap();
-        let refusal = left_behind(&tmp).expect_err("a directory left behind is a red");
+        let refusal = left_behind(&tmp, &short, &[]).expect_err("a directory left behind is a red");
         assert!(refusal.contains("forkcheck-1-current"), "{refusal}");
+    }
+
+    /// A short root whose process died while the steps ran is named; one already
+    /// dead before them is not the steps'.
+    #[test]
+    fn the_job_names_a_short_root_a_step_left_when_it_died() {
+        let tmp = toyos_tmpdir::TempDir::new("left-behind-died");
+        let short = toyos_tmpdir::TempDir::new("left-behind-died-short");
+        std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
+        let earlier = format!("{}1-0", toyos_tmpdir::ROOT_PREFIX);
+        std::fs::create_dir(short.join(&earlier)).unwrap();
+        let before = toyos_tmpdir::gone_roots(&short);
+        assert!(left_behind(&tmp, &short, &before).is_ok());
+        let died = format!("{}2-0", toyos_tmpdir::ROOT_PREFIX);
+        std::fs::create_dir(short.join(&died)).unwrap();
+        let refusal = left_behind(&tmp, &short, &before).expect_err("a dead step's root is a red");
+        assert!(refusal.contains(&died) && !refusal.contains(&earlier), "{refusal}");
     }
 
     fn repo_root() -> PathBuf {
@@ -910,6 +1004,44 @@ mod tests {
         assert!(parse(&words("host extra")).is_err());
         assert!(parse(&words("smoke")).is_err());
         assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn each_schedule_names_its_reach_and_another_is_refused() {
+        let nightly = reach_of_schedule(Some(NIGHTLY_CRON));
+        let weekly = reach_of_schedule(Some(WEEKLY_CRON));
+        assert_eq!(nightly, Ok("--nightly"), "the nightly schedule's reach");
+        assert_eq!(weekly, Ok("--weekly"), "the weekly schedule's reach");
+        for stray in [Some("0 4 * * *"), None] {
+            let refusal = reach_of_schedule(stray).unwrap_err();
+            assert!(refusal.contains(&format!("{stray:?}")), "{refusal}");
+        }
+    }
+
+    /// Only a scheduled run reads its payload, and every other run is a nightly one.
+    #[test]
+    fn a_run_no_schedule_started_reaches_nightly() {
+        for name in [None, Some("workflow_dispatch"), Some("push")] {
+            let reach = reach_of_event(name, || panic!("{name:?} read a schedule payload"));
+            assert_eq!(reach, Ok("--nightly"), "a {name:?} run");
+        }
+        let weekly = format!(r#"{{"schedule":"{WEEKLY_CRON}"}}"#);
+        assert_eq!(reach_of_event(Some("schedule"), || Ok(weekly)), Ok("--weekly"));
+        let unread = reach_of_event(Some("schedule"), || Err("no payload".into()));
+        assert_eq!(unread, Err("no payload".into()));
+    }
+
+    /// The schedules `nightly.yml` declares are exactly the two a reach is
+    /// named for, so no scheduled run reaches the refusal above.
+    #[test]
+    fn nightly_yml_declares_the_two_schedules() {
+        let text = std::fs::read_to_string(repo_root().join(".github/workflows/nightly.yml"))
+            .expect("nightly.yml is readable");
+        let crons: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("- cron: '")?.strip_suffix('\''))
+            .collect();
+        assert_eq!(crons, [NIGHTLY_CRON, WEEKLY_CRON]);
     }
 
     /// Teeth for the controls' judge: a green negative control, a control that

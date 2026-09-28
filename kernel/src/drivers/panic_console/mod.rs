@@ -3,9 +3,8 @@
 //! Renders log records as an 8x16 text grid onto the UEFI GOP framebuffer,
 //! through `LogRecord`'s `Display`, so no second formatter can drift from
 //! `logd`. [`capture`] freezes the report before `panic_flush` drains it;
-//! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. A
-//! recovered panic must call [`discard_capture`]. virtio-gpu is
-//! unsupported: its scanout needs the unbounded-poll wedge this module avoids.
+//! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. virtio-gpu
+//! is unsupported: its scanout needs the unbounded-poll wedge this module avoids.
 //!
 //! The two holds this module ends a panic in — [`page_forever`] and
 //! [`hold_the_panel`] — are also where `crate::panic_reboot`'s bound is
@@ -24,7 +23,7 @@ use toyos_ps2::{KeyDecoder, KeyOutcome};
 use crate::log;
 use crate::panic_reboot::Bound;
 use crate::time::{Budget, Cadence, Duration};
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use crate::mm::{self, DirectMap, align_2m};
 
 /// 1 bpp 8x16, codepoints 0x20..=0x7E, one byte per row, bit 7 leftmost.
@@ -259,7 +258,7 @@ static EARLY: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
 static CAPTURE_ACCESS: access::CaptureAccess = access::CaptureAccess::new();
 
-/// `SNAPSHOT`'s writer owner until recovery; the owner may refresh and every other CPU is refused.
+/// `SNAPSHOT`'s writer owner; the owner may refresh and every other CPU is refused.
 static CAPTURE: latch::CaptureLatch = latch::CaptureLatch::new();
 
 /// The early branch's token: percpu is not up there, and exactly one CPU exists.
@@ -289,8 +288,7 @@ static CLAIMED_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 #[cfg(feature = "boot-actuators")]
 const PROBE_DELAY_NS: u64 = 5_000_000_000;
 
-/// Whether the `metal-panic-probe` boot should panic now. Called from the
-/// idle loop, whose fall-through skips recovery — the only path that never paints.
+/// Whether the `metal-panic-probe` boot should panic now.
 #[cfg(feature = "boot-actuators")]
 pub fn probe_due() -> bool {
     if !crate::actuator::metal_panic_probe() {
@@ -399,7 +397,7 @@ const fn framebuffer_is_reclaimed_ram(
     let mut i = 0;
     while i < maps.len() {
         let entry = &maps[i];
-        if entry.start < end && phys < entry.end && mm::pmm::is_usable_type(entry.uefi_type) {
+        if entry.start < end && phys < entry.end && toyos_bootmap::is_usable_type(entry.uefi_type) {
             return Some(entry.uefi_type);
         }
         i += 1;
@@ -553,19 +551,6 @@ fn captor_token() -> u32 {
         crate::arch::percpu::cpu_id().wrapping_add(2)
     } else {
         EARLY_CAPTOR
-    }
-}
-
-/// Drop the captured report: this panic was survived. Called only on the recovery branch.
-///
-/// A refused discard leaves the latch owned and the report standing, so a
-/// survived panic can still be painted as the cause of death: `CAPTURE_ACCESS`
-/// refuses only under a fatal reader, and admitting a fresh captor beneath that
-/// reader's live borrow is the worse of the two.
-pub fn discard_capture() {
-    let token = captor_token();
-    if CAPTURE.owned_by(token) && CAPTURE_ACCESS.discard() {
-        let _ = CAPTURE.release(token);
     }
 }
 

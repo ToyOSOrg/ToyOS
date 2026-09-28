@@ -88,6 +88,19 @@ recorded mechanism through the census instrument on the hosted shard — the
 first sighting of this class off the dev host. Its redlist row cites this
 paragraph.
 
+**A witness, PR #564 at `4919fbd7`.** `handle_basic` red at
+`tests/toyos-rust-tests/src/bin/handle_basic.rs:305` — sixteen more rounds of
+handle churn left one extra live `PipeWrite` behind (`[("PipeWrite", 5, 6)]`),
+`PipeRead` unchanged. CI run 33266767478, job 99138099030 reds the same
+assertion on `wt/toyos-wv-fs` at `b10c4daf`, green when run alone. `PipeWrite`
++1 with `PipeRead` unchanged is the last round's `drop(write)` still in the
+release queue at the second census reading: this issue's defect.
+While `handle_basic` is disabled, four of its assertions run in no gate at all —
+a closed slot reissued at generation+1, a superset of rights refused, `dup2`
+answering generation 0, then 1, and keeping it across a live replace, and a
+spent slot retiring with the table exactly one slot smaller — so this issue's
+exit brings them back by re-enabling it.
+
 ## A syscall answering the wrong word, 2026-08-20
 
 **The three witnesses above are quantities that settle. This one is not.**
@@ -183,12 +196,6 @@ at all.** It belongs with that track, not beside it.
 
 ### What "give the batch an owner" costs, worked out 2026-08-20
 
-An owner has to be the *thread*, not the CPU. `kill_process` phase 2 calls
-`scheduler::retire_task`, which parks the killer until the victim's record is
-released, so the killing thread can be moved to another CPU between the
-`close_all` that queues its objects and the syscall exit that would drain them —
-a per-CPU list would strand exactly the batch it was added to own.
-
 A per-thread list cannot live behind `ThreadData`'s lock either:
 `teardown_resources` holds `ProcessData` across `close_all`, and its own first
 line is that the two locks are never held together. So the list has to be on the
@@ -237,9 +244,7 @@ So the two constraints meet. **The hook queue may not park, and the row that
 would want to is not on the hook queue but in a `Drop` that also may not.**
 Moving `File` to `deferred` swaps one illegal site for another. The second shape
 above is still right for the `deferred` rows, and by itself it reaches neither
-`File` nor `close_all` — that one is also called from `recover_or_halt`'s
-`Blame::Process` arm (`arch/idt/exceptions.rs:348`), which has no syscall to
-return through.
+`File` nor `close_all`.
 
 The track carries this as **wall 4**, with the three shapes the owner has to
 choose between. Nothing here should be built before that choice, because all

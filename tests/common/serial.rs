@@ -36,13 +36,7 @@ use super::qemu::{is_kernel_line, QemuInstance};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Died {
     /// The kernel itself. Every path that writes one of these words ends at
-    /// `panic::halt_all_cpus` — **unless** the panic handler finds the panic
-    /// recoverable, which it does for a `panic!` taken in syscall context
-    /// (`kernel/src/main.rs`: the caller is killed and the machine carries on,
-    /// which is what `panic_recovery`, `heap_ceiling` and
-    /// `screen_recoverable_untouched` are about). No line says which of the two
-    /// happened. So what a caller learns here is "the kernel said it was
-    /// dying", and the guest going quiet afterwards is what says it meant it.
+    /// `panic::halt_all_cpus`.
     Kernel,
     /// A process the kernel killed: a Ring 3 fault, reported by name in
     /// `kernel/src/arch/x86_64/idt/exceptions.rs`. The machine is fine — a test whose
@@ -258,7 +252,7 @@ impl Serial {
     pub fn interleaved(&self) -> Option<&str> {
         self.text
             .lines()
-            .find(|l| !is_kernel_line(l) && l.contains("[kernel "))
+            .find(|l| !is_kernel_line(l) && l.contains(toyos_build::kernelconsole::HEAD))
     }
 
     /// The channel carried something the kernel wrote.

@@ -19,7 +19,7 @@ use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::heartbeat;
 use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::redlist;
-use toyos_build::tiers::Tier;
+use toyos_build::tiers::{Reach, Schedule, Tier};
 
 struct TestDef {
     name: String,
@@ -71,46 +71,11 @@ enum Sched {
 /// *waiting* — for a marker, for a debounce, for a device — which is why this is
 /// a measurement and not a division.
 ///
-/// **Twelve is the number for one suite on this host**, and [`HostSlots`] is
-/// what stops four agents at twelve being 48 guests on 14 cores.
+/// **Twelve is the number for one suite on this host.**
 /// An earlier table said eight; it was taken while `drain_serial` was still
 /// width-scaled and
 /// `metal_sim_pointer_churn`'s twenty-four paced drains *were* the phase.
 const DEFAULT_WIDTH: usize = 12;
-
-/// This run's claim on the host's guest budget.
-///
-/// [`DEFAULT_WIDTH`] is a number for *one* suite, and nothing was handing out
-/// the cores that two suites both spend.
-/// A second suite on this machine is not a slower first suite, it
-/// is a wrong one: `screen_fatal_halt` red at 11 s against 3.3 s alone, and an
-/// agent's hour spent chasing that as a regression.
-///
-/// **One slot per task, never per boot.** A worker holds at most one and never
-/// waits for a second while holding one, which is what makes the semaphore
-/// deadlock-free rather than lucky: several tests hold two guests at once, and a
-/// slot each would let twelve workers each hold one and each wait for another.
-///
-/// The wait sits outside the task, so it lands in the phase's wall clock and in
-/// no test's duration — a `PASS` time, and the profile [`longest_first`] orders
-/// on, both stay measurements of the test rather than of the queue.
-struct HostSlots {
-    root: std::path::PathBuf,
-    /// The name this run answers to in another run's waiting message. A pid
-    /// alone is not enough to act on: an agent needs to know which worktree.
-    label: String,
-    /// Zero is the semaphore off. It is the only way to measure a suite against
-    /// one that has it, which is what `--host-slots 0` is for.
-    budget: usize,
-}
-
-impl HostSlots {
-    fn take(&self, what: &str) -> Option<toyos_build::buildlock::Guard> {
-        let budget = self.budget;
-        (budget > 0)
-            .then(|| toyos_build::buildlock::guest_slot(&self.root, budget, &format!("{}: {what}", self.label)))
-    }
-}
 
 /// Which tier the shared boot's discovered members are in: one boot, so one
 /// tier. Declared beside [`SHARED_BLOCK`] rather than assumed, for the same
@@ -152,10 +117,6 @@ const SHARED_BLOCK: Sched = Sched::Parallel;
 /// second of guest time between its members, and what these need is a syscall
 /// number the other 150 must not have.
 const ACTUATOR_TESTS: &[&str] = &[
-    // Actions 0, 1 and 2: a kernel `panic!`, a null read in kernel context, and
-    // a spinlock held across a scheduler entry. Each kills the caller and the
-    // machine has to survive it, which is the whole verdict.
-    "panic_recovery",
     // Actions 10 and 11: the address of sixteen bytes of kernel memory and
     // whether they still hold what the kernel put there. A guest cannot read the
     // kernel's address space, so without them a kernel that still made the write
@@ -208,10 +169,6 @@ const RUST_SKIP: &[&str] = &[
     // that measured anything. It also needs the real-time band, which only
     // `tests/latencycase` endows. `latency_wake` runs it there.
     "cyclictest",
-    // Its verdict is a property of the *console capture*, which only a boot of
-    // its own can hold: in the shared boot every other binary's output is in the
-    // same stream. `console_line_atomicity` runs it.
-    "console_line_atomicity",
     // **It reboots the machine**, so in the shared block it would end the boot
     // under whichever member came next; and its verdict is the order of the
     // console after that reset, which only its own boot holds.
@@ -221,7 +178,6 @@ const RUST_SKIP: &[&str] = &[
     // `quiesce_refuses_a_second_shutdown` runs it.
     "quiesce_twice",
     // The same, and its verdict is the stop record of a boot staged around it.
-    // `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_exit` run it.
     "quiesce_last",
     // The same, and its verdict is the log volume the stop leaves.
     // `quiesce_leaves_the_volume_whole` runs it.
@@ -233,8 +189,7 @@ const RUST_SKIP: &[&str] = &[
     // `log_program_forgery` runs it.
     "log_forger",
     // Its verdict is where its one line went — `/log`, the served log and the
-    // console — which only a boot of its own reads back. `log_program_line`
-    // and `log_stream` run it.
+    // console — which only a boot of its own reads back.
     "log_origin",
     // Its verdict is where its line lands among the kernel's records, which
     // every other binary's records would crowd. `log_program_line_after_its_records`
@@ -256,7 +211,6 @@ const RUST_SKIP: &[&str] = &[
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
-    "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
@@ -307,15 +261,16 @@ const RUST_SKIP: &[&str] = &[
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
     // `netd_slow_reader`, `netd_held_open`, `netd_stalled_peer`,
-    // `netd_udp_refused`, `netd_udp_any_address` and `netd_refused_pipes` run
-    // them on `tests/netcase`, and `netd_lookup_let_go` on it with its frames
-    // held.
+    // `netd_udp_refused`, `netd_udp_any_address`, `netd_refused_pipes` and
+    // `netd_refused_accept` run them on `tests/netcase`, and
+    // `netd_lookup_let_go` on it with its frames held.
     "netd_slow_reader",
     "netd_held_open",
     "netd_stalled_peer",
     "netd_udp_refused",
     "netd_udp_any_address",
     "netd_refused_pipes",
+    "netd_refused_accept",
     "netd_lookup_let_go",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
@@ -328,8 +283,7 @@ const RUST_SKIP: &[&str] = &[
     // and the runner's bound is the fallback. `lan_swap` rides it.
     "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
-    // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
-    // which is also what makes its claim about *the recovered CPU* precise.
+    // `heap_ceiling_bounds` boots the `test-actuators` kernel for it.
     "heap_ceiling",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
@@ -350,6 +304,9 @@ const RUST_SKIP: &[&str] = &[
     // Same again, and it also needs a host injecting pointer packets:
     // `metal_sim_window_drag` runs it.
     "window_drag",
+    // Same again, and it also needs a host typing GUI+V:
+    // `metal_sim_hostile_clipboard` runs it.
+    "compositor_hostile_clipboard",
     // Needs a compositor, a terminal and a shell: `desktop_window_child`
     // launches it from that shell.
     "window_child",
@@ -422,6 +379,8 @@ const RUST_SKIP: &[&str] = &[
     // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
     // `tests/doommusiccase`.
     "doom_music",
+    // Same WAD, same config: `doom_frames` runs it on `tests/doommusiccase`.
+    "doom_frames",
     // Needs a `logd` that leaves soundd's ring unread until it says so, and a
     // capture of the tone it plays into that. `soundd_log_stall` runs it on
     // `tests/logstallcase`.
@@ -430,16 +389,6 @@ const RUST_SKIP: &[&str] = &[
     // shared boot it would be reported against whichever test came next — and
     // every one after that. `short_sleep_livelock` gives it a boot of its own.
     "abuse_short_sleep",
-    // The four below were **running twice under one name**, once here on the
-    // plain boot and once as the test that owns the name, and the collision was
-    // invisible: `check_registration` compared the three declared lists against
-    // each other and never against the binaries the registry discovers.
-    // `check_no_collisions` closes that, and this is what it found.
-    //
-    // What the shared copy adds is the binary exiting 0 on a boot that gives it
-    // nothing to measure — `cache_eviction` in 132 ms against the 22.5 s its
-    // own device shape costs (run `31247206462`).
-    //
     // `cache_eviction` needs the small NVMe that makes the cache evict at all.
     "cache_eviction",
     // `writeback_reopen` and `writeback_spawn` each need their own boot with
@@ -477,11 +426,6 @@ const RUST_SKIP: &[&str] = &[
     // succeeds and its two must-refuse assertions red for an honest reason.
     // `fsync_failed_commit` boots it with the arm.
     "fsync_flush_failed",
-    // Needs `fsync-budget-spent` and the NVMe `/home`; unstaged it passes
-    // vacuously. `home_budget_refusal_retried` boots it with both.
-    "home_fsync_budget",
-    // Needs `so-cache-tiny` and the NVMe `/home`. `so_cache_refusals` gives both.
-    "so_cache_policy",
     // Needs the NVMe `/home` and a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
     "home_overwrite_zero",
     // Needs a boot where the DATA volume is ours and absent; on the shared
@@ -521,6 +465,7 @@ const RUST_SKIP: &[&str] = &[
 /// `sched_stress` is the one whose two runs differ by *kernel* rather than by
 /// what the host staged: the shipping build here, `sched_check_build`'s
 /// assert-carrying build there.
+#[allow(dead_code, reason = "`suite_split` reads it, in `toyos-checks` alone")]
 const DRIVEN_AND_SHARED: &[&str] = &[
     // The lost-wake canary: its shared run is the count on the shipping
     // kernel with nothing staged, and `blocking_read_window` drives it again
@@ -529,11 +474,6 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
-    // Its shared run is a whole handle-lifecycle gate with its own census;
-    // `userdev_dma_fault` drives the same binary for a different reason
-    // entirely — as the proof the machine still schedules and spawns after a
-    // device was refused at the unit — and stages nothing for it.
-    "handle_basic",
     "hierarchy_paths",
     "null_sink_client_exits",
     "nvme_home_roundtrip",
@@ -564,20 +504,17 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 // used to read a screendump now reads the console instead — a screenshot is a
 // poor way to ask "did the right process come up", and thresholds over a live
 // desktop are how those tests passed vacuously twice.
-// `screen_decoder` needs no guest at all; it proves the decoder against a
-// bitmap it rendered itself, before anything points it at a real screen.
 /// The order was once about kernel rebuilds — every actuator was a build, and a
 /// feature-carrying test last left the plain-kernel ones above it untouched by
 /// the thrash. There are two kernels now and nothing to thrash; the order is
 /// kept because these are read the way they are
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
-    ("screen_decoder", Sched::Parallel, Tier::Fast),
     // Two boots, each ended at a loader line rather than at the kernel's ready
     // marker. Every verdict is a count of rows against a count of lines off the
     // same boot's console; no clock is in either.
-    ("screen_loader_lines", Sched::Parallel, Tier::Fast),
-    ("screen_gop_firmware_mode", Sched::Parallel, Tier::Nightly),
+    ("screen_loader_lines", Sched::Parallel, Tier::Nightly),
+    ("screen_gop_firmware_mode", Sched::Parallel, Tier::Weekly),
     // `thread::sleep(5 s)` is the measurement, not a ceiling: the assertion is
     // literally that the log is still on the panel five seconds after the boot
     // finished, so a 2x slower machine changes nothing about the wait but the
@@ -585,33 +522,27 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_diag_boot", Sched::Parallel, Tier::Nightly),
     // A guest halted in the window, so the panel is read where only the repaint
     // under test can have painted it.
-    ("screen_early_panel", Sched::Parallel, Tier::Fast),
+    ("screen_early_panel", Sched::Parallel, Tier::Nightly),
     ("screen_log_absent", Sched::Parallel, Tier::Fast),
     ("screen_console_shell", Sched::Parallel, Tier::Fast),
     ("screen_console_clear", Sched::Parallel, Tier::Fast),
-    ("screen_console_scroll", Sched::Parallel, Tier::Nightly),
-    ("screen_i8042_health", Sched::Parallel, Tier::Fast),
+    ("screen_console_scroll", Sched::Parallel, Tier::Fast),
+    ("screen_i8042_health", Sched::Parallel, Tier::Weekly),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
     // compositor is holding it. A fixed 2 s settle sits inside the dump's own
     // guest-timed 15 s hold, and the verdict is whether the report survived
     // the desktop's next repaint — which only where that wait lands decides,
     // so it is timer-anchored despite being a screendump-content check.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
-    ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
-    // The other half of the recovery branch: the test above reads the screen
-    // either side of a survived panic, which holds whether or not the discard
-    // did anything.
-    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
-    ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
-    ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
-    ("screen_panic_muted", Sched::Parallel, Tier::Fast),
+    ("screen_paged_scrollback", Sched::Parallel, Tier::Weekly),
+    ("screen_panic_muted", Sched::Parallel, Tier::Weekly),
     ("screen_console_panic", Sched::Parallel, Tier::Fast),
     ("screen_fatal_halt", Sched::Parallel, Tier::Fast),
     // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
     // panel's latch it will never give back: the report has to take the screen
     // anyway, and its CPU has to go on to watch the reset bound.
-    ("screen_fatal_behind_a_painter", Sched::Parallel, Tier::Fast),
+    ("screen_fatal_behind_a_painter", Sched::Parallel, Tier::Nightly),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in and the one no screen
     // test covered: `screen_fatal_halt` boots a config with no compositor, and
@@ -676,7 +607,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // and the first number against a number. Parallel: every verdict is
     // arithmetic over counters the guest printed, and there is no clock in any
     // of it.
-    ("irq_census_conservation", Sched::Parallel, Tier::Fast),
+    ("irq_census_conservation", Sched::Parallel, Tier::Weekly),
     ("control_regs", Sched::Parallel, Tier::Fast),
     ("control_regs_negative", Sched::Parallel, Tier::Fast),
     // The boot facts the metal suite reads off a machine's own records: every
@@ -688,24 +619,24 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // matches its rows; and one machine-wide TLB shootdown's cost is a
     // distribution rather than one boot's average. Every verdict is arithmetic
     // over records, with no clock in the judging, so all six are Parallel.
-    ("smp_roster_and_tsc_trail", Sched::Parallel, Tier::Fast),
-    ("pmm_accounting", Sched::Parallel, Tier::Fast),
+    ("smp_roster_and_tsc_trail", Sched::Parallel, Tier::Nightly),
+    ("pmm_accounting", Sched::Parallel, Tier::Nightly),
     // ROOT is the loader's image in memory: the kernel says it mounted it
     // from memory, and that init was spawned with no storage command issued;
     // and a loader that hands no image is a boot refused by name, never one
     // that goes to a disk for ROOT. Both are records of one boot each, with no
     // clock in the verdict.
-    ("root_from_memory", Sched::Parallel, Tier::Fast),
-    ("root_withheld_refused", Sched::Parallel, Tier::Fast),
+    ("root_from_memory", Sched::Parallel, Tier::Nightly),
+    ("root_withheld_refused", Sched::Parallel, Tier::Nightly),
     // The boot from power-on, as the kernel converts the loader's TSC readings:
     // judged against the loader's raw counts and the kernel's own rate, and
     // bounded above by the host's clock, which is Parallel-safe because load
     // only widens that bound.
-    ("boot_from_power_on", Sched::Parallel, Tier::Fast),
-    ("acpi_table_inventory", Sched::Parallel, Tier::Fast),
-    ("timer_calibration", Sched::Parallel, Tier::Fast),
-    ("pci_inventory", Sched::Parallel, Tier::Fast),
-    ("tlb_shootdown_cost", Sched::Parallel, Tier::Fast),
+    ("boot_from_power_on", Sched::Parallel, Tier::Nightly),
+    ("acpi_table_inventory", Sched::Parallel, Tier::Nightly),
+    ("timer_calibration", Sched::Parallel, Tier::Nightly),
+    ("pci_inventory", Sched::Parallel, Tier::Nightly),
+    ("tlb_shootdown_cost", Sched::Parallel, Tier::Nightly),
     // What a waiter in the real-time band pays to be woken, as a distribution
     // over ten thousand programmed wakes — and, beside it, that the number
     // reaches a machine with no serial port at all, through the kernel's own
@@ -717,15 +648,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     //
     // Serial: it is the one registration here whose verdict is a *time*, and a
     // wake latency measured beside eleven other guests is the host's schedule.
-    // Nightly for that same reason.
     ("latency_wake", Sched::Serial, Tier::Nightly),
-    ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Fast),
-    ("input_merge", Sched::Parallel, Tier::Fast),
-    ("metal_sim_input", Sched::Parallel, Tier::Fast),
-    ("input_claim_absent", Sched::Parallel, Tier::Fast),
+    ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Weekly),
+    ("input_merge", Sched::Parallel, Tier::Weekly),
+    ("metal_sim_input", Sched::Parallel, Tier::Weekly),
+    ("input_claim_absent", Sched::Parallel, Tier::Weekly),
     // One boot; every verdict is a PPM header field or a console line, and no
-    // clock is in any of them, so it is Nightly for its price and nothing else.
-    ("gpu_set_resolution", Sched::Parallel, Tier::Nightly),
+    // clock is in any of them.
+    ("gpu_set_resolution", Sched::Parallel, Tier::Fast),
     // One boot from here to `metal_sim_compositor_stall` (`METAL_SIM_DESKTOP`).
     ("metal_sim_compositor", Sched::Parallel, Tier::Nightly),
     // Reads the boot log this group already has, after the member above has
@@ -752,7 +682,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // verdict rather than a slower one. Watched to happen, on a compositor made
     // slow on purpose. Its own boot too: it leaves the pointer somewhere else
     // and the window in a different place than it found them.
-    ("metal_sim_window_drag", Sched::Serial, Tier::Nightly),
+    ("metal_sim_window_drag", Sched::Serial, Tier::Weekly),
+    // Its own boot: the compositor it abuses has to be one nothing else has
+    // touched.
+    ("metal_sim_hostile_clipboard", Sched::Parallel, Tier::Fast),
     // A host-measured drain rate with an 8 s ceiling on a 3.3 s expectation.
     // Not gate A, but the same instrument: what it measures is how fast a
     // client's audio leaves the machine.
@@ -767,17 +700,23 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Reads a device capture and requires at least MIN_SIGNAL_SECS = 0.8 s of
     // it to carry signal at peak >= 6000 — an absolute seconds-of-signal
     // floor on audio recorded in real time, not a fraction of the capture and
-    // not compute-bound: timer-anchored, and Nightly for that reason.
+    // not compute-bound: timer-anchored.
     ("doom_music", Sched::Parallel, Tier::Nightly),
+    // One C program through the toolchain's clang, read by the loader's decoder,
+    // and one boot to run it.
+    ("c_hello", Sched::Parallel, Tier::Fast),
+    // One boot and one number, with no clock in the verdict: the frames are
+    // counted in game tics, whatever the host's speed. Fast, because it is the
+    // gate on what the C compiler makes of doom.
+    ("doom_frames", Sched::Parallel, Tier::Fast),
     // A tone played while soundd's pipe to a stalled log is full. The verdicts
     // are the capture's gaps and a count of lines; the clocks are liveness
-    // guards. Nightly for the two megabytes of refusals the log reads back
-    // through a TCG guest's volume.
+    // guards.
     ("soundd_log_stall", Sched::Serial, Tier::Nightly),
     // ureq and rustls from crates.io, fetching over TLS 1.3 from a host this
     // test mints a CA for. Every verdict is a printed line or a digest; the
     // only clock is `run_test`'s ceiling.
-    ("https_tls13", Sched::Parallel, Tier::Fast),
+    ("https_tls13", Sched::Parallel, Tier::Weekly),
     // The same judge over netd's Intel driver instead of the virtio one: the
     // 82574L QEMU models has the register file the T14's I219 has, so this is
     // where that driver moves real frames before the laptop does.
@@ -793,55 +732,54 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // only machine in reach that runs that driver.
     ("log_stream_e1000e", Sched::Parallel, Tier::Nightly),
     // A reader that never reads, beside a flood: the file and a second reader
-    // are whole regardless. Nightly for the flood's megabytes.
+    // are whole regardless.
     ("log_stream_stalled_reader", Sched::Parallel, Tier::Nightly),
     // A program's line in `/log`, on the served log and on the console, under
     // the name of the pipe it came out of. Lines and a comparison; no clock.
-    ("log_program_line", Sched::Parallel, Tier::Fast),
+    ("log_program_line", Sched::Parallel, Tier::Nightly),
     // A program writing the kernel's words and another program's head: every
     // judge of `/log` reads the truth. Lines, and the exit judge; no clock.
-    ("log_program_forgery", Sched::Parallel, Tier::Fast),
+    ("log_program_forgery", Sched::Parallel, Tier::Nightly),
     // A stop the kernel refuses after logd flushed for it: a line said after
     // it is in `/log`. Lines; no clock.
-    ("log_after_a_refused_stop", Sched::Parallel, Tier::Fast),
+    ("log_after_a_refused_stop", Sched::Parallel, Tier::Nightly),
     // The same stop with logd's flush held until init resumes it: logd runs
     // the flush, then the resume, and lives. Lines; init's flush bound.
-    ("log_resume_meets_its_flush", Sched::Parallel, Tier::Fast),
+    ("log_resume_meets_its_flush", Sched::Parallel, Tier::Nightly),
     // A child flooding its parent's log ring while logd reads none of it: the
     // parent's next line is in `/log`. Lines; its clock is a guard.
-    ("log_ring_keeps_the_owners_slots", Sched::Parallel, Tier::Fast),
+    ("log_ring_keeps_the_owners_slots", Sched::Parallel, Tier::Nightly),
     // A program's line said after three batches of records, read before them:
     // `/log` carries it after every one. Lines and positions; no clock.
-    ("log_program_line_after_its_records", Sched::Parallel, Tier::Fast),
+    ("log_program_line_after_its_records", Sched::Parallel, Tier::Nightly),
     // A program printing init's word accepting a swap of netd: logd turns
     // nobody away, and a reader after it is admitted. Lines; no clock.
-    ("log_carrier_forgery", Sched::Parallel, Tier::Fast),
+    ("log_carrier_forgery", Sched::Parallel, Tier::Nightly),
     // A flood many times its ring: every line in `/log` in order or counted.
-    // Nightly for its megabytes through a TCG guest's volume.
     ("log_program_flood", Sched::Parallel, Tier::Nightly),
     // netd taking this machine's address from the network instead of carrying
     // one written down. The DHCP server it is judged against is QEMU's own, an
     // implementation of RFC 2131 this repository did not write, and its lease
     // is known field by field. The verdicts are records and a lease's fields;
     // no clock in it.
-    ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
+    ("lan_dhcp_lease", Sched::Parallel, Tier::Nightly),
     // The lease probe on the same part: netd serves its window, exits with the
     // lease's verdict, and the report it leaves on the log volume names the
     // backend's lease with frames counted both ways and the lease kept across
     // a link flap. Records and a file; its clocks are the flap's hold and the
     // drain that outlasts netd's window, and a slower machine moves neither.
-    ("lan_lease_report", Sched::Parallel, Tier::Fast),
+    ("lan_lease_report", Sched::Parallel, Tier::Weekly),
     // The T14's talking boot rehearsed on the same part: the log the guest
     // serves, read from its first line through a forward, one command over ssh
     // answered byte for byte, and `reboot` over ssh ending the guest. Lines,
     // bytes and a reset; its clocks are liveness guards on a guest that
     // stopped talking.
-    ("lan_talk", Sched::Parallel, Tier::Fast),
+    ("lan_talk", Sched::Parallel, Tier::Nightly),
     // netd answering for its name: a resolver's query through a forward onto
     // the guest's multicast DNS port is answered with the lease's address, and
     // one for another name is not answered. Bytes; its clocks are a guard on
     // the answer and the window the unanswered query is given.
-    ("lan_mdns_answer", Sched::Parallel, Tier::Fast),
+    ("lan_mdns_answer", Sched::Parallel, Tier::Nightly),
     // A running service's binary replaced with no reboot: netd swapped for its
     // rebuild over ssh while the stream runs, on virtio-net and on the 82574
     // the T14's I219 shares a register file with; a wrong digest and a
@@ -849,146 +787,144 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // once answered by the old binary running again. Records, bytes and the
     // guest's own `/log`; every clock is a liveness guard on a guest that
     // stopped talking, and probation is init's.
-    ("swap_netd", Sched::Parallel, Tier::Fast),
+    ("swap_netd", Sched::Parallel, Tier::Nightly),
     // The machine updates itself: an image over `ssh … update` is written to
     // the idle slot and is the kernel the next boot runs; every slot the loader
     // must refuse is refused by name and the other boots; and a slot whose
     // kernel dies falls back on its own, its death in the next boot's `/log`.
     // The same machine's floor, grant and hang: a floor is its key's and its
     // image's, init grants nothing the slot table names but an idle slot's
-    // partition, and a hang of an unproven image is a death. Each is 25 s or
-    // more of boots, past the fast tier's line, so they are nightly.
-    ("update_boots_the_new_kernel", Sched::Parallel, Tier::Nightly),
-    ("update_refusals_boot_the_other_slot", Sched::Parallel, Tier::Nightly),
-    ("update_falls_back_from_a_dying_kernel", Sched::Parallel, Tier::Nightly),
+    // partition, and a hang of an unproven image is a death.
+    ("update_boots_the_new_kernel", Sched::Parallel, Tier::Weekly),
+    ("update_refusals_boot_the_other_slot", Sched::Parallel, Tier::Weekly),
+    ("update_falls_back_from_a_dying_kernel", Sched::Parallel, Tier::Weekly),
     ("update_hang_kills_an_unproven_image", Sched::Parallel, Tier::Nightly),
     ("update_grant_refuses_a_stray_partition", Sched::Parallel, Tier::Nightly),
-    ("update_floor_is_the_images_own", Sched::Parallel, Tier::Nightly),
+    ("update_floor_is_the_images_own", Sched::Parallel, Tier::Weekly),
     ("update_refused_pass_credits_no_image", Sched::Parallel, Tier::Nightly),
-    ("lan_swap", Sched::Parallel, Tier::Fast),
-    ("swap_refusals", Sched::Parallel, Tier::Fast),
-    ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
+    ("lan_swap", Sched::Parallel, Tier::Nightly),
+    ("swap_refusals", Sched::Parallel, Tier::Nightly),
+    ("swap_crash_rolls_back", Sched::Parallel, Tier::Nightly),
     // The 82574 swapped to a holder that stops it and masters it while the
     // host sends it frames. The verdict is the kernel's console; its clocks
     // are liveness guards.
-    ("swap_quiets_the_function", Sched::Parallel, Tier::Fast),
+    ("swap_quiets_the_function", Sched::Parallel, Tier::Nightly),
     // The same part released as though nothing could reset it, the way the
     // T14's I219 is, and swapped to a holder that masters it with its receive
     // unit still on. The verdict is the kernel's console; its clocks are
     // liveness guards.
-    ("swap_keeps_what_nothing_reset", Sched::Parallel, Tier::Fast),
+    ("swap_keeps_what_nothing_reset", Sched::Parallel, Tier::Nightly),
     // The same part swapped to a holder that aims it outside its grant and
     // waits on its claim. The verdict is the holder's own word on what the
     // faulted claim answered; its clocks are liveness guards.
-    ("swap_fault_tells_its_holder", Sched::Parallel, Tier::Fast),
+    ("swap_fault_tells_its_holder", Sched::Parallel, Tier::Nightly),
     // An `igb` netd held, released by an Express function level reset and
     // claimed again by netd's replacement, which reads it through the window
     // its claim maps. The verdict is what the function answers there.
-    ("swap_resets_the_function", Sched::Parallel, Tier::Fast),
+    ("swap_resets_the_function", Sched::Parallel, Tier::Nightly),
     // The same `igb`, its window left where its reset put it: the replacement
     // is refused it, and the verdict is init failing the swap by the
     // device's name rather than putting netd in service without it.
     ("swap_refused_device_fails", Sched::Parallel, Tier::Fast),
     // The same, its window moved inside the cut rather than lost: the kernel
     // reads the address the register holds, not only that it holds one.
-    ("swap_moved_device_fails", Sched::Parallel, Tier::Fast),
+    ("swap_moved_device_fails", Sched::Parallel, Tier::Nightly),
     // A program sshd runs undeclared asks for the swap port. The verdict is
     // the program's own exit: the port is not in the namespace it inherited.
-    ("swap_not_inherited", Sched::Parallel, Tier::Fast),
+    ("swap_not_inherited", Sched::Parallel, Tier::Nightly),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
-    ("lan_no_lease", Sched::Parallel, Tier::Nightly),
-    ("netd_connection_caps", Sched::Parallel, Tier::Fast),
+    ("lan_no_lease", Sched::Parallel, Tier::Weekly),
+    ("netd_connection_caps", Sched::Parallel, Tier::Nightly),
     // `inspect` against the four owners on the one boot that runs them all,
     // with the negative control's binary run on it too. Every verdict is the
     // set of lines a selector printed; no clock in any.
-    ("inspect_reads_its_owners", Sched::Parallel, Tier::Fast),
+    ("inspect_reads_its_owners", Sched::Parallel, Tier::Nightly),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
     // no clock in it.
-    ("netd_listener_forgery", Sched::Parallel, Tier::Fast),
+    ("netd_listener_forgery", Sched::Parallel, Tier::Weekly),
     // The netcase boot again: a receiver that stops reading until its pipe
     // is full still gets every byte of a stream past it. The verdict is the
     // guest's byte-for-byte comparison; its clocks are liveness guards.
-    ("netd_slow_reader", Sched::Parallel, Tier::Fast),
+    ("netd_slow_reader", Sched::Parallel, Tier::Nightly),
     // The netcase boot again: client pipes netd cannot use, or loses under
     // it, cost that client its connection and never netd. The verdict is a
     // round trip after each case, a named line per refusal and a clean
     // console; its clocks are liveness guards.
-    ("netd_refused_pipes", Sched::Parallel, Tier::Fast),
+    ("netd_refused_pipes", Sched::Parallel, Tier::Nightly),
+    // The netcase boot again: an accept netd refuses for room leaves its owner
+    // a wake for the connection it left, once room returns. The verdict
+    // is the guest's wake or its absence.
+    ("netd_refused_accept", Sched::Parallel, Tier::Fast),
     // The netcase boot again: bytes held back past a full pipe move on the
     // pipe's room alone, the peer holding the connection open and silent. The
     // verdict is the guest's byte-for-byte comparison; its clocks are
     // liveness guards.
-    ("netd_held_open", Sched::Parallel, Tier::Fast),
+    ("netd_held_open", Sched::Parallel, Tier::Nightly),
     // The netcase boot again: a client out-writing a peer that stopped reading
-    // costs netd no CPU. Nightly: its verdict is the machine's busy time over
-    // a window of real time.
+    // costs netd no CPU.
     ("netd_stalled_peer", Sched::Parallel, Tier::Nightly),
     // The netcase boot again, beside a host UDP echo: a datagram the client's
     // pipe will not take whole ends that socket by name and no other. The
     // verdict is each socket's answer; its clocks are liveness guards.
-    ("netd_udp_refused", Sched::Parallel, Tier::Fast),
+    ("netd_udp_refused", Sched::Parallel, Tier::Nightly),
     // The netcase boot again, beside a host UDP echo: a socket bound through
     // std to 0.0.0.0 receives the echo's unicast reply. The verdict is the
     // reply's bytes; its clock is a liveness guard.
-    ("netd_udp_any_address", Sched::Parallel, Tier::Fast),
+    ("netd_udp_any_address", Sched::Parallel, Tier::Nightly),
     // The netcase boot, whose user network forwards 10.0.2.3 to this host's
     // resolver: `host` resolves a real name to the addresses this host's
     // resolver gives it, and a `.invalid` name to none. The verdict is the
-    // two answers; its clocks are liveness guards. Nightly, because both
-    // answers rest on this host's network, which no change to the tree moves.
+    // two answers; its clocks are liveness guards.
     ("dns_resolve", Sched::Parallel, Tier::Nightly),
     // The netcase boot, every frame it sends held once it has its lease:
     // lookups whose clients hung up or spoke again are let go at once, and
     // one nobody answers ends when its schedule does. The verdict is netd's
     // answers; the schedule's end is a bound derived from it.
-    ("netd_lookup_let_go", Sched::Parallel, Tier::Fast),
+    ("netd_lookup_let_go", Sched::Parallel, Tier::Nightly),
     // Two netcase boots, each frame put on the wire kept: the first DHCP
     // transaction ID of each differs, because netd seeds smoltcp's random
     // source from the kernel's. The verdict is two numbers off the wire.
-    ("netd_seeds_its_stack", Sched::Parallel, Tier::Fast),
+    ("netd_seeds_its_stack", Sched::Parallel, Tier::Nightly),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
-    ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
+    ("pci_function_is_exclusive", Sched::Parallel, Tier::Nightly),
     // The same boot again, read for what the kernel asked the machine before it
     // moved that function's BAR. Its own boot rather than a second assertion in
     // the row above, because that one's subject is exclusivity and a test that
     // reds tells a reader which of the two it is about. It waits out a drain for
     // the message record, so its price carries a fixed span of host wall clock.
-    ("bar_placement_is_proven", Sched::Parallel, Tier::Fast),
-    // Its own boot with a NIC under it, because sshd leaves at the bind on
-    // every other config. Every verdict is a line of text; no clock in any.
-    ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
+    ("bar_placement_is_proven", Sched::Parallel, Tier::Nightly),
     // Its own boot with a blank DATA volume, asked over ssh where everything
     // it wrote went. Every verdict is a listing or a line; no clock in any.
-    ("layout_fresh_boot", Sched::Parallel, Tier::Fast),
+    ("layout_fresh_boot", Sched::Parallel, Tier::Nightly),
     // One `SSHD_LOGIN` boot for the three, driven by `tests/ssh-client-host`.
     // Adjacent because `group_of` makes adjacency load-bearing, and one tier
     // because one boot cannot be in two. Every verdict is bytes or an exit
     // status; the client's own ceiling is a liveness guard and no assertion
     // reads a clock.
-    ("sshd_exec", Sched::Parallel, Tier::Fast),
-    ("sshd_files", Sched::Parallel, Tier::Fast),
-    ("sshd_key_auth", Sched::Parallel, Tier::Fast),
+    ("sshd_exec", Sched::Parallel, Tier::Nightly),
+    ("sshd_files", Sched::Parallel, Tier::Nightly),
+    ("sshd_key_auth", Sched::Parallel, Tier::Nightly),
     // Serial: it measures netd's 2 s handshake deadline against the host's
     // clock, and counts how many connections survived a 48 ms paced burst
     // before that deadline could expire any of them. Both are wall-clock
     // margins, which is the definition of [`Sched::Serial`].
-    ("netd_hostile_peer", Sched::Serial, Tier::Nightly),
-    ("launcher_refusals", Sched::Parallel, Tier::Fast),
+    ("netd_hostile_peer", Sched::Serial, Tier::Weekly),
+    ("launcher_refusals", Sched::Parallel, Tier::Weekly),
     // Paths a child prints and the kernel's refusals by name; no clock in any of them.
-    ("spawn_cwd", Sched::Parallel, Tier::Fast),
-    ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
-    ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
-    ("broken_data_volume_is_absent", Sched::Parallel, Tier::Fast),
-    ("data_candidate_with_bad_geometry_is_absent", Sched::Parallel, Tier::Fast),
+    ("spawn_cwd", Sched::Parallel, Tier::Nightly),
+    ("foreign_disk_untouched", Sched::Parallel, Tier::Weekly),
+    ("volume_from_another_disk", Sched::Parallel, Tier::Weekly),
+    ("broken_data_volume_is_absent", Sched::Parallel, Tier::Nightly),
+    ("data_candidate_with_bad_geometry_is_absent", Sched::Parallel, Tier::Nightly),
     // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
-    ("internal_disk_boot", Sched::Parallel, Tier::Fast),
+    ("internal_disk_boot", Sched::Parallel, Tier::Weekly),
     // One boot each, kernel lines and image bytes for verdicts, no clock in either.
-    ("block_duplicate_id", Sched::Parallel, Tier::Fast),
-    ("page_cache_partition_offset", Sched::Parallel, Tier::Fast),
+    ("block_duplicate_id", Sched::Parallel, Tier::Weekly),
+    ("page_cache_partition_offset", Sched::Parallel, Tier::Weekly),
     // A partition claimed as a device: one boot, every refusal in the guest,
     // the neighbours and the target judged off the image. Body in
     // `tests/common/partclaim.rs`, as are the two below.
@@ -996,83 +932,73 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Three boots: a disk that does not answer a read of its table, every
     // attempt refused until the deadman, and ROOT's source withheld from every
     // claim once its disk did not answer the boot's hold.
-    ("partition_claim_gives_up", Sched::Parallel, Tier::Fast),
+    ("partition_claim_gives_up", Sched::Parallel, Tier::Nightly),
     // Three boots, a USB stick's device leaving owing one claim's write and
     // coming back on another port each time: each partition's fsync answers
     // for its own writes, across a close, after another's flush, and at the
     // shutdown when nobody asked.
-    ("partition_claim_departure", Sched::Parallel, Tier::Fast),
-    // F9's negative control: a budget-refused /home fsync retried to durable,
-    // its bytes then read off the NVMe image by the host's own bcachefs
-    // reader. Body in `tests/common/storage.rs`.
-    ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
-    // The shared-object cache's two refusals. Body in `tests/common/storage.rs`.
-    ("so_cache_refusals", Sched::Parallel, Tier::Fast),
+    ("partition_claim_departure", Sched::Parallel, Tier::Nightly),
     // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
-    ("home_overwrite_reads_back", Sched::Parallel, Tier::Fast),
+    ("home_overwrite_reads_back", Sched::Parallel, Tier::Weekly),
     // One filesystem under two paths: the guest writes under each of /apps and
     // /home, the host finds both in one volume on the image. Body in
     // `tests/common/storage.rs`.
-    ("apps_and_home_are_one_filesystem", Sched::Parallel, Tier::Fast),
+    ("apps_and_home_are_one_filesystem", Sched::Parallel, Tier::Weekly),
     // `pkg install <file>` from a local archive and gbae's first run: the whole
     // package path in one boot, judged off the DATA volume once the guest is
     // gone. Body in `tests/common/pkg.rs`.
-    ("pkg_install_gbae", Sched::Parallel, Tier::Fast),
-    ("boot_partition_identity", Sched::Parallel, Tier::Fast),
+    ("pkg_install_gbae", Sched::Parallel, Tier::Nightly),
+    ("boot_partition_identity", Sched::Parallel, Tier::Nightly),
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
-    ("machine_reboot", Sched::Parallel, Tier::Fast),
+    ("machine_reboot", Sched::Parallel, Tier::Weekly),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot, and the one whose numbers are the T14's: what it judges
     // here is the plumbing, since every span on an emulated device is a fact
     // about TCG.
-    ("metal_device_probe", Sched::Parallel, Tier::Fast),
+    ("metal_device_probe", Sched::Parallel, Tier::Nightly),
     // Its verdict waits out a staged window.
-    ("job_deadline_reboots", Sched::Parallel, Tier::Fast),
+    ("job_deadline_reboots", Sched::Parallel, Tier::Nightly),
     // Its own boot, and its verdict waits out the same staged window.
     ("quiesce_stops_the_machine", Sched::Parallel, Tier::Fast),
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
-    ("quiesce_refuses_a_second_shutdown", Sched::Parallel, Tier::Fast),
+    ("quiesce_refuses_a_second_shutdown", Sched::Parallel, Tier::Nightly),
     // Its own boot: it ends the machine, and its verdict is the volume that
     // boot leaves.
-    ("quiesce_leaves_the_volume_whole", Sched::Parallel, Tier::Fast),
+    ("quiesce_leaves_the_volume_whole", Sched::Parallel, Tier::Nightly),
     // Its own boot each: it ends the machine, and its verdict is the stop
     // record that boot writes.
-    ("quiesce_wakes_on_the_last_park", Sched::Parallel, Tier::Fast),
-    ("quiesce_wakes_on_the_last_exit", Sched::Parallel, Tier::Fast),
-    // Its own boot: it ends the machine, and its verdict is a dump served
-    // inside that boot's stop.
-    ("quiesce_dump_holds_the_stopped", Sched::Parallel, Tier::Fast),
+    ("quiesce_wakes_on_the_last_park", Sched::Parallel, Tier::Nightly),
+    ("quiesce_wakes_on_the_last_teardown", Sched::Parallel, Tier::Nightly),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
     // Its own boot, and the verdict is QEMU's stop reason inside the bound.
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
-    ("watchdog_fed", Sched::Serial, Tier::Nightly),
+    ("watchdog_fed", Sched::Serial, Tier::Weekly),
     // The panicked kernel's own bound, which is what ends a boot on a machine
     // whose chipset timer does not count. Both verdicts are QEMU's stop reason
     // against a bound the guest printed, so a slower machine moves both.
     ("panic_reboots", Sched::Parallel, Tier::Nightly),
     // The same verdict from inside `percpu::init_bsp`: the earliest point a
     // panic is reportable, and the window the owner's T14 stops in.
-    ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Fast),
+    ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Nightly),
     // Serial like `watchdog_fed`: its verdict is that nothing happened for a span of host clock.
-    ("panic_key_holds", Sched::Serial, Tier::Nightly),
+    ("panic_key_holds", Sched::Serial, Tier::Weekly),
     // The boot chain's three answers. The two chain names each watch a guest
     // take its own reset and read the pass after it, so both are anchored to
     // the bound the first boot counts down.
     ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
-    ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
+    ("blackbox_done_chain", Sched::Parallel, Tier::Nightly),
     // The one bound in this tree that ends a machine nothing else can: a boot
     // whose every CPU has stopped taking scheduler passes. Its verdict is a
-    // bound counted down in the guest, so it is Nightly.
+    // bound counted down in the guest.
     ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
-    // The same bound ending the same machine with a device in its hands, and
-    // Nightly for the same reason.
-    ("usb_reset_records_the_phase_it_cut", Sched::Parallel, Tier::Nightly),
+    // The same bound ending the same machine with a device in its hands.
+    ("usb_reset_records_the_phase_it_cut", Sched::Parallel, Tier::Weekly),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
     // bounds counted down in the guest, so it belongs beside the row above.
@@ -1083,36 +1009,32 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("panic_outlives_the_deadline", Sched::Parallel, Tier::Nightly),
     // Four chained boots, one per way this kernel reaches a reset, each
     // anchored to the bound its own first boot counts down.
-    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
+    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Weekly),
     // The control on the chain: a record another image left in the same memory
     // is cleared and its pass boots a kernel, where a real predecessor's ends
     // the chain. One boot, one actuator.
     ("blackbox_foreign_record", Sched::Parallel, Tier::Fast),
     // Three launches of one image file, and the third is the one that makes it
     // a bound: a hang costs the machine one boot and never traps it.
-    ("hang_bounded_by_the_stick", Sched::Parallel, Tier::Fast),
+    ("hang_bounded_by_the_stick", Sched::Parallel, Tier::Nightly),
     // Its own boot, and every verdict is a line: no host clock in any of it.
-    ("blackbox_unclaimed_page", Sched::Parallel, Tier::Fast),
+    ("blackbox_unclaimed_page", Sched::Parallel, Tier::Nightly),
     // The seal read off the page's own bytes by QEMU, after a panic earlier than
     // anything the kernel used to learn the page's address from. Its own boot,
     // and no clock in the verdict.
-    ("blackbox_early_panic_sealed", Sched::Parallel, Tier::Fast),
+    ("blackbox_early_panic_sealed", Sched::Parallel, Tier::Nightly),
     // The same crash on the owner's machine's own shape — no serial port at all
     // — where the panel and the page are the only two channels there are.
-    ("blackbox_early_panic_sealed_muted", Sched::Parallel, Tier::Fast),
+    ("blackbox_early_panic_sealed_muted", Sched::Parallel, Tier::Nightly),
     // The exception entry's own seal, off the page's bytes on an ordinary boot.
-    ("blackbox_fault_sealed", Sched::Parallel, Tier::Fast),
-    ("double_fault_stack", Sched::Parallel, Tier::Fast),
+    ("blackbox_fault_sealed", Sched::Parallel, Tier::Nightly),
+    ("double_fault_stack", Sched::Parallel, Tier::Nightly),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
     // CPL 0 with a user `rsp`, against how many landed in Ring 3, both off the
     // same storm. No host clock is in any of it — the ten seconds are how long
     // the victim spins, not a margin anything is measured against — so Parallel.
-    //
-    // **It was three boots and priced at 19,740 ms** on the hosted lane (run
-    // 32580794553), twice the Fast ceiling. The two negative controls are the
-    // name below.
-    ("syscall_window_nmi", Sched::Parallel, Tier::Fast),
+    ("syscall_window_nmi", Sched::Parallel, Tier::Weekly),
     // The two controls on the name above: the kernel with vector 2's IST index
     // taken off, which must double fault at the entry on the NMI aimed at the
     // CPU the storm holds inside it, with `cr2 = rsp - 8` at the held `rsp`, and
@@ -1120,10 +1042,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // path. Both boots end in a halted machine that has to be drained past its
     // own report, which is where the price is. Nothing in either verdict is a
     // duration.
-    ("syscall_window_nmi_controls", Sched::Parallel, Tier::Nightly),
+    ("syscall_window_nmi_controls", Sched::Parallel, Tier::Weekly),
     // Its own boot, its own feature, and it drives the guest only through
     // stdin — nothing it touches is shared with another test.
-    ("idle_stack_guard", Sched::Parallel, Tier::Nightly),
+    ("idle_stack_guard", Sched::Parallel, Tier::Weekly),
     // Its own boot and its own feature, and it deafens one CPU for 400 ms —
     // but the deafening is a *window*, and the verdict is whether the NMI is
     // answered inside `NMI_BUDGET_NS`, which is one millisecond. That is a
@@ -1132,30 +1054,30 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // reads exactly like the defect it hunts, and it was green alone in the
     // same run and three times after it. Serial by the default rule — a
     // verdict that is a duration does not go in the parallel phase.
-    ("dump_nmi_probe", Sched::Serial, Tier::Nightly),
+    ("dump_nmi_probe", Sched::Serial, Tier::Weekly),
     // The same dump asked for inside the passes that may not serve it, on one
     // CPU. Parallel: every verdict is a line the guest prints or a count the guest
     // keeps, and no duration is in any of them.
-    ("dump_left_pending_is_owed", Sched::Parallel, Tier::Fast),
-    ("diskless_boot", Sched::Parallel, Tier::Fast),
+    ("dump_left_pending_is_owed", Sched::Parallel, Tier::Nightly),
+    ("diskless_boot", Sched::Parallel, Tier::Nightly),
     // Every verdict is a line of text or a device property, and no clock is in
     // any of them.
     ("virtio_net_no_msix", Sched::Parallel, Tier::Fast),
     // One boot of the NIC config with a staged capability list, and every
     // verdict a console line. No clock in any of them.
-    ("pci_claim_caps_truncated", Sched::Parallel, Tier::Fast),
+    ("pci_claim_caps_truncated", Sched::Parallel, Tier::Nightly),
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
-    ("virtio_used_ring", Sched::Parallel, Tier::Fast),
+    ("virtio_used_ring", Sched::Parallel, Tier::Weekly),
     // A fatal path with other CPUs running userland that makes kernel records:
     // none is stamped past the fatal record by more than an IPI takes.
-    ("panic_halts_the_others_first", Sched::Parallel, Tier::Fast),
+    ("panic_halts_the_others_first", Sched::Parallel, Tier::Nightly),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
-    ("pci_capability_walk", Sched::Parallel, Tier::Fast),
+    ("pci_capability_walk", Sched::Parallel, Tier::Weekly),
     // What QEMU was told to create against what the guest enumerated: two
     // accounts of one bus from two independent readers. One boot, every
     // verdict a set comparison.
-    ("query_pci_agreement", Sched::Parallel, Tier::Fast),
+    ("query_pci_agreement", Sched::Parallel, Tier::Weekly),
     // The root `system.toml`, booted rather than read: the shipped init list
     // and program namespaces have no other gate a harness run can reach.
     // Every verdict is a console line.
@@ -1163,45 +1085,41 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
     // no host clock decides anything.
-    ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
+    ("lapic_spurious_vector", Sched::Parallel, Tier::Weekly),
     // One boot with both stuck-device actuators armed.
-    ("driver_wait_refused", Sched::Parallel, Tier::Nightly),
+    ("driver_wait_refused", Sched::Parallel, Tier::Weekly),
     // One boot; the leak-rollback controls' two verdict lines.
-    ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
+    ("leak_rollback_selftest", Sched::Parallel, Tier::Weekly),
     // One boot; the reopen control's one verdict line.
-    ("process_reopen_selftest", Sched::Parallel, Tier::Fast),
+    ("process_reopen_selftest", Sched::Parallel, Tier::Weekly),
     // One boot; three read-fault control verdicts.
-    ("read_fault_selftests", Sched::Parallel, Tier::Fast),
-    ("xhci_many_devices", Sched::Parallel, Tier::Fast),
+    ("read_fault_selftests", Sched::Parallel, Tier::Weekly),
+    ("xhci_many_devices", Sched::Parallel, Tier::Weekly),
     // Its whole assertion is that a keystroke injected from the host crossed a
     // USB keyboard on the *second* controller, and `input_events_run` sends
     // each one only after the guest has printed the last — so a key the host
     // never got to send is a stall it names, and never a key the driver lost.
-    ("xhci_second_controller", Sched::Parallel, Tier::Fast),
-    ("xhci_two_controllers", Sched::Parallel, Tier::Fast),
+    ("xhci_second_controller", Sched::Parallel, Tier::Weekly),
+    ("xhci_two_controllers", Sched::Parallel, Tier::Weekly),
     // **Returned 2026-08-17**, on the same `input_events_run` the two names
     // above it run: it had `xhci_second_controller`'s sequence written out again
     // on fixed sleeps, and nothing sent the right-button release
     // `test_rs_input_events` exits on — so 30 s of its 35.2 s CI price was a
     // client waiting out a fallback deadline with every assertion already
     // satisfied.
-    ("xhci_msi_only", Sched::Parallel, Tier::Fast),
-    ("xhci_no_interrupt", Sched::Parallel, Tier::Fast),
-    ("nvme_large_device", Sched::Parallel, Tier::Fast),
-    ("nvme_wide_sector", Sched::Parallel, Tier::Fast),
-    ("iommu_discovery", Sched::Parallel, Tier::Nightly),
-    ("readdir_bound", Sched::Parallel, Tier::Nightly),
+    ("xhci_msi_only", Sched::Parallel, Tier::Weekly),
+    ("xhci_no_interrupt", Sched::Parallel, Tier::Weekly),
+    ("nvme_large_device", Sched::Parallel, Tier::Nightly),
+    ("nvme_wide_sector", Sched::Parallel, Tier::Weekly),
+    ("iommu_discovery", Sched::Parallel, Tier::Weekly),
+    ("readdir_bound", Sched::Parallel, Tier::Weekly),
     // Its own boot: it fills the VFS `created_dirs` cap and leaves it there.
-    ("mkdir_cap", Sched::Parallel, Tier::Fast),
+    ("mkdir_cap", Sched::Parallel, Tier::Weekly),
     // Two boots, and the verdict is that they answer differently. Nothing in it
-    // is timed: every arm is a process exit code or a byte comparison — still
-    // compute-bound, still Nightly: 11,075 ms in the sweep's final shard
-    // packing (run 31705986758) is a Cost row, the same shape
-    // `desktop_window_child` carries, not a reclassification.
+    // is timed: every arm is a process exit code or a byte comparison.
     ("fpu_isolation", Sched::Parallel, Tier::Nightly),
-    // Two boots, exit codes only (no clock, Parallel). Nightly for `Cost`: its
-    // second (`user-writable-gsbase`) kernel double-boots it over the ceiling.
-    ("gsbase_locked", Sched::Parallel, Tier::Nightly),
+    // Two boots, exit codes only (no clock, Parallel).
+    ("gsbase_locked", Sched::Parallel, Tier::Weekly),
     // The fourth declared kernel build, booted so that the scheduler core's
     // `feature = "check"` instruments are compiled and executed by a CI run at
     // all. One of its verdicts is a *quantile* of the guest's published
@@ -1226,112 +1144,80 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // construct one. Parallel, and nothing in it is a duration — every verdict
     // is a comparison between two numbers the kernel printed, both of them
     // offsets it chose itself.
-    ("operation_nesting", Sched::Parallel, Tier::Fast),
+    ("operation_nesting", Sched::Parallel, Tier::Weekly),
     ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
-    // The spawn half alone: one headless boot whose verdict is three kernel
-    // log lines.
-    ("klogd_hosted", Sched::Parallel, Tier::Fast),
-    // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
-    // spawn half is per-PR again; alone they still price over the ceiling,
-    // and sit Nightly.
-    ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
+    // The spawn half alone: one headless boot whose verdict is kernel log
+    // lines.
+    ("klogd_hosted", Sched::Parallel, Tier::Weekly),
+    ("klogd_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("lock_across_switch_halts", Sched::Parallel, Tier::Nightly),
+    ("heap_over_ceiling_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
-    // what the machine manages to say on its way out. **Two names because one
-    // over two boots measured 12 s twelve-wide on the dev host**, against
-    // `screen_late_panic`'s 5 s there for one boot of the same shape and its
-    // 3,782 ms in CI — a single name would have arrived at the fast tier's line
-    // with nothing to spare. Each boot dies inside the boot phases at the marker
-    // the harness waits for, so neither pays for a userland. Parallel and Fast:
+    // what the machine manages to say on its way out. Each boot dies inside the
+    // boot phases at the marker the harness waits for, so neither pays for a
+    // userland. Parallel:
     // every verdict is a substring of a report the guest wrote, and there is no
     // clock in any of it.
-    ("reentry_names_the_first_panic", Sched::Parallel, Tier::Fast),
+    ("reentry_names_the_first_panic", Sched::Parallel, Tier::Weekly),
     // The kernel hasher's boot-order obligation, in the row above's shape and
     // for its reasons.
-    ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
-    ("double_panic_names_the_fault", Sched::Parallel, Tier::Nightly),
+    ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Weekly),
+    ("double_panic_names_the_fault", Sched::Parallel, Tier::Weekly),
     // The third shape: a `#PF` inside a panic, which is the one
     // `fatal_exception`'s recursive short-circuit exists for and the one it
     // never classified. Same boot shape as its two neighbours — dies inside the
-    // boot phases at the marker, no userland — so Parallel and, pending its
-    // first measured run, Fast.
-    ("nested_fault_is_recursive", Sched::Parallel, Tier::Fast),
-    // The conservation law across `SYS_LOG_READ`, one registered name per
-    // width, and the nesting gate at one CPU. **Three names because one over
-    // three boots measured 17,112 ms in CI** — over the fast tier's line, and
-    // the gate the whole design turns on may not sit in the nightly tier — and
-    // because the three widths are different subjects rather than one subject
-    // measured three times. Parallel: every verdict is a ledger the
+    // boot phases at the marker, no userland — so Parallel.
+    ("nested_fault_is_recursive", Sched::Parallel, Tier::Weekly),
+    // The conservation law across `SYS_LOG_READ`, and the nesting gate at one
+    // CPU. Parallel: every verdict is a ledger the
     // guest computes over its own records — every sequence number read or
     // counted lost, every payload regenerated byte for byte — and not one of
     // them reads a clock. A loaded host makes the producers outrun the reader
     // further, which moves records from `read` into `lost` and leaves the law
     // exactly where it was.
-    ("log_conservation_smp1", Sched::Parallel, Tier::Fast),
-    ("log_conservation_smp4", Sched::Parallel, Tier::Nightly),
-    ("log_conservation_smp8", Sched::Parallel, Tier::Fast),
-    ("log_nested_emit", Sched::Parallel, Tier::Fast),
+    ("log_conservation_smp1", Sched::Parallel, Tier::Weekly),
+    ("log_nested_emit", Sched::Parallel, Tier::Weekly),
     // The same interrupt one window earlier — between a record's shard-pointer
     // read and its `xadd` — and its negative control, which is the only reader
-    // `log-unbracketed-reserve` has ever had. Parallel and Fast for
+    // `log-unbracketed-reserve` has ever had. Parallel for
     // `log_nested_emit`'s reasons: both verdicts are the guest's ledger over its
     // own records, one saying the shard kept a single order and the other that
     // it lost it by name, and no clock is in either.
-    ("log_reserve_window", Sched::Parallel, Tier::Fast),
-    ("log_reserve_window_negative", Sched::Parallel, Tier::Fast),
-    // Two processes building a fixed-width line out of two `write`s each, and a
-    // count of the lines that carry both of them. Parallel and Fast: the verdict
-    // is a count over a fixed number of lines the guest declares, so a loaded
-    // host changes when the writers run and not whether a line is whole. It boots
-    // its own machine because what it reads is the console capture, which a
-    // shared boot fills with everything else.
-    ("console_line_atomicity", Sched::Parallel, Tier::Nightly),
-    // What the C family is allowed to conclude from the line above being whole:
-    // a guest writes a daemon-shaped line into a real capture window on purpose
+    ("log_reserve_window", Sched::Parallel, Tier::Weekly),
+    ("log_reserve_window_negative", Sched::Parallel, Tier::Weekly),
+    // A guest writes a daemon-shaped line into a real capture window on purpose
     // and the real comparison ignores it, with the filter turned off as the
     // control. One boot, two `echo`s, and every verdict is a string comparison
-    // the host makes over a capture — no clock in it; Nightly because its
-    // *wall* clock is whatever the partition co-schedules, and it straddles the
-    // fast line run to run.
-    ("c_capture_ignores_daemon_lines", Sched::Parallel, Tier::Nightly),
-    // A poll on the machine's log against a *handle* going away. Parallel and
-    // Fast: both halves are verdicts the guest computes — a completion count
+    // the host makes over a capture — no clock in it.
+    ("c_capture_ignores_daemon_lines", Sched::Parallel, Tier::Weekly),
+    // A poll on the machine's log against a *handle* going away. Parallel: both
+    // halves are verdicts the guest computes — a completion count
     // immediately after a close, retried against a record arriving in the same
     // microseconds, and a completion afterwards bounded far above the two
     // scheduler passes it needs.
-    ("log_poll_outlives_a_close", Sched::Parallel, Tier::Fast),
+    ("log_poll_outlives_a_close", Sched::Parallel, Tier::Weekly),
     // The same question asked of the keyboard, where two *kinds* of object name
     // one source: a poll on stdin against the keyboard claim going away, a poll
     // on the mouse claim against its own, and an injected keystroke to show the
-    // first was still armed. Parallel and Fast: two of the three verdicts are
+    // first was still armed. Parallel: two of the three verdicts are
     // counts the guest takes immediately after a close on its own thread, and
     // the third is bounded far above the one interrupt it waits for.
     ("keyboard_claim_close_spares_stdin", Sched::Parallel, Tier::Fast),
     // One boot that stops dead in phase 3, read for what it managed to say.
-    ("pre_idle_wedge_speaks", Sched::Parallel, Tier::Fast),
+    ("pre_idle_wedge_speaks", Sched::Parallel, Tier::Weekly),
     ("i8042_health", Sched::Parallel, Tier::Nightly),
-    // And one from here to `i8042_mouse` (`I8042_TRACE`), which is why all
-    // three carry the answer the last of them needs.
-    //
-    // None of the three measures a rate. All three keep fewer bytes in flight
-    // than QEMU's PS/2 device holds, and all three do it the same way: nothing
-    // goes out until the guest has reported what the injection before it
-    // produced — `i8042_mouse` within [`MOUSE_LEAD`], the two keyboard ones a
-    // group at a time. So a guest with less of the host is a longer run and not
-    // a smaller count. **A wall clock cannot buy that bound**: the two keyboard
-    // tests spaced their injections with `thread::sleep` and put 26 and 20
-    // bytes against a sixteen-byte device queue, which held only as long as the
-    // guest kept draining, and a stalled guest lost bytes with nothing anywhere
-    // reporting a loss. `i8042_keyboard` itself held the group Nightly on a cost
-    // that was really the fixed 5 s collection deadline in
-    // `test_rs_i8042_keyboard`; now that the binary exits on a sentinel instead,
-    // all three return.
-    ("i8042_keyboard", Sched::Parallel, Tier::Fast),
-    ("i8042_no_spurious_wake", Sched::Parallel, Tier::Fast),
-    ("i8042_mouse", Sched::Parallel, Tier::Fast),
+    // And one from here to `i8042_mouse` (`I8042_TRACE`). Neither measures a
+    // rate: nothing goes out until the guest has reported what the injection
+    // before it produced — `i8042_mouse` within [`MOUSE_LEAD`], the keyboard one
+    // a group at a time — so a guest with less of the host is a longer run and
+    // not a smaller count.
+    ("i8042_no_spurious_wake", Sched::Parallel, Tier::Nightly),
+    ("i8042_mouse", Sched::Parallel, Tier::Nightly),
     // A boot each, and deliberately not a group: every one of them changes
-    // the machine's layout, which `i8042_keyboard` asserts against, and a
-    // wizard that exits the instant it has its answer leaves the guest with
-    // nothing to run — so a later member reads a console the previous one is
+    // the machine's layout, and a wizard that exits the instant it has its
+    // answer leaves the guest with nothing to run — so a later member reads a console the previous one is
     // still draining into.
     //
     // Each is a wizard conversation typed from the host, and that used to make
@@ -1343,19 +1229,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // against a marker with a twenty-second ceiling, so a slower guest is a
     // slower test and not a different verdict — which is the same argument
     // `i8042_kbd_echo` has run on at width 4 since the phase landed.
-    //
-    // **Returned 2026-08-17.** Eight of its 12.6 s CI price were
-    // `test_rs_locale_gate layout` holding an idle keyboard open until a fixed
-    // deadline expired, against half a second of injection; it exits on the End
-    // key's release now, which is `i8042_keyboard`'s own sentinel and the fix
-    // made for that whole family.
-    ("swiss_german_layout", Sched::Parallel, Tier::Fast),
+    ("swiss_german_layout", Sched::Parallel, Tier::Nightly),
     // One `LOCALE_WIZARD` boot for the pair since the drainer was made
     // runnable at commit — the boot-apiece and the injected drain keys it took
     // to share one were both the closed log-ring lag. Adjacent because
-    // `group_of` makes adjacency load-bearing; the carrier straddles the
-    // fast line run to run, so the pair is Nightly — the rider by its
-    // `RidesTheBootOf` row, the collateral that record exists to name.
+    // `group_of` makes adjacency load-bearing.
     ("locale_detect", Sched::Parallel, Tier::Nightly),
     ("locale_detect_unrecognized", Sched::Parallel, Tier::Nightly),
     // The wizard on the two surfaces the machine actually has, rather than on
@@ -1371,7 +1249,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // An unmodified iced app on the desktop, launched from the shell: the
     // window, its text in the system font, no redraw it did not ask for, and
     // a clean exit when the compositor closes it.
-    ("toolkit_iced", Sched::Parallel, Tier::Nightly),
+    ("toolkit_iced", Sched::Parallel, Tier::Weekly),
     // The wait every winit loop blocks in, the loop itself through winit's
     // API, and an animation held to the compositor's frame events.
     ("toolkit_window_wake", Sched::Parallel, Tier::Nightly),
@@ -1386,10 +1264,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // verdicts are counts the report has to agree with itself about, not a
     // wall-clock margin — the one duration in it is the dump's own 250 ms
     // ceiling, which the guest spends and the host never measures.
-    ("blocked_dump", Sched::Parallel, Tier::Fast),
+    ("blocked_dump", Sched::Parallel, Tier::Nightly),
     // Two boots of one machine compared on the guest's own `Boot: complete`
-    // with a 300 ms allowance, which is the whole assertion — a real-time
-    // verdict, so Nightly.
+    // with a 300 ms allowance, which is the whole assertion.
     ("i8042_absent", Sched::Serial, Tier::Nightly),
     // The fault quarantines (masks) the controller's GSI within milliseconds
     // of readiness — confirmed from the serial log, before a host round trip
@@ -1399,54 +1276,39 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // timer-anchored, and its price straddles the ceiling run to run (9,355 /
     // 10,568 / 11,073 ms across three measurements) for exactly that reason.
     ("i8042_quarantine", Sched::Parallel, Tier::Nightly),
-    // The negative-direction half of the same gate, and the one that runs on
-    // every PR: no QEMU can stage a CPU into spinning through idle on
-    // purpose, so this is `idle_is_spinning` proving its teeth against a
-    // crafted trace shaped like the regression, the way
-    // `control_regs`/`control_regs_verdict` split the same question.
-    ("i8042_quarantine_verdict", Sched::Parallel, Tier::Fast),
-    ("i8042_budget_expiry", Sched::Parallel, Tier::Fast),
-    ("i8042_fadt_denial", Sched::Parallel, Tier::Fast),
-    ("i8042_kbd_echo", Sched::Parallel, Tier::Fast),
-    // Returned 2026-08-13: relegated on this branch for the same 5 s fixed
-    // collection deadline the rest of the family crossed on, now fixed at
-    // the source (`test_rs_i8042_keyboard` exits on a sentinel).
+    ("i8042_budget_expiry", Sched::Parallel, Tier::Nightly),
+    ("i8042_fadt_denial", Sched::Parallel, Tier::Weekly),
+    ("i8042_kbd_echo", Sched::Parallel, Tier::Nightly),
     ("i8042_undecoded_bytes", Sched::Parallel, Tier::Fast),
     // Its verdict is a cadence, and its absence is the assertion — both read
     // off the guest's own `last byte at Nms` stamps. The gap it injects is
     // 3 s against a 500 ms period, so six periods of margin decide whether the
     // report is on the pin or on a timer.
     ("i8042_health_cadence", Sched::Parallel, Tier::Nightly),
-    ("xhci_xecp_walk", Sched::Parallel, Tier::Fast),
-    ("xhci_slot_exhaustion", Sched::Parallel, Tier::Nightly),
-    ("usb_storage_gate", Sched::Parallel, Tier::Nightly),
-    ("usb_storage_shapes", Sched::Parallel, Tier::Nightly),
-    ("usb_refused_disk_first", Sched::Parallel, Tier::Nightly),
-    ("xhci_scan_hands_over_a_free_slot", Sched::Parallel, Tier::Fast),
+    ("xhci_xecp_walk", Sched::Parallel, Tier::Weekly),
+    ("xhci_slot_exhaustion", Sched::Parallel, Tier::Weekly),
+    ("usb_storage_gate", Sched::Parallel, Tier::Weekly),
+    ("usb_storage_shapes", Sched::Parallel, Tier::Weekly),
+    ("usb_refused_disk_first", Sched::Parallel, Tier::Weekly),
+    ("xhci_scan_hands_over_a_free_slot", Sched::Parallel, Tier::Nightly),
     // The owner's freeze, staged: `device_del` on the stick carrying `/boot`
     // and `/log` while the desktop draws. Serial because both verdicts are
     // liveness ceilings — two 2 s compositor reporting intervals inside 20 s,
     // and a console round trip inside 20 s — and a guest sharing the host with
     // eleven others answers those late for reasons that are not the defect.
     ("usb_boot_stick_pulled", Sched::Serial, Tier::Nightly),
-    ("usb_pool_exhausted", Sched::Parallel, Tier::Fast),
-    ("usb_short_read", Sched::Parallel, Tier::Nightly),
-    // A plug over QMP and two host-side verdicts, neither of them a byte
-    // comparison alone: the fixed 1.2 s wait against a 100 ms debounce is a
-    // staged latency window the LATE_READY assertion is waited out before
-    // being read, which is timer-anchored regardless of how comfortable the
-    // margin looks under TCG.
-    ("usb_disk_index_stable", Sched::Parallel, Tier::Nightly),
-    ("usb_storage_write_error", Sched::Parallel, Tier::Fast),
+    ("usb_pool_exhausted", Sched::Parallel, Tier::Weekly),
+    ("usb_short_read", Sched::Parallel, Tier::Weekly),
+    ("usb_storage_write_error", Sched::Parallel, Tier::Weekly),
     ("usb_flush_optional", Sched::Parallel, Tier::Nightly),
-    ("xhci_deaf_registers", Sched::Parallel, Tier::Nightly),
+    ("xhci_deaf_registers", Sched::Parallel, Tier::Weekly),
     // The window is anchored on the controller's own port-power stamp now, not
     // boot, so a slow boot no longer eats it — but the bound is still a fixed
     // span of the guest's own TSC clock (`SLOW_CONNECT_NS`/`DEBOUNCE_NS`), and
     // a host running several other guests can still stall this one's vCPU past
     // that span for reasons that are not the defect.
     ("xhci_slow_connect", Sched::Serial, Tier::Nightly),
-    ("xhci_portsc_rw1c", Sched::Parallel, Tier::Fast),
+    ("xhci_portsc_rw1c", Sched::Parallel, Tier::Weekly),
     // One staged break and no other, which puts the driver's recovery finishing
     // on its first try in the verdict: a retried command that reaches an
     // endpoint still halted from the staged break logs a second `transport
@@ -1454,14 +1316,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // had — its own doc says one break under KVM and two under TCG off the
     // same tree, which is the race timer-anchored, not a margin, describes.
     ("usb_transport_break", Sched::Serial, Tier::Nightly),
-    ("xhci_full_speed_device", Sched::Parallel, Tier::Nightly),
-    ("xhci_superspeed_ports", Sched::Parallel, Tier::Fast),
-    // Two of the three below stage plug and unplug with fixed waits, 600-800 ms
-    // against a 100 ms debounce, plus 20-200 ms sleeps pacing the input pokes
-    // that follow — staged latency windows gating the verdict, so timer-
-    // anchored even though every individual check is a count of what the
-    // guest logged.
-    ("xhci_hotplug", Sched::Parallel, Tier::Nightly),
+    ("xhci_full_speed_device", Sched::Parallel, Tier::Weekly),
+    ("xhci_superspeed_ports", Sched::Parallel, Tier::Weekly),
     // `xhci_flap` is the one that genuinely races the host against the guest:
     // its two QMP writes have to land inside *one* 100 ms debounce or the state
     // under test never happens, and it says so — `no replug collapsed inside a
@@ -1469,56 +1325,49 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // second write past 100 ms turns a green machine red with that sentence,
     // which is indistinguishable from the driver defect it hunts.
     ("xhci_flap", Sched::Serial, Tier::Nightly),
-    ("xhci_hid_break", Sched::Parallel, Tier::Nightly),
-    ("xhci_descriptor_walk", Sched::Parallel, Tier::Fast),
+    ("xhci_descriptor_walk", Sched::Parallel, Tier::Weekly),
     ("esp_filesystem", Sched::Parallel, Tier::Nightly),
     // Three boots: a budget-refused flush retried and kept, the deadman's
     // declared death, and a hung device's failed reset escalation — the three
     // exits of `object/ops.rs`'s fsync loop. Every verdict is line presence
     // and host-side bytes, never a wall-clock margin.
     ("log_flush_retry", Sched::Parallel, Tier::Nightly),
-    ("toybox_cp_volume", Sched::Parallel, Tier::Nightly),
+    ("toybox_cp_volume", Sched::Parallel, Tier::Weekly),
     ("kernel_log_file", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is a cadence — heartbeats against a 250 ms period —
     // and a guest sharing the host with eleven others reaches its idle loop
     // late for reasons that are not the defect.
     ("kernel_heartbeat", Sched::Serial, Tier::Nightly),
-    // Both own their images and their lanes, and neither verdict is a
-    // wall-clock margin: the guest's clock starts from an instant the host set
-    // and the only duration either measures is how long a boot takes to reach
-    // its log sink, against a bound five minutes wide. A host so loaded that
-    // this failed would have failed every timed test in the phase first.
-    ("wall_clock_file", Sched::Parallel, Tier::Fast),
     // The five RTC/firmware shapes, one kernel build and one boot each. Five
     // registrations because the artifact memo builds one kernel per feature
     // set anyway, so the split costs nothing and the parallel phase gets five
-    // jobs it can place instead of one serial five-boot job it cannot. Three
-    // priced near the line across two runs and sit Nightly.
-    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Nightly),
-    ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Fast),
-    ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
-    ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
-    ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
+    // jobs it can place instead of one serial five-boot job it cannot.
+    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Weekly),
+    ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Weekly),
+    ("wall_clock_no_century", Sched::Parallel, Tier::Weekly),
+    ("wall_clock_century_register", Sched::Parallel, Tier::Weekly),
+    ("wall_clock_zone", Sched::Parallel, Tier::Weekly),
     // `xhci_slow_connect`'s shape against the disk's port, but its actuator
     // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
     // so what it stages is an ordering with no wall-clock margin on either
     // side: nothing here needs the serial tail.
-    ("late_storage_connect", Sched::Parallel, Tier::Nightly),
-    ("log_backing_read_error", Sched::Parallel, Tier::Fast),
-    ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
-    ("log_partition_layout", Sched::Parallel, Tier::Fast),
+    ("late_storage_connect", Sched::Parallel, Tier::Weekly),
+    ("log_backing_read_error", Sched::Parallel, Tier::Weekly),
+    ("boot_volume_metadata_error", Sched::Parallel, Tier::Weekly),
+    ("log_partition_layout", Sched::Parallel, Tier::Weekly),
     // What the loader does with a slot's ROOT: bytes its signature does not
     // cover, a parameter naming another, an overlapping partition and an
     // unreadable chunk refused by name, and a twin on the boot disk or on
     // another disk never read. Serial, not by association: each stages a whole
     // boot image, one a second 32 GiB stick beside it.
-    ("root_candidate_malformed", Sched::Serial, Tier::Fast),
-    ("root_named_but_absent", Sched::Serial, Tier::Fast),
-    ("root_chunk_refused", Sched::Serial, Tier::Fast),
-    ("root_candidate_overlaps", Sched::Serial, Tier::Fast),
-    ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Fast),
-    ("root_named_twice", Sched::Serial, Tier::Nightly),
-    ("log_partition_identity", Sched::Parallel, Tier::Nightly),
+    ("root_candidate_malformed", Sched::Serial, Tier::Weekly),
+    ("root_named_but_absent", Sched::Serial, Tier::Weekly),
+    ("root_chunk_refused", Sched::Serial, Tier::Nightly),
+    ("root_chunk_refused_on_a_usb_stick", Sched::Serial, Tier::Fast),
+    ("root_candidate_overlaps", Sched::Serial, Tier::Nightly),
+    ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Nightly),
+    ("root_named_twice", Sched::Serial, Tier::Weekly),
+    ("log_partition_identity", Sched::Parallel, Tier::Weekly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
     // The write-back queue's three negative controls (wall 4 of
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
@@ -1530,70 +1379,70 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The watch's lost-wake window, staged: `watch-window` holds every pipe
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
-    ("blocking_read_window", Sched::Parallel, Tier::Fast),
+    ("blocking_read_window", Sched::Parallel, Tier::Nightly),
     // A sibling's munmap and mmap staged between a typed copy's translation
     // and its store (`copy-meets-a-remap`): the store never reaches the region
     // mapped after it.
-    ("user_copy_races_munmap", Sched::Parallel, Tier::Fast),
+    ("user_copy_races_munmap", Sched::Parallel, Tier::Nightly),
     // A sibling's store staged between a thread's TLS block being placed and
     // its rebase (`tls-rebase-window`): the block is never reachable there.
-    ("tls_rebase_window", Sched::Parallel, Tier::Fast),
-    ("writeback_reopen", Sched::Parallel, Tier::Fast),
-    ("writeback_spawn", Sched::Parallel, Tier::Nightly),
-    ("writeback_durability", Sched::Parallel, Tier::Nightly),
+    ("tls_rebase_window", Sched::Parallel, Tier::Nightly),
+    ("writeback_reopen", Sched::Parallel, Tier::Weekly),
+    ("writeback_spawn", Sched::Parallel, Tier::Weekly),
+    ("writeback_durability", Sched::Parallel, Tier::Fast),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
-    ("sysret_ss_reload", Sched::Parallel, Tier::Fast),
+    ("sysret_ss_reload", Sched::Parallel, Tier::Weekly),
     // The FAT32 read side's revocation gate, and a host-side volume oracle for
     // the same reason `writeback_durability` is one: whether the clusters the
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
-    ("fat_backing_revoked", Sched::Parallel, Tier::Nightly),
+    ("fat_backing_revoked", Sched::Parallel, Tier::Weekly),
     // F5 and F6's negative controls: an fsync that must keep refusing while the
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
-    ("fsync_failed_commit", Sched::Parallel, Tier::Nightly),
-    ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
+    ("fsync_failed_commit", Sched::Parallel, Tier::Weekly),
+    ("redirty_mid_flush", Sched::Parallel, Tier::Weekly),
     // A truncate staged inside a flush's metadata window, re-read off the image.
-    ("ftruncate_flush_race", Sched::Parallel, Tier::Nightly),
+    ("ftruncate_flush_race", Sched::Parallel, Tier::Weekly),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
-    ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
+    ("fs_rename_durable", Sched::Parallel, Tier::Weekly),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
-    ("fs_dirs_durable", Sched::Parallel, Tier::Fast),
-    ("va_exhaustion", Sched::Parallel, Tier::Fast),
-    ("heap_ceiling_recovery", Sched::Parallel, Tier::Nightly),
-    ("iommu_context_absent", Sched::Parallel, Tier::Fast),
-    ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
-    ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
+    ("fs_dirs_durable", Sched::Parallel, Tier::Weekly),
+    ("va_exhaustion", Sched::Parallel, Tier::Weekly),
+    ("heap_ceiling_bounds", Sched::Parallel, Tier::Nightly),
+    ("iommu_context_absent", Sched::Parallel, Tier::Weekly),
+    ("iommu_empty_domain", Sched::Parallel, Tier::Weekly),
+    ("iommu_interrupt_remapping", Sched::Parallel, Tier::Weekly),
     ("iommu_virtio_platform", Sched::Parallel, Tier::Nightly),
-    ("iommu_domain_isolation", Sched::Parallel, Tier::Nightly),
-    ("iommu_gpu_scanout_swap", Sched::Parallel, Tier::Fast),
-    ("iommu_gpu_foreign_backing", Sched::Parallel, Tier::Fast),
-    ("iommu_hda_foreign_bdl", Sched::Parallel, Tier::Fast),
-    ("iommu_sound_foreign_dma", Sched::Parallel, Tier::Fast),
+    ("iommu_domain_isolation", Sched::Parallel, Tier::Weekly),
+    ("iommu_gpu_scanout_swap", Sched::Parallel, Tier::Nightly),
+    ("iommu_gpu_foreign_backing", Sched::Parallel, Tier::Weekly),
+    ("iommu_hda_foreign_bdl", Sched::Parallel, Tier::Weekly),
+    ("iommu_sound_foreign_dma", Sched::Parallel, Tier::Weekly),
     // The one arm of that family whose device is driven by a *process*, and
     // the only one whose verdict is that the machine is still running.
-    ("userdev_dma_fault", Sched::Parallel, Tier::Fast),
+    ("userdev_dma_fault", Sched::Parallel, Tier::Nightly),
     // Two claims of a function nothing resets, the first closed with its grant
     // still mapped: the verdict is the first holder's own grant, read in the
     // guest after the second holder wrote its own.
-    ("userdev_residue_is_its_own", Sched::Parallel, Tier::Fast),
+    ("userdev_residue_is_its_own", Sched::Parallel, Tier::Nightly),
     // blockd, the NVMe driver in userland, on a second controller beside the
     // kernel's: partitions served and timed against the kernel's driver; a
     // controller reset and its own death, each survived by the client and
     // judged off the image by the host's readers; and a transfer outside what
     // its function was lent, which is a fault record. Each boot runs several
     // blockd lifetimes and one waits out a ten-second silence.
-    ("blockd_serves_partitions", Sched::Parallel, Tier::Nightly),
-    ("blockd_survives_its_death", Sched::Parallel, Tier::Nightly),
-    ("blockd_dma_outside_the_lent", Sched::Parallel, Tier::Nightly),
+    ("blockd_serves_partitions", Sched::Parallel, Tier::Weekly),
+    ("blockd_survives_its_death", Sched::Parallel, Tier::Weekly),
+    ("blockd_dma_outside_the_lent", Sched::Parallel, Tier::Weekly),
     // What a claim may lend: a kernel driver's pool refused, the claim's bound
     // refusing the next region at the count it leaves room for, and lending and
     // taking back ten narrowed domains' worth of addresses with the kernel
     // standing; then, on a second boot, a function no release resets is never
     // lent where it was left aimed.
-    ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Nightly),
+    ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Weekly),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -1602,28 +1451,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the DMA ring takes to come round. The verdict is soundd's own liveness
     // and its counters rather than a capture, so it runs wide.
     ("hda_client_stall", Sched::Parallel, Tier::Nightly),
-    ("hda_two_live_refused", Sched::Parallel, Tier::Fast),
-    ("serial_vocabulary", Sched::Parallel, Tier::Fast),
-    // Host-side, no guest: the harness asking whether it can still tell a
-    // suspended machine from a slow one, and whether it reports one as a
-    // verdict it does not have.
-    ("suspend_detector", Sched::Parallel, Tier::Fast),
-    ("suspend_invalidates_a_verdict", Sched::Parallel, Tier::Fast),
-    ("stall_is_not_a_verdict", Sched::Parallel, Tier::Fast),
-    // Same: whether two guests can still be handed one lane's NVMe image, which
-    // is what a shared-boot reboot did to itself.
-    ("nvme_image_is_held_by_one_guest", Sched::Parallel, Tier::Fast),
-    // Same: what a whole run exits with.
-    ("run_exit_status", Sched::Parallel, Tier::Fast),
-    // Same: the control-register verdict, against the machine this tree
-    // actually booted before `arch/x86_64/control_regs.rs`.
-    ("control_regs_verdict", Sched::Parallel, Tier::Fast),
-    // Same: which of the two shared boots each binary belongs on, asked of the
-    // binaries rather than of the list that claims to name them.
-    ("suite_split", Sched::Parallel, Tier::Fast),
-    // Same: whether a run that did not attempt most of the suite's measured cost says
-    // so where its verdict is read.
-    ("nightly_tier_is_announced", Sched::Parallel, Tier::Fast),
+    ("hda_two_live_refused", Sched::Parallel, Tier::Weekly),
 ];
 
 /// The test binaries a [`MACHINE_TESTS`] or [`SCREEN_TESTS`] entry runs, which
@@ -1655,8 +1483,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("xhci_msi_only", &["test_rs_input_events"]),
     ("metal_sim_input", &["test_rs_input_events"]),
     ("xhci_flap", &["test_rs_input_events"]),
-    ("xhci_hotplug", &["test_rs_input_events"]),
-    ("xhci_hid_break", &["test_rs_input_events"]),
     ("nvme_large_device", &["test_rs_nvme_home_roundtrip"]),
     ("va_exhaustion", &["test_rs_va_exhaustion"]),
     ("readdir_bound", &["test_rs_readdir_bound"]),
@@ -1665,7 +1491,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("gsbase_locked", &["test_rs_gsbase_locked"]),
     ("sched_check_build", &["test_rs_sched_stress"]),
     ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
-    ("heap_ceiling_recovery", &["test_rs_heap_ceiling"]),
+    ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("cache_eviction", &["test_rs_cache_eviction"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
     ("i8042_health_cadence", &["test_rs_i8042_keyboard"]),
@@ -1674,7 +1500,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("i8042_kbd_echo", &["test_rs_i8042_keyboard"]),
     ("i8042_undecoded_bytes", &["test_rs_i8042_keyboard"]),
     ("i8042_quarantine", &["test_rs_i8042_keyboard"]),
-    ("i8042_keyboard", &["test_rs_i8042_keyboard"]),
     ("i8042_no_spurious_wake", &["test_rs_i8042_keyboard"]),
     ("i8042_mouse", &["test_rs_i8042_mouse"]),
     ("swiss_german_layout", &["test_rs_locale_gate"]),
@@ -1684,6 +1509,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_listener_forgery", &["test_rs_netd_listener_forgery"]),
     ("netd_slow_reader", &["test_rs_netd_slow_reader"]),
     ("netd_refused_pipes", &["test_rs_netd_refused_pipes"]),
+    ("netd_refused_accept", &["test_rs_netd_refused_accept"]),
     ("netd_held_open", &["test_rs_netd_held_open"]),
     ("netd_stalled_peer", &["test_rs_netd_stalled_peer"]),
     ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
@@ -1695,7 +1521,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("input_claim_absent", &["test_rs_input_absent"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
-    ("userdev_dma_fault", &["test_rs_handle_basic"]),
+    ("userdev_dma_fault", &["test_rs_log_origin"]),
     ("userdev_residue_is_its_own", &["test_rs_userdev_residue"]),
     ("blockd_serves_partitions", &["test_rs_blockd_io"]),
     ("blockd_survives_its_death", &["test_rs_blockd_io"]),
@@ -1712,12 +1538,14 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("metal_sim_compositor_stall", METAL_SIM_CLIENTS),
     ("metal_sim_client_death", METAL_SIM_CLIENTS),
     ("metal_sim_window_drag", &["test_rs_window_drag"]),
+    ("metal_sim_hostile_clipboard", &["test_rs_compositor_hostile_clipboard"]),
     ("desktop_window_child", &["test_rs_window_child"]),
     ("toolkit_window_wake", &["test_rs_window_wake"]),
     ("toolkit_winit_loop", &["test_rs_winit_loop"]),
     ("toolkit_winit_pace", &["test_rs_winit_pace"]),
     ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
     ("doom_music", &["test_rs_doom_music"]),
+    ("doom_frames", &["test_rs_doom_frames"]),
     ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
     ("metal_sim_null_audio", &["test_rs_audio_tone"]),
     ("null_sink_shipped_client", &["test_rs_null_sink_client_exits"]),
@@ -1735,9 +1563,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("layout_fresh_boot", &["test_rs_layout_paths"]),
     ("broken_data_volume_is_absent", &["test_rs_home_absent"]),
     ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
-    ("home_budget_refusal_retried", &["test_rs_home_fsync_budget"]),
     ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
-    ("so_cache_refusals", &["test_rs_so_cache_policy"]),
     ("boot_volume_metadata_error", &["test_rs_boot_volume_metadata_error"]),
     ("esp_filesystem", &["test_rs_esp_files"]),
     ("log_flush_retry", &["test_rs_esp_files"]),
@@ -1748,10 +1574,14 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("ftruncate_flush_race", &["test_rs_ftruncate_flush_race", "test_rs_fs_rename_durable"]),
     ("log_backing_read_error", &["test_rs_log_volume_reread"]),
     ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
-    ("writeback_durability", &["test_rs_writeback_durability", "test_rs_fat_backing_revoked"]),
+    ("writeback_durability", &["test_rs_writeback_durability"]),
     ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
+    ("syscall_panic_halts", &["test_rs_test_panic_child"]),
+    ("syscall_fault_halts", &["test_rs_test_panic_child"]),
+    ("lock_across_switch_halts", &["test_rs_test_panic_child"]),
+    ("heap_over_ceiling_halts", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
     ("dump_nmi_probe", &["test_rs_dump_stage_load"]),
     ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
@@ -1770,13 +1600,11 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("log_stream", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
     ("log_stream_e1000e", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
     ("log_stream_stalled_reader", &["test_rs_log_flood"]),
-    ("console_line_atomicity", &["test_rs_console_line_atomicity"]),
     ("c_capture_ignores_daemon_lines", &["test_c_71_macro_empty_arg"]),
     ("quiesce_stops_the_machine", &["test_rs_quiesce_writers"]),
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
-    ("quiesce_wakes_on_the_last_exit", &["test_rs_quiesce_last"]),
-    ("quiesce_dump_holds_the_stopped", &["test_rs_quiesce_writers"]),
+    ("quiesce_wakes_on_the_last_teardown", &["test_rs_quiesce_last"]),
     ("quiesce_leaves_the_volume_whole", &["test_rs_quiesce_fsync"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
@@ -1784,7 +1612,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("swap_fault_tells_its_holder", &["test_rs_swap_claim_astray"]),
     ("swap_resets_the_function", &["test_rs_swap_flr_probe"]),
     ("swap_not_inherited", &["test_rs_swap_probe"]),
-    ("wall_clock_file", &["test_rs_wall_clock_now"]),
     ("wall_clock_rtc_dead", &["test_rs_wall_clock_now"]),
     ("wall_clock_rtc_unstable", &["test_rs_wall_clock_now"]),
     ("wall_clock_no_century", &["test_rs_wall_clock_now"]),
@@ -1795,8 +1622,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
-    ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
-    ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
 
 /// The clients every `tests/metalcase` desktop boot carries: the group shares
@@ -2592,7 +2417,7 @@ const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 /// eight that stayed off the suite each say what their own output was.
 #[derive(Clone, Copy)]
 enum Stage {
-    /// toyos-cc refuses it, and this is what the refusal says.
+    /// clang refuses it, and this is what the refusal says.
     ///
     /// Quoted so that a second defect landing on the same case cannot hide
     /// under the first.
@@ -2644,19 +2469,19 @@ struct NotRun {
 
 const NOT_RUN: &[NotRun] = &[
     NotRun {
-        case: "03_struct",
-        stage: Stage::Refused("__attribute__((__cleanup__)) is not implemented"),
-        why: Why::Declined("cleanup attributes; the entry used to say _Generic, which is 33_ternary_op's reason and not this one"),
+        case: "22_floating_point",
+        stage: Stage::Built,
+        why: Why::Declined("it prints `long double`s through `%Lf`, and libc reads a `long double` as a `double` (issues/build/libc-reads-a-long-double-as-a-double.md): every `%Lf` of a line whose `double`s filled the registers prints 0.000000"),
     },
     NotRun {
         case: "31_args",
         stage: Stage::Built,
-        why: Why::Declined("its `.expect` is written for tcc's own runner, which passes it five arguments; every corpus binary here is run with none, so it prints `hello world 1` against an expected `hello world 6`. Nothing about this compiler is in it"),
+        why: Why::Declined("its `.expect` is written for tcc's own runner, which passes it five arguments; every corpus binary here is run with none, so it prints `hello world 1` against an expected `hello world 6`. Nothing about the compiler is in it"),
     },
     NotRun {
-        case: "33_ternary_op",
-        stage: Stage::Refused("_Generic type dispatch is not implemented"),
-        why: Why::Declined("_Generic"),
+        case: "34_array_assignment",
+        stage: Stage::Refused("array type 'int[4]' is not assignable"),
+        why: Why::Declined("it assigns one array to another, which C does not allow — an array is not a modifiable lvalue (C11 6.5.16p2) — and TinyCC accepts as an extension"),
     },
     NotRun {
         case: "40_stdio",
@@ -2664,9 +2489,24 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("it writes `fred.txt` into the working directory and reads it back; the corpus runs from the read-only ROOT, so the write fails and the program prints `couldn't read fred.txt`. A writable working directory for the corpus is a harness change nothing else has needed"),
     },
     NotRun {
-        case: "79_vla_continue",
+        case: "73_arm64",
         stage: Stage::Built,
-        why: Why::Declined("it asserts that a VLA declared inside a loop has the same address on every iteration — tcc reuses one stack slot and ours are heap allocations, so four of its five checks print `NOT OK` and the fifth is the allocator's accident. C99 requires no such thing, so this is tcc's implementation and not the language"),
+        why: Why::Declined("AArch64's argument-passing corners, run here on x86-64: its `long double` lines print 0.0, for libc's reason in 22_floating_point"),
+    },
+    NotRun {
+        case: "83_utf8_in_identifiers",
+        stage: Stage::Built,
+        why: Why::Declined("its identifiers are UTF-8 and so is its `printf` format, and libc's `printf` writes each byte of a format as a character of its own (issues/build/libc-printf-re-encodes-every-non-ascii-byte-of-its-format.md): `привет` arrives as `Ð¿Ñ\u{80}Ð¸Ð²ÐµÑ\u{82}`"),
+    },
+    NotRun {
+        case: "95_bitfields",
+        stage: Stage::Built,
+        why: Why::Declined("its expected layouts are TinyCC's, and TinyCC packs a `#pragma pack(1)` bitfield struct otherwise than GCC and clang do: `TEST 2 - PACKED` is 12 bytes there and 11 here, and every packed test after it differs the same way"),
+    },
+    NotRun {
+        case: "95_bitfields_ms",
+        stage: Stage::Built,
+        why: Why::Declined("the same file under `ms_struct`, whose expected values are TinyCC's widths for an MS-layout bitfield: `fffffffffffffffe` there, `fffffffe` here"),
     },
     NotRun {
         case: "60_errors_and_warnings",
@@ -2674,74 +2514,39 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("a meta-test of compiler diagnostics: every branch is behind a -D the harness does not pass, so the file preprocesses to no `main`"),
     },
     NotRun {
-        case: "73_arm64",
-        stage: Stage::Refused("va_arg of a struct or union"),
-        why: Why::Declined("aarch64-specific, and this target is x86-64. Its myprintf pulls whole structs through va_arg, which toyos-cc refuses by name — the case used to reach the Cranelift verifier instead, through the one expression that yielded an aggregate as a scalar"),
-    },
-    NotRun {
-        case: "83_utf8_in_identifiers",
-        stage: Stage::Refused("unexpected character '\u{ef}' (0xef)"),
-        why: Why::Declined("non-ASCII identifiers. UTF-8 in strings and comments works; the lexer stops on the byte it could not read, so nothing is dropped"),
-    },
-    NotRun {
-        case: "85_asm_outside_function",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("emitting file-scope asm needs an x86-64 assembler"),
-    },
-    NotRun {
-        case: "94_generic",
-        stage: Stage::Refused("_Generic type dispatch is not implemented"),
-        why: Why::Declined("_Generic"),
-    },
-    NotRun {
-        case: "95_bitfields",
-        stage: Stage::Refused("#pragma pack(push,1) is not implemented"),
-        why: Why::Declined("a self-including bitfield torture test wanting #pragma pack, ms_struct, gcc_struct, aligned on a declaration specifier and packed bitfields — every one of them a deliberate refusal"),
-    },
-    NotRun {
-        case: "95_bitfields_ms",
-        stage: Stage::Refused("#pragma pack(push,1) is not implemented"),
-        why: Why::Declined("the same file again, through a two-line wrapper"),
-    },
-    NotRun {
         case: "96_nodata_wanted",
         stage: Stage::NoLink("main"),
-        why: Why::Declined("seven configurations selected by a -D from tcc's own Makefile, four of which expect compiler diagnostics. The harness compiles one configuration and compares one stdout, so no fix to toyos-cc can make it pass"),
-    },
-    NotRun {
-        case: "98_al_ax_extend",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("file-scope asm again"),
+        why: Why::Declined("seven configurations selected by a -D from tcc's own Makefile, four of which expect compiler diagnostics. The harness compiles one configuration and compares one stdout, so no compiler can make it pass"),
     },
     NotRun {
         case: "99_fastcall",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("32-bit x86 — pushl %esp, pusha, __attribute((fastcall)). It stops on the file-scope asm at line 26 before reaching any of that"),
+        stage: Stage::Refused("instruction requires: Not 64-bit mode"),
+        why: Why::Declined("32-bit x86 — pushl %esp, pusha, __attribute((fastcall)) — and this target is x86-64"),
     },
     NotRun {
         case: "101_cleanup",
-        stage: Stage::Refused("__attribute__((cleanup)) is not implemented"),
-        why: Why::Declined("cleanup attributes"),
+        stage: Stage::Built,
+        why: Why::Declined("`main` returns its counter, 105, and a corpus case passes on exit 0; it also prints a `long double` through `%Lf`, for libc's reason in 22_floating_point"),
     },
     NotRun {
         case: "102_alignas",
-        stage: Stage::Refused("expected Semi, got Alignas"),
-        why: Why::Declined("_Alignas. It stops as a parse error rather than by name, which reads worse and is still a stop"),
+        stage: Stage::Built,
+        why: Why::Declined("`i8` takes its alignment from `__attribute__((aligned(16)))` on a type name inside `_Alignas`, which the case's own comment says clang does not apply, so it prints `1 1 1 0`"),
     },
     NotRun {
         case: "104_inline",
-        stage: Stage::Refused("unexpected token in expression: Attribute"),
-        why: Why::Declined("weak symbols. The file itself compiles — the companion `104+_inline.c` is what stops, which is the stage as the harness reaches it"),
+        stage: Stage::NoLink("inline_inline_undeclared"),
+        why: Why::Declined("it expects tcc's reading of `inline`, which emits a definition a plain `inline` function never has in C99 and later (C11 6.7.4p7): the companion calls one no translation unit defines"),
     },
     NotRun {
         case: "106_versym",
-        stage: Stage::NoLink("PTHREAD_PROCESS_SHARED"),
-        why: Why::Declined("pthread condition variables"),
+        stage: Stage::Refused("call to undeclared function 'pthread_condattr_setpshared'"),
+        why: Why::Declined("pthread condition variables shared across processes: `pthread.h` declares neither `pthread_condattr_setpshared` nor `PTHREAD_PROCESS_SHARED`"),
     },
     NotRun {
         case: "108_constructor",
-        stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
-        why: Why::Declined("constructor attributes"),
+        stage: Stage::Built,
+        why: Why::Declined("libc runs neither `.init_array` nor `.fini_array` (issues/build/libc-runs-no-constructors.md), so it prints `main` alone"),
     },
     NotRun {
         case: "113_btdll",
@@ -2751,12 +2556,12 @@ const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "112_backtrace",
         stage: Stage::Built,
-        why: Why::Declined("a meta-test of tcc's `-b` runtime: it expects `RUNTIME ERROR: invalid memory access` and `BCHECK: invalid pointer` lines from a bounds-checking runtime this compiler does not have, and prints nothing"),
+        why: Why::Declined("a meta-test of tcc's `-b` runtime: it expects `RUNTIME ERROR: invalid memory access` and `BCHECK: invalid pointer` lines from a bounds-checking runtime clang does not have, and prints nothing"),
     },
     NotRun {
         case: "114_bound_signal",
-        stage: Stage::Refused("expected Semi, got Ident(\"sj\")"),
-        why: Why::Declined("sigaction and sigjmp_buf, which no header here declares, so the declaration does not parse"),
+        stage: Stage::Refused("use of undeclared identifier 'SIGUSR1'"),
+        why: Why::Declined("sigaction, sigjmp_buf and the signal numbers, which no header here declares"),
     },
     NotRun {
         case: "115_bound_setjmp",
@@ -2769,49 +2574,39 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("the same `longjmp not implemented` panic, exit 134"),
     },
     NotRun {
-        case: "122_vla_reuse",
-        stage: Stage::Built,
-        why: Why::Declined("the same claim `79_vla_continue` makes, through a `goto` loop: it requires `&x[0]` to repeat across 100,000 iterations and stops on the second with `ERROR: 0xffff005ae0 0xffff000040`"),
-    },
-    NotRun {
         case: "126_bound_global",
         stage: Stage::Built,
         why: Why::Declined("tcc's `-b` bounds checker again: it expects `BCHECK: … is outside of the region` and `RUNTIME ERROR: invalid memory access`, and prints nothing"),
     },
     NotRun {
         case: "117_builtins",
-        stage: Stage::NoLink("__builtin_abort"),
-        why: Why::Declined("__builtin_abort, and the compiler implements no builtin under that name"),
+        stage: Stage::Built,
+        why: Why::Declined("its second half is behind TinyCC's `-b` bounds checker, which clang does not have, so it prints `BOUNDS OFF:` and stops"),
     },
     NotRun {
         case: "120_alias",
-        stage: Stage::Refused("__attribute__((alias)) is not implemented"),
-        why: Why::Declined("symbol aliases. Its two `__asm__(_\"name\")` renames at lines 19 and 20 are refused too, but the attribute at line 9 comes first"),
+        stage: Stage::Refused("definition 'alias_int' cannot also be an alias"),
+        why: Why::Declined("it gives a symbol a definition and an alias at once, which TinyCC allows and clang refuses"),
     },
     NotRun {
         case: "124_atomic_counter",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics: clang's `stdatomic.h` needs the `least` types `stdint.h` does not define"),
     },
     NotRun {
         case: "125_atomic_misc",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
-    },
-    NotRun {
-        case: "127_asm_goto",
-        stage: Stage::Refused("expected LParen, got Goto"),
-        why: Why::Declined("`asm goto`, and inline asm generally"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
     },
     NotRun {
         case: "128_run_atexit",
-        stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
-        why: Why::Declined("constructor attributes, and a -D per configuration to have a main at all"),
+        stage: Stage::NoLink("on_exit"),
+        why: Why::Declined("`on_exit`, a glibc extension libc does not define, and a -D per configuration to have a main at all"),
     },
     NotRun {
         case: "136_atomic_gcc_style",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
     },
 ];
 
@@ -2863,23 +2658,46 @@ fn discover_rust_tests(bins: &[(String, Vec<u8>)]) -> Vec<String> {
 }
 
 fn compile_c_tests(names: &[String]) -> Vec<(String, Vec<u8>)> {
+    // Made before the hook below goes in: a C sysroot that cannot be made is
+    // no case's failure, and says so in its own words.
+    compile::c_sysroot();
     // Suppress panic messages during compilation — we handle failures via catch_unwind.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
-    let mut bins = Vec::new();
-    let mut broken: Vec<(&str, String)> = Vec::new();
-    for name in names {
-        match std::panic::catch_unwind(|| {
-            let (obj, extras) = compile::compile_c(name);
-            compile::link_toyos(&obj, &extras, name)
-        }) {
-            Ok(linked) => bins.push((name.clone(), linked)),
-            Err(e) => broken.push((name.as_str(), panic_message(&e))),
-        }
-    }
+    // A clang and a link per case, so the cases are spread over threads; the
+    // result is in `names`' order whatever order they finish in.
+    let per_thread = names.len().div_ceil(8).max(1);
+    let results: Vec<(&String, Result<Vec<u8>, String>)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = names
+            .chunks(per_thread)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|name| {
+                            let built = std::panic::catch_unwind(|| {
+                                compile::link_toyos(&compile::compile_c(name), name)
+                            });
+                            (name, built.map_err(|e| panic_message(&e)))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("a compile thread")).collect()
+    });
 
     std::panic::set_hook(prev_hook);
+
+    let mut bins = Vec::new();
+    let mut broken: Vec<(&str, String)> = Vec::new();
+    for (name, built) in results {
+        match built {
+            Ok(linked) => bins.push((name.clone(), linked)),
+            Err(why) => broken.push((name.as_str(), why)),
+        }
+    }
 
     if !broken.is_empty() {
         let mut msg = String::from(
@@ -2905,6 +2723,7 @@ fn check_not_run() {
     let mut wrong: Vec<String> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
 
+    compile::c_sysroot();
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
@@ -2938,8 +2757,8 @@ fn check_not_run() {
                 "{case}: no longer compiles, and it was declared to get further: {}",
                 panic_message(&e)
             )),
-            (stage, Ok((obj, extras))) => {
-                let linked = std::panic::catch_unwind(|| compile::link_toyos(&obj, &extras, case));
+            (stage, Ok(objects)) => {
+                let linked = std::panic::catch_unwind(|| compile::link_toyos(&objects, case));
                 match (stage, linked) {
                     (Stage::NoLink(symbol), Err(e)) => {
                         let said = panic_message(&e);
@@ -3000,7 +2819,7 @@ const MAX_KERNEL_LINES: usize = 60;
 /// The kernel's own account of a test that died, which `stdout` cannot carry.
 ///
 /// **`exit code Some(-1)` is the kernel saying it killed the process** —
-/// `recover_or_halt` answers a Ring 3 fault with `kill_process(-1)` — and every
+/// `fatal_exception` answers a Ring 3 fault with `kill_process(-1)` — and every
 /// word of *why* is a `log!`: the vector, `rip`, `cr2`, the resolved symbol.
 /// `run_test_paced` files kernel lines under `serial` and keeps them out of
 /// `stdout`, which is right for a test that passed and leaves a killed one with
@@ -3033,7 +2852,14 @@ fn check_c_result(result: &TestResult) -> bool {
         Some(0) => {
             let expect_file = compile::testcases_dir().join(format!("{test_name}.expect"));
             if expect_file.exists() {
-                let expected = fs::read_to_string(&expect_file).unwrap();
+                // TinyCC's runner captured its warnings about the case with its output.
+                let warned = format!("{test_name}.c:");
+                let expected: String = fs::read_to_string(&expect_file)
+                    .unwrap()
+                    .lines()
+                    .filter(|l| !(l.starts_with(&warned) && l.contains(": warning: ")))
+                    .map(|l| format!("{l}\n"))
+                    .collect();
                 // **The one comparison in this suite that reads a whole capture
                 // as one program's output, on a console every process shares.**
                 // `common::console::verdict` takes the lines that are some
@@ -3076,7 +2902,7 @@ fn check_rust_result(result: &TestResult) -> bool {
     let test_name = result.name.strip_prefix("test_rs_").unwrap_or(&result.name);
 
     if let Some(err) = &result.error {
-        eprintln!("FAIL rs::{test_name}: {err}{}", kernel_account(result));
+        eprintln!("FAIL rs::{test_name}: {err}\nstdout:\n{}{}", result.stdout, kernel_account(result));
         return false;
     }
 
@@ -3101,42 +2927,9 @@ fn check_rust_result(result: &TestResult) -> bool {
     }
 }
 
-/// Checks both exit code and serial diagnostics for panic recovery.
-fn check_panic_recovery(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
-
-    let checks: &[(&str, &str)] = &[
-        ("PANIC:", "expected PANIC header"),
-        ("SYS_DEBUG", "expected SYS_DEBUG in panic message"),
-        ("Syscall: num=92", "expected syscall context in panic report"),
-        ("User backtrace:", "expected user backtrace in panic report"),
-        ("Registers:", "expected register dump from kernel fault"),
-        ("SEGFAULT tid=", "expected SEGFAULT header"),
-        ("deliberate_null_deref", "expected deliberate_null_deref in segfault backtrace"),
-        ("+0x", "expected symbolized backtraces"),
-    ];
-
-    let mut ok = true;
-    for (needle, msg) in checks {
-        if !result.serial.contains(needle) {
-            eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-            ok = false;
-        }
-    }
-    if let Err(msg) = check_tripwire_attribution(&result.serial) {
-        eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-        ok = false;
-    }
-    ok & check_symbols_were_read("panic_recovery", &result.serial)
-}
-
 /// The kernel names the frames of a process it loaded off a **disk**.
 ///
-/// `null_deref_run_from_disk` is this child's alone, so a `contains` over the
-/// capture window cannot be satisfied by `segfault_child` running in the same
-/// boot.
+/// `null_deref_run_from_disk` is this child's alone.
 fn check_disk_backtrace(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
@@ -3178,13 +2971,6 @@ fn check_disk_backtrace(result: &TestResult) -> bool {
 /// task's own record — so the two reasons left are a CPU inside a scheduler pass
 /// and a CPU running nothing, and either one in a report is a finding rather
 /// than weather.
-///
-/// The measured before/after on the dev host under a twelve-wide suite, which is
-/// what makes that a claim — N = 12 rounds of `fault_gates` + `panic_recovery`
-/// an arm, 2026-08-22: 3 of 12 conceded with the table lookup, 0 of 12 without
-/// it, and 1 of 12 with the lookup put back on the same base, that third arm
-/// being the control that says the first two are about the code and not about
-/// the day.
 fn check_symbols_were_read(test: &str, serial: &str) -> bool {
     const CONCEDED: &str = "<symbol unread:";
     let lines: Vec<&str> = serial.lines().filter(|l| l.contains(CONCEDED)).collect();
@@ -3204,11 +2990,9 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
 /// A whole-buffer `contains("syscall/dispatch.rs")` certifies none of that: the
-/// same boot's `test_syscall_panic` panics in that file too, so the needle is
-/// already present before the tripwire runs. Scope it instead to the window
-/// between this panic's header and its message — `panicked at <location>` is
-/// the only thing in there, and the backtrace that names every frame comes
-/// after the message, so it cannot supply the answer either.
+/// backtrace names every frame, that file's included. Scope it instead to the
+/// window between this panic's header and its message — `panicked at
+/// <location>` is the only thing in there.
 fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
     const MSG: &str = "scheduler entered while a lock is held";
     const HEADER: &str = "PANIC:";
@@ -3224,6 +3008,28 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
             "expected the tripwire to name the guilty call site, not scheduler.rs; got: {}",
             location.trim()
         ));
+    }
+    Ok(())
+}
+
+/// The kernel's Ring 0 read of the address `test_panic_child` named halted on
+/// that address as **unmapped**. A read that demand paging filled for the
+/// caller re-executes into SMAP's protection fault instead, so the word is what
+/// says nothing was mapped into the current process.
+fn check_ring0_read_unmapped(serial: &str) -> Result<(), String> {
+    const READ_OF: &str = "SYS_DEBUG: a Ring 0 read of ";
+    let at = serial.find(READ_OF).ok_or("expected the kernel to name the address it read")?;
+    let named = serial[at + READ_OF.len()..].split_whitespace().next().unwrap_or_default();
+    let addr = named
+        .strip_prefix("0x")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| format!("the address the kernel read is not a number: {named:?}"))?;
+    if addr == 0 {
+        return Err("expected the demand-paged window, not the null read".to_string());
+    }
+    let want = format!("KERNEL PANIC: read unmapped address at {addr:#x}");
+    if !serial.contains(&want) {
+        return Err(format!("expected `{want}`: the read did not fault as unmapped at {addr:#x}"));
     }
     Ok(())
 }
@@ -3306,6 +3112,8 @@ fn check_fault_gates(result: &TestResult) -> bool {
             "fault_gate_child::divide_by_zero",
             "expected the faulting function in the #DE backtrace",
         ),
+        ("SEGFAULT tid=", "expected a SEGFAULT header for the null read"),
+        ("fault_gate_child::read_null", "expected the faulting function in the #PF backtrace"),
     ];
 
     let mut ok = true;
@@ -3482,7 +3290,6 @@ fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
 /// Select check function by test name convention.
 fn check_for(name: &str) -> fn(&TestResult) -> bool {
     match name {
-        "panic_recovery" => check_panic_recovery,
         "disk_backtrace" => check_disk_backtrace,
         "audio_idle_suspend" => check_audio_idle_suspend,
         "null_sink_client_exits" => check_null_sink_client_exits,
@@ -4667,10 +4474,6 @@ fn run_screen_test(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     match name {
-        "screen_decoder" => {
-            screen::self_test();
-            Ok(())
-        }
         "screen_loader_lines" => {
             // An EXCLUSIVE open of `GraphicsOutput` calls `Stop` on the
             // firmware's graphics console, so with one the panel stops at the
@@ -6124,39 +5927,6 @@ fn run_screen_test(
             }
             Ok(())
         }
-        "screen_early_panic" => {
-            // The window the console exists for: percpu is not up, mm::init
-            // has not run, and on a machine with no UART nothing else can
-            // report at all. The alert! that is the ready marker precedes
-            // capture(), panic_flush() and render(), so the screen is polled.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    kernel_params: &["test-early-panic"],
-                    ready_marker: "EARLY PANIC:",
-                    ..Default::default()
-                },
-            );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            for want in ["EARLY PANIC:", "test-early-panic: on-screen console check"] {
-                if !text.contains(want) {
-                    return Err(format!("{want:?} not on screen\ndecoded screen:\n{text}"));
-                }
-            }
-            check_colors(
-                &dump,
-                FILL_FATAL,
-                &["EARLY PANIC:", "test-early-panic: on-screen console check"],
-                "PAT:",
-            )?;
-            Ok(())
-        }
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:
             // crash_report, capture, panic_flush, halt_all_cpus, render. The
@@ -6890,143 +6660,6 @@ fn run_screen_test(
             );
             Ok(())
         }
-        "screen_recoverable_untouched" => {
-            // The negative of screen_fatal_halt: a panic the kernel recovers
-            // from must not paint its report over a live display. Action 0
-            // panics in syscall context, which the handler recovers from, so it
-            // never reaches halt_all_cpus. **Every screen across the recovery,
-            // not two endpoints**: a report painted and then painted over is
-            // gone by any endpoint — the fatal fill is looked for on each dump
-            // from the command until well after the child is reaped.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    // Action 0 is a `SYS_DEBUG` arm, and a kernel that ships
-                    // has none: the child would be answered `InvalidArgument`
-                    // and exit 0, which is this test's own red for a reason
-                    // that is not about the screen at all.
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            let before = qemu.screendump();
-            let from = qemu.console_stream().mark();
-            writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child").map_err(|e| format!("{e}"))?;
-            qemu.flush_stdin();
-            const ENDED: &str = "===TEST_END test_rs_test_panic_child exit=";
-            // Past the child's end by this much: a paint the recovery made late
-            // is still looked for.
-            const AFTER_END: Duration = Duration::from_millis(1500);
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(15));
-            let mut ended_at: Option<Instant> = None;
-            let mut dumps = 0usize;
-            loop {
-                let dump = qemu.screendump();
-                dumps += 1;
-                if dump.fill() == FILL_FATAL {
-                    return Err(format!(
-                        "recovering panic painted its report over the display, on dump {dumps} \
-                         across the recovery\ndecoded screen:\n{}",
-                        dump.text()
-                    ));
-                }
-                if ended_at.is_none() && qemu.console_stream().since(from).contains(ENDED) {
-                    ended_at = Some(Instant::now());
-                }
-                if ended_at.is_some_and(|at| at.elapsed() >= AFTER_END) {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "the recoverable panic never completed\nserial:\n{}",
-                        qemu.console_stream().since(from)
-                    ));
-                }
-            }
-            // The premise, not a formality: a child that never panicked leaves
-            // every dump boot-filled and this test green.
-            let said = qemu.console_stream().since(from);
-            if !said.contains("SYS_DEBUG: kernel panic triggered by userspace") {
-                return Err(format!("no kernel panic in the child's output\nserial:\n{said}"));
-            }
-            if said.contains(&format!("{ENDED}0===")) {
-                return Err("recoverable panic did not kill the child".to_string());
-            }
-            // A screen that was blank to begin with would pass the fill for
-            // the wrong reason.
-            let text = before.text();
-            print_screen(name, &format!("{dumps} dumps across the recovery, none fatal\n{text}"));
-            if !text.contains("Boot: complete") {
-                return Err(format!("nothing on screen to preserve\ndecoded screen:\n{text}"));
-            }
-            Ok(())
-        }
-        "screen_survived_panic_not_blamed" => {
-            // `discard_capture` told from a no-op: `capture` freezes a report on
-            // every panic and the recovery branch drops it, so two deaths in one
-            // boot and the panel must name the second. Action 0 panics in
-            // syscall context, which the handler recovers from.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
-            let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
-            if let Some(err) = &survived.error {
-                return Err(format!("the survivable panic never completed: {err}"));
-            }
-            if survived.exit_code == Some(0) {
-                return Err("the survivable panic did not kill the child".to_string());
-            }
-            if !survived.serial.contains(USERSPACE_PANIC) {
-                return Err(format!(
-                    "no kernel panic in the child's output, so there is no capture to \
-                     discard and the rest of this test would pass vacuously\nserial:\n{}",
-                    survived.serial
-                ));
-            }
-            // The machine walked away from it: that is what makes this a second death.
-            if !qemu.command_until(
-                "run test_rs_test_panic_child 3",
-                FATAL_HALT_NONCE,
-                Duration::from_secs(15),
-            ) {
-                return Err(format!(
-                    "{FATAL_HALT_NONCE:?} never reached the console, so the guest did not \
-                     survive the first panic and there is no second death to read"
-                ));
-            }
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            // The nonce is logged after the first panic's snapshot was frozen,
-            // so a snapshot the discard failed to drop cannot carry it.
-            if !text.contains(FATAL_HALT_NONCE) {
-                return Err(format!(
-                    "the panel does not name the fatal halt: the survived panic's frozen \
-                     report was painted as the cause of death, so `discard_capture` did not \
-                     drop it\ndecoded screen:\n{text}"
-                ));
-            }
-            if dump.fill() != FILL_FATAL {
-                return Err(format!(
-                    "the report is on screen but the fill is {:?}, not the fatal {FILL_FATAL:?}",
-                    dump.fill()
-                ));
-            }
-            Ok(())
-        }
         other => Err(format!("unknown screen test {other}")),
     }
 }
@@ -7112,7 +6745,7 @@ fn group_of(name: &str) -> Option<&'static str> {
         | "metal_sim_ipc_hostile_peer"
         | "metal_sim_compositor_stall"
         | "metal_sim_client_death" => Some(METAL_SIM_DESKTOP),
-        "i8042_keyboard" | "i8042_no_spurious_wake" | "i8042_mouse" => Some(I8042_TRACE),
+        "i8042_no_spurious_wake" | "i8042_mouse" => Some(I8042_TRACE),
         // The positive wizard first: it applies a layout, and the negative
         // member reads only its own window, so the order is the argument that
         // no member reads state another left.
@@ -7725,6 +7358,85 @@ fn metal_sim_window_drag(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> 
     Ok(())
 }
 
+/// The guest runs the cases and asks for a paste after each copy; this half
+/// types GUI+V at every ask and asserts what the guest cannot see. **The
+/// kernel's record is the independent half**: a compositor that maps the pipe
+/// is ended by the kernel with a handle fault, whatever the compositor believed
+/// it was doing, so no such record may appear — and each refusal the guest
+/// caused must be named by the compositor.
+fn metal_sim_hostile_clipboard(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    /// The guest's `PASTE_MARKER`.
+    const PASTE: &str = "===HOSTILE_CLIPBOARD_PASTE===";
+    let bins: Vec<(String, Vec<u8>)> = rust_bins
+        .iter()
+        .filter(|(name, _)| name == "compositor_hostile_clipboard")
+        .cloned()
+        .collect();
+    if bins.is_empty() {
+        return Err("the compositor_hostile_clipboard client was not built".to_string());
+    }
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase");
+    let options =
+        BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() };
+    metal_sim_argv_check(&qemu::profile_argv(&options))?;
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+
+    let result = qemu.run_test_paced(
+        "test_rs_compositor_hostile_clipboard",
+        Duration::from_secs(240),
+        |socket, line| {
+            if line.contains(PASTE) {
+                let socket = socket.expect("this boot was made with QMP");
+                qemu::QmpInput::open(socket).keys(&[
+                    ("meta_l", true),
+                    ("v", true),
+                    ("v", false),
+                    ("meta_l", false),
+                ]);
+            }
+        },
+    );
+    let text = format!("{}\n{}", result.stdout, result.serial);
+
+    for death in ["handle fault:", "exit: compositor"] {
+        if let Some(line) = text.lines().find(|l| l.contains(death)) {
+            return Err(format!("the kernel ended the compositor: {}\n{text}", line.trim()));
+        }
+    }
+    if result.error.is_some() || result.exit_code != Some(0) {
+        let why = match &result.error {
+            Some(err) => err.to_string(),
+            None => String::from("it finished and its exit code is the finding"),
+        };
+        return Err(format!(
+            "compositor_hostile_clipboard exited {:?}: {why}\n{text}",
+            result.exit_code
+        ));
+    }
+    if !text.contains("hostile clipboard: every case survived") {
+        return Err(format!("the guest did not report that every case survived:\n{text}"));
+    }
+    if !text.contains("it began a copy and never committed it") {
+        return Err(format!(
+            "the client that held its region and never committed was not dropped by name:\n{text}"
+        ));
+    }
+    // The compositor's `DropReason::Retired`, which no other case produces.
+    const RETIRED: &str = "it sent the retired clipboard region";
+    if !text.lines().any(|l| l.contains("compositor: dropping client") && l.contains(RETIRED)) {
+        return Err(format!(
+            "the client that sent a pipe where a region went was not refused by name:\n{text}"
+        ));
+    }
+    const NOT_UTF8: [&str; 2] = ["compositor: refusing a clipboard from client", "it is not UTF-8"];
+    if !text.lines().any(|l| NOT_UTF8.iter().all(|s| l.contains(s))) {
+        return Err(format!("the copy that is not UTF-8 was not refused by name:\n{text}"));
+    }
+    serial::Serial::named("boot console", result.serial.as_str()).must_be_clean()?;
+    eprintln!("  [metal-sim] a pipe refused unused");
+    Ok(())
+}
+
 /// How far above its content the host reaches for a window's title bar.
 ///
 /// Not the compositor's title-bar height — this is a probe, and what it needs
@@ -7760,169 +7472,12 @@ fn compositor_screen_size(console: &str) -> Result<(u32, u32), String> {
 /// injects through a fresh connection sends this after its last injection
 /// instead of running out the binary's fallback deadline, except
 /// `i8042_health_cadence` — whose verdict is a report cadence over a real span,
-/// not a delivered key. The two callers that hold one connection open for the
-/// whole run ([`i8042_keyboard`], [`i8042_no_spurious_wake`]) send the same two
-/// transitions as the last group of their own script: a `-qmp …,server` socket
+/// not a delivered key. [`i8042_no_spurious_wake`], which holds one connection
+/// open for the whole run, sends the same two transitions as the last group of
+/// its own script: a `-qmp …,server` socket
 /// serves one monitor at a time, so a second one opened here would block.
 fn send_i8042_sentinel(socket: &Path) {
     qemu::qmp_send_keys(socket, &[("end", true), ("end", false)]);
-}
-
-/// What [`i8042_keyboard`] types, as the groups it may have in flight at once,
-/// each with the number of `kev` lines the guest owes for it.
-///
-/// **A group is the unit of pacing, and its size is bounded by
-/// [`QEMU_PS2_QUEUE`].** The device holds sixteen set-1 bytes and
-/// `ps2_queue()` drops the seventeenth *silently and one byte at a time*; the
-/// kernel never learns of it, so its `dropped`/`lost edges`/`overruns`
-/// counters all read zero on a stream with a hole in it. What a lost byte
-/// costs is not one transition: a lost make leaves its break to be filtered by
-/// `handle_key` — a break for a usage nothing holds queues nothing — so the
-/// whole key disappears, and a lost `0xE0` leaves the break to decode as an
-/// unrelated keypad code that also holds nothing, so a press survives with no
-/// release. Sending the script on a wall clock and hoping the guest keeps up
-/// is what put 26 bytes against those 16 and produced both of those shapes on
-/// CI. The largest group below is four bytes.
-const KEYBOARD_SCRIPT: &[(&[(&str, bool)], usize)] = &[
-    (&[("h", true), ("h", false)], 2),
-    (&[("e", true), ("e", false)], 2),
-    (&[("l", true), ("l", false)], 2),
-    (&[("l", true), ("l", false)], 2),
-    (&[("o", true), ("o", false)], 2),
-    // One command, so the chord arrives as a chord rather than as a race.
-    (&[("shift", true), ("b", true), ("b", false), ("shift", false)], 4),
-    (&[("left", true), ("left", false)], 2),
-    (&[("esc", true), ("esc", false)], 2),
-    // A modifier on its own, so a stuck one is visible.
-    (&[("shift", true)], 1),
-    (&[("shift", false)], 1),
-    // The sentinel the guest exits on; see [`send_i8042_sentinel`].
-    (&[("end", true), ("end", false)], 2),
-];
-
-/// A key injected at the controller, decoded, mapped and delivered to a
-/// userland process — IRQ delivery, set-1 decode, the HID mapping and the
-/// shared translate/layout path, in one run.
-///
-/// **Paced against the guest's own report**, for [`i8042_mouse`]'s reason and
-/// [`KEYBOARD_SCRIPT`]'s: a group goes out only once every `kev` line the one
-/// before it owed has come back, so at most four bytes are ever outstanding at
-/// a device that holds sixteen. A guest that stalls costs this test wall clock
-/// and never a verdict.
-fn i8042_keyboard(boot: &mut Boot) -> Result<(), String> {
-    let qemu = &mut boot.qemu;
-    let boot = qemu.boot_log().to_string();
-    if !boot.contains("i8042: kbd set2+xlat (readback 0x41)") {
-        return Err(format!("the PS/2 keyboard never came up:\n{boot}"));
-    }
-
-    let sent = std::cell::Cell::new(0usize);
-    let seen = std::cell::Cell::new(0usize);
-    let result = {
-        let mut input: Option<qemu::QmpInput> = None;
-        qemu.run_test_paced(
-            "test_rs_i8042_keyboard",
-            Duration::from_secs(20),
-            |socket, line| {
-                if line.contains(I8042_READY) {
-                    input = Some(qemu::QmpInput::open(
-                        socket.expect("i8042_keyboard needs BootOptions { qmp }"),
-                    ));
-                }
-                if line.contains("kev usage=") {
-                    seen.set(seen.get() + 1);
-                }
-                let Some(input) = input.as_mut() else { return };
-                // What everything already sent owes. Nothing new goes out
-                // until the guest has reported all of it, which is what bounds
-                // the bytes outstanding at the device to one group's worth.
-                let owed: usize = KEYBOARD_SCRIPT[..sent.get()].iter().map(|(_, n)| n).sum();
-                if seen.get() < owed {
-                    return;
-                }
-                if let Some((keys, _)) = KEYBOARD_SCRIPT.get(sent.get()) {
-                    input.keys(keys);
-                    sent.set(sent.get() + 1);
-                }
-            },
-        )
-    };
-    let (sent, seen) = (sent.get(), seen.get());
-    if let Some(err) = &result.error {
-        // The guard, not the verdict: under the pacing the host is *waiting*
-        // for the guest when this fires, so what it establishes is that the run
-        // stopped and never that the machine dropped a key.
-        let owed: usize = KEYBOARD_SCRIPT.iter().map(|(_, n)| n).sum();
-        return Err(format!(
-            "{STALLED} {err} — {sent} of {} groups sent and {seen} of {owed} key events back \
-             when the host gave up waiting for the next\n{}",
-            KEYBOARD_SCRIPT.len(),
-            result.stdout
-        ));
-    }
-
-    let events = parse_key_events(&result.stdout);
-    if events.is_empty() {
-        return Err(format!("no key event reached userland:\n{}", result.stdout));
-    }
-    // Presses spell the injected text: IRQ delivery, set-1 decode,
-    // the HID mapping, the shared translate/layout path, and arrival
-    // in a userland process, in one assertion.
-    let typed: String = events
-        .iter()
-        .filter(|e| e.modifiers & 0x10 == 0)
-        .map(|e| e.translated.as_str())
-        .collect();
-    if !typed.contains("hello") {
-        return Err(format!("typed {typed:?}, want it to contain \"hello\""));
-    }
-    if !typed.contains('B') {
-        return Err(format!("typed {typed:?} — Shift+b did not produce a capital"));
-    }
-    if !typed.contains("\u{1b}[D") {
-        return Err(format!("typed {typed:?} — Left arrow produced no escape sequence"));
-    }
-    for want in [0x29u8, 0x50, 0xE1] {
-        if !events.iter().any(|e| e.usage == want) {
-            return Err(format!("no event for HID usage {want:#04x} in {events:?}"));
-        }
-    }
-    // Every press is matched by a release — **the sentinel's included**. `0x4D`
-    // is End, and the guest exits on its release, so a run that never receives
-    // it runs out that binary's own five-second fallback instead and every
-    // assertion above still passes: a green test six seconds slower than its
-    // price, which is what a lost sentinel used to look like.
-    for usage in [0x0Bu8, 0x08, 0x0F, 0x12, 0x05, 0x29, 0x50, 0xE1, 0x4D] {
-        let presses = events.iter().filter(|e| e.usage == usage && e.modifiers & 0x10 == 0).count();
-        let releases = events.iter().filter(|e| e.usage == usage && e.modifiers & 0x10 != 0).count();
-        if presses == 0 || presses != releases {
-            return Err(format!(
-                "usage {usage:#04x}: {presses} presses, {releases} releases"
-            ));
-        }
-    }
-    // Nothing is left held: the bare Shift came back up.
-    let last = events.last().unwrap();
-    if last.modifiers & !0x10 != 0 {
-        return Err(format!("a modifier is stuck down: last event {last:?}"));
-    }
-    // And they came from the i8042, not from somewhere else.
-    let drained: usize = qemu
-        .boot_log()
-        .lines()
-        .chain(result.serial.lines())
-        .filter_map(trace_keys)
-        .filter(|&k| k > 0)
-        .sum();
-    if drained == 0 {
-        return Err("no i8042 drain reported a key event".to_string());
-    }
-    eprintln!(
-        "  [i8042] {} events to userland, {drained} from the driver; {sent} groups, none sent \
-         before the one before it came back",
-        events.len()
-    );
-    Ok(())
 }
 
 /// The line `tests/toyos-rust-tests/src/bin/locale_gate.rs` prints in `layout`
@@ -7935,8 +7490,7 @@ const SWISS_READY: &str = "===SWISS_READY===";
 /// once, each with the number of `kev` lines the guest owes for it.
 ///
 /// **A group is the unit of pacing, and its size is bounded by
-/// [`QEMU_PS2_QUEUE`]**, for [`KEYBOARD_SCRIPT`]'s reason and by the same
-/// arithmetic: the widest group here is four transitions, eight set-1 bytes even
+/// [`QEMU_PS2_QUEUE`]**: the widest group here is four transitions, eight set-1 bytes even
 /// if every one were `0xE0`-prefixed, against a device holding sixteen. The
 /// whole string is far more than the queue, so a host sending it on a wall clock
 /// loses its tail to a guest that stops draining.
@@ -7985,8 +7539,9 @@ const SWISS_SCRIPT: &[(&[(&str, bool)], usize)] = &[
     (&[("end", true), ("end", false)], 2),
 ];
 
-/// No group of [`SWISS_SCRIPT`] may outrun the device queue, on the same
-/// worst-case width [`KEYBOARD_SCRIPT`] is held to.
+/// No group of [`SWISS_SCRIPT`] may outrun the device queue even if every
+/// transition in it is an `0xE0`-prefixed two-byte one, which is the widest a
+/// non-Pause set-1 transition gets.
 const _: () = {
     let mut i = 0;
     while i < SWISS_SCRIPT.len() {
@@ -8009,8 +7564,7 @@ const _: () = {
 /// on the table, the modifier levels, the ISO key and the dead-key machine at
 /// once.
 ///
-/// **Paced against the guest's own report**, for [`i8042_keyboard`]'s reason and
-/// [`SWISS_SCRIPT`]'s: a group goes out only once every `kev` line the one
+/// **Paced against the guest's own report**, for [`SWISS_SCRIPT`]'s reason: a group goes out only once every `kev` line the one
 /// before it owed has come back, so at most one group's bytes are ever
 /// outstanding at a device that holds sixteen. A guest that stalls costs this
 /// test wall clock and never a verdict.
@@ -8766,6 +8320,50 @@ const SNAKE_ROUNDS: usize = 3;
 /// Turns played in the last round, at four keys each, so that round's snake is
 /// a program that has been running and drawing rather than one a second old.
 const SNAKE_TURNS: usize = 8;
+
+/// What doom's renderer draws over `demo1`'s first `TICS` tics, as
+/// `userland/doom/src/frames.rs` hashes it: the frames doom drew before clang
+/// built its C, which a compiler that builds doom correctly draws again.
+const DOOM_FRAMES: &str = "874685cf6fd3dfa5";
+
+/// Gate: doom draws, frame for frame, what it drew when another compiler built
+/// it.
+///
+/// One verdict and no clock: the hash of each game tic's frame over a timedemo
+/// of `demo1`, which replays identically on any machine at any speed, against
+/// [`DOOM_FRAMES`]. A miscompile anywhere in the renderer, the game logic or the
+/// demo's playback moves it.
+fn doom_frames(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = root.join("tests/doommusiccase");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, BootOptions::default());
+    let result = qemu.run_test("test_rs_doom_frames", Duration::from_secs(300));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("doom's frame check did not finish (exit {:?}):\n{}", result.exit_code, result.stdout));
+    }
+    let line = result
+        .stdout
+        .lines()
+        .find(|line| line.contains("[frame-check] tics="))
+        .ok_or_else(|| format!("doom printed no [frame-check] line:\n{}", result.stdout))?;
+    let field = |name: &str| {
+        line.split_whitespace()
+            .find_map(|word| word.strip_prefix(name))
+            .ok_or_else(|| format!("no {name} in {line:?}"))
+    };
+    let hash = field("hash=")?;
+    if hash != DOOM_FRAMES {
+        return Err(format!(
+            "doom drew other frames than the ones recorded: hash {hash}, recorded {DOOM_FRAMES} \
+             ({line})"
+        ));
+    }
+    eprintln!("  [doommusiccase] {line}");
+    Ok(())
+}
 
 /// Gate: doom's music reaches the device, with the SoundFont this tree ships.
 ///
@@ -10536,6 +10134,22 @@ fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
+/// An accept netd refuses for room leaves its owner a wake for the connection
+/// it left: the guest's wakes are the verdict. This side carries that netd named the
+/// refusal for room and that no program panicked.
+fn netd_refused_accept(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let HostRun { result, console, .. } = netcase_against_host(rust_bins, "netd_refused_accept", true, "")?;
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_refused_accept: ok")) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    if !console.contains("netd: refusing accept, ") {
+        return Err(format!("netd refused an accept for room without saying so:\n{console}"));
+    }
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] an accept refused for room left a wake once room returned");
+    Ok(())
+}
+
 /// Ctrl+Alt+D at a live desktop: every CPU answers, and the two halves of the
 /// report agree.
 ///
@@ -10630,20 +10244,16 @@ fn blocked_dump() -> Result<(), String> {
         return Err(format!("no parked task was named by pid and tid:\n{report}"));
     }
 
-    // **All three kernel threads, by name.** They are almost always blocked, so
+    // **Every kernel thread, by name.** They are almost always blocked, so
     // the parked lines above carry them as a pid and a tid and nothing else —
-    // and on a machine that has gone quiet the question is *which* of the three
-    // is stuck. `sched::dump`'s census tags a kernel thread whatever it is
-    // doing, which is C6's gate: three kernel threads split the work —
-    // `klogd` the console drain, `usbd` the xHCI port machine, `iod` the
-    // write-back queue — precisely so that one of them wedging does not stop
-    // the other two. A report that cannot tell them apart cannot say which did.
+    // and on a machine that has gone quiet the question is *which* one is
+    // stuck. `sched::dump`'s census tags a kernel thread whatever it is doing.
     //
     // Matched with the ` cpu=` that follows the name on the census line, because
     // a bare name appears in every one of these programs' own log lines and
     // `/system/bin/init` speaks in a program's name before that program runs
     // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd", "usbd", "iod"]
+    let unnamed: Vec<&str> = ["klogd", "iod"]
         .into_iter()
         .filter(|name| !report.contains(&format!(" {name} cpu=")))
         .collect();
@@ -10729,8 +10339,7 @@ fn soundd_clients_since(log: &str, from: usize, verb: &str) -> usize {
 /// bytes and no events must produce no wake. Pause is that stimulus — six
 /// bytes, deliberately swallowed.
 ///
-/// It drives the same in-guest reader as [`i8042_keyboard`], for the userland
-/// half of the assertion.
+/// It drives `test_rs_i8042_keyboard`, for the userland half of the assertion.
 ///
 /// **The zero-event drain is arranged, not hoped for.** What a drain carries is
 /// whatever the ISR found in the ring, so a host that injects on a wall clock
@@ -10884,21 +10493,6 @@ const QEMU_PS2_QUEUE: usize = 16;
 /// caller that types behind a chord it cannot prove has been consumed budgets
 /// this much of [`QEMU_PS2_QUEUE`] for it.
 const CHORD_BYTES: usize = 6;
-
-/// No group of [`KEYBOARD_SCRIPT`] may outrun the device queue even if every
-/// transition in it is an `0xE0`-prefixed two-byte one, which is the widest a
-/// non-Pause set-1 transition gets.
-const _: () = {
-    let mut i = 0;
-    while i < KEYBOARD_SCRIPT.len() {
-        assert!(
-            KEYBOARD_SCRIPT[i].0.len() * 2 <= QEMU_PS2_QUEUE,
-            "an i8042_keyboard group can outrun QEMU's PS/2 queue, which drops what it \
-             cannot hold one byte at a time and says nothing"
-        );
-        i += 1;
-    }
-};
 
 /// A PS/2 pointer packet. Three bytes, because the driver's aux init sends no
 /// IntelliMouse knock and QEMU therefore frames a plain mouse.
@@ -11409,14 +11003,20 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
         ));
     }
 
-    // The one case whose verdict is a line rather than survival: a payload
-    // past what any client may inline is refused by name, because storing the
-    // prefix a frame reader keeps is the silent half of the same event.
     const OVERSIZE: &str = "compositor: refusing an inline payload past";
     if !result.stdout.contains(OVERSIZE) {
         return Err(format!(
             "an over-long inline clipboard was not refused by name, so nothing here separates \
              a refusal from a truncation:\n{}",
+            result.stdout
+        ));
+    }
+    // A copy's length sizes the region the compositor makes, so a length past
+    // the clipboard is refused before any region exists.
+    const LONG_COPY: &str = "compositor: refusing a copy of 4294967295 bytes";
+    if !result.stdout.contains(LONG_COPY) {
+        return Err(format!(
+            "a copy longer than any clipboard was not refused by name:\n{}",
             result.stdout
         ));
     }
@@ -11491,10 +11091,6 @@ fn run_machine_test(
         "data_candidate_with_bad_geometry_is_absent" => {
             storage::data_candidate_with_bad_geometry_is_absent(test_config, c_bins, rust_bins)
         }
-        "home_budget_refusal_retried" => {
-            storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
-        }
-        "so_cache_refusals" => storage::so_cache_refusals(test_config, c_bins, rust_bins),
         "home_overwrite_reads_back" => {
             storage::home_overwrite_reads_back(test_config, c_bins, rust_bins)
         }
@@ -11511,8 +11107,7 @@ fn run_machine_test(
         "quiesce_stops_the_machine" => power::quiesce_stops_the_machine(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
         "quiesce_wakes_on_the_last_park" => power::quiesce_wakes_on_the_last_park(test_config, c_bins, rust_bins),
-        "quiesce_wakes_on_the_last_exit" => power::quiesce_wakes_on_the_last_exit(test_config, c_bins, rust_bins),
-        "quiesce_dump_holds_the_stopped" => power::quiesce_dump_holds_the_stopped(test_config, c_bins, rust_bins),
+        "quiesce_wakes_on_the_last_teardown" => power::quiesce_wakes_on_the_last_teardown(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
@@ -11566,7 +11161,6 @@ fn run_machine_test(
         }
         "usb_pool_exhausted" => usb::usb_pool_exhausted(test_config, c_bins, rust_bins),
         "usb_short_read" => usb::usb_short_read(test_config, c_bins, rust_bins),
-        "usb_disk_index_stable" => usb::usb_disk_index_stable(test_config, c_bins, rust_bins),
         // Body in `tests/common/volumes.rs`, same reason.
         "esp_filesystem" => common::volumes::esp_filesystem(test_config, c_bins, rust_bins),
         "log_flush_retry" => common::volumes::log_flush_retry(test_config, c_bins, rust_bins),
@@ -12004,8 +11598,6 @@ fn run_machine_test(
             );
             Ok(())
         }
-        // Body in `tests/common/wallclock.rs`, same reason.
-        "wall_clock_file" => common::wallclock::wall_clock_file(test_config, c_bins, rust_bins),
         "wall_clock_rtc_dead" => common::wallclock::undated(
             test_config,
             c_bins,
@@ -12037,6 +11629,9 @@ fn run_machine_test(
             common::volumes::root_named_but_absent(test_config, c_bins, rust_bins)
         }
         "root_chunk_refused" => common::volumes::root_chunk_refused(test_config, c_bins, rust_bins),
+        "root_chunk_refused_on_a_usb_stick" => {
+            common::volumes::root_chunk_refused_on_a_usb_stick(test_config, c_bins, rust_bins)
+        }
         "root_candidate_overlaps" => common::volumes::root_candidate_overlaps(test_config, c_bins, rust_bins),
         "root_named_twice_on_the_boot_disk" => {
             common::volumes::root_named_twice_on_the_boot_disk(test_config, c_bins, rust_bins)
@@ -12066,20 +11661,12 @@ fn run_machine_test(
             usb::xhci_full_speed_device(test_config, c_bins, rust_bins)
         }
         "xhci_superspeed_ports" => usb::xhci_superspeed_ports(test_config, c_bins, rust_bins),
-        "xhci_hotplug" => usb::xhci_hotplug(test_config, c_bins, rust_bins),
         "xhci_flap" => usb::xhci_flap(test_config, c_bins, rust_bins),
-        "xhci_hid_break" => usb::xhci_hid_break(test_config, c_bins, rust_bins),
         // Body in `tests/common/iommu.rs`, same reason.
         "iommu_discovery" => common::iommu::iommu_discovery(test_config, c_bins, rust_bins),
         // Body in `tests/common/logread.rs`, so the hunk here stays one line.
         "log_conservation_smp1" => {
             common::logread::log_conservation_smp1(test_config, c_bins, rust_bins)
-        }
-        "log_conservation_smp4" => {
-            common::logread::log_conservation_smp4(test_config, c_bins, rust_bins)
-        }
-        "log_conservation_smp8" => {
-            common::logread::log_conservation_smp8(test_config, c_bins, rust_bins)
         }
         "log_nested_emit" => common::logread::log_nested_emit(test_config, c_bins, rust_bins),
         "log_reserve_window" => {
@@ -12094,9 +11681,6 @@ fn run_machine_test(
         // Body in `tests/common/console.rs`, same reason.
         "c_capture_ignores_daemon_lines" => {
             common::console::c_capture_ignores_daemon_lines(test_config, c_bins, rust_bins)
-        }
-        "console_line_atomicity" => {
-            common::console::console_line_atomicity(test_config, c_bins, rust_bins)
         }
         "keyboard_claim_close_spares_stdin" => {
             common::console::keyboard_claim_close_spares_stdin(test_config, c_bins, rust_bins)
@@ -12167,6 +11751,9 @@ fn run_machine_test(
         "null_sink_shipped_client" => audio::null_sink_shipped_client(test_config, c_bins, rust_bins),
         "doom_sound_flood" => audio::doom_sound_flood(rust_bins),
         "doom_music" => doom_music(rust_bins),
+        // Body in `tests/common/clang.rs`.
+        "c_hello" => common::clang::c_hello(rust_bins),
+        "doom_frames" => doom_frames(rust_bins),
         "soundd_log_stall" => audio::soundd_log_stall(rust_bins),
         "metal_sim_compositor" => {
             metal_sim_compositor(group_boot(held, METAL_SIM_DESKTOP, || {
@@ -12198,9 +11785,6 @@ fn run_machine_test(
                 boot_metal_sim_desktop(rust_bins)
             }))
         }
-        "i8042_keyboard" => i8042_keyboard(group_boot(held, I8042_TRACE, || {
-            boot_i8042_trace(test_config, c_bins, rust_bins)
-        })),
         "i8042_no_spurious_wake" => i8042_no_spurious_wake(group_boot(held, I8042_TRACE, || {
             boot_i8042_trace(test_config, c_bins, rust_bins)
         })),
@@ -13017,27 +12601,6 @@ fn run_machine_test(
             );
             Ok(())
         }
-        // No guest: the instrument itself, in both directions. `screen_decoder`
-        // is the same idea for the framebuffer decoder.
-        //
-        // Three of them under one name, because they are one subject: what a
-        // console line says died, what a wait does about it, and the fact that
-        // only one place in the harness is allowed to answer either.
-        "serial_vocabulary" => {
-            serial::self_check()?;
-            qemu::ceiling_self_check()?;
-            qemu::host_scale_self_check()?;
-            one_vocabulary()
-        }
-        "suspend_detector" => common::clock::self_check(),
-        "suspend_invalidates_a_verdict" => suspend_invalidates_a_verdict(),
-        "stall_is_not_a_verdict" => stall_is_not_a_verdict(),
-        "nvme_image_is_held_by_one_guest" => nvme_image_is_held_by_one_guest(),
-        "run_exit_status" => run_exit_status(),
-        "control_regs_verdict" => control_regs_verdict(),
-        "i8042_quarantine_verdict" => idle_trip_verdict(),
-        "suite_split" => suite_split(),
-        "nightly_tier_is_announced" => nightly_tier_is_announced(),
         "nvme_wide_sector" => {
             // The other half of "a device's size is a shape dimension": not how
             // many sectors, but how big one is. `lba_ds` is an 8-bit
@@ -13443,8 +13006,7 @@ fn run_machine_test(
             // trampoline that never issues an `iretq`. It gets a process-table
             // entry rather than a bare task, and that is what makes it
             // nameable: without one a crash report would print a pid nothing
-            // in the machine resolves. What each row *means* when the panic
-            // really fires is `klogd_panic_halts`' two actuator boots.
+            // in the machine resolves.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -13453,84 +13015,42 @@ fn run_machine_test(
             );
             klogd_hosted(&serial::Serial::boot(&qemu))
         }
-        "klogd_panic_halts" => {
-            // **A kernel thread's panic is not recoverable by accident.**
-            // `syscall_rip` is never cleared, so the ordinary recovery
-            // predicate reads whatever user thread last ran on that CPU, and
-            // a kernel task would recover or halt by accident of work
-            // stealing. The row in `sched::kthread` replaces the accident
-            // with an answer; these two actuator boots walk both branches.
-            //
-            // The marker is a line of the crash *report* rather than `PANIC:`
-            // itself, because `boot_log` stops at the marker and the name is
-            // printed after the header — a boot stopped at the header would
-            // have nothing left to assert the process table against.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["klogd-panic"],
-                    ready_marker: "Process: klogd",
-                    ..Default::default()
-                },
-            );
-            let mut dead = serial::Serial::boot(&qemu);
-            dead.must_say("PANIC:")?;
-            dead.must_say("klogd-panic: the console drainer died")?;
-            // The process table answered for a task with no *user* address
-            // space — since C6 it names the kernel's, which is what let
-            // `KernelPayload.address_space` stop being an `Option`.
-            dead.must_say("Process: klogd")?;
-
-            // The verdict. A *recovered* panic kills the thread and lets the
-            // machine carry on into userland, which announces itself; the
-            // fatal branch halts every CPU. The window is a liveness margin
-            // and not a threshold: `klogd` panics as the scheduler starts, and
-            // the arm this must never become reaches the marker a few hundred
-            // milliseconds later — so three seconds is a tenfold margin over
-            // the state it refuses, and it is the whole of this test's fixed
-            // cost against the Fast ceiling.
-            const CARRIED_ON: Duration = Duration::from_secs(3);
-            dead.push(&qemu.drain_serial(CARRIED_ON));
-            dead.must_not_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [klogd] a kernel thread's panic halted the machine rather than recovering");
-
-            drop(qemu);
-
-            // **The same panic on the other row, and it is the direction
-            // nothing had ever taken.** Two rows in one table are one row
-            // until both branches have been walked: before this arm, every
-            // kernel-thread panic this tree had ever run took `OnPanic::Halt`,
-            // so `Recover` was a value rather than a path — and the path it
-            // names goes through `poison_tid`, the idle loop's `reap_poisoned`
-            // and `zombify_poisoned`, none of which had ever seen a task with
-            // no user address space. A row that quietly halted the machine
-            // would make `usbd` and `iod` worse than the thread they were
-            // split off from.
-            //
-            // The verdict is content in the same window and never a timeout:
-            // the boot returns at the crash report's own line, and what the
-            // three seconds after it must contain is the ready marker the
-            // arm above must *not*.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["usbd-panic"],
-                    ready_marker: "Process: usbd",
-                    ..Default::default()
-                },
-            );
-            let mut survived = serial::Serial::boot(&qemu);
-            survived.must_say("PANIC:")?;
-            survived.must_say("usbd-panic: the device thread died")?;
-            survived.must_say("Process: usbd")?;
-            survived.push(&qemu.drain_serial(CARRIED_ON));
-            survived.must_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [usbd] a kernel thread's panic killed the thread and the machine booted");
-            Ok(())
+        "klogd_fault_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-fault", "panic-reboot-fast"],
+            &["KERNEL PANIC: read unmapped address at 0x0", "console::body"],
+        ),
+        "syscall_panic_halts" | "syscall_fault_halts" | "lock_across_switch_halts"
+        | "heap_over_ceiling_halts" => {
+            use toyos_abi::syscall::{debug_action as da, SYS_DEBUG};
+            let syscall = format!("Syscall: num={SYS_DEBUG}");
+            let syscall = syscall.as_str();
+            let (action, said): (u64, &[&str]) = match name {
+                "syscall_panic_halts" => (
+                    da::PANIC,
+                    &["SYS_DEBUG: kernel panic triggered by userspace", syscall, "User backtrace:"],
+                ),
+                // A Ring 0 read of a user address is the kernel's, inside a syscall too.
+                "syscall_fault_halts" => (da::NULL_READ, &[syscall, "User backtrace:"]),
+                "lock_across_switch_halts" => (da::LOCK_ACROSS_SWITCH, &[syscall]),
+                // The message, not `mm/alloc.rs`: it names the ceiling rather
+                // than the page source's own request.
+                "heap_over_ceiling_halts" => {
+                    (da::HEAP_OVER_CEILING, &["exceeds MAX_HEAP_ALLOC", syscall])
+                }
+                other => unreachable!("{other} is not a syscall-death row"),
+            };
+            let said = power::syscall_death_resets(test_config, c_bins, rust_bins, action, said)?;
+            // With the capture: this guest's 16550 is its stdio, so no
+            // `uart-*.log` keeps what it said.
+            match name {
+                "lock_across_switch_halts" => check_tripwire_attribution(&said),
+                "syscall_fault_halts" => check_ring0_read_unmapped(&said),
+                _ => Ok(()),
+            }
+            .map_err(|e| format!("{e}\n{said}"))
         }
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
@@ -13841,57 +13361,19 @@ fn run_machine_test(
             eprintln!("  [sleep] {}", result.stdout.lines().last().unwrap_or("").trim());
             Ok(())
         }
-        "heap_ceiling_recovery" => {
-            // A panic inside the kernel allocator's own lock left the heap
-            // locked for the rest of the boot: the panicking thread never
-            // unwinds, so `now` never advances, and the CPU that recovered
-            // spun `Lock::lock` to its 500M-spin deadline on its next `alloc`
-            // or `free` — then panicked again, forever. The fix moved the
-            // ceiling check to `KernelAllocator::alloc`, before the lock.
-            //
-            // `smp: 1` is what makes the claim precise. The property is that
-            // *the recovered CPU* survives its next allocation; on a wider
-            // machine `/system/bin/echo` could run somewhere else and pass without
-            // touching it. With one CPU there is nowhere else.
-            //
-            // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `syscall/dispatch.rs`: routes
-            // past the ceiling do still exist,
-            // and each of them holds the VFS lock when it dies, so the
-            // machine wedges either way and the allocator's recovery cannot
-            // be observed on its own.
-            let options = BootOptions {
-                smp: 1,
-                kernel_features: ACTUATOR_KERNEL,
-                ..Default::default()
-            };
+        "heap_ceiling_bounds" => {
+            // Its own boot: `LOWER_SYSINFO_BOUND` stays lowered for the rest of it.
+            let options = BootOptions { kernel_features: ACTUATOR_KERNEL, ..Default::default() };
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             serial::Serial::boot(&qemu).must_be_clean()?;
 
             let result = qemu.run_test("test_rs_heap_ceiling", Duration::from_secs(30));
             if let Some(err) = &result.error {
-                // The wedge's signature. Before the fix this is where the test
-                // ends: the child's panic strands the allocator, the guest
-                // stops answering, and `run_test` runs out of window.
-                return Err(format!(
-                    "the guest stopped answering after the over-ceiling panic: {err}\n\
-                     serial:\n{}",
-                    result.serial
-                ));
+                return Err(format!("heap_ceiling did not finish: {err}\nserial:\n{}", result.serial));
             }
             if !check_rust_result(&result) {
                 return Err(format!("heap_ceiling failed:\n{}", result.stdout));
             }
-
-            // The panic must be the one this test asked for, and it must have
-            // fired where the fix put it. `mm/alloc.rs` appears in the report
-            // either way — the old assert was in the same file — so the needle
-            // is the message, which names the ceiling rather than the page
-            // source's own request.
-            let serial = serial::Serial::named("test serial", result.serial.as_str());
-            serial.must_say("PANIC:")?;
-            let line = serial.must_say("exceeds MAX_HEAP_ALLOC")?;
-            eprintln!("  [heap] {}", line.trim());
             Ok(())
         }
         "cache_eviction" => {
@@ -15388,6 +14870,7 @@ fn run_machine_test(
             Ok(())
         }
         "metal_sim_window_drag" => metal_sim_window_drag(rust_bins),
+        "metal_sim_hostile_clipboard" => metal_sim_hostile_clipboard(rust_bins),
         "metal_sim_pointer_churn" => {
             // The owner froze his desktop twice by plugging a mouse in and
             // pulling it out again, and the second freeze landed on the fourth
@@ -15518,66 +15001,6 @@ fn run_machine_test(
             eprintln!(
                 "  [metal-sim] {CYCLES} pointer plug/unplug cycles, {bound} source bindings, \
                  desktop still compositing"
-            );
-            Ok(())
-        }
-        "sshd_fail_closed" => {
-            // sshd with a network under it — the only boot that gets past its
-            // bind. What that reaches for the first time is the daemon's own
-            // state on disk: the identity it mints under `/state/sshd`, and the file
-            // it authenticates against.
-            //
-            // The verdict is that it authenticates nobody and says which file
-            // left it that way. A daemon that cannot accept any key must not
-            // be holding port 22, so "never listened" is asserted too — that
-            // is the half a missing-file check would still pass without.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sshdcase");
-            let options = BootOptions {
-                profile: qemu::Profile::Headless,
-                ..Default::default()
-            };
-            if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
-                return Err("this test needs a NIC and the profile has none".to_string());
-            }
-
-            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-            let mut console = qemu.boot_log().to_string();
-
-            // Minting proves init made `/state/sshd` and set it as the daemon's
-            // `HOME`; the fingerprint proves the key it wrote reads back.
-            //
-            // **Both files are named, because either one alone authorizes.**
-            // This boot stages neither, so the daemon has to report both as
-            // unreadable — a check on only the writable one would pass a
-            // machine whose image file was silently never consulted.
-            const WANT: [&str; 5] = [
-                "sshd: minted a new host identity at /state/sshd/host_ed25519",
-                "sshd: host identity SHA256:",
-                "sshd: cannot read /state/sshd/authorized_keys",
-                "sshd: cannot read /system/etc/ssh_authorized_keys",
-                "sshd: no file names a usable key",
-            ];
-            let stalled =
-                await_guest(&mut qemu, &mut console, "every line sshd owes", |c| {
-                    WANT.iter().all(|w| c.contains(w))
-                })
-                .err();
-            if let Some(why) = stalled {
-                eprintln!("  [sshd] {why}");
-            }
-            for want in WANT {
-                if !console.contains(want) {
-                    return Err(format!("{want:?} never reached the console:\n{console}"));
-                }
-            }
-            if console.contains("sshd: listening on port 22") {
-                return Err(format!(
-                    "sshd listened on port 22 with no key it could ever accept:\n{console}"
-                ));
-            }
-            eprintln!(
-                "  [sshd] host identity minted under /state/sshd, and neither authorized_keys file \
-                 left it refusing to listen at all"
             );
             Ok(())
         }
@@ -16067,6 +15490,7 @@ fn run_machine_test(
         }
         "netd_slow_reader" => netd_slow_reader(rust_bins),
         "netd_refused_pipes" => netd_refused_pipes(rust_bins),
+        "netd_refused_accept" => netd_refused_accept(rust_bins),
         "netd_held_open" => netd_held_open(rust_bins),
         "netd_stalled_peer" => netd_stalled_peer(rust_bins),
         "netd_udp_refused" => netd_udp_refused(rust_bins),
@@ -16860,18 +16284,21 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The kernel reopens init by pid after the last handle to it has gone.
+/// The kernel reopens init by pid after the last handle to it has gone, and
+/// no kernel thread's pid opens.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn process_reopen(log: &str) -> Result<(), String> {
-        let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
-            return Err(format!("the reopen control never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
+        for control in ["process-reopen:", "process-open-kthread:"] {
+            let Some(verdict) = log.lines().find(|l| l.contains(control)) else {
+                return Err(format!("{control} never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [process] {}", verdict.trim());
         }
-        eprintln!("  [process] {}", verdict.trim());
         Ok(())
 }
 
@@ -17214,30 +16641,14 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The machine's three kernel threads are hosted, and each claims the panic row
-/// its own loss demands.
+/// The machine's kernel threads are hosted.
 ///
-/// Text in, a verdict out: all three lines are `log!` records, so the T14's
+/// Text in, a verdict out: every line is a `log!` record, so the T14's
 /// readback and a QEMU boot log are judged by this one predicate.
 fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     boot.must_be_clean()?;
-    let line = boot.must_say("kthread: klogd")?;
-    if !line.contains("halts the machine") {
-        return Err(format!("klogd is hosted but claims the wrong panic row: {line:?}"));
-    }
-    eprintln!("  [klogd] {}", line.trim());
-
-    // **The other two threads, and the opposite row.** `usbd` owns the xHCI
-    // port machine and `iod` the write-back queue, so a stuck USB enumeration
-    // cannot stop the log. Their panics are *recoverable* and `klogd`'s
-    // deliberately is not — a killed drainer is the one loss nothing left alive
-    // can report — and this is the one boot in the suite where all three rows
-    // are on the wire together.
-    for name in ["usbd", "iod"] {
+    for name in ["klogd", "iod"] {
         let line = boot.must_say(&format!("kthread: {name}"))?;
-        if !line.contains("kills the thread") {
-            return Err(format!("{name} is hosted but claims the wrong panic row: {line:?}"));
-        }
         eprintln!("  [kthread] {}", line.trim());
     }
     Ok(())
@@ -17853,84 +17264,6 @@ fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
     boot.number("latency.p99_us", u64::try_from(code).expect("a non-negative code"))
 }
 
-/// [`control_regs`] against machines this host cannot boot, with no guest.
-///
-/// [`control_regs_negative`] runs the real defective machine and is the link
-/// between this verdict and a kernel; what is here is the states no actuator
-/// reaches — a CPU that differs from three others, a bit set uniformly on all
-/// four, an AP that never printed. Every value is one this tree has printed or
-/// one bit away from it.
-fn control_regs_verdict() -> Result<(), String> {
-    /// The pre-fix machine, `smp=4`, TCG, read off this tree on 2026-08-08:
-    /// firmware's registers on the BSP and INIT's on every AP.
-    const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);
-    const DECLARED: (u64, u64) = (0x8001_0033, 0x0030_0668);
-
-    fn log(cpus: &[(u64, u64)]) -> String {
-        cpus.iter()
-            .enumerate()
-            .map(|(i, (cr0, cr4))| {
-                format!("[kernel 0.1 cpu{i}] control_regs: cpu{i} cr0={cr0:#010x} cr4={cr4:#010x}\n")
-            })
-            .collect()
-    }
-
-    let refused = |what: &str, cpus: &[(u64, u64)], says: &str| match control_regs(&log(cpus), 4) {
-        Ok(()) => Err(format!("{what} was accepted")),
-        Err(e) if e.contains(says) => Ok(()),
-        Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
-    };
-
-    // Positive control first: a verdict that refuses everything refuses the
-    // defect too, and would prove nothing below.
-    control_regs(&log(&[DECLARED; 4]), 4)
-        .map_err(|e| format!("the declared machine was refused: {e}"))?;
-
-    refused("the machine this tree booted", &[DECLARED, AP_BEFORE, AP_BEFORE, AP_BEFORE], "CD")?;
-    // The case a "do all the CPUs agree?" test passes: they agree, on INIT's
-    // value. Nothing about uniformity says caching is on.
-    refused("four CPUs agreeing on INIT's CR0", &[AP_BEFORE; 4], "CD")?;
-    refused(
-        "one CPU without WP",
-        &[DECLARED, (DECLARED.0 & !(1 << 16), DECLARED.1), DECLARED, DECLARED],
-        "WP",
-    )?;
-    refused(
-        "one CPU without NE",
-        &[DECLARED, DECLARED, (DECLARED.0 & !(1 << 5), DECLARED.1), DECLARED],
-        "NE",
-    )?;
-    // The bit that must be *absent*: with it set, XCR0 can name components
-    // FXSAVE64 does not save.
-    refused("OSXSAVE set", &[(DECLARED.0, DECLARED.1 | (1 << 18)); 4], "OSXSAVE")?;
-    // Two bits a machine could hold uniformly, each one line of kernel diff
-    // away, and neither reachable by an actuator. `AM` is named clear above and
-    // answers by name; `PGE` is named nowhere, which is the case the whole
-    // never-named rule exists for — `TSD` and `PKE` are the same case. `UMIP`
-    // used to be this file's example of the same thing, until it joined
-    // `CR4_MAY` — a bit that moves from unnamed to optional is exactly the
-    // migration this gate exists to force a diff for.
-    refused("every CPU with AM set", &[(DECLARED.0 | (1 << 18), DECLARED.1); 4], "AM")?;
-    refused(
-        "every CPU with PGE set",
-        &[(DECLARED.0, DECLARED.1 | (1 << 7)); 4],
-        "never named",
-    )?;
-    // The bit that was on before this and asserted nowhere, so deleting `+smep`
-    // from the launcher or breaking the CPUID gate in `control_regs::supported`
-    // reddened nothing at all.
-    refused("every CPU without SMEP", &[(DECLARED.0, DECLARED.1 & !(1 << 20)); 4], "SMEP")?;
-    // A CPU that agrees about every named bit and differs in one the CPU is
-    // allowed to withhold, so nothing above it can object.
-    refused("one CPU with PCID and three without", &[DECLARED, DECLARED, DECLARED, (DECLARED.0, DECLARED.1 | (1 << 17))], "cpu3")?;
-    // And an AP that never printed at all, which is what a machine whose AP
-    // died before the check looks like.
-    refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
-
-    eprintln!("  [control_regs] the verdict refuses 10 machines and accepts the declared one");
-    Ok(())
-}
-
 /// The negative control, executed: an AP left holding what `INIT` gave it, and
 /// [`control_regs`] refusing the machine that produces.
 ///
@@ -18124,55 +17457,6 @@ fn idle_is_spinning(serial: &str) -> Option<(u32, u64)> {
             .or_insert((trips, trips));
     }
     spread.into_iter().map(|(id, (min, max))| (id, max - min)).find(|&(_, delta)| delta > MAX_IDLE_TRIP_DELTA)
-}
-
-/// [`idle_is_spinning`] against a healthy trace and a crafted one shaped like
-/// the regression it exists to catch, with no guest — the same split
-/// `control_regs`/`control_regs_verdict` use, and for the same reason: a
-/// gate's own teeth are a claim a live boot cannot demonstrate on the
-/// negative side, because nothing in this tree can stage a CPU into spinning
-/// through idle on purpose.
-///
-/// This is the demonstration the closed vacuous-line-count entry
-/// asked for: proof the restored assertion still fails when the condition it
-/// names is violated, not just that it still passes when it is not.
-fn idle_trip_verdict() -> Result<(), String> {
-    let healthy = "\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=3\n\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=2\n";
-    if let Some((cpu, delta)) = idle_is_spinning(healthy) {
-        return Err(format!("a healthy trace was refused: cpu{cpu} moved by {delta}"));
-    }
-
-    // The regression's own shape: one CPU quarantines cleanly and stays
-    // quiet, the other's undrained ring never lets it halt.
-    let spinning = "\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=4\n\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=2\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=2685004\n";
-    match idle_is_spinning(spinning) {
-        Some((1, delta)) if delta > MAX_IDLE_TRIP_DELTA => {}
-        Some((cpu, delta)) => {
-            return Err(format!("refused the wrong CPU or by the wrong margin: cpu{cpu} delta {delta}"))
-        }
-        None => return Err("a spinning CPU's trace was accepted".to_string()),
-    }
-
-    // And the line the old, count-of-lines check would have been fooled by:
-    // the same number of `sched: cpu=` lines either way, because the print
-    // itself is rate-limited regardless of what is underneath it — which is
-    // exactly the vacuity this replaces.
-    assert_eq!(
-        healthy.matches("sched: cpu=").count(),
-        spinning.matches("sched: cpu=").count(),
-        "the crafted traces must differ only in trips=, not in line count — otherwise this proves nothing about the old check's blindness"
-    );
-
-    eprintln!("  [i8042] the idle-trip verdict accepts a healthy trace and refuses a spinning one");
-    Ok(())
 }
 
 /// Everything the driver derived its DMA pool from, off the two lines it
@@ -18392,8 +17676,7 @@ enum Poke {
 /// The right button, which no sequence driving that client produces for any
 /// other reason, and the release rather than the press so the pointer is left
 /// with nothing held. Every caller owes it one: without it the client waits out
-/// its liveness ceiling, and `xhci_hid_break`, `xhci_hotplug` and `xhci_flap`
-/// each paid 30 s for the omission.
+/// its liveness ceiling.
 pub(crate) fn input_events_end(input: &mut qemu::QmpInput) {
     input.mouse(0, 0, Some(("right", true)));
     input.mouse(0, 0, Some(("right", false)));
@@ -18537,7 +17820,6 @@ fn build_test_registry(
 
     for name in discover_rust_tests(rust_bins) {
         let timeout = match name.as_str() {
-            "panic_recovery" => Duration::from_secs(10),
             // Writes the child's whole image through bcachefs before it can run
             // it, which is the only thing here that is not a spawn.
             "disk_backtrace" => Duration::from_secs(15),
@@ -18729,210 +18011,6 @@ fn headline(reason: Option<&str>) -> String {
     reason.unwrap_or("check failed").lines().next().unwrap_or("check failed").to_string()
 }
 
-/// One live guest holds its lane's NVMe image, and the next one may not.
-///
-/// **The overlap this stages is the one the shared-boot reboot used to
-/// produce.** `qemu = boot()` evaluates its right-hand side first, so the
-/// replacement was launched while the guest it replaced still held the lane's
-/// `test-nvme-*.img` open for write; QEMU's second process exited 1 on its own
-/// image lock, `wait_for_ready` panicked, and the panic escaped the shared
-/// block — 129 of one run's 131 reds on one sentence, 2026-08-17.
-///
-/// The ordering itself is now the type's: `boot` takes a [`qemu::LaneFree`] and
-/// the only thing that makes one out of a guest is `QemuInstance::shutdown`,
-/// which takes it by value. What is left to check at runtime is the claim
-/// underneath — that a hold is real while a guest is up and gone once it is
-/// not — and this checks it on the harness's own registry, in both directions,
-/// with no guest.
-fn nvme_image_is_held_by_one_guest() -> Result<(), String> {
-    // Names, not files: a claim is a hold on a path and touches no disk, so
-    // nothing here has to create or delete a hundred megabytes to ask.
-    let dir = common::lane::dir();
-    let image = dir.join("nvme-claim-gate.img");
-    let other = dir.join("nvme-claim-gate-other.img");
-
-    let held = qemu::NvmeClaim::take(&image).map_err(|why| {
-        format!("a free image refused its first guest: {why}")
-    })?;
-
-    // The overlap. This is the direction that must red, and it is what the
-    // reboot produced.
-    match qemu::NvmeClaim::take(&image) {
-        Ok(_) => {
-            return Err(format!(
-                "a second guest took {}, which a live one is holding — two QEMUs are then \
-                 handed one image and the second dies on its lock",
-                image.display()
-            ))
-        }
-        Err(why) => {
-            // The refusal has to name the image, or it cannot be acted on: a
-            // run makes dozens of guests and the message is all a reader gets.
-            if !why.contains(&image.display().to_string()) {
-                return Err(format!("the refusal does not name the image it is about: {why}"));
-            }
-        }
-    }
-
-    // A different image is not a conflict, or every lane would refuse every
-    // other lane's boot the moment this gate had teeth.
-    let elsewhere = qemu::NvmeClaim::take(&other)
-        .map_err(|why| format!("an unheld image was refused: {why}"))?;
-    drop(elsewhere);
-
-    // And the ordinary reboot: the replacement takes the image the guest it
-    // replaces released. Green, and it is the half a fix that simply refused
-    // every second boot would break.
-    drop(held);
-    let replacement = qemu::NvmeClaim::take(&image).map_err(|why| {
-        format!("a replacement was refused the image its predecessor released: {why}")
-    })?;
-    drop(replacement);
-    Ok(())
-}
-
-/// A blown guard stays red, and stops reading as an answer.
-///
-/// Both halves, because each fails the other's way round. An implementation
-/// that made a stall its own non-red status would hide a guest that genuinely
-/// stops; one that only renamed the line would leave the summary saying a test
-/// found something. Staged against the strings a wait actually produces rather
-/// than against the marker on its own, because a caller prefixes its own
-/// sentence to [`await_marker`]'s and the classification has to survive that.
-fn stall_is_not_a_verdict() -> Result<(), String> {
-    // Built from the marker rather than copied, so a rename cannot leave the
-    // gate asserting against a string nothing produces any more.
-    let real = format!("{STALLED} waiting for the long tone to start — it went quiet");
-    let under_a_sentence = format!("the compositor stopped painting\n{real}");
-    let cases: [(&str, Option<&str>, bool); 4] = [
-        ("an ordinary red", Some("the pointer never moved right"), false),
-        ("a wait that expired", Some(real.as_str()), true),
-        (
-            "a wait that expired under a caller's own sentence",
-            Some(under_a_sentence.as_str()),
-            true,
-        ),
-        ("a pass", None, false),
-    ];
-    for (what, reason, want_stall) in cases {
-        let outcome = Outcome {
-            name: what.to_string(),
-            reason: reason.map(str::to_string),
-            elapsed: Duration::from_secs(1),
-            suspended: Duration::ZERO,
-        };
-        if outcome.stalled() != want_stall {
-            return Err(format!(
-                "{what} reads as stalled={}, and it has to be {want_stall}",
-                outcome.stalled()
-            ));
-        }
-        // Red is red. A stall that stopped failing the run would be a gate that
-        // reports and enforces nothing.
-        let red = outcome.verdict() == Verdict::Fail;
-        if red != reason.is_some() {
-            return Err(format!("{what} is red={red}, and a reason is always red"));
-        }
-    }
-
-    let mut tally = Tally::new();
-    tally.record(Outcome {
-        name: "a_stalled_test".to_string(),
-        reason: Some(format!("{STALLED} waiting for nothing at all — it went quiet")),
-        elapsed: Duration::from_secs(1),
-        suspended: Duration::ZERO,
-    });
-    tally.record(Outcome {
-        name: "a_wrong_answer".to_string(),
-        reason: Some("the pointer never moved right".to_string()),
-        elapsed: Duration::from_secs(1),
-        suspended: Duration::ZERO,
-    });
-    if tally.exit_code() != 1 {
-        return Err(format!("two reds exited {}, and they have to red", tally.exit_code()));
-    }
-    if tally.stalls != ["a_stalled_test"] {
-        return Err(format!(
-            "the run named {:?} as blown guards; it has to name exactly the one that was",
-            tally.stalls
-        ));
-    }
-    let summary = tally.summary(2, Duration::from_secs(2), Duration::ZERO);
-    if !summary.contains("1 of those reds are blown liveness guards") {
-        return Err(format!("the summary does not separate the two kinds of red:\n{summary}"));
-    }
-    Ok(())
-}
-
-/// Whether a run that did not attempt most of the suite's measured cost says so.
-///
-/// **The failure mode the tier introduces is silence, not a wrong answer.** A
-/// green run holding back 60 tests and a green run holding back none print the
-/// same word, and the difference between them is the whole reason `--nightly`
-/// exists. Nothing else can see whether the *run* mentions it, and a run nobody
-/// can tell apart from a full one is how a temporary measure becomes permanent.
-///
-/// Both directions, because the second is the one that rots quietly: a suite
-/// that ran everything must not claim to have held anything back either, or the
-/// line stops carrying information the day somebody makes it unconditional.
-fn nightly_tier_is_announced() -> Result<(), String> {
-    let held: [&str; 2] = ["desktop_window_child", "sshd_fail_closed"];
-    let announced =
-        Tally::new().holding_back(&held).summary(1, Duration::ZERO, Duration::ZERO);
-    for want in [
-        "not run — the nightly tier",
-        "desktop_window_child, sshd_fail_closed",
-        "`cargo test --test toyos-build -- --nightly` runs them",
-        "2 held back for the nightly tier",
-    ] {
-        if !announced.contains(want) {
-            return Err(format!("a run holding tests back never says {want:?}:\n{announced}"));
-        }
-    }
-    let whole = Tally::new().summary(1, Duration::ZERO, Duration::ZERO);
-    if whole.contains("nightly") || whole.contains("held back") {
-        return Err(format!("a run that held nothing back says it did:\n{whole}"));
-    }
-    Ok(())
-}
-
-/// What a suspend is worth to a verdict, staged rather than reasoned about.
-///
-/// `common::clock::self_check` gates the detector; this gates what the suite
-/// does with what it detects. Both halves are needed and neither implies the
-/// other: **a suspend that silently passes is as bad as one that silently
-/// fails**, and here the two are one line apart.
-fn suspend_invalidates_a_verdict() -> Result<(), String> {
-    let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
-    let awake = Duration::ZERO;
-    // Under the threshold on purpose: two clock reads jitter against each other
-    // by microseconds, and a run must not be thrown away for that.
-    let jitter = common::clock::SUSPENDED_AT_LEAST
-        .checked_sub(Duration::from_millis(1))
-        .expect("SUSPENDED_AT_LEAST must be at least 1ms for this case to mean anything");
-    let cases: [(&str, Option<&str>, Duration, Verdict); 6] = [
-        ("a pass on a host that stayed up", None, awake, Verdict::Pass),
-        ("a fail on a host that stayed up", Some("the guest said no"), awake, Verdict::Fail),
-        ("a pass across a suspend", None, slept, Verdict::Invalid),
-        ("a fail across a suspend", Some("timed out"), slept, Verdict::Invalid),
-        ("a pass across clock jitter", None, jitter, Verdict::Pass),
-        ("a fail across clock jitter", Some("the guest said no"), jitter, Verdict::Fail),
-    ];
-    for (what, reason, suspended, want) in cases {
-        let outcome = Outcome {
-            name: what.to_string(),
-            reason: reason.map(str::to_string),
-            elapsed: Duration::from_secs(3),
-            suspended,
-        };
-        let got = outcome.verdict();
-        if got != want {
-            return Err(format!("{what} is {got:?}, and it has to be {want:?}"));
-        }
-    }
-    Ok(())
-}
-
 /// What a run has established, as it establishes it.
 ///
 /// One place rather than five counters in `main`, because the interesting part
@@ -18947,11 +18025,11 @@ struct Tally {
     /// that never got the guest going has measured the host and not the tree.
     stalls: Vec<String>,
     invalid: Vec<(String, Duration)>,
-    /// What the tier held back, by name. Not a verdict and never red — it is the
-    /// one thing a reader of the last line cannot infer from anything else in
-    /// it, because a run that skipped a third of its cost looks exactly like a
-    /// run that had nothing to do.
-    relegated: Vec<&'static str>,
+    /// What each tier held back, under the flag that runs it. Not a verdict and
+    /// never red — it is the one thing a reader of the last line cannot infer
+    /// from anything else in it, because a run that skipped a third of its cost
+    /// looks exactly like a run that had nothing to do.
+    relegated: Vec<(&'static str, Vec<String>)>,
 }
 
 impl Tally {
@@ -18966,8 +18044,12 @@ impl Tally {
     }
 
     /// The names this run's tier filter took out, for the summary to say so.
-    fn holding_back(mut self, names: &[&'static str]) -> Self {
-        self.relegated = names.to_vec();
+    fn holding_back(mut self, held: Vec<(Tier, Vec<String>)>) -> Self {
+        self.relegated = held
+            .into_iter()
+            .filter(|(_, names)| !names.is_empty())
+            .map(|(tier, names)| (tier.flag().expect("only a flag's tier is held back"), names))
+            .collect();
         self
     }
 
@@ -19062,21 +18144,21 @@ impl Tally {
 
         // Above the result line and not below it, so the pointer is the last
         // thing before the verdict rather than an afterthought under it.
-        if !self.relegated.is_empty() {
-            say("not run — the nightly tier:".to_string());
-            say(format!("    {}", self.relegated.join(", ")));
-            say("    `cargo test --test toyos-build -- --nightly` runs them.".to_string());
+        for (flag, names) in &self.relegated {
+            say(format!("not run without {flag}:"));
+            say(format!("    {}", names.join(", ")));
+            say(format!("    `cargo test --test toyos-build -- {flag}` runs them."));
             say(String::new());
         }
 
         // **In the result line, because that is the line a shard's job summary
         // extracts and the line anybody reads.** A count of what ran means
         // something different depending on how much was not attempted.
-        let held = if self.relegated.is_empty() {
-            String::new()
-        } else {
-            format!(", {} held back for the nightly tier", self.relegated.len())
-        };
+        let held: String = self
+            .relegated
+            .iter()
+            .map(|(flag, names)| format!(", {} held back for {flag}", names.len()))
+            .collect();
         match self.exit_code() {
             1 => say(format!(
                 "test result: FAILED. {} passed, {} failed, {} invalidated, \
@@ -19105,318 +18187,6 @@ impl Tally {
         }
         out
     }
-}
-
-/// What a whole run exits with, and what its last line says.
-///
-/// Driven through [`Tally`] rather than asserted about it: the property that
-/// matters is what `--land`'s gate reads off the process, and that is the exit
-/// code after `record` has seen every outcome.
-fn run_exit_status() -> Result<(), String> {
-    let outcome = |name: &str, reason: Option<&str>, suspended: Duration| Outcome {
-        name: name.to_string(),
-        reason: reason.map(str::to_string),
-        elapsed: Duration::from_secs(3),
-        suspended,
-    };
-    let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
-
-    let mut red = Tally::new();
-    red.record(outcome("a_red", Some("the disk came back short"), Duration::ZERO));
-    red.record(outcome("a_suspended_one", None, slept));
-    if red.exit_code() != 1 {
-        return Err(format!("a run with a red exits {}, and it has to be 1", red.exit_code()));
-    }
-
-    let mut suspended = Tally::new();
-    suspended.record(outcome("a_suspended_one", None, slept));
-    if suspended.exit_code() != 2 {
-        return Err(format!("a suspended run exits {}, and it has to be 2", suspended.exit_code()));
-    }
-
-    // The clean case, so that none of the above is passing because everything
-    // reds.
-    let mut clean = Tally::new();
-    clean.record(outcome("a_green", None, Duration::ZERO));
-    let text = clean.summary(1, Duration::from_secs(9), Duration::ZERO);
-    if clean.exit_code() != 0 {
-        return Err(format!("a clean run exits {}, and it has to be 0", clean.exit_code()));
-    }
-    if !text.lines().last().unwrap_or_default().starts_with("test result: ok.") {
-        return Err(format!("a clean run does not say so plainly:\n{text}"));
-    }
-    Ok(())
-}
-
-/// A wait that hands a death spelling to a scan of its own, asked of the
-/// harness's source.
-///
-/// **The one place the vocabulary lives is the whole of the fix, so this is
-/// what keeps it the one place.** `tests/common/qemu.rs` holds three waits on a
-/// guest and they used to disagree: the boot half ended on three spellings, the
-/// test half on one and `await_guest` on none at all — so a Rust `panic!` in the
-/// kernel matched nothing while a test was running, the machine halted every
-/// CPU, and the guard expired onto a verdict saying the guest had stopped
-/// answering. All three ask `serial::died` now, which is the only thing in the
-/// harness that knows the words and the only thing that knows the prefix decides
-/// whose death they report.
-///
-/// The way that comes back is the obvious patch: one more spelling handed
-/// straight to a `contains` beside the call. It would match a *program's* panic
-/// as readily as the kernel's and take the run down with a guest binary that
-/// was expected to die — so the shape is refused by name rather than left to a
-/// reviewer. Comment lines go first: this file argues about these words at
-/// length, and prose is not a second answer.
-fn hand_rolled_deaths(text: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for (n, line) in text.lines().enumerate() {
-        if line.trim_start().starts_with("//") {
-            continue;
-        }
-        for word in serial::spellings() {
-            // The shape is the spelling as somebody's first argument —
-            // `contains`, `starts_with`, `find`, any of them. A spelling
-            // *inside* a longer staged line is how this file's own gates build
-            // their inputs, and those are not scans.
-            if line.contains(&format!("(\"{word}")) {
-                found.push(format!("{}:{}: {}", n + 1, word, line.trim()));
-            }
-        }
-    }
-    found
-}
-
-/// [`hand_rolled_deaths`] over the file that has to stay clean, with its own
-/// bad input beside it so a check that stopped finding anything says so.
-fn one_vocabulary() -> Result<(), String> {
-    const FILE: &str = "tests/common/qemu.rs";
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(FILE);
-    let text = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let found = hand_rolled_deaths(&text);
-    if !found.is_empty() {
-        return Err(format!(
-            "{FILE} scans for a death spelling itself, and `serial::died` is where that is \
-             decided for every wait at once — a second answer here is what let a kernel panic \
-             read as a stall, and it matches a program's own panic besides:\n  {}",
-            found.join("\n  ")
-        ));
-    }
-    // The negative control. Every line of it is a shape this must name, and the
-    // last two are shapes it must not: prose, and a staged capture built out of
-    // the same words.
-    let staged = "\
-        } else if line.contains(\"KERNEL PANIC\") {\n\
-        if line.starts_with(\"SEGFAULT\") {\n\
-        // ends on `PANIC:` and nothing else, which is the defect\n\
-        const KERNEL: &str = \"[kernel 1.450 cpu3] PANIC: panicked at reserve.rs:812:9:\";\n";
-    let named = hand_rolled_deaths(staged);
-    if named.len() != 2 {
-        return Err(format!(
-            "the check names {} of the two hand-rolled scans staged for it: {named:?}",
-            named.len()
-        ));
-    }
-    eprintln!("  [vocabulary] {FILE} asks `serial::died` and nothing else");
-    Ok(())
-}
-
-/// What the declaration itself has to be, before any of it means anything.
-/// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
-///
-/// A name reaches the syscall directly, or through a child it spawns —
-/// `panic_recovery`'s three actions are all `test_panic_child`'s, and a rule
-/// that only read the test's own source would miss the one test in the list
-/// whose whole subject is the syscall.
-fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<String> {
-    // The fourth spelling is the argument-taking form: every action that
-    // carries a payload (TLB_ACK_DELAY_ARM, CENSUS_KIND, LOWER_SYSINFO_BOUND,
-    // SLOT_TO_LAST_GENERATION) is reached through `debug_with`, never
-    // `debug`. The third is the SDK's: `toyos::census` calls `debug_with` on
-    // the caller's behalf, so a binary whose leak assertion is a census names
-    // no syscall of its own and reads as innocent to the others.
-    let calls = |text: &str| {
-        text.contains("SYS_DEBUG")
-            || text.contains("syscall::debug(")
-            || text.contains("syscall::debug_with(")
-            || text.contains("census::Census")
-    };
-    let direct: BTreeSet<&str> =
-        sources.iter().filter(|(_, t)| calls(t)).map(|(n, _)| n.as_str()).collect();
-    let mut out = BTreeSet::new();
-    for (name, text) in sources {
-        if !registry.contains(&name.as_str()) {
-            continue;
-        }
-        let spawns = direct.iter().any(|d| text.contains(&format!("test_rs_{d}")));
-        if direct.contains(name.as_str()) || spawns {
-            out.insert(name.clone());
-        }
-    }
-    out
-}
-
-/// [`ACTUATOR_TESTS`] is exactly the shared-boot binaries that reach
-/// `SYS_DEBUG`, and the binaries are what is asked.
-///
-/// **What this does not cover, stated because the hole is real:** a machine or
-/// screen test that *drives* one of those binaries on a boot of its own.
-/// `screen_recoverable_untouched` was the instance — it runs
-/// `test_rs_test_panic_child` on a featureless kernel, where action 0 is answered
-/// `InvalidArgument` and the child exits 0 — and no static rule here can say
-/// which `BootOptions` a `run_test` call belongs to. What answers it instead is
-/// the guest: `test_panic_child` names `InvalidArgument` as *this kernel carries
-/// no actuators* rather than reporting a kernel that failed to kill anybody, so
-/// the red says what is wrong wherever it happens.
-///
-/// **Both directions are the point.** A binary that gains a `debug()` call and
-/// no entry would run on the shipping kernel, where the syscall answers
-/// `InvalidArgument` — and a test whose verdict is that a process died would
-/// then fail for a reason with nothing to do with what it is about. An entry
-/// whose binary no longer calls it is a test kept off the shipping kernel for
-/// nothing, which is the erosion this split exists to stop.
-fn suite_split() -> Result<(), String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests/src/bin");
-    let mut sources: Vec<(String, String)> = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.extension().is_none_or(|e| e != "rs") {
-            continue;
-        }
-        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-        let text = fs::read_to_string(&path).map_err(|e| format!("read {name}: {e}"))?;
-        sources.push((name, text));
-    }
-    let registry: Vec<&str> =
-        sources.iter().map(|(n, _)| n.as_str()).filter(|n| !RUST_SKIP.contains(n)).collect();
-
-    // The negative control, and it carries its own bad input: a binary that
-    // calls the syscall and is on no list must be named, or the check above is
-    // a spelling of `true`.
-    let staged = vec![
-        ("a_listed_one".to_string(), "syscall::debug(3)".to_string()),
-        ("an_unlisted_one".to_string(), "SYS_DEBUG".to_string()),
-        ("its_parent".to_string(), "Command::new(\"/system/bin/test_rs_an_unlisted_one\")".to_string()),
-        ("a_censor".to_string(), "use toyos::census::Census;".to_string()),
-        ("a_debug_with_user".to_string(), "syscall::debug_with(3, 4)".to_string()),
-        ("innocent".to_string(), "println!()".to_string()),
-    ];
-    let staged_registry = [
-        "a_listed_one",
-        "an_unlisted_one",
-        "its_parent",
-        "a_censor",
-        "a_debug_with_user",
-        "innocent",
-    ];
-    let found = needs_actuators(&staged, &staged_registry);
-    let want: BTreeSet<String> =
-        ["a_listed_one", "an_unlisted_one", "its_parent", "a_censor", "a_debug_with_user"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-    if found != want {
-        return Err(format!("the check does not work: on staged input it named {found:?}"));
-    }
-
-    let want: BTreeSet<String> = needs_actuators(&sources, &registry);
-    let listed: BTreeSet<String> = ACTUATOR_TESTS.iter().map(|s| s.to_string()).collect();
-    let missing: Vec<&String> = want.difference(&listed).collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "{missing:?} reach SYS_DEBUG and are on the shipping boot, where the syscall answers \
-             InvalidArgument. Add each to ACTUATOR_TESTS, or to RUST_SKIP if it is driven rather \
-             than run."
-        ));
-    }
-    let stale: Vec<&String> = listed.difference(&want).collect();
-    if !stale.is_empty() {
-        return Err(format!(
-            "{stale:?} are held off the shipping kernel and no longer reach SYS_DEBUG. Delete \
-             each entry — coverage of the binary an image ships is what it costs."
-        ));
-    }
-    // **The other shape `check_no_collisions` cannot see**: a binary a machine
-    // test drives under a *different* name is still discovered here, still runs
-    // on the shared boot, and there passes on its exit code with nothing staged
-    // for it to act on.
-    let staged_driven = [
-        String::from("qemu.run_test(\"test_rs_a_driven_one\", Duration::from_secs(30))"),
-        String::from("Command::new(\"/system/bin/test_rs_another_driven\")"),
-        String::from("qemu.run_test(&format!(\"test_rs_{name}\"), ceiling)"),
-    ];
-    let found = driven_binaries(&staged_driven);
-    let want: BTreeSet<String> =
-        ["a_driven_one", "another_driven"].iter().map(|s| s.to_string()).collect();
-    if found != want {
-        return Err(format!("the driven-name reader does not work: it named {found:?}"));
-    }
-
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut harness = vec![fs::read_to_string(root.join("tests/toyos.rs"))
-        .map_err(|e| format!("read tests/toyos.rs: {e}"))?];
-    let common = root.join("tests/common");
-    for entry in fs::read_dir(&common).map_err(|e| format!("read {}: {e}", common.display()))? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.extension().is_some_and(|e| e == "rs") {
-            harness.push(fs::read_to_string(&path).map_err(|e| e.to_string())?);
-        }
-    }
-    let shared: BTreeSet<&str> = registry.iter().copied().collect();
-    let both: BTreeSet<String> = driven_binaries(&harness)
-        .into_iter()
-        .filter(|name| shared.contains(name.as_str()))
-        .collect();
-    let declared: BTreeSet<String> = DRIVEN_AND_SHARED.iter().map(|s| s.to_string()).collect();
-    let undeclared: Vec<&String> = both.difference(&declared).collect();
-    if !undeclared.is_empty() {
-        return Err(format!(
-            "{undeclared:?} are driven by a machine test and also run on the shared boot, where \
-             nothing stages what they need — so each passes on its exit code with no verdict. Add \
-             each to RUST_SKIP with the reason its driver exists, or to DRIVEN_AND_SHARED if its \
-             shared run asserts something of its own."
-        ));
-    }
-    let stale: Vec<&String> = declared.difference(&both).collect();
-    if !stale.is_empty() {
-        return Err(format!(
-            "DRIVEN_AND_SHARED names {stale:?}, which no machine test drives or the shared boot \
-             no longer runs. Delete each entry — a declaration nothing is true of is what makes \
-             the rest of the list unreadable."
-        ));
-    }
-
-    println!(
-        "  [split] {} shared binaries on the shipping kernel, {} on the actuator one, {} of them \
-         driven elsewhere and declared",
-        registry.len() - listed.len(),
-        listed.len(),
-        both.len()
-    );
-    Ok(())
-}
-
-/// Every guest binary the harness drives by name, read out of its own sources.
-///
-/// A driver reaches a binary as the literal `test_rs_<name>`, so that is what
-/// says a binary has one; a `format!` over a variable name yields no literal
-/// and is not a driver of any particular binary. Pure, and the sources are a
-/// parameter, so `suite_split` stages its own before trusting it on the tree.
-fn driven_binaries(sources: &[String]) -> BTreeSet<String> {
-    const MARK: &str = "test_rs_";
-    let mut found = BTreeSet::new();
-    for text in sources {
-        let mut rest = text.as_str();
-        while let Some(at) = rest.find(MARK) {
-            rest = &rest[at + MARK.len()..];
-            let end = rest
-                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .unwrap_or(rest.len());
-            if end > 0 {
-                found.insert(rest[..end].to_string());
-            }
-        }
-    }
-    found
 }
 
 /// Which of the two shared boots a name belongs on — a *kernel build*, because
@@ -19741,9 +18511,7 @@ fn save_durations(mut known: BTreeMap<String, Duration>, timed: &[(String, Durat
 /// A phase's wall clock is `max(sum / width, longest job)`, and FIFO reaches the
 /// first term only if no long job is dispatched late. Declaration order puts the
 /// feature-carrying tests last — deliberately, to keep the kernel rebuilds
-/// together — which is exactly the worst order for a wide phase: `xhci_hid_break`
-/// and `xhci_deaf_registers` are two of the three longest jobs in the suite and
-/// both sit in the last quarter of `MACHINE_TESTS`.
+/// together — which is exactly the worst order for a wide phase.
 ///
 /// **The profile is measured, not declared**, because the alternative is a
 /// hand-maintained list of long tests — a second registration to keep true, and
@@ -19798,7 +18566,6 @@ fn run_phase(
     tasks: Vec<Task<'_>>,
     width: usize,
     bins: &Bins<'_>,
-    slots: &HostSlots,
 ) -> Vec<Outcome> {
     if tasks.is_empty() {
         return Vec::new();
@@ -19818,7 +18585,6 @@ fn run_phase(
                     let next =
                         queue.lock().expect("a worker panicked holding the queue").pop_front();
                     let Some(task) = next else { return };
-                    let _slot = slots.take(&task.names().join(" "));
                     run_task(task, bins, &tx);
                 }
             });
@@ -19910,9 +18676,9 @@ fn build_tasks<'a>(
 /// the width CI actually runs.
 fn check_shard_partition(all_tests: &[TestDef]) {
     let pricing = shard_pricing();
-    for &nightly in &[false, true] {
+    for reach in [Reach::Fast, Reach::Nightly, Reach::Weekly] {
         // Sharded, because every run this partition is for is one.
-        let in_tier = |tier: Tier| tier.selected(nightly, true);
+        let in_tier = |tier: Tier| tier.selected(reach, true);
         let tests_to_run: Vec<&TestDef> =
             all_tests.iter().filter(|_| in_tier(SHARED_TIER)).collect();
         let machine_to_run: Vec<(&str, Sched)> = MACHINE_TESTS
@@ -19963,28 +18729,28 @@ fn check_shard_partition(all_tests: &[TestDef]) {
             for name in mine_p.iter().chain(&mine_s).flat_map(Task::names) {
                 assert!(
                     seen.insert(name.to_string()),
-                    "nightly={nightly}: {name} lands in shard {index}/{COUNT} and at least \
+                    "{reach:?}: {name} lands in shard {index}/{COUNT} and at least \
                      one earlier shard too — every execution label must belong to exactly one"
                 );
             }
             for name in mine_a {
                 assert!(
                     audio_seen.insert(name.to_string()),
-                    "nightly={nightly}: audio config {name} lands in shard {index}/{COUNT} \
+                    "{reach:?}: audio config {name} lands in shard {index}/{COUNT} \
                      and at least one earlier shard too"
                 );
             }
         }
         assert_eq!(
             seen, want,
-            "nightly={nightly}: the twelve shards together do not equal the full selection — \
+            "{reach:?}: the twelve shards together do not equal the full selection — \
              {:?} present in the selection and missing from every shard",
             want.difference(&seen).collect::<Vec<_>>()
         );
         let want_audio: BTreeSet<String> = audio_names.iter().map(|s| s.to_string()).collect();
         assert_eq!(
             audio_seen, want_audio,
-            "nightly={nightly}: the twelve shards' audio configs do not equal the full \
+            "{reach:?}: the twelve shards' audio configs do not equal the full \
              selection"
         );
     }
@@ -20218,16 +18984,6 @@ fn check_registration() {
             "CARRIES has a row for {test}, which no MACHINE_TESTS or SCREEN_TESTS entry registers"
         );
     }
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for name in MACHINE_TESTS
-        .iter()
-        .chain(SCREEN_TESTS)
-        .map(|(n, _, _)| *n)
-        .chain(AUDIO_TESTS.iter().map(|(n, _)| *n))
-    {
-        assert!(seen.insert(name), "{name} is registered twice");
-    }
-
     let mut groups: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
     for (i, (name, _, _)) in MACHINE_TESTS.iter().enumerate() {
         let Some(group) = group_of(name) else { continue };
@@ -20255,48 +19011,29 @@ fn check_registration() {
     }
 }
 
-/// The half [`check_registration`] could not ask: the shared boot's tests are
-/// *discovered* from the binaries in `tests/toyos-rust-tests` and `tests/c`, so
-/// nothing declared can be compared against them until they exist.
-fn check_no_collisions(shared: &[TestDef]) {
-    let mut shared_seen = BTreeSet::new();
-    let shared_twice: Vec<&str> = shared
-        .iter()
-        .map(|test| test.name.as_str())
-        .filter(|name| !shared_seen.insert(*name))
-        .collect();
-    assert!(
-        shared_twice.is_empty(),
-        "{shared_twice:?} name two binaries on the shared boot; every verdict and duration \
-         label must identify exactly one execution"
-    );
-    let declared: BTreeSet<&str> = MACHINE_TESTS
-        .iter()
-        .map(|(n, _, _)| *n)
-        .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
-        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
-        .collect();
-    let clash: Vec<&str> =
-        shared.iter().map(|t| t.name.as_str()).filter(|n| declared.contains(n)).collect();
-    assert!(
-        clash.is_empty(),
-        "{clash:?} name both a binary on the shared boot and a test that declares its own \
-         machine — two verdicts under one name. Add each to RUST_SKIP with the reason its \
-         own test exists, or rename one of the two."
-    );
+/// Every name this suite can produce a verdict for, at its one tier: the shared
+/// boot's discovered binaries and the three declared registries, so a name two
+/// of them give is refused before anything boots.
+fn schedule(shared: &[TestDef]) -> Schedule<'_> {
+    Schedule::new(
+        shared
+            .iter()
+            .map(|t| (t.name.as_str(), SHARED_TIER))
+            .chain(AUDIO_TESTS.iter().copied())
+            .chain(SCREEN_TESTS.iter().chain(MACHINE_TESTS).map(|(n, _, tier)| (*n, *tier))),
+    )
+    .unwrap_or_else(|refusal| {
+        panic!(
+            "{refusal}. A binary a machine test drives goes on RUST_SKIP with the reason its own \
+             test exists, or one of the two is renamed."
+        )
+    })
 }
 
-/// `redlist::DISABLED` against every name `all_tests` plus the three declared
-/// registries could produce a verdict for, before any boot on any entry point.
-fn check_redlist(all_tests: &[TestDef]) -> Result<(), String> {
-    let runnable: BTreeSet<&str> = all_tests
-        .iter()
-        .map(|t| t.name.as_str())
-        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
-        .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
-        .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
-        .collect();
-    redlist::check(redlist::DISABLED, |name| runnable.contains(name), &compile::repo_root())
+/// `redlist::DISABLED` against every name the schedule holds, before any boot
+/// on any entry point.
+fn check_redlist(schedule: &Schedule<'_>) -> Result<(), String> {
+    redlist::check(redlist::DISABLED, |name| schedule.contains(name), &compile::repo_root())
 }
 
 fn main() {
@@ -20323,10 +19060,11 @@ fn main() {
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
     let list_mode = SUITE.present(&args, &testargs::LIST);
-    // The nightly tier, on. A flag and not an env var for `--audio-gate`'s
-    // reason: an env var is invisible in the command line and easy to leave set,
-    // and the whole point of the split is that a run says what it ran.
-    let nightly = SUITE.present(&args, &testargs::NIGHTLY);
+    // How far down the tiers this run reaches. Flags and not an env var for
+    // `--audio-gate`'s reason: an env var is invisible in the command line and
+    // easy to leave set, and the whole point of the split is that a run says what
+    // it ran.
+    let reach = Reach::of(&args);
     // The metal profile, and where its images and readbacks live. Naming the
     // directory means the machine is not touched — see `common::metal::Mode`.
     let metal_mode = SUITE.present(&args, &testargs::METAL);
@@ -20379,33 +19117,6 @@ fn main() {
         run.exit(0);
     }
 
-    // How many guests may be up on the *host* at once, across every worktree.
-    // `--jobs` is this run's demand; this is what the machine will supply, and
-    // zero turns it off.
-    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or(
-        toyos_build::buildlock::HOST_GUESTS,
-        |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
-    );
-
-    // And how many of this host's *compiles* may run at once, across every
-    // worktree. A worker holds a guest slot from the moment it takes a task and
-    // spends the first part of it building a kernel variant, so twelve workers
-    // are twelve concurrent `cargo build`s and no guest at all.
-    if let Some(n) = SUITE.value(&args, &testargs::HOST_BUILDS) {
-        toyos_build::buildlock::set_host_builds(
-            n.parse().unwrap_or_else(|_| panic!("--host-builds: {n:?} is not a budget")),
-        );
-    }
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-
-    let slots = HostSlots {
-        label: repo_root
-            .file_name()
-            .map_or_else(|| "this worktree".to_string(), |n| n.to_string_lossy().into_owned()),
-        root: repo_root,
-        budget: host_budget,
-    };
-
     check_registration();
 
     if nocapture || debug_mode {
@@ -20432,7 +19143,7 @@ fn main() {
         let c_bins = compile_c_tests(&c_names);
         check_metal_only_unshared(&rust_bins, &c_bins);
         let c_compiled: Vec<String> = c_bins.iter().map(|(n, _)| n.clone()).collect();
-        if let Err(refusal) = check_redlist(&build_test_registry(&rust_bins, &c_compiled)) {
+        if let Err(refusal) = check_redlist(&schedule(&build_test_registry(&rust_bins, &c_compiled))) {
             eprintln!("[toyos] src/redlist.rs: {refusal}");
             run.exit(1);
         }
@@ -20492,24 +19203,23 @@ fn main() {
     // Every name this process could produce a verdict for, before `--list`,
     // `--debug` and `--audio-gate` can return without ever reaching it.
     let all_tests = build_test_registry(&rust_bins, &c_compiled);
-    if let Err(refusal) = check_redlist(&all_tests) {
+    let schedule = schedule(&all_tests);
+    if let Err(refusal) = check_redlist(&schedule) {
         eprintln!("[toyos] src/redlist.rs: {refusal}");
         run.exit(1);
     }
 
-    // --list: print test names and exit
+    // Every row against the catalogue before `--list` and before any boot, so a
+    // name the suite did not build is refused here and not by whichever worker
+    // reaches it.
+    for (_, names) in CARRIES {
+        qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
+    }
+
+    // --list: every test at its tier, and exit
     if list_mode {
-        for t in &all_tests {
-            println!("{}", t.name);
-        }
-        for (name, _) in AUDIO_TESTS {
-            println!("{name}");
-        }
-        for (name, _, _) in SCREEN_TESTS {
-            println!("{name}");
-        }
-        for (name, _, _) in MACHINE_TESTS {
-            println!("{name}");
+        for (name, tier) in schedule.iter() {
+            println!("{tier:?} {name}");
         }
         return;
     }
@@ -20543,12 +19253,6 @@ fn main() {
             );
         }
         let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
-        // One slot for the whole tier: it boots one guest at a time for the
-        // length of it, so one slot is what it occupies. The owner has ruled
-        // that gate A does not get a quiet host (CLAUDE.md, 2026-08-04), so it
-        // takes its share of the machine like everything else and does not
-        // reserve it.
-        let _slot = slots.take("gate A, thorough");
         let ok = run_audio_gate(
             iterations,
             &load_audio_baseline(),
@@ -20563,13 +19267,7 @@ fn main() {
         return;
     }
 
-    check_no_collisions(&all_tests);
     check_metal_only_unshared(&rust_bins, &c_bins);
-    // Every row against the catalogue before any boot, so a name the suite did
-    // not build is refused here and not by whichever worker reaches it.
-    for (_, names) in CARRIES {
-        qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
-    }
     check_shard_partition(&all_tests);
 
     // The tier filter, and it is not conditional on the name filter: a rule with
@@ -20577,7 +19275,7 @@ fn main() {
     // nobody remembers. `cargo test -- screen_diag_boot` refuses below and
     // says what to type instead, which is the same information a silent skip
     // would have withheld.
-    let in_tier = |tier: Tier| tier.selected(nightly, shard.is_some());
+    let in_tier = |tier: Tier| tier.selected(reach, shard.is_some());
     let tests_to_run: Vec<&TestDef> = all_tests
         .iter()
         .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
@@ -20603,21 +19301,13 @@ fn main() {
     // introduces, so the names are printed rather than counted, and the line
     // carries both the command that runs them and the record that says what each
     // one guarded.
-    let held = |which: Tier| -> Vec<&str> {
-        MACHINE_TESTS
+    let held = |which: Tier| -> Vec<String> {
+        schedule
             .iter()
-            .chain(SCREEN_TESTS)
-            .filter(|(n, _, tier)| keep(n) && *tier == which && !in_tier(*tier))
-            .map(|(n, _, _)| *n)
-            .chain(
-                AUDIO_TESTS
-                    .iter()
-                    .filter(|(name, tier)| keep(name) && *tier == which && !in_tier(*tier))
-                    .map(|(name, _)| *name),
-            )
+            .filter(|(n, tier)| keep(n) && *tier == which && !in_tier(*tier))
+            .map(|(n, _)| n.to_string())
             .collect()
     };
-    let held_back = held(Tier::Nightly);
     let held_local = held(Tier::Local);
     if !held_local.is_empty() {
         eprintln!(
@@ -20627,14 +19317,18 @@ fn main() {
         );
         eprintln!("[toyos]   {}", held_local.join(", "));
     }
-    if !held_back.is_empty() {
+    let held_back: Vec<(Tier, Vec<String>)> =
+        [Tier::Nightly, Tier::Weekly].into_iter().map(|tier| (tier, held(tier))).collect();
+    let widest_held = held_back.iter().rev().find(|(_, names)| !names.is_empty()).map(|(tier, _)| *tier);
+    for (tier, names) in held_back.iter().filter(|(_, names)| !names.is_empty()) {
+        let flag = tier.flag().expect("a held tier is a reach's");
         eprintln!(
-            "[toyos] nightly tier: {} test(s) NOT run. \
-             `cargo test --test toyos-build -- --nightly` runs them manually; \
-             .github/workflows/nightly.yml runs them every night at 03:00 UTC.",
-            held_back.len(),
+            "[toyos] {} test(s) NOT run without {flag}, which \
+             `cargo test --test toyos-build -- {flag}` and .github/workflows/nightly.yml's \
+             schedule for it run.",
+            names.len(),
         );
-        eprintln!("[toyos]   {}", held_back.join(", "));
+        eprintln!("[toyos]   {}", names.join(", "));
     }
 
     if tests_to_run.is_empty()
@@ -20642,19 +19336,19 @@ fn main() {
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
-        if !held_back.is_empty() {
-            eprintln!(
-                "[toyos] filter {filter:?} matches only tests in the nightly tier. Add \
-                 --nightly to run them."
-            );
-        } else {
-            eprintln!("No enabled test matches filter {filter:?}");
+        match widest_held.and_then(Tier::flag) {
+            Some(flag) => eprintln!(
+                "[toyos] filter {filter:?} matches only tests a wider reach runs. Add {flag} to \
+                 run them."
+            ),
+            None => eprintln!("No enabled test matches filter {filter:?}"),
         }
         run.exit(1);
     }
 
     let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
-    let mut tally = Tally::new().holding_back(&held_back);
+    let mut tally = Tally::new().holding_back(held_back);
+
     let suite_start = common::clock::mark();
 
     let bins = Bins {
@@ -20745,7 +19439,7 @@ fn main() {
         longest_first(&mut parallel, &known);
         eprintln!("  --- parallel, {width} wide ---");
         let started = std::time::Instant::now();
-        let outcomes = run_phase(parallel, width, &bins, &slots);
+        let outcomes = run_phase(parallel, width, &bins);
         eprintln!("  --- parallel done in {:.1?} ---", started.elapsed());
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
@@ -20753,7 +19447,7 @@ fn main() {
     if !serial.is_empty() {
         eprintln!("  --- serial ---");
         let started = std::time::Instant::now();
-        let outcomes = run_phase(serial, 1, &bins, &slots);
+        let outcomes = run_phase(serial, 1, &bins);
         eprintln!("  --- serial done in {:.1?} ---", started.elapsed());
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
@@ -20777,7 +19471,6 @@ fn main() {
             for &smp in AUDIO_SMP {
                 let label = format!("{name} (smp={smp})");
                 let baseline = config_baseline(&audio_baseline, name, smp);
-                let _slot = slots.take(&label);
                 let start = common::clock::mark();
                 // A boot that never reaches its marker panics, and gate A is the
                 // last thing the suite runs: unwrapped, that panic took the

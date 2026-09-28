@@ -17,6 +17,7 @@
 
 [package]
 name = "toyos-proclife"
+description = "The process and thread lifecycle's decisions, pure and interleaving-checked."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -43,6 +44,25 @@ mutate-claim-teardown-always-wins = []
 # under the very lock the insert takes. `interleave::tests::a_published_exit_
 # leaves_no_unretired_thread` must red under this.
 mutate-spawn-skips-the-insert-recheck = []
+# The model's kill waits for its victim's exit before it returns.
+# `interleave::tests::two_processes_killing_each_other_both_end` must red under
+# this: each killer waits on a process whose thread is inside the other's kill.
+mutate-kill-waits-for-its-victims = []
+# `teardown::leave` answers `Last` to every thread that leaves a claimed
+# process, so the first one out tears it down under its siblings.
+# `interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down` must
+# red under this.
+mutate-first-out-tears-down = []
+# `teardown::leave` marks the last one out dead before its teardown runs, so
+# the machine's stop finds nothing running while that teardown frees and logs.
+# `interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done`
+# must red under this.
+mutate-last-out-leaves-before-its-teardown = []
+# `join::collect_zombie` gives up a thread of a process being torn down, whose
+# mappings its siblings may still run in.
+# `interleave::tests::a_join_racing_the_kill_that_takes_its_target` must red
+# under this.
+mutate-join-collects-in-a-teardown = []
 
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }

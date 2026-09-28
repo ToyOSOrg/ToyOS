@@ -318,7 +318,7 @@ fn stopped_boot(
         .ok_or_else(|| format!("the kernel's stop record did not read back as one:\n  {said}"))?;
     if !record.stopped_the_machine() {
         return Err(format!(
-            "the stop gave up on {} thread(s) that never reached a safe point:\n  {record}",
+            "the stop gave up on {} thread(s) that never reached a safe point:\n  {record}\n{whole}",
             record.sweep.running,
         ));
     }
@@ -334,22 +334,29 @@ pub fn quiesce_wakes_on_the_last_park(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-park", LATE_WORD], rust_bins)
+    woken_by_the_held_thread(&["quiesce-last-park", LATE_WORD], None, rust_bins)
 }
 
-/// **An exit that is the stop's last transition wakes it.** The same, with
-/// `quiesce-last-exit` holding the thread inside `SYS_THREAD_EXIT`.
-pub fn quiesce_wakes_on_the_last_exit(
+/// **A process teardown that is the stop's last transition is waited for.**
+/// The same, with `quiesce-last-teardown` holding the last thread out of a
+/// process between its leaving and its teardown.
+pub fn quiesce_wakes_on_the_last_teardown(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-exit", LATE_WORD], rust_bins)
+    woken_by_the_held_thread(
+        &["quiesce-last-teardown", LATE_WORD],
+        Some("test_rs_quiesce_last"),
+        rust_bins,
+    )
 }
 
-/// One of the two `quiesce-last-*` boots: its actuator first, the late word beside it.
+/// One of the `quiesce-last-*` boots: its actuator first, the late word beside it;
+/// `torn_down` names the process whose teardown the held thread runs.
 fn woken_by_the_held_thread(
     armed: &'static [&'static str; 2],
+    torn_down: Option<&str>,
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let actuator = armed[0];
@@ -373,92 +380,30 @@ fn woken_by_the_held_thread(
     if held_at > synced_at {
         return Err(format!("the thread was held after the stop was over\n{whole}"));
     }
-    // More than one sweep: the stop found the held thread running and had
-    // to be woken to see it stop.
-    if record.sweeps < 2 {
+    // **The claim**: a sweep counted the held thread, and it alone, as
+    // running before the stop wrote its record, so what the held thread did
+    // next is what the stop waited for.
+    let alone = format!("{actuator}: the stop counts {} alone", toyos_quiesce::LAST_THREAD);
+    let stopped_at = at(toyos_quiesce::STOPPED)
+        .ok_or_else(|| format!("the kernel wrote no stop record\n{whole}"))?;
+    let Some(alone_at) = at(&alone).filter(|&line| line < stopped_at) else {
         return Err(format!(
-            "the stop saw nothing running at its first sweep, so no transition of the held \
-             thread was waited for:\n  {record}"
+            "no {alone:?} line before the stop's record, so no transition of the held thread \
+             was waited for:\n  {record}\n{whole}"
         ));
+    };
+    if let Some(process) = torn_down {
+        let exit = format!("exit: {process} pid=");
+        let mut torn = whole.lines().skip(alone_at).take(stopped_at - alone_at);
+        if !torn.any(|line| line.contains(&exit) && line.contains(" code=0 ")) {
+            return Err(format!(
+                "no `{exit}… code=0` record between {alone:?} and the stop's record, so the \
+                 stop did not wait for that teardown\n{whole}"
+            ));
+        }
     }
     woken_by_its_threads(&record)?;
     eprintln!("  [power] {actuator}: the held thread's transition woke the stop: {record}");
-    Ok(())
-}
-
-/// **A dump served during the stop says every thread it stopped is held.**
-/// `quiesce-dump` serves Ctrl+Alt+D's report from the shutdown once its first
-/// stage has stopped the writers, the moment the owner presses it on a
-/// shutdown stuck there. A stopped thread's state word reads `Ready`, and a
-/// report that counted it nowhere else would call it claimed and not held.
-pub fn quiesce_dump_holds_the_stopped(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let (whole, record) = stopped_boot(
-        "tests/quiescecase/system.toml",
-        "quiesce_writers",
-        &["quiesce-dump", LATE_WORD],
-        rust_bins,
-    )?;
-    let lines: Vec<&str> = whole.lines().collect();
-    let at = |needle: &str| lines.iter().position(|line| line.contains(needle));
-    let (Some(began), Some(ended), Some(synced)) = (
-        at("=== blocked-task dump:"),
-        at("=== end of dump ==="),
-        at("Syncing filesystems..."),
-    ) else {
-        return Err(format!("no whole dump and sync in this boot\n{whole}"));
-    };
-    if !(began < ended && ended < synced) {
-        return Err(format!(
-            "the dump (lines {began} to {ended}) did not finish inside the stop, which ends at \
-             line {synced}\n{whole}"
-        ));
-    }
-    let report = &lines[began..=ended];
-    let number_before = |marker: &str, word: &str| -> Result<u32, String> {
-        let line = report
-            .iter()
-            .find(|line| line.contains(marker))
-            .ok_or_else(|| format!("no {marker:?} line in the report:\n{}", report.join("\n")))?;
-        let (head, _) =
-            line.split_once(word).ok_or_else(|| format!("no {word:?} on {line:?}"))?;
-        head.split_whitespace()
-            .next_back()
-            .and_then(|n| n.parse().ok())
-            .ok_or_else(|| format!("no number before {word:?} on {line:?}"))
-    };
-    // The harm first: a report that has no word for a stopped thread still
-    // writes this verdict, and calls each one it cannot place unheld.
-    let unheld = number_before("== VERDICT:", " unheld,")?;
-    if unheld != 0 {
-        return Err(format!(
-            "a dump served during the stop called {unheld} thread(s) claimed and not held:\n{}",
-            report.join("\n"),
-        ));
-    }
-    // Then the premise: the report was served over a machine with banded
-    // threads, or the zero above is about nothing.
-    let stopped = number_before("== sched:", " stopped,")?;
-    if stopped == 0 {
-        return Err(format!(
-            "the report found no stopped thread on any cpu, so it says nothing about how it \
-             counts one:\n{}",
-            report.join("\n"),
-        ));
-    }
-    // And the count is the threads it names: this stop bands fewer than one
-    // cpu's line cap, so each one it counts is a line of its own.
-    let named = report.iter().filter(|line| line.contains("stopped (the machine is stopping)")).count();
-    if named != stopped as usize {
-        return Err(format!(
-            "the report counted {stopped} stopped thread(s) and named {named}:\n{}",
-            report.join("\n"),
-        ));
-    }
-    eprintln!("  [power] the dump inside the stop held all {stopped} stopped thread(s): {record}");
     Ok(())
 }
 
@@ -885,19 +830,100 @@ pub fn panic_reboots(
     // Not `must_be_clean`: this boot panics on purpose, and the arm line is
     // what says the panic path — not something else — is holding the machine.
     let line = boot.must_say(&panic_armed())?.to_string();
+    let watch = watch_the_bound(&qemu);
+    let (budget, _) = resets_inside_the_bound(&mut qemu, watch, PANICKED_AND_STAYED_UP)?;
+    eprintln!("  [power] the panicked guest reset itself inside {budget:?} of: {}", line.trim());
+    Ok(())
+}
 
+/// QEMU's `SHUTDOWN` event, subscribed to for the fast bound plus what a reset
+/// costs. Opened before whatever starts the bound: QMP delivers no event
+/// emitted before its client connected.
+fn watch_the_bound(qemu: &QemuInstance) -> (qemu::QmpShutdown, Duration) {
     let budget = qemu.budget(Duration::from_secs(PANIC_FAST_SECS) + RESET_ALLOWANCE);
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), budget);
+    (qemu::QmpShutdown::open(qemu.qmp_socket(), budget), budget)
+}
+
+/// QEMU's own `guest-reset` on `watch`, and the serial the guest wrote after
+/// its boot log; `never` is what a guest that did not stop means to the caller.
+fn resets_inside_the_bound(
+    qemu: &mut QemuInstance,
+    (mut stop, budget): (qemu::QmpShutdown, Duration),
+    never: &str,
+) -> Result<(Duration, String), String> {
     let reason = stop.reason();
     // A guest that came back to firmware pays none of this: `-no-reboot` exits and the reader disconnects.
     let tail = qemu.drain_serial(WAIT);
-    returned_to_firmware(reason, PANICKED_AND_STAYED_UP, &tail)?;
+    returned_to_firmware(reason, never, &tail)?;
 
     let drain = serial::Serial::named("panic reboot drain", tail.as_str());
     drain.must_say(PANIC_REBOOTING)?;
+    Ok((budget, tail))
+}
 
-    eprintln!("  [power] the panicked guest reset itself inside {budget:?} of: {}", line.trim());
-    Ok(())
+/// `kernel_params` kills `klogd` on its first instruction, and the machine is
+/// what dies. The verdict is QEMU's reset, never the guest's word.
+pub fn klogd_death_resets(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    kernel_params: &'static [&'static str],
+    said: &[&str],
+) -> Result<(), String> {
+    // `panicked()`'s 16550-only guest: the reset's own line goes to the UART raw.
+    let options =
+        BootOptions { kernel_params, ready_marker: "kthread: klogd pid=", ..panicked() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let dead = serial::Serial::boot(&qemu);
+    let watch = watch_the_bound(&qemu);
+    let never = "QEMU never reported stopping: klogd died and the machine carried on without it";
+    died_and_reset(&mut qemu, watch, dead, never, said).map(drop)
+}
+
+/// `SYS_DEBUG` `action` ends the kernel inside its caller's syscall, and the
+/// machine is what dies, never only the caller. The verdict is QEMU's reset, as
+/// [`klogd_death_resets`]'s is; what the guest said is returned for the caller
+/// to read further.
+pub fn syscall_death_resets(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    action: u64,
+    said: &[&str],
+) -> Result<String, String> {
+    let options = BootOptions {
+        kernel_params: &["panic-reboot-fast"],
+        ready_marker: qemu::DEFAULT_READY,
+        ..panicked()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let dead = serial::Serial::boot(&qemu);
+    let watch = watch_the_bound(&qemu);
+    writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child {action}")
+        .expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let never = "QEMU never reported stopping: the kernel died inside a syscall and the machine \
+                 carried on without its caller";
+    died_and_reset(&mut qemu, watch, dead, never, said)
+}
+
+/// QEMU's reset inside the bound, then what the dead guest said, `said` and the
+/// arm line among it.
+fn died_and_reset(
+    qemu: &mut QemuInstance,
+    watch: (qemu::QmpShutdown, Duration),
+    mut dead: serial::Serial,
+    never: &str,
+    said: &[&str],
+) -> Result<String, String> {
+    let (budget, tail) = resets_inside_the_bound(qemu, watch, never)?;
+    dead.push(&tail);
+    for want in said {
+        dead.must_say(want)?;
+    }
+    dead.must_say(&panic_armed())?;
+    eprintln!("  [power] {said:?}: QEMU reset the machine inside {budget:?}");
+    Ok(dead.text().to_string())
 }
 
 /// A panic inside `percpu::init_bsp`, one statement after it loads the IDT,

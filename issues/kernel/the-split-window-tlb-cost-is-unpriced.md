@@ -11,7 +11,7 @@ W^X maps one 2 MiB window per binary at 4 KiB granularity — the window where
 the boot set's text can be write-protected and 0 % of its data can be made
 non-executable (measured 2026-08-20 over 20 binaries and 33 windows; the numbers
 and the rejected alternatives are in `WindowProt`'s doc comment in
-`kernel/src/mm/paging.rs`). The design question is settled by those numbers. The
+`kernel/src/arch/x86_64/paging.rs`). The design question is settled by those numbers. The
 *cost* is not measured, and this host cannot measure it.
 
 512 4 KiB entries replace one 2 MiB entry for that window, so a program whose hot
@@ -30,7 +30,7 @@ send it to 2 MiB-aligning `toyos-ld`'s segments, which was measured at +4 MiB of
 physical memory per process.
 
 **2026-08-25, promoted to `defect`.** Checked at the site: `WindowProt`'s doc
-comment in `kernel/src/mm/paging.rs` carries the design measurement — 20
+comment in `kernel/src/arch/x86_64/paging.rs` carries the design measurement — 20
 binaries, 33 windows, 20 mixed, 48.9 % and 0 % — and says nothing about what the
 512 4 KiB entries cost the TLB, so the number lives nowhere in the tree. That
 makes it a measurement owed, in the same class as the AP control-register delta

@@ -52,7 +52,6 @@ extern crate alloc;
 extern crate std;
 
 pub mod join;
-pub mod poison;
 pub mod reap;
 pub mod spawn;
 pub mod table;
@@ -77,7 +76,7 @@ pub use toyos_abi::{Pid, Tid};
 ///
 /// For a live thread the scheduler is authoritative about running, ready or
 /// blocked — `scheduler::task_sched_state()` has that detail.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ThreadLocation {
     /// Alive: running, ready, or blocked. The scheduler owns the detail.
     Scheduled,
@@ -107,28 +106,12 @@ impl ThreadLocation {
 /// whole of the distinction a real defect turned on: `process::thread_exit`
 /// posted one wake and it was always the process's main thread, so a non-main
 /// thread joining a sibling was owed a wake nobody sent.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Watch {
     /// One thread's exit. `SYS_THREAD_JOIN` arms here.
     Thread(Pid, Tid),
     /// A process's exit. `SYS_PROCESS_WAIT` arms here.
     Process(Pid),
-}
-
-impl Watch {
-    /// The thread this names, or `None` for a process's own watch.
-    ///
-    /// Total rather than a match at the call site: the kernel resolves a
-    /// [`Watch::Thread`] through `process::thread_sched` and a
-    /// [`Watch::Process`] through the object, and a caller that can only
-    /// perform one of the two says so here instead of writing an arm it
-    /// believes is unreachable.
-    pub fn thread(self) -> Option<(Pid, Tid)> {
-        match self {
-            Self::Thread(pid, tid) => Some((pid, tid)),
-            Self::Process(_) => None,
-        }
-    }
 }
 
 /// The code every thread but the main one is marked dead with when a process is

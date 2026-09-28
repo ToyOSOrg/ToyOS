@@ -24,4 +24,5 @@ for AArch64 (PR #524).
 satisfies (PR #528 moves them to `…-sdk-0.15` branches for its own reasons, and
 the path crate is at 0.16.0 on #524), the three build for
 `aarch64-unknown-toyos`, and their rows in `NOT_YET_BUILT` are deleted; doom's
-row goes when its C is also shown to compile for AArch64 through `toyos-cc`.
+row goes with them: its C compiles for AArch64 through the toolchain's clang,
+all 82 translation units against the AArch64 C sysroot the build makes.

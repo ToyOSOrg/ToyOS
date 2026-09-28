@@ -11,10 +11,8 @@
 //! A teardown claims the process under that same lock
 //! ([`crate::teardown::claim_teardown`]), collects the tids it is going to
 //! retire, and gives the lock up to retire them. A thread inserted after that
-//! collection is a thread the retire sweep never names — so it is enqueued in
-//! the scheduler, its process's exit is published without it, its entry is
-//! reaped, and the address space its page tables map is freed while it is still
-//! runnable. `interleave::tests::a_published_exit_leaves_no_unretired_thread`
+//! collection is a thread the retire sweep never names.
+//! `interleave::tests::a_published_exit_leaves_no_unretired_thread`
 //! is that whole sentence as a host test, and
 //! `mutate-spawn-skips-the-insert-recheck` is what it reds under.
 
@@ -106,7 +104,7 @@ mod tests {
     fn a_claimed_process_refuses_at_the_start_in_both_arms() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(teardown::claim_teardown(&mut world, pid));
+        assert!(teardown::claim_teardown(&mut world, pid, 137));
         assert_eq!(admit_thread_start(&world, pid), Admit::TearingDown);
     }
 
@@ -115,7 +113,7 @@ mod tests {
     fn a_claimed_process_refuses_at_the_insert_too() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(teardown::claim_teardown(&mut world, pid));
+        assert!(teardown::claim_teardown(&mut world, pid, 137));
         assert_eq!(admit_thread_insert(&world, pid), Admit::TearingDown);
     }
 
@@ -124,7 +122,7 @@ mod tests {
     fn the_mutation_really_admits_into_a_claimed_teardown() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(teardown::claim_teardown(&mut world, pid));
+        assert!(teardown::claim_teardown(&mut world, pid, 137));
         assert_eq!(
             admit_thread_insert(&world, pid),
             Admit::Yes,

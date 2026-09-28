@@ -11,6 +11,7 @@ use std::{fs, thread};
 use super::compile;
 use toyos_build::arch::{Accel, Arch};
 use toyos_build::tether::Tether;
+use toyos_tmpdir::TempDir;
 
 /// The architecture every machine this suite builds and boots is: the suite's
 /// q35 shapes, i8042 and VT-d are x86-64's, and the aarch64 bring-up boots
@@ -513,20 +514,6 @@ pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 /// The compositor prints its interval line whatever else has stopped, so
 /// silence alone cannot end a desktop wait, and a suite that never ends is
 /// worse than one that reds.
-///
-/// **Not [`budget`]-scaled, and that is the point of the pair.** Width is what a
-/// ceiling on a *slow* guest has to be corrected for, and the silence bound
-/// above is what a slow guest is now judged by — it keeps talking, so it is
-/// never judged by this at all. What is left for this number to catch is a guest
-/// that is stuck *and* chatty, which is a state the width does not produce;
-/// scaling it would only make that state cost an hour at width 12. The longest
-/// guest action any caller waits on is eight seconds of audio.
-///
-/// It is also the real ceiling of any failing wait on a shared boot, because
-/// the kernel's own 10 s cadence keeps the quiet clock above reset: a settle
-/// predicate that could never come true was measured ending here at 302 s,
-/// not at 15 (PR #96's verification). Price a new waiting check against this
-/// number, not the one above.
 pub const GUEST_WEDGED: Duration = Duration::from_secs(300);
 
 pub fn guest_liveness() -> Liveness {
@@ -651,25 +638,13 @@ impl std::fmt::Display for WaitVerdict {
 /// and its full backtrace four lines above that sentence, on a guest that died
 /// at 1.450 s of its own uptime.
 ///
-/// A kernel panic does not end the wait *by itself*, and that is deliberate:
-/// the same handler recovers a panic taken in syscall context, killing the
-/// caller and leaving the machine running, which is exactly what
-/// `panic_recovery`, `heap_ceiling` and `screen_recoverable_untouched` assert.
-/// Silence is what separates the two, and it is the separation the harness
-/// already trusts everywhere else ([`GUEST_QUIET`]): a recovering guest keeps
-/// talking — the test's own `===TEST_END` arrives in milliseconds — and a
-/// halted one cannot.
-///
 /// **The wall clock is not the wedge; silence is.** A test's `ceiling` is the
 /// budgeted wall clock (`budget_smp`-scaled, so it already carries #256's
 /// `vcpus/cores` oversubscription widening), and until this it ended the wait
 /// the instant it passed — so a merely-slow guest reported exactly what a wedged
 /// one did. `launcher_refusals` was killed at `192s "still talking 1s ago"` on a
 /// loaded `smp:2` runner its `vcpus/cores` factor clamps to 1, a guest making
-/// steady progress called wedged by a clock. So a guest still *talking* is now
-/// never ended by `ceiling`: the per-test budget bites only a guest that has
-/// *also* gone quiet for [`GUEST_QUIET`], and a talking one runs to the
-/// [`GUEST_WEDGED`] backstop below.
+/// steady progress called wedged by a clock.
 ///
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
@@ -824,8 +799,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     //     all four directions. A talking guest past its budget is slow, not
     //     wedged; a silent one within its budget is idle, not wedged; the wedge
     //     guard still fires, and fast; and the backstop still catches a guest
-    //     that talks forever. Staged with a ceiling below [`GUEST_WEDGED`] so the
-    //     backstop is a distinct, higher number — the shape every real test has.
+    //     that talks forever.
     const TIGHT: Duration = Duration::from_secs(153);
     let bstop = TIGHT.max(GUEST_WEDGED);
     assert!(TIGHT < bstop, "the case needs a ceiling below the backstop");
@@ -873,6 +847,19 @@ pub fn ceiling_self_check() -> Result<(), String> {
         return Err(String::from(
             "a guest idle-but-within-budget was called wedged — a boot with no periodic speaker \
              would red healthy",
+        ));
+    }
+
+    // 3c. **The other side of `ceiling.max(GUEST_WEDGED)`**: a ceiling *above*
+    //     `GUEST_WEDGED` must itself be the backstop, not get clamped down to
+    //     the floor. `CEILING` (380 s, from case 1) is such a ceiling; a guest
+    //     talking past `GUEST_WEDGED` (300 s) but still short of `CEILING` is
+    //     not yet at its backstop and must run on.
+    if ceiling_verdict(None, GUEST_WEDGED + Duration::from_secs(50), CEILING, talking, 40).is_some()
+    {
+        return Err(String::from(
+            "a guest talking past GUEST_WEDGED but short of a higher ceiling was ended anyway — \
+             the backstop did not follow a ceiling above GUEST_WEDGED",
         ));
     }
 
@@ -984,9 +971,7 @@ pub fn await_guest(
     doing: &str,
     done: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
-    // Where this wait's own evidence starts. The capture is the caller's and
-    // outlives every wait on it, so a panic the machine recovered from ten
-    // probes ago must not be handed to this one as its cause.
+    // Where this wait's own evidence starts.
     let from = log.len();
     let mut live = guest_liveness();
     while !done(log) && live.working(log) {
@@ -2358,10 +2343,10 @@ pub struct BootOptions {
     /// before it left — and a guest with it set runs until the harness kills it.
     pub takes_the_reset: bool,
     /// Keep the firmware's variables in this file, writable, instead of the
-    /// shared read-only template: a copy the test made, so what one boot's
-    /// loader writes — the anti-rollback floor, `BootNext` — is what the next
-    /// boot of the same machine reads. `None` is every other boot, whose
-    /// variables live in firmware memory and die with the guest.
+    /// boot's own fresh copy of the template: a copy the test made, so what one
+    /// boot's loader writes — the anti-rollback floor, `BootNext` — is what the
+    /// next boot of the same machine reads. `None` is every other boot, whose
+    /// copy dies with the guest.
     pub firmware_vars: Option<PathBuf>,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
@@ -2402,10 +2387,11 @@ pub struct BootOptions {
     /// a driver put on it, which no line the guest prints can be. Refused by
     /// name on a profile with no data disk, where it would record nothing.
     pub usb_pcap: Option<PathBuf>,
-    /// Fail with EIO every read of the boot stick that covers this 512-byte
-    /// sector, through QEMU's `blkdebug` under the stick's raw format: a disk
-    /// error at a place the test chose, which no well-formed image can stage.
-    pub stick_read_error: Option<u64>,
+    /// Fail with EIO every read of the boot disk that covers this 512-byte
+    /// sector, through QEMU's `blkdebug` under the boot image's raw format, on
+    /// whichever bus the profile puts that disk: a disk error at a place the
+    /// test chose, which no well-formed image can stage.
+    pub boot_read_error: Option<u64>,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.
     ///
@@ -2434,8 +2420,9 @@ pub struct BootOptions {
     pub console_file: bool,
     /// Put the host on the guest's own segment (`super::segment`): frames
     /// it writes reach the NIC as if off the cable, and it sees every frame the
-    /// guest sends. Refused by name on a profile with no NIC.
-    pub segment: Option<super::segment::Tap>,
+    /// guest sends, through [`QemuInstance::segment`]. Refused by name on a
+    /// profile with no NIC.
+    pub segment: bool,
     /// Forward this host port to the guest's TCP 22. **slirp is one-way
     /// without it**: nothing on the host can open a connection into the guest
     /// unless QEMU is told which port to translate. A profile with no NIC
@@ -2531,12 +2518,12 @@ impl Default for BootOptions {
             boot_image: None,
             usb_images: Vec::new(),
             usb_pcap: None,
-            stick_read_error: None,
+            boot_read_error: None,
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
             console_file: false,
-            segment: None,
+            segment: false,
             ssh_port: None,
             wire_dump: None,
             userland_nvme: None,
@@ -2648,12 +2635,15 @@ pub struct QemuInstance {
     uart_log: PathBuf,
     nvme: NvmeClaim,
     usb_images: Vec<PathBuf>,
-    qmp_socket: Option<PathBuf>,
+    sockets: Sockets,
     screendump: PathBuf,
     /// The image this boot built for itself, which is the only one it may
     /// delete: a [`BootOptions::boot_image`] belongs to the test that staged it
     /// and is often read back after the guest is gone.
     own_boot_image: Option<PathBuf>,
+    /// The variable store this boot copied for itself, on the same terms as
+    /// `own_boot_image`: a [`BootOptions::firmware_vars`] is the test's.
+    own_vars: Option<PathBuf>,
     boot_log: String,
     /// Whether this boot armed `i8042-trace`, which is the only channel a
     /// windowed shell has for saying it took a burst out of the device.
@@ -2985,7 +2975,7 @@ pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
 /// and nothing else writes it — a program's line reaches the console only
 /// through `logd`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
-    line.starts_with("[kernel ")
+    line.starts_with(toyos_build::kernelconsole::HEAD)
 }
 
 /// A console line's text as its program wrote it: a program's line without
@@ -3157,10 +3147,7 @@ impl QemuInstance {
         let audio_wav = test_dir.join(format!("audio-{seq}.wav"));
         let _ = fs::remove_file(&audio_wav);
 
-        let qmp_socket = options.qmp.then(|| test_dir.join(format!("qmp-{seq}.sock")));
-        if let Some(path) = &qmp_socket {
-            let _ = fs::remove_file(path);
-        }
+        let sockets = Sockets::new(&options);
         let screendump = test_dir.join(format!("screen-{seq}.ppm"));
 
         // Per-instance, not a fixed /tmp path: the audio gate boots dozens of
@@ -3170,13 +3157,25 @@ impl QemuInstance {
         let _ = fs::remove_file(&uart_log);
         let console_file = options.console_file.then(|| ConsoleFile::of(&uart_log).made());
 
+        let (firmware_vars, own_vars) = match &options.firmware_vars {
+            Some(vars) => (vars.clone(), None),
+            None => {
+                let vars = test_dir.join(format!("vars-{seq}.fd"));
+                toyos_build::firmware::of(options.profile.arch())
+                    .and_then(|firmware| firmware.fresh_vars(&vars))
+                    .unwrap_or_else(|why| panic!("[qemu] {why}"));
+                (vars.clone(), Some(vars))
+            }
+        };
+
         let qemu = qemu_command(
             &boot_image,
             nvme.path(),
             &usb_images,
             &audio_wav,
             &uart_log,
-            qmp_socket.as_deref(),
+            &sockets.dir,
+            &firmware_vars,
             &options,
         );
         spawn_and_wait_ready(
@@ -3188,9 +3187,10 @@ impl QemuInstance {
                 uart_log,
                 nvme,
                 usb_images,
-                qmp_socket,
+                sockets,
                 screendump,
                 own_boot_image,
+                own_vars,
                 carried,
                 console_file,
             },
@@ -3205,7 +3205,7 @@ impl QemuInstance {
     /// command that answers, so what a test judges is memory QEMU dumped and not
     /// a report the guest wrote about itself.
     pub fn guest_memory(&mut self, phys: u64, bytes: usize) -> Result<Vec<u8>, String> {
-        let socket = self.qmp_socket.clone().expect("guest_memory needs BootOptions { qmp: true }");
+        let socket = self.sockets.qmp.clone().expect("guest_memory needs BootOptions { qmp: true }");
         // Beside the screendump, which is this instance's own scratch path.
         let out = self.screendump.with_extension(format!("mem-{phys:#x}"));
         let _ = fs::remove_file(&out);
@@ -3232,10 +3232,7 @@ impl QemuInstance {
     /// the file itself, so the only synchronization needed is the command's
     /// own reply.
     pub fn screendump(&mut self) -> super::screen::Ppm {
-        let socket = self
-            .qmp_socket
-            .clone()
-            .expect("screendump needs BootOptions { qmp: true }");
+        let socket = self.sockets.qmp.clone().expect("screendump needs BootOptions { qmp: true }");
         let out = self.screendump.clone();
         let _ = fs::remove_file(&out);
 
@@ -3308,8 +3305,8 @@ impl QemuInstance {
     /// is the case whose paint "never arrived in the window" while the guest was
     /// alive — the budget-scaled deadline undercounts a later moment in the run
     /// exactly as the serial ceiling did. Only a screen *frozen* for
-    /// [`GUEST_QUIET`] past the deadline, or the [`GUEST_WEDGED`] backstop, ends
-    /// the wait; `done` firing ends it at once, so a passing caller is untouched
+    /// [`GUEST_QUIET`] past the deadline ends the wait; `done` firing ends it at
+    /// once, so a passing caller is untouched
     /// and a real bug (the paint that should not be there, and stays) still fires
     /// its assertion, a frozen-screen `GUEST_QUIET` later.
     ///
@@ -3554,7 +3551,12 @@ impl QemuInstance {
     /// The QMP socket this instance opened. Injection needs it, and it needs
     /// `BootOptions { qmp: true }`.
     pub fn qmp_socket(&self) -> &Path {
-        self.qmp_socket.as_ref().expect("qmp_socket needs BootOptions { qmp: true }")
+        self.sockets.qmp.as_deref().expect("qmp_socket needs BootOptions { qmp: true }")
+    }
+
+    /// Stand on this guest's segment; it needs `BootOptions { segment: true }`.
+    pub fn segment(&self) -> Result<super::segment::Segment, String> {
+        self.sockets.segment.as_ref().expect("segment needs BootOptions { segment: true }").open()
     }
 
     /// [`budget`] for a host-side wait on *this* guest, widened by the guest's
@@ -3613,9 +3615,6 @@ impl QemuInstance {
     ) -> TestResult {
         writeln!(self.stdin, "run {name}").expect("Failed to write to QEMU stdin");
         self.stdin.flush().expect("Failed to flush QEMU stdin");
-
-        let mut fire =
-            |line: &str, socket: Option<&PathBuf>| step(socket.map(PathBuf::as_path), line);
 
         // `run <name> [args...]`, and the markers carry only the binary name.
         let want = name.split_whitespace().next().unwrap_or(name);
@@ -3685,7 +3684,7 @@ impl QemuInstance {
                 Ok(line) => {
                     last_line = Instant::now();
                     lines += 1;
-                    fire(&line, self.qmp_socket.as_ref());
+                    step(self.sockets.qmp.as_deref(), &line);
                     if dying.is_none()
                         && super::serial::died(&line) == Some(super::serial::Died::Kernel)
                     {
@@ -3809,11 +3808,7 @@ impl Drop for QemuInstance {
         let _ = self.child.wait();
         let _ = fs::remove_file(&self.audio_wav);
         // **The 16550's log outlives the guest, because it is the one channel
-        // that exists before the console does.** Firmware, the bootloader and
-        // the kernel up to the backend switch write here and nowhere else, so a
-        // boot that dies before virtio-console comes up leaves this file and an
-        // empty capture — which is exactly the shape `issues/diagnostics/`
-        // records as looking like a kernel that never started. 1.4 KB on a
+        // that exists before the console does.** 1.4 KB on a
         // healthy `tests/testcases` boot, measured, against the hundreds of
         // megabytes of per-boot image beside it.
         //
@@ -3823,14 +3818,12 @@ impl Drop for QemuInstance {
         // reads as "there was nothing to keep" rather than "it was deleted
         // before the step ran".
         let _ = fs::remove_file(&self.screendump);
-        if let Some(socket) = &self.qmp_socket {
-            let _ = fs::remove_file(socket);
-        }
         // A per-boot image is hundreds of megabytes and a full run makes ~76 of
         // them; the shared name used to make that one file.
-        if let Some(image) = &self.own_boot_image {
-            let _ = fs::remove_file(image);
+        for own in [&self.own_boot_image, &self.own_vars].into_iter().flatten() {
+            let _ = fs::remove_file(own);
         }
+        // `sockets` goes with the fields, after QEMU is reaped.
         LIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -4336,7 +4329,7 @@ impl QmpDevices {
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
     let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
-    qemu_command(p, p, &usb, p, p, None, options)
+    qemu_command(p, p, &usb, p, p, p, p, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -4356,15 +4349,18 @@ fn stick_file(image: &Path, read_error: Option<u64>) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn qemu_command(
     boot_image: &Path,
     nvme_image: &Path,
     usb_images: &[PathBuf],
     audio_wav: &Path,
     uart_log: &Path,
-    qmp_socket: Option<&Path>,
+    socket_dir: &Path,
+    firmware_vars: &Path,
     options: &BootOptions,
 ) -> Command {
+    let (qmp_socket, segment) = socket_names(socket_dir, options);
     let shape = options.profile.shape();
     let console_file = options.console_file.then(|| ConsoleFile::of(uart_log));
     assert!(
@@ -4377,8 +4373,9 @@ fn qemu_command(
     );
 
     let arch = options.profile.arch();
-    let repo = compile::repo_root();
-    let [firmware_code, firmware_vars] = arch.pflash(&repo);
+    let [firmware_code, firmware_vars] = toyos_build::firmware::of(arch)
+        .unwrap_or_else(|why| panic!("[qemu] {why}"))
+        .drives(firmware_vars);
 
     let mut qemu = Command::new(arch.qemu());
     if let Some(boot) = arch.boot() {
@@ -4404,15 +4401,15 @@ fn qemu_command(
     // needs the userspace half of the irqchip, and a machine with no unit has
     // no reason to be built differently from the one it has always been.
     let mut machine = match arch {
-        Arch::X86_64 => String::from("q35"),
+        Arch::X86_64 => arch.machine().to_string(),
         Arch::Aarch64 => {
             // `virt` has no i8042 to take away, and the unit a profile declares
             // is VT-d, which it has none of either.
             assert!(options.i8042 && shape.iommu.is_none(), "`virt` has neither an i8042 nor VT-d");
-            String::from(match options.profile {
-                Profile::VirtEl2 => "virt,gic-version=3,virtualization=on",
-                _ => "virt,gic-version=3",
-            })
+            match options.profile {
+                Profile::VirtEl2 => format!("{},gic-version=3,virtualization=on", arch.machine()),
+                _ => format!("{},gic-version=3", arch.machine()),
+            }
         }
     };
     if !options.i8042 {
@@ -4444,14 +4441,11 @@ fn qemu_command(
         .arg("-drive")
         .arg(firmware_code)
         .arg("-drive")
-        .arg(match &options.firmware_vars {
-            Some(vars) => format!("if=pflash,format=raw,unit=1,file={},readonly=off", vars.display()),
-            None => firmware_vars,
-        })
+        .arg(firmware_vars)
         .arg("-drive")
         .arg(format!(
             "if=none,id=stick,{}{}",
-            stick_file(boot_image, options.stick_read_error),
+            stick_file(boot_image, options.boot_read_error),
             // **What a `Staged::Pristine` boot is made of.** QEMU keeps this
             // drive's writes in a temporary file and drops it when the guest
             // exits, so the staged image is never written and the boot after it
@@ -4742,7 +4736,7 @@ fn qemu_command(
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
     }
-    if let Some(tap) = &options.segment {
+    if let Some(tap) = &segment {
         assert!(
             !matches!(shape.nic, Nic::Absent),
             "this profile carries no NIC, so there is no `net0` segment to stand on"
@@ -4804,6 +4798,32 @@ fn qemu_command(
     qemu
 }
 
+/// A boot's Unix sockets, in a directory of its own under `/tmp` rather than
+/// the lane's: `sun_path` is 104 bytes on Darwin, and `$TMPDIR`'s depth is the
+/// host's. The directory goes with this, after QEMU is reaped.
+struct Sockets {
+    dir: TempDir,
+    qmp: Option<PathBuf>,
+    segment: Option<super::segment::Tap>,
+}
+
+impl Sockets {
+    fn new(options: &BootOptions) -> Sockets {
+        let dir = TempDir::short("boot");
+        let (qmp, segment) = socket_names(&dir, options);
+        Sockets { dir, qmp, segment }
+    }
+}
+
+/// The QMP and segment sockets `options` asks for, named in `dir`.
+fn socket_names(
+    dir: &Path,
+    options: &BootOptions,
+) -> (Option<PathBuf>, Option<super::segment::Tap>) {
+    let qmp = options.qmp.then(|| dir.join("qmp.sock"));
+    (qmp, options.segment.then(|| super::segment::Tap::in_dir(dir)))
+}
+
 /// Every file one boot owns, so that adding another does not lengthen a
 /// parameter list eight paths long.
 struct Files {
@@ -4812,9 +4832,10 @@ struct Files {
     uart_log: PathBuf,
     nvme: NvmeClaim,
     usb_images: Vec<PathBuf>,
-    qmp_socket: Option<PathBuf>,
+    sockets: Sockets,
     screendump: PathBuf,
     own_boot_image: Option<PathBuf>,
+    own_vars: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
     console_file: Option<ConsoleFile>,
 }
@@ -4886,9 +4907,10 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         uart_log,
         nvme,
         usb_images,
-        qmp_socket,
+        sockets,
         screendump,
         own_boot_image,
+        own_vars,
         carried,
         console_file,
     } = files;
@@ -4928,6 +4950,14 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     let (tx, rx) = mpsc::channel::<String>();
     let console = ConsoleStream::new();
     let reader_console = console.clone();
+    // The virtio port starts at the kernel's first record; a 16550 on stdio has
+    // no other file, so it is read whole.
+    let mut kernel_console = options
+        .profile
+        .shape()
+        .virtio
+        .present()
+        .then(toyos_build::kernelconsole::KernelConsole::default);
     let reader_thread = thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut full_log = String::new();
@@ -4947,12 +4977,16 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
                 }
                 return full_log;
             }
+            let read = match &mut kernel_console {
+                Some(console) => console.pass(&chunk[..read]),
+                None => std::borrow::Cow::Borrowed(&chunk[..read]),
+            };
             reader_console
                 .0
                 .lock()
                 .expect("the console stream lock is never held across a panic")
-                .extend_from_slice(&chunk[..read]);
-            pending.extend_from_slice(&chunk[..read]);
+                .extend_from_slice(&read);
+            pending.extend_from_slice(&read);
             while let Some(at) = pending.iter().position(|&b| b == b'\n') {
                 let mut line: Vec<u8> = pending.drain(..=at).collect();
                 line.pop();
@@ -4988,9 +5022,10 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         uart_log,
         nvme,
         usb_images,
-        qmp_socket,
+        sockets,
         screendump,
         own_boot_image,
+        own_vars,
         boot_log,
         console,
         i8042_trace: options.kernel_params.contains(&"i8042-trace"),

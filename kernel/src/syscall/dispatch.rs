@@ -21,7 +21,7 @@ use toyos_untrusted::Untrusted;
 
 use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
-use super::debug::{canary, debug_heap_alloc, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH, LOCK_ACROSS_SWITCH_ARMED};
+use super::debug::{canary, debug_heap_alloc, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
     holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
     sys_device_dma_unmap,
@@ -239,17 +239,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 data.handles
                     .get::<crate::object::process::ProcessObject>(RawHandle(a1 as u32), Rights::MANAGE)
             }) {
-                Ok(object) => {
-                    // Killing yourself is exiting, not killing: kill_process retires every
-                    // thread of its target, and retire_task asserts a CPU never retires itself.
-                    // Reachable: TRANSFER lets a parent hand a child a handle to itself.
-                    if object.pid() == process::current_process() {
-                        // exit() never returns, so the held clone is dropped while it still can be.
-                        drop(object);
-                        process::exit(process::KILLED_EXIT_CODE);
-                    }
-                    process::kill_process(&object)
-                }
+                Ok(object) => process::kill_process(&object),
                 Err(e) => e.refuse(),
             }
         }
@@ -533,19 +523,20 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         #[cfg(feature = "test-actuators")]
         SYS_DEBUG => match a1 {
             DA::PANIC => panic!("SYS_DEBUG: kernel panic triggered by userspace"),
-            // SAFETY: unsound by design — a staged null read in Ring 0, gated behind test-actuators.
-            // Volatile: a plain read could be optimized to unreachable, leaving nothing to fault.
-            DA::NULL_READ => { unsafe { core::ptr::read_volatile(core::ptr::null::<u64>()); } 0 }
+            // A record and not the caller's own line: the panic path drains records, and a
+            // program's line is still in userland when the read below ends the machine.
+            DA::NULL_READ => {
+                log!("SYS_DEBUG: a Ring 0 read of {a2:#x}");
+                // SAFETY: unsound by design — a staged Ring 0 read of the caller's address, gated behind test-actuators.
+                // Volatile: a plain read could be optimized to unreachable, leaving nothing to fault.
+                unsafe { core::ptr::read_volatile(a2 as *const u64) };
+                0
+            }
             DA::LOCK_ACROSS_SWITCH => {
-                if !LOCK_ACROSS_SWITCH_ARMED.swap(false, core::sync::atomic::Ordering::Relaxed) {
-                    return SyscallError::InvalidArgument.to_u64();
-                }
                 let _held = LOCK_ACROSS_SWITCH.lock();
                 crate::scheduler::yield_now();
                 0
             }
-            // Unlike every other action, this costs the machine, not just the caller's
-            // process: one call is already a permanent halt.
             DA::FATAL_HALT => { log!("{}", FATAL_HALT_NONCE); crate::panic::halt_all_cpus(); }
             DA::DOUBLE_FAULT => {
                 log!("SYS_DEBUG: provoking a double fault");

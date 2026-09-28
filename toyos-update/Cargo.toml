@@ -5,6 +5,7 @@
 
 [package]
 name = "toyos-update"
+description = "A signed image, the slots it installs into, and every decision the loader and update make about one, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

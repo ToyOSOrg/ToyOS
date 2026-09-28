@@ -41,6 +41,7 @@ const ARMS: &[(&str, Expect)] = &[
     // `CR0.AM` is declared clear, so `RFLAGS.AC` buys a Ring 3 process nothing
     // on any machine this kernel runs on — emulated or not.
     ("ac", Expect::MachineLives),
+    ("pf", Expect::Killed),
 ];
 
 fn main() {

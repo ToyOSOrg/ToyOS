@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use crate::file_backing::FileBacking;
-use crate::mm::paging::Prot;
+use crate::mm::policy::Prot;
 use crate::mm::PAGE_2M;
 use toyos_userbound::Window;
 

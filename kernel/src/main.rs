@@ -111,7 +111,7 @@ mod late_panic {
     }
 }
 
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use arch::{cpu, percpu, smp};
@@ -167,7 +167,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     arch::trap::report_panic(info, cpu::frame_pointer());
 
-    // Captures now: recovery below may re-enter a scheduler this panic left locked, so a later drain isn't guaranteed.
     drivers::panic_console::capture();
     // One record after the snapshot and before the paint: what tells a frozen
     // report from a live re-read of a ring siblings are still writing to.
@@ -177,15 +176,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     // SAFETY: IF is clear on this CPU and every other one halts before anything else can write the port.
     unsafe { drivers::serial::panic_flush(); }
-
-    // Recoverable only when a syscall is what's panicking, or a kthread says its own row's answer.
-    let recoverable = sched::kthread::panic_recovers_here().unwrap_or_else(percpu::in_syscall);
-    if recoverable {
-        depth.store(0, core::sync::atomic::Ordering::SeqCst);
-        // Discarded here: a stale capture would blame this panic for the next fatal one.
-        drivers::panic_console::discard_capture();
-        arch::trap::try_recover_from_panic();
-    }
 
     panic::halt_all_cpus();
 }
@@ -651,7 +641,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     boot_phase!("complete", 0);
     report_power_on(kernel_args, complete_tsc);
 
-    // No current task here, so the handler's recovery predicate fails — the one panic no userland process can produce.
     #[cfg(feature = "boot-actuators")]
     if actuator::test_late_panic() {
         late_panic::Nest::<late_panic::Nest<late_panic::Nest<late_panic::Nest<
@@ -659,16 +648,19 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
             late_panic::Nest<late_panic::Nest<()>>>>>>>>>>::on_screen_console_check();
     }
 
-    // Same no-current-task window as above: blame is Kernel, so fatal_exception halts the machine.
     if actuator::test_kernel_fault() {
         cpu::undefined_instruction();
     }
 
     // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.
     log::console::start();
-    // After klogd so their own spawn logs have a drainer.
-    drivers::xhci::usbd::start();
     iod::start();
+
+    // Here: the last kernel thread is spawned.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::process_reopen_selftest() {
+        sched::kthread::open_selftest();
+    }
 
     smp::set_ready();
 

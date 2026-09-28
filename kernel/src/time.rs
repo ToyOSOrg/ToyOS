@@ -202,10 +202,6 @@ impl Tripwire {
         Self { limit, absurd_because }
     }
 
-    pub const fn duration(self) -> Duration {
-        self.limit
-    }
-
     pub const fn nanos(self) -> u64 {
         self.limit.nanos()
     }
@@ -216,6 +212,13 @@ impl fmt::Display for Tripwire {
         write!(f, "{} ({})", self.limit, self.absurd_because)
     }
 }
+
+/// How long a CPU waits for another to take an interrupt before calling it
+/// deaf and panicking — the TLB shootdown's acknowledgement wait is this.
+pub const DEAF_CPU: Tripwire = Tripwire::absurd(
+    Duration::from_secs(5),
+    "no CPU that is not wedged goes five seconds without taking an interrupt",
+);
 
 /// A wall-clock allowance whose expiry is a **degraded answer**, never a panic.
 #[derive(Clone, Copy)]

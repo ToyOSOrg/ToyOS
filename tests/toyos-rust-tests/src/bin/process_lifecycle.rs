@@ -4,8 +4,8 @@
 //! **There is no zombie here and no parent.** A pid-keyed wait needed the
 //! process table to keep a corpse until somebody claimed it, and rules for who
 //! was allowed to claim one and what happened when nobody did. The exit code
-//! lives on the object instead, published once by whichever of exit, kill or
-//! panic recovery owns the teardown — so a wait after the fact reads a value, a
+//! lives on the object instead, published once by whichever of exit or kill
+//! owns the teardown — so a wait after the fact reads a value, a
 //! wait before it parks and is woken by the publish, and two holders both get
 //! the answer.
 //!

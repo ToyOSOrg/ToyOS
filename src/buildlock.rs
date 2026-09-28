@@ -35,26 +35,9 @@
 //! [`integration`] is neither: one file of its own, exclusive-only, and held
 //! while this host's `main` moves rather than while anything builds.
 //!
-//! [`guest_slot`] and [`build_slot`] are not modes of anything — they are
-//! counts. The host's cores are spent by intra-suite width and by inter-worktree
-//! suites alike, and nothing was handing them out, so a second suite on the
-//! machine timed the first one's boots out. A guest slot counts guests; a worker
-//! that is *compiling* holds one and is not a guest, which is what
-//! [`build_slot`] adds and what twelve simultaneous kernel builds on fourteen
-//! cores cost.
-//!
-//! **Neither count reaches work that does not go through `src/build.rs`** — a
-//! `toyos-sched-sim measure`, a `cargo build` typed by hand in a fork clone,
-//! `./x.py` run directly in `rust/`. Those spend the same cores and are counted
-//! by nothing, so a phase can still be starved with every slot honestly free;
-//! what separates that from an ordinary slow one is that no `[host-slots]` or
-//! `[host-builds] waiting …` line was printed.
-//!
-//! **The order between them is a constraint, not a preference:** host slot
-//! (guest or build) → a compiler key's lock → a sysroot key's lock → the
-//! worktree build lock → the
-//! global one → artifact. A build slot is taken before any build lock and never
-//! while one is held; a key's lock is taken with the worktree lock put down
+//! **The lock order is a constraint, not a preference:** a compiler
+//! key's lock → a sysroot key's lock → the worktree build lock → the global one
+//! → artifact. A key's lock is taken with the worktree lock put down
 //! ([`Held::without_shared`]), because the key's builder takes the worktree lock
 //! exclusively.
 //!
@@ -256,105 +239,6 @@ fn integration_path(root: &Path) -> PathBuf {
     git_lock_dir(root).join("integration")
 }
 
-/// How many guests may be up on this host at once, across every worktree.
-///
-/// The suite's own width is twelve, measured on this host against eight in one
-/// session, so one suite alone gets exactly the machine it was measured on and
-/// N suites divide it. Without this the two parallelisms spend the same 14 cores
-/// twice over: four agents at twelve is 48 guests, which is slower than serial
-/// and mismeasures everything.
-///
-/// It is a count of *guests*, not of cores, because that is what the width is a
-/// count of and what the measurement was taken in.
-pub const HOST_GUESTS: usize = 12;
-
-/// One of the host's guest slots, held until the guard drops.
-///
-/// A counting semaphore over `budget` lock files, because there is nothing here
-/// to count with: `flock`'s shared mode admits any number of holders and reports
-/// no number at all. So a slot is a file, and taking one is finding a file
-/// nobody holds — which inherits the property the rest of this module rests on,
-/// that a slot a SIGKILLed holder had is free the moment the process dies, with
-/// no reaper, no pid file and no staleness.
-///
-/// **A caller holds at most one slot and never waits for a second while holding
-/// one.** That is what makes the semaphore deadlock-free rather than merely
-/// deadlock-free-so-far, and it is a constraint on callers: a task that needs
-/// two guests takes one slot for both, because two half-served tasks are a
-/// cycle.
-///
-/// The scan polls. `flock` cannot wait on "the first of these N files to be
-/// released", and the alternatives — a designated file each waiter blocks on, a
-/// waiter queue in a file — either starve or need a reaper. A round is `budget`
-/// non-blocking syscalls against tasks that run for seconds.
-///
-/// `budget` is a parameter so a run can be told to use fewer, and so the gates
-/// below can fill a host of two. Every process must name the same number or the
-/// bound is the largest of them: the files are per-index, and a process
-/// scanning a prefix cannot see that a longer one is full.
-pub fn guest_slot(root: &Path, budget: usize, what: &str) -> Guard {
-    slot(&git_lock_dir(root).join(SLOT_DIR), budget, what, GUESTS)
-}
-
-/// Its own directory under the global one: the files are named by index and
-/// nothing else in there is.
-const SLOT_DIR: &str = "slots";
-
-/// How many compiles may run on this host at once, across every worktree.
-///
-/// [`HOST_GUESTS`] counts the thing that was easy to count and not the thing
-/// that is scarce. A suite worker holds a guest slot from the moment it picks
-/// a task up, and the first thing the task does is build its kernel variant —
-/// so twelve workers is twelve concurrent `cargo build`s, each of which asks
-/// cargo for the whole machine. Measured on 2026-08-07: load average 49.9 on
-/// fourteen cores with twelve `rustc`/`cargo` processes and **one** guest live,
-/// which is the one worker that had got as far as booting being given a
-/// fiftieth of the host its wall-clock margins were written for.
-///
-/// Four rather than one, because a build is not saturating for its whole
-/// length — the tail of any crate graph is a single rustc — and because a bound
-/// that is too generous is recoverable where one that is too tight makes every
-/// agent wait on every other. It is policy, not physics: the second question of
-/// any bound is what the caller sees when it is hit, and here that is a
-/// `[host-builds] waiting …` line naming the holders.
-pub const HOST_BUILDS: usize = 4;
-
-/// The budget [`build_slot`] hands out, which `--host-builds N` overrides and
-/// `0` turns off.
-///
-/// A static rather than a parameter because the callers are three functions
-/// deep inside `src/build.rs` that a suite reaches through its own boot
-/// machinery, and threading a number through them would put the flag in every
-/// signature between here and there. Set once, before anything is compiled.
-static BUILD_BUDGET: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(HOST_BUILDS);
-
-pub fn set_host_builds(budget: usize) {
-    BUILD_BUDGET.store(budget, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// One of the host's build slots, held until the guard drops.
-///
-/// `None` is the semaphore turned off, which is the only way to measure a run
-/// against one that has it.
-///
-/// **Taken before any build lock and never while one is held**, so the order in
-/// the module header holds at every acquirer. Its own directory, and so its own
-/// count: a suite holding all twelve guest slots must not be unable to compile,
-/// and a machine full of builds must not be unable to boot.
-pub fn build_slot(root: &Path, what: &str) -> Option<Guard> {
-    let budget = BUILD_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
-    let here = root.file_name().map_or_else(
-        || "this worktree".to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    (budget > 0).then(|| {
-        slot(&git_lock_dir(root).join(BUILD_SLOT_DIR), budget, &format!("{here}: {what}"), BUILDS)
-    })
-}
-
-const BUILD_SLOT_DIR: &str = "build-slots";
-
 /// A content-addressed product of the host, locked per key: a sysroot, or a
 /// compiler a worktree's fork checkout names (`src/compiler.rs`).
 #[derive(Clone, Copy)]
@@ -381,14 +265,14 @@ impl Keyed {
 
 /// Make what `key` names: exclusive, and waited for by every other process that
 /// wants the same key, which then finds it made.
-pub fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
     let lock = format!("{} lock", kind.name());
     exclusive(&keyed_lock_path(root, kind, key), &lock, &format!("building {} {key}", kind.name()))
 }
 
 /// Use what `key` names: shared, so any number of builds use it at once, a
 /// builder of it is waited for, and a sweep cannot remove it.
-pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
     let path = keyed_lock_path(root, kind, key);
     let file = open_lock_file(&path);
     if !try_lock(&file, LOCK_SH) {
@@ -402,6 +286,33 @@ pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
     Guard { file, records_holder: false }
 }
 
+/// What `key` names, held in use and whole: made by `make` under
+/// [`keyed_building`] while `defect`, which says why it is not whole, says it is
+/// not. A `make` that leaves it not whole is refused by that defect rather than
+/// run again.
+pub fn keyed_made(
+    root: &Path,
+    kind: Keyed,
+    key: &str,
+    defect: impl Fn() -> Option<String>,
+    mut make: impl FnMut(),
+) -> Guard {
+    loop {
+        let using = keyed_using(root, kind, key);
+        if defect().is_none() {
+            return using;
+        }
+        drop(using);
+        let _building = keyed_building(root, kind, key);
+        if defect().is_some() {
+            make();
+            if let Some(defect) = defect() {
+                panic!("{} {key} was made, and is not whole: {defect}", kind.name());
+            }
+        }
+    }
+}
+
 /// What `key` names, exclusively and only if nobody is making or using it: what
 /// a sweep holds while it removes one.
 pub fn keyed_idle(root: &Path, kind: Keyed, key: &str) -> Option<Guard> {
@@ -411,82 +322,6 @@ pub fn keyed_idle(root: &Path, kind: Keyed, key: &str) -> Option<Guard> {
 
 fn keyed_lock_path(root: &Path, kind: Keyed, key: &str) -> PathBuf {
     git_lock_dir(root).join(kind.dir()).join(key)
-}
-
-fn slot_path(dir: &Path, index: usize) -> PathBuf {
-    dir.join(format!("slot-{index}"))
-}
-
-/// What a counting semaphore counts, in the words its waiting message needs.
-///
-/// Two counts, two directories, two prefixes: an agent reading
-/// `[host-builds] waiting …` is being told something different from
-/// `[host-slots] waiting …`, and the first thing it needs to know is which.
-#[derive(Clone, Copy)]
-struct Slots {
-    tag: &'static str,
-    one: &'static str,
-}
-
-const GUESTS: Slots = Slots { tag: "host-slots", one: "guest slot" };
-const BUILDS: Slots = Slots { tag: "host-builds", one: "build slot" };
-
-fn slot(dir: &Path, budget: usize, what: &str, kind: Slots) -> Guard {
-    assert!(budget >= 1, "a host with no {} can run nothing at all", kind.one);
-    let mut files: Vec<fs::File> =
-        (0..budget).map(|i| open_lock_file(&slot_path(dir, i))).collect();
-
-    // Where this process starts its scan, so N waiting runs do not all try slot
-    // 0 first and hand the same one back and forth.
-    let start = std::process::id() as usize % budget;
-    let began = Instant::now();
-    let mut said: Option<Instant> = None;
-
-    loop {
-        for offset in 0..budget {
-            let index = (start + offset) % budget;
-            if try_lock(&files[index], LOCK_EX) {
-                if said.is_some() {
-                    eprintln!(
-                        "[{}] {what} got a {} after {:.1?}",
-                        kind.tag,
-                        kind.one,
-                        began.elapsed()
-                    );
-                }
-                let mut guard = Guard { file: files.remove(index), records_holder: true };
-                write_note(&mut guard.file, &note_text(what));
-                return guard;
-            }
-        }
-        // Once when the wait starts and every half minute it lasts: an agent
-        // staring at silence kills and retries, and a wait that is working
-        // looks exactly like a wedge until it says so.
-        if said.is_none_or(|last| last.elapsed() >= HEARTBEAT) {
-            announce_slots(dir, budget, what, began.elapsed(), kind);
-            said = Some(Instant::now());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn announce_slots(dir: &Path, budget: usize, what: &str, waited: Duration, kind: Slots) {
-    let mut runs: Vec<(i32, String)> = Vec::new();
-    for index in 0..budget {
-        if let Some((pid, holder, _)) = read_note(&slot_path(dir, index)) {
-            if !runs.iter().any(|(other, _)| *other == pid) {
-                runs.push((pid, holder));
-            }
-        }
-    }
-    let who = if runs.is_empty() {
-        "the holders left no readable note".to_string()
-    } else {
-        let named: Vec<String> =
-            runs.iter().map(|(pid, holder)| format!("pid {pid} ({holder})")).collect();
-        format!("all {budget} held by {} holder(s): {}", runs.len(), named.join(", "))
-    };
-    eprintln!("[{}] waiting for a {} ({what}), {waited:.0?} so far — {who}", kind.tag, kind.one);
 }
 
 /// One lock file, taken exclusively and held until the guard drops.
@@ -634,13 +469,6 @@ fn take_lock_announcing(file: &fs::File, op: i32, path: &Path, lock: &str, label
 /// caller's, because a lock with a shared mode is usually held by holders who
 /// never wrote a note at all, and a lock without one never is.
 fn describe_holder(path: &Path) -> Option<String> {
-    let (pid, what, secs) = read_note(path)?;
-    Some(format!("held by pid {pid} ({what}), {secs}s so far"))
-}
-
-/// The note a live holder of `path` left: its pid, what it said it was doing,
-/// and how long ago it said so.
-fn read_note(path: &Path) -> Option<(i32, String, u64)> {
     let mut file = fs::File::open(path).ok()?;
     let mut text = String::new();
     file.read_to_string(&mut text).ok()?;
@@ -654,7 +482,7 @@ fn read_note(path: &Path) -> Option<(i32, String, u64)> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs().saturating_sub(since))
         .unwrap_or(0);
-    Some((pid, what.to_string(), secs))
+    Some(format!("held by pid {pid} ({what}), {secs}s so far"))
 }
 
 fn alive(pid: i32) -> bool {
@@ -729,8 +557,9 @@ fn try_lock(file: &fs::File, op: i32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::process::{Child, Command};
     use std::time::Duration;
     use toyos_tmpdir::TempDir;
@@ -742,6 +571,87 @@ mod tests {
     // ordinary `cargo test` never runs the child half on its own.
     const ROLE: &str = "TOYOS_BUILDLOCK_TEST_ROLE";
     const ROOT: &str = "TOYOS_BUILDLOCK_TEST_ROOT";
+    const MARKS: &str = "TOYOS_BUILDLOCK_TEST_MARKS";
+    const KEY: &str = "TOYOS_BUILDLOCK_TEST_KEY";
+
+    /// A lock held by a process of its own, which [`Elsewhere::release`] waits
+    /// to exit.
+    ///
+    /// A test never asserts free a lock this process has held: another test
+    /// thread's spawn copies every descriptor open at that moment into its child
+    /// until the child's exec, and the copy holds the lock past the drop.
+    pub(crate) struct Elsewhere {
+        child: Child,
+        marks: TempDir,
+        released: bool,
+    }
+
+    impl Elsewhere {
+        /// Run the `#[ignore]`d test `role` names, with `env`, and return once
+        /// it has called [`hold_until_released`].
+        pub(crate) fn hold(role: &str, env: &[(&str, &OsStr)]) -> Self {
+            let marks = TempDir::new("buildlock-elsewhere");
+            let mut child = rerun(role)
+                .envs(env.iter().copied())
+                .env(MARKS, &marks)
+                .spawn()
+                .expect("spawn the holder");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !marks.join("held").exists() {
+                if let Some(status) = child.try_wait().unwrap() {
+                    panic!("{role} exited before it took its lock: {status}");
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    panic!("{role} never took its lock in 20 s, killed: {}", child.wait().unwrap());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Elsewhere { child, marks, released: false }
+        }
+
+        pub(crate) fn id(&self) -> u32 {
+            self.child.id()
+        }
+
+        /// Let go, and return once the holder has exited.
+        pub(crate) fn release(mut self) {
+            self.released = true;
+            touch(&self.marks.join("release"));
+            assert!(self.child.wait().unwrap().success(), "the holder failed");
+        }
+    }
+
+    impl Drop for Elsewhere {
+        /// An assertion between `hold` and `release` skips `release`; without
+        /// this, the holder it leaked keeps running and its lock held past
+        /// the test that dropped it.
+        fn drop(&mut self) {
+            if self.released {
+                return;
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// The holder's half of [`Elsewhere`].
+    pub(crate) fn hold_until_released() {
+        let marks = PathBuf::from(std::env::var(MARKS).expect("a holder runs under Elsewhere::hold"));
+        touch(&marks.join("held"));
+        assert!(appeared(&marks.join("release"), Duration::from_secs(20)), "the holder was never released");
+    }
+
+    /// Sysroot `key` of `root`, held in use by a process of its own.
+    pub(crate) fn sysroot_used_elsewhere(root: &Path, key: &str) -> Elsewhere {
+        let env = [(ROLE, OsStr::new("use-sysroot")), (ROOT, root.as_os_str()), (KEY, OsStr::new(key))];
+        Elsewhere::hold("buildlock::tests::child_role", &env)
+    }
+
+    /// What `role` of [`child_role`] takes in `root`, held by a process of its own.
+    fn held_elsewhere(root: &Path, role: &str) -> Elsewhere {
+        Elsewhere::hold("buildlock::tests::child_role", &[(ROLE, OsStr::new(role)), (ROOT, root.as_os_str())])
+    }
 
     /// A git repository, because the global scope is keyed on the common
     /// directory and a scratch tree that is not one would exercise a path the
@@ -762,32 +672,15 @@ mod tests {
         root.join(LOCK_DIR)
     }
 
-    /// A host of two, so filling it costs two processes rather than twelve.
-    const TEST_SLOTS: usize = 2;
-
-    fn slot_dir(root: &Path) -> PathBuf {
-        git_lock_dir(root).join(SLOT_DIR)
-    }
-
-    fn build_slot_dir(root: &Path) -> PathBuf {
-        git_lock_dir(root).join(BUILD_SLOT_DIR)
-    }
-
-    /// How many of the host's slots are held right now, asked with a fresh fd
-    /// per slot for the reason [`intent_is_taken`] gives.
-    fn slots_held_in(dir: &Path) -> usize {
-        (0..TEST_SLOTS)
-            .filter(|i| !try_lock(&open_lock_file(&slot_path(dir, *i)), LOCK_EX))
-            .count()
-    }
-
-    fn slots_held(root: &Path) -> usize {
-        slots_held_in(&slot_dir(root))
+    /// This test binary, to run the one `#[ignore]`d test `test` names.
+    fn rerun(test: &str) -> Command {
+        let mut rerun = Command::new(std::env::current_exe().unwrap());
+        rerun.args(["--exact", test, "--include-ignored", "--nocapture"]);
+        rerun
     }
 
     fn child(root: &Path, role: &str) -> Child {
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "buildlock::tests::child_role", "--include-ignored", "--nocapture"])
+        rerun("buildlock::tests::child_role")
             .env(ROLE, role)
             .env(ROOT, root)
             .spawn()
@@ -849,15 +742,7 @@ mod tests {
         match role.as_str() {
             "hold-exclusive" => {
                 let mut held = shared(&root, "child");
-                held.act_if(
-                    Scope::Worktree,
-                    "child exclusive phase",
-                    || (!root.join("release").exists()).then_some(()),
-                    |()| {
-                        touch(&root.join("held"));
-                        appeared(&root.join("release"), Duration::from_secs(20));
-                    },
-                );
+                held.act_if(Scope::Worktree, "child exclusive phase", || Some(()), |()| hold_until_released());
             }
             "hold-exclusive-forever" => {
                 let mut held = shared(&root, "child");
@@ -873,8 +758,7 @@ mod tests {
             }
             "hold-integration" => {
                 let _landing = integration(&root);
-                touch(&root.join("held"));
-                appeared(&root.join("release"), Duration::from_secs(20));
+                hold_until_released();
             }
             "hold-integration-forever" => {
                 let _landing = integration(&root);
@@ -889,20 +773,9 @@ mod tests {
                 let _held = shared(&root, "child");
                 note(&root, "sh");
             }
-            "hold-slot" => {
-                let _slot = slot(&slot_dir(&root), TEST_SLOTS, "a child's task", GUESTS);
-                touch(&root.join(format!("held-{}", std::process::id())));
-                appeared(&root.join("release"), Duration::from_secs(20));
-            }
-            "hold-slot-forever" => {
-                let _slot = slot(&slot_dir(&root), TEST_SLOTS, "a child's task", GUESTS);
-                touch(&root.join(format!("held-{}", std::process::id())));
-                until_orphaned();
-            }
             "hold-sysroot-build" => {
                 let _building = keyed_building(&root, Keyed::Sysroot, "k1");
-                touch(&root.join("held"));
-                appeared(&root.join("release"), Duration::from_secs(20));
+                hold_until_released();
                 note(&root, "built");
             }
             "want-integration" => {
@@ -913,23 +786,9 @@ mod tests {
                 let _using = keyed_using(&root, Keyed::Sysroot, "k1");
                 note(&root, "used");
             }
-            "want-slot" => {
-                let _slot = slot(&slot_dir(&root), TEST_SLOTS, "the queued run", GUESTS);
-                note(&root, "got a slot");
-            }
-            "hold-build" => {
-                let _slot = slot(&build_slot_dir(&root), TEST_SLOTS, "a child's build", BUILDS);
-                touch(&root.join(format!("held-{}", std::process::id())));
-                appeared(&root.join("release"), Duration::from_secs(20));
-            }
-            "hold-build-forever" => {
-                let _slot = slot(&build_slot_dir(&root), TEST_SLOTS, "a child's build", BUILDS);
-                touch(&root.join(format!("held-{}", std::process::id())));
-                until_orphaned();
-            }
-            "want-build" => {
-                let _slot = slot(&build_slot_dir(&root), TEST_SLOTS, "the queued build", BUILDS);
-                note(&root, "got a build slot");
+            "use-sysroot" => {
+                let _using = keyed_using(&root, Keyed::Sysroot, &std::env::var(KEY).unwrap());
+                hold_until_released();
             }
             "clean" | "clean-unlocked" => {
                 touch(&root.join("cleaner-ready"));
@@ -955,8 +814,7 @@ mod tests {
     #[test]
     fn exclusive_excludes_every_other_acquirer() {
         let root = scratch("exclusive");
-        let mut kid = child(&root, "hold-exclusive");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
+        let kid = held_elsewhere(&root, "hold-exclusive");
 
         let state = open_lock_file(&worktree_lock_dir(&root).join("state"));
         assert!(!try_lock(&state, LOCK_SH), "a build got in while an exclusive phase ran");
@@ -968,8 +826,7 @@ mod tests {
             "the waiting side cannot name the holder: {holder}"
         );
 
-        touch(&root.join("release"));
-        assert!(kid.wait().unwrap().success());
+        kid.release();
         drop(state);
         let _mine = shared(&root, "parent");
     }
@@ -998,8 +855,7 @@ mod tests {
     #[test]
     fn two_landings_serialise() {
         let root = scratch("integration");
-        let mut kid = child(&root, "hold-integration");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
+        let kid = held_elsewhere(&root, "hold-integration");
 
         let mine = open_lock_file(&integration_path(&root));
         assert!(!try_lock(&mine, LOCK_EX), "two landings held the integration lock at once");
@@ -1009,8 +865,7 @@ mod tests {
             "the queued landing cannot name the one ahead of it: {holder}"
         );
 
-        touch(&root.join("release"));
-        assert!(kid.wait().unwrap().success());
+        kid.release();
         drop(mine);
         let _mine = integration(&root);
     }
@@ -1090,29 +945,18 @@ mod tests {
             mine.worktree_dir, theirs.worktree_dir,
             "two worktrees share one target-directory lock"
         );
-        drop(theirs);
-        drop(mine);
 
         // Naming one path is not yet excluding on it: `flock` conflicts between
         // open file descriptions, so a second handle on the shared file is the
-        // question a second process would ask.
-        let held = acquire(&root.join(LOCK_DIR), LOCK_SH, "a build in the primary", BUILD);
-        let global = open_lock_file(&git_common_lock_dir(&linked).join("state"));
-        assert!(
-            try_lock(&global, LOCK_EX),
-            "the worktree lock excluded a global phase it knows nothing about"
-        );
-        drop(global);
-        drop(held);
-
-        // A build compiles against its own sysroot and reads no compiler, so a
-        // toolchain rebuild does not wait for it; a sysroot being made reads the
-        // compiler, so the rebuild waits for that.
-        let building = shared(&linked, "a build in the worktree");
+        // question a second process would ask. A build compiles against its own
+        // sysroot and reads no compiler, so a toolchain rebuild waits for no
+        // build in either worktree; a sysroot being made reads the compiler, so
+        // the rebuild waits for that.
         let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(try_lock(&global, LOCK_EX), "a build kept the toolchain from being rebuilt");
         drop(global);
-        drop(building);
+        drop(theirs);
+        drop(mine);
         let making = compiler_shared(&linked, "a sysroot build in the worktree");
         let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(
@@ -1164,6 +1008,17 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "ex\nsh\n");
     }
 
+    /// [`Elsewhere::release`] returns only once the holder has exited and been
+    /// reaped: a zombie still answers `kill(pid, 0)`.
+    #[test]
+    fn a_released_holder_is_gone() {
+        let root = scratch("released");
+        let user = sysroot_used_elsewhere(&root, "k");
+        let pid = user.id() as i32;
+        user.release();
+        assert!(!alive(pid), "release returned before the holder was reaped");
+    }
+
     /// **One key is built once, and two keys never meet.** A second process
     /// wanting the key being built waits on the builder's lock — not on a
     /// timer — and gets it only once the build is done; a process making
@@ -1172,8 +1027,7 @@ mod tests {
     #[test]
     fn a_key_being_built_is_waited_for_and_another_key_is_not() {
         let root = scratch("sysroot-keys");
-        let mut builder = child(&root, "hold-sysroot-build");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "the builder never started");
+        let builder = held_elsewhere(&root, "hold-sysroot-build");
 
         assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key being built");
         let other = keyed_building(&root, Keyed::Sysroot, "k2");
@@ -1184,162 +1038,14 @@ mod tests {
             !appeared(&root.join("order.log"), Duration::from_millis(300)),
             "a build used a sysroot while it was still being made"
         );
-        touch(&root.join("release"));
-        assert!(builder.wait().unwrap().success());
+        builder.release();
         assert!(user.wait().unwrap().success());
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "built\nused\n");
 
-        let using = keyed_using(&root, Keyed::Sysroot, "k1");
+        let user = sysroot_used_elsewhere(&root, "k1");
         assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key in use");
-        drop(using);
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some());
-    }
-
-    /// The whole point of a counting semaphore: the run past the budget waits.
-    ///
-    /// Two suites on one host was not slower, it was wrong — `screen_fatal_halt`
-    /// red at 11 s against 3.3 s alone, and an hour spent chasing it as a
-    /// regression.
-    #[test]
-    fn a_full_host_makes_the_next_run_wait() {
-        let root = scratch("slots-full");
-        let mut holders: Vec<Child> = (0..TEST_SLOTS).map(|_| child(&root, "hold-slot")).collect();
-        for kid in &holders {
-            assert!(
-                appeared(&root.join(format!("held-{}", kid.id())), Duration::from_secs(20)),
-                "a child never took its slot"
-            );
-        }
-        assert_eq!(slots_held(&root), TEST_SLOTS, "the host is not full");
-
-        let mut queued = child(&root, "want-slot");
-        assert!(
-            !appeared(&root.join("order.log"), Duration::from_millis(400)),
-            "a {TEST_SLOTS}-slot host admitted a {}th guest", TEST_SLOTS + 1
-        );
-
-        touch(&root.join("release"));
-        for kid in &mut holders {
-            assert!(kid.wait().unwrap().success());
-        }
-        assert!(queued.wait().unwrap().success());
-        assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "got a slot\n");
-    }
-
-    /// An agent kills a suite that is taking too long, and the host is one host:
-    /// a slot its guest never gave back would shrink the machine for everybody
-    /// else until the next reboot, with nothing in the tree able to notice.
-    #[test]
-    fn a_killed_run_gives_its_slot_back() {
-        let root = scratch("slots-killed");
-        let mut holders: Vec<Child> =
-            (0..TEST_SLOTS).map(|_| child(&root, "hold-slot-forever")).collect();
-        for kid in &holders {
-            assert!(
-                appeared(&root.join(format!("held-{}", kid.id())), Duration::from_secs(20)),
-                "a child never took its slot"
-            );
-        }
-        assert_eq!(slots_held(&root), TEST_SLOTS, "the host is not full");
-
-        holders[0].kill().unwrap();
-        holders[0].wait().unwrap();
-        assert_eq!(slots_held(&root), TEST_SLOTS - 1, "the dead run's slot is still held");
-
-        let start = Instant::now();
-        let mine = slot(&slot_dir(&root), TEST_SLOTS, "the parent", GUESTS);
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "a SIGKILLed run stranded its guest slot"
-        );
-        drop(mine);
-        holders[1].kill().unwrap();
-        holders[1].wait().unwrap();
-    }
-
-    /// The count `guest_slot` was not: twelve workers each holding a guest slot
-    /// and each running `cargo build` is twelve concurrent compiles, which is
-    /// load 49.9 on fourteen cores with one guest live.
-    #[test]
-    fn a_full_host_makes_the_next_build_wait() {
-        let root = scratch("builds-full");
-        let mut holders: Vec<Child> = (0..TEST_SLOTS).map(|_| child(&root, "hold-build")).collect();
-        for kid in &holders {
-            assert!(
-                appeared(&root.join(format!("held-{}", kid.id())), Duration::from_secs(20)),
-                "a child never took its build slot"
-            );
-        }
-        assert_eq!(slots_held_in(&build_slot_dir(&root)), TEST_SLOTS, "the host is not full");
-
-        let mut queued = child(&root, "want-build");
-        assert!(
-            !appeared(&root.join("order.log"), Duration::from_millis(400)),
-            "a {TEST_SLOTS}-build host admitted a {}th compile", TEST_SLOTS + 1
-        );
-
-        touch(&root.join("release"));
-        for kid in &mut holders {
-            assert!(kid.wait().unwrap().success());
-        }
-        assert!(queued.wait().unwrap().success());
-        assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "got a build slot\n");
-    }
-
-    /// Same argument as the guest slots': a killed build that kept its slot
-    /// would shrink the machine for every worktree until the next reboot.
-    #[test]
-    fn a_killed_build_gives_its_slot_back() {
-        let root = scratch("builds-killed");
-        let mut holders: Vec<Child> =
-            (0..TEST_SLOTS).map(|_| child(&root, "hold-build-forever")).collect();
-        for kid in &holders {
-            assert!(
-                appeared(&root.join(format!("held-{}", kid.id())), Duration::from_secs(20)),
-                "a child never took its build slot"
-            );
-        }
-        assert_eq!(slots_held_in(&build_slot_dir(&root)), TEST_SLOTS, "the host is not full");
-
-        holders[0].kill().unwrap();
-        holders[0].wait().unwrap();
-        assert_eq!(
-            slots_held_in(&build_slot_dir(&root)),
-            TEST_SLOTS - 1,
-            "the dead build's slot is still held"
-        );
-        holders[1].kill().unwrap();
-        holders[1].wait().unwrap();
-    }
-
-    /// **Two counts, and neither may be the other.** One directory for both
-    /// would make a suite that legitimately holds every guest slot unable to
-    /// compile the next kernel variant it needs — which is a deadlock, since
-    /// the slot it is waiting for is one it holds itself.
-    #[test]
-    fn guests_and_builds_are_counted_separately() {
-        let root = scratch("slots-vs-builds");
-        let mut holders: Vec<Child> = (0..TEST_SLOTS).map(|_| child(&root, "hold-slot")).collect();
-        for kid in &holders {
-            assert!(
-                appeared(&root.join(format!("held-{}", kid.id())), Duration::from_secs(20)),
-                "a child never took its slot"
-            );
-        }
-        assert_eq!(slots_held(&root), TEST_SLOTS, "the host is not full of guests");
-
-        let start = Instant::now();
-        let mine = slot(&build_slot_dir(&root), TEST_SLOTS, "a build on a full host", BUILDS);
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "a host full of guests could not compile anything"
-        );
-        drop(mine);
-
-        touch(&root.join("release"));
-        for kid in &mut holders {
-            assert!(kid.wait().unwrap().success());
-        }
+        user.release();
+        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some(), "a sweep could not remove a key nobody uses");
     }
 
     /// A wait of minutes that says one line and then goes silent is
@@ -1352,8 +1058,7 @@ mod tests {
         let mut holder = child(&root, "hold-integration-forever");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
 
-        let mut queued = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "buildlock::tests::child_role", "--include-ignored", "--nocapture"])
+        let mut queued = rerun("buildlock::tests::child_role")
             .env(ROLE, "want-integration")
             .env(ROOT, &root)
             .stderr(std::process::Stdio::piped())

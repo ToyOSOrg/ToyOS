@@ -19,8 +19,7 @@ one clause; do not work around it.
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test before anyone reviews:
 
-- Host tests only: an implementer never runs QEMU. Every guest arm goes to the orchestrator as
-  the exact command, the patch file and the expected outcome with its named reason.
+- `cargo test`, never `cargo run`: the run path opens a window on the owner's desktop.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the job scratchpad the brief
@@ -37,8 +36,8 @@ guess. Then build, then test before anyone reviews:
 ## Commits and the pull request
 
 `git commit -F <file>`, never `-m`. No `--amend`, no rebase, no force: merge `origin/main`, never
-rebase onto it. Never edit a `CLAUDE.md`. Never touch `toyos-abi/src`, `toyos/src` or
-`userland/libc/src` unless the brief is an ABI brief. No new dependency.
+rebase onto it. Never touch `toyos-abi/src`, `toyos/src` or `userland/libc/src` unless the brief is
+an ABI brief. No new dependency.
 
 `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,
 so keep it true of the branch as it stands: what changed and why, per decision; each gate with its

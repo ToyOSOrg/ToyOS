@@ -31,6 +31,11 @@ typed can be ended by whoever sent it.** The sender needs nothing but
 - An audio client receives two handles from soundd and calls `SYS_SHM_MAP` on
   the first (`toyos/src/audio.rs`). A hostile *server* ends every client.
 - A window client receives its buffer the same way (`userland/toyos-window/src/lib.rs`).
+- blockd maps the region a client sends with its open (`Region::adopt` in
+  `userland/blockd/src/region.rs`), so a *client* holding its connector ends it.
+- netd adopts as pipes the two handles a client sends with a piped socket
+  (`DataPipes::take`) and the one with a piped bind (`handle_tcp_bind_piped`),
+  both in `userland/netd/src/main.rs`: a *client* ends it the same way.
 
 Nothing in the tree is hostile today, so nothing fails. The property the
 architecture claims — that a process cannot be harmed by what it was not given —
@@ -57,18 +62,6 @@ change, and a new syscall is the owner's to approve.
 Judged while clearing PR #22's blockers, with the reasoning written down because
 the next reader will ask why a class this wide was left open.
 
-- **The one instance a hostile *client* can reach is closed.** `/system/bin/init`'s
-  launcher takes `extra` connectors from anybody holding a `launcher` connector
-  and hands them to `SYS_NAMESPACE_BUILD`, and that call answers
-  `InvalidArgument` for a wrong type rather than ending the caller. It is the
-  one handle argument in the ABI that routinely crosses a trust boundary,
-  `kernel/CLAUDE.md` says so where the policy is stated, and `launcher_refusals`
-  gates it.
-- **Every other instance needs a hostile *server*** — soundd sending an audio
-  client its region, the compositor sending a window its buffer. A client whose
-  server is hostile has already lost: that server chooses what the client sees,
-  when it is answered, and whether it is answered at all. Ending it with a
-  `WrongType` is not a new capability.
 - **The fix is an ABI shape change and the ABI was the owner's to approve.** It
   widens `SYS_HANDLE_RECV`'s answer from `n` to `n` pairs, which is a syscall
   the owner approved changing shape after the fact.
