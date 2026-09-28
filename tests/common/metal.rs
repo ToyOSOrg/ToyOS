@@ -718,8 +718,8 @@ fn build(
     // **What a job spawns comes with it, and it is not optional.** A binary that
     // cannot find its `.so` or its helper child does not fail an assertion — it
     // fails to *spawn*. Measured on a metal-shaped guest: `std_tls` did not run
-    // at all and took the rest of the job list with it, and `disk_backtrace`,
-    // `fault_gates` and `panic_recovery` each panicked on `entity not found`
+    // at all and took the rest of the job list with it, and `disk_backtrace`
+    // and `fault_gates` each panicked on `entity not found`
     // looking for a child nothing had staged.
     //
     // **Which helper, though, is read rather than assumed.** Staging all of them

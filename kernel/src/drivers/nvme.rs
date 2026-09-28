@@ -13,7 +13,7 @@ use crate::mm::Mmio;
 use super::pci::PciDevice;
 use super::DmaPool;
 use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId};
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use crate::log;
 use crate::mm::{Dma, Unaligned};
 use crate::scheduler::Operation;

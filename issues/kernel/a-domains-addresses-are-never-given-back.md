@@ -6,7 +6,7 @@ opened: 2026-09-03
 
 # A domain's addresses are never given back
 
-`Domain::reserve` (`kernel/src/iommu/vtd/table.rs:213-224`) is a monotonic
+`Domain::reserve` (`kernel/src/arch/x86_64/vtd/table.rs:213-224`) is a monotonic
 bump: an address is never handed out twice, unmapped or not, and `unmap`
 returns no range. A driver that maps and unmaps repeatedly therefore consumes
 its domain's device address space for good. The display is the first such

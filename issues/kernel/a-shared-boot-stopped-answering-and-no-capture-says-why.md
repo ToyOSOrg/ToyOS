@@ -39,12 +39,12 @@ runs). Its guest prints
 
 and then passes. Those are the two parked counts and the reporter cadence the
 2026-08-29 sighting read as proof of a wedged machine. A console read parks on a
-10 ms re-poll (`CONSOLE_REPOLL`, `kernel/src/arch/syscall/io.rs`), so an idle
+10 ms re-poll (`CONSOLE_REPOLL`, `kernel/src/syscall/io.rs`), so an idle
 shared boot waiting for its next command is parked at almost every sample.
 
 **Site: unknown.** The only candidate the surviving capture line supports is a
 `SYS_THREAD_JOIN` whose wake was lost: it parks on the target thread's own watch
-at `Deadline::never()` (`kernel/src/arch/syscall/proc.rs:171`), and nothing else
+at `Deadline::never()` (`kernel/src/syscall/proc.rs:171`), and nothing else
 would leave a whole boot idle straight after a sibling thread's clean exit.
 `issues/kernel/thread-exits-completion-post-is-the-second-one.md` owns that
 path's two posts.

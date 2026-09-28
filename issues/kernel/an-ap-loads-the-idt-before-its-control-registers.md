@@ -7,7 +7,7 @@ opened: 2026-09-07
 # An AP loads the IDT before its control registers, so a fault there triple-faults
 
 `percpu::init_bsp` applies the control registers before it loads the IDT: every
-entry stub in `kernel/src/arch/idt` saves SSE state, and `fxsave` without
+entry stub in `kernel/src/arch/x86_64/idt` saves SSE state, and `fxsave` without
 `CR4.OSFXSR` is `#UD`, so a fault taken between the two would raise `#UD` inside
 its own handler, double-fault into the same stub, and reset the machine. That
 ordering is stated at the site.

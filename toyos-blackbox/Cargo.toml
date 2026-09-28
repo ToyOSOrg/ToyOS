@@ -1,5 +1,6 @@
 [package]
 name = "toyos-blackbox"
+description = "The page a boot leaves for the next boot to find, and the three things it can say."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

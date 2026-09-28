@@ -9,6 +9,7 @@ use toyos::say;
 mod device;
 mod dhcp;
 mod i219;
+mod listen;
 mod mdns;
 mod report;
 mod resolve;
@@ -399,7 +400,7 @@ impl PipedConnection {
 struct PipedListener {
     handle: SocketHandle,
     notify_write: Pipe,
-    notified: bool,
+    listening: listen::Listening,
 }
 
 struct PendingPipedConnect {
@@ -1223,7 +1224,7 @@ impl NetDaemon {
         self.piped_listeners.insert(socket_id, PipedListener {
             handle,
             notify_write,
-            notified: false,
+            listening: listen::Listening::new(port),
         });
 
         msg.client.result(&TcpBindResponse {
@@ -1238,39 +1239,38 @@ impl NetDaemon {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        if !self.piped_room() {
-            say!(
-                "netd: refusing accept, {} piped connections already (max {})",
-                self.piped_live(),
-                self.max_piped_connections,
-            );
-            msg.client.error(ERR_RESOURCE_EXHAUSTED);
-            return;
-        }
-        let Some(pipes) = DataPipes::take(&msg.client) else {
-            msg.client.error(ERR_INVALID_INPUT);
-            return;
-        };
-        let Some(listener) = self.piped_listeners.get(&req.socket_id) else {
+        let (room, pipes) = (self.piped_room(), DataPipes::take(&msg.client));
+        let Some(listener) = self.piped_listeners.get_mut(&req.socket_id) else {
             msg.client.error(ERR_NOT_CONNECTED);
             return;
         };
+        let (old_handle, local_port) = (listener.handle, listener.listening.port());
+        let pipes = match listener.listening.accept(socket_set.get_mut::<tcp::Socket>(old_handle), room, pipes) {
+            listen::Accept::Take(pipes) => pipes,
+            listen::Accept::NoPipes => {
+                msg.client.error(ERR_INVALID_INPUT);
+                return;
+            }
+            listen::Accept::NoRoom => {
+                say!(
+                    "netd: refusing accept, {} piped connections already (max {})",
+                    self.piped_live(),
+                    self.max_piped_connections,
+                );
+                msg.client.error(ERR_RESOURCE_EXHAUSTED);
+                return;
+            }
+            listen::Accept::Nothing => {
+                msg.client.error(ERR_NOT_CONNECTED);
+                return;
+            }
+        };
 
-        let socket = socket_set.get_mut::<tcp::Socket>(listener.handle);
-        // Not `is_active`: that is already true in SynReceived, where
-        // `remote_endpoint()` is still None.
-        if socket.state() != tcp::State::Established {
-            msg.client.error(ERR_NOT_CONNECTED);
-            return;
-        }
-
-        let remote = socket.remote_endpoint().unwrap();
-        let local_port = socket.local_endpoint().unwrap().port;
+        let remote = socket_set.get_mut::<tcp::Socket>(old_handle).remote_endpoint().unwrap();
         let remote_addr = match remote.addr {
             IpAddress::Ipv4(a) => a.octets(),
         };
 
-        let old_handle = listener.handle;
         let stream_id = self.alloc_id();
         self.sockets.insert(stream_id, SocketKind::TcpStream(old_handle));
 
@@ -1288,10 +1288,10 @@ impl NetDaemon {
         let new_handle = socket_set.add(new_listener);
         self.sockets.insert(req.socket_id, SocketKind::TcpListener(new_handle));
 
-        if let Some(pl) = self.piped_listeners.get_mut(&req.socket_id) {
-            pl.handle = new_handle;
-            pl.notified = false;
-        }
+        self.piped_listeners
+            .get_mut(&req.socket_id)
+            .expect("looked up above; nothing between there and here removes a piped_listeners entry")
+            .handle = new_handle;
 
         msg.client.result(&TcpAcceptPipedResponse {
             socket_id: stream_id,
@@ -1429,18 +1429,14 @@ impl NetDaemon {
     /// is what tells it instead — its notify pipe reads EOF. A full pipe is
     /// that refusal too: it is an owner that has left a whole pipe of wakes
     /// unread.
-    fn serve_piped_listeners(&mut self, socket_set: &mut SocketSet<'_>) {
+    fn serve_piped_listeners(&mut self, socket_set: &mut SocketSet<'_>, room: bool) {
         use toyos_abi::syscall::SyscallError;
         let mut dead = Vec::new();
         for (&socket_id, listener) in &mut self.piped_listeners {
-            let socket = socket_set.get_mut::<tcp::Socket>(listener.handle);
-            // Not `is_active`: that is already true in SynReceived, before the
-            // three-way handshake completes.
-            let owed = socket.state() == tcp::State::Established && !listener.notified;
-            let wake: &[u8] = if owed { &[1] } else { &[] };
+            let wake = listener.listening.wake(socket_set.get_mut::<tcp::Socket>(listener.handle), room);
             match toyos_abi::syscall::write_nonblock(listener.notify_write.as_handle(), wake) {
-                Ok(_) => listener.notified |= owed,
-                Err(SyscallError::WouldBlock) if !owed => {}
+                Ok(_) => {}
+                Err(SyscallError::WouldBlock) if wake.is_empty() => {}
                 // Its owner has gone, which is the ordinary end of a listener.
                 Err(SyscallError::Gone) => dead.push(socket_id),
                 Err(e) => {
@@ -1461,8 +1457,9 @@ impl NetDaemon {
         }
     }
 
-    /// Process pending async operations (UDP recvs, lookups, piped connects).
-    fn process_pending(&mut self, socket_set: &mut SocketSet<'_>) {
+    /// Process pending async operations (UDP recvs, lookups, piped connects),
+    /// and say whether there is room for another piped connection after them.
+    fn process_pending(&mut self, socket_set: &mut SocketSet<'_>) -> bool {
         let now = Instant::now();
 
         for pr in std::mem::take(&mut self.pending_udp_recvs) {
@@ -1527,6 +1524,7 @@ impl NetDaemon {
             }
             i += 1;
         }
+        self.piped_room()
     }
 }
 
@@ -1739,9 +1737,8 @@ fn main() {
 
         daemon.bridge_piped(&mut socket_set);
 
-        daemon.serve_piped_listeners(&mut socket_set);
-
-        daemon.process_pending(&mut socket_set);
+        let room = daemon.process_pending(&mut socket_set);
+        daemon.serve_piped_listeners(&mut socket_set, room);
 
         // smoltcp's own next deadline — a retransmit, a persist probe, a
         // delayed ACK — and zero when it has a frame to send now. A piped

@@ -40,7 +40,7 @@ Shell 28 is the healthy control the same log offers: 95 syscalls, `spawn 3`
 paired with `waitpid 3`, and it went on from `ls /system/bin` to `free` and then
 `doom`. So neither a lost exit notification nor a missed wakeup is involved,
 and `sys_waitpid` registering on the park lot before it reads the table
-(`kernel/src/arch/syscall.rs:1067`) is doing its job.
+(`4a98107f^:kernel/src/arch/syscall.rs`; `SYS_WAITPID` is retired since) is doing its job.
 
 **Refuted, and it was the first hypothesis because it was a same-day change**
 (#129, `85a8433`): a child that takes a surface grab and dies without releasing

@@ -6,7 +6,7 @@ opened: 2026-09-03
 
 # The host job tracks whatever toolchain `macos-latest` ships, and a runner roll reds every open pull request at once
 
-`.github/workflows/host-tests.yml`'s `host` job installs no Rust toolchain: it
+`35383398^:.github/workflows/host-tests.yml`'s `host` job installs no Rust toolchain: it
 runs `rustc -vV; cargo -V; rustup component add clippy` on whatever
 `macos-latest` ships that day, and there is no root `rust-toolchain.toml` —
 only `kernel/`, `bootloader/` and `userland/` pin one, each to a target list
@@ -56,7 +56,7 @@ own `set -e` never reached before the script died on the first red pipeline —
 site under the kernel's own two clippy invocations
 (`kernel/src/loader/start.rs:146`), plus one unrelated new lint the kernel
 arm alone surfaced, `clippy::map_or_identity`
-(`kernel/src/arch/syscall/dispatch.rs:278`). All were confirmed clean under
+(`kernel/src/syscall/dispatch.rs:278`). All were confirmed clean under
 `RUSTUP_TOOLCHAIN=1.98.0 cargo run -- --clippy` and unchanged under the
 default 1.97.1 after the fix.
 

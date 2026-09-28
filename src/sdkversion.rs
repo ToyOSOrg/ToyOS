@@ -300,8 +300,8 @@ mod tests {
     fn every_lockfile_resolves_the_published_crates_from_the_tree() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut seen = 0;
-        for lockfile in crate::pr::git(root, &["ls-files", "*Cargo.lock"]).unwrap().lines() {
-            let lock: toml::Table = std::fs::read_to_string(root.join(lockfile)).unwrap().parse().unwrap();
+        for lockfile in crate::sysroot::tracked_files(root, &["*Cargo.lock"]).unwrap() {
+            let lock: toml::Table = std::fs::read_to_string(root.join(&lockfile)).unwrap().parse().unwrap();
             for package in lock.get("package").and_then(|p| p.as_array()).into_iter().flatten() {
                 let name = package["name"].as_str().unwrap();
                 if PUBLISHED.iter().any(|k| k.name == name) {

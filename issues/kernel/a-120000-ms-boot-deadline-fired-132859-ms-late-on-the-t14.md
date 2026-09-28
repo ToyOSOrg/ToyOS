@@ -9,7 +9,7 @@ opened: 2026-09-16
 `kernel/src/deadline.rs` reads the bound off the parameter line (`claim`,
 `:150-162`), turns it into a TSC deadline once there is a clock (`start`,
 `:168-183`), and `poll` (`:194-200`) compares one relaxed load of `AT_TSC`
-against `rdtsc` from the timer interrupt entry — `kernel/src/arch/idt/timer.rs:71`
+against `rdtsc` from the timer interrupt entry — `kernel/src/arch/x86_64/idt/timer.rs:71`
 (`:79`) in Ring 0 and `:96` in Ring 3 — and calls `expire` (`:208-225`), which
 seals the record and writes the reset register through `acpi::reset_now`.
 `start` arms the other half of the same parameter at `:182`,

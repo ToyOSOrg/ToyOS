@@ -6,7 +6,7 @@ opened: 2026-09-06
 
 # Whether writing `TCO2_STS` back clears it is verified on QEMU only
 
-`kernel/src/drivers/watchdog.rs`'s `arm` writes `TCO_SECOND_TO_STS` and
+`kernel/src/arch/x86_64/watchdog.rs`'s `arm` writes `TCO_SECOND_TO_STS` and
 `TCO_BOOT_STS` back so that a reset is reported by the boot after it and not by
 every boot after it. That the write clears them is established for QEMU, whose
 store masks both bits out (`hw/acpi/ich9_tco.c:167`). Whether a Tiger Lake-LP

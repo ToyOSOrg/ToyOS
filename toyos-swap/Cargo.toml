@@ -1,5 +1,6 @@
 [package]
 name = "toyos-swap"
+description = "Replacing a running service's binary: what swap, init and the host say about it, and init's decisions, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

@@ -22,7 +22,7 @@ error: could not compile `std` (lib) due to 2 previous errors
 thread 'main' panicked at src/toolchain.rs:1583:5:
 ```
 
-Afterwards `rust/build/aarch64-apple-darwin/stage2/` held only `lib/`, and
+Afterwards `rust/build/aarch64-apple-darwin/stage2/` held only a `lib` directory, and
 `rustc -vV` in `userland/` answered "'rustc' is not installed for the custom
 toolchain 'toyos'". The lock log shows a second process (pid 31197) holding
 the same step just before, so the step had already been attempted once.

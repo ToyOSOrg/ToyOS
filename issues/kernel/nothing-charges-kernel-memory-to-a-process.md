@@ -20,8 +20,8 @@ is not a value with a destructor" is unrepresentable; the descriptor type and
 its un-refcounted clone are gone; the file cache installs a real budget and a
 budget that was never installed is now a loud kernel bug; and the unbounded
 user-string copy has a ceiling. What survives is the *accounting*, which nothing
-has touched, plus two items: panic recovery still runs no teardown, and peak
-memory is written by two paths that overwrite each other.
+has touched, plus one item: peak memory is written by two paths that overwrite
+each other.
 
 Blocked on nothing. Two things worth knowing before it is restarted, because
 both cost a day to discover:
@@ -34,9 +34,7 @@ both cost a day to discover:
   =`, `drop()` and burial in a collection all pass silently. A drop bomb is the
   state of the art, and `Unmapped<T>` is already exactly such an obligation.
 
-**The terminal state of every unbounded grower is this entry's.** The allocation
-failure itself reports cleanly — a failed kernel allocation takes `alloc`'s
-no_std default handler and panics with the size, the layer and the call site
-named — so what is left at the end of a grower is *who dies*: whichever thread
-happened to allocate, not the one that exhausted the heap. That is what charging
-fixes, and nothing else does.
+**The terminal state of every unbounded grower is a halted machine.** A failed
+kernel allocation panics with the size, the layer and the call site named, and
+every kernel panic halts, so a grower userland can drive is refused at its bound
+or it ends the machine.

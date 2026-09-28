@@ -4,16 +4,15 @@ kind: defect
 opened: 2026-09-27
 ---
 
-# Seven kernel actuators lost the only test that armed them
+# Six kernel actuators lost the only test that armed them
 
-The test schedule deleted the guest tests that never caught a defect, and seven
+The test schedule deleted the guest tests that never caught a defect, and six
 actuators in `kernel/src/actuator.rs` were armed by nothing else: no row of
 `tests/toyos.rs`, `tests/common/` or `tests/metal-profile.toml` names them now.
 
 | actuator | the deleted test | the kernel site it guards |
 |---|---|---|
 | `klogd-panic` | `klogd_panic_halts` | `kernel/src/log/console.rs` |
-| `usbd-panic` | `klogd_panic_halts` | `kernel/src/drivers/xhci/usbd.rs` |
 | `quiesce-dump` | `quiesce_dump_holds_the_stopped` | `kernel/src/sched/dump.rs` |
 | `quiesce-last-exit` | `quiesce_wakes_on_the_last_exit` | `kernel/src/quiesce.rs`, `toyos-quiesce/src/lib.rs` |
 | `so-cache-tiny` | `so_cache_refusals` | `kernel/src/elf/cache.rs` |
