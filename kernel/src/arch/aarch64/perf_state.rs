@@ -18,3 +18,7 @@ pub fn read_cpu(declared: &Declared) -> CpuRegisters {
 pub fn read_package(declared: &Declared) -> PackageRegisters {
     match *declared {}
 }
+
+pub fn diverge(declared: &Declared, _: u32) {
+    match *declared {}
+}

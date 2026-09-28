@@ -803,6 +803,12 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     ("usb-transport-break", Flash::Ok),
+    // It moves cpu1's HWP request one ratio off the declaration once the
+    // machine is up, to a value the CPU accepts, and the kernel's own check
+    // then panics the boot. It reaches no device register and no firmware
+    // state, and the reset that ends the boot clears `IA32_PM_ENABLE`, which
+    // only a reset does.
+    ("perf-request-diverges", Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(

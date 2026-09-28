@@ -30,7 +30,7 @@ static SLOTS: [Slot; MAX_CPUS] = [const { Slot::new() }; MAX_CPUS];
 pub static WATCH: Watch = Watch::new();
 
 /// A kicked CPU reaches a pass within one timer interrupt; this is the
-/// kernel's choice, the blocked-task dump's for the same question.
+/// kernel's choice.
 const ANSWER: Budget = Budget::of(
     Duration::from_millis(250),
     "the read is refused `Io`, and the CPUs that did not answer are named",
@@ -58,9 +58,12 @@ impl Slot {
 }
 
 /// One claim's side of the protocol: the proof its reads need, and the ask
-/// its reads wait on — joined by every read of the claim until it is answered.
+/// its reads wait on — joined by every read of the claim until it is answered
+/// or a reader waiting on it is cancelled.
 pub struct Reader {
-    declared: Declared,
+    /// `None` only under `perf-state-deaf-cpu`, whose claim has no
+    /// declaration behind it and answers zeros.
+    declared: Option<Declared>,
     pending: Lock<Option<Ask>>,
 }
 
@@ -71,8 +74,18 @@ struct Ask {
 }
 
 impl Reader {
-    pub fn new(declared: Declared) -> Self {
-        Self { declared, pending: Lock::new(None) }
+    /// A claim's reader, or why this machine has none.
+    pub fn claim() -> Result<Self, &'static str> {
+        let declared = perf_state::declared().map(Some).or_else(|why| {
+            if crate::actuator::perf_state_deaf_cpu() { Ok(None) } else { Err(why) }
+        })?;
+        Ok(Self { declared, pending: Lock::new(None) })
+    }
+
+    /// A read that was cancelled takes its ask back, so the next read asks
+    /// afresh and is never answered with registers read before it began.
+    pub fn cancel(&self) {
+        *self.pending.lock() = None;
     }
 
     /// The answer's bytes into `buf`, or `None` while a CPU has not answered —
@@ -98,7 +111,8 @@ impl Reader {
             }
             return Some(SyscallError::Io.to_u64());
         }
-        buf.write_at(0, perf_state::read_package(&self.declared).as_bytes());
+        let package = self.declared.as_ref().map_or_else(Default::default, perf_state::read_package);
+        buf.write_at(0, package.as_bytes());
         // `answer_len(cpu)` is where CPU `cpu`'s record starts.
         for (cpu, slot) in SLOTS[..cpus].iter().enumerate() {
             buf.write_at(answer_len(cpu), slot.load().as_bytes());
@@ -111,7 +125,9 @@ impl Reader {
     fn ask(&self, cpus: usize, now: Instant) -> Ask {
         let generation = ASKS.issue();
         let me = crate::arch::percpu::cpu_id() as usize;
-        ASKS.serve(me, || SLOTS[me].store(perf_state::read_cpu(&self.declared)));
+        if !deaf(me, cpus) {
+            ASKS.serve(me, || SLOTS[me].store(sample(me)));
+        }
         for cpu in (0..cpus).filter(|&cpu| cpu != me) {
             crate::arch::irqchip::kick_cpu(cpu as u32);
         }
@@ -131,18 +147,43 @@ pub fn park_deadline() -> Deadline {
     Deadline::at(crate::clock::now() + ANSWER.duration())
 }
 
-/// This CPU's answer, if one is owed. Called from `drain_irqs` every pass, so
-/// what it costs when nothing is owed is two relaxed loads.
+/// This CPU's answer, if one is owed. Called from `drain_irqs` every pass.
 pub fn serve_if_owed() {
     let me = crate::arch::percpu::cpu_id() as usize;
-    if !ASKS.owes(me) {
+    if !ASKS.owes(me) || deaf(me, crate::arch::smp::cpu_count() as usize) {
         return;
     }
+    ASKS.serve(me, || SLOTS[me].store(sample(me)));
+    WATCH.post();
+}
+
+/// This CPU's registers, or zeros where the claim has no declaration behind it.
+fn sample(me: usize) -> CpuRegisters {
     // The proof is used inside the closure only: on an architecture where it
     // is uninhabited, binding one here would make the rest unreachable.
-    let read = perf_state::declared()
-        .map(|declared| move || perf_state::read_cpu(&declared))
-        .expect("an ask is made only through a claim, and a claim only where the request is declared");
-    ASKS.serve(me, || SLOTS[me].store(read()));
-    WATCH.post();
+    let read = perf_state::declared().map(|declared| {
+        move || {
+            if crate::actuator::perf_request_diverges() && me == 1 {
+                perf_state::diverge(&declared, 1);
+            }
+            perf_state::read_cpu(&declared)
+        }
+    });
+    match read {
+        Ok(read) => read(),
+        Err(why) => {
+            assert!(
+                crate::actuator::perf_state_deaf_cpu(),
+                "an ask is made only through a claim, and a claim only where the request is \
+                 declared: {why}",
+            );
+            CpuRegisters::default()
+        }
+    }
+}
+
+/// `perf-state-deaf-cpu`'s silent CPU, the last: it answers no ask, its own
+/// included.
+fn deaf(cpu: usize, cpus: usize) -> bool {
+    crate::actuator::perf_state_deaf_cpu() && cpu + 1 == cpus
 }

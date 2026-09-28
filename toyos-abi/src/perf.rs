@@ -12,16 +12,8 @@ pub struct PackageRegisters {
     pub hwp_request_pkg: u64,
     /// `MSR_PLATFORM_INFO`, 0xCE.
     pub platform_info: u64,
-    /// `MSR_RAPL_POWER_UNIT`, 0x606.
-    pub rapl_power_unit: u64,
-    /// `MSR_PKG_POWER_LIMIT`, 0x610.
-    pub pkg_power_limit: u64,
-    /// `MSR_PKG_ENERGY_STATUS`, 0x611.
-    pub pkg_energy_status: u64,
     /// `IA32_PACKAGE_THERM_STATUS`, 0x1B1.
     pub package_therm_status: u64,
-    /// `MSR_TEMPERATURE_TARGET`, 0x1A2.
-    pub temperature_target: u64,
 }
 
 /// One CPU's registers, read on that CPU.
@@ -42,7 +34,7 @@ pub struct CpuRegisters {
 
 // Every byte belongs to a field: both cross the boundary as bytes, so a gap
 // would publish whatever the kernel stack held.
-const _: () = assert!(core::mem::size_of::<PackageRegisters>() == 7 * 8);
+const _: () = assert!(core::mem::size_of::<PackageRegisters>() == 3 * 8);
 const _: () = assert!(core::mem::size_of::<CpuRegisters>() == 5 * 8);
 
 /// The bytes a read answers on a machine of `cpus` CPUs.
@@ -102,8 +94,8 @@ mod tests {
         };
         assert_eq!(CpuRegisters::read_from(cpu.as_bytes()), Some(cpu));
         assert_eq!(CpuRegisters::read_from(&cpu.as_bytes()[1..]), None);
-        let pkg = PackageRegisters { pkg_power_limit: 0x0042_8200_00dd_8200, ..Default::default() };
+        let pkg = PackageRegisters { package_therm_status: 0x8830_0000, ..Default::default() };
         assert_eq!(PackageRegisters::read_from(pkg.as_bytes()), Some(pkg));
-        assert_eq!(answer_len(8), 56 + 8 * 40);
+        assert_eq!(answer_len(8), 24 + 8 * 40);
     }
 }

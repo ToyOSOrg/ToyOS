@@ -7,6 +7,7 @@ use toyos_perfstate::msr;
 use super::cpu;
 
 pub use super::control_regs::HwpDeclared as Declared;
+pub use super::control_regs::diverge;
 
 /// The proof every read below needs, or why this machine has none.
 pub fn declared() -> Result<Declared, &'static str> {
@@ -29,10 +30,6 @@ pub fn read_package(_: &Declared) -> PackageRegisters {
     PackageRegisters {
         hwp_request_pkg: cpu::rdmsr(msr::HWP_REQUEST_PKG),
         platform_info: cpu::rdmsr(msr::PLATFORM_INFO),
-        rapl_power_unit: cpu::rdmsr(msr::RAPL_POWER_UNIT),
-        pkg_power_limit: cpu::rdmsr(msr::PKG_POWER_LIMIT),
-        pkg_energy_status: cpu::rdmsr(msr::PKG_ENERGY_STATUS),
         package_therm_status: cpu::rdmsr(msr::PACKAGE_THERM_STATUS),
-        temperature_target: cpu::rdmsr(msr::TEMPERATURE_TARGET),
     }
 }

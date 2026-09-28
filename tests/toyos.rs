@@ -250,6 +250,9 @@ const RUST_SKIP: &[&str] = &[
     // Which of its two branches is right is the machine's to say: QEMU's CPUs
     // have no HWP and the T14's do. `perf_request` runs it and reads which.
     "perf_state",
+    // Meaningful only under `perf-state-deaf-cpu`, which grants a claim no
+    // other boot has. `perf_state_silent_cpu` runs it.
+    "perf_state_silent",
     // Needs a display whose mode can change, which is `Profile::VirtioGpu`
     // alone; the shared boot has no display at all. `gpu_set_resolution` runs
     // it there, and `iommu_gpu_scanout_swap` the second.
@@ -613,6 +616,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("control_regs", Sched::Parallel, Tier::Fast),
     ("control_regs_negative", Sched::Parallel, Tier::Fast),
     ("perf_request", Sched::Parallel, Tier::Fast),
+    ("perf_state_silent_cpu", Sched::Parallel, Tier::Fast),
     // The boot facts the metal suite reads off a machine's own records: every
     // CPU the firmware named came up and none of their timestamp counters
     // trails the BSP's; the physical memory manager's accounting against the
@@ -1523,6 +1527,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
     ("input_claim_absent", &["test_rs_input_absent"]),
     ("perf_request", &["test_rs_perf_state"]),
+    ("perf_state_silent_cpu", &["test_rs_perf_state_silent"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
     ("userdev_dma_fault", &["test_rs_log_origin"]),
@@ -1702,8 +1707,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // Two boots: `testcases`, whose CPUs hold the declaration and read it
+        // back, and `perfdiverge`, where cpu1's request is moved off it once the
+        // machine is up and the boot's own check must panic naming it.
         "perf_request",
-        metal::Metal::Runs { arms: TESTCASES, judge: |b| perf_request_on_metal(b[0]) },
+        metal::Metal::Runs {
+            arms: PERF_REQUEST,
+            judge: |b| {
+                perf_request_on_metal(b[0])?;
+                perf_request_diverged(b[1])
+            },
+        },
     ),
     (
         "ioapic_topology",
@@ -2060,8 +2074,21 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
     "testcases",
     "tests/testcases",
     &[],
-    &["test_rs_abuse_short_sleep", "test_rs_null_sink_client_exits", "log-close"],
+    &[
+        "test_rs_abuse_short_sleep",
+        "test_rs_perf_state",
+        "test_rs_null_sink_client_exits",
+        "log-close",
+    ],
 )];
+
+/// `perf_request`'s two boots. The first is [`TESTCASES`], whose list carries
+/// `test_rs_perf_state` because a job this row added would land after
+/// `log-close`; the second is its own, since it ends in a panic.
+const PERF_REQUEST: &[metal::Arm] = &[
+    metal::once("testcases", "tests/testcases", &[], &[]),
+    metal::once("perfdiverge", "tests/testcases", &["perf-request-diverges"], &["test_rs_perf_state"]),
+];
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
@@ -13705,6 +13732,7 @@ fn run_machine_test(
         }
         "control_regs_negative" => control_regs_negative(test_config, c_bins, rust_bins),
         "perf_request" => perf_request(test_config, c_bins, rust_bins),
+        "perf_state_silent_cpu" => perf_state_silent_cpu(test_config, c_bins, rust_bins),
         "smp_roster_and_tsc_trail" => {
             // Eight, which is the T14's own count and this suite's ceiling.
             const CPUS: u32 = 8;
@@ -19715,5 +19743,73 @@ fn perf_request_on_metal(boot: &metal::Readback) -> Result<(), String> {
     }
     boot.job_passed("test_rs_perf_state")?;
     eprintln!("  [perf_request] {cpus} CPUs hold the bar's request and read it back");
+    Ok(())
+}
+
+/// The second boot: `perf-request-diverges` moves cpu1's request one ratio off
+/// the declaration when it answers `test_rs_perf_state`'s read, and runs the
+/// check boot runs. That check panics naming what cpu1 holds against what it
+/// was declared — the page after the reset carries it — and a boot whose check
+/// did not assert reaches no such panic.
+fn perf_request_diverged(boot: &metal::Readback) -> Result<(), String> {
+    const NAMED: &str = "control_regs: cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04";
+    let after = boot.after_the_reset()?;
+    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, NAMED)?.to_string();
+    eprintln!("  [perf_request] a request moved off the declaration panicked: {}", said.trim());
+    Ok(())
+}
+
+/// A read one CPU never answers is refused `Io` once the kernel's bound has
+/// passed, naming that CPU and no other — twice, so a refused ask answers no
+/// later read. `perf-state-deaf-cpu` grants the claim on QEMU's CPUs, which
+/// have no HWP, and silences the last CPU; a read with no bound waits for
+/// ever, and this reds at its ceiling.
+fn perf_state_silent_cpu(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const CPUS: u32 = 2;
+    const SILENT: &str = " did not answer a read within ";
+    const READS: usize = 2;
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { smp: CPUS, kernel_params: &["perf-state-deaf-cpu"], ..Default::default() },
+    );
+    let result = qemu.run_test("test_rs_perf_state_silent", Duration::from_secs(30));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) || !result.stdout.contains("===PERF_STATE_SILENT_OK===") {
+        return Err(format!("perf_state_silent exited {:?}:\n{}", result.exit_code, result.serial));
+    }
+    // The kernel's records reach the console through `klogd` and the test's
+    // lines through `logd`, so the refusals may still be on their way.
+    let named = |text: &str| -> Vec<String> {
+        text.lines().filter(|l| l.contains(SILENT)).map(str::to_string).collect()
+    };
+    let mut refusals = named(&result.serial);
+    if refusals.len() < READS {
+        let owed = READS - refusals.len();
+        let seen = std::cell::Cell::new(0);
+        let more = qemu.drain_until(Duration::from_secs(10), |line| {
+            seen.set(seen.get() + usize::from(line.contains(SILENT)));
+            seen.get() >= owed
+        });
+        refusals.extend(named(&more));
+    }
+    let want = format!("perf_state: cpu{}{SILENT}", CPUS - 1);
+    if refusals.len() != READS || !refusals.iter().all(|l| l.contains(&want)) {
+        return Err(format!(
+            "want {READS} refusals each naming cpu{} alone, got {}:\n{}\n{}",
+            CPUS - 1,
+            refusals.len(),
+            refusals.join("\n"),
+            result.serial,
+        ));
+    }
+    eprintln!("  [perf_state_silent_cpu] {READS} reads refused Io, each naming cpu{}", CPUS - 1);
     Ok(())
 }

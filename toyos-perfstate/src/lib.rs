@@ -4,11 +4,10 @@
 //! and does the writes.
 //!
 //! Layouts are the Intel SDM's — Vol. 3B, *Power and Thermal Management*, for
-//! HWP, the energy/performance bias, RAPL and package thermal status; Vol. 4
-//! for the addresses. The declared values are the power envelope the
-//! self-hosting bar is measured under (`issues/build/toyos-builds-itself.md`),
-//! so a ToyOS run and the Linux run it is held against ask the CPU for the
-//! same thing.
+//! HWP, the energy/performance bias and package thermal status; Vol. 4 for the
+//! addresses. The declared values are the power envelope the self-hosting bar
+//! is measured under (`issues/build/toyos-builds-itself.md`), so a ToyOS run
+//! and the Linux run it is held against ask the CPU for the same thing.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -19,17 +18,15 @@ pub mod msr {
     pub const PM_ENABLE: u32 = 0x770;
     pub const HWP_CAPABILITIES: u32 = 0x771;
     pub const HWP_REQUEST_PKG: u32 = 0x772;
+    /// Exists where CPUID.06H:EAX[8] says so ([`super::hwp_notification`]).
+    pub const HWP_INTERRUPT: u32 = 0x773;
     pub const HWP_REQUEST: u32 = 0x774;
     pub const MISC_ENABLE: u32 = 0x1A0;
     pub const ENERGY_PERF_BIAS: u32 = 0x1B0;
     pub const PACKAGE_THERM_STATUS: u32 = 0x1B1;
-    // Model-specific, and named by no CPUID bit: every Intel core since Sandy
-    // Bridge has them, and HWP is younger than all four.
+    /// `MSR_PLATFORM_INFO`: enumerated by no CPUID bit. Vol. 4 documents it in
+    /// the model tables of DisplayFamily 06H, which [`super::refusal`] requires.
     pub const PLATFORM_INFO: u32 = 0xCE;
-    pub const TEMPERATURE_TARGET: u32 = 0x1A2;
-    pub const RAPL_POWER_UNIT: u32 = 0x606;
-    pub const PKG_POWER_LIMIT: u32 = 0x610;
-    pub const PKG_ENERGY_STATUS: u32 = 0x611;
 }
 
 /// `IA32_MISC_ENABLE` bit 38: set, turbo is off.
@@ -37,6 +34,10 @@ pub const TURBO_DISABLE: u64 = 1 << 38;
 
 /// `IA32_PM_ENABLE` on every CPU.
 pub const PM_ENABLE: u64 = 1;
+
+/// `IA32_HWP_INTERRUPT` on every CPU that has it: no HWP notification is
+/// enabled, as intel_pstate leaves it — nothing in this kernel takes one.
+pub const HWP_INTERRUPT: u64 = 0;
 
 /// `IA32_ENERGY_PERF_BIAS` on every CPU: the bar's 6, on the scale where 0 is
 /// performance and 15 is energy saving.
@@ -57,6 +58,7 @@ pub struct Cpuid {
     /// Leaf 0's `EBX`, `EDX`, `ECX`, in that order: the vendor string.
     pub vendor: [u8; 12],
     pub max_leaf: u32,
+    pub leaf1_eax: u32,
     pub leaf6_eax: u32,
     pub leaf6_ecx: u32,
     pub leaf7_edx: u32,
@@ -69,6 +71,7 @@ pub enum Refusal {
     NoLeaf6,
     NoHwp,
     NotIntel,
+    NotFamily6,
     NoEpp,
     NoPackageRequest,
     NoEnergyPerfBias,
@@ -84,6 +87,10 @@ impl Refusal {
             Self::NotIntel => {
                 "HWP on a CPU that is not Intel, whose RAPL and thermal registers are Intel's \
                  model-specific ones"
+            }
+            Self::NotFamily6 => {
+                "an Intel CPU outside DisplayFamily 06H, for which the SDM documents no \
+                 MSR_PLATFORM_INFO (0xCE), and no CPUID bit enumerates it"
             }
             Self::NoEpp => "HWP without an energy/performance preference (CPUID.06H:EAX[10] clear)",
             Self::NoPackageRequest => "HWP without a package-level request (CPUID.06H:EAX[11] clear)",
@@ -114,6 +121,8 @@ pub const fn refusal(cpuid: &Cpuid) -> Option<Refusal> {
         Some(Refusal::NoHwp)
     } else if !is_intel(&cpuid.vendor) {
         Some(Refusal::NotIntel)
+    } else if display_family(cpuid.leaf1_eax) != 6 {
+        Some(Refusal::NotFamily6)
     } else if eax & HWP_EPP == 0 {
         Some(Refusal::NoEpp)
     } else if eax & HWP_PKG == 0 {
@@ -126,6 +135,22 @@ pub const fn refusal(cpuid: &Cpuid) -> Option<Refusal> {
         Some(Refusal::Hybrid)
     } else {
         None
+    }
+}
+
+/// Whether this CPU has `IA32_HWP_INTERRUPT` (CPUID.06H:EAX[8]).
+pub const fn hwp_notification(cpuid: &Cpuid) -> bool {
+    cpuid.leaf6_eax & 1 << 8 != 0
+}
+
+/// CPUID.01H:EAX's DisplayFamily (SDM Vol. 2A, CPUID): the extended family
+/// counts only where the family field is 0FH.
+const fn display_family(leaf1_eax: u32) -> u32 {
+    let family = (leaf1_eax >> 8) & 0xf;
+    if family == 0xf {
+        family + ((leaf1_eax >> 20) & 0xff)
+    } else {
+        family
     }
 }
 
@@ -145,11 +170,12 @@ const fn is_intel(vendor: &[u8; 12]) -> bool {
 /// `capabilities`, in a package whose `MSR_PLATFORM_INFO` reads
 /// `platform_info`. The bar names every field: the minimum is the package's
 /// maximum-efficiency ratio, the maximum is the CPU's highest performance —
-/// turbo included — and the CPU chooses between them, unwindowed, on its own.
+/// turbo included, the capabilities' bits 7:0 — and the CPU chooses between
+/// them, unwindowed, on its own.
 pub const fn hwp_request(capabilities: u64, platform_info: u64) -> u64 {
     HwpRequest {
         min: ((platform_info >> 40) & 0xff) as u8,
-        max: HwpCapabilities::of(capabilities).highest,
+        max: capabilities as u8,
         desired: 0,
         epp: EPP,
         window: 0,
@@ -196,26 +222,6 @@ impl HwpRequest {
     }
 }
 
-/// `IA32_HWP_CAPABILITIES`' four performance levels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HwpCapabilities {
-    pub highest: u8,
-    pub guaranteed: u8,
-    pub efficient: u8,
-    pub lowest: u8,
-}
-
-impl HwpCapabilities {
-    pub const fn of(raw: u64) -> Self {
-        Self {
-            highest: raw as u8,
-            guaranteed: (raw >> 8) as u8,
-            efficient: (raw >> 16) as u8,
-            lowest: (raw >> 24) as u8,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,9 +236,18 @@ mod tests {
     /// What every one of the T14's eight CPUs held under Linux, intel_pstate
     /// active with EPP `balance_performance`.
     const T14_REQUEST: u64 = 0x8000_2a04;
+    /// CPUID.01H:EAX's family field at 6, every other field 0.
+    const FAMILY_6: u32 = 6 << 8;
 
     fn intel(leaf6_eax: u32, leaf6_ecx: u32, leaf7_edx: u32) -> Cpuid {
-        Cpuid { vendor: *b"GenuineIntel", max_leaf: 0x1b, leaf6_eax, leaf6_ecx, leaf7_edx }
+        Cpuid {
+            vendor: *b"GenuineIntel",
+            max_leaf: 0x1b,
+            leaf1_eax: FAMILY_6,
+            leaf6_eax,
+            leaf6_ecx,
+            leaf7_edx,
+        }
     }
 
     /// The bits a CPU needs: PTM, HWP, EPP and the package request in `EAX`,
@@ -247,20 +262,24 @@ mod tests {
         }
     }
 
+    /// The maximum is the capabilities' highest level alone: the three levels
+    /// above it in the register are not read into the request.
+    #[test]
+    fn the_maximum_is_the_highest_level_alone() {
+        assert_eq!(HwpRequest::of(hwp_request(0xffff_ff2a, 0)).max, 42);
+        assert_eq!(HwpRequest::of(hwp_request(0x0000_0000, 0)).max, 0);
+    }
+
     #[test]
     fn the_package_request_is_the_bars() {
         assert_eq!(HWP_REQUEST_PKG, 0x8000_ff01);
     }
 
     #[test]
-    fn the_t14s_registers_decode_to_the_bars_fields() {
+    fn the_t14s_request_decodes_to_the_bars_fields() {
         assert_eq!(
             HwpRequest::of(T14_REQUEST),
             HwpRequest { min: 4, max: 42, desired: 0, epp: 128, window: 0, package_control: false },
-        );
-        assert_eq!(
-            HwpCapabilities::of(T14_CAPABILITIES[0]),
-            HwpCapabilities { highest: 42, guaranteed: 24, efficient: 13, lowest: 1 },
         );
     }
 
@@ -289,7 +308,7 @@ mod tests {
     /// `ARAT` (bit 2); KVM's `host` passes the vendor and the same leaf 6.
     #[test]
     fn no_qemu_cpu_is_declared() {
-        let tcg = Cpuid { vendor: *b"AuthenticAMD", max_leaf: 0xd, leaf6_eax: 1 << 2, leaf6_ecx: 0, leaf7_edx: 0 };
+        let tcg = Cpuid { vendor: *b"AuthenticAMD", max_leaf: 0xd, ..intel(1 << 2, 0, 0) };
         assert_eq!(refusal(&tcg), Some(Refusal::NoHwp));
         assert_eq!(refusal(&intel(1 << 2, 0, 0)), Some(Refusal::NoHwp));
     }
@@ -309,5 +328,27 @@ mod tests {
         // Leaf 7 above the maximum is not read: a stale `EDX` there says nothing.
         let six = Cpuid { max_leaf: 6, ..intel(EAX, ECX, 1 << 15) };
         assert_eq!(refusal(&six), None);
+    }
+
+    /// `MSR_PLATFORM_INFO` is the family's, so a CPU of any other family is
+    /// refused before the register is read — the extended family included,
+    /// which is 0FH plus its field and never its field alone.
+    #[test]
+    fn a_cpu_outside_family_6_is_refused_by_name() {
+        let of = |leaf1_eax: u32| refusal(&Cpuid { leaf1_eax, ..intel(EAX, ECX, 0) });
+        assert_eq!(of(FAMILY_6), None);
+        // Family 0FH, extended family 0: a Pentium 4.
+        assert_eq!(of(0x0000_0f41), Some(Refusal::NotFamily6));
+        // Family 0FH, extended family 3: DisplayFamily 12H.
+        assert_eq!(of(0x0030_0f00), Some(Refusal::NotFamily6));
+        // An extended family beside family 6 does not count.
+        assert_eq!(of(0x0ff0_0600), None);
+    }
+
+    #[test]
+    fn notification_is_bit_8_alone() {
+        assert!(hwp_notification(&intel(EAX | 1 << 8, ECX, 0)));
+        assert!(!hwp_notification(&intel(EAX, ECX, 0)));
+        assert!(!hwp_notification(&intel(!(1 << 8), ECX, 0)));
     }
 }

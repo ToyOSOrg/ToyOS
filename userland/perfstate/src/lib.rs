@@ -19,16 +19,8 @@ pub fn read_back(claim: &Device) -> Result<(), String> {
     }
     let pkg = PackageRegisters::read_from(&buf).expect("the buffer holds the package record");
     println!(
-        "pkg hwp_request_pkg={:#010x} platform_info={:#018x} rapl_power_unit={:#x} \
-         pkg_power_limit={:#018x} pkg_energy_status={:#x} package_therm_status={:#x} \
-         temperature_target={:#x}",
-        pkg.hwp_request_pkg,
-        pkg.platform_info,
-        pkg.rapl_power_unit,
-        pkg.pkg_power_limit,
-        pkg.pkg_energy_status,
-        pkg.package_therm_status,
-        pkg.temperature_target,
+        "pkg hwp_request_pkg={:#010x} platform_info={:#018x} package_therm_status={:#x}",
+        pkg.hwp_request_pkg, pkg.platform_info, pkg.package_therm_status,
     );
     check("pkg", "hwp_request_pkg", pkg.hwp_request_pkg, toyos_perfstate::HWP_REQUEST_PKG)?;
     for cpu in 0..cpus {

@@ -1266,8 +1266,9 @@ device_classes! {
     Partition = 8 => "part",
     /// The CPU performance envelope's registers, read back: every read answers
     /// [`crate::perf`]'s records, each CPU's taken on that CPU after the read
-    /// asked. Read-only — the kernel writes the declaration and nothing else
-    /// does. `NotFound` on a machine whose CPUs got no declared request.
+    /// asked; reads of one claim that overlap share one ask. Read-only — the
+    /// kernel writes the declaration and nothing else does. `NotFound` on a
+    /// machine whose CPUs got no declared request.
     PerfState = 9 => "perf-state",
 }
 

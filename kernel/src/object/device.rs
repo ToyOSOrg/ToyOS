@@ -166,6 +166,14 @@ impl DeviceClaim {
         }
     }
 
+    /// A performance-state read that was cancelled while it waited.
+    pub fn cancel_perf_state(&self) {
+        match &self.described.lock().info {
+            DeviceInfo::PerfState(reader) => reader.cancel(),
+            _ => unreachable!("a {:?} claim has no performance-state read to cancel", self.class),
+        }
+    }
+
     pub fn info_read(&self) -> bool {
         self.info_read.load(Ordering::Relaxed)
     }
