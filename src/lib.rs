@@ -44,7 +44,6 @@ pub mod soundfont;
 /// build system at all.
 #[cfg(test)]
 pub mod sourcegate;
-pub mod stamps;
 pub mod sysroot;
 pub mod testargs;
 pub mod tiers;
