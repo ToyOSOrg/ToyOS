@@ -53,6 +53,10 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },
     Disabled {
+        test: "log_ring_keeps_the_owners_slots",
+        issue: "issues/kernel/a-log-rings-owner-is-named-only-when-logd-reads-its-registration.md",
+    },
+    Disabled {
         test: "partition_claim_departure",
         issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
     },
