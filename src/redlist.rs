@@ -62,7 +62,7 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "netd_refused_accept",
-        issue: "issues/kernel/netd-refused-accept-hung-waiting-for-a-wake-that-never-came.md",
+        issue: "issues/hardware/netd-refused-accept-hung-waiting-for-a-wake-that-never-came.md",
     },
     Disabled {
         test: "partition_claim_departure",
