@@ -67,10 +67,9 @@ impl Sweep {
     }
 }
 
-/// The thread the kernel's `quiesce-last-park` and `quiesce-last-teardown`
-/// actuators hold, by the name its program gives it: held until it is the one
-/// thread the stop still waits on, so the transition it makes next is the
-/// stop's last.
+/// The thread the kernel's quiesce-last actuators hold, by the name its
+/// program gives it: held until it is the one thread the stop still waits
+/// on, so the transition it makes next is the stop's last.
 pub const LAST_THREAD: &str = "quiesce-last";
 
 /// What a line of kernel log carrying a [`Record`] begins with.

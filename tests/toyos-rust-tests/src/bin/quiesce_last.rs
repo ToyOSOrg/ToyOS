@@ -1,15 +1,14 @@
-//! Two threads the kernel's `quiesce-last-*` actuators can hold, and a reboot.
+//! The threads the kernel's `quiesce-last-*` actuators can hold, and a reboot.
 //!
-//! Both carry [`toyos_quiesce::LAST_THREAD`]'s name. One parks for longer than
+//! They carry [`toyos_quiesce::LAST_THREAD`]'s name. One parks for longer than
 //! any stop's budget, and one is the only thread of a child that exits at once.
 //! `quiesce-last-park` holds the first inside its `SYS_NANOSLEEP`, and
 //! `quiesce-last-teardown` the second between leaving its process and tearing
 //! it down. The kernel holds the reset itself until one of them is held, so
 //! this program orders nothing.
 //!
-//! Nothing here asserts: `common::power::quiesce_wakes_on_the_last_park` and
-//! `quiesce_wakes_on_the_last_teardown` read the kernel's hold line and its
-//! `stop:` record.
+//! Nothing here asserts: the kernel's hold line and its `stop:` record are
+//! read elsewhere.
 
 use std::process::Command;
 use std::time::Duration;

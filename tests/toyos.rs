@@ -178,8 +178,6 @@ const RUST_SKIP: &[&str] = &[
     // `quiesce_refuses_a_second_shutdown` runs it.
     "quiesce_twice",
     // The same, and its verdict is the stop record of a boot staged around it.
-    // `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_teardown`
-    // run it.
     "quiesce_last",
     // The same, and its verdict is the log volume the stop leaves.
     // `quiesce_leaves_the_volume_whole` runs it.
