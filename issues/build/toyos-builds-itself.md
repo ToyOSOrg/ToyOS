@@ -53,6 +53,34 @@ enough for an LLVM build tree
 memory beyond what 2 MiB process pages allow
 (`issues/kernel/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`).
 
+**The bar: Linux building the same LLVM on the same T14.** Measured
+2026-09-27: stage 2, the pinned commit's own stage-1 clang+lld building
+clang+lld from the same source, at `rust-lang/llvm-project` commit
+`52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04`, Release, targets X86 and
+AArch64:
+
+```
+cmake -S src/llvm -B s2 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_ENABLE_PROJECTS=clang;lld -DLLVM_TARGETS_TO_BUILD=X86;AArch64 \
+  -DLLVM_ENABLE_ASSERTIONS=OFF -DLLVM_INCLUDE_TESTS=OFF \
+  -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
+  -DCMAKE_C_COMPILER=s1/bin/clang -DCMAKE_CXX_COMPILER=s1/bin/clang++ \
+  -DLLVM_ENABLE_LLD=ON
+ninja -C s2 -j8 clang lld
+```
+
+Conditions: Ubuntu 24.04.4, kernel 6.8.0-142-generic, ext4 on LVM;
+i5-1135G7, 8 threads, 16 GB RAM; platform_profile=performance (RAPL PL1
+20 W, PL2 64 W), on AC, intel_pstate active. Result: wall 45:08.77, user
+21018.09 s, sys 573.98 s, 797% CPU, max RSS 1,121,732 KB, 160,044,528
+minor faults, 874,817 involuntary and 43,204 voluntary context switches,
+4,146,616 filesystem output blocks. Stage 1 (gcc building the stage-1
+clang+lld) ran under a mixed power profile and is excluded from the
+baseline.
+
+*Exit*: a ToyOS build of the same commit, same configuration, on the
+same T14, at or under 45:08.77 wall.
+
 **What M2 must do to delete toyos-ld.** It is frozen and links nothing the host
 builds; what keeps it is that it is the one linker a ToyOS process can run,
 shipped as `/system/bin/toyos-ld` by `system.toml`'s `[programs]` row and named
