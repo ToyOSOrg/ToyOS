@@ -35,6 +35,10 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
     Disabled { test: "doom_sound_flood", issue: "issues/audio/doom-sound-flood-played-full-scale-once.md" },
+    Disabled {
+        test: "ftruncate_flush_race",
+        issue: "issues/build/ftruncate-flush-race-reds-intermittently-and-nothing-says-why.md",
+    },
     Disabled { test: "handle_basic", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
         test: "handle_kill_policy",
@@ -62,11 +66,19 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "quiesce_dump_holds_the_stopped",
-        issue: "issues/kernel/quiesce-dump-holds-the-stopped-reds-wide-with-usb-transport-breaks.md",
+        issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
+    },
+    Disabled {
+        test: "quiesce_stops_the_machine",
+        issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
     },
     Disabled {
         test: "quiesce_wakes_on_the_last_exit",
         issue: "issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md",
+    },
+    Disabled {
+        test: "quiesce_wakes_on_the_last_park",
+        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
     },
     Disabled {
         test: "sched_check_build",
@@ -99,10 +111,6 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "usb_transport_break",
         issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
-    },
-    Disabled {
-        test: "xhci_flap",
-        issue: "issues/hardware/a-collapsed-replug-is-enumerated-only-when-another-port-event-arrives.md",
     },
 ];
 
