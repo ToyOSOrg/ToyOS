@@ -17,6 +17,10 @@
 //!
 //! Roles: no argument is the server; `client` is the child that asks for a
 //! window and decodes what comes back.
+//!
+//! No wait here has a clock: each side prints what it waits for and blocks on
+//! it, so an answer that never comes is the harness's ceiling with its name on
+//! the last line.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -80,9 +84,11 @@ fn server() {
         .expect("window_refusal: spawn the client");
 
     for (reply, _) in CASES {
+        println!("window refusal: [{reply:?}] waiting for the client's request");
         serve_one(&acceptor, *reply);
     }
 
+    println!("window refusal: waiting for the client to exit");
     let status = child.wait().expect("window_refusal: reap the client");
     assert_eq!(status.code(), Some(0), "the client did not survive the refusals");
     println!("{} refusal outcomes decoded, none panicked the client", CASES.len());
@@ -117,6 +123,7 @@ fn serve_one(acceptor: &Acceptor, reply: Reply) {
 
 fn client() {
     for (reply, expected) in CASES {
+        println!("window refusal: [{reply:?}] waiting for the answer");
         let outcome = Window::create(100, 100);
         let got = match outcome {
             Ok(_) => panic!("reply {reply:?} produced a window"),

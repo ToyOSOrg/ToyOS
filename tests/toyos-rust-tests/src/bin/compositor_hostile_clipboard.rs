@@ -23,19 +23,21 @@
 //! 8. **A commit on a window.** A commit names a region held, so a window
 //!    sending one loses its connection.
 //!
-//! Each case ends with a probe the compositor answers from its dispatch, under
-//! a deadline. The host asserts what this side cannot see: no handle fault and
-//! no compositor exit in the kernel's records, and the refusals named.
+//! Each case ends with a probe the compositor answers from its dispatch. The
+//! host asserts what this side cannot see: no handle fault and no compositor
+//! exit in the kernel's records, and the refusals named.
+//!
+//! No wait here has a clock. Each blocks on its event and first prints what it
+//! waits for, so an event that never comes is the harness's ceiling with its
+//! name on the guest's last line.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{Duration, Instant};
 
 use toyos::endow;
 use toyos::ipc;
-use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::{AsHandle, Connection};
-use toyos_abi::syscall::{self, SyscallError};
+use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use window::{Event, Window};
 
@@ -49,23 +51,19 @@ const COPY_REGION: u32 = 13;
 /// The longest copy the compositor makes a region for.
 const COPY_LEN: usize = 2 * 1024 * 1024;
 
-/// The line the host answers with GUI+V. Printed again while no paste has
-/// come, so an injection lost on the way costs time and not the verdict.
+/// The line the host answers with GUI+V, once.
 const PASTE_MARKER: &str = "===HOSTILE_CLIPBOARD_PASTE===";
-const REMARK: Duration = Duration::from_secs(2);
-
-/// A liveness ceiling on every wait here: it costs nothing when the answer
-/// comes, and bounds a compositor that is gone or parked.
-const CEILING: Duration = Duration::from_secs(30);
 
 const BEFORE: &str = "hostile clipboard: the text before";
 const AFTER: &str = "hostile clipboard: the text after";
 
 fn main() {
     // First, so it has the focus: GUI+V pastes into the focused window.
+    waiting("the paste target", "its window");
     let mut target = Window::create_with_title(160, 120, "paste")
         .unwrap_or_else(|e| fail("the paste target", &format!("no window: {e}")));
     target.present();
+    waiting("the clipboard to start from", "the compositor taking it");
     window::clipboard_set(BEFORE)
         .unwrap_or_else(|e| fail("the clipboard to start from", &e.to_string()));
     probe("the clipboard to start from");
@@ -76,7 +74,7 @@ fn main() {
     let what = "a copy that is not UTF-8";
     commit_filled(what, 0xFF);
     probe(what);
-    let first = paste(&mut target, what, None);
+    let first = paste(&mut target, what);
     if first != BEFORE.as_bytes() {
         let len = first.len();
         fail(what, &format!("the paste was {len} bytes, not the clipboard from before"));
@@ -85,10 +83,10 @@ fn main() {
     let what = "a region rewritten after its commit";
     let region = commit_filled(what, b'C');
     // Text too, so a read of the region at the paste is pasted rather than
-    // refused, and differs from the stale paste `paste` skips.
+    // refused.
     fill(&region, b'D');
     probe(what);
-    let second = paste(&mut target, what, Some(&first));
+    let second = paste(&mut target, what);
     if second.len() != COPY_LEN || second.iter().any(|&b| b != b'C') {
         fail(what, &describe(&second, b'C'));
     }
@@ -122,7 +120,7 @@ fn main() {
         .unwrap_or_else(|e| fail(what, &format!("no commit: {e:?}")));
     await_hangup(conn.as_handle(), what, "the compositor's refusal");
     probe(what);
-    let third = paste(&mut target, what, Some(&second));
+    let third = paste(&mut target, what);
     if third != AFTER.as_bytes() {
         let len = third.len();
         fail(what, &format!("the paste was {len} bytes, not the clipboard from before"));
@@ -130,20 +128,13 @@ fn main() {
 
     // Last: the new window takes the focus the pastes went to.
     let what = "a commit on a window";
+    waiting(what, "its window");
     let mut committing = Window::create_with_title(64, 64, "commit")
         .unwrap_or_else(|e| fail(what, &format!("no window: {e}")));
     ipc::signal(committing.handle(), COPY_COMMIT)
         .unwrap_or_else(|e| fail(what, &format!("no commit: {e:?}")));
-    let deadline = Instant::now() + CEILING;
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            fail(what, &format!("the compositor kept the window {} s", CEILING.as_secs()));
-        }
-        if let Some(Event::Close) = committing.poll_event(left.as_nanos() as u64) {
-            break;
-        }
-    }
+    waiting(what, "the compositor closing the window");
+    while !matches!(committing.recv_event(), Event::Close) {}
     probe(what);
 
     println!("hostile clipboard: every case survived, compositor still serving");
@@ -191,7 +182,7 @@ fn begin_copy(what: &str) -> (Connection, SharedMemory) {
     let conn = connect(what);
     conn.send(COPY_BEGIN, &window::ClipboardShmMsg { len: COPY_LEN as u32 })
         .unwrap_or_else(|e| fail(what, &format!("could not begin: {e:?}")));
-    await_readable(conn.as_handle(), what, "the compositor's region");
+    waiting(what, "the compositor's region");
     let header = conn.recv_header().unwrap_or_else(|e| fail(what, &format!("no answer: {e:?}")));
     if header.msg_type != COPY_REGION || header.len() != 0 {
         fail(
@@ -223,24 +214,14 @@ fn bytes(region: &SharedMemory) -> &[AtomicU8] {
     unsafe { std::slice::from_raw_parts(region.as_ptr() as *const AtomicU8, region.len()) }
 }
 
-/// Ask the host for GUI+V and return what the target is pasted, skipping any
-/// paste equal to `stale` — an earlier marker's second injection.
-fn paste(target: &mut Window, what: &str, stale: Option<&[u8]>) -> Vec<u8> {
-    let deadline = Instant::now() + CEILING;
-    let mut mark = Instant::now();
+/// Ask the host for GUI+V and return what the target is pasted.
+fn paste(target: &mut Window, what: &str) -> Vec<u8> {
+    waiting(what, "the paste");
+    println!("{PASTE_MARKER}");
     loop {
-        let now = Instant::now();
-        if now >= deadline {
-            fail(what, &format!("no paste in {} s of asking", CEILING.as_secs()));
-        }
-        if now >= mark {
-            println!("{PASTE_MARKER}");
-            mark = now + REMARK;
-        }
-        let wait = mark.min(deadline).saturating_duration_since(now);
-        match target.poll_event(wait.as_nanos() as u64) {
-            Some(Event::ClipboardPaste(text)) if Some(text.as_slice()) != stale => return text,
-            Some(Event::Close) => fail(what, "the paste target's window was closed"),
+        match target.recv_event() {
+            Event::ClipboardPaste(text) => return text,
+            Event::Close => fail(what, "the paste target's window was closed"),
             _ => {}
         }
     }
@@ -262,44 +243,28 @@ fn connect(what: &str) -> Connection {
         .unwrap_or_else(|e| fail(what, &format!("the compositor is not serving: {e:?}")))
 }
 
-/// Wait until `handle` is readable, or fail at the ceiling.
-fn await_readable(handle: RawHandle, what: &str, awaited: &str) {
-    let poller = Poller::new(1);
-    poller.watch_raw(handle, READABLE, 0);
-    let mut ready = false;
-    poller.wait(1, CEILING.as_nanos() as u64, |_| ready = true);
-    if !ready {
-        fail(what, &format!("{awaited} did not come in {} s", CEILING.as_secs()));
-    }
+/// Said before every blocking wait: the line a missing event leaves last.
+fn waiting(what: &str, awaited: &str) {
+    println!("hostile clipboard: [{what}] waiting for {awaited}");
 }
 
 /// Wait for the peer of `handle` to hang up, failing on anything it sends.
 fn await_hangup(handle: RawHandle, what: &str, awaited: &str) {
-    let deadline = Instant::now() + CEILING;
-    loop {
-        let mut byte = [0u8; 1];
-        match syscall::read_nonblock(handle, &mut byte) {
-            Ok(0) => return,
-            Ok(_) => fail(what, &format!("the peer answered where {awaited} was due")),
-            Err(SyscallError::WouldBlock) => {}
-            Err(e) => fail(what, &format!("waiting for {awaited}: {e:?}")),
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            fail(what, &format!("{awaited} did not come in {} s", CEILING.as_secs()));
-        }
-        let poller = Poller::new(1);
-        poller.watch_raw(handle, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+    waiting(what, awaited);
+    let mut byte = [0u8; 1];
+    match syscall::read(handle, &mut byte) {
+        Ok(0) => {}
+        Ok(_) => fail(what, &format!("the peer answered where {awaited} was due")),
+        Err(e) => fail(what, &format!("waiting for {awaited}: {e:?}")),
     }
 }
 
-/// Ask the compositor something it always answers, under the ceiling.
+/// Ask the compositor something it always answers.
 fn probe(what: &str) {
     let conn = connect(what);
     conn.signal(window::MSG_GET_RESOLUTION)
         .unwrap_or_else(|e| fail(what, &format!("could not ask for the resolution: {e:?}")));
-    await_readable(conn.as_handle(), what, "the compositor's answer to a probe");
+    waiting(what, "the compositor's answer to a probe");
     let header = conn
         .recv_header()
         .unwrap_or_else(|e| fail(what, &format!("the probe went unanswered: {e:?}")));
