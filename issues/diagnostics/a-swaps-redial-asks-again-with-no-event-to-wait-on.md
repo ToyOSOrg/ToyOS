@@ -1,10 +1,12 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-25
 ---
 
 # A swap's redial asks again with no event to wait on
+
+Held by the orchestrator.
 
 A swap of netd ends the host's log stream with no FIN and no reset, and
 `src/metaltalk.rs`'s `Stream::redial` dials `logd` again. Nothing the machine
@@ -16,12 +18,15 @@ forward, accepted and closed before a line — is asked again at once. On a LAN
 that is a question for the name on the link, which the old netd answers at
 once, and a `connect` per round trip for the whole gap.
 
-What bounds it: every dial turned away is counted, refusals included
-(`Stream::turned_away`), and a redial gives up at
-`metalswap::TURNED_AWAY_CEILING`, which the swap's judge reds on by name
-(`a_redial_counts_every_refusal_and_gives_up_at_its_ceiling`). The T14 is
-unmeasured, and a refusal there costs a LAN round trip rather than QEMU's
-forward's.
+The T14 is unmeasured, and a refusal there costs a LAN round trip rather than
+QEMU's forward's. Its redial asks the name on the link again after every dial
+turned away, as soon as the old netd answers the last ask, so its questions
+may go out faster than RFC 6762 §5.2's floor between two queries
+(`ASK_WAIT`); that rate is unmeasured on metal.
+
+The forward's cost is measured: a hold-green run turned away 8125 dials in
+7019 ms, and the guest logged 16231 of its 19034 interrupts over that boot, all
+on cpu0.
 
 ## Exit condition
 
@@ -30,4 +35,5 @@ machine sends when `logd` can admit a reader again after a swap of netd —
 for example `logd` keeping its listener across the swap and holding the
 connections it accepts until the new netd serves, or netd announcing its
 exit on a channel that outlives it — and `Stream::redial` dials once per
-such event, with the ceiling and the count deleted.
+such event, with the count deleted, so no redial asks the link faster than
+§5.2's floor.
