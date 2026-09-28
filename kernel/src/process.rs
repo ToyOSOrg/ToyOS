@@ -1272,7 +1272,7 @@ pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
 }
 
 /// Ask `join` once more; an unsettled one collects under the table lock, which is what makes validating the parent-thread relationship and collecting the zombie one act.
-pub fn ask_join(join: &mut join::Join, tid: Tid, parent_pid: Pid) -> Option<Result<i32, join::JoinRefused>> {
+pub fn ask_join(join: &join::Join, tid: Tid, parent_pid: Pid) -> Option<Result<i32, join::JoinRefused>> {
     join.ask(|| join::collect_zombie(PROCESS_TABLE.lock().as_mut().unwrap(), parent_pid, tid))
 }
 

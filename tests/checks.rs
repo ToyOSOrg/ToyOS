@@ -568,10 +568,6 @@ mod checks {
     }
 
     /// What a whole run exits with, and what its last line says.
-    ///
-    /// Driven through [`Tally`] rather than asserted about it: the property that
-    /// matters is what `--land`'s gate reads off the process, and that is the exit
-    /// code after `record` has seen every outcome.
     #[test]
     fn run_exit_status() -> Result<(), String> {
         let outcome = |name: &str, reason: Option<&str>, suspended: Duration| Outcome {

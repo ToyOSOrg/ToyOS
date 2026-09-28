@@ -13,6 +13,8 @@
 //! is gone stays gone, and a tid this process never had never appears.
 //! `sys_thread_join` reads it as the terminal answer for exactly that reason.
 
+use core::cell::Cell;
+
 use crate::table::{Lifecycle, Processes};
 use crate::{Pid, Tid};
 
@@ -52,9 +54,11 @@ pub fn collect_zombie<T: Processes>(
 ///
 /// Collecting takes the zombie out of the table, so an ask after the one that
 /// collected finds [`JoinRefused::NoSuchThread`]: a join whose wait asks again
-/// after every wake answers with its first settled ask, never its last.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub struct Join(Option<Result<i32, JoinRefused>>);
+/// after every wake answers with its first settled ask, never its last. The
+/// answer lives here, behind `&self`, so every ask of one join reads the same
+/// answer and no caller holds a copy to write back.
+#[derive(Default, Debug)]
+pub struct Join(Cell<Option<Result<i32, JoinRefused>>>);
 
 impl Join {
     /// Ask `collect` — [`collect_zombie`] under the table lock — unless an
@@ -62,19 +66,21 @@ impl Join {
     /// `collect`, so it never takes the table lock again.
     #[must_use = "a settled join is the answer the syscall returns"]
     pub fn ask(
-        &mut self,
+        &self,
         collect: impl FnOnce() -> Result<Option<i32>, JoinRefused>,
     ) -> Option<Result<i32, JoinRefused>> {
-        if self.0.is_none() {
-            self.0 = collect().transpose();
+        if self.0.get().is_none() {
+            self.0.set(collect().transpose());
         }
-        self.0
+        self.0.get()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::cell::RefCell;
+
     use crate::model::World;
     use crate::ThreadLocation;
 
@@ -97,25 +103,30 @@ mod tests {
         assert_eq!(collect_zombie(&mut world, pid, t1), Err(JoinRefused::NoSuchThread));
     }
 
-    /// The wait's predicate collects the zombie, and the syscall asks again once
-    /// the wait returns: the second ask is the answer the caller gets.
+    /// `sys_thread_join`'s path: one join, one shared `ask`, asked before the
+    /// wait, by the wait's predicate on the wake that finds the zombie, and again
+    /// once the wait returns. The last ask is the answer the caller gets.
     #[test]
     fn a_join_asked_after_it_collected_keeps_its_answer() {
-        let mut world = World::new();
-        let pid = world.spawn_process();
-        let t1 = world.spawn_thread(pid);
-        let mut join = Join::default();
-        assert_eq!(join.ask(|| collect_zombie(&mut world, pid, t1)), None);
-        world.set_location(pid, t1, ThreadLocation::Zombie(11));
-        assert_eq!(join.ask(|| collect_zombie(&mut world, pid, t1)), Some(Ok(11)));
+        let world = RefCell::new(World::new());
+        let pid = world.borrow_mut().spawn_process();
+        let t1 = world.borrow_mut().spawn_thread(pid);
+        let join = Join::default();
+        let ask = || join.ask(|| collect_zombie(&mut *world.borrow_mut(), pid, t1));
+        let settled = || ask().is_some();
+        assert_eq!(ask(), None);
+        assert!(!settled());
+        world.borrow_mut().set_location(pid, t1, ThreadLocation::Zombie(11));
+        assert!(settled(), "the wake that found the zombie did not settle the join");
         assert_eq!(
-            join.ask(|| collect_zombie(&mut world, pid, t1)),
+            ask(),
             Some(Ok(11)),
             "a join that collected its thread answered the ask after it with no such thread",
         );
-        let mut refused = Join::default();
-        assert_eq!(refused.ask(|| collect_zombie(&mut world, pid, Tid(9))), Some(Err(JoinRefused::NoSuchThread)));
-        assert_eq!(refused.ask(|| collect_zombie(&mut world, pid, Tid(9))), Some(Err(JoinRefused::NoSuchThread)));
+        let refused = Join::default();
+        let ask = || refused.ask(|| collect_zombie(&mut *world.borrow_mut(), pid, Tid(9)));
+        assert_eq!(ask(), Some(Err(JoinRefused::NoSuchThread)));
+        assert_eq!(ask(), Some(Err(JoinRefused::NoSuchThread)));
     }
 
     /// The syscall's wait asks after every wake, and `collect` is where the
@@ -126,10 +137,10 @@ mod tests {
         let pid = world.spawn_process();
         let t1 = world.spawn_thread(pid);
         world.set_location(pid, t1, ThreadLocation::Zombie(11));
-        let mut join = Join::default();
+        let join = Join::default();
         assert_eq!(join.ask(|| collect_zombie(&mut world, pid, t1)), Some(Ok(11)));
         assert_eq!(join.ask(|| panic!("a settled join took the table lock to ask again")), Some(Ok(11)));
-        let mut refused = Join::default();
+        let refused = Join::default();
         assert_eq!(refused.ask(|| collect_zombie(&mut world, pid, Tid(9))), Some(Err(JoinRefused::NoSuchThread)));
         assert_eq!(
             refused.ask(|| panic!("a refused join took the table lock to ask again")),

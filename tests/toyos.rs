@@ -463,7 +463,7 @@ const RUST_SKIP: &[&str] = &[
 /// `sched_stress` is the one whose two runs differ by *kernel* rather than by
 /// what the host staged: the shipping build here, `sched_check_build`'s
 /// assert-carrying build there.
-#[allow(dead_code, reason = "`suite_split` reads it, in `toyos-checks` alone")]
+#[cfg(test)]
 const DRIVEN_AND_SHARED: &[&str] = &[
     // The lost-wake canary: its shared run is the count on the shipping
     // kernel with nothing staged, and `blocking_read_window` drives it again

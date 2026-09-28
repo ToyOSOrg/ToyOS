@@ -151,13 +151,8 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
     // None means never existed or already collected; the predicate below answers both.
     let target = process::thread_sched(caller, tid);
     let parkable = crate::scheduler::Parkable::at_entry();
-    let join = core::cell::Cell::new(toyos_proclife::join::Join::default());
-    let ask = || {
-        let mut asked = join.get();
-        let answer = process::ask_join(&mut asked, tid, caller);
-        join.set(asked);
-        answer
-    };
+    let join = toyos_proclife::join::Join::default();
+    let ask = || process::ask_join(&join, tid, caller);
     loop {
         // Both refusals are one answer here; `JoinRefused` keeps them apart because they aren't the same fact.
         if let Some(answer) = ask() {
