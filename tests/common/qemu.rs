@@ -2347,10 +2347,10 @@ pub struct BootOptions {
     /// before it left — and a guest with it set runs until the harness kills it.
     pub takes_the_reset: bool,
     /// Keep the firmware's variables in this file, writable, instead of the
-    /// shared read-only template: a copy the test made, so what one boot's
-    /// loader writes — the anti-rollback floor, `BootNext` — is what the next
-    /// boot of the same machine reads. `None` is every other boot, whose
-    /// variables live in firmware memory and die with the guest.
+    /// boot's own fresh copy of the template: a copy the test made, so what one
+    /// boot's loader writes — the anti-rollback floor, `BootNext` — is what the
+    /// next boot of the same machine reads. `None` is every other boot, whose
+    /// copy dies with the guest.
     pub firmware_vars: Option<PathBuf>,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
@@ -2391,10 +2391,11 @@ pub struct BootOptions {
     /// a driver put on it, which no line the guest prints can be. Refused by
     /// name on a profile with no data disk, where it would record nothing.
     pub usb_pcap: Option<PathBuf>,
-    /// Fail with EIO every read of the boot stick that covers this 512-byte
-    /// sector, through QEMU's `blkdebug` under the stick's raw format: a disk
-    /// error at a place the test chose, which no well-formed image can stage.
-    pub stick_read_error: Option<u64>,
+    /// Fail with EIO every read of the boot disk that covers this 512-byte
+    /// sector, through QEMU's `blkdebug` under the boot image's raw format, on
+    /// whichever bus the profile puts that disk: a disk error at a place the
+    /// test chose, which no well-formed image can stage.
+    pub boot_read_error: Option<u64>,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.
     ///
@@ -2521,7 +2522,7 @@ impl Default for BootOptions {
             boot_image: None,
             usb_images: Vec::new(),
             usb_pcap: None,
-            stick_read_error: None,
+            boot_read_error: None,
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
@@ -2642,6 +2643,9 @@ pub struct QemuInstance {
     /// delete: a [`BootOptions::boot_image`] belongs to the test that staged it
     /// and is often read back after the guest is gone.
     own_boot_image: Option<PathBuf>,
+    /// The variable store this boot copied for itself, on the same terms as
+    /// `own_boot_image`: a [`BootOptions::firmware_vars`] is the test's.
+    own_vars: Option<PathBuf>,
     boot_log: String,
     /// Whether this boot armed `i8042-trace`, which is the only channel a
     /// windowed shell has for saying it took a burst out of the device.
@@ -2973,7 +2977,7 @@ pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
 /// and nothing else writes it — a program's line reaches the console only
 /// through `logd`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
-    line.starts_with("[kernel ")
+    line.starts_with(toyos_build::kernelconsole::HEAD)
 }
 
 /// A console line's text as its program wrote it: a program's line without
@@ -3155,6 +3159,17 @@ impl QemuInstance {
         let _ = fs::remove_file(&uart_log);
         let console_file = options.console_file.then(|| ConsoleFile::of(&uart_log).made());
 
+        let (firmware_vars, own_vars) = match &options.firmware_vars {
+            Some(vars) => (vars.clone(), None),
+            None => {
+                let vars = test_dir.join(format!("vars-{seq}.fd"));
+                toyos_build::firmware::of(options.profile.arch())
+                    .and_then(|firmware| firmware.fresh_vars(&vars))
+                    .unwrap_or_else(|why| panic!("[qemu] {why}"));
+                (vars.clone(), Some(vars))
+            }
+        };
+
         let qemu = qemu_command(
             &boot_image,
             nvme.path(),
@@ -3162,6 +3177,7 @@ impl QemuInstance {
             &audio_wav,
             &uart_log,
             &sockets.dir,
+            &firmware_vars,
             &options,
         );
         spawn_and_wait_ready(
@@ -3176,6 +3192,7 @@ impl QemuInstance {
                 sockets,
                 screendump,
                 own_boot_image,
+                own_vars,
                 carried,
                 console_file,
             },
@@ -3789,11 +3806,7 @@ impl Drop for QemuInstance {
         let _ = self.child.wait();
         let _ = fs::remove_file(&self.audio_wav);
         // **The 16550's log outlives the guest, because it is the one channel
-        // that exists before the console does.** Firmware, the bootloader and
-        // the kernel up to the backend switch write here and nowhere else, so a
-        // boot that dies before virtio-console comes up leaves this file and an
-        // empty capture — which is exactly the shape `issues/diagnostics/`
-        // records as looking like a kernel that never started. 1.4 KB on a
+        // that exists before the console does.** 1.4 KB on a
         // healthy `tests/testcases` boot, measured, against the hundreds of
         // megabytes of per-boot image beside it.
         //
@@ -3805,8 +3818,8 @@ impl Drop for QemuInstance {
         let _ = fs::remove_file(&self.screendump);
         // A per-boot image is hundreds of megabytes and a full run makes ~76 of
         // them; the shared name used to make that one file.
-        if let Some(image) = &self.own_boot_image {
-            let _ = fs::remove_file(image);
+        for own in [&self.own_boot_image, &self.own_vars].into_iter().flatten() {
+            let _ = fs::remove_file(own);
         }
         // `sockets` goes with the fields, after QEMU is reaped.
         LIVE.fetch_sub(1, Ordering::SeqCst);
@@ -4314,7 +4327,7 @@ impl QmpDevices {
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
     let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
-    qemu_command(p, p, &usb, p, p, p, options)
+    qemu_command(p, p, &usb, p, p, p, p, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -4334,6 +4347,7 @@ fn stick_file(image: &Path, read_error: Option<u64>) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn qemu_command(
     boot_image: &Path,
     nvme_image: &Path,
@@ -4341,6 +4355,7 @@ fn qemu_command(
     audio_wav: &Path,
     uart_log: &Path,
     socket_dir: &Path,
+    firmware_vars: &Path,
     options: &BootOptions,
 ) -> Command {
     let (qmp_socket, segment) = socket_names(socket_dir, options);
@@ -4356,8 +4371,9 @@ fn qemu_command(
     );
 
     let arch = options.profile.arch();
-    let repo = compile::repo_root();
-    let [firmware_code, firmware_vars] = arch.pflash(&repo);
+    let [firmware_code, firmware_vars] = toyos_build::firmware::of(arch)
+        .unwrap_or_else(|why| panic!("[qemu] {why}"))
+        .drives(firmware_vars);
 
     let mut qemu = Command::new(arch.qemu());
     if let Some(boot) = arch.boot() {
@@ -4383,15 +4399,15 @@ fn qemu_command(
     // needs the userspace half of the irqchip, and a machine with no unit has
     // no reason to be built differently from the one it has always been.
     let mut machine = match arch {
-        Arch::X86_64 => String::from("q35"),
+        Arch::X86_64 => arch.machine().to_string(),
         Arch::Aarch64 => {
             // `virt` has no i8042 to take away, and the unit a profile declares
             // is VT-d, which it has none of either.
             assert!(options.i8042 && shape.iommu.is_none(), "`virt` has neither an i8042 nor VT-d");
-            String::from(match options.profile {
-                Profile::VirtEl2 => "virt,gic-version=3,virtualization=on",
-                _ => "virt,gic-version=3",
-            })
+            match options.profile {
+                Profile::VirtEl2 => format!("{},gic-version=3,virtualization=on", arch.machine()),
+                _ => format!("{},gic-version=3", arch.machine()),
+            }
         }
     };
     if !options.i8042 {
@@ -4423,14 +4439,11 @@ fn qemu_command(
         .arg("-drive")
         .arg(firmware_code)
         .arg("-drive")
-        .arg(match &options.firmware_vars {
-            Some(vars) => format!("if=pflash,format=raw,unit=1,file={},readonly=off", vars.display()),
-            None => firmware_vars,
-        })
+        .arg(firmware_vars)
         .arg("-drive")
         .arg(format!(
             "if=none,id=stick,{}{}",
-            stick_file(boot_image, options.stick_read_error),
+            stick_file(boot_image, options.boot_read_error),
             // **What a `Staged::Pristine` boot is made of.** QEMU keeps this
             // drive's writes in a temporary file and drops it when the guest
             // exits, so the staged image is never written and the boot after it
@@ -4820,6 +4833,7 @@ struct Files {
     sockets: Sockets,
     screendump: PathBuf,
     own_boot_image: Option<PathBuf>,
+    own_vars: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
     console_file: Option<ConsoleFile>,
 }
@@ -4894,6 +4908,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         sockets,
         screendump,
         own_boot_image,
+        own_vars,
         carried,
         console_file,
     } = files;
@@ -4932,6 +4947,14 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     let (tx, rx) = mpsc::channel::<String>();
     let console = ConsoleStream::new();
     let reader_console = console.clone();
+    // The virtio port starts at the kernel's first record; a 16550 on stdio has
+    // no other file, so it is read whole.
+    let mut kernel_console = options
+        .profile
+        .shape()
+        .virtio
+        .present()
+        .then(toyos_build::kernelconsole::KernelConsole::default);
     let reader_thread = thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut full_log = String::new();
@@ -4951,12 +4974,16 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
                 }
                 return full_log;
             }
+            let read = match &mut kernel_console {
+                Some(console) => console.pass(&chunk[..read]),
+                None => std::borrow::Cow::Borrowed(&chunk[..read]),
+            };
             reader_console
                 .0
                 .lock()
                 .expect("the console stream lock is never held across a panic")
-                .extend_from_slice(&chunk[..read]);
-            pending.extend_from_slice(&chunk[..read]);
+                .extend_from_slice(&read);
+            pending.extend_from_slice(&read);
             while let Some(at) = pending.iter().position(|&b| b == b'\n') {
                 let mut line: Vec<u8> = pending.drain(..=at).collect();
                 line.pop();
@@ -4994,6 +5021,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         sockets,
         screendump,
         own_boot_image,
+        own_vars,
         boot_log,
         console,
         i8042_trace: options.kernel_params.contains(&"i8042-trace"),

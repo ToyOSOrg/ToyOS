@@ -413,36 +413,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Font("OFL-1.1"),
     ),
     (
-        "aavmf/AAVMF_CODE.fd",
-        "47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d",
-        "NOTICE",
-        Terms::Spdx("BSD-2-Clause-Patent AND Apache-2.0"),
-    ),
-    (
-        "aavmf/AAVMF_VARS.fd",
-        "b3b855c5a80310168051164986855692d1bdb06e67619856177965cd87c6774f",
-        "NOTICE",
-        Terms::Spdx("BSD-2-Clause-Patent AND Apache-2.0"),
-    ),
-    (
-        "ovmf/DEBUGX64_OVMF.fd",
-        "800ff5af1220d1232d4da7173ccddbb74a9217600bd8935903d9d534801778b4",
-        "NOTICE",
-        Terms::Spdx("BSD-2-Clause-Patent"),
-    ),
-    (
-        "ovmf/OVMF_CODE-pure-efi.fd",
-        "9de33971d47958f42af86584b502f83256120b2482e4f7ed14db32fd68e92922",
-        "NOTICE",
-        Terms::Spdx("BSD-2-Clause-Patent"),
-    ),
-    (
-        "ovmf/OVMF_VARS-pure-efi.fd",
-        "c653de93db67e4f2213a35598efb379a13ef4a12c241e003699d4d7afd193635",
-        "NOTICE",
-        Terms::Spdx("BSD-2-Clause-Patent"),
-    ),
-    (
         "tests/fixtures/gbae-v0.2.0-toyos-x86_64.tar.gz",
         "99fcd8a7263b5c25cd90cead1baaa7200ef272100fc2226e008a4e8205ba2916",
         "NOTICE",
