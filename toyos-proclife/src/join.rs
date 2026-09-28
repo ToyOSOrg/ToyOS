@@ -56,7 +56,7 @@ pub fn collect_zombie<T: Processes>(
 /// collected finds [`JoinRefused::NoSuchThread`]: a join whose wait asks again
 /// after every wake answers with its first settled ask, never its last. The
 /// answer lives here, behind `&self`, so every ask of one join reads the same
-/// answer and no caller holds a copy to write back.
+/// answer.
 #[derive(Default, Debug)]
 pub struct Join(Cell<Option<Result<i32, JoinRefused>>>);
 
@@ -103,9 +103,6 @@ mod tests {
         assert_eq!(collect_zombie(&mut world, pid, t1), Err(JoinRefused::NoSuchThread));
     }
 
-    /// `sys_thread_join`'s path: one join, one shared `ask`, asked before the
-    /// wait, by the wait's predicate on the wake that finds the zombie, and again
-    /// once the wait returns. The last ask is the answer the caller gets.
     #[test]
     fn a_join_asked_after_it_collected_keeps_its_answer() {
         let world = RefCell::new(World::new());
