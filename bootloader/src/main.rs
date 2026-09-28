@@ -874,11 +874,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     println!("[PANIC]: {info}");
     let system_table = uefi_services::system_table();
     let rt = system_table.runtime_services();
-    let ours = bootnext::our_partition(system_table.boot_services().image_handle(), &system_table);
-    let fell = bootvars::after_this_one(rt, ours.as_ref()).and_then(|(current, next)| {
-        let next = next.ok_or_else(|| alloc::format!("BootOrder holds no entry after Boot{current:04X}"))?;
-        bootvars::boot_next(rt, next).map(|()| (current, next))
-    });
+    let fell = bootnext::ours()
+        .map_err(alloc::string::String::from)
+        .and_then(|ours| bootvars::after_this_one(rt, ours.as_ref()))
+        .and_then(|(current, next)| {
+            let next = next.ok_or_else(|| alloc::format!("BootOrder holds no entry after Boot{current:04X}"))?;
+            bootvars::boot_next(rt, next).map(|()| (current, next))
+        });
     let reset = match fell {
         Ok((current, next)) => {
             println!("{} this pass failed, so BootNext=Boot{next:04X}, the entry after Boot{current:04X} in BootOrder", bootvars::HEAD);
@@ -902,6 +904,8 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // boot manager is a pass whose image the boot manager then unloads. See
     // `end_this_pass`.
     let exit_event = uefi_services::init(&mut system_table).unwrap();
+    // Before anything else can panic: the panic handler falls past this ESP.
+    let ours = bootnext::take_ours(handle, &system_table);
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
     // the image neither exits boot services nor disables it, and a minute is
@@ -1019,7 +1023,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Before either end of the chain below: a request the running system left
     // is due at the next pass, and a report pass is that pass as often as not.
     println!("{}", bootvars::state(system_table.runtime_services()));
-    let ours = bootnext::our_partition(handle, &system_table);
     let fired = request::firmware(handle, &system_table, ours.as_ref());
     if retry {
         // **The hang, and the only bound there is on one.** The last boot of
@@ -1149,7 +1152,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // The page says a kernel is running, and `BootNext` says this loader gets the
     // machine again however that kernel ends.
     blackbox::arm(page, armed_at(&system_table), log_guid);
-    bootnext::point_at_us(handle, &system_table);
+    bootnext::point_at_us(ours.as_ref(), &system_table);
 
     // The last act before the jump, so the smallest possible span of this loader
     // is inside the bound: everything above it can still be reported, and a hang
