@@ -16,7 +16,9 @@
 //! artifacts — a member's land in the workspace root's `target/`, not its own —
 //! and the gates below walk the tree and red on a `Cargo.toml` that joined
 //! neither `members` nor `exclude`. **A new host crate that forgets to join is
-//! a red, not a silent gap.**
+//! a red, not a silent gap.** Every package the table names carries a
+//! `description`, and a gate below reds on one without: the table and those
+//! lines are the repository's layout, and nothing else lists it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -179,6 +181,20 @@ fn walk(root: &Path, dir: &Path, prune: &BTreeSet<String>, found: &mut BTreeSet<
 #[cfg(test)]
 fn unclaimed(members: &BTreeSet<String>, found: &BTreeSet<String>) -> Vec<String> {
     found.difference(members).cloned().collect()
+}
+
+/// The `[package]` `description` of `manifest`: `Ok(None)` for a manifest with
+/// no `[package]` (a virtual workspace), `Err` for a package whose description
+/// is missing or blank.
+#[cfg(test)]
+fn description(manifest: &str) -> Result<Option<String>, &'static str> {
+    let doc: toml::Value = manifest.parse().expect("a manifest is TOML");
+    let Some(package) = doc.get("package") else { return Ok(None) };
+    match package.get("description").and_then(|d| d.as_str()).map(str::trim) {
+        Some(d) if !d.is_empty() => Ok(Some(d.to_string())),
+        Some(_) => Err("a blank `description`"),
+        None => Err("no `description`"),
+    }
 }
 
 /// The tables in `manifest` that cargo reads only from a workspace root.
@@ -429,6 +445,41 @@ mod tests {
             "default-members must be the root package alone, so a bare `cargo test` stays \
              the QEMU harness and a bare `cargo run` stays the dev loop",
         );
+    }
+
+    /// **Every package the `[workspace]` table names says what it is.** Root
+    /// `CLAUDE.md` points here instead of listing the crates, so a crate that
+    /// arrives without a `description` is one nothing describes.
+    #[test]
+    fn every_package_the_workspace_names_has_a_description() {
+        let root = repo_root();
+        let mut missing = Vec::new();
+        let mut described = 0;
+        for dir in members(&root).into_iter().chain(excluded(&root)) {
+            let Ok(text) = std::fs::read_to_string(root.join(&dir).join("Cargo.toml")) else { continue };
+            match description(&text) {
+                Ok(Some(_)) => described += 1,
+                Ok(None) => {}
+                Err(why) => missing.push(format!("{dir}/Cargo.toml has {why}")),
+            }
+        }
+        assert!(described > 40, "only {described} packages read; the walk is reading no workspace");
+        assert!(
+            missing.is_empty(),
+            "a package the root Cargo.toml names says what it is in one line of its own \
+             [package] `description`:\n  {}",
+            missing.join("\n  "),
+        );
+    }
+
+    /// Teeth for the rule above.
+    #[test]
+    fn a_package_without_a_description_is_refused_and_a_virtual_workspace_is_not() {
+        assert_eq!(description("[package]\nname = \"a\"\ndescription = \"An a.\"\n"), Ok(Some("An a.".into())));
+        assert_eq!(description("[package]\nname = \"a\"\n"), Err("no `description`"));
+        assert_eq!(description("[package]\nname = \"a\"\ndescription = \"  \"\n"), Err("a blank `description`"));
+        assert_eq!(description("# description = \"x\"\n[package]\nname = \"a\"\n"), Err("no `description`"));
+        assert_eq!(description("[workspace]\nmembers = [\"a\"]\n"), Ok(None));
     }
 
     /// Cargo reads `[profile]` and `[patch]` from the workspace root and

@@ -6,7 +6,7 @@ opened: 2026-08-07
 
 # A `toyos` branch mostly has no upstream, so `git status` cannot say if it is pushed
 
-13 of the 16 consumed and PR branches across `forks/` have no tracking ref:
+13 of the 16 consumed and PR branches across the fork checkouts in `../forks` have no tracking ref:
 `git for-each-ref --format='%(refname:short)|%(upstream:short)' refs/heads` gives
 `NO UPSTREAM` for cpal, ctrlc, getrandom (all three), mio, raw-window-handle,
 socket2, softbuffer, stacker, target-lexicon, tokio and winit. Only libloading,

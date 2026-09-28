@@ -41,6 +41,7 @@ members = [
     "toyos-manifest",
     "toyos-mdns",
     "toyos-mixer",
+    "toyos-net-tcp",
     "toyos-net-wire",
     "toyos-pci",
     "toyos-pcid",
@@ -55,6 +56,7 @@ members = [
     "toyos-symbols",
     "toyos-tco",
     "toyos-tmpdir",
+    "toyos-transport",
     "toyos-untrusted",
     "toyos-update",
     "toyos-userbound",
@@ -93,6 +95,7 @@ exclude = [
 
 [package]
 name = "toyos-build"
+description = "The build system: toolchain, kernel, bootloader, userland and image, the QEMU harness, CI jobs, and the gates the tree is held to."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

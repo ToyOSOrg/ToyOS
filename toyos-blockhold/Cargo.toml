@@ -8,6 +8,7 @@
 
 [package]
 name = "toyos-blockhold"
+description = "Who holds each span of a block device, and whose flush answers for the writes its disk lost, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

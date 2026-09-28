@@ -2,7 +2,7 @@
 //! stated rate every part can be trusted for, so the boot measures it.
 
 use crate::log;
-use crate::mm::paging::MmioPolicy;
+use crate::mm::policy::MmioPolicy;
 use crate::time::{Delay, Duration};
 
 use super::cpu;

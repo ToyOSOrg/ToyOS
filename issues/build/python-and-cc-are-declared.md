@@ -40,7 +40,7 @@ Rust bootstrap again as an incidental fix; do not soften the entry either.
 
 `src/toolchain.rs:749` picks `./x` when `rust/x` exists, which it does. That file
 is a `/bin/sh` script whose whole job is `SEARCH="python3 python py python2 uv"`,
-and it execs `x.py` → `src/bootstrap/bootstrap.py` (55,550 bytes). So a clean
+and it execs `x.py` → `rust/src/bootstrap/bootstrap.py` (55,550 bytes). So a clean
 clone cannot build a toolchain without Python 3. It is upstream's bootstrap and
 not our code, which is why it is stated rather than blamed — but the bar has no
 upstream exemption, and `bootstrap.py` can never run inside ToyOS.

@@ -1,4 +1,4 @@
-//! The capture latch: one writer CPU owns the panic snapshot until recovery and may re-enter.
+//! The capture latch: one writer CPU owns the panic snapshot and may re-enter.
 //! No `crate::` references: `kernel-loom` compiles this file under `feature = "loom"` to drive the real latch in its tests.
 
 #[cfg(not(feature = "loom"))]
@@ -44,10 +44,6 @@ impl CaptureLatch {
             Err(owner) if owner == token => Claim::Reentrant,
             Err(_) => Claim::Refused,
         }
-    }
-
-    pub fn owned_by(&self, token: u32) -> bool {
-        self.owner.load(Ordering::Acquire) == token
     }
 
     /// Give the snapshot back only when `token` owns it.

@@ -219,6 +219,7 @@ const SCHED_LOOM: &[&str] = &["-p", "toyos-sched-loom"];
 const SCHED_SIM: &[&str] = &["-p", "toyos-sched-sim"];
 const PROCLIFE: &[&str] = &["-p", "toyos-proclife"];
 const BLOCKRING: &[&str] = &["-p", "toyos-blockring"];
+const TRANSPORT: &[&str] = &["-p", "toyos-transport"];
 
 const fn red(
     krate: &'static [&'static str],
@@ -244,9 +245,6 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
         "a_lost_try_lock_leaves_the_lock_held ... FAILED",
         "two_writers_never_overlap ... FAILED",
-    ]),
-    red(KERNEL_LOOM, "poison-overwrite", Some("poison_set"), &[
-        "a_second_death_banks_beside_the_first ... FAILED",
     ]),
     red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
         "a_claim_sees_the_enrolled_work ... FAILED",
@@ -367,8 +365,10 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
     ]),
-    red(BLOCKRING, "mutate-ring-publish-relaxed", Some("loom_ring"), &[
-        "a_published_request_is_read_whole ... FAILED",
+    red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
+    red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
+    red(TRANSPORT, "end-keeps-inflight", None, &[
+        "an_end_answers_every_tag_once_and_a_late_completion_nothing ... FAILED",
     ]),
 ];
 
@@ -599,14 +599,9 @@ fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 
 // --- The guest jobs ------------------------------------------------------------
 
-/// The harness's arguments for a CI lane: a runner is a whole host with one
-/// suite on it, so the host's guest slots arbitrate nothing there.
 fn suite_args(args: &[&str]) -> Vec<String> {
     let mut all = vec!["test", "--test", "toyos-build", "--"];
     all.extend(args);
-    if on_runner() {
-        all.extend(["--host-slots", "0"]);
-    }
     all.into_iter().map(String::from).collect()
 }
 

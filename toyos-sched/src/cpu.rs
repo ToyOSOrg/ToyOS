@@ -2498,13 +2498,11 @@ mod tests {
     }
 
     impl Machine for TestHw {
-        type IrqGuard = ();
         fn now(&self) -> Nanos {
             Nanos::ZERO
         }
         fn set_timer(&self, _deadline: Nanos) {}
         fn stop_timer(&self) {}
-        fn irq_guard(&self) {}
         fn halt(&self) {}
         fn need_resched(&self, cpu: CpuId) {
             self.state().need_resched.push(cpu);

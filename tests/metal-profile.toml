@@ -131,7 +131,7 @@ measured = 46
 # is a floor and not a measurement, which is a red whatever the machine did. The
 # two shootdown rows are bounded by the reading, half again — the margin this
 # file uses everywhere a first reading becomes a ceiling — because
-# `arch::tlb::ACK_TIMEOUT` is two million times the reading and a ceiling nothing
+# `time::DEAF_CPU` is two million times the reading and a ceiling nothing
 # can reach is a row that cannot red.
 
 [[number]]
@@ -145,7 +145,7 @@ measured = 16
 name = "tlb.latencycase.p50_ns"
 unit = "ns"
 ceiling = 3387
-ceiling_from = "2,258 ns measured, and half again — 50 % over one machine's one reading, which is what this file gives every ceiling derived from a first one. `kernel arch::tlb::ACK_TIMEOUT` is 5 s and panics the machine; it bounds the wait and is not a ceiling this row could ever red on"
+ceiling_from = "2,258 ns measured, and half again — 50 % over one machine's one reading, which is what this file gives every ceiling derived from a first one. `kernel time::DEAF_CPU` is 5 s and panics the machine; it bounds the wait and is not a ceiling this row could ever red on"
 measured = 2258
 
 [[number]]

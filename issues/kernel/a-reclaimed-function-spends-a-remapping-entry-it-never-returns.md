@@ -6,7 +6,7 @@ opened: 2026-09-24
 
 # A re-claimed PCI function spends an interrupt remapping entry it never returns
 
-`iommu::vtd::interrupt::allocate` (`kernel/src/iommu/vtd/interrupt.rs`) hands
+`iommu::vtd::interrupt::allocate` (`kernel/src/arch/x86_64/vtd/interrupt.rs`) hands
 out the next entry of a 256-entry table (`ENTRIES`) by bumping `used`, and no
 path gives one back. Every `pcidev` claim arms MSI or MSI-X through
 `interrupt::msi`, so every claim of a function takes a new entry, and its

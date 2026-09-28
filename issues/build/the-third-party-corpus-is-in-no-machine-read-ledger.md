@@ -13,7 +13,7 @@ tracks **plus every third-party source corpus**"*.
 
 The corpus is `tests/testcases/` --- 315 tracked files, of which **312** are
 `tinycc/` (the other three, its own `LICENSE`, a `system.toml` and `hello.c`,
-are ours): TinyCC's `tests/tests2` under LGPL-2.1 plus picoc under
+are ours): TinyCC's `tinycc/tests/tests2` under LGPL-2.1 plus picoc under
 BSD-3-Clause. They are compiler *input* rather than
 linked code, so their terms do not reach this repository's own, but the
 attribution is still owed and
@@ -25,7 +25,7 @@ what is whose *"with the counts it was established from"*.
 reads that licence's own per-population numbers, counts what `git` tracks under
 each population, and reds when they disagree; it also refuses a tracked file
 under the corpus that no population attributes, and the one name `NOTICE` says
-is not to come back --- `tests/testcases/tinycc/46_grep.c`, "Copyright (C) 1980,
+is not to come back --- `b2771acc^:tests/testcases/tinycc/46_grep.c`, "Copyright (C) 1980,
 DECUS", *"but not for profit"*, deleted rather than attributed on 2026-08-08. An
 arrival and a deletion are both caught.
 

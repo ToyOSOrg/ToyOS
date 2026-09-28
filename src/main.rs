@@ -186,11 +186,6 @@ fn main() {
     let build_only = asked(&flags::BUILD_ONLY);
     let dump_audio = asked(&flags::DUMP_AUDIO);
     let rebuild_toolchain = asked(&flags::REBUILD_TOOLCHAIN);
-    if let Some(budget) = CARGO_RUN.value(&args, &flags::HOST_BUILDS) {
-        toyos_build::buildlock::set_host_builds(
-            budget.parse().unwrap_or_else(|_| panic!("--host-builds: {budget:?} is not a budget")),
-        );
-    }
     let smp = parse_smp(&args);
     let profile = parse_profile(&args);
     let mute = asked(&flags::MUTE);
