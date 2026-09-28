@@ -627,7 +627,7 @@ fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -
         // A redial asked for while this connection was being made wants a
         // connection made after the ask, and this is not one.
         if state.stop || state.redial.is_some() {
-            return Some("this reader dropped it, made before the latest ask".to_string());
+            return None;
         }
         state.current = conn.try_clone().ok();
         state.lines.len()
