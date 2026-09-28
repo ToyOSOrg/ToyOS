@@ -157,7 +157,7 @@ pub fn init_wall(century_reg: Option<u8>, utc_offset_minutes: Option<i32>) {
 
     let local = civil.to_unix_secs();
     let offset_secs = utc_offset_minutes.unwrap_or(0) as i64 * 60;
-    BOOT_LOCAL_SECS.store(local.saturating_sub(nanos_since_boot() / 1_000_000_000), Relaxed);
+    BOOT_LOCAL_SECS.store(local.saturating_sub(nanos_since_boot() / NANOS_PER_SEC), Relaxed);
     UTC_OFFSET_SECS.store(offset_secs, Relaxed);
     WALL_KNOWN.store(true, Release);
 
@@ -172,17 +172,16 @@ pub fn init_wall(century_reg: Option<u8>, utc_offset_minutes: Option<i32>) {
 pub fn local_secs() -> Option<u64> {
     WALL_KNOWN
         .load(Acquire)
-        .then(|| BOOT_LOCAL_SECS.load(Relaxed) + nanos_since_boot() / 1_000_000_000)
+        .then(|| BOOT_LOCAL_SECS.load(Relaxed) + nanos_since_boot() / NANOS_PER_SEC)
 }
 
 /// The same instant in Unix seconds (UTC) — what `SYS_CLOCK_EPOCH` serves: the
-/// whole seconds of [`utc_nanos`], so a file written after this answered `s`
-/// carries a stamp of at least `s` seconds.
+/// whole seconds of [`utc_nanos`].
 pub fn utc_secs() -> Option<u64> {
     utc_nanos().map(|nanos| nanos / NANOS_PER_SEC)
 }
 
-pub const NANOS_PER_SEC: u64 = 1_000_000_000;
+const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 /// Nanoseconds since the Unix epoch, UTC: the RTC's whole-second reading carried
 /// on by the counter, so its resolution is the counter's and its accuracy the
@@ -195,20 +194,19 @@ pub fn utc_nanos() -> Option<u64> {
 }
 
 /// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
-/// [`utc_nanos`], and on a machine whose RTC never answered — which
-/// [`init_wall`] said by name — a wall clock that starts at the epoch at boot,
-/// so one boot's stamps still order.
+/// [`utc_nanos`], and 0 — undated — on a machine whose RTC never answered.
 pub fn mtime_now() -> u64 {
-    utc_nanos().unwrap_or_else(nanos_since_boot)
+    utc_nanos().unwrap_or(0)
 }
 
-/// `utc` Unix seconds in the machine's zone, for a format that stores local time.
-pub fn local_of_utc(utc: u64) -> u64 {
-    utc.saturating_add_signed(-UTC_OFFSET_SECS.load(Relaxed))
+/// A file's `mtime` as whole seconds in the machine's zone, for a format that
+/// stores local time.
+pub fn local_secs_of(mtime: u64) -> u64 {
+    (mtime / NANOS_PER_SEC).saturating_add_signed(-UTC_OFFSET_SECS.load(Relaxed))
 }
 
-/// The inverse of [`local_of_utc`].
-pub fn utc_of_local(local: u64) -> u64 {
-    local.saturating_add_signed(UTC_OFFSET_SECS.load(Relaxed))
+/// The inverse of [`local_secs_of`], to the second.
+pub fn mtime_of_local(local: u64) -> u64 {
+    local.saturating_add_signed(UTC_OFFSET_SECS.load(Relaxed)).saturating_mul(NANOS_PER_SEC)
 }
 

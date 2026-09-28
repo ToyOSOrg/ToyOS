@@ -687,11 +687,10 @@ pub struct Stat {
     pub file_type: FileType,
     pub size: u64,
     /// When the file was last written: nanoseconds since the Unix epoch, UTC,
-    /// off the wall clock at the write — never a time since boot. Kept to the
-    /// precision its filesystem stores (`kernel/src/fat32_adapter.rs`: two
-    /// seconds; `src/image.rs` stamps ROOT's files 0), and on a machine whose
-    /// RTC never answered, off a clock that starts at the epoch at boot
-    /// (`kernel/src/clock.rs`'s `mtime_now`).
+    /// off the wall clock at the write, to the resolution its mount keeps —
+    /// the nanosecond on `/tmp` and DATA, two seconds on FAT. 0 is undated:
+    /// written on a machine whose RTC never answered, or shipped in ROOT's
+    /// reproducible image.
     pub mtime: u64,
 }
 

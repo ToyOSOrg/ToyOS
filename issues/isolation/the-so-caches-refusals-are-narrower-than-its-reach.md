@@ -14,9 +14,7 @@ residual: what the refusals do **not** reach.
 
 ## The identity cannot see a same-size rewrite on a FAT32 mount
 
-`vfs::BackingId` is size plus the mount's mtime. On `/home` (bcachefs) the mtime
-is `nanos_since_boot` at the flush, so two writes are always apart —
-`so_cache_policy`'s `stale-mtime` arm asserts exactly that.
+`vfs::BackingId` is size plus the mount's mtime.
 
 `/log` is FAT32, mounted `UserAccess::ReadWrite` (`kernel/src/main.rs:461`), and
 **FAT stores seconds in units of two**: `toyos-fat32/src/time.rs:5-15` states

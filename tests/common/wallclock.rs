@@ -513,3 +513,44 @@ pub fn file_mtime_survives_a_reboot(
     );
     Ok(())
 }
+
+/// On a machine whose RTC never answered, a file's mtime is undated — 0, which
+/// std reports as an error — and never 1970 plus the boot's uptime.
+pub fn file_mtime_undated(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const SAID: &str = "file-mtime: /tmp/file-mtime-undated is undated";
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { kernel_params: &["rtc-dead"], ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    if !boot.contains("clock: this machine will not say what time it is") {
+        return Err(format!(
+            "with rtc-dead armed the kernel never refused the clock\n{}",
+            clock_lines(&boot)
+        ));
+    }
+    let result = qemu.run_test("test_rs_file_mtime undated", Duration::from_secs(60));
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    if result.exit_code != Some(0) || !result.stdout.contains(SAID) {
+        return Err(format!(
+            "`file_mtime undated` exited {:?}:\n{}\nkernel log while it ran:\n{}{}",
+            result.exit_code, result.stdout, result.before, result.serial
+        ));
+    }
+    eprintln!("  [clock] rtc-dead: a file written in /tmp is undated");
+    Ok(())
+}

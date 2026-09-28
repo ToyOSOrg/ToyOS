@@ -656,7 +656,7 @@ pub struct FatFs {
 /// A VFS `mtime` as FAT stores it: local time, whole seconds, and the two-second
 /// field of a write time drops the odd one.
 fn stamp(mtime: u64) -> FatTime {
-    FatTime::from_unix_secs(crate::clock::local_of_utc(mtime / crate::clock::NANOS_PER_SEC))
+    FatTime::from_unix_secs(crate::clock::local_secs_of(mtime))
 }
 
 /// What to stamp on an entry the VFS gave no `mtime` for.
@@ -922,7 +922,7 @@ impl FileSystem for FatFs {
         let role = self.role;
         self.fs
             .metadata(name)
-            .map(|m| crate::clock::utc_of_local(m.modified_unix) * crate::clock::NANOS_PER_SEC)
+            .map(|m| crate::clock::mtime_of_local(m.modified_unix))
             .map_err(|e| refused(role, &self.fs, &mut self.repair_named, "metadata", name, e))
     }
 
