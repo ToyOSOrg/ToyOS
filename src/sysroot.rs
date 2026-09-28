@@ -403,9 +403,9 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
 }
 
 /// Empty the std build directory `build_dir` of all but what bootstrap
-/// downloaded — `cache`, and `<host>`'s `ci-llvm` and `rustfmt` — unless
-/// `identity` ([`Compiler::identity`]) is the compiler its `compiled-by` records
-/// as having compiled the rest, then record `identity` there.
+/// downloaded unless `identity` ([`Compiler::identity`]) is the compiler its
+/// `compiled-by` records as having compiled the rest, then record `identity`
+/// there.
 ///
 /// Cargo keys what it reuses on `rustc -vV`, which every ToyOS compiler prints
 /// alike, so another compiler's rlibs stay fresh and the next crate that does
@@ -764,6 +764,7 @@ mod tests {
             build.join("host/stage0-std/dist/build/std/build-script-build"),
             build.join("host/a-directory-bootstrap-adds/lib.rlib"),
             build.join("tmp/cc-rs-out-dir/out.o"),
+            build.join("host/a-stamp-bootstrap-writes"),
         ];
         let downloaded = [
             build.join("cache/llvm-1/llvm.tar.xz"),

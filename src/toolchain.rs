@@ -574,8 +574,13 @@ fn link_stale(stage2: &Path) -> bool {
 }
 
 /// Run bootstrap in the fork checkout `rust_dir`, streaming its output where it
-/// was going anyway and keeping a copy, with the checkout's lockfiles held
-/// ([`lockfiles_held`]).
+/// was going anyway and keeping a copy, with both the checkout's lockfiles put
+/// back as they were when this returns, however the build that holds them
+/// ends.
+///
+/// Bootstrap re-locks them against this worktree's `toyos-abi` and `toyos`;
+/// putting them back keeps the checkout clean, and a key read from it the one
+/// that was built.
 ///
 /// `.status()` was enough while the only question was the exit code. It is not
 /// enough for the question [`refuse_on_compile_error`] asks, which is what the
@@ -584,7 +589,10 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
     use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::{Arc, Mutex};
 
-    let _locks = lockfiles_held(rust_dir);
+    let _locks = [
+        Restore::holding(&rust_dir.join("Cargo.lock")),
+        Restore::holding(&rust_dir.join("library/Cargo.lock")),
+    ];
     // Two literals and not one variable: `src/sourcegate::every_binary_the_host_runs_is_declared`
     // reads the argument, and a name assembled at run time is a name nobody declared.
     let (x, mut command) = if rust_dir.join("x").exists() {
@@ -625,16 +633,6 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
 
     let log = Arc::try_unwrap(log).expect("both pumps are joined").into_inner();
     (status.success(), log.expect("no pump panicked while holding it"))
-}
-
-/// Both of the fork checkout `fork`'s lockfiles, put back as they were when
-/// this drops, however the build that holds it ends.
-///
-/// Bootstrap re-locks them against this worktree's `toyos-abi` and `toyos`;
-/// putting them back keeps the checkout clean, and a key read from it the one
-/// that was built.
-fn lockfiles_held(fork: &Path) -> [Restore; 2] {
-    [Restore::holding(&fork.join("Cargo.lock")), Restore::holding(&fork.join("library/Cargo.lock"))]
 }
 
 /// A file put back to its bytes when this drops, however the scope ends, by a
