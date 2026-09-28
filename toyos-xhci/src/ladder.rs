@@ -99,6 +99,49 @@ pub fn next(climbed: Option<Rung>, left: Left) -> Rung {
     above.max(enters_at(left))
 }
 
+/// A device's run of breaks: how many, and the highest rung among them.
+///
+/// **Per device, not per command**: the run it bounds is the device's, however
+/// many callers and operations it is spread over, and only a completed round
+/// trip ends it ([`Self::over`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Run {
+    breaks: u8,
+    climbed: Option<Rung>,
+}
+
+/// What one break costs the run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Climb {
+    pub rung: Rung,
+    /// The run's first rung is above the class reset: the device is owed the
+    /// Data-Out of the command that broke ([`enters_at`]).
+    pub skips_class_reset: bool,
+}
+
+impl Run {
+    pub const NONE: Self = Self { breaks: 0, climbed: None };
+
+    /// Breaks in the run so far.
+    pub fn breaks(self) -> u8 {
+        self.breaks
+    }
+
+    /// A break that left the device `left`: counted, and the rung it climbs.
+    pub fn broke(&mut self, left: Left) -> Climb {
+        self.breaks = self.breaks.saturating_add(1);
+        let rung = next(self.climbed, left);
+        let skips_class_reset = self.climbed.is_none() && rung != Rung::ClassReset;
+        self.climbed = Some(rung);
+        Climb { rung, skips_class_reset }
+    }
+
+    /// A round trip completed: the run is over. How many breaks it held.
+    pub fn over(&mut self) -> u8 {
+        core::mem::replace(self, Self::NONE).breaks
+    }
+}
+
 /// One step of [`Rung::PortReset`], in the order taken.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PortStep {
@@ -235,6 +278,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The run is the device's: every break climbs above the last, the count
+    /// reaches [`MOST_BREAKS`] exactly where the run is offline, and a completed
+    /// round trip starts the next run at the bottom.
+    #[test]
+    fn a_run_climbs_one_rung_per_break_until_a_round_trip_ends_it() {
+        let mut run = Run::NONE;
+        assert_eq!(run.broke(Left::Elsewhere), Climb { rung: Rung::ClassReset, skips_class_reset: false });
+        assert_eq!(run.broke(Left::Elsewhere), Climb { rung: Rung::PortReset, skips_class_reset: false });
+        assert_eq!(run.broke(Left::Elsewhere).rung, Rung::Offline);
+        assert_eq!(run.breaks(), MOST_BREAKS);
+        assert_eq!(run.over(), MOST_BREAKS);
+        assert_eq!(run, Run::NONE);
+        assert_eq!(run.broke(Left::Elsewhere).rung, Rung::ClassReset, "a run begun again climbs from the bottom");
+    }
+
+    /// Said once, at the first rung of a run, and only when that rung is the
+    /// port reset.
+    #[test]
+    fn only_a_run_that_begins_owed_data_out_skips_the_class_reset() {
+        let mut run = Run::NONE;
+        assert_eq!(run.broke(Left::OwedDataOut), Climb { rung: Rung::PortReset, skips_class_reset: true });
+        assert_eq!(run.broke(Left::OwedDataOut), Climb { rung: Rung::Offline, skips_class_reset: false });
+        let mut run = Run::NONE;
+        run.broke(Left::Elsewhere);
+        assert!(!run.broke(Left::OwedDataOut).skips_class_reset, "the class reset was climbed");
     }
 
     #[test]

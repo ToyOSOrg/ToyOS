@@ -207,9 +207,9 @@ issues/build/the-toolchain-ships-no-cargo-and-the-shared-cache-waits-on-one.md
 issues/build/there-is-no-network-gate.md
 issues/design-debt/redesign-the-log-subsystem.md
 issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md
+issues/hardware/a-disk-plugged-in-after-boot-is-bound-inside-a-scheduling-pass.md
 issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md
 issues/hardware/device-shape-and-lifecycle-have-no-coverage.md
-issues/hardware/the-bot-scsi-machine-is-still-hand-written-in-the-kernel.md
 issues/hardware/the-t14-touchpad-is-i2c-hid-and-unbuilt.md
 issues/hardware/there-is-no-wifi.md
 issues/isolation/the-power-broker-authority-with-a-human-in-the-loop.md

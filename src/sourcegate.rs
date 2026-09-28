@@ -238,10 +238,7 @@ const BANS: &[Ban] = &[
     Ban {
         needle: ": u32 = 4096",
         why: "as above, in the other width",
-        allowed: &[
-            // The block size this driver reads a disk in.
-            ("kernel/src/drivers/xhci/wait/msc.rs", 1),
-        ],
+        allowed: &[],
     },
 ];
 
