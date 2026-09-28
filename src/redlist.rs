@@ -77,6 +77,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
     },
     Disabled {
+        test: "quiesce_wakes_on_the_last_teardown",
+        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
+    },
+    Disabled {
         test: "root_chunk_refused_on_a_usb_stick",
         issue: "issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md",
     },

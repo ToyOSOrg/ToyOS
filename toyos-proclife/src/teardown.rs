@@ -1,36 +1,32 @@
-//! Who ends a process, which threads they must retire, and what a thread's own
-//! exit is.
+//! Who ends a process, which threads they retire, and which thread tears it
+//! down.
 //!
-//! **Exactly one path publishes exactly one exit.** Two of them can arrive at
-//! once — a `SYS_EXIT` on the process's own main thread and a `SYS_PROCESS_KILL`
-//! from a holder of a `Process` handle — and the whole arrangement rests on
-//! [`claim_teardown`] answering `true` to one of them. A second publish is an
-//! assertion failure in `ProcessObject::publish_exit`, by design: it means two
-//! teardowns claimed one process, and a kernel that tolerated it would free one
-//! address space twice.
+//! **Exactly one path claims a process.** Two of them can arrive at once — a
+//! `SYS_EXIT` on one of its threads and a `SYS_PROCESS_KILL` from a holder of a
+//! `Process` handle — and [`claim_teardown`] answers `true` to one of them. The
+//! claim fixes the exit code, and its winner posts a retire to every thread
+//! still in the process ([`retire_set`]) and waits on none of them: a kill's
+//! victim may be killing the killer.
 //!
-//! **The claimant retires every other thread before it frees anything.** A
-//! thread that is still schedulable when its process's mappings go writes
-//! through stale page tables into 2 MiB frames the PMM has already re-issued,
-//! so the order — claim, collect, retire, free, mark, publish — is the whole of
-//! the teardown's soundness. What this module owns is the *decisions* in that
-//! order: which threads are in the set, where each one's CPU time is charged,
-//! what code each is marked with. The retire itself is `toyos-sched`'s and the
-//! free is the kernel's.
+//! **The last thread out tears the process down.** Every thread leaves by its
+//! own hand ([`leave`]), and the one whose leaving empties a claimed process
+//! frees what the process holds and publishes its exit, on its own stack.
+//! Nothing a thread can still run in is freed before then, and no thread waits
+//! for another to leave. A second publish is an assertion failure in
+//! `ProcessObject::publish_exit`, by design.
 
 use alloc::vec::Vec;
 
 use crate::table::{Lifecycle, Processes};
 use crate::{Pid, ThreadLocation, Tid, Watch, TORN_DOWN_THREAD_CODE};
 
-/// Claim exclusive teardown of a process.
+/// Claim exclusive teardown of a process, for `code`.
 ///
-/// Exactly one exit or kill path wins; a later caller must simply exit its
-/// own thread — the claimant's retire sweep handles it like any other thread.
-/// `false` also covers a process that is not in the table at all, because there
-/// is nothing left for a second claimant to do either way.
-#[must_use = "a caller that did not win the claim must not tear anything down"]
-pub fn claim_teardown<T: Processes>(table: &mut T, pid: Pid) -> bool {
+/// Exactly one exit or kill path wins; a later caller's thread simply
+/// leaves. `false` also covers a process that is not in the table at all,
+/// because there is nothing left for a second claimant to do either way.
+#[must_use = "a caller that did not win the claim must not retire anything"]
+pub fn claim_teardown<T: Processes>(table: &mut T, pid: Pid, code: i32) -> bool {
     let Some(proc) = table.get_mut(pid) else { return false };
     // The mutation this feature stages is the whole of the exclusion: the flag
     // is still raised and still readable, and every arrival is still told it
@@ -39,114 +35,98 @@ pub fn claim_teardown<T: Processes>(table: &mut T, pid: Pid) -> bool {
     if proc.tearing_down() {
         return false;
     }
-    proc.begin_teardown();
+    proc.begin_teardown(code);
     true
 }
 
-/// The threads a process's own exit must retire, and whether the thread running
-/// that exit is the main one.
-///
-/// The current thread is **not** in `others`, and cannot be: it is executing
-/// the teardown, and `retire_task` returns only when its subject is provably
-/// off every CPU. Its own CPU time is read separately, which is what
-/// [`ExitSet::current_is_main`] is for — a main thread filtered out of the
-/// retire set would otherwise leave `cpu=0ms` on its own exit line.
-pub struct ExitSet {
-    /// Every thread of the process except the one calling. Sorted, so the
-    /// retire order does not depend on a hash seed.
-    pub others: Vec<Tid>,
-    /// Whether the calling thread is this process's main thread.
-    pub current_is_main: bool,
-}
-
-pub fn exit_set<P: Lifecycle>(proc: &P, current: Tid) -> ExitSet {
-    let mut others = Vec::new();
-    proc.each_thread(&mut |tid, _| {
-        if tid != current {
-            others.push(tid);
+/// The threads a claim's winner retires: every one still in the process but
+/// `caller`, which leaves by its own exit. Sorted, so the retire order does not
+/// depend on a hash seed.
+pub fn retire_set<P: Lifecycle>(proc: &P, caller: Option<Tid>) -> Vec<Tid> {
+    let mut tids = Vec::new();
+    proc.each_thread(&mut |tid, at| {
+        if !at.is_zombie() && Some(tid) != caller {
+            tids.push(tid);
         }
     });
-    others.sort_unstable();
-    ExitSet { others, current_is_main: proc.main_tid() == current }
-}
-
-/// Every thread of a process being killed from outside, in retire order.
-///
-/// Unlike [`exit_set`] this includes the main thread and holds no exception:
-/// every thread belongs to another process, so none of them is the one running
-/// the kill.
-pub fn kill_set<P: Lifecycle>(proc: &P) -> Vec<Tid> {
-    let mut tids = Vec::new();
-    proc.each_thread(&mut |tid, _| tids.push(tid));
     tids.sort_unstable();
     tids
 }
 
-/// Where a retired thread's CPU time is charged.
-///
-/// The two are not interchangeable: the main thread's is what a process's exit
-/// line reports and what `ProcessStats::cpu_ns` is built from, while a
-/// sibling's is folded into `child_threads_cpu_ns` and added to it. Charging
-/// one as the other double-counts or loses the whole of a process's CPU time.
+/// What a thread's leaving makes it.
+#[must_use = "the last thread out owes its process's teardown"]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CpuCharge {
-    /// The process's own `cpu_ns`.
-    MainThread,
-    /// `ProcessAccounting::child_threads_cpu_ns`.
-    ChildThreads,
+pub enum Leave {
+    /// It is emptying a claimed process: it tears the process down, publishes
+    /// `code`, and stays in the process until [`torn_down`] marks it dead with
+    /// `mark`, so the machine's stop counts its teardown as running.
+    Last { code: i32, mark: i32 },
+    /// Some thread is still in the process, or nobody has claimed it.
+    NotLast,
 }
 
-pub fn charge(tid: Tid, main_tid: Tid) -> CpuCharge {
-    if tid == main_tid {
-        CpuCharge::MainThread
-    } else {
-        CpuCharge::ChildThreads
-    }
-}
-
-/// Mark one thread dead.
+/// Take `tid` out of `pid`: dead with the code it chose, else its process's
+/// for the main thread and [`TORN_DOWN_THREAD_CODE`] for any other. The last
+/// one out of a claimed process is not marked here: [`torn_down`] marks it.
 ///
-/// Idempotent, and silent about an entry that has gone: a main thread reaches
-/// this after its own process published its exit, by which point any idle pass
-/// may already have reaped the entry. A thread already dead keeps the code it
-/// died with — the second mark is a teardown arriving behind the thread's own
-/// exit, and the code the thread chose is the true one.
-pub fn mark_zombie<T: Processes>(table: &mut T, pid: Pid, tid: Tid, code: i32) {
-    let Some(proc) = table.get_mut(pid) else { return };
-    if proc.location(tid).is_some_and(|l| !l.is_zombie()) {
-        proc.set_location(tid, ThreadLocation::Zombie(code));
-    }
-}
-
-/// Mark every thread of a terminating process dead: the main thread with the
-/// process's code, every sibling with [`TORN_DOWN_THREAD_CODE`].
-///
-/// Runs under the table lock at the end of a teardown, after every thread has
-/// been retired — so nothing it marks can still be running, and a thread that
-/// is already a zombie has already answered for itself and keeps its code.
-pub fn mark_all_zombie<P: Lifecycle>(proc: &mut P, code: i32) {
-    let main_tid = proc.main_tid();
-    let mut pending: Vec<(Tid, i32)> = Vec::new();
-    proc.each_thread(&mut |tid, at| {
-        if !at.is_zombie() {
-            pending.push((tid, if tid == main_tid { code } else { TORN_DOWN_THREAD_CODE }));
+/// Panics for a thread that is not in its process's entry or has left already:
+/// an entry outlives every thread that has not left it.
+pub fn leave<T: Processes>(table: &mut T, pid: Pid, tid: Tid, chosen: Option<i32>) -> Leave {
+    let proc = table.get_mut(pid).expect("leave: a thread's process is not in the table");
+    assert_eq!(
+        proc.location(tid),
+        Some(ThreadLocation::Scheduled),
+        "leave: pid {pid} tid {tid} is not a thread still in its process",
+    );
+    let claimed = proc.teardown_code();
+    let mark = match chosen {
+        Some(code) => code,
+        None if tid == proc.main_tid() => {
+            claimed.expect("leave: a main thread leaves only a process somebody claimed")
         }
-    });
-    for (tid, code) in pending {
-        proc.set_location(tid, ThreadLocation::Zombie(code));
+        None => TORN_DOWN_THREAD_CODE,
+    };
+    let mut others_in = false;
+    proc.each_thread(&mut |other, at| others_in |= other != tid && !at.is_zombie());
+    // The mutation this feature stages: every thread that leaves a claimed
+    // process tears it down, the first one out included.
+    #[cfg(feature = "mutate-first-out-tears-down")]
+    let others_in = false;
+    match claimed {
+        Some(code) if !others_in => {
+            // The mutation this feature stages: the last one out is marked
+            // dead before its teardown runs.
+            #[cfg(feature = "mutate-last-out-leaves-before-its-teardown")]
+            proc.set_location(tid, ThreadLocation::Zombie(mark));
+            Leave::Last { code, mark }
+        }
+        _ => {
+            proc.set_location(tid, ThreadLocation::Zombie(mark));
+            Leave::NotLast
+        }
     }
+}
+
+/// The last one out has torn its process down: it is dead with `mark`.
+pub fn torn_down<T: Processes>(table: &mut T, pid: Pid, tid: Tid, mark: i32) {
+    let proc = table.get_mut(pid).expect("torn_down: a process is in the table until its exit is published");
+    #[cfg(not(feature = "mutate-last-out-leaves-before-its-teardown"))]
+    assert_eq!(
+        proc.location(tid),
+        Some(ThreadLocation::Scheduled),
+        "torn_down: pid {pid} tid {tid} is not the last one out",
+    );
+    proc.set_location(tid, ThreadLocation::Zombie(mark));
 }
 
 /// Which of the two exits a `SYS_THREAD_EXIT` is.
 #[must_use = "a thread exit that is not routed is a thread that never dies"]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ThreadExit {
-    /// The main thread: this is the process's exit, and the whole teardown
-    /// runs.
+    /// The main thread: this is the process's exit.
     Process,
-    /// A sibling: release its own mappings, mark it `Zombie(code)`, and post
-    /// on `post` before the exit pass — after it, this thread does not
-    /// run again.
+    /// A sibling: release its own mappings, leave, and post on `post` before
+    /// the exit pass — after it, this thread does not run again.
     Sibling {
         /// **The subject a joiner armed on, which is the exiting thread's own
         /// watch.** It was the process's main thread until `1bfe4e5b`, because
@@ -156,22 +136,12 @@ pub enum ThreadExit {
         /// reach it.
         post: Watch,
     },
-    /// The process has no entry — another CPU's kill reaped it while this
-    /// thread was on its way here. **The same exit a sibling takes**, on the
-    /// same [`Watch`]: nothing here is the main thread any more, so the
-    /// teardown branch is skipped and every table write is a no-op.
-    Gone { post: Watch },
 }
 
-/// Route a thread's own exit.
-///
-/// **A missing entry is [`ThreadExit::Gone`] and not a panic**, which is
-/// [`mark_zombie`]'s rule one function along: a thread that arrives to find
-/// nothing has to leave, not take the machine with it.
+/// Route a thread's own exit. Panics for a process not in the table: an entry
+/// outlives every thread that has not left it.
 pub fn route_thread_exit<T: Processes>(table: &T, pid: Pid, tid: Tid) -> ThreadExit {
-    let Some(proc) = table.get(pid) else {
-        return ThreadExit::Gone { post: Watch::Thread(pid, tid) };
-    };
+    let proc = table.get(pid).expect("route_thread_exit: a thread's process is not in the table");
     if proc.main_tid() == tid {
         return ThreadExit::Process;
     }
@@ -188,9 +158,10 @@ mod tests {
     fn exactly_one_claimant_wins_however_many_arrive() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(claim_teardown(&mut world, pid));
-        assert!(!claim_teardown(&mut world, pid));
-        assert!(!claim_teardown(&mut world, pid));
+        assert!(claim_teardown(&mut world, pid, 0));
+        assert!(!claim_teardown(&mut world, pid, 137));
+        assert!(!claim_teardown(&mut world, pid, 137));
+        assert_eq!(world.get(pid).unwrap().teardown_code(), Some(0), "the winner's code stands");
     }
 
     /// Teeth for the control itself: under the mutation a second claimant
@@ -201,9 +172,9 @@ mod tests {
     fn the_mutation_really_grants_a_second_claim() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(claim_teardown(&mut world, pid));
+        assert!(claim_teardown(&mut world, pid, 0));
         assert!(
-            claim_teardown(&mut world, pid),
+            claim_teardown(&mut world, pid, 137),
             "the control is inert: the claim is still exclusive, so whatever the \
              model reds on under it is not this mutation",
         );
@@ -212,79 +183,60 @@ mod tests {
     #[test]
     fn a_process_that_is_gone_grants_no_claim() {
         let mut world = World::new();
-        assert!(!claim_teardown(&mut world, Pid(9)));
+        assert!(!claim_teardown(&mut world, Pid(9), 137));
     }
 
     #[test]
-    fn the_exit_set_leaves_out_the_thread_running_the_exit() {
+    fn the_retire_set_is_every_thread_still_in_but_the_caller() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let main = world.main_tid(pid);
+        let t1 = world.spawn_thread(pid);
+        let t2 = world.spawn_thread(pid);
+        let t3 = world.spawn_thread(pid);
+        world.set_location(pid, t3, ThreadLocation::Zombie(0));
+
+        let proc = world.get(pid).unwrap();
+        assert_eq!(retire_set(proc, None), [main, t1, t2]);
+        assert_eq!(retire_set(proc, Some(main)), [t1, t2]);
+        assert_eq!(retire_set(proc, Some(t1)), [main, t2]);
+    }
+
+    #[cfg(not(feature = "mutate-first-out-tears-down"))]
+    #[test]
+    fn only_the_thread_that_empties_a_claimed_process_tears_it_down() {
         let mut world = World::new();
         let pid = world.spawn_process();
         let main = world.main_tid(pid);
         let t1 = world.spawn_thread(pid);
         let t2 = world.spawn_thread(pid);
 
-        let from_main = exit_set(world.get(pid).unwrap(), main);
-        assert_eq!(from_main.others, [t1, t2]);
-        assert!(from_main.current_is_main);
+        // Unclaimed: a sibling's own exit, with its own code.
+        assert_eq!(leave(&mut world, pid, t2, Some(5)), Leave::NotLast);
+        assert!(claim_teardown(&mut world, pid, 42));
+        assert_eq!(leave(&mut world, pid, main, None), Leave::NotLast);
+        assert_eq!(leave(&mut world, pid, t1, None), Leave::Last { code: 42, mark: TORN_DOWN_THREAD_CODE });
+        assert_eq!(
+            world.get(pid).unwrap().location(t1),
+            Some(ThreadLocation::Scheduled),
+            "the last one out is in its process until its teardown is done",
+        );
+        torn_down(&mut world, pid, t1, TORN_DOWN_THREAD_CODE);
 
-        let from_sibling = exit_set(world.get(pid).unwrap(), t1);
-        assert_eq!(from_sibling.others, [main, t2]);
-        assert!(!from_sibling.current_is_main);
-    }
-
-    #[test]
-    fn a_kill_set_holds_every_thread_including_the_main_one() {
-        let mut world = World::new();
-        let pid = world.spawn_process();
-        let main = world.main_tid(pid);
-        let t1 = world.spawn_thread(pid);
-        assert_eq!(kill_set(world.get(pid).unwrap()), [main, t1]);
-    }
-
-    #[test]
-    fn cpu_time_is_charged_to_the_main_thread_only_for_the_main_thread() {
-        assert_eq!(charge(Tid(0), Tid(0)), CpuCharge::MainThread);
-        assert_eq!(charge(Tid(1), Tid(0)), CpuCharge::ChildThreads);
-        // A process whose main thread is not tid 0 — nothing in this crate
-        // assumes the loader's numbering.
-        assert_eq!(charge(Tid(3), Tid(3)), CpuCharge::MainThread);
-        assert_eq!(charge(Tid(0), Tid(3)), CpuCharge::ChildThreads);
-    }
-
-    #[test]
-    fn a_second_mark_never_moves_a_code_a_thread_chose() {
-        let mut world = World::new();
-        let pid = world.spawn_process();
-        let t1 = world.spawn_thread(pid);
-        mark_zombie(&mut world, pid, t1, 7);
-        mark_zombie(&mut world, pid, t1, TORN_DOWN_THREAD_CODE);
-        assert_eq!(world.get(pid).unwrap().location(t1), Some(ThreadLocation::Zombie(7)));
-    }
-
-    #[test]
-    fn marking_a_reaped_process_is_silent() {
-        let mut world = World::new();
-        mark_zombie(&mut world, Pid(4), Tid(0), 0);
-    }
-
-    #[test]
-    fn the_teardown_sweep_gives_the_main_thread_the_code_and_the_rest_minus_one() {
-        let mut world = World::new();
-        let pid = world.spawn_process();
-        let main = world.main_tid(pid);
-        let t1 = world.spawn_thread(pid);
-        let t2 = world.spawn_thread(pid);
-        mark_zombie(&mut world, pid, t2, 5);
-
-        mark_all_zombie(world.get_mut(pid).unwrap(), 42);
         let proc = world.get(pid).unwrap();
         assert_eq!(proc.location(main), Some(ThreadLocation::Zombie(42)));
         assert_eq!(proc.location(t1), Some(ThreadLocation::Zombie(TORN_DOWN_THREAD_CODE)));
-        assert_eq!(
-            proc.location(t2),
-            Some(ThreadLocation::Zombie(5)),
-            "a thread that had already answered for itself kept its own code",
-        );
+        assert_eq!(proc.location(t2), Some(ThreadLocation::Zombie(5)));
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a thread still in its process")]
+    fn a_thread_leaves_once() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let t1 = world.spawn_thread(pid);
+        let _ = leave(&mut world, pid, t1, Some(0));
+        let _ = leave(&mut world, pid, t1, Some(0));
     }
 
     #[test]
@@ -293,15 +245,6 @@ mod tests {
         let pid = world.spawn_process();
         let main = world.main_tid(pid);
         assert_eq!(route_thread_exit(&world, pid, main), ThreadExit::Process);
-    }
-
-    #[test]
-    fn an_exit_on_a_reaped_process_leaves_by_the_sibling_door() {
-        let world = World::new();
-        assert_eq!(
-            route_thread_exit(&world, Pid(3), Tid(1)),
-            ThreadExit::Gone { post: Watch::Thread(Pid(3), Tid(1)) },
-        );
     }
 
     /// Two siblings, and the one that is waiting is not the main thread — the

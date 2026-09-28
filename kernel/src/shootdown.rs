@@ -58,7 +58,8 @@ impl Shootdown {
     pub fn serve(&self, cpu: usize, flush: impl FnOnce()) {
         let owed = self.requested.load(OWED);
         flush();
-        self.flushed[cpu].store(owed, Ordering::Release);
+        // A max, not a store: a serve nested inside this one may already have published a later generation.
+        self.flushed[cpu].fetch_max(owed, Ordering::Release);
     }
 
     /// Does `cpu` owe anyone a flush?
