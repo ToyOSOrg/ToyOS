@@ -32,7 +32,6 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::poller::Poller;
 use toyos::AsHandle;
 use toyos::process::Process;
 use toyos::syscap::SysCap;
@@ -63,7 +62,6 @@ fn test() {
     an_unrelated_wake_does_not_end_the_wait();
     two_handles_answer_the_same();
     a_kill_publishes_like_an_exit();
-    its_end_completes_a_poll();
     a_handle_is_the_whole_of_the_right();
     a_pid_is_not_authority();
     an_undefined_wait_flag_bit_is_refused();
@@ -284,40 +282,6 @@ fn a_kill_publishes_like_an_exit() {
     syscall::process_kill(handle).expect("killing a process that has gone is not a failure");
     assert_eq!(syscall::process_wait(handle), Ok(KILLED), "the code after the second kill");
     println!("  a kill publishes {KILLED} once, and a second kill changes nothing");
-}
-
-/// A process's end is an event: its handle turns readable when the exit is
-/// published, never before, and a poll registered after the end completes at
-/// once.
-fn its_end_completes_a_poll() {
-    const END: u64 = 1;
-    const LATE: u64 = 2;
-    let (mut child, release) = start(4);
-    let handle = syscall::dup(RawHandle(child.as_raw_handle())).expect("a handle to poll");
-    // SAFETY: the duplicate is this function's alone.
-    let process = unsafe { Process::from_raw(handle) };
-    let poller = Poller::new(1);
-
-    process.watch_end(&poller, END);
-    let mut early = Vec::new();
-    poller.wait(0, 0, |token| early.push(token));
-    // Another handle's close ends no process, so it cancels no poll.
-    syscall::close(syscall::dup(RawHandle(child.as_raw_handle())).expect("a handle to close"));
-    poller.wait(0, 0, |token| early.push(token));
-    assert!(early.is_empty(), "a running process's handle completed a poll: {early:?}");
-
-    drop(release);
-    let mut ended = Vec::new();
-    poller.wait(1, u64::MAX, |token| ended.push(token));
-    assert_eq!(ended, [END], "the end completed no poll");
-    assert_eq!(process.try_wait(), Ok(4), "the poll completed before the exit was published");
-
-    process.watch_end(&poller, LATE);
-    let mut late = Vec::new();
-    poller.wait(1, u64::MAX, |token| late.push(token));
-    assert_eq!(late, [LATE], "a poll on an ended process did not complete");
-    assert_eq!(child.wait().expect("wait").code(), Some(4));
-    println!("  a process's end completes a poll on its handle, and not before");
 }
 
 /// **The arm the pid-keyed shape could not have.** The waiter did not spawn the

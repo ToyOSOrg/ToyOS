@@ -266,11 +266,9 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         },
         // Named unconditionally: the watch alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
-        // Readable once its exit is published.
-        KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
     }
 }
 
@@ -308,12 +306,10 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
             | device_registry::DeviceType::Framebuffer
             | device_registry::DeviceType::Partition => true,
         },
-        // One handle closing ends no process.
-        KObjectRef::Process(_) => false,
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) => true,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => true,
     }
 }
 
@@ -849,10 +845,9 @@ pub fn has_data(object: &KObjectRef) -> bool {
                 !d.info_read() || crate::drivers::virtio_sound::has_pending()
             }
         },
-        KObjectRef::Process(p) => p.finished(),
         KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) => false,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => false,
     }
 }
 

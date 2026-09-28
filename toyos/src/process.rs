@@ -10,7 +10,6 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 
 use crate::endow::FromHandle;
-use crate::poller::{Poller, READABLE};
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
 pub struct Process(pub(crate) OwnedHandle);
@@ -31,15 +30,8 @@ impl Process {
     }
 
     /// Kill it. `Ok` for one already dead: the caller asked for it to be gone.
-    /// Returns before it is gone; its end is what [`wait`](Self::wait) and
-    /// [`watch_end`](Self::watch_end) report.
     pub fn kill(&self) -> Result<(), SyscallError> {
         syscall::process_kill(self.0.raw())
-    }
-
-    /// Complete `token` on `poller` once its exit is published.
-    pub fn watch_end(&self, poller: &Poller, token: u64) {
-        poller.watch(self, READABLE, token);
     }
 
     pub fn stats(&self) -> Result<ProcessStats, SyscallError> {
