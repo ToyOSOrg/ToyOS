@@ -518,9 +518,10 @@ pub fn lan_no_lease(
     let options = BootOptions { profile: qemu::Profile::E1000eNoServer, ..Default::default() };
     let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
     let mut console = guest.boot_log().to_string();
-    // Drained until the line and not awaited: the guest says nothing at all
-    // until netd gives up on its own clock, which every wait in this harness
-    // reads as a machine that stopped. The ceiling is the harness's.
+    // Drained until netd's `ready` after its give-up, and not awaited: the
+    // guest says nothing at all until netd gives up on its own clock, which
+    // every wait in this harness reads as a machine that stopped. The ceiling
+    // is the harness's.
     let gave_up = format!("{NO_LEASE}{HOSTNAME} in ");
     let given_up = std::cell::Cell::new(false);
     let served = std::cell::Cell::new(false);
