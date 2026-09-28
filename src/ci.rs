@@ -721,17 +721,13 @@ fn verdicts(log: &str) -> String {
     }
 }
 
-/// The QEMU on `PATH` against `.github/qemu-version`, and whether `/dev/kvm`
-/// opens where it is present — the two things a guest verdict must be read
-/// against.
+/// The QEMU on `PATH` against `.github/qemu-version`, the firmware it declares,
+/// and whether `/dev/kvm` opens where it is present — the three things a guest
+/// verdict must be read against.
 fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     let want = declared_qemu_version(root).ok_or(".github/qemu-version declares no version")?;
-    let out = Command::new(arch.qemu())
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("{}: {e}", arch.qemu()))?;
-    let said = String::from_utf8_lossy(&out.stdout).into_owned();
-    let have = parse_qemu_version(&said).ok_or_else(|| format!("QEMU said {said:?}"))?;
+    let have = qemu_version(arch)?;
+    let firmware = crate::firmware::of(arch)?;
     let node = Path::new("/dev/kvm").exists();
     let accelerated = arch.accel().is_hardware();
     let accel = match (node, accelerated) {
@@ -748,7 +744,10 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
         })
         .unwrap_or_else(|| "an unnamed CPU".to_string());
     let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
-    let line = format!("QEMU {have}, {accel}, {cpu}, {cores} core(s)");
+    let line = format!(
+        "QEMU {have}, firmware {}, {accel}, {cpu}, {cores} core(s)",
+        firmware.code.display()
+    );
     if have != want {
         return Err(format!(
             "{line}: this runs QEMU {have} and .github/qemu-version declares {want}. The \
@@ -776,6 +775,16 @@ pub fn declared_qemu_version(root: &Path) -> Option<String> {
     (!version.is_empty()).then_some(version)
 }
 
+/// The version the QEMU on `PATH` that boots `arch` says it is.
+pub fn qemu_version(arch: Arch) -> Result<String, String> {
+    let out = Command::new(arch.qemu())
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("{}: {e}", arch.qemu()))?;
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    parse_qemu_version(&said).ok_or_else(|| format!("QEMU said {said:?}"))
+}
+
 /// `QEMU emulator version 11.0.3 (Debian 1:11.0.3+ds-1)` → `11.0.3`.
 fn parse_qemu_version(text: &str) -> Option<String> {
     let first = text.lines().next()?;
@@ -788,8 +797,7 @@ fn parse_qemu_version(text: &str) -> Option<String> {
 /// `.github/qemu-version` declares, and nothing at all when it is.
 pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     let want = declared_qemu_version(root)?;
-    let out = Command::new(arch.qemu()).arg("--version").output().ok()?;
-    let have = parse_qemu_version(&String::from_utf8_lossy(&out.stdout))?;
+    let have = qemu_version(arch).ok()?;
     (have != want).then(|| {
         format!(
             "Note: this host runs QEMU {have} and .github/qemu-version declares {want} — \
