@@ -36,9 +36,8 @@ guess. Then build, then test before anyone reviews:
 ## Commits and the pull request
 
 `git commit -F <file>`, never `-m`. No `--amend`, no rebase, no force: merge `origin/main`, never
-rebase onto it. Never edit a `CLAUDE.md` unless the brief names the sentence. Never touch
-`toyos-abi/src`, `toyos/src` or `userland/libc/src` unless the brief is an ABI brief. No new
-dependency.
+rebase onto it. Never touch `toyos-abi/src`, `toyos/src` or `userland/libc/src` unless the brief is
+an ABI brief. No new dependency.
 
 `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,
 so keep it true of the branch as it stands: what changed and why, per decision; each gate with its
