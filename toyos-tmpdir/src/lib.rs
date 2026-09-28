@@ -110,6 +110,23 @@ impl TempDir {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Move every root under `base` that process `pid` made and is gone from
+    /// into this directory, so it goes when this does: for a caller that
+    /// `SIGKILL`ed `pid` after this process's one sweep of `base`. A live root
+    /// is left alone, whatever its name.
+    pub fn adopt(&self, base: &Path, pid: u32) {
+        let prefix = format!("{ROOT_PREFIX}{pid}-");
+        let _global = global(base);
+        for root in gone_under(base) {
+            let name = root.file_name().expect("a root has a name").to_string_lossy();
+            if name.starts_with(&prefix) {
+                let to = self.path.join(format!("reap-{name}"));
+                fs::rename(&root, &to)
+                    .unwrap_or_else(|e| panic!("move {} to {}: {e}", root.display(), to.display()));
+            }
+        }
+    }
 }
 
 impl Deref for TempDir {

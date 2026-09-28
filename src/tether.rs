@@ -116,12 +116,12 @@ pub struct Owner {
 
 impl Owner {
     /// Spawn `cmd` as an owner: its stdin a pipe only this process writes, so
-    /// it ends when this process does; its stdout read by [`Self::said`]; and
-    /// `SIGHUP` blocked and ignored, the worst a harness can hand down to what
-    /// it spawns.
+    /// it ends when this process does; its stdout read by [`Self::said`]; in a
+    /// process group of its own, which a tethered child leaves and an
+    /// untethered one stays in; and `SIGHUP` blocked and ignored, the worst a
+    /// harness can hand down to what it spawns.
     pub fn spawn(mut cmd: Command) -> Result<Owner, String> {
-        let (mut stderr, write) = io::pipe().map_err(|e| format!("a pipe for the owner's stderr: {e}"))?;
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(write);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
         // SAFETY: two system calls on the child's own state, allocating nothing.
         unsafe {
             cmd.pre_exec(|| {
@@ -137,8 +137,7 @@ impl Owner {
             });
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn the owner: {e}"))?;
-        // Its copy of the write end, which would otherwise be a holder too.
-        drop(cmd);
+        let mut stderr = child.stderr.take().expect("a piped stderr");
         let (tx, closed) = mpsc::channel();
         std::thread::spawn(move || {
             let mut text = Vec::new();
@@ -181,30 +180,50 @@ impl Owner {
         }
     }
 
+    /// The owner's pid, which names what it leaves behind.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// `SIGKILL` the owner, and how long every process holding its stderr took
     /// to exit after it. `Err` if one outlived it by [`WITHIN`], naming which
-    /// of `pids` still run, and ending them.
+    /// of `pids` still answer; the owner's group is then killed, and the
+    /// refusal says whether every holder went with it.
     pub fn killed(mut self, pids: &[u32]) -> Result<Duration, String> {
         let killed = Instant::now();
         self.child.kill().map_err(|e| format!("SIGKILL the owner: {e}"))?;
         // Held past the verdict: `wait` would close it, and a child reading
         // it would end on that instead of on its tether.
         let _stdin = self.child.stdin.take();
+        let verdict = match self.closed.recv_timeout(WITHIN) {
+            Ok(_) => Ok(killed.elapsed()),
+            Err(_) => Err(self.survived(pids)),
+        };
         self.child.wait().map_err(|e| format!("reap the owner: {e}"))?;
-        if self.closed.recv_timeout(WITHIN).is_ok() {
-            return Ok(killed.elapsed());
-        }
+        verdict
+    }
+
+    /// What outlived the owner, asked before it is reaped: until then no other
+    /// process can hold its pid, so its group is what it spawned untethered.
+    fn survived(&self, pids: &[u32]) -> String {
         // SAFETY: signal 0 asks whether the pid exists and delivers nothing.
-        let alive: Vec<u32> =
+        let answered: Vec<u32> =
             pids.iter().copied().filter(|&pid| unsafe { libc::kill(pid as i32, 0) } == 0).collect();
-        for &pid in &alive {
-            // SAFETY: a process of this test's own that still holds its pid.
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-        }
-        Err(format!(
+        // SAFETY: the group the unreaped owner leads.
+        let group = match unsafe { libc::killpg(self.child.id() as i32, libc::SIGKILL) } {
+            0 => "was killed".to_string(),
+            _ => format!("could not be killed: {}", io::Error::last_os_error()),
+        };
+        let after = if self.closed.recv_timeout(WITHIN).is_ok() {
+            "every holder of its stderr then exited".to_string()
+        } else {
+            format!("a holder of its stderr outside that group still ran {WITHIN:?} later")
+        };
+        format!(
             "a process holding the owner's stderr still ran {WITHIN:?} after the owner's SIGKILL; \
-             of its tethered children {pids:?}, {alive:?} did, and were killed"
-        ))
+             of its tethered children {pids:?}, {answered:?} still answered; the owner's process \
+             group {group}, and {after}"
+        )
     }
 }
 
