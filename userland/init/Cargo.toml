@@ -18,5 +18,3 @@ toyos-gpt = { path = "../../toyos-gpt" }
 toyos-blockring = { path = "../../toyos-blockring" }
 # How long a stop is prepared before the kernel is asked for it.
 toyos-quiesce = { path = "../../toyos-quiesce" }
-# The kernel's device inventory, read whole or refused.
-toyos-inventory = { path = "../../toyos-inventory" }

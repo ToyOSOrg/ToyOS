@@ -2191,7 +2191,9 @@ struct Storage {
 
 /// Every record the kernel's inventory answers.
 fn inventory(syscap: &SysCap) -> Result<Vec<toyos_abi::inventory::Record>, String> {
-    toyos_inventory::read(|buf| syscap.inventory(buf)).map_err(|why| why.to_string())
+    syscap
+        .records(|n| vec![toyos_abi::inventory::RawRecord::EMPTY; n])
+        .map_err(|why| why.to_string())
 }
 
 /// The unique GUID the loader named for `role`.

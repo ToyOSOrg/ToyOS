@@ -35,7 +35,6 @@ members = [
     "toyos-hda",
     "toyos-i219",
     "toyos-inspect",
-    "toyos-inventory",
     "toyos-keymap",
     "toyos-ld",
     "toyos-libc-copies",
