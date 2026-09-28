@@ -669,6 +669,8 @@ fn drain_irqs(entered: super::dump::Entered) {
     // A CPU cannot read a sibling's `CpuSched`, so the dump reaches every CPU
     // by asking, and this is where each one answers.
     super::dump::serve_if_owed();
+    // Per-CPU registers are readable only on their own CPU, so a performance-state read asks here too.
+    crate::perf_state::serve_if_owed();
     // Repaints the panel if whoever owns the screen has drawn over the report.
     crate::drivers::panic_console::hold_report();
 

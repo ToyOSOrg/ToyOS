@@ -45,6 +45,7 @@ members = [
     "toyos-net-wire",
     "toyos-pci",
     "toyos-pcid",
+    "toyos-perfstate",
     "toyos-proclife",
     "toyos-ps2",
     "toyos-quiesce",

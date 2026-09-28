@@ -1,11 +1,20 @@
-//! What `CR0`, `CR4` and `IA32_EFER` hold on every CPU in this machine. One
-//! declaration, applied by the BSP and every AP and checked on each; nothing
-//! else may write any of the three. Each register is written whole: `CR0`
-//! and `EFER` are constants, `CR4` is required bits plus whatever optional
-//! bits this CPU offers. `EFER.NXE` lets bit 63 of a paging entry mean *not
-//! executable* ([`Prot`](crate::mm::policy::Prot)).
+//! What `CR0`, `CR4`, `IA32_EFER` and the performance request hold on every
+//! CPU in this machine. One declaration, applied by the BSP and every AP and
+//! checked on each; nothing else may write any of them. Each register is
+//! written whole: `CR0` and `EFER` are constants, `CR4` is required bits plus
+//! whatever optional bits this CPU offers. `EFER.NXE` lets bit 63 of a paging
+//! entry mean *not executable* ([`Prot`](crate::mm::policy::Prot)).
+//!
+//! The performance request is HWP's (`toyos_perfstate`): `IA32_PM_ENABLE`,
+//! `IA32_HWP_REQUEST`, `IA32_HWP_REQUEST_PKG` and `IA32_ENERGY_PERF_BIAS`, on
+//! a machine whose CPUs have every register it names, and none of them on one
+//! that does not — refused by name once, and firmware's values stand.
+//! `IA32_MISC_ENABLE`'s turbo bit is not declared: that register's other bits
+//! are model-specific and firmware's, and writing it whole would decide them.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+
+use toyos_perfstate::msr;
 
 use super::cpu;
 use crate::log;
@@ -112,11 +121,91 @@ pub fn init_cr0(cpu_id: u32) {
     bench::report(cpu_id, before);
 }
 
-/// Puts this CPU's `CR4` and `EFER` into the declaration and checks all
-/// three against it. Must run after [`init_cr0`] and before `arch::syscall::init`, which needs `SCE` set.
+/// Whether the machine's declaration carries the performance request: the
+/// BSP's verdict, which every AP must reach too.
+static HWP: AtomicU8 = AtomicU8::new(HWP_UNDECIDED);
+const HWP_UNDECIDED: u8 = 0;
+const HWP_DECLARED: u8 = 1;
+const HWP_REFUSED: u8 = 2;
+
+/// Proof that the machine's declaration carries the performance request, so
+/// every register [`toyos_perfstate::msr`] names exists on every CPU and
+/// reading one is no `#GP`.
+#[derive(Clone, Copy)]
+pub struct HwpDeclared(());
+
+impl HwpDeclared {
+    /// The proof, or the reason this machine has none.
+    pub fn ask() -> Result<Self, toyos_perfstate::Refusal> {
+        match HWP.load(Ordering::Acquire) {
+            HWP_DECLARED => Ok(Self(())),
+            HWP_REFUSED => Err(toyos_perfstate::refusal(&perf_cpuid())
+                .expect("every CPU reached the BSP's refusal, this one included")),
+            _ => panic!("control_regs: the performance request is asked about before the BSP declared it"),
+        }
+    }
+}
+
+/// This CPU's `IA32_HWP_REQUEST`, or `None` where the machine has no request.
+/// Recomputed per CPU, as `CR4` is, and not required to match the BSP's: a
+/// CPU's highest performance is its own. Whether there is one at all is the
+/// machine's, and a CPU that disagrees is named.
+fn hwp_declaration(cpu_id: u32) -> Option<u64> {
+    let refusal = toyos_perfstate::refusal(&perf_cpuid());
+    let mine = if refusal.is_none() { HWP_DECLARED } else { HWP_REFUSED };
+    match HWP.compare_exchange(HWP_UNDECIDED, mine, Ordering::Release, Ordering::Acquire) {
+        Ok(_) => {
+            if let Some(refusal) = refusal {
+                log!("control_regs: no performance request is declared: {}", refusal.reason());
+            }
+        }
+        Err(machine) => assert!(
+            machine == mine,
+            "control_regs: cpu{cpu_id} {} a performance request and the BSP {} one",
+            if mine == HWP_DECLARED { "can hold" } else { "cannot hold" },
+            if machine == HWP_DECLARED { "declared" } else { "refused" },
+        ),
+    }
+    refusal.is_none().then(|| {
+        toyos_perfstate::hwp_request(
+            cpu::rdmsr(msr::HWP_CAPABILITIES),
+            cpu::rdmsr(msr::PLATFORM_INFO),
+        )
+    })
+}
+
+fn perf_cpuid() -> toyos_perfstate::Cpuid {
+    let (max_leaf, ebx, ecx, edx) = cpu::cpuid(0, 0);
+    let mut vendor = [0u8; 12];
+    for (at, word) in [ebx, edx, ecx].into_iter().enumerate() {
+        vendor[at * 4..at * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    // A leaf above the maximum answers with the highest basic leaf's data.
+    let (leaf6_eax, _, leaf6_ecx, _) = if max_leaf >= 6 { cpu::cpuid(6, 0) } else { (0, 0, 0, 0) };
+    let leaf7_edx = if max_leaf >= 7 { cpu::cpuid(7, 0).3 } else { 0 };
+    toyos_perfstate::Cpuid { vendor, max_leaf, leaf6_eax, leaf6_ecx, leaf7_edx }
+}
+
+/// Puts this CPU's `CR4`, `EFER` and performance request into the declaration
+/// and checks every register against it. Must run after [`init_cr0`] and
+/// before `arch::syscall::init`, which needs `SCE` set.
 pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
+    let hwp = hwp_declaration(cpu_id);
     if !skipped(cpu_id) {
+        if let Some(request) = hwp {
+            // SAFETY: `hwp_declaration` answered `Some` only where CPUID
+            // enumerates HWP with EPP and the package request and EPB, so each
+            // MSR exists; `PM_ENABLE` goes first because a request written
+            // before it is `#GP` (SDM Vol. 3B, HWP's enabling), and every
+            // value fits the register's defined bits.
+            unsafe {
+                cpu::wrmsr(msr::PM_ENABLE, toyos_perfstate::PM_ENABLE);
+                cpu::wrmsr(msr::HWP_REQUEST, request);
+                cpu::wrmsr(msr::HWP_REQUEST_PKG, toyos_perfstate::HWP_REQUEST_PKG);
+                cpu::wrmsr(msr::ENERGY_PERF_BIAS, toyos_perfstate::ENERGY_PERF_BIAS);
+            }
+        }
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
         // the first two and both callers use PCID 0; `wrmsr` writes [`EFER`], whose
@@ -132,6 +221,9 @@ pub fn init(cpu_id: u32) {
         }
     }
     self_check(cpu_id, declared);
+    if let Some(request) = hwp {
+        hwp_check(cpu_id, request);
+    }
 }
 
 /// Whether the declaration carries `PCIDE`, and therefore whether `INVPCID` is this machine's flush.
@@ -276,6 +368,39 @@ fn self_check(cpu_id: u32, declared_cr4: u64) {
          {EFER:#06x} plus the CPU's own LMA",
     );
     CHECKED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// [`self_check`] for the performance request, logged first for the same
+/// reason; the line carries the request's two inputs, so a reader can
+/// recompute it.
+fn hwp_check(cpu_id: u32, request: u64) {
+    let pm_enable = cpu::rdmsr(msr::PM_ENABLE);
+    let live = cpu::rdmsr(msr::HWP_REQUEST);
+    let pkg = cpu::rdmsr(msr::HWP_REQUEST_PKG);
+    let epb = cpu::rdmsr(msr::ENERGY_PERF_BIAS);
+    log!(
+        "control_regs: cpu{} pm_enable={} hwp_request={:#010x} hwp_request_pkg={:#010x} epb={} \
+         hwp_capabilities={:#010x} platform_info={:#018x}",
+        cpu_id,
+        pm_enable,
+        live,
+        pkg,
+        epb,
+        cpu::rdmsr(msr::HWP_CAPABILITIES),
+        cpu::rdmsr(msr::PLATFORM_INFO),
+    );
+    let want = [
+        ("pm_enable", pm_enable, toyos_perfstate::PM_ENABLE),
+        ("hwp_request", live, request),
+        ("hwp_request_pkg", pkg, toyos_perfstate::HWP_REQUEST_PKG),
+        ("epb", epb, toyos_perfstate::ENERGY_PERF_BIAS),
+    ];
+    for (name, holds, declared) in want {
+        assert!(
+            holds == declared,
+            "control_regs: cpu{cpu_id} holds {name}={holds:#x}, the declaration is {declared:#x}",
+        );
+    }
 }
 
 /// How many CPUs hold the declaration, said once after the last of them has

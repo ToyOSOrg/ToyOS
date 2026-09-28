@@ -28,6 +28,8 @@ pub enum DeviceInfo {
     /// Which partition, how long, and both its GUIDs; the view it moves blocks
     /// through is the claim's own (`device::Claim::partition`).
     Partition(toyos_abi::part::PartitionInfo),
+    /// Answers the performance envelope's registers, never a description.
+    PerfState(crate::perf_state::Reader),
 }
 
 /// The two scanout buffers and the cursor plane.
@@ -56,7 +58,7 @@ impl DeviceInfo {
     // `described.bytes` unset, so the next read re-mints instead of binding stranded handles.
     fn mint(&self, table: &mut HandleTable) -> Result<Box<[u8]>, SyscallError> {
         Ok(match self {
-            Self::Events => Box::new([]),
+            Self::Events | Self::PerfState(_) => Box::new([]),
             Self::Framebuffer(info, buffers) => {
                 let mut info = *info;
                 let h = install_buffers(
@@ -154,6 +156,14 @@ impl DeviceClaim {
         };
         let device = self.reference.with(|claim| claim.partition().map(|view| view.device_id())).flatten()?;
         Some((device, unique))
+    }
+
+    /// A performance-state claim's read, which [`crate::perf_state::Reader`] answers.
+    pub fn read_perf_state(&self, buf: &mut crate::user_ptr::UserBytesMut) -> Option<u64> {
+        match &self.described.lock().info {
+            DeviceInfo::PerfState(reader) => reader.read(buf),
+            _ => unreachable!("a {:?} claim is not read as a performance-state one", self.class),
+        }
     }
 
     pub fn info_read(&self) -> bool {

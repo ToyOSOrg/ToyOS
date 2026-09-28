@@ -184,6 +184,14 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let claim = Claim::acquire(class)?;
             Ok(DeviceClaim::new(class, DeviceInfo::VirtioSound(info, shm(dma)), claim))
         }
+        DeviceType::PerfState => {
+            let declared = crate::arch::perf_state::declared().map_err(|why| {
+                log!("perf-state: no claim: {why}");
+                ClaimError::Absent
+            })?;
+            let claim = Claim::acquire(class)?;
+            Ok(DeviceClaim::new(class, DeviceInfo::PerfState(crate::perf_state::Reader::new(declared)), claim))
+        }
     }
 }
 

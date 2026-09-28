@@ -1144,6 +1144,10 @@ name = "toyos-pcid"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-perfstate"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-proclife"
 version = "0.1.0"
 dependencies = [

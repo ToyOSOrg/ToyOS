@@ -1,4 +1,5 @@
-//! The acknowledgement half of a TLB shootdown, with no hardware in it.
+//! The acknowledgement half of a machine-wide ask — a TLB shootdown, or a
+//! performance-state read — with no hardware in it.
 //! Compiled a second time into `kernel-loom/` against loom's atomics, so this file must hold no `crate::` references.
 //! The read must happen before the flush, or a target could publish a generation its flush has not yet completed.
 

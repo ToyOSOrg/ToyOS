@@ -35,6 +35,7 @@ pub mod irqchip;
 pub mod keyboard_controller;
 pub mod paging;
 pub mod percpu;
+pub mod perf_state;
 pub mod pio;
 pub mod pmu;
 pub mod rtc;

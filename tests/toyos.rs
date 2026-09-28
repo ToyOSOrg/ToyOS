@@ -247,6 +247,9 @@ const RUST_SKIP: &[&str] = &[
     // Meaningful only on `MetalNoUsb`, where no input source exists; on every
     // other machine both claims succeed. `input_claim_absent` runs it.
     "input_absent",
+    // Which of its two branches is right is the machine's to say: QEMU's CPUs
+    // have no HWP and the T14's do. `perf_request` runs it and reads which.
+    "perf_state",
     // Needs a display whose mode can change, which is `Profile::VirtioGpu`
     // alone; the shared boot has no display at all. `gpu_set_resolution` runs
     // it there, and `iommu_gpu_scanout_swap` the second.
@@ -609,6 +612,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("irq_census_conservation", Sched::Parallel, Tier::Weekly),
     ("control_regs", Sched::Parallel, Tier::Fast),
     ("control_regs_negative", Sched::Parallel, Tier::Fast),
+    ("perf_request", Sched::Parallel, Tier::Fast),
     // The boot facts the metal suite reads off a machine's own records: every
     // CPU the firmware named came up and none of their timestamp counters
     // trails the BSP's; the physical memory manager's accounting against the
@@ -1518,6 +1522,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
     ("input_claim_absent", &["test_rs_input_absent"]),
+    ("perf_request", &["test_rs_perf_state"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
     ("userdev_dma_fault", &["test_rs_log_origin"]),
@@ -1695,6 +1700,10 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| control_regs(b[0].kernel().text(), b[0].cpus()?),
         },
+    ),
+    (
+        "perf_request",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| perf_request_on_metal(b[0]) },
     ),
     (
         "ioapic_topology",
@@ -13695,6 +13704,7 @@ fn run_machine_test(
             control_regs(qemu.boot_log(), CPUS)
         }
         "control_regs_negative" => control_regs_negative(test_config, c_bins, rust_bins),
+        "perf_request" => perf_request(test_config, c_bins, rust_bins),
         "smp_roster_and_tsc_trail" => {
             // Eight, which is the T14's own count and this suite's ceiling.
             const CPUS: u32 = 8;
@@ -19651,5 +19661,59 @@ fn root_withheld_refused(log: &str) -> Result<(), String> {
         }
     }
     eprintln!("  [root] a handoff with no ROOT image refused the boot by name");
+    Ok(())
+}
+
+/// The kernel's performance request, on a machine that cannot hold one: every
+/// QEMU CPU this repository launches has no HWP (`Arch::cpu`'s `qemu64` and
+/// KVM's `host`, whose leaf 6 KVM reduces to `ARAT`), so the kernel refuses it
+/// by name, programs none of it, and a `perf-state` claim is `NotFound`.
+fn perf_request(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const REFUSED: &str = "control_regs: no performance request is declared: no HWP";
+    let mut qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+    let boot = qemu.boot_log().to_string();
+    if !boot.contains(REFUSED) {
+        return Err(format!("the kernel never said {REFUSED:?}:\n{boot}"));
+    }
+    if let Some(line) = boot.lines().find(|l| l.contains(" hwp_request=")) {
+        return Err(format!("a CPU with no HWP was given a request: {line}"));
+    }
+    let result = qemu.run_test("test_rs_perf_state", Duration::from_secs(30));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("perf_state exited {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if !result.stdout.contains("perf-state: refused NotFound") {
+        return Err(format!("the claim was not refused NotFound:\n{}", result.stdout));
+    }
+    eprintln!("  [perf_request] no HWP: refused by name, and the claim refused NotFound");
+    Ok(())
+}
+
+/// The same on the T14, whose CPUs have every register the request names:
+/// each CPU holds the bar's power envelope — the `IA32_HWP_REQUEST`,
+/// `IA32_HWP_REQUEST_PKG` and EPB the Linux run it is held against held — and
+/// the guest binary read every CPU back holding its declaration.
+fn perf_request_on_metal(boot: &metal::Readback) -> Result<(), String> {
+    const BAR: &str = "pm_enable=1 hwp_request=0x80002a04 hwp_request_pkg=0x8000ff01 epb=6 ";
+    let cpus = boot.cpus()?;
+    let log = boot.kernel();
+    for cpu in 0..cpus {
+        let head = format!("control_regs: cpu{cpu} pm_enable=");
+        let Some(line) = log.text().lines().find(|l| l.contains(&head)) else {
+            return Err(format!("cpu{cpu} logged no performance request:\n{}", log.text()));
+        };
+        if !line.contains(&format!("control_regs: cpu{cpu} {BAR}")) {
+            return Err(format!("cpu{cpu} does not hold the bar's envelope {BAR:?}: {line}"));
+        }
+    }
+    boot.job_passed("test_rs_perf_state")?;
+    eprintln!("  [perf_request] {cpus} CPUs hold the bar's request and read it back");
     Ok(())
 }

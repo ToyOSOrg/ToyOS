@@ -30,6 +30,7 @@ pub mod nmi_gate;
 pub mod paging;
 pub mod pat;
 pub mod percpu;
+pub mod perf_state;
 pub mod pio;
 pub mod pmu;
 pub mod rtc;
