@@ -76,18 +76,6 @@ impl IrqGuard {
         }
         Self { rflags, _not_send_sync: core::marker::PhantomData }
     }
-
-    /// The flags captured and interrupts left as they are: what the
-    /// `log-unbracketed-reserve` actuator stages a log reservation with.
-    #[cfg(feature = "boot-actuators")]
-    pub fn unclosed() -> Self {
-        let rflags: u64;
-        // SAFETY: pushfq/pop is balanced and writes no RFLAGS bit.
-        unsafe {
-            core::arch::asm!("pushfq", "pop {saved}", saved = out(reg) rflags);
-        }
-        Self { rflags, _not_send_sync: core::marker::PhantomData }
-    }
 }
 
 impl Drop for IrqGuard {
@@ -107,23 +95,6 @@ pub unsafe fn percpu_fetch_add(
     counter: &core::sync::atomic::AtomicU64,
     _guard: &IrqGuard,
 ) -> u64 {
-    // Under `log-shared-reservation`, stage a load/store race instead of the `xadd` below.
-    if crate::actuator::log_shared_reservation() {
-        let previous = counter.load(core::sync::atomic::Ordering::Relaxed);
-        if crate::log::nested::inject() {
-            // SAFETY: `sti`/`cli` each write one `RFLAGS` bit and touch no memory.
-            unsafe {
-                core::arch::asm!("sti");
-                for _ in 0..256 {
-                    core::hint::spin_loop();
-                }
-                core::arch::asm!("cli");
-            }
-        }
-        counter.store(previous + 1, core::sync::atomic::Ordering::Relaxed);
-        return previous;
-    }
-
     let previous: u64;
     // Not `AtomicU64::fetch_add`: its locked xadd is costly under QEMU TCG emulation.
     // SAFETY: `counter.as_ptr()` is live; unlocked `xadd` retires whole, atomic against an interrupt here.

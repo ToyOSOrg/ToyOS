@@ -255,14 +255,10 @@ loader_watchdog_arms 10064
 locale_detect 9959
 locale_detect_unrecognized 160
 log_backing_read_error 4887
-log_conservation_smp1 4686
 log_flush_retry 20526
-log_nested_emit 5008
 log_partition_identity 9516
 log_partition_layout 477
 log_poll_outlives_a_close 4738
-log_reserve_window 7022
-log_reserve_window_negative 6791
 log_stream 24865
 log_stream_e1000e 25219
 log_stream_no_listener 25182

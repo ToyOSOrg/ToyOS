@@ -429,21 +429,6 @@ actuators! {
     /// Log the monotonic time and which CPUs are alive every 250ms.
     heartbeat = "heartbeat";
 
-    /// Have every CPU emit patterned log records at once from spawned kernel threads.
-    log_storm = "log-storm";
-
-    /// Remove the IF/TF bracket around shard selection through publication — the negative control on the log's interrupt-atomicity claim.
-    log_unbracketed_reserve = "log-unbracketed-reserve";
-
-    /// Send this CPU an IPI mid record-copy and emit one shard generation from the handler.
-    log_nested_emit = "log-nested-emit";
-
-    /// The same IPI, sent between the shard-pointer read and the unlocked `xadd` — stages order damage the log gate detects, unlike the row above's invisible corruption.
-    log_nested_reserve = "log-nested-reserve";
-
-    /// Turn the reservation's `xadd` into a load, an open interrupt window, and a store.
-    log_shared_reservation = "log-shared-reservation";
-
     /// Let a handle close cancel every poll on the log's watch in the machine.
     log_close_cancels_any_syscap = "log-close-cancels-any-syscap";
 

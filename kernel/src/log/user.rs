@@ -46,17 +46,6 @@ pub fn read(
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> Result<usize, SyscallError> {
-    // Started on first read, not at boot: an unread storm has already spent itself before a cursor exists to notice it.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::log_storm() {
-        super::storm::start_once();
-    }
-    // Armed here too, once: one thread serves both injection windows; `log::nested` picks the target from whichever actuators are armed.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::log_nested_emit() || crate::actuator::log_nested_reserve() {
-        super::nested::start_once();
-    }
-
     let shards = super::shard_count();
     // Refused, not truncated: a capacity below one record per shard cannot hold what a single call may have to merge.
     if capacity == 0 || capacity < shards as usize {

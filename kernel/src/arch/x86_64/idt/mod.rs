@@ -3,8 +3,6 @@ mod device_irq;
 mod dma_fault;
 mod hda;
 mod i8042;
-#[cfg(feature = "boot-actuators")]
-mod log_nest;
 mod nmi;
 pub(crate) mod spurious;
 mod timer;
@@ -40,10 +38,6 @@ pub const HDA_VECTOR: u8 = Vector::Hda as u8;
 
 /// The vector the virtio-sound device's MSI-X entry carries.
 pub const VIRTIO_SOUND_VECTOR: u8 = Vector::VirtioSound as u8;
-
-/// The vector `log-nested-emit` sends itself; installed only in a kernel built with `boot-actuators`.
-#[cfg(feature = "boot-actuators")]
-pub const LOG_NEST_VECTOR: u8 = 0x27;
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
@@ -261,8 +255,7 @@ idt_vectors! {
         ring3 I8042        = 0x24, i8042::i8042_entry;
         ring3 DmaFault     = 0x25, dma_fault::dma_fault_entry;
         ring3 Hda          = 0x26, hda::hda_entry;
-        // 0x27 is the actuator gate's (`log_nest`), which is why these start at
-        // 0x28. One per `pcidev` claim slot: the vector is how the kernel knows
+        // One per `pcidev` claim slot: the vector is how the kernel knows
         // which claim a message belongs to.
         ring3 UserDev0     = 0x28, user_dev::user_dev0_entry;
         ring3 UserDev1     = 0x29, user_dev::user_dev1_entry;
@@ -464,8 +457,6 @@ pub fn init() {
     disable_pic();
 
     install_gates(&mut IDT.lock());
-    #[cfg(feature = "boot-actuators")]
-    install_actuator_gates(&mut IDT.lock());
     // Every slot no row filled: delivery through a P = 0 gate is a
     // contributory fault, and the machine would halt as #DF with no name.
     let mut unclaimed = 0u32;
@@ -506,13 +497,6 @@ pub fn init() {
         base,
         limit,
     );
-}
-
-/// The one gate outside the table: only an actuator raises [`LOG_NEST_VECTOR`], so a shipping kernel never installs it.
-#[cfg(feature = "boot-actuators")]
-fn install_actuator_gates(idt: &mut Idt) {
-    idt.entries[LOG_NEST_VECTOR as usize] =
-        IdtEntry::ring3(Ring3Entry::new(log_nest::log_nest_entry));
 }
 
 /// Take IF=1 on this CPU; split from `init` so `ioapic::init` can mask firmware-left entries before interrupts are live.

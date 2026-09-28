@@ -17,8 +17,8 @@
 //! `cancel_by_source` acted on. What it proves is that the *handle* is not what the
 //! source's lifetime is tied to.
 //!
-//! It runs inside `test-runner` for `log-gate`'s reason — a `SysCap` dup is not
-//! a namespace entry, so a spawned binary has none — and it needs `dup` in its
+//! It runs inside `test-runner` because a `SysCap` dup is not a namespace
+//! entry, so a spawned binary has none — and it needs `dup` in its
 //! manifest row on top of `logread`, which `tests/testcases/system.toml` has.
 
 use std::process::Command;
