@@ -27,9 +27,9 @@ nothing.
    | `init` | `supervisor` |
    | `netd` | `netstack` |
    | `logd` | `logkeeper` |
-   | `soundd` | open with the owner |
-   | `blockd` | open with the owner |
-   | `fsd` | open with the owner |
+   | `soundd` | `soundserver` |
+   | `blockd` | `diskserver` |
+   | `fsd` | `fileserver` |
    | `sshd` | `sshserver` |
    | `compositor` | unchanged |
 
@@ -82,7 +82,6 @@ nothing.
 
 ## Open with the owner
 
-- The new names of `fsd`, `soundd` and `blockd`.
 - Before stage 3: the ask's ABI (no syscall is proposed); whether a program
   started through `launcher` is asked or only stopped; whether
   `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.

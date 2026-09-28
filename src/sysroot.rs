@@ -1001,7 +1001,7 @@ mod tests {
         }
         write(&root.join(RECORD), "named");
         write(&linked.join(RECORD), "linked-named");
-        let using = buildlock::keyed_using(&root, Keyed::Sysroot, "in-use");
+        let user = buildlock::tests::sysroot_used_elsewhere(&root, "in-use");
 
         let mut removed = sweep(&root);
         removed.sort();
@@ -1009,7 +1009,7 @@ mod tests {
         for stays in ["named", "linked-named", "in-use"] {
             assert!(dir.join(stays).is_dir(), "{stays} was swept");
         }
-        drop(using);
+        user.release();
         assert_eq!(sweep(&root), [dir.join("in-use")]);
     }
 
