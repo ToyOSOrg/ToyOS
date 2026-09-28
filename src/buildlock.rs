@@ -265,14 +265,14 @@ impl Keyed {
 
 /// Make what `key` names: exclusive, and waited for by every other process that
 /// wants the same key, which then finds it made.
-pub fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
     let lock = format!("{} lock", kind.name());
     exclusive(&keyed_lock_path(root, kind, key), &lock, &format!("building {} {key}", kind.name()))
 }
 
 /// Use what `key` names: shared, so any number of builds use it at once, a
 /// builder of it is waited for, and a sweep cannot remove it.
-pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
     let path = keyed_lock_path(root, kind, key);
     let file = open_lock_file(&path);
     if !try_lock(&file, LOCK_SH) {

@@ -311,6 +311,12 @@ fn unfinished(dir: &Path) -> Option<String> {
     toolchain::toolchain_defect(dir)
 }
 
+/// The sysroot `key` names at `dir`, made by `make` if nobody has made it, and
+/// held in use for as long as the returned guard lives.
+fn held(root: &Path, key: &str, dir: &Path, make: impl FnMut()) -> Guard {
+    buildlock::keyed_made(root, Keyed::Sysroot, key, || unfinished(dir), make)
+}
+
 /// The sysroot this worktree's sources name, made if nobody has made it, and
 /// held in use for as long as the returned value lives.
 pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
@@ -322,11 +328,7 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     fs::create_dir_all(record.parent().expect("a file under target/")).ok();
     fs::write(&record, &key).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
 
-    let using = lock.without_shared(|| {
-        buildlock::keyed_made(root, Keyed::Sysroot, &key, || unfinished(&dir), || {
-            build(root, &compiler, &fork, &key, &dir)
-        })
-    });
+    let using = lock.without_shared(|| held(root, &key, &dir, || build(root, &compiler, &fork, &key, &dir)));
     Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
 }
 
@@ -946,11 +948,6 @@ mod tests {
             write(&lld.parent().unwrap().parent().unwrap().join("lib/clang/22/include/stddef.h"), "stddef");
         }
         compiler
-    }
-
-    /// The sysroot `key` names at `dir`, made by `make` as [`ensure`] makes it.
-    fn held(base: &Path, key: &str, dir: &Path, make: impl FnMut()) -> Guard {
-        buildlock::keyed_made(base, Keyed::Sysroot, key, || unfinished(dir), make)
     }
 
     /// What a panic in `f` said.

@@ -395,18 +395,6 @@ fn bootstrap(force_rebuild: bool, current: bool, toolchain_exists: bool) -> Opti
     }
 }
 
-/// Complete a toolchain whose bootstrap was stopped before [`reassemble`]
-/// finished it. Every other build decides there is nothing to do, and takes no
-/// lock.
-fn complete_toolchain(lock: &mut buildlock::Held, rust_dir: &Path) {
-    lock.act_if(
-        Scope::Global,
-        "complete the toyos toolchain",
-        || incomplete(rust_dir).then_some(()),
-        |()| complete(rust_dir),
-    );
-}
-
 /// Ensure the toolchain is up to date, and return the sysroot this checkout's
 /// sources name — made if nobody has made it (`src/sysroot.rs`).
 ///
@@ -467,7 +455,6 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         Scope::Global,
         "build the rust toolchain",
         || {
-            // Asked first, so an LLVM edit no commit holds is refused before any build.
             let current = crate::compiler::primary_is_current(&rust_dir);
             let toolchain_exists = Command::new("rustup")
                 .args(["run", "toyos", "rustc", "--version"])
@@ -513,7 +500,15 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         },
     );
 
-    complete_toolchain(lock, &rust_dir);
+    // Completes a toolchain whose bootstrap was stopped before `reassemble`
+    // finished it; every other build decides there is nothing to do, and takes
+    // no lock.
+    lock.act_if(
+        Scope::Global,
+        "complete the toyos toolchain",
+        || incomplete(&rust_dir).then_some(()),
+        |()| complete(&rust_dir),
+    );
     assert_toolchain_is_honest(&stage2);
 
     sysroot::ensure(root, &rust_dir, lock)
