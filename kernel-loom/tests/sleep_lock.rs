@@ -57,8 +57,7 @@ const TWO: TaskId = TaskId(1, 2);
 ///
 /// The mirror of `ticket_lock.rs`'s first model, on the type that replaces it
 /// where the holder may be descheduled. Neither thread parks, so what this one
-/// isolates is the edge alone. An exploration in which no `try_lock` follows
-/// the writer's release never takes that edge, so the model reds on one.
+/// isolates is the edge alone.
 #[test]
 fn try_lock_observes_the_previous_holders_writes() {
     static FOLLOWED: AtomicBool = AtomicBool::new(false);

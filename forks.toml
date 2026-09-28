@@ -399,7 +399,7 @@ pr_note = "9481b7db adds crt0.o, d03e5f68 removes it and 39ec544b fixes 9481b7db
 upstream = "tokio-rs/loom"
 base = "v0.7.2"
 base_note = "a7033ee0, the release the host workspace resolved from crates.io before the fork; its `src/` is byte-identical to the published crate's."
-delta = "+108/-33"
+delta = "+132/-33"
 tier = "fork"
 why = """
 Loom's DPOR raced a store or read-modify-write only against the atomic's last
@@ -408,8 +408,6 @@ storing thread's own, an earlier load by another thread was never raced, so the
 store was never run ahead of it and a model whose defect needs that order
 passed. The fork races a store or read-modify-write against the last store and
 every thread's last load since it, and joins all of them into its DPOR clock.
-Consumed by the root `[patch.crates-io]`, so by every host-workspace model;
-`kernel-loom/tests/loom_exploration.rs` reds without it.
 """
 pr = "none — no upstream PRs for now (owner). Written to upstream quality, with its regression tests in loom's own `tests/atomic.rs`."
 exit = "goes when upstream races a store against every thread's last load"

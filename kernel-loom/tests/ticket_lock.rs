@@ -30,8 +30,7 @@ use loom::sync::Arc;
 ///
 /// Both threads acquire through `try_lock`, so nothing spins. The release edge
 /// under test is `LockGuard::drop`, which is the same one whichever path the
-/// previous owner acquired by. An exploration in which no `try_lock` follows
-/// the writer's release never takes that edge, so the model reds on one.
+/// previous owner acquired by.
 #[test]
 fn try_lock_observes_the_previous_owners_writes() {
     static FOLLOWED: AtomicBool = AtomicBool::new(false);

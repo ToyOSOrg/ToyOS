@@ -199,9 +199,6 @@ toyos-xhci = { path = "toyos-xhci" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 
-# The fork races a store against every thread's last load, which stock loom
-# does not (`forks.toml`), and `kernel-loom/tests/loom_exploration.rs` reds
-# without it.
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
 
