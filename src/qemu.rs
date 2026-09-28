@@ -141,7 +141,15 @@ pub fn launch(opts: &Options) {
     }
     qemu.arg("-cpu").arg(arch.cpu(accel));
 
-    let [code, vars] = arch.pflash(std::path::Path::new("."));
+    // Remade every launch, beside the image it boots: what one session's
+    // firmware wrote is never the next one's premise.
+    let vars = std::path::Path::new("target/firmware-vars.fd");
+    let [code, vars] = toyos_build::firmware::of(arch)
+        .and_then(|firmware| firmware.fresh_vars(vars).map(|()| firmware.drives(vars)))
+        .unwrap_or_else(|why| {
+            eprintln!("Error: {why}");
+            std::process::exit(1)
+        });
     if let Some(boot) = arch.boot() {
         qemu.arg("-boot").arg(boot);
     }
@@ -281,12 +289,13 @@ pub fn launch(opts: &Options) {
 
 /// The machine a profile runs on, with its IOMMU where the machine carries one
 /// as a property rather than a device.
-fn machine(arch: Arch, iommu: bool) -> &'static str {
+fn machine(arch: Arch, iommu: bool) -> String {
+    let base = arch.machine();
     match (arch, iommu) {
-        (Arch::X86_64, true) => "q35,kernel-irqchip=split",
-        (Arch::X86_64, false) => "q35",
-        (Arch::Aarch64, true) => "virt,gic-version=3,iommu=smmuv3",
-        (Arch::Aarch64, false) => "virt,gic-version=3",
+        (Arch::X86_64, true) => format!("{base},kernel-irqchip=split"),
+        (Arch::X86_64, false) => base.to_string(),
+        (Arch::Aarch64, true) => format!("{base},gic-version=3,iommu=smmuv3"),
+        (Arch::Aarch64, false) => format!("{base},gic-version=3"),
     }
 }
 

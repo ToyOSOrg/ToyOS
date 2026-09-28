@@ -1,7 +1,7 @@
 //! The machines ToyOS runs on.
 //!
-//! Every target triple, QEMU binary, firmware image, guest CPU and accelerator
-//! the build system and the harness name is a function of one [`Arch`]. Neither
+//! Every target triple, QEMU binary, guest CPU and accelerator the build
+//! system and the harness name is a function of one [`Arch`]. Neither
 //! architecture is the reference: a new question about a machine is a new
 //! method here that both variants answer, or it does not compile.
 
@@ -110,29 +110,12 @@ impl Arch {
         }
     }
 
-    /// The firmware's code and variable-store images, relative to the
-    /// repository root, pinned and hashed in `NOTICE`.
-    pub const fn firmware(self) -> (&'static str, &'static str) {
+    /// The `-machine` alias this architecture's guests boot on.
+    pub const fn machine(self) -> &'static str {
         match self {
-            Arch::X86_64 => ("ovmf/OVMF_CODE-pure-efi.fd", "ovmf/OVMF_VARS-pure-efi.fd"),
-            Arch::Aarch64 => ("aavmf/AAVMF_CODE.fd", "aavmf/AAVMF_VARS.fd"),
+            Arch::X86_64 => "q35",
+            Arch::Aarch64 => "virt",
         }
-    }
-
-    /// The two `-drive` values that give a guest its firmware, from the
-    /// repository at `root`. The store is never written back: OVMF boots from a
-    /// read-only one, and AAVMF's `DEBUG` build asserts on one, so it writes a
-    /// snapshot QEMU discards.
-    pub fn pflash(self, root: &Path) -> [String; 2] {
-        let (code, vars) = self.firmware();
-        let store = match self {
-            Arch::X86_64 => "readonly=on",
-            Arch::Aarch64 => "snapshot=on",
-        };
-        [
-            format!("if=pflash,format=raw,unit=0,file={},readonly=on", root.join(code).display()),
-            format!("if=pflash,format=raw,unit=1,file={},{store}", root.join(vars).display()),
-        ]
     }
 
     /// QEMU's `-boot` for this machine's firmware, if it needs one. AAVMF
