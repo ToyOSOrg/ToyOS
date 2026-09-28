@@ -43,7 +43,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::buildlock::{self, Guard, Held, Keyed};
-use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity, Restore};
+use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is none of them: the
@@ -279,10 +279,6 @@ fn build_in_fork(fork: &Path) -> PathBuf {
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, config_text(&build_dir, &host)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
-    // Bootstrap re-locks both lockfiles to this worktree's `toyos-abi` and
-    // `toyos`; the fork's own are put back, so the checkout stays clean and the
-    // key stays the one it was built for.
-    let _locks = (Restore::holding(&fork.join("Cargo.lock")), Restore::holding(&fork.join("library/Cargo.lock")));
     let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library"];
     let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
     toolchain::refuse_on_compile_error(&log, "the compiler");

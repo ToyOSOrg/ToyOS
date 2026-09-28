@@ -573,8 +573,14 @@ fn link_stale(stage2: &Path) -> bool {
     rustup_link().is_none_or(|current| current != stage2)
 }
 
-/// Run bootstrap, streaming its output where it was going anyway and keeping a
-/// copy.
+/// Run bootstrap in the fork checkout `rust_dir`, streaming its output where it
+/// was going anyway and keeping a copy, with both the checkout's lockfiles put
+/// back as they were when this returns, however the build that holds them
+/// ends.
+///
+/// Bootstrap re-locks them against this worktree's `toyos-abi` and `toyos`;
+/// putting them back keeps the checkout clean, and a key read from it the one
+/// that was built.
 ///
 /// `.status()` was enough while the only question was the exit code. It is not
 /// enough for the question [`refuse_on_compile_error`] asks, which is what the
@@ -583,6 +589,10 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
     use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::{Arc, Mutex};
 
+    let _locks = [
+        Restore::holding(&rust_dir.join("Cargo.lock")),
+        Restore::holding(&rust_dir.join("library/Cargo.lock")),
+    ];
     // Two literals and not one variable: `src/sourcegate::every_binary_the_host_runs_is_declared`
     // reads the argument, and a name assembled at run time is a name nobody declared.
     let (x, mut command) = if rust_dir.join("x").exists() {
@@ -623,6 +633,30 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
 
     let log = Arc::try_unwrap(log).expect("both pumps are joined").into_inner();
     (status.success(), log.expect("no pump panicked while holding it"))
+}
+
+/// A file put back to its bytes when this drops, however the scope ends, by a
+/// sibling renamed over it: a restore that fails leaves the file as it was.
+struct Restore {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl Restore {
+    fn holding(path: &Path) -> Self {
+        let bytes = fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        Self { path: path.to_path_buf(), bytes }
+    }
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        let mut sibling = self.path.clone().into_os_string();
+        sibling.push(".restore");
+        let sibling = PathBuf::from(sibling);
+        fs::write(&sibling, &self.bytes).unwrap_or_else(|e| panic!("write {}: {e}", sibling.display()));
+        fs::rename(&sibling, &self.path).unwrap_or_else(|e| panic!("restore {}: {e}", self.path.display()));
+    }
 }
 
 /// Where a compile error starts in an `x build` log, if there is one.
@@ -912,6 +946,61 @@ fn link_host_target(rust_dir: &Path) {
 mod tests {
     use super::*;
     use toyos_tmpdir::TempDir;
+
+    /// The file a fork checkout carries for [`a_fake_bootstrap`] to act in it.
+    const FAKE: &str = "FAKE_BOOTSTRAP";
+
+    /// **Every bootstrap run leaves the fork's lockfiles as it found them**:
+    /// `./x` here is this test binary, running [`a_fake_bootstrap`], which
+    /// re-locks both and fails.
+    #[test]
+    fn a_bootstrap_run_leaves_both_lockfiles_as_they_were() {
+        let fork = TempDir::new("x-build-locks");
+        let locks = [fork.join("Cargo.lock"), fork.join("library/Cargo.lock")];
+        fs::create_dir_all(fork.join("library")).unwrap();
+        for lock in &locks {
+            fs::write(lock, "# as committed\n").unwrap();
+        }
+        fs::write(fork.join(FAKE), "").unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
+
+        let args = ["--exact", "toolchain::tests::a_fake_bootstrap", "--include-ignored", "--nocapture"];
+        let (ok, log) = x_build(&fork, &args, "a fake bootstrap");
+        assert!(!ok, "the fake bootstrap did not run: {log:?}");
+        assert!(log.iter().any(|l| l.contains("re-locked both")), "{log:?}");
+        for lock in &locks {
+            assert_eq!(fs::read_to_string(lock).unwrap(), "# as committed\n", "{} was left re-locked", lock.display());
+        }
+    }
+
+    #[test]
+    #[ignore = "the bootstrap `a_bootstrap_run_leaves_both_lockfiles_as_they_were` runs; never runs on its own"]
+    fn a_fake_bootstrap() {
+        assert!(Path::new(FAKE).is_file(), "a_fake_bootstrap ran outside a fake fork checkout; it is not a test");
+        for lock in ["Cargo.lock", "library/Cargo.lock"] {
+            fs::write(lock, "# re-locked to the published toyos-abi\n").unwrap();
+        }
+        panic!("re-locked both, and failed");
+    }
+
+    /// **A restore that cannot write leaves the file as it found it**, and
+    /// names what it could not write.
+    #[test]
+    fn a_restore_that_cannot_write_leaves_the_file_whole() {
+        let dir = TempDir::new("restore-fails");
+        let lock = dir.join("Cargo.lock");
+        fs::write(&lock, "# as committed\n").unwrap();
+        let held = Restore::holding(&lock);
+        fs::write(&lock, "# re-locked to the published toyos-abi\n").unwrap();
+        fs::create_dir(dir.join("Cargo.lock.restore")).unwrap();
+
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(held)));
+        let refusal = failed.expect_err("a restore that could not write went unsaid");
+        let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
+        assert!(refusal.contains("Cargo.lock.restore"), "{refusal}");
+        assert_eq!(fs::read_to_string(&lock).unwrap(), "# re-locked to the published toyos-abi\n",
+                   "a restore that failed wrote over the file");
+    }
 
     /// **The layout that makes rustup narrate, as a decision.**
     ///
