@@ -10,8 +10,10 @@ Each window has one region, which the client draws into and the compositor
 blits from (`render::draw_window` in `userland/compositor/src/render.rs`). The
 compositor reads it as a `&[u8]` while the client may be writing it: a data
 race in Rust's model, and on the panel a frame whose pixels come from two of
-the client's frames. Nothing bounds the read outside the mapping, so the
-compositor is not at risk; the soundness claim and the frame are.
+the client's frames.
+
+Owner: the compositor's window blit, `render::draw_window` in
+`userland/compositor/src/render.rs`.
 
 **Exit**: the compositor makes two buffers per window, a client hands one over
 with its present and gets it back on release, and the compositor never reads a

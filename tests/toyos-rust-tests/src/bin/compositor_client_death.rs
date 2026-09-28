@@ -23,10 +23,6 @@
 //! question it answers from its dispatch — the host asserts the other half,
 //! that the desktop is still painting and that every client dropped on the way
 //! was named with its pid.
-//!
-//! No wait here has a clock: each blocks on its event, so one that never comes
-//! is the harness's ceiling. Before each wait on the compositor this process
-//! prints what it waits for, the line such an event leaves last.
 
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
@@ -150,6 +146,7 @@ fn run() {
             None => fail(&format!("[{what}] the connection went and the window never said so")),
         }
     }
+    waiting(what, "the latched poll answering None");
     if ending.poll_event(FOREVER).is_some() {
         fail(&format!(
             "[{what}] the poll after Close answered again — a client that drains until None \

@@ -26,12 +26,8 @@
 //! Each case ends with a probe the compositor answers from its dispatch. The
 //! host asserts what this side cannot see: no handle fault and no compositor
 //! exit in the kernel's records, and the refusals named.
-//!
-//! No wait here has a clock. Each blocks on its event and first prints what it
-//! waits for, so an event that never comes is the harness's ceiling with its
-//! name on the guest's last line.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::Ordering;
 
 use toyos::endow;
 use toyos::ipc;
@@ -129,12 +125,13 @@ fn main() {
     // Last: the new window takes the focus the pastes went to.
     let what = "a commit on a window";
     waiting(what, "its window");
-    let mut committing = Window::create_with_title(64, 64, "commit")
+    let committing = Window::create_with_title(64, 64, "commit")
         .unwrap_or_else(|e| fail(what, &format!("no window: {e}")));
     ipc::signal(committing.handle(), COPY_COMMIT)
         .unwrap_or_else(|e| fail(what, &format!("no commit: {e:?}")));
-    waiting(what, "the compositor closing the window");
-    while !matches!(committing.recv_event(), Event::Close) {}
+    ipc::signal(committing.handle(), window::MSG_GET_RESOLUTION)
+        .unwrap_or_else(|e| fail(what, &format!("no probe: {e:?}")));
+    await_hangup(committing.handle(), what, "the compositor closing the window");
     probe(what);
 
     println!("hostile clipboard: every case survived, compositor still serving");
@@ -202,16 +199,9 @@ fn begin_copy(what: &str) -> (Connection, SharedMemory) {
 }
 
 fn fill(region: &SharedMemory, byte: u8) {
-    for b in bytes(region) {
+    for b in region.as_atomic() {
         b.store(byte, Ordering::Relaxed);
     }
-}
-
-/// The region as the only type that may alias memory another process reads.
-fn bytes(region: &SharedMemory) -> &[AtomicU8] {
-    // SAFETY: the mapping is `region.len()` bytes and `region` outlives the
-    // borrow; the compositor reads it concurrently, which an atomic permits.
-    unsafe { std::slice::from_raw_parts(region.as_ptr() as *const AtomicU8, region.len()) }
 }
 
 /// Ask the host for GUI+V and return what the target is pasted.

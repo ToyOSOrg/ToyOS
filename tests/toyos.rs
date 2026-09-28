@@ -710,7 +710,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // slow on purpose. Its own boot too: it leaves the pointer somewhere else
     // and the window in a different place than it found them.
     ("metal_sim_window_drag", Sched::Serial, Tier::Nightly),
-    // A client's clipboard; no clock in any verdict. Its own
+    // A client's clipboard. Its own
     // boot: the compositor it abuses has to be one nothing else has touched.
     ("metal_sim_hostile_clipboard", Sched::Parallel, Tier::Fast),
     // A host-measured drain rate with an 8 s ceiling on a 3.3 s expectation.
@@ -11314,9 +11314,6 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
         ));
     }
 
-    // A payload past what any client may inline is refused by name, because
-    // storing the prefix a frame reader keeps is the silent half of the same
-    // event.
     const OVERSIZE: &str = "compositor: refusing an inline payload past";
     if !result.stdout.contains(OVERSIZE) {
         return Err(format!(
