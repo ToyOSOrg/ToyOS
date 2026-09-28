@@ -702,9 +702,8 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
         .unwrap_or_else(|| "an unnamed CPU".to_string());
     let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
     let line = format!(
-        "QEMU {have}, firmware {} as {} declares it, {accel}, {cpu}, {cores} core(s)",
-        firmware.code.display(),
-        firmware.descriptor.display()
+        "QEMU {have}, firmware {}, {accel}, {cpu}, {cores} core(s)",
+        firmware.code.display()
     );
     if have != want {
         return Err(format!(

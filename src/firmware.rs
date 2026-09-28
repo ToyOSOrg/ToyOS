@@ -20,8 +20,6 @@ use crate::arch::Arch;
 /// One installation's firmware for one machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Firmware {
-    /// The descriptor that declared it.
-    pub descriptor: PathBuf,
     /// The code image, which a guest only ever reads.
     pub code: PathBuf,
     /// The variable-store template, which no guest is handed: each boot writes
@@ -153,7 +151,6 @@ fn select(arch: Arch, machine: &str, descriptors: &[(PathBuf, Vec<u8>)]) -> Resu
             && fits_machine.map_err(|why| format!("{}: {why}", path.display()))?.contains(&true);
         if fits {
             return Ok(Firmware {
-                descriptor: path.clone(),
                 code: flash.executable.filename,
                 vars: flash.nvram_template.expect("a fitting descriptor names its template").filename,
             });
@@ -265,7 +262,6 @@ mod tests {
         assert_eq!(
             select(Arch::X86_64, "pc-q35-11.1", &files),
             Ok(Firmware {
-                descriptor: PathBuf::from("60-plain.json"),
                 code: PathBuf::from("/plain.fd"),
                 vars: PathBuf::from("/plain.fd.vars"),
             })
@@ -345,7 +341,7 @@ mod tests {
         let template = tmp.path().join("template.fd");
         std::fs::write(&template, b"vars").unwrap();
         std::fs::set_permissions(&template, std::fs::Permissions::from_mode(0o444)).unwrap();
-        let firmware = Firmware { descriptor: PathBuf::new(), code: PathBuf::new(), vars: template };
+        let firmware = Firmware { code: PathBuf::new(), vars: template };
         let to = tmp.path().join("copy.fd");
         firmware.fresh_vars(&to).unwrap();
         let mode = std::fs::metadata(&to).unwrap().permissions().mode() & 0o777;

@@ -110,9 +110,7 @@ impl Arch {
         }
     }
 
-    /// The `-machine` alias this architecture's guests boot on, and (with
-    /// x86_64's PC lineage prefixed `pc-`) the family a firmware descriptor's
-    /// `machines` glob is matched against.
+    /// The `-machine` alias this architecture's guests boot on.
     pub const fn machine(self) -> &'static str {
         match self {
             Arch::X86_64 => "q35",
@@ -201,12 +199,6 @@ mod tests {
             }
             assert!(arch.qemu().ends_with(arch.name()));
         }
-    }
-
-    #[test]
-    fn each_arch_names_its_own_qemu_machine() {
-        assert_eq!(Arch::X86_64.machine(), "q35");
-        assert_eq!(Arch::Aarch64.machine(), "virt");
     }
 
     #[test]

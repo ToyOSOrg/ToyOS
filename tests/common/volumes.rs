@@ -3401,7 +3401,7 @@ pub fn root_named_twice_on_the_boot_disk(
         rust_bins,
         BootOptions { boot_image: Some(qemu::Staged::Written(path.clone())), ..Default::default() },
     );
-    let log = format!("{}{}", qemu.uart_log(), qemu.boot_log());
+    let log = qemu.uart_log();
     drop(qemu);
     let _ = std::fs::remove_file(&path);
 

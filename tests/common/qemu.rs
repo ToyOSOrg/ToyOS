@@ -2976,7 +2976,7 @@ pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
 /// and nothing else writes it — a program's line reaches the console only
 /// through `logd`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
-    line.starts_with("[kernel ")
+    line.starts_with(toyos_build::kernelconsole::HEAD)
 }
 
 /// A console line's text as its program wrote it: a program's line without
@@ -3805,11 +3805,7 @@ impl Drop for QemuInstance {
         let _ = self.child.wait();
         let _ = fs::remove_file(&self.audio_wav);
         // **The 16550's log outlives the guest, because it is the one channel
-        // that exists before the console does.** Firmware, the bootloader and
-        // the kernel up to the backend switch write here and nowhere else, so a
-        // boot that dies before virtio-console comes up leaves this file and an
-        // empty capture — which is exactly the shape `issues/diagnostics/`
-        // records as looking like a kernel that never started. 1.4 KB on a
+        // that exists before the console does.** 1.4 KB on a
         // healthy `tests/testcases` boot, measured, against the hundreds of
         // megabytes of per-boot image beside it.
         //
@@ -4950,6 +4946,14 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     let (tx, rx) = mpsc::channel::<String>();
     let console = ConsoleStream::new();
     let reader_console = console.clone();
+    // The virtio port starts at the kernel's first record; a 16550 on stdio has
+    // no other file, so it is read whole.
+    let mut kernel_console = options
+        .profile
+        .shape()
+        .virtio
+        .present()
+        .then(toyos_build::kernelconsole::KernelConsole::default);
     let reader_thread = thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut full_log = String::new();
@@ -4969,12 +4973,16 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
                 }
                 return full_log;
             }
+            let read = match &mut kernel_console {
+                Some(console) => console.pass(&chunk[..read]),
+                None => std::borrow::Cow::Borrowed(&chunk[..read]),
+            };
             reader_console
                 .0
                 .lock()
                 .expect("the console stream lock is never held across a panic")
-                .extend_from_slice(&chunk[..read]);
-            pending.extend_from_slice(&chunk[..read]);
+                .extend_from_slice(&read);
+            pending.extend_from_slice(&read);
             while let Some(at) = pending.iter().position(|&b| b == b'\n') {
                 let mut line: Vec<u8> = pending.drain(..=at).collect();
                 line.pop();
