@@ -6,11 +6,13 @@
 //! frame the allocator hands out first, so the two frames are never one
 //! physically contiguous run — the buffer a kernel that copies through one run
 //! refuses with `BadAddress`.
+//!
+//! Plain `std` and nothing of ToyOS's own, so the same source is its own
+//! oracle on any other operating system: the bytes it expects are the ones
+//! `read` and `write` move everywhere.
 
 use std::fs::{self, File};
-use std::io::{Read, Write};
-
-use toyos_abi::syscall;
+use std::io::{self, Read, Write};
 
 const PAGE_2M: usize = 2 * 1024 * 1024;
 /// Three windows: whatever the alignment, two whole ones lie inside.
@@ -53,28 +55,30 @@ fn main() {
         at(boundary - REACH - 1).read_volatile() == CANARY && at(boundary + REACH).read_volatile() == CANARY
     };
 
-    // 1. A pipe read: the kernel writes a ring run into the buffer.
-    let ends = syscall::pipe().expect("pipe");
+    // 1. A pipe read: the kernel writes into the buffer. The other end is a
+    //    thread so that no pipe capacity decides the outcome.
+    let (mut reader, mut writer) = io::pipe().expect("pipe");
     let sent = pattern(buf.len(), 0x5A);
-    assert_eq!(syscall::write(ends.write, &sent), Ok(sent.len()), "fill the pipe");
-    let got = syscall::read(ends.read, buf);
+    std::thread::scope(|s| {
+        s.spawn(|| writer.write_all(&sent).expect("fill the pipe"));
+        reader.read_exact(buf).expect("a pipe read into a buffer across two windows");
+    });
     assert!(outside_intact(), "a pipe read into the buffer wrote past its ends");
-    assert_eq!(got, Ok(buf.len()), "a pipe read into a buffer across two windows");
     if let Some(diff) = first_difference(buf, &sent) {
         panic!("a pipe read across two windows: {diff}");
     }
 
-    // 2. A pipe write: the kernel reads the buffer into a ring run.
+    // 2. A pipe write: the kernel reads the buffer.
     let mine = pattern(buf.len(), 0xC3);
     buf.copy_from_slice(&mine);
-    assert_eq!(syscall::write(ends.write, buf), Ok(buf.len()), "a pipe write from a buffer across two windows");
     let mut back = vec![0u8; buf.len()];
-    assert_eq!(syscall::read(ends.read, &mut back), Ok(back.len()), "drain the pipe");
+    std::thread::scope(|s| {
+        s.spawn(|| reader.read_exact(&mut back).expect("drain the pipe"));
+        writer.write_all(buf).expect("a pipe write from a buffer across two windows");
+    });
     if let Some(diff) = first_difference(&back, &mine) {
         panic!("a pipe write from across two windows: {diff}");
     }
-    syscall::close(ends.read);
-    syscall::close(ends.write);
 
     // 3. A file write and read back: the file cache's copies, a page at a time.
     let mine = pattern(buf.len(), 0x3C);
