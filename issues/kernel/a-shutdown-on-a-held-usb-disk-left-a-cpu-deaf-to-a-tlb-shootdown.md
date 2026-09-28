@@ -30,7 +30,7 @@ branch no longer starts that thread there, which would remove this boot's
 trigger and not the deaf CPU.
 
 `a-disk-operation-can-spin-past-the-tlb-ack-tripwire-before-its-break.md` is
-the arithmetic for one disk operation outrunning `ACK_TIMEOUT`; this is a boot
+the arithmetic for one disk operation outrunning `time::DEAF_CPU`; this is a boot
 that did outrun it, in `quiesce`, across several operations each inside its
 own budget. Whether `quiesce` holds `IF` clear between them is not measured.
 

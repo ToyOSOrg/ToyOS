@@ -7,7 +7,7 @@ opened: 2026-09-08
 # Nothing asserts that a claim answers no configuration write
 
 `SYS_DEVICE_REG_WRITE` on a `RegTarget::PciConfig` target is refused
-`NotSupported` in `kernel/src/arch/syscall/device.rs`, and no test in any tier
+`NotSupported` in `kernel/src/syscall/device.rs`, and no test in any tier
 reads that refusal. It is what a handed-over MSI function's safety rests on: its
 message address and data are words of configuration space rather than a table in
 a BAR, so nothing is withheld from the holder and the whole of the boundary is

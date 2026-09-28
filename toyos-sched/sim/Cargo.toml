@@ -1,5 +1,6 @@
 [package]
 name = "toyos-sched-sim"
+description = "The deterministic host simulator for toyos-sched: machine, explorer, shrinker and scenario corpus."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

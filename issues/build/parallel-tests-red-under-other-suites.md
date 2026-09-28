@@ -68,31 +68,27 @@ changes.
   the profile used to seat a second desktop beside, `desktop_window_child`, is
   `Tier::Nightly` and so never in a pull request's parallel phase.
 - **`desktop_locale_detect`** — retired 2026-09-04, green 5 of 5 beside a full
-  fast tier; `src/redlist.rs` carries the runs.
+  fast tier.
 - **`netd_connection_caps`** — retired 2026-09-04, green 5 of 5 beside a full
-  fast tier; `src/redlist.rs` carries the runs.
+  fast tier.
 - **`metal_sim_pointer_churn`** — observed once, on a host carrying three other
   suites *and* a `toyos-sched-sim` run. Not investigated. Still
   `Sched::Parallel`.
 - **`dump_nmi_probe`** — retired 2026-09-04, green 3 of 3 beside a full fast
-  tier; `src/redlist.rs` carries the runs. `4ad8875` made it `Sched::Serial`,
+  tier. `4ad8875` made it `Sched::Serial`,
   which shows what serialising buys and what it does not: within one run the
-  phase is quiet, across runs nothing but `buildlock::guest_slot` spans
-  worktrees and twelve slots is not one guest.
+  phase is quiet.
 - **`blocked_dump`** — retired 2026-09-04, green 3 of 3 beside a full fast
-  tier; `src/redlist.rs` carries the runs.
+  tier.
 - **`screen_console_scroll`** — retired 2026-09-04, green 3 of 3 beside a full
-  fast tier; `src/redlist.rs` carries the runs.
+  fast tier.
 - **`hda_tone`** — added 2026-08-07, hours after the test itself landed. In a
   full run on a host carrying another worktree's suite: `2 mid-tone silences in
   the capture: total 2 [3p×1 4p×1]`, `dither 3.3%`, `phase-breaks 92`. Alone on
   the same tree eight minutes later: `gaps none`, `phase-breaks 16` — the
   declared #88 failure and nothing else. It is `Sched::Serial`, so like
   `dump_nmi_probe` the harness never re-runs it alone and the run simply reds.
-  Its `EXPECTED_FAILURES` entry covers the phase-break message alone, which is
-  why a *dropout* under load reaches the verdict, and that is correct: **do not
-  widen it.** A silence and a phase break are two different defects and an entry
-  that covered both would stop saying anything. The tree it was seen on differed
+  The tree it was seen on differed
   from main only in `src/`, so the guest image was byte-identical to main's.
   **Three times the same day**, all three in landing gates of that one
   build-system branch and all three confirmed alone within ten minutes: `2
@@ -103,7 +99,7 @@ changes.
   the branch last merged, which reads as the branch's own work and is not.
 
 - **`xhci_hid_break`** — retired 2026-09-04, green 3 of 3 beside a full fast
-  tier; `src/redlist.rs` carries the runs. It is one of the three longest jobs
+  tier. It is one of the three longest jobs
   in the suite by `longest_first`'s own profile, so it is dispatched early and
   runs beside everything.
 
@@ -147,9 +143,7 @@ changes.
   immediately afterwards: `PASS handle_kill_policy (615ms)`. A third sighting of
   the same census, on a third unrelated branch, is what the mechanism above
   predicts — and the three together are why it is no longer only this file's
-  record: `src/redlist.rs` carries an `Instrument::Ci` row for
-  `handle_kill_policy` as of the CI sighting, so `cargo run -- --known-red
-  handle_kill_policy` now answers it.
+  record.
 
 - **`wall_clock_file`** — added 2026-08-17, same session, **1 of 6**,
   `ALONE … GREEN`, green on all twelve shards of the same tree. Not
@@ -190,8 +184,7 @@ changes.
   answers `NOT ON THE LIST`. The two runs are the measurement: the red one was
   the branch's *first* suite after a full rebuild and its parallel phase took
   103.9 s, the green one minutes later on a warm tree took 32.0 s — so the phase
-  that failed was carrying this worktree's own twelve kernel builds, which is
-  the load `build_slot` bounds and the section below describes. The branch's
+  that failed was carrying this worktree's own twelve kernel builds. The branch's
   kernel delta in `drivers/xhci/` is two comment blocks, two `#[allow]`
   attributes and two pairs of parentheses that spell out the precedence Rust
   already applied (`+` and `*` bind tighter than `|`), so no instruction in that
@@ -220,8 +213,7 @@ changes.
   record of which children died and which calls their parent made.
 
 - **`console_line_atomicity`** — added 2026-08-20, the name's first sighting
-  on the CI instrument (its standing rows are the loaded dev host's, 1 of 3
-  there): PR #166 run 32364721784, `guest (10)`, `writer A declared 1000
+  on the CI instrument: PR #166 run 32364721784, `guest (10)`, `writer A declared 1000
   whole lines and the capture carries 995`, `ALONE: GREEN` in the same job.
   CI runs one guest per machine, so whatever loses five of a writer's
   thousand lines there is not host contention — which sharpens this file's
@@ -275,7 +267,7 @@ changes.
   yet. `ALONE … GREEN` in **5 s** in the same session, reporting the storm in
   full: `3000 sent, 3000 taken, 43 in the window, 140 in Ring 3, 663 syscalls
   made under the storm`. `cargo run -- --known-red syscall_window_nmi` answered
-  `NOT ON THE LIST` when it was filed; `src/redlist.rs` carries a row now.
+  `NOT ON THE LIST` when it was filed.
 
   **Not the branch it was found on**: that branch changed the syscall entry's
   displacement *spelling* — `const` operands for the same immediates,
@@ -383,51 +375,15 @@ changes.
   `arch/tlb.rs:171` (`issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md`).
   None investigated.
 
-**The eight-landing regime, and what it does to the paragraph above.** That
-paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
-twelve guests across every worktree. It recurred on 2026-08-07: **eight
-`toyos-build --land` processes were queued on the integration lock at once**, and
-one branch's two consecutive landing gates died on two *different* tests from
-this list — `blocked_dump`, then `screen_early_panic` — each `ALONE … GREEN`,
-neither related to a branch that touched only `tests/`. The semaphore is not
-wrong; it counts the thing it says it counts. But a landing gate is a full build
-plus a suite, and **the build half is bounded by nothing** — eight of them is
-eight cargo trees compiling on 14 cores, which reaches every liveness margin in
-the wide phase without a thirteenth guest ever existing. The gate's own audio
-lines recorded the host at seven `toyos-build` processes throughout.
-
-So the closing claim needs the qualifier: guest slots bound *guests*, and a
-landing storm is not made of guests. Whether the integration lock should also
-gate the gate's build, or whether these tests belong in the serial tail, is a
-decision for whoever owns the harness; what is established here is that a branch
-can be unable to land for reasons that have nothing to do with it.
-
-**Bounded the same day, and the count was closer to home than a landing storm.**
-A worker takes a guest slot and then *compiles its kernel variant*, so twelve
-workers in one suite are twelve concurrent `cargo build`s before any of them
-boots — which is the load 49.9 with twelve rustc/cargo processes and exactly one
-guest live that was measured while this was being written, on a host where the
-semaphore was doing precisely what it says. `buildlock::build_slot` is the
-second count: four across every worktree, its own directory so a suite holding
-every guest slot can still compile, `--host-builds N` to override and `0` to turn
-off. It bounds the build half of a landing gate
-by construction, since a gate's builds are these builds. What it does **not**
-bound is anything that never enters `src/build.rs` — a `toyos-sched-sim measure`,
-a hand-run `cargo build` in a fork clone, the primary's `./x.py`.
-
-**What to do about a red on any of these names:** read the `ALONE` line under it
-before anything else. `GREEN` there means the host, not the kernel. What none of
+What none of
 them should get is a widened bound — a gate that tolerates one lost byte
 tolerates the defect it was written for. The two fixes above are the two shapes
 that are legitimate: make the verdict independent of the rate, or scale a
-liveness ceiling with the phase. The global QEMU-slot semaphore this section
-used to name as the closing move now exists (`buildlock::guest_slot`): the host
-admits twelve guests across every
-worktree, so the four-suite regime these were observed in cannot recur. A looser
+liveness ceiling with the phase. A looser
 assertion is still not the answer.
 
-**But `ALONE … red again — the defect is real` is not evidence, and the protocol
-above leans on it.** The re-run happens inside the same process, moments after
+**But `ALONE … red again — the defect is real` is not evidence.**
+The re-run happens inside the same process, moments after
 twelve guests have been torn down and while another worktree's suite may still
 own the host — so it is alone in the suite's bookkeeping and not on the machine.
 Measured 2026-08-06 on the xHCI port-machine branch, whose kernel delta is
@@ -451,12 +407,6 @@ the host was carrying roughly four times its own load throughout, the `ALONE`
 re-run included. A verdict that flips between "GREEN, it is the host" and "red
 again, the defect is real" for one test on one tree twenty minutes apart is
 measuring the host in both directions.
-
-Consequence for the protocol: `ALONE: GREEN` still means what it says, because a
-green cannot be produced by load. `ALONE: red again` means nothing on its own
-and must be confirmed against `main` in the same session before it is believed —
-which is the A/B the audio rules already require and which this line currently
-invites an agent to skip.
 
 **2026-08-23 — the host-speed correction was blind to wide-SMP oversubscription,
 and now is not.** Each CI `guest` shard is its own four-core `ubuntu-24.04`
@@ -517,7 +467,7 @@ describes. `ALONE: GREEN` both times, and green again when re-run alone by hand
 (3 s, 2 s). So the name flakes for two different reasons and only one of them
 is the ceiling this section corrects; what a contended host does to `/system/bin/init`'s
 handle accounting on a *refused* launch is not explained here, and nobody has a
-mechanism for it. `src/redlist.rs` carries the sighting.
+mechanism for it.
 
 - **`i8042_undecoded_bytes`** — added 2026-09-07 on the metal branch's
   pre-pull-request fast tier over the merged tip `8d895a15`, one sighting:
@@ -534,7 +484,7 @@ mechanism for it. `src/redlist.rs` carries the sighting.
   **It contradicts a retirement rather than joining a class.** All three of the
   name's earlier rows in `src/redlist.rs` are retired: the two dev-host
   `ALONE: GREEN` rows by the single-word tally in
-  `kernel/src/drivers/i8042/tally.rs` (2026-08-17), which made `N interrupts
+  `kernel/src/arch/x86_64/i8042/tally.rs` (2026-08-17), which made `N interrupts
   and 0 bytes` unprintable, and the CI row by "the verdict revises itself once"
   (2026-08-28) — a mute line said while a decoder still holds the run is
   `HEALTH_MUTE_BLIND`, the first blamed byte moves it to `HEALTH_MUTE_SAID`

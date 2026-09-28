@@ -1575,16 +1575,21 @@ fn syscall_entry_bytes(kernel: &[u8]) -> Result<&[u8], String> {
         ));
     };
     let header = toyos_elf::FileHeader::parse(kernel).map_err(|e| format!("{e:?}"))?;
+    let extent = toyos_elf::Layout::parse(kernel, header.machine).map_err(|e| format!("{e}"))?.extent();
+    let value = entry
+        .address(extent)
+        .map(|at| extent.min() + at.get())
+        .ok_or("the kernel's `syscall_entry` lies outside its own image")?;
     let segments = header.program_headers(kernel).map_err(|e| format!("{e:?}"))?;
     (0..header.phnum as usize)
         .filter_map(|i| ProgramHeader::parse(segments, i))
         .filter(|segment| segment.kind == PT_LOAD)
         .find_map(|segment| {
-            let within = entry.value.checked_sub(segment.vaddr)?;
+            let within = value.checked_sub(segment.vaddr)?;
             let left = segment.filesz.checked_sub(within).filter(|&left| left != 0)?;
             toyos_symbols::file_range(kernel, segment.offset.checked_add(within)?, left)
         })
-        .ok_or_else(|| format!("no `PT_LOAD` holds `syscall_entry` at {:#x} in the file", entry.value))
+        .ok_or_else(|| format!("no `PT_LOAD` holds `syscall_entry` at {value:#x} in the file"))
 }
 
 /// Whether an entry switches to the kernel's `rsp` in the instruction after it
@@ -1825,11 +1830,6 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
     let kernel_features = plan.features.join(",");
     let arch = plan.arch;
 
-    // Before every build lock, which is the order `buildlock`'s header fixes.
-    // What it bounds is the host: ten agents' builds spend the same fourteen
-    // cores, and nothing was counting them.
-    let _slot = buildlock::build_slot(root, "cargo run");
-
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
@@ -2064,14 +2064,6 @@ pub fn build_test_parts(
     // outside the charge because every execution needs one.
     let build_timer = ArtifactBuildTimer::start();
 
-    // **Below the memo's early return, so a boot that builds nothing queues for
-    // nothing.** Above every build lock, per the module header. This is the
-    // acquisition the eight-landing day was about: twelve suite workers each
-    // hold a guest slot and the first thing each does is compile its kernel
-    // variant, so the semaphore that bounds guests was bounding the phase that
-    // was not scarce.
-    let _slot = buildlock::build_slot(root, "a test image");
-
     // Held to the end of the function: the staged artifacts below are read
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
@@ -2122,7 +2114,6 @@ pub fn build_test_parts(
 /// a *second* implementation, and a second implementation's dependency graph is
 /// not the harness's to resolve.
 pub fn build_host_judges(root: &Path, quiet: bool) {
-    let _slot = buildlock::build_slot(root, "the network judges' host binaries");
     for (dir, _) in HOST_JUDGES {
         let at = root.join(dir);
         let mut cmd = Command::new("cargo");
@@ -2191,7 +2182,6 @@ fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
 /// and over the name of whatever gets it next.
 pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool) -> Vec<(String, Vec<u8>)> {
     let target = arch.userland();
-    let _slot = buildlock::build_slot(root, "the test binaries");
     let mut lock = buildlock::shared(root, "test binaries");
     let sysroot = crate::toolchain::ensure(root, false, &mut lock);
     let env = GuestEnv::new(&sysroot);
@@ -2642,7 +2632,7 @@ mod tests {
                 // other is a miscomputed base address. No suite builds it, so a
                 // full run pays nothing and a boot storm asks for it by name.
                 "heap-tripwire",
-                // The five below cost no kernel build at all, for
+                // The four below cost no kernel build at all, for
                 // `wake-fence-off`'s reason: each is declared only so `cfg`
                 // checking knows the name, and turned on only by
                 // `kernel-loom`, one at a time, to relax the single edge its
@@ -2653,7 +2643,6 @@ mod tests {
                 // `heap-lockspin`'s other arm: the same visit to the pass path,
                 // for the same span, without the allocator's lock.
                 "pass-spin",
-                "poison-overwrite",
                 // `wake-fence-off`'s twin, for a poll ring's one-shot answer:
                 // turned on only by `kernel-loom`, to split `inbox/once.rs`'s
                 // exchange and prove `poll_once` reds without it.
@@ -2753,6 +2742,7 @@ mod tests {
             ("toyos-sched-sim", "toyos-sched/sim/Cargo.toml"),
             ("toyos-proclife", "toyos-proclife/Cargo.toml"),
             ("toyos-blockring", "toyos-blockring/Cargo.toml"),
+            ("toyos-transport", "toyos-transport/Cargo.toml"),
         ] {
             let path = root.join(manifest);
             let text = fs::read_to_string(&path)

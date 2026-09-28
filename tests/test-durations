@@ -135,7 +135,6 @@ abuse_thread_name 1
 abuse_tls_alloc 15
 acpi_table_inventory 4601
 allocator_stress 787
-alone_line_reports_the_alone_run 0
 apps_and_home_are_one_filesystem 7263
 audio_idle_suspend 1013
 audio_tone (smp=1) 8450
@@ -185,9 +184,7 @@ empty_dir_stat 12
 endowment_denied 10
 esp_filesystem 10123
 exit_wait_storm 178
-quarantine_entries 0
-quarantine_exit_status 0
-quarantine_verdicts 0
+run_exit_status 0
 fat_backing_revoked 8226
 fault_gates 31
 foreign_disk_untouched 4688
@@ -212,7 +209,6 @@ hash_seed_precedes_every_map 4976
 hda_client_stall 19047
 hda_tone 13389
 hda_two_live_refused 4848
-heap_ceiling_recovery 10371
 hierarchy_paths 87
 home_backing_revoked 663
 home_budget_refusal_retried 18661
@@ -254,7 +250,6 @@ kernel_log_file 13152
 keyboard_claim_close_spares_stdin 4580
 kill_while_blocked 44
 klogd_hosted 5674
-klogd_panic_halts 16658
 lan_dhcp_lease 3029
 lan_no_lease 32709
 lapic_spurious_vector 6829
@@ -316,7 +311,6 @@ page_cache_partition_offset 6984
 panic_before_peripherals_reboots 3227
 panic_key_holds 42033
 panic_reboots 9768
-panic_recovery 130
 pci_capability_walk 5775
 pci_claim_caps_truncated 2583
 pci_inventory 4529
@@ -363,8 +357,6 @@ screen_log_absent 1823
 screen_paged_scrollback 7384
 screen_pager_keys 16152
 screen_panic_muted 4416
-screen_recoverable_untouched 5117
-screen_survived_panic_not_blamed 8477
 serial_vocabulary 2
 shipped_config_boots 3024
 shm_release_reclaims 29

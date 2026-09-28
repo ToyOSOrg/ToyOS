@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-08-19
 ---
@@ -78,11 +78,6 @@ tail. The census is immune to *another binary's churn*, which is what the
 free-memory verdicts are not, and it reds anyway. So the shared boot was never
 the common factor between these three names; the release latency is.
 
-`handle_kill_policy` is on the redlist already (`src/redlist.rs`, dev host
-loaded, 1 of 3, 2026-08-18) with a contention reading, and it is **not touched
-here** — this entry records the mechanism, and re-adjudicating that row is its
-owner's to do with a measurement rather than with this argument.
-
 **A fourth witness, hosted CI, 2026-08-25.** `handle_transfer` red on run
 32876917304 `guest (3)` — the census found one extra live `PipeRead` (2 → 3)
 after its deferred-release scenarios, red again in the shard's own alone
@@ -139,14 +134,6 @@ doc comments and one `#![warn(clippy::undocumented_unsafe_blocks)]` attribute,
 no behaviour change anywhere; `ZERO_QUEUE` and `ZERO_PENDING` arrived with
 `6c39b1b4` and this test with `8f74272d`, so the shape has been reachable since
 the queue existed and no landing is a suspect.
-
-**`kill_while_blocked`'s `ALONE … GREEN` must not be read as the harness reads
-it.** That line says the name's `Sched::Parallel` is wrong, which is the wrong
-conclusion for this defect and is already ruled out for its sibling:
-`src/redlist.rs`'s `handle_lifetime` row records that `Sched::Serial` would have
-retired nothing. What is owed at the name is that its rows stay, so a landing
-gate that hits it has a rate to check the red against and nobody re-runs it away
-or re-classifies its `Sched`.
 
 So the sentence below is no longer the whole of it: this is a *semantic* event
 riding a release the caller cannot wait for, which is what
@@ -246,9 +233,7 @@ So the two constraints meet. **The hook queue may not park, and the row that
 would want to is not on the hook queue but in a `Drop` that also may not.**
 Moving `File` to `deferred` swaps one illegal site for another. The second shape
 above is still right for the `deferred` rows, and by itself it reaches neither
-`File` nor `close_all` — that one is also called from `recover_or_halt`'s
-`Blame::Process` arm (`arch/idt/exceptions.rs:348`), which has no syscall to
-return through.
+`File` nor `close_all`.
 
 The track carries this as **wall 4**, with the three shapes the owner has to
 choose between. Nothing here should be built before that choice, because all

@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # ToyOS runs on ARM64: QEMU `virt` first, ACPI only, EL1 only
 
-Supersedes `issues/kernel/arm64-is-a-decision-nobody-has-made.md`, which is
+Supersedes `8a277bb2^:issues/kernel/arm64-is-a-decision-nobody-has-made.md`, which is
 folded in below and deleted. It keeps that file's settled points: compile-time
 dispatch (one `cfg_attr(path)` module choice, no `dyn Arch`, no `Kernel<A>`,
 ~20 distinct symbols behind ~145 `crate::arch::` paths), a 4 KiB granule with
@@ -42,7 +42,7 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   target for now.
 - **The memory-model audit is stage 0's**, not discovered on real ARM
   hardware: the kernel's `Relaxed` orderings and `Mmio`'s barrier semantics are
-  real latent defects on x86 too (`issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
+  real latent defects on x86 too (`aaddf38a^:issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
   is one instance).
 - **`toyos-cc` gets no AArch64 backend yet.** Doom and tinycc stay x86-only
   until userland runs on ARM, and that is decided again then.
@@ -88,7 +88,7 @@ code for hardware no ARM board in scope has.
 `sched/driver.rs:1019-1062`), `irq_census.rs` 19, `nmi_gate.rs` 16, `main.rs`
 13, `drivers/serial.rs` 13, `hw.rs` 10, `blackbox.rs` 6, `iommu/vtd/table.rs`
 6, `panic_console/mod.rs:1294` 1, `xhci/wait/mod.rs:36` 1. Userland plus
-`toyos-abi`: 54 lines (`libc/memory.rs` 23, `toyos-abi/syscall.rs` 20). The
+`toyos-abi`: 54 lines (`libc/memory.rs` 23, `toyos-abi/src/syscall.rs` 20). The
 rust fork's std has two naked-asm sites: `_start`
 (`rust/library/std/src/sys/pal/toyos/mod.rs:44`) and `__tls_get_addr` reading
 `fs:[8]` (`pal/toyos/tls.rs:43`).
@@ -158,7 +158,7 @@ refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
 (`toyos-abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `toyos-sched`
 (8,099 lines) is pure behind `Machine`/`Hw`
 (`toyos-sched/src/hw.rs:88-158`: `now`, `set_timer`, `stop_timer`,
-`irq_guard`, `halt`, `need_resched`, `switch`), with `kernel/src/hw.rs` as
+`irq_guard`, `halt`, `need_resched`, `switch`), with `kernel/src/arch/x86_64/hw.rs` as
 the one x86 implementation and a simulator as the other. PCI is
 ECAM/MMIO-only (`drivers/pci.rs:134-154`), no `0xCF8`. NVMe, xHCI and virtio
 have no ISA dependence beyond TSC-based waits. The bootloader is the `uefi`
@@ -258,7 +258,7 @@ Each stage names its exit; "measured" means a number from a run.
    `gate.rs` moves out of `arch/`. The MSI doorbell becomes
    one arch-provided constant. `IrqGuard`/`LogCommitGuard` become one arch
    primitive. The loom model owed by
-   `issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
+   `aaddf38a^:issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
    lands, and the `Mmio` barrier contract above is written and asserted.
    **Exit**: x86 builds and passes unchanged. `rg 'x86_64-unknown' src/`
    names one `Arch` table.
@@ -329,7 +329,7 @@ Each stage names its exit; "measured" means a number from a run.
 
 8. **An aarch64 tier in the harness.** `tests/common/qemu.rs` takes an
    `Arch`: `virt`, edk2-aarch64, HVF on Apple hosts (TCG otherwise).
-   `src/tiers.rs` gains the arch axis. `src/redlist.rs` quarantines per arch.
+   `src/tiers.rs` gains the arch axis.
    The CI runner is picked here, after measuring hosted `macos-latest`
    (whether HVF is usable inside the runner VM) and hosted
    `ubuntu-24.04-arm` (whether `/dev/kvm` exists there). **Exit**: the fast

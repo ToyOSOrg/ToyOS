@@ -13,13 +13,12 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::shootdown::{Generation, Shootdown};
-use crate::time::{Duration, Tripwire};
 
 use super::{apic, percpu, smp};
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
-pub use crate::invalidation::Origin;
+use crate::invalidation::Origin;
 
 /// Issuer-side census; `irq_census`'s `tlb` column is the receiver side, and a
 /// delivery the two disagree on is an uncounted issuing path.
@@ -57,18 +56,6 @@ pub fn log_census() {
         Fields(&counts)
     );
 }
-
-/// Set above xHCI's `CALL_AFTER_BREAK`, the longest a disk call spins with `IF`
-/// clear once its transport has broken, so no legitimate wait trips it; that
-/// assertion below holds the order.
-const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
-    Duration::from_secs(5),
-    "above the longest IF-clear device spin a target can be inside",
-);
-
-// A disk call spins with interrupts off, so one that outlasted this tripwire
-// would panic another CPU over a device.
-const _: () = assert!(crate::drivers::xhci::CALL_AFTER_BREAK.nanos() < ACK_TIMEOUT.nanos());
 
 /// Spins between deadline checks; `nanos_since_boot`'s 128-bit divide is too
 /// costly to call on every iteration.
@@ -147,11 +134,11 @@ fn wait_for(me: usize, cpu: u32, generation: Generation) {
             spins = 0;
             let now = crate::clock::nanos_since_boot();
             match deadline {
-                None => deadline = Some(now.saturating_add(ACK_TIMEOUT.nanos())),
+                None => deadline = Some(now.saturating_add(crate::time::DEAF_CPU.nanos())),
                 Some(at) if now >= at => panic!(
                     "tlb: cpu {cpu} has not flushed for generation {generation:?} in {}ns — \
                      it is not taking interrupts",
-                    ACK_TIMEOUT.nanos(),
+                    crate::time::DEAF_CPU.nanos(),
                 ),
                 Some(_) => {}
             }

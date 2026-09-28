@@ -1,5 +1,6 @@
 [package]
 name = "bcachefs"
+description = "The /home filesystem: a read side of the real bcachefs on-disk format."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

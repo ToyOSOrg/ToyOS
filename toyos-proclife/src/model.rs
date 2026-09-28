@@ -108,8 +108,6 @@ pub struct World {
     switched: BTreeSet<(Pid, Tid)>,
     /// Threads whose kernel stack has been freed.
     stacks_freed: BTreeSet<(Pid, Tid)>,
-    /// Threads that died in panic recovery and never run again.
-    poisoned: BTreeSet<(Pid, Tid)>,
     /// Threads whose own TLS block is still mapped in their process.
     mapped: BTreeSet<(Pid, Tid)>,
     /// Threads whose entry went, and its mapped TLS block with it, while a
@@ -154,7 +152,6 @@ impl World {
             departing: BTreeMap::new(),
             switched: BTreeSet::new(),
             stacks_freed: BTreeSet::new(),
-            poisoned: BTreeSet::new(),
             mapped: BTreeSet::new(),
             unmapped_under_siblings: BTreeSet::new(),
             frees: BTreeMap::new(),
@@ -220,12 +217,6 @@ impl World {
     pub fn set_location(&mut self, pid: Pid, tid: Tid, to: ThreadLocation) {
         if let Some(proc) = self.procs.get_mut(&pid) {
             proc.set_location(tid, to);
-        }
-    }
-
-    pub fn forget_thread(&mut self, pid: Pid, tid: Tid) {
-        if let Some(proc) = self.procs.get_mut(&pid) {
-            proc.forget_thread(tid);
         }
     }
 
@@ -306,7 +297,6 @@ impl World {
         for &(pid, tid) in &self.killed {
             let at_boundary = !self.in_kernel.contains(&(pid, tid))
                 && !self.departing.contains_key(&(pid, tid))
-                && !self.poisoned.contains(&(pid, tid))
                 && self.procs.get(&pid).and_then(|p| p.location(tid)) == Some(ThreadLocation::Scheduled);
             if at_boundary {
                 ready.push((pid, tid));
@@ -355,15 +345,6 @@ impl World {
     /// `Hw::release`: the payload goes, and the kernel stack with it.
     pub fn free_stack(&mut self, pid: Pid, tid: Tid) {
         self.stacks_freed.insert((pid, tid));
-    }
-
-    /// A thread dying in panic recovery: `schedule_no_return`'s exit pass, and
-    /// the release after it.
-    pub fn poison(&mut self, pid: Pid, tid: Tid) {
-        self.in_kernel.remove(&(pid, tid));
-        self.poisoned.insert((pid, tid));
-        self.switched.insert((pid, tid));
-        self.free_stack(pid, tid);
     }
 
     /// Whether this thread can still execute user code.

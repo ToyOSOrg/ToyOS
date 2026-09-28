@@ -187,6 +187,13 @@ actuators! {
     /// and `mmap` staged inside the copy. Judged by `user_copy_races_munmap`.
     copy_meets_a_remap = "copy-meets-a-remap";
 
+    /// Hold a thread spawn whose argument carries `loader::rebase_window`'s
+    /// mark between its TLS block being given an address and the block's
+    /// pointers being rebased to it: where the process can already reach the
+    /// block, until a sibling has stored into its DTV; where it cannot, it
+    /// says so. Judged by `tls_rebase_window`.
+    tls_rebase_window = "tls-rebase-window";
+
     /// Stall the bind of a disk that arrives while another is held for its
     /// device, for less than `usb-slow-return` does, and leave every transfer
     /// of the operation the held call sends again on it unanswered, once, each
@@ -458,8 +465,8 @@ actuators! {
     /// Panic inside `klogd` on its first instruction.
     klogd_panic = "klogd-panic";
 
-    /// Panic inside `usbd` on its first instruction.
-    usbd_panic = "usbd-panic";
+    /// Read address zero inside `klogd` on its first instruction.
+    klogd_fault = "klogd-fault";
 
     /// Stop the boot dead in phase 3, interrupts off, before any log drain.
     pre_idle_wedge = "pre-idle-wedge";

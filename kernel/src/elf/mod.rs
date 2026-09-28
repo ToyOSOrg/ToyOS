@@ -17,17 +17,17 @@ mod reloc;
 pub use cache::{cache_loaded_lib, try_clone_cached, CachedRelocs};
 pub use index::{parse_rela_entries, ParsedRelaEntries, RelocationIndex};
 pub use reloc::{
-    apply_dtpmod_relocs, apply_tpoff_relocs, defining_module, rebase_relative_relocs,
-    resolve_dlopen_relocs, resolve_lib_bind_relocs,
+    apply_dtpmod_relocs, apply_dtpoff_relocs, apply_tpoff_relocs, compute_tpoff,
+    rebase_relative_relocs, resolve_dlopen_relocs, resolve_lib_bind_relocs, tpoff32_value,
 };
 
 use crate::mm::{align_2m_checked, KernelSlice, MAX_HEAP_ALLOC, PAGE_2M, PAGE_BYTES};
 use crate::process::PageAlloc;
 use crate::UserAddr;
-use toyos_elf::dynamic::Dynamic;
+use toyos_elf::dynamic::{Dynamic, InitArray};
 use toyos_elf::section::{SectionTable, SHT_DYNSYM};
-use toyos_elf::sym::SymTab;
-use toyos_elf::{rela, GnuHash, Layout, RelaTable};
+use toyos_elf::sym::{Sym, SymTab};
+use toyos_elf::{rela, Extent, GnuHash, ImageRange, Layout, Rela, RelaTable, Reloc, RelocError, SymIndex, TlsSegment};
 
 /// `toyos_elf::MAX_TLS_ALIGN` must equal the kernel's largest page.
 const _: () = assert!(toyos_elf::MAX_TLS_ALIGN == PAGE_2M);
@@ -37,7 +37,7 @@ const _: () = assert!(toyos_elf::MAX_TLS_ALIGN == PAGE_2M);
 pub fn parse_layout(data: &[u8]) -> Result<Layout, &'static str> {
     let layout = Layout::parse(data, crate::arch::ELF_MACHINE).map_err(|e| e.as_str())?;
     if layout
-        .section_headers
+        .section_headers()
         .is_some_and(|s| s.byte_len() > MAX_HEAP_ALLOC)
     {
         return Err("ELF: section header table larger than one kernel allocation");
@@ -92,18 +92,17 @@ pub struct LoadedLib {
     dynsym: Option<KernelSlice>,
     dynstr: Option<KernelSlice>,
     pub tls_template: Option<KernelSlice>,
-    pub tls_memsz: usize,
-    pub tls_align: usize,
     rela: Option<KernelSlice>,
     jmprel: Option<KernelSlice>,
     gnu_hash: Option<KernelSlice>,
     cached_relocs: Option<CachedRelocs>,
-    /// `.eh_frame_hdr`, relative to the module base, from `PT_GNU_EH_FRAME`.
-    pub eh_frame_hdr_vaddr: u64,
-    pub eh_frame_hdr_size: u64,
-    /// `.init_array`, relative to the module base, from `DT_INIT_ARRAY`.
-    pub init_array_vaddr: u64,
-    pub init_array_size: u64,
+    /// What `load_shared_lib` parsed `rela` and `jmprel` against: every later
+    /// walk of those tables parses them again, against the same rules.
+    rules: rela::Rules,
+    /// `PT_GNU_EH_FRAME`, for DWARF unwinding.
+    pub eh_frame_hdr: Option<ImageRange>,
+    /// `DT_INIT_ARRAY`.
+    pub init_array: Option<InitArray>,
     /// Bytes between the image's lowest and highest virtual address.
     pub span: u64,
     /// Exact (unrounded) writable range within the image; `(span, span)` if none.
@@ -117,8 +116,8 @@ impl LoadedLib {
     /// Protection for the page at `offset`: exec below the writable window,
     /// write inside it, read-only above — over-permissive, never under, for
     /// an unusual segment layout.
-    fn page_prot(&self, offset: u64) -> crate::mm::paging::Prot {
-        use crate::mm::paging::Prot;
+    fn page_prot(&self, offset: u64) -> crate::mm::policy::Prot {
+        use crate::mm::policy::Prot;
         if offset < self.rw_lo {
             Prot::ReadExec
         } else if offset < self.rw_hi {
@@ -134,7 +133,7 @@ impl LoadedLib {
     /// A `Shared` module's split window holds a shared tail of `.text` plus
     /// the private copy, byte-identical there, so `ReadExec` is safe over either.
     pub fn map_into(&self, pt: &crate::process::PageTables) -> Option<UserAddr> {
-        use crate::mm::paging::WindowProt;
+        use crate::mm::policy::WindowProt;
 
         let (image_phys, image_size) = match &self.memory {
             LibMemory::Owned(alloc) => (
@@ -164,7 +163,7 @@ impl LoadedLib {
                     }
                 }
             };
-            let mut prot = WindowProt::uniform(crate::mm::paging::Prot::Read);
+            let mut prot = WindowProt::uniform(crate::mm::policy::Prot::Read);
             let mut page = 0;
             while page < PAGE_2M {
                 prot.set(page, self.page_prot(offset + page));
@@ -194,18 +193,26 @@ impl LoadedLib {
         unsafe { SymTab::new(syms.as_slice(), strs) }
     }
 
-    pub fn sym_count(&self) -> usize {
-        self.symbols().count()
-    }
-
     fn gnu_hash(&self) -> Option<GnuHash<'_>> {
         // SAFETY: same bounds argument as `symbols` above.
         GnuHash::parse(unsafe { self.gnu_hash.as_ref()?.as_slice() })
     }
 
-    /// Every relocation in this module's `DT_RELA` and `DT_JMPREL` tables.
-    fn relocations(&self) -> impl Iterator<Item = toyos_elf::Rela> + '_ {
+    /// Every entry of this module's `DT_RELA` and `DT_JMPREL` tables, as the
+    /// file wrote it.
+    fn raw_relocations(&self) -> impl Iterator<Item = Rela> + '_ {
         table_entries(&self.rela).chain(table_entries(&self.jmprel))
+    }
+
+    /// Every relocation this module's loader writes, parsed.
+    ///
+    /// `load_shared_lib` parsed each of these once, refusing the module on the
+    /// first it could not, and the bytes have not moved since: they lie on no
+    /// page of the writable window (`rela::tables_outside_window`), so neither
+    /// the process nor a relocation writes them.
+    fn relocations(&self) -> impl Iterator<Item = Reloc> + '_ {
+        self.raw_relocations()
+            .filter_map(|raw| rela::parse(raw, &self.rules, self.symbols()).unwrap_or_else(|e| reparse_refused(e)))
     }
 
     /// One past the last virtual address this module occupies.
@@ -220,48 +227,80 @@ impl LoadedLib {
     pub fn resolve(&self, name: &str) -> Option<UserAddr> {
         let symbols = self.symbols();
         let idx = self.gnu_hash()?.lookup(name, &symbols)?;
-        Some(self.user_base + symbols.get(idx)?.value)
+        self.address_of(&symbols.get(idx)?)
     }
 
-    /// A `STT_TLS` symbol's offset within this module's TLS segment.
-    pub fn resolve_tls(&self, name: &str) -> Option<u64> {
-        self.symbols().find_tls(name)
+    /// This module's `PT_TLS`, as `load_shared_lib` parsed it.
+    pub fn tls(&self) -> Option<TlsSegment> {
+        self.rules.tls
     }
+
+    /// Where a defined, non-TLS symbol of this module lies once mapped; `None`
+    /// for an undefined or `STT_TLS` one.
+    fn address_of(&self, sym: &Sym) -> Option<UserAddr> {
+        if !sym.is_defined() || sym.kind() == toyos_elf::sym::STT_TLS {
+            return None;
+        }
+        match sym.address(self.rules.extent) {
+            Some(at) => Some(self.user_base + at.get()),
+            None => bounded_symbol_outside(),
+        }
+    }
+}
+
+/// A defined symbol outside the extent `load_shared_lib` bounded every one of
+/// against: the table moved under the module, which is a kernel bug.
+#[cold]
+#[inline(never)]
+fn bounded_symbol_outside() -> ! {
+    panic!("ELF: a symbol load_shared_lib bounded inside the image lies outside it")
+}
+
+/// The symbol a parsed relocation names, in the table whose [`SymTab::count`]
+/// bounded its parse: a miss is a kernel bug.
+pub fn relocated_symbol(symbols: SymTab<'_>, i: SymIndex) -> Sym {
+    symbols.get(i.get()).expect("ELF: a relocation's symbol lies past the table its parse was bounded by")
+}
+
+/// A module's tables parsed differently the second time: the bytes moved under
+/// a module whose tables no writer reaches, which is a kernel bug.
+#[cold]
+#[inline(never)]
+fn reparse_refused(e: RelocError) -> ! {
+    panic!("ELF: a relocation load_shared_lib accepted is refused on a second parse: {e}")
 }
 
 /// Look up a symbol by name, walking `.dynsym` rather than the hash table;
 /// some symbols are absent from `.gnu.hash`.
 pub fn dlsym(lib: &LoadedLib, name: &str) -> Option<UserAddr> {
     let symbols = lib.symbols();
-    symbols.find(name).map(|(_, sym)| lib.user_base + sym.value)
+    symbols.find(name).and_then(|(_, sym)| lib.address_of(&sym))
 }
 
-/// A loaded module image, addressed by the module's own virtual addresses.
-/// Converts a file-supplied vaddr to an in-image offset with a bounds check;
-/// refuses rather than panics, since a malformed `.so` is untrusted input.
-/// The bounds check must precede the `vaddr - vaddr_min` subtraction: on an
-/// out-of-range vaddr that subtraction wraps, and a wrapped offset can pass
-/// the slice's own bounds check.
+/// A loaded module image, addressed by the module's own virtual addresses:
+/// a file-supplied vaddr becomes an in-image range through the extent's
+/// check, or is refused, since a malformed `.so` is untrusted input.
 struct ModuleImage {
     image: KernelSlice,
-    vaddr_min: u64,
-    vaddr_max: u64,
+    extent: Extent,
 }
 
 impl ModuleImage {
     fn slice(&self, vaddr: u64, size: u64) -> Result<KernelSlice, &'static str> {
-        let end = vaddr.checked_add(size).ok_or("ELF: dynamic extent overflows")?;
-        if vaddr < self.vaddr_min || end > self.vaddr_max {
-            return Err("ELF: dynamic table outside the loaded image");
-        }
-        Ok(self
-            .image
-            .subslice((vaddr - self.vaddr_min) as usize, size as usize))
+        let range = self
+            .extent
+            .range(vaddr, size)
+            .ok_or("ELF: dynamic table outside the loaded image")?;
+        Ok(self.at(range))
+    }
+
+    fn at(&self, range: ImageRange) -> KernelSlice {
+        self.image.subslice(range.start().get() as usize, range.len() as usize)
     }
 
     /// From `vaddr` to the end of the image (used where no tag records a size, e.g. `.gnu.hash`).
     fn slice_to_end(&self, vaddr: u64) -> Result<KernelSlice, &'static str> {
-        self.slice(vaddr, self.vaddr_max.saturating_sub(vaddr))
+        self.slice(vaddr, self.extent.max().saturating_sub(vaddr))
     }
 
     fn optional(&self, vaddr: Option<u64>, size: u64) -> Result<Option<KernelSlice>, &'static str> {
@@ -309,11 +348,11 @@ pub fn load_shared_lib(
     let header_data = crate::loader::read_file_range(backing, 0, header_size);
     let layout = parse_layout(&header_data)?;
 
-    let (vaddr_min, vaddr_max) = (layout.vaddr_min, layout.vaddr_max);
+    let extent = layout.extent();
     // Every bound below is image-relative and every `r_offset` is a vaddr, so a
     // non-zero `vaddr_min` shifts the two against each other: a write validated
     // inside the writable window lands `vaddr_min` bytes lower in the image.
-    if vaddr_min != 0 {
+    if extent.min() != 0 {
         return Err("ELF: a shared object must begin at vaddr 0");
     }
     // No writable segment yields an empty window; no relocation can target it.
@@ -343,20 +382,20 @@ pub fn load_shared_lib(
     }
     let t2 = crate::clock::nanos_since_boot();
 
+    let module = ModuleImage { image, extent };
     // In bounds only because `Layout` guarantees `filesz <= memsz`; the checked
     // subslice turns a weakening of that into an assert, not an overwrite.
     for seg in layout.segments() {
-        let dst = image.subslice((seg.vaddr - vaddr_min) as usize, seg.filesz as usize);
-        read_backing_into(backing, seg.file_offset, dst)
+        let dst = module.at(seg.image()).subslice(0, seg.filesz() as usize);
+        read_backing_into(backing, seg.file_offset(), dst)
             .map_err(|_| "a segment could not be read off the device")?;
     }
     let t3 = crate::clock::nanos_since_boot();
 
-    let module = ModuleImage { image, vaddr_min, vaddr_max };
-    let dyn_info = match layout.dynamic {
-        Some((_, vaddr, size)) => {
-            let region = module.slice(vaddr, size)?;
-            // SAFETY: `region` came from `ModuleImage::slice`'s bounds check;
+    let dyn_info = match layout.dynamic() {
+        Some(dynamic) => {
+            let region = module.at(dynamic.image());
+            // SAFETY: `region` came from the layout's own range inside the image;
             // `image` is still exclusively owned here.
             Dynamic::parse(unsafe { region.as_slice() })
         }
@@ -389,8 +428,16 @@ pub fn load_shared_lib(
         }
         None => None,
     };
-    let sym_count = dynsym.as_ref().map_or(0, |s| s.size() / toyos_elf::sym::ENTRY_SIZE);
     let dynstr = module.optional(dyn_info.strtab, dyn_info.strsz.unwrap_or(0))?;
+    // Every symbol another module or `dlsym` may later ask for is inside this
+    // one, and every TLS one inside its segment — or the module is refused now.
+    // SAFETY: both came from `ModuleImage::slice`'s bounds check, and no write
+    // below reaches them: `rela::tables_outside_window` refuses that first.
+    let symbols = unsafe {
+        SymTab::new(dynsym.as_ref().map_or(&[][..], |s| s.as_slice()), dynstr.as_ref().map_or(&[][..], |s| s.as_slice()))
+    };
+    symbols.bounded(extent, layout.tls()).map_err(|e| e.as_str())?;
+    let init_array = InitArray::parse(dyn_info.init_array, extent).map_err(|e| e.as_str())?;
 
     let rela = match dyn_info.rela {
         Some(t) => Some(module.slice(t.vaddr, t.size)?),
@@ -401,61 +448,54 @@ pub fn load_shared_lib(
         None => None,
     };
 
-    // Validate every entry before writing any: an unvalidated `DTPOFF64` with
-    // `r_sym == 0` writes `r_addend` verbatim, an arbitrary 8-byte write.
     // The exact writable extent, not `rw_offset`'s 2 MiB-rounded one: the
     // rounded start is up to 2 MiB below the first writable byte, and the pages
     // there are mapped `ReadExec` by `page_prot`.
     let window = (rw_lo, rw_hi);
-    let extent = |slice: &KernelSlice| {
+    let span_of = |slice: &KernelSlice| {
         let at = (slice.base() as usize - image.base() as usize) as u64;
         (at, at + slice.size() as u64)
     };
     let tables = rela::ReadTables {
-        dynsym: dynsym.as_ref().map_or((0, 0), extent),
-        dynstr: dynstr.as_ref().map_or((0, 0), extent),
-        rela: rela.as_ref().map_or((0, 0), extent),
-        jmprel: jmprel.as_ref().map_or((0, 0), extent),
+        dynsym: dynsym.as_ref().map_or((0, 0), span_of),
+        dynstr: dynstr.as_ref().map_or((0, 0), span_of),
+        rela: rela.as_ref().map_or((0, 0), span_of),
+        jmprel: jmprel.as_ref().map_or((0, 0), span_of),
     };
-    rela::tables_outside_window(&tables, window)?;
-    let entries = table_entries(&rela).chain(table_entries(&jmprel));
-    // `None`: a library's image is written contiguously, with no fill-page edge.
-    rela::validate(entries, window, sym_count, None).map_err(|e| e.as_str())?;
-
+    rela::tables_outside_window(&tables, window, PAGE_BYTES as u64)?;
+    let rules = rela::Rules {
+        extent,
+        window,
+        // A library's image is written contiguously, with no fill-page edge.
+        fill: None,
+        tls: layout.tls(),
+    };
+    // Every entry is parsed here, and a refusal drops the image this pass has
+    // written into: nothing but this function has seen it.
     let base_phys = image.phys();
     let mut reloc_count = 0u64;
-    for entry in table_entries(&rela).chain(table_entries(&jmprel)) {
-        if entry.kind == toyos_elf::RelocKind::Relative {
-            let value = (base_phys as i64 + entry.addend) as u64;
-            // SAFETY: `module.slice(entry.offset, 8)?` bounds-checks the write
-            // independently of `rela::validate`; `image` is still exclusively owned.
-            unsafe { module.slice(entry.offset, 8)?.write::<u64>(0, value) };
+    for raw in table_entries(&rela).chain(table_entries(&jmprel)) {
+        let Some(r) = rela::parse(raw, &rules, symbols).map_err(|e| e.as_str())? else { continue };
+        if let toyos_elf::Op::Relative(target) = r.op() {
+            // SAFETY: `module.slice(r.offset(), 8)?` bounds-checks the write
+            // independently of the parse; `image` is still exclusively owned.
+            unsafe { module.slice(r.offset(), 8)?.write::<u64>(0, base_phys + target.get()) };
             reloc_count += 1;
         }
     }
 
-    let (tls_template, tls_memsz, tls_align) = match layout.tls {
-        Some(tls) => (
-            Some(module.slice(tls.vaddr, tls.filesz)?),
-            tls.memsz as usize,
-            tls.align as usize,
-        ),
-        None => (None, 0, 0),
-    };
-    let (eh_frame_hdr_vaddr, eh_frame_hdr_size) = layout.eh_frame_hdr.unwrap_or((0, 0));
-    let init_array = dyn_info.init_array;
+    let tls_template = layout.tls().map(|tls| module.at(tls.template()));
 
     let t4 = crate::clock::nanos_since_boot();
     log!(
-        "dlopen: base={:#x} {}MB alloc={}ms zero={}ms copy={}ms reloc={}ms ({} relocs, {} syms)",
+        "dlopen: base={:#x} {}MB alloc={}ms zero={}ms copy={}ms reloc={}ms ({} relocs)",
         base_phys,
         load_size / (1024 * 1024),
         (t1 - t0) / 1_000_000,
         (t2 - t1) / 1_000_000,
         (t3 - t2) / 1_000_000,
         (t4 - t3) / 1_000_000,
-        reloc_count,
-        sym_count
+        reloc_count
     );
 
     Ok((
@@ -467,16 +507,13 @@ pub fn load_shared_lib(
             dynsym,
             dynstr,
             tls_template,
-            tls_memsz,
-            tls_align,
             rela,
             jmprel,
             gnu_hash,
             cached_relocs: None,
-            eh_frame_hdr_vaddr,
-            eh_frame_hdr_size,
-            init_array_vaddr: init_array.map_or(0, |t| t.vaddr),
-            init_array_size: init_array.map_or(0, |t| t.size),
+            rules,
+            eh_frame_hdr: layout.eh_frame_hdr(),
+            init_array,
             span: layout.span(),
             rw_lo,
             rw_hi,
@@ -492,7 +529,7 @@ fn dynsym_count_from_sections(
     backing: &dyn crate::file_backing::FileBacking,
     layout: &Layout,
 ) -> Option<usize> {
-    let table = layout.section_headers?;
+    let table = layout.section_headers()?;
     let bytes = crate::loader::read_file_range(backing, table.file_offset, table.byte_len());
     let dynsym = SectionTable::new(&bytes).find(SHT_DYNSYM)?;
     let entry_size = dynsym.entry_size.max(toyos_elf::sym::ENTRY_SIZE as u64);

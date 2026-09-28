@@ -31,8 +31,6 @@ pub use crate::sched::driver::{
 };
 pub use crate::sched::MAX_CPUS;
 
-use crate::sched::poison;
-
 /// Panics unless the preempt depth equals `baseline`: a mismatch means a
 /// spinlock is held across a scheduler entry that switches.
 #[track_caller]
@@ -504,11 +502,7 @@ pub fn post_retire(sched: &ThreadSched) {
     });
 }
 
-/// Per-CPU hand-off bank for threads that died in panic recovery: the panic
-/// path may hold any lock, so it can only store here.
-static POISONED: [poison::PoisonSet; MAX_CPUS] = [const { poison::PoisonSet::new() }; MAX_CPUS];
-
-/// Whether [`reap_poisoned`] has anything to do; claimed by whichever idle
+/// Whether [`reap_finished`] has anything to do; claimed by whichever idle
 /// trip takes the work.
 static REAP_GATE: ReapGate = ReapGate::new();
 
@@ -518,84 +512,22 @@ pub fn note_reapable() {
     REAP_GATE.raise();
 }
 
-pub fn poison_tid(id: TaskId) {
-    let cpu = percpu::cpu_id() as usize;
-    let Some(bank) = POISONED.get(cpu) else {
-        crate::log!("poison_tid: cpu {cpu} >= MAX_CPUS — {id} will never be reaped");
-        return;
-    };
-    let banked = bank.bank(id.pack());
-    // After the bank is written, never before: the gate's release is what
-    // carries it to the CPU that claims the work.
-    REAP_GATE.raise();
-    if !banked {
-        crate::log!(
-            "poison_tid: cpu {cpu} banked {} deaths since its last reap — {id}'s waiter is stranded",
-            poison::SLOTS
-        );
-    }
-}
-
-/// Zombify threads that died in panic recovery, collect finished processes'
-/// entries, and wake whoever was joining them. Called from the idle loop,
-/// which holds none of the panicking thread's locks. Checked before locking
-/// `PROCESS_TABLE` unconditionally: holding it on every idle trip would
-/// starve a crash report's `try_lock` of that table.
-pub(crate) fn reap_poisoned() {
+/// Collect finished processes' entries. Called from the idle loop, and
+/// checked before locking `PROCESS_TABLE` unconditionally: holding it on every
+/// idle trip would starve a crash report's `try_lock` of that table.
+pub(crate) fn reap_finished() {
     if !REAP_GATE.take() {
         return;
     }
-    let mut wakes: [Option<process::PoisonWake>; MAX_CPUS * poison::SLOTS] =
-        [const { None }; MAX_CPUS * poison::SLOTS];
     // Dropped after the guard: an entry's drop reaches `remove_vruntime`.
-    let reaped;
-    {
+    let reaped = {
         let mut guard = process::PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
-        // SAFETY: `reap_poisoned`'s one caller, `sched::driver::idle_loop`,
+        // SAFETY: `reap_finished`'s one caller, `sched::driver::idle_loop`,
         // runs on the per-CPU idle stack, which is what `IdleProof` requires.
-        reaped = process::reap_finished(table, unsafe { process::IdleProof::new_unchecked() });
-        let mut next = 0;
-        for bank in POISONED.iter() {
-            bank.drain(|raw| {
-                let id = TaskId::unpack(raw);
-                wakes[next] = Some(process::zombify_poisoned(table, id.0, id.1));
-                next += 1;
-            });
-        }
-    }
+        process::reap_finished(table, unsafe { process::IdleProof::new_unchecked() })
+    };
     drop(reaped);
-    for wake in wakes.into_iter().flatten() {
-        for sched in &wake.retire {
-            post_retire(sched);
-        }
-        if let Some(sched) = wake.joiner {
-            sched.handle.watch().post();
-        }
-        // No teardown ran to account this exit: the resources go with the entry.
-        if let Some((object, code)) = wake.exit {
-            let stats = toyos_abi::syscall::ProcessStats {
-                pid: object.pid().raw(),
-                ..Default::default()
-            };
-            object.publish_exit(crate::object::process::Exit { code, stats });
-        }
-    }
-}
-
-/// The panic path's exit: the faulted thread's context is unusable, so it
-/// dies where it stands. No baseline assert: a panicking thread may hold
-/// any lock, and asserting would double-panic and lose the report.
-pub fn schedule_no_return() -> ! {
-    if in_schedule_self() {
-        crate::log!("schedule_no_return: panicked inside a pass, cannot rejoin");
-        crate::panic::halt_all_cpus();
-    }
-    if percpu::current_tid().is_none() {
-        enter_idle_loop();
-    }
-    driver::pass(Dispose::Exit);
-    unreachable!("schedule_no_return: returned from the exit pass");
 }
 
 /// Cumulative CPU time; a running thread's live slice is added by the reader.

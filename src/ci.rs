@@ -219,6 +219,7 @@ const SCHED_LOOM: &[&str] = &["-p", "toyos-sched-loom"];
 const SCHED_SIM: &[&str] = &["-p", "toyos-sched-sim"];
 const PROCLIFE: &[&str] = &["-p", "toyos-proclife"];
 const BLOCKRING: &[&str] = &["-p", "toyos-blockring"];
+const TRANSPORT: &[&str] = &["-p", "toyos-transport"];
 
 const fn red(
     krate: &'static [&'static str],
@@ -244,9 +245,6 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
         "a_lost_try_lock_leaves_the_lock_held ... FAILED",
         "two_writers_never_overlap ... FAILED",
-    ]),
-    red(KERNEL_LOOM, "poison-overwrite", Some("poison_set"), &[
-        "a_second_death_banks_beside_the_first ... FAILED",
     ]),
     red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
         "a_claim_sees_the_enrolled_work ... FAILED",
@@ -377,8 +375,10 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
     ]),
-    red(BLOCKRING, "mutate-ring-publish-relaxed", Some("loom_ring"), &[
-        "a_published_request_is_read_whole ... FAILED",
+    red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
+    red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
+    red(TRANSPORT, "end-keeps-inflight", None, &[
+        "an_end_answers_every_tag_once_and_a_late_completion_nothing ... FAILED",
     ]),
 ];
 
@@ -609,14 +609,9 @@ fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 
 // --- The guest jobs ------------------------------------------------------------
 
-/// The harness's arguments for a CI lane: a runner is a whole host with one
-/// suite on it, so the host's guest slots arbitrate nothing there.
 fn suite_args(args: &[&str]) -> Vec<String> {
     let mut all = vec!["test", "--test", "toyos-build", "--"];
     all.extend(args);
-    if on_runner() {
-        all.extend(["--host-slots", "0"]);
-    }
     all.into_iter().map(String::from).collect()
 }
 
@@ -654,8 +649,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
 }
 
 /// The suite's own count line and every line naming a verdict worth reading
-/// without the log: a failure, whether it survived being run alone, and a
-/// quarantined name that failed for something else.
+/// without the log: a failure.
 fn verdicts(log: &str) -> String {
     let total = log
         .lines()
@@ -665,10 +659,8 @@ fn verdicts(log: &str) -> String {
         .lines()
         .filter(|l| {
             l.starts_with("FAIL ")
-                || l.starts_with("XFAIL ")
                 || (l.starts_with(' ')
-                    && ["STALL ", "INVL ", "ALONE "].iter().any(|v| l.trim_start().starts_with(v)))
-                || l.contains("is quarantined for something else")
+                    && ["STALL ", "INVL "].iter().any(|v| l.trim_start().starts_with(v)))
         })
         .collect();
     if named.is_empty() {
@@ -979,11 +971,11 @@ mod tests {
     #[test]
     fn the_summary_keeps_the_count_and_the_verdicts() {
         let log = "test result: ok. 3 passed\n\
-                   FAIL rs::lan_talk: no exit code\n  ALONE lan_talk: GREEN\nnoise\n\
+                   FAIL rs::lan_talk: no exit code\nnoise\n\
                    test result: FAILED. 40 passed; 1 failed, 41 total (300 s)\n";
         let said = verdicts(log);
         assert!(said.starts_with("test result: FAILED. 40 passed; 1 failed, 41 total"), "{said}");
-        assert!(said.contains("FAIL rs::lan_talk") && said.contains("ALONE lan_talk"), "{said}");
+        assert!(said.contains("FAIL rs::lan_talk"), "{said}");
         assert!(!said.contains("noise"), "{said}");
         assert_eq!(verdicts(""), "no suite result line");
     }

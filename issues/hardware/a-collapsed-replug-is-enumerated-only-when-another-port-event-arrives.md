@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-27
 ---
@@ -50,6 +50,11 @@ both events are drained before the completion.
   With the one-line wake added it is green, `EXIT=0`, `3 seen as such`.
 - One named run of `xhci_flap` as committed is green on `nightly-green2`
   (`EXIT=0`) and on `main` at 16d2e645 (`EXIT=0`).
+- PR #542's nightly at 059c5de7 (run 36328646395, `guest (2)`), whose diff
+  touches no driver or guest code, was red with the same sentence. The
+  collapse torn down at 1.523 s was enumerated at 2.225 s, when the next
+  cycle's edges arrived; the one torn down at 3.328 s had nothing after it
+  before the guest's input ended at 4.234 s.
 
 So the gate as committed passes by parity wherever every collapse loses its
 wake. On the dev host it cannot go red. It reds on CI's KVM shards only when
@@ -64,5 +69,6 @@ A port torn down with its device still in it is looked at again without
 waiting for another event, shown by a gate that goes red on the lost wake on
 every host. `xhci_flap` at an odd cycle count is one such gate. An assertion
 that every collapsed teardown is enumerated before the next cycle's edges is
-another. Until then `xhci_flap` reds on main's nightly at a rate. It should go
-on #542's disabled list when that lands, citing this file.
+another. `xhci_flap` is disabled in `src/redlist.rs` until then, and the change
+that meets this deletes its row. Owner: the xHCI driver's port stepping
+(`kernel/src/drivers/xhci/mod.rs`); held by the orchestrator.

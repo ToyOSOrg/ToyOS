@@ -1,10 +1,9 @@
 //! Who ends a process, which threads they retire, and which thread tears it
 //! down.
 //!
-//! **Exactly one path claims a process.** Three of them can arrive at once — a
-//! `SYS_EXIT` on one of its threads, a `SYS_PROCESS_KILL` from a holder of a
-//! `Process` handle, and the idle loop's sweep of a main thread that died in
-//! panic recovery — and [`claim_teardown`] answers `true` to one of them. The
+//! **Exactly one path claims a process.** Two of them can arrive at once — a
+//! `SYS_EXIT` on one of its threads and a `SYS_PROCESS_KILL` from a holder of a
+//! `Process` handle — and [`claim_teardown`] answers `true` to one of them. The
 //! claim fixes the exit code, and its winner posts a retire to every thread
 //! still in the process ([`retire_set`]) and waits on none of them: a kill's
 //! victim may be killing the killer.
@@ -23,7 +22,7 @@ use crate::{Pid, ThreadLocation, Tid, Watch, TORN_DOWN_THREAD_CODE};
 
 /// Claim exclusive teardown of a process, for `code`.
 ///
-/// Exactly one exit/kill/poison path wins; a later caller's thread simply
+/// Exactly one exit or kill path wins; a later caller's thread simply
 /// leaves. `false` also covers a process that is not in the table at all,
 /// because there is nothing left for a second claimant to do either way.
 #[must_use = "a caller that did not win the claim must not retire anything"]

@@ -23,7 +23,6 @@ use alloc::vec::Vec;
 use std::collections::HashSet;
 
 use crate::model::World;
-use crate::poison::{self, Poisoned};
 use crate::table::Processes;
 use crate::{join, reap, spawn, teardown, Pid, Tid, Watch};
 
@@ -48,10 +47,7 @@ pub enum Op {
     ThreadExit { pid: Pid, tid: Tid, code: i32, pc: u32 },
     /// `sys_thread_join`: collect or arm, then re-check.
     Join { pid: Pid, target: Tid, waiter: Tid, pc: u32 },
-    /// A thread dying in panic recovery inside a syscall, and the idle loop's
-    /// `reap_poisoned` that takes it out of its process.
-    Poison { pid: Pid, tid: Tid, pc: u32, owed: Poisoned },
-    /// The idle loop's `reap_poisoned`, reap half.
+    /// The idle loop's `reap_finished`.
     IdlePass { pc: u32 },
 }
 
@@ -76,9 +72,6 @@ impl Op {
     pub fn join(pid: Pid, target: Tid, waiter: Tid) -> Self {
         Op::Join { pid, target, waiter, pc: 0 }
     }
-    pub fn poison(pid: Pid, tid: Tid) -> Self {
-        Op::Poison { pid, tid, pc: 0, owed: Poisoned::default() }
-    }
     pub fn idle_pass() -> Self {
         Op::IdlePass { pc: 0 }
     }
@@ -86,9 +79,7 @@ impl Op {
     /// The thread running the op, in the kernel until it returns.
     fn actor(&self) -> Option<(Pid, Tid)> {
         match *self {
-            Op::Exit { pid, tid, .. } | Op::ThreadExit { pid, tid, .. } | Op::Poison { pid, tid, .. } => {
-                Some((pid, tid))
-            }
+            Op::Exit { pid, tid, .. } | Op::ThreadExit { pid, tid, .. } => Some((pid, tid)),
             Op::Join { pid, waiter, .. } => Some((pid, waiter)),
             Op::Kill { by, .. } => by,
             Op::Spawn { .. } | Op::IdlePass { .. } => None,
@@ -102,7 +93,6 @@ impl Op {
             | Op::Spawn { pc, .. }
             | Op::ThreadExit { pc, .. }
             | Op::Join { pc, .. }
-            | Op::Poison { pc, .. }
             | Op::IdlePass { pc, .. } => *pc == DONE,
         }
     }
@@ -123,7 +113,6 @@ impl Op {
             Op::Spawn { .. } => "spawn_thread",
             Op::ThreadExit { .. } => "thread_exit",
             Op::Join { .. } => "thread_join",
-            Op::Poison { .. } => "poison",
             Op::IdlePass { .. } => "idle pass",
         }
     }
@@ -240,31 +229,6 @@ impl Op {
                     world.leave_kernel((*pid, *waiter));
                 }
             }
-            Op::Poison { pid, tid, pc, owed } => match *pc {
-                // The panic: the thread's exit pass, with every lock it held.
-                0 => {
-                    world.poison(*pid, *tid);
-                    *pc = 1;
-                }
-                // The idle loop, under the table lock.
-                1 => {
-                    *owed = poison::zombify_poisoned(world, *pid, *tid);
-                    *pc = 2;
-                }
-                // Its posts, with the lock given up.
-                _ => {
-                    for &other in &owed.retire {
-                        world.post_retire(*pid, other);
-                    }
-                    if let Some(on) = owed.joiner {
-                        world.post(on);
-                    }
-                    if let Some(code) = owed.exit {
-                        world.publish_exit(*pid, code);
-                    }
-                    *pc = DONE;
-                }
-            },
             Op::IdlePass { pc } => {
                 for pid in reap::finished_pids(world) {
                     world.reap(pid);
@@ -593,29 +557,5 @@ mod tests {
         let p = world.spawn_process();
         let sibling = world.spawn_thread(p);
         holds(&world, vec![Op::kill_by(p, 137, (p, sibling))]);
-    }
-
-    /// A thread of a process being killed dies in panic recovery instead of
-    /// leaving: the idle loop takes it out, and whichever of it and its sibling
-    /// is last publishes the kill's exit.
-    #[test]
-    fn a_kill_racing_a_poisoned_thread_ends() {
-        let mut world = World::new();
-        let p = world.spawn_process();
-        let main = world.main_tid(p);
-        world.spawn_thread(p);
-        holds(&world, vec![Op::kill(p, 137), Op::poison(p, main)]);
-    }
-
-    /// A poisoned main thread ends its process: its sibling is retired and the
-    /// last one out publishes, racing an exit on the sibling itself.
-    #[test]
-    fn a_poisoned_main_thread_ends_its_siblings() {
-        let mut world = World::new();
-        let p = world.spawn_process();
-        let main = world.main_tid(p);
-        let sibling = world.spawn_thread(p);
-        let states = holds(&world, vec![Op::poison(p, main), Op::exit(p, sibling, 3)]);
-        assert!(states > 0);
     }
 }

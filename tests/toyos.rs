@@ -18,7 +18,7 @@ use common::{
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::heartbeat;
 use toyos_build::testargs::{self, Shard, SUITE};
-use toyos_build::redlist::{self, Quarantined};
+use toyos_build::redlist;
 use toyos_build::tiers::Tier;
 
 struct TestDef {
@@ -71,46 +71,11 @@ enum Sched {
 /// *waiting* — for a marker, for a debounce, for a device — which is why this is
 /// a measurement and not a division.
 ///
-/// **Twelve is the number for one suite on this host**, and [`HostSlots`] is
-/// what stops four agents at twelve being 48 guests on 14 cores.
+/// **Twelve is the number for one suite on this host.**
 /// An earlier table said eight; it was taken while `drain_serial` was still
 /// width-scaled and
 /// `metal_sim_pointer_churn`'s twenty-four paced drains *were* the phase.
 const DEFAULT_WIDTH: usize = 12;
-
-/// This run's claim on the host's guest budget.
-///
-/// [`DEFAULT_WIDTH`] is a number for *one* suite, and nothing was handing out
-/// the cores that two suites both spend.
-/// A second suite on this machine is not a slower first suite, it
-/// is a wrong one: `screen_fatal_halt` red at 11 s against 3.3 s alone, and an
-/// agent's hour spent chasing that as a regression.
-///
-/// **One slot per task, never per boot.** A worker holds at most one and never
-/// waits for a second while holding one, which is what makes the semaphore
-/// deadlock-free rather than lucky: several tests hold two guests at once, and a
-/// slot each would let twelve workers each hold one and each wait for another.
-///
-/// The wait sits outside the task, so it lands in the phase's wall clock and in
-/// no test's duration — a `PASS` time, and the profile [`longest_first`] orders
-/// on, both stay measurements of the test rather than of the queue.
-struct HostSlots {
-    root: std::path::PathBuf,
-    /// The name this run answers to in another run's waiting message. A pid
-    /// alone is not enough to act on: an agent needs to know which worktree.
-    label: String,
-    /// Zero is the semaphore off. It is the only way to measure a suite against
-    /// one that has it, which is what `--host-slots 0` is for.
-    budget: usize,
-}
-
-impl HostSlots {
-    fn take(&self, what: &str) -> Option<toyos_build::buildlock::Guard> {
-        let budget = self.budget;
-        (budget > 0)
-            .then(|| toyos_build::buildlock::guest_slot(&self.root, budget, &format!("{}: {what}", self.label)))
-    }
-}
 
 /// Which tier the shared boot's discovered members are in: one boot, so one
 /// tier. Declared beside [`SHARED_BLOCK`] rather than assumed, for the same
@@ -152,10 +117,6 @@ const SHARED_BLOCK: Sched = Sched::Parallel;
 /// second of guest time between its members, and what these need is a syscall
 /// number the other 150 must not have.
 const ACTUATOR_TESTS: &[&str] = &[
-    // Actions 0, 1 and 2: a kernel `panic!`, a null read in kernel context, and
-    // a spinlock held across a scheduler entry. Each kills the caller and the
-    // machine has to survive it, which is the whole verdict.
-    "panic_recovery",
     // Actions 10 and 11: the address of sixteen bytes of kernel memory and
     // whether they still hold what the kernel put there. A guest cannot read the
     // kernel's address space, so without them a kernel that still made the write
@@ -250,10 +211,12 @@ const RUST_SKIP: &[&str] = &[
     // It waits for a cue only a kernel armed with `copy-meets-a-remap` gives.
     // `user_copy_races_munmap` runs it.
     "copy_out_races_munmap",
+    // Only a kernel armed with `tls-rebase-window` holds a spawn in the window it probes.
+    // `tls_rebase_window` runs it.
+    "tls_dtv_race",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
-    "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
@@ -304,15 +267,16 @@ const RUST_SKIP: &[&str] = &[
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
     // `netd_slow_reader`, `netd_held_open`, `netd_stalled_peer`,
-    // `netd_udp_refused`, `netd_udp_any_address` and `netd_refused_pipes` run
-    // them on `tests/netcase`, and `netd_lookup_let_go` on it with its frames
-    // held.
+    // `netd_udp_refused`, `netd_udp_any_address`, `netd_refused_pipes` and
+    // `netd_refused_accept` run them on `tests/netcase`, and
+    // `netd_lookup_let_go` on it with its frames held.
     "netd_slow_reader",
     "netd_held_open",
     "netd_stalled_peer",
     "netd_udp_refused",
     "netd_udp_any_address",
     "netd_refused_pipes",
+    "netd_refused_accept",
     "netd_lookup_let_go",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
@@ -325,8 +289,7 @@ const RUST_SKIP: &[&str] = &[
     // and the runner's bound is the fallback. `lan_swap` rides it.
     "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
-    // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
-    // which is also what makes its claim about *the recovered CPU* precise.
+    // `heap_ceiling_bounds` boots the `test-actuators` kernel for it.
     "heap_ceiling",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
@@ -433,13 +396,9 @@ const RUST_SKIP: &[&str] = &[
     // each other and never against the binaries the registry discovers.
     // `check_no_collisions` closes that, and this is what it found.
     //
-    // Two verdicts under one name is not extra coverage, it is a name that
-    // cannot be read: `retry_task` searches the shared registry first, so a
-    // machine test of one of these that failed wide was re-run *as the shared
-    // binary* and its `ALONE:` line was about a different test. What the shared
-    // copy adds is the binary exiting 0 on a boot that gives it nothing to
-    // measure — `cache_eviction` in 132 ms against the 22.5 s its own device
-    // shape costs (run `31247206462`).
+    // What the shared copy adds is the binary exiting 0 on a boot that gives it
+    // nothing to measure — `cache_eviction` in 132 ms against the 22.5 s its
+    // own device shape costs (run `31247206462`).
     //
     // `cache_eviction` needs the small NVMe that makes the cache evict at all.
     "cache_eviction",
@@ -598,11 +557,6 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // the desktop's next repaint — which only where that wait lands decides,
     // so it is timer-anchored despite being a screendump-content check.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
-    ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
-    // The other half of the recovery branch: the test above reads the screen
-    // either side of a survived panic, which holds whether or not the discard
-    // did anything.
-    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
     ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
@@ -917,6 +871,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // round trip after each case, a named line per refusal and a clean
     // console; its clocks are liveness guards.
     ("netd_refused_pipes", Sched::Parallel, Tier::Fast),
+    // The netcase boot again: an accept netd refuses for room leaves its owner
+    // a wake for the connection it left, once room returns. The verdict
+    // is the guest's wake or its absence.
+    ("netd_refused_accept", Sched::Parallel, Tier::Fast),
     // The netcase boot again: bytes held back past a full pipe move on the
     // pipe's room alone, the peer holding the connection open and silent. The
     // verdict is the guest's byte-for-byte comparison; its clocks are
@@ -1228,13 +1186,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // offsets it chose itself.
     ("operation_nesting", Sched::Parallel, Tier::Fast),
     ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
-    // The spawn half alone: one headless boot whose verdict is three kernel
-    // log lines.
+    // The spawn half alone: one headless boot whose verdict is kernel log
+    // lines.
     ("klogd_hosted", Sched::Parallel, Tier::Fast),
-    // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
-    // spawn half is per-PR again; alone they still price over the ceiling,
-    // and sit Nightly.
     ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("klogd_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("lock_across_switch_halts", Sched::Parallel, Tier::Nightly),
+    ("heap_over_ceiling_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
     // over two boots measured 12 s twelve-wide on the dev host**, against
@@ -1535,6 +1495,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // and its store (`copy-meets-a-remap`): the store never reaches the region
     // mapped after it.
     ("user_copy_races_munmap", Sched::Parallel, Tier::Fast),
+    // A sibling's store staged between a thread's TLS block being placed and
+    // its rebase (`tls-rebase-window`): the block is never reachable there.
+    ("tls_rebase_window", Sched::Parallel, Tier::Fast),
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Nightly),
     ("writeback_durability", Sched::Parallel, Tier::Nightly),
@@ -1559,7 +1522,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
     ("fs_dirs_durable", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
-    ("heap_ceiling_recovery", Sched::Parallel, Tier::Nightly),
+    ("heap_ceiling_bounds", Sched::Parallel, Tier::Nightly),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
@@ -1606,19 +1569,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // verdict it does not have.
     ("suspend_detector", Sched::Parallel, Tier::Fast),
     ("suspend_invalidates_a_verdict", Sched::Parallel, Tier::Fast),
-    // Same again: whether a red that is a blown liveness guard still reads as
-    // one by the time it reaches the summary, and whether the `ALONE:` line
-    // under a red is about the run it claims to be about.
     ("stall_is_not_a_verdict", Sched::Parallel, Tier::Fast),
-    ("alone_line_reports_the_alone_run", Sched::Parallel, Tier::Fast),
     // Same: whether two guests can still be handed one lane's NVMe image, which
     // is what a shared-boot reboot did to itself.
     ("nvme_image_is_held_by_one_guest", Sched::Parallel, Tier::Fast),
-    // Same: the quarantine list asking whether it still refuses the
-    // things it exists to refuse.
-    ("quarantine_verdicts", Sched::Parallel, Tier::Fast),
-    ("quarantine_exit_status", Sched::Parallel, Tier::Fast),
-    ("quarantine_entries", Sched::Parallel, Tier::Fast),
+    // Same: what a whole run exits with.
+    ("run_exit_status", Sched::Parallel, Tier::Fast),
     // Same: the control-register verdict, against the machine this tree
     // actually booted before `arch/x86_64/control_regs.rs`.
     ("control_regs_verdict", Sched::Parallel, Tier::Fast),
@@ -1652,6 +1608,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
+    ("tls_rebase_window", &["test_rs_tls_dtv_race"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
@@ -1668,7 +1625,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("gsbase_locked", &["test_rs_gsbase_locked"]),
     ("sched_check_build", &["test_rs_sched_stress"]),
     ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
-    ("heap_ceiling_recovery", &["test_rs_heap_ceiling"]),
+    ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("cache_eviction", &["test_rs_cache_eviction"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
     ("i8042_health_cadence", &["test_rs_i8042_keyboard"]),
@@ -1687,6 +1644,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_listener_forgery", &["test_rs_netd_listener_forgery"]),
     ("netd_slow_reader", &["test_rs_netd_slow_reader"]),
     ("netd_refused_pipes", &["test_rs_netd_refused_pipes"]),
+    ("netd_refused_accept", &["test_rs_netd_refused_accept"]),
     ("netd_held_open", &["test_rs_netd_held_open"]),
     ("netd_stalled_peer", &["test_rs_netd_stalled_peer"]),
     ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
@@ -1755,6 +1713,10 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
+    ("syscall_panic_halts", &["test_rs_test_panic_child"]),
+    ("syscall_fault_halts", &["test_rs_test_panic_child"]),
+    ("lock_across_switch_halts", &["test_rs_test_panic_child"]),
+    ("heap_over_ceiling_halts", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
     ("dump_nmi_probe", &["test_rs_dump_stage_load"]),
     ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
@@ -1798,8 +1760,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
-    ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
-    ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
 
 /// The clients every `tests/metalcase` desktop boot carries: the group shares
@@ -3003,7 +2963,7 @@ const MAX_KERNEL_LINES: usize = 60;
 /// The kernel's own account of a test that died, which `stdout` cannot carry.
 ///
 /// **`exit code Some(-1)` is the kernel saying it killed the process** —
-/// `recover_or_halt` answers a Ring 3 fault with `kill_process(-1)` — and every
+/// `fatal_exception` answers a Ring 3 fault with `kill_process(-1)` — and every
 /// word of *why* is a `log!`: the vector, `rip`, `cr2`, the resolved symbol.
 /// `run_test_paced` files kernel lines under `serial` and keeps them out of
 /// `stdout`, which is right for a test that passed and leaves a killed one with
@@ -3104,42 +3064,9 @@ fn check_rust_result(result: &TestResult) -> bool {
     }
 }
 
-/// Checks both exit code and serial diagnostics for panic recovery.
-fn check_panic_recovery(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
-
-    let checks: &[(&str, &str)] = &[
-        ("PANIC:", "expected PANIC header"),
-        ("SYS_DEBUG", "expected SYS_DEBUG in panic message"),
-        ("Syscall: num=92", "expected syscall context in panic report"),
-        ("User backtrace:", "expected user backtrace in panic report"),
-        ("Registers:", "expected register dump from kernel fault"),
-        ("SEGFAULT tid=", "expected SEGFAULT header"),
-        ("deliberate_null_deref", "expected deliberate_null_deref in segfault backtrace"),
-        ("+0x", "expected symbolized backtraces"),
-    ];
-
-    let mut ok = true;
-    for (needle, msg) in checks {
-        if !result.serial.contains(needle) {
-            eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-            ok = false;
-        }
-    }
-    if let Err(msg) = check_tripwire_attribution(&result.serial) {
-        eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-        ok = false;
-    }
-    ok & check_symbols_were_read("panic_recovery", &result.serial)
-}
-
 /// The kernel names the frames of a process it loaded off a **disk**.
 ///
-/// `null_deref_run_from_disk` is this child's alone, so a `contains` over the
-/// capture window cannot be satisfied by `segfault_child` running in the same
-/// boot.
+/// `null_deref_run_from_disk` is this child's alone.
 fn check_disk_backtrace(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
@@ -3181,13 +3108,6 @@ fn check_disk_backtrace(result: &TestResult) -> bool {
 /// task's own record — so the two reasons left are a CPU inside a scheduler pass
 /// and a CPU running nothing, and either one in a report is a finding rather
 /// than weather.
-///
-/// The measured before/after on the dev host under a twelve-wide suite, which is
-/// what makes that a claim — N = 12 rounds of `fault_gates` + `panic_recovery`
-/// an arm, 2026-08-22: 3 of 12 conceded with the table lookup, 0 of 12 without
-/// it, and 1 of 12 with the lookup put back on the same base, that third arm
-/// being the control that says the first two are about the code and not about
-/// the day.
 fn check_symbols_were_read(test: &str, serial: &str) -> bool {
     const CONCEDED: &str = "<symbol unread:";
     let lines: Vec<&str> = serial.lines().filter(|l| l.contains(CONCEDED)).collect();
@@ -3207,11 +3127,9 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
 /// A whole-buffer `contains("syscall/dispatch.rs")` certifies none of that: the
-/// same boot's `test_syscall_panic` panics in that file too, so the needle is
-/// already present before the tripwire runs. Scope it instead to the window
-/// between this panic's header and its message — `panicked at <location>` is
-/// the only thing in there, and the backtrace that names every frame comes
-/// after the message, so it cannot supply the answer either.
+/// backtrace names every frame, that file's included. Scope it instead to the
+/// window between this panic's header and its message — `panicked at
+/// <location>` is the only thing in there.
 fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
     const MSG: &str = "scheduler entered while a lock is held";
     const HEADER: &str = "PANIC:";
@@ -3227,6 +3145,28 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
             "expected the tripwire to name the guilty call site, not scheduler.rs; got: {}",
             location.trim()
         ));
+    }
+    Ok(())
+}
+
+/// The kernel's Ring 0 read of the address `test_panic_child` named halted on
+/// that address as **unmapped**. A read that demand paging filled for the
+/// caller re-executes into SMAP's protection fault instead, so the word is what
+/// says nothing was mapped into the current process.
+fn check_ring0_read_unmapped(serial: &str) -> Result<(), String> {
+    const READ_OF: &str = "SYS_DEBUG: a Ring 0 read of ";
+    let at = serial.find(READ_OF).ok_or("expected the kernel to name the address it read")?;
+    let named = serial[at + READ_OF.len()..].split_whitespace().next().unwrap_or_default();
+    let addr = named
+        .strip_prefix("0x")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| format!("the address the kernel read is not a number: {named:?}"))?;
+    if addr == 0 {
+        return Err("expected the demand-paged window, not the null read".to_string());
+    }
+    let want = format!("KERNEL PANIC: read unmapped address at {addr:#x}");
+    if !serial.contains(&want) {
+        return Err(format!("expected `{want}`: the read did not fault as unmapped at {addr:#x}"));
     }
     Ok(())
 }
@@ -3309,6 +3249,8 @@ fn check_fault_gates(result: &TestResult) -> bool {
             "fault_gate_child::divide_by_zero",
             "expected the faulting function in the #DE backtrace",
         ),
+        ("SEGFAULT tid=", "expected a SEGFAULT header for the null read"),
+        ("fault_gate_child::read_null", "expected the faulting function in the #PF backtrace"),
     ];
 
     let mut ok = true;
@@ -3485,18 +3427,56 @@ fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
 /// Select check function by test name convention.
 fn check_for(name: &str) -> fn(&TestResult) -> bool {
     match name {
-        "panic_recovery" => check_panic_recovery,
         "disk_backtrace" => check_disk_backtrace,
         "audio_idle_suspend" => check_audio_idle_suspend,
         "null_sink_client_exits" => check_null_sink_client_exits,
         "fault_gates" => check_fault_gates,
         "debug_trap" => check_debug_trap,
         "dlopen_dedup" => check_dlopen_dedup,
+        "abuse_elf_loader" => check_abuse_elf_loader,
         "syscall_cost" => check_syscall_cost,
         "exit_wait_storm" => check_exit_wait_storm,
         _ => check_rust_result,
     }
 }
+
+/// `abuse_elf_loader` plus the reason each apply-time refusal must fire for.
+///
+/// Each case is refused for the right reason only if the kernel names its
+/// [`toyos_elf::RelocError`] beside the file — a case refused later, for
+/// another reason, would pass the exit-code check alone. Every reason is
+/// checked even when the guest failed, so one run shows each case's verdict.
+fn check_abuse_elf_loader(result: &TestResult) -> bool {
+    use toyos_elf::RelocError;
+    let mut ok = check_rust_result(result);
+    let log = format!("{}{}", result.before, result.serial);
+    for (file, refused, what) in [
+        ("tls_apply_refs.so", RelocError::TlsOutsideSegment, "the dlopen apply-time TLS refusal"),
+        ("tls_apply_spawn", RelocError::TlsOutsideSegment, "the spawn apply-time TLS refusal"),
+        ("f13_refs_past.so", RelocError::TlsOutsideSegment, "the cross-module apply-time TLS refusal"),
+        ("tpoff_overflow.so", RelocError::TpoffOverflows, "the dlopen TPOFF overflow"),
+        ("tpoff_overflow_spawn", RelocError::TpoffOverflows, "the spawn TPOFF overflow"),
+        ("globdat_past_dynsym", RelocError::SymbolPastTable, "the executable's GLOB_DAT past .dynsym"),
+    ] {
+        let reason = refused.as_str();
+        let named = log.lines().any(|l| l.contains(file) && l.contains(reason));
+        if !named {
+            eprintln!(
+                "FAIL rs::abuse_elf_loader: {what} did not fire for its reason — no line names \
+                 {file:?} with {reason:?}{}",
+                kernel_account(result)
+            );
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// `kernel/src/loader/tls.rs`'s `rebase_window` line for a watched spawn's
+/// block the process could not yet reach before its rebase.
+const TLS_BLOCK_UNREACHABLE: &str = "is not reachable before its rebase";
+/// The spawns `tls_dtv_race` watches: every round of its `ROUNDS` but the first.
+const TLS_RACE_WATCHED: usize = 15;
 
 /// What a loader writes when it caches a library under the directory it searched
 /// and did not find it in. Only `dlopen_dedup`'s last arm produces this string.
@@ -6852,143 +6832,6 @@ fn run_screen_test(
                  desktop repainted: {}",
                 back.rows()[row].trim()
             );
-            Ok(())
-        }
-        "screen_recoverable_untouched" => {
-            // The negative of screen_fatal_halt: a panic the kernel recovers
-            // from must not paint its report over a live display. Action 0
-            // panics in syscall context, which the handler recovers from, so it
-            // never reaches halt_all_cpus. **Every screen across the recovery,
-            // not two endpoints**: a report painted and then painted over is
-            // gone by any endpoint — the fatal fill is looked for on each dump
-            // from the command until well after the child is reaped.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    // Action 0 is a `SYS_DEBUG` arm, and a kernel that ships
-                    // has none: the child would be answered `InvalidArgument`
-                    // and exit 0, which is this test's own red for a reason
-                    // that is not about the screen at all.
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            let before = qemu.screendump();
-            let from = qemu.console_stream().mark();
-            writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child").map_err(|e| format!("{e}"))?;
-            qemu.flush_stdin();
-            const ENDED: &str = "===TEST_END test_rs_test_panic_child exit=";
-            // Past the child's end by this much: a paint the recovery made late
-            // is still looked for.
-            const AFTER_END: Duration = Duration::from_millis(1500);
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(15));
-            let mut ended_at: Option<Instant> = None;
-            let mut dumps = 0usize;
-            loop {
-                let dump = qemu.screendump();
-                dumps += 1;
-                if dump.fill() == FILL_FATAL {
-                    return Err(format!(
-                        "recovering panic painted its report over the display, on dump {dumps} \
-                         across the recovery\ndecoded screen:\n{}",
-                        dump.text()
-                    ));
-                }
-                if ended_at.is_none() && qemu.console_stream().since(from).contains(ENDED) {
-                    ended_at = Some(Instant::now());
-                }
-                if ended_at.is_some_and(|at| at.elapsed() >= AFTER_END) {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "the recoverable panic never completed\nserial:\n{}",
-                        qemu.console_stream().since(from)
-                    ));
-                }
-            }
-            // The premise, not a formality: a child that never panicked leaves
-            // every dump boot-filled and this test green.
-            let said = qemu.console_stream().since(from);
-            if !said.contains("SYS_DEBUG: kernel panic triggered by userspace") {
-                return Err(format!("no kernel panic in the child's output\nserial:\n{said}"));
-            }
-            if said.contains(&format!("{ENDED}0===")) {
-                return Err("recoverable panic did not kill the child".to_string());
-            }
-            // A screen that was blank to begin with would pass the fill for
-            // the wrong reason.
-            let text = before.text();
-            print_screen(name, &format!("{dumps} dumps across the recovery, none fatal\n{text}"));
-            if !text.contains("Boot: complete") {
-                return Err(format!("nothing on screen to preserve\ndecoded screen:\n{text}"));
-            }
-            Ok(())
-        }
-        "screen_survived_panic_not_blamed" => {
-            // `discard_capture` told from a no-op: `capture` freezes a report on
-            // every panic and the recovery branch drops it, so two deaths in one
-            // boot and the panel must name the second. Action 0 panics in
-            // syscall context, which the handler recovers from.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
-            let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
-            if let Some(err) = &survived.error {
-                return Err(format!("the survivable panic never completed: {err}"));
-            }
-            if survived.exit_code == Some(0) {
-                return Err("the survivable panic did not kill the child".to_string());
-            }
-            if !survived.serial.contains(USERSPACE_PANIC) {
-                return Err(format!(
-                    "no kernel panic in the child's output, so there is no capture to \
-                     discard and the rest of this test would pass vacuously\nserial:\n{}",
-                    survived.serial
-                ));
-            }
-            // The machine walked away from it: that is what makes this a second death.
-            if !qemu.command_until(
-                "run test_rs_test_panic_child 3",
-                FATAL_HALT_NONCE,
-                Duration::from_secs(15),
-            ) {
-                return Err(format!(
-                    "{FATAL_HALT_NONCE:?} never reached the console, so the guest did not \
-                     survive the first panic and there is no second death to read"
-                ));
-            }
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            // The nonce is logged after the first panic's snapshot was frozen,
-            // so a snapshot the discard failed to drop cannot carry it.
-            if !text.contains(FATAL_HALT_NONCE) {
-                return Err(format!(
-                    "the panel does not name the fatal halt: the survived panic's frozen \
-                     report was painted as the cause of death, so `discard_capture` did not \
-                     drop it\ndecoded screen:\n{text}"
-                ));
-            }
-            if dump.fill() != FILL_FATAL {
-                return Err(format!(
-                    "the report is on screen but the fill is {:?}, not the fatal {FILL_FATAL:?}",
-                    dump.fill()
-                ));
-            }
             Ok(())
         }
         other => Err(format!("unknown screen test {other}")),
@@ -10500,6 +10343,22 @@ fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
+/// An accept netd refuses for room leaves its owner a wake for the connection
+/// it left: the guest's wakes are the verdict. This side carries that netd named the
+/// refusal for room and that no program panicked.
+fn netd_refused_accept(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let HostRun { result, console, .. } = netcase_against_host(rust_bins, "netd_refused_accept", true, "")?;
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_refused_accept: ok")) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    if !console.contains("netd: refusing accept, ") {
+        return Err(format!("netd refused an accept for room without saying so:\n{console}"));
+    }
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] an accept refused for room left a wake once room returned");
+    Ok(())
+}
+
 /// Ctrl+Alt+D at a live desktop: every CPU answers, and the two halves of the
 /// report agree.
 ///
@@ -10594,20 +10453,16 @@ fn blocked_dump() -> Result<(), String> {
         return Err(format!("no parked task was named by pid and tid:\n{report}"));
     }
 
-    // **All three kernel threads, by name.** They are almost always blocked, so
+    // **Every kernel thread, by name.** They are almost always blocked, so
     // the parked lines above carry them as a pid and a tid and nothing else —
-    // and on a machine that has gone quiet the question is *which* of the three
-    // is stuck. `sched::dump`'s census tags a kernel thread whatever it is
-    // doing, which is C6's gate: three kernel threads split the work —
-    // `klogd` the console drain, `usbd` the xHCI port machine, `iod` the
-    // write-back queue — precisely so that one of them wedging does not stop
-    // the other two. A report that cannot tell them apart cannot say which did.
+    // and on a machine that has gone quiet the question is *which* one is
+    // stuck. `sched::dump`'s census tags a kernel thread whatever it is doing.
     //
     // Matched with the ` cpu=` that follows the name on the census line, because
     // a bare name appears in every one of these programs' own log lines and
     // `/system/bin/init` speaks in a program's name before that program runs
     // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd", "usbd", "iod"]
+    let unnamed: Vec<&str> = ["klogd", "iod"]
         .into_iter()
         .filter(|name| !report.contains(&format!(" {name} cpu=")))
         .collect();
@@ -11552,14 +11407,13 @@ fn run_machine_test(
             };
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // A liveness ceiling, not a pace: a loaded shard once took past a
-            // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
-            // The T14's readback needs no drain at all — the whole boot's records
-            // are on the stick — so the wait is here and the predicate is shared.
-            let log = qemu.boot_log().to_string()
-                + &qemu.drain_until(Duration::from_secs(10), |l| {
-                    l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
-                });
+            // iod's probe reports on either side of the ready marker and the
+            // drain reads only lines after it, so the boot log is asked first;
+            // the drain's ceiling is a liveness bound on a report still owed.
+            let mut log = qemu.boot_log().to_string();
+            if !log.lines().any(sysret_ss_reported) {
+                log += &qemu.drain_until(Duration::from_secs(10), sysret_ss_reported);
+            }
             sysret_ss(&log)
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
@@ -11605,6 +11459,28 @@ fn run_machine_test(
                 return Err(format!(
                     "user_copy_races_munmap failed:\n{}\nkernel log while it ran:\n{}{}",
                     result.stdout, result.before, result.serial
+                ));
+            }
+            Ok(())
+        }
+        // Two CPUs: the held spawn spins in the kernel while its sibling stores
+        // on the other.
+        "tls_rebase_window" => {
+            let options = BootOptions {
+                smp: 2,
+                kernel_params: &["tls-rebase-window"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let result = qemu.run_test("test_rs_tls_dtv_race", Duration::from_secs(30));
+            let log = format!("{}{}", result.before, result.serial);
+            let unreachable = log.lines().filter(|l| l.contains(TLS_BLOCK_UNREACHABLE)).count();
+            if !check_rust_result(&result) || unreachable != TLS_RACE_WATCHED {
+                return Err(format!(
+                    "tls_rebase_window failed: {unreachable} of {TLS_RACE_WATCHED} watched blocks \
+                     unreachable before their rebase:\n{}\nkernel log while it ran:\n{log}",
+                    result.stdout
                 ));
             }
             Ok(())
@@ -12975,11 +12851,8 @@ fn run_machine_test(
         "suspend_detector" => common::clock::self_check(),
         "suspend_invalidates_a_verdict" => suspend_invalidates_a_verdict(),
         "stall_is_not_a_verdict" => stall_is_not_a_verdict(),
-        "alone_line_reports_the_alone_run" => alone_line_reports_the_alone_run(),
         "nvme_image_is_held_by_one_guest" => nvme_image_is_held_by_one_guest(),
-        "quarantine_verdicts" => quarantine_verdicts(),
-        "quarantine_exit_status" => quarantine_exit_status(),
-        "quarantine_entries" => quarantine_entries(),
+        "run_exit_status" => run_exit_status(),
         "control_regs_verdict" => control_regs_verdict(),
         "i8042_quarantine_verdict" => idle_trip_verdict(),
         "suite_split" => suite_split(),
@@ -13389,8 +13262,7 @@ fn run_machine_test(
             // trampoline that never issues an `iretq`. It gets a process-table
             // entry rather than a bare task, and that is what makes it
             // nameable: without one a crash report would print a pid nothing
-            // in the machine resolves. What each row *means* when the panic
-            // really fires is `klogd_panic_halts`' two actuator boots.
+            // in the machine resolves.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -13399,84 +13271,49 @@ fn run_machine_test(
             );
             klogd_hosted(&serial::Serial::boot(&qemu))
         }
-        "klogd_panic_halts" => {
-            // **A kernel thread's panic is not recoverable by accident.**
-            // `syscall_rip` is never cleared, so the ordinary recovery
-            // predicate reads whatever user thread last ran on that CPU, and
-            // a kernel task would recover or halt by accident of work
-            // stealing. The row in `sched::kthread` replaces the accident
-            // with an answer; these two actuator boots walk both branches.
-            //
-            // The marker is a line of the crash *report* rather than `PANIC:`
-            // itself, because `boot_log` stops at the marker and the name is
-            // printed after the header — a boot stopped at the header would
-            // have nothing left to assert the process table against.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["klogd-panic"],
-                    ready_marker: "Process: klogd",
-                    ..Default::default()
-                },
-            );
-            let mut dead = serial::Serial::boot(&qemu);
-            dead.must_say("PANIC:")?;
-            dead.must_say("klogd-panic: the console drainer died")?;
-            // The process table answered for a task with no *user* address
-            // space — since C6 it names the kernel's, which is what let
-            // `KernelPayload.address_space` stop being an `Option`.
-            dead.must_say("Process: klogd")?;
-
-            // The verdict. A *recovered* panic kills the thread and lets the
-            // machine carry on into userland, which announces itself; the
-            // fatal branch halts every CPU. The window is a liveness margin
-            // and not a threshold: `klogd` panics as the scheduler starts, and
-            // the arm this must never become reaches the marker a few hundred
-            // milliseconds later — so three seconds is a tenfold margin over
-            // the state it refuses, and it is the whole of this test's fixed
-            // cost against the Fast ceiling.
-            const CARRIED_ON: Duration = Duration::from_secs(3);
-            dead.push(&qemu.drain_serial(CARRIED_ON));
-            dead.must_not_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [klogd] a kernel thread's panic halted the machine rather than recovering");
-
-            drop(qemu);
-
-            // **The same panic on the other row, and it is the direction
-            // nothing had ever taken.** Two rows in one table are one row
-            // until both branches have been walked: before this arm, every
-            // kernel-thread panic this tree had ever run took `OnPanic::Halt`,
-            // so `Recover` was a value rather than a path — and the path it
-            // names goes through `poison_tid`, the idle loop's `reap_poisoned`
-            // and `zombify_poisoned`, none of which had ever seen a task with
-            // no user address space. A row that quietly halted the machine
-            // would make `usbd` and `iod` worse than the thread they were
-            // split off from.
-            //
-            // The verdict is content in the same window and never a timeout:
-            // the boot returns at the crash report's own line, and what the
-            // three seconds after it must contain is the ready marker the
-            // arm above must *not*.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["usbd-panic"],
-                    ready_marker: "Process: usbd",
-                    ..Default::default()
-                },
-            );
-            let mut survived = serial::Serial::boot(&qemu);
-            survived.must_say("PANIC:")?;
-            survived.must_say("usbd-panic: the device thread died")?;
-            survived.must_say("Process: usbd")?;
-            survived.push(&qemu.drain_serial(CARRIED_ON));
-            survived.must_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [usbd] a kernel thread's panic killed the thread and the machine booted");
-            Ok(())
+        "klogd_panic_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-panic", "panic-reboot-fast"],
+            &["klogd-panic: the console drainer died", "Process: klogd"],
+        ),
+        "klogd_fault_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-fault", "panic-reboot-fast"],
+            &["KERNEL PANIC: read unmapped address at 0x0", "console::body"],
+        ),
+        "syscall_panic_halts" | "syscall_fault_halts" | "lock_across_switch_halts"
+        | "heap_over_ceiling_halts" => {
+            use toyos_abi::syscall::{debug_action as da, SYS_DEBUG};
+            let syscall = format!("Syscall: num={SYS_DEBUG}");
+            let syscall = syscall.as_str();
+            let (action, said): (u64, &[&str]) = match name {
+                "syscall_panic_halts" => (
+                    da::PANIC,
+                    &["SYS_DEBUG: kernel panic triggered by userspace", syscall, "User backtrace:"],
+                ),
+                // A Ring 0 read of a user address is the kernel's, inside a syscall too.
+                "syscall_fault_halts" => (da::NULL_READ, &[syscall, "User backtrace:"]),
+                "lock_across_switch_halts" => (da::LOCK_ACROSS_SWITCH, &[syscall]),
+                // The message, not `mm/alloc.rs`: it names the ceiling rather
+                // than the page source's own request.
+                "heap_over_ceiling_halts" => {
+                    (da::HEAP_OVER_CEILING, &["exceeds MAX_HEAP_ALLOC", syscall])
+                }
+                other => unreachable!("{other} is not a syscall-death row"),
+            };
+            let said = power::syscall_death_resets(test_config, c_bins, rust_bins, action, said)?;
+            // With the capture: this guest's 16550 is its stdio, so no
+            // `uart-*.log` keeps what it said.
+            match name {
+                "lock_across_switch_halts" => check_tripwire_attribution(&said),
+                "syscall_fault_halts" => check_ring0_read_unmapped(&said),
+                _ => Ok(()),
+            }
+            .map_err(|e| format!("{e}\n{said}"))
         }
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
@@ -13787,57 +13624,19 @@ fn run_machine_test(
             eprintln!("  [sleep] {}", result.stdout.lines().last().unwrap_or("").trim());
             Ok(())
         }
-        "heap_ceiling_recovery" => {
-            // A panic inside the kernel allocator's own lock left the heap
-            // locked for the rest of the boot: the panicking thread never
-            // unwinds, so `now` never advances, and the CPU that recovered
-            // spun `Lock::lock` to its 500M-spin deadline on its next `alloc`
-            // or `free` — then panicked again, forever. The fix moved the
-            // ceiling check to `KernelAllocator::alloc`, before the lock.
-            //
-            // `smp: 1` is what makes the claim precise. The property is that
-            // *the recovered CPU* survives its next allocation; on a wider
-            // machine `/system/bin/echo` could run somewhere else and pass without
-            // touching it. With one CPU there is nowhere else.
-            //
-            // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `syscall/dispatch.rs`: routes
-            // past the ceiling do still exist,
-            // and each of them holds the VFS lock when it dies, so the
-            // machine wedges either way and the allocator's recovery cannot
-            // be observed on its own.
-            let options = BootOptions {
-                smp: 1,
-                kernel_features: ACTUATOR_KERNEL,
-                ..Default::default()
-            };
+        "heap_ceiling_bounds" => {
+            // Its own boot: `LOWER_SYSINFO_BOUND` stays lowered for the rest of it.
+            let options = BootOptions { kernel_features: ACTUATOR_KERNEL, ..Default::default() };
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             serial::Serial::boot(&qemu).must_be_clean()?;
 
             let result = qemu.run_test("test_rs_heap_ceiling", Duration::from_secs(30));
             if let Some(err) = &result.error {
-                // The wedge's signature. Before the fix this is where the test
-                // ends: the child's panic strands the allocator, the guest
-                // stops answering, and `run_test` runs out of window.
-                return Err(format!(
-                    "the guest stopped answering after the over-ceiling panic: {err}\n\
-                     serial:\n{}",
-                    result.serial
-                ));
+                return Err(format!("heap_ceiling did not finish: {err}\nserial:\n{}", result.serial));
             }
             if !check_rust_result(&result) {
                 return Err(format!("heap_ceiling failed:\n{}", result.stdout));
             }
-
-            // The panic must be the one this test asked for, and it must have
-            // fired where the fix put it. `mm/alloc.rs` appears in the report
-            // either way — the old assert was in the same file — so the needle
-            // is the message, which names the ceiling rather than the page
-            // source's own request.
-            let serial = serial::Serial::named("test serial", result.serial.as_str());
-            serial.must_say("PANIC:")?;
-            let line = serial.must_say("exceeds MAX_HEAP_ALLOC")?;
-            eprintln!("  [heap] {}", line.trim());
             Ok(())
         }
         "cache_eviction" => {
@@ -14777,12 +14576,7 @@ fn run_machine_test(
             let start = toyos_build::build::boot_start(&config.join("system.toml"));
             for program in &start {
                 let line = format!("init: started {program}");
-                if !log.contains(&line) {
-                    return Err(format!(
-                        "the shipped `[boot] start` names {program} and init never said \
-                         {line:?}\n{log}"
-                    ));
-                }
+                qemu::await_marker(&mut qemu, &mut log, &line, &line)?;
             }
             serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
             eprintln!(
@@ -16017,6 +15811,7 @@ fn run_machine_test(
         }
         "netd_slow_reader" => netd_slow_reader(rust_bins),
         "netd_refused_pipes" => netd_refused_pipes(rust_bins),
+        "netd_refused_accept" => netd_refused_accept(rust_bins),
         "netd_held_open" => netd_held_open(rust_bins),
         "netd_stalled_peer" => netd_stalled_peer(rust_bins),
         "netd_udp_refused" => netd_udp_refused(rust_bins),
@@ -17008,18 +16803,35 @@ fn window_held(before: &str, during: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `kernel/src/arch/x86_64/hw.rs`'s probe, when it could not run.
+const SYSRET_SS_UNARMED: &str = "sysret-ss: probe could not arm";
+/// The probe, when a switch refreshed SS from null.
+const SYSRET_SS_RELOADED: &str = "sysret-ss: reloaded";
+/// The probe, when SS stayed null across a switch.
+const SYSRET_SS_NOT_RELOADED: &str = "sysret-ss: NOT reloaded";
+
+/// Whether `line` is the probe's last word: each of its three outcomes.
+fn sysret_ss_reported(line: &str) -> bool {
+    [SYSRET_SS_RELOADED, SYSRET_SS_NOT_RELOADED, SYSRET_SS_UNARMED]
+        .iter()
+        .any(|end| line.contains(end))
+}
+
 /// The context switch reloads SS from null before a `sysretq` can see it.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn sysret_ss(log: &str) -> Result<(), String> {
-        if log.contains("sysret-ss: NOT reloaded") {
+        if log.contains(SYSRET_SS_UNARMED) {
+            return Err(format!("the SS-reload probe could not arm, so it measured nothing:\n{log}"));
+        }
+        if log.contains(SYSRET_SS_NOT_RELOADED) {
             return Err(format!(
                 "the switch did not reload SS — a sysretq here would hand userland an \
                  unusable one:\n{log}"
             ));
         }
-        if !log.contains("sysret-ss: reloaded") {
+        if !log.contains(SYSRET_SS_RELOADED) {
             return Err(format!(
                 "the SS-reload probe never reported — iod may not have run it:\n{log}"
             ));
@@ -17150,30 +16962,14 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The machine's three kernel threads are hosted, and each claims the panic row
-/// its own loss demands.
+/// The machine's kernel threads are hosted.
 ///
-/// Text in, a verdict out: all three lines are `log!` records, so the T14's
+/// Text in, a verdict out: every line is a `log!` record, so the T14's
 /// readback and a QEMU boot log are judged by this one predicate.
 fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     boot.must_be_clean()?;
-    let line = boot.must_say("kthread: klogd")?;
-    if !line.contains("halts the machine") {
-        return Err(format!("klogd is hosted but claims the wrong panic row: {line:?}"));
-    }
-    eprintln!("  [klogd] {}", line.trim());
-
-    // **The other two threads, and the opposite row.** `usbd` owns the xHCI
-    // port machine and `iod` the write-back queue, so a stuck USB enumeration
-    // cannot stop the log. Their panics are *recoverable* and `klogd`'s
-    // deliberately is not — a killed drainer is the one loss nothing left alive
-    // can report — and this is the one boot in the suite where all three rows
-    // are on the wire together.
-    for name in ["usbd", "iod"] {
+    for name in ["klogd", "iod"] {
         let line = boot.must_say(&format!("kthread: {name}"))?;
-        if !line.contains("kills the thread") {
-            return Err(format!("{name} is hosted but claims the wrong panic row: {line:?}"));
-        }
         eprintln!("  [kthread] {}", line.trim());
     }
     Ok(())
@@ -18473,7 +18269,6 @@ fn build_test_registry(
 
     for name in discover_rust_tests(rust_bins) {
         let timeout = match name.as_str() {
-            "panic_recovery" => Duration::from_secs(10),
             // Writes the child's whole image through bcachefs before it can run
             // it, which is the only thing here that is not a spawn.
             "disk_backtrace" => Duration::from_secs(15),
@@ -18629,51 +18424,29 @@ struct Outcome {
 /// What the suite may conclude from one outcome.
 #[derive(PartialEq, Debug)]
 enum Verdict {
-    /// `Some` when the name is quarantined: still a pass, and still worth a
-    /// line, because one green of a quarantined test closes nothing.
-    Pass(Option<&'static Quarantined>),
-    /// Red. `Some` when the name is quarantined and this is not the failure its
-    /// row quotes: the row excuses one failure, and this is another.
-    Fail(Option<&'static Quarantined>),
+    Pass,
+    Fail,
     /// The host stopped in the middle of it. Neither a pass nor a fail: the
     /// guest, QEMU's virtual clock and every wall-clock margin the test's
     /// assertion rests on all jumped by however long the lid was closed, so the
     /// run measured something and it was not this tree.
     Invalid,
-    /// Quarantined, and failed the way its row quotes. Not red — and reported by
-    /// name, with its issue, on every run.
-    Quarantined(&'static Quarantined),
 }
 
 impl Outcome {
     fn verdict(&self) -> Verdict {
-        self.verdict_against(redlist::QUARANTINE)
-    }
-
-    /// Whether this red is a blown liveness guard rather than an answer.
-    ///
-    /// Deliberately *not* a [`Verdict`] arm. A stall is red on exactly the same
-    /// terms as any other red — the exit code, the quarantine lookup and
-    /// the alone re-run all have to treat it identically, and an arm would make
-    /// each of those a place where somebody could decide otherwise. What it
-    /// changes is only what the reader is told, which is the whole complaint:
-    /// the run establishes nothing about this tree, so nobody should bisect it.
-    fn stalled(&self) -> bool {
-        self.reason.as_deref().is_some_and(|r| r.contains(STALLED))
-    }
-
-    /// The table is a parameter so the gates can state a case rather than
-    /// depend on what the tree happens to quarantine today.
-    fn verdict_against(&self, quarantine: &'static [Quarantined]) -> Verdict {
         if self.suspended >= common::clock::SUSPENDED_AT_LEAST {
             return Verdict::Invalid;
         }
-        let listed = quarantine.iter().find(|q| q.test == self.name);
-        match (&self.reason, listed) {
-            (None, listed) => Verdict::Pass(listed),
-            (Some(reason), Some(row)) if row.excuses(reason) => Verdict::Quarantined(row),
-            (Some(_), listed) => Verdict::Fail(listed),
+        match self.reason {
+            None => Verdict::Pass,
+            Some(_) => Verdict::Fail,
         }
+    }
+
+    /// Whether this red is a blown liveness guard rather than an answer.
+    fn stalled(&self) -> bool {
+        self.reason.as_deref().is_some_and(|r| r.contains(STALLED))
     }
 }
 
@@ -18685,188 +18458,6 @@ impl Outcome {
 /// already prints.
 fn headline(reason: Option<&str>) -> String {
     reason.unwrap_or("check failed").lines().next().unwrap_or("check failed").to_string()
-}
-
-/// What a red says when its name is quarantined and its failure is not the one
-/// the row quotes.
-fn quarantined_for_something_else(row: &Quarantined) -> String {
-    format!(
-        "{} is quarantined for something else, so its row does not cover this failure: {} \
-         excuses {:?}",
-        row.test, row.issue, row.says
-    )
-}
-
-/// What the isolated re-run of one red is allowed to say about it.
-///
-/// **A red-again arm quotes the alone run's own failure**, and says so when it
-/// is not the failure the wide run found. `red again — the defect is real` used
-/// to be the whole line, and the `failures:` summary beside it always carries
-/// the *wide* run's message: on PR #22's run `31424496450` the wide run failed
-/// `xhci_hid_break`'s endpoint count and the alone re-run failed its pointer
-/// delivery three minutes later, and the job said `red again` over the wide
-/// run's sentence — so an adjudicator read one assertion's evidence for
-/// another's. Two different assertions in one job is not a weaker finding than
-/// one twice; it is a different and larger one, and the line now says which it
-/// was.
-///
-/// Which of the two it is is not a text comparison — an assertion that prints
-/// what it measured writes a different sentence every time it fires, so
-/// `toyos_build::alone::same_failure` decides it and both readings are quoted.
-///
-/// The green arms are untouched. They are a classification the issue files are
-/// written against, and nothing about them was wrong.
-///
-/// Pure, and every input a parameter, so [`alone_line_reports_the_alone_run`]
-/// can stage the divergence rather than wait for CI to produce one.
-fn alone_line(name: &str, wide: &str, shared_the_host: bool, alone: Option<&Outcome>) -> String {
-    let Some(outcome) = alone else {
-        return format!("  ALONE {name}: the lone run reported nothing about it");
-    };
-    match outcome.verdict() {
-        // **Two different findings, and which one it is depends on whether the
-        // first run shared the host** — the parallel phase's width, never the
-        // run's, because the serial tail is one guest at any width. Beside other
-        // guests, a green retry says this one was not, which is a classification
-        // defect.
-        Verdict::Pass(_) if shared_the_host => format!(
-            "  ALONE {name}: GREEN — it fails only beside other guests, so its \
-             Sched::Parallel is wrong. The run stays red on the classification."
-        ),
-        // Alone both times, nothing differed that the harness controls: it
-        // failed once and passed once, which is a *rate* and says nothing about
-        // `Sched`. CI runs one lane per machine, so every one of its retries is
-        // the second kind.
-        Verdict::Pass(_) => format!(
-            "  ALONE {name}: GREEN, and it was alone both times — nothing the harness \
-             controls differed, so it failed once and passed once. That is a rate and \
-             not a classification."
-        ),
-        Verdict::Fail(_) | Verdict::Quarantined(_) => {
-            let said = headline(outcome.reason.as_deref());
-            // One decision and one classifier: byte equality is the case
-            // `same_failure` already answers, so asking it first would be a
-            // second rule nothing tests.
-            if toyos_build::alone::same_failure(&said, wide) {
-                format!(
-                    "  ALONE {name}: red again, the same failure both times — the defect is \
-                     real.\n      wide:  {wide}\n      alone: {said}"
-                )
-            } else {
-                format!(
-                    "  ALONE {name}: red again on a DIFFERENT failure — it failed twice, on two \
-                     assertions, so this is not one defect reproduced and the divergence is \
-                     itself the finding.\n      wide:  {wide}\n      alone: {said}"
-                )
-            }
-        }
-        Verdict::Invalid => format!("  ALONE {name}: the host was suspended during the retry too"),
-    }
-}
-
-/// Whether the `ALONE:` line still reports the run it is a line about.
-///
-/// The staged pair is the one that was mis-reported: a wide failure and an
-/// alone failure that are not the same sentence. A gate rather than a comment
-/// because the defect is invisible from inside a green run — every arm prints
-/// *a* plausible line, and only the quoted text says which run it came from.
-fn alone_line_reports_the_alone_run() -> Result<(), String> {
-    const WIDE: &str = "3 endpoint(s) were found Running after the break, want 2";
-    const OTHER: &str = "input never came back: no pointer event moved by (2560, -1920)";
-    let red = |reason: &str| Outcome {
-        name: "a_test".to_string(),
-        reason: Some(format!("{reason}\n[kernel 2.639 cpu0] a whole capture nobody diffs")),
-        elapsed: Duration::from_secs(9),
-        suspended: Duration::ZERO,
-    };
-    let green = Outcome {
-        name: "a_test".to_string(),
-        reason: None,
-        elapsed: Duration::from_secs(9),
-        suspended: Duration::ZERO,
-    };
-
-    // The two greens, byte for byte what they have always been: the issue
-    // files quote these, and a reworded classification would silently
-    // invalidate the record rather than add to it.
-    let wide_green = alone_line("a_test", WIDE, true, Some(&green));
-    if !wide_green.contains(
-        "GREEN — it fails only beside other guests, so its Sched::Parallel is wrong. \
-         The run stays red on the classification.",
-    ) {
-        return Err(format!("the shared-host green arm has changed wording:\n{wide_green}"));
-    }
-    let lone_green = alone_line("a_test", WIDE, false, Some(&green));
-    if !lone_green.contains(
-        "GREEN, and it was alone both times — nothing the harness controls differed, so it \
-         failed once and passed once. That is a rate and not a classification.",
-    ) {
-        return Err(format!("the alone-both-times green arm has changed wording:\n{lone_green}"));
-    }
-    for line in [&wide_green, &lone_green] {
-        if line.contains(WIDE) {
-            return Err(format!("a green quotes the wide run's failure:\n{line}"));
-        }
-    }
-
-    // Red again on the same assertion: still "the defect is real", now with the
-    // sentence the *alone* run produced under it.
-    let same = alone_line("a_test", WIDE, false, Some(&red(WIDE)));
-    if !same.contains("red again, the same failure both times") || !same.contains(WIDE) {
-        return Err(format!("a reproduced failure does not say so, or does not quote it:\n{same}"));
-    }
-    if same.contains("[kernel 2.639") {
-        return Err(format!("the line pasted the whole capture into the summary:\n{same}"));
-    }
-
-    // One assertion at two readings: still a reproduction, and it quotes both
-    // rather than picking one.
-    const MEASURED: &str = "the controller started at 0.303 s, past the 0.3 s the ports are held \
-                            empty for";
-    const AGAIN: &str = "the controller started at 0.300 s, past the 0.3 s the ports are held \
-                         empty for";
-    let twice = alone_line("a_test", MEASURED, false, Some(&red(AGAIN)));
-    if !twice.contains("red again, the same failure both times") {
-        return Err(format!("one assertion at two readings reads as two assertions:\n{twice}"));
-    }
-    // The labels are the whole content of the line: two sentences under swapped
-    // labels is the mis-attribution this gate exists to stop, said in the other
-    // direction.
-    for (label, sentence) in [("wide:  ", MEASURED), ("alone: ", AGAIN)] {
-        if !twice.contains(&format!("{label}{sentence}")) {
-            return Err(format!("{sentence:?} is not the line's {label:?} run:\n{twice}"));
-        }
-    }
-
-    // And the case the old line could not tell apart from it.
-    let diverged = alone_line("a_test", WIDE, false, Some(&red(OTHER)));
-    if !diverged.contains("DIFFERENT failure") {
-        return Err(format!("two different failures read as one reproduced:\n{diverged}"));
-    }
-    for both in [WIDE, OTHER] {
-        if !diverged.contains(both) {
-            return Err(format!("the divergent line drops {both:?}:\n{diverged}"));
-        }
-    }
-    if diverged.find(WIDE) > diverged.find(OTHER) {
-        return Err(format!("the divergent line reads alone-then-wide:\n{diverged}"));
-    }
-
-    // The host stopping during the retry is neither, and a retry that never
-    // reported is not a verdict about anything.
-    let suspended = Outcome {
-        suspended: common::clock::SUSPENDED_AT_LEAST,
-        ..red(OTHER)
-    };
-    let asleep = alone_line("a_test", WIDE, false, Some(&suspended));
-    if !asleep.contains("the host was suspended during the retry too") {
-        return Err(format!("a suspended retry reads as a verdict:\n{asleep}"));
-    }
-    let missing = alone_line("a_test", WIDE, false, None);
-    if !missing.contains("the lone run reported nothing about it") {
-        return Err(format!("a retry that reported nothing reads as a verdict:\n{missing}"));
-    }
-    Ok(())
 }
 
 /// One live guest holds its lane's NVMe image, and the next one may not.
@@ -18969,13 +18560,13 @@ fn stall_is_not_a_verdict() -> Result<(), String> {
         }
         // Red is red. A stall that stopped failing the run would be a gate that
         // reports and enforces nothing.
-        let red = matches!(outcome.verdict_against(&[]), Verdict::Fail(_));
+        let red = outcome.verdict() == Verdict::Fail;
         if red != reason.is_some() {
             return Err(format!("{what} is red={red}, and a reason is always red"));
         }
     }
 
-    let mut tally = Tally::new(&[]);
+    let mut tally = Tally::new();
     tally.record(Outcome {
         name: "a_stalled_test".to_string(),
         reason: Some(format!("{STALLED} waiting for nothing at all — it went quiet")),
@@ -19018,7 +18609,7 @@ fn stall_is_not_a_verdict() -> Result<(), String> {
 fn nightly_tier_is_announced() -> Result<(), String> {
     let held: [&str; 2] = ["desktop_window_child", "sshd_fail_closed"];
     let announced =
-        Tally::new(&[]).holding_back(&held).summary(1, Duration::ZERO, Duration::ZERO);
+        Tally::new().holding_back(&held).summary(1, Duration::ZERO, Duration::ZERO);
     for want in [
         "not run — the nightly tier",
         "desktop_window_child, sshd_fail_closed",
@@ -19029,7 +18620,7 @@ fn nightly_tier_is_announced() -> Result<(), String> {
             return Err(format!("a run holding tests back never says {want:?}:\n{announced}"));
         }
     }
-    let whole = Tally::new(&[]).summary(1, Duration::ZERO, Duration::ZERO);
+    let whole = Tally::new().summary(1, Duration::ZERO, Duration::ZERO);
     if whole.contains("nightly") || whole.contains("held back") {
         return Err(format!("a run that held nothing back says it did:\n{whole}"));
     }
@@ -19051,12 +18642,12 @@ fn suspend_invalidates_a_verdict() -> Result<(), String> {
         .checked_sub(Duration::from_millis(1))
         .expect("SUSPENDED_AT_LEAST must be at least 1ms for this case to mean anything");
     let cases: [(&str, Option<&str>, Duration, Verdict); 6] = [
-        ("a pass on a host that stayed up", None, awake, Verdict::Pass(None)),
-        ("a fail on a host that stayed up", Some("the guest said no"), awake, Verdict::Fail(None)),
+        ("a pass on a host that stayed up", None, awake, Verdict::Pass),
+        ("a fail on a host that stayed up", Some("the guest said no"), awake, Verdict::Fail),
         ("a pass across a suspend", None, slept, Verdict::Invalid),
         ("a fail across a suspend", Some("timed out"), slept, Verdict::Invalid),
-        ("a pass across clock jitter", None, jitter, Verdict::Pass(None)),
-        ("a fail across clock jitter", Some("the guest said no"), jitter, Verdict::Fail(None)),
+        ("a pass across clock jitter", None, jitter, Verdict::Pass),
+        ("a fail across clock jitter", Some("the guest said no"), jitter, Verdict::Fail),
     ];
     for (what, reason, suspended, want) in cases {
         let outcome = Outcome {
@@ -19080,18 +18671,12 @@ fn suspend_invalidates_a_verdict() -> Result<(), String> {
 /// only reports, and what the process exits with. [`Tally::exit_code`] and
 /// [`Tally::summary`] are that arithmetic, and both are gated.
 struct Tally {
-    quarantine: &'static [Quarantined],
     passed: usize,
     failures: Vec<(String, String)>,
     /// The subset of `failures` whose guard expired rather than whose assertion
     /// failed, by name. Red like any other — and named apart, because a run
     /// that never got the guest going has measured the host and not the tree.
     stalls: Vec<String>,
-    /// A quarantined test that failed. Reported, never red.
-    fired: Vec<&'static Quarantined>,
-    /// A quarantined test that passed. Not red, and reported: one green of a
-    /// quarantined test closes nothing.
-    quiet: Vec<&'static Quarantined>,
     invalid: Vec<(String, Duration)>,
     /// What the tier held back, by name. Not a verdict and never red — it is the
     /// one thing a reader of the last line cannot infer from anything else in
@@ -19101,14 +18686,11 @@ struct Tally {
 }
 
 impl Tally {
-    fn new(quarantine: &'static [Quarantined]) -> Self {
+    fn new() -> Self {
         Tally {
-            quarantine,
             passed: 0,
             failures: Vec::new(),
             stalls: Vec::new(),
-            fired: Vec::new(),
-            quiet: Vec::new(),
             invalid: Vec::new(),
             relegated: Vec::new(),
         }
@@ -19121,35 +18703,21 @@ impl Tally {
     }
 
     fn record(&mut self, outcome: Outcome) {
-        match outcome.verdict_against(self.quarantine) {
-            Verdict::Pass(None) => self.passed += 1,
-            Verdict::Pass(Some(row)) => {
-                self.passed += 1;
-                self.quiet.push(row);
-            }
-            Verdict::Fail(listed) => {
+        match outcome.verdict() {
+            Verdict::Pass => self.passed += 1,
+            Verdict::Fail => {
                 if outcome.stalled() {
                     self.stalls.push(outcome.name.clone());
                 }
                 let said = headline(outcome.reason.as_deref());
-                let said = match listed {
-                    None => said,
-                    Some(row) => format!("{said} — {}", quarantined_for_something_else(row)),
-                };
                 self.failures.push((outcome.name, said));
             }
-            Verdict::Quarantined(row) => self.fired.push(row),
             Verdict::Invalid => self.invalid.push((outcome.name.clone(), outcome.suspended)),
         }
     }
 
-    /// **Three statuses, and a quarantined failure is none of them.**
-    ///
-    /// It never reaches this function, which is the statement: a run whose only
-    /// reds were quarantined is exit 0, and a failure on no list is exit 1.
-    ///
-    /// 2 keeps its existing meaning untouched: the run established nothing,
-    /// because the host stopped in the middle of it.
+    /// **Three statuses**: 0 green, 1 red, and 2 when the run established
+    /// nothing, because the host stopped in the middle of it.
     fn exit_code(&self) -> i32 {
         if !self.failures.is_empty() {
             return 1;
@@ -19163,9 +18731,7 @@ impl Tally {
     /// Everything the run has to say, as one block, ending in the result line.
     ///
     /// A string rather than a pile of `eprintln!`s so that the gate can read
-    /// what an agent reads. **The result line names every quarantined test the run
-    /// judged, failed or green**: the whole hazard of this mechanism is a run that
-    /// looks clean, or a row that looks needed, because nobody scrolled up.
+    /// what an agent reads.
     fn summary(&self, total: usize, elapsed: Duration, suspended: Duration) -> String {
         let mut out = String::new();
         let mut say = |line: String| {
@@ -19215,26 +18781,6 @@ impl Tally {
                 self.stalls.len(),
                 self.stalls.join(", ")
             ));
-            say(
-                "    The guest stopped making progress, so the run established nothing \
-                 about this tree and there is nothing in it to bisect. Re-run; if one \
-                 recurs with the host to itself, the guest really is stopping."
-                    .to_string(),
-            );
-            say(String::new());
-        }
-        if !self.fired.is_empty() {
-            say("quarantined — known defects this run reproduced:".to_string());
-            for row in &self.fired {
-                say(format!("    {}  {}", row.test, row.issue));
-            }
-            say(String::new());
-        }
-        if !self.quiet.is_empty() {
-            say("quarantined and green this run — one green closes nothing:".to_string());
-            for row in &self.quiet {
-                say(format!("    {}  {}", row.test, row.issue));
-            }
             say(String::new());
         }
         if !self.invalid.is_empty() {
@@ -19254,18 +18800,6 @@ impl Tally {
             say(String::new());
         }
 
-        let named = |what: &str, rows: &[&Quarantined]| {
-            if rows.is_empty() {
-                return String::new();
-            }
-            let names: Vec<&str> = rows.iter().map(|row| row.test).collect();
-            format!(", {} {what}: {}", rows.len(), names.join(", "))
-        };
-        let quarantined_note = format!(
-            "{}{}",
-            named("quarantined", &self.fired),
-            named("quarantined and green", &self.quiet)
-        );
         // **In the result line, because that is the line a shard's job summary
         // extracts and the line anybody reads.** A count of what ran means
         // something different depending on how much was not attempted.
@@ -19276,7 +18810,7 @@ impl Tally {
         };
         match self.exit_code() {
             1 => say(format!(
-                "test result: FAILED. {} passed, {} failed{quarantined_note}, {} invalidated, \
+                "test result: FAILED. {} passed, {} failed, {} invalidated, \
                  {total} total ({elapsed:.1?}){held}",
                 self.passed,
                 self.failures.len(),
@@ -19284,7 +18818,7 @@ impl Tally {
             )),
             2 => {
                 say(format!(
-                    "test result: INVALID. {} passed{quarantined_note}, {} invalidated by a \
+                    "test result: INVALID. {} passed, {} invalidated by a \
                      host suspend of {suspended:.0?}, {total} total ({elapsed:.1?}){held}",
                     self.passed,
                     self.invalid.len(),
@@ -19295,13 +18829,8 @@ impl Tally {
                         .to_string(),
                 );
             }
-            _ if !self.fired.is_empty() => say(format!(
-                "test result: ok, NOT clean. {} passed{quarantined_note}, {total} total \
-                 ({elapsed:.1?}){held}",
-                self.passed,
-            )),
             _ => say(format!(
-                "test result: ok. {} passed{quarantined_note}, {total} total ({elapsed:.1?}){held}",
+                "test result: ok. {} passed, {total} total ({elapsed:.1?}){held}",
                 self.passed
             )),
         }
@@ -19309,264 +18838,37 @@ impl Tally {
     }
 }
 
-/// Every claim [`redlist::QUARANTINE`] makes that only the registry can check.
-///
-/// `runnable` is the whole registry rather than the two const lists, because the
-/// shared boot's C and Rust tests are discovered and a name that only exists
-/// there must still be listable.
-fn check_quarantine(
-    quarantine: &'static [Quarantined],
-    runnable: &BTreeSet<&str>,
-) -> Result<(), String> {
-    for row in quarantine {
-        if !runnable.contains(row.test) {
-            return Err(format!(
-                "{} is quarantined and no list registers it — a renamed or deleted test must \
-                 take its row with it, or the quarantine is waiting for whatever gets that \
-                 name next",
-                row.test
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// What the quarantine decides about one outcome, and what it must not.
-///
-/// The negative controls are the point: a quarantined test failing any way its
-/// row does not quote is an ordinary red, so is a failure of a name on no list
-/// — a name that merely extends a listed one is on no list — and a suspend
-/// invalidates a quarantined verdict like any other. The match is the row's
-/// fragment inside the *whole* failure text, spelled as the row spells it: a
-/// reason that says nothing is excused by nothing, a fragment reached only past
-/// the headline still excuses, and a fragment that differs only in case is a
-/// different fragment.
-fn quarantine_verdicts() -> Result<(), String> {
-    static LISTED: &[Quarantined] = &[Quarantined {
-        test: "known_to_red",
-        says: &["the guest never answered", "the shell never answered again"],
-        issue: "i.md",
-    }];
-    let awake = Duration::ZERO;
-    let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
-    let row = &LISTED[0];
-    let cases: [(&str, &str, Option<&str>, Duration, Verdict); 12] = [
-        (
-            "a quarantined test failing the way its row quotes",
-            "known_to_red",
-            Some("round 2: the shell never answered again:\n<log>"),
-            awake,
-            Verdict::Quarantined(row),
-        ),
-        (
-            "a quarantined test whose failure says nothing at all",
-            "known_to_red",
-            Some(""),
-            awake,
-            Verdict::Fail(Some(row)),
-        ),
-        (
-            "a quote the reason carries below its headline, as a shared boot's does",
-            "known_to_red",
-            Some("exit code Some(101)\nthe guest never answered"),
-            awake,
-            Verdict::Quarantined(row),
-        ),
-        (
-            "a quote the failure repeats in another case",
-            "known_to_red",
-            Some("The Guest Never Answered"),
-            awake,
-            Verdict::Fail(Some(row)),
-        ),
-        (
-            "the row's second alternative",
-            "known_to_red",
-            Some("the guest never answered"),
-            awake,
-            Verdict::Quarantined(row),
-        ),
-        ("a quarantined test passing", "known_to_red", None, awake, Verdict::Pass(Some(row))),
-        (
-            "a quarantined test failing some other way",
-            "known_to_red",
-            Some("the client binary was not built"),
-            awake,
-            Verdict::Fail(Some(row)),
-        ),
-        (
-            "an unlisted test failing the same way",
-            "some_other_test",
-            Some("round 2: the shell never answered again:\n<log>"),
-            awake,
-            Verdict::Fail(None),
-        ),
-        ("an unlisted test passing", "some_other_test", None, awake, Verdict::Pass(None)),
-        (
-            "an unlisted name that extends a listed one, failing the same way",
-            "known_to_red_controls",
-            Some("round 2: the shell never answered again:\n<log>"),
-            awake,
-            Verdict::Fail(None),
-        ),
-        (
-            "an unlisted name that extends a listed one, passing",
-            "known_to_red_controls",
-            None,
-            awake,
-            Verdict::Pass(None),
-        ),
-        (
-            "a quarantined test across a host suspend",
-            "known_to_red",
-            Some("the shell never answered again"),
-            slept,
-            Verdict::Invalid,
-        ),
-    ];
-    for (what, name, reason, suspended, want) in cases {
-        let outcome = Outcome {
-            name: name.to_string(),
-            reason: reason.map(str::to_string),
-            elapsed: Duration::from_secs(3),
-            suspended,
-        };
-        let got = outcome.verdict_against(LISTED);
-        if got != want {
-            return Err(format!("{what} is {got:?}, and it has to be {want:?}"));
-        }
-    }
-    Ok(())
-}
-
 /// What a whole run exits with, and what its last line says.
 ///
 /// Driven through [`Tally`] rather than asserted about it: the property that
 /// matters is what `--land`'s gate reads off the process, and that is the exit
 /// code after `record` has seen every outcome.
-fn quarantine_exit_status() -> Result<(), String> {
-    static LISTED: &[Quarantined] = &[Quarantined {
-        test: "a_test_pending_on_a_defect",
-        says: &["the shell never answered again"],
-        issue: "issues/nowhere.md",
-    }];
-    let outcome = |name: &str, reason: Option<&str>| Outcome {
+fn run_exit_status() -> Result<(), String> {
+    let outcome = |name: &str, reason: Option<&str>, suspended: Duration| Outcome {
         name: name.to_string(),
         reason: reason.map(str::to_string),
         elapsed: Duration::from_secs(3),
-        suspended: Duration::ZERO,
+        suspended,
     };
-    let fired = || outcome("a_test_pending_on_a_defect", Some("the shell never answered again:\n<log>"));
+    let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
 
-    let mut only_quarantined = Tally::new(LISTED);
-    only_quarantined.record(outcome("something_else", None));
-    only_quarantined.record(fired());
-    let text = only_quarantined.summary(2, Duration::from_secs(9), Duration::ZERO);
-    if only_quarantined.exit_code() != 0 {
-        return Err(format!(
-            "a run whose only red was quarantined exits {}, and it has to be 0:\n{text}",
-            only_quarantined.exit_code()
-        ));
-    }
-    // The whole hazard is a run that reads as clean. The result line is the one
-    // line every reader and every log-scraper looks at, so it is the line that
-    // has to carry it.
-    let result = text.lines().last().unwrap_or_default();
-    for wanted in ["a_test_pending_on_a_defect", "1 quarantined", "NOT clean"] {
-        if !result.contains(wanted) {
-            return Err(format!("the result line does not say {wanted:?}: {result}"));
-        }
-    }
-    if !text.contains("issues/nowhere.md") {
-        return Err(format!("the report never points at the issue that owns the defect:\n{text}"));
+    let mut red = Tally::new();
+    red.record(outcome("a_red", Some("the disk came back short"), Duration::ZERO));
+    red.record(outcome("a_suspended_one", None, slept));
+    if red.exit_code() != 1 {
+        return Err(format!("a run with a red exits {}, and it has to be 1", red.exit_code()));
     }
 
-    // A quarantined test going green is reported and is not red.
-    let mut went_green = Tally::new(LISTED);
-    went_green.record(outcome("a_test_pending_on_a_defect", None));
-    let text = went_green.summary(1, Duration::from_secs(9), Duration::ZERO);
-    if went_green.exit_code() != 0 {
-        return Err(format!("a quarantined test passing exits {}:\n{text}", went_green.exit_code()));
-    }
-    if !text.contains("one green closes nothing") {
-        return Err(format!("a quarantined test passing is not reported:\n{text}"));
-    }
-    let result = text.lines().last().unwrap_or_default();
-    if !result.contains("1 quarantined and green: a_test_pending_on_a_defect") {
-        return Err(format!("the result line does not name the quarantined test that passed: {result}"));
-    }
-
-    // Negative control: a red on no list is still an ordinary red, and a
-    // quarantined one beside it does not soften the status.
-    let mut real_red = Tally::new(LISTED);
-    real_red.record(outcome("something_else", Some("the disk came back short")));
-    real_red.record(fired());
-    if real_red.exit_code() != 1 {
-        return Err(format!(
-            "a run with an unlisted red exits {}, and it has to be 1",
-            real_red.exit_code()
-        ));
-    }
-
-    // And a listed test failing some other way: the row must not reach it.
-    let mut wrong_failure = Tally::new(LISTED);
-    wrong_failure.record(outcome("a_test_pending_on_a_defect", Some("the client was not built")));
-    let text = wrong_failure.summary(1, Duration::from_secs(9), Duration::ZERO);
-    if wrong_failure.exit_code() != 1 {
-        return Err(format!(
-            "a listed test failing another way exits {}, and it has to be 1:\n{text}",
-            wrong_failure.exit_code()
-        ));
-    }
-    if !text.contains("a_test_pending_on_a_defect is quarantined for something else") {
-        return Err(format!("the report does not say why the row did not cover it:\n{text}"));
-    }
-
-    // The same two arms over the table the suite really runs under: every row
-    // excuses the failure it quotes, and none excuses a failure nobody has seen.
-    for row in redlist::QUARANTINE {
-        let mut quoted = Tally::new(redlist::QUARANTINE);
-        let quote = row.says.first().copied().unwrap_or_default();
-        quoted.record(outcome(row.test, Some(&format!("round 2: {quote}:\n<log>"))));
-        if quoted.exit_code() != 0 {
-            return Err(format!(
-                "{} failing the way its row quotes exits {}, and it has to be 0",
-                row.test,
-                quoted.exit_code()
-            ));
-        }
-        let mut unseen = Tally::new(redlist::QUARANTINE);
-        unseen.record(outcome(row.test, Some("a wholly different assertion, never seen before")));
-        if unseen.exit_code() != 1 {
-            return Err(format!(
-                "{} is quarantined for {:?}, and failing on a text matching none of them exits \
-                 {}: it has to be 1",
-                row.test,
-                row.says,
-                unseen.exit_code()
-            ));
-        }
-    }
-
-    // Exit 2 keeps its meaning: a suspended run establishes nothing.
-    let mut suspended = Tally::new(LISTED);
-    suspended.record(Outcome {
-        name: "something_else".to_string(),
-        reason: None,
-        elapsed: Duration::from_secs(3),
-        suspended: common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120),
-    });
+    let mut suspended = Tally::new();
+    suspended.record(outcome("a_suspended_one", None, slept));
     if suspended.exit_code() != 2 {
-        return Err(format!(
-            "a suspended run exits {}, and it has to be 2",
-            suspended.exit_code()
-        ));
+        return Err(format!("a suspended run exits {}, and it has to be 2", suspended.exit_code()));
     }
 
     // The clean case, so that none of the above is passing because everything
     // reds.
-    let mut clean = Tally::new(LISTED);
-    clean.record(outcome("something_else", None));
+    let mut clean = Tally::new();
+    clean.record(outcome("a_green", None, Duration::ZERO));
     let text = clean.summary(1, Duration::from_secs(9), Duration::ZERO);
     if clean.exit_code() != 0 {
         return Err(format!("a clean run exits {}, and it has to be 0", clean.exit_code()));
@@ -19652,10 +18954,7 @@ fn one_vocabulary() -> Result<(), String> {
 /// What the declaration itself has to be, before any of it means anything.
 /// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
 ///
-/// A name reaches the syscall directly, or through a child it spawns —
-/// `panic_recovery`'s three actions are all `test_panic_child`'s, and a rule
-/// that only read the test's own source would miss the one test in the list
-/// whose whole subject is the syscall.
+/// A name reaches the syscall directly, or through a child it spawns.
 fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<String> {
     // The fourth spelling is the argument-taking form: every action that
     // carries a payload (TLB_ACK_DELAY_ARM, CENSUS_KIND, LOWER_SYSINFO_BOUND,
@@ -19688,14 +18987,12 @@ fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<
 /// `SYS_DEBUG`, and the binaries are what is asked.
 ///
 /// **What this does not cover, stated because the hole is real:** a machine or
-/// screen test that *drives* one of those binaries on a boot of its own.
-/// `screen_recoverable_untouched` was the instance — it runs
-/// `test_rs_test_panic_child` on a featureless kernel, where action 0 is answered
-/// `InvalidArgument` and the child exits 0 — and no static rule here can say
-/// which `BootOptions` a `run_test` call belongs to. What answers it instead is
-/// the guest: `test_panic_child` names `InvalidArgument` as *this kernel carries
-/// no actuators* rather than reporting a kernel that failed to kill anybody, so
-/// the red says what is wrong wherever it happens.
+/// screen test that *drives* one of those binaries on a boot of its own. No
+/// static rule here can say which `BootOptions` a `run_test` call belongs to.
+/// What answers it instead is the guest: `test_panic_child` names
+/// `InvalidArgument` as *this kernel carries no actuators* rather than reporting
+/// a kernel that failed to stop, so the red says what is wrong wherever it
+/// happens.
 ///
 /// **Both directions are the point.** A binary that gains a `debug()` call and
 /// no entry would run on the shipping kernel, where the syscall answers
@@ -19846,60 +19143,6 @@ fn driven_binaries(sources: &[String]) -> BTreeSet<String> {
         }
     }
     found
-}
-
-fn quarantine_entries() -> Result<(), String> {
-    static NAMED_NOTHING: &[Quarantined] =
-        &[Quarantined { test: "a_test_that_was_renamed", says: &["x"], issue: "issues/i.md" }];
-    static GOOD: &[Quarantined] =
-        &[Quarantined { test: "a_real_test", says: &["x"], issue: "issues/i.md" }];
-    let runnable: BTreeSet<&str> = ["a_real_test", "another_real_test"].into_iter().collect();
-    match check_quarantine(NAMED_NOTHING, &runnable) {
-        Ok(()) => return Err("a row for a test that no longer exists was accepted".to_string()),
-        Err(refusal) if !refusal.contains("no list registers it") => {
-            return Err(format!("a stale row was refused, but for {refusal:?}"))
-        }
-        Err(_) => {}
-    }
-    // The negative control: the check is refusing that and not refusing
-    // everything put in front of it.
-    check_quarantine(GOOD, &runnable).map_err(|e| format!("a well-formed row was refused: {e}"))?;
-    check_quarantine(&[], &runnable).map_err(|e| format!("an empty list was refused: {e}"))
-}
-
-/// The task that would run `name` again, by itself.
-///
-/// **Every red from the parallel phase is re-run alone**, and the two possible
-/// answers are both findings. Same verdict: the defect is real and the width had
-/// nothing to do with it. Green: the test is red only when it shares the host,
-/// which makes its [`Sched::Parallel`] wrong — a bug in this file, not in the
-/// kernel, and one the suite has no other way to notice.
-///
-/// **A green retry does not turn the run green.** A rerun-only pass counting as
-/// a pass is selective test running by the back door; the failure line
-/// says which of the two it was and the run stays red until somebody fixes the
-/// classification. That is the whole safety argument for widening the parallel
-/// phase: getting a scheduling answer wrong costs a red run, never a quiet one.
-///
-/// A group member is re-run **as its group**, not on its own, so that the only
-/// thing that changed between the two attempts is how many guests the host had.
-fn retry_task<'a>(name: &str, all_tests: &[&'a TestDef]) -> Option<Task<'a>> {
-    if let Some(def) = all_tests.iter().find(|t| t.name == name) {
-        return Some(Task::Shared(vec![def], shared_kernel(name)));
-    }
-    if let Some((registered, _, _)) = SCREEN_TESTS.iter().find(|(n, _, _)| *n == name) {
-        return Some(Task::Screen(registered));
-    }
-    let (registered, _, _) = MACHINE_TESTS.iter().find(|(n, _, _)| *n == name)?;
-    let names = match group_of(registered) {
-        None => vec![*registered],
-        Some(group) => MACHINE_TESTS
-            .iter()
-            .filter(|(n, _, _)| group_of(n) == Some(group))
-            .map(|(n, _, _)| *n)
-            .collect(),
-    };
-    Some(Task::Machine(names))
 }
 
 /// Which of the two shared boots a name belongs on — a *kernel build*, because
@@ -20064,8 +19307,8 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                                 .as_ref()
                                 .map(ToString::to_string)
                                 // What the guest said rides the reason, as a machine
-                                // test's capture does: a quarantine row quotes the
-                                // assertion, and an exit code is every assertion's.
+                                // test's capture does: an exit code is every
+                                // assertion's.
                                 .unwrap_or_else(|| {
                                     format!("exit code {:?}\n{}", result.exit_code, result.stdout)
                                 })
@@ -20250,35 +19493,18 @@ fn longest_first(tasks: &mut [Task<'_>], known: &BTreeMap<String, Duration>) {
 fn report_line(outcome: &Outcome) {
     let reason = || outcome.reason.as_deref().unwrap_or("check failed");
     match outcome.verdict() {
-        Verdict::Pass(None) => eprintln!("  PASS  {}  ({:.0?})", outcome.name, outcome.elapsed),
-        Verdict::Pass(Some(row)) => eprintln!(
-            "  PASS  {}  ({:.0?})  — quarantined, and one green closes nothing: {}",
-            outcome.name, outcome.elapsed, row.issue
-        ),
-        Verdict::Fail(listed) => {
+        Verdict::Pass => eprintln!("  PASS  {}  ({:.0?})", outcome.name, outcome.elapsed),
+        Verdict::Fail => {
             eprintln!("FAIL {}: {}", outcome.name, reason());
-            let other = listed
-                .map(|row| format!("  — {}", quarantined_for_something_else(row)))
-                .unwrap_or_default();
             if outcome.stalled() {
                 eprintln!(
                     "  STALL {}  ({:.0?})  — the guard expired, so this says nothing about \
-                     the tree{other}",
+                     the tree",
                     outcome.name, outcome.elapsed
                 );
             } else {
-                eprintln!("  FAIL  {}  ({:.0?}){other}", outcome.name, outcome.elapsed);
+                eprintln!("  FAIL  {}  ({:.0?})", outcome.name, outcome.elapsed);
             }
-        }
-        Verdict::Quarantined(row) => {
-            // The reason in full, exactly as a red would print it. A
-            // quarantined failure is still a defect reproducing, and the run
-            // that reproduced it is the only place its evidence exists.
-            eprintln!("XFAIL {}: {}", outcome.name, reason());
-            eprintln!(
-                "  XFAIL {}  ({:.0?})  — quarantined, {}",
-                outcome.name, outcome.elapsed, row.issue
-            );
         }
         Verdict::Invalid => eprintln!(
             "  INVL  {}  ({:.0?}) — the host was suspended for {:.0?} while it ran",
@@ -20298,7 +19524,6 @@ fn run_phase(
     tasks: Vec<Task<'_>>,
     width: usize,
     bins: &Bins<'_>,
-    slots: &HostSlots,
 ) -> Vec<Outcome> {
     if tasks.is_empty() {
         return Vec::new();
@@ -20318,7 +19543,6 @@ fn run_phase(
                     let next =
                         queue.lock().expect("a worker panicked holding the queue").pop_front();
                     let Some(task) = next else { return };
-                    let _slot = slots.take(&task.names().join(" "));
                     run_task(task, bins, &tx);
                 }
             });
@@ -20758,12 +19982,6 @@ fn check_registration() {
 /// The half [`check_registration`] could not ask: the shared boot's tests are
 /// *discovered* from the binaries in `tests/toyos-rust-tests` and `tests/c`, so
 /// nothing declared can be compared against them until they exist.
-///
-/// A name in both places is two tests reporting one name, and the damage is not
-/// a duplicate line. [`retry_task`] searches the shared registry first, so a
-/// machine test of that name which failed wide is re-run *as the other test* and
-/// its `ALONE:` verdict is about neither. Four names were doing this and the
-/// suite had never been able to see them.
 fn check_no_collisions(shared: &[TestDef]) {
     let mut shared_seen = BTreeSet::new();
     let shared_twice: Vec<&str> = shared
@@ -20787,9 +20005,22 @@ fn check_no_collisions(shared: &[TestDef]) {
     assert!(
         clash.is_empty(),
         "{clash:?} name both a binary on the shared boot and a test that declares its own \
-         machine — two verdicts under one name, and `retry_task` takes the shared one. Add \
-         each to RUST_SKIP with the reason its own test exists, or rename one of the two."
+         machine — two verdicts under one name. Add each to RUST_SKIP with the reason its \
+         own test exists, or rename one of the two."
     );
+}
+
+/// `redlist::DISABLED` against every name `all_tests` plus the three declared
+/// registries could produce a verdict for, before any boot on any entry point.
+fn check_redlist(all_tests: &[TestDef]) -> Result<(), String> {
+    let runnable: BTreeSet<&str> = all_tests
+        .iter()
+        .map(|t| t.name.as_str())
+        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
+        .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
+        .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
+        .collect();
+    redlist::check(redlist::DISABLED, |name| runnable.contains(name), &compile::repo_root())
 }
 
 fn main() {
@@ -20804,6 +20035,14 @@ fn main() {
             eprintln!("[toyos] {refusal}");
             std::process::exit(1);
         }
+    };
+    // The one selection every entry point below takes, the metal's included: a
+    // disabled test runs nowhere, and every run names each one with its issue.
+    for row in redlist::DISABLED {
+        eprintln!("[toyos] disabled: {} — {}", row.test, row.issue);
+    }
+    let keep = |name: &str| {
+        filter.is_none_or(|f| name.contains(f)) && redlist::disabled(redlist::DISABLED, name).is_none()
     };
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
@@ -20856,33 +20095,6 @@ fn main() {
     // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
-    // How many guests may be up on the *host* at once, across every worktree.
-    // `--jobs` is this run's demand; this is what the machine will supply, and
-    // zero turns it off.
-    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or(
-        toyos_build::buildlock::HOST_GUESTS,
-        |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
-    );
-
-    // And how many of this host's *compiles* may run at once, across every
-    // worktree. A worker holds a guest slot from the moment it takes a task and
-    // spends the first part of it building a kernel variant, so twelve workers
-    // are twelve concurrent `cargo build`s and no guest at all.
-    if let Some(n) = SUITE.value(&args, &testargs::HOST_BUILDS) {
-        toyos_build::buildlock::set_host_builds(
-            n.parse().unwrap_or_else(|_| panic!("--host-builds: {n:?} is not a budget")),
-        );
-    }
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-
-    let slots = HostSlots {
-        label: repo_root
-            .file_name()
-            .map_or_else(|| "this worktree".to_string(), |n| n.to_string_lossy().into_owned()),
-        root: repo_root,
-        budget: host_budget,
-    };
-
     check_registration();
 
     if nocapture || debug_mode {
@@ -20908,9 +20120,14 @@ fn main() {
         eprintln!("[toyos] Compiling {} C tests for the corpus boot...", c_names.len());
         let c_bins = compile_c_tests(&c_names);
         check_metal_only_unshared(&rust_bins, &c_bins);
+        let c_compiled: Vec<String> = c_bins.iter().map(|(n, _)| n.clone()).collect();
+        if let Err(refusal) = check_redlist(&build_test_registry(&rust_bins, &c_compiled)) {
+            eprintln!("[toyos] src/redlist.rs: {refusal}");
+            run.exit(1);
+        }
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
             .iter()
-            .filter(|(name, _)| filter.is_none_or(|f| name.contains(f)))
+            .filter(|(name, _)| keep(name))
             .map(|(name, decl)| (*name, decl))
             .collect();
         // The shared boots carry names no registration holds, so an empty
@@ -20931,7 +20148,6 @@ fn main() {
                 &dir,
                 &selected,
 &{
-                    let keep = |n: &str| filter.is_none_or(|f| n.contains(f));
                     let mut boots = shared_metal(&rust_bins, keep);
                     boots.push(c_corpus_metal(&c_bins, keep));
                     boots
@@ -20962,10 +20178,17 @@ fn main() {
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
     toyos_build::build::build_host_judges(&common::compile::repo_root(), !nocapture && !debug_mode);
 
+    // Every name this process could produce a verdict for, before `--list`,
+    // `--debug` and `--audio-gate` can return without ever reaching it.
+    let all_tests = build_test_registry(&rust_bins, &c_compiled);
+    if let Err(refusal) = check_redlist(&all_tests) {
+        eprintln!("[toyos] src/redlist.rs: {refusal}");
+        run.exit(1);
+    }
+
     // --list: print test names and exit
     if list_mode {
-        let tests = build_test_registry(&rust_bins, &c_compiled);
-        for t in &tests {
+        for t in &all_tests {
             println!("{}", t.name);
         }
         for (name, _) in AUDIO_TESTS {
@@ -20989,7 +20212,7 @@ fn main() {
         let mut audio_to_run: Vec<&str> = AUDIO_TESTS
             .iter()
             .map(|(name, _)| *name)
-            .filter(|n| filter.is_none_or(|f| n.contains(f)))
+            .filter(|n| keep(n))
             .collect();
         assert!(!audio_to_run.is_empty(), "no audio test matches filter {filter:?}");
         // Sharded too, and this is the tier it buys the most for: the thorough
@@ -21009,12 +20232,6 @@ fn main() {
             );
         }
         let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
-        // One slot for the whole tier: it boots one guest at a time for the
-        // length of it, so one slot is what it occupies. The owner has ruled
-        // that gate A does not get a quiet host (CLAUDE.md, 2026-08-04), so it
-        // takes its share of the machine like everything else and does not
-        // reserve it.
-        let _slot = slots.take("gate A, thorough");
         let ok = run_audio_gate(
             iterations,
             &load_audio_baseline(),
@@ -21029,7 +20246,6 @@ fn main() {
         return;
     }
 
-    let all_tests = build_test_registry(&rust_bins, &c_compiled);
     check_no_collisions(&all_tests);
     check_metal_only_unshared(&rust_bins, &c_bins);
     // Every row against the catalogue before any boot, so a name the suite did
@@ -21038,25 +20254,10 @@ fn main() {
         qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
     }
     check_shard_partition(&all_tests);
-    // Every name this process could produce a verdict for, which is what a
-    // quarantine row has to be one of. Taken before the filter, so a filtered
-    // run cannot make a stale row look well-formed.
-    let runnable: BTreeSet<&str> = all_tests
-        .iter()
-        .map(|t| t.name.as_str())
-        .chain(AUDIO_TESTS.iter().map(|(name, _)| *name))
-        .chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
-        .chain(MACHINE_TESTS.iter().map(|(n, _, _)| *n))
-        .collect();
-    if let Err(refusal) = check_quarantine(redlist::QUARANTINE, &runnable) {
-        eprintln!("[toyos] src/redlist.rs: {refusal}");
-        run.exit(1);
-    }
 
-    let keep = |name: &str| filter.is_none_or(|f| name.contains(f));
     // The tier filter, and it is not conditional on the name filter: a rule with
     // an exception for filtered runs is two rules, and the second one is the one
-    // nobody remembers. `cargo test -- desktop_window_child` refuses below and
+    // nobody remembers. `cargo test -- screen_diag_boot` refuses below and
     // says what to type instead, which is the same information a silent skip
     // would have withheld.
     let in_tier = |tier: Tier| tier.selected(nightly, shard.is_some());
@@ -21130,18 +20331,13 @@ fn main() {
                  --nightly to run them."
             );
         } else {
-            eprintln!("No tests match filter {filter:?}");
+            eprintln!("No enabled test matches filter {filter:?}");
         }
         run.exit(1);
     }
-    for row in redlist::QUARANTINE {
-        // Before anything boots, so that the run reads as what it is from its
-        // first line: a suite carrying quarantined names is not a clean suite.
-        eprintln!("[toyos] quarantined: {} — {}", row.test, row.issue);
-    }
 
     let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
-    let mut tally = Tally::new(redlist::QUARANTINE).holding_back(&held_back);
+    let mut tally = Tally::new().holding_back(&held_back);
     let suite_start = common::clock::mark();
 
     let bins = Bins {
@@ -21173,9 +20369,6 @@ fn main() {
     }
     let (mut parallel, mut serial) = build_tasks(&tests_to_run, &machine_to_run, &screen_to_run);
 
-    // Every red the wide phase produced, re-run by itself before anything is
-    // believed about it. See [`retry_task`] for why both answers are findings
-    // and why neither turns the run green.
     let known = load_durations();
     // After the phases are decided and before either is ordered: what a shard
     // divides is the work, and a task's answer to `Sched` is a property of the
@@ -21231,61 +20424,24 @@ fn main() {
     eprintln!("\nrunning {total} tests\n");
 
     let mut timed: Vec<(String, Duration)> = Vec::new();
-    // Every red, with whether it had the host to itself when it happened and
-    // *what it said* — the third field, because the re-run below has to be able
-    // to answer whether the two runs failed the same way, and by the time it
-    // runs this outcome has been moved into the tally. Reds only: a test the
-    // host slept through has no verdict to confirm, and re-running it would put
-    // a second guess beside the first — and a quarantined failure has already
-    // been answered by its row, which names the issue that owns it.
-    let mut reds: Vec<(String, bool, String)> = Vec::new();
-    let mut collect = |outcomes: &[Outcome], shared_the_host: bool| {
-        reds.extend(
-            outcomes
-                .iter()
-                .filter(|o| matches!(o.verdict(), Verdict::Fail(_)))
-                .map(|o| (o.name.clone(), shared_the_host, headline(o.reason.as_deref()))),
-        );
-    };
     if !parallel.is_empty() {
         longest_first(&mut parallel, &known);
         eprintln!("  --- parallel, {width} wide ---");
         let started = std::time::Instant::now();
-        let outcomes = run_phase(parallel, width, &bins, &slots);
+        let outcomes = run_phase(parallel, width, &bins);
         eprintln!("  --- parallel done in {:.1?} ---", started.elapsed());
-        collect(&outcomes, width > 1);
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
     if !serial.is_empty() {
         eprintln!("  --- serial ---");
         let started = std::time::Instant::now();
-        let outcomes = run_phase(serial, 1, &bins, &slots);
+        let outcomes = run_phase(serial, 1, &bins);
         eprintln!("  --- serial done in {:.1?} ---", started.elapsed());
-        // **The serial tail is one guest whatever `--jobs` says**, which is
-        // exactly why its reds were never re-run: the loop below was written for
-        // the parallel phase and read the *run's* width. So the two
-        // `Sched::Serial` reds of run `31252989653` — `screen_pager_keys` and
-        // `usb_transport_break` — carried no `ALONE:` line at all and nobody
-        // could say whether either was reproducible.
-        collect(&outcomes, false);
         timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
     qemu::set_width(1);
-
-    if !reds.is_empty() {
-        eprintln!("  --- re-running {} failure(s) alone ---", reds.len());
-        for (name, shared_the_host, wide) in &reds {
-            let Some(task) = retry_task(name, &tests_to_run) else {
-                eprintln!("  ALONE {name}: no way to run it by itself; verdict stands");
-                continue;
-            };
-            let outcomes = run_phase(vec![task], 1, &bins, &slots);
-            let alone = outcomes.iter().find(|o| &o.name == name);
-            eprintln!("{}", alone_line(name, wide, *shared_the_host, alone));
-        }
-    }
 
     // Gate A, alone. `tests/audio-baseline.toml`'s numbers were recorded with
     // one QEMU on the host and no concurrent agents, so a run beside anything
@@ -21304,7 +20460,6 @@ fn main() {
             for &smp in AUDIO_SMP {
                 let label = format!("{name} (smp={smp})");
                 let baseline = config_baseline(&audio_baseline, name, smp);
-                let _slot = slots.take(&label);
                 let start = common::clock::mark();
                 // A boot that never reaches its marker panics, and gate A is the
                 // last thing the suite runs: unwrapped, that panic took the
@@ -21334,9 +20489,8 @@ fn main() {
         save_durations(known, &timed);
     }
 
-    // Three exit statuses, because there are three things a run can establish,
-    // and a quarantined failure is deliberately none of them — see
-    // [`Tally::exit_code`], which is where the whole decision now lives.
+    // Three exit statuses, because there are three things a run can establish —
+    // see [`Tally::exit_code`], which is where the whole decision now lives.
     //
     // A green run is a claim that this tree passed, and `--land`'s gate consumes
     // exactly this number. A run that spanned a suspend did not establish that:

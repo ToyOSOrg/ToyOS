@@ -92,7 +92,7 @@ it again should re-read this: the backtrace will not look like the one above.
 
 `WaitQueue::wake_one`/`wake_all` popped a waiter and cleared its flag as two
 steps, so a waiter withdrawing in between found `dequeue` empty and its own
-flag still set; `toyos-sched/loom/tests/loom_ticket.rs`'s
+flag still set; `aaddf38a^:toyos-sched/loom/tests/loom_ticket.rs`'s
 `cancel_and_wake_agree_on_who_won` reds on that schedule. Both clear under the
 list lock now. It is a hole in the primitive rather than the capture above's
 path — `scheduler::wake_sched` claims through `wake_direct`, and no kernel
