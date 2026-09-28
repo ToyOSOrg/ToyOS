@@ -161,12 +161,14 @@ pub fn install() {
 /// ([`super::msi_message`], [`super::irqchip::send_self`]) is owed.
 #[repr(u8)]
 enum Vector {
+    LogNest = 1,
     Hda,
     VirtioSound,
 }
 
 pub const HDA_VECTOR: u8 = Vector::Hda as u8;
 pub const VIRTIO_SOUND_VECTOR: u8 = Vector::VirtioSound as u8;
+pub const LOG_NEST_VECTOR: u8 = Vector::LogNest as u8;
 
 /// The crash report for a panic, from the frame pointer the panic handler stood on.
 pub(crate) fn report_panic(message: &core::panic::PanicInfo, frame: u64) {

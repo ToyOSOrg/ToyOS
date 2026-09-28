@@ -39,7 +39,8 @@ onto `cf715c49` as a checked patch, four more sessions of the same suite had it
 green 4/4. The branch touches nothing on the spawn path. Neither arm
 reproduced it, so neither arm explains it.
 
-**Exit.** The refusal named. The cheapest step is that the message carry
+**Exit.** The refusal named. The cheapest step is that the message at
+`userland/test-runner/src/log_gate.rs`'s `/system/bin/echo` spawn carry
 `e.raw_os_error()` — `other error` is a message that costs a whole run to
 learn nothing from — and the next sighting then says which refusal it was.
 Until then the rate is one guest in one shard of one run, and its `ALONE`

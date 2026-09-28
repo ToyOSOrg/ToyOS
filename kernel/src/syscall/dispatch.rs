@@ -602,6 +602,12 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     None => SyscallError::InvalidArgument.to_u64(),
                 }
             }
+            // Kernel records at the rate a tight loop makes them, from a preemptible userland
+            // thread beside the reader: the load the log gate's conservation law is read under.
+            DA::LOG_PATTERNED => {
+                crate::log::storm::emit_patterned(0, a2);
+                0
+            }
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_SCHED_INFO => match ctx.copy_out(UserAddr::new(a1), &sys_sched_info()) {

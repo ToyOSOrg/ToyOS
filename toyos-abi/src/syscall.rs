@@ -855,6 +855,9 @@ pub mod debug_action {
     /// shipped field, and the install and the close that follow are the shipped
     /// paths making the shipped decision (`kernel::object::handle`).
     pub const SLOT_TO_LAST_GENERATION: u64 = 20;
+    /// Emit one patterned kernel log record, `logstorm t=0 i=<arg> …`, whose
+    /// text the reader regenerates from its two numbers.
+    pub const LOG_PATTERNED: u64 = 21;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`
