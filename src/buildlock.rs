@@ -530,8 +530,9 @@ fn try_lock(file: &fs::File, op: i32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::process::{Child, Command};
     use std::time::Duration;
     use toyos_tmpdir::TempDir;
@@ -543,6 +544,53 @@ mod tests {
     // ordinary `cargo test` never runs the child half on its own.
     const ROLE: &str = "TOYOS_BUILDLOCK_TEST_ROLE";
     const ROOT: &str = "TOYOS_BUILDLOCK_TEST_ROOT";
+    const MARKS: &str = "TOYOS_BUILDLOCK_TEST_MARKS";
+    const KEY: &str = "TOYOS_BUILDLOCK_TEST_KEY";
+
+    /// A lock held by a process of its own, which [`Elsewhere::release`] waits
+    /// to exit.
+    ///
+    /// A test never asserts free a lock this process has held: another test
+    /// thread's spawn copies every descriptor open at that moment into its child
+    /// until the child's exec, and the copy holds the lock past the drop.
+    pub(crate) struct Elsewhere {
+        child: Child,
+        marks: TempDir,
+    }
+
+    impl Elsewhere {
+        /// Run the `#[ignore]`d test `role` names, with `env`, and return once
+        /// it has called [`hold_until_released`].
+        pub(crate) fn hold(role: &str, env: &[(&str, &OsStr)]) -> Self {
+            let marks = TempDir::new("buildlock-elsewhere");
+            let child = rerun(role)
+                .envs(env.iter().copied())
+                .env(MARKS, &marks)
+                .spawn()
+                .expect("spawn the holder");
+            assert!(appeared(&marks.join("held"), Duration::from_secs(20)), "{role} never took its lock");
+            Elsewhere { child, marks }
+        }
+
+        /// Let go, and return once the holder has exited.
+        pub(crate) fn release(mut self) {
+            touch(&self.marks.join("release"));
+            assert!(self.child.wait().unwrap().success(), "the holder failed");
+        }
+    }
+
+    /// The holder's half of [`Elsewhere`].
+    pub(crate) fn hold_until_released() {
+        let marks = PathBuf::from(std::env::var(MARKS).expect("a holder runs under Elsewhere::hold"));
+        touch(&marks.join("held"));
+        assert!(appeared(&marks.join("release"), Duration::from_secs(20)), "the holder was never released");
+    }
+
+    /// Sysroot `key` of `root`, held in use by a process of its own.
+    pub(crate) fn sysroot_used_elsewhere(root: &Path, key: &str) -> Elsewhere {
+        let env = [(ROLE, OsStr::new("use-sysroot")), (ROOT, root.as_os_str()), (KEY, OsStr::new(key))];
+        Elsewhere::hold("buildlock::tests::child_role", &env)
+    }
 
     /// A git repository, because the global scope is keyed on the common
     /// directory and a scratch tree that is not one would exercise a path the
@@ -563,9 +611,15 @@ mod tests {
         root.join(LOCK_DIR)
     }
 
+    /// This test binary, to run the one `#[ignore]`d test `test` names.
+    fn rerun(test: &str) -> Command {
+        let mut rerun = Command::new(std::env::current_exe().unwrap());
+        rerun.args(["--exact", test, "--include-ignored", "--nocapture"]);
+        rerun
+    }
+
     fn child(root: &Path, role: &str) -> Child {
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "buildlock::tests::child_role", "--include-ignored", "--nocapture"])
+        rerun("buildlock::tests::child_role")
             .env(ROLE, role)
             .env(ROOT, root)
             .spawn()
@@ -680,6 +734,10 @@ mod tests {
             "want-sysroot" => {
                 let _using = keyed_using(&root, Keyed::Sysroot, "k1");
                 note(&root, "used");
+            }
+            "use-sysroot" => {
+                let _using = keyed_using(&root, Keyed::Sysroot, &std::env::var(KEY).unwrap());
+                hold_until_released();
             }
             "clean" | "clean-unlocked" => {
                 touch(&root.join("cleaner-ready"));
@@ -840,29 +898,19 @@ mod tests {
             mine.worktree_dir, theirs.worktree_dir,
             "two worktrees share one target-directory lock"
         );
-        drop(theirs);
-        drop(mine);
 
         // Naming one path is not yet excluding on it: `flock` conflicts between
         // open file descriptions, so a second handle on the shared file is the
-        // question a second process would ask.
-        let held = acquire(&root.join(LOCK_DIR), LOCK_SH, "a build in the primary", BUILD);
-        let global = open_lock_file(&git_common_lock_dir(&linked).join("state"));
-        assert!(
-            try_lock(&global, LOCK_EX),
-            "the worktree lock excluded a global phase it knows nothing about"
-        );
-        drop(global);
-        drop(held);
-
-        // A build compiles against its own sysroot and reads no compiler, so a
-        // toolchain rebuild does not wait for it; a sysroot being made reads the
-        // compiler, so the rebuild waits for that.
-        let building = shared(&linked, "a build in the worktree");
+        // question a second process would ask. A build compiles against its own
+        // sysroot and reads no compiler, so a toolchain rebuild waits for no
+        // build in either worktree; a sysroot being made reads the compiler, so
+        // the rebuild waits for that. Only one probe takes the global lock: a
+        // lock this process has held is never asserted free ([`Elsewhere`]).
         let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(try_lock(&global, LOCK_EX), "a build kept the toolchain from being rebuilt");
         drop(global);
-        drop(building);
+        drop(theirs);
+        drop(mine);
         let making = compiler_shared(&linked, "a sysroot build in the worktree");
         let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(
@@ -920,7 +968,6 @@ mod tests {
     /// another key is not held at all; and a sweep cannot take a key that
     /// somebody is making or using.
     #[test]
-    #[ignore = "issues/build/a-key-being-built-is-waited-for-and-another-key-is-not-reds-under-host-load.md"]
     fn a_key_being_built_is_waited_for_and_another_key_is_not() {
         let root = scratch("sysroot-keys");
         let mut builder = child(&root, "hold-sysroot-build");
@@ -940,10 +987,10 @@ mod tests {
         assert!(user.wait().unwrap().success());
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "built\nused\n");
 
-        let using = keyed_using(&root, Keyed::Sysroot, "k1");
+        let user = sysroot_used_elsewhere(&root, "k1");
         assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key in use");
-        drop(using);
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some());
+        user.release();
+        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some(), "a sweep could not remove a key nobody uses");
     }
 
     /// A wait of minutes that says one line and then goes silent is
@@ -956,8 +1003,7 @@ mod tests {
         let mut holder = child(&root, "hold-integration-forever");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
 
-        let mut queued = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "buildlock::tests::child_role", "--include-ignored", "--nocapture"])
+        let mut queued = rerun("buildlock::tests::child_role")
             .env(ROLE, "want-integration")
             .env(ROOT, &root)
             .stderr(std::process::Stdio::piped())

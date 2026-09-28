@@ -469,11 +469,7 @@ mod tests {
         let builds = Cell::new(0);
         let fake = |fork: &Path| {
             builds.set(builds.get() + 1);
-            let stage2 = fork.join("build/toyos-compiler/stage2");
-            let spec = fs::read_to_string(fork.join("compiler/rustc_target/src/lib.rs")).unwrap();
-            write(&stage2.join("bin/rustc"), &format!("a rustc knowing {spec}"));
-            write(&stage2.join("lib/librustc_driver-1.dylib"), &spec);
-            stage2
+            fake_build(fork)
         };
 
         let mine = choose(&same, &rust_dir, &same.join("rust"), fake);
@@ -518,26 +514,67 @@ mod tests {
         assert_eq!(toolchain::rustup_link(), link, "the machine-global toyos link moved");
 
         // A sweep takes the compiler nobody names, and only that one — and
-        // not while it is still in use, though nobody names it any more.
-        let orphan = ca2.stage2.parent().unwrap().to_path_buf();
-        choose(&a, &rust_dir, &a.join("rust"), fake);
-        assert_eq!(sweep(&primary, &rust_dir), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
-        assert!(ca2.stage2.is_dir());
-        drop((mine, ca, cb, again, ca2, committed));
+        // not while it is still in use, though nobody names it any more. What
+        // this process has used it holds to the end, so a sweep leaves it: a
+        // compiler asserted gone is one only another process ever held.
+        let spec = a.join("rust/compiler/rustc_target/src/orphan.rs");
+        write(&spec, "pub fn o() {}\n");
+        let orphan = compilers_dir(&rust_dir).join(key(&a.join("rust")));
+        let user = chosen_elsewhere(&a, &rust_dir);
+        fs::remove_file(&spec).unwrap();
         let kept = choose(&a, &rust_dir, &a.join("rust"), fake);
+        assert_eq!(sweep(&primary, &rust_dir), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
+        assert!(orphan.is_dir() && ca2.stage2.is_dir());
+        user.release();
         assert_eq!(sweep(&primary, &rust_dir), [orphan], "the sweep took a compiler a worktree names, or left one nobody does");
-        assert!(kept.stage2.is_dir());
+        assert!(kept.stage2.is_dir() && ca2.stage2.is_dir());
 
         // A placement sweeps too: the compiler an edit replaces goes once nobody
         // uses it, and the one another worktree names stays.
-        let replaced = kept.stage2.parent().unwrap().to_path_buf();
+        let spec = a.join("rust/compiler/rustc_target/src/another.rs");
+        write(&spec, "pub fn u() {}\n");
+        let replaced = compilers_dir(&rust_dir).join(key(&a.join("rust")));
+        chosen_elsewhere(&a, &rust_dir).release();
         let named = choose(&b, &rust_dir, &b.join("rust"), fake).stage2;
-        drop(kept);
-        write(&a.join("rust/compiler/rustc_target/src/another.rs"), "pub fn u() {}\n");
+        write(&spec, "pub fn v() {}\n");
         let ca3 = choose(&a, &rust_dir, &a.join("rust"), fake);
         assert!(!replaced.exists(), "placing a compiler left the one it replaced, which nobody names");
         assert!(ca3.stage2.is_dir() && named.is_dir());
+        drop((mine, ca, cb, again, ca2, committed, kept));
     }
+
+    const WORKTREE: &str = "TOYOS_COMPILER_TEST_WORKTREE";
+    const RUST_DIR: &str = "TOYOS_COMPILER_TEST_RUST_DIR";
+
+    /// The competing process for the test above: the compiler the worktree in
+    /// [`WORKTREE`] names, chosen and held in use until released.
+    #[test]
+    #[ignore = "the competing process for the test above; never runs on its own"]
+    fn child_role() {
+        let worktree = std::env::var(WORKTREE).unwrap_or_else(|_| panic!("child_role ran without {WORKTREE}; it is not a test"));
+        let worktree = PathBuf::from(worktree);
+        let rust_dir = PathBuf::from(std::env::var(RUST_DIR).unwrap());
+        let chosen = choose(&worktree, &rust_dir, &worktree.join("rust"), fake_build);
+        assert!(!chosen.primary, "the holder was given the primary's compiler, which holds no key");
+        buildlock::tests::hold_until_released();
+    }
+
+    /// The compiler `worktree` names, made if nobody has and held in use by a
+    /// process of its own.
+    fn chosen_elsewhere(worktree: &Path, rust_dir: &Path) -> buildlock::tests::Elsewhere {
+        let env = [(WORKTREE, worktree.as_os_str()), (RUST_DIR, rust_dir.as_os_str())];
+        buildlock::tests::Elsewhere::hold("compiler::tests::child_role", &env)
+    }
+
+    /// Bootstrap's stand-in: a `stage2` that says which target spec it knows.
+    fn fake_build(fork: &Path) -> PathBuf {
+        let stage2 = fork.join("build/toyos-compiler/stage2");
+        let spec = fs::read_to_string(fork.join("compiler/rustc_target/src/lib.rs")).unwrap();
+        write(&stage2.join("bin/rustc"), &format!("a rustc knowing {spec}"));
+        write(&stage2.join("lib/librustc_driver-1.dylib"), &spec);
+        stage2
+    }
+
     /// **A primary with no record of its compiler is refused by name**, never
     /// read as "no compiler": that reading made every worktree build its own.
     #[test]

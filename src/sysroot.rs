@@ -915,7 +915,6 @@ mod tests {
     /// A key no registered worktree records goes, and so does a half-built one;
     /// a key a worktree records stays, and so does one somebody is using.
     #[test]
-    #[ignore = "issues/build/a-key-being-built-is-waited-for-and-another-key-is-not-reds-under-host-load.md"]
     fn a_sweep_removes_what_no_worktree_names_and_nobody_uses() {
         let root = TempDir::new("sweep");
         git(&root, &["init", "-q"]);
@@ -931,7 +930,7 @@ mod tests {
         }
         write(&root.join(RECORD), "named");
         write(&linked.join(RECORD), "linked-named");
-        let using = buildlock::keyed_using(&root, Keyed::Sysroot, "in-use");
+        let user = buildlock::tests::sysroot_used_elsewhere(&root, "in-use");
 
         let mut removed = sweep(&root);
         removed.sort();
@@ -939,7 +938,7 @@ mod tests {
         for stays in ["named", "linked-named", "in-use"] {
             assert!(dir.join(stays).is_dir(), "{stays} was swept");
         }
-        drop(using);
+        user.release();
         assert_eq!(sweep(&root), [dir.join("in-use")]);
     }
 
