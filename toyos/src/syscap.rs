@@ -53,6 +53,18 @@ impl SysCap {
         self.mint(DeviceRequest::Partition(guid))
     }
 
+    /// Mint the claim for one legacy ISA function, by exactly its ports and
+    /// lines. Apart from [`Self::claim`] for the reason [`Self::claim_pci`] is.
+    ///
+    /// `NotFound` is a set that is not one function this machine can hand out
+    /// whole, and `PermissionDenied` one the kernel drives itself.
+    pub fn claim_isa<T: FromHandle>(
+        &self,
+        set: toyos_abi::syscall::IsaId,
+    ) -> Result<T, SyscallError> {
+        self.mint(DeviceRequest::Isa(set))
+    }
+
     fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
         let raw = syscall::device_claim(self.0.raw(), request)?;
         // SAFETY: the kernel installed this handle in this process's table for

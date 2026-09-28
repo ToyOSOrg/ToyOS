@@ -1,8 +1,6 @@
 //! What a panicked kernel does with the machine once its report is on the
 //! panel: it holds the panel for [`toyos_tco::PANIC_BOUND_MS`] and then returns
-//! the machine to firmware. A key press retires the bound for good — a key is
-//! how a person at the machine says the panel is being read — and nobody
-//! pressing one inside the bound means nobody is there to read it.
+//! the machine to firmware.
 //!
 //! **The bound is carried in counter ticks, not nanoseconds** (`cpu::counter`:
 //! the TSC, the generic timer's count). A panic may land before `clock::init`,
@@ -28,12 +26,11 @@ const PANIC_BOUND: Budget = Budget::of(
 );
 
 /// `tco-fast`'s counterpart for this bound: a judge cannot spend the shipped
-/// minute per boot, and its control cannot press a key inside a bound shorter
-/// than the round trip that presses it.
+/// minute per boot.
 #[cfg(feature = "boot-actuators")]
 const FAST_BOUND: Budget = Budget::of(
     Duration::from_secs(5),
-    "a guest reaches the reset inside one test, and a control still beats it to the keyboard",
+    "a guest reaches the reset inside one test",
 );
 
 /// Whether a reboot is armed on this panic, and when.
@@ -41,17 +38,12 @@ const FAST_BOUND: Budget = Budget::of(
 pub enum Bound {
     /// Reset the machine at this `cpu::counter` reading.
     At(u64),
-    /// Hold the panel: somebody is reading it, or nothing here could time a
-    /// wait, or this machine has no reset register to write.
+    /// Hold the panel: nothing here could time a wait, or this machine has no
+    /// reset register to write.
     Held,
 }
 
 impl Bound {
-    /// A key arrived: the machine is that person's from here on.
-    pub fn retire(&mut self) {
-        *self = Self::Held;
-    }
-
     /// Reset the machine if the bound has passed; every wait on the panic path
     /// calls this, and it is the only place that decides the reset has come due.
     pub fn check(self) {
@@ -121,12 +113,9 @@ pub fn arm(on_the_record: bool) -> Bound {
     match (deadline(budget), acpi::can_reboot()) {
         (Some((cycles, source)), true) => {
             if on_the_record {
-                alert!(
-                    "{ARMED} in {secs} s unless a key is pressed, timed by {}",
-                    source.named()
-                );
+                alert!("{ARMED} in {secs} s, timed by {}", source.named());
             } else {
-                serial::panic_raw(b"panic: rebooting unless a key is pressed\n");
+                serial::panic_raw(b"panic: rebooting\n");
             }
             Bound::At(cycles)
         }
@@ -159,10 +148,7 @@ pub fn arm(on_the_record: bool) -> Bound {
 /// Return the machine to firmware. The second of this path's two lines, and it
 /// goes out raw: the log has already been flushed and drained by here.
 pub fn reboot_now() -> ! {
-    serial::panic_raw(
-        b"\npanic: no key inside the bound, so nobody is here: returning this machine to \
-          firmware\n",
-    );
+    serial::panic_raw(b"\npanic: the bound is spent: returning this machine to firmware\n");
     // Not `acpi::reboot`: its flush waits on the console wire, and a CPU this
     // panic stopped may be holding it.
     acpi::reset_now()

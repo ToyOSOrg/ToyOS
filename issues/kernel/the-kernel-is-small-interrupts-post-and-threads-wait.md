@@ -128,7 +128,7 @@ times:
        keyboard claim and mass storage over `toyos-blockring`, and the kernel
        USB bridge is deleted. **What must work with no userland stays off
        USB**: the panic console pages its report by itself and needs no
-       keyboard, and steers only from the i8042 it polls; the kernel's one
+       keyboard; the kernel's one
        hotkey, Ctrl+Alt+D (`kernel/src/keyboard.rs`, the blocked-task dump),
        is recognised on the i8042's transitions and no longer on a USB
        keyboard's, which from here reach the kernel only as usbd's keyboard
@@ -145,6 +145,21 @@ times:
    to their device's `Watch`, and the device's thread does the work. The
    per-CPU IRQ relay, the driver list in the scheduler pass and the idle
    special cases are deleted.
+7. **The i8042 leaves the kernel.** Owner ruling, 2026-09-28: drivers are
+   userland, and a dead kernel takes no input, with no emergency way.
+   1. **The panic console takes no input, and an `isa` claim grants a process
+      exact ports through the TSS I/O permission bitmap and its ISA lines as
+      records** (`kernel/src/isa.rs`). **Done** (PR_NUMBER).
+   2. **ps2d**, the server over that claim, feeding the kernel's keyboard and
+      mouse streams so Ctrl+Alt+D and the merge with USB HID stay where they
+      are; the kernel's driver, its vector, its actuators and the
+      `keyboard_controller` seam deleted. Constraints: the harness paces typed
+      input on the kernel's `i8042: drain bytes=` trace (`shell_type_once`,
+      every `i8042-trace` boot), every boot config that types needs the server,
+      and a keyboard claim is refused while no source exists, which init's
+      order of endowment then decides. **Exit**: every keyboard and mouse guest
+      test green with no i8042 code in the kernel, and typing resumes after
+      ps2d is killed and restarted.
 
 ## Standing
 

@@ -194,9 +194,8 @@ attempt.
 ![ToyOS booting on a ThinkPad T14](first-boot.jpg)
 
 The screenshot is the laptop's own panel. The machine has no serial port, so
-the kernel renders its log and its panics to the framebuffer, and pages them
-with PageUp and PageDown polled straight off the keyboard controller after
-every CPU has halted. It is reporting a real bug: the page cache sized an index
+the kernel renders its log and its panics to the framebuffer. It is reporting a
+real bug: the page cache sized an index
 from the disk's block count, which fit in QEMU's test image and wanted 238 MB
 on a 244 GB drive.
 

@@ -94,7 +94,7 @@
 
 /// No `crate::` reference, so `kernel-loom` compiles it and models the
 /// interleaving no guest test lands on.
-mod record;
+pub(crate) mod record;
 
 use alloc::string::String;
 use alloc::sync::Arc;

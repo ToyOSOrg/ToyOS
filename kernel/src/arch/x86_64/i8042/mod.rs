@@ -103,6 +103,11 @@ static LAST_IRQ_NS: AtomicU64 = AtomicU64::new(0);
 /// only CPU an `irq_ring` record for this source can exist on.
 static IRQ_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 
+/// Whether this driver holds the controller, which refuses an `isa` claim on it.
+pub fn drives() -> bool {
+    ACTIVE.load(Ordering::Relaxed)
+}
+
 fn is_irq_cpu() -> bool {
     IRQ_CPU.load(Ordering::Relaxed) == crate::arch::percpu::cpu_id()
 }
@@ -815,8 +820,8 @@ fn trace_drain(bytes: usize, keys: usize, motion: usize, woke_kb: bool, woke_ms:
 }
 
 // Each read below is done as its section's sole reader: init before the
-// vector is armed, the aux re-enable on `IRQ_CPU` under `IrqGuard::close`,
-// and the panic pager with every CPU halted — so no ISR ever races them.
+// vector is armed, and the aux re-enable on `IRQ_CPU` under `IrqGuard::close`
+// — so no ISR ever races them.
 
 fn deadline(millis: u64) -> u64 {
     crate::clock::nanos_since_boot() + millis * 1_000_000
@@ -1377,16 +1382,6 @@ pub fn init(rsdp_addr: u64) {
         FAULT.store(true, Ordering::Relaxed);
         log!("i8042: fault injection armed");
     }
-}
-
-/// One byte from the controller if it has one; never waits. Only legal once
-/// every CPU is halted — port 0x60's sole reader is otherwise the ISR.
-pub fn poll_byte() -> Option<(u8, bool)> {
-    let status = inb(STATUS);
-    if status & OBF == 0 {
-        return None;
-    }
-    Some((inb(DATA), status & AUXB != 0))
 }
 
 /// The handler's drain loop, without the EOI. Runs with interrupts off on

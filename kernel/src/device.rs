@@ -42,11 +42,13 @@ pub struct Claim {
 /// What one claim holds. A class is at most one device on this machine and a
 /// per-class flag says whether it is taken; a PCI function is one of several,
 /// so what it gives back is its `pcidev` slot; a partition's exclusivity is its
-/// view's own hold on the blocks (`block::Partition::of`).
+/// view's own hold on the blocks (`block::Partition::of`); an ISA function's is
+/// its `isa` row's.
 enum Claimed {
     Class(DeviceType),
     PciFunction(usize),
     Partition(crate::block::Partition),
+    Isa(usize),
 }
 
 impl Claim {
@@ -71,7 +73,7 @@ impl Claim {
     pub(crate) fn partition(&self) -> Option<&crate::block::Partition> {
         match &self.what {
             Claimed::Partition(view) => Some(view),
-            Claimed::Class(_) | Claimed::PciFunction(_) => None,
+            Claimed::Class(_) | Claimed::PciFunction(_) | Claimed::Isa(_) => None,
         }
     }
 }
@@ -85,6 +87,7 @@ impl Drop for Claim {
             Claimed::PciFunction(slot) => crate::pcidev::release(slot),
             // The view drops with this, and its hold with the last clone of it.
             Claimed::Partition(_) => {}
+            Claimed::Isa(row) => crate::isa::release(row),
         }
     }
 }
@@ -173,6 +176,13 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             };
             let claim = Claim { what: Claimed::Partition(view) };
             Ok(DeviceClaim::new(class, DeviceInfo::Partition(info), claim))
+        }
+        DeviceType::Isa => {
+            let set = toyos_abi::syscall::IsaId::from_wire(selector).ok_or(ClaimError::Absent)?;
+            // The row's own guard, taken inside as a PCI slot's is.
+            let row = crate::isa::claim(set)?;
+            let claim = Claim { what: Claimed::Isa(row) };
+            Ok(DeviceClaim::new(class, DeviceInfo::Isa(set, row), claim))
         }
         DeviceType::HdaAudio => {
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;

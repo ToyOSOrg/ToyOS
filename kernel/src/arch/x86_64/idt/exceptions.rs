@@ -90,6 +90,17 @@ fn safe_read_u64(addr: u64, user_pml4: *const u64) -> Option<u64> {
     }
 }
 
+/// The `in` or `out` at `rip`, read through the page tables as the rest of the
+/// report reads user memory; `None` for any other instruction or an unreadable one.
+fn port_access_at(rip: u64, rdx: u64, pml4: *const u64) -> Option<super::super::pio::PortAccess> {
+    let at = rip & !7;
+    let lo = safe_read_u64(at, pml4)?;
+    let hi = safe_read_u64(at + 8, pml4)?;
+    // Shifted rather than indexed: nothing on this path may panic.
+    let code = ((u128::from(lo) | u128::from(hi) << 64) >> (8 * (rip & 7))) as u32;
+    super::super::pio::port_access(code.to_le_bytes(), rdx as u16)
+}
+
 pub(crate) struct ExceptionContext<'a> {
     frame: &'a TrapFrame,
     cr2: u64,
@@ -180,7 +191,14 @@ fn crash_report_exception(ctx: &ExceptionContext) {
                 log!("SIGFPE tid={}: {}", tid, name)
             }
             Vector::GeneralProtection | Vector::StackSegment | Vector::AlignmentCheck => {
-                log!("SIGBUS tid={}: {} (error_code={:#x})", tid, name, ctx.frame.error_code)
+                log!("SIGBUS tid={}: {} (error_code={:#x})", tid, name, ctx.frame.error_code);
+                // At CPL 3 an `in` or `out` faults only on a port the bitmap refuses.
+                if let Some(access) = (ctx.vector() == Vector::GeneralProtection)
+                    .then(|| port_access_at(ctx.frame.rip, ctx.frame.rdx, pml4))
+                    .flatten()
+                {
+                    log!("  {access}, which this process holds no grant for");
+                }
             }
             _ => log!("FATAL tid={}: {}", tid, name),
         }

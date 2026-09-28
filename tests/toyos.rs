@@ -247,6 +247,8 @@ const RUST_SKIP: &[&str] = &[
     // Meaningful only on `MetalNoUsb`, where no input source exists; on every
     // other machine both claims succeed. `input_claim_absent` runs it.
     "input_absent",
+    // One role per machine shape, each named by the `isa_` test that boots it.
+    "isa_grant",
     // Needs a display whose mode can change, which is `Profile::VirtioGpu`
     // alone; the shared boot has no display at all. `gpu_set_resolution` runs
     // it there, and `iommu_gpu_scanout_swap` the second.
@@ -549,7 +551,6 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // `screen_blocked_dump` has one but paints through `paint_report` rather
     // than through `halt_all_cpus`.
     ("screen_fatal_halt_composited", Sched::Parallel, Tier::Nightly),
-    ("screen_pager_keys", Sched::Serial, Tier::Nightly),
     // AArch64 guests on QEMU `virt`: local, because no CI runner boots one yet.
     ("virt_early_panic", Sched::Parallel, Tier::Local),
     ("virt_early_fault", Sched::Parallel, Tier::Local),
@@ -652,6 +653,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("input_merge", Sched::Parallel, Tier::Weekly),
     ("metal_sim_input", Sched::Parallel, Tier::Weekly),
     ("input_claim_absent", Sched::Parallel, Tier::Weekly),
+    // The `isa` claim, a boot each: refused where the kernel drives the i8042,
+    // its ports granted and refused by the I/O permission bitmap where there is
+    // none, and a real controller the kernel gave up on driven to a keystroke.
+    // Every verdict is a guest's line or the kernel's record of a kill; the one
+    // wait is on the guest's own ready line.
+    ("isa_claim_refused_where_the_kernel_drives", Sched::Parallel, Tier::Fast),
+    ("isa_ports_are_the_binders_alone", Sched::Parallel, Tier::Fast),
+    ("isa_lines_reach_their_holder", Sched::Parallel, Tier::Nightly),
     // One boot; every verdict is a PPM header field or a console line, and no
     // clock is in any of them.
     ("gpu_set_resolution", Sched::Parallel, Tier::Fast),
@@ -985,8 +994,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The same verdict from inside `percpu::init_bsp`: the earliest point a
     // panic is reportable, and the window the owner's T14 stops in.
     ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Nightly),
-    // Serial like `watchdog_fed`: its verdict is that nothing happened for a span of host clock.
-    ("panic_key_holds", Sched::Serial, Tier::Weekly),
+    // Its control: a key pressed inside the bound, and the same stop reason.
+    ("panic_ignores_keys", Sched::Parallel, Tier::Weekly),
     // The boot chain's three answers. The two chain names each watch a guest
     // take its own reset and read the pass after it, so both are anchored to
     // the bound the first boot counts down.
@@ -1518,6 +1527,9 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
     ("input_claim_absent", &["test_rs_input_absent"]),
+    ("isa_claim_refused_where_the_kernel_drives", &["test_rs_isa_grant"]),
+    ("isa_ports_are_the_binders_alone", &["test_rs_isa_grant"]),
+    ("isa_lines_reach_their_holder", &["test_rs_isa_grant"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
     ("userdev_dma_fault", &["test_rs_log_origin"]),
@@ -5779,7 +5791,7 @@ fn run_screen_test(
             // The bound is derived: a panel promising a minute while the kernel
             // counts something else is the failure this line exists to catch.
             let armed = format!(
-                "panic: rebooting in {} s unless a key is pressed",
+                "panic: rebooting in {} s, timed by ",
                 toyos_tco::PANIC_BOUND_MS / 1_000
             );
             for want in ["PANIC:", "test-late-panic: on-screen console check", &armed] {
@@ -6092,191 +6104,6 @@ fn run_screen_test(
                     judged.join(" ")
                 ));
             }
-            Ok(())
-        }
-        "screen_pager_keys" => {
-            // The halted pager takes PageDown off the i8042 with every
-            // CPU stopped, and this is the only place that claim can be made:
-            // the decode is `toyos-ps2`'s and host-tested, but that a keystroke
-            // reaches a machine which has stopped scheduling is a fact about
-            // the controller and the poll, not about the table.
-            //
-            // `Profile::Metal` because QEMU routes injected keys to one handler
-            // per device class: every profile with a `usb-kbd` sends them there
-            // instead, and this is the only GOP machine without one.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Metal,
-                    qmp: true,
-                    kernel_params: &["test-late-panic"],
-                    ready_marker: "PANIC:",
-                    ..Default::default()
-                },
-            );
-            let socket = qemu.qmp_socket().to_path_buf();
-
-            // The footer only exists once the report overflows the screen, so
-            // waiting for one is waiting for the pager to be the thing on
-            // screen. `page_forever` returns without looping below two pages.
-            // Retried, because a dump taken while the pager is repainting
-            // catches a half-written bottom row and no footer at all.
-            let footer = |q: &mut QemuInstance| {
-                for _ in 0..4 {
-                    let text = q.screendump().text();
-                    if let Some(f) = text.lines().rev().find(|l| l.starts_with("[page ")) {
-                        return Some(f.to_string());
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-                None
-            };
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(30));
-            let mut last = loop {
-                if let Some(f) = footer(&mut qemu) {
-                    break f;
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "{STALLED} no `[page n/m]` footer ever appeared; nothing was paging"
-                    ));
-                }
-            };
-
-            // How long the unattended deadline actually takes to move the page,
-            // measured before a key is pressed because the first key retires it
-            // for good. This is what stops the last phase passing vacuously: a
-            // guest too slow to have paged in its window would prove nothing by
-            // not paging, and this is the window measured on *this* guest.
-            let timing_from = Instant::now();
-            let unattended_move = loop {
-                let Some(now) = footer(&mut qemu) else {
-                    return Err(format!(
-                        "{STALLED} the footer vanished while timing the unattended deadline"
-                    ));
-                };
-                if now != last {
-                    last = now;
-                    break timing_from.elapsed();
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "{STALLED} the pager did not advance on its own in {:.1}s against a 3s \
-                         deadline — nothing here can say whether a keystroke stops it",
-                        timing_from.elapsed().as_secs_f64()
-                    ));
-                }
-            };
-
-            // **One keystroke, then its page, then the next keystroke.** The
-            // verdict is that every one of them moved the page, and there is no
-            // clock of the host's in it: a guest that is slow costs this run
-            // wall clock and never a move.
-            //
-            // It used to inject all thirty at the host's own speed and compare
-            // the moves it saw against what a 3 s deadline could have produced
-            // in the elapsed time — `moved >= elapsed/3 + 1` times three. That
-            // arithmetic asks a guest which has not been given time to repaint
-            // once for three moves, so on a host that got through the thirty in
-            // 0.3 s it demanded 3.3 of them and reported `0 page moves over 30
-            // keystrokes in 0.3s`: the symptom, where the fact was that nothing
-            // had run. Two agents bisected that as a kernel regression on one
-            // day. Unpaced it was wrong about the wire as well — thirty
-            // press/release pairs is sixty scancodes into QEMU's 16-byte
-            // `PS2_QUEUE_SIZE` (`hw/input/ps2.c`), so the keys a full-panel
-            // repaint had no room for were never delivered at all.
-            //
-            // What makes "every key moved it" the whole claim, with no rate
-            // beside it, is the phase below: after the first keystroke the
-            // deadline is retired for good, so it contributes no move to this
-            // loop, and if it were still running the steered page would not hold.
-            const SAMPLES: usize = 30;
-            let started = Instant::now();
-            for key in 1..=SAMPLES {
-                qemu::qmp_send_keys(&socket, &[("pgdn", true), ("pgdn", false)]);
-                let by = Instant::now() + qemu.budget(Duration::from_secs(20));
-                loop {
-                    let Some(now) = footer(&mut qemu) else {
-                        return Err(format!(
-                            "{STALLED} the footer vanished after {} of {SAMPLES} keystrokes",
-                            key - 1
-                        ));
-                    };
-                    if now != last {
-                        last = now;
-                        break;
-                    }
-                    if Instant::now() >= by {
-                        return Err(format!(
-                            "keystroke {key} of {SAMPLES} left the pager on {last:?}: a PageDown \
-                             reached a halted machine and no page came of it"
-                        ));
-                    }
-                }
-            }
-            let elapsed = started.elapsed();
-
-            // Nothing is in flight — the loop above did not send a key until the
-            // page the one before it moved was on the screen — so this asks only
-            // that the panel is not mid-repaint before the watch starts.
-            const SETTLED: Duration = Duration::from_secs(1);
-            let settle_by = Instant::now() + qemu.budget(Duration::from_secs(20));
-            let mut held = last;
-            let mut stable_since = Instant::now();
-            loop {
-                let Some(now) = footer(&mut qemu) else {
-                    return Err(format!(
-                        "{STALLED} the footer vanished while the last page settled"
-                    ));
-                };
-                if now != held {
-                    held = now;
-                    stable_since = Instant::now();
-                } else if stable_since.elapsed() >= SETTLED {
-                    break;
-                }
-                if Instant::now() >= settle_by {
-                    return Err(format!(
-                        "the pager never held one page for {}s after the last keystroke, so \
-                         something is still moving it",
-                        SETTLED.as_secs()
-                    ));
-                }
-            }
-
-            // And now the owner's complaint, which is the other half: a page he
-            // steered to must stay up. The window is twice what the unattended
-            // deadline was measured to need above, so a pager still running it
-            // moves at least twice inside this and a slow guest cannot pass by
-            // being slow.
-            let quiet = unattended_move * 2 + Duration::from_secs(1);
-            let watching_from = Instant::now();
-            while watching_from.elapsed() < quiet {
-                let Some(now) = footer(&mut qemu) else {
-                    return Err("the footer vanished while watching a steered page".into());
-                };
-                if now != held {
-                    return Err(format!(
-                        "the page moved from {held:?} to {now:?} on its own {:.1}s into a {:.1}s \
-                         watch after the last keystroke — the deadline is still running under a \
-                         reader who has taken the wheel, which is what it must not do",
-                        watching_from.elapsed().as_secs_f64(),
-                        quiet.as_secs_f64()
-                    ));
-                }
-            }
-            print_screen(
-                name,
-                &format!(
-                    "every one of {SAMPLES} keystrokes moved the page, in {:.1}s; unattended it \
-                     moved once in {:.1}s, and after a keystroke it held {held} for {:.1}s",
-                    elapsed.as_secs_f64(),
-                    unattended_move.as_secs_f64(),
-                    quiet.as_secs_f64(),
-                ),
-            );
             Ok(())
         }
         "screen_fatal_halt" => {
@@ -11045,6 +10872,21 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
     Ok(())
 }
 
+/// A `test_rs_isa_grant` role that ran to its end: no ceiling, exit 0, and the
+/// line it prints last.
+fn isa_verdict(result: &TestResult, last: &str) -> Result<(), String> {
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) || !result.stdout.contains(last) {
+        return Err(format!(
+            "isa_grant exited {:?} without {last:?}:\n{}\n{}",
+            result.exit_code, result.stdout, result.serial
+        ));
+    }
+    Ok(())
+}
+
 /// Run one machine-shape test. Like `run_screen_test`, each of these owns its
 /// QEMU — the machine shape *is* the test — except for the runs of adjacent
 /// names that share one through `held` (see [`group_boot`]).
@@ -11114,7 +10956,7 @@ fn run_machine_test(
         "panic_before_peripherals_reboots" => {
             power::panic_before_peripherals_reboots(test_config, c_bins, rust_bins)
         }
-        "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
+        "panic_ignores_keys" => power::panic_ignores_keys(test_config, c_bins, rust_bins),
         "blackbox_panic_chain" => power::blackbox_panic_chain(test_config, c_bins, rust_bins),
         "panic_outlives_the_deadline" => {
             power::panic_outlives_the_deadline(test_config, c_bins, rust_bins)
@@ -15734,6 +15576,96 @@ fn run_machine_test(
                 }
             }
             eprintln!("  [input] no input source exists and both claims refused NotFound");
+            Ok(())
+        }
+        "isa_claim_refused_where_the_kernel_drives" => {
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { profile: qemu::Profile::Metal, ..Default::default() },
+            );
+            // The premise: without it the refusal below could be anything's.
+            let Some(armed) = qemu.boot_log().lines().find(|l| l.contains("scanning on")) else {
+                return Err(format!("the kernel never drove the i8042:\n{}", qemu.boot_log()));
+            };
+            let armed = armed.to_string();
+            let result = qemu.run_test("test_rs_isa_grant driven", Duration::from_secs(30));
+            isa_verdict(&result, "refused PermissionDenied")?;
+            eprintln!("  [isa] {}", armed.trim());
+            eprintln!("  [isa] the claim on the controller the kernel drives was refused");
+            Ok(())
+        }
+        "isa_ports_are_the_binders_alone" => {
+            // No i8042 at all, so the kernel drives nothing the claim names and
+            // the ports float: the bitmap is the only thing between a process
+            // and them.
+            let options = BootOptions {
+                profile: qemu::Profile::MetalNoUsb,
+                i8042: false,
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            if !qemu.boot_log().contains("i8042: absent") {
+                return Err(format!("the i8042 is not absent:\n{}", qemu.boot_log()));
+            }
+            let result = qemu.run_test("test_rs_isa_grant grant", Duration::from_secs(60));
+            isa_verdict(&result, "===ISA_GRANT_OK===")?;
+            // Each refused access is the kernel's to name: the port, and whose
+            // grant it is not. The unbound holder and the moved claim both die
+            // at 0x64, the bound child one port past what it holds, and the
+            // process holding nothing at the data port.
+            for (port, times) in [("0x0064", 2), ("0x0061", 1), ("0x0060", 1)] {
+                let named = format!(
+                    "in of 1 byte(s) from port {port}, which this process holds no grant for"
+                );
+                let seen = result.serial.matches(named.as_str()).count();
+                if seen != times {
+                    return Err(format!(
+                        "the kernel named {named:?} {seen} time(s), want {times}:\n{}",
+                        result.serial
+                    ));
+                }
+            }
+            for want in
+                ["isa: the i8042's ports are pid", "isa: the i8042's ports went back with pid"]
+            {
+                if !result.serial.contains(want) {
+                    return Err(format!("the kernel never said {want:?}:\n{}", result.serial));
+                }
+            }
+            eprintln!("  [isa] {}", result.stdout.trim().replace('\n', "\n  [isa] "));
+            Ok(())
+        }
+        "isa_lines_reach_their_holder" => {
+            // `i8042-budget-expired` has the kernel give the controller up
+            // before it arms a line, so a real i8042 is here for a claim.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Metal,
+                    qmp: true,
+                    kernel_params: &["i8042-budget-expired"],
+                    ..Default::default()
+                },
+            );
+            if !qemu.boot_log().contains("init budget spent before the self-test stage") {
+                return Err(format!("the kernel did not give the i8042 up:\n{}", qemu.boot_log()));
+            }
+            let result = qemu.run_test_hooked(
+                "test_rs_isa_grant device",
+                Duration::from_secs(60),
+                "===ISA_DEVICE_READY===",
+                |socket| qemu::qmp_send_keys(socket, &[("a", true), ("a", false)]),
+            );
+            isa_verdict(&result, "===ISA_DEVICE_OK===")?;
+            if !result.serial.contains("isa: the i8042 took its first interrupt") {
+                return Err(format!("the line's first interrupt was never said:\n{}", result.serial));
+            }
+            eprintln!("  [isa] {}", result.stdout.trim().replace('\n', "\n  [isa] "));
             Ok(())
         }
         "gpu_set_resolution" => {

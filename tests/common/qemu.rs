@@ -480,10 +480,7 @@ impl Liveness {
 ///
 /// A test that ran out of time has not found the guest doing the wrong thing;
 /// it has found nothing at all, and the two readings send an agent to opposite
-/// places. `screen_pager_keys` reporting `0 page moves over 30 keystrokes`
-/// after 0.3 s was bisected as a kernel regression twice in one day by two
-/// agents, and the fact it was hiding is that the whole run had collapsed
-/// before the guest could answer once.
+/// places.
 ///
 /// Still red. A guest that stopped answering may have stopped for a reason this
 /// tree owns, and a status that is not a failure is a status nobody reads. What

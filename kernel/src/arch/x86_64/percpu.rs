@@ -22,7 +22,11 @@ pub const STAR_SYSRET_BASE: u16 = USER_DS - 8;
 const _: () = assert!(STAR_SYSRET_BASE + 8 == USER_DS);
 const _: () = assert!(STAR_SYSRET_BASE + 16 == USER_CS);
 
-/// 64-bit TSS (104 bytes).
+/// Ports the I/O permission bitmap names; every port from here on is past the
+/// TSS limit, which refuses it without a bit (Intel SDM Vol. 1 §19.5.2).
+pub const IO_PORTS: usize = 0x100;
+
+/// The 104-byte 64-bit TSS, then the I/O permission bitmap.
 #[repr(C, packed)]
 pub struct Tss {
     reserved0: u32,
@@ -34,6 +38,12 @@ pub struct Tss {
     reserved2: u64,
     reserved3: u16,
     iopb_offset: u16,
+    /// A set bit refuses its port to Ring 3; `pio::switch_to` clears one only
+    /// while the process holding it runs.
+    io_bitmap: [u8; IO_PORTS / 8],
+    /// All ones: the processor reads two bytes for every check, and the byte
+    /// past the last one the bitmap names must refuse.
+    io_bitmap_end: u8,
 }
 
 impl Tss {
@@ -47,10 +57,18 @@ impl Tss {
             ist: [0; 7],
             reserved2: 0,
             reserved3: 0,
-            iopb_offset: size_of::<Tss>() as u16,
+            iopb_offset: offset_of!(Tss, io_bitmap) as u16,
+            io_bitmap: [0xFF; IO_PORTS / 8],
+            io_bitmap_end: 0xFF,
         }
     }
 }
+
+const _: () = assert!(offset_of!(Tss, io_bitmap) == 104, "the bitmap follows the architectural TSS");
+const _: () = assert!(
+    offset_of!(Tss, io_bitmap_end) + 1 == size_of::<Tss>(),
+    "the TSS limit ends at the refusing byte"
+);
 
 /// Per-CPU fault state machine for the escalation policy on nested faults.
 #[repr(u8)]
@@ -659,6 +677,20 @@ pub unsafe fn set_kernel_stack(rsp: u64) {
     let percpu = gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu;
     (*percpu).kernel_rsp = rsp;
     core::ptr::write_unaligned(&raw mut (*percpu).tss.rsp0, rsp);
+}
+
+/// Open or close `port` to Ring 3 on this CPU. Called with interrupts off, so
+/// the CPU whose bitmap this reaches cannot change under the write.
+pub fn set_port_open(port: u16, open: bool) {
+    let (byte, bit) = (port as usize / 8, 1u8 << (port % 8));
+    assert!(byte < IO_PORTS / 8, "port {port:#x} is past the I/O permission bitmap");
+    let percpu = gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu;
+    // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`; `byte` is inside the
+    // array (asserted), and a `u8` has no alignment a packed struct could break.
+    unsafe {
+        let at = &raw mut (*percpu).tss.io_bitmap[byte];
+        *at = if open { *at & !bit } else { *at | bit };
+    }
 }
 
 /// The two words [`set_kernel_stack`] writes: `kernel_rsp` (syscall entry) and `tss.rsp0` (Ring 3 interrupt entry); read only by an instrument.

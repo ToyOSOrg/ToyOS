@@ -780,9 +780,8 @@ const FED_FOR: Duration = Duration::from_secs(20);
 ///
 /// A kernel constant does not cross into the harness, so it is written here and
 /// then *read back*: [`panic_armed`] is the whole arm line including this
-/// number, and both tests demand it before they judge anything. A bound that
-/// moved in the kernel and not here reds on that line rather than on a stop
-/// reason nobody could attribute.
+/// number. A bound that moved in the kernel and not here reds on that line
+/// rather than on a stop reason nobody could attribute.
 const PANIC_FAST_SECS: u64 = 5;
 
 /// The panic path's arm line, which is also this boot's ready marker: the guest
@@ -791,13 +790,10 @@ const PANIC_FAST_SECS: u64 = 5;
 const PANIC_ARMED_HEAD: &str = "panic: rebooting in";
 
 fn panic_armed() -> String {
-    format!("{PANIC_ARMED_HEAD} {PANIC_FAST_SECS} s unless a key is pressed, timed by ")
+    format!("{PANIC_ARMED_HEAD} {PANIC_FAST_SECS} s, timed by ")
 }
 
-/// A guest whose kernel panicked and armed the bound. `Profile::Metal` for the
-/// same reason `screen_pager_keys` needs it: QEMU routes injected keys to one
-/// handler per device class, and this is the only GOP profile with an i8042 and
-/// no `usb-kbd` to send them to instead.
+/// A guest whose kernel panicked and armed the bound.
 fn panicked() -> BootOptions {
     BootOptions {
         profile: qemu::Profile::Metal,
@@ -811,11 +807,9 @@ fn panicked() -> BootOptions {
 /// What a panicked guest that never stopped means where the bound should have
 /// ended it.
 const PANICKED_AND_STAYED_UP: &str =
-    "QEMU never reported stopping: nobody pressed a key and the panicked guest held its panel \
-     anyway";
+    "QEMU never reported stopping: the panicked guest held its panel past the bound";
 
-/// A panicked kernel nobody is at returns the machine to firmware itself.
-/// [`panic_key_holds`] is the same guest with a key pressed inside the bound.
+/// A panicked kernel returns the machine to firmware itself.
 ///
 /// The verdict is QEMU's stop reason arriving inside the bound the arm line
 /// names, which is what the budget below is: a reset that had to wait longer
@@ -987,96 +981,32 @@ const RESET_ALLOWANCE: Duration = Duration::from_secs(20);
 
 /// The panic path's second line, written raw because the log is already drained
 /// by then (`kernel/src/panic_reboot.rs`'s `reboot_now`).
-const PANIC_REBOOTING: &str = "panic: no key inside the bound, so nobody is here";
+const PANIC_REBOOTING: &str = "panic: the bound is spent";
 
-/// The control on [`panic_reboots`]: the same guest with one key pressed inside
-/// the bound holds its panel and is still there several bounds later.
-///
-/// The key is `a`, not a page key: what retires the bound is that somebody is at
-/// the machine, and `screen_pager_keys` is where the pager's own two keys are judged.
-pub fn panic_key_holds(
+/// The control on [`panic_reboots`], and the owner's ruling that a dead kernel
+/// takes no input: the same guest with a key pressed inside the bound returns
+/// itself to firmware all the same.
+pub fn panic_ignores_keys(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, panicked());
     let boot = serial::Serial::boot(&qemu);
-    // Demanded before the key, so a control that never armed a bound cannot
-    // pass by holding a panel nothing was counting down.
+    // Demanded before the key, so a guest that never armed a bound cannot pass
+    // on a reset something else caused.
     boot.must_say(&panic_armed())?;
 
+    // One monitor per `-qmp` socket: the key goes out before the watch connects.
     let socket = qemu.qmp_socket().to_path_buf();
     qemu::qmp_send_keys(&socket, &[("a", true), ("a", false)]);
-
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(PANEL_HELD_FOR));
-    if let Some(seen) = stop.reason() {
-        let tail = qemu.drain_serial(WAIT);
-        return Err(format!(
-            "a key was pressed inside the bound and QEMU stopped this guest anyway, for \
-             {seen:?}\n{tail}"
-        ));
-    }
-
-    // One monitor per `-qmp` socket, so the shutdown watch is given up before
-    // the screendump connects.
-    drop(stop);
-    // QEMU not exiting is not the claim in this test's name; the panel still
-    // carrying the report is. The fill and not a line of it, because a key that
-    // is not a page key leaves the pager unsteered and which page is up when the
-    // dump is taken is nobody's to say.
-    let fill = qemu.screendump().fill();
-    if fill != FILL_FATAL {
-        return Err(format!(
-            "the guest is still up {PANEL_HELD_FOR:?} after the key, but its panel fills \
-             {fill:?} and not the fatal {FILL_FATAL:?}: whatever it holds is not the report"
-        ));
-    }
-
-    eprintln!("  [power] a key retired the bound and the report held the panel {PANEL_HELD_FOR:?}");
-    drop(qemu);
-    release_alone_does_not_retire(test_config, c_bins, rust_bins)
-}
-
-/// The negative arm on [`panic_key_holds`]: a byte that is not a key **press**
-/// leaves the bound armed, and the machine still resets itself.
-///
-/// A bare break code is what this injects, because it is the one byte of that
-/// class QMP can deliver — a controller's own ACK reaches the port through no
-/// monitor command. The claim is the same either way: `read_key` retires on a
-/// make code and on nothing else, so a panel nobody pressed a key at is a panel
-/// nobody is reading, whatever else the controller said.
-fn release_alone_does_not_retire(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, panicked());
-    let boot = serial::Serial::boot(&qemu);
-    boot.must_say(&panic_armed())?;
-
-    let socket = qemu.qmp_socket().to_path_buf();
-    qemu::qmp_send_keys(&socket, &[("a", false)]);
-
-    let budget = qemu.budget(Duration::from_secs(PANIC_FAST_SECS) + RESET_ALLOWANCE);
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), budget);
-    let reason = stop.reason();
-    let tail = qemu.drain_serial(WAIT);
-    returned_to_firmware(
-        reason,
-        "a key release retired a bound only a key press may retire, and the guest held its panel",
-        &tail,
-    )?;
-
-    eprintln!("  [power] a release alone left the bound armed and the guest reset itself");
+    let watch = watch_the_bound(&qemu);
+    let never = "QEMU never reported stopping: a key pressed inside the bound held the panel of a \
+                 kernel that takes no input";
+    let (budget, _) = resets_inside_the_bound(&mut qemu, watch, never)?;
+    eprintln!("  [power] a key pressed inside the bound, and the guest reset itself inside {budget:?}");
     Ok(())
 }
-
-/// What `panic_console`'s `Fill::Fatal` paints behind a report — the one thing
-/// on that panel which does not depend on the page the pager has up.
-const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
-
-/// Several bounds, so the control is not a race the guest won once.
-const PANEL_HELD_FOR: Duration = Duration::from_secs(PANIC_FAST_SECS * 4);
 
 /// A line of the first boot's own report, which has to come back out of DRAM on
 /// the boot after it: the panic's message, so what is recovered is the crash

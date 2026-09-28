@@ -89,6 +89,7 @@ mod pipe;
 
 mod device;
 mod pcidev;
+mod isa;
 mod gpu;
 mod user_ptr;
 mod vma;

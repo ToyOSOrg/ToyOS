@@ -299,7 +299,6 @@ nvme_wide_sector 3500
 operation_nesting 5075
 page_cache_partition_offset 6984
 panic_before_peripherals_reboots 3227
-panic_key_holds 42033
 panic_reboots 9768
 pci_capability_walk 5775
 pci_claim_caps_truncated 2583
@@ -343,7 +342,6 @@ screen_late_panic 3926
 screen_loader_lines 3991
 screen_log_absent 1823
 screen_paged_scrollback 7384
-screen_pager_keys 16152
 screen_panic_muted 4416
 shipped_config_boots 3024
 shm_release_reclaims 29

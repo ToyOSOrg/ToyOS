@@ -673,10 +673,11 @@ fn drain_irqs(entered: super::dump::Entered) {
     crate::drivers::panic_console::hold_report();
 
     if crate::irq_ring::take(crate::irq_ring::IrqSource::UserDev).is_some() {
-        // Which claim it was is the per-slot flag `pcidev` keeps; the record
-        // here says only that a pass is owed, so one function's interrupt does
-        // not wake every user driver in the machine.
+        // Which claim it was is the per-slot flag `pcidev` and `isa` keep; the
+        // record here says only that a pass is owed, so one function's
+        // interrupt does not wake every user driver in the machine.
         crate::pcidev::drain_pending();
+        crate::isa::drain_pending();
     }
     if crate::irq_ring::take(crate::irq_ring::IrqSource::Audio).is_some() {
         // Both backends share one watch, so a second would need the parking side

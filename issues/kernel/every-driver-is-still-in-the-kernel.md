@@ -36,6 +36,8 @@ What is left of the staged work:
 3. Done: **the capability itself** is `DeviceType::PciFunction` plus
    `SYS_DEVICE_BAR_MAP` and `SYS_DEVICE_DMA_ALLOC`, with config space readable
    and unwritable and the interrupt delivered as a record on the claim.
+4. **The i8042 (PS/2)**: staged as stage 7 of
+   `issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`.
 
 Two constraints that were not obvious before the code was read:
 
