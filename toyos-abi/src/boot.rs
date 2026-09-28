@@ -110,10 +110,11 @@ pub struct KernelArgs {
     pub root_read_tsc: u64,
 }
 
-/// [`KernelArgs::layout`] for the struct this file declares, bumped by any
-/// change to its layout. Never within -1440..=1440 as an `i32`: a loader older
-/// than the word wrote a firmware zone in minutes at its offset.
-pub const LAYOUT: u32 = 0x5459_0001;
+/// [`KernelArgs::layout`] for the struct this file declares: the struct's own
+/// size folded in, so any field added or removed moves it. Never within
+/// -1440..=1440 as an `i32`: a loader older than the word wrote a firmware
+/// zone in minutes at its offset.
+pub const LAYOUT: u32 = 0x5459_0000 | core::mem::size_of::<KernelArgs>() as u32;
 
 /// The boot parameter on which the loader writes 0 as [`KernelArgs::layout`],
 /// what an older loader writes there on firmware that names no zone: the

@@ -654,7 +654,8 @@ pub struct FatFs {
 }
 
 /// What to stamp on an entry: reads `clock` directly — the VFS's `mtime` is
-/// nanoseconds since boot, not a time of day.
+/// nanoseconds since boot, not a time of day. FAT specifies local time; this
+/// stamps UTC because the owner ruled the hardware clock is UTC.
 fn now() -> FatTime {
     crate::clock::utc_secs().map_or(FatTime::EPOCH, FatTime::from_unix_secs)
 }

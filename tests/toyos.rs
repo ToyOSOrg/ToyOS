@@ -19586,7 +19586,6 @@ fn root_from_memory(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The loader's line: its TSC at entry, at the handoff.
 const LOADER_TSC: &str = "Loader TSC: ";
 /// The kernel's line, followed by its four spans in milliseconds.
 const POWER_ON: &str = "boot: power-on to loader ";

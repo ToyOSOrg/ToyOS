@@ -190,8 +190,7 @@ const DATA_PATHS: [&str; 4] = ["apps", "config", "home", "state"];
 
 /// The boot from power-on, off the loader's TSC readings and `complete`'s, at
 /// the calibrated rate. The TSC counts from reset, so the first span is
-/// firmware's unless firmware wrote the counter, which `IA32_TSC_ADJUST` says
-/// where the CPU has one.
+/// firmware's unless firmware wrote the counter.
 fn report_power_on(args: &KernelArgs, complete: u64) {
     arch::boot::report_counter_origin();
     let (entry, handoff) = (args.loader_entry_tsc, args.loader_handoff_tsc);

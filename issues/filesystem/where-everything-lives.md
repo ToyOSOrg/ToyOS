@@ -83,10 +83,8 @@ until that lands nothing verifies it.
    login row, and `toy` stops being a constant in `toyos-manifest`.
    **Exit**: init names no user.
 4. **The time zone.** One file in `/config` names the machine's zone, one
-   program writes it, and local time is read through it rather than recovered
-   by subtracting `SYS_CLOCK_REALTIME` from `SYS_CLOCK_EPOCH`. **Exit**: a
-   guest test sets the zone and reads its local time back, and nothing
-   recovers the zone by subtraction.
+   program writes it, and local time is read through it. **Exit**: a guest
+   test sets the zone and reads its local time back.
 5. **The language.** One file in `/config` names the machine's default
    language, one program writes it, and init sets it on every program it
    starts. **Exit**: a guest test sets the language and a program init starts
