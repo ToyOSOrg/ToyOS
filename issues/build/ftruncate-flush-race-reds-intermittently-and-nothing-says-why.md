@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: tooling
 opened: 2026-09-01
 ---
@@ -42,4 +42,18 @@ the loop is one-sided precisely because a sleep can overshoot. Whoever takes
 this decides what to measure; this entry is the rate and the refutation, not a
 design.
 
-`cargo run -- --known-red ftruncate_flush_race` says `NOT ON THE LIST`.
+Red again in the orchestrator's nightly for PR #572 at `87629411`: "the
+truncate did not serialise with the stalled flush".
+
+## Exit condition
+
+The capture holds when `set_len` entered the kernel relative to the stall's
+start, so a short `waited` is machine-distinguishable from a retry, and
+`ftruncate_flush_race` is green against that instrument on the dev host across
+the counts in the table above. Then this file and its `src/redlist.rs` row are
+deleted.
+
+## Owner
+
+The `ftruncate-flush-stall` actuator, `tests/common/volumes.rs`; held by the
+orchestrator.

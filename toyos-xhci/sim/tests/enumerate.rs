@@ -201,3 +201,24 @@ fn a_slot_the_controller_has_not_named_yet_is_waited_for_even_when_the_port_goes
     assert_eq!(driver.abandoned, 0, "the Enable Slot was abandoned and its slot with it");
     assert!(driver.busy(), "nothing is listening for the slot the controller was asked for");
 }
+
+/// The same Enable Slot, waited out. Its unplug's edge was spent while the port
+/// was inside the enumeration, so the report that ends it is what has the port
+/// read again, and the device that left is taken down a debounce later.
+#[test]
+fn a_device_pulled_while_enable_slot_goes_unanswered_is_torn_down() {
+    let mut port = FakePort::occupied(QUICK);
+    let mut driver = Driver::new().answering(Answers::Never);
+    let began = until_busy(&mut driver, &mut port, SETTLED);
+    port.detach();
+    let end = began + ANSWER_DEADLINE_NS + 2 * DEBOUNCE_NS;
+    driver.run_to(&mut port, began, end, PASS).unwrap();
+
+    assert!(
+        driver.did.contains(&Did::Enumerated { slot: None, trained: false }),
+        "the Enable Slot's deadline never ended the enumeration: {:?}",
+        driver.did
+    );
+    assert_eq!(driver.teardowns(), 1, "the device that left was never taken down: {:?}", driver.did);
+    assert!(!driver.attached(), "{:?}", driver.did);
+}

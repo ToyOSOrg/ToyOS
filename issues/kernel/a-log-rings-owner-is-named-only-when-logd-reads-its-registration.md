@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-27
 ---
@@ -28,6 +28,7 @@ log_`, interleaved per round against `origin/main`'s kernel and tests:
   began; 0 of 5 after);
 - `origin/main`: 2 red of 13 (0 of 8 at 1ce71831, 2 of 5 at 16d2e645).
 Each red was this failure. The race is on `main`.
+Also red on the orchestrator's Fast tier for PR #563 at `d6716fc7`: the same failure.
 
 The fix belongs where the owner is decided:
 - init names the owner itself, after the spawn and before the frame. That
@@ -37,3 +38,9 @@ The fix belongs where the owner is decided:
 
 **Exit**: a child writing before the ring's owner is named cannot take the
 slots the owner is kept, shown by a test that makes it write in that window.
+No test today covers that owner decision in `Ring::push`
+(`toyos/src/log/region.rs:202`) or logd's `ring.own(pid)`
+(`userland/logd/src/origin.rs:176`); `let keep = 0;` there, or deleting
+`ring.own(pid)`, passes every test in the tree, so the exit's test must turn
+both mutations red. Owner: `toyos/src/log/region.rs`'s `Ring::push`; held by
+the orchestrator.

@@ -13,7 +13,6 @@ until the stop waits on it alone`, `stop: 4 of 7 userland thread(s) stopped
 ... in 2010 ms of a 2010 ms budget`, `usb-quiesce: disk 0 SYNCHRONIZE CACHE
 ok` and `Rebooting.`, then `shutdown: /log did not answer in 2000ms`; the uart
 captured `nothing at all`. The harness's re-run alone was green in 2 s.
-`cargo run -- --known-red` answers NO.
 
 The same shape as
 `issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md`,
