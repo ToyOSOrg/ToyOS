@@ -972,7 +972,7 @@ mod tests {
         // `most` bounds the makes so far, so a make that loops fails rather than hangs.
         let make = |dir: &Path, most: usize| {
             made.set(made.get() + 1);
-            assert!(made.get() <= most, "a sysroot that was not whole was made again");
+            assert!(made.get() <= most, "a sysroot that was not whole was made again: make {}", made.get());
             publish(&compiler, dir, |partial| {
                 write(&partial.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib"), "std");
                 "found\n".to_string()
