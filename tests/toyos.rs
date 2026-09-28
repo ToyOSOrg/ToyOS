@@ -19760,8 +19760,8 @@ fn perf_request_diverged(boot: &metal::Readback) -> Result<(), String> {
 }
 
 /// A read one CPU never answers is refused `Io` once the kernel's bound has
-/// passed, naming that CPU and no other — twice, so a refused ask answers no
-/// later read. `perf-state-deaf-cpu` grants the claim on QEMU's CPUs, which
+/// passed, naming that CPU and no other — twice, so the claim still answers
+/// after a refusal. `perf-state-deaf-cpu` grants the claim on QEMU's CPUs, which
 /// have no HWP, and silences the last CPU; a read with no bound waits for
 /// ever, and this reds at its ceiling.
 fn perf_state_silent_cpu(

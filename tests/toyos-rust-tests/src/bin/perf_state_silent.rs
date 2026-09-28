@@ -17,7 +17,7 @@ fn main() {
         .claim::<Device>(DeviceType::PerfState)
         .expect("perf-state-deaf-cpu grants the claim on any machine");
     let mut buf = vec![0u8; answer_len(syscall::cpu_count() as usize)];
-    // Twice: a refused read leaves no ask behind that answers the next.
+    // Twice: the claim still answers after a refusal.
     for _ in 0..2 {
         assert_eq!(claim.read(&mut buf), Err(SyscallError::Io));
     }
