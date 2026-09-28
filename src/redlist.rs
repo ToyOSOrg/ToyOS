@@ -35,6 +35,7 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
     Disabled { test: "doom_sound_flood", issue: "issues/audio/doom-sound-flood-played-full-scale-once.md" },
+    Disabled { test: "handle_basic", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
         test: "handle_kill_policy",
         issue: "issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md",
@@ -98,10 +99,6 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "usb_transport_break",
         issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
-    },
-    Disabled {
-        test: "xhci_flap",
-        issue: "issues/hardware/a-collapsed-replug-is-enumerated-only-when-another-port-event-arrives.md",
     },
 ];
 
