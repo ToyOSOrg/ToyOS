@@ -22,7 +22,6 @@ getrandom and libloading are `issues/build/the-toolchain-pins-an-older-commit-of
 stacker has no branch with the SDK range.
 
 **Owner**: the toolchain re-lock that closes the linked issue, with stacker's
-requirement widened on its branch too; it moves every compiler's key, so it is
-scheduled, not folded into a build-tooling change.
+requirement widened on its branch too; it moves every compiler's key.
 **Exit**: `rust/Cargo.lock` as a bootstrap run leaves it names no registry
 `toyos-abi` and no `[[patch.unused]]`.

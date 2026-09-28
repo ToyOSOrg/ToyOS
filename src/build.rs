@@ -245,10 +245,12 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
                 crate_dir.display(),
             );
             eprintln!("external deps changed: cleaning {}", crate_dir.display());
-            let _ = Command::new("cargo")
+            let status = Command::new("cargo")
                 .arg("clean")
                 .current_dir(crate_dir)
-                .status();
+                .status()
+                .unwrap_or_else(|e| panic!("run cargo clean in {}: {e}", crate_dir.display()));
+            assert!(status.success(), "cargo clean in {} exited {status}", crate_dir.display());
         }
         Clean::ToyosOnly => {
             let guest = Arch::ALL.iter().map(|arch| target.join(arch.userland()));
@@ -2396,6 +2398,24 @@ mod tests {
         }
         assert!(host.is_file(), "the host workspace's own build went");
         assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), "fingerprint");
+    }
+
+    /// **A `cargo clean` that fails stops the build and stamps nothing**: a
+    /// stamp over a target it did not clean calls another compiler's build
+    /// current.
+    #[test]
+    fn a_failed_cargo_clean_panics_and_stamps_nothing() {
+        let root = toyos_tmpdir::TempDir::new("failed-clean");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let kernel = root.join("kernel");
+        fs::create_dir_all(kernel.join("target")).unwrap();
+        fs::write(kernel.join("Cargo.toml"), "[package\n").unwrap();
+
+        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, Clean::All, "fingerprint"));
+        let refusal = failed.expect_err("a cargo clean that failed was taken for one that ran");
+        let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
+        assert!(refusal.starts_with(&format!("cargo clean in {} exited", kernel.display())), "{refusal}");
+        assert!(!kernel.join("target/.deps-stamp").exists(), "a clean that failed stamped the target");
     }
 
     #[test]
