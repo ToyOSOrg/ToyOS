@@ -514,9 +514,7 @@ mod tests {
         assert_eq!(toolchain::rustup_link(), link, "the machine-global toyos link moved");
 
         // A sweep takes the compiler nobody names, and only that one — and
-        // not while it is still in use, though nobody names it any more. What
-        // this process has used it holds to the end, so a sweep leaves it: a
-        // compiler asserted gone is one only another process ever held.
+        // not while it is still in use, though nobody names it any more.
         let spec = a.join("rust/compiler/rustc_target/src/orphan.rs");
         write(&spec, "pub fn o() {}\n");
         let orphan = compilers_dir(&rust_dir).join(key(&a.join("rust")));
@@ -526,6 +524,7 @@ mod tests {
         assert_eq!(sweep(&primary, &rust_dir), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
         assert!(orphan.is_dir() && ca2.stage2.is_dir());
         user.release();
+        drop(cb);
         assert_eq!(sweep(&primary, &rust_dir), [orphan], "the sweep took a compiler a worktree names, or left one nobody does");
         assert!(kept.stage2.is_dir() && ca2.stage2.is_dir());
 
@@ -540,7 +539,7 @@ mod tests {
         let ca3 = choose(&a, &rust_dir, &a.join("rust"), fake);
         assert!(!replaced.exists(), "placing a compiler left the one it replaced, which nobody names");
         assert!(ca3.stage2.is_dir() && named.is_dir());
-        drop((mine, ca, cb, again, ca2, committed, kept));
+        drop((mine, ca, again, ca2, committed, kept));
     }
 
     const WORKTREE: &str = "TOYOS_COMPILER_TEST_WORKTREE";

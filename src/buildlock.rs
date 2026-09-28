@@ -563,13 +563,27 @@ pub(crate) mod tests {
         /// it has called [`hold_until_released`].
         pub(crate) fn hold(role: &str, env: &[(&str, &OsStr)]) -> Self {
             let marks = TempDir::new("buildlock-elsewhere");
-            let child = rerun(role)
+            let mut child = rerun(role)
                 .envs(env.iter().copied())
                 .env(MARKS, &marks)
                 .spawn()
                 .expect("spawn the holder");
-            assert!(appeared(&marks.join("held"), Duration::from_secs(20)), "{role} never took its lock");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !marks.join("held").exists() {
+                if let Some(status) = child.try_wait().unwrap() {
+                    panic!("{role} exited before it took its lock: {status}");
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    panic!("{role} never took its lock in 20 s, killed: {}", child.wait().unwrap());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
             Elsewhere { child, marks }
+        }
+
+        pub(crate) fn id(&self) -> u32 {
+            self.child.id()
         }
 
         /// Let go, and return once the holder has exited.
@@ -590,6 +604,11 @@ pub(crate) mod tests {
     pub(crate) fn sysroot_used_elsewhere(root: &Path, key: &str) -> Elsewhere {
         let env = [(ROLE, OsStr::new("use-sysroot")), (ROOT, root.as_os_str()), (KEY, OsStr::new(key))];
         Elsewhere::hold("buildlock::tests::child_role", &env)
+    }
+
+    /// What `role` of [`child_role`] takes in `root`, held by a process of its own.
+    fn held_elsewhere(root: &Path, role: &str) -> Elsewhere {
+        Elsewhere::hold("buildlock::tests::child_role", &[(ROLE, OsStr::new(role)), (ROOT, root.as_os_str())])
     }
 
     /// A git repository, because the global scope is keyed on the common
@@ -681,15 +700,7 @@ pub(crate) mod tests {
         match role.as_str() {
             "hold-exclusive" => {
                 let mut held = shared(&root, "child");
-                held.act_if(
-                    Scope::Worktree,
-                    "child exclusive phase",
-                    || (!root.join("release").exists()).then_some(()),
-                    |()| {
-                        touch(&root.join("held"));
-                        appeared(&root.join("release"), Duration::from_secs(20));
-                    },
-                );
+                held.act_if(Scope::Worktree, "child exclusive phase", || Some(()), |()| hold_until_released());
             }
             "hold-exclusive-forever" => {
                 let mut held = shared(&root, "child");
@@ -705,8 +716,7 @@ pub(crate) mod tests {
             }
             "hold-integration" => {
                 let _landing = integration(&root);
-                touch(&root.join("held"));
-                appeared(&root.join("release"), Duration::from_secs(20));
+                hold_until_released();
             }
             "hold-integration-forever" => {
                 let _landing = integration(&root);
@@ -723,8 +733,7 @@ pub(crate) mod tests {
             }
             "hold-sysroot-build" => {
                 let _building = keyed_building(&root, Keyed::Sysroot, "k1");
-                touch(&root.join("held"));
-                appeared(&root.join("release"), Duration::from_secs(20));
+                hold_until_released();
                 note(&root, "built");
             }
             "want-integration" => {
@@ -763,8 +772,7 @@ pub(crate) mod tests {
     #[test]
     fn exclusive_excludes_every_other_acquirer() {
         let root = scratch("exclusive");
-        let mut kid = child(&root, "hold-exclusive");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
+        let kid = held_elsewhere(&root, "hold-exclusive");
 
         let state = open_lock_file(&worktree_lock_dir(&root).join("state"));
         assert!(!try_lock(&state, LOCK_SH), "a build got in while an exclusive phase ran");
@@ -776,8 +784,7 @@ pub(crate) mod tests {
             "the waiting side cannot name the holder: {holder}"
         );
 
-        touch(&root.join("release"));
-        assert!(kid.wait().unwrap().success());
+        kid.release();
         drop(state);
         let _mine = shared(&root, "parent");
     }
@@ -806,8 +813,7 @@ pub(crate) mod tests {
     #[test]
     fn two_landings_serialise() {
         let root = scratch("integration");
-        let mut kid = child(&root, "hold-integration");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
+        let kid = held_elsewhere(&root, "hold-integration");
 
         let mine = open_lock_file(&integration_path(&root));
         assert!(!try_lock(&mine, LOCK_EX), "two landings held the integration lock at once");
@@ -817,8 +823,7 @@ pub(crate) mod tests {
             "the queued landing cannot name the one ahead of it: {holder}"
         );
 
-        touch(&root.join("release"));
-        assert!(kid.wait().unwrap().success());
+        kid.release();
         drop(mine);
         let _mine = integration(&root);
     }
@@ -904,8 +909,7 @@ pub(crate) mod tests {
         // question a second process would ask. A build compiles against its own
         // sysroot and reads no compiler, so a toolchain rebuild waits for no
         // build in either worktree; a sysroot being made reads the compiler, so
-        // the rebuild waits for that. Only one probe takes the global lock: a
-        // lock this process has held is never asserted free ([`Elsewhere`]).
+        // the rebuild waits for that.
         let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(try_lock(&global, LOCK_EX), "a build kept the toolchain from being rebuilt");
         drop(global);
@@ -970,8 +974,7 @@ pub(crate) mod tests {
     #[test]
     fn a_key_being_built_is_waited_for_and_another_key_is_not() {
         let root = scratch("sysroot-keys");
-        let mut builder = child(&root, "hold-sysroot-build");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "the builder never started");
+        let builder = held_elsewhere(&root, "hold-sysroot-build");
 
         assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key being built");
         let other = keyed_building(&root, Keyed::Sysroot, "k2");
@@ -982,8 +985,7 @@ pub(crate) mod tests {
             !appeared(&root.join("order.log"), Duration::from_millis(300)),
             "a build used a sysroot while it was still being made"
         );
-        touch(&root.join("release"));
-        assert!(builder.wait().unwrap().success());
+        builder.release();
         assert!(user.wait().unwrap().success());
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "built\nused\n");
 
