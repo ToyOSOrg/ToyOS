@@ -1097,8 +1097,6 @@ pub fn random(buf: &mut [u8]) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0))
 }
 
-/// The time of day in the zone the machine keeps its clock in.
-///
 /// `None` is a machine that never said what time it is — an RTC that is absent,
 /// wedged, or answering with something that is not a date. It is `None` for the
 /// whole of such a boot rather than intermittently, because the kernel reads

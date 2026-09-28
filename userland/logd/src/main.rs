@@ -87,7 +87,6 @@ mod origin;
 mod policy;
 mod serve;
 mod store;
-mod wall;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -164,21 +163,21 @@ fn main() {
     // The wall clock, read once. The kernel reads the RTC once too, so a second
     // reading later in the boot would answer out of the same anchor and tell
     // this program nothing new.
-    let (stem, boot_local, zone) = boot_stamp();
+    let (stem, boot_secs, dated) = boot_stamp();
 
     let volume = Volume::open(stem, rotate_at, |line| say!("{line}"));
     match &volume {
         // This program's half of the startup report, in one line: the kernel
         // says whether it has a console, this program whether it has a volume
         // and what the name it chose was decided by.
-        Some(v) => say!("logd: this boot's kernel log is {} ({zone})", v.path()),
+        Some(v) => say!("logd: this boot's kernel log is {} ({dated})", v.path()),
         None => say!(
             "logd: no {DIR} on this machine - this boot's kernel log is on the console only \
-             ({zone})"
+             ({dated})"
         ),
     }
 
-    let hub = Arc::new(serve::Hub::start(REPLAY_BYTES, boot_local));
+    let hub = Arc::new(serve::Hub::start(REPLAY_BYTES, boot_secs));
     let published = Arc::new(inspect::Published::new(hub.network()));
     if let Some(acceptor) = endow::acceptor(SERVICE) {
         inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
@@ -200,7 +199,7 @@ fn main() {
         owed: false,
         retrying_since: None,
         degraded: false,
-        boot_local,
+        boot_secs,
         hub,
         stall: Stall::from_args(),
         stopping: None,
@@ -232,7 +231,7 @@ struct Log {
     retrying_since: Option<Instant>,
     /// Whether the volume answers, slower than `LOG_WRITE_BUDGET` a round.
     degraded: bool,
-    boot_local: Option<u64>,
+    boot_secs: Option<u64>,
     hub: Arc<serve::Hub>,
     stall: Option<Stall>,
     /// init's flush was answered and the machine stops: the file's text held
@@ -542,13 +541,13 @@ impl Log {
         for line in &lines {
             match &line.kind {
                 Kind::Kernel(record) => {
-                    file.push_str(&format!("{}\n", record.tagged(&stamp(self.boot_local, record.at_ns))));
+                    file.push_str(&format!("{}\n", record.tagged(&stamp(self.boot_secs, record.at_ns))));
                 }
                 Kind::Program { tag, owner, said } => {
                     let severity = said.severity;
                     let tag = Tag::new(tag).expect("an origin's name is a tag");
                     let pid = (said.pid != *owner).then_some(said.pid);
-                    let at = stamp(self.boot_local, said.at_ns);
+                    let at = stamp(self.boot_secs, said.at_ns);
                     let mut line = ProgramLine {
                         stamp: &at,
                         at_ns: said.at_ns,
@@ -823,47 +822,24 @@ impl Stall {
     }
 }
 
-/// This boot's file stem, and the local epoch second the machine booted at.
+/// This boot's file stem, and the epoch second the machine booted at.
 ///
 /// `None` for the stem is a boot that cannot be placed in time, which takes an
-/// `unknown-NN` name — and the two ways to get there are named separately,
-/// because "this machine has no clock" and "this machine has a clock whose zone
-/// two readings cannot separate" are different facts about the machine.
+/// `unknown-NN` name.
 fn boot_stamp() -> (Option<String>, Option<u64>, String) {
-    match wall::local_now() {
-        wall::Wall::Local { secs, offset_secs } => {
-            let civil = Civil::from_unix_secs(secs);
-            let uptime_secs = toyos_abi::clock::nanos_since_boot() / 1_000_000_000;
-            (
-                Some(format!("{}", civil.stem())),
-                Some(secs.saturating_sub(uptime_secs)),
-                format!("{civil} at UTC{:+} recovered from two readings", offset_secs / 3_600),
-            )
-        }
-        wall::Wall::Unknown => {
-            (None, None, "undated: this machine will not say what time it is".into())
-        }
-        // Named rather than guessed. The two candidates are the same time of day
-        // on different days, so a file named from either is a day wrong half the
-        // time; `wall`'s module header is the argument.
-        wall::Wall::Ambiguous { east, west } => (
-            None,
-            None,
-            format!(
-                "undated: the clock is UTC{:+} or UTC{:+} on these two readings and nothing \
-                 separates them",
-                east / 3_600,
-                west / 3_600
-            ),
-        ),
-    }
+    let Some(secs) = toyos::system::clock_epoch() else {
+        return (None, None, "undated: this machine will not say what time it is".into());
+    };
+    let civil = Civil::from_unix_secs(secs);
+    let uptime_secs = toyos_abi::clock::nanos_since_boot() / 1_000_000_000;
+    (Some(format!("{}", civil.stem())), Some(secs.saturating_sub(uptime_secs)), format!("{civil} UTC"))
 }
 
-/// A line's wall-clock stamp: the local second the machine booted at, plus the
+/// A line's wall-clock stamp: the second the machine booted at, plus the
 /// line's own monotonic offset — which the line carries too, so `/log` holds
 /// both clocks.
-pub(crate) fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
-    match boot_local {
+pub(crate) fn stamp(boot_secs: Option<u64>, at_ns: u64) -> String {
+    match boot_secs {
         Some(base) => format!("{}", Civil::from_unix_secs(base + at_ns / 1_000_000_000)),
         // An undated boot writes the space the stamp would have taken, so the
         // columns line up and nothing has to be re-parsed to notice that a

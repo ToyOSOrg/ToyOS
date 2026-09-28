@@ -129,9 +129,7 @@ pub fn windows(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -
         }
 
         let list = List { at: resources as u64 };
-        let walk = memory_windows(list, list.at, &mut out[found..]);
-
-        match walk.windows {
+        match memory_windows(list, list.at, &mut out[found..]) {
             Ok(count) => found += count,
             Err(why) => {
                 println!("{HEAD} {index} (segment {}) {why}, so the kernel is handed no window", bridge.segment_number);
