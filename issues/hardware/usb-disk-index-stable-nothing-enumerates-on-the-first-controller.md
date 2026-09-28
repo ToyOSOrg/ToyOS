@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: defect
 opened: 2026-08-08
 ---
@@ -16,5 +16,4 @@ probe found, only this one still reds.
 Split out of `issues/hardware/eleven-names-red-on-ci.md`, which covers eleven
 names and has no exit condition for this one in particular.
 
-**Exit condition.** The cause of the empty first controller is fixed, and
-`usb_disk_index_stable` green on CI's `guest` shards. Owner: orchestrator.
+**Exit condition.** The cause of the empty first controller is fixed. Owner: orchestrator.
