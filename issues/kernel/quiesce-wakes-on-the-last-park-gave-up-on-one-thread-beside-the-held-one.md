@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-09-28
 ---
 
-# `quiesce_wakes_on_the_last_park`'s stop gave up on threads still running beside the held one
+# `quiesce_wakes_on_the_last_park`'s stop gave up on one thread beside the held one
 
 Three Fast tiers carry the identical failure:
 
@@ -21,23 +21,28 @@ The earliest is PR #510 at `98e803cb`, recorded in
 `issues/build/quiesce-wakes-on-the-last-park-lost-its-serial-ready-beside-other-guests.md`:
 `stop: 4 of 7 userland thread(s) stopped ... in 2010 ms of a 2010 ms budget`.
 That boot then lost its READY, so the harness reported the READY and not the
-stop. None of the four branches touches the guest's stop path.
+stop.
 
-In the three sightings above, neither of the two threads was parked. Each
-record has 0 block operations open, and `stop_if_blocked` stops every parked
-thread outside a `block::OpenUpdate`, so the sweep counted both as running. One
-of them is the held thread by construction: `quiesce::last::hold` yields until
-the latest sweep counts 1 running, so a sweep that counts 2 keeps it spinning.
-The defect is the other thread. No sighting can name it, because the `stop:`
-record carries only counts.
+One of the two threads is the held thread by construction: `quiesce::last::hold`
+yields until the latest sweep counts 1 running, so a sweep that counts 2 keeps
+it spinning. The defect is the other thread. No sighting can name it, because
+the `stop:` record carries only counts.
 
-**Hypothesis, untested.** The hold's yield loop keeps its CPU busy. A Ready
+**Hypothesis A, untested.** The hold's yield loop keeps its CPU busy. A Ready
 thread queued on that CPU then runs only if `dispose_yield`
 (`toyos-sched/src/cpu.rs`) re-inserts the spinner behind it.
 
-**What no enabled guest test checks while this is disabled.** Four of the six
-quiesce guest tests are disabled: `quiesce_stops_the_machine`,
-`quiesce_dump_holds_the_stopped`, `quiesce_wakes_on_the_last_exit` and this one.
+**Hypothesis B, untested.** `tests/quiescelastcase/system.toml` starts `logd`,
+which fsyncs `/log`. `begin_update`'s only caller is `SYS_FSYNC`
+(`kernel/src/object/ops.rs:626`), and that update spans every retry, including
+the park in `between_attempts`. A thread parked there is `Blocked` with
+`MID_UPDATE`; `stop_if_blocked` refuses it (`toyos-sched/src/task.rs:450`), the
+sweep counts it running, and it adds 0 to `in_flight` — so `logd` parked
+between refused fsync attempts past the 2010 ms budget is a candidate the
+records cannot exclude, and it sits on the same `/log` fsync path the writers
+issue owns.
+
+**What no enabled guest test checks while this is disabled.**
 `woken_by_its_threads` (`tests/common/power.rs`) has no enabled caller. So no
 enabled test checks any of these:
 

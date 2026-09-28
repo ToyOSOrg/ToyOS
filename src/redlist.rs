@@ -74,7 +74,7 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "quiesce_wakes_on_the_last_park",
-        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-threads-running-beside-the-held-one.md",
+        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
     },
     Disabled {
         test: "sched_check_build",
