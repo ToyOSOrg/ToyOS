@@ -15,8 +15,7 @@ the victim's own pass answers (`SchedPass::answer_steal_requests`). A CPU
 spinning with `IF` clear takes no pass. If the main thread is queued on that
 CPU, no other CPU can take it, and the kernel panics.
 
-Seen twice, in the orchestrator's Fast tier for PR #562 at `2a9c77ee` (a
-two-CPU guest):
+In the orchestrator's Fast tier for PR #562 at `2a9c77ee` (a two-CPU guest):
 
 ```
 [kernel 10.738 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=4 current=None trips=91
@@ -31,14 +30,13 @@ neither CPU. Queued behind the spin on cpu0 is the reading that fits all of
 this. Nothing in the capture proves it: no line says which queue held the
 thread.
 
-This is not PR #562's doing. On that branch `kernel/src/user_ptr.rs` and the
-scheduler are the same as on `main`. The one change to
-`copy_out_races_munmap.rs` removes a 10 s assert from the main thread's cue
-loop, and that assert only fires when the main thread is running, in which
-case it sees the cue and maps.
+This is not PR #562's doing. On that branch `kernel/src/user_ptr.rs` is the
+same as on `main`. The one change to `copy_out_races_munmap.rs` removes a
+10 s assert from the main thread's cue loop, and that assert only fires when
+the main thread is running, in which case it sees the cue and maps.
 
 Also seen in the orchestrator's nightly for PR #536 at its head `069722c3`,
-the same panic site, `src/user_ptr.rs:402:13` (`orch-runs/536r15-nightly.log:1411`).
+the same panic site, `src/user_ptr.rs:402:13`.
 
 ## Exit condition
 

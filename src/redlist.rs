@@ -124,10 +124,6 @@ pub const DISABLED: &[Disabled] = &[
         test: "user_copy_races_munmap",
         issue: "issues/kernel/copy-meets-a-remap-holds-a-cpu-the-thread-it-waits-on-may-be-queued-behind.md",
     },
-    Disabled {
-        test: "userdev_dma_fault",
-        issue: "issues/isolation/userdev-dma-fault-forbids-the-panic-netd-answers-a-refused-claim-with.md",
-    },
 ];
 
 /// The row of `rows` that disables `test`, matched by the whole name.

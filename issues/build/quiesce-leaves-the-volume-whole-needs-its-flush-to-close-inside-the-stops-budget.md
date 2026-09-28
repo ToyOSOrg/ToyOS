@@ -16,7 +16,7 @@ attempts, and any time the guest is not running, are not covered by anything.
 the shortfall. So the test asserts an outcome the kernel does not promise, and
 under TCG the guest clock runs with the host's.
 
-Across the 41 passing records of this test in the orchestrator's logs, the
+Across the passing records of this test in the orchestrator's logs, the
 ladder closed 1333–1735 ms after the fsync began, and the stop began 9–207 ms
 after the fsync did. The one red, the Fast tier for PR #562 at `2a9c77ee`:
 
