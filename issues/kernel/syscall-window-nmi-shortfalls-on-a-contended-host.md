@@ -12,11 +12,13 @@ iteration passes through both exactly once, so they are of one order; a 10x
 shortfall says the arrivals are not being classified where they land
 ```
 
-Green in the same session's alone re-run (4 s) and green again on a quiet
-re-run of the same tree.
+Also seen in the orchestrator's own runs at a main-level head, `c5d09bb6`:
 
-It has since red in the orchestrator's own runs, each with the same
-"N sprayed window arrivals against M in Ring 3 ... a 10x shortfall" message.
+```
+FAIL syscall_window_nmi: 24 sprayed window arrivals against 515 in Ring 3. Every
+iteration passes through both exactly once, so they are of one order; a 10x
+shortfall says the arrivals are not being classified where they land
+```
 
 Two readings and nothing here separates them: the storming CPU genuinely lands
 in the three-instruction window less often when the host is oversubscribed —
@@ -29,7 +31,7 @@ rate measured on a host whose company is recorded (`tests/CLAUDE.md`).
 Not `Sched::Parallel` being wrong. The harness suggests that on every alone-green
 red, and re-classifying a red whose mechanism is unknown answers nothing.
 
-**2026-08-25, promoted to `defect`.** A test that reds on a loaded host with no
+**2026-08-25.** A test that reds on a loaded host with no
 rate written down is an unadjudicated red, and CLAUDE.md's rule is that such a
 red is fixed at its owner rather than re-run away. The act is a measurement: a
 window-arrival rate taken across widths on hosts whose company is recorded, so

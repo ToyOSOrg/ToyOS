@@ -4,11 +4,11 @@ kind: tooling
 opened: 2026-09-28
 ---
 
-# `quiesce_leaves_the_volume_whole` passes only when the refused flush closes inside the stop's 2010 ms, which a host stall takes away
+# `quiesce_leaves_the_volume_whole` passes only when the refused flush closes inside the stop's `PARK`, which a host stall takes away
 
 The verdict needs `fsync: … durable on attempt 9` on the console before
 `Syncing filesystems...`. In other words, the `quiesce-fsync-refuse` ladder has
-to close before `quiesce::stop` spends `PARK` (2010 ms of guest clock). The
+to close before `quiesce::stop` spends `PARK`. The
 kernel's own `const` assert in `fat32_adapter::mirror_refuse` only covers the
 parks: 1270 ms of `RETRY_SOONEST` doubling against `PARK`. The I/O of nine
 attempts, and any time the guest is not running, are not covered by anything.
@@ -16,9 +16,7 @@ attempts, and any time the guest is not running, are not covered by anything.
 the shortfall. So the test asserts an outcome the kernel does not promise, and
 under TCG the guest clock runs with the host's.
 
-Across the passing records of this test in the orchestrator's logs, the
-ladder closed 1333–1735 ms after the fsync began, and the stop began 9–207 ms
-after the fsync did. The one red, the Fast tier for PR #562 at `2a9c77ee`:
+The one red, the Fast tier for PR #562 at `2a9c77ee`:
 
 ```
 refusals 1..8 at 630 643 658 681 723 809 974 1304 ms   (the nominal ladder)
