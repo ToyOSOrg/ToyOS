@@ -289,5 +289,9 @@ name = "toyos-build"
 path = "tests/toyos.rs"
 harness = false
 
+[[test]]
+name = "toyos-checks"
+path = "tests/checks.rs"
+
 [patch.crates-io]
 target-lexicon = { git = "https://github.com/ToyOSOrg/target-lexicon", branch = "toyos" }

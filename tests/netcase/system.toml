@@ -29,9 +29,11 @@ service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
-# `launcher`: this is the only config whose test binaries take the launcher
-# path to `Command::spawn` at all; everywhere else test-runner holds no
-# connector and every spawn is direct.
+# `launcher` for `launcher_refusals`, whose subject is what a client can make
+# `/system/bin/init` do — so the test estate has to be able to reach it somewhere.
+# This is also the only config whose test binaries take the launcher path to
+# `Command::spawn` at all: everywhere else test-runner holds no connector and
+# every spawn is direct.
 # `logread` is the log gate's own: a spawned test binary does not inherit a
 # `SysCap` dup, so the gate that reads the kernel's records runs inside
 # `test-runner` itself.
@@ -45,7 +47,9 @@ syscap = ["logread"]
 # `every_device_class_has_at_most_one_claimant`.
 devices = ["pci:1af4:1041"]
 
-# A declared program `spawn_cwd` spawns through init's launcher.
+# What `launcher_refusals` asks init to start. A declared program that serves
+# nothing and provides nothing, so a refused launch of it takes no acceptor
+# with it and a granted one is a clean round trip.
 [programs.toybox]
 
 # What `spawn_cwd` asks for the owner's `cd` and a launch from it: the shell

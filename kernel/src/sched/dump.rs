@@ -157,21 +157,6 @@ pub fn file_request() {
     REQUEST.file();
 }
 
-/// `quiesce-dump`: the report a keystroke asks for, served by the thread
-/// running the shutdown once its stop holds every thread it named. That
-/// thread is at its syscall's entry depth with no lock under it, which is
-/// what a pass entered at zero proves and what `Parkable::at_entry` asserts.
-#[cfg(feature = "boot-actuators")]
-pub fn serve_for_the_stop() {
-    let _nothing_under_it = crate::scheduler::Parkable::at_entry();
-    // Filed and taken in one exchange: a sibling's pass entered at zero would take a request filed alone.
-    assert!(
-        REQUEST.file_and_take(),
-        "quiesce-dump: a report was already running when the stop asked for its own"
-    );
-    report_until_nothing_pending(&UnderNothing(()));
-}
-
 /// Ctrl+Alt+D's request, from `drain_irqs` on every pass.
 pub fn serve_request(entered: Entered) {
     #[cfg(feature = "boot-actuators")]
@@ -190,11 +175,7 @@ fn serve(proof: &UnderNothing) {
     if !REQUEST.pending() || !REQUEST.take() {
         return;
     }
-    report_until_nothing_pending(proof);
-}
-
-/// The caller took the request: report until a report ends with nothing filed during it.
-fn report_until_nothing_pending(proof: &UnderNothing) {
+    // Until a report ends with nothing filed during it.
     loop {
         report(proof);
         if !REQUEST.end_report() {

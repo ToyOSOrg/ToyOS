@@ -160,7 +160,6 @@ connect_before_serve 23
 console_locale_detect 3922
 control_regs 7243
 control_regs_negative 3872
-control_regs_verdict 0
 debug_float 11
 debug_trap 25
 demand_paging_sse 12
@@ -184,6 +183,7 @@ endowment_denied 10
 esp_filesystem 10123
 exit_wait_storm 178
 run_exit_status 0
+fat_backing_revoked 8226
 fault_gates 31
 foreign_disk_untouched 4688
 fpu_isolation 14662
@@ -221,7 +221,6 @@ i8042_kbd_echo 4770
 i8042_mouse 4310
 i8042_no_spurious_wake 146
 i8042_quarantine 10068
-i8042_quarantine_verdict 0
 i8042_undecoded_bytes 4960
 idle_stack_guard 9601
 inbox_cancel_wakes 543
@@ -251,6 +250,7 @@ lan_no_lease 32709
 lapic_spurious_vector 6829
 late_storage_connect 6455
 latency_wake 8790
+launcher_refusals 2106
 leak_rollback_selftest 5423
 loader_watchdog_arms 10064
 locale_detect 9959
@@ -292,11 +292,9 @@ netd_connection_caps 6538
 netd_gone_mid_bind 32
 netd_hostile_peer 4509
 netd_listener_forgery 2649
-nightly_tier_is_announced 0
 null_sink_client_exits 2167
 null_sink_shipped_client 7095
 nvme_home_roundtrip 13
-nvme_image_is_held_by_one_guest 0
 nvme_large_device 6052
 nvme_wide_sector 3500
 operation_nesting 5075
@@ -336,7 +334,6 @@ screen_console_clear 5756
 screen_console_panic 6788
 screen_console_scroll 12310
 screen_console_shell 2604
-screen_decoder 6
 screen_diag_boot 7330
 screen_early_panel 5779
 screen_fatal_halt 4970
@@ -349,7 +346,6 @@ screen_log_absent 1823
 screen_paged_scrollback 7384
 screen_pager_keys 16152
 screen_panic_muted 4416
-serial_vocabulary 2
 shipped_config_boots 3024
 shm_release_reclaims 29
 short_sleep_livelock 4823
@@ -358,7 +354,6 @@ smp_roster_and_tsc_trail 4926
 sshd_exec 5110
 sshd_files 535
 sshd_key_auth 1428
-stall_is_not_a_verdict 0
 std_alloc 12
 std_fs 17
 std_fs_write 12
@@ -373,9 +368,6 @@ std_tls_dlopen 18
 std_tls_multi_crate 13
 std_unwind 18
 std_unwind_so 20
-suite_split 1
-suspend_detector 20
-suspend_invalidates_a_verdict 0
 swiss_german_layout 5355
 syscall_cost 92
 syscall_window_nmi 6825

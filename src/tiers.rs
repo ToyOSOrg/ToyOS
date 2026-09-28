@@ -7,14 +7,7 @@
 //! between tiers is editing that one word.
 //!
 //! The tiers nest: a plain `cargo test` reaches `Fast`, `--nightly` adds
-//! `Nightly`, and `--weekly` adds `Weekly` to that. `.github/workflows/nightly.yml`
-//! runs the nightly reach six nights a week and the weekly reach on the seventh
-//! (`src/ci.rs`). No pull request boots a guest.
-//!
-//! A test's tier is what it has caught: `Fast` is the shared boot and the tests
-//! that caught a real defect for at most 5 s of guest time, `Nightly` the other
-//! tests that caught one, and `Weekly` those that never did; a group sharing one
-//! boot takes its most frequent member's tier. A new test enters `Nightly`.
+//! `Nightly`, and `--weekly` adds `Weekly` to that.
 //!
 //! The local tier is the fourth, and the only one CI never runs: its guests are
 //! of an architecture no hosted runner has been measured to boot.
@@ -102,12 +95,9 @@ impl<'a> Schedule<'a> {
         Ok(Self(tiers))
     }
 
-    /// `name`'s tier, refused by name when nothing registers it.
-    pub fn tier(&self, name: &str) -> Result<Tier, String> {
-        self.0
-            .get(name)
-            .copied()
-            .ok_or_else(|| format!("{name} is not a registered test, so it has no tier"))
+    /// Whether anything registers `name`.
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(name)
     }
 
     /// Every registered name and its tier, by name.
@@ -126,10 +116,9 @@ mod tests {
     #[test]
     fn every_registered_test_has_exactly_one_tier() {
         let schedule = Schedule::new(NAMES.into_iter().zip(EVERY)).unwrap();
-        for (name, tier) in NAMES.into_iter().zip(EVERY) {
-            assert_eq!(schedule.tier(name), Ok(tier), "{name}");
-        }
-        assert_eq!(schedule.iter().count(), EVERY.len());
+        let mut want: Vec<_> = NAMES.into_iter().zip(EVERY).collect();
+        want.sort_by_key(|(name, _)| *name);
+        assert_eq!(schedule.iter().collect::<Vec<_>>(), want);
         for second in EVERY {
             let refusal =
                 Schedule::new([("twice", Tier::Fast), ("once", Tier::Weekly), ("twice", second)])
@@ -140,12 +129,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unregistered_test_is_refused_by_name() {
+    fn only_a_registered_name_is_contained() {
         let schedule = Schedule::new([("registered", Tier::Weekly)]).unwrap();
-        let refusal =
-            schedule.tier("never_registered").expect_err("an unregistered name was given a tier");
-        assert!(refusal.starts_with("never_registered is not a registered test"), "{refusal}");
-        assert!(schedule.tier("registere").is_err(), "a prefix is not the name");
+        assert!(schedule.contains("registered"));
+        assert!(!schedule.contains("never_registered"));
+        assert!(!schedule.contains("registere"), "a prefix is not the name");
     }
 
     /// Each reach selects its own tier and every narrower one, and nothing

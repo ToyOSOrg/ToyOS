@@ -46,9 +46,9 @@ const NIGHTLY_CRON: &str = "0 3 * * 1-6";
 const WEEKLY_CRON: &str = "0 3 * * 0";
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
-  host              every host test: the build system, the host workspace, the
-                    licences of what ships, clippy, the model controls, userland
-                    and the SDK (ci.yml, nightly)
+  host              every host test: the build system, the harness's own checks,
+                    the host workspace, the licences of what ships, clippy, the
+                    model controls, userland and the SDK (ci.yml, nightly)
   gate-stage        what protects main, read back from GitHub (ci.yml)
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest <i>/<n>     one shard of the guest suite at the reach its schedule names (nightly)
@@ -439,6 +439,7 @@ fn host(root: &Path) -> Vec<Step> {
     let host_triple = crate::toolchain::host_triple();
     let mut steps = vec![
         step("the build system", || cargo(root, &["test", "--lib"])),
+        step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
@@ -609,14 +610,25 @@ fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 /// schedule, and the nightly one on the other schedule, on a dispatch and off a
 /// runner.
 fn guest_reach() -> Result<&'static str, String> {
-    if std::env::var("GITHUB_EVENT_NAME").as_deref() != Ok("schedule") {
+    reach_of_event(std::env::var("GITHUB_EVENT_NAME").ok().as_deref(), || {
+        let path = std::env::var("GITHUB_EVENT_PATH").map_err(|_| {
+            "a scheduled run with no $GITHUB_EVENT_PATH names no schedule".to_string()
+        })?;
+        std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+    })
+}
+
+/// [`guest_reach`] over the event's name and a reader of its payload, which
+/// only a scheduled run asks for.
+fn reach_of_event(
+    name: Option<&str>,
+    payload: impl FnOnce() -> Result<String, String>,
+) -> Result<&'static str, String> {
+    if name != Some("schedule") {
         return Ok(testargs::NIGHTLY.name);
     }
-    let path = std::env::var("GITHUB_EVENT_PATH")
-        .map_err(|_| "a scheduled run with no $GITHUB_EVENT_PATH names no schedule".to_string())?;
-    let payload = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
     let event: serde_json::Value =
-        serde_json::from_str(&payload).map_err(|e| format!("{path}: {e}"))?;
+        serde_json::from_str(&payload()?).map_err(|e| format!("the schedule event: {e}"))?;
     reach_of_schedule(event["schedule"].as_str())
 }
 
@@ -945,6 +957,19 @@ mod tests {
             let refusal = reach_of_schedule(stray).unwrap_err();
             assert!(refusal.contains(&format!("{stray:?}")), "{refusal}");
         }
+    }
+
+    /// Only a scheduled run reads its payload, and every other run is a nightly one.
+    #[test]
+    fn a_run_no_schedule_started_reaches_nightly() {
+        for name in [None, Some("workflow_dispatch"), Some("push")] {
+            let reach = reach_of_event(name, || panic!("{name:?} read a schedule payload"));
+            assert_eq!(reach, Ok("--nightly"), "a {name:?} run");
+        }
+        let weekly = format!(r#"{{"schedule":"{WEEKLY_CRON}"}}"#);
+        assert_eq!(reach_of_event(Some("schedule"), || Ok(weekly)), Ok("--weekly"));
+        let unread = reach_of_event(Some("schedule"), || Err("no payload".into()));
+        assert_eq!(unread, Err("no payload".into()));
     }
 
     /// The schedules `nightly.yml` declares are exactly the two a reach is

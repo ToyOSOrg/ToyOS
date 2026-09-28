@@ -334,25 +334,18 @@ pub fn quiesce_wakes_on_the_last_park(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-park", LATE_WORD], rust_bins)
-}
-
-fn woken_by_the_held_thread(
-    armed: &'static [&'static str; 2],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let actuator = armed[0];
+    const ACTUATOR: &str = "quiesce-last-park";
     let (whole, record) = stopped_boot(
         "tests/quiescelastcase/system.toml",
         "quiesce_last",
-        armed,
+        &[ACTUATOR, LATE_WORD],
         rust_bins,
     )?;
     // **The premise, by the kernel's own word**: the thread was held, and
     // held before the stop claimed anything. Without it the boot below is
     // one whose last transition was anything at all.
     let held = format!(
-        "{actuator}: {} is held until the stop waits on it alone",
+        "{ACTUATOR}: {} is held until the stop waits on it alone",
         toyos_quiesce::LAST_THREAD,
     );
     let at = |needle: &str| whole.lines().position(|line| line.contains(needle));
@@ -371,7 +364,7 @@ fn woken_by_the_held_thread(
         ));
     }
     woken_by_its_threads(&record)?;
-    eprintln!("  [power] {actuator}: the held thread's transition woke the stop: {record}");
+    eprintln!("  [power] {ACTUATOR}: the held thread's transition woke the stop: {record}");
     Ok(())
 }
 

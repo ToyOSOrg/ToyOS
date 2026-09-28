@@ -71,4 +71,4 @@ the two `Builder::check` helpers:
 **Exit**: each model above read for a word one thread only loads while another
 loads then writes it, and every such pair driven with the writer on the model's
 thread, as `i8042_tally.rs` now is; or a loom that races a store against every
-thread's last load.
+thread's last load. Owner: orchestrator.

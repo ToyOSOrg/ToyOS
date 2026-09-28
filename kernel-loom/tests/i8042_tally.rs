@@ -178,10 +178,7 @@ impl TornTally {
 /// Asserted by collecting rather than by failing, so this stays a passing test
 /// that proves a failure is reachable — the flag is an ordinary `std` atomic and
 /// therefore outlives loom's executions, and the assertion after `loom::model`
-/// is the whole verdict. If a future loom, or a future edit to the model's
-/// shape, stops scheduling a reader inside the ISR's window, **this reds** and
-/// says so: at that point the two models above are passing because nothing is
-/// being explored, which is the one failure a gate must not have.
+/// is the whole verdict.
 #[test]
 fn the_split_counters_this_replaced_are_read_torn() {
     static TORN: AtomicBool = AtomicBool::new(false);

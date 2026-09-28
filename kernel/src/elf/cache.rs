@@ -154,17 +154,6 @@ static SO_CACHE: Lock<Vec<(String, CachedLib)>> = Lock::new(Vec::new());
 /// this admits one of those and refuses a second.
 const BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
-/// `so-cache-tiny`'s number, in reach of a guest. Only the magnitude moves.
-const TINY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
-
-fn budget_bytes() -> usize {
-    if crate::actuator::so_cache_tiny() {
-        TINY_BUDGET_BYTES
-    } else {
-        BUDGET_BYTES
-    }
-}
-
 /// Every cached image's allocation, summed. The caller holds the lock.
 fn held_bytes(cache: &[(String, CachedLib)]) -> usize {
     cache.iter().map(|(_, c)| c.alloc.size()).sum()
@@ -239,7 +228,7 @@ pub fn cache_loaded_lib(
         return outcome.map(|cloned| cloned.unwrap_or_else(|| owned(alloc)));
     }
     // Under the lock that publishes: two concurrent loads must not both find room.
-    let budget = budget_bytes();
+    let budget = BUDGET_BYTES;
     let (held, entries) = (held_bytes(&cache), cache.len());
     let Some(after) = held.checked_add(alloc.size()).filter(|b| *b <= budget) else {
         drop(cache);

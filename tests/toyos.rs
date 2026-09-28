@@ -330,6 +330,10 @@ const RUST_SKIP: &[&str] = &[
     "inventory_bounds",
     // Same reason, same config: `netd_hostile_peer` runs it there.
     "netd_hostile_peer",
+    // Needs a `launcher` connector, which `tests/testcases`'s test-runner has
+    // no reason to hold. `launcher_refusals` runs it on tests/netcase, whose
+    // test-runner receives one for exactly this.
+    "launcher_refusals",
     // Needs a launcher to tell its two roads apart, and a declared shell and
     // toybox to take it: `spawn_cwd` runs it on tests/netcase.
     "spawn_cwd",
@@ -391,6 +395,12 @@ const RUST_SKIP: &[&str] = &[
     "writeback_reopen",
     "writeback_spawn",
     "writeback_durability",
+    // Same shape as `writeback_durability`: what it stages on `/log` — a file
+    // unlinked out from under a held descriptor, its clusters handed to the next
+    // writer — is only half the claim, and the other half is the volume read
+    // back off the image after a shutdown by a FAT implementation that is not
+    // the kernel's. `fat_backing_revoked` runs it.
+    "fat_backing_revoked",
     // Stages a rename with an absent source on `/log` and leaves the
     // destination for `fs_rename_durable` to read back off the image.
     "fs_rename_durable",
@@ -503,7 +513,6 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 /// kept because these are read the way they are
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
-    ("screen_decoder", Sched::Parallel, Tier::Weekly),
     // Two boots, each ended at a loader line rather than at the kernel's ready
     // marker. Every verdict is a count of rows against a count of lines off the
     // same boot's console; no clock is in either.
@@ -641,7 +650,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     //
     // Serial: it is the one registration here whose verdict is a *time*, and a
     // wake latency measured beside eleven other guests is the host's schedule.
-    // Nightly for that same reason.
     ("latency_wake", Sched::Serial, Tier::Nightly),
     ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Weekly),
     ("input_merge", Sched::Parallel, Tier::Weekly),
@@ -691,12 +699,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Reads a device capture and requires at least MIN_SIGNAL_SECS = 0.8 s of
     // it to carry signal at peak >= 6000 — an absolute seconds-of-signal
     // floor on audio recorded in real time, not a fraction of the capture and
-    // not compute-bound: timer-anchored, and Nightly for that reason.
+    // not compute-bound: timer-anchored.
     ("doom_music", Sched::Parallel, Tier::Nightly),
     // A tone played while soundd's pipe to a stalled log is full. The verdicts
     // are the capture's gaps and a count of lines; the clocks are liveness
-    // guards. Nightly for the two megabytes of refusals the log reads back
-    // through a TCG guest's volume.
+    // guards.
     ("soundd_log_stall", Sched::Serial, Tier::Nightly),
     // ureq and rustls from crates.io, fetching over TLS 1.3 from a host this
     // test mints a CA for. Every verdict is a printed line or a digest; the
@@ -849,8 +856,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // liveness guards.
     ("netd_held_open", Sched::Parallel, Tier::Nightly),
     // The netcase boot again: a client out-writing a peer that stopped reading
-    // costs netd no CPU. Nightly: its verdict is the machine's busy time over
-    // a window of real time.
+    // costs netd no CPU.
     ("netd_stalled_peer", Sched::Parallel, Tier::Nightly),
     // The netcase boot again, beside a host UDP echo: a datagram the client's
     // pipe will not take whole ends that socket by name and no other. The
@@ -899,6 +905,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // before that deadline could expire any of them. Both are wall-clock
     // margins, which is the definition of [`Sched::Serial`].
     ("netd_hostile_peer", Sched::Serial, Tier::Weekly),
+    ("launcher_refusals", Sched::Parallel, Tier::Weekly),
     // Paths a child prints and the kernel's refusals by name; no clock in any of them.
     ("spawn_cwd", Sched::Parallel, Tier::Nightly),
     ("foreign_disk_untouched", Sched::Parallel, Tier::Weekly),
@@ -1055,7 +1062,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("virtio_used_ring", Sched::Parallel, Tier::Weekly),
     // A fatal path with other CPUs running userland that makes kernel records:
     // none is stamped past the fatal record by more than an IPI takes.
-    ("panic_halts_the_others_first", Sched::Parallel, Tier::Fast),
+    ("panic_halts_the_others_first", Sched::Parallel, Tier::Nightly),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
     ("pci_capability_walk", Sched::Parallel, Tier::Weekly),
     // What QEMU was told to create against what the guest enumerated: two
@@ -1250,8 +1257,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // ceiling, which the guest spends and the host never measures.
     ("blocked_dump", Sched::Parallel, Tier::Nightly),
     // Two boots of one machine compared on the guest's own `Boot: complete`
-    // with a 300 ms allowance, which is the whole assertion — a real-time
-    // verdict, so Nightly.
+    // with a 300 ms allowance, which is the whole assertion.
     ("i8042_absent", Sched::Serial, Tier::Nightly),
     // The fault quarantines (masks) the controller's GSI within milliseconds
     // of readiness — confirmed from the serial log, before a host round trip
@@ -1261,11 +1267,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // timer-anchored, and its price straddles the ceiling run to run (9,355 /
     // 10,568 / 11,073 ms across three measurements) for exactly that reason.
     ("i8042_quarantine", Sched::Parallel, Tier::Nightly),
-    // The negative-direction half of the same gate: no QEMU can stage a CPU into spinning through idle on
-    // purpose, so this is `idle_is_spinning` proving its teeth against a
-    // crafted trace shaped like the regression, the way
-    // `control_regs`/`control_regs_verdict` split the same question.
-    ("i8042_quarantine_verdict", Sched::Parallel, Tier::Weekly),
     ("i8042_budget_expiry", Sched::Parallel, Tier::Nightly),
     ("i8042_fadt_denial", Sched::Parallel, Tier::Weekly),
     ("i8042_kbd_echo", Sched::Parallel, Tier::Nightly),
@@ -1383,6 +1384,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
     ("sysret_ss_reload", Sched::Parallel, Tier::Weekly),
+    // The FAT32 read side's revocation gate, and a host-side volume oracle for
+    // the same reason `writeback_durability` is one: whether the clusters the
+    // unlink freed were really reissued, and whether the cycle left a volume, are
+    // both questions the guest that staged them cannot answer about itself.
+    ("fat_backing_revoked", Sched::Parallel, Tier::Weekly),
     // F5 and F6's negative controls: an fsync that must keep refusing while the
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
@@ -1390,7 +1396,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("redirty_mid_flush", Sched::Parallel, Tier::Weekly),
     // A truncate staged inside a flush's metadata window, re-read off the image.
     ("ftruncate_flush_race", Sched::Parallel, Tier::Weekly),
-    // The rename gate's FAT arm, a host-side volume oracle.
+    // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel, Tier::Weekly),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
     ("fs_dirs_durable", Sched::Parallel, Tier::Weekly),
@@ -1435,28 +1441,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the DMA ring takes to come round. The verdict is soundd's own liveness
     // and its counters rather than a capture, so it runs wide.
     ("hda_client_stall", Sched::Parallel, Tier::Nightly),
-    ("hda_two_live_refused", Sched::Parallel, Tier::Fast),
-    ("serial_vocabulary", Sched::Parallel, Tier::Weekly),
-    // Host-side, no guest: the harness asking whether it can still tell a
-    // suspended machine from a slow one, and whether it reports one as a
-    // verdict it does not have.
-    ("suspend_detector", Sched::Parallel, Tier::Weekly),
-    ("suspend_invalidates_a_verdict", Sched::Parallel, Tier::Weekly),
-    ("stall_is_not_a_verdict", Sched::Parallel, Tier::Weekly),
-    // Same: whether two guests can still be handed one lane's NVMe image, which
-    // is what a shared-boot reboot did to itself.
-    ("nvme_image_is_held_by_one_guest", Sched::Parallel, Tier::Weekly),
-    // Same: what a whole run exits with.
+    ("hda_two_live_refused", Sched::Parallel, Tier::Weekly),
+    // Host-side, no guest: what a whole run exits with.
     ("run_exit_status", Sched::Parallel, Tier::Nightly),
-    // Same: the control-register verdict, against the machine this tree
-    // actually booted before `arch/x86_64/control_regs.rs`.
-    ("control_regs_verdict", Sched::Parallel, Tier::Weekly),
-    // Same: which of the two shared boots each binary belongs on, asked of the
-    // binaries rather than of the list that claims to name them.
-    ("suite_split", Sched::Parallel, Tier::Weekly),
-    // Same: whether a run that did not attempt most of the suite's measured cost says
-    // so where its verdict is read.
-    ("nightly_tier_is_announced", Sched::Parallel, Tier::Weekly),
 ];
 
 /// The test binaries a [`MACHINE_TESTS`] or [`SCREEN_TESTS`] entry runs, which
@@ -1521,6 +1508,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_udp_any_address", &["test_rs_netd_udp_any_address"]),
     ("netd_lookup_let_go", &["test_rs_netd_lookup_let_go"]),
     ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
+    ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
     ("input_claim_absent", &["test_rs_input_absent"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
@@ -1569,6 +1557,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("boot_volume_metadata_error", &["test_rs_boot_volume_metadata_error"]),
     ("esp_filesystem", &["test_rs_esp_files"]),
     ("log_flush_retry", &["test_rs_esp_files"]),
+    ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),
     ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
     ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
@@ -4473,10 +4462,6 @@ fn run_screen_test(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     match name {
-        "screen_decoder" => {
-            screen::self_test();
-            Ok(())
-        }
         "screen_loader_lines" => {
             // An EXCLUSIVE open of `GraphicsOutput` calls `Stop` on the
             // firmware's graphics console, so with one the panel stops at the
@@ -11043,6 +11028,9 @@ fn run_machine_test(
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
         "writeback_durability" => common::volumes::writeback_durability(test_config, c_bins, rust_bins),
+        // Same again: the FAT32 read side's revocation, judged off the volume the
+        // guest's unlink-and-reallocate cycle left behind.
+        "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
         // `sysret-ss-probe` has iod null SS, force a switch, and log whether the
         // switch reloaded it; a missing `mov ss` turns `reloaded` into `NOT`.
         "sysret_ss_reload" => {
@@ -12465,27 +12453,7 @@ fn run_machine_test(
             );
             Ok(())
         }
-        // No guest: the instrument itself, in both directions. `screen_decoder`
-        // is the same idea for the framebuffer decoder.
-        //
-        // Three of them under one name, because they are one subject: what a
-        // console line says died, what a wait does about it, and the fact that
-        // only one place in the harness is allowed to answer either.
-        "serial_vocabulary" => {
-            serial::self_check()?;
-            qemu::ceiling_self_check()?;
-            qemu::host_scale_self_check()?;
-            one_vocabulary()
-        }
-        "suspend_detector" => common::clock::self_check(),
-        "suspend_invalidates_a_verdict" => suspend_invalidates_a_verdict(),
-        "stall_is_not_a_verdict" => stall_is_not_a_verdict(),
-        "nvme_image_is_held_by_one_guest" => nvme_image_is_held_by_one_guest(),
         "run_exit_status" => run_exit_status(),
-        "control_regs_verdict" => control_regs_verdict(),
-        "i8042_quarantine_verdict" => idle_trip_verdict(),
-        "suite_split" => suite_split(),
-        "nightly_tier_is_announced" => nightly_tier_is_announced(),
         "nvme_wide_sector" => {
             // The other half of "a device's size is a shape dimension": not how
             // many sectors, but how big one is. `lba_ds` is an 8-bit
@@ -15466,6 +15434,66 @@ fn run_machine_test(
             eprintln!("  [netcase] {refused} hostile frames refused, netd named every peer it dropped");
             Ok(())
         }
+        "launcher_refusals" => {
+            // **`/system/bin/init` is the one process the machine cannot lose**, and
+            // every launcher client — the compositor, every terminal, every
+            // shell, sshd — can send it whatever it likes. The guest carries
+            // the verdicts: init answered, init is still launching, and the
+            // kernel's live-object count did not grow across sixteen refused
+            // launches. The host carries the one the guest cannot see —
+            // whether init said anything about what it refused.
+            //
+            // `tests/netcase` because its test-runner is the only one that
+            // receives a `launcher` connector, and because two boot programs
+            // is the smallest blast radius for a test whose whole subject is
+            // making init misbehave.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+            let bins: Vec<(String, Vec<u8>)> = rust_bins
+                .iter()
+                .filter(|(name, _)| name == "launcher_refusals")
+                .cloned()
+                .collect();
+            if bins.is_empty() {
+                return Err("launcher_refusals was not built".to_string());
+            }
+            let mut qemu = QemuInstance::boot_with_options(
+                &config,
+                &[],
+                &bins,
+                BootOptions {
+                    profile: qemu::Profile::Headless,
+                    // The live-object count is a `SYS_DEBUG` action, and a
+                    // shipping kernel has none: both readings would be the same
+                    // `InvalidArgument` and the leak arm would pass having
+                    // counted nothing.
+                    kernel_features: ACTUATOR_KERNEL,
+                    ..Default::default()
+                },
+            );
+            let mut console = qemu.boot_log().to_string();
+            let _ = await_marker(&mut qemu, &mut console, "===READY===", "test-runner to come up");
+
+            let result = qemu.run_test("test_rs_launcher_refusals", Duration::from_secs(120));
+            if let Some(err) = &result.error {
+                return Err(format!("{err}\n{}", result.stdout));
+            }
+            if result.exit_code != Some(0) {
+                return Err(format!(
+                    "launcher_refusals exited {:?}:\n{}",
+                    result.exit_code, result.stdout
+                ));
+            }
+            console.push_str(&result.serial);
+            if !console.contains("init: launcher: cannot start") {
+                return Err(format!(
+                    "init refused a launch without a line saying so — a launcher that \
+                     drops requests silently cannot be asked what happened:\n{console}"
+                ));
+            }
+            serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+            eprintln!("  [netcase] init refused three bad launches, named them, and kept launching");
+            Ok(())
+        }
         "spawn_cwd" => {
             // A child starts in the directory its spawn names — through the
             // launcher from the shell's `cd`, through the launcher from
@@ -17976,7 +18004,7 @@ fn headline(reason: Option<&str>) -> String {
 fn nvme_image_is_held_by_one_guest() -> Result<(), String> {
     // Names, not files: a claim is a hold on a path and touches no disk, so
     // nothing here has to create or delete a hundred megabytes to ask.
-    let dir = common::lane::dir();
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let image = dir.join("nvme-claim-gate.img");
     let other = dir.join("nvme-claim-gate-other.img");
 
@@ -19499,8 +19527,7 @@ fn schedule(shared: &[TestDef]) -> Schedule<'_> {
 /// `redlist::DISABLED` against every name the schedule holds, before any boot
 /// on any entry point.
 fn check_redlist(schedule: &Schedule<'_>) -> Result<(), String> {
-    redlist::check(redlist::DISABLED, |name| schedule.tier(name).is_ok(), &compile::repo_root())
-
+    redlist::check(redlist::DISABLED, |name| schedule.contains(name), &compile::repo_root())
 }
 
 fn main() {
@@ -20121,4 +20148,66 @@ fn root_withheld_refused(log: &str) -> Result<(), String> {
     }
     eprintln!("  [root] a handoff with no ROOT image refused the boot by name");
     Ok(())
+}
+
+/// The harness's own checks: none boots a guest, so each is a libtest test of
+/// `tests/checks.rs` and runs on every host gate rather than in a guest tier.
+#[cfg(test)]
+mod checks {
+    use super::*;
+
+    /// One subject: what a console line says died, what a wait does about it,
+    /// and that only one place in the harness answers either.
+    #[test]
+    fn serial_vocabulary() -> Result<(), String> {
+        serial::self_check()?;
+        qemu::ceiling_self_check()?;
+        qemu::host_scale_self_check()?;
+        one_vocabulary()
+    }
+
+    #[test]
+    fn suspend_detector() -> Result<(), String> {
+        common::clock::self_check()
+    }
+
+    #[test]
+    fn suspend_invalidates_a_verdict() -> Result<(), String> {
+        super::suspend_invalidates_a_verdict()
+    }
+
+    #[test]
+    fn stall_is_not_a_verdict() -> Result<(), String> {
+        super::stall_is_not_a_verdict()
+    }
+
+    #[test]
+    fn nvme_image_is_held_by_one_guest() -> Result<(), String> {
+        super::nvme_image_is_held_by_one_guest()
+    }
+
+    #[test]
+    fn control_regs_verdict() -> Result<(), String> {
+        super::control_regs_verdict()
+    }
+
+    #[test]
+    fn i8042_quarantine_verdict() -> Result<(), String> {
+        idle_trip_verdict()
+    }
+
+    #[test]
+    fn suite_split() -> Result<(), String> {
+        super::suite_split()
+    }
+
+    #[test]
+    fn nightly_tier_is_announced() -> Result<(), String> {
+        super::nightly_tier_is_announced()
+    }
+
+    #[test]
+    fn screen_decoder() {
+        screen::self_test();
+    }
 }

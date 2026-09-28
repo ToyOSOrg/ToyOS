@@ -21,4 +21,5 @@ The same pass names `tests/common/audio.rs`'s `completions` and `clients` and
 (`wt/toyos-notiming`) deletes with their modules.
 
 **Exit**: the three deleted, and the module-wide `allow(dead_code)` replaced by
-nothing, so the next orphan is a warning the host gate denies.
+nothing, so the next orphan is a warning the host gate denies. Owner:
+orchestrator.

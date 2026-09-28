@@ -45,10 +45,6 @@ pub struct HidDevice {
     pub broke_with: Option<u32>,
     /// Consecutive failures; a delivered report clears it — see [`super::MAX_HID_FAILURES`].
     pub failures: u8,
-    /// Completions this endpoint has produced.
-    /// Counted unconditionally so the `xhci-hid-break-*` actuators aren't a second code path.
-    #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
-    pub completions: u32,
 }
 
 impl HidDevice {
@@ -104,32 +100,5 @@ impl HidDevice {
         self.int_ring.enqueue(trb);
         // An `Mmio` write: ordered after the TRB it announces.
         db_base.write_u32(self.slot_id as u64 * 4, self.int_ep_dci as u32);
-    }
-}
-
-/// Takes one completion away from the device that earned it and hands the driver a stall in its place.
-// QEMU's usb-hid has no path to USB_RET_STALL for an interrupt IN token, so nothing on the host side can stage this.
-// Replaces the completion code and the delivered report, not the TRB/ring/transfer-event/output-context chain, so a dispatched "success" can only be real.
-#[cfg(feature = "boot-actuators")]
-impl HidDevice {
-    // The first completion is a never-delivered endpoint; the fourth is one that was working and stopped — different driver states, not degrees of one.
-    fn break_at() -> Option<u32> {
-        if crate::actuator::xhci_hid_break_first() {
-            Some(1)
-        } else if crate::actuator::xhci_hid_break_late() {
-            Some(4)
-        } else {
-            None
-        }
-    }
-
-    pub fn stage_break(&mut self, code: u32) -> u32 {
-        self.completions += 1;
-        if Self::break_at() != Some(self.completions) {
-            return code;
-        }
-        // Zeroing leaves the slot as a stalled endpoint would have; runs before requeue, so nothing else touches the buffer.
-        self.report.subview(0, self.report_size as usize).zero();
-        super::CC_STALL
     }
 }
