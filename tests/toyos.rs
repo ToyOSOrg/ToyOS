@@ -117,10 +117,6 @@ const SHARED_BLOCK: Sched = Sched::Parallel;
 /// second of guest time between its members, and what these need is a syscall
 /// number the other 150 must not have.
 const ACTUATOR_TESTS: &[&str] = &[
-    // Actions 0, 1 and 2: a kernel `panic!`, a null read in kernel context, and
-    // a spinlock held across a scheduler entry. Each kills the caller and the
-    // machine has to survive it, which is the whole verdict.
-    "panic_recovery",
     // Actions 10 and 11: the address of sixteen bytes of kernel memory and
     // whether they still hold what the kernel put there. A guest cannot read the
     // kernel's address space, so without them a kernel that still made the write
@@ -221,7 +217,6 @@ const RUST_SKIP: &[&str] = &[
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
-    "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
@@ -294,8 +289,7 @@ const RUST_SKIP: &[&str] = &[
     // and the runner's bound is the fallback. `lan_swap` rides it.
     "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
-    // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
-    // which is also what makes its claim about *the recovered CPU* precise.
+    // `heap_ceiling_bounds` boots the `test-actuators` kernel for it.
     "heap_ceiling",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
@@ -388,6 +382,8 @@ const RUST_SKIP: &[&str] = &[
     // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
     // `tests/doommusiccase`.
     "doom_music",
+    // Same WAD, same config: `doom_frames` runs it on `tests/doommusiccase`.
+    "doom_frames",
     // Needs a `logd` that leaves soundd's ring unread until it says so, and a
     // capture of the tone it plays into that. `soundd_log_stall` runs it on
     // `tests/logstallcase`.
@@ -563,11 +559,6 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // the desktop's next repaint — which only where that wait lands decides,
     // so it is timer-anchored despite being a screendump-content check.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
-    ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
-    // The other half of the recovery branch: the test above reads the screen
-    // either side of a survived panic, which holds whether or not the discard
-    // did anything.
-    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
     ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
@@ -734,6 +725,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // floor on audio recorded in real time, not a fraction of the capture and
     // not compute-bound: timer-anchored, and Nightly for that reason.
     ("doom_music", Sched::Parallel, Tier::Nightly),
+    // One C program through the toolchain's clang, read by the loader's decoder,
+    // and one boot to run it.
+    ("c_hello", Sched::Parallel, Tier::Fast),
+    // One boot and one number, with no clock in the verdict: the frames are
+    // counted in game tics, whatever the host's speed. Fast, because it is the
+    // gate on what the C compiler makes of doom.
+    ("doom_frames", Sched::Parallel, Tier::Fast),
     // A tone played while soundd's pipe to a stalled log is full. The verdicts
     // are the capture's gaps and a count of lines; the clocks are liveness
     // guards. Nightly for the two megabytes of refusals the log reads back
@@ -1197,13 +1195,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // offsets it chose itself.
     ("operation_nesting", Sched::Parallel, Tier::Fast),
     ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
-    // The spawn half alone: one headless boot whose verdict is three kernel
-    // log lines.
+    // The spawn half alone: one headless boot whose verdict is kernel log
+    // lines.
     ("klogd_hosted", Sched::Parallel, Tier::Fast),
-    // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
-    // spawn half is per-PR again; alone they still price over the ceiling,
-    // and sit Nightly.
     ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("klogd_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_panic_halts", Sched::Parallel, Tier::Nightly),
+    ("syscall_fault_halts", Sched::Parallel, Tier::Nightly),
+    ("lock_across_switch_halts", Sched::Parallel, Tier::Nightly),
+    ("heap_over_ceiling_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
     // over two boots measured 12 s twelve-wide on the dev host**, against
@@ -1531,7 +1531,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
     ("fs_dirs_durable", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
-    ("heap_ceiling_recovery", Sched::Parallel, Tier::Nightly),
+    ("heap_ceiling_bounds", Sched::Parallel, Tier::Nightly),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
@@ -1634,7 +1634,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("gsbase_locked", &["test_rs_gsbase_locked"]),
     ("sched_check_build", &["test_rs_sched_stress"]),
     ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
-    ("heap_ceiling_recovery", &["test_rs_heap_ceiling"]),
+    ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("cache_eviction", &["test_rs_cache_eviction"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
     ("i8042_health_cadence", &["test_rs_i8042_keyboard"]),
@@ -1688,6 +1688,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("toolkit_winit_pace", &["test_rs_winit_pace"]),
     ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
     ("doom_music", &["test_rs_doom_music"]),
+    ("doom_frames", &["test_rs_doom_frames"]),
     ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
     ("metal_sim_null_audio", &["test_rs_audio_tone"]),
     ("null_sink_shipped_client", &["test_rs_null_sink_client_exits"]),
@@ -1722,6 +1723,10 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
+    ("syscall_panic_halts", &["test_rs_test_panic_child"]),
+    ("syscall_fault_halts", &["test_rs_test_panic_child"]),
+    ("lock_across_switch_halts", &["test_rs_test_panic_child"]),
+    ("heap_over_ceiling_halts", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
     ("dump_nmi_probe", &["test_rs_dump_stage_load"]),
     ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
@@ -1765,8 +1770,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
-    ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
-    ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
 
 /// The clients every `tests/metalcase` desktop boot carries: the group shares
@@ -2562,7 +2565,7 @@ const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 /// eight that stayed off the suite each say what their own output was.
 #[derive(Clone, Copy)]
 enum Stage {
-    /// toyos-cc refuses it, and this is what the refusal says.
+    /// clang refuses it, and this is what the refusal says.
     ///
     /// Quoted so that a second defect landing on the same case cannot hide
     /// under the first.
@@ -2614,19 +2617,19 @@ struct NotRun {
 
 const NOT_RUN: &[NotRun] = &[
     NotRun {
-        case: "03_struct",
-        stage: Stage::Refused("__attribute__((__cleanup__)) is not implemented"),
-        why: Why::Declined("cleanup attributes; the entry used to say _Generic, which is 33_ternary_op's reason and not this one"),
+        case: "22_floating_point",
+        stage: Stage::Built,
+        why: Why::Declined("it prints `long double`s through `%Lf`, and libc reads a `long double` as a `double` (issues/build/libc-reads-a-long-double-as-a-double.md): every `%Lf` of a line whose `double`s filled the registers prints 0.000000"),
     },
     NotRun {
         case: "31_args",
         stage: Stage::Built,
-        why: Why::Declined("its `.expect` is written for tcc's own runner, which passes it five arguments; every corpus binary here is run with none, so it prints `hello world 1` against an expected `hello world 6`. Nothing about this compiler is in it"),
+        why: Why::Declined("its `.expect` is written for tcc's own runner, which passes it five arguments; every corpus binary here is run with none, so it prints `hello world 1` against an expected `hello world 6`. Nothing about the compiler is in it"),
     },
     NotRun {
-        case: "33_ternary_op",
-        stage: Stage::Refused("_Generic type dispatch is not implemented"),
-        why: Why::Declined("_Generic"),
+        case: "34_array_assignment",
+        stage: Stage::Refused("array type 'int[4]' is not assignable"),
+        why: Why::Declined("it assigns one array to another, which C does not allow — an array is not a modifiable lvalue (C11 6.5.16p2) — and TinyCC accepts as an extension"),
     },
     NotRun {
         case: "40_stdio",
@@ -2634,9 +2637,24 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("it writes `fred.txt` into the working directory and reads it back; the corpus runs from the read-only ROOT, so the write fails and the program prints `couldn't read fred.txt`. A writable working directory for the corpus is a harness change nothing else has needed"),
     },
     NotRun {
-        case: "79_vla_continue",
+        case: "73_arm64",
         stage: Stage::Built,
-        why: Why::Declined("it asserts that a VLA declared inside a loop has the same address on every iteration — tcc reuses one stack slot and ours are heap allocations, so four of its five checks print `NOT OK` and the fifth is the allocator's accident. C99 requires no such thing, so this is tcc's implementation and not the language"),
+        why: Why::Declined("AArch64's argument-passing corners, run here on x86-64: its `long double` lines print 0.0, for libc's reason in 22_floating_point"),
+    },
+    NotRun {
+        case: "83_utf8_in_identifiers",
+        stage: Stage::Built,
+        why: Why::Declined("its identifiers are UTF-8 and so is its `printf` format, and libc's `printf` writes each byte of a format as a character of its own (issues/build/libc-printf-re-encodes-every-non-ascii-byte-of-its-format.md): `привет` arrives as `Ð¿Ñ\u{80}Ð¸Ð²ÐµÑ\u{82}`"),
+    },
+    NotRun {
+        case: "95_bitfields",
+        stage: Stage::Built,
+        why: Why::Declined("its expected layouts are TinyCC's, and TinyCC packs a `#pragma pack(1)` bitfield struct otherwise than GCC and clang do: `TEST 2 - PACKED` is 12 bytes there and 11 here, and every packed test after it differs the same way"),
+    },
+    NotRun {
+        case: "95_bitfields_ms",
+        stage: Stage::Built,
+        why: Why::Declined("the same file under `ms_struct`, whose expected values are TinyCC's widths for an MS-layout bitfield: `fffffffffffffffe` there, `fffffffe` here"),
     },
     NotRun {
         case: "60_errors_and_warnings",
@@ -2644,74 +2662,39 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("a meta-test of compiler diagnostics: every branch is behind a -D the harness does not pass, so the file preprocesses to no `main`"),
     },
     NotRun {
-        case: "73_arm64",
-        stage: Stage::Refused("va_arg of a struct or union"),
-        why: Why::Declined("aarch64-specific, and this target is x86-64. Its myprintf pulls whole structs through va_arg, which toyos-cc refuses by name — the case used to reach the Cranelift verifier instead, through the one expression that yielded an aggregate as a scalar"),
-    },
-    NotRun {
-        case: "83_utf8_in_identifiers",
-        stage: Stage::Refused("unexpected character '\u{ef}' (0xef)"),
-        why: Why::Declined("non-ASCII identifiers. UTF-8 in strings and comments works; the lexer stops on the byte it could not read, so nothing is dropped"),
-    },
-    NotRun {
-        case: "85_asm_outside_function",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("emitting file-scope asm needs an x86-64 assembler"),
-    },
-    NotRun {
-        case: "94_generic",
-        stage: Stage::Refused("_Generic type dispatch is not implemented"),
-        why: Why::Declined("_Generic"),
-    },
-    NotRun {
-        case: "95_bitfields",
-        stage: Stage::Refused("#pragma pack(push,1) is not implemented"),
-        why: Why::Declined("a self-including bitfield torture test wanting #pragma pack, ms_struct, gcc_struct, aligned on a declaration specifier and packed bitfields — every one of them a deliberate refusal"),
-    },
-    NotRun {
-        case: "95_bitfields_ms",
-        stage: Stage::Refused("#pragma pack(push,1) is not implemented"),
-        why: Why::Declined("the same file again, through a two-line wrapper"),
-    },
-    NotRun {
         case: "96_nodata_wanted",
         stage: Stage::NoLink("main"),
-        why: Why::Declined("seven configurations selected by a -D from tcc's own Makefile, four of which expect compiler diagnostics. The harness compiles one configuration and compares one stdout, so no fix to toyos-cc can make it pass"),
-    },
-    NotRun {
-        case: "98_al_ax_extend",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("file-scope asm again"),
+        why: Why::Declined("seven configurations selected by a -D from tcc's own Makefile, four of which expect compiler diagnostics. The harness compiles one configuration and compares one stdout, so no compiler can make it pass"),
     },
     NotRun {
         case: "99_fastcall",
-        stage: Stage::Refused("file-scope asm(...) is not implemented"),
-        why: Why::Declined("32-bit x86 — pushl %esp, pusha, __attribute((fastcall)). It stops on the file-scope asm at line 26 before reaching any of that"),
+        stage: Stage::Refused("instruction requires: Not 64-bit mode"),
+        why: Why::Declined("32-bit x86 — pushl %esp, pusha, __attribute((fastcall)) — and this target is x86-64"),
     },
     NotRun {
         case: "101_cleanup",
-        stage: Stage::Refused("__attribute__((cleanup)) is not implemented"),
-        why: Why::Declined("cleanup attributes"),
+        stage: Stage::Built,
+        why: Why::Declined("`main` returns its counter, 105, and a corpus case passes on exit 0; it also prints a `long double` through `%Lf`, for libc's reason in 22_floating_point"),
     },
     NotRun {
         case: "102_alignas",
-        stage: Stage::Refused("expected Semi, got Alignas"),
-        why: Why::Declined("_Alignas. It stops as a parse error rather than by name, which reads worse and is still a stop"),
+        stage: Stage::Built,
+        why: Why::Declined("`i8` takes its alignment from `__attribute__((aligned(16)))` on a type name inside `_Alignas`, which the case's own comment says clang does not apply, so it prints `1 1 1 0`"),
     },
     NotRun {
         case: "104_inline",
-        stage: Stage::Refused("unexpected token in expression: Attribute"),
-        why: Why::Declined("weak symbols. The file itself compiles — the companion `104+_inline.c` is what stops, which is the stage as the harness reaches it"),
+        stage: Stage::NoLink("inline_inline_undeclared"),
+        why: Why::Declined("it expects tcc's reading of `inline`, which emits a definition a plain `inline` function never has in C99 and later (C11 6.7.4p7): the companion calls one no translation unit defines"),
     },
     NotRun {
         case: "106_versym",
-        stage: Stage::NoLink("PTHREAD_PROCESS_SHARED"),
-        why: Why::Declined("pthread condition variables"),
+        stage: Stage::Refused("call to undeclared function 'pthread_condattr_setpshared'"),
+        why: Why::Declined("pthread condition variables shared across processes: `pthread.h` declares neither `pthread_condattr_setpshared` nor `PTHREAD_PROCESS_SHARED`"),
     },
     NotRun {
         case: "108_constructor",
-        stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
-        why: Why::Declined("constructor attributes"),
+        stage: Stage::Built,
+        why: Why::Declined("libc runs neither `.init_array` nor `.fini_array` (issues/build/libc-runs-no-constructors.md), so it prints `main` alone"),
     },
     NotRun {
         case: "113_btdll",
@@ -2721,12 +2704,12 @@ const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "112_backtrace",
         stage: Stage::Built,
-        why: Why::Declined("a meta-test of tcc's `-b` runtime: it expects `RUNTIME ERROR: invalid memory access` and `BCHECK: invalid pointer` lines from a bounds-checking runtime this compiler does not have, and prints nothing"),
+        why: Why::Declined("a meta-test of tcc's `-b` runtime: it expects `RUNTIME ERROR: invalid memory access` and `BCHECK: invalid pointer` lines from a bounds-checking runtime clang does not have, and prints nothing"),
     },
     NotRun {
         case: "114_bound_signal",
-        stage: Stage::Refused("expected Semi, got Ident(\"sj\")"),
-        why: Why::Declined("sigaction and sigjmp_buf, which no header here declares, so the declaration does not parse"),
+        stage: Stage::Refused("use of undeclared identifier 'SIGUSR1'"),
+        why: Why::Declined("sigaction, sigjmp_buf and the signal numbers, which no header here declares"),
     },
     NotRun {
         case: "115_bound_setjmp",
@@ -2739,49 +2722,39 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("the same `longjmp not implemented` panic, exit 134"),
     },
     NotRun {
-        case: "122_vla_reuse",
-        stage: Stage::Built,
-        why: Why::Declined("the same claim `79_vla_continue` makes, through a `goto` loop: it requires `&x[0]` to repeat across 100,000 iterations and stops on the second with `ERROR: 0xffff005ae0 0xffff000040`"),
-    },
-    NotRun {
         case: "126_bound_global",
         stage: Stage::Built,
         why: Why::Declined("tcc's `-b` bounds checker again: it expects `BCHECK: … is outside of the region` and `RUNTIME ERROR: invalid memory access`, and prints nothing"),
     },
     NotRun {
         case: "117_builtins",
-        stage: Stage::NoLink("__builtin_abort"),
-        why: Why::Declined("__builtin_abort, and the compiler implements no builtin under that name"),
+        stage: Stage::Built,
+        why: Why::Declined("its second half is behind TinyCC's `-b` bounds checker, which clang does not have, so it prints `BOUNDS OFF:` and stops"),
     },
     NotRun {
         case: "120_alias",
-        stage: Stage::Refused("__attribute__((alias)) is not implemented"),
-        why: Why::Declined("symbol aliases. Its two `__asm__(_\"name\")` renames at lines 19 and 20 are refused too, but the attribute at line 9 comes first"),
+        stage: Stage::Refused("definition 'alias_int' cannot also be an alias"),
+        why: Why::Declined("it gives a symbol a definition and an alias at once, which TinyCC allows and clang refuses"),
     },
     NotRun {
         case: "124_atomic_counter",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics: clang's `stdatomic.h` needs the `least` types `stdint.h` does not define"),
     },
     NotRun {
         case: "125_atomic_misc",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
-    },
-    NotRun {
-        case: "127_asm_goto",
-        stage: Stage::Refused("expected LParen, got Goto"),
-        why: Why::Declined("`asm goto`, and inline asm generally"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
     },
     NotRun {
         case: "128_run_atexit",
-        stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
-        why: Why::Declined("constructor attributes, and a -D per configuration to have a main at all"),
+        stage: Stage::NoLink("on_exit"),
+        why: Why::Declined("`on_exit`, a glibc extension libc does not define, and a -D per configuration to have a main at all"),
     },
     NotRun {
         case: "136_atomic_gcc_style",
-        stage: Stage::Refused("cannot find system include file: stdatomic.h"),
-        why: Why::Declined("C11 atomics"),
+        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
+        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
     },
 ];
 
@@ -2833,23 +2806,46 @@ fn discover_rust_tests(bins: &[(String, Vec<u8>)]) -> Vec<String> {
 }
 
 fn compile_c_tests(names: &[String]) -> Vec<(String, Vec<u8>)> {
+    // Made before the hook below goes in: a C sysroot that cannot be made is
+    // no case's failure, and says so in its own words.
+    compile::c_sysroot();
     // Suppress panic messages during compilation — we handle failures via catch_unwind.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
-    let mut bins = Vec::new();
-    let mut broken: Vec<(&str, String)> = Vec::new();
-    for name in names {
-        match std::panic::catch_unwind(|| {
-            let (obj, extras) = compile::compile_c(name);
-            compile::link_toyos(&obj, &extras, name)
-        }) {
-            Ok(linked) => bins.push((name.clone(), linked)),
-            Err(e) => broken.push((name.as_str(), panic_message(&e))),
-        }
-    }
+    // A clang and a link per case, so the cases are spread over threads; the
+    // result is in `names`' order whatever order they finish in.
+    let per_thread = names.len().div_ceil(8).max(1);
+    let results: Vec<(&String, Result<Vec<u8>, String>)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = names
+            .chunks(per_thread)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|name| {
+                            let built = std::panic::catch_unwind(|| {
+                                compile::link_toyos(&compile::compile_c(name), name)
+                            });
+                            (name, built.map_err(|e| panic_message(&e)))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("a compile thread")).collect()
+    });
 
     std::panic::set_hook(prev_hook);
+
+    let mut bins = Vec::new();
+    let mut broken: Vec<(&str, String)> = Vec::new();
+    for (name, built) in results {
+        match built {
+            Ok(linked) => bins.push((name.clone(), linked)),
+            Err(why) => broken.push((name.as_str(), why)),
+        }
+    }
 
     if !broken.is_empty() {
         let mut msg = String::from(
@@ -2875,6 +2871,7 @@ fn check_not_run() {
     let mut wrong: Vec<String> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
 
+    compile::c_sysroot();
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
@@ -2908,8 +2905,8 @@ fn check_not_run() {
                 "{case}: no longer compiles, and it was declared to get further: {}",
                 panic_message(&e)
             )),
-            (stage, Ok((obj, extras))) => {
-                let linked = std::panic::catch_unwind(|| compile::link_toyos(&obj, &extras, case));
+            (stage, Ok(objects)) => {
+                let linked = std::panic::catch_unwind(|| compile::link_toyos(&objects, case));
                 match (stage, linked) {
                     (Stage::NoLink(symbol), Err(e)) => {
                         let said = panic_message(&e);
@@ -2970,7 +2967,7 @@ const MAX_KERNEL_LINES: usize = 60;
 /// The kernel's own account of a test that died, which `stdout` cannot carry.
 ///
 /// **`exit code Some(-1)` is the kernel saying it killed the process** —
-/// `recover_or_halt` answers a Ring 3 fault with `kill_process(-1)` — and every
+/// `fatal_exception` answers a Ring 3 fault with `kill_process(-1)` — and every
 /// word of *why* is a `log!`: the vector, `rip`, `cr2`, the resolved symbol.
 /// `run_test_paced` files kernel lines under `serial` and keeps them out of
 /// `stdout`, which is right for a test that passed and leaves a killed one with
@@ -3003,7 +3000,14 @@ fn check_c_result(result: &TestResult) -> bool {
         Some(0) => {
             let expect_file = compile::testcases_dir().join(format!("{test_name}.expect"));
             if expect_file.exists() {
-                let expected = fs::read_to_string(&expect_file).unwrap();
+                // TinyCC's runner captured its warnings about the case with its output.
+                let warned = format!("{test_name}.c:");
+                let expected: String = fs::read_to_string(&expect_file)
+                    .unwrap()
+                    .lines()
+                    .filter(|l| !(l.starts_with(&warned) && l.contains(": warning: ")))
+                    .map(|l| format!("{l}\n"))
+                    .collect();
                 // **The one comparison in this suite that reads a whole capture
                 // as one program's output, on a console every process shares.**
                 // `common::console::verdict` takes the lines that are some
@@ -3071,42 +3075,9 @@ fn check_rust_result(result: &TestResult) -> bool {
     }
 }
 
-/// Checks both exit code and serial diagnostics for panic recovery.
-fn check_panic_recovery(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
-
-    let checks: &[(&str, &str)] = &[
-        ("PANIC:", "expected PANIC header"),
-        ("SYS_DEBUG", "expected SYS_DEBUG in panic message"),
-        ("Syscall: num=92", "expected syscall context in panic report"),
-        ("User backtrace:", "expected user backtrace in panic report"),
-        ("Registers:", "expected register dump from kernel fault"),
-        ("SEGFAULT tid=", "expected SEGFAULT header"),
-        ("deliberate_null_deref", "expected deliberate_null_deref in segfault backtrace"),
-        ("+0x", "expected symbolized backtraces"),
-    ];
-
-    let mut ok = true;
-    for (needle, msg) in checks {
-        if !result.serial.contains(needle) {
-            eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-            ok = false;
-        }
-    }
-    if let Err(msg) = check_tripwire_attribution(&result.serial) {
-        eprintln!("FAIL rs::panic_recovery: {msg}\nserial:\n{}", result.serial);
-        ok = false;
-    }
-    ok & check_symbols_were_read("panic_recovery", &result.serial)
-}
-
 /// The kernel names the frames of a process it loaded off a **disk**.
 ///
-/// `null_deref_run_from_disk` is this child's alone, so a `contains` over the
-/// capture window cannot be satisfied by `segfault_child` running in the same
-/// boot.
+/// `null_deref_run_from_disk` is this child's alone.
 fn check_disk_backtrace(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
@@ -3148,13 +3119,6 @@ fn check_disk_backtrace(result: &TestResult) -> bool {
 /// task's own record — so the two reasons left are a CPU inside a scheduler pass
 /// and a CPU running nothing, and either one in a report is a finding rather
 /// than weather.
-///
-/// The measured before/after on the dev host under a twelve-wide suite, which is
-/// what makes that a claim — N = 12 rounds of `fault_gates` + `panic_recovery`
-/// an arm, 2026-08-22: 3 of 12 conceded with the table lookup, 0 of 12 without
-/// it, and 1 of 12 with the lookup put back on the same base, that third arm
-/// being the control that says the first two are about the code and not about
-/// the day.
 fn check_symbols_were_read(test: &str, serial: &str) -> bool {
     const CONCEDED: &str = "<symbol unread:";
     let lines: Vec<&str> = serial.lines().filter(|l| l.contains(CONCEDED)).collect();
@@ -3174,11 +3138,9 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
 /// A whole-buffer `contains("syscall/dispatch.rs")` certifies none of that: the
-/// same boot's `test_syscall_panic` panics in that file too, so the needle is
-/// already present before the tripwire runs. Scope it instead to the window
-/// between this panic's header and its message — `panicked at <location>` is
-/// the only thing in there, and the backtrace that names every frame comes
-/// after the message, so it cannot supply the answer either.
+/// backtrace names every frame, that file's included. Scope it instead to the
+/// window between this panic's header and its message — `panicked at
+/// <location>` is the only thing in there.
 fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
     const MSG: &str = "scheduler entered while a lock is held";
     const HEADER: &str = "PANIC:";
@@ -3194,6 +3156,28 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
             "expected the tripwire to name the guilty call site, not scheduler.rs; got: {}",
             location.trim()
         ));
+    }
+    Ok(())
+}
+
+/// The kernel's Ring 0 read of the address `test_panic_child` named halted on
+/// that address as **unmapped**. A read that demand paging filled for the
+/// caller re-executes into SMAP's protection fault instead, so the word is what
+/// says nothing was mapped into the current process.
+fn check_ring0_read_unmapped(serial: &str) -> Result<(), String> {
+    const READ_OF: &str = "SYS_DEBUG: a Ring 0 read of ";
+    let at = serial.find(READ_OF).ok_or("expected the kernel to name the address it read")?;
+    let named = serial[at + READ_OF.len()..].split_whitespace().next().unwrap_or_default();
+    let addr = named
+        .strip_prefix("0x")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| format!("the address the kernel read is not a number: {named:?}"))?;
+    if addr == 0 {
+        return Err("expected the demand-paged window, not the null read".to_string());
+    }
+    let want = format!("KERNEL PANIC: read unmapped address at {addr:#x}");
+    if !serial.contains(&want) {
+        return Err(format!("expected `{want}`: the read did not fault as unmapped at {addr:#x}"));
     }
     Ok(())
 }
@@ -3276,6 +3260,8 @@ fn check_fault_gates(result: &TestResult) -> bool {
             "fault_gate_child::divide_by_zero",
             "expected the faulting function in the #DE backtrace",
         ),
+        ("SEGFAULT tid=", "expected a SEGFAULT header for the null read"),
+        ("fault_gate_child::read_null", "expected the faulting function in the #PF backtrace"),
     ];
 
     let mut ok = true;
@@ -3452,7 +3438,6 @@ fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
 /// Select check function by test name convention.
 fn check_for(name: &str) -> fn(&TestResult) -> bool {
     match name {
-        "panic_recovery" => check_panic_recovery,
         "disk_backtrace" => check_disk_backtrace,
         "audio_idle_suspend" => check_audio_idle_suspend,
         "null_sink_client_exits" => check_null_sink_client_exits,
@@ -6860,143 +6845,6 @@ fn run_screen_test(
             );
             Ok(())
         }
-        "screen_recoverable_untouched" => {
-            // The negative of screen_fatal_halt: a panic the kernel recovers
-            // from must not paint its report over a live display. Action 0
-            // panics in syscall context, which the handler recovers from, so it
-            // never reaches halt_all_cpus. **Every screen across the recovery,
-            // not two endpoints**: a report painted and then painted over is
-            // gone by any endpoint — the fatal fill is looked for on each dump
-            // from the command until well after the child is reaped.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    // Action 0 is a `SYS_DEBUG` arm, and a kernel that ships
-                    // has none: the child would be answered `InvalidArgument`
-                    // and exit 0, which is this test's own red for a reason
-                    // that is not about the screen at all.
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            let before = qemu.screendump();
-            let from = qemu.console_stream().mark();
-            writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child").map_err(|e| format!("{e}"))?;
-            qemu.flush_stdin();
-            const ENDED: &str = "===TEST_END test_rs_test_panic_child exit=";
-            // Past the child's end by this much: a paint the recovery made late
-            // is still looked for.
-            const AFTER_END: Duration = Duration::from_millis(1500);
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(15));
-            let mut ended_at: Option<Instant> = None;
-            let mut dumps = 0usize;
-            loop {
-                let dump = qemu.screendump();
-                dumps += 1;
-                if dump.fill() == FILL_FATAL {
-                    return Err(format!(
-                        "recovering panic painted its report over the display, on dump {dumps} \
-                         across the recovery\ndecoded screen:\n{}",
-                        dump.text()
-                    ));
-                }
-                if ended_at.is_none() && qemu.console_stream().since(from).contains(ENDED) {
-                    ended_at = Some(Instant::now());
-                }
-                if ended_at.is_some_and(|at| at.elapsed() >= AFTER_END) {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "the recoverable panic never completed\nserial:\n{}",
-                        qemu.console_stream().since(from)
-                    ));
-                }
-            }
-            // The premise, not a formality: a child that never panicked leaves
-            // every dump boot-filled and this test green.
-            let said = qemu.console_stream().since(from);
-            if !said.contains("SYS_DEBUG: kernel panic triggered by userspace") {
-                return Err(format!("no kernel panic in the child's output\nserial:\n{said}"));
-            }
-            if said.contains(&format!("{ENDED}0===")) {
-                return Err("recoverable panic did not kill the child".to_string());
-            }
-            // A screen that was blank to begin with would pass the fill for
-            // the wrong reason.
-            let text = before.text();
-            print_screen(name, &format!("{dumps} dumps across the recovery, none fatal\n{text}"));
-            if !text.contains("Boot: complete") {
-                return Err(format!("nothing on screen to preserve\ndecoded screen:\n{text}"));
-            }
-            Ok(())
-        }
-        "screen_survived_panic_not_blamed" => {
-            // `discard_capture` told from a no-op: `capture` freezes a report on
-            // every panic and the recovery branch drops it, so two deaths in one
-            // boot and the panel must name the second. Action 0 panics in
-            // syscall context, which the handler recovers from.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
-            let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
-            if let Some(err) = &survived.error {
-                return Err(format!("the survivable panic never completed: {err}"));
-            }
-            if survived.exit_code == Some(0) {
-                return Err("the survivable panic did not kill the child".to_string());
-            }
-            if !survived.serial.contains(USERSPACE_PANIC) {
-                return Err(format!(
-                    "no kernel panic in the child's output, so there is no capture to \
-                     discard and the rest of this test would pass vacuously\nserial:\n{}",
-                    survived.serial
-                ));
-            }
-            // The machine walked away from it: that is what makes this a second death.
-            if !qemu.command_until(
-                "run test_rs_test_panic_child 3",
-                FATAL_HALT_NONCE,
-                Duration::from_secs(15),
-            ) {
-                return Err(format!(
-                    "{FATAL_HALT_NONCE:?} never reached the console, so the guest did not \
-                     survive the first panic and there is no second death to read"
-                ));
-            }
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            // The nonce is logged after the first panic's snapshot was frozen,
-            // so a snapshot the discard failed to drop cannot carry it.
-            if !text.contains(FATAL_HALT_NONCE) {
-                return Err(format!(
-                    "the panel does not name the fatal halt: the survived panic's frozen \
-                     report was painted as the cause of death, so `discard_capture` did not \
-                     drop it\ndecoded screen:\n{text}"
-                ));
-            }
-            if dump.fill() != FILL_FATAL {
-                return Err(format!(
-                    "the report is on screen but the fill is {:?}, not the fatal {FILL_FATAL:?}",
-                    dump.fill()
-                ));
-            }
-            Ok(())
-        }
         other => Err(format!("unknown screen test {other}")),
     }
 }
@@ -8736,6 +8584,50 @@ const SNAKE_ROUNDS: usize = 3;
 /// Turns played in the last round, at four keys each, so that round's snake is
 /// a program that has been running and drawing rather than one a second old.
 const SNAKE_TURNS: usize = 8;
+
+/// What doom's renderer draws over `demo1`'s first `TICS` tics, as
+/// `userland/doom/src/frames.rs` hashes it: the frames doom drew before clang
+/// built its C, which a compiler that builds doom correctly draws again.
+const DOOM_FRAMES: &str = "874685cf6fd3dfa5";
+
+/// Gate: doom draws, frame for frame, what it drew when another compiler built
+/// it.
+///
+/// One verdict and no clock: the hash of each game tic's frame over a timedemo
+/// of `demo1`, which replays identically on any machine at any speed, against
+/// [`DOOM_FRAMES`]. A miscompile anywhere in the renderer, the game logic or the
+/// demo's playback moves it.
+fn doom_frames(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = root.join("tests/doommusiccase");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, BootOptions::default());
+    let result = qemu.run_test("test_rs_doom_frames", Duration::from_secs(300));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("doom's frame check did not finish (exit {:?}):\n{}", result.exit_code, result.stdout));
+    }
+    let line = result
+        .stdout
+        .lines()
+        .find(|line| line.contains("[frame-check] tics="))
+        .ok_or_else(|| format!("doom printed no [frame-check] line:\n{}", result.stdout))?;
+    let field = |name: &str| {
+        line.split_whitespace()
+            .find_map(|word| word.strip_prefix(name))
+            .ok_or_else(|| format!("no {name} in {line:?}"))
+    };
+    let hash = field("hash=")?;
+    if hash != DOOM_FRAMES {
+        return Err(format!(
+            "doom drew other frames than the ones recorded: hash {hash}, recorded {DOOM_FRAMES} \
+             ({line})"
+        ));
+    }
+    eprintln!("  [doommusiccase] {line}");
+    Ok(())
+}
 
 /// Gate: doom's music reaches the device, with the SoundFont this tree ships.
 ///
@@ -10616,20 +10508,16 @@ fn blocked_dump() -> Result<(), String> {
         return Err(format!("no parked task was named by pid and tid:\n{report}"));
     }
 
-    // **All three kernel threads, by name.** They are almost always blocked, so
+    // **Every kernel thread, by name.** They are almost always blocked, so
     // the parked lines above carry them as a pid and a tid and nothing else —
-    // and on a machine that has gone quiet the question is *which* of the three
-    // is stuck. `sched::dump`'s census tags a kernel thread whatever it is
-    // doing, which is C6's gate: three kernel threads split the work —
-    // `klogd` the console drain, `usbd` the xHCI port machine, `iod` the
-    // write-back queue — precisely so that one of them wedging does not stop
-    // the other two. A report that cannot tell them apart cannot say which did.
+    // and on a machine that has gone quiet the question is *which* one is
+    // stuck. `sched::dump`'s census tags a kernel thread whatever it is doing.
     //
     // Matched with the ` cpu=` that follows the name on the census line, because
     // a bare name appears in every one of these programs' own log lines and
     // `/system/bin/init` speaks in a program's name before that program runs
     // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd", "usbd", "iod"]
+    let unnamed: Vec<&str> = ["klogd", "iod"]
         .into_iter()
         .filter(|name| !report.contains(&format!(" {name} cpu=")))
         .collect();
@@ -12153,6 +12041,9 @@ fn run_machine_test(
         "null_sink_shipped_client" => audio::null_sink_shipped_client(test_config, c_bins, rust_bins),
         "doom_sound_flood" => audio::doom_sound_flood(rust_bins),
         "doom_music" => doom_music(rust_bins),
+        // Body in `tests/common/clang.rs`.
+        "c_hello" => common::clang::c_hello(rust_bins),
+        "doom_frames" => doom_frames(rust_bins),
         "soundd_log_stall" => audio::soundd_log_stall(rust_bins),
         "metal_sim_compositor" => {
             metal_sim_compositor(group_boot(held, METAL_SIM_DESKTOP, || {
@@ -13429,8 +13320,7 @@ fn run_machine_test(
             // trampoline that never issues an `iretq`. It gets a process-table
             // entry rather than a bare task, and that is what makes it
             // nameable: without one a crash report would print a pid nothing
-            // in the machine resolves. What each row *means* when the panic
-            // really fires is `klogd_panic_halts`' two actuator boots.
+            // in the machine resolves.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -13439,84 +13329,49 @@ fn run_machine_test(
             );
             klogd_hosted(&serial::Serial::boot(&qemu))
         }
-        "klogd_panic_halts" => {
-            // **A kernel thread's panic is not recoverable by accident.**
-            // `syscall_rip` is never cleared, so the ordinary recovery
-            // predicate reads whatever user thread last ran on that CPU, and
-            // a kernel task would recover or halt by accident of work
-            // stealing. The row in `sched::kthread` replaces the accident
-            // with an answer; these two actuator boots walk both branches.
-            //
-            // The marker is a line of the crash *report* rather than `PANIC:`
-            // itself, because `boot_log` stops at the marker and the name is
-            // printed after the header — a boot stopped at the header would
-            // have nothing left to assert the process table against.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["klogd-panic"],
-                    ready_marker: "Process: klogd",
-                    ..Default::default()
-                },
-            );
-            let mut dead = serial::Serial::boot(&qemu);
-            dead.must_say("PANIC:")?;
-            dead.must_say("klogd-panic: the console drainer died")?;
-            // The process table answered for a task with no *user* address
-            // space — since C6 it names the kernel's, which is what let
-            // `KernelPayload.address_space` stop being an `Option`.
-            dead.must_say("Process: klogd")?;
-
-            // The verdict. A *recovered* panic kills the thread and lets the
-            // machine carry on into userland, which announces itself; the
-            // fatal branch halts every CPU. The window is a liveness margin
-            // and not a threshold: `klogd` panics as the scheduler starts, and
-            // the arm this must never become reaches the marker a few hundred
-            // milliseconds later — so three seconds is a tenfold margin over
-            // the state it refuses, and it is the whole of this test's fixed
-            // cost against the Fast ceiling.
-            const CARRIED_ON: Duration = Duration::from_secs(3);
-            dead.push(&qemu.drain_serial(CARRIED_ON));
-            dead.must_not_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [klogd] a kernel thread's panic halted the machine rather than recovering");
-
-            drop(qemu);
-
-            // **The same panic on the other row, and it is the direction
-            // nothing had ever taken.** Two rows in one table are one row
-            // until both branches have been walked: before this arm, every
-            // kernel-thread panic this tree had ever run took `OnPanic::Halt`,
-            // so `Recover` was a value rather than a path — and the path it
-            // names goes through `poison_tid`, the idle loop's `reap_poisoned`
-            // and `zombify_poisoned`, none of which had ever seen a task with
-            // no user address space. A row that quietly halted the machine
-            // would make `usbd` and `iod` worse than the thread they were
-            // split off from.
-            //
-            // The verdict is content in the same window and never a timeout:
-            // the boot returns at the crash report's own line, and what the
-            // three seconds after it must contain is the ready marker the
-            // arm above must *not*.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["usbd-panic"],
-                    ready_marker: "Process: usbd",
-                    ..Default::default()
-                },
-            );
-            let mut survived = serial::Serial::boot(&qemu);
-            survived.must_say("PANIC:")?;
-            survived.must_say("usbd-panic: the device thread died")?;
-            survived.must_say("Process: usbd")?;
-            survived.push(&qemu.drain_serial(CARRIED_ON));
-            survived.must_say(qemu::DEFAULT_READY)?;
-            eprintln!("  [usbd] a kernel thread's panic killed the thread and the machine booted");
-            Ok(())
+        "klogd_panic_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-panic", "panic-reboot-fast"],
+            &["klogd-panic: the console drainer died", "Process: klogd"],
+        ),
+        "klogd_fault_halts" => power::klogd_death_resets(
+            test_config,
+            c_bins,
+            rust_bins,
+            &["klogd-fault", "panic-reboot-fast"],
+            &["KERNEL PANIC: read unmapped address at 0x0", "console::body"],
+        ),
+        "syscall_panic_halts" | "syscall_fault_halts" | "lock_across_switch_halts"
+        | "heap_over_ceiling_halts" => {
+            use toyos_abi::syscall::{debug_action as da, SYS_DEBUG};
+            let syscall = format!("Syscall: num={SYS_DEBUG}");
+            let syscall = syscall.as_str();
+            let (action, said): (u64, &[&str]) = match name {
+                "syscall_panic_halts" => (
+                    da::PANIC,
+                    &["SYS_DEBUG: kernel panic triggered by userspace", syscall, "User backtrace:"],
+                ),
+                // A Ring 0 read of a user address is the kernel's, inside a syscall too.
+                "syscall_fault_halts" => (da::NULL_READ, &[syscall, "User backtrace:"]),
+                "lock_across_switch_halts" => (da::LOCK_ACROSS_SWITCH, &[syscall]),
+                // The message, not `mm/alloc.rs`: it names the ceiling rather
+                // than the page source's own request.
+                "heap_over_ceiling_halts" => {
+                    (da::HEAP_OVER_CEILING, &["exceeds MAX_HEAP_ALLOC", syscall])
+                }
+                other => unreachable!("{other} is not a syscall-death row"),
+            };
+            let said = power::syscall_death_resets(test_config, c_bins, rust_bins, action, said)?;
+            // With the capture: this guest's 16550 is its stdio, so no
+            // `uart-*.log` keeps what it said.
+            match name {
+                "lock_across_switch_halts" => check_tripwire_attribution(&said),
+                "syscall_fault_halts" => check_ring0_read_unmapped(&said),
+                _ => Ok(()),
+            }
+            .map_err(|e| format!("{e}\n{said}"))
         }
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
@@ -13827,57 +13682,19 @@ fn run_machine_test(
             eprintln!("  [sleep] {}", result.stdout.lines().last().unwrap_or("").trim());
             Ok(())
         }
-        "heap_ceiling_recovery" => {
-            // A panic inside the kernel allocator's own lock left the heap
-            // locked for the rest of the boot: the panicking thread never
-            // unwinds, so `now` never advances, and the CPU that recovered
-            // spun `Lock::lock` to its 500M-spin deadline on its next `alloc`
-            // or `free` — then panicked again, forever. The fix moved the
-            // ceiling check to `KernelAllocator::alloc`, before the lock.
-            //
-            // `smp: 1` is what makes the claim precise. The property is that
-            // *the recovered CPU* survives its next allocation; on a wider
-            // machine `/system/bin/echo` could run somewhere else and pass without
-            // touching it. With one CPU there is nowhere else.
-            //
-            // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `syscall/dispatch.rs`: routes
-            // past the ceiling do still exist,
-            // and each of them holds the VFS lock when it dies, so the
-            // machine wedges either way and the allocator's recovery cannot
-            // be observed on its own.
-            let options = BootOptions {
-                smp: 1,
-                kernel_features: ACTUATOR_KERNEL,
-                ..Default::default()
-            };
+        "heap_ceiling_bounds" => {
+            // Its own boot: `LOWER_SYSINFO_BOUND` stays lowered for the rest of it.
+            let options = BootOptions { kernel_features: ACTUATOR_KERNEL, ..Default::default() };
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             serial::Serial::boot(&qemu).must_be_clean()?;
 
             let result = qemu.run_test("test_rs_heap_ceiling", Duration::from_secs(30));
             if let Some(err) = &result.error {
-                // The wedge's signature. Before the fix this is where the test
-                // ends: the child's panic strands the allocator, the guest
-                // stops answering, and `run_test` runs out of window.
-                return Err(format!(
-                    "the guest stopped answering after the over-ceiling panic: {err}\n\
-                     serial:\n{}",
-                    result.serial
-                ));
+                return Err(format!("heap_ceiling did not finish: {err}\nserial:\n{}", result.serial));
             }
             if !check_rust_result(&result) {
                 return Err(format!("heap_ceiling failed:\n{}", result.stdout));
             }
-
-            // The panic must be the one this test asked for, and it must have
-            // fired where the fix put it. `mm/alloc.rs` appears in the report
-            // either way — the old assert was in the same file — so the needle
-            // is the message, which names the ceiling rather than the page
-            // source's own request.
-            let serial = serial::Serial::named("test serial", result.serial.as_str());
-            serial.must_say("PANIC:")?;
-            let line = serial.must_say("exceeds MAX_HEAP_ALLOC")?;
-            eprintln!("  [heap] {}", line.trim());
             Ok(())
         }
         "cache_eviction" => {
@@ -17200,30 +17017,14 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The machine's three kernel threads are hosted, and each claims the panic row
-/// its own loss demands.
+/// The machine's kernel threads are hosted.
 ///
-/// Text in, a verdict out: all three lines are `log!` records, so the T14's
+/// Text in, a verdict out: every line is a `log!` record, so the T14's
 /// readback and a QEMU boot log are judged by this one predicate.
 fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     boot.must_be_clean()?;
-    let line = boot.must_say("kthread: klogd")?;
-    if !line.contains("halts the machine") {
-        return Err(format!("klogd is hosted but claims the wrong panic row: {line:?}"));
-    }
-    eprintln!("  [klogd] {}", line.trim());
-
-    // **The other two threads, and the opposite row.** `usbd` owns the xHCI
-    // port machine and `iod` the write-back queue, so a stuck USB enumeration
-    // cannot stop the log. Their panics are *recoverable* and `klogd`'s
-    // deliberately is not — a killed drainer is the one loss nothing left alive
-    // can report — and this is the one boot in the suite where all three rows
-    // are on the wire together.
-    for name in ["usbd", "iod"] {
+    for name in ["klogd", "iod"] {
         let line = boot.must_say(&format!("kthread: {name}"))?;
-        if !line.contains("kills the thread") {
-            return Err(format!("{name} is hosted but claims the wrong panic row: {line:?}"));
-        }
         eprintln!("  [kthread] {}", line.trim());
     }
     Ok(())
@@ -18523,7 +18324,6 @@ fn build_test_registry(
 
     for name in discover_rust_tests(rust_bins) {
         let timeout = match name.as_str() {
-            "panic_recovery" => Duration::from_secs(10),
             // Writes the child's whole image through bcachefs before it can run
             // it, which is the only thing here that is not a spawn.
             "disk_backtrace" => Duration::from_secs(15),
@@ -19209,10 +19009,7 @@ fn one_vocabulary() -> Result<(), String> {
 /// What the declaration itself has to be, before any of it means anything.
 /// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
 ///
-/// A name reaches the syscall directly, or through a child it spawns —
-/// `panic_recovery`'s three actions are all `test_panic_child`'s, and a rule
-/// that only read the test's own source would miss the one test in the list
-/// whose whole subject is the syscall.
+/// A name reaches the syscall directly, or through a child it spawns.
 fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<String> {
     // The fourth spelling is the argument-taking form: every action that
     // carries a payload (TLB_ACK_DELAY_ARM, CENSUS_KIND, LOWER_SYSINFO_BOUND,
@@ -19245,14 +19042,12 @@ fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<
 /// `SYS_DEBUG`, and the binaries are what is asked.
 ///
 /// **What this does not cover, stated because the hole is real:** a machine or
-/// screen test that *drives* one of those binaries on a boot of its own.
-/// `screen_recoverable_untouched` was the instance — it runs
-/// `test_rs_test_panic_child` on a featureless kernel, where action 0 is answered
-/// `InvalidArgument` and the child exits 0 — and no static rule here can say
-/// which `BootOptions` a `run_test` call belongs to. What answers it instead is
-/// the guest: `test_panic_child` names `InvalidArgument` as *this kernel carries
-/// no actuators* rather than reporting a kernel that failed to kill anybody, so
-/// the red says what is wrong wherever it happens.
+/// screen test that *drives* one of those binaries on a boot of its own. No
+/// static rule here can say which `BootOptions` a `run_test` call belongs to.
+/// What answers it instead is the guest: `test_panic_child` names
+/// `InvalidArgument` as *this kernel carries no actuators* rather than reporting
+/// a kernel that failed to stop, so the red says what is wrong wherever it
+/// happens.
 ///
 /// **Both directions are the point.** A binary that gains a `debug()` call and
 /// no entry would run on the shipping kernel, where the syscall answers

@@ -123,11 +123,6 @@ impl Kicker for SimHw {
 }
 
 impl Machine for SimHw {
-    /// A step is atomic in this world, so "IRQs off" is the default rather
-    /// than a state to enter: delivery steps are simply not enabled while a
-    /// pass runs. The guard is therefore a witness with nothing to carry.
-    type IrqGuard = ();
-
     /// The VM threads `now` into every pass as a value, so this is read by
     /// exactly one caller: the core's check-build pass-cost recorder. Inside
     /// a pass it therefore reports the pass's modelled cost; outside one it is
@@ -152,8 +147,6 @@ impl Machine for SimHw {
             s.armed[cpu] = None;
         });
     }
-
-    fn irq_guard(&self) {}
 
     fn halt(&self) {
         self.with(|s| {

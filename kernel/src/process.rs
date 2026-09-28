@@ -30,7 +30,7 @@ use toyos_abi::syscall::EndowEntry;
 
 /// The lifecycle's decisions; this file only performs them.
 pub use toyos_proclife::{ThreadLocation, Watch};
-use toyos_proclife::{join, poison, reap, spawn as proclife_spawn, teardown as proclife, Lifecycle, Processes};
+use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, Lifecycle, Processes};
 
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
@@ -749,35 +749,8 @@ pub fn mark_thread_zombie(table: &mut ProcessTable, pid: Pid, tid: Tid, code: i3
     proclife::mark_zombie(table, pid, tid, code);
 }
 
-/// What a thread that died in panic recovery leaves to be cleaned up; the panic path itself may hold any lock the faulted thread held, so this only records the thread, and the idle loop runs it later.
-#[must_use = "a poisoned thread's waiter must be woken"]
-pub enum PoisonWake {
-    /// A child thread died; the pair is the subject `thread_join` arms on (not the process's main thread).
-    Joiner(Pid, Tid),
-    /// The main thread died, so the process is over; publish outside the table lock.
-    Process(Arc<crate::object::process::ProcessObject>),
-}
-
-/// Mark a poisoned thread dead and say what the idle loop must wake for it. `None`: nothing to do — the entry is gone, or another path already owns teardown.
-/// Resources are freed with the table entry rather than before it: every release below wants a lock the faulted thread may still hold.
-#[must_use = "a poisoned thread's waiter must be woken"]
-pub fn zombify_poisoned(table: &mut ProcessTable, pid: Pid, tid: Tid) -> Option<PoisonWake> {
-    match poison::zombify_poisoned(table, pid, tid) {
-        poison::PoisonOutcome::Nothing => None,
-        poison::PoisonOutcome::Joiner(watch) => {
-            let (pid, tid) = watch.thread()?;
-            Some(PoisonWake::Joiner(pid, tid))
-        }
-        poison::PoisonOutcome::Process(pid) => {
-            let proc = Processes::get(table, pid)
-                .expect("zombify_poisoned: the entry it just claimed and marked");
-            Some(PoisonWake::Process(Arc::clone(&proc.object)))
-        }
-    }
-}
-
 /// Take every entry whose process has published its exit.
-/// Entries come back rather than being dropped here: the caller holds the table lock, and an entry's drop reaches `remove_vruntime` and, for a process whose teardown never ran, the whole of its `ProcessData`.
+/// Entries come back rather than being dropped here: the caller holds the table lock, and an entry's drop reaches `remove_vruntime`.
 #[must_use = "the reaped entries must be dropped outside the table lock"]
 pub fn reap_finished(table: &mut ProcessTable, _proof: IdleProof) -> Vec<ProcessEntry> {
     reap::finished_pids(table).into_iter().filter_map(|pid| table.remove(pid)).collect()
@@ -1314,11 +1287,6 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
     if tid == Tid::MAX {
         return false;
     }
-    // A kernel thread's fault is fatal, said explicitly rather than fallen into by accident: demand paging is a user-mapping mechanism only, and the kernel's direct map is complete.
-    if crate::sched::kthread::current_is_kernel_thread() {
-        return false;
-    }
-
     let (data_arc, addr_space) = {
         let Some(addr_space) = scheduler::current_address_space() else { return false };
         let guard = PROCESS_TABLE.lock();

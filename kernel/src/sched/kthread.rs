@@ -1,8 +1,7 @@
 //! Kernel threads: ordinary tasks that name `mm::paging::kernel` as their
 //! address space, enter through `loader::kernel_start`, and hold a process-table
 //! entry. One is preempted or stolen only at a preemption point its body reaches,
-//! and a Ring 0 loop reaches none. [`ROWS`] holds every one, and
-//! [`panic_recovers_here`] says what a panic inside one means.
+//! and a Ring 0 loop reaches none. [`ROWS`] holds every one.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -19,37 +18,26 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
-/// `klogd`, `usbd` and `iod`, plus one `log-storm` thread per shard in the actuator build.
+/// `klogd` and `iod`, plus one `log-storm` thread per shard in the actuator build.
 #[cfg(not(feature = "boot-actuators"))]
-const MAX_KERNEL_TASKS: usize = 3;
+const MAX_KERNEL_TASKS: usize = 2;
 #[cfg(feature = "boot-actuators")]
-const MAX_KERNEL_TASKS: usize = 3 + toyos_abi::log::MAX_LOG_SHARDS;
+const MAX_KERNEL_TASKS: usize = 2 + toyos_abi::log::MAX_LOG_SHARDS;
 
 /// Collides with no packed id: neither id map issues `u32::MAX`.
 const NO_TASK: u64 = u64::MAX;
 
-/// Distinct from a published identity, so the identity can be stored last,
-/// after the policy word, without another claimant matching the same row.
+/// A reserved row whose identity is not yet known; collides with no packed id.
 const CLAIMING: u64 = u64::MAX - 1;
 
-/// `task` is stored `Release` after `recoverable` and loaded `Acquire` before it,
-/// so a row found by identity never answers with an unwritten policy.
-struct Row {
-    task: AtomicU64,
-    // `recoverable` exists because `percpu::in_syscall()` is never true for a kernel
-    // thread, which would otherwise make every kernel-thread panic halt the machine by default.
-    recoverable: AtomicU64,
-}
-
 /// A row reserved before the table lock and published before `enqueue_new`.
-struct Claim(&'static Row);
+struct Claim(&'static AtomicU64);
 
 impl Claim {
     /// Reserve a row, or panic naming the thread.
     fn take(name: &str) -> Self {
         for row in &ROWS {
             if row
-                .task
                 .compare_exchange(NO_TASK, CLAIMING, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
@@ -59,46 +47,24 @@ impl Claim {
         panic!("kthread: {name} is the {}th kernel thread and there is room for {MAX_KERNEL_TASKS}", MAX_KERNEL_TASKS + 1);
     }
 
-    /// Payload first, then the identity `Release`.
-    fn publish(self, id: TaskId, on_panic: OnPanic) {
-        self.0
-            .recoverable
-            .store(u64::from(on_panic == OnPanic::Recover), Ordering::Relaxed);
-        self.0.task.store(id.pack(), Ordering::Release);
+    fn publish(self, id: TaskId) {
+        self.0.store(id.pack(), Ordering::Relaxed);
     }
 }
 
-/// Registered at spawn and never cleared: a dead `Recover` thread's row stays.
-static ROWS: [Row; MAX_KERNEL_TASKS] =
-    [const { Row { task: AtomicU64::new(NO_TASK), recoverable: AtomicU64::new(0) } };
-        MAX_KERNEL_TASKS];
+/// Registered at spawn and never cleared.
+static ROWS: [AtomicU64; MAX_KERNEL_TASKS] = [const { AtomicU64::new(NO_TASK) }; MAX_KERNEL_TASKS];
 
-/// What a kernel thread's panic does.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum OnPanic {
-    /// Ask for `Recover` only when the thread's absence is both survivable and visible.
-    Recover,
-    /// `Halt` is `klogd`'s answer: it is the machine's only console drainer,
-    /// so killing it would leave the machine silently mute.
-    Halt,
-}
-
-/// Lock-free and fault-free, so it may run with any lock held or preemption on.
-fn current_row() -> Option<&'static Row> {
+/// Is the task this CPU is running a kernel thread? Lock-free and fault-free,
+/// so it may run with any lock held or preemption on.
+pub fn current_is_kernel_thread() -> bool {
     let (Some(pid), Some(tid)) = (
         crate::arch::percpu::current_pid(),
         crate::arch::percpu::current_tid(),
     ) else {
-        return None;
+        return false;
     };
-    let packed = TaskId(pid, tid).pack();
-    // Pairs with `Claim::publish`'s `Release`: a relaxed load could read an unwritten `recoverable`.
-    ROWS.iter().find(|row| row.task.load(Ordering::Acquire) == packed)
-}
-
-/// Is the task this CPU is running a kernel thread?
-pub fn current_is_kernel_thread() -> bool {
-    current_row().is_some()
+    is_kernel_task(TaskId(pid, tid))
 }
 
 /// Is `id` a kernel thread?
@@ -106,16 +72,11 @@ pub fn current_is_kernel_thread() -> bool {
 // stuck, where taking one could hang diagnostics.
 pub fn is_kernel_task(id: TaskId) -> bool {
     let packed = id.pack();
-    ROWS.iter().any(|row| row.task.load(Ordering::Acquire) == packed)
-}
-
-/// Whether a panic on the running task recovers; `None` unless it is a kernel thread.
-pub fn panic_recovers_here() -> Option<bool> {
-    Some(current_row()?.recoverable.load(Ordering::Relaxed) != 0)
+    ROWS.iter().any(|row| row.load(Ordering::Relaxed) == packed)
 }
 
 /// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
-pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPanic) -> ThreadSched {
+pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched {
     let (stack, entry_rsp) = crate::loader::alloc_kernel_stack(
         crate::loader::kernel_start,
         body as usize as u64,
@@ -147,8 +108,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
         )
     });
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
-    // Before `enqueue_new`: from that call the task can run and panic.
-    claim.publish(TaskId(pid, tid), on_panic);
+    claim.publish(TaskId(pid, tid));
     // The kernel address space, named so one declaration decides every task's `cr3`.
     let (sched, _dst) = scheduler::enqueue_new(
         TaskId(pid, tid),
@@ -165,15 +125,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
         .set_sched(sched.clone());
     drop(guard);
 
-    crate::log!(
-        "kthread: {name} pid={} tid={} runs in the kernel address space; a panic in it {}",
-        pid,
-        tid,
-        match on_panic {
-            OnPanic::Halt => "halts the machine",
-            OnPanic::Recover => "kills the thread",
-        }
-    );
+    crate::log!("kthread: {name} pid={pid} tid={tid} runs in the kernel address space");
     sched
 }
 

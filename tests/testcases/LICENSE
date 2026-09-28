@@ -1,8 +1,9 @@
 Licences and provenance of the C test corpus
 ============================================
 
-`tinycc/` and `pp_tcc/` are the inputs `toyos-cc` is tested against. Most of
-them are not ours. This file says which, and carries the notices that have to
+`tinycc/` is what the toolchain's clang and ToyOS's C library are tested
+against, compiled on the host and run as ToyOS processes. Most of it is not
+ours. This file says which, and carries the notices that have to
 travel with them; it is the attribution the corpus was missing until
 2026-08-08.
 
@@ -26,11 +27,6 @@ project made to some filenames.
                         56 not upstream at all — 55 cases written here, plus
                         `fred.txt`, which is output `40_stdio.c` writes when it
                         runs and which was committed by accident.
-
-  pp_tcc/     51 files: 46 byte-identical to tinycc's `tests/pp`,
-                        2 modified here (`11.c`, `11.expect`),
-                        3 written here (`24.c`, `24.expect`,
-                        `24_include_in_call.h`).
 
 The cases written here use upstream's conventions — `NN_name.c` beside
 `NN_name.expect`, and `NN+_name.c` for a companion translation unit — because

@@ -4,6 +4,10 @@ pub mod audio;
 /// own trace.
 #[allow(dead_code)]
 pub mod blockd;
+/// The C toolchain, end to end: a program the toolchain's clang built, judged
+/// as the loader reads it and then run.
+#[allow(dead_code)]
+pub mod clang;
 #[allow(dead_code)]
 pub mod clock;
 #[allow(dead_code)]
