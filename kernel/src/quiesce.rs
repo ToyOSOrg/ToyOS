@@ -245,11 +245,11 @@ fn sweep(caller: ThreadId) -> Sweep {
     out
 }
 
-/// `quiesce-last-park` and `quiesce-last-exit`: one thread, named
-/// [`toyos_quiesce::LAST_THREAD`], held inside its syscall until the stop's
-/// latest sweep counts it as the one thread still running, so the park or the
-/// exit it makes next is the last transition the stop sees. Without them no
-/// boot can tell whether that transition's post is what wakes the stop.
+/// `quiesce-last-park`: one thread, named [`toyos_quiesce::LAST_THREAD`],
+/// held inside its `SYS_NANOSLEEP` until the stop's latest sweep counts it as
+/// the one thread still running, so the park it makes next is the last
+/// transition the stop sees. Without it no boot can tell whether that park's
+/// post is what wakes the stop.
 #[cfg(feature = "boot-actuators")]
 pub mod last {
     use core::sync::atomic::{
@@ -262,28 +262,7 @@ pub mod last {
     use crate::watch::{self, Watch};
     use crate::time::{Budget, Deadline, Duration};
 
-    /// The transition the held thread makes once it is released.
-    #[derive(Clone, Copy)]
-    pub enum Last {
-        Park,
-        Exit,
-    }
-
-    impl Last {
-        fn armed(self) -> bool {
-            match self {
-                Last::Park => crate::actuator::quiesce_last_park(),
-                Last::Exit => crate::actuator::quiesce_last_exit(),
-            }
-        }
-
-        fn name(self) -> &'static str {
-            match self {
-                Last::Park => "quiesce-last-park",
-                Last::Exit => "quiesce-last-exit",
-            }
-        }
-    }
+    const NAME: &str = "quiesce-last-park";
 
     /// How long either side waits for the other before the boot dies by name.
     const STAGED: Budget = Budget::of(
@@ -304,18 +283,13 @@ pub mod last {
         RUNNING.store(swept.running, Release);
     }
 
-    fn armed() -> Option<Last> {
-        [Last::Park, Last::Exit].into_iter().find(|last| last.armed())
-    }
-
-    /// Hold the running thread here if it is the one `last` stages.
-    pub fn hold(last: Last) {
-        if !last.armed() || !is_the_named_thread() || HELD.swap(true, AcqRel) {
+    /// Hold the running thread here if it is the one this staging names.
+    pub fn hold() {
+        if !crate::actuator::quiesce_last_park() || !is_the_named_thread() || HELD.swap(true, AcqRel) {
             return;
         }
         crate::log!(
-            "{}: {} is held until the stop waits on it alone",
-            last.name(),
+            "{NAME}: {} is held until the stop waits on it alone",
             toyos_quiesce::LAST_THREAD,
         );
         ARRIVED.post();
@@ -325,8 +299,7 @@ pub mod last {
         while RUNNING.load(Acquire) != 1 {
             assert!(
                 !deadline.reached(crate::clock::now()),
-                "{}: the stop never came down to this thread alone in {} ms",
-                last.name(),
+                "{NAME}: the stop never came down to this thread alone in {} ms",
                 STAGED.nanos() / 1_000_000,
             );
             crate::scheduler::yield_now();
@@ -336,10 +309,11 @@ pub mod last {
     /// Called by the shutdown before it stops anything: the stop is staged
     /// only once the thread it is staged around is inside its syscall.
     pub fn await_the_held_thread() {
-        let Some(last) = armed() else { return };
+        if !crate::actuator::quiesce_last_park() {
+            return;
+        }
         crate::log!(
-            "{}: the stop waits for {} to reach its syscall",
-            last.name(),
+            "{NAME}: the stop waits for {} to reach its syscall",
             toyos_quiesce::LAST_THREAD,
         );
         let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
@@ -354,8 +328,7 @@ pub mod last {
         );
         assert!(
             HELD.load(Acquire),
-            "{}: no thread named {} reached its syscall in {} ms",
-            last.name(),
+            "{NAME}: no thread named {} reached its syscall in {} ms",
             toyos_quiesce::LAST_THREAD,
             STAGED.nanos() / 1_000_000,
         );
