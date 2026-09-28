@@ -121,19 +121,39 @@ pub fn enumeration_ack(after: Option<Reset>, portsc: Portsc) -> portsc::Write {
     }
 }
 
+/// Whether a pass steps the ports, given whether a Port Status Change Event or
+/// a caller's own reason to look has arrived since the last one.
+///
+/// A port with work of its own is stepped without an event: xHCI raises one
+/// only on a change bit's 0→1 edge, and a port whose belief has just moved may
+/// hold a device whose edge is already spent ([`PortState::believe`]).
+pub fn due(signalled: bool, ports: &[PortState]) -> bool {
+    signalled || ports.iter().any(PortState::outstanding)
+}
+
 /// Why a port stopped being worked on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GaveUp {
-    /// A reset was written and no completion came.
-    ResetNeverFinished(Reset),
+    /// A hot reset was written and no completion came.
+    ResetNeverFinished,
     /// A USB3 link was warm-reset as well and still did not come up.
     /// §4.19.1.2 has nothing beyond a warm reset, so this is the end of the
     /// road for the port rather than one step short of it.
     LinkNeverTrained,
-    /// The reset *completed* with the port still disabled, where §4.19.5
+    /// The hot reset *completed* with the port still disabled, where §4.19.5
     /// offers no escalation ("USB2 protocol ports never fail"): a controller
     /// misbehaving, not a link a warm reset could retrain.
-    ResetFailed(Reset),
+    ResetFailed,
+}
+
+impl GaveUp {
+    /// A `kind` reset whose deadline passed with no completion.
+    pub fn never_finished(kind: Reset) -> Self {
+        match kind {
+            Reset::Warm => GaveUp::LinkNeverTrained,
+            Reset::Hot => GaveUp::ResetNeverFinished,
+        }
+    }
 }
 
 /// What a completed reset means for the port — **the one place that question
@@ -152,7 +172,7 @@ pub fn reset_outcome(kind: Reset, protocol: Option<Protocol>, portsc: Portsc) ->
     }
     ResetOutcome::GaveUp(match kind {
         Reset::Warm => GaveUp::LinkNeverTrained,
-        Reset::Hot => GaveUp::ResetFailed(Reset::Hot),
+        Reset::Hot => GaveUp::ResetFailed,
     })
 }
 
@@ -263,6 +283,12 @@ enum Work {
     Resetting { until: Nanos, kind: Reset },
     /// The caller is inside an effect and has not reported it.
     Working(Effect),
+    /// The driver's belief moved ([`PortState::believe`]) and nothing has read
+    /// the register against it since.
+    Unread,
+    /// A warm reset was given up on ([`PortState::gave_up`]) and no read has
+    /// found the port's change flags clear since.
+    GivenUp,
 }
 
 /// A deliberate defect, compiled only for the negative gates.
@@ -361,20 +387,16 @@ impl PortState {
     /// not. Recorded either way: an Enable Slot that succeeded is the
     /// controller's resource whatever happened after it.
     pub fn enumerated(&mut self, slot: Option<NonZeroU8>) {
-        self.adopt(slot);
+        self.believe(true, slot);
     }
 
     /// The teardown finished. The port is empty as far as the driver is
     /// concerned, whatever the register says, so the next look runs the
     /// ordinary fresh-connect path.
     pub fn torn_down(&mut self) {
-        self.attached = false;
-        self.slot = None;
-        self.work = Work::Settled;
+        self.believe(false, None);
     }
 
-    /// Adopt a port the boot scan enumerated, so the hot-plug machine starts
-    /// from what the boot path already did rather than re-deciding it.
     /// What the controller's Supported Protocol capability said this port
     /// speaks. Set once, at bring-up, from firmware's own description of the
     /// machine.
@@ -382,10 +404,38 @@ impl PortState {
         self.protocol = protocol;
     }
 
-    pub fn adopt(&mut self, slot: Option<NonZeroU8>) {
-        self.attached = true;
+    /// **Leaves the port [`Self::outstanding`] until a look has read the
+    /// register against it.** Every caller has just ended an effect,
+    /// and the device in the port may have changed meanwhile with no change
+    /// bit going 0→1 again — the only edge xHCI raises an event for — because
+    /// an effect's own acknowledge spent it.
+    fn believe(&mut self, attached: bool, slot: Option<NonZeroU8>) {
+        self.attached = attached;
         self.slot = slot;
-        self.work = Work::Settled;
+        self.work = Work::Unread;
+    }
+
+    /// The port was given up on: **attached, so it is not reset again until a
+    /// fresh edge moves it**, and read once, so a pull is still seen.
+    pub fn gave_up(&mut self, why: GaveUp) {
+        match why {
+            // §4.19.5.1's retrain raises a connect edge of its own, which
+            // nothing tells apart from a replug; judged as one, it would tear
+            // the port down and reset it again every debounce for as long as
+            // its device stayed in.
+            GaveUp::LinkNeverTrained => {
+                self.attached = true;
+                self.work = Work::GivenUp;
+            }
+            // A hot reset changes no connect state, so a connect flag is a
+            // real replug.
+            GaveUp::ResetNeverFinished | GaveUp::ResetFailed => self.believe(true, None),
+        }
+    }
+
+    fn give_up(&mut self, why: GaveUp) -> Step<'static> {
+        self.gave_up(why);
+        Step::GaveUp(why)
     }
 
     #[cfg(feature = "flaws")]
@@ -437,11 +487,7 @@ impl PortState {
                             Work::Resetting { until: now + RESET_DEADLINE_NS, kind: Reset::Warm };
                         return Step::Reset(Reset::Warm, write);
                     }
-                    ResetOutcome::GaveUp(why) => {
-                        self.attached = true;
-                        self.work = Work::Settled;
-                        return Step::GaveUp(why);
-                    }
+                    ResetOutcome::GaveUp(why) => return self.give_up(why),
                 }
             }
             if now < until || self.flawed(Flaw::NoResetDeadline) {
@@ -455,15 +501,7 @@ impl PortState {
                 self.work = Work::Resetting { until: now + RESET_DEADLINE_NS, kind: Reset::Warm };
                 return Step::Reset(Reset::Warm, reset_write(Reset::Warm, portsc));
             }
-            // Attached, so the port is not tried again until its device is
-            // pulled — which is what stops a port the controller will not reset
-            // from being reset forever.
-            self.attached = true;
-            self.work = Work::Settled;
-            return Step::GaveUp(match kind {
-                Reset::Warm => GaveUp::LinkNeverTrained,
-                Reset::Hot => GaveUp::ResetNeverFinished(Reset::Hot),
-            });
+            return self.give_up(GaveUp::never_finished(kind));
         }
 
         if self.flawed(Flaw::AcknowledgeBeforeDeciding) && portsc.any_change() {
@@ -477,7 +515,7 @@ impl PortState {
         // the device that was here is gone. The ordinary teardown then sets
         // `attached` false, which turns the rest of this into the fresh connect
         // it already knows how to run.
-        if connected && replugged && self.attached {
+        if connected && replugged && self.attached && self.work != Work::GivenUp {
             return Step::Teardown(Gone::Replugged, Pending(self));
         }
 
@@ -494,8 +532,9 @@ impl PortState {
         }
 
         let held = match self.work {
-            Work::Settled => {
+            Work::Settled | Work::Unread | Work::GivenUp => {
                 if connected == self.attached {
+                    self.work = Work::Settled;
                     return Step::Idle;
                 }
                 self.work = Work::Debouncing { at: now };
@@ -584,6 +623,29 @@ mod tests {
         assert_eq!(inherited(Some(Protocol::Usb3), connected(false, 6)), Reset::Warm);
         assert_eq!(inherited(Some(Protocol::Usb2), connected(true, 0)), Reset::Hot);
         assert_eq!(inherited(None, trained), Reset::Hot);
+    }
+
+    /// Every report that moves the belief leaves the port to be read: a device
+    /// that changed under the effect raises no further change event.
+    #[test]
+    fn a_port_whose_belief_moved_is_outstanding_until_it_is_read() {
+        let empty = Portsc::from_raw(1 << 9);
+        let reports = [
+            ("enumerated", (|p| p.enumerated(NonZeroU8::new(1))) as fn(&mut PortState)),
+            ("torn_down", PortState::torn_down),
+        ];
+        for (name, report) in reports {
+            let mut port = PortState::EMPTY;
+            report(&mut port);
+            assert!(port.outstanding(), "{name}: nothing would read a port whose device changed");
+            let (disagrees, agrees) =
+                if port.attached() { (empty, connected(true, 0)) } else { (connected(true, 0), empty) };
+            assert!(matches!(port.step(disagrees, 0), Step::Wait(DEBOUNCE_NS)), "{name}");
+
+            report(&mut port);
+            assert!(matches!(port.step(agrees, 0), Step::Idle), "{name}");
+            assert!(!port.outstanding(), "{name}: a port read once and found as believed is at rest");
+        }
     }
 
     #[test]

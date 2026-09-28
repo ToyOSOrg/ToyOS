@@ -2067,16 +2067,16 @@ pub fn userdev_dma_fault(
 ) -> Result<(), String> {
     let _ = c_bins;
     // One guest binary, for the half of this test the fault line cannot say:
-    // that the machine still schedules, spawns, and answers. `handle_basic`
-    // makes and closes an object of every kind and counts the census, so a
-    // kernel limping after the fault fails it rather than passing vacuously.
+    // that the machine still schedules, spawns, and answers. `log_origin` says
+    // one line and exits, and asserts nothing else: a verdict that rides a
+    // deferred release would red here as a fault it is not.
     let bins: Vec<(String, Vec<u8>)> = rust_bins
         .iter()
-        .filter(|(name, _)| name == "handle_basic")
+        .filter(|(name, _)| name == "log_origin")
         .cloned()
         .collect();
     if bins.is_empty() {
-        return Err("handle_basic was not built".to_string());
+        return Err("log_origin was not built".to_string());
     }
     let mut qemu = foreign_fault(test_config, &[], &bins, &USERDEV_FOREIGN)?;
     let log = Serial::named("boot console", qemu.boot_log().to_string());
@@ -2096,7 +2096,7 @@ pub fn userdev_dma_fault(
     // And the machine is running. This is the assertion the whole stage is
     // for: a guest that answers here is one whose scheduler, spawn path and
     // IPC all survived a device being refused mid-flight.
-    let result = qemu.run_test("test_rs_handle_basic", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_log_origin", Duration::from_secs(60));
     if let Some(err) = &result.error {
         return Err(format!(
             "the guest stopped answering after the fault: {err}\n{}\n{}",

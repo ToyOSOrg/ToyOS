@@ -191,8 +191,7 @@ const RUST_SKIP: &[&str] = &[
     // `log_program_forgery` runs it.
     "log_forger",
     // Its verdict is where its one line went — `/log`, the served log and the
-    // console — which only a boot of its own reads back. `log_program_line`
-    // and `log_stream` run it.
+    // console — which only a boot of its own reads back.
     "log_origin",
     // Its verdict is where its line lands among the kernel's records, which
     // every other binary's records would crowd. `log_program_line_after_its_records`
@@ -462,11 +461,6 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
-    // Its shared run is a whole handle-lifecycle gate with its own census;
-    // `userdev_dma_fault` drives the same binary for a different reason
-    // entirely — as the proof the machine still schedules and spawns after a
-    // device was refused at the unit — and stages nothing for it.
-    "handle_basic",
     "hierarchy_paths",
     "null_sink_client_exits",
     "nvme_home_roundtrip",
@@ -1624,7 +1618,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("input_claim_absent", &["test_rs_input_absent"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
-    ("userdev_dma_fault", &["test_rs_handle_basic"]),
+    ("userdev_dma_fault", &["test_rs_log_origin"]),
     ("userdev_residue_is_its_own", &["test_rs_userdev_residue"]),
     ("blockd_serves_partitions", &["test_rs_blockd_io"]),
     ("blockd_survives_its_death", &["test_rs_blockd_io"]),
