@@ -513,20 +513,6 @@ pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 /// The compositor prints its interval line whatever else has stopped, so
 /// silence alone cannot end a desktop wait, and a suite that never ends is
 /// worse than one that reds.
-///
-/// **Not [`budget`]-scaled, and that is the point of the pair.** Width is what a
-/// ceiling on a *slow* guest has to be corrected for, and the silence bound
-/// above is what a slow guest is now judged by — it keeps talking, so it is
-/// never judged by this at all. What is left for this number to catch is a guest
-/// that is stuck *and* chatty, which is a state the width does not produce;
-/// scaling it would only make that state cost an hour at width 12. The longest
-/// guest action any caller waits on is eight seconds of audio.
-///
-/// It is also the real ceiling of any failing wait on a shared boot, because
-/// the kernel's own 10 s cadence keeps the quiet clock above reset: a settle
-/// predicate that could never come true was measured ending here at 302 s,
-/// not at 15 (PR #96's verification). Price a new waiting check against this
-/// number, not the one above.
 pub const GUEST_WEDGED: Duration = Duration::from_secs(300);
 
 pub fn guest_liveness() -> Liveness {
@@ -657,10 +643,7 @@ impl std::fmt::Display for WaitVerdict {
 /// the instant it passed — so a merely-slow guest reported exactly what a wedged
 /// one did. `launcher_refusals` was killed at `192s "still talking 1s ago"` on a
 /// loaded `smp:2` runner its `vcpus/cores` factor clamps to 1, a guest making
-/// steady progress called wedged by a clock. So a guest still *talking* is now
-/// never ended by `ceiling`: the per-test budget bites only a guest that has
-/// *also* gone quiet for [`GUEST_QUIET`], and a talking one runs to the
-/// [`GUEST_WEDGED`] backstop below.
+/// steady progress called wedged by a clock.
 ///
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
@@ -815,8 +798,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     //     all four directions. A talking guest past its budget is slow, not
     //     wedged; a silent one within its budget is idle, not wedged; the wedge
     //     guard still fires, and fast; and the backstop still catches a guest
-    //     that talks forever. Staged with a ceiling below [`GUEST_WEDGED`] so the
-    //     backstop is a distinct, higher number — the shape every real test has.
+    //     that talks forever.
     const TIGHT: Duration = Duration::from_secs(153);
     let bstop = TIGHT.max(GUEST_WEDGED);
     assert!(TIGHT < bstop, "the case needs a ceiling below the backstop");
@@ -864,6 +846,19 @@ pub fn ceiling_self_check() -> Result<(), String> {
         return Err(String::from(
             "a guest idle-but-within-budget was called wedged — a boot with no periodic speaker \
              would red healthy",
+        ));
+    }
+
+    // 3c. **The other side of `ceiling.max(GUEST_WEDGED)`**: a ceiling *above*
+    //     `GUEST_WEDGED` must itself be the backstop, not get clamped down to
+    //     the floor. `CEILING` (380 s, from case 1) is such a ceiling; a guest
+    //     talking past `GUEST_WEDGED` (300 s) but still short of `CEILING` is
+    //     not yet at its backstop and must run on.
+    if ceiling_verdict(None, GUEST_WEDGED + Duration::from_secs(50), CEILING, talking, 40).is_some()
+    {
+        return Err(String::from(
+            "a guest talking past GUEST_WEDGED but short of a higher ceiling was ended anyway — \
+             the backstop did not follow a ceiling above GUEST_WEDGED",
         ));
     }
 
@@ -3307,8 +3302,8 @@ impl QemuInstance {
     /// is the case whose paint "never arrived in the window" while the guest was
     /// alive — the budget-scaled deadline undercounts a later moment in the run
     /// exactly as the serial ceiling did. Only a screen *frozen* for
-    /// [`GUEST_QUIET`] past the deadline, or the [`GUEST_WEDGED`] backstop, ends
-    /// the wait; `done` firing ends it at once, so a passing caller is untouched
+    /// [`GUEST_QUIET`] past the deadline ends the wait; `done` firing ends it at
+    /// once, so a passing caller is untouched
     /// and a real bug (the paint that should not be there, and stays) still fires
     /// its assertion, a frozen-screen `GUEST_QUIET` later.
     ///

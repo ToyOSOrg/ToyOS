@@ -57,6 +57,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/a-log-rings-owner-is-named-only-when-logd-reads-its-registration.md",
     },
     Disabled {
+        test: "netd_refused_accept",
+        issue: "issues/hardware/netd-refused-accept-hung-waiting-for-a-wake-that-never-came.md",
+    },
+    Disabled {
         test: "partition_claim_departure",
         issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
     },
