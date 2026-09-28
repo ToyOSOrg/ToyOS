@@ -31,6 +31,7 @@ pub use pmm::Region;
 
 /// All physical memory is mapped at this virtual offset.
 pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
+const _: () = assert!(toyos_bootmap::DIRECT_MAP_WINDOW == 0u64.wrapping_sub(PHYS_OFFSET));
 
 /// The kernel's one user page size and translation granularity.
 pub use toyos_userbound::PAGE_2M;
@@ -107,6 +108,10 @@ impl core::fmt::LowerHex for UserAddr {
 }
 
 
+/// One past the direct map's last byte: the boot map's until `paging::init`
+/// builds the kernel's own, which never reaches less.
+static DIRECT_MAP_END: toyos_bootmap::DirectMapEndCell = toyos_bootmap::DirectMapEndCell::boot();
+
 /// Converts between physical addresses and kernel virtual pointers; use only at that boundary, not for storing pointers.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DirectMap(u64);
@@ -131,6 +136,11 @@ impl DirectMap {
     }
 }
 
+/// One past the direct map's last byte now.
+pub fn direct_map_end() -> toyos_bootmap::DirectMapEnd {
+    DIRECT_MAP_END.get()
+}
+
 impl core::fmt::Display for DirectMap {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:#x}", self.0)
@@ -143,12 +153,15 @@ impl core::fmt::Debug for DirectMap {
     }
 }
 
-/// Call once at boot, in order: pmm (physical pages) → paging (direct map) → alloc (heap).
+/// Call once at boot, in order: pmm (physical pages) → paging (direct map) →
+/// alloc (heap) → every kernel root slot, before the first user space copies
+/// them.
 pub fn init(memory_map: &[MemoryMapEntry], reserved: &[Region]) {
     alloc::init_early();
     pmm::init(memory_map, reserved);
-    paging::init(memory_map);
+    DIRECT_MAP_END.set(paging::init(memory_map));
     alloc::init();
+    paging::seal_kernel_half();
 }
 
 /// The two memory facts every crash report ends its contexts with: how deep

@@ -199,6 +199,9 @@ toyos-xhci = { path = "toyos-xhci" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 
+[patch.crates-io]
+loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
+
 [profile.release]
 opt-level = 2
 
