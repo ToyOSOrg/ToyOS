@@ -277,6 +277,17 @@ impl Rig {
         image::read_file_on(&mut file, slot.boot, toyos_update::slots::SIGNED_FILE)
     }
 
+    /// Flip a byte of slot `which`'s kernel, past its signed header: the
+    /// signature still verifies and the hash does not.
+    fn bend_kernel(&self, which: Which) -> Result<(), String> {
+        let mut file = std::fs::File::open(&self.image).map_err(|e| format!("{}: {e}", self.image.display()))?;
+        let slot = image::slot_table_of(&mut file)?.slot(which).ok_or_else(|| format!("no slot {}", which.letter()))?;
+        let mut kernel = image::read_file_on(&mut file, slot.boot, toyos_update::slots::KERNEL_FILE)?;
+        drop(file);
+        kernel[100] ^= 0x01;
+        image::overwrite_file_on(&self.image, slot.boot, toyos_update::slots::KERNEL_FILE, &kernel)
+    }
+
     /// The name of the floor this machine's loader keeps.
     fn floor_name(&self) -> Result<String, String> {
         let key = signing::key();
@@ -622,12 +633,7 @@ pub fn update_refused_pass_credits_no_image(_: &Path, _: &[(String, Vec<u8>)], _
     }
     // A byte of slot A's kernel, and slot B holds no image: every slot is
     // refused, so the pass panics after its first write and before its second.
-    let mut file = std::fs::File::open(&rig.image).map_err(|e| format!("{}: {e}", rig.image.display()))?;
-    let a = image::slot_table_of(&mut file)?.slot(Which::A).ok_or("no slot A")?;
-    let mut kernel = image::read_file_on(&mut file, a.boot, toyos_update::slots::KERNEL_FILE)?;
-    drop(file);
-    kernel[100] ^= 0x01;
-    image::overwrite_file_on(&rig.image, a.boot, toyos_update::slots::KERNEL_FILE, &kernel)?;
+    rig.bend_kernel(Which::A)?;
     let refused = rig.launch("Slots: no slot verifies");
     said(refused.boot_log(), &["Slot A: REFUSED, its kernel is not the bytes its signed header names", "Slot B: REFUSED"])?;
     drop(refused);
@@ -845,11 +851,8 @@ pub fn update_trial_writes_nothing_of_the_kept_slot(_: &Path, _: &[(String, Vec<
     eprintln!("  [update] the trial held no grant, slot A kept its image, and the boot after was slot A's");
 
     // A trial the loader refuses: slot B's kernel bent, and asked for once.
-    let b = table.slot(Which::B).ok_or("no slot B")?;
-    let mut kernel = image::read_file_on(&mut file, b.boot, toyos_update::slots::KERNEL_FILE)?;
     drop(file);
-    kernel[100] ^= 0x01;
-    image::overwrite_file_on(&rig.image, b.boot, toyos_update::slots::KERNEL_FILE, &kernel)?;
+    rig.bend_kernel(Which::B)?;
     image::restage_table(&rig.image, |t| t.request.next = Some(toyos_update::slots::Next::Slot(Which::B)))?;
     let (guest, console) = rig.boot()?;
     loader_said(&guest, 0, "Slot B: REFUSED, its kernel is not the bytes its signed header names")?;
@@ -931,12 +934,7 @@ pub fn update_no_slot_boots_the_recovery_stick(_: &Path, _: &[(String, Vec<u8>)]
     planted_order.insert(1, planted);
     vars::plant_global(&rig.vars, "BootOrder", &planted_order.iter().flat_map(|n| n.to_le_bytes()).collect::<Vec<u8>>())?;
 
-    let mut file = std::fs::File::open(&rig.image).map_err(|e| format!("{}: {e}", rig.image.display()))?;
-    let a = image::slot_table_of(&mut file)?.slot(Which::A).ok_or("no slot A")?;
-    let mut kernel = image::read_file_on(&mut file, a.boot, toyos_update::slots::KERNEL_FILE)?;
-    drop(file);
-    kernel[100] ^= 0x01;
-    image::overwrite_file_on(&rig.image, a.boot, toyos_update::slots::KERNEL_FILE, &kernel)?;
+    rig.bend_kernel(Which::A)?;
     // The recovery stick's own loader, naming its log partition: the pass
     // that follows the fall.
     let theirs: &'static str = Box::leak(Rig::loader_of(rig.recovery()?)?.into_boxed_str());
@@ -957,6 +955,52 @@ pub fn update_no_slot_boots_the_recovery_stick(_: &Path, _: &[(String, Vec<u8>)]
         return Err(format!("the pass fell by {falls:?}, where once, past Boot{planted:04X} to the recovery stick's entry ({owed:?}), is owed"));
     }
     eprintln!("  [update] {}; the recovery stick's loader took the machine", falls[0]);
+    drop(fell);
+    let _ = std::fs::remove_dir_all(&rig.scratch);
+    Ok(())
+}
+
+/// What the loader's panic handler says of a failed pass with nothing behind
+/// its own entry.
+const NO_ENTRY: &str = "this pass failed, and there is no entry to fall to";
+
+/// **A failed pass with no entry behind its own powers the machine off**,
+/// never resetting into the same failure: slot A's kernel carries a flipped
+/// byte and slot B holds no image, so no slot verifies, and every entry behind
+/// the stick's in `BootOrder` is made inactive (`LOAD_OPTION_ACTIVE`, UEFI 2.10
+/// §3.1.3, cleared). The pass says so, and QEMU, which takes every reset here,
+/// exits after that one pass.
+pub fn update_no_entry_powers_off(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let rig = Rig::stage("update-no-entry")?;
+    // The firmware's own entries, which its first boot writes.
+    drop(rig.launch("Slots: the table marks"));
+    rig.powered_off_cleanly()?;
+    let order = vars::global(&rig.vars, "BootOrder")?;
+    let order: Vec<u16> = order.chunks(2).map(|w| u16::from_le_bytes([w[0], w[1]])).collect();
+    let (current, behind) = order.split_first().ok_or("the firmware wrote an empty BootOrder")?;
+    for n in behind {
+        let name = format!("Boot{n:04X}");
+        let mut option = vars::global(&rig.vars, &name)?;
+        option[0] &= !1;
+        vars::plant_global(&rig.vars, &name, &option)?;
+    }
+    rig.bend_kernel(Which::A)?;
+    let mut fell = rig.launch("Boot entries: this pass failed");
+    let fall = fell.boot_log().lines().find(|l| l.contains("this pass failed")).unwrap_or_default().to_string();
+    if !fall.contains(NO_ENTRY) {
+        let state = fell.boot_log().lines().find(|l| l.contains("this pass was booted as")).unwrap_or_default().to_string();
+        return Err(format!(
+            "with Boot{current:04X}'s followers {behind:04X?} made inactive, the pass fell by {fall:?} ({state:?}), where {NO_ENTRY:?} is owed"
+        ));
+    }
+    let after = fell.await_exit(std::time::Duration::from_secs(30)).map_err(|why| format!("the machine did not power off after {fall:?}: {why}"))?;
+    let all = format!("{}{after}", fell.boot_log());
+    said(&all, &["Slot A: REFUSED, its kernel is not the bytes its signed header names", "Slots: no slot verifies"])?;
+    let passes = all.matches(bootlog::LOADER_FIRST_LINE).count();
+    if passes != 1 {
+        return Err(format!("the loader ran {passes} passes, where one that powers the machine off is owed:\n{all}"));
+    }
+    eprintln!("  [update] {fall}");
     drop(fell);
     let _ = std::fs::remove_dir_all(&rig.scratch);
     Ok(())

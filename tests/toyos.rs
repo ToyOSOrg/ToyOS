@@ -830,11 +830,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("update_refused_pass_credits_no_image", Sched::Parallel, Tier::Nightly),
     // The loader writes the firmware's boot variables on the running system's
     // request: a boot of another stick once, its own entry first, and the
-    // recovery stick behind it where no slot verifies. Boots of two sticks,
-    // nightly like the rest of the machine's.
+    // recovery stick behind it where no slot verifies, or a power-off where
+    // nothing is behind it. Nightly like the rest of the machine's.
     ("update_boot_next_boots_the_entry_once", Sched::Parallel, Tier::Nightly),
     ("update_boot_first_puts_the_loader_first", Sched::Parallel, Tier::Nightly),
     ("update_no_slot_boots_the_recovery_stick", Sched::Parallel, Tier::Nightly),
+    ("update_no_entry_powers_off", Sched::Parallel, Tier::Nightly),
     ("update_trial_writes_nothing_of_the_kept_slot", Sched::Parallel, Tier::Nightly),
     // The bench: `toyos-metal` delivers a staged boot to a machine running
     // ToyOS alone with `update --once`, swaps its netd, hands it back and
@@ -1630,6 +1631,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_boot_next_boots_the_entry_once", &[]),
     ("update_boot_first_puts_the_loader_first", &[]),
     ("update_no_slot_boots_the_recovery_stick", &[]),
+    ("update_no_entry_powers_off", &[]),
     ("update_trial_writes_nothing_of_the_kept_slot", &[]),
     // The boot it delivers is staged as the metal profile stages it, with the
     // swap rehearsal's hold job on it.
@@ -15498,6 +15500,7 @@ fn run_machine_test(
         "update_no_slot_boots_the_recovery_stick" => {
             common::update::update_no_slot_boots_the_recovery_stick(test_config, c_bins, rust_bins)
         }
+        "update_no_entry_powers_off" => common::update::update_no_entry_powers_off(test_config, c_bins, rust_bins),
         "update_trial_writes_nothing_of_the_kept_slot" => {
             common::update::update_trial_writes_nothing_of_the_kept_slot(test_config, c_bins, rust_bins)
         }
