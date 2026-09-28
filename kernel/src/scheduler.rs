@@ -386,7 +386,12 @@ pub fn leave_ring3_if_due() {
             unreachable!("leave_ring3_if_due: a stopped task was dispatched again");
         }
         SafePoint::Exit => {
+            // `IF` set across the teardown, as a syscall's exit runs it: its
+            // closes and address-space drop are no interrupt latency. The
+            // depth stays this boundary's, which is `do_preempt`'s own.
+            crate::arch::cpu::enable_interrupts();
             process::leave(None);
+            crate::arch::cpu::disable_interrupts();
             driver::pass(Dispose::Exit);
             unreachable!("leave_ring3_if_due: returned from the exit pass");
         }
