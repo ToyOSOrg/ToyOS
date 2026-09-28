@@ -622,9 +622,7 @@ impl<X: SchedPayload> CpuSched<X> {
     /// does not exist.
     ///
     /// One permanently-RT thread that never parks then holds a CPU's dying list
-    /// closed for ever, no sibling can rescue the corpse, and
-    /// `scheduler::retire_task`'s wall-clock tripwire panics the kernel from a
-    /// legal `Rights::RT` workload. Invariant I14 must catch it;
+    /// closed for ever, and no sibling can rescue the corpse. Invariant I14 must catch it;
     /// `scenarios::old_rt_starved_the_corpse` is the gate that proves it does,
     /// and it is the *other* direction of the pair
     /// `scenarios::old_migrate_kept_the_corpse` opens.
@@ -1288,8 +1286,7 @@ pub const MAX_PASS_NS: u64 = 200_000;
 ///   under one permanently-RT thread that never parks — `Rights::RT` is
 ///   capability-gated but `soundd` holds it and `SYS_RT_ENTER` has no
 ///   revocation, so a killed thread of an RT process on that CPU never reaches
-///   `Hw::release`, and `scheduler::retire_task`'s tripwire panics the kernel
-///   from a legal workload. That is the kernel crashing from userland.
+///   `Hw::release`.
 ///
 /// So the corpse ages. Once its head has stood in the dying list for this long,
 /// the next pick takes it ahead of the RT band for one [`DYING_CHUNK_NS`], then
@@ -1313,8 +1310,7 @@ pub const DYING_AGE_NS: u64 = QUANTUM_NS;
 /// **This is the number invariant I4's bound grows by**, so it is as small as
 /// the other side can afford. Under saturated RT an unwind is delivered at one
 /// chunk per `DYING_AGE_NS + DYING_CHUNK_NS`, so the corpse's release is
-/// stretched by 11× — which is a term of `scheduler::retire_task`'s `GIVE_UP`
-/// derivation. A larger chunk buys that term
+/// stretched by 11×. A larger chunk buys that
 /// back and spends it on RT latency; `soundd` is the process that pays, and 1 ms
 /// of added worst-case jitter once per 10 ms is the trade this picks.
 pub const DYING_CHUNK_NS: u64 = QUANTUM_NS / 10;
@@ -1843,14 +1839,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// scheduler states as law — a ready real-time task preempts the normal
     /// band — outright.
     ///
-    /// Asking only `rq.has_rt()` is the other absolute and it is worse, because
-    /// its failure is a kernel panic: one permanently-RT thread that never parks
-    /// holds this CPU's dying list closed for ever, no sibling CPU can rescue a
-    /// corpse (`hand_off` refuses to migrate a killed task, `pop_surplus` reads
-    /// `fair` only), and `scheduler::retire_task`'s tripwire fires. That is
+    /// Asking only `rq.has_rt()` is the other absolute and it is worse: one
+    /// permanently-RT thread that never parks holds this CPU's dying list closed
+    /// for ever, and no sibling CPU can rescue a corpse (`hand_off` refuses to
+    /// migrate a killed task, `pop_surplus` reads `fair` only). That is
     /// reachable from a legal `Rights::RT` workload — `soundd` holds the right
-    /// and `SYS_RT_ENTER` has no revocation — so it is the kernel crashing from
-    /// userland.
+    /// and `SYS_RT_ENTER` has no revocation.
     ///
     /// So the question asked here is `rq.has_rt()` **unless the head of the
     /// dying list has waited [`DYING_AGE_NS`]**, and an aged corpse is
@@ -3396,11 +3390,9 @@ mod tests {
 
     /// **The other direction of the same law.** The three tests above say a
     /// corpse never starves the RT band.
-    /// This one says the RT band never starves the corpse, because unqualified
-    /// RT precedence over the dying list ends in a kernel panic:
-    /// `scheduler::retire_task` blocks on `Hw::release` behind a tripwire, and
-    /// one permanently-RT thread that never parks holds this CPU's dying list
-    /// closed for ever. `hand_off` refuses to migrate a killed task and
+    /// This one says the RT band never starves the corpse: under unqualified RT
+    /// precedence over the dying list, one permanently-RT thread that never
+    /// parks holds this CPU's dying list closed for ever. `hand_off` refuses to migrate a killed task and
     /// `pop_surplus` reads `fair` only, so no sibling CPU can rescue it.
     ///
     /// The workload is legal: `Rights::RT` is capability-gated, `soundd` holds
@@ -3507,11 +3499,6 @@ mod tests {
     /// saturated RT band the corpse gets `DYING_CHUNK_NS` out of every
     /// `DYING_AGE_NS + DYING_CHUNK_NS`, so an unwind's wall-clock length is
     /// stretched by that factor and no more.
-    ///
-    /// It is a separate test because it is the term
-    /// `scheduler::retire_task`'s `GIVE_UP` derivation carries, and a change
-    /// that quietly widened `DYING_AGE_NS` would leave the gate above green
-    /// while making that tripwire wrong.
     #[test]
     // Deliberately asserts on constants: the test exists to state the
     // relations between them, with messages a `const` block's bare assert
@@ -3521,8 +3508,7 @@ mod tests {
         let stretch = (DYING_AGE_NS + DYING_CHUNK_NS) / DYING_CHUNK_NS;
         assert_eq!(
             stretch, 11,
-            "`retire_task`'s GIVE_UP prices the unwind at {stretch}x its own CPU \
-             time; the constants say {}",
+            "the unwind is stretched {stretch}x its own CPU time; the constants say {}",
             DYING_AGE_NS + DYING_CHUNK_NS,
         );
         assert!(

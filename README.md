@@ -343,7 +343,7 @@ at your option.
 
 Some of what the repository carries is not ours and is under other terms:
 `userland/doom` is GPL-2.0, `assets/` holds a font, a set of icons, a wallpaper
-and id Software's Doom shareware IWAD, `ovmf/` holds EDK II firmware builds,
+and id Software's Doom shareware IWAD,
 and `tests/testcases/` holds TinyCC's test corpus. Third-party crates keep
 their own upstream licenses. **[NOTICE](NOTICE) is the list**, item by item,
 with the licence texts in [licenses/](licenses).

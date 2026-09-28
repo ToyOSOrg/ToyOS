@@ -51,6 +51,9 @@ use toyos_abi::syscall::{self, SyscallError, SERVE_PREFIX, SVC_LABEL};
 const SELF_PATH: &str = "/system/bin/test_rs_kill_while_blocked";
 const SERVICE: &str = "blocked";
 
+/// `process::KILLED_EXIT_CODE`.
+const KILLED: i32 = 137;
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some(role) => child(role),
@@ -184,16 +187,15 @@ fn an_acceptor_killed_in_the_accept() {
 /// all. With either miss the child here is preempted, queued in the dying list,
 /// picked straight back off it and returned to Ring 3, once per tick, forever.
 ///
-/// **The kill is the observation.** `Process::kill` is
-/// `scheduler::retire_task`, which parks until the victim's record is released
-/// at its exit boundary and panics the kernel at its own tripwire when it never
-/// is: on the tree this arm exists to catch the call does not come back, and
-/// that panic is the red.
+/// **What it watches is the victim's exit.** Its one thread publishes that
+/// exit only once it has left at its exit boundary, so a spinner the boundary
+/// misses never ends, and the harness's hang ceiling is what says so.
 fn a_ring_three_spinner_ends_at_its_next_exit_boundary() {
     let mut victim = parked("spin", None);
     victim.kill().expect("kill the spinning child");
-    let _ = victim.wait();
-    println!("  ring 3: a killed spinner reached its last exit boundary, with no syscall to cancel");
+    let code = victim.wait().expect("wait for the killed spinner").code();
+    assert_eq!(code, Some(KILLED), "a child killed while spinning in Ring 3 ended with {code:?}");
+    println!("  ring 3: a killed spinner left at its exit boundary, with no syscall to cancel");
 }
 
 fn child(role: &str) -> ! {

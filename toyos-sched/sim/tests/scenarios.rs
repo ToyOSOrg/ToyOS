@@ -275,10 +275,7 @@ fn old_migrate_keeping_the_corpse_is_caught() {
 /// never dispatched at all, because the pick asked only `rq.has_rt()` and one
 /// permanently-RT thread that never parks answered yes for ever.
 ///
-/// That shape shipped on this branch between the two fixes, and its failure is
-/// not a slow retire: `scheduler::retire_task` blocks behind a wall-clock
-/// tripwire and **panics the kernel**, from a workload that only needs
-/// `Rights::RT` — which `soundd` holds and `SYS_RT_ENTER` never gives back.
+/// That shape shipped on this branch between the two fixes.
 ///
 /// It must be caught by **I14**, on every seed: nothing in this scenario is a
 /// race. The corpse is queued, the RT thread runs, and the only question is
@@ -320,12 +317,6 @@ fn rt_starving_the_corpse_is_caught() {
 /// The positive half of the same pair: with the kill bit read, no schedule of
 /// that workload puts a corpse in transit, and every retire completes well
 /// inside the derived bound.
-///
-/// The measurement is the point. `retire_task`'s guard is a wall clock two
-/// orders of magnitude wider than [`toyos_sched_sim::explore::Outcome::retire_bound`],
-/// so what this reports is how much of that budget the protocol actually spends
-/// — and a change that starts spending it shows up here as a number long before
-/// it shows up on the owner's laptop as a panic.
 #[test]
 fn a_retire_completes_inside_its_derived_bound() {
     let scenario = scenarios::retire_under_balance();

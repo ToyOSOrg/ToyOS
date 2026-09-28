@@ -15,8 +15,7 @@ the victim's own pass answers (`SchedPass::answer_steal_requests`). A CPU
 spinning with `IF` clear takes no pass. If the main thread is queued on that
 CPU, no other CPU can take it, and the kernel panics.
 
-Seen once, in the orchestrator's Fast tier for PR #562 at `2a9c77ee` (a
-two-CPU guest):
+In the orchestrator's Fast tier for PR #562 at `2a9c77ee` (a two-CPU guest):
 
 ```
 [kernel 10.738 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=4 current=None trips=91
@@ -30,6 +29,9 @@ cpu1 was idle with nothing ready, and the main thread (pid 6 tid 0) was on
 neither CPU. Queued behind the spin on cpu0 is the reading that fits all of
 this. Nothing in the capture proves it: no line says which queue held the
 thread.
+
+Also seen in the orchestrator's nightly for PR #536 at its head `069722c3`,
+the same panic site, `src/user_ptr.rs:402:13`.
 
 ## Exit condition
 

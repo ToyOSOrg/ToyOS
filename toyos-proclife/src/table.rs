@@ -12,7 +12,7 @@
 //! this crate's model is a `BTreeMap`: an associated iterator type would put
 //! both spellings in the trait for no decision's benefit. A caller that needs
 //! an order sorts what it collected, and the two that do
-//! ([`crate::teardown::exit_set`] and [`crate::reap::finished_pids`]) say so.
+//! ([`crate::teardown::retire_set`] and [`crate::reap::finished_pids`]) say so.
 
 use crate::{Pid, ThreadLocation, Tid};
 
@@ -23,13 +23,18 @@ pub trait Lifecycle {
     /// builds, but nothing here relies on that.
     fn main_tid(&self) -> Tid;
 
-    /// Whether some path has claimed this process's teardown.
-    fn tearing_down(&self) -> bool;
+    /// The exit code of the teardown some path has claimed, or `None`.
+    fn teardown_code(&self) -> Option<i32>;
 
-    /// Raise the teardown claim. [`crate::teardown::claim_teardown`] is the one
+    /// Whether some path has claimed this process's teardown.
+    fn tearing_down(&self) -> bool {
+        self.teardown_code().is_some()
+    }
+
+    /// Raise the teardown claim, with the code the exit publishes. [`crate::teardown::claim_teardown`] is the one
     /// caller — the flag exists to be claimed exactly once, so raising it
     /// anywhere else is what that function is written to prevent.
-    fn begin_teardown(&mut self);
+    fn begin_teardown(&mut self, code: i32);
 
     /// Where `tid` is, or `None` for a thread this process does not have.
     fn location(&self, tid: Tid) -> Option<ThreadLocation>;

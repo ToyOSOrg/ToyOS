@@ -22,7 +22,7 @@ use crate::sched::payload::{KShare, KernelLock, TaskHandle, ThreadSched};
 use crate::sched::reap_gate::ReapGate;
 use crate::sched::futex;
 use crate::sync::Lock;
-use crate::time::{Cadence, Deadline, Duration, Tripwire};
+use crate::time::{Cadence, Deadline, Duration};
 use crate::DirectMap;
 
 pub use crate::sched::driver::{
@@ -342,6 +342,12 @@ pub fn yield_now() {
     driver::pass(Dispose::Yield);
 }
 
+/// Whether [`yield_now`] may be called where the running context stands.
+#[cfg(feature = "boot-actuators")]
+pub fn may_yield() -> bool {
+    crate::preempt::count() == blocking_baseline()
+}
+
 /// Unified preempt entry: the Ring 3 timer path, `kernel_exit_to_user_check`
 /// and the `preempt::enable` slow path all funnel through here.
 #[track_caller]
@@ -380,25 +386,22 @@ pub fn leave_ring3_if_due() {
             unreachable!("leave_ring3_if_due: a stopped task was dispatched again");
         }
         SafePoint::Exit => {
-            // The retirer owns teardown; a mark_thread_zombie here would race it.
+            // `IF` set across the teardown, as a syscall's exit runs it: its
+            // closes and address-space drop are no interrupt latency. The
+            // depth stays this boundary's, which is `do_preempt`'s own.
+            crate::arch::cpu::enable_interrupts();
+            process::leave(None);
+            crate::arch::cpu::disable_interrupts();
             driver::pass(Dispose::Exit);
             unreachable!("leave_ring3_if_due: returned from the exit pass");
         }
     }
 }
 
+/// The exit pass of a thread that has left its process (`process::leave`).
 #[track_caller]
-pub fn exit_current(code: i32) -> ! {
+pub fn exit_current() -> ! {
     assert_baseline(BASELINE_TRAP);
-    {
-        let mut guard = process::PROCESS_TABLE.lock();
-        let table = guard.as_mut().unwrap();
-        let tid = percpu::current_tid().unwrap();
-        let pid = percpu::current_pid().unwrap();
-        process::mark_thread_zombie(table, pid, tid, code);
-    }
-    // The table says zombie now, which a sweep counts as nothing left to stop.
-    crate::quiesce::note_progress();
     driver::pass(Dispose::Exit);
     unreachable!("exit_current: returned from the exit pass");
 }
@@ -499,68 +502,12 @@ pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
     futex::watch_of(phys_addr).post_n(phys_addr.phys(), count) as u64
 }
 
-/// Retire a thread and wait until its record — kernel stack and
-/// address-space reference — is released. The state word reading `Dead` is
-/// not enough: that payload is freed by the pass after the one that publishes it.
-#[track_caller]
-pub fn retire_task(sched: &ThreadSched) {
-    // Also on the early-return path below, where no park happens and the two
-    // asserts inside the wait would never run.
-    assert_baseline(BASELINE_TRAP);
-    if let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) {
-        if let Some(handle) = driver::current_shared() {
-            assert!(
-                !Arc::ptr_eq(&handle, &sched.shared),
-                "retire_task: cannot retire self ({})",
-                TaskId(pid, tid),
-            );
-        }
-    }
-    if sched.handle.released() {
-        return;
-    }
+/// Set a thread's kill bit and ask its CPU for a safe point; returns at once.
+/// The thread leaves at that safe point: `process::leave`.
+pub fn post_retire(sched: &ThreadSched) {
     preempt_off(|p| {
         toyos_sched::retire::begin(&sched.shared).post(cpus(), &HW, p);
     });
-    /// Re-poll rate for the liveness backstop; the release wake is what
-    /// actually ends the wait.
-    const RECHECK: Cadence = Cadence::every(
-        Duration::from_millis(50),
-        "two hundred re-polls inside the tripwire, on a thread that is otherwise parked",
-    );
-    /// Superseded by the scheduling-reservations design; kept because a
-    /// known-wrong constant is still what this kernel runs
-    /// (`issues/kernel/scheduler-pass-blocks-in-xhci.md`).
-    const GIVE_UP: Tripwire = Tripwire::absurd(
-        Duration::from_secs(10),
-        "four pass prologues on xHCI's own 2 s deadline, two quanta, and an unwind \
-         the real-time band may stretch elevenfold; past this the wake was lost",
-    );
-    let give_up = Deadline::at(crate::clock::now() + GIVE_UP.duration());
-    let parkable = Parkable::at_entry();
-    // Uncancellable: a killed retirer cannot propagate a cancel with the
-    // retire half done; the tripwire above bounds it instead.
-    let Some(armed) = watch::arm(
-        sched.handle.watch(),
-        sched.shared.key().0,
-        WaitClass::Other,
-    ) else {
-        panic!("retire_task: no current task to park");
-    };
-    while !sched.handle.released() {
-        if give_up.reached(crate::clock::now()) {
-            panic!(
-                "retire_task: task not released after {}: {:?}",
-                GIVE_UP.duration(),
-                sched.shared.state()
-            );
-        }
-        watch::wait_uncancellable(
-            &parkable,
-            &armed,
-            Deadline::at(crate::clock::now() + RECHECK.duration()),
-        );
-    }
 }
 
 /// Whether [`reap_finished`] has anything to do; claimed by whichever idle

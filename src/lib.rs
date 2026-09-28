@@ -12,12 +12,14 @@ pub mod clippy;
 pub mod compiler;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
+pub mod firmware;
 pub mod flags;
 pub mod forkcheck;
 pub mod hostws;
 pub mod icmp;
 pub mod identity;
 pub mod image;
+pub mod kernelconsole;
 pub mod signing;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
 /// but its own tests.

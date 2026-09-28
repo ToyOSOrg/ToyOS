@@ -116,6 +116,9 @@ actuators! {
     /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
     quiesce_last_park = "quiesce-last-park";
 
+    /// The same for the last thread out of its process, between its leaving and its teardown: that teardown is then the stop's last transition.
+    quiesce_last_teardown = "quiesce-last-teardown";
+
     /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
     fat_flush_meta_refuse = "fat-flush-meta-refuse";
 
@@ -518,7 +521,7 @@ actuators! {
     /// Judged by `partition_claim_gives_up`.
     partclaim_root_withheld = "partclaim-root-withheld";
 
-    /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
+    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 
     /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.
