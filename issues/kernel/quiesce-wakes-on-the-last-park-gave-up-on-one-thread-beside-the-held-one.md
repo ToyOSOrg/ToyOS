@@ -17,6 +17,10 @@ FAIL quiesce_wakes_on_the_last_park: the stop gave up on 2 thread(s) that never 
 - PR #555 at `d2656765`.
 - PR #559 at `ac948e6a`.
 
+`quiesce_wakes_on_the_last_teardown`'s boot shares the same shape, in the Fast
+tier: PR #549 at `751e36d9`, `4 of 6 … 2010 ms of a 2010 ms budget over 2
+sweep(s)`. That boot normally counts 5 userland threads.
+
 The earliest is PR #510 at `98e803cb`, recorded in
 `issues/build/quiesce-wakes-on-the-last-park-lost-its-serial-ready-beside-other-guests.md`:
 `stop: 4 of 7 userland thread(s) stopped ... in 2010 ms of a 2010 ms budget`.
@@ -49,7 +53,10 @@ enabled test checks any of these:
 - that a band, a park or an exit wakes the stop, rather than its deadline;
 - `in_flight == 0` with `begun > 0`;
 - the thread census;
-- the `console-queue-at-the-stop` drain.
+- the `console-queue-at-the-stop` drain;
+- that the stop waits for a teardown in flight —
+  `quiesce_wakes_on_the_last_teardown`'s only claim, and the only enabled
+  guest check of it, disabled by this same issue.
 
 `quiesce_refuses_a_second_shutdown` stays green over a lost post. It judges the
 stop only by `stopped_the_machine`, so a stop that spends its budget and then
@@ -60,7 +67,9 @@ finds everything stopped passes it.
 - an instrument that names each thread still running when the stop gives up,
   with its name, tid, cpu and scheduler state;
 - the mechanism it names fixed;
-- this test green in a Fast tier beside other guests;
+- this test green beside other guests;
+- `quiesce_wakes_on_the_last_teardown` — the stop waits for a teardown in
+  flight — green beside other guests;
 - an enabled guest test checking each claim listed above.
 
 Owner: the stop path, `kernel/src/quiesce.rs`; held by the orchestrator.

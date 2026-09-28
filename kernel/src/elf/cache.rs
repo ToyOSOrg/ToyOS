@@ -154,17 +154,6 @@ static SO_CACHE: Lock<Vec<(String, CachedLib)>> = Lock::new(Vec::new());
 /// this admits one of those and refuses a second.
 const BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
-/// `so-cache-tiny`'s number, in reach of a guest. Only the magnitude moves.
-const TINY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
-
-fn budget_bytes() -> usize {
-    if crate::actuator::so_cache_tiny() {
-        TINY_BUDGET_BYTES
-    } else {
-        BUDGET_BYTES
-    }
-}
-
 /// Every cached image's allocation, summed. The caller holds the lock.
 fn held_bytes(cache: &[(String, CachedLib)]) -> usize {
     cache.iter().map(|(_, c)| c.alloc.size()).sum()
@@ -239,15 +228,14 @@ pub fn cache_loaded_lib(
         return outcome.map(|cloned| cloned.unwrap_or_else(|| owned(alloc)));
     }
     // Under the lock that publishes: two concurrent loads must not both find room.
-    let budget = budget_bytes();
     let (held, entries) = (held_bytes(&cache), cache.len());
-    let Some(after) = held.checked_add(alloc.size()).filter(|b| *b <= budget) else {
+    let Some(after) = held.checked_add(alloc.size()).filter(|b| *b <= BUDGET_BYTES) else {
         drop(cache);
         // Both allocations drop here, so the refusal gives back what the load took.
         log!(
             "dlopen: {} would take the shared-object cache to {} bytes over {} entries, past its \
              {}-byte budget; refused, and nothing is evicted for it",
-            path, held.saturating_add(alloc.size()), entries + 1, budget
+            path, held.saturating_add(alloc.size()), entries + 1, BUDGET_BYTES
         );
         return Err(SyscallError::ResourceExhausted);
     };
@@ -259,7 +247,7 @@ pub fn cache_loaded_lib(
     log!(
         "dlopen: cached {} with {} bind + {} tpoff64 + {} tpoff32 + {} dtpmod64 + {} dtpoff64 pre-scanned relocs, cache now {} of {} bytes",
         path, relocs.bind.len(), relocs.tpoff64.len(), relocs.tpoff32.len(),
-        relocs.dtpmod64.len(), relocs.dtpoff64.len(), after, budget
+        relocs.dtpmod64.len(), relocs.dtpoff64.len(), after, BUDGET_BYTES
     );
 
     Ok(snapshot.into_lib(

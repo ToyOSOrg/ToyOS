@@ -1,19 +1,22 @@
-//! Two threads the kernel's `quiesce-last-*` actuators can hold, and a reboot.
+//! The threads the kernel's `quiesce-last-*` actuators can hold, and a reboot.
 //!
-//! Both carry [`toyos_quiesce::LAST_THREAD`]'s name. One parks for longer than
-//! any stop's budget and the other exits at once. `quiesce-last-park` holds
-//! the first inside its `SYS_NANOSLEEP`, and `quiesce-last-exit` holds the
-//! second inside its `SYS_THREAD_EXIT`. The kernel holds the reset itself until
-//! one of them is held, so this program orders nothing.
+//! They carry [`toyos_quiesce::LAST_THREAD`]'s name. One parks for longer than
+//! any stop's budget, and one is the only thread of a child that exits at once.
+//! `quiesce-last-park` holds the first inside its `SYS_NANOSLEEP`, and
+//! `quiesce-last-teardown` the second between leaving its process and tearing
+//! it down. The kernel holds the reset itself until one of them is held, so
+//! this program orders nothing.
 //!
-//! Nothing here asserts: `common::power::quiesce_wakes_on_the_last_park` and
-//! `quiesce_wakes_on_the_last_exit` read the kernel's hold line and its `stop:`
-//! record.
+//! Nothing here asserts: the kernel's hold line and its `stop:` record are
+//! read elsewhere.
 
+use std::process::Command;
 use std::time::Duration;
 
 use toyos::power::Stop;
 use toyos_quiesce::LAST_THREAD;
+
+const SELF_PATH: &str = "/system/bin/test_rs_quiesce_last";
 
 /// Longer than any stop's budget: a park the timer ends inside the stop would
 /// come back to Ring 3 and be banded there, and that band's post would wake the
@@ -21,12 +24,15 @@ use toyos_quiesce::LAST_THREAD;
 const PARKED_FOR: Duration = Duration::from_secs(3_600);
 
 fn main() {
-    for body in [park as fn(), exit] {
-        std::thread::Builder::new()
-            .name(LAST_THREAD.into())
-            .spawn(body)
-            .expect("spawn a thread the kernel may hold");
+    if std::env::args().nth(1).as_deref() == Some("teardown") {
+        toyos_abi::syscall::set_thread_name(LAST_THREAD.as_bytes());
+        std::process::exit(0);
     }
+    std::thread::Builder::new()
+        .name(LAST_THREAD.into())
+        .spawn(park)
+        .expect("spawn a thread the kernel may hold");
+    let _child = Command::new(SELF_PATH).arg("teardown").spawn().expect("spawn a process the kernel may hold");
 
     // Comes back only refused.
     let refused = toyos::power::stop(Stop::Reboot);
@@ -37,5 +43,3 @@ fn main() {
 fn park() {
     std::thread::sleep(PARKED_FOR);
 }
-
-fn exit() {}
