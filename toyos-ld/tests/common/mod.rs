@@ -18,9 +18,9 @@ use toyos_tmpdir::TempDir;
 
 /// How many samples a determinism case takes. Two suffices for a case whose
 /// hazard is wide — each of them is, deliberately, so that a hash order and a
-/// sorted order essentially never coincide. Eight is the margin for the narrow
-/// case somebody adds later: `toyos-cc`'s gate has one hazard of a single stack
-/// slot, and two runs caught it 39 times in 40 where eight caught it 40.
+/// sorted order essentially never coincide. Eight is the margin for a narrow
+/// case somebody adds later: a hazard of a single stack slot was caught by two
+/// runs 39 times in 40 and by eight 40 times.
 pub const RUNS: usize = 8;
 
 /// `mov rax, [rip + disp32]` — the byte sequence Cranelift emits for a GOT load.
