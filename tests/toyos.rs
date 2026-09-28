@@ -658,7 +658,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // none, and a real controller the kernel gave up on driven to a keystroke.
     // Every verdict is a guest's line or the kernel's record of a kill; the one
     // wait is on the guest's own ready line.
-    ("isa_claim_refused_where_the_kernel_drives", Sched::Parallel, Tier::Fast),
+    ("isa_claim_refused_where_the_kernel_drives", Sched::Parallel, Tier::Nightly),
     ("isa_ports_are_the_binders_alone", Sched::Parallel, Tier::Fast),
     ("isa_lines_reach_their_holder", Sched::Parallel, Tier::Nightly),
     // One boot; every verdict is a PPM header field or a console line, and no

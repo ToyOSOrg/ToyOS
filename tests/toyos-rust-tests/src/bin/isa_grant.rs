@@ -97,7 +97,10 @@ fn outb(port: u16, value: u8) {
 fn driven(cap: &SysCap) {
     match claim(cap, I8042) {
         Err(SyscallError::PermissionDenied) => {}
-        other => panic!("isa: the kernel drives the i8042 and a claim on it answered {:?}", other.map(|_| ())),
+        other => panic!(
+            "isa: the kernel drives the i8042 and a claim on it answered {:?}",
+            other.map(|_| ())
+        ),
     }
     println!("isa: the claim on a controller the kernel drives was refused PermissionDenied");
 }
