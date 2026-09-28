@@ -539,7 +539,6 @@ mod tests {
         let ca3 = choose(&a, &rust_dir, &a.join("rust"), fake);
         assert!(!replaced.exists(), "placing a compiler left the one it replaced, which nobody names");
         assert!(ca3.stage2.is_dir() && named.is_dir());
-        drop((mine, ca, again, ca2, committed, kept));
     }
 
     const WORKTREE: &str = "TOYOS_COMPILER_TEST_WORKTREE";

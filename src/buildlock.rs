@@ -556,6 +556,7 @@ pub(crate) mod tests {
     pub(crate) struct Elsewhere {
         child: Child,
         marks: TempDir,
+        released: bool,
     }
 
     impl Elsewhere {
@@ -579,7 +580,7 @@ pub(crate) mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Elsewhere { child, marks }
+            Elsewhere { child, marks, released: false }
         }
 
         pub(crate) fn id(&self) -> u32 {
@@ -588,8 +589,22 @@ pub(crate) mod tests {
 
         /// Let go, and return once the holder has exited.
         pub(crate) fn release(mut self) {
+            self.released = true;
             touch(&self.marks.join("release"));
             assert!(self.child.wait().unwrap().success(), "the holder failed");
+        }
+    }
+
+    impl Drop for Elsewhere {
+        /// An assertion between `hold` and `release` skips `release`; without
+        /// this, the holder it leaked keeps running and its lock held past
+        /// the test that dropped it.
+        fn drop(&mut self) {
+            if self.released {
+                return;
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 
