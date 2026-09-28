@@ -553,7 +553,7 @@ const HOST_SPAWNS: &[Spawn] = &[
     },
     Spawn {
         arg: "arch.qemu()",
-        sites: &[("src/qemu.rs", 1), ("src/ci.rs", 2), ("tests/common/qemu.rs", 1)],
+        sites: &[("src/qemu.rs", 1), ("src/ci.rs", 1), ("src/firmware.rs", 1), ("tests/common/qemu.rs", 1)],
         why: "QEMU, the other half of the bar: `Arch::qemu` names `qemu-system-x86_64` and \
               `qemu-system-aarch64`, and `check_prerequisites` requires the one being booted",
     },
@@ -741,6 +741,13 @@ const CI_PACKAGES: &[Package] = &[
         name: "ninja-build=1.11.1-2",
         why: "the same Ninja, pinned to the version Ubuntu 24.04 released, on the nightly's \
               toolchain runner",
+    },
+    Package {
+        name: "ovmf-generic",
+        why: "the package that carries the descriptor Debian's QEMU declares for q35 \
+              (src/firmware.rs): Debian's edk2 build, named rather than left to \
+              `qemu-system-x86`'s Recommends or pulled in by the `ovmf` metapackage, whose \
+              amdsev/inteltdx siblings contribute only memory-mapped descriptors this reader skips",
     },
     Package {
         name: "python3",
