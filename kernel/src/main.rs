@@ -327,8 +327,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     );
     log!("boot: log partition guid {:02x?}", kernel_args.log_partition_guid);
     log!(
-        "boot: rtc utc offset {} minutes (known={}), cmdline {:#x}+{}",
-        kernel_args.rtc_utc_offset_minutes, kernel_args.rtc_utc_offset_known,
+        "boot: cmdline {:#x}+{}",
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
     // Before `mm::init`, which may hand the parameter's memory out. This record

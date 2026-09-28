@@ -55,34 +55,6 @@ pub struct KernelArgs {
     /// Naming the partition is all this does. Whether one with that GUID is on
     /// the disk is the kernel's question, and its answer there may well be no.
     pub log_partition_guid: [u8; 16],
-    /// Minutes to add to the CMOS RTC's own reading to get UTC, as firmware
-    /// reported it in `EFI_TIME::TimeZone`.
-    ///
-    /// The RTC's registers carry a wall clock and no zone, and no two operating
-    /// systems agree on which zone that is: a machine that has ever run Windows
-    /// keeps local time there, one that has only run Linux keeps UTC. Firmware
-    /// is the one party that both knows and can be asked, and `GetTime` is the
-    /// call — a *runtime* service, so it is asked here rather than in the
-    /// kernel, which never maps the runtime.
-    ///
-    /// UEFI's relation is `Localtime = UTC - TimeZone`, so a machine keeping
-    /// local time in UTC+2 reports -120 and the kernel adds -120 minutes to what
-    /// it reads off the CMOS.
-    pub rtc_utc_offset_minutes: i32,
-    /// Whether firmware answered the question above at all.
-    ///
-    /// Zero when `GetTime` failed, or reported `EFI_UNSPECIFIED_TIMEZONE`, or
-    /// named an offset outside the range its own spec gives the field. The
-    /// middle one is the ordinary state of a machine nothing has ever told its
-    /// zone to, and it is what OVMF ships. The kernel then treats the RTC as UTC
-    /// and says so, because with the one party that knows declining to answer
-    /// there is nothing else left to assume.
-    ///
-    /// A flag rather than a sentinel in the field above, for the same reason
-    /// [`Self::boot_partition_present`] is one: `0x7FF` is a value the *wire*
-    /// format defines, and carrying it inward would make every reader of this
-    /// struct know that.
-    pub rtc_utc_offset_known: u32,
     /// The boot parameter, as ASCII with no terminator: comma-separated tokens
     /// read out of `\toyos\cmdline` on the volume the bootloader loaded itself
     /// from. [`root_uuid`] and [`actuators`] are the two readings of it.
@@ -201,15 +173,6 @@ pub fn actuators(cmdline: &str) -> impl Iterator<Item = &str> {
 }
 
 impl KernelArgs {
-    /// Firmware's answer about the zone the RTC keeps, as one value.
-    ///
-    /// The two fields exist because this struct is a C layout shared by two
-    /// binaries; this is where they become the option they describe, and no
-    /// caller inward of here handles the pair.
-    pub fn rtc_utc_offset(&self) -> Option<i32> {
-        (self.rtc_utc_offset_known != 0).then_some(self.rtc_utc_offset_minutes)
-    }
-
     /// The windows firmware named, and none of the array behind them. The
     /// loader is the only writer of the count, so one past the array panics
     /// here rather than clamping.
@@ -238,19 +201,17 @@ const _: () = {
     assert!(offset_of!(KernelArgs, boot_partition_guid) == 128);
     assert!(offset_of!(KernelArgs, boot_partition_present) == 144);
     assert!(offset_of!(KernelArgs, log_partition_guid) == 148);
-    assert!(offset_of!(KernelArgs, rtc_utc_offset_minutes) == 164);
-    assert!(offset_of!(KernelArgs, rtc_utc_offset_known) == 168);
-    assert!(offset_of!(KernelArgs, cmdline_addr) == 176);
-    assert!(offset_of!(KernelArgs, cmdline_len) == 184);
-    assert!(offset_of!(KernelArgs, root_bridge_window_count) == 192);
-    assert!(offset_of!(KernelArgs, root_bridge_windows) == 200);
-    assert!(offset_of!(KernelArgs, root_image_addr) == 1224);
-    assert!(offset_of!(KernelArgs, root_image_len) == 1232);
-    assert!(offset_of!(KernelArgs, root_partition_guid) == 1240);
-    assert!(offset_of!(KernelArgs, loader_entry_tsc) == 1256);
-    assert!(offset_of!(KernelArgs, loader_handoff_tsc) == 1264);
-    assert!(offset_of!(KernelArgs, root_read_tsc) == 1272);
-    assert!(size_of::<KernelArgs>() == 1280);
+    assert!(offset_of!(KernelArgs, cmdline_addr) == 168);
+    assert!(offset_of!(KernelArgs, cmdline_len) == 176);
+    assert!(offset_of!(KernelArgs, root_bridge_window_count) == 184);
+    assert!(offset_of!(KernelArgs, root_bridge_windows) == 192);
+    assert!(offset_of!(KernelArgs, root_image_addr) == 1216);
+    assert!(offset_of!(KernelArgs, root_image_len) == 1224);
+    assert!(offset_of!(KernelArgs, root_partition_guid) == 1232);
+    assert!(offset_of!(KernelArgs, loader_entry_tsc) == 1248);
+    assert!(offset_of!(KernelArgs, loader_handoff_tsc) == 1256);
+    assert!(offset_of!(KernelArgs, root_read_tsc) == 1264);
+    assert!(size_of::<KernelArgs>() == 1272);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
     assert!(align_of::<RootBridgeWindow>() == 8);
@@ -332,8 +293,6 @@ mod tests {
         boot_partition_guid: [0; 16],
         boot_partition_present: 0,
         log_partition_guid: [0; 16],
-        rtc_utc_offset_minutes: 0,
-        rtc_utc_offset_known: 0,
         cmdline_addr: 0,
         cmdline_len: 0,
         root_bridge_window_count: 0,

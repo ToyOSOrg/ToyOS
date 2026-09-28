@@ -1345,7 +1345,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Weekly),
     ("wall_clock_no_century", Sched::Parallel, Tier::Weekly),
     ("wall_clock_century_register", Sched::Parallel, Tier::Weekly),
-    ("wall_clock_zone", Sched::Parallel, Tier::Weekly),
+    ("wall_clock_utc", Sched::Parallel, Tier::Weekly),
     // `xhci_slow_connect`'s shape against the disk's port, but its actuator
     // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
     // so what it stages is an ordering with no wall-clock margin on either
@@ -1614,7 +1614,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("wall_clock_rtc_unstable", &["test_rs_wall_clock_now"]),
     ("wall_clock_no_century", &["test_rs_wall_clock_now"]),
     ("wall_clock_century_register", &["test_rs_wall_clock_now"]),
-    ("wall_clock_zone", &["test_rs_wall_clock_now"]),
+    ("wall_clock_utc", &["test_rs_wall_clock_now"]),
     ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
@@ -11615,9 +11615,7 @@ fn run_machine_test(
         "wall_clock_century_register" => {
             common::wallclock::century_from_the_register(test_config, c_bins, rust_bins)
         }
-        "wall_clock_zone" => {
-            common::wallclock::zone_from_firmware(test_config, c_bins, rust_bins)
-        }
+        "wall_clock_utc" => common::wallclock::rtc_is_utc(test_config, c_bins, rust_bins),
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
         "root_candidate_malformed" => {
             common::volumes::root_candidate_malformed(test_config, c_bins, rust_bins)

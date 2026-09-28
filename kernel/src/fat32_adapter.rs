@@ -653,10 +653,10 @@ pub struct FatFs {
     repair_named: RepairNotice,
 }
 
-/// What to stamp on an entry: reads `clock` directly, in local time as FAT
-/// requires — the VFS's `mtime` is nanoseconds since boot, not a time of day.
+/// What to stamp on an entry: reads `clock` directly — the VFS's `mtime` is
+/// nanoseconds since boot, not a time of day.
 fn now() -> FatTime {
-    crate::clock::local_secs().map_or(FatTime::EPOCH, FatTime::from_unix_secs)
+    crate::clock::utc_secs().map_or(FatTime::EPOCH, FatTime::from_unix_secs)
 }
 
 /// What one of `toyos-fat32`'s errors means to the [`FileSystem`] caller;

@@ -155,8 +155,7 @@ fn boot_and_read(
     writeln!(qemu.stdin_mut(), "run echo {WINDOW_MARKER}")
         .map_err(|e| format!("stage the between-tests window: {e}"))?;
     qemu.flush_stdin();
-    // What the two clock syscalls answer, which nothing on the volume can show:
-    // the file name is local time and `SYS_CLOCK_EPOCH` serves UTC.
+    // What the two clock syscalls answer, which nothing on the volume can show.
     let probe = qemu.run_test("test_rs_wall_clock_now", Duration::from_secs(30));
     log.push_str(&probe.before);
     log.push_str(&probe.stdout);
@@ -188,36 +187,23 @@ fn boot_and_read(
     Ok((entries, log))
 }
 
-/// A firmware-named zone separates local time from UTC, in the direction UEFI
-/// defines.
-///
-/// The clock the RTC reads is local by firmware's account, so the file name and
-/// every FAT stamp stay on the staged instant; only `SYS_CLOCK_EPOCH` moves.
-/// UEFI's relation is `Localtime = UTC - TimeZone`, so the two hours east this
-/// stages report -120 and UTC comes out *behind* the RTC — the sign that a
-/// reader of the field gets backwards, and the one that would put a dual-booted
-/// laptop four hours out rather than two.
-pub fn zone_from_firmware(
+/// The RTC keeps UTC: the file name, its FAT stamp and `SYS_CLOCK_EPOCH` all
+/// sit on the staged instant.
+pub fn rtc_is_utc(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    const PARAMS: &[&str] = &["rtc-zone-east"];
-    /// What `clock::init_wall` stages, in seconds: two hours east of UTC.
-    const OFFSET_SECS: i64 = -120 * 60;
-
     let (entries, log) =
-        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-zone.img", PARAMS, &[])?;
+        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-utc.img", &[], &[])?;
     let logs = logs(&entries);
 
     let [only] = logs.as_slice() else {
         return Err(format!("the volume holds {} logs, wanted one: {}", logs.len(), names(&logs)));
     };
-    // Unmoved: FAT stores local time by specification, and so does the name.
     if !only.name.starts_with(RTC_BASE_DATE) {
         return Err(format!(
-            "a zone moved this boot's *local* time: the log is {} and the host staged \
-             {RTC_BASE}\n{}",
+            "the log is {} and the host staged {RTC_BASE}\n{}",
             only.name,
             clock_lines(&log)
         ));
@@ -225,7 +211,8 @@ pub fn zone_from_firmware(
     let stamp_drift = only.modified - RTC_BASE_SECS;
     if !(0..=MAX_BOOT_DRIFT_SECS).contains(&stamp_drift) {
         return Err(format!(
-            "a zone moved this boot's FAT timestamp by {stamp_drift}s, and FAT stores local time"
+            "this boot's FAT timestamp is {stamp_drift}s from the staged instant\n{}",
+            clock_lines(&log)
         ));
     }
 
@@ -235,21 +222,14 @@ pub fn zone_from_firmware(
             clock_lines(&log)
         ));
     };
-    let drift = epoch - (RTC_BASE_SECS + OFFSET_SECS);
+    let drift = epoch - RTC_BASE_SECS;
     if !(0..=MAX_BOOT_DRIFT_SECS).contains(&drift) {
-        let unshifted = epoch - RTC_BASE_SECS;
         return Err(format!(
-            "with firmware naming -120 minutes, `SYS_CLOCK_EPOCH` answered {epoch}: {drift}s from \
-             the UTC that implies, and {unshifted}s from the RTC's own reading. Zero for the \
-             second means the offset was dropped; {}s means its sign is inverted\n{}",
-            -OFFSET_SECS * 2,
+            "`SYS_CLOCK_EPOCH` answered {epoch}, {drift}s from the staged instant\n{}",
             clock_lines(&log)
         ));
     }
-    eprintln!(
-        "  [clock] firmware naming -120 minutes: {} keeps local time, epoch is {}s behind it",
-        only.name, -OFFSET_SECS
-    );
+    eprintln!("  [clock] {} and epoch {epoch} sit on the staged instant", only.name);
     Ok(())
 }
 

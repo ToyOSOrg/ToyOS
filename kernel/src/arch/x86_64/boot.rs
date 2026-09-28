@@ -102,7 +102,7 @@ pub fn clock(args: &KernelArgs) {
     let hpet_base = acpi::find_hpet_base(args.rsdp_addr)
         .expect("ACPI: HPET not found");
     super::hpet::calibrate_counter(hpet_base);
-    // Century register and time zone both come from ACPI/firmware, not the RTC's own registers.
+    // The century register comes from ACPI, not the RTC's own registers.
     let century_reg = match acpi::rtc_century_register(args.rsdp_addr) {
         Ok(reg) => reg,
         Err(e) => {
@@ -110,7 +110,7 @@ pub fn clock(args: &KernelArgs) {
             None
         }
     };
-    crate::clock::init_wall(century_reg, args.rtc_utc_offset());
+    crate::clock::init_wall(century_reg);
 }
 
 /// The per-CPU timer, once the clock converts its bound.

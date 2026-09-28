@@ -62,8 +62,7 @@
 //! rule `UNDATED_STEM` was written under in the first place.
 //!
 //! **Not shipped as a permanent answer.** The clean fix is one field:
-//! `SYS_CLOCK_REALTIME` answering a full civil date rather than `h:m:s`, or a
-//! call handing back the offset the kernel already holds in `UTC_OFFSET_SECS`.
+//! `SYS_CLOCK_REALTIME` answering a full civil date rather than `h:m:s`.
 //! An ABI change is the owner's, so this recovers what is recoverable and
 //! refuses the rest rather than guessing on its own authority.
 //!

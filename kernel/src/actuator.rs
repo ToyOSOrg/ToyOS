@@ -500,9 +500,6 @@ actuators! {
     /// Make the century register read `0x21`.
     rtc_century_next = "rtc-century-next";
 
-    /// Make firmware name its own timezone.
-    rtc_zone_east = "rtc-zone-east";
-
     /// Run the leak-rollback controls (device mint, FAT reopen) after mount.
     leak_rollback_selftest = "leak-rollback-selftest";
 
