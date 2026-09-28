@@ -19,7 +19,7 @@ use super::virtio::{BufDir, UsedRingConsumer, VirtioDevice, Virtqueue, Virtqueue
                     VIRTIO_F_VERSION_1};
 use super::DmaPool;
 use crate::log;
-use crate::mm::paging::CachePolicy;
+use crate::mm::policy::CachePolicy;
 use crate::mm::{Dma, Mmio};
 use crate::object::shm::Region;
 use crate::sync::Lock;

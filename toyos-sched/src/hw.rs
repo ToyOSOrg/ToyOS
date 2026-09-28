@@ -86,8 +86,6 @@ pub trait Kicker: Sync {
 /// one-shot timer, interrupt gate, halt, resched request, trace sink. Split
 /// from [`Hw`] so an implementor needs no [`SchedPayload`] to provide it.
 pub trait Machine: Kicker + 'static {
-    type IrqGuard;
-
     /// Sampled ONCE per pass by the driver and threaded as a value — the
     /// core never reads the clock mid-flight.
     fn now(&self) -> Nanos;
@@ -99,19 +97,9 @@ pub trait Machine: Kicker + 'static {
 
     fn stop_timer(&self);
 
-    /// Kernel: cli/sti RAII. Sim: gates event delivery for this vcpu.
-    ///
-    /// Has no caller in either world, and does **not** fit the site it looks
-    /// like it should — the idle loop's cli / final recheck / sti;hlt: both exits
-    /// from that recheck must *set* IF unconditionally — the halt exit because
-    /// `sti;hlt` is one atom, the stay-awake exit because panic recovery
-    /// enters the idle loop with IF already 0 — and an RAII guard restores
-    /// the caller's flags instead.
-    fn irq_guard(&self) -> Self::IrqGuard;
-
     /// Enable interrupts and halt, atomically — on x86 the `sti;hlt` pair and
     /// its STI shadow, which is why this is one operation and not an
-    /// [`Self::irq_guard`] drop followed by a halt. A wake that lands in
+    /// IRQ-guard drop followed by a halt. A wake that lands in
     /// between would be consumed as an ordinary interrupt and then slept
     /// through. Returns once an interrupt has been taken.
     ///

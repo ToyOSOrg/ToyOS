@@ -117,7 +117,7 @@ Pids come from `IdMap`, which starts at zero and never reuses; pid 1 is the
 **That pid excludes the idle stack, which is the only stack in this kernel whose
 overflow the CPU can turn into a `#DF`.** `percpu::current_pid`/`current_tid`
 are written on every context switch from the incoming task's id
-(`kernel/src/hw.rs`), and the idle context's id is `None`
+(`kernel/src/arch/x86_64/hw.rs`), and the idle context's id is `None`
 (`sched/driver::enter_idle_loop` sets both to `None` before it moves `rsp`). A
 live pid therefore means CPU 1 was running a task. The idle stack is the one
 with an unmapped page under it (`IDLE_GUARD_SIZE`, `guard_kernel_page`), and an

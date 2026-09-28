@@ -7,6 +7,7 @@
 # test, not a library the kernel links.
 [package]
 name = "toyos-userpin"
+description = "The user-copy window's pin invariant, checked over every park interleaving."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

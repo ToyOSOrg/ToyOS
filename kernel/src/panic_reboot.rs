@@ -12,12 +12,10 @@
 //! that states no frequency and has no calibrated clock cannot time anything,
 //! and the arm line says so instead of resetting on a guess.
 //!
-//! The reset is the FADT's, through [`acpi::reboot`]; a machine whose reset
-//! register this kernel could not decode is refused by name and holds, with no
-//! fallback. That register is decoded before `percpu::init_bsp` loads the IDT,
-//! so every panic that can reach this path at all has one to write.
-//!
-//! [`acpi::reboot`]: crate::drivers::acpi::reboot
+//! The reset is the FADT's; a machine whose reset register this kernel could
+//! not decode is refused by name and holds, with no fallback. That register is
+//! decoded before `percpu::init_bsp` loads the IDT, so every panic that can
+//! reach this path at all has one to write.
 
 use crate::arch::cpu;
 use crate::drivers::{acpi, serial};
@@ -165,5 +163,7 @@ pub fn reboot_now() -> ! {
         b"\npanic: no key inside the bound, so nobody is here: returning this machine to \
           firmware\n",
     );
-    acpi::reboot()
+    // Not `acpi::reboot`: its flush waits on the console wire, and a CPU this
+    // panic stopped may be holding it.
+    acpi::reset_now()
 }

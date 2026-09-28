@@ -16,7 +16,7 @@ mod armed {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use crate::log::shard::SHARD_RECORDS;
-    use crate::sched::kthread::{self, OnPanic};
+    use crate::sched::kthread;
 
     /// One-shot for the body-copy injection point, consumed by `mid_body` or, under `log-shared-reservation`, by the outer `inject`.
     static ARMED: AtomicBool = AtomicBool::new(false);
@@ -43,8 +43,7 @@ mod armed {
         }
         crate::log!("lognest start records={SHARD_RECORDS}");
         // A kernel thread, not the syscall that arms it: `IF` is clear for a whole syscall, so injecting there would never test the guard.
-        // `Halt`: this thread carries the whole stimulus; surviving its death would answer the gate having injected nothing.
-        kthread::spawn("lognest", body, 0, OnPanic::Halt);
+        kthread::spawn("lognest", body, 0);
     }
 
     extern "C" fn body(_arg: u64) -> ! {
