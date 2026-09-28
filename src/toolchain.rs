@@ -337,6 +337,7 @@ pub(crate) fn assert_toolchain_is_honest(stage2: &Path) {
         stage2.display(),
         lld.display(),
     );
+    crate::clang::assert_present(stage2);
 }
 
 /// Ensure the toolchain is up to date, and return the sysroot this checkout's
@@ -368,29 +369,6 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
     fs::create_dir_all(&stamps_dir).ok();
 
     let owner = owner(root);
-
-    // Used as a host tool by doom's build.rs.
-    let cc_src = root.join("toyos-cc/src");
-    let cc_inc = root.join("toyos-cc/include");
-    let cc_stamp = stamps_dir.join("toyos-cc.stamp");
-    let cc_inc_stamp = stamps_dir.join("toyos-cc-include.stamp");
-    lock.act_if(
-        Scope::Worktree,
-        "build toyos-cc",
-        || {
-            (stamps::dir_changed(&cc_src, &cc_stamp)
-                || stamps::dir_changed(&cc_inc, &cc_inc_stamp)
-                || !toyos_cc_binary(root).exists())
-            .then_some(())
-        },
-        |()| {
-            eprintln!("Building toyos-cc...");
-            build_toyos_cc(root);
-            stamps::write_dir_stamp(&cc_src, &cc_stamp);
-            stamps::write_dir_stamp(&cc_inc, &cc_inc_stamp);
-        },
-    );
-
 
     match owner {
         Owner::Elsewhere(primary) => {
@@ -430,7 +408,14 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            if stamps::dir_changed(&rust_dir.join("compiler"), &compiler_stamp) || force_rebuild {
+            // A `stage2` that links another LLVM than the one `rust/` names —
+            // or one no record says was built from `src/llvm-project` at all —
+            // is a compiler this checkout no longer describes. Named before any
+            // build, so an LLVM edit no commit holds is refused before one.
+            let names = crate::compiler::source(&rust_dir);
+            let moved =
+                fs::read_to_string(rust_dir.join("build/toyos-compiler")).is_ok_and(|built| built.trim() != names);
+            if stamps::dir_changed(&rust_dir.join("compiler"), &compiler_stamp) || moved || force_rebuild {
                 Some(Bootstrap { invalidate_hosted: true })
             } else if !toolchain_exists {
                 Some(Bootstrap { invalidate_hosted: false })
@@ -491,6 +476,12 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         "give the toyos toolchain its own cargo",
         || cargo_link_stale(&stage2).then_some(()),
         |()| provision_toolchain_cargo(&stage2),
+    );
+    lock.act_if(
+        Scope::Global,
+        "give the toyos toolchain the clang of its LLVM",
+        || crate::clang::missing(&stage2).then_some(()),
+        |()| crate::clang::provision(&stage2),
     );
     assert_toolchain_is_honest(&stage2);
 
@@ -771,11 +762,11 @@ fn build_hosted_rustc(rust_dir: &Path) {
 /// `lld = true` is what puts `rust-lld` in every stage's sysroot, where rustc
 /// finds the linker every guest target names. The hosted rustc's build cannot
 /// have it: bootstrap would then build LLD for the ToyOS host from C++, which
-/// nothing here can compile, so that build links the architecture it builds a
-/// rustc for through the LLD bootstrap downloaded with LLVM — the same binary
-/// `lld = true` ships as `rust-lld`. Every assemble removes the host's `stage2`
-/// first, so [`build_hosted_rustc`] reassembles it under the host-only config
-/// after.
+/// nothing here can compile yet. Every assemble removes the host's
+/// `stage2` first, so [`build_hosted_rustc`] reassembles it under the host-only
+/// config after.
+///
+/// `clang::LLVM_CONFIG` is the `[llvm]` both builds share.
 ///
 /// The host's `default-linker-linux-override` is pinned off because bootstrap
 /// otherwise ties it to `lld` for `x86_64-unknown-linux-gnu`, and a host rustc
@@ -792,13 +783,12 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    let build = rust_dir.join(format!("build/{host}"));
     let userland: String = Arch::ALL
         .iter()
         .map(|arch| {
-            // rust-lld by name: rustc finds it in the sysroot of the stage that
-            // links, which `lld = true` puts it in. It takes no `-Wl,` rpath,
-            // and a guest std has no host library path to record.
-            let linker = if with_hosted_rustc && *arch == HOSTED_ARCH {
+            let linker = format!("linker = \"{}\"", build.join("lld/bin/lld").display());
+            let hosted = if with_hosted_rustc && *arch == HOSTED_ARCH {
                 // Cranelift because no LLVM is built for a ToyOS host yet, and
                 // only for that reason: the hosted rustc carries LLVM once clang
                 // and libc++ run on ToyOS, and Cranelift is not where the
@@ -808,16 +798,14 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
                 // C built for this target (blake3's assembly), and a host `ar`
                 // that indexes only its own object format, as macOS's does,
                 // leaves those ELF members out of the index lld pulls from.
-                let llvm = rust_dir.join(format!("build/{host}/ci-llvm/bin"));
                 format!(
-                    "linker = \"{}\"\nar = \"{}\"\ncodegen-backends = [\"cranelift\"]",
-                    llvm.join("lld").display(),
-                    llvm.join("llvm-ar").display(),
+                    "\nar = \"{}\"\ncodegen-backends = [\"cranelift\"]",
+                    build.join("llvm/bin/llvm-ar").display(),
                 )
             } else {
-                "linker = \"rust-lld\"".to_string()
+                String::new()
             };
-            format!("[target.{}]\n{linker}\nrpath = false\n\n", arch.userland())
+            format!("[target.{}]\n{linker}{hosted}\nrpath = false\n\n", arch.userland())
         })
         .collect();
     let config = format!(
@@ -828,6 +816,9 @@ profile = "compiler"
 {host_line}
 target = [{targets}]
 
+[llvm]
+{llvm}
+
 [rust]
 incremental = true
 lld = {lld}
@@ -836,6 +827,7 @@ lld = {lld}
 {HOST_LINKER_PIN}
 
 {userland}"#,
+        llvm = crate::clang::LLVM_CONFIG,
         lld = !with_hosted_rustc,
     );
     fs::write(rust_dir.join("bootstrap.toml"), config).unwrap();
@@ -849,26 +841,6 @@ pub(crate) const HOST_LINKER_PIN: &str = "default-linker-linux-override = \"off\
 /// it: `lib/rustlib/<host>/bin/rust-lld`, where rustc itself looks for it.
 pub fn rust_lld(toolchain: &Path) -> PathBuf {
     toolchain.join("lib/rustlib").join(host_triple()).join("bin/rust-lld")
-}
-
-/// Path to the host toyos-cc binary. The workspace root's `target/`, not
-/// `toyos-cc/target/`: `toyos-cc` is a member of the host workspace (root
-/// `Cargo.toml`), and a member has no target directory of its own —
-/// `src/hostws.rs::target_dir` is the same answer for the crates `src/build.rs`
-/// asks about generically.
-pub fn toyos_cc_binary(root: &Path) -> PathBuf {
-    let host = host_triple();
-    root.join(format!("target/{host}/release/toyos-cc"))
-}
-
-fn build_toyos_cc(root: &Path) {
-    let host = host_triple();
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--target", &host])
-        .current_dir(root.join("toyos-cc"))
-        .status()
-        .expect("Failed to build toyos-cc");
-    assert!(status.success(), "toyos-cc build failed");
 }
 
 /// The host triple, asked of rustc once per process.
@@ -976,10 +948,27 @@ mod tests {
         let said = refused.downcast_ref::<String>().expect("a formatted refusal");
         assert!(said.contains("rust-lld"), "the refusal names the linker: {said}");
 
+        // And with its linker, it is still refused: it has no C compiler, which
+        // `clang`'s own tests provision.
         let lld = rust_lld(&stage2);
         fs::create_dir_all(lld.parent().unwrap()).unwrap();
         fs::write(&lld, b"").unwrap();
-        assert_toolchain_is_honest(&stage2);
+        let refused = std::panic::catch_unwind(|| assert_toolchain_is_honest(&stage2))
+            .expect_err("a toolchain with no clang is refused");
+        let said = refused.downcast_ref::<String>().expect("a formatted refusal");
+        assert!(said.contains("clang") && !said.contains("rust-lld,"), "the refusal names clang alone: {said}");
+    }
+
+    /// Every guest links through the host build's LLD, named by path.
+    #[test]
+    fn every_build_names_its_lld_by_path() {
+        let rust_dir = TempDir::new("lld-config");
+        let lld = format!("linker = \"{}\"", rust_dir.join("build/h/lld/bin/lld").display());
+        for (hosted, lld_flag) in [(true, "lld = false"), (false, "lld = true")] {
+            write_config(&rust_dir, "h", hosted);
+            let config = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
+            assert!(config.contains(lld_flag) && config.contains(&lld) && !config.contains("\"rust-lld\""), "{config}");
+        }
     }
 
     /// The negative control is the defect itself: this is verbatim what cargo

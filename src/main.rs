@@ -26,11 +26,27 @@ const REQUIRED: &[Tool] = &[
 /// Named, because a list that stops at what is fatal reads as the whole list.
 /// Each of these costs one thing when absent rather than the build, so none of
 /// them exits.
+///
+/// CMake and Ninja are what rustc's bootstrap builds LLVM and clang from
+/// `rust/src/llvm-project` with, which it does only when that commit has not
+/// been built here. Host tools like `cc`, and never in a guest: on macOS from
+/// Homebrew, on CI's toolchain runner at the versions `.github/workflows`
+/// pins. They go when the build no longer needs a host.
 const ALSO_USED: &[Tool] = &[
     Tool {
         any: &["python3", "python", "py", "python2", "uv"],
         why: "rust/x runs rustc's bootstrap, which is Python — a clean clone and \
               every toolchain change need one",
+    },
+    Tool {
+        any: &["cmake"],
+        why: "rustc's bootstrap configures LLVM and clang with it — every toolchain build \
+              whose LLVM commit this host has not built; `brew install cmake` on macOS",
+    },
+    Tool {
+        any: &["ninja"],
+        why: "rustc's bootstrap builds LLVM and clang with it, under CMake; `brew install \
+              ninja` on macOS",
     },
 ];
 
