@@ -7,9 +7,7 @@
 //!
 //! For a thread the "reached" half is [`TaskShared::notify`]'s write to the
 //! word, which the waiter's own next [`prepare`] or commit reads; for a ring it
-//! is [`Ring::fire`], one-shot against the registrant's own recheck. Both
-//! sides of every model are spawned threads: loom runs the model's own thread
-//! first, so a side written on it never sees the other not having run yet.
+//! is [`Ring::fire`], one-shot against the registrant's own recheck.
 //!
 //! The negative control is a cargo feature, `commit-ignores-notify`: it makes
 //! `begin_commit` blind to the notified bit — a waiter that checks, registers,
