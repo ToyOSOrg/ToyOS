@@ -122,9 +122,14 @@ fn serve_one(acceptor: &Acceptor, reply: Reply) {
 }
 
 fn client() {
-    for (reply, expected) in CASES {
+    // Every request is made before any is judged: the stand-in serves one per
+    // case, and a client that stopped early would leave it waiting on the next.
+    let mut outcomes = Vec::new();
+    for (reply, _) in CASES {
         println!("window refusal: [{reply:?}] waiting for the answer");
-        let outcome = Window::create(100, 100);
+        outcomes.push(Window::create(100, 100));
+    }
+    for ((reply, expected), outcome) in CASES.iter().zip(outcomes) {
         let got = match outcome {
             Ok(_) => panic!("reply {reply:?} produced a window"),
             Err(e) => e,
