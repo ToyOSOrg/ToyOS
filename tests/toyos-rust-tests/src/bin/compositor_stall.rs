@@ -97,6 +97,7 @@ fn main() {
     let handle = noisy.handle();
     let mut watcher = Window::create(64, 64).expect("a window to composite under the stream");
     let (streaming, framed) = (AtomicBool::new(false), AtomicBool::new(false));
+    let presenter = thread::current();
     thread::scope(|s| {
         s.spawn(|| {
             let frame = header(UNKNOWN_MSG, 0);
@@ -111,14 +112,18 @@ fn main() {
                 // either fits whole or finds no room at all.
                 while matches!(syscall::write_nonblock(handle, &frame), Ok(8)) {}
                 streaming.store(true, Ordering::Release);
+                presenter.unpark();
                 syscall::nanosleep(1_000_000);
             }
         });
         // Presented once the ring is full, so the frame is composited under
-        // the stream and not ahead of it.
+        // the stream and not ahead of it. Parked until then, never spinning: a
+        // thread yielding beside the writer held it below the compositor's
+        // drain rate, and the ring never filled.
         while !streaming.load(Ordering::Acquire) {
-            thread::yield_now();
+            thread::park();
         }
+        println!("compositor stall: the ring is full; a second window presents under it");
         watcher.present();
         loop {
             match watcher.recv_event() {
