@@ -175,9 +175,40 @@ pub fn local_secs() -> Option<u64> {
         .then(|| BOOT_LOCAL_SECS.load(Relaxed) + nanos_since_boot() / 1_000_000_000)
 }
 
-/// The same instant in Unix seconds (UTC) — what `SYS_CLOCK_EPOCH` serves.
+/// The same instant in Unix seconds (UTC) — what `SYS_CLOCK_EPOCH` serves: the
+/// whole seconds of [`utc_nanos`], so a file written after this answered `s`
+/// carries a stamp of at least `s` seconds.
 pub fn utc_secs() -> Option<u64> {
-    let local = local_secs()?;
-    Some(local.saturating_add_signed(UTC_OFFSET_SECS.load(Relaxed)))
+    utc_nanos().map(|nanos| nanos / NANOS_PER_SEC)
+}
+
+pub const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// Nanoseconds since the Unix epoch, UTC: the RTC's whole-second reading carried
+/// on by the counter, so its resolution is the counter's and its accuracy the
+/// RTC's second.
+pub fn utc_nanos() -> Option<u64> {
+    WALL_KNOWN.load(Acquire).then(|| {
+        let boot = BOOT_LOCAL_SECS.load(Relaxed).saturating_add_signed(UTC_OFFSET_SECS.load(Relaxed));
+        boot.saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot())
+    })
+}
+
+/// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
+/// [`utc_nanos`], and on a machine whose RTC never answered — which
+/// [`init_wall`] said by name — a wall clock that starts at the epoch at boot,
+/// so one boot's stamps still order.
+pub fn mtime_now() -> u64 {
+    utc_nanos().unwrap_or_else(nanos_since_boot)
+}
+
+/// `utc` Unix seconds in the machine's zone, for a format that stores local time.
+pub fn local_of_utc(utc: u64) -> u64 {
+    utc.saturating_add_signed(-UTC_OFFSET_SECS.load(Relaxed))
+}
+
+/// The inverse of [`local_of_utc`].
+pub fn utc_of_local(local: u64) -> u64 {
+    local.saturating_add_signed(UTC_OFFSET_SECS.load(Relaxed))
 }
 

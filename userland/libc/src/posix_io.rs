@@ -7,6 +7,8 @@ use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
+use crate::time::Timespec;
+
 // Constants (matching POSIX / Linux values)
 
 const O_RDONLY: i32 = 0;
@@ -145,7 +147,10 @@ pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
                 ptr::write_bytes(buf, 0, 1);
                 let s = &mut *buf;
                 s.st_size = st.size as i64;
-                s.st_mtime = st.mtime as i64;
+                s.st_mtim = Timespec {
+                    tv_sec: (st.mtime / NANOS_PER_SEC) as i64,
+                    tv_nsec: (st.mtime % NANOS_PER_SEC) as i64,
+                };
                 s.st_mode = match st.file_type {
                     syscall::FileType::File => S_IFREG | 0o644,
                     syscall::FileType::Pipe => S_IFIFO | 0o644,
@@ -487,10 +492,12 @@ pub struct Stat {
     pub st_size: i64,
     pub st_blksize: i64,
     pub st_blocks: i64,
-    pub st_atime: i64,
-    pub st_mtime: i64,
-    pub st_ctime: i64,
+    pub st_atim: Timespec,
+    pub st_mtim: Timespec,
+    pub st_ctim: Timespec,
 }
+
+const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 // mmap/munmap (real implementations using toyos-abi)
 

@@ -653,10 +653,15 @@ pub struct FatFs {
     repair_named: RepairNotice,
 }
 
-/// What to stamp on an entry: reads `clock` directly, in local time as FAT
-/// requires — the VFS's `mtime` is nanoseconds since boot, not a time of day.
+/// A VFS `mtime` as FAT stores it: local time, whole seconds, and the two-second
+/// field of a write time drops the odd one.
+fn stamp(mtime: u64) -> FatTime {
+    FatTime::from_unix_secs(crate::clock::local_of_utc(mtime / crate::clock::NANOS_PER_SEC))
+}
+
+/// What to stamp on an entry the VFS gave no `mtime` for.
 fn now() -> FatTime {
-    crate::clock::local_secs().map_or(FatTime::EPOCH, FatTime::from_unix_secs)
+    stamp(crate::clock::mtime_now())
 }
 
 /// What one of `toyos-fat32`'s errors means to the [`FileSystem`] caller;
@@ -917,7 +922,7 @@ impl FileSystem for FatFs {
         let role = self.role;
         self.fs
             .metadata(name)
-            .map(|m| m.modified_unix)
+            .map(|m| crate::clock::utc_of_local(m.modified_unix) * crate::clock::NANOS_PER_SEC)
             .map_err(|e| refused(role, &self.fs, &mut self.repair_named, "metadata", name, e))
     }
 
@@ -945,12 +950,12 @@ impl FileSystem for FatFs {
         Ok((file_id, Some(backing)))
     }
 
-    fn create(&mut self, name: &str, _mtime: u64) -> Result<FileId, SyscallError> {
+    fn create(&mut self, name: &str, mtime: u64) -> Result<FileId, SyscallError> {
         if let Some(&file_id) = self.by_name.get(name) {
             return Ok(file_id);
         }
         let role = self.role;
-        let time = now();
+        let time = stamp(mtime);
         self.ensure_parent(name, time)?;
         let file = match self.fs.create(name, time) {
             Ok(file) => file,
@@ -1043,10 +1048,10 @@ impl FileSystem for FatFs {
         &mut self,
         file_id: FileId,
         size: u64,
-        _mtime: u64,
+        mtime: u64,
     ) -> Result<(), SyscallError> {
         let role = self.role;
-        let time = now();
+        let time = stamp(mtime);
         let name = {
             let known = self.open.get(&file_id).ok_or(SyscallError::NotFound)?;
             let (name, was) = (known.name.clone(), known.file.len());

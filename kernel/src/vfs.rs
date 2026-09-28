@@ -67,7 +67,8 @@ pub trait FileSystem: Send {
     /// the mount's — a bcachefs answer of no reads the whole tree.
     fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError>;
 
-    /// When `name` was last written, in whatever epoch the mount keeps.
+    /// When `name` was last written, as `toyos_abi::syscall::Stat::mtime` says,
+    /// to the precision the mount stores.
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError>;
 
     /// What `name` points at; `Ok(None)` for a non-link or an absent name, never for a device that would not answer.
@@ -720,7 +721,7 @@ impl Vfs {
         };
         if let Some(file_id) = dirty {
             // The flush's own instant: no one handle's last write is the file's.
-            let mtime = crate::clock::nanos_since_boot();
+            let mtime = crate::clock::mtime_now();
             let owner = String::from(target.as_str());
             self.flush_file(&owner, file_id, mtime)?;
         }

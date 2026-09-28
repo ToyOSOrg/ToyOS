@@ -390,3 +390,126 @@ pub fn century_from_the_register(
     eprintln!("  [clock] century register 0x21: {}, a century past the staged clock", only.name);
     Ok(())
 }
+
+/// Where [`file_mtime_survives_a_reboot`] writes, on DATA: the one volume a
+/// file outlives its boot on.
+const MTIME_PATH: &str = "/home/file-mtime.bin";
+
+/// The second boot's RTC, a day past [`RTC_BASE`]: a stamp taken again at the
+/// mount or the open would carry this day, so an unchanged one was carried.
+const RTC_NEXT_DAY: &str = "2033-03-08T09:14:25";
+
+/// What `file_mtime` printed for [`MTIME_PATH`], in nanoseconds.
+fn printed_mtime(result: &qemu::TestResult) -> Result<u64, String> {
+    let head = format!("file-mtime: {MTIME_PATH} mtime=");
+    result
+        .stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(head.as_str()))
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "`{}` printed no {head:?} line (exit {:?})\n{}{}{}",
+                result.name, result.exit_code, result.before, result.stdout, result.serial
+            )
+        })
+}
+
+/// One boot of the image `data` carries DATA on, with the RTC at `rtc_base`,
+/// running `file_mtime <mode> MTIME_PATH`, then shut down.
+fn mtime_boot(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    data: &Path,
+    rtc_base: &'static str,
+    mode: &str,
+) -> Result<u64, String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            nvme_image: Some(data.to_path_buf()),
+            rtc_base: Some(rtc_base),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    if boot.contains("are a tmpfs") {
+        return Err(format!("/home fell back to tmpfs, so no file of it outlives the boot:\n{boot}"));
+    }
+    let result = qemu.run_test(&format!("test_rs_file_mtime {mode} {MTIME_PATH}"), Duration::from_secs(60));
+    let printed = printed_mtime(&result);
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "`file_mtime {mode}` failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    printed
+}
+
+/// A file's mtime is the wall clock at its write, and a reboot carries it
+/// unchanged.
+///
+/// The oracle is the instant the host staged with `-rtc base=`: the guest's
+/// stamp for a file on DATA lies within [`MAX_BOOT_DRIFT_SECS`] of it, the
+/// DATA volume read off the image by the host's own `bcachefs` reader holds
+/// that same stamp, and a second boot with the clock a day on reads it back
+/// unchanged. A stamp since boot is decades short of the instant.
+pub fn file_mtime_survives_a_reboot(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+    let data = super::lane::dir().join("file-mtime-data.img");
+    toyos_build::build::create_sparse(&data, qemu::NVME_SMALL);
+
+    let written = mtime_boot(test_config, c_bins, rust_bins, &data, RTC_BASE, "write")?;
+    let drift = (written / NANOS_PER_SEC) as i64 - RTC_BASE_SECS;
+    if !(0..=MAX_BOOT_DRIFT_SECS).contains(&drift) {
+        return Err(format!(
+            "{MTIME_PATH} is stamped {written} ns, {drift} s from the {RTC_BASE} the host set the \
+             RTC to"
+        ));
+    }
+
+    let io = super::storage::FileBlocks::open(&data)?;
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
+        .map_err(|e| format!("the DATA volume does not mount on the host: {e:?}"))?;
+    let on_device = fs
+        .file_mtime(MTIME_PATH.trim_start_matches('/'))
+        .map_err(|e| format!("reading {MTIME_PATH}'s mtime off the image: {e:?}"))?;
+    drop(fs);
+    if on_device != Some(written) {
+        return Err(format!(
+            "the guest read {written} ns for {MTIME_PATH} and the device holds {on_device:?}"
+        ));
+    }
+
+    let read = mtime_boot(test_config, c_bins, rust_bins, &data, RTC_NEXT_DAY, "read")?;
+    if read != written {
+        return Err(format!(
+            "{MTIME_PATH} was stamped {written} ns and reads {read} ns after a reboot with the RTC \
+             at {RTC_NEXT_DAY}"
+        ));
+    }
+    let _ = std::fs::remove_file(&data);
+    eprintln!(
+        "  [clock] {MTIME_PATH} stamped {drift} s past the staged RTC, the same {written} ns on \
+         the device and after a reboot a day on"
+    );
+    Ok(())
+}

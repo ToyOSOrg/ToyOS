@@ -686,7 +686,12 @@ pub struct RealTime {
 pub struct Stat {
     pub file_type: FileType,
     pub size: u64,
-    /// Last modification time (nanoseconds since boot).
+    /// When the file was last written: nanoseconds since the Unix epoch, UTC,
+    /// off the wall clock at the write — never a time since boot. Kept to the
+    /// precision its filesystem stores (`kernel/src/fat32_adapter.rs`: two
+    /// seconds; `src/image.rs` stamps ROOT's files 0), and on a machine whose
+    /// RTC never answered, off a clock that starts at the epoch at boot
+    /// (`kernel/src/clock.rs`'s `mtime_now`).
     pub mtime: u64,
 }
 
