@@ -48,3 +48,8 @@ Related records — `usb_transport_break`'s three other open red modes, not this
 one: `issues/kernel/a-shutdown-on-a-held-usb-disk-left-a-cpu-deaf-to-a-tlb-shootdown.md`,
 `issues/build/usb-transport-break-flushedstick-can-break-after-the-reboot.md`, and
 `issues/boot-media/a-disk-whose-port-went-away-panics-the-boot-at-roots-hold.md`.
+
+**Unrun since it was disabled**: PR #562 deleted this test's timing check,
+that the staged break's record came less than 2 s of kernel clock after the
+record before it. That change has never run: the test's first run back is
+also that change's.
