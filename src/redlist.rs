@@ -57,12 +57,20 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
     },
     Disabled {
+        test: "quiesce_leaves_the_volume_whole",
+        issue: "issues/build/quiesce-leaves-the-volume-whole-needs-its-flush-to-close-inside-the-stops-budget.md",
+    },
+    Disabled {
         test: "quiesce_stops_the_machine",
         issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
     },
     Disabled {
         test: "quiesce_wakes_on_the_last_park",
         issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
+    },
+    Disabled {
+        test: "root_chunk_refused_on_a_usb_stick",
+        issue: "issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md",
     },
     Disabled {
         test: "sched_check_build",
@@ -77,8 +85,16 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/short-sleep-livelock-stalls-on-ci-with-one-sleeper-never-returning.md",
     },
     Disabled {
+        test: "syscall_window_nmi",
+        issue: "issues/kernel/syscall-window-nmi-shortfalls-on-a-contended-host.md",
+    },
+    Disabled {
         test: "usb_transport_break",
         issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
+    },
+    Disabled {
+        test: "user_copy_races_munmap",
+        issue: "issues/kernel/copy-meets-a-remap-holds-a-cpu-the-thread-it-waits-on-may-be-queued-behind.md",
     },
 ];
 
