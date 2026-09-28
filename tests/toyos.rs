@@ -178,7 +178,6 @@ const RUST_SKIP: &[&str] = &[
     // `quiesce_refuses_a_second_shutdown` runs it.
     "quiesce_twice",
     // The same, and its verdict is the stop record of a boot staged around it.
-    // `quiesce_wakes_on_the_last_park` runs it.
     "quiesce_last",
     // The same, and its verdict is the log volume the stop leaves.
     // `quiesce_leaves_the_volume_whole` runs it.
@@ -968,9 +967,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot: it ends the machine, and its verdict is the volume that
     // boot leaves.
     ("quiesce_leaves_the_volume_whole", Sched::Parallel, Tier::Nightly),
-    // Its own boot: it ends the machine, and its verdict is the stop record
-    // that boot writes.
+    // Its own boot each: it ends the machine, and its verdict is the stop
+    // record that boot writes.
     ("quiesce_wakes_on_the_last_park", Sched::Parallel, Tier::Nightly),
+    ("quiesce_wakes_on_the_last_teardown", Sched::Parallel, Tier::Nightly),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
@@ -1603,6 +1603,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("quiesce_stops_the_machine", &["test_rs_quiesce_writers"]),
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
+    ("quiesce_wakes_on_the_last_teardown", &["test_rs_quiesce_last"]),
     ("quiesce_leaves_the_volume_whole", &["test_rs_quiesce_fsync"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
@@ -2900,7 +2901,7 @@ fn check_rust_result(result: &TestResult) -> bool {
     let test_name = result.name.strip_prefix("test_rs_").unwrap_or(&result.name);
 
     if let Some(err) = &result.error {
-        eprintln!("FAIL rs::{test_name}: {err}{}", kernel_account(result));
+        eprintln!("FAIL rs::{test_name}: {err}\nstdout:\n{}{}", result.stdout, kernel_account(result));
         return false;
     }
 
@@ -11105,6 +11106,7 @@ fn run_machine_test(
         "quiesce_stops_the_machine" => power::quiesce_stops_the_machine(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
         "quiesce_wakes_on_the_last_park" => power::quiesce_wakes_on_the_last_park(test_config, c_bins, rust_bins),
+        "quiesce_wakes_on_the_last_teardown" => power::quiesce_wakes_on_the_last_teardown(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
@@ -16278,18 +16280,21 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The kernel reopens init by pid after the last handle to it has gone.
+/// The kernel reopens init by pid after the last handle to it has gone, and
+/// no kernel thread's pid opens.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn process_reopen(log: &str) -> Result<(), String> {
-        let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
-            return Err(format!("the reopen control never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
+        for control in ["process-reopen:", "process-open-kthread:"] {
+            let Some(verdict) = log.lines().find(|l| l.contains(control)) else {
+                return Err(format!("{control} never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [process] {}", verdict.trim());
         }
-        eprintln!("  [process] {}", verdict.trim());
         Ok(())
 }
 

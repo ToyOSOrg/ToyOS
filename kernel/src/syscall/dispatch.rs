@@ -239,17 +239,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 data.handles
                     .get::<crate::object::process::ProcessObject>(RawHandle(a1 as u32), Rights::MANAGE)
             }) {
-                Ok(object) => {
-                    // Killing yourself is exiting, not killing: kill_process retires every
-                    // thread of its target, and retire_task asserts a CPU never retires itself.
-                    // Reachable: TRANSFER lets a parent hand a child a handle to itself.
-                    if object.pid() == process::current_process() {
-                        // exit() never returns, so the held clone is dropped while it still can be.
-                        drop(object);
-                        process::exit(process::KILLED_EXIT_CODE);
-                    }
-                    process::kill_process(&object)
-                }
+                Ok(object) => process::kill_process(&object),
                 Err(e) => e.refuse(),
             }
         }
