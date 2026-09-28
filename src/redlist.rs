@@ -108,10 +108,6 @@ pub const DISABLED: &[Disabled] = &[
         test: "usb_transport_break",
         issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
     },
-    Disabled {
-        test: "xhci_flap",
-        issue: "issues/hardware/a-collapsed-replug-is-enumerated-only-when-another-port-event-arrives.md",
-    },
 ];
 
 /// The row of `rows` that disables `test`, matched by the whole name.

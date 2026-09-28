@@ -6,7 +6,7 @@ opened: 2026-09-24
 
 # A shutdown on a held USB disk left a CPU deaf to a TLB shootdown for five seconds, and the kernel panicked
 
-One sighting, `usb_transport_break` in a local `--nightly` run on the logd
+`usb_transport_break` in a local `--nightly` run on the logd
 branch at `eef19bd1` (parameter line
 `root=…,usb-transport-break,usb-reset-moves,blackbox=0x8000000`, two CPUs,
 TCG). Alone it was green.
@@ -33,6 +33,16 @@ trigger and not the deaf CPU.
 the arithmetic for one disk operation outrunning `time::DEAF_CPU`; this is a boot
 that did outrun it, in `quiesce`, across several operations each inside its
 own budget. Whether `quiesce` holds `IF` clear between them is not measured.
+
+**Second sighting, with the roles swapped**: `usb_transport_break --nightly` at
+`e889d03e` (#554), the `AnotherStick` boot (`554r6-usb_transport_break.log` in
+the job scratchpad). cpu0 took the reboot's `Syncing filesystems` at 4.424 s
+and spent it in calls on held disk 0, each ending `still held`: at 6.427, 8.428
+and 10.430. cpu1, in its idle loop, dropped an `InboxRef` in
+`object::drain_zero_handles` and waited on cpu0:
+
+    [kernel 9.425 cpu1] PANIC: panicked at src/arch/x86_64/tlb.rs:151:42:
+    tlb: cpu 0 has not flushed for generation Generation(1) in 5000000000ns — it is not taking interrupts
 
 ## Exit condition
 
