@@ -96,8 +96,7 @@ fn add(root: &Path, path: &str) {
         NEEDED_BYTES as f64 / 1024.0_f64.powi(3),
     );
 
-    let branch = format!("wt/{name}");
-    git(root, &["worktree", "add", "-b", &branch, &path.to_string_lossy(), "main"]);
+    let summary = create_worktree(root, &path, &name);
 
     // `rust/` is deliberately left the empty stub `git worktree add` made: the
     // first build makes it a fork checkout sharing the primary's objects, where
@@ -116,10 +115,34 @@ fn add(root: &Path, path: &str) {
 
     eprintln!();
     eprintln!("worktree   {}", path.display());
-    eprintln!("branch     {branch}");
+    eprintln!("branch     {summary}");
     eprintln!("compiler   {} (shared, not copied)", stage2.display());
     eprintln!();
     eprintln!("Build it with `cargo run -- --build-only` from {}.", path.display());
+}
+
+/// Never a fetch, never a reset.
+fn create_worktree(root: &Path, path: &Path, name: &str) -> String {
+    let branch = format!("wt/{name}");
+    let path = path.to_string_lossy();
+    if ok(root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
+        let sha = short_sha(root, &branch);
+        git(root, &["worktree", "add", &path, &branch]);
+        format!("{branch} (resumed at {sha})")
+    } else if ok(root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
+        let upstream = format!("origin/{branch}");
+        let sha = short_sha(root, &upstream);
+        git(root, &["worktree", "add", "--track", "-b", &branch, &path, &upstream]);
+        format!("{branch} (resumed from {upstream} at {sha})")
+    } else {
+        let sha = short_sha(root, "main");
+        git(root, &["worktree", "add", "-b", &branch, &path, "main"]);
+        format!("{branch} (new, from main at {sha})")
+    }
+}
+
+fn short_sha(root: &Path, rev: &str) -> String {
+    capture(root, &["rev-parse", "--short", rev]).trim().to_string()
 }
 
 fn list(root: &Path) {
@@ -512,6 +535,78 @@ mod tests {
         assert!(!line.contains("/live"), "{line}");
         assert!(!line.contains("/primary"), "{line}");
         assert!(line.contains("2.0 GiB"), "the offer has to say what it is worth: {line}");
+    }
+
+    /// A local `wt/<name>` that has diverged from `main` is resumed at its own
+    /// tip, not reset onto `main`'s.
+    #[test]
+    fn a_local_branch_is_resumed_at_its_own_commit_not_mains() {
+        let (dir, _origin, work) = crate::pr::tests::repo("wtresume-local");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt"]);
+        git(&work, &["checkout", "-qb", "wt/foo", "main"]);
+        crate::pr::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        git(&work, &["checkout", "-q", "main"]);
+        crate::pr::tests::commit(&work, "on-main", "main moved on\n", "main moved on");
+
+        let path = dir.join("resumed");
+        let summary = create_worktree(&work, &path, "foo");
+
+        assert!(summary.contains("resumed at"), "{summary}");
+        assert!(!summary.contains("main"), "{summary}");
+        let branch_sha = capture(&work, &["rev-parse", "wt/foo"]);
+        let worktree_sha = capture(&path, &["rev-parse", "HEAD"]);
+        let main_sha = capture(&work, &["rev-parse", "main"]);
+        assert_eq!(worktree_sha, branch_sha, "must resume at the branch's own tip");
+        assert_ne!(worktree_sha, main_sha, "must not have been reset onto main");
+    }
+
+    /// A branch that exists only as `origin/wt/<name>` — its local worktree
+    /// long since removed and the local branch deleted with it — is recreated
+    /// tracking the remote one, at the remote's commit, without a fetch.
+    #[test]
+    fn an_origin_only_branch_is_recreated_tracking_it() {
+        let (dir, _origin, work) = crate::pr::tests::repo("wtresume-origin");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt"]);
+        git(&work, &["checkout", "-qb", "wt/bar", "main"]);
+        crate::pr::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        git(&work, &["push", "-q", "-u", "origin", "wt/bar"]);
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt/bar"]);
+        crate::pr::tests::commit(&work, "on-main", "main moved on\n", "main moved on");
+
+        let path = dir.join("resumed");
+        let summary = create_worktree(&work, &path, "bar");
+
+        assert!(summary.contains("resumed from origin/wt/bar"), "{summary}");
+        let origin_sha = capture(&work, &["rev-parse", "origin/wt/bar"]);
+        let worktree_sha = capture(&path, &["rev-parse", "HEAD"]);
+        let main_sha = capture(&work, &["rev-parse", "main"]);
+        assert_eq!(worktree_sha, origin_sha, "must resume at origin's commit");
+        assert_ne!(worktree_sha, main_sha, "must not have been reset onto main");
+        assert!(
+            ok(&work, &["show-ref", "--verify", "--quiet", "refs/heads/wt/bar"]),
+            "a local branch must exist to track with"
+        );
+    }
+
+    /// Neither a local nor an origin `wt/<name>` exists: today's behaviour,
+    /// branched fresh from `main`.
+    #[test]
+    fn with_neither_branch_it_starts_fresh_from_main() {
+        let (dir, _origin, work) = crate::pr::tests::repo("wtresume-fresh");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt"]);
+        crate::pr::tests::commit(&work, "on-main", "main moved on\n", "main moved on");
+
+        let path = dir.join("resumed");
+        let summary = create_worktree(&work, &path, "baz");
+
+        assert!(summary.contains("new, from main"), "{summary}");
+        let worktree_sha = capture(&path, &["rev-parse", "HEAD"]);
+        let main_sha = capture(&work, &["rev-parse", "main"]);
+        assert_eq!(worktree_sha, main_sha);
     }
 
     /// A linked worktree of a fresh repository whose `.gitignore` names `target/`,
