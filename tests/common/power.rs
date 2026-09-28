@@ -334,7 +334,7 @@ pub fn quiesce_wakes_on_the_last_park(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-park", LATE_WORD], rust_bins)
+    woken_by_the_held_thread(&["quiesce-last-park", LATE_WORD], None, rust_bins)
 }
 
 /// **An exit that is the stop's last transition wakes it.** The same, with
@@ -344,25 +344,29 @@ pub fn quiesce_wakes_on_the_last_exit(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-exit", LATE_WORD], rust_bins)
+    woken_by_the_held_thread(&["quiesce-last-exit", LATE_WORD], None, rust_bins)
 }
 
 /// **A process teardown that is the stop's last transition is waited for.**
 /// The same, with `quiesce-last-teardown` holding the last thread out of a
-/// process between its leaving and its teardown: a stop that counted it as
-/// gone would return at its first sweep while that teardown still frees and
-/// logs.
+/// process between its leaving and its teardown.
 pub fn quiesce_wakes_on_the_last_teardown(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-teardown", LATE_WORD], rust_bins)
+    woken_by_the_held_thread(
+        &["quiesce-last-teardown", LATE_WORD],
+        Some("test_rs_quiesce_last"),
+        rust_bins,
+    )
 }
 
-/// One of the `quiesce-last-*` boots: its actuator first, the late word beside it.
+/// One of the `quiesce-last-*` boots: its actuator first, the late word beside it;
+/// `torn_down` names the process whose teardown the held thread runs.
 fn woken_by_the_held_thread(
     armed: &'static [&'static str; 2],
+    torn_down: Option<&str>,
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let actuator = armed[0];
@@ -386,13 +390,27 @@ fn woken_by_the_held_thread(
     if held_at > synced_at {
         return Err(format!("the thread was held after the stop was over\n{whole}"));
     }
-    // More than one sweep: the stop found the held thread running and had
-    // to be woken to see it stop.
-    if record.sweeps < 2 {
+    // **The claim**: a sweep counted the held thread, and it alone, as
+    // running before the stop wrote its record, so what the held thread did
+    // next is what the stop waited for.
+    let alone = format!("{actuator}: the stop counts {} alone", toyos_quiesce::LAST_THREAD);
+    let stopped_at = at(toyos_quiesce::STOPPED)
+        .ok_or_else(|| format!("the kernel wrote no stop record\n{whole}"))?;
+    let Some(alone_at) = at(&alone).filter(|&line| line < stopped_at) else {
         return Err(format!(
-            "the stop saw nothing running at its first sweep, so no transition of the held \
-             thread was waited for:\n  {record}"
+            "no {alone:?} line before the stop's record, so no transition of the held thread \
+             was waited for:\n  {record}\n{whole}"
         ));
+    };
+    if let Some(process) = torn_down {
+        let exit = format!("exit: {process} pid=");
+        let mut torn = whole.lines().skip(alone_at).take(stopped_at - alone_at);
+        if !torn.any(|line| line.contains(&exit) && line.contains(" code=0 ")) {
+            return Err(format!(
+                "no `{exit}… code=0` record between {alone:?} and the stop's record, so the \
+                 stop did not wait for that teardown\n{whole}"
+            ));
+        }
     }
     woken_by_its_threads(&record)?;
     eprintln!("  [power] {actuator}: the held thread's transition woke the stop: {record}");

@@ -181,8 +181,6 @@ pub fn stop() -> Record {
     loop {
         let swept = sweep(caller);
         sweeps += 1;
-        #[cfg(feature = "boot-actuators")]
-        last::note_sweep(swept);
         let elapsed = (crate::clock::now() - began).nanos();
         if swept.keep_waiting(elapsed, PARK.nanos()) {
             // Uncancellable: the claim is taken, and a caller that left here
@@ -213,6 +211,8 @@ pub fn stop() -> Record {
 /// on another CPU finishing its own teardown takes this same lock.
 fn sweep(caller: ThreadId) -> Sweep {
     let mut out = Sweep::default();
+    #[cfg(feature = "boot-actuators")]
+    let mut held_running = false;
     let guard = process::PROCESS_TABLE.lock();
     let Some(table) = guard.as_ref() else { return out };
     for (_, proc) in table.iter() {
@@ -237,9 +237,15 @@ fn sweep(caller: ThreadId) -> Sweep {
                 out.stopped += 1;
             } else {
                 out.running += 1;
+                #[cfg(feature = "boot-actuators")]
+                {
+                    held_running |= last::is_held(ThreadId { pid: pid.raw(), tid: tid.raw() });
+                }
             }
         }
     }
+    #[cfg(feature = "boot-actuators")]
+    last::note_sweep(out, held_running);
     out
 }
 
@@ -252,10 +258,10 @@ fn sweep(caller: ThreadId) -> Sweep {
 #[cfg(feature = "boot-actuators")]
 pub mod last {
     use core::sync::atomic::{
-        AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Acquire, Ordering::Release,
+        AtomicBool, AtomicU64, Ordering::AcqRel, Ordering::Acquire, Ordering::Release,
     };
 
-    use toyos_quiesce::Sweep;
+    use toyos_quiesce::{Sweep, ThreadId};
     use toyos_sched::task::WaitClass;
 
     use crate::watch::{self, Watch};
@@ -294,17 +300,26 @@ pub mod last {
         "the boot panics naming the side of the staging that never arrived",
     );
 
-    /// No sweep yet.
-    const UNSWEPT: u32 = u32::MAX;
+    /// No thread claimed yet: `percpu`'s spelling of idle, which no thread has.
+    const NOBODY: u64 = u64::MAX;
 
-    /// The latest sweep's running count.
-    static RUNNING: AtomicU32 = AtomicU32::new(UNSWEPT);
-    static HELD: AtomicBool = AtomicBool::new(false);
+    /// The one thread this boot holds, `pid` high and `tid` low.
+    static HELD: AtomicU64 = AtomicU64::new(NOBODY);
+    /// Whether the latest sweep counted one thread running, and that one [`HELD`].
+    static ALONE: AtomicBool = AtomicBool::new(false);
     /// What the shutdown's caller parks on until a thread is held.
     static ARRIVED: Watch = Watch::new();
 
-    pub(super) fn note_sweep(swept: Sweep) {
-        RUNNING.store(swept.running, Release);
+    fn word(thread: ThreadId) -> u64 {
+        (u64::from(thread.pid) << 32) | u64::from(thread.tid)
+    }
+
+    pub(super) fn is_held(thread: ThreadId) -> bool {
+        HELD.load(Acquire) == word(thread)
+    }
+
+    pub(super) fn note_sweep(swept: Sweep, held_running: bool) {
+        ALONE.store(swept.running == 1 && held_running, Release);
     }
 
     fn armed() -> Option<Last> {
@@ -313,7 +328,22 @@ pub mod last {
 
     /// Hold the running thread here if it is the one `last` stages.
     pub fn hold(last: Last) {
-        if !last.armed() || !is_the_named_thread() || HELD.swap(true, AcqRel) {
+        if !last.armed() {
+            return;
+        }
+        let Some(thread) = the_named_thread() else { return };
+        if HELD.compare_exchange(NOBODY, word(thread), AcqRel, Acquire).is_err() {
+            return;
+        }
+        if !crate::scheduler::may_yield() {
+            // A thread killed in Ring 3 leaves at its exit boundary, at a depth
+            // where a yield asserts: refused there, and the stop goes on unheld.
+            crate::log!(
+                "{}: {} left outside a syscall and is not held",
+                last.name(),
+                toyos_quiesce::LAST_THREAD,
+            );
+            ARRIVED.post();
             return;
         }
         crate::log!(
@@ -325,7 +355,7 @@ pub mod last {
         let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
         // Yields and never parks: a park is the transition this hold exists to
         // place, and a sweep would stop this thread at the first one.
-        while RUNNING.load(Acquire) != 1 {
+        while !ALONE.load(Acquire) {
             assert!(
                 !deadline.reached(crate::clock::now()),
                 "{}: the stop never came down to this thread alone in {} ms",
@@ -334,6 +364,7 @@ pub mod last {
             );
             crate::scheduler::yield_now();
         }
+        crate::log!("{}: the stop counts {} alone", last.name(), toyos_quiesce::LAST_THREAD);
     }
 
     /// Called by the shutdown before it stops anything: the stop is staged
@@ -353,10 +384,10 @@ pub mod last {
             0,
             WaitClass::Other,
             deadline,
-            || HELD.load(Acquire),
+            || HELD.load(Acquire) != NOBODY,
         );
         assert!(
-            HELD.load(Acquire),
+            HELD.load(Acquire) != NOBODY,
             "{}: no thread named {} reached its syscall in {} ms",
             last.name(),
             toyos_quiesce::LAST_THREAD,
@@ -364,17 +395,16 @@ pub mod last {
         );
     }
 
-    fn is_the_named_thread() -> bool {
-        let (Some(pid), Some(tid)) =
-            (crate::arch::percpu::current_pid(), crate::arch::percpu::current_tid())
-        else {
-            return false;
-        };
+    /// The running thread, if it carries [`toyos_quiesce::LAST_THREAD`]'s name.
+    fn the_named_thread() -> Option<ThreadId> {
+        let pid = crate::arch::percpu::current_pid()?;
+        let tid = crate::arch::percpu::current_tid()?;
         let guard = crate::process::PROCESS_TABLE.lock();
         guard
             .as_ref()
             .and_then(|table| table.get(pid))
             .and_then(|proc| proc.threads().get(tid))
             .is_some_and(|thread| thread.name_str() == toyos_quiesce::LAST_THREAD)
+            .then_some(ThreadId { pid: pid.raw(), tid: tid.raw() })
     }
 }
