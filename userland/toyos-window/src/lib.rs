@@ -6,6 +6,7 @@ pub use framebuffer::{Color, Framebuffer, Screen, Traffic};
 pub use wait::{Waiter, Waker, Woke};
 /// What [`Window::handle`] answers with, and what a [`Waiter`] waits on.
 pub use toyos_abi::RawHandle;
+use toyos_abi::syscall::SyscallError;
 
 use toyos::ipc;
 use toyos::AsHandle;
@@ -61,9 +62,33 @@ pub const MSG_RESOLUTION_CHANGED: u32 = 8;
 /// another window has no move except to serve it or to drop the connection.
 pub const MSG_WINDOW_REFUSED: u32 = 9;
 
-// Shared-memory clipboard (for payloads > 116 bytes)
-pub const MSG_CLIPBOARD_SET_SHM: u32 = 10;
+/// Client → compositor, retired: it carried a region the client chose, and the
+/// compositor never uses a handle a client sent. A client sending it is dropped
+/// by name.
+pub const MSG_RETIRED_CLIPBOARD_SET_SHM: u32 = 10;
+/// Compositor → client: a clipboard past [`MAX_INLINE_PAYLOAD`], in a region
+/// the compositor made. Payload is a [`ClipboardShmMsg`].
 pub const MSG_CLIPBOARD_PASTE_SHM: u32 = 11;
+
+/// Client → compositor, as a connection's first frame whose payload is exactly
+/// a [`ClipboardShmMsg`]: a clipboard of that many bytes, which [`copy_fits`].
+/// Answered with [`MSG_COPY_REGION`].
+pub const MSG_COPY_BEGIN: u32 = 13;
+/// Client → compositor, bare, and the only frame a connection answered with
+/// [`MSG_COPY_REGION`] may send next: the text is in the region. The compositor
+/// copies it once and closes the connection.
+pub const MSG_COPY_COMMIT: u32 = 14;
+/// Compositor → client, bare: a region the compositor made, as long as the copy
+/// [`MSG_COPY_BEGIN`] announced, sent ahead of the frame.
+pub const MSG_COPY_REGION: u32 = 13;
+
+/// The longest clipboard. Policy: a clipboard is text somebody selected.
+pub const MAX_CLIPBOARD_BYTES: usize = 2 * 1024 * 1024;
+
+/// Whether a clipboard of `len` bytes is one the compositor makes a region for.
+pub fn copy_fits(len: usize) -> bool {
+    (1..=MAX_CLIPBOARD_BYTES).contains(&len)
+}
 
 /// Either direction: [`surface::LAYOUT_CONFIG`] changed, re-read it.
 ///
@@ -89,17 +114,28 @@ toyos::ipc_payload! {
     }
 }
 
-/// Why creating a window failed.
+/// Why a request to the compositor failed: a window, or the exchange under a
+/// [`CopyError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateError {
     /// This program was given no `compositor` connector. A statement about
     /// what the manifest says this program holds, not about the machine — and
     /// never about timing: every port exists before any server runs.
     NotEndowed,
-    /// The compositor exited, or the connection died mid-request.
+    /// The compositor exited: its port is closed for good.
     CompositorGone,
+    /// The kernel refused a call of the exchange: the connection, a frame, or
+    /// the map of the region the compositor sent.
+    Kernel(SyscallError),
+    /// The exchange broke off: the compositor closed the connection, having
+    /// exited or refused (its log says which), or sent a frame this client
+    /// cannot read.
+    BrokenOff,
     /// The compositor answered, and not with anything this exchange allows.
     Protocol(u32),
+    /// The answer came without the one handle it carries: the compositor sent
+    /// none, or this process had no room to take it.
+    NoHandle,
     /// The compositor is already holding as many windows as it can afford.
     AtCapacity,
     /// The requested size is bigger than the screen it would be drawn on.
@@ -115,12 +151,17 @@ impl std::fmt::Display for CreateError {
         match self {
             Self::NotEndowed => write!(f, "this program was given no compositor"),
             Self::CompositorGone => write!(f, "the compositor is gone"),
+            Self::Kernel(e) => {
+                write!(f, "the kernel refused the exchange with the compositor ({e:?})")
+            }
+            Self::BrokenOff => write!(f, "the compositor broke off the exchange"),
+            Self::NoHandle => write!(f, "the compositor's answer arrived without its handle"),
             Self::AtCapacity => write!(f, "the compositor is at its window limit"),
             Self::TooLarge => write!(f, "the window is larger than the screen"),
             Self::NoMemory => write!(f, "there is no memory for a window that size"),
             Self::Refused(reason) => write!(f, "the compositor refused (reason {reason})"),
             Self::Protocol(msg_type) => {
-                write!(f, "the compositor answered with message type {msg_type}")
+                write!(f, "the compositor's answer (type {msg_type}) is not one this exchange allows")
             }
         }
     }
@@ -132,10 +173,25 @@ impl From<EndowError> for CreateError {
     fn from(e: EndowError) -> Self {
         match e {
             EndowError::NotEndowed => Self::NotEndowed,
-            EndowError::ServerGone | EndowError::Refused(_) => Self::CompositorGone,
+            EndowError::ServerGone => Self::CompositorGone,
+            EndowError::Refused(e) => Self::Kernel(e),
         }
     }
 }
+
+impl From<ipc::IpcError> for CreateError {
+    fn from(e: ipc::IpcError) -> Self {
+        match e {
+            ipc::IpcError::Disconnected | ipc::IpcError::Malformed => Self::BrokenOff,
+            ipc::IpcError::Syscall(e) => Self::Kernel(e),
+            ipc::IpcError::TooLarge => {
+                unreachable!("every frame this crate sends is within ipc::MAX_FRAME_LEN")
+            }
+        }
+    }
+}
+
+const _: () = assert!(MAX_INLINE_PAYLOAD <= ipc::MAX_FRAME_LEN as usize);
 
 impl CreateError {
     fn from_wire(reason: u32) -> Self {
@@ -163,8 +219,8 @@ toyos::ipc_payload! {
         pub h: u32,
     }
 
-    /// How much of the region that travels with this message is text. The
-    /// region itself is one transferred handle, sent ahead of the frame.
+    /// How many bytes of clipboard text a copy region holds. Where a region
+    /// travels with the message, it is one handle sent ahead of the frame.
     pub struct ClipboardShmMsg {
         pub len: u32,
     }
@@ -353,31 +409,61 @@ pub fn load_layout(translator: &mut Translator) {
     }
 }
 
+/// Why [`clipboard_set`] put nothing on the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyError {
+    /// Longer than [`MAX_CLIPBOARD_BYTES`].
+    TooLong(usize),
+    /// The exchange with the compositor failed.
+    Compositor(CreateError),
+}
+
+impl std::fmt::Display for CopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLong(len) => {
+                write!(f, "{len} bytes is past the clipboard's {MAX_CLIPBOARD_BYTES}")
+            }
+            Self::Compositor(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CopyError {}
+
+impl From<CreateError> for CopyError {
+    fn from(e: CreateError) -> Self {
+        Self::Compositor(e)
+    }
+}
+
 /// Put `text` on the system clipboard, over a connection of its own.
 ///
-/// Fallible where it used to `expect`: a program the manifest gives no
-/// compositor is a program that cannot copy, which is an answer and not a
-/// reason to take the caller down.
-pub fn clipboard_set(text: &str) -> Result<(), CreateError> {
-    use std::sync::Mutex;
-    static CLIPBOARD_SHM: Mutex<Option<SharedMemory>> = Mutex::new(None);
-
-    let conn = endow::service("compositor")?;
+/// Past [`MAX_INLINE_PAYLOAD`] the text goes into a region the compositor
+/// made for it ([`MSG_COPY_BEGIN`]).
+pub fn clipboard_set(text: &str) -> Result<(), CopyError> {
     let bytes = text.as_bytes();
-    if bytes.len() <= MAX_INLINE_PAYLOAD {
-        let _ = conn.send_bytes(MSG_CLIPBOARD_SET, bytes);
-    } else if let Ok(mut shm) = SharedMemory::create(bytes.len()) {
-        shm.as_mut_slice()[..bytes.len()].copy_from_slice(bytes);
-        if let Ok(handle) = shm.share() {
-            let _ = conn.send_with_handles(
-                &[handle],
-                MSG_CLIPBOARD_SET_SHM,
-                &ClipboardShmMsg { len: bytes.len() as u32 },
-            );
-        }
-        *CLIPBOARD_SHM.lock().unwrap() = Some(shm);
+    if bytes.len() > MAX_INLINE_PAYLOAD && !copy_fits(bytes.len()) {
+        return Err(CopyError::TooLong(bytes.len()));
     }
-    Ok(())
+    Ok(copy(bytes)?)
+}
+
+/// [`clipboard_set`]'s exchange, for text the clipboard holds.
+fn copy(bytes: &[u8]) -> Result<(), CreateError> {
+    let conn = endow::service("compositor")?;
+    if bytes.len() <= MAX_INLINE_PAYLOAD {
+        return Ok(conn.send_bytes(MSG_CLIPBOARD_SET, bytes)?);
+    }
+    conn.send(MSG_COPY_BEGIN, &ClipboardShmMsg { len: bytes.len() as u32 })?;
+    let header = conn.recv_header()?;
+    if header.msg_type != MSG_COPY_REGION || header.len() != 0 {
+        return Err(CreateError::Protocol(header.msg_type));
+    }
+    let [region] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+    let mut region = SharedMemory::adopt(region, bytes.len()).map_err(CreateError::Kernel)?;
+    region.as_mut_slice().copy_from_slice(bytes);
+    Ok(conn.signal(MSG_COPY_COMMIT)?)
 }
 
 pub struct Window {
@@ -432,32 +518,28 @@ impl Window {
         let len = bytes.len().min(30);
         req.title[..len].copy_from_slice(&bytes[..len]);
         req.title_len = len as u8;
-        conn.send(MSG_CREATE_WINDOW, &req).map_err(|_| CreateError::CompositorGone)?;
+        conn.send(MSG_CREATE_WINDOW, &req)?;
 
         // Header first, then the payload the message type calls for: the two
         // answers carry different structs, and a payload shorter than the type
         // it was asked for is a refusal from `recv_payload`, not a window.
-        let header = conn.recv_header().map_err(|_| CreateError::CompositorGone)?;
+        let header = conn.recv_header()?;
         match header.msg_type {
             MSG_WINDOW_CREATED => {}
             MSG_WINDOW_REFUSED => {
-                let refused: WindowRefused = conn
-                    .recv_payload(&header)
-                    .map_err(|_| CreateError::CompositorGone)?;
+                let refused: WindowRefused = conn.recv_payload(&header)?;
                 return Err(CreateError::from_wire(refused.reason));
             }
             other => return Err(CreateError::Protocol(other)),
         }
-        let info: WindowInfo = conn
-            .recv_payload(&header)
-            .map_err(|_| CreateError::CompositorGone)?;
+        let info: WindowInfo = conn.recv_payload(&header)?;
 
         let buf_size = info.stride as usize * info.height as usize * 4;
         // The buffer crossed ahead of the frame. A compositor that announced a
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
-        let [buffer] = conn.recv_handles_exact::<1>().ok_or(CreateError::CompositorGone)?;
-        let shm = SharedMemory::adopt(buffer, buf_size).map_err(|_| CreateError::CompositorGone)?;
+        let [buffer] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+        let shm = SharedMemory::adopt(buffer, buf_size).map_err(CreateError::Kernel)?;
 
         let poller = Poller::new(1);
         Ok(Self {

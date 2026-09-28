@@ -9,6 +9,8 @@
 //! The mapping goes away with the last handle, so dropping this is all the
 //! cleanup there is.
 
+use core::sync::atomic::AtomicU8;
+
 use toyos_abi::syscall::{self, SyscallError};
 
 use crate::{AsHandle, OwnedHandle, RawHandle};
@@ -71,6 +73,13 @@ impl SharedMemory {
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.ptr, self.size) }
+    }
+
+    /// The region as the one type that may alias memory a peer writes.
+    pub fn as_atomic(&self) -> &[AtomicU8] {
+        // SAFETY: the mapping is `size` bytes and lives as long as `self`, and
+        // `AtomicU8` has `u8`'s size and alignment.
+        unsafe { core::slice::from_raw_parts(self.ptr as *const AtomicU8, self.size) }
     }
 }
 
