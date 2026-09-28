@@ -35,6 +35,10 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
     Disabled { test: "doom_sound_flood", issue: "issues/audio/doom-sound-flood-played-full-scale-once.md" },
+    Disabled {
+        test: "ftruncate_flush_race",
+        issue: "issues/build/ftruncate-flush-race-reds-intermittently-and-nothing-says-why.md",
+    },
     Disabled { test: "handle_basic", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
         test: "handle_kill_policy",
