@@ -101,7 +101,7 @@ pub fn init(cmdline: &str, args: &KernelArgs, map: &[MemoryMapEntry]) -> Region 
     let (at, len) = (args.root_image_addr, args.root_image_len);
     let descriptors = map.iter().map(|entry| Descriptor { ty: entry.uefi_type, start: entry.start, end: entry.end });
     let none = Region { start: 0, end: 0 };
-    let (handed, region) = match held(descriptors, crate::mm::pmm::EFI_LOADER_DATA, at, len, BLOCK as u64) {
+    let (handed, region) = match held(descriptors, toyos_bootmap::EFI_LOADER_DATA, at, len, BLOCK as u64) {
         _ if len == 0 => (Handed::Nothing, none),
         None => (Handed::Unheld { at, len }, none),
         Some(extent) => (

@@ -12,6 +12,45 @@ use toyos_abi::boot::RootBridgeWindow;
 
 use crate::bridge::Window;
 
+/// Where the fixed platform devices start on a PC: the I/O APIC, the HPET and
+/// the LAPIC window are at and above this, so a 32-bit run may not reach it.
+pub const PLATFORM_MMIO: u64 = 0xFEC0_0000;
+
+/// Where a 64-bit BAR's runs start. **Never below**, because the 32-bit runs
+/// are there, and two lists holding one address would hand it out twice.
+pub const WIDE_FLOOR: u64 = 1 << 32;
+
+/// What `taken` leaves free, lowest first: below [`PLATFORM_MMIO`] for a 32-bit
+/// BAR, from [`WIDE_FLOOR`] up for a 64-bit one.
+///
+/// `taken` is every extent the caller read something to decode — the firmware
+/// memory map, the BARs firmware assigned, the ranges bridges forward — in any
+/// order, overlapping as they may; it is sorted here. **A run is a gap between
+/// them and never merely what lies above the highest**: firmware describes
+/// extents outside every window it declared, and one of those says nothing
+/// about the space free inside a window below it.
+pub fn free_runs(taken: &mut [Window], wide: bool) -> impl Iterator<Item = Window> + '_ {
+    let (floor, ceiling) = if wide { (WIDE_FLOOR, u64::MAX) } else { (0, PLATFORM_MMIO) };
+    taken.sort_unstable_by_key(|extent| extent.start);
+    let mut at = floor;
+    let mut rest = taken.iter();
+    core::iter::from_fn(move || {
+        while at < ceiling {
+            let Some(next) = rest.next() else {
+                let run = Window { start: at, end: ceiling };
+                at = ceiling;
+                return Some(run);
+            };
+            let run = Window { start: at, end: next.start.min(ceiling) };
+            at = at.max(next.end);
+            if run.start < run.end {
+                return Some(run);
+            }
+        }
+        None
+    })
+}
+
 /// One address a `span`-byte window may take, and the base of the root bridge
 /// window firmware declared it inside.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,6 +138,123 @@ mod tests {
     ];
 
     const MIB: u64 = 1024 * 1024;
+
+    /// QEMU q35 booted on its stock edk2 with 2 GiB: the extents its firmware
+    /// map covers, then its memory BARs.
+    const EDK2_TAKEN: [Window; 10] = [
+        Window { start: 0, end: 0xa_0000 },
+        Window { start: 0x10_0000, end: 0x8000_0000 },
+        Window { start: 0xe000_0000, end: 0xf000_0000 },
+        Window { start: 0xfd_0000_0000, end: 0x100_0000_0000 },
+        Window { start: 0x8000_0000, end: 0x8104_0000 },
+        Window { start: 0x8104_0000, end: 0x8104_1000 },
+        Window { start: 0x8104_1000, end: 0x8104_2000 },
+        Window { start: 0x8104_2000, end: 0x8104_3000 },
+        Window { start: 0xc0_0000_0000, end: 0xc0_0000_4000 },
+        Window { start: 0xc0_0000_4000, end: 0xc0_0000_8000 },
+    ];
+    /// The four windows that boot's firmware declared, in the order it did.
+    const EDK2_WINDOWS: [RootBridgeWindow; 4] = [
+        RootBridgeWindow { base: 0x8000_0000, length: 0x110_0000 },
+        RootBridgeWindow { base: 0xc0_0000_0000, length: 0x10_0000 },
+        RootBridgeWindow { base: 0x8110_0000, length: 0x5ef0_0000 },
+        RootBridgeWindow { base: 0xc0_0010_0000, length: 0x1f_fff0_0000 },
+    ];
+
+    fn runs(taken: &[Window], wide: bool) -> std::vec::Vec<Window> {
+        let mut taken = taken.to_vec();
+        free_runs(&mut taken, wide).collect()
+    }
+
+    /// **edk2 offers a 64-bit BAR the window it declared for one.** The
+    /// reserved hole at 1 TiB is the highest extent it describes and lies
+    /// outside every window, so the space above it is inside none, and a run
+    /// found there alone offers the virtio NIC's BAR 4 no address.
+    #[test]
+    fn edk2_offers_a_64_bit_bar_the_window_it_declared() {
+        let mut high = runs(&EDK2_TAKEN, true);
+        assert_eq!(
+            reserve(&mut high, &EDK2_WINDOWS, 2 * MIB),
+            Some(Reservation { at: 0xc0_0020_0000, window: 0xc0_0010_0000, run: 1 })
+        );
+    }
+
+    /// The 32-bit runs of 2 MiB or more are the two that boot printed.
+    #[test]
+    fn edk2s_32_bit_runs_are_the_ones_its_boot_printed() {
+        let low: std::vec::Vec<Window> = runs(&EDK2_TAKEN, false)
+            .into_iter()
+            .filter(|run| run.end - run.start >= 2 * MIB)
+            .collect();
+        assert_eq!(
+            low,
+            [
+                Window { start: 0x8104_3000, end: 0xe000_0000 },
+                Window { start: 0xf000_0000, end: PLATFORM_MMIO },
+            ]
+        );
+    }
+
+    /// The 64-bit runs are the three that boot printed.
+    #[test]
+    fn edk2s_64_bit_runs_are_the_ones_its_boot_printed() {
+        assert_eq!(
+            runs(&EDK2_TAKEN, true),
+            [
+                Window { start: 0x1_0000_0000, end: 0xc0_0000_0000 },
+                Window { start: 0xc0_0000_8000, end: 0xfd_0000_0000 },
+                Window { start: 0x100_0000_0000, end: u64::MAX },
+            ]
+        );
+    }
+
+    /// **An extent inside another opens no run inside it**: a bridge's
+    /// forwarded range holds the BARs behind it, and a map descriptor may hold
+    /// BARs.
+    #[test]
+    fn an_extent_inside_another_opens_no_run() {
+        const GIB: u64 = 1 << 30;
+        let nested = [
+            Window { start: 5 * GIB, end: 8 * GIB },
+            Window { start: 6 * GIB, end: 6 * GIB + 0x4000 },
+        ];
+        assert_eq!(
+            runs(&nested, true),
+            [Window { start: 4 * GIB, end: 5 * GIB }, Window { start: 8 * GIB, end: u64::MAX }]
+        );
+    }
+
+    /// No address is in both lists, none is in either twice, and none is
+    /// taken.
+    #[test]
+    fn a_run_is_free_and_in_one_list_once() {
+        let low = runs(&EDK2_TAKEN, false);
+        let high = runs(&EDK2_TAKEN, true);
+        assert!(low.iter().all(|l| high.iter().all(|h| l.end <= h.start || h.end <= l.start)));
+        for list in [&low, &high] {
+            assert!(list.windows(2).all(|pair| pair[0].end < pair[1].start));
+            assert!(list.iter().all(|run| {
+                run.start < run.end
+                    && EDK2_TAKEN.iter().all(|t| t.end <= run.start || t.start >= run.end)
+            }));
+        }
+    }
+
+    /// Order and overlap in `taken` change nothing, and nothing taken leaves
+    /// each width its whole space.
+    #[test]
+    fn taken_is_read_in_any_order_and_overlapping() {
+        let mut shuffled = EDK2_TAKEN.to_vec();
+        shuffled.reverse();
+        shuffled.push(Window { start: 0xc0_0000_2000, end: 0xc0_0000_8000 });
+        assert_eq!(runs(&shuffled, true), runs(&EDK2_TAKEN, true));
+        assert_eq!(runs(&shuffled, false), runs(&EDK2_TAKEN, false));
+        assert_eq!(runs(&[], false), [Window { start: 0, end: PLATFORM_MMIO }]);
+        assert_eq!(runs(&[], true), [Window { start: WIDE_FLOOR, end: u64::MAX }]);
+        let everything = [Window { start: 0, end: u64::MAX }];
+        assert_eq!(runs(&everything, false), []);
+        assert_eq!(runs(&everything, true), []);
+    }
 
     /// Every address `runs` hands out before it is empty, in order.
     fn drain(
