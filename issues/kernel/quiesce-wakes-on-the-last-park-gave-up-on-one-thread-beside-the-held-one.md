@@ -17,6 +17,11 @@ FAIL quiesce_wakes_on_the_last_park: the stop gave up on 2 thread(s) that never 
 - PR #555 at `d2656765`.
 - PR #559 at `ac948e6a`.
 
+`quiesce_wakes_on_the_last_teardown`'s boot shares the same shape, in the Fast
+tier: PR #549 at `751e36d9`, `4 of 6 … 2010 ms of a 2010 ms budget over 2
+sweep(s)`. That boot normally counts 5 userland threads; the sixth is the
+defect this issue is open for, not this PR's teardown change.
+
 The earliest is PR #510 at `98e803cb`, recorded in
 `issues/build/quiesce-wakes-on-the-last-park-lost-its-serial-ready-beside-other-guests.md`:
 `stop: 4 of 7 userland thread(s) stopped ... in 2010 ms of a 2010 ms budget`.
