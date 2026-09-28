@@ -64,8 +64,16 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/quiesce-dump-holds-the-stopped-reds-wide-with-usb-transport-breaks.md",
     },
     Disabled {
+        test: "quiesce_stops_the_machine",
+        issue: "issues/kernel/quiesce-stops-the-machine-stayed-up-beside-other-guests.md",
+    },
+    Disabled {
         test: "quiesce_wakes_on_the_last_exit",
         issue: "issues/build/quiesce-wakes-on-the-last-exit-lost-its-serial-ready-beside-other-guests.md",
+    },
+    Disabled {
+        test: "quiesce_wakes_on_the_last_park",
+        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-two-parked-threads.md",
     },
     Disabled {
         test: "sched_check_build",

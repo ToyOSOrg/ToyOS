@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: finding
 opened: 2026-09-26
 ---
@@ -26,3 +26,8 @@ never reported stopping: the guest asked for a reboot and stayed up`, after
 266 s, and the harness's re-run alone was green. The host was loaded
 throughout by another worktree's spinner at 397% CPU, with the load average
 between 20 and 28.
+
+Again in the fast tier on PR #566's branch at `74f7d717`, a diff that is
+host-side only: the same `QEMU never reported stopping: the guest asked for a
+reboot and stayed up`, after 266 s, with the writers' progress lines and no
+`stop:` record in its capture.
