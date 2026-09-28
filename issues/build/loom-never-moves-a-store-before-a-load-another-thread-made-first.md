@@ -23,9 +23,7 @@ explored 1; the reader spawned beside the adder on the model's thread explored
 `kernel-loom/tests/i8042_tally.rs` had that shape: the model's thread read the
 tally, and the spawned ISR's `Tally::record` opens with its saturation check's
 load. Its models ran one execution, and a mutation that counted an empty
-interrupt as a carrying one passed them. They now spawn the reader and run the
-ISR on the model's thread, so the reader's pending load is raced against the
-ISR's write, and they refuse a run of one execution (`explored`).
+interrupt as a carrying one passed them.
 
 A spawned thread that opens with a load is not the trigger on its own. Every
 model below has one, and each explores more than one execution unless it joins

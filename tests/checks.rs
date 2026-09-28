@@ -21,14 +21,7 @@ mod checks {
     /// harness's source.
     ///
     /// **The one place the vocabulary lives is the whole of the fix, so this is
-    /// what keeps it the one place.** `tests/common/qemu.rs` holds three waits on a
-    /// guest and they used to disagree: the boot half ended on three spellings, the
-    /// test half on one and `await_guest` on none at all — so a Rust `panic!` in the
-    /// kernel matched nothing while a test was running, the machine halted every
-    /// CPU, and the guard expired onto a verdict saying the guest had stopped
-    /// answering. All three ask `serial::died` now, which is the only thing in the
-    /// harness that knows the words and the only thing that knows the prefix decides
-    /// whose death they report.
+    /// what keeps it the one place.**
     ///
     /// The way that comes back is the obvious patch: one more spelling handed
     /// straight to a `contains` beside the call. It would match a *program's* panic
@@ -208,13 +201,6 @@ mod checks {
 
     /// One live guest holds its lane's NVMe image, and the next one may not.
     ///
-    /// **The overlap this stages is the one the shared-boot reboot used to
-    /// produce.** `qemu = boot()` evaluates its right-hand side first, so the
-    /// replacement was launched while the guest it replaced still held the lane's
-    /// `test-nvme-*.img` open for write; QEMU's second process exited 1 on its own
-    /// image lock, `wait_for_ready` panicked, and the panic escaped the shared
-    /// block — 129 of one run's 131 reds on one sentence, 2026-08-17.
-    ///
     /// The ordering itself is now the type's: `boot` takes a [`qemu::LaneFree`] and
     /// the only thing that makes one out of a guest is `QemuInstance::shutdown`,
     /// which takes it by value. What is left to check at runtime is the claim
@@ -278,8 +264,6 @@ mod checks {
     /// one bit away from it.
     #[test]
     fn control_regs_verdict() -> Result<(), String> {
-        /// The pre-fix machine, `smp=4`, TCG, read off this tree on 2026-08-08:
-        /// firmware's registers on the BSP and INIT's on every AP.
         const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);
         const DECLARED: (u64, u64) = (0x8001_0033, 0x0030_0668);
 
@@ -323,19 +307,13 @@ mod checks {
         // Two bits a machine could hold uniformly, each one line of kernel diff
         // away, and neither reachable by an actuator. `AM` is named clear above and
         // answers by name; `PGE` is named nowhere, which is the case the whole
-        // never-named rule exists for — `TSD` and `PKE` are the same case. `UMIP`
-        // used to be this file's example of the same thing, until it joined
-        // `CR4_MAY` — a bit that moves from unnamed to optional is exactly the
-        // migration this gate exists to force a diff for.
+        // never-named rule exists for — `TSD` and `PKE` are the same case.
         refused("every CPU with AM set", &[(DECLARED.0 | (1 << 18), DECLARED.1); 4], "AM")?;
         refused(
             "every CPU with PGE set",
             &[(DECLARED.0, DECLARED.1 | (1 << 7)); 4],
             "never named",
         )?;
-        // The bit that was on before this and asserted nowhere, so deleting `+smep`
-        // from the launcher or breaking the CPUID gate in `control_regs::supported`
-        // reddened nothing at all.
         refused("every CPU without SMEP", &[(DECLARED.0, DECLARED.1 & !(1 << 20)); 4], "SMEP")?;
         // A CPU that agrees about every named bit and differs in one the CPU is
         // allowed to withhold, so nothing above it can object.
@@ -354,10 +332,6 @@ mod checks {
     /// gate's own teeth are a claim a live boot cannot demonstrate on the
     /// negative side, because nothing in this tree can stage a CPU into spinning
     /// through idle on purpose.
-    ///
-    /// This is the demonstration the closed vacuous-line-count entry
-    /// asked for: proof the restored assertion still fails when the condition it
-    /// names is violated, not just that it still passes when it is not.
     #[test]
     fn i8042_quarantine_verdict() -> Result<(), String> {
         let healthy = "\
@@ -397,39 +371,6 @@ mod checks {
         eprintln!("  [i8042] the idle-trip verdict accepts a healthy trace and refuses a spinning one");
         Ok(())
     }
-
-    /// Binaries a machine test drives that the shared boot also runs on purpose.
-    ///
-    /// **A binary a machine test drives under a different name is still discovered
-    /// by [`discover_rust_tests`]**, still runs on the shared boot, and there
-    /// passes on its exit code with nothing staged for it to act on. `RUST_SKIP` is
-    /// one answer to that; this list is the other, for the binaries whose shared
-    /// run asserts something of its own. Every driven name is on one list or the
-    /// other, so neither answer is silence — `suite_split` is the gate.
-    /// `sched_stress` is the one whose two runs differ by *kernel* rather than by
-    /// what the host staged: the shipping build here, `sched_check_build`'s
-    /// assert-carrying build there.
-    const DRIVEN_AND_SHARED: &[&str] = &[
-        // The lost-wake canary: its shared run is the count on the shipping
-        // kernel with nothing staged, and `blocking_read_window` drives it again
-        // with the watch's window held open.
-        "blocking_read_stress",
-        // The log-stream arms drive it for the kernel's `exit:` record about it,
-        // not for anything it does: it is the cheapest process this tree starts.
-        "empty_dir_stat",
-        // Its shared run is a whole handle-lifecycle gate with its own census;
-        // `userdev_dma_fault` drives the same binary for a different reason
-        // entirely — as the proof the machine still schedules and spawns after a
-        // device was refused at the unit — and stages nothing for it.
-        "handle_basic",
-        "hierarchy_paths",
-        "null_sink_client_exits",
-        "nvme_home_roundtrip",
-        "sched_stress",
-        "std_alloc",
-        "std_mmap",
-        "wall_clock_now",
-    ];
 
     /// What the declaration itself has to be, before any of it means anything.
     /// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
@@ -624,6 +565,48 @@ mod checks {
             }
         }
         found
+    }
+
+    /// What a whole run exits with, and what its last line says.
+    ///
+    /// Driven through [`Tally`] rather than asserted about it: the property that
+    /// matters is what `--land`'s gate reads off the process, and that is the exit
+    /// code after `record` has seen every outcome.
+    #[test]
+    fn run_exit_status() -> Result<(), String> {
+        let outcome = |name: &str, reason: Option<&str>, suspended: Duration| Outcome {
+            name: name.to_string(),
+            reason: reason.map(str::to_string),
+            elapsed: Duration::from_secs(3),
+            suspended,
+        };
+        let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
+
+        let mut red = Tally::new();
+        red.record(outcome("a_red", Some("the disk came back short"), Duration::ZERO));
+        red.record(outcome("a_suspended_one", None, slept));
+        if red.exit_code() != 1 {
+            return Err(format!("a run with a red exits {}, and it has to be 1", red.exit_code()));
+        }
+
+        let mut suspended = Tally::new();
+        suspended.record(outcome("a_suspended_one", None, slept));
+        if suspended.exit_code() != 2 {
+            return Err(format!("a suspended run exits {}, and it has to be 2", suspended.exit_code()));
+        }
+
+        // The clean case, so that none of the above is passing because everything
+        // reds.
+        let mut clean = Tally::new();
+        clean.record(outcome("a_green", None, Duration::ZERO));
+        let text = clean.summary(1, Duration::from_secs(9), Duration::ZERO);
+        if clean.exit_code() != 0 {
+            return Err(format!("a clean run exits {}, and it has to be 0", clean.exit_code()));
+        }
+        if !text.lines().last().unwrap_or_default().starts_with("test result: ok.") {
+            return Err(format!("a clean run does not say so plainly:\n{text}"));
+        }
+        Ok(())
     }
 
     /// Whether a run that did not attempt most of the suite's measured cost says so.

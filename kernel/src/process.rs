@@ -1271,10 +1271,9 @@ pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
     scheduler::wake_pipe_writers(pipe_id);
 }
 
-/// Ask `join` once more under the table lock, which is what makes validating the parent-thread relationship and collecting the zombie one act.
+/// Ask `join` once more; an unsettled one collects under the table lock, which is what makes validating the parent-thread relationship and collecting the zombie one act.
 pub fn ask_join(join: &mut join::Join, tid: Tid, parent_pid: Pid) -> Option<Result<i32, join::JoinRefused>> {
-    let mut guard = PROCESS_TABLE.lock();
-    join.ask(guard.as_mut().unwrap(), parent_pid, tid)
+    join.ask(|| join::collect_zombie(PROCESS_TABLE.lock().as_mut().unwrap(), parent_pid, tid))
 }
 
 /// Handle a page fault at `fault_addr` by looking up the current process's VMAs. Returns whether the fault was resolved.

@@ -453,6 +453,40 @@ const RUST_SKIP: &[&str] = &[
     "pkg_launch_gbae",
 ];
 
+/// Binaries a machine test drives that the shared boot also runs on purpose.
+///
+/// **A binary a machine test drives under a different name is still discovered
+/// by [`discover_rust_tests`]**, still runs on the shared boot, and there
+/// passes on its exit code with nothing staged for it to act on. `RUST_SKIP` is
+/// one answer to that; this list is the other, for the binaries whose shared
+/// run asserts something of its own. Every driven name is on one list or the
+/// other, so neither answer is silence — `suite_split` is the gate.
+/// `sched_stress` is the one whose two runs differ by *kernel* rather than by
+/// what the host staged: the shipping build here, `sched_check_build`'s
+/// assert-carrying build there.
+#[allow(dead_code, reason = "`suite_split` reads it, in `toyos-checks` alone")]
+const DRIVEN_AND_SHARED: &[&str] = &[
+    // The lost-wake canary: its shared run is the count on the shipping
+    // kernel with nothing staged, and `blocking_read_window` drives it again
+    // with the watch's window held open.
+    "blocking_read_stress",
+    // The log-stream arms drive it for the kernel's `exit:` record about it,
+    // not for anything it does: it is the cheapest process this tree starts.
+    "empty_dir_stat",
+    // Its shared run is a whole handle-lifecycle gate with its own census;
+    // `userdev_dma_fault` drives the same binary for a different reason
+    // entirely — as the proof the machine still schedules and spawns after a
+    // device was refused at the unit — and stages nothing for it.
+    "handle_basic",
+    "hierarchy_paths",
+    "null_sink_client_exits",
+    "nvme_home_roundtrip",
+    "sched_stress",
+    "std_alloc",
+    "std_mmap",
+    "wall_clock_now",
+];
+
 // Audio glitch tests. Each runs in its own QEMU boot per SMP config and
 // asserts on the wav the virtio-sound device captured, so they are excluded
 // from the shared multi-test boot.
@@ -474,8 +508,6 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 // used to read a screendump now reads the console instead — a screenshot is a
 // poor way to ask "did the right process come up", and thresholds over a live
 // desktop are how those tests passed vacuously twice.
-// `screen_decoder` needs no guest at all; it proves the decoder against a
-// bitmap it rendered itself, before anything points it at a real screen.
 /// The order was once about kernel rebuilds — every actuator was a build, and a
 /// feature-carrying test last left the plain-kernel ones above it untouched by
 /// the thrash. There are two kernels now and nothing to thrash; the order is
@@ -1418,8 +1450,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // and its counters rather than a capture, so it runs wide.
     ("hda_client_stall", Sched::Parallel, Tier::Nightly),
     ("hda_two_live_refused", Sched::Parallel, Tier::Weekly),
-    // Host-side, no guest: what a whole run exits with.
-    ("run_exit_status", Sched::Parallel, Tier::Nightly),
 ];
 
 /// The test binaries a [`MACHINE_TESTS`] or [`SCREEN_TESTS`] entry runs, which
@@ -12478,7 +12508,6 @@ fn run_machine_test(
             );
             Ok(())
         }
-        "run_exit_status" => run_exit_status(),
         "nvme_wide_sector" => {
             // The other half of "a device's size is a shape dimension": not how
             // many sectors, but how big one is. `lba_ds` is an 8-bit
@@ -18060,47 +18089,6 @@ impl Tally {
         }
         out
     }
-}
-
-/// What a whole run exits with, and what its last line says.
-///
-/// Driven through [`Tally`] rather than asserted about it: the property that
-/// matters is what `--land`'s gate reads off the process, and that is the exit
-/// code after `record` has seen every outcome.
-fn run_exit_status() -> Result<(), String> {
-    let outcome = |name: &str, reason: Option<&str>, suspended: Duration| Outcome {
-        name: name.to_string(),
-        reason: reason.map(str::to_string),
-        elapsed: Duration::from_secs(3),
-        suspended,
-    };
-    let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
-
-    let mut red = Tally::new();
-    red.record(outcome("a_red", Some("the disk came back short"), Duration::ZERO));
-    red.record(outcome("a_suspended_one", None, slept));
-    if red.exit_code() != 1 {
-        return Err(format!("a run with a red exits {}, and it has to be 1", red.exit_code()));
-    }
-
-    let mut suspended = Tally::new();
-    suspended.record(outcome("a_suspended_one", None, slept));
-    if suspended.exit_code() != 2 {
-        return Err(format!("a suspended run exits {}, and it has to be 2", suspended.exit_code()));
-    }
-
-    // The clean case, so that none of the above is passing because everything
-    // reds.
-    let mut clean = Tally::new();
-    clean.record(outcome("a_green", None, Duration::ZERO));
-    let text = clean.summary(1, Duration::from_secs(9), Duration::ZERO);
-    if clean.exit_code() != 0 {
-        return Err(format!("a clean run exits {}, and it has to be 0", clean.exit_code()));
-    }
-    if !text.lines().last().unwrap_or_default().starts_with("test result: ok.") {
-        return Err(format!("a clean run does not say so plainly:\n{text}"));
-    }
-    Ok(())
 }
 
 /// Which of the two shared boots a name belongs on — a *kernel build*, because
