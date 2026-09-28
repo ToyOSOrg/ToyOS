@@ -1417,16 +1417,11 @@ mod tests {
 
     /// The next connection `server` takes, or a panic naming `what` once a
     /// bound has passed with none: a reader that stopped dialing fails the test
-    /// rather than hanging it. The clone accepted on is closed before the
-    /// connection is returned, so dropping `server` then closes the listener.
+    /// rather than hanging it.
     fn accepted(server: &TcpListener, what: &str) -> TcpStream {
         let server = server.try_clone().unwrap();
         let (took, taken) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let conn = server.accept().map(|(conn, _)| conn);
-            drop(server);
-            took.send(conn)
-        });
+        std::thread::spawn(move || took.send(server.accept().map(|(conn, _)| conn)));
         taken
             .recv_timeout(Duration::from_secs(5))
             .unwrap_or_else(|_| panic!("{what} never connected"))
@@ -1610,15 +1605,17 @@ mod tests {
 
     /// **A redial of a forward that fails a connect ends at that failure**:
     /// QEMU's forward takes every connect while QEMU lives, so a refusal is
-    /// its exit, named at once rather than dialled until the bound.
+    /// its exit, named at once rather than dialled until the bound. The
+    /// refusal is staged through [`Reach`]: a listener this process drops
+    /// still takes connects while any child it is spawning holds the fd.
     #[test]
     fn a_redial_on_a_forward_that_refuses_ends_at_the_refusal() {
         let dir = toyos_tmpdir::TempDir::new("metaltalk-forward-gone");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
-        let (stream, first) = read_first(&server, Arc::new(Net), Peer::At(at), &dir);
-        assert_eq!(stream.turned_away(), 0, "the first dial was taken by a live listener");
-        drop((server, first));
+        let reach = Arc::new(TurnedAway { dials: 0.into(), taken_from: usize::MAX });
+        let (stream, _first) = read_first(&server, reach, Peer::At(at), &dir);
+        assert_eq!(stream.turned_away(), 0, "the first dial was taken");
         stream.redial(Duration::from_secs(60));
         assert_eq!(stream.wait_for_connection(1, Duration::from_secs(5)), None);
         let why = stream.unopened().expect("a refusing forward ends the redial at once");
