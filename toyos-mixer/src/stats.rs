@@ -15,7 +15,7 @@
 /// when the first client arrives, flushed when the last one leaves, so no
 /// number here is diluted by the idle path — where soundd waits on raw
 /// completion IRQs with no timer and a batched IRQ is indistinguishable from a
-/// missed deadline. Each has to mean exactly one thing.
+/// missed deadline.
 #[derive(Default)]
 pub struct MixStats {
     pub wakes: u32,

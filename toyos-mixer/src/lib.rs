@@ -9,11 +9,6 @@
 //! timers — those are `userland/soundd/`'s, and it is the only caller.
 //!
 //! **The split exists because a QEMU boot cannot ask any of these questions.**
-//! Nothing in a guest can say whether the sample a client wrote is the sample the device played. That is
-//! the half a listener hears, and `corpus`/`fixtures/mix-corpus.txt` is where it
-//! is certified: a transcript of every decision below over the space that
-//! reaches it, captured from `userland/soundd/src/main.rs` before a line of it
-//! moved here, and asserted byte for byte on every host run.
 //!
 //! **Audible behaviour is the owner's to change.** A change to the arithmetic
 //! here reds the corpus, and that red is the design: it says a refactor altered

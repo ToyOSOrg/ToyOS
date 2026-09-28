@@ -617,8 +617,7 @@ const SNAPSHOT_INTERVAL: Cadence = Cadence::every(
 /// single CPU speaks for all of them.
 static NEXT_HEALTH: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// How many times each CPU has passed through idle since boot, counted on
-/// every trip rather than only the ones that print.
+/// How many times each CPU has passed through idle since boot.
 static IDLE_TRIPS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// A snapshot of this CPU's run queues, at most once per
