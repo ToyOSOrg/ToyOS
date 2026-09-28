@@ -29,7 +29,11 @@ const WAITED: &str = "waited";
 /// `process::KILLED_EXIT_CODE`.
 const KILLED: i32 = 137;
 
-const WAITS: [&str; 5] = ["futex", "poll", "process-wait", "thread-join", "sleep"];
+// `sleep` runs before `process-wait` and `thread-join`: both of those arms also
+// sleep underneath (the waited process's `nanosleep`, the joined thread's
+// `std::thread::sleep`), so a mutation that breaks sleep would otherwise surface
+// under one of their names instead of its own.
+const WAITS: [&str; 5] = ["futex", "poll", "sleep", "process-wait", "thread-join"];
 
 fn main() {
     match std::env::args().nth(1).as_deref() {

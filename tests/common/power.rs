@@ -318,7 +318,7 @@ fn stopped_boot(
         .ok_or_else(|| format!("the kernel's stop record did not read back as one:\n  {said}"))?;
     if !record.stopped_the_machine() {
         return Err(format!(
-            "the stop gave up on {} thread(s) that never reached a safe point:\n  {record}",
+            "the stop gave up on {} thread(s) that never reached a safe point:\n  {record}\n{whole}",
             record.sweep.running,
         ));
     }

@@ -338,6 +338,9 @@ pub mod last {
         if !crate::scheduler::may_yield() {
             // A thread killed in Ring 3 leaves at its exit boundary, at a depth
             // where a yield asserts: refused there, and the stop goes on unheld.
+            // The slot this thread claimed above is freed, or the thread the
+            // boot stages could never take it.
+            HELD.store(NOBODY, Release);
             crate::log!(
                 "{}: {} left outside a syscall and is not held",
                 last.name(),
