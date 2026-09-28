@@ -33,8 +33,7 @@ also went silent. The failed read returned, and its line reached the console,
 but the stick answered the loader's next write to `loader.log` with nothing,
 so the read's line was the last the boot said (the ready-marker comment in
 `4444076c`'s `tests/common/volumes.rs`). The stick went silent after the
-EIO under both firmwares. The factor common to both is QEMU's `usb-storage`
-answer to a failed data phase.
+EIO under both firmwares.
 
 This measurement does not show which side does not finish: edk2's USB
 mass-storage and xHCI stack, or QEMU's `usb-storage`. It also does not show

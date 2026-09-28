@@ -164,10 +164,8 @@ fn select(arch: Arch, machine: &str, descriptors: &[(PathBuf, Vec<u8>)]) -> Resu
     ))
 }
 
-/// Whether `pattern` matches `name`. Every glob measured across Homebrew's
-/// and Debian's descriptors is a plain prefix with at most one trailing `*`;
-/// anything else — a non-trailing `*`, or another fnmatch metacharacter — is
-/// refused by name rather than misread.
+/// Whether `pattern` matches `name`. Anything else — a non-trailing `*`, or
+/// another fnmatch metacharacter — is refused by name rather than misread.
 fn glob(pattern: &str, name: &str) -> Result<bool, String> {
     match pattern.strip_suffix('*') {
         Some(prefix) if !prefix.contains(['*', '?', '[', '\\']) => Ok(name.starts_with(prefix)),

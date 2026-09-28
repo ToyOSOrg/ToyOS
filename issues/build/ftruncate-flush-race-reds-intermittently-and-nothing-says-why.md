@@ -20,7 +20,8 @@ shrink-mark work and against the same tree with that kernel change reverted:
 | kernel change reverted | alone | 3 | 1 fail, then 2 pass (attempt 0, 358.0 and 356.3 ms) |
 | branch | full nightly tier | 3 | 2 fail, 1 pass |
 | kernel change reverted | full nightly tier | 1 | pass |
-| stock edk2, #572 at `9082d6b4`, a later session | alone | 5 | 2 fail (runs 1 and 3), 3 pass |
+| stock edk2, #572 at `9082d6b4` | alone | 5 | 2 fail (runs 1 and 3), 3 pass |
+| `cd2e6307`, the committed `ovmf/` | alone | 5 | 1 fail (run 5), 4 pass |
 
 Both arms fail and both pass, and the only same-configuration comparison with
 more than one sample per side is the *alone* one, where the branch is 6 for 6
