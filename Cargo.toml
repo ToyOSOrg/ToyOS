@@ -274,3 +274,7 @@ strip = "debuginfo"
 name = "toyos-build"
 path = "tests/toyos.rs"
 harness = false
+
+[[test]]
+name = "toyos-checks"
+path = "tests/checks.rs"

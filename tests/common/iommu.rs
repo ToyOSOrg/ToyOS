@@ -259,11 +259,6 @@ fn table_word(socket: &Path, base: u64, index: u16) -> Result<(u64, u64), String
 ///
 /// [`Profile::Headless`] carries the most sources of both kinds — the i8042's
 /// two pins, and xHCI, virtio-net and virtio-sound over MSI-X.
-///
-/// **Per pull request this is the one machine that runs.** The machines that
-/// make the verdict move — `intremap=off`, and `eim=on` for the other entry
-/// format — are [`iommu_discovery`]'s, and that is nightly, so a change that
-/// broke only the not-remapping arm would land and be caught the next night.
 pub fn iommu_interrupt_remapping(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

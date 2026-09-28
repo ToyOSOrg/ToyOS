@@ -1271,12 +1271,9 @@ pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
     scheduler::wake_pipe_writers(pipe_id);
 }
 
-/// Atomically validate the parent-thread relationship and collect a zombie thread; the table lock is the atomicity. `Err(())`: this caller may not join `tid`/`pid`.
-pub fn wait_thread_zombie(tid: Tid, parent_pid: Pid) -> Result<Option<i32>, ()> {
-    let mut guard = PROCESS_TABLE.lock();
-    let table = guard.as_mut().unwrap();
-    // Both refusals are one answer here (`SyscallError::NotFound`); `JoinRefused` keeps them apart because they aren't the same fact.
-    join::collect_zombie(table, parent_pid, tid).map_err(|_| ())
+/// Ask `join` once more; an unsettled one collects under the table lock, which is what makes validating the parent-thread relationship and collecting the zombie one act.
+pub fn ask_join(join: &join::Join, tid: Tid, parent_pid: Pid) -> Option<Result<i32, join::JoinRefused>> {
+    join.ask(|| join::collect_zombie(PROCESS_TABLE.lock().as_mut().unwrap(), parent_pid, tid))
 }
 
 /// Handle a page fault at `fault_addr` by looking up the current process's VMAs. Returns whether the fault was resolved.
