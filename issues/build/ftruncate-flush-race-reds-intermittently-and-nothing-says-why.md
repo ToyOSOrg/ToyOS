@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: tooling
 opened: 2026-09-01
 ---
@@ -42,4 +42,9 @@ the loop is one-sided precisely because a sleep can overshoot. Whoever takes
 this decides what to measure; this entry is the rate and the refutation, not a
 design.
 
-`cargo run -- --known-red ftruncate_flush_race` says `NOT ON THE LIST`.
+Red again in the orchestrator's nightly for PR #572 at `87629411`: "the
+truncate did not serialise with the stalled flush". #572's diff is a firmware
+selection change; it does not touch the VFS.
+
+A flaky test is disabled at once: `src/redlist.rs` now carries this test, and
+`cargo run -- --known-red ftruncate_flush_race` says `YES, disabled`.
