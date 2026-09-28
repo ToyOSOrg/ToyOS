@@ -14,6 +14,7 @@
 
 use std::fs::File;
 use std::io::Write;
+use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::log::{LogTail, Record, MAX_LOG_SHARDS};
@@ -97,16 +98,18 @@ fn main() {
     }
     std::thread::Builder::new()
         .name(LAST_THREAD.into())
-        .spawn(park_for_ever)
+        .spawn(asleep_until_stopped)
         .expect("spawn the thread the stop waits for");
     // No deadline: a machine that never stops this process is a hang the
     // harness ceiling reds.
-    park_for_ever()
+    asleep_until_stopped()
 }
 
-/// Parked until the machine stops, which is the only thing that ends it.
-fn park_for_ever() -> ! {
+/// Asleep until the machine stops, which is the only thing that ends it. A
+/// sleep and not a park because `nanosleep` is the syscall `quiesce-last-park`
+/// holds the named thread in; its span is never reached.
+fn asleep_until_stopped() -> ! {
     loop {
-        std::thread::park();
+        std::thread::sleep(Duration::MAX);
     }
 }
