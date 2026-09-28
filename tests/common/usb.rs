@@ -1017,6 +1017,33 @@ fn optional_flush_keeps_the_log(
     Ok(())
 }
 
+/// Ask test-runner to run `name`, a binary no image carries, and wait for its
+/// answer. The spawn's refusal is a kernel record
+/// (`spawn: /system/bin/<name>: not found`), which is the probe's load; any other
+/// answer ends the wait red, naming it.
+fn absent_probe(
+    qemu: &mut QemuInstance,
+    console: &mut String,
+    name: &str,
+    after: &str,
+) -> Result<(), String> {
+    let asked = console.len();
+    writeln!(qemu.stdin_mut(), "run {name}").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let answer = format!("===TEST_END {name} ");
+    let refused = format!("===TEST_END {name} error=entity not found===");
+    qemu::await_guest(qemu, console, &format!("test-runner's answer to {name} {after}"), |c| {
+        c[asked..].contains(&answer)
+    })?;
+    match console[asked..].lines().find(|line| line.contains(&answer)) {
+        Some(line) if line.contains(&refused) => Ok(()),
+        line => Err(format!(
+            "test-runner answered {name} {after} with {line:?}, and a name no image carries is \
+             answered {refused:?}"
+        )),
+    }
+}
+
 /// Boot with a stick whose flush genuinely fails. The writer says so once and
 /// stops, rather than writing the device that just refused it.
 ///
@@ -1071,13 +1098,7 @@ fn failed_flush_stops_once(
     // which is what gives logd something to fail to write.
     qemu::await_marker(&mut qemu, &mut boot, GAVE_UP, "logd to give up on the sync")?;
     for i in 0..PROBES {
-        let asked = boot.len();
-        writeln!(qemu.stdin_mut(), "run flush-probe-{i}").expect("write to QEMU stdin");
-        qemu.flush_stdin();
-        let answered = format!("===TEST_END flush-probe-{i} exit=");
-        qemu::await_guest(&mut qemu, &mut boot, &format!("probe {i} to be answered"), |c| {
-            c[asked..].contains(&answered)
-        })?;
+        absent_probe(&mut qemu, &mut boot, &format!("flush-probe-{i}"), "after the give-up")?;
     }
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
@@ -4288,13 +4309,7 @@ pub fn usb_boot_stick_pulled(
         let frames = |text: &str| text.matches("compositor: frames=").count();
         let from = console.len();
         for i in probes {
-            let asked = console.len();
-            writeln!(qemu.stdin_mut(), "run pull-probe-{i}").expect("write to QEMU stdin");
-            qemu.flush_stdin();
-            let answered = format!("===TEST_END pull-probe-{i} exit=");
-            if let Err(why) = qemu::await_guest(qemu, console, &format!("probe {i} {after}"), |c| {
-                c[asked..].contains(&answered)
-            }) {
+            if let Err(why) = absent_probe(qemu, console, &format!("pull-probe-{i}"), after) {
                 let report = crate::freeze_report(qemu, console);
                 return Err(format!("{why}\n{console}\n{report}"));
             }
