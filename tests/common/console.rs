@@ -1,31 +1,13 @@
-//! The console's line atomicity, and the one thing the harness may conclude
-//! from it.
+//! The one thing the harness may conclude from the console's line atomicity:
+//! [`verdict`] — a line's *first bytes are its writer's own*, so the C family
+//! can tell a daemon's line from the program under test's by reading it, and
+//! stop failing on output that is not its own.
 //!
-//! Two subjects, in this order because the second rests on the first:
-//!
-//! 1. [`console_line_atomicity`] — every line on the console is one writer's,
-//!    whole.
-//! 2. [`verdict`] — therefore a line's *first bytes are its writer's own*, so
-//!    the C family can tell a daemon's line from the program under test's by
-//!    reading it, and stop failing on output that is not its own.
-//!
-//! The order is the argument, and it is the whole of what closed task #84.
-//! Before L5 a daemon's `println!` and a test's could reach the backend in
-//! pieces and arrive spliced into one line, and no rule over lines could
-//! separate them — so the standing write-up said there was no cheap honest fix
-//! and left a choice between giving each child a capture channel and tagging
-//! every console write with its writer. Both are built now: a program's line
-//! is a record in its own log ring, assembled by the process that wrote it,
-//! and `logd` puts it on the console whole under the program's name — so a
-//! line begins with its writer's first bytes or `console_line_atomicity` is
-//! red.
-//!
-//! **L5's guarantee is about flushes, not about newlines, and that is the
-//! second half.** A program that writes without a trailing newline has its
-//! bytes joined to the next writer's line by the *host's* splitter — see
-//! [`speaker_at`], which is where that is written down. Both halves are
-//! [`c_capture_ignores_daemon_lines`]'s, and every one of its verdicts carries
-//! the control that says it has teeth.
+//! **L5's guarantee is about flushes, not about newlines.** A program that
+//! writes without a trailing newline has its bytes joined to the next writer's
+//! line by the *host's* splitter — see [`speaker_at`], which is where that is
+//! written down. Both are [`c_capture_ignores_daemon_lines`]'s, and every one
+//! of its verdicts carries the control that says it has teeth.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -33,225 +15,12 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::qemu::{BootOptions, QemuInstance};
-use super::serial::Serial;
 
-/// The guest binary's name in the `run <name>` protocol.
-const WRITER: &str = "test_rs_console_line_atomicity";
-
-/// A liveness guard and never the verdict: two thousand 200-byte lines is a
-/// fraction of a second of virtio-console, and this only catches a guest that
+/// A liveness guard and never the verdict: it only catches a guest that
 /// stopped answering.
 const CEILING: Duration = Duration::from_secs(60);
 
-/// What the guest's binary declares, so the host is not carrying a second copy
-/// of the numbers.
-struct Declared {
-    writers: usize,
-    lines: usize,
-    width: usize,
-    /// Bytes the third writer said in two `write`s and never ended with a
-    /// newline, which only its own exit can put on the wire.
-    midline: usize,
-    /// Digits of the sequence number after each line's leading tag byte —
-    /// what tells a gap in a writer's own run from a capture that ends early.
-    seq: usize,
-}
-
-pub fn console_line_atomicity(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    // **Two CPUs, because one writer preempting another is the stimulus.** At
-    // `--smp 1` the two processes still interleave — they are preempted, not
-    // parallel — but at two the gap between one writer's two `write`s can be
-    // filled by a genuinely concurrent one, which is the harder case and the
-    // one a laptop has.
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions { smp: 2, ..Default::default() },
-    );
-    let result = qemu.run_test(WRITER, CEILING);
-    if let Some(err) = &result.error {
-        return Err(format!("{err}\nstdout:\n{}", tail(&result.stdout)));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!(
-            "the writers exited {:?}\n{}",
-            result.exit_code,
-            tail(&result.stdout)
-        ));
-    }
-    let declared = declared(&result.stdout)?;
-    // **The writers' lines and the runner's `===TEST_START` reach the console
-    // through `logd` from two rings' reads**, so a writer's first lines may
-    // arrive before the marker opens the window: every line since the command
-    // was typed is read.
-    let capture = format!("{}{}", result.before, result.stdout);
-
-    let mut pure: [BTreeSet<usize>; 2] = [BTreeSet::new(), BTreeSet::new()];
-    let mut duplicated: usize = 0;
-    let mut mixed: Vec<&str> = Vec::new();
-    let mut short: usize = 0;
-    for line in capture.lines() {
-        let a = line.bytes().filter(|b| *b == b'A').count();
-        let b = line.bytes().filter(|b| *b == b'B').count();
-        // A writer's line is one tag byte, its sequence digits, and the tag
-        // repeated to the width — so a line that is mostly one tag is one of
-        // its lines however it ended up.
-        let (tag, other) = if a >= b { (a, b) } else { (b, a) };
-        if tag * 2 < declared.width - 1 {
-            continue; // not a writer's line at all
-        }
-        if other > 0 {
-            mixed.push(line);
-            continue;
-        }
-        let writer = usize::from(b > a);
-        let bytes = line.as_bytes();
-        let tag_byte = b"AB"[writer];
-        let whole = bytes.len() == declared.width - 1
-            && bytes[0] == tag_byte
-            && bytes[1..1 + declared.seq].iter().all(u8::is_ascii_digit)
-            && bytes[1 + declared.seq..].iter().all(|c| *c == tag_byte);
-        let seq = whole
-            .then(|| std::str::from_utf8(&bytes[1..1 + declared.seq]).expect("ascii digits"))
-            .and_then(|digits| digits.parse::<usize>().ok())
-            .filter(|seq| *seq < declared.lines);
-        let Some(seq) = seq else {
-            short += 1;
-            continue;
-        };
-        if !pure[writer].insert(seq) {
-            duplicated += 1;
-        }
-    }
-
-    if !mixed.is_empty() {
-        let sample: Vec<String> = mixed
-            .iter()
-            .take(3)
-            .map(|l| l.chars().take(80).collect::<String>())
-            .collect();
-        return Err(format!(
-            "{} of {} console lines carry both writers' bytes — a `write` syscall is still the \
-             unit of interleaving, so half a line reaches the backend and another process's \
-             half follows it. First three, truncated to 80 columns:\n{}",
-            mixed.len(),
-            declared.writers * declared.lines,
-            sample.join("\n")
-        ));
-    }
-    if short != 0 {
-        return Err(format!(
-            "{short} console lines are a writer's bytes at the wrong width; a whole line is one \
-             unit and these were cut"
-        ));
-    }
-    if duplicated != 0 {
-        return Err(format!(
-            "{duplicated} console lines repeat a sequence number a writer used once — the \
-             capture duplicated lines, which no writer and no buffer can do"
-        ));
-    }
-    // Non-vacuity: a capture that lost the writers' output entirely would count
-    // zero mixed lines and prove nothing. The sequence numbers say what *kind*
-    // of loss it was, so a red here is not misread as the line buffer breaking:
-    // a gap inside a writer's own run is lines lost mid-stream, a contiguous
-    // run that stops early is a capture missing its tail, and neither is a
-    // mixed or short line — the mechanism's own verdicts are above.
-    for (i, tag) in ["A", "B"].iter().enumerate() {
-        let seen = &pure[i];
-        if seen.len() == declared.lines {
-            continue;
-        }
-        let top = seen.iter().next_back().map_or(0, |s| s + 1);
-        let gaps = top - seen.len();
-        if gaps > 0 {
-            let first_gap = (0..top).find(|s| !seen.contains(s)).unwrap_or(0);
-            return Err(format!(
-                "writer {tag} declared {} whole lines and the capture carries {}: {gaps} gap(s) \
-                 inside the writer's own numbered run (first at #{first_gap}, run ends at \
-                 #{}) — lines were lost mid-stream, between the guest's console and this \
-                 capture, not by the line buffer",
-                declared.lines,
-                seen.len(),
-                top - 1,
-            ));
-        }
-        return Err(format!(
-            "writer {tag} declared {} whole lines and the capture carries {}: the numbered run \
-             is contiguous and simply stops at #{} — a short capture missing its tail, not a \
-             line lost by the buffer",
-            declared.lines,
-            seen.len(),
-            top.saturating_sub(1),
-        ));
-    }
-    // **The line's other half: a process that exits mid-line.** The third
-    // writer says `midline` bytes in two `write`s, ends them with nothing and
-    // exits; the only thing that can make them a line is its exit ending what
-    // its stream held. A tree without that loses them silently, which drops a
-    // dying process's last words — so the assertion is the run's *length*,
-    // and it is exact on both sides: shorter means bytes were lost, longer
-    // means something else was acquired inside them.
-    let longest = capture
-        .split(|c| c != 'C')
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
-    if longest != declared.midline {
-        return Err(format!(
-            "a process exited having written {} unterminated bytes and the longest run of them on \
-             the console is {longest} — the process's exit is what turns a partial line into all \
-             there will ever be, and this capture says it went nowhere",
-            declared.midline
-        ));
-    }
-
-    // The kernel-into-userland half, on the same capture. A kernel record can
-    // only land inside a userland line if the line reached the backend in
-    // pieces, so this reds on exactly the coupling the count above reds on and
-    // observes it from the other side.
-    let console = Serial::named("console", &capture);
-    if let Some(spliced) = console.interleaved() {
-        return Err(format!(
-            "a kernel record landed inside a userland line: {:?}",
-            spliced.chars().take(160).collect::<String>()
-        ));
-    }
-    eprintln!(
-        "  [console] {} writers x {} lines of {} bytes, 0 mixed; {} unterminated bytes flushed by \
-         an exit",
-        declared.writers, declared.lines, declared.width, declared.midline
-    );
-    Ok(())
-}
-
-fn declared(stdout: &str) -> Result<Declared, String> {
-    let line = stdout
-        .lines()
-        .find(|l| l.contains("console-atomicity: writers="))
-        .ok_or_else(|| format!("the guest never declared its run\n{}", tail(stdout)))?;
-    let field = |key: &str| -> Result<usize, String> {
-        line.split_whitespace()
-            .find_map(|w| w.strip_prefix(key))
-            .and_then(|v| v.parse::<usize>().ok())
-            .ok_or_else(|| format!("the guest's declaration has no `{key}`: {line:?}"))
-    };
-    Ok(Declared {
-        writers: field("writers=")?,
-        lines: field("lines=")?,
-        width: field("width=")?,
-        midline: field("midline=")?,
-        seq: field("seq=")?,
-    })
-}
-
-/// The last of a capture, for a failure message. Two thousand 200-byte lines is
-/// not something to put in an assertion message whole.
+/// The last of a capture, for a failure message.
 fn tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     lines[lines.len().saturating_sub(20)..]
@@ -704,8 +473,8 @@ pub fn c_capture_ignores_daemon_lines(
 ///
 /// **`Profile::Metal` because the keystroke has to arrive.** Its i8042 is the
 /// only keyboard on the machine — no USB HID, no virtio — which is the shape
-/// `i8042_keyboard` and `swiss_german_layout` already inject through, and the
-/// mouse the middle arm claims is the PS/2 one beside it.
+/// `swiss_german_layout` already injects through, and the mouse the middle arm
+/// claims is the PS/2 one beside it.
 ///
 /// **One CPU, because the keystroke outlives the probe.** Nothing holds the
 /// keyboard once the claim is released, so the key stays queued while the

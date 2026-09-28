@@ -417,11 +417,6 @@ fn left_to_the_stop() -> bool {
 }
 
 extern "C" fn body(_arg: u64) -> ! {
-    // First, before any drain: stages a panic inside a kernel thread to test the panic handler's branch.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::klogd_panic() {
-        panic!("klogd-panic: the console drainer died");
-    }
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::klogd_fault() {
         // SAFETY: unsound by design — a staged Ring 0 null read, only on this actuator's boot.

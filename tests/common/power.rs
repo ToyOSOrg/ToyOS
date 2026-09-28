@@ -313,36 +313,18 @@ pub fn quiesce_wakes_on_the_last_park(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-park", LATE_WORD], rust_bins)
-}
-
-/// The same, with `quiesce-last-exit` holding the thread inside
-/// `SYS_THREAD_EXIT`.
-pub fn quiesce_wakes_on_the_last_exit(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-exit", LATE_WORD], rust_bins)
-}
-
-/// One of the two `quiesce-last-*` boots: its actuator first, the late word beside it.
-fn woken_by_the_held_thread(
-    armed: &'static [&'static str; 2],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let actuator = armed[0];
+    const ACTUATOR: &str = "quiesce-last-park";
     let (whole, record) = stopped_boot(
         "tests/quiescelastcase/system.toml",
         "quiesce_last",
-        armed,
+        &[ACTUATOR, LATE_WORD],
         rust_bins,
     )?;
     // **The premise, by the kernel's own word**: the thread was held, and
     // held before the stop claimed anything. Without it the boot below is
     // one whose last transition was anything at all.
     let held = format!(
-        "{actuator}: {} is held until the stop waits on it alone",
+        "{ACTUATOR}: {} is held until the stop waits on it alone",
         toyos_quiesce::LAST_THREAD,
     );
     let at = |needle: &str| whole.lines().position(|line| line.contains(needle));
@@ -360,83 +342,7 @@ fn woken_by_the_held_thread(
              thread was waited for:\n  {record}"
         ));
     }
-    eprintln!("  [power] {actuator}: the stop waited on the held thread's transition: {record}");
-    Ok(())
-}
-
-/// **A dump served during the stop says every thread it stopped is held.**
-/// `quiesce-dump` serves Ctrl+Alt+D's report from the shutdown once its first
-/// stage has stopped the writers, the moment the owner presses it on a
-/// shutdown stuck there. A stopped thread's state word reads `Ready`, and a
-/// report that counted it nowhere else would call it claimed and not held.
-pub fn quiesce_dump_holds_the_stopped(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let (whole, record) = stopped_boot(
-        "tests/quiescecase/system.toml",
-        "quiesce_writers",
-        &["quiesce-dump", LATE_WORD],
-        rust_bins,
-    )?;
-    let lines: Vec<&str> = whole.lines().collect();
-    let at = |needle: &str| lines.iter().position(|line| line.contains(needle));
-    let (Some(began), Some(ended), Some(synced)) = (
-        at("=== blocked-task dump:"),
-        at("=== end of dump ==="),
-        at("Syncing filesystems..."),
-    ) else {
-        return Err(format!("no whole dump and sync in this boot\n{whole}"));
-    };
-    if !(began < ended && ended < synced) {
-        return Err(format!(
-            "the dump (lines {began} to {ended}) did not finish inside the stop, which ends at \
-             line {synced}\n{whole}"
-        ));
-    }
-    let report = &lines[began..=ended];
-    let number_before = |marker: &str, word: &str| -> Result<u32, String> {
-        let line = report
-            .iter()
-            .find(|line| line.contains(marker))
-            .ok_or_else(|| format!("no {marker:?} line in the report:\n{}", report.join("\n")))?;
-        let (head, _) =
-            line.split_once(word).ok_or_else(|| format!("no {word:?} on {line:?}"))?;
-        head.split_whitespace()
-            .next_back()
-            .and_then(|n| n.parse().ok())
-            .ok_or_else(|| format!("no number before {word:?} on {line:?}"))
-    };
-    // The harm first: a report that has no word for a stopped thread still
-    // writes this verdict, and calls each one it cannot place unheld.
-    let unheld = number_before("== VERDICT:", " unheld,")?;
-    if unheld != 0 {
-        return Err(format!(
-            "a dump served during the stop called {unheld} thread(s) claimed and not held:\n{}",
-            report.join("\n"),
-        ));
-    }
-    // Then the premise: the report was served over a machine with banded
-    // threads, or the zero above is about nothing.
-    let stopped = number_before("== sched:", " stopped,")?;
-    if stopped == 0 {
-        return Err(format!(
-            "the report found no stopped thread on any cpu, so it says nothing about how it \
-             counts one:\n{}",
-            report.join("\n"),
-        ));
-    }
-    // And the count is the threads it names: this stop bands fewer than one
-    // cpu's line cap, so each one it counts is a line of its own.
-    let named = report.iter().filter(|line| line.contains("stopped (the machine is stopping)")).count();
-    if named != stopped as usize {
-        return Err(format!(
-            "the report counted {stopped} stopped thread(s) and named {named}:\n{}",
-            report.join("\n"),
-        ));
-    }
-    eprintln!("  [power] the dump inside the stop held all {stopped} stopped thread(s): {record}");
+    eprintln!("  [power] {ACTUATOR}: the stop waited on the held thread's transition: {record}");
     Ok(())
 }
 

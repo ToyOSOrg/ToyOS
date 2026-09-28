@@ -618,8 +618,7 @@ pub fn lan_talk(
     let (start, len) = super::volumes::log_extent(&bytes, &image)?;
 
     // **Its own disk.** sshd mints its identity under `/home`, and the lane's
-    // shared image would hand that identity to the next boot of the lane,
-    // which `sshd_fail_closed` asserts it mints itself.
+    // shared image would hand that identity to the next boot of the lane.
     let data = super::lane::dir().join("lan-talk-data.img");
     toyos_build::build::create_sparse(&data, qemu::NVME_SMALL);
     let (ssh_port, log_port) = (qemu::free_host_port(), qemu::free_host_port());

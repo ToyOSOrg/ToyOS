@@ -153,6 +153,7 @@ declare_flags!(pub SUITE = {
     pub JOBS_SHORT = "-j", Next;
     pub SHARD = "--shard", Next;
     pub NIGHTLY = "--nightly", None;
+    pub WEEKLY = "--weekly", None;
     /// The metal profile: the registrations that run on the T14, batched into
     /// images and judged off the log the stick came back with.
     pub METAL = "--metal", None;
@@ -209,6 +210,21 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
                 .to_string(),
         );
     }
+    if has(&NIGHTLY) && has(&WEEKLY) {
+        return Err(
+            "--weekly runs the nightly tier too, so a --nightly beside it would be read by \
+             nothing; write one"
+                .to_string(),
+        );
+    }
+    for reach in [&NIGHTLY, &WEEKLY] {
+        if has(reach) && has(&METAL) {
+            return Err(format!(
+                "{} and {} are separate tiers and cannot be combined; run one tier at a time",
+                reach.name, METAL.name
+            ));
+        }
+    }
     Ok(filter)
 }
 
@@ -240,6 +256,24 @@ mod tests {
     fn a_flags_value_is_not_the_filter() {
         assert_eq!(parse_owned(&["--jobs", "4"]).unwrap(), None);
         assert_eq!(parse_owned(&["-j", "4"]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_reach_and_the_metal_tier_are_refused_by_the_argv_validator() {
+        for (argv, reach) in
+            [(vec!["--metal", "--nightly"], "--nightly"), (vec!["--weekly", "--metal"], "--weekly")]
+        {
+            let refusal = parse_owned(&argv).unwrap_err();
+            assert!(refusal.contains(reach) && refusal.contains("--metal"), "{argv:?}: {refusal}");
+            assert!(refusal.contains("cannot be combined"), "{argv:?}: {refusal}");
+        }
+    }
+
+    #[test]
+    fn the_weekly_reach_refuses_a_nightly_it_already_runs() {
+        let refusal = parse_owned(&["--nightly", "--weekly"])
+            .expect_err("a --nightly beside --weekly was accepted and read by nothing");
+        assert!(refusal.contains("read by nothing"), "{refusal}");
     }
 
     #[test]
@@ -454,10 +488,11 @@ mod tests {
             vec!["--jobs", "4"],
             vec!["--shard", "2/4"],
             vec!["--nightly"],
+            vec!["--weekly"],
+            vec!["--weekly", "--shard", "2/12", "--jobs", "1"],
             vec!["--debug"],
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
-            vec!["--metal", "--nightly"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
         }

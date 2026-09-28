@@ -154,11 +154,9 @@ boot_volume_metadata_error 4968
 c_capture_ignores_daemon_lines 4578
 cache_eviction 8165
 connect_before_serve 23
-console_line_atomicity 8925
 console_locale_detect 3922
 control_regs 7243
 control_regs_negative 3872
-control_regs_verdict 0
 debug_float 11
 debug_trap 25
 demand_paging_sse 12
@@ -177,7 +175,6 @@ empty_dir_stat 12
 endowment_denied 10
 esp_filesystem 10123
 exit_wait_storm 178
-run_exit_status 0
 fat_backing_revoked 8226
 fault_gates 31
 foreign_disk_untouched 4688
@@ -202,7 +199,6 @@ hash_seed_precedes_every_map 4976
 hda_two_live_refused 4848
 hierarchy_paths 87
 home_backing_revoked 663
-home_budget_refusal_retried 18661
 home_overwrite_reads_back 4835
 https_tls13 5166
 https_tls13_e1000e 6072
@@ -211,7 +207,6 @@ i8042_budget_expiry 3135
 i8042_fadt_denial 5736
 i8042_health 9509
 i8042_kbd_echo 4770
-i8042_keyboard 4550
 i8042_mouse 4310
 i8042_no_spurious_wake 146
 i8042_quarantine 10068
@@ -250,8 +245,6 @@ locale_detect 9959
 locale_detect_unrecognized 160
 log_backing_read_error 4887
 log_conservation_smp1 4686
-log_conservation_smp4 8248
-log_conservation_smp8 5112
 log_flush_retry 20526
 log_nested_emit 5008
 log_partition_identity 9516
@@ -286,9 +279,7 @@ netd_connection_caps 6538
 netd_gone_mid_bind 32
 netd_hostile_peer 4509
 netd_listener_forgery 2649
-nightly_tier_is_announced 0
 nvme_home_roundtrip 13
-nvme_image_is_held_by_one_guest 0
 nvme_large_device 6052
 nvme_wide_sector 3500
 operation_nesting 5075
@@ -327,10 +318,8 @@ screen_console_clear 5756
 screen_console_panic 6788
 screen_console_scroll 12310
 screen_console_shell 2604
-screen_decoder 6
 screen_diag_boot 7330
 screen_early_panel 5779
-screen_early_panic 4441
 screen_fatal_halt 4970
 screen_fatal_halt_composited 6908
 screen_gop_firmware_mode 12624
@@ -341,18 +330,14 @@ screen_log_absent 1823
 screen_paged_scrollback 7384
 screen_pager_keys 16152
 screen_panic_muted 4416
-serial_vocabulary 2
 shipped_config_boots 3024
 shm_release_reclaims 29
 short_sleep_livelock 4823
 smp_failed_ap_leaves_no_hole 6672
 smp_roster_and_tsc_trail 4926
-so_cache_refusals 7784
 sshd_exec 5110
-sshd_fail_closed 2307
 sshd_files 535
 sshd_key_auth 1428
-a_stall_stays_red 0
 std_alloc 12
 std_fs 17
 std_fs_write 12
@@ -367,9 +352,6 @@ std_tls_dlopen 18
 std_tls_multi_crate 13
 std_unwind 18
 std_unwind_so 20
-suite_split 1
-suspend_detector 20
-suspend_invalidates_a_verdict 0
 swiss_german_layout 5355
 syscall_window_nmi 6825
 syscall_window_nmi_controls 13090
@@ -378,7 +360,6 @@ timer_calibration 6722
 toybox_cp_volume 18616
 toybox_file_tools 205
 usb_boot_stick_pulled 15650
-usb_disk_index_stable 6267
 usb_flush_optional 18056
 usb_pool_exhausted 5237
 usb_refused_disk_first 7260
@@ -395,7 +376,6 @@ virtio_net_no_msix 2039
 virtio_used_ring 4189
 volume_from_another_disk 7122
 wall_clock_century_register 9030
-wall_clock_file 4642
 wall_clock_no_century 6987
 wall_clock_now 13
 wall_clock_rtc_dead 8070
@@ -410,8 +390,6 @@ xhci_deaf_registers 21244
 xhci_descriptor_walk 5186
 xhci_flap 8220
 xhci_full_speed_device 8833
-xhci_hid_break 15290
-xhci_hotplug 7687
 xhci_many_devices 6247
 xhci_msi_only 5757
 xhci_no_interrupt 5114

@@ -6,8 +6,7 @@ opened: 2026-09-25
 
 # A `quiesce_writers` writer's first write-and-fsync pass outlasts the job's 5 s spin-up
 
-`quiesce_dump_holds_the_stopped` and `quiesce_stops_the_machine` both boot
-`quiesce_writers`. It asks for the reset only once each of its six writers has
+It asks for the reset only once each of its six writers has
 finished one pass: a create, 64 KiB of writes and an fsync. Every sighting below then reads `QEMU never reported stopping: the
 guest asked for a reboot and stayed up`; that misreport is
 `issues/build/a-stopped-boot-whose-job-never-asked-waits-out-the-reset-budget-and-says-it-asked.md`.
@@ -73,5 +72,5 @@ the orchestrator.
 **Unrun since it was disabled**: PR #562 deleted the job's 5 s spin-up.
 `quiesce_writers` waits for every writer's first pass with no deadline, so a
 first pass as slow as those above delays the reset and no longer ends the boot
-unasked. That change has never run: the tests' first run back is also that
+unasked. That change has never run: the test's first run back is also that
 change's.

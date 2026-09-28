@@ -25,9 +25,8 @@ their clocks, and no `METAL` row judges them.
 - **Scheduling.** Every CPU reaches a scheduler pass each heartbeat period, and
   no window between two heartbeats hides a death (`kernel_heartbeat`). A
   scheduler pass's cost distribution (`sched_check_build`; no metal arm boots
-  the check kernel). A stop is woken by its last park or exit before its
-  budget, rather than giving up on it (`quiesce_wakes_on_the_last_park`,
-  `quiesce_wakes_on_the_last_exit`).
+  the check kernel). A stop is woken by its last park before its budget,
+  rather than giving up on it (`quiesce_wakes_on_the_last_park`).
 - **Wakes delivered rather than waited out**: 500 pipe round trips and the
   24-child, 24-thread exit storm inside 3 s, every armed ring watcher woken
   inside 200 ms (`blocking_read_stress`, `exit_wait_storm`, `poll_wake_pipe`).

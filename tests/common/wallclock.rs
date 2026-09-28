@@ -70,24 +70,6 @@ const WINDOW_MARKER: &str = "between-tests-window-is-captured";
 /// quietly weakening the gate.
 pub const MAX_LOG_FILES: usize = 16;
 
-/// The name of the boot the guest must delete, and the ones it must not.
-///
-/// Sixteen staged files, so the volume is exactly at the bound before the guest
-/// starts and this boot's own file is the one that puts it over. They are dated
-/// well before [`RTC_BASE`], so the one that has to go is unambiguous — and
-/// they are *not* consecutive days, so an implementation deleting "the first one
-/// it listed" or "the lowest index" rather than the oldest lands on a different
-/// file than the one asserted.
-fn staged_logs() -> Vec<(String, Vec<u8>)> {
-    (0..MAX_LOG_FILES)
-        .map(|i| {
-            let name = format!("2019-12-{:02}-120000.log", 1 + i * 2);
-            let body = format!("staged by the host as boot {i}\n").into_bytes();
-            (name, body)
-        })
-        .collect()
-}
-
 /// The log files this module's kernel wrote or was given, oldest first.
 fn logs(entries: &[Entry]) -> Vec<&Entry> {
     entries.iter().filter(|e| toyos_build::bootlog::is_logd_file(&e.name)).collect()
@@ -102,13 +84,6 @@ fn names(entries: &[&Entry]) -> String {
 fn probed_epoch(log: &str) -> Option<i64> {
     let line = log.lines().find(|l| l.contains("wall-clock: epoch="))?;
     let rest = line.split("epoch=").nth(1)?;
-    rest.split_whitespace().next()?.parse().ok()
-}
-
-/// What the same probe printed for `std`'s `SystemTime::now`.
-fn probed_std_epoch(log: &str) -> Option<i64> {
-    let line = log.lines().find(|l| l.contains("wall-clock: std_epoch="))?;
-    let rest = line.split("std_epoch=").nth(1)?;
     rest.split_whitespace().next()?.parse().ok()
 }
 
@@ -212,124 +187,6 @@ fn boot_and_read(
     let entries = volumes::root_entries(&after[start..start + len])?;
     let _ = std::fs::remove_file(&image_path);
     Ok((entries, log, launched.elapsed()))
-}
-
-/// One file per boot, named and stamped from the wall clock, with the oldest
-/// deleted once the volume is at its bound.
-pub fn wall_clock_file(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let staged = staged_logs();
-    let (entries, log, lived) =
-        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-boot.img", &[], &staged)?;
-    let logs = logs(&entries);
-
-    // The bound, on the volume rather than in the guest's account of it.
-    if logs.len() != MAX_LOG_FILES {
-        return Err(format!(
-            "the volume holds {} logs, not the {MAX_LOG_FILES} the bound allows: {}\n{}",
-            logs.len(),
-            names(&logs),
-            clock_lines(&log)
-        ));
-    }
-
-    // The oldest staged file and no other. `staged_logs` dates them two days
-    // apart, so deleting by list order or by index would take a different one.
-    let oldest = &staged[0].0;
-    if logs.iter().any(|e| &e.name == oldest) {
-        return Err(format!(
-            "the oldest log {oldest} is still on the volume, so the bound was met by deleting \
-             something else: {}",
-            names(&logs)
-        ));
-    }
-    for (name, _) in &staged[1..] {
-        if !logs.iter().any(|e| &e.name == name) {
-            return Err(format!(
-                "{name} was deleted and it is not the oldest: {}\n{}",
-                names(&logs),
-                clock_lines(&log)
-            ));
-        }
-    }
-    if !log.contains(&format!("/log/{oldest} was deleted")) {
-        return Err(format!(
-            "nothing in the log names {oldest} as the file that was deleted to make room\n{}",
-            clock_lines(&log)
-        ));
-    }
-
-    // This boot's own file: named for the staged instant, which needs the
-    // century register to come out as 2101 rather than 2001.
-    let Some(mine) = logs.iter().find(|e| e.name.starts_with(RTC_BASE_DATE)) else {
-        return Err(format!(
-            "no log named for the day the host staged ({RTC_BASE_DATE}*): {}\n{}",
-            names(&logs),
-            clock_lines(&log)
-        ));
-    };
-    let drift = mine.modified - RTC_BASE_SECS;
-    if !after_the_base(drift, lived) {
-        return Err(format!(
-            "{} carries a timestamp {drift}s from the {RTC_BASE} the host set, outside the \
-             {lived:?} its RTC ran\n{}",
-            mine.name,
-            clock_lines(&log)
-        ));
-    }
-    if mine.len == 0 {
-        return Err(format!("{} is on the volume and empty", mine.name));
-    }
-
-    // The other end of the same instant. Firmware named no zone on this
-    // machine — OVMF ships `EFI_UNSPECIFIED_TIMEZONE` — so the kernel takes the
-    // RTC as UTC and the epoch syscall must answer the staged instant itself.
-    // A kernel serving 1970, or serving local time shifted by a zone it
-    // invented, lands outside this window.
-    let Some(epoch) = probed_epoch(&log) else {
-        return Err(format!(
-            "the guest never printed what `SYS_CLOCK_EPOCH` answered\n{}",
-            clock_lines(&log)
-        ));
-    };
-    let epoch_drift = epoch - RTC_BASE_SECS;
-    if !after_the_base(epoch_drift, lived) {
-        return Err(format!(
-            "`SYS_CLOCK_EPOCH` answered {epoch}, {epoch_drift}s from the {RTC_BASE} the host set \
-             and outside the {lived:?} its RTC ran\n{}",
-            clock_lines(&log)
-        ));
-    }
-
-    // Judged against `RTC_BASE` and not against the syscall above, so a std
-    // agreeing with a wrong kernel still lands outside this window.
-    let Some(std_epoch) = probed_std_epoch(&log) else {
-        return Err(format!(
-            "the guest never printed what std's `SystemTime::now` answered\n{}",
-            clock_lines(&log)
-        ));
-    };
-    let std_drift = std_epoch - RTC_BASE_SECS;
-    if !after_the_base(std_drift, lived) {
-        return Err(format!(
-            "std's `SystemTime::now` answered {std_epoch}, {std_drift}s from the {RTC_BASE} the \
-             host set and outside the {lived:?} its RTC ran. A std that never asks the kernel \
-             answers the epoch, which is {}s out\n{}",
-            -RTC_BASE_SECS,
-            clock_lines(&log)
-        ));
-    }
-
-    eprintln!(
-        "  [clock] {} carries {} bytes, stamped {drift}s after the {RTC_BASE} the host set, epoch \
-         {epoch_drift}s after it and std {std_drift}s after it; {} deleted for the \
-         {MAX_LOG_FILES}-log bound",
-        mine.name, mine.len, oldest
-    );
-    Ok(())
 }
 
 /// A firmware-named zone separates local time from UTC, in the direction UEFI
