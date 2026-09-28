@@ -915,6 +915,42 @@ mod tests {
     use super::*;
     use toyos_tmpdir::TempDir;
 
+    /// The file a fork checkout carries for [`a_fake_bootstrap`] to act in it.
+    const FAKE: &str = "FAKE_BOOTSTRAP";
+
+    /// **Every bootstrap run leaves the fork's lockfiles as it found them**:
+    /// `./x` here is this test binary, running [`a_fake_bootstrap`], which
+    /// re-locks both and fails.
+    #[test]
+    fn a_bootstrap_run_leaves_both_lockfiles_as_they_were() {
+        let fork = TempDir::new("x-build-locks");
+        let locks = [fork.join("Cargo.lock"), fork.join("library/Cargo.lock")];
+        fs::create_dir_all(fork.join("library")).unwrap();
+        for lock in &locks {
+            fs::write(lock, "# as committed\n").unwrap();
+        }
+        fs::write(fork.join(FAKE), "").unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
+
+        let args = ["--exact", "toolchain::tests::a_fake_bootstrap", "--include-ignored", "--nocapture"];
+        let (ok, log) = x_build(&fork, &args, "a fake bootstrap");
+        assert!(!ok, "the fake bootstrap did not run: {log:?}");
+        assert!(log.iter().any(|l| l.contains("re-locked both")), "{log:?}");
+        for lock in &locks {
+            assert_eq!(fs::read_to_string(lock).unwrap(), "# as committed\n", "{} was left re-locked", lock.display());
+        }
+    }
+
+    #[test]
+    #[ignore = "the bootstrap `a_bootstrap_run_leaves_both_lockfiles_as_they_were` runs; never runs on its own"]
+    fn a_fake_bootstrap() {
+        assert!(Path::new(FAKE).is_file(), "a_fake_bootstrap ran outside a fake fork checkout; it is not a test");
+        for lock in ["Cargo.lock", "library/Cargo.lock"] {
+            fs::write(lock, "# re-locked to the published toyos-abi\n").unwrap();
+        }
+        panic!("re-locked both, and failed");
+    }
+
     /// **The layout that makes rustup narrate, as a decision.**
     ///
     /// The toolchain was given a cargo once, by hand, in a step the rebuild path
