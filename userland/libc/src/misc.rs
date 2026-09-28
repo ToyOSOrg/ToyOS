@@ -155,6 +155,8 @@ unsafe fn run_atexit() {
 #[no_mangle]
 pub unsafe extern "C" fn exit(status: i32) -> ! {
     run_atexit();
+    #[cfg(not(feature = "std-runtime"))]
+    crate::runtime::fini();
     super::stdio::fflush(ptr::null_mut());
     _exit(status)
 }
