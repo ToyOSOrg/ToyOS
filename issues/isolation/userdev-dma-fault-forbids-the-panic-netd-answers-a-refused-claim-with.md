@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-28
 ---
@@ -24,6 +24,11 @@ The boot's capture, in order:
 
 The same head's Fast tier ran the test green. It is the one red among 39
 unmutated runs in the orchestrator's kept logs.
+
+Also seen in the orchestrator's Fast at PR #562's head `ba14967e`:
+`orch-runs/562r6-fast.log:1244`, `FAIL userdev_dma_fault: "panicked at" on a
+boot console that should not have it: "{0.423 error netd} thread 'main' (1)
+panicked at netd/src/main.rs:186:35:"`.
 
 That panic is netd's designed answer. `Card::begin_pass`
 (`userland/netd/src/main.rs`) panics when the claim refuses its interrupt

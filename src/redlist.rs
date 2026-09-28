@@ -109,6 +109,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/build/a-swaps-redial-races-a-hard-dial-ceiling-against-an-unbounded-guest-gap.md",
     },
     Disabled {
+        test: "syscall_window_nmi",
+        issue: "issues/kernel/syscall-window-nmi-shortfalls-on-a-contended-host.md",
+    },
+    Disabled {
         test: "usb_disk_index_stable",
         issue: "issues/hardware/usb-disk-index-stable-nothing-enumerates-on-the-first-controller.md",
     },
@@ -119,6 +123,10 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "user_copy_races_munmap",
         issue: "issues/kernel/copy-meets-a-remap-holds-a-cpu-the-thread-it-waits-on-may-be-queued-behind.md",
+    },
+    Disabled {
+        test: "userdev_dma_fault",
+        issue: "issues/isolation/userdev-dma-fault-forbids-the-panic-netd-answers-a-refused-claim-with.md",
     },
 ];
 
