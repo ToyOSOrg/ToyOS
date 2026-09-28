@@ -194,8 +194,7 @@ const RUST_SKIP: &[&str] = &[
     // `log_program_forgery` runs it.
     "log_forger",
     // Its verdict is where its one line went — `/log`, the served log and the
-    // console — which only a boot of its own reads back. `log_program_line`,
-    // `log_stream` and `userdev_dma_fault` run it.
+    // console — which only a boot of its own reads back.
     "log_origin",
     // Its verdict is where its line lands among the kernel's records, which
     // every other binary's records would crowd. `log_program_line_after_its_records`
