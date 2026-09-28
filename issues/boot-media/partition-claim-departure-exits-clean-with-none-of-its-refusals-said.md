@@ -63,9 +63,9 @@ missing, which that hypothesis does not by itself explain.
 
 `guest_verdict`'s "exited 0 having said" refusal (`tests/common/partclaim.rs`)
 carries the kernel window, as its non-zero-exit refusal already does, so the
-next sighting is not blind; the mechanism — a QMP hook racing the marker it is
-keyed on, or something else — named and fixed; and a test that turns red on it
-deterministically. Then this row and its `src/redlist.rs` entry are deleted.
+next sighting is not blind; the mechanism named and fixed; and a test that
+turns red on it deterministically. Then this row and its `src/redlist.rs`
+entry are deleted.
 
 ## Owner
 

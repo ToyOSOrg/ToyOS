@@ -143,14 +143,24 @@ fn entries(tmp: &Path) -> Vec<String> {
 fn a_killed_process_is_reclaimed_and_a_live_one_is_never_touched() {
     let _spawning = spawning();
     let tmp = TempDir::new("reclaim");
-    reclaimed(|| Holder::start(&tmp));
+    reclaimed(|| Holder::start(&tmp), &tmp);
     assert_eq!(entries(&tmp), [GLOBAL], "a returned process left something behind");
-    reclaimed(|| Holder::short(&tmp));
+    // A short directory is under `/tmp` however deep `$TMPDIR` (here `tmp`) is,
+    // so a socket's path in it fits Darwin's `sun_path`, the shorter of the
+    // hosts'.
+    let short_base = std::fs::canonicalize(SHORT_BASE).unwrap();
+    reclaimed(|| Holder::short(&tmp), &short_base);
 }
 
-fn reclaimed(start: impl Fn() -> Holder) {
+fn reclaimed(start: impl Fn() -> Holder, base: &Path) {
     let killed = start();
     let killed_root = killed.root();
+    assert!(
+        killed_root.starts_with(base),
+        "{} is not under {}",
+        killed_root.display(),
+        base.display()
+    );
     killed.kill();
     assert!(killed_root.exists(), "the premise: SIGKILL leaves the root");
 
@@ -163,23 +173,6 @@ fn reclaimed(start: impl Fn() -> Holder) {
     live.finish();
     past.finish();
     assert!(!live_root.exists() && !past_root.exists(), "a process that returned left its root");
-}
-
-/// A short directory is under `/tmp` however deep `$TMPDIR` is, so a socket's
-/// path in it fits Darwin's `sun_path`, the shorter of the hosts'.
-#[test]
-fn a_socket_in_a_short_directory_fits_whatever_tmpdir_is() {
-    const DARWIN_SUN_PATH: usize = 104;
-    let _spawning = spawning();
-    let tmp = TempDir::new("deep");
-    let deep = tmp.join("d".repeat(DARWIN_SUN_PATH));
-    std::fs::create_dir(&deep).unwrap();
-    let holder = Holder::short(&deep);
-    let socket = holder.dir.join("tap-out.sock");
-    holder.finish();
-    let base = std::fs::canonicalize(SHORT_BASE).unwrap();
-    assert!(socket.starts_with(&base), "{} is not under {}", socket.display(), base.display());
-    assert!(socket.as_os_str().len() < DARWIN_SUN_PATH, "{} outgrows sun_path", socket.display());
 }
 
 /// A root whose making or removal was cut short, with no owner file, is a gone

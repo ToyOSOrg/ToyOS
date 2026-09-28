@@ -498,9 +498,7 @@ fn host(root: &Path) -> Vec<Step> {
 }
 
 /// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
-/// under `short` whose process is gone that `before` does not name, as a
-/// refusal: a `toyos_tmpdir::TempDir::short` of a step that died, which
-/// only some later process's sweep would take.
+/// under `short` whose process is gone that `before` does not name.
 ///
 /// Refuses if `tmp` holds no [`toyos_tmpdir::GLOBAL`] at all: every step above
 /// makes at least one `toyos_tmpdir::TempDir`, which always writes that lock
