@@ -2108,11 +2108,29 @@ pub fn userdev_dma_fault(
             result.exit_code, result.stdout
         ));
     }
-    // Nothing panicked on the way, and the staged fault happened **once**:
-    // clearing the function's Bus Master Enable is what bounds a storm, and a
-    // second line would say it did not. Every other boot in the estate reds on
-    // this line through `must_be_clean`; this is the one that staged it.
+    // `end` is the window from the fault to netd's exit, and nothing else
+    // judges it — it goes into the check below rather than staying read only
+    // for the two needles `await_guest` waited on. netd's own panic is
+    // staged, so its location line, immediately above the message already
+    // matched above, is the one line this capture may hold; a second panic,
+    // netd's or anyone else's, has no line here to hide behind.
+    let message_at = end
+        .lines()
+        .position(|l| l.contains("netd: this NIC's claim refused an interrupt read: Io"))
+        .ok_or_else(|| format!("netd's panic message vanished between the wait and the check:\n{end}"))?;
+    let mut lines: Vec<&str> = end.lines().collect();
+    if message_at == 0 || !lines[message_at - 1].contains("panicked at") {
+        return Err(format!("netd's panic message arrived without its location line:\n{end}"));
+    }
+    lines.remove(message_at - 1);
+    let end = lines.join("\n");
+
+    // The staged fault happened **once**: clearing the function's Bus Master
+    // Enable is what bounds a storm, and a second line would say it did not.
+    // Every other boot in the estate reds on this line through
+    // `must_be_clean`; this is the one that staged it.
     let mut after = log;
+    after.push(&end);
     after.push(&result.serial);
     after.must_be_clean_apart_from("iommu: DMA FAULT owner=slot", 1)?;
     eprintln!(
