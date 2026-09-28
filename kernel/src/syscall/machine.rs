@@ -199,21 +199,34 @@ pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
 /// The most live threads `SYS_SYSINFO` will describe; kept under `mm::MAX_HEAP_ALLOC` so an unbounded thread count cannot trip the allocator's fail-fast assert.
 const MAX_SYSINFO_THREADS: usize = 65_536;
 
-/// Test-only override for `MAX_SYSINFO_THREADS`, armed at runtime by `DA::LOWER_SYSINFO_BOUND` so the shipped bound stays exercised.
+/// How far past the machine's live threads at arming `DA::LOWER_SYSINFO_BOUND` puts the bound.
 #[cfg(feature = "test-actuators")]
-const GATED_SYSINFO_THREADS: usize = 16;
+const LOWERED_SYSINFO_HEADROOM: usize = 16;
 
+/// `MAX_SYSINFO_THREADS` until `DA::LOWER_SYSINFO_BOUND` lowers it for the rest of the boot.
 #[cfg(feature = "test-actuators")]
-pub(super) static SYSINFO_BOUND_LOWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static SYSINFO_BOUND: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(MAX_SYSINFO_THREADS);
+
+/// Lowers [`sys_sysinfo`]'s bound to the machine's own live threads plus a fixed headroom, counted as `sys_sysinfo` counts them.
+#[cfg(feature = "test-actuators")]
+pub(super) fn lower_sysinfo_bound() {
+    let guard = process::PROCESS_TABLE.lock();
+    let live = live_threads(guard.as_ref().unwrap());
+    SYSINFO_BOUND.store(live + LOWERED_SYSINFO_HEADROOM, core::sync::atomic::Ordering::Relaxed);
+}
 
 /// What [`sys_sysinfo`] compares against on this boot.
 fn sysinfo_thread_bound() -> usize {
     #[cfg(feature = "test-actuators")]
-    if SYSINFO_BOUND_LOWERED.load(core::sync::atomic::Ordering::Relaxed) {
-        return GATED_SYSINFO_THREADS;
-    }
+    return SYSINFO_BOUND.load(core::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(feature = "test-actuators"))]
     MAX_SYSINFO_THREADS
+}
+
+/// Every thread in the process table, zombies included: the roster's entries.
+fn live_threads(table: &process::ProcessTable) -> usize {
+    table.iter().map(|(_, proc)| proc.threads().iter().count()).sum()
 }
 
 /// The machine's header, then the live-thread roster for as much of `out` as fits; the roster requires a `SysCap` carrying `Rights::ROSTER`, demanded only when `out` has room for an entry.
@@ -240,7 +253,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     let guard = process::PROCESS_TABLE.lock();
     let table = guard.as_ref().unwrap();
 
-    let entry_count: u32 = table.iter().flat_map(|(_, proc)| proc.threads().iter().map(move |(tid, thread)| (tid, proc, thread))).count() as u32;
+    let entry_count = live_threads(table) as u32;
     if entry_count as usize > sysinfo_thread_bound() {
         return SyscallError::ResourceExhausted.to_u64();
     }

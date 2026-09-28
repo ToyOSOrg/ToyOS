@@ -45,7 +45,7 @@ use super::machine::{
     MAX_INVENTORY_RECORDS,
 };
 #[cfg(feature = "test-actuators")]
-use super::machine::SYSINFO_BOUND_LOWERED;
+use super::machine::lower_sysinfo_bound;
 use super::proc::{
     sys_endowments, sys_exit, sys_nanosleep, sys_process_open, sys_process_stats,
     sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
@@ -629,7 +629,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // Armed, not #[cfg]'d, so it doesn't ship in every kernel this suite boots:
             // the real bound is unreachable (no guest makes 65,536 threads).
             DA::LOWER_SYSINFO_BOUND => {
-                SYSINFO_BOUND_LOWERED.store(true, core::sync::atomic::Ordering::Relaxed);
+                lower_sysinfo_bound();
                 0
             }
             // Puts one free slot one lifecycle from the end so retirement is reachable without

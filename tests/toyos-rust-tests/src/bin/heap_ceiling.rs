@@ -7,8 +7,9 @@
 
 // `SYS_DEBUG` actions a `test-actuators` kernel provides. The first two take
 // one kernel heap allocation each and release it again — at
-// `mm::MAX_HEAP_ALLOC`, and at `MAX_HEAP_ALLOC` with 4096-byte alignment; the last lowers `SYS_SYSINFO`'s thread bound to a count
-// this guest can reach.
+// `mm::MAX_HEAP_ALLOC`, and at `MAX_HEAP_ALLOC` with 4096-byte alignment; the
+// last lowers `SYS_SYSINFO`'s thread bound to the machine's live threads plus
+// 16.
 use toyos_abi::syscall::debug_action::{
     HEAP_AT_CEILING, HEAP_AT_CEILING_PAGE_ALIGNED, LOWER_SYSINFO_BOUND,
 };
@@ -31,9 +32,10 @@ fn main() {
 /// ask the heap for more than `MAX_HEAP_ALLOC` and trip the assert three
 /// functions above — from any process, with no privilege.
 ///
-/// [`LOWER_SYSINFO_BOUND`] puts 16 in `MAX_SYSINFO_THREADS`'s place, because
-/// 65,536 threads is 8 GiB of kernel stacks and no guest can make them. The
-/// count, the comparison and the refusal are the shipped ones.
+/// [`LOWER_SYSINFO_BOUND`] puts the machine's live threads plus 16 in
+/// `MAX_SYSINFO_THREADS`'s place, because 65,536 threads is 8 GiB of kernel
+/// stacks and no guest can make them. The count, the comparison and the
+/// refusal are the shipped ones.
 ///
 /// **Armed here rather than compiled in, and the arming is itself an
 /// assertion**: the bound is the shipped 65,536 until this call, so a kernel
@@ -44,7 +46,7 @@ fn sysinfo_refuses_rather_than_allocating_past_the_ceiling() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    assert!(sysinfo_answers(), "sysinfo already refuses with no threads of ours");
+    let live = sysinfo_live().expect("sysinfo already refuses with no threads of ours");
     let rc = toyos_abi::syscall::debug(LOWER_SYSINFO_BOUND);
     assert_eq!(rc, 0, "SYS_DEBUG {LOWER_SYSINFO_BOUND} did not lower the bound (rc={rc:#x})");
 
@@ -60,7 +62,7 @@ fn sysinfo_refuses_rather_than_allocating_past_the_ceiling() {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }));
-        if !sysinfo_answers() {
+        if sysinfo_live().is_none() {
             refused_at = Some(i + 1);
             break;
         }
@@ -76,15 +78,19 @@ fn sysinfo_refuses_rather_than_allocating_past_the_ceiling() {
         t.join().expect("join a parked thread");
     }
     // A bound, not a one-way door: with the threads gone it answers again.
-    assert!(sysinfo_answers(), "sysinfo stayed refused after the threads exited");
-    println!("  PASS: sysinfo refused past its bound at {at} extra threads, and recovered");
+    assert!(sysinfo_live().is_some(), "sysinfo stayed refused after the threads exited");
+    println!(
+        "  PASS: sysinfo refused past its bound at {at} extra threads over {live} live before arming, and recovered"
+    );
 }
 
-/// Whether `SYS_SYSINFO` filled its header. The ABI wrapper reports an error
-/// as `0`, and the header is the smallest buffer it accepts.
-fn sysinfo_answers() -> bool {
+/// The live threads `SYS_SYSINFO`'s header counts, or `None` when it refused.
+/// The ABI wrapper reports an error as `0`, and the header is the smallest
+/// buffer it accepts.
+fn sysinfo_live() -> Option<u32> {
     let mut buf = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
-    toyos::system::sysinfo(&mut buf) == buf.len()
+    (toyos::system::sysinfo(&mut buf) == buf.len())
+        .then(|| toyos_abi::syscall::SysinfoHeader::decode(&buf).entries)
 }
 
 /// The documented ceiling is a size the heap actually serves.
