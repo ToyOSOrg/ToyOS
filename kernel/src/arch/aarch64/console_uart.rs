@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use toyos_acpi::{SerialInterface, GAS_SYSTEM_MEMORY};
 
-use crate::drivers::acpi::DirectPhys;
+use crate::drivers::acpi::direct_phys;
 use crate::log;
 use crate::mm::{DirectMap, Mmio};
 
@@ -35,7 +35,7 @@ fn regs() -> Mmio {
 
 /// Find the UART SPCR names and answer whether it is one this file drives.
 pub fn init(rsdp_addr: u64) -> bool {
-    let spcr = match toyos_acpi::spcr(DirectPhys::now(), rsdp_addr) {
+    let spcr = match toyos_acpi::spcr(direct_phys(), rsdp_addr) {
         Ok(spcr) => spcr,
         Err(e) => {
             log!("serial: no console UART, because the SPCR is unusable: {e:?}");

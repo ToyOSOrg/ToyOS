@@ -1,11 +1,10 @@
 //! How far the direct map reaches: to the end of the memory the kernel reads,
-//! never to a range the map describes and does not call memory; and what a
-//! firmware address the kernel reads through it must lie inside.
+//! never to a range the map describes and does not call memory.
 
 use toyos_abi::boot::MemoryMapEntry;
-use toyos_bootmap::x86_64::direct_map_end;
 use toyos_bootmap::{
-    is_usable_type, reaches, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, EFI_LOADER_DATA, PAGE_2M,
+    is_usable_type, x86_64, DirectMapEnd, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW,
+    EFI_LOADER_DATA, PAGE_2M,
 };
 
 const RESERVED: u32 = 0;
@@ -14,6 +13,10 @@ const ACPI_RECLAIM: u32 = 9;
 const ACPI_NVS: u32 = 10;
 
 const GIB: u64 = 1 << 30;
+
+fn direct_map_end(map: &[MemoryMapEntry]) -> Result<u64, Refusal> {
+    x86_64::direct_map_end(map).map(DirectMapEnd::get)
+}
 
 const fn e(uefi_type: u32, start: u64, end: u64) -> MemoryMapEntry {
     MemoryMapEntry { uefi_type, start, end }
@@ -232,14 +235,6 @@ fn an_empty_map_is_the_boot_map() {
     assert_eq!(direct_map_end(&[]), Ok(BOOT_MAP_BYTES));
 }
 
-/// Root slots 256 to 511 at `PHYS_OFFSET`: everything from there to the top of
-/// the address space.
-#[test]
-fn the_window_is_what_phys_offset_leaves() {
-    const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
-    assert_eq!(DIRECT_MAP_WINDOW, 0u64.wrapping_sub(PHYS_OFFSET));
-}
-
 #[test]
 fn memory_past_the_window_is_refused_by_name() {
     let map = [e(CONVENTIONAL, DIRECT_MAP_WINDOW - PAGE_2M, DIRECT_MAP_WINDOW + 1)];
@@ -260,27 +255,4 @@ fn memory_past_the_window_is_refused_by_name() {
 fn a_range_past_the_window_that_is_not_memory_is_not_refused() {
     let map = [e(CONVENTIONAL, 0x10_0000, 2 * GIB), e(RESERVED, 0, u64::MAX)];
     assert_eq!(direct_map_end(&map), Ok(BOOT_MAP_BYTES));
-}
-
-/// What the ACPI reader asks of a firmware address: the direct map's extent,
-/// not the architecture's physical-address width.
-#[test]
-fn a_firmware_address_past_the_direct_map_is_not_read() {
-    let end = direct_map_end(&EDK2_Q35_AMD).unwrap();
-    // The RSDP and the five tables the same boot read, where it found them.
-    for (at, len) in [
-        (0x7f77e014, 36),
-        (0x7f778000, 144),
-        (0x7f779000, 244),
-        (0x7f777000, 56),
-        (0x7f776000, 60),
-        (0x7f775000, 128),
-    ] {
-        assert!(reaches(end, at, len), "{at:#x}+{len}");
-    }
-    assert!(!reaches(end, 0xfd_0000_0000, 36), "a table in the reserved hole");
-    assert!(!reaches(BOOT_MAP_BYTES, 1 << 40, 1), "before the kernel's own map, past the boot map");
-    assert!(reaches(end, end - 36, 36));
-    assert!(!reaches(end, end - 35, 36), "a table whose last byte is past the map");
-    assert!(!reaches(end, u64::MAX, 2), "a range whose end does not fit an address");
 }

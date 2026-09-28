@@ -5,7 +5,7 @@
 
 use toyos_abi::boot::MemoryMapEntry;
 
-use crate::{is_read_as_memory, Cache, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, PAGE_2M};
+use crate::{is_read_as_memory, Cache, DirectMapEnd, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, PAGE_2M};
 
 /// One past the kernel direct map's last byte: [`BOOT_MAP_BYTES`], or the end
 /// of the highest range the kernel reads as memory in whole [`PAGE_2M`] pages,
@@ -14,13 +14,14 @@ use crate::{is_read_as_memory, Cache, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW
 /// The low [`BOOT_MAP_BYTES`] are mapped whole, registers and holes included,
 /// because x86-64 types those pages by its MTRRs rather than by the entry, and
 /// because the kernel goes on using addresses it took through the boot map.
-pub fn direct_map_end(map: &[MemoryMapEntry]) -> Result<u64, Refusal> {
+pub fn direct_map_end(map: &[MemoryMapEntry]) -> Result<DirectMapEnd, Refusal> {
     map.iter().filter(|entry| is_read_as_memory(entry.uefi_type)).try_fold(BOOT_MAP_BYTES, |end, entry| {
         if entry.end > DIRECT_MAP_WINDOW {
             return Err(Refusal::PastWindow(entry.end));
         }
         Ok(end.max(entry.end.next_multiple_of(PAGE_2M)))
     })
+    .map(DirectMapEnd)
 }
 
 const PRESENT: u64 = 1 << 0;

@@ -27,9 +27,8 @@ pub const WIDE_FLOOR: u64 = 1 << 32;
 /// memory map, the BARs firmware assigned, the ranges bridges forward — in any
 /// order, overlapping as they may; it is sorted here. **A run is a gap between
 /// them and never merely what lies above the highest**: firmware describes
-/// extents outside every window it declared (q35's edk2 reserves
-/// `0xfd00000000..0x10000000000`), and one of those says nothing about the
-/// space free inside a window below it.
+/// extents outside every window it declared, and one of those says nothing
+/// about the space free inside a window below it.
 pub fn free_runs(taken: &mut [Window], wide: bool) -> impl Iterator<Item = Window> + '_ {
     let (floor, ceiling) = if wide { (WIDE_FLOOR, u64::MAX) } else { (0, PLATFORM_MMIO) };
     taken.sort_unstable_by_key(|extent| extent.start);
@@ -140,9 +139,8 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
-    /// QEMU q35 booted on its stock edk2 with 2 GiB, as that boot printed it:
-    /// the extents its firmware map covers, then its memory BARs, each running
-    /// to the next one's address (xHCI's to the end its `mmio:` line names).
+    /// QEMU q35 booted on its stock edk2 with 2 GiB: the extents its firmware
+    /// map covers, then its memory BARs.
     const EDK2_TAKEN: [Window; 10] = [
         Window { start: 0, end: 0xa_0000 },
         Window { start: 0x10_0000, end: 0x8000_0000 },
@@ -153,7 +151,7 @@ mod tests {
         Window { start: 0x8104_1000, end: 0x8104_2000 },
         Window { start: 0x8104_2000, end: 0x8104_3000 },
         Window { start: 0xc0_0000_0000, end: 0xc0_0000_4000 },
-        Window { start: 0xc0_0000_4000, end: 0xc0_0001_4000 },
+        Window { start: 0xc0_0000_4000, end: 0xc0_0000_8000 },
     ];
     /// The four windows that boot's firmware declared, in the order it did.
     const EDK2_WINDOWS: [RootBridgeWindow; 4] = [
@@ -194,6 +192,35 @@ mod tests {
                 Window { start: 0x8104_3000, end: 0xe000_0000 },
                 Window { start: 0xf000_0000, end: PLATFORM_MMIO },
             ]
+        );
+    }
+
+    /// The 64-bit runs are the three that boot printed.
+    #[test]
+    fn edk2s_64_bit_runs_are_the_ones_its_boot_printed() {
+        assert_eq!(
+            runs(&EDK2_TAKEN, true),
+            [
+                Window { start: 0x1_0000_0000, end: 0xc0_0000_0000 },
+                Window { start: 0xc0_0000_8000, end: 0xfd_0000_0000 },
+                Window { start: 0x100_0000_0000, end: u64::MAX },
+            ]
+        );
+    }
+
+    /// **An extent inside another opens no run inside it**: a bridge's
+    /// forwarded range holds the BARs behind it, and a map descriptor may hold
+    /// BARs.
+    #[test]
+    fn an_extent_inside_another_opens_no_run() {
+        const GIB: u64 = 1 << 30;
+        let nested = [
+            Window { start: 5 * GIB, end: 8 * GIB },
+            Window { start: 6 * GIB, end: 6 * GIB + 0x4000 },
+        ];
+        assert_eq!(
+            runs(&nested, true),
+            [Window { start: 4 * GIB, end: 5 * GIB }, Window { start: 8 * GIB, end: u64::MAX }]
         );
     }
 

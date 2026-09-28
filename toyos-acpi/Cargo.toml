@@ -16,3 +16,4 @@ publish = false
 # The window type the bootloader hands the kernel: decoded here, carried in
 # `KernelArgs`, and one declaration rather than two that have to agree.
 toyos-abi = { path = "../toyos-abi" }
+toyos-bootmap = { path = "../toyos-bootmap" }

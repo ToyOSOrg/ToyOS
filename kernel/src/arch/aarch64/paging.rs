@@ -141,7 +141,7 @@ pub fn map_mmio(_phys: u64, _size: u64, _policy: MmioPolicy) -> crate::mm::Mmio 
     owed!("the kernel's page tables", "stage 4")
 }
 
-pub(crate) fn init(_memory_map: &[MemoryMapEntry]) -> u64 {
+pub(crate) fn init(_memory_map: &[MemoryMapEntry]) -> toyos_bootmap::DirectMapEnd {
     owed!("the kernel's page tables", "stage 4")
 }
 

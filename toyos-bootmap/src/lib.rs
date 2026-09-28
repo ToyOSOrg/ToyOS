@@ -19,7 +19,7 @@
 //! What the kernel takes from firmware's map when it builds its own tables is
 //! here too, because it may never map less than this map did: which types the
 //! pmm hands out ([`is_usable_type`]), and how far the direct map reaches
-//! ([`x86_64::direct_map_end`], [`reaches`]). The types are `EFI_MEMORY_TYPE`'s,
+//! ([`x86_64::direct_map_end`], [`DirectMapEnd`]). The types are `EFI_MEMORY_TYPE`'s,
 //! and what an OS may do with each after `ExitBootServices` is the UEFI
 //! specification's table under `EFI_BOOT_SERVICES.AllocatePages()` (§7.2).
 //! That table puts no bound on where a range the OS does not use may sit, and
@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod aarch64;
 pub mod x86_64;
@@ -58,12 +59,41 @@ pub const BOOT_MAP_BYTES: u64 = 4 * GIB;
 /// hold: every slot from there to the root's last.
 pub const DIRECT_MAP_WINDOW: u64 = (512 - ROOT_HIGH_HALF as u64) * GIB_PER_PDPT * GIB;
 
-/// Whether every byte of `phys..phys + len` lies inside a direct map of
-/// `0..end`.
-pub const fn reaches(end: u64, phys: u64, len: u64) -> bool {
-    match phys.checked_add(len) {
-        Some(last) => last <= end,
-        None => false,
+/// One past the kernel direct map's last byte. Made only here, by
+/// [`x86_64::direct_map_end`] or as [`DirectMapEnd::BOOT`], so no reader can
+/// be handed a wider map than one that was built.
+///
+/// ```compile_fail,E0603
+/// let _ = toyos_bootmap::DirectMapEnd(1 << 52);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DirectMapEnd(u64);
+
+impl DirectMapEnd {
+    /// The boot map's, which the kernel's own never reaches less than.
+    pub const BOOT: Self = Self(BOOT_MAP_BYTES);
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Where a [`DirectMapEnd`] is kept between the map that decided it and the
+/// readers that ask; it holds no other number.
+pub struct DirectMapEndCell(AtomicU64);
+
+impl DirectMapEndCell {
+    /// Holding [`DirectMapEnd::BOOT`].
+    pub const fn boot() -> Self {
+        Self(AtomicU64::new(BOOT_MAP_BYTES))
+    }
+
+    pub fn set(&self, end: DirectMapEnd) {
+        self.0.store(end.0, Ordering::Release);
+    }
+
+    pub fn get(&self) -> DirectMapEnd {
+        DirectMapEnd(self.0.load(Ordering::Acquire))
     }
 }
 

@@ -450,12 +450,6 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// **Before any driver `init`**, because the sizing probe below takes memory
 /// decode off the function it is probing for the length of the probe, and a
 /// driver mid-transfer must not meet that.
-///
-/// The runs are what three things this machine could be asked about leave over
-/// ([`placement::free_runs`]), and each is *read*: the firmware memory map,
-/// the BARs this bus has assigned, and every range a bridge forwards to a
-/// secondary bus. None of the three says an address reaches the bus, which is
-/// why a run is only where [`place_bar`] *may* ask.
 pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
     let mut decoded = Vec::new();
     let mut taken: Vec<Window> =

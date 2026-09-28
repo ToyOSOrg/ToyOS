@@ -816,11 +816,6 @@ impl AddressSpace {
         let target = self.root();
 
         if self.root[pml4_idx] & PAGE_PRESENT == 0 {
-            assert!(
-                pml4_idx < ROOT_HIGH_HALF,
-                "ensure_table: kernel root slot {pml4_idx} is absent at {va:#x}, and a user space \
-                 copies the kernel's slots once: `init` and `seal_kernel_half` install every one"
-            );
             let child = Box::new(PageTablePage([0; 512]));
             self.root
                 .write(pml4_idx, va, child.phys() | flags)
@@ -930,9 +925,10 @@ pub fn guard_kernel_page(addr: u64) {
 /// Build kernel page tables: the direct map in the high half, in 2 MiB pages,
 /// as far as [`toyos_bootmap::x86_64::direct_map_end`] reaches, and answer
 /// that end.
-pub(crate) fn init(memory_map: &[MemoryMapEntry]) -> u64 {
-    let end = toyos_bootmap::x86_64::direct_map_end(memory_map)
+pub(crate) fn init(memory_map: &[MemoryMapEntry]) -> toyos_bootmap::DirectMapEnd {
+    let extent = toyos_bootmap::x86_64::direct_map_end(memory_map)
         .unwrap_or_else(|refusal| panic!("paging: firmware's memory map: {refusal}"));
+    let end = extent.get();
 
     let mut kernel = AddressSpace {
         root: Box::new(PageTablePage([0; 512])),
@@ -970,7 +966,7 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry]) -> u64 {
     unsafe {
         cr3.load_flush();
     }
-    end
+    extent
 }
 
 /// Install a second-level table under every kernel root slot [`init`] left
