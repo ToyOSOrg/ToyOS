@@ -8,54 +8,46 @@ opened: 2026-09-28
 
 Held by the orchestrator. Every stage waits on PR #536 (`wt/toyos-fsd`).
 
-On #536 the stop is init's `Init::stop`: it has `logd` flush, then `Dir::sync`s
-every writable file-server role, bounded together, then calls `SYS_SHUTDOWN` or
-`SYS_REBOOT`. No other service hears of the stop.
-
 ## Stages
 
+Every guest test this track names is registered at `Tier::Fast` or
+`Tier::Nightly` with no `src/redlist.rs` row. A deleted or disabled test covers
+nothing.
+
 1. **The rename**, one mechanical PR, first after #536. It touches `toyos/src`,
-   `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's ToyOS files, so
-   it is briefed as an ABI brief, and its `CLAUDE.md` edits are placed in the
-   same PR by an agent briefed for them. Issue slugs carrying an old name are
-   renamed with every citation.
+   `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, so it is
+   briefed as an ABI brief, and its `CLAUDE.md` edits are placed in the same PR
+   by an agent briefed for them. Issue slugs carrying an old name are renamed
+   with every citation.
 
    | today | becomes |
    |---|---|
    | `init` | `supervisor` |
    | `netd` | `netstack` |
    | `logd` | `logkeeper` |
-   | `soundd` | `mixer` |
-   | `blockd` | `disks` |
+   | `soundd` | open with the owner |
+   | `blockd` | open with the owner |
    | `fsd` | open with the owner |
    | `sshd` | `sshserver` |
    | `compositor` | unchanged |
 
    **Exit**: over every tracked path and every text file's content, in the
-   superproject and the fork's ToyOS files, excluding the bodies of `issues/`
-   files (recorded evidence), no hit remains outside the exclusions, each
-   judged per match and not per line:
+   superproject and the `rust/` fork's delta as `src/forkcheck.rs` defines it,
+   excluding the bodies of `issues/` files (recorded evidence), no hit remains
+   outside the exclusions, each judged per match and not per line:
    - a case-insensitive substring search for `netd`, `logd`, `soundd`,
-     `blockd`, `fsd`, `sshd`, excluding an identifier containing `klogd`,
-     `blockdev`, `VirtioSoundDev`, `netdev`, `netdb`, `ENETDOWN` or `fsdir`;
-   - a case-insensitive search for `init` with no letter on either side (so
-     `spawn_init`, `struct Init`, `INIT_PATH` and "asks init" all hit),
-     excluding a function named `init` (`fn init`, `::init`, `init(`),
-     `git init`, `init.defaultBranch`, `rustup-init`, `zero-init`, `init-tls`;
-     ELF's `init_array`, `DT_INIT_ARRAY*`, `SHT_INIT_ARRAY` and toyos-elf's
-     `init_at`, `init_sz`, `init_info`, `init_count`, `init_out`, `n_init`, and
-     `INIT`/`init` in `toyos-elf/tests/fuzz.rs`; `assume_init*`,
-     `get_or_init`, `atomic_init`, `sem_init`, `pthread_*_init`,
-     `PTHREAD_ONCE_INIT`, `init_routine`, and SFTP's `INIT`/`FXP_INIT`; the
-     processor's `INIT` signal (`INIT IPI`, `INIT-SIPI`, what `INIT` leaves an
-     AP) and `init_bsp`, `init_ap`, `init_cr0`, `init_pcid`, `INIT_AS`,
-     `init_tss_descriptor`, `init_timer`, `X2APIC_TIMER_INIT`, `send_init`,
-     `AFTER_INIT`, `init_early`, `init_wall`, `init_reset`, `init_power`,
-     `init_budget_ms`, `init_one`, `init_device`, `init_entry`,
-     `init_dot_entries`, `Tr2init`; and the C ports' `DG_Init`, `Z_Init`,
-     `toyos_music_init`, `toyos_init_sound`, `log_zeroed_init`, and
-     `tests/testcases/`' `*_init` names. Prose that says "init" for a bring-up
-     (i8042's "Init treats the controller") is reworded, not excluded.
+     `blockd`, `fsd`, `sshd`, excluding, case-insensitively, an identifier
+     containing `klogd`, `blockdev`, `VirtioSoundDev`, `netdev`, `netdb`,
+     `ENETDOWN` or `fsdir`;
+   - a case-insensitive search for `init` followed by no lowercase letter and
+     preceded by a letter only where it starts with a capital `I` (so
+     `spawn_init`, `struct Init`, `SpawnInit`, `TimerInit`, `InitPort` and
+     "asks init" all hit). A match stays only where `init` means initialise,
+     initial or the CPU's INIT signal (a function, method or field named
+     `init`, an identifier of that meaning, ELF's init arrays, bring-up prose,
+     a log string a test matches such as `init budget`), or where it sits in
+     third-party text (`tests/testcases/`, the C ports); every other match
+     names the program and goes.
 2. **Decisions in a pure crate.** The supervisor's decisions live in
    `toyos-supervisor`, with host tests; `userland/supervisor` keeps only
    handles, spawns and the loop. The decisions: namespace and claim selection
@@ -65,15 +57,15 @@ every writable file-server role, bounded together, then calls `SYS_SHUTDOWN` or
    cycle broken only by declaration.
    **Exit**: the crate's tests pass in
    `cargo test --workspace --exclude toyos-build`; a host test refuses a
-   manifest whose dependencies form an undeclared cycle; and each refusal and
-   each decision above has a mutation that reds a host test, named in the PR.
+   manifest whose dependencies form an undeclared cycle; each refusal and
+   each decision above has a mutation that reds a host test, named in the PR;
+   and the stage deletes each decision from `userland/supervisor`, which calls
+   the crate for it, named per decision in the PR. No decision exists in two
+   places.
 3. **The supervisor owns the stop.** It asks each service it started to
    finish, in reverse dependency order, storage last, each ask bounded; only
    then does it call the kernel, whose part is to stop whatever is left and
-   cut power. The order is not in the manifest today: `[boot] start` says its
-   order "means nothing", `compositor` and `filepicker` each receive the
-   other, and `logd` writes `/log` through the `log` role, whose server's lines
-   reach `logd`.
+   cut power.
    **Exit**: two guest tests. In one, two non-storage services with a declared
    dependency are asked to finish in reverse dependency order; it reds when
    they are asked in forward order, and when they are asked all at once with
@@ -82,19 +74,19 @@ every writable file-server role, bounded together, then calls `SYS_SHUTDOWN` or
    negative control is the same service never answering, where the stop still
    lands at the bound and the supervisor's line names the service.
 4. **The stop's coverage comes back.** **Exit**: each claim below is asserted
-   by a host test, or by a guest test registered at `Tier::Fast` or
-   `Tier::Nightly` with no `src/redlist.rs` row, and a mutation named in the
-   PR reds it. A deleted or disabled test covers nothing.
-   - a thread's transition wakes the stop;
-   - no block operation is open at the stop;
-   - the thread count;
-   - the console drain;
-   - storage made durable before power-off.
+   by a host test or a guest test, and a mutation named in the PR reds it.
+   - A held thread's transition wakes the stop.
+   - No block operation is open at the stop.
+   - A dump served during the stop counts every thread it stopped as held.
+   - Every record reaches the console, `Rebooting.` last.
+   - Storage is durable before power is cut.
 
 ## Open with the owner
 
-- `fsd`'s new name. The orchestrator's candidate is `fileserver`; `files` stays
-  the file manager's.
+- The new names of `fsd`, `soundd` and `blockd`. The orchestrator's candidate
+  for `fsd` is `fileserver`. `mixer` and `disks` are refused: both are words
+  the tree already uses (`flush_disks`), so a search for either program would
+  be as ambiguous as one for `init` is today.
 - Before stage 3: the ask's ABI (no syscall is proposed); whether a program
   started through `launcher` is asked or only stopped; whether
   `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.

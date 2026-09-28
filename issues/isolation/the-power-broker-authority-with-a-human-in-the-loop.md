@@ -30,5 +30,4 @@ so the native shape is smaller:
 
 Unstaffed until the owner opens it; sequenced naturally with the userland/
 product era. What must not happen meanwhile is the accident this track
-exists to prevent: `POWER` spreading to more manifest rows because asking
-the applet is inconvenient — the broker is the answer to that itch.
+exists to prevent: `POWER` spreading to more manifest rows.
