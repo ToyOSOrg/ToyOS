@@ -430,8 +430,7 @@ mod tests {
     #[test]
     fn a_placement_moves_the_address_and_keeps_the_devices_own_bits() {
         // The virtio NIC this machine has: BAR 4, 64-bit prefetchable, 16 KiB
-        // at 0x800000000, moved to the first 2 MiB window above what firmware
-        // assigned.
+        // at 0x800000000.
         let placed = placement(4, 0x0000_000C, 0x8_0020_0000, 0x4000).unwrap();
         assert_eq!(placed.low, 0x0020_000C, "the low four bits are the device's");
         assert_eq!(placed.high, Some(8));
