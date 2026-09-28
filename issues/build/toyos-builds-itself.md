@@ -53,33 +53,54 @@ enough for an LLVM build tree
 memory beyond what 2 MiB process pages allow
 (`issues/kernel/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`).
 
-**The bar: Linux building the same LLVM on the same T14.** Measured
-2026-09-27: stage 2, the pinned commit's own stage-1 clang+lld building
-clang+lld from the same source, at `rust-lang/llvm-project` commit
-`52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04`, Release, targets X86 and
-AArch64:
+**The bar: Linux on this T14 building the same LLVM.** It is a recipe, and a
+ToyOS run matches every element of it:
+
+- *Source*: `rust-lang/llvm-project` at
+  `52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04`.
+- *Stage 1*: `gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0`, cmake 3.28.3 and
+  ninja 1.11.1 build clang+lld with the `s1` lines below: Release
+  (`-O3 -DNDEBUG`), `LLVM_ENABLE_LTO=OFF`, `LLVM_BUILD_INSTRUMENTED=OFF`, no
+  profile data.
+- *Stage 2*: that clang+lld builds clang+lld from the same source with the
+  `s2` lines below, configured afresh.
+- *Timed span*: the last line's `ninja` alone.
+- *Cache*: warm. The source and stage 1 were read or written just before the
+  span, and `File system inputs` was 16 in the 45:08.77 run and 0 in the
+  others.
+- *Power envelope*, read back every 60 s and at the start and end of the
+  three runs that sampled it: on AC; `platform_profile` `performance`;
+  intel_pstate active, governor `powersave`, EPP `balance_performance`. RAPL
+  through the MSR: PL1 64 W with a 27983872 µs window, PL2 64 W. RAPL through
+  MMIO: PL2 64 W, and PL1 20 W at every sample but the first four of the one
+  run that started cold, which read 64 W up to 3:01 into it at up to 100 °C.
+  Mean package power over a run was 19.96 W to 21.22 W.
+- *Machine*: i5-1135G7, 8 threads, 16476082176 B RAM; Ubuntu 24.04.4, kernel
+  6.8.0-142-generic, ext4 on LVM.
+
+The lines, run in bash, which splits `$CONF`:
 
 ```
-cmake -S src/llvm -B s2 -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DLLVM_ENABLE_PROJECTS=clang;lld -DLLVM_TARGETS_TO_BUILD=X86;AArch64 \
-  -DLLVM_ENABLE_ASSERTIONS=OFF -DLLVM_INCLUDE_TESTS=OFF \
-  -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
-  -DCMAKE_C_COMPILER=s1/bin/clang -DCMAKE_CXX_COMPILER=s1/bin/clang++ \
-  -DLLVM_ENABLE_LLD=ON
-ninja -C s2 -j8 clang lld
+W=$HOME/llvm-baseline; SHA=52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04
+mkdir -p $W; cd $W
+git init -q src && git -C src remote add origin https://github.com/rust-lang/llvm-project.git
+git -C src fetch -q --depth 1 origin $SHA && git -C src checkout -q FETCH_HEAD
+CONF="-G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS=clang;lld -DLLVM_TARGETS_TO_BUILD=X86;AArch64 -DLLVM_ENABLE_ASSERTIONS=OFF -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF"
+rm -rf s1; cmake -S src/llvm -B s1 $CONF -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ > s1-config.log
+/usr/bin/time -v -o s1-time.txt ninja -C s1 -j8 clang lld > s1-build.log
+rm -rf s2; PATH=$W/s1/bin:$PATH cmake -S src/llvm -B s2 $CONF -DCMAKE_C_COMPILER=$W/s1/bin/clang -DCMAKE_CXX_COMPILER=$W/s1/bin/clang++ -DLLVM_ENABLE_LLD=ON > s2-config.log
+PATH=$W/s1/bin:$PATH /usr/bin/time -v -o s2-time.txt ninja -C s2 -j8 clang lld > s2-build.log
 ```
 
-Conditions: Ubuntu 24.04.4, kernel 6.8.0-142-generic, ext4 on LVM;
-i5-1135G7, 8 threads, 16 GB RAM; platform_profile=performance (RAPL PL1
-20 W, PL2 64 W), on AC, intel_pstate active. Result: wall 45:08.77, user
-21018.09 s, sys 573.98 s, 797% CPU, max RSS 1,121,732 KB, 160,044,528
-minor faults, 874,817 involuntary and 43,204 voluntary context switches,
-4,146,616 filesystem output blocks. Stage 1 (gcc building the stage-1
-clang+lld) ran under a mixed power profile and is excluded from the
-baseline.
+The timed span's wall over four runs: 44:01.03, 45:08.76, 45:08.77 and
+45:08.78; min 44:01.03, median 45:08.765, max 45:08.78. The 44:01.03 run is
+the one that started cold. The 45:08.77 run's envelope was not read back.
 
-*Exit*: a ToyOS build of the same commit, same configuration, on the
-same T14, at or under 45:08.77 wall.
+*Exit*: a ToyOS run on this T14 that matches every element of the recipe
+finishes at or under the fastest Linux sample, 44:01.03. Its clang+lld is
+`52ed14fc` built by the stage-1 recipe, the span is the stage-2 `ninja`
+alone after a fresh configure, the cache is warm, and it runs on AC with the
+MSR and MMIO PL1 and PL2 above, read back during the run.
 
 **What M2 must do to delete toyos-ld.** It is frozen and links nothing the host
 builds; what keeps it is that it is the one linker a ToyOS process can run,
