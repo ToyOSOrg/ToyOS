@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-22
 ---
@@ -62,3 +62,8 @@ the held disk; the interleaving comes at a rate.
 **Exit**: a disk call that waits for a device does not hold a CPU with `IF`
 clear — the wait parks — or a held call's CPU may bind within its bound without
 making the bind the caller's cost. Either is the owner's ruling to revisit.
+
+Related records — `usb_transport_break`'s three other open red modes, not this
+one: `issues/kernel/a-shutdown-on-a-held-usb-disk-left-a-cpu-deaf-to-a-tlb-shootdown.md`,
+`issues/build/usb-transport-break-flushedstick-can-break-after-the-reboot.md`, and
+`issues/boot-media/a-disk-whose-port-went-away-panics-the-boot-at-roots-hold.md`.

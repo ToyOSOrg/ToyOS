@@ -26,7 +26,7 @@ measure.
 **BLOCKER** sends the branch back: wrong behaviour, a security or isolation hole, data loss, a
 race, a fallback or second code path, a sibling of something the tree already has, and on
 high-risk code a test that cannot fail on a claim the change makes. **NOTE** is everything else:
-fixed on the way, no new round. **REMOVE** is prose that makes trouble.
+fixed on the way. **REMOVE** is prose that makes trouble.
 
 High-risk is security boundaries, the scheduler, filesystems, memory management, the ABI and device
 drivers. There, check every claim against the measurement behind it and hunt mutations without
