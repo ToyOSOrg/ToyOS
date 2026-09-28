@@ -16,7 +16,7 @@ The module header at the site owns its subsystem — read it before changing a m
 - **A block-layer `BudgetExpired` is not-durable-yet and never a loss** — it is retried on a fresh budget above every lock; a flush that discards its pages on one splits a FAT mirror.
 - **A decision the process table makes lives in `toyos-proclife`, never in `process.rs`** — its defects are interleavings and that crate is the only machine that can enumerate one.
 - **A task holds at most one watch registration** — a standing registration across a loop must not call anything that registers again. A double registration panics only at attempt ≥ 2, so the contention depth is the coverage.
-- **A console is per holder, minted at spawn** — the object *is* the line buffer; `console_line_atomicity` is the gate.
+- **A console is per holder, minted at spawn** — the object *is* the line buffer.
 - **`ops::close` cancels a poll only for a source its object really ends** — `Watch::cancel_polls` answers every ring's poll on that watch; `ops::close_ends_polls` is where a new object kind answers.
 - **A page shared with userland is never reached through a Rust reference** — the words a protocol shares are `&AtomicU32` one at a time, everything else is a volatile copy of the whole value, and a page is laid out *before* it is mapped (`SharedMemObject::phys_before_mapping`). The kernel, `toyos-abi` and the SDK each hold one end of this rule.
 - **A device a process drives reaches only the memory its grants map** — the domain is the gate, not the descriptor; a device address outside a grant is a `DMA FAULT` record and never a crash, and `userdev_dma_fault` is the registration.

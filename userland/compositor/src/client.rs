@@ -7,7 +7,13 @@
 //! it the same decision by not reading. Here a peer that stops halfway through
 //! a frame costs a buffer and a deadline, and one that will not take a message
 //! costs itself.
+//!
+//! **The compositor never receives a handle from a client.** A received handle's
+//! kind is unknowable, and using one of the wrong kind ends the process that
+//! used it — so every region a client writes is one the compositor made, and a
+//! handle a client sends stays queued until its connection closes.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use toyos::shm::SharedMemory;
@@ -41,17 +47,6 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// declare up to `ipc::MAX_FRAME_LEN` and the excess is discarded unread.
 pub const MAX_KEPT_PAYLOAD: usize = window::MAX_INLINE_PAYLOAD + 1;
 
-/// The largest clipboard the compositor will hold for a client.
-///
-/// Two things meet here. `MSG_CLIPBOARD_SET_SHM` carries a length the client
-/// chooses and the compositor reads that many bytes out of a region the client
-/// sent, so an unbounded length is a read past the mapping — and the kernel
-/// rounds every shared region up to one 2 MiB page
-/// (`object::shm::SharedMemObject::create`), which makes a page the largest
-/// length that cannot leave the smallest region anybody can send. It is also policy: a clipboard is text somebody selected,
-/// and a megabyte of it is already generous.
-pub const MAX_CLIPBOARD_BYTES: usize = 2 * 1024 * 1024;
-
 /// One client's inbound framing.
 pub type ClientRx = ipc::FrameRx<MAX_KEPT_PAYLOAD>;
 
@@ -74,20 +69,30 @@ pub type Win = Window<Client>;
 
 /// A whole client message, off the connection and in memory.
 ///
-/// `conn` is `Some` only for the first frame on a freshly accepted connection:
-/// `MSG_CREATE_WINDOW` keeps it, and every other message type answers on it
-/// and lets it close.
+/// `conn` is `Some` only for a frame off a connection that is not a window:
+/// `MSG_CREATE_WINDOW` keeps it, `MSG_COPY_BEGIN` puts it back with the region
+/// it answered with, and every other message type answers on it and lets it
+/// close.
 pub struct ClientFrame {
     pub handle: RawHandle,
     pub msg_type: u32,
     payload: [u8; MAX_KEPT_PAYLOAD],
     payload_len: usize,
     pub conn: Option<Connection>,
+    /// The connection's [`PendingConn::copy`].
+    pub copy: Option<CopyRegion>,
 }
 
 impl ClientFrame {
     pub fn new(handle: RawHandle, msg_type: u32) -> Self {
-        Self { handle, msg_type, payload: [0; MAX_KEPT_PAYLOAD], payload_len: 0, conn: None }
+        Self {
+            handle,
+            msg_type,
+            payload: [0; MAX_KEPT_PAYLOAD],
+            payload_len: 0,
+            conn: None,
+            copy: None,
+        }
     }
 
     pub fn set_payload(&mut self, bytes: &[u8]) {
@@ -109,6 +114,28 @@ pub struct PendingConn {
     pub conn: Connection,
     pub rx: ClientRx,
     pub since: Instant,
+    /// The region a `MSG_COPY_BEGIN` was answered with. A connection holding
+    /// one may send `MSG_COPY_COMMIT` and nothing else, within
+    /// [`HANDSHAKE_TIMEOUT`] of `since`.
+    pub copy: Option<CopyRegion>,
+}
+
+/// A region made for one client's copy, which that client maps and may still
+/// be writing.
+///
+/// **Read once, and only by being taken.** Its one method consumes it, so
+/// nothing here can read the region twice or validate it in place.
+pub struct CopyRegion(SharedMemory);
+
+impl CopyRegion {
+    pub fn new(region: SharedMemory) -> Self {
+        Self(region)
+    }
+
+    /// Every byte, each read once, into memory no client can write.
+    pub fn take(self) -> Vec<u8> {
+        self.0.as_atomic().iter().map(|b| b.load(Ordering::Relaxed)).collect()
+    }
 }
 
 /// Why a client is going.
@@ -126,6 +153,9 @@ pub enum DropReason {
     /// A frame no protocol here can produce. The next message boundary is
     /// unlocatable, so there is nothing to resynchronise to.
     OutOfProtocol,
+    /// `window::MSG_RETIRED_CLIPBOARD_SET_SHM`, whose handle this compositor
+    /// never takes.
+    Retired,
     /// Its pipe would not take a whole frame — an entire pipe of messages it
     /// has not read.
     NotReading,
@@ -133,15 +163,19 @@ pub enum DropReason {
     Gone,
     /// Accepted, and never completed a first frame.
     HandshakeTimeout,
+    /// Given a region to copy into, and never committed it.
+    CopyTimeout,
 }
 
 impl DropReason {
     pub fn why(self) -> &'static str {
         match self {
             Self::OutOfProtocol => "it sent a frame this protocol cannot describe",
+            Self::Retired => "it sent the retired clipboard region, whose handle is never taken",
             Self::NotReading => "its pipe will not take another message and it is not reading",
             Self::Gone => "its connection is gone",
             Self::HandshakeTimeout => "it never finished its first message",
+            Self::CopyTimeout => "it began a copy and never committed it",
         }
     }
 }
@@ -215,10 +249,6 @@ pub fn deliver<T: ipc::IpcPayload>(dead: &mut Vec<Dead>, win: &Win, msg_type: u3
 }
 
 /// [`deliver`] for a message whose payload names buffers that travel with it.
-///
-/// The handles are moved whether or not the frame lands, so the caller has
-/// already given them up — and a client dropped here drops the queue holding
-/// them, which is what releases the region.
 pub fn deliver_with_handles<T: ipc::IpcPayload>(
     dead: &mut Vec<Dead>,
     win: &Win,

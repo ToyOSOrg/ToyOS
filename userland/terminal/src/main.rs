@@ -38,6 +38,12 @@ fn present(console: &Console, window: &Window) {
     }
 }
 
+fn copy(text: &str) {
+    if let Err(e) = window::clipboard_set(text) {
+        eprintln!("terminal: nothing was copied — {e}");
+    }
+}
+
 fn main() {
     // **This terminal's surface is a port it makes, not a name it registers.**
     // One per instance: the connector goes into the namespace of the shell it
@@ -148,7 +154,7 @@ fn main() {
                 window::Event::KeyInput(key) if key.gui() && key.keycode == 0x06 => {
                     // Cmd+C: copy selection to clipboard
                     if let Some(text) = console.get_selection() {
-                        window::clipboard_set(&text).ok();
+                        copy(&text);
                     }
                 }
                 window::Event::KeyInput(key) => {
@@ -175,7 +181,7 @@ fn main() {
                         }
                         window::MOUSE_RELEASE if ev.changed == 1 => {
                             if let Some(text) = console.mouse_up(col, row) {
-                                window::clipboard_set(&text).ok();
+                                copy(&text);
                             }
                             present(&console, &window);
                         }

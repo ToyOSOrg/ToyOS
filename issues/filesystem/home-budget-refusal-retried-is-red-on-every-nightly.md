@@ -27,5 +27,7 @@ issues/boot-media/partition-claim-gives-up-reds-beside-other-guests-and-is-green
 names as racing whichever fsync the boot reaches first. Not shown: whether
 that race is this test's cause.
 
-**Exit**: the cause shown on a red run's log, and the test green on a
-nightly.
+**Exit**: the cause shown on the log of a red run of `home_budget_refusal_retried`
+as it stands at `1808fb8d` (its binary `test_rs_home_fsync_budget` and its
+`storage` body), restored and run on CI's nightly `guest` shards; and that
+test green on a nightly after the fix. Owner: orchestrator.

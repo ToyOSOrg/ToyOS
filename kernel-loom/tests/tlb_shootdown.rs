@@ -234,3 +234,33 @@ fn an_initiator_answers_while_it_waits() {
         assert!(s.wait_turn(0, 1, g0, || {}));
     });
 }
+
+/// A serve that an interrupt nests inside another publishes the later
+/// generation, and the outer serve, finishing after it, must not take it back.
+///
+/// The nested serve runs on a thread of its own, so loom places it at every
+/// point of the outer one, the nesting among them. Reds when `serve` stores
+/// what it owes instead of raising to it.
+#[test]
+fn a_nested_serve_is_not_undone_by_the_one_it_interrupted() {
+    model(|| {
+        let s = Arc::new(Shootdown::new());
+        let first = s.issue();
+        let nested = {
+            let s = Arc::clone(&s);
+            loom::thread::spawn(move || {
+                let later = s.issue();
+                s.serve(1, || {});
+                later
+            })
+        };
+        s.serve(1, || {});
+        let later = nested.join().unwrap();
+        assert!(s.served(1, first));
+        assert!(
+            s.served(1, later),
+            "cpu 1 flushed for the nested shootdown, and the serve it interrupted \
+             published an older generation over it",
+        );
+    });
+}

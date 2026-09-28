@@ -119,11 +119,8 @@ actuators! {
     /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
     quiesce_last_park = "quiesce-last-park";
 
-    /// The same inside `SYS_THREAD_EXIT`: its exit is then the stop's last transition.
-    quiesce_last_exit = "quiesce-last-exit";
-
-    /// Serve a blocked-task dump from the shutdown once its first stage has stopped the machine: the report Ctrl+Alt+D gives on a shutdown stuck in its stop.
-    quiesce_dump = "quiesce-dump";
+    /// The same for the last thread out of its process, between its leaving and its teardown: that teardown is then the stop's last transition.
+    quiesce_last_teardown = "quiesce-last-teardown";
 
     /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
     fat_flush_meta_refuse = "fat-flush-meta-refuse";
@@ -248,9 +245,6 @@ actuators! {
     /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
 
-    /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
-    so_cache_tiny = "so-cache-tiny";
-
     /// Run the first attempt of each run `object::ops::until_answered` retries —
     /// a file's `SYS_FSYNC`, a claimed partition's read, write or flush — under an
     /// operation that is already over, once per file and per partition and kind.
@@ -325,12 +319,6 @@ actuators! {
 
     /// Give PORTSC's PED bit the RW1CS meaning xHCI 1.2 §5.4.8 gives it.
     xhci_portsc_rw1c = "xhci-portsc-rw1c";
-
-    /// Take a bound HID device's first completion away and hand back a stall.
-    xhci_hid_break_first = "xhci-hid-break-first";
-
-    /// The same at its fourth completion.
-    xhci_hid_break_late = "xhci-hid-break-late";
 
     /// Run `parse_config` over nine crafted configuration descriptors at init.
     xhci_descriptor_selftest = "xhci-descriptor-selftest";
@@ -462,9 +450,6 @@ actuators! {
     /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
 
-    /// Panic inside `klogd` on its first instruction.
-    klogd_panic = "klogd-panic";
-
     /// Read address zero inside `klogd` on its first instruction.
     klogd_fault = "klogd-fault";
 
@@ -542,7 +527,7 @@ actuators! {
     /// Judged by `partition_claim_gives_up`.
     partclaim_root_withheld = "partclaim-root-withheld";
 
-    /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
+    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 
     /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.
