@@ -479,6 +479,10 @@ impl Liveness {
 /// second producer: a test's own ceiling is a guard of exactly this kind.
 pub const STALLED: &str = "STALLED:";
 
+/// The backstop's red: a guest still talking past [`GUEST_WEDGED`] that never
+/// finished. The ceiling too, and counted with [`STALLED`]'s.
+pub const TIMED_OUT: &str = "timed out after";
+
 /// How long a guest may say nothing before a wait on it is a stall.
 ///
 /// Every config these waits run on has something on a periodic interval — the
@@ -683,7 +687,7 @@ pub fn ceiling_verdict(
     let backstop = ceiling.max(GUEST_WEDGED);
     if elapsed > backstop {
         return Some(format!(
-            "timed out after {}s, with the guest still talking {quiet:.0?} ago ({lines} \
+            "{TIMED_OUT} {}s, with the guest still talking {quiet:.0?} ago ({lines} \
              console line(s) while it ran) — it was working and did not finish",
             backstop.as_secs()
         ));

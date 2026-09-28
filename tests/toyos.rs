@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::qemu::{
     self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance, TestResult,
-    STALLED,
+    STALLED, TIMED_OUT,
 };
 use common::{
     audio, compile, devices, faults, lan, metal, partclaim, pkg, power, screen, serial, storage,
@@ -16463,9 +16463,10 @@ impl Outcome {
         }
     }
 
-    /// Whether this red is a blown liveness guard rather than an answer.
+    /// Whether this red is a blown liveness guard or the backstop rather than an
+    /// answer.
     fn stalled(&self) -> bool {
-        self.reason.as_deref().is_some_and(|r| r.contains(STALLED))
+        self.reason.as_deref().is_some_and(|r| r.contains(STALLED) || r.contains(TIMED_OUT))
     }
 }
 
@@ -16687,7 +16688,10 @@ fn a_stall_stays_red() -> Result<(), String> {
     // gate asserting against a string nothing produces any more.
     let real = format!("{STALLED} waiting for the long tone to start — it went quiet");
     let under_a_sentence = format!("the compositor stopped painting\n{real}");
-    let cases: [(&str, Option<&str>, bool); 4] = [
+    let past = qemu::GUEST_WEDGED + Duration::from_secs(1);
+    let backstop = qemu::ceiling_verdict(None, past, qemu::GUEST_WEDGED, Duration::from_secs(1), 900)
+        .ok_or("a guest talking past the backstop was given no verdict")?;
+    let cases: [(&str, Option<&str>, bool); 5] = [
         ("an ordinary red", Some("the pointer never moved right"), false),
         ("a wait that expired", Some(real.as_str()), true),
         (
@@ -16695,6 +16699,7 @@ fn a_stall_stays_red() -> Result<(), String> {
             Some(under_a_sentence.as_str()),
             true,
         ),
+        ("the backstop on a guest still talking", Some(backstop.as_str()), true),
         ("a pass", None, false),
     ];
     for (what, reason, want_stall) in cases {
