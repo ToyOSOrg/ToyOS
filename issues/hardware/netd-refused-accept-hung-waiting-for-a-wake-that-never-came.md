@@ -22,7 +22,7 @@ write-stall error. A reset would return the listener's socket to `Listen`
 (`settle` in `userland/netd/src/listen.rs:73-85`, the `tcp::State::Closed`
 arm re-`listen`s without producing an accept), after which netd owes the
 test's `end(held.pop()...)` connection no wake. The guest console for this
-run was not kept, so which path the reset actually took is not established.
+run was not kept.
 
 Exit condition: the mechanism established from a kept console, fixed, and
 `netd_refused_accept` green — which needs `netcase_against_host`

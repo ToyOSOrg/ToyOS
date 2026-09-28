@@ -514,19 +514,14 @@ pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 /// silence alone cannot end a desktop wait, and a suite that never ends is
 /// worse than one that reds.
 ///
-/// **Not [`budget`]-scaled, and that is the point of the pair.** Width is what a
-/// ceiling on a *slow* guest has to be corrected for, and the silence bound
-/// above is what a slow guest is now judged by — it keeps talking, so it is
-/// never judged by this at all. What is left for this number to catch is a guest
-/// that is stuck *and* chatty, which is a state the width does not produce;
-/// scaling it would only make that state cost an hour at width 12. The longest
-/// guest action any caller waits on is eight seconds of audio.
+/// Width is what a ceiling on a *slow* guest has to be corrected for, and the
+/// silence bound above is what a slow guest is now judged by — it keeps talking,
+/// so it is never judged by this at all. What is left for this number to catch
+/// is a guest that is stuck *and* chatty, which is a state the width does not
+/// produce. The longest guest action any caller waits on is eight seconds of
+/// audio.
 ///
-/// It is also the real ceiling of any failing wait on a shared boot, because
-/// the kernel's own 10 s cadence keeps the quiet clock above reset: a settle
-/// predicate that could never come true was measured ending here at 302 s,
-/// not at 15 (PR #96's verification). Price a new waiting check against this
-/// number, not the one above.
+/// Price a new waiting check against this number, not the one above.
 pub const GUEST_WEDGED: Duration = Duration::from_secs(300);
 
 pub fn guest_liveness() -> Liveness {
@@ -659,8 +654,7 @@ impl std::fmt::Display for WaitVerdict {
 /// loaded `smp:2` runner its `vcpus/cores` factor clamps to 1, a guest making
 /// steady progress called wedged by a clock. So a guest still *talking* is now
 /// never ended by `ceiling`: the per-test budget bites only a guest that has
-/// *also* gone quiet for [`GUEST_QUIET`], and a talking one runs to the
-/// [`GUEST_WEDGED`] backstop below.
+/// *also* gone quiet for [`GUEST_QUIET`].
 ///
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
@@ -815,8 +809,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     //     all four directions. A talking guest past its budget is slow, not
     //     wedged; a silent one within its budget is idle, not wedged; the wedge
     //     guard still fires, and fast; and the backstop still catches a guest
-    //     that talks forever. Staged with a ceiling below [`GUEST_WEDGED`] so the
-    //     backstop is a distinct, higher number — the shape every real test has.
+    //     that talks forever.
     const TIGHT: Duration = Duration::from_secs(153);
     let bstop = TIGHT.max(GUEST_WEDGED);
     assert!(TIGHT < bstop, "the case needs a ceiling below the backstop");
