@@ -22,7 +22,7 @@ use crate::vfs::BackingId;
 use crate::UserAddr;
 use toyos_elf::dynamic::InitArray;
 use toyos_elf::rela::Rules;
-use toyos_elf::{ImageRange, Op, RelaCounts, RelocKind, SymIndex, TlsRef};
+use toyos_elf::{ImageRange, Op, ProgramHeaderTable, RelaCounts, RelocKind, SymIndex, TlsRef};
 
 /// A module's non-`RELATIVE` relocations, parsed and extracted once at cache
 /// time, each as `(r_offset, what it names)`.
@@ -82,6 +82,7 @@ struct Snapshot {
     gnu_hash: Option<KernelSlice>,
     rules: Rules,
     eh_frame_hdr: Option<ImageRange>,
+    phdrs: ProgramHeaderTable,
     init_array: Option<InitArray>,
     span: u64,
     rw_lo: u64,
@@ -100,6 +101,7 @@ impl Snapshot {
             gnu_hash: lib.gnu_hash,
             rules: lib.rules,
             eh_frame_hdr: lib.eh_frame_hdr,
+            phdrs: lib.phdrs,
             init_array: lib.init_array,
             span: lib.span,
             rw_lo: lib.rw_lo,
@@ -127,6 +129,7 @@ impl Snapshot {
             cached_relocs,
             rules: self.rules,
             eh_frame_hdr: self.eh_frame_hdr,
+            phdrs: self.phdrs,
             init_array: self.init_array,
             span: self.span,
             rw_lo: self.rw_lo,

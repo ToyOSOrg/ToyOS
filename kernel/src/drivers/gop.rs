@@ -25,6 +25,8 @@ impl Gpu for GopGpu {
 }
 
 /// `addr` is the physical address of the framebuffer supplied by firmware.
+/// `None` is a scanout no process can be given: one is handed over in 2 MiB
+/// pages, and the architecture says whether this one's are its own.
 pub fn init(
     addr: u64,
     size: u64,
@@ -32,7 +34,11 @@ pub fn init(
     height: u32,
     stride: u32,
     pixel_format: u32,
-) -> (Box<dyn Gpu>, GpuInfo) {
+) -> Option<(Box<dyn Gpu>, GpuInfo)> {
+    if let Err(why) = crate::mm::paging::scanout_whole_pages(addr, size) {
+        log!("GOP: the scanout at {addr:#x}+{size:#x} is refused: {why}");
+        return None;
+    }
     // A size smaller than stride*height*4 maps less than the compositor writes.
     // Boot-time firmware data has no actionable error path, so this panics rather than returning one.
     let needed = stride as u64 * height as u64 * 4;
@@ -92,5 +98,5 @@ pub fn init(
         flags: 0,
     };
 
-    (Box::new(GopGpu), info)
+    Some((Box::new(GopGpu), info))
 }
