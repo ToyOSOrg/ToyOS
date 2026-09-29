@@ -498,6 +498,6 @@ mechanism for it.
   driver nor this test, and the test was green in its previous fast-tier run.
 
   Owner: the i8042 tally. **Exit condition**: the verdict revising itself in a
-  parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
+  parallel run — a loaded full suite in which `i8042_undecoded_bytes`'
   first mute line names nothing and its second names the sequence, or the
   retirement's clause narrowed to the conditions under which it holds.

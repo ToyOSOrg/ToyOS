@@ -7,7 +7,7 @@ opened: 2026-09-08
 # Nothing reaches the MSI arm of a claimed function
 
 `pcidev::bring_up` arms a claimed function on MSI where it publishes no MSI-X,
-and no test in any tier arms one. The *order* is guarded — `https_tls13_e1000e`
+and no test arms one. The *order* is guarded — `https_tls13_e1000e`
 holds a claimed `8086:10d3`, which publishes both mechanisms, and refuses an
 `msi address=` line for it — but the MSI arm itself is reached by nothing. `virtio_net_no_msix` calls
 `PciDevice::enable_msi` from `bring_up` and reads false back; nothing reaches a
