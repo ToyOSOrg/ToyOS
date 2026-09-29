@@ -30,7 +30,7 @@ pub use madt::{
     madt_entries, Gicc, IoApicEntry, MadtEntries, MadtEntry, MadtHalt, SourceOverride, MADT_ENTRIES,
 };
 pub use gtdt::{gtdt, Gtdt, TimerInterrupt, GTDT_NEEDED};
-pub use resource::{memory_windows, ResourceError, Walk, MAX_LIST_BYTES};
+pub use resource::{memory_windows, ResourceError, MAX_LIST_BYTES};
 pub use spcr::{spcr, Gas, SerialInterface, Spcr, GAS_SYSTEM_MEMORY, SPCR_NEEDED};
 
 /// Physical memory, as this decoder reads it.

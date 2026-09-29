@@ -192,9 +192,9 @@ const DATA_PATHS: [&str; 4] = ["apps", "config", "home", "state"];
 
 /// The boot from power-on, off the loader's TSC readings and `complete`'s, at
 /// the calibrated rate. The TSC counts from reset, so the first span is
-/// firmware's unless firmware wrote the counter, which the loader's
-/// `IA32_TSC_ADJUST` says where the CPU has one.
+/// firmware's unless firmware wrote the counter.
 fn report_power_on(args: &KernelArgs, complete: u64) {
+    arch::boot::report_counter_origin();
     let (entry, handoff) = (args.loader_entry_tsc, args.loader_handoff_tsc);
     if handoff < entry || complete < handoff {
         log!(
@@ -250,6 +250,16 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
+    // Before the first field a layout change can move; `rsdp_addr` sits below
+    // the word, so the refusal reaches the UART.
+    if kernel_args.layout != toyos_abi::boot::LAYOUT {
+        serial::init(kernel_args.rsdp_addr);
+        panic!(
+            "boot: the loader wrote KernelArgs layout {:#x} and this kernel reads layout {:#x}",
+            kernel_args.layout,
+            toyos_abi::boot::LAYOUT
+        );
+    }
     // Beside it, and out of the raw buffer: a panic between here and
     // `params::init` — inside `serial::init`, or on the parameter line's own
     // UTF-8 check — is one the page has to carry past the reset, and neither
@@ -281,6 +291,13 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
+    // The actuator's other half: a loader that ignored it would boot on unrefused.
+    if actuator::loader_writes_no_layout() {
+        panic!(
+            "boot: {} is armed and the loader wrote this kernel's layout anyway",
+            toyos_abi::boot::WRITE_NO_LAYOUT_PARAM
+        );
+    }
     let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
     // Armed here so the next record — the architecture's first — reaches the console and the panel keeps the one before it.
@@ -329,8 +346,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     );
     log!("boot: log partition guid {:02x?}", kernel_args.log_partition_guid);
     log!(
-        "boot: rtc utc offset {} minutes (known={}), cmdline {:#x}+{}",
-        kernel_args.rtc_utc_offset_minutes, kernel_args.rtc_utc_offset_known,
+        "boot: cmdline {:#x}+{}",
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
     // Before `mm::init`, which may hand the parameter's memory out. This record

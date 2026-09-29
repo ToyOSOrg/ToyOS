@@ -29,6 +29,7 @@ use toyos::syscap::SysCap;
 /// collision is about does not exist in one.
 const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
     ("log-gate", log_gate::run),
+    ("log-storm", log_gate::run_storm),
     ("log-close", log_close::run),
     ("kbd-close", kbd_close::run),
 ];

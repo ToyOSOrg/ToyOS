@@ -1,11 +1,5 @@
 //! What the two clock syscalls answer, from inside the machine.
 //!
-//! The host stages the RTC with `-rtc base=` and reads the *name* of the file
-//! the kernel writes, which is local time. Neither of those can see
-//! `SYS_CLOCK_EPOCH`, which serves UTC — and the difference between the two is
-//! the whole of the timezone question. This prints both so the host can put
-//! them against the instant it set, in `tests/common/wallclock.rs`.
-//!
 //! What it asserts itself is only what holds on *every* machine, because it
 //! runs on four of them: the shared boot, and the three whose clocks are staged
 //! broken. A machine with no wall clock is not a failure here — printing that
@@ -32,7 +26,7 @@ fn main() {
         return;
     };
     println!(
-        "wall-clock: epoch={epoch} local={:02}:{:02}:{:02}",
+        "wall-clock: epoch={epoch} realtime={:02}:{:02}:{:02}",
         time.hours, time.minutes, time.seconds
     );
 

@@ -350,37 +350,41 @@ fn incomplete(rust_dir: &Path) -> bool {
     cargo_link_stale(&stage2) || crate::clang::defect(&stage2).is_some() || host_target_missing(rust_dir)
 }
 
-/// Give the primary's toolchain what [`incomplete`] finds missing.
-fn complete(rust_dir: &Path) {
+/// Give the primary's toolchain what [`incomplete`] finds missing, its clang by
+/// `provision_clang`.
+fn complete(rust_dir: &Path, provision_clang: impl FnOnce(&Path)) {
     let stage2 = stage2(rust_dir);
     if cargo_link_stale(&stage2) {
         provision_toolchain_cargo(&stage2);
     }
     if crate::clang::defect(&stage2).is_some() {
-        crate::clang::provision(&stage2);
+        provision_clang(&stage2);
     }
     if host_target_missing(rust_dir) {
         link_host_target(rust_dir);
     }
 }
 
-/// Run `bootstrap` in the primary's `rust/`, then [`complete`] what it
-/// reassembled. Called inside the act that holds the global lock exclusively.
+/// Run `bootstrap` in the primary's `rust/` against the LLVM at `llvm`, then
+/// remove the LLVM its build directory built itself (`llvm::retire_in_tree`)
+/// and [`complete`] what it reassembled. Called inside the act that holds the
+/// global lock exclusively.
 ///
 /// **In the same hold, because bootstrap recreates `stage2` without its cargo
 /// and clang**: a completion under a hold of its own queues behind every sysroot
 /// build that takes the lock shared in between, and those last minutes.
-fn reassemble(rust_dir: &Path, bootstrap: impl FnOnce()) {
+fn reassemble(rust_dir: &Path, llvm: &Path, bootstrap: impl FnOnce()) {
     bootstrap();
-    complete(rust_dir);
+    crate::llvm::retire_in_tree(&rust_dir.join("build"));
+    complete(rust_dir, |stage2| crate::clang::provision(stage2, llvm));
 }
 
 /// [`reassemble`] the primary's compiler with `bootstrap`, with nothing recording
 /// which compiler `stage2` is until it is whole: a bootstrap that is stopped is
 /// run again by the primary, and refused by name in every linked worktree.
-fn rebuild_compiler(rust_dir: &Path, bootstrap: impl FnOnce()) {
+fn rebuild_compiler(rust_dir: &Path, llvm: &Path, bootstrap: impl FnOnce()) {
     crate::compiler::forget(rust_dir);
-    reassemble(rust_dir, bootstrap);
+    reassemble(rust_dir, llvm, bootstrap);
     crate::compiler::record(rust_dir);
 }
 
@@ -467,7 +471,8 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         },
         |kind| {
             eprintln!("Building full toolchain (this takes a while on first run)...");
-            rebuild_compiler(&rust_dir, || full_bootstrap(root, &rust_dir));
+            let llvm = crate::llvm::resolve(root, &rust_dir, &rust_dir);
+            rebuild_compiler(&rust_dir, &llvm.dir, || full_bootstrap(root, &rust_dir, &llvm.dir));
             if kind.invalidate_hosted {
                 let _ = fs::remove_file(&hosted_stamp);
             }
@@ -480,7 +485,8 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         "build the ToyOS-hosted rustc",
         || (!hosted_stamp.exists() || !hosted_rustc.exists()).then_some(()),
         |()| {
-            reassemble(&rust_dir, || build_hosted_rustc(&rust_dir));
+            let llvm = crate::llvm::resolve(root, &rust_dir, &rust_dir);
+            reassemble(&rust_dir, &llvm.dir, || build_hosted_rustc(&rust_dir, &llvm.dir));
             assert!(hosted_rustc.exists(), "Failed to build hosted rustc");
             fs::write(&hosted_stamp, "").unwrap();
         },
@@ -504,7 +510,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         Scope::Global,
         "complete the toyos toolchain",
         || incomplete(&rust_dir).then_some(()),
-        |()| complete(&rust_dir),
+        |()| complete(&rust_dir, |stage2| crate::clang::provision(stage2, &crate::llvm::resolve(root, &rust_dir, &rust_dir).dir)),
     );
     assert_toolchain_is_honest(&stage2);
 
@@ -601,6 +607,17 @@ fn link_stale(stage2: &Path) -> bool {
 /// enough for the question [`refuse_on_compile_error`] asks, which is what the
 /// failure *was*.
 pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<String>) {
+    x_build_with(rust_dir, args, what, |_| {})
+}
+
+/// [`x_build`], with bootstrap's environment what `environment` makes of this
+/// process's.
+pub(crate) fn x_build_with(
+    rust_dir: &Path,
+    args: &[&str],
+    what: &str,
+    environment: impl FnOnce(&mut Command),
+) -> (bool, Vec<String>) {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::{Arc, Mutex};
 
@@ -615,6 +632,7 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
     } else {
         ("./x.py", Command::new("./x.py"))
     };
+    environment(&mut command);
     let mut child = command
         .args(args)
         .env("BOOTSTRAP_SKIP_TARGET_SANITY", "1")
@@ -715,14 +733,14 @@ fn tolerated_failure(log: &[String], what: &str) {
     );
 }
 
-fn full_bootstrap(root: &Path, rust_dir: &Path) {
+fn full_bootstrap(root: &Path, rust_dir: &Path, llvm: &Path) {
     // Ensure library/backtrace is checked out — std depends on it.
     // Other rust submodules (llvm, docs, cargo) are handled by bootstrap on demand.
     crate::ensure_submodule(rust_dir, "library/backtrace");
 
     // Write bootstrap.toml — ToyOS as target only, not host (fast rebuilds)
     let host = host_triple();
-    write_config(rust_dir, &host, false);
+    write_config(rust_dir, &host, false, llvm);
 
     // Clean cached std for all ToyOS targets so bootstrap picks up compiler changes
     // (e.g. target spec changes like default_uwtable that affect codegen).
@@ -757,10 +775,10 @@ fn full_bootstrap(root: &Path, rust_dir: &Path) {
     }
 }
 
-fn build_hosted_rustc(rust_dir: &Path) {
+fn build_hosted_rustc(rust_dir: &Path, llvm: &Path) {
     eprintln!("Building ToyOS-hosted rustc...");
     let host = host_triple();
-    write_config(rust_dir, &host, true);
+    write_config(rust_dir, &host, true, llvm);
 
     let (ok, log) =
         x_build(rust_dir, &["build", "--stage", "2", "--warnings", "warn"], "the hosted rustc");
@@ -789,7 +807,7 @@ fn build_hosted_rustc(rust_dir: &Path) {
     // That build reassembled the host's `stage2` without `rust-lld`
     // (`write_config` says why), so the host-only build runs once more to put
     // it back: everything it would compile is already built.
-    write_config(rust_dir, &host, false);
+    write_config(rust_dir, &host, false, llvm);
     let (ok, log) = x_build(
         rust_dir,
         &["build", "--stage", "2", "--warnings", "warn"],
@@ -815,13 +833,14 @@ fn build_hosted_rustc(rust_dir: &Path) {
 /// `stage2` first, so [`build_hosted_rustc`] reassembles it under the host-only
 /// config after.
 ///
-/// `clang::LLVM_CONFIG` is the `[llvm]` both builds share.
+/// `clang::LLVM_CONFIG` is the `[llvm]` both builds share, and both link the LLVM
+/// at `llvm` (`src/llvm.rs`), whose LLD every guest target names by path.
 ///
 /// The host's `default-linker-linux-override` is pinned off because bootstrap
 /// otherwise ties it to `lld` for `x86_64-unknown-linux-gnu`, and a host rustc
 /// whose build environment flips with the config is rebuilt by each of those
 /// two builds.
-fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
+fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool, llvm: &Path) {
     let host_line = if with_hosted_rustc {
         format!("host = [\"{host}\", \"{}\"]", HOSTED_ARCH.userland())
     } else {
@@ -832,11 +851,10 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let build = rust_dir.join(format!("build/{host}"));
     let userland: String = Arch::ALL
         .iter()
         .map(|arch| {
-            let linker = format!("linker = \"{}\"", build.join("lld/bin/lld").display());
+            let linker = format!("linker = \"{}\"", llvm.join("bin/lld").display());
             let hosted = if with_hosted_rustc && *arch == HOSTED_ARCH {
                 // Cranelift because no LLVM is built for a ToyOS host yet, and
                 // only for that reason: the hosted rustc carries LLVM once clang
@@ -849,7 +867,7 @@ fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool) {
                 // leaves those ELF members out of the index lld pulls from.
                 format!(
                     "\nar = \"{}\"\ncodegen-backends = [\"cranelift\"]",
-                    build.join("llvm/bin/llvm-ar").display(),
+                    llvm.join("bin/llvm-ar").display(),
                 )
             } else {
                 String::new()
@@ -874,9 +892,11 @@ lld = {lld}
 
 [target.{host}]
 {HOST_LINKER_PIN}
+{external}
 
 {userland}"#,
         llvm = crate::clang::LLVM_CONFIG,
+        external = crate::llvm::host_lines(llvm),
         lld = !with_hosted_rustc,
     );
     fs::write(rust_dir.join("bootstrap.toml"), config).unwrap();
@@ -1063,15 +1083,22 @@ mod tests {
         assert!(said.contains("clang") && !said.contains("rust-lld,"), "the refusal names clang alone: {said}");
     }
 
-    /// Every guest links through the host build's LLD, named by path.
+    /// Every build links the host's LLVM, and every guest links through its
+    /// LLD, named by path.
     #[test]
-    fn every_build_names_its_lld_by_path() {
+    fn every_build_links_the_host_s_llvm_and_names_its_lld_by_path() {
         let rust_dir = TempDir::new("lld-config");
-        let lld = format!("linker = \"{}\"", rust_dir.join("build/h/lld/bin/lld").display());
+        let llvm = rust_dir.join("build/llvm/k");
+        let lld = format!("linker = \"{}\"", llvm.join("bin/lld").display());
         for (hosted, lld_flag) in [(true, "lld = false"), (false, "lld = true")] {
-            write_config(&rust_dir, "h", hosted);
+            write_config(&rust_dir, "h", hosted, &llvm);
             let config = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
             assert!(config.contains(lld_flag) && config.contains(&lld) && !config.contains("\"rust-lld\""), "{config}");
+            let host = format!(
+                "[target.h]\ndefault-linker-linux-override = \"off\"\nllvm-config = \"{}/bin/llvm-config\"\nllvm-has-rust-patches = true\n",
+                llvm.display()
+            );
+            assert!(config.contains(&host), "{config}");
         }
     }
 
@@ -1084,26 +1111,8 @@ mod tests {
     fn a_bootstrap_leaves_nothing_to_wait_on_a_sysroot_build_for() {
         let rust_dir = TempDir::new("no-wait");
         let stage2 = stage2(&rust_dir);
-        // The LLVM bootstrap builds beside `stage2`, which `clang::provision` reads.
-        let llvm = stage2.with_file_name("llvm");
-        for (file, text) in [("bin/clang", "clang"), ("lib/clang/22/include/stddef.h", "stddef")] {
-            fs::create_dir_all(llvm.join(file).parent().unwrap()).unwrap();
-            fs::write(llvm.join(file), text).unwrap();
-        }
-
-        reassemble(&rust_dir, || {
-            // What bootstrap leaves: `stage2` made again, with `rustc` and the
-            // LLVM tools it assembles, and neither cargo nor clang; and the
-            // hosted rustc's sysroot without the host target.
-            let _ = fs::remove_dir_all(&stage2);
-            let lld = rust_lld(&stage2);
-            for file in [stage2.join("bin/rustc"), lld.clone(), lld.with_file_name("llvm-ar")] {
-                fs::create_dir_all(file.parent().unwrap()).unwrap();
-                fs::write(file, b"").unwrap();
-            }
-            let hosted = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
-            fs::create_dir_all(&hosted).unwrap();
-        });
+        let llvm = store_llvm(&rust_dir);
+        reassemble(&rust_dir, &llvm, || bootstrapped(&rust_dir));
         assert!(
             !incomplete(&rust_dir),
             "a bootstrap let its exclusive hold go with a global step left, which the primary's \
@@ -1112,18 +1121,93 @@ mod tests {
         assert_eq!(toolchain_defect(&stage2), None, "a bootstrap let its exclusive hold go with stage2 not whole");
     }
 
+    /// The LLVM `clang::provision` reads, in `rust_dir`'s store.
+    fn store_llvm(rust_dir: &Path) -> PathBuf {
+        let llvm = rust_dir.join("build/llvm/k");
+        for (file, text) in [("bin/clang", "clang"), ("lib/clang/22/include/stddef.h", "stddef")] {
+            fs::create_dir_all(llvm.join(file).parent().unwrap()).unwrap();
+            fs::write(llvm.join(file), text).unwrap();
+        }
+        llvm
+    }
+
+    /// What bootstrap leaves in `rust_dir`: `stage2` made again, with `rustc`
+    /// and the LLVM tools it assembles, and neither cargo nor clang; and the
+    /// hosted rustc's sysroot without the host target.
+    fn bootstrapped(rust_dir: &Path) {
+        let stage2 = stage2(rust_dir);
+        let _ = fs::remove_dir_all(&stage2);
+        let lld = rust_lld(&stage2);
+        for file in [stage2.join("bin/rustc"), lld.clone(), lld.with_file_name("llvm-ar")] {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"").unwrap();
+        }
+        let hosted = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
+        fs::create_dir_all(&hosted).unwrap();
+    }
+
+    /// What a build directory holds of an LLVM of its own: bootstrap's LLVM and
+    /// LLD.
+    fn in_tree_llvm(rust_dir: &Path) -> [PathBuf; 2] {
+        let host = rust_dir.join("build").join(host_triple());
+        let own = [host.join("llvm"), host.join("lld")];
+        for dir in &own {
+            fs::create_dir_all(dir.join("bin")).unwrap();
+            fs::write(dir.join("bin/tool"), "a tool").unwrap();
+        }
+        own
+    }
+
+    /// **A primary whose compiler is built against the store keeps no LLVM of
+    /// its own**: the rebuild that links the store removes the one its build
+    /// directory built.
+    #[test]
+    fn a_rebuilt_compiler_leaves_no_llvm_of_its_own() {
+        let scratch = TempDir::new("in-tree-llvm");
+        let (_primary, rust_dir, _) = crate::compiler::tests::estate(&scratch);
+        let own = in_tree_llvm(&rust_dir);
+        let llvm = store_llvm(&rust_dir);
+        rebuild_compiler(&rust_dir, &llvm, || bootstrapped(&rust_dir));
+        for dir in own {
+            assert!(!dir.exists() && !dir.with_extension("swept").exists(), "{} outlived the rebuild", dir.display());
+        }
+        assert_eq!(toolchain_defect(&stage2(&rust_dir)), None);
+    }
+
+    /// **Landing the store moves an existing primary onto it**: a primary whose
+    /// record was written before its compiler linked the host's LLVM is not
+    /// current, so its next build bootstraps, and that rebuild removes the LLVM
+    /// and LLD its build directory built. Its LLVM checkout sitting at a commit
+    /// its gitlink does not name changes neither answer.
+    #[test]
+    fn a_primary_recorded_before_the_store_is_rebuilt_onto_it() {
+        let scratch = TempDir::new("store-migration");
+        let (_primary, rust_dir, _) = crate::compiler::tests::estate(&scratch);
+        crate::compiler::tests::llvm_checkout(&rust_dir);
+        assert!(crate::compiler::primary_is_current(&rust_dir));
+        crate::compiler::tests::record_before_the_store(&rust_dir);
+        let own = in_tree_llvm(&rust_dir);
+        let kind = bootstrap(false, crate::compiler::primary_is_current(&rust_dir), true);
+        assert!(kind.is_some_and(|k| k.invalidate_hosted), "a primary recorded before the store was taken for current");
+        rebuild_compiler(&rust_dir, &store_llvm(&rust_dir), || bootstrapped(&rust_dir));
+        assert!(own.iter().all(|dir| !dir.exists()), "the rebuild kept the LLVM its build directory built");
+        assert!(crate::compiler::primary_is_current(&rust_dir), "the rebuild recorded a compiler that is not current");
+    }
+
     /// **A stopped bootstrap is run again**: nothing records which compiler
     /// `stage2` is while one runs, so the primary's next build is not told the
-    /// old one is current.
+    /// old one is current; and the LLVM the old one linked stays.
     #[test]
     fn a_stopped_bootstrap_leaves_no_record() {
         let rust_dir = TempDir::new("stopped");
         let record = crate::compiler::primary_record(&rust_dir);
         fs::create_dir_all(record.parent().unwrap()).unwrap();
         fs::write(&record, "the compiler before").unwrap();
-        let stopped = std::panic::catch_unwind(|| rebuild_compiler(&rust_dir, || panic!("stopped")));
+        let own = in_tree_llvm(&rust_dir);
+        let stopped = std::panic::catch_unwind(|| rebuild_compiler(&rust_dir, Path::new("no-llvm"), || panic!("stopped")));
         assert!(stopped.is_err());
         assert!(!record.exists(), "a stopped bootstrap left the record of the compiler before it");
+        assert!(own.iter().all(|dir| dir.join("bin/tool").is_file()), "a stopped bootstrap took the LLVM its compiler linked");
     }
 
     /// **The primary bootstraps a new compiler exactly when asked to or when its
