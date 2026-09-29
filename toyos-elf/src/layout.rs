@@ -599,7 +599,8 @@ impl Layout {
 ///
 /// Only `p_filesz` counts: past it a segment is zeroes, not the file.
 fn program_header_table(ehdr: &FileHeader, segments: &[Segment]) -> Option<ProgramHeaderTable> {
-    let len = u64::from(ehdr.phnum).checked_mul(PROGRAM_HEADER_SIZE as u64)?;
+    // A `u16` count of 56-byte entries: the product cannot overflow a `u64`.
+    let len = u64::from(ehdr.phnum) * PROGRAM_HEADER_SIZE as u64;
     segments.iter().find_map(|seg| {
         let within = ehdr.phoff.checked_sub(seg.file_offset)?;
         if within.checked_add(len)? > seg.filesz {
@@ -607,7 +608,7 @@ fn program_header_table(ehdr: &FileHeader, segments: &[Segment]) -> Option<Progr
         }
         // Inside the segment's own range, which the extent holds: `within +
         // len <= filesz <= memsz`.
-        let start = seg.image.start.checked_add(within)?;
+        let start = seg.image.start + within;
         Some(ProgramHeaderTable { image: ImageRange { start, len }, count: ehdr.phnum })
     })
 }
