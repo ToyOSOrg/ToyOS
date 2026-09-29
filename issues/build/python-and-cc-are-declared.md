@@ -40,7 +40,7 @@ Rust bootstrap again as an incidental fix; do not soften the entry either.
 
 `src/toolchain.rs:749` picks `./x` when `rust/x` exists, which it does. That file
 is a `/bin/sh` script whose whole job is `SEARCH="python3 python py python2 uv"`,
-and it execs `x.py` → `rust/src/bootstrap/bootstrap.py` (55,550 bytes). So a clean
+and it execs `x.py` → `rust/src/bootstrap/bootstrap.py`. So a clean
 clone cannot build a toolchain without Python 3. It is upstream's bootstrap and
 not our code, which is why it is stated rather than blamed — but the bar has no
 upstream exemption, and `bootstrap.py` can never run inside ToyOS.
@@ -71,7 +71,7 @@ exit condition is Python's: they go when the build no longer needs a host,
 which is the self-hosting track's last stage
 (`issues/build/toyos-builds-itself.md`).
 
-**What removing each takes, measured at the fork's pinned `9c3eea44`.**
+**What removing each takes.**
 
 - **Python.** Upstream has no Python-free entry: `x`, `x.py` and
   `src/tools/x` all end in `bootstrap.py`. But `src/bootstrap` builds with
@@ -81,23 +81,13 @@ which is the self-hosting track's last stage
   `bootstrap.py`, with no change to the fork, taking over `bootstrap.py`'s
   environment contract at every fork bump. That removes Python only from a
   build that reuses a keyed LLVM: LLVM's own CMake requires a Python 3
-  (`find_package(Python3 … REQUIRED)`, `llvm/CMakeLists.txt:1016` at the
-  pinned `src/llvm-project`), so building an LLVM needs one until CMake goes.
-  Nobody has run it end to end, and whether to try is the owner's call under
-  the ruling of 2026-09-01.
+  (`find_package(Python3 … REQUIRED)`), so building an LLVM needs one until CMake goes.
 - **`cc` has two jobs**: it links every host binary, and it is
   the C++ compiler of LLVM, clang, LLD and `rustc_llvm` (`bootstrap.toml`'s
   `cc`/`cxx`, named in `src/llvm.rs`, with `xcrun` asked for the SDK). It also
   compiles `ring`'s C for `tests/https-server-host` and
-  `tests/https-fetch-host`. `rust-lld` can take only the link. On the macOS dev
-  host, nightly's `rust-lld` (LLVM 22.1.0) links a host `hello` against
-  `MacOSX14.4.sdk` with `-Zunstable-options -C linker-flavor=darwin-lld`; the
-  flavor is unstable on stable 1.98.1. It refuses the default
-  `MacOSX27.0.sdk`'s TAPI stubs (`unknown architecture` at
-  `arm64e.x1-macos`), and it needs Apple's SDK in either case.
-  Nothing replaces the compile but a clang the host did not build.
-- **CMake and Ninja.** LLVM, clang and LLD at the pinned `src/llvm-project`
-  have 726 `CMakeLists.txt` and 78 `.cmake` modules. The only other build
-  descriptions upstream carries are an unsupported GN overlay (740 `BUILD.gn`)
+  `tests/https-fetch-host`. `rust-lld` can take only the link. Nothing replaces the compile but a clang the host did not build.
+- **CMake and Ninja.** LLVM, clang and LLD are described in CMake. The only other build
+  descriptions upstream carries are an unsupported GN overlay (`BUILD.gn`)
   and a Bazel one. Replacing CMake means writing one of those and keeping it
   in Rust, which is M5's.

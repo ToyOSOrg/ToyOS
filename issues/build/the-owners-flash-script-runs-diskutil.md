@@ -18,5 +18,5 @@ disks that `diskutil list external physical` names, and it writes only to a
 disk that reports `Internal=false` and `BusProtocol=USB` on its own account. A
 replacement keeps both.
 
-**Exit**: no `diskutil` or `plutil` anywhere in the tree, and the stick is
-written by the build system or by nothing.
+**Exit**: `rg -l "diskutil|plutil"` over the tree outside `rust/` finds nothing, and
+the build system writes the stick.
