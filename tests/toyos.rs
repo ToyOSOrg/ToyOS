@@ -18,7 +18,6 @@ use common::{
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::redlist;
-use toyos_build::arch::Arch;
 
 struct TestDef {
     name: String,
@@ -485,56 +484,56 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 /// the thrash. There are two kernels now and nothing to thrash; the order is
 /// kept because these are read the way they are
 /// written.
-const SCREEN_TESTS: &[(&str, Sched, Arch)] = &[
+const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     // Two boots, each ended at a loader line rather than at the kernel's ready
     // marker. Every verdict is a count of rows against a count of lines off the
     // same boot's console; no clock is in either.
-    ("screen_loader_lines", Sched::Parallel, Arch::X86_64),
-    ("screen_gop_firmware_mode", Sched::Parallel, Arch::X86_64),
+    ("screen_loader_lines", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_gop_firmware_mode", Sched::Parallel, qemu::Profile::Gop),
     // The log is still on the panel once every program the image starts has
     // run: an event, and no clock in it.
-    ("screen_diag_boot", Sched::Parallel, Arch::X86_64),
+    ("screen_diag_boot", Sched::Parallel, qemu::Profile::Metal),
     // A guest halted in the window, so the panel is read where only the repaint
     // under test can have painted it.
-    ("screen_early_panel", Sched::Parallel, Arch::X86_64),
-    ("screen_log_absent", Sched::Parallel, Arch::X86_64),
-    ("screen_console_shell", Sched::Parallel, Arch::X86_64),
-    ("screen_console_clear", Sched::Parallel, Arch::X86_64),
-    ("screen_console_scroll", Sched::Parallel, Arch::X86_64),
-    ("screen_i8042_health", Sched::Parallel, Arch::X86_64),
+    ("screen_early_panel", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_log_absent", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_console_shell", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_console_clear", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_console_scroll", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_i8042_health", Sched::Parallel, qemu::Profile::Metal),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
     // compositor is holding it. The verdict is the report on the panel.
-    ("screen_blocked_dump", Sched::Parallel, Arch::X86_64),
-    ("screen_late_panic", Sched::Parallel, Arch::X86_64),
-    ("screen_paged_scrollback", Sched::Parallel, Arch::X86_64),
-    ("screen_panic_muted", Sched::Parallel, Arch::X86_64),
-    ("screen_console_panic", Sched::Parallel, Arch::X86_64),
-    ("screen_fatal_halt", Sched::Parallel, Arch::X86_64),
+    ("screen_blocked_dump", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_late_panic", Sched::Parallel, qemu::Profile::Gop),
+    ("screen_paged_scrollback", Sched::Parallel, qemu::Profile::Gop),
+    ("screen_panic_muted", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_console_panic", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_fatal_halt", Sched::Parallel, qemu::Profile::Gop),
     // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
     // panel's latch it will never give back: the report has to take the screen
     // anyway, and its CPU has to go on to watch the reset bound.
-    ("screen_fatal_behind_a_painter", Sched::Parallel, Arch::X86_64),
+    ("screen_fatal_behind_a_painter", Sched::Parallel, qemu::Profile::Gop),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in and the one no screen
     // test covered: `screen_fatal_halt` boots a config with no compositor, and
     // `screen_blocked_dump` has one but paints through `paint_report` rather
     // than through `halt_all_cpus`.
-    ("screen_fatal_halt_composited", Sched::Parallel, Arch::X86_64),
+    ("screen_fatal_halt_composited", Sched::Parallel, qemu::Profile::Metal),
     // Every PageUp moves the page one back, which the unattended deadline
     // never does: order, and no clock in it.
-    ("screen_pager_keys", Sched::Parallel, Arch::X86_64),
-    ("virt_early_panic", Sched::Parallel, Arch::Aarch64),
-    ("virt_early_fault", Sched::Parallel, Arch::Aarch64),
-    ("virt_el2_drop", Sched::Parallel, Arch::Aarch64),
-    ("virt_user_mode", Sched::Parallel, Arch::Aarch64),
-    ("virt_timer_preempts", Sched::Parallel, Arch::Aarch64),
-    ("virt_irq_storm", Sched::Parallel, Arch::Aarch64),
-    ("virt_timer_floor", Sched::Parallel, Arch::Aarch64),
-    ("virt_fp_isolation", Sched::Parallel, Arch::Aarch64),
-    ("virt_first_entry", Sched::Parallel, Arch::Aarch64),
-    ("virt_unmap_touch", Sched::Parallel, Arch::Aarch64),
-    ("virt_debug_refused", Sched::Parallel, Arch::Aarch64),
-    ("virt_readonly_copyout", Sched::Parallel, Arch::Aarch64),
+    ("screen_pager_keys", Sched::Parallel, qemu::Profile::Metal),
+    ("virt_early_panic", Sched::Parallel, qemu::Profile::Virt),
+    ("virt_early_fault", Sched::Parallel, qemu::Profile::Virt),
+    ("virt_el2_drop", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_user_mode", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_timer_preempts", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_irq_storm", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_timer_floor", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_fp_isolation", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_first_entry", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_unmap_touch", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_debug_refused", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_readonly_copyout", Sched::Parallel, qemu::Profile::VirtEl2),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -3562,13 +3561,12 @@ fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String>
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
-/// Boot `tests/virtjobcase` under the EL2 profile and judge its job `job`:
+/// Boot `tests/virtjobcase` and judge its job `job`:
 /// it ends with exit 0, having said `said`. The kernel carries `SYS_DEBUG`
 /// for `debug_refused`, and every job runs in every boot of the case.
-fn virt_job(job: &str, said: &str) -> Result<(), String> {
+fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    let profile = qemu::Profile::VirtEl2;
     static COPYOUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     let copyout = COPYOUT.get_or_init(|| {
         qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
@@ -3606,16 +3604,20 @@ fn virt_job(job: &str, said: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Boot `test_config` under the EL2 profile with the kernel selftest `armed`
+/// Boot `test_config` with the kernel selftest `armed`
 /// names, and judge its one line: `<param>: PASS`.
-fn virt_selftest(test_config: &Path, armed: &'static [&'static str; 1]) -> Result<(), String> {
+fn virt_selftest(
+    profile: qemu::Profile,
+    test_config: &Path,
+    armed: &'static [&'static str; 1],
+) -> Result<(), String> {
     let [param] = armed;
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         &[],
         &[],
         BootOptions {
-            profile: qemu::Profile::VirtEl2,
+            profile,
             kernel_params: armed,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
@@ -3639,6 +3641,7 @@ fn virt_selftest(test_config: &Path, armed: &'static [&'static str; 1]) -> Resul
 /// grid is the only readable form of that.
 fn run_screen_test(
     name: &str,
+    profile: qemu::Profile,
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -3650,7 +3653,7 @@ fn run_screen_test(
             // GOP query and every later loader line is on serial alone.
             let dump_at = |marker: &'static str| -> Result<(usize, String), String> {
                 let options = BootOptions {
-                    profile: qemu::Profile::Metal,
+                    profile,
                     qmp: true,
                     ready_marker: marker,
                     ..Default::default()
@@ -3805,15 +3808,15 @@ fn run_screen_test(
                 }
                 Ok(kernel)
             };
-            let boot = |profile, _: qemu::LaneFree| {
+            let boot = |machine, _: qemu::LaneFree| {
                 QemuInstance::boot_with_options(
                     test_config,
                     c_bins,
                     rust_bins,
-                    BootOptions { profile, qmp: true, ..Default::default() },
+                    BootOptions { profile: machine, qmp: true, ..Default::default() },
                 )
             };
-            let mut qemu = boot(qemu::Profile::Gop, qemu::LaneFree::no_guest_yet());
+            let mut qemu = boot(profile, qemu::LaneFree::no_guest_yet());
             let gop = mode_of(&mut qemu, "Gop")?;
             let free = qemu.shutdown();
             let mut qemu = boot(qemu::Profile::Metal, free);
@@ -3826,11 +3829,11 @@ fn run_screen_test(
             // `PixelBlueGreenRedReserved8BitPerColor`, which `query_gop`
             // encodes as 1.
             const BGR: u32 = 1;
-            for (profile, label, mode) in [
-                (qemu::Profile::Gop, "Gop", gop),
+            for (machine, label, mode) in [
+                (profile, "Gop", gop),
                 (qemu::Profile::Metal, "metal-sim", metal),
             ] {
-                let panel = profile.panel().expect("both machines have a VGA adapter");
+                let panel = machine.panel().expect("both machines have a VGA adapter");
                 if (mode.0, mode.1) != panel {
                     return Err(format!(
                         "{label} advertises a {panel:?} panel and booted into {:?}{} — an \
@@ -3884,7 +3887,7 @@ fn run_screen_test(
             // on ROOT, so the image booted here is the image flashed.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("diag");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 // No test-runner in this image, so the kernel's own last phase
                 // line is the marker. It says the ring drained, not that the
@@ -4033,14 +4036,14 @@ fn run_screen_test(
                 ["panic console: armed", "serial: 16550 loopback read"];
             const AFTER_PARAMS: &str = "actuators:";
 
-            let panel = qemu::Profile::Metal.panel().expect("metal-sim advertises a panel");
+            let panel = profile.panel().expect("metal-sim advertises a panel");
             let halted_panel = |params: &'static [&'static str]| -> Result<String, String> {
                 let mut qemu = QemuInstance::boot_with_options(
                     test_config,
                     c_bins,
                     rust_bins,
                     BootOptions {
-                        profile: qemu::Profile::Metal,
+                        profile,
                         qmp: true,
                         kernel_params: params,
                         ready_marker: LAST,
@@ -4124,7 +4127,7 @@ fn run_screen_test(
                 &[],
             )?;
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 boot_image: Some(qemu::Staged::Written(image_path.clone())),
                 ready_marker: "Boot: complete",
@@ -4190,7 +4193,7 @@ fn run_screen_test(
             // flashed — the property `screen_diag_boot` has for its mode.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 ready_marker: "console: ready",
                 ..Default::default()
@@ -4344,7 +4347,7 @@ fn run_screen_test(
             // window to read from.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 kernel_features: ACTUATOR_KERNEL,
                 ready_marker: "console: ready",
@@ -4542,7 +4545,7 @@ fn run_screen_test(
             // cost of this test is its byte count and nothing else.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 kernel_features: ACTUATOR_KERNEL,
                 ready_marker: "console: ready",
@@ -4786,7 +4789,7 @@ fn run_screen_test(
             // certifies is the kernel's behaviour, not the artifact.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 kernel_features: ACTUATOR_KERNEL,
                 ready_marker: "console: ready",
@@ -4860,7 +4863,7 @@ fn run_screen_test(
             // is under test here is a *successful* boot repainting to say
             // something the last boot checkpoint could not have known yet.
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 mute: true,
                 ..Default::default()
@@ -4917,7 +4920,7 @@ fn run_screen_test(
             // boot and no rebuild — and it is the one place the absent-UART
             // branches run at all.
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 mute: true,
                 kernel_params: &["test-late-panic"],
@@ -4976,7 +4979,7 @@ fn run_screen_test(
                 &[],
                 &[],
                 BootOptions {
-                    profile: qemu::Profile::Virt,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-early-panic"],
                     ready_marker: "EARLY PANIC:",
@@ -5032,7 +5035,7 @@ fn run_screen_test(
                 &[],
                 &[],
                 BootOptions {
-                    profile: qemu::Profile::VirtEl2,
+                    profile,
                     kernel_params: &["test-early-panic"],
                     ready_marker: "EARLY PANIC:",
                     ..Default::default()
@@ -5066,7 +5069,7 @@ fn run_screen_test(
                 &[],
                 &[],
                 BootOptions {
-                    profile: qemu::Profile::Virt,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-early-fault"],
                     ready_marker: "EARLY PANIC:",
@@ -5105,7 +5108,7 @@ fn run_screen_test(
                 &[],
                 &[],
                 BootOptions {
-                    profile: qemu::Profile::VirtEl2,
+                    profile,
                     ready_marker: "control registers: SCTLR_EL1=",
                     ..Default::default()
                 },
@@ -5129,26 +5132,27 @@ fn run_screen_test(
         }
         "virt_timer_preempts" => {
             // Spelled in `userland/toybox/src/preempt.rs`.
-            virt_job("preempt", "preempt: the counting thread was preempted twice")
+            virt_job(profile, "preempt", "preempt: the counting thread was preempted twice")
         }
-        "virt_fp_isolation" => virt_job("fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
-        "virt_first_entry" => virt_job("first_entry", "first_entry: x1-x30 were zero"),
-        "virt_unmap_touch" => virt_job("unmap_touch", "unmap_touch: 4 reads of a page just unmapped"),
+        "virt_fp_isolation" => virt_job(profile, "fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
+        "virt_first_entry" => virt_job(profile, "first_entry", "first_entry: x1-x30 were zero"),
+        "virt_unmap_touch" => virt_job(profile, "unmap_touch", "unmap_touch: 4 reads of a page just unmapped"),
         "virt_debug_refused" => virt_job(
+            profile,
             "debug_refused",
             "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused",
         ),
         "virt_readonly_copyout" => {
-            virt_job(&format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
+            virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
         }
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
             // thousand times through the flood, then waits for every SGI it
             // sent. A tick lost or never re-armed, or an SGI lost, leaves the
             // storm running and the verdict unsaid.
-            virt_selftest(test_config, &["irq-storm"])
+            virt_selftest(profile, test_config, &["irq-storm"])
         }
-        "virt_timer_floor" => virt_selftest(test_config, &["timer-floor"]),
+        "virt_timer_floor" => virt_selftest(profile, test_config, &["timer-floor"]),
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:
             // crash_report, capture, panic_flush, halt_all_cpus, render. The
@@ -5159,7 +5163,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Gop,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-late-panic"],
                     ready_marker: "PANIC:",
@@ -5219,7 +5223,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Gop,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-late-panic"],
                     ready_marker: "PANIC:",
@@ -5332,7 +5336,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Metal,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-late-panic"],
                     ready_marker: "PANIC:",
@@ -5453,7 +5457,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Gop,
+                    profile,
                     qmp: true,
                     kernel_features: ACTUATOR_KERNEL,
                     ..Default::default()
@@ -5516,7 +5520,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Gop,
+                    profile,
                     qmp: true,
                     kernel_params: &["panel-painter-stalls"],
                     ..Default::default()
@@ -5574,7 +5578,7 @@ fn run_screen_test(
             // path his image does not contain.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 smp: 8,
                 qmp: true,
                 // The T14's literal shape: no console, so the panel and the
@@ -5688,7 +5692,7 @@ fn run_screen_test(
             //
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopaudiocase");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 smp: 8,
                 qmp: true,
                 mute: true,
@@ -16120,7 +16124,7 @@ enum Task<'a> {
     /// the shipping binary's own coverage.
     Shared(Vec<&'a TestDef>, &'static [&'static str]),
     Machine(Vec<&'static str>),
-    Screen(&'static str),
+    Screen(&'static str, qemu::Profile),
 }
 
 /// What the suite has to say about one test once it has finished.
@@ -16647,11 +16651,11 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                 send(name.to_string(), outcome.err(), start);
             }
         }
-        Task::Screen(name) => {
+        Task::Screen(name, profile) => {
             let carried = carried_by(&[name], bins);
             let start = common::clock::mark();
             let outcome =
-                catching(|| run_screen_test(name, bins.test_config, &carried.c, &carried.rust));
+                catching(|| run_screen_test(name, profile, bins.test_config, &carried.c, &carried.rust));
             send(name.to_string(), outcome.err(), start);
         }
     }
@@ -16663,7 +16667,7 @@ impl Task<'_> {
         match self {
             Task::Shared(tests, _) => tests.iter().map(|t| t.name.as_str()).collect(),
             Task::Machine(names) => names.to_vec(),
-            Task::Screen(name) => vec![name],
+            Task::Screen(name, _) => vec![name],
         }
     }
 }
@@ -16868,7 +16872,7 @@ fn machine_tasks(selected: &[(&'static str, Sched)]) -> Vec<(Sched, Vec<&'static
 fn build_tasks<'a>(
     tests_to_run: &[&'a TestDef],
     machine_to_run: &[(&'static str, Sched)],
-    screen_to_run: &[(&'static str, Sched)],
+    screen_to_run: &[(&'static str, Sched, qemu::Profile)],
 ) -> (Vec<Task<'a>>, Vec<Task<'a>>) {
     let mut parallel: Vec<Task> = Vec::new();
     let mut serial: Vec<Task> = Vec::new();
@@ -16894,8 +16898,8 @@ fn build_tasks<'a>(
             Sched::Serial => serial.push(task),
         }
     }
-    for &(name, sched) in screen_to_run {
-        let task = Task::Screen(name);
+    for &(name, sched, profile) in screen_to_run {
+        let task = Task::Screen(name, profile);
         match sched {
             Sched::Parallel => parallel.push(task),
             Sched::Serial => serial.push(task),
@@ -16912,19 +16916,21 @@ fn kept(filter: Option<&str>, name: &str) -> bool {
 
 /// The shared boot's members, the machine tests and the screen tests a run
 /// boots.
-type Selection<'a> = (Vec<&'a TestDef>, Vec<(&'static str, Sched)>, Vec<(&'static str, Sched)>);
+type Selection<'a> =
+    (Vec<&'a TestDef>, Vec<(&'static str, Sched)>, Vec<(&'static str, Sched, qemu::Profile)>);
 
-/// Every registered test a run [`kept`], but on a shard only the guests of
-/// [`toyos_build::ci::GUEST_ARCH`], the one architecture a CI guest lane boots.
+/// Every registered test a run [`kept`], but on a shard only the screen rows
+/// whose profile is of [`toyos_build::ci::GUEST_ARCH`].
 fn select<'a>(shared: &'a [TestDef], filter: Option<&str>, sharded: bool) -> Selection<'a> {
-    let boots = |arch: Arch| !sharded || arch == toyos_build::ci::GUEST_ARCH;
     (
         shared.iter().filter(|t| kept(filter, &t.name)).collect(),
         MACHINE_TESTS.iter().filter(|(n, _)| kept(filter, n)).copied().collect(),
         SCREEN_TESTS
             .iter()
-            .filter(|(n, _, arch)| kept(filter, n) && boots(*arch))
-            .map(|(n, s, _)| (*n, *s))
+            .filter(|(n, _, profile)| {
+                kept(filter, n) && (!sharded || profile.arch() == toyos_build::ci::GUEST_ARCH)
+            })
+            .copied()
             .collect(),
     )
 }
@@ -17235,17 +17241,18 @@ fn declared<'a>() -> impl Iterator<Item = &'a str> {
 /// Every name this suite can produce a verdict for: the shared boot's
 /// discovered binaries and the two declared registries, so a name two of them
 /// give is refused before anything boots.
-fn registered(shared: &[TestDef]) -> BTreeSet<&str> {
+fn registered(shared: &[TestDef]) -> Result<BTreeSet<&str>, String> {
     let mut names = BTreeSet::new();
     for name in shared.iter().map(|t| t.name.as_str()).chain(declared()) {
-        assert!(
-            names.insert(name),
-            "{name} is registered twice, and two rows are two verdicts under one name. A binary \
-             a machine test drives goes on RUST_SKIP with the reason its own test exists, or one \
-             of the two is renamed."
-        );
+        if !names.insert(name) {
+            return Err(format!(
+                "{name} is registered twice, and two rows are two verdicts under one name. A \
+                 binary a machine test drives goes on RUST_SKIP with the reason its own test \
+                 exists, or one of the two is renamed."
+            ));
+        }
     }
-    names
+    Ok(names)
 }
 
 /// `redlist::DISABLED` against every registered name, before any boot on any
@@ -17335,8 +17342,11 @@ fn main() {
         let c_bins = compile_c_tests(&c_names);
         check_metal_only_unshared(&rust_bins, &c_bins);
         let c_compiled: Vec<String> = c_bins.iter().map(|(n, _)| n.clone()).collect();
-        if let Err(refusal) = check_redlist(&registered(&build_test_registry(&rust_bins, &c_compiled))) {
-            eprintln!("[toyos] src/redlist.rs: {refusal}");
+        let all_tests = build_test_registry(&rust_bins, &c_compiled);
+        if let Err(refusal) = registered(&all_tests).and_then(|registered| {
+            check_redlist(&registered).map_err(|e| format!("src/redlist.rs: {e}"))
+        }) {
+            eprintln!("[toyos] {refusal}");
             run.exit(1);
         }
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
@@ -17387,7 +17397,13 @@ fn main() {
     // Every name this process could produce a verdict for, before `--list`
     // and `--debug` can return without ever reaching it.
     let all_tests = build_test_registry(&rust_bins, &c_compiled);
-    let registered = registered(&all_tests);
+    let registered = match registered(&all_tests) {
+        Ok(registered) => registered,
+        Err(refusal) => {
+            eprintln!("[toyos] {refusal}");
+            run.exit(1);
+        }
+    };
     if let Err(refusal) = check_redlist(&registered) {
         eprintln!("[toyos] src/redlist.rs: {refusal}");
         run.exit(1);
@@ -17421,7 +17437,17 @@ fn main() {
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
-        eprintln!("No enabled test matches filter {filter:?}");
+        let (_, _, dropped) = select(&all_tests, filter, false);
+        if dropped.is_empty() {
+            eprintln!("No enabled test matches filter {filter:?}");
+        } else {
+            let names: Vec<&str> = dropped.iter().map(|(n, _, _)| *n).collect();
+            eprintln!(
+                "[toyos] filter {filter:?} matches only {}, and a shard boots no guest but {}",
+                names.join(", "),
+                toyos_build::ci::GUEST_ARCH.name()
+            );
+        }
         run.exit(1);
     }
 

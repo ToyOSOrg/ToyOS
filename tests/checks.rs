@@ -574,24 +574,29 @@ mod checks {
         Ok(())
     }
 
-    /// A run takes every registered test its filter matches, and a shard, which
-    /// only a CI guest lane runs, drops exactly the rows of an architecture that
-    /// lane does not boot.
-    #[test]
-    fn a_run_selects_every_test_its_host_boots() -> Result<(), String> {
-        let shared = [TestDef {
-            name: "shared_one".to_string(),
-            qemu_name: "test_rs_shared_one".to_string(),
+    /// A shared-boot row under `name`, for the checks below.
+    fn shared_row(name: &str) -> TestDef {
+        TestDef {
+            name: name.to_string(),
+            qemu_name: format!("test_rs_{name}"),
             timeout: Duration::from_secs(1),
             check: |_| true,
             settle: no_settle,
-        }];
+        }
+    }
+
+    /// A run takes every registered test its filter matches, and a shard drops
+    /// exactly the screen rows whose profile is not of [`toyos_build::ci::GUEST_ARCH`].
+    #[test]
+    fn a_run_selects_by_filter_and_shard() -> Result<(), String> {
+        let shared = [shared_row("shared_one")];
         let taken = |filter: Option<&str>, sharded: bool| -> BTreeSet<String> {
             let (tests, machine, screen) = select(&shared, filter, sharded);
             tests
                 .iter()
                 .map(|t| t.name.clone())
-                .chain(machine.iter().chain(&screen).map(|(n, _)| n.to_string()))
+                .chain(machine.iter().map(|(n, _)| n.to_string()))
+                .chain(screen.iter().map(|(n, _, _)| n.to_string()))
                 .collect()
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
@@ -600,7 +605,7 @@ mod checks {
             declared().chain(["shared_one"]).filter(enabled).map(String::from).collect();
         let foreign: BTreeSet<String> = SCREEN_TESTS
             .iter()
-            .filter(|(_, _, arch)| *arch != toyos_build::ci::GUEST_ARCH)
+            .filter(|(_, _, profile)| profile.arch() != toyos_build::ci::GUEST_ARCH)
             .map(|(n, _, _)| *n)
             .filter(enabled)
             .map(String::from)
@@ -612,6 +617,7 @@ mod checks {
             (None, false, every.clone()),
             (None, true, every.difference(&foreign).cloned().collect()),
             (Some("virt_el2"), false, names(&["virt_el2_drop"])),
+            (Some("el2_drop"), false, names(&["virt_el2_drop"])),
             (Some("virt_el2"), true, BTreeSet::new()),
             (Some("sshd_"), true, names(&["sshd_exec", "sshd_files", "sshd_key_auth"])),
             (Some("shared_one"), true, names(&["shared_one"])),
@@ -624,6 +630,33 @@ mod checks {
                     got.difference(&want).collect::<Vec<_>>(),
                     want.difference(&got).collect::<Vec<_>>()
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Two rows under one name are refused, whether both are shared-boot rows
+    /// or one is a declared registry's.
+    #[test]
+    fn a_name_registered_twice_is_refused() -> Result<(), String> {
+        let apart = [shared_row("shared_one"), shared_row("shared_two")];
+        let names = registered(&apart)?;
+        for name in ["shared_one", "shared_two", "virt_el2_drop"] {
+            if !names.contains(name) {
+                return Err(format!("{name} is not among the {} registered names", names.len()));
+            }
+        }
+        for twice in [
+            [shared_row("shared_one"), shared_row("shared_one")],
+            [shared_row("shared_one"), shared_row("virt_el2_drop")],
+        ] {
+            let twice_name = &twice[1].name;
+            match registered(&twice) {
+                Err(refusal) if refusal.contains(&format!("{twice_name} is registered twice")) => {}
+                other => {
+                    let answer = other.map(|names| names.len());
+                    return Err(format!("{twice_name} registered twice was answered {answer:?}"));
+                }
             }
         }
         Ok(())

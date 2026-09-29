@@ -93,9 +93,7 @@ the number this entry says nothing prices is measured on every run, deliberately
 removed from the price, and then dropped on the floor. What is missing is two
 smaller things: nothing attributes that duration to the *config* that caused it
 rather than to the worker thread that happened to ask first, and nothing writes
-it anywhere. `tests/test-durations` cannot be where it goes — the same file is
-read against `FAST_CEILING_MS` (`src/tiers.rs:84`, 10,000 ms), which is this
-entry's own reason for wanting a second profile.
+it anywhere.
 
 **What no work on this host can supply is the seed and the verdict.** The cost
 being priced is a *cold-checkout* rebuild on a hosted shard: `actions/checkout`

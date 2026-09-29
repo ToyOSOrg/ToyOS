@@ -153,11 +153,7 @@ ledger was written.
   `xhci_full_speed_device` run 32513441183), which is what made the pattern
   visible as a rule and not as three tests. escape boundary: `main` — the rule
   had been the tree's since 2026-08-11 and every relegation and return since was
-  decided by it. `src/tiers.rs` reded a `Tier::Fast` name measured over
-  `FAST_CEILING_MS` and invited a `Why::Cost` row back the moment one
-  measurement landed under it, **both on one sample**, so any test priced within
-  a few percent of the line was a coin flip per partition and its red landed on
-  whichever pull request measured it next. Fixed by the owner's decision of
+  decided by it. Fixed by the owner's decision of
   2026-08-21 — *the fast tier demands margin* — as `FAST_COMMIT_MS`
   (`FAST_CEILING_MS * 4 / 5` = 8,000 ms): the price a test may be **committed**
   at, refusing a Fast name priced in the band and requiring margin of a returning

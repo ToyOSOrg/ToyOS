@@ -64,9 +64,7 @@ changes.
   `qemu::budget(20 s)`, the phase's. Still `Sched::Parallel`. **The duration
   profile's share of this is closed**: nothing is retyped against a clock any
   more — `/system/bin/terminal` prints `terminal: ready` and `shell_echoes` waits on
-  that (`tests/toyos.rs`'s `SURFACE_UP`) — and the four-minute lane holder that
-  the profile used to seat a second desktop beside, `desktop_window_child`, is
-  `Tier::Nightly` and so never in a pull request's parallel phase.
+  that (`tests/toyos.rs`'s `SURFACE_UP`).
 - **`desktop_locale_detect`** — retired 2026-09-04, green 5 of 5 beside a full
   fast tier.
 - **`netd_connection_caps`** — retired 2026-09-04, green 5 of 5 beside a full
