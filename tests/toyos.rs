@@ -3552,9 +3552,6 @@ fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Run one screen test. `Err` carries the decoded screen, because a failure
-/// here is almost always "the text is not what I expected" and the decoded
-/// grid is the only readable form of that.
 /// Boot `tests/virtjobcase` under the EL2 profile and judge its job `job`:
 /// it ends with exit 0, having said `said`. The kernel carries `SYS_DEBUG`
 /// for `debug_refused`, and every job runs in every boot of the case.
@@ -3573,11 +3570,16 @@ fn virt_job(job: &str, said: &str) -> Result<(), String> {
         },
     );
     let end = format!("===TEST_END {job} ");
-    let rest = qemu.drain_until(Duration::from_secs(300), |l| l.contains(&end));
+    let mut rest = String::new();
+    let waited = await_marker(&mut qemu, &mut rest, &end, &format!("the job {job} to end"));
     let serial = format!("{}\n{rest}", qemu.boot_log());
-    let Some(ended) = serial.lines().find(|l| l.contains(&end)) else {
-        return Err(format!("the job {job} never ended\nserial:\n{serial}"));
-    };
+    if let Err(why) = waited {
+        return Err(format!("{why}\nserial:\n{serial}"));
+    }
+    let ended = serial
+        .lines()
+        .find(|l| l.contains(&end))
+        .expect("await_marker answered Ok, so the marker is in what it drained");
     let Some(line) = serial.lines().find(|l| l.contains(said)) else {
         return Err(format!("{said:?} not on the PL011 ({ended})\nserial:\n{serial}"));
     };
@@ -3616,6 +3618,9 @@ fn virt_selftest(test_config: &Path, armed: &'static [&'static str; 1]) -> Resul
     Ok(())
 }
 
+/// Run one screen test. `Err` carries the decoded screen, because a failure
+/// here is almost always "the text is not what I expected" and the decoded
+/// grid is the only readable form of that.
 fn run_screen_test(
     name: &str,
     test_config: &Path,
@@ -5113,7 +5118,10 @@ fn run_screen_test(
         "virt_fp_isolation" => virt_job("fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
         "virt_first_entry" => virt_job("first_entry", "first_entry: x1-x30 were zero"),
         "virt_unmap_touch" => virt_job("unmap_touch", "unmap_touch: 4 reads of a page just unmapped"),
-        "virt_debug_refused" => virt_job("debug_refused", "debug_refused: SYS_DEBUG's TLB acknowledgement delay was refused"),
+        "virt_debug_refused" => virt_job(
+            "debug_refused",
+            "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused",
+        ),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
             // thousand times through the flood, then waits for every SGI it
@@ -5121,12 +5129,7 @@ fn run_screen_test(
             // storm running and the verdict unsaid.
             virt_selftest(test_config, &["irq-storm"])
         }
-        "virt_timer_floor" => {
-            // The timer made due and then asked to fire within a quantum: a
-            // re-arm shorter than the floor re-fires on its own return, and
-            // the CPU taking it at EL1 never gets back to say anything.
-            virt_selftest(test_config, &["timer-floor"])
-        }
+        "virt_timer_floor" => virt_selftest(test_config, &["timer-floor"]),
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:
             // crash_report, capture, panic_flush, halt_all_cpus, render. The

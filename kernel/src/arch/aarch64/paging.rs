@@ -323,7 +323,7 @@ fn alloc_asid() -> Option<AsidGuard> {
         match pool.alloc() {
             Alloc::Ready(tag) => return Some(AsidGuard(tag)),
             Alloc::NeedsFlush => {
-                tlb::shootdown(crate::invalidation::Origin::Pcid);
+                tlb::all(crate::invalidation::Origin::Pcid);
                 pool.reclaim();
             }
             Alloc::Exhausted => return None,

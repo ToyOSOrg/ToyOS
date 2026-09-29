@@ -1,5 +1,4 @@
-//! The applets that ask a CPU what the kernel left in its registers, one
-//! module per architecture.
+//! What toybox's applets must say in assembly, one module per architecture.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;

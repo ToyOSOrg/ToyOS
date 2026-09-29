@@ -364,14 +364,13 @@ pub(super) fn rearm() {
 }
 
 /// `timer-floor`: this CPU's timer made due with interrupts masked, then
-/// asked to fire within a quantum, which leaves it nothing to fire within;
-/// then [`FLOOR_FIRES`] of its interrupts taken at EL1 with them open. A
-/// re-arm shorter than [`MIN_ONE_SHOT`] is what an EL1 fire repeats, and one
-/// that re-fires on its own return leaves this CPU no progress to say
-/// anything with.
+/// asked to fire within a quantum, which leaves it nothing to fire within.
+/// The comparator it is left holding must be at least [`MIN_ONE_SHOT`] past
+/// the counter read just before the ask. That reading tells a floored
+/// comparator from an unfloored one only while the ask took less than the
+/// floor, so a wider window is a `FAIL` too.
 #[cfg(feature = "boot-actuators")]
 pub fn floor_selftest() {
-    const FLOOR_FIRES: u32 = 100;
     let _guard = crate::arch::IrqGuard::close();
     arm_one_shot(0);
     let due = || {
@@ -381,15 +380,14 @@ pub fn floor_selftest() {
         ctl & TIMER_ISTATUS != 0
     };
     settles(100, "the timer armed for its floor", due);
+    let before = cpu::counter();
     arm_within(toyos_sched::fair::QUANTUM_NS);
-    let (armed, floor) = (percpu::armed_ticks(), floor_ticks());
-    let before = percpu::kernel_timer_fires();
-    cpu::enable_interrupts();
-    while percpu::kernel_timer_fires().wrapping_sub(before) < FLOOR_FIRES {
-        core::hint::spin_loop();
-    }
-    cpu::disable_interrupts();
+    let cval: u64;
+    // SAFETY: reads the EL1 virtual timer's comparator.
+    unsafe { core::arch::asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack, preserves_flags)) };
+    let window = cpu::counter() - before;
     stop_timer();
-    let verdict = if armed >= floor { "PASS" } else { "FAIL" };
-    log!("timer-floor: {verdict} armed={armed} floor={floor} ticks: {FLOOR_FIRES} fires taken at EL1 re-armed for the floor");
+    let (span, floor) = (cval.saturating_sub(before), floor_ticks());
+    let verdict = if span >= floor && window < floor { "PASS" } else { "FAIL" };
+    log!("timer-floor: {verdict} span={span} floor={floor} window={window} ticks: the comparator past the counter before the ask, and the ask's own width");
 }

@@ -1,15 +1,16 @@
 //! `unmap_touch`: whether a page's unmapping reaches the TLB. A child writes
 //! a page, unmaps it and reads it at once; the read must end the child,
 //! because a translation left cached past the unmap still reaches the frame.
-//! Several children, so the one read that a switch between the unmap and the
-//! read would have made fault anyway cannot decide the verdict alone.
 
 use std::process::Command;
 
-use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt};
+use toyos_abi::syscall::{mmap, MmapFlags, MmapProt};
 
 const TRIALS: usize = 4;
 const PAGE: usize = 2 * 1024 * 1024;
+/// The status `kill_process(-1)` gives a process whose fault nothing serves;
+/// a refused unmap or a panic ends the child with another.
+const FAULTED: i32 = -1;
 /// The child's last line before the unmap and the read.
 const UNMAPPING: &str = "unmap_touch: written; unmapping and reading";
 /// The child's line if the read came back.
@@ -32,8 +33,8 @@ fn judge() {
         let said = String::from_utf8_lossy(&out.stdout);
         assert!(said.contains(UNMAPPING), "trial {trial}: the child never reached the unmap: {said:?}");
         assert!(
-            !out.status.success() && !said.contains(READ_BACK),
-            "trial {trial}: a read of an unmapped page came back, and the child exited {:?}: {said:?}",
+            out.status.code() == Some(FAULTED) && !said.contains(READ_BACK),
+            "trial {trial}: the child exited {:?}, not faulted ({FAULTED}), on the read of a page it had just unmapped: {said:?}",
             out.status.code(),
         );
     }
@@ -47,9 +48,10 @@ fn touch() {
     // SAFETY: inside the mapping just made.
     unsafe { page.write_volatile(0x5A) };
     println!("{UNMAPPING}");
-    // SAFETY: the region `mmap` returned, whole; nothing else holds it.
-    unsafe { munmap(page, PAGE) }.expect("unmap_touch: munmap refused");
-    // SAFETY: none — the read of an unmapped page is what this child exists to make.
-    let value = unsafe { page.read_volatile() };
-    println!("{READ_BACK} {value:#x} after the unmap");
+    // After the last print: a print can switch the CPU, and a switch can drop
+    // the translation the first read caches.
+    // SAFETY: the mapping just made, whole, which nothing else names; the
+    // second read ending this process is what the child exists to make.
+    let (first, answer, second) = unsafe { crate::arch::read_unmap_read(page.cast(), PAGE) };
+    println!("{READ_BACK} {second:#x} after the unmap answered {answer:#x}, {first:#x} before it");
 }

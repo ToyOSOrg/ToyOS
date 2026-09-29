@@ -1,6 +1,6 @@
-//! What an AArch64 thread finds in its registers after the kernel has had the
-//! CPU: its own FP/SIMD state across the switches that took the CPU from it,
-//! and nothing of the kernel's at its first instruction.
+//! What an AArch64 thread finds after the kernel has had the CPU: its own
+//! FP/SIMD state across the switches that took the CPU from it, nothing of the
+//! kernel's at its first instruction, and no translation of a page it unmapped.
 
 /// `fp_isolation`: this thread pins a distinctive FP/SIMD state — v0–v31,
 /// `FPCR` and `FPSR` — and holds it while a sibling that loads another state
@@ -236,4 +236,35 @@ pub mod first_entry {
             exit = const SYS_THREAD_EXIT,
         );
     }
+}
+
+/// Reads the word at `page`, unmaps the `len` bytes there with `SYS_MUNMAP`
+/// and reads the word again, in one block, so nothing but the unmap itself
+/// can switch the CPU between the reads. Answers the first read, the unmap's
+/// answer and the second read.
+///
+/// # Safety
+/// `page` starts a mapping of `len` bytes that nothing else names. The second
+/// read ends the process unless the unmap was refused or left its
+/// translation standing.
+pub unsafe fn read_unmap_read(page: *const u64, len: usize) -> (u64, u64, u64) {
+    let (first, answer, second): (u64, u64, u64);
+    // SAFETY: the caller's; the two loads name `page` and the `svc` is the
+    // ABI's (`toyos_abi::syscall`), which preserves every register but x0.
+    unsafe {
+        core::arch::asm!(
+            "ldr {first}, [{page}]",
+            "svc #0",
+            "ldr {second}, [{page}]",
+            page = in(reg) page,
+            first = out(reg) first,
+            second = lateout(reg) second,
+            inlateout("x0") toyos_abi::syscall::SYS_MUNMAP => answer,
+            in("x1") page,
+            in("x2") len,
+            in("x3") 0u64,
+            in("x4") 0u64,
+        );
+    }
+    (first, answer, second)
 }

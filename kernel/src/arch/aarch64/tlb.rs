@@ -2,7 +2,8 @@
 //! every CPU in the inner-shareable domain, and the `DSB ISH` after it
 //! returns once every one of them has dropped the entry (Arm ARM K.a,
 //! D8.13.4). So nothing here sends an interrupt or waits for an
-//! acknowledgement, and [`shootdown`] is one instruction.
+//! acknowledgement, and the page-table edit that clears an entry is the one
+//! place its translation is dropped: [`shootdown`] has nothing left to do.
 //!
 //! Every operation below is bracketed the same way: `DSB ISHST` so the table
 //! write it answers for is visible to every walker first, then the `TLBI`,
@@ -50,20 +51,19 @@ pub(super) fn kernel_page(va: u64) {
     tlbi!("vaae1is", (va >> 12) & 0xFFF_FFFF_FFFF);
 }
 
-/// Every EL1&0 translation, on every CPU.
-fn all() {
+/// Every EL1&0 translation every CPU holds, dropped before this returns —
+/// what a returned ASID needs before it is issued again.
+pub(super) fn all(origin: Origin) {
+    ISSUED[origin as usize].fetch_add(1, Ordering::Relaxed);
     // SAFETY: as `tlbi!`'s.
     unsafe {
         core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack, preserves_flags));
     }
 }
 
-/// Every translation every CPU holds, dropped before this returns — what a
-/// returned ASID needs before it is issued again.
-pub fn shootdown(origin: Origin) {
-    ISSUED[origin as usize].fetch_add(1, Ordering::Relaxed);
-    all();
-}
+/// Nothing to drop: every caller follows an `AddressSpace` edit whose own
+/// `page` or `asid` already reached every CPU before it returned.
+pub fn shootdown(_origin: Origin) {}
 
 /// Nothing to answer: no CPU waits on another's acknowledgement here.
 pub fn poll() {}
