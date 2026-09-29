@@ -13,10 +13,11 @@
 //! the key of the LLVM it links, and [`RECIPE`]. Nothing writes that directory after its [`SOURCE`] file exists,
 //! and two worktrees naming the same compiler share one copy.
 //!
-//! **LLVM is the host's, built from `src/llvm-project`** (`src/llvm.rs`), once
-//! per commit and linked through its `llvm-config`. [`source`] names that
-//! commit, so another LLVM is another compiler, and an LLVM checkout holding
-//! what no commit does names none.
+//! **LLVM is the host's, built from `src/llvm-project`** (`src/llvm.rs`), and
+//! linked through its `llvm-config`. [`source`] names that commit, so another
+//! LLVM is another compiler, and an LLVM checkout holding what no commit does
+//! names none. A worktree records the LLVM its compiler links for as long as it
+//! builds with that compiler.
 //!
 //! **A compiler of a worktree's own never touches what the others build with**:
 //! not the primary's `stage2`, not its record, not the machine-global rustup
@@ -30,7 +31,7 @@
 //! then, to build, this worktree's exclusively, because its fork build
 //! directory is written; then the LLVM key's, held shared while it is linked.
 //!
-//! A compiler no worktree names any more is removed by [`sweep`], which
+//! A compiler no worktree names any more is removed by `keystore::sweep`, which
 //! `--worktree remove` and every placement run: each build records the key it used in its
 //! worktree's `target/`, and a key no registered worktree records, that nobody
 //! is making or using, goes.
@@ -44,6 +45,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::buildlock::{self, Guard, Held, Keyed};
+use crate::keystore;
 use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity};
 use crate::toolchain::{self, host_triple};
 
@@ -61,10 +63,6 @@ pub(crate) const LLVM: &str = "src/llvm-project";
 /// The file a finished compiler carries last, naming what it was built from. A
 /// directory without it is a build that did not finish.
 const SOURCE: &str = "SOURCE";
-
-/// Where each build records the key of the compiler of its own it used, for
-/// [`sweep`]. Absent while a worktree builds with the primary's.
-const RECORD: &str = "target/toyos-compiler-key";
 
 /// A compiler, held in use for as long as this lives.
 pub struct Compiler {
@@ -194,8 +192,8 @@ pub fn key(fork: &Path) -> String {
     short(parts.join("\n\0\n").as_bytes())
 }
 
-/// The LLVM commit `fork` builds against: the one its `HEAD` records, which is
-/// the one bootstrap checks out and builds whatever the submodule holds. An
+/// The LLVM commit `fork` builds against: the one its `HEAD` records, refused
+/// when its index stages another, because bootstrap checks out the index's. An
 /// LLVM change is a commit there and a gitlink here, so a checkout holding
 /// anything no commit does is refused rather than named by its commit.
 pub(crate) fn llvm_commit(fork: &Path) -> String {
@@ -212,10 +210,22 @@ pub(crate) fn llvm_commit(fork: &Path) -> String {
         fork.display(),
     );
     let recorded = git_out(fork, &["ls-tree", "HEAD", LLVM]);
-    match recorded.split_whitespace().collect::<Vec<_>>().as_slice() {
+    let committed = match recorded.split_whitespace().collect::<Vec<_>>().as_slice() {
         ["160000", "commit", sha, _] => sha.to_string(),
         _ => panic!("{} records no {LLVM} gitlink: `git ls-tree HEAD {LLVM}` said {recorded:?}", fork.display()),
-    }
+    };
+    let indexed = git_out(fork, &["ls-files", "--stage", LLVM]);
+    let staged = match indexed.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["160000", sha, "0", _] => sha.to_string(),
+        _ => panic!("{} indexes no {LLVM} gitlink: `git ls-files --stage {LLVM}` said {indexed:?}", fork.display()),
+    };
+    assert!(
+        staged == committed,
+        "{} stages {LLVM} at {staged}, and its HEAD records {committed}: bootstrap builds the one \
+         staged, and nothing is keyed on what no commit holds; commit the gitlink, or unstage it",
+        fork.display(),
+    );
+    committed
 }
 
 /// The compiler `root`'s fork checkout at `fork` names: the primary's where its
@@ -230,7 +240,6 @@ pub fn resolve(root: &Path, rust_dir: &Path, fork: &Path, lock: &mut Held) -> Co
 /// test can stand in for bootstrap: `build` compiles the fork checkout it is
 /// given and returns the `stage2` it left there.
 fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> PathBuf) -> Compiler {
-    let recorded = root.join(RECORD);
     if fork == rust_dir {
         return Compiler::primary(rust_dir);
     }
@@ -242,14 +251,17 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
             primary_record(rust_dir).display(),
         )
     });
+    // The LLVM record follows the compiler's: a compiler links the LLVM its key
+    // names, and the primary's is recorded by the primary.
     if names_primary {
-        let _ = fs::remove_file(&recorded);
+        keystore::forget(root, Keyed::Compiler);
+        keystore::forget(root, Keyed::Llvm);
         return Compiler::primary(rust_dir);
     }
     let key = key(fork);
     let dir = compilers_dir(rust_dir).join(&key);
-    fs::create_dir_all(recorded.parent().expect("a file under target/")).ok();
-    fs::write(&recorded, &key).unwrap_or_else(|e| panic!("write {}: {e}", recorded.display()));
+    keystore::record(root, Keyed::Compiler, &key);
+    keystore::record(root, Keyed::Llvm, &crate::llvm::key(fork));
     let mut placed = false;
     let using = buildlock::keyed_made(
         root,
@@ -264,7 +276,7 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     // A compiler edit loop places one per edit, and the one this replaced is
     // named by nobody now; the one in use is held, so the sweep leaves it.
     if placed {
-        for gone in sweep(root, rust_dir) {
+        for gone in keystore::sweep(root, Keyed::Compiler, &compilers_dir(rust_dir)) {
             eprintln!("Removed compiler {}: no worktree names it", gone.display());
         }
     }
@@ -311,6 +323,7 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
     toolchain::refuse_on_compile_error(&log, "the compiler");
     assert!(ok, "the compiler build in {} failed, and nothing in its output was a compile error", fork.display());
+    crate::llvm::retire_in_tree(&build_dir);
     let stage2 = build_dir.join(&host).join("stage2");
     assert!(stage2.join("bin/rustc").is_file(), "the compiler build left no {}", stage2.join("bin/rustc").display());
     toolchain::provision_toolchain_cargo(&stage2);
@@ -348,39 +361,6 @@ lld = true
         pin = toolchain::HOST_LINKER_PIN,
         external = crate::llvm::host_lines(llvm),
     )
-}
-
-/// The key of the compiler of its own `root`'s last build used, if it used one.
-pub fn recorded_key(root: &Path) -> Option<String> {
-    fs::read_to_string(root.join(RECORD)).ok().map(|k| k.trim().to_string())
-}
-
-/// Remove every compiler no registered worktree records and nobody is making
-/// or using, and every half-built one nobody is making. Returns what went.
-pub fn sweep(root: &Path, rust_dir: &Path) -> Vec<PathBuf> {
-    let dir = compilers_dir(rust_dir);
-    let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
-    let named: std::collections::BTreeSet<String> = git_out(root, &["worktree", "list", "--porcelain"])
-        .lines()
-        .filter_map(|l| l.strip_prefix("worktree "))
-        .filter_map(|w| recorded_key(Path::new(w)))
-        .collect();
-    let mut removed = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let (key, whole) = match name.split_once('.') {
-            Some((key, _)) => (key.to_string(), false),
-            None => (name.clone(), true),
-        };
-        if whole && named.contains(&key) {
-            continue;
-        }
-        let Some(_idle) = buildlock::keyed_idle(root, Keyed::Compiler, &key) else { continue };
-        let path = entry.path();
-        fs::remove_dir_all(&path).unwrap_or_else(|e| panic!("remove {}: {e}", path.display()));
-        removed.push(path);
-    }
-    removed
 }
 
 #[cfg(test)]
@@ -551,6 +531,7 @@ pub(crate) mod tests {
         let user = chosen_elsewhere(&a, &rust_dir);
         fs::remove_file(&spec).unwrap();
         let kept = choose(&a, &rust_dir, &a.join("rust"), fake);
+        let sweep = |root: &Path, rust_dir: &Path| keystore::sweep(root, Keyed::Compiler, &compilers_dir(rust_dir));
         assert_eq!(sweep(&primary, &rust_dir), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
         assert!(orphan.is_dir() && ca2.stage2.is_dir());
         user.release();
@@ -569,6 +550,32 @@ pub(crate) mod tests {
         let ca3 = choose(&a, &rust_dir, &a.join("rust"), fake);
         assert!(!replaced.exists(), "placing a compiler left the one it replaced, which nobody names");
         assert!(ca3.stage2.is_dir() && named.is_dir());
+    }
+
+    /// **A worktree names the LLVM of the compiler it builds with, and only
+    /// that one**: one it placed or found placed, never one it has gone back to
+    /// the primary's from.
+    #[test]
+    fn the_llvm_record_follows_the_compiler_in_use() {
+        let scratch = TempDir::new("compiler-llvm-record");
+        let (primary, rust_dir, [_same, a, _b]) = estate(&scratch);
+        let fork = a.join("rust");
+        let store = crate::llvm::store(&rust_dir);
+        let llvm = store.join(crate::llvm::key(&fork));
+        let sweep = || keystore::sweep(&primary, Keyed::Llvm, &store);
+
+        drop(choose(&a, &rust_dir, &fork, fake_build));
+        fs::create_dir_all(&llvm).unwrap();
+        assert_eq!(sweep(), Vec::<PathBuf>::new(), "the LLVM of a worktree's own compiler was swept");
+
+        keystore::forget(&a, Keyed::Llvm);
+        let never = |_: &Path| -> PathBuf { panic!("a placed compiler was built again") };
+        drop(choose(&a, &rust_dir, &fork, never));
+        assert_eq!(keystore::recorded(&a, Keyed::Llvm), Some(crate::llvm::key(&fork)), "a placed compiler's LLVM went unrecorded");
+
+        git(&fork, &["checkout", "-q", &git(&rust_dir, &["rev-parse", "HEAD"])]);
+        assert!(choose(&a, &rust_dir, &fork, never).primary);
+        assert_eq!(sweep(), [llvm], "the LLVM of a compiler the worktree no longer builds with stayed");
     }
 
     const WORKTREE: &str = "TOYOS_COMPILER_TEST_WORKTREE";
@@ -733,7 +740,10 @@ pub(crate) mod tests {
         let tools = key(&fork);
         assert_ne!(tools, before, "a tool's source did not move the key");
         git(&fork, &["update-index", "--add", "--cacheinfo", &format!("160000,{LLVM_B},{LLVM}")]);
-        assert_eq!(key(&fork), tools, "a gitlink staged and not committed moved the key; bootstrap builds HEAD's");
+        let said = refusal("a gitlink staged and not committed named a compiler", || {
+            key(&fork);
+        });
+        assert!(said.contains("stages"), "{said}");
         git(&fork, &["commit", "-qm", "another LLVM"]);
         assert_ne!(key(&fork), tools, "another LLVM commit did not move the key");
     }

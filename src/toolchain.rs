@@ -350,30 +350,33 @@ fn incomplete(rust_dir: &Path) -> bool {
     cargo_link_stale(&stage2) || crate::clang::defect(&stage2).is_some() || host_target_missing(rust_dir)
 }
 
-/// Give the primary's toolchain what [`incomplete`] finds missing, its clang from
-/// the LLVM at `llvm`.
-fn complete(rust_dir: &Path, llvm: &Path) {
+/// Give the primary's toolchain what [`incomplete`] finds missing, its clang by
+/// `provision_clang`.
+fn complete(rust_dir: &Path, provision_clang: impl FnOnce(&Path)) {
     let stage2 = stage2(rust_dir);
     if cargo_link_stale(&stage2) {
         provision_toolchain_cargo(&stage2);
     }
     if crate::clang::defect(&stage2).is_some() {
-        crate::clang::provision(&stage2, llvm);
+        provision_clang(&stage2);
     }
     if host_target_missing(rust_dir) {
         link_host_target(rust_dir);
     }
 }
 
-/// Run `bootstrap` in the primary's `rust/`, then [`complete`] what it
-/// reassembled. Called inside the act that holds the global lock exclusively.
+/// Run `bootstrap` in the primary's `rust/` against the LLVM at `llvm`, then
+/// remove the LLVM its build directory built itself (`llvm::retire_in_tree`)
+/// and [`complete`] what it reassembled. Called inside the act that holds the
+/// global lock exclusively.
 ///
 /// **In the same hold, because bootstrap recreates `stage2` without its cargo
 /// and clang**: a completion under a hold of its own queues behind every sysroot
 /// build that takes the lock shared in between, and those last minutes.
 fn reassemble(rust_dir: &Path, llvm: &Path, bootstrap: impl FnOnce()) {
     bootstrap();
-    complete(rust_dir, llvm);
+    crate::llvm::retire_in_tree(&rust_dir.join("build"));
+    complete(rust_dir, |stage2| crate::clang::provision(stage2, llvm));
 }
 
 /// [`reassemble`] the primary's compiler with `bootstrap`, with nothing recording
@@ -507,7 +510,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         Scope::Global,
         "complete the toyos toolchain",
         || incomplete(&rust_dir).then_some(()),
-        |()| complete(&rust_dir, &crate::llvm::resolve(root, &rust_dir, &rust_dir).dir),
+        |()| complete(&rust_dir, |stage2| crate::clang::provision(stage2, &crate::llvm::resolve(root, &rust_dir, &rust_dir).dir)),
     );
     assert_toolchain_is_honest(&stage2);
 
@@ -1079,7 +1082,11 @@ mod tests {
             write_config(&rust_dir, "h", hosted, &llvm);
             let config = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
             assert!(config.contains(lld_flag) && config.contains(&lld) && !config.contains("\"rust-lld\""), "{config}");
-            assert!(config.contains(&format!("[target.h]\n{HOST_LINKER_PIN}\n{}\n", crate::llvm::host_lines(&llvm))), "{config}");
+            let host = format!(
+                "[target.h]\ndefault-linker-linux-override = \"off\"\nllvm-config = \"{}/bin/llvm-config\"\nllvm-has-rust-patches = true\n",
+                llvm.display()
+            );
+            assert!(config.contains(&host), "{config}");
         }
     }
 
@@ -1092,26 +1099,8 @@ mod tests {
     fn a_bootstrap_leaves_nothing_to_wait_on_a_sysroot_build_for() {
         let rust_dir = TempDir::new("no-wait");
         let stage2 = stage2(&rust_dir);
-        // The LLVM `clang::provision` reads.
-        let llvm = rust_dir.join("build/llvm/k");
-        for (file, text) in [("bin/clang", "clang"), ("lib/clang/22/include/stddef.h", "stddef")] {
-            fs::create_dir_all(llvm.join(file).parent().unwrap()).unwrap();
-            fs::write(llvm.join(file), text).unwrap();
-        }
-
-        reassemble(&rust_dir, &llvm, || {
-            // What bootstrap leaves: `stage2` made again, with `rustc` and the
-            // LLVM tools it assembles, and neither cargo nor clang; and the
-            // hosted rustc's sysroot without the host target.
-            let _ = fs::remove_dir_all(&stage2);
-            let lld = rust_lld(&stage2);
-            for file in [stage2.join("bin/rustc"), lld.clone(), lld.with_file_name("llvm-ar")] {
-                fs::create_dir_all(file.parent().unwrap()).unwrap();
-                fs::write(file, b"").unwrap();
-            }
-            let hosted = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
-            fs::create_dir_all(&hosted).unwrap();
-        });
+        let llvm = store_llvm(&rust_dir);
+        reassemble(&rust_dir, &llvm, || bootstrapped(&rust_dir));
         assert!(
             !incomplete(&rust_dir),
             "a bootstrap let its exclusive hold go with a global step left, which the primary's \
@@ -1120,18 +1109,73 @@ mod tests {
         assert_eq!(toolchain_defect(&stage2), None, "a bootstrap let its exclusive hold go with stage2 not whole");
     }
 
+    /// The LLVM `clang::provision` reads, in `rust_dir`'s store.
+    fn store_llvm(rust_dir: &Path) -> PathBuf {
+        let llvm = rust_dir.join("build/llvm/k");
+        for (file, text) in [("bin/clang", "clang"), ("lib/clang/22/include/stddef.h", "stddef")] {
+            fs::create_dir_all(llvm.join(file).parent().unwrap()).unwrap();
+            fs::write(llvm.join(file), text).unwrap();
+        }
+        llvm
+    }
+
+    /// What bootstrap leaves in `rust_dir`: `stage2` made again, with `rustc`
+    /// and the LLVM tools it assembles, and neither cargo nor clang; and the
+    /// hosted rustc's sysroot without the host target.
+    fn bootstrapped(rust_dir: &Path) {
+        let stage2 = stage2(rust_dir);
+        let _ = fs::remove_dir_all(&stage2);
+        let lld = rust_lld(&stage2);
+        for file in [stage2.join("bin/rustc"), lld.clone(), lld.with_file_name("llvm-ar")] {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"").unwrap();
+        }
+        let hosted = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
+        fs::create_dir_all(&hosted).unwrap();
+    }
+
+    /// What a build directory holds of an LLVM of its own: bootstrap's LLVM and
+    /// LLD.
+    fn in_tree_llvm(rust_dir: &Path) -> [PathBuf; 2] {
+        let host = rust_dir.join("build").join(host_triple());
+        let own = [host.join("llvm"), host.join("lld")];
+        for dir in &own {
+            fs::create_dir_all(dir.join("bin")).unwrap();
+            fs::write(dir.join("bin/tool"), "a tool").unwrap();
+        }
+        own
+    }
+
+    /// **A primary whose compiler is built against the store keeps no LLVM of
+    /// its own**: the rebuild that links the store removes the one its build
+    /// directory built.
+    #[test]
+    fn a_rebuilt_compiler_leaves_no_llvm_of_its_own() {
+        let scratch = TempDir::new("in-tree-llvm");
+        let (_primary, rust_dir, _) = crate::compiler::tests::estate(&scratch);
+        let own = in_tree_llvm(&rust_dir);
+        let llvm = store_llvm(&rust_dir);
+        rebuild_compiler(&rust_dir, &llvm, || bootstrapped(&rust_dir));
+        for dir in own {
+            assert!(!dir.exists() && !dir.with_extension("swept").exists(), "{} outlived the rebuild", dir.display());
+        }
+        assert_eq!(toolchain_defect(&stage2(&rust_dir)), None);
+    }
+
     /// **A stopped bootstrap is run again**: nothing records which compiler
     /// `stage2` is while one runs, so the primary's next build is not told the
-    /// old one is current.
+    /// old one is current; and the LLVM the old one linked stays.
     #[test]
     fn a_stopped_bootstrap_leaves_no_record() {
         let rust_dir = TempDir::new("stopped");
         let record = crate::compiler::primary_record(&rust_dir);
         fs::create_dir_all(record.parent().unwrap()).unwrap();
         fs::write(&record, "the compiler before").unwrap();
+        let own = in_tree_llvm(&rust_dir);
         let stopped = std::panic::catch_unwind(|| rebuild_compiler(&rust_dir, Path::new("no-llvm"), || panic!("stopped")));
         assert!(stopped.is_err());
         assert!(!record.exists(), "a stopped bootstrap left the record of the compiler before it");
+        assert!(own.iter().all(|dir| dir.join("bin/tool").is_file()), "a stopped bootstrap took the LLVM its compiler linked");
     }
 
     /// **The primary bootstraps a new compiler exactly when asked to or when its

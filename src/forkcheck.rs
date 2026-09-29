@@ -33,10 +33,12 @@
 //! never a repurposed cfg gate; prefer ToyOS-specific files (`sys/pal/toyos/`,
 //! `os/toyos/`, anything with `toyos` in the path); a cross-platform file is
 //! touched only to add a target arm at an existing platform-dispatch site, never
-//! to change cross-platform semantics or API shape; `library/alloc` and
-//! `library/core` have **zero** delta. Cherry-picking an already-merged upstream
-//! commit is allowed. Copying an unmerged PR is not — the delta must stay
-//! exactly the content of a future upstream PR.
+//! to change cross-platform semantics or API shape, except `src/bootstrap`, which
+//! takes a general bootstrap capability written to upstream quality with its
+//! `change_tracker` entry; `library/alloc` and `library/core` have **zero**
+//! delta. Cherry-picking an already-merged upstream commit is allowed. Copying
+//! an unmerged PR is not — the delta must stay exactly the content of a future
+//! upstream PR.
 //!
 //! **Coverage, and this is the one that bites:** the fork sources live *outside*
 //! this repository, so a repository-wide search or gate does not reach them. An

@@ -29,7 +29,7 @@
 //! exclusively (its fork build directory is written); then, if the compiler is
 //! the primary's, the global one shared, because it is read.
 //!
-//! A sysroot no worktree names any more is removed by [`sweep`], which
+//! A sysroot no worktree names any more is removed by `keystore::sweep`, which
 //! `--worktree remove` runs: each build records the key it used in its
 //! worktree's `target/`, and a key no registered worktree records, that nobody
 //! is making or using, goes.
@@ -65,9 +65,6 @@ const SOURCES: &str = "SOURCES";
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
                       a C sysroot of libc's staticlib and headers per target; 4";
-
-/// Where each build records the key it compiled against, for [`sweep`].
-const RECORD: &str = "target/toyos-sysroot-key";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -294,11 +291,6 @@ pub fn fork_checkout(root: &Path) -> PathBuf {
     fork
 }
 
-/// The key `root`'s last build compiled against.
-pub fn recorded_key(root: &Path) -> Option<String> {
-    fs::read_to_string(root.join(RECORD)).ok().map(|k| k.trim().to_string())
-}
-
 /// Why `dir` is not a finished sysroot, if it is not: no [`SOURCES`], or not a
 /// whole toolchain (`toolchain::toolchain_defect`). One found with the first and
 /// not the second is made again rather than trusted — all of it even when only
@@ -324,9 +316,7 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     let compiler = compiler::resolve(root, rust_dir, &fork, lock);
     let key = key(root, &compiler, &fork);
     let dir = sysroots_dir(rust_dir).join(&key);
-    let record = root.join(RECORD);
-    fs::create_dir_all(record.parent().expect("a file under target/")).ok();
-    fs::write(&record, &key).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
+    crate::keystore::record(root, Keyed::Sysroot, &key);
 
     let using = lock.without_shared(|| held(root, &key, &dir, || build(root, &compiler, &fork, &key, &dir)));
     Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
@@ -593,36 +583,6 @@ pub(crate) fn clone_tree(from: &Path, to: &Path) {
                 .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", src.display(), dst.display()));
         }
     }
-}
-
-/// Remove every sysroot no registered worktree records and nobody is making
-/// or using, and every half-built one nobody is making. Returns what went.
-pub fn sweep(root: &Path) -> Vec<PathBuf> {
-    let rust_dir = toolchain::rust_dir(root);
-    let dir = sysroots_dir(&rust_dir);
-    let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
-    let named: BTreeSet<String> = git_out(root, &["worktree", "list", "--porcelain"])
-        .lines()
-        .filter_map(|l| l.strip_prefix("worktree "))
-        .filter_map(|w| fs::read_to_string(Path::new(w).join(RECORD)).ok())
-        .map(|k| k.trim().to_string())
-        .collect();
-    let mut removed = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let (key, whole) = match name.split_once('.') {
-            Some((key, _)) => (key.to_string(), false),
-            None => (name.clone(), true),
-        };
-        if whole && named.contains(&key) {
-            continue;
-        }
-        let Some(_idle) = buildlock::keyed_idle(root, Keyed::Sysroot, &key) else { continue };
-        let path = entry.path();
-        fs::remove_dir_all(&path).unwrap_or_else(|e| panic!("remove {}: {e}", path.display()));
-        removed.push(path);
-    }
-    removed
 }
 
 fn path_str(path: &Path) -> &str {
@@ -1039,36 +999,6 @@ mod tests {
         });
         assert!(said.starts_with("sysroot made was made, and is not whole") && said.contains("/clang"), "{said}");
         assert_eq!(made.get(), 1);
-    }
-
-    /// A key no registered worktree records goes, and so does a half-built one;
-    /// a key a worktree records stays, and so does one somebody is using.
-    #[test]
-    fn a_sweep_removes_what_no_worktree_names_and_nobody_uses() {
-        let root = TempDir::new("sweep");
-        git(&root, &["init", "-q"]);
-        write(&root.join("f"), "x\n");
-        git(&root, &["add", "f"]);
-        git(&root, &["commit", "-qm", "init"]);
-        let linked = root.join("linked");
-        git(&root, &["worktree", "add", "-q", "-b", "wt", linked.to_str().unwrap()]);
-
-        let dir = sysroots_dir(&root.join("rust"));
-        for name in ["named", "linked-named", "in-use", "orphan", "named.partial"] {
-            fs::create_dir_all(dir.join(name)).unwrap();
-        }
-        write(&root.join(RECORD), "named");
-        write(&linked.join(RECORD), "linked-named");
-        let user = buildlock::tests::sysroot_used_elsewhere(&root, "in-use");
-
-        let mut removed = sweep(&root);
-        removed.sort();
-        assert_eq!(removed, [dir.join("named.partial"), dir.join("orphan")]);
-        for stays in ["named", "linked-named", "in-use"] {
-            assert!(dir.join(stays).is_dir(), "{stays} was swept");
-        }
-        user.release();
-        assert_eq!(sweep(&root), [dir.join("in-use")]);
     }
 
     /// **What a stage-0 std build made is what its stamp names**: its
