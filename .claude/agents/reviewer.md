@@ -74,6 +74,12 @@ above; otherwise it is a NOTE.
   arm reads or writes is touched only under that guard or inside an item compiled only with an
   actuator feature (`#[cfg(feature = "…-actuators")]`); a `cfg(not(feature = …))` item compiles
   into shipping and does not count, and any other touch runs on the shipping kernel.
+- **Forks.** A fork change that is not upstream-mergeable is a BLOCKER: ToyOS enters as a new platform, a
+  cross-platform change is written as upstream would accept it, and a path dependency on a ToyOS crate
+  is never mergeable. A pull request that changes a fork's consumed commit changes it in every lockfile and
+  gitlink that names that branch; one it leaves behind is a BLOCKER. In `rust/`: any `library/alloc` or `library/core` delta, a cross-platform semantic change, a
+  `change_tracker` entry with no upstream PR number, a copied unmerged upstream PR. A search for
+  callers that skipped the fork clones and `~/.cargo/git/checkouts/` searched part of the tree.
 
 ## Prose is removed, never reviewed
 
