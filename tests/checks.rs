@@ -613,4 +613,27 @@ mod checks {
     fn metal_audio_judges() -> Result<(), String> {
         audio::judges_verdict()
     }
+
+    /// `blackbox_unclaimed_page` is a registration `tests/metal-profile.toml` already prices,
+    /// so sizing and batching run for real.
+    #[test]
+    fn metal_list_from_parse_reaches_run_without_the_machine() -> Result<(), String> {
+        let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
+        let mode = testargs::parse(&args)?
+            .metal
+            .ok_or_else(|| "--metal --list resolved to no mode at all".to_string())?;
+        if mode != testargs::MetalMode::List {
+            return Err(format!("--metal --list resolved to {mode:?}"));
+        }
+        let selected: Vec<(&str, &'static metal::Metal)> = METAL
+            .iter()
+            .find(|(name, _)| *name == "blackbox_unclaimed_page")
+            .map(|(name, decl)| vec![(*name, decl)])
+            .ok_or_else(|| "blackbox_unclaimed_page is not registered".to_string())?;
+        let verdict = metal::run(mode, &selected, &[], &[], &[], true);
+        if verdict != metal::Verdict::Green {
+            return Err(format!("--metal --list produced {verdict:?}, not Green"));
+        }
+        Ok(())
+    }
 }
