@@ -130,14 +130,18 @@ fn create_worktree(root: &Path, path: &Path, name: &str) -> String {
     let origin_exists = ok(root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/{upstream}")]);
     let path_str = path.to_string_lossy();
     if local_exists {
-        refuse_if_landed(root, &branch);
+        refuse_if_no_commit_beyond_main(
+            root,
+            &branch,
+            &format!("delete it with `git branch -d {branch}` or pick a new name for the worktree."),
+        );
         if origin_exists {
             refuse_if_behind_or_diverged(root, &branch, &upstream);
         }
         git(root, &["worktree", "add", &path_str, &branch]);
         format!("{branch} (resumed at {})", short_sha(path, "HEAD"))
     } else if origin_exists {
-        refuse_if_landed(root, &upstream);
+        refuse_if_no_commit_beyond_main(root, &upstream, "pick a new name for the worktree.");
         git(root, &["worktree", "add", "--track", "-b", &branch, &path_str, &upstream]);
         format!("{branch} (resumed from {upstream} at {})", short_sha(path, "HEAD"))
     } else {
@@ -146,14 +150,19 @@ fn create_worktree(root: &Path, path: &Path, name: &str) -> String {
     }
 }
 
-/// Refuse by name, before anything is created, when `resolve` is already
-/// merged into `origin/main`: the same ancestry test [`measure`] uses to call
-/// a worktree landed and offer its build caches back, run here before a
-/// resume would start one from an old tip behind main.
-fn refuse_if_landed(root: &Path, resolve: &str) {
+/// Refuse by name, before anything is created, when `resolve` carries no
+/// commit beyond `origin/main` — the same ancestry test [`measure`] uses to
+/// call a worktree landed and offer its build caches back.
+///
+/// `merge-base --is-ancestor` cannot tell a branch that landed apart from one
+/// that never diverged from `main` in the first place: both are true of it.
+/// The message says only what both share, and never "landed" or "merged" —
+/// a resume would otherwise start work from an old tip behind main, or from
+/// a branch that never carried any work of its own.
+fn refuse_if_no_commit_beyond_main(root: &Path, resolve: &str, hint: &str) {
     assert!(
         !ok(root, &["merge-base", "--is-ancestor", resolve, "origin/main"]),
-        "{resolve} is already in origin/main; pick a new name for the worktree."
+        "{resolve} carries no commit beyond origin/main; {hint}"
     );
 }
 
@@ -620,6 +629,31 @@ mod tests {
         let panic = refused.expect_err("a landed branch must not be resumed");
         let message = panic.downcast::<String>().expect("the refusal is formatted");
         assert!(message.contains("wt/foo"), "{message}");
+        assert!(!path.exists(), "nothing must be created before the refusal");
+    }
+
+    /// A branch made from `main` and never touched carries no commit beyond
+    /// `origin/main` either, and `merge-base --is-ancestor` cannot tell it
+    /// apart from one that actually landed — refused before anything is
+    /// created, for the reason that is true of it, never "landed".
+    #[test]
+    fn an_untouched_branch_is_refused_not_resumed() {
+        let (dir, _origin, work) = crate::pr::tests::repo("wtresume-untouched");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt"]);
+        git(&work, &["checkout", "-qb", "wt/foo", "main"]);
+        git(&work, &["checkout", "-q", "main"]);
+
+        let path = dir.join("resumed");
+        let refused = std::panic::catch_unwind(|| create_worktree(&work, &path, "foo"));
+
+        let panic = refused.expect_err("an untouched branch must not be resumed");
+        let message = panic.downcast::<String>().expect("the refusal is formatted");
+        assert!(message.contains("wt/foo"), "{message}");
+        assert!(message.contains("carries no commit beyond origin/main"), "{message}");
+        assert!(message.contains("git branch -d wt/foo"), "{message}");
+        assert!(!message.contains("landed"), "{message}");
+        assert!(!message.contains("merged"), "{message}");
         assert!(!path.exists(), "nothing must be created before the refusal");
     }
 
