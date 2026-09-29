@@ -28,7 +28,8 @@ PR #539 does not land. Its pieces:
   `update_boot_next_boots_the_entry_once`'s read-only half; the harness's
   `stick_readonly`; and `update_trial_writes_nothing_of_the_kept_slot`,
   rewritten for priorities;
-- stage 6 takes the bench: `src/metalbench.rs`, `tests/common/bench.rs`,
+- stage 2 of `issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md`
+  takes what it uses of the bench: `src/metalbench.rs`, `tests/common/bench.rs`,
   `tests/bench*case`, `--bench-image` with `build::bench_image`,
   `src/image.rs`' `update_of`, `tests/common/metal.rs`' `Reach`, `stage` and
   bench `invocation`, `--metal-via-ubuntu`, toybox `date`, `Ssh::probe` and
@@ -248,8 +249,8 @@ Each stage lands on its own, in this order.
      differs from `LAST_LAYOUT` (stage 4's derived value, pinned as a literal)
      and `assert!(LAYOUT != LAST_LAYOUT)` builds. This stage is an ABI change.
    - `update --boot-first` writes only the request. The loader writes its own
-     `HD(…)/File(…)` entry and puts it first. Once stage 7 deletes
-     `bootnext.rs`, that is the only boot-variable write.
+     `HD(…)/File(…)` entry and puts it first. Once `bootnext.rs` is deleted
+     (stage 7), that is the only boot-variable write.
    - This stage deletes the floor issue's "a floor that never rises" bullet
      and its exit's second half.
 
@@ -306,32 +307,16 @@ Each stage lands on its own, in this order.
    format's bytes and not by `toyos_update::slots::Table::decode`; and OVMF's
    boot manager booting the entry the loader wrote.
 
-6. **The T14 bench.**
-   - It is built from #539's pieces that stage 6 takes above, and the bench
-     path of `src/metal.rs`. `--via-ubuntu` stays as the old path.
-   - The bench reads the loader's file off the ESP.
-   - The tested pass's `loader.log` is kept as `loader-previous.log` by a
-     rename (`SetInfo`), not by #539's copy.
-   - It runs over the cable that
-     `issues/hardware/the-t14-answers-only-through-a-usb-stick.md` owns.
-   - #539's issues `a-loader-change-reaches-a-machine-only-by-writing-its-stick`,
-     `the-bench-reads-no-quiescent-log-volume`,
-     `the-bench-runs-with-no-bound-on-its-own-boot`,
-     `the-bench-sometimes-comes-back-two-minutes-late` and
-     `the-benchs-cable-is-read-by-the-driver-under-test` land here, each only
-     as far as it is true of what lands.
-
-   **Exit**: `bench_loop_drives_a_toyos_machine` passes in QEMU. On the T14,
-   with Ubuntu never started, three things hold: a kernel change boots; a slot
-   with a flipped byte, no signature or a lower security version is refused
-   and the other boots; and a slot that dies falls back on its own.
-
-7. **Ubuntu leaves the loop.** Delete `toyos-metal`'s `--via-ubuntu` path,
-   `--metal-via-ubuntu` and `bootloader/src/bootnext.rs`. After a reset the
-   firmware comes back to the loader because ToyOS's entry is first (stage 5).
-
-   **Exit**: no path in `src/metal*.rs` reaches Ubuntu. On the T14, a panic's
-   reset reaches the loader with no `BootNext` set.
+6. **The T14 bench** and 7. **Ubuntu leaves the loop** are stage 2 of
+   `issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md`, which
+   drives the T14 by sessions of tests over the cable and deletes
+   `bootloader/src/bootnext.rs`. #539's issues
+   `a-loader-change-reaches-a-machine-only-by-writing-its-stick`,
+   `the-bench-reads-no-quiescent-log-volume`,
+   `the-bench-runs-with-no-bound-on-its-own-boot`,
+   `the-bench-sometimes-comes-back-two-minutes-late` and
+   `the-benchs-cable-is-read-by-the-driver-under-test` land there, each only
+   as far as it is true of what lands.
 
 8. **The kernel arms the TCO before anything unbounded.** The loader's arm is
    the only bound today from `ExitBootServices` to `deadline::start` on
@@ -371,8 +356,7 @@ Each stage lands on its own, in this order.
      `DROPPED_OPENS_WITH`'s count.
    - The report pass goes, taking with it `end_this_pass`, the chain
      constants, `loaderlog`'s chain lines, `armed_at`'s `GetTime`, everything
-     else in `bootloader/src/blackbox.rs` except the claim and the arm, and the
-     chained-pass item of `issues/hardware/the-t14-boots-toyos-unattended.md`.
+     else in `bootloader/src/blackbox.rs` except the claim and the arm.
    - `ENDS_AT_CHAIN` goes, so this stage rewrites the exit of
      `issues/diagnostics/a-wedged-reports-newest-records-were-cut-by-the-loaders-own-log-file.md`:
      a `deadlinewedge` rerun whose `/log` carries the `WEDGED` report with its
