@@ -18,7 +18,7 @@ use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is none of them: the
 /// build below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM; 6";
+const RECIPE: &str = "bootstrap stage 2 of compiler/rustc, library and src/tools/cargo linked statically, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM; 8";
 
 /// Where a fork checkout builds its compiler, kept between builds so the next
 /// one is incremental.
@@ -77,8 +77,8 @@ fn fill(root: &Path, fork: &Path, key: &str, partial: &Path, build: &impl Fn(&Pa
 }
 
 /// Bootstrap's build of the compiler in `fork`, into [`BUILD_DIR`], against the
-/// LLVM `sources` name, and the `stage2` it made, with the cargo and the clang
-/// every toolchain directory carries.
+/// LLVM `sources` name, and the `stage2` it made, with the fork's own cargo and
+/// the clang every toolchain directory carries.
 fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path, sources: &Sources) -> PathBuf {
     crate::ensure_submodule(fork, "library/backtrace");
     let llvm = llvm::resolve(root, rust_dir, fork, sources);
@@ -88,13 +88,24 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path, sources: &Sources) -
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, config_text(&build_dir, &host, &llvm.dir)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
-    let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library"];
+    let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library", "src/tools/cargo"];
     let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
     toolchain::refuse_on_compile_error(&log, "the compiler");
     assert!(ok, "the compiler build in {} failed, and nothing in its output was a compile error", fork.display());
     let stage2 = build_dir.join(&host).join("stage2");
     assert!(stage2.join("bin/rustc").is_file(), "the compiler build left no {}", stage2.join("bin/rustc").display());
-    toolchain::provision_toolchain_cargo(&stage2);
+    let tools: Vec<PathBuf> = fs::read_dir(build_dir.join(&host))
+        .unwrap_or_else(|e| panic!("read {}: {e}", build_dir.join(&host).display()))
+        .map(|e| e.unwrap_or_else(|e| panic!("read the build directory: {e}")).path().join("cargo"))
+        .filter(|cargo| cargo.parent().is_some_and(|d| d.to_string_lossy().ends_with("-tools-bin")) && cargo.is_file())
+        .collect();
+    let [cargo] = tools.as_slice() else { panic!("the compiler build left cargo at {tools:?}, not one place") };
+    // Removed first: a link left there would be copied through, onto what it names.
+    match fs::remove_file(stage2.join("bin/cargo")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("remove {}: {e}", stage2.join("bin/cargo").display()),
+        _ => {}
+    }
+    fs::copy(cargo, stage2.join("bin/cargo")).unwrap_or_else(|e| panic!("copy {} into {}: {e}", cargo.display(), stage2.display()));
     crate::clang::provision(&stage2, &llvm.dir);
     toolchain::assert_toolchain_is_honest(&stage2);
     stage2
@@ -102,7 +113,9 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path, sources: &Sources) -
 
 /// Bootstrap's configuration for a compiler: for the host alone, since every
 /// guest target's libraries are the sysroot's to build, linking the LLVM at
-/// `llvm`.
+/// `llvm`. Its cargo carries its own OpenSSL, curl, libgit2 and zlib
+/// (`cargo-native-static`): linked dynamically it names the host's, which a
+/// store entry cannot carry.
 fn config_text(build_dir: &Path, host: &str, llvm: &Path) -> String {
     format!(
         r#"change-id = "ignore"
@@ -112,6 +125,7 @@ profile = "compiler"
 build-dir = "{build_dir}"
 host = ["{host}"]
 target = ["{host}"]
+cargo-native-static = true
 
 [llvm]
 {llvm}
@@ -150,7 +164,7 @@ mod tests {
             write(&lld.with_file_name(tool), tool);
         }
         write(&lld.parent().unwrap().parent().unwrap().join("lib/clang/22/include/stddef.h"), "stddef");
-        toolchain::provision_toolchain_cargo(&stage2);
+        write(&stage2.join("bin/cargo"), "cargo");
         stage2
     }
 
@@ -230,7 +244,7 @@ mod tests {
             choose(&e.a, &e.rust_dir, &fork, &sources(&e.a), moving);
         });
         assert!(said.contains("moved while compiler"), "{said}");
-        let placed: Vec<_> = fs::read_dir(Kind::Compiler.dir(&e.rust_dir)).unwrap().flatten().map(|e| e.file_name()).collect();
-        assert!(placed.iter().all(|n| n.to_string_lossy().ends_with(".making")), "placed: {placed:?}");
+        let placed: Vec<_> = fs::read_dir(Kind::Compiler.dir(&e.rust_dir)).into_iter().flatten().flatten().map(|e| e.file_name()).collect();
+        assert!(placed.is_empty(), "placed: {placed:?}");
     }
 }

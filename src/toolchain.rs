@@ -209,72 +209,6 @@ fn narrated_binaries(bin: &Path) -> Vec<&'static str> {
     TOOLCHAIN_BINARIES.into_iter().filter(|name| !bin.join(name).exists()).collect()
 }
 
-/// The `cargo` this machine can lend the `toyos` toolchain.
-///
-/// **A nightly one if rustup has it, and the host's otherwise — which is what
-/// rustup itself falls back to, measured on both machines that matter.** The
-/// dev host has a `nightly-<host>` installed and rustup's narration names it
-/// (`falling back to ".../nightly-aarch64-apple-darwin/bin/cargo"`, cargo
-/// 1.96.0-nightly); every CI runner installs `--profile minimal
-/// --default-toolchain stable` and nothing else, so rustup falls back to
-/// stable's. Provisioning in that order changes the cargo behind no ToyOS build
-/// anywhere: it removes the narration and nothing else.
-///
-/// The order is not decoration. `-Z` is refused outside the nightly channel, so
-/// stable's cargo (1.97.1) and bootstrap's stage0 cargo (1.98.0-beta.2) both
-/// refuse the `-Zbuild-std` std type-check `src/CLAUDE.md` documents — measured,
-/// both — while the nightly rustup already falls back to accepts it. Picking
-/// "the host cargo" flatly would have taken that away from the dev host and
-/// called it a cleanup.
-///
-/// The host's is resolved through `rustc --print sysroot`: it is whatever stable
-/// toolchain this machine has, and it is not a path any artifact can know.
-fn host_cargo() -> &'static Path {
-    static CARGO: OnceLock<PathBuf> = OnceLock::new();
-    CARGO.get_or_init(|| {
-        if let Some(home) = rustup_home() {
-            let nightly = home.join(format!("toolchains/nightly-{}/bin/cargo", host_triple()));
-            if nightly.exists() {
-                return nightly;
-            }
-        }
-        let cargo = host_sysroot().join("bin/cargo");
-        assert!(
-            cargo.exists(),
-            "there is no cargo at {}, so the toyos toolchain cannot be given one and every \
-             cargo invocation under it will narrate a fallback.",
-            cargo.display(),
-        );
-        cargo
-    })
-}
-
-/// Whether the toolchain's `cargo` is not the one this machine would lend it.
-///
-/// The question is what the link *points at*, not whether a file is there: a
-/// `bin/cargo` that arrived inside the published artifact names a path only the
-/// publisher had, and a build that took it for provisioned would keep narrating
-/// — or worse, run another platform's binary.
-fn cargo_link_stale(stage2: &Path) -> bool {
-    fs::read_link(stage2.join("bin/cargo")).ok().as_deref() != Some(host_cargo())
-}
-
-/// Put a `cargo` beside the toolchain's `rustc`.
-///
-/// **A symlink, and what survives the artifact round-trip is this step rather
-/// than the link.** `src/release.rs` excludes it from the tarball for the reason
-/// it excludes `lib/rustlib/<host>`: it names a path only the publishing runner
-/// has, and a copy would put a 32 MB host binary into a 401 MiB artifact to
-/// stand in for a file the consumer can make in a microsecond. `Owner::Installed`
-/// makes it, exactly as it makes the host target.
-pub(crate) fn provision_toolchain_cargo(stage2: &Path) {
-    let at = stage2.join("bin/cargo");
-    let _ = fs::remove_file(&at);
-    std::os::unix::fs::symlink(host_cargo(), &at).unwrap_or_else(|e| {
-        panic!("Failed to symlink {} -> {}: {e}", at.display(), host_cargo().display())
-    });
-}
-
 /// Why the toolchain at `stage2` is not whole, if it is not: a binary rustup
 /// would narrate a fallback for, no linker for the guest targets, or no C
 /// toolchain (`src/clang.rs`).
@@ -288,7 +222,7 @@ pub(crate) fn toolchain_defect(stage2: &Path) -> Option<String> {
         return Some(format!(
             "the toyos toolchain at {} is missing {}, so rustup answers for {} by falling back to \
              another toolchain and narrating it on every invocation.\n\
-             provision_toolchain_cargo is the step that puts them there, and it did not.",
+             The compiler build puts them there (`src/compiler.rs`), and it did not.",
             bin.display(),
             narrated.join(" and "),
             if narrated.len() == 1 { "it" } else { "them" },
@@ -385,11 +319,6 @@ fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
         stage2.display(),
     );
 
-    // Recreated rather than shipped: it points into whatever cargo this
-    // machine has, which is not a path any artifact can know.
-    if cargo_link_stale(&stage2) {
-        provision_toolchain_cargo(&stage2);
-    }
     assert_toolchain_is_honest(&stage2);
 
     let want = sysroot::witness(root);
@@ -554,15 +483,6 @@ pub fn host_triple() -> String {
     .clone()
 }
 
-/// The stable host toolchain's sysroot, as `rustc --print sysroot` reports it.
-fn host_sysroot() -> PathBuf {
-    let output = Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .output()
-        .expect("Failed to run rustc");
-    let sysroot = String::from_utf8(output.stdout).expect("rustc prints a path");
-    PathBuf::from(sysroot.trim())
-}
 
 #[cfg(test)]
 mod tests {
@@ -625,10 +545,6 @@ mod tests {
     }
 
     /// **The layout that makes rustup narrate, as a decision.**
-    ///
-    /// The toolchain was given a cargo once, by hand, in a step the rebuild path
-    /// does not run; the 2026-08-14 sysroot rebuild recreated `bin/` without it
-    /// and nothing noticed, because nothing asked. This is the asking —
     /// [`assert_toolchain_is_honest`] is this function over the real `bin/`.
     #[test]
     fn a_toolchain_bin_without_cargo_is_one_rustup_narrates() {
@@ -638,20 +554,17 @@ mod tests {
         assert_eq!(narrated_binaries(&bin), ["rustc", "cargo"]);
 
         fs::write(bin.join("rustc"), b"").unwrap();
-        assert_eq!(narrated_binaries(&bin), ["cargo"], "the layout every build had until now");
-        assert!(cargo_link_stale(&stage2));
+        assert_eq!(narrated_binaries(&bin), ["cargo"]);
 
-        // A link that rode in on the published artifact, naming a path only the
-        // publishing runner had. It is *there*, and it is a narrated fallback
-        // all the same — which is why the question is what it points at.
+        // A link naming a path only another machine had is there, and it is a
+        // narrated fallback all the same.
         let foreign = Path::new("/a-runner-that-is-not-this-one/bin/cargo");
         std::os::unix::fs::symlink(foreign, bin.join("cargo")).unwrap();
         assert_eq!(narrated_binaries(&bin), ["cargo"], "a dangling proxy is not a cargo");
-        assert!(cargo_link_stale(&stage2), "another machine's cargo is not this one's");
 
-        provision_toolchain_cargo(&stage2);
+        fs::remove_file(bin.join("cargo")).unwrap();
+        fs::write(bin.join("cargo"), b"").unwrap();
         assert!(narrated_binaries(&bin).is_empty());
-        assert!(!cargo_link_stale(&stage2));
 
         // Nothing narrates, and the toolchain is still refused: it has no linker.
         let refused = std::panic::catch_unwind(|| assert_toolchain_is_honest(&stage2))
@@ -669,7 +582,6 @@ mod tests {
         let said = refused.downcast_ref::<String>().expect("a formatted refusal");
         assert!(said.contains("clang") && !said.contains("rust-lld,"), "the refusal names clang alone: {said}");
     }
-
 
     /// **The rustup `toyos` toolchain names one stable path, ever**: the
     /// primary's builds move the link at that path, and rustup's own is made

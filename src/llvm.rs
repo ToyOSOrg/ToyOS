@@ -584,7 +584,7 @@ mod tests {
             choose(&e.a, &e.rust_dir, &fork, &sources(&e.a), moving);
         });
         assert!(said.contains("moved while LLVM"), "{said}");
-        let placed: Vec<_> = fs::read_dir(Kind::Llvm.dir(&e.rust_dir)).unwrap().flatten().map(|e| e.file_name()).collect();
-        assert!(placed.iter().all(|n| n.to_string_lossy().ends_with(".making")), "placed: {placed:?}");
+        let placed: Vec<_> = fs::read_dir(Kind::Llvm.dir(&e.rust_dir)).into_iter().flatten().flatten().map(|e| e.file_name()).collect();
+        assert!(placed.is_empty(), "placed: {placed:?}");
     }
 }

@@ -22,6 +22,7 @@ use std::process::Command;
 
 use crate::arch::Arch;
 use crate::compiler::{self, Compiler};
+use crate::dirlock::Lock;
 use crate::store::{self, Kind, Sources, ABI_TREES};
 use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 
@@ -29,7 +30,8 @@ use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 /// std build's recipe below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
-                      a C sysroot of libc's staticlib and headers per target; 6";
+                      a C sysroot of libc's staticlib and headers per target, \
+                      run by the compiler's own cargo; 7";
 
 /// A sysroot a build compiles against, held in use for as long as this lives.
 pub struct Sysroot {
@@ -57,7 +59,7 @@ pub fn witness(root: &Path) -> String {
 
 /// The key of the sysroot the compiler `compiler` builds from `sources`.
 pub fn key(compiler: &str, sources: &Sources) -> String {
-    let recipe = format!("{RECIPE}; cargo {STAGE0_CARGO}; targets {}", GUEST_TARGETS.join(" "));
+    let recipe = format!("{RECIPE}; targets {}", GUEST_TARGETS.join(" "));
     let trees = ["library", "src/bootstrap"].into_iter().chain(ABI_TREES).map(|tree| sources.get(tree));
     let parts: Vec<&str> = std::iter::once(compiler).chain(trees).collect();
     store::key(&recipe, &parts)
@@ -190,11 +192,17 @@ fn assemble(stage2: &Path, partial: &Path, fill: impl FnOnce(&Path)) {
 /// with `compiler`, into `partial`.
 fn build(root: &Path, compiler: &Compiler, fork: &Path, partial: &Path) {
     eprintln!("Building a sysroot: std from {}, the compiler {}", fork.display(), compiler.key);
-    let built = build_std(root, compiler, fork);
-    for target in GUEST_TARGETS {
-        place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
+    {
+        // One std build at a time in a checkout: each empties the build directory
+        // the one before it built in.
+        let _std = Lock::exclusive(fork, &format!("a std build in {}", fork.display()));
+        let built = build_std(root, compiler, fork);
+        for target in GUEST_TARGETS {
+            place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
+        }
     }
-    let libc_target = partial.with_extension("libc-target");
+    // Inside the product being made, which nothing else writes or collects.
+    let libc_target = partial.join(".libc-target");
     for arch in Arch::ALL {
         crate::libc::build(root, partial, &libc_target, arch);
         crate::libc::build_c(root, partial, &libc_target, arch);
@@ -210,7 +218,7 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
     let build_dir = fork.join("build/toyos-std");
     prepare_std_build(&build_dir, &host, &compiler.key);
     let config = build_dir.join("bootstrap.toml");
-    fs::write(&config, std_config(&compiler.stage2, &bootstrap_cargo(), &build_dir, &host))
+    fs::write(&config, std_config(&compiler.stage2, &compiler.stage2.join("bin/cargo"), &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
     let targets = GUEST_TARGETS.join(",");
@@ -335,6 +343,8 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
 /// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
 /// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one.
+/// The cargo is the compiler's own: a local rebuild passes it the flags of the
+/// fork's own version, which any other cargo may refuse.
 fn std_config(compiler: &Path, cargo: &Path, build_dir: &Path, host: &str) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
     let linker = toolchain::rust_lld(compiler);
@@ -364,31 +374,6 @@ lld = false
         cargo = cargo.display(),
         build_dir = build_dir.display(),
     )
-}
-
-/// The rustup toolchain whose cargo runs bootstrap's stage-0 std build.
-///
-/// A local rebuild passes cargo the flags of the fork's own version — the
-/// fork's bootstrap spells `-Zembed-metadata=no` for it, which the fork's
-/// stage-0 beta cargo refuses — so this is a nightly of the fork's version, and
-/// it moves when an upstream merge moves that version: bootstrap refuses any
-/// other by name (`Unexpected cargo version`).
-const STAGE0_CARGO: &str = "nightly-2026-07-22";
-
-/// [`STAGE0_CARGO`]'s cargo, installed through rustup the first time a sysroot
-/// is built without it.
-fn bootstrap_cargo() -> PathBuf {
-    let name = format!("{STAGE0_CARGO}-{}", host_triple());
-    let cargo = toolchain::rustup_home().expect("a rustup home").join("toolchains").join(&name).join("bin/cargo");
-    if !cargo.exists() {
-        eprintln!("Installing {STAGE0_CARGO}, whose cargo builds std for a sysroot...");
-        let ok = Command::new("rustup")
-            .args(["toolchain", "install", STAGE0_CARGO, "--profile", "minimal"])
-            .status()
-            .is_ok_and(|s| s.success());
-        assert!(ok && cargo.exists(), "rustup could not install {STAGE0_CARGO}, so {} is missing", cargo.display());
-    }
-    cargo
 }
 
 /// Copy `from` to `to`, a symbolic link as a link: `stage2`'s own point at
@@ -615,7 +600,7 @@ mod tests {
         write(&stage2.join("bin/rustc"), "rustc");
         write(&lld, "lld");
         write(&lld.with_file_name("llvm-ar"), "llvm-ar");
-        toolchain::provision_toolchain_cargo(&stage2);
+        write(&stage2.join("bin/cargo"), "cargo");
         let said = refusal("a sysroot without clang was taken for whole", || {
             assemble(&stage2, &base.join("partial"), |partial| write(&partial.join("lib/rustlib/x/lib/libstd.rlib"), "std"));
         });

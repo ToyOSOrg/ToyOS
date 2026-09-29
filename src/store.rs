@@ -7,12 +7,13 @@
 //! a toolchain is made of — the rust fork, `toyos-abi`, `toyos` and
 //! `userland/libc` — as git hashes them where they stand, edits included.
 //!
-//! **A product is there whole or not at all.** One maker at a time holds
-//! `<key>.making` (`src/dirlock.rs`), fills it and renames it to `<key>`; a
-//! build that finds it held waits for its maker instead of making the key
-//! again, and one whose maker is dead takes it away and makes the key afresh. A
-//! rename onto a key already placed fails, and the loser removes its copy. A
-//! product in use is held shared.
+//! **A product is there whole or not at all, and the store holds nothing else.**
+//! One maker at a time holds the claim `<kind>.making/<key>` (`src/dirlock.rs`),
+//! fills it and renames it into the store as `<key>`; a build that finds it held
+//! waits for its maker instead of making the key again, and one whose maker is
+//! dead takes it away and makes the key afresh. A rename onto a key already
+//! placed fails, and the loser removes its copy. A product in use is held
+//! shared.
 //!
 //! **A key stays while a registered worktree records it, [`CURRENT`] names it,
 //! or somebody holds it; everything else goes** — every other key, and whatever
@@ -118,8 +119,10 @@ impl Sources {
 /// The git hash of each of `paths` in the checkout `repo` as it stands:
 /// committed, staged or neither, untracked files included and ignored ones not.
 /// A submodule is the commit its gitlink names, which is what bootstrap checks
-/// out, and never the one its checkout happens to be at. Hashed through a copy
-/// of the checkout's index, so the checkout's own is never written.
+/// out, and never the one its checkout happens to be at; a `Cargo.lock` is what
+/// the index holds, because bootstrap rewrites the fork's while it runs and puts
+/// them back after, and a key read meanwhile would name neither. Hashed through a
+/// copy of the checkout's index, so the checkout's own is never written.
 pub fn trees(repo: &Path, paths: &[&str]) -> Vec<String> {
     let scratch = TempDir::new("store-index");
     let index = scratch.join("index");
@@ -128,8 +131,10 @@ pub fn trees(repo: &Path, paths: &[&str]) -> Vec<String> {
     let listed: Vec<&str> = ["ls-files", "--stage", "--"].iter().chain(paths).copied().collect();
     let staged = git(repo, &listed, Some(&index));
     let gitlinks = staged.lines().filter(|l| l.starts_with("160000 ")).filter_map(|l| l.split_once('\t'));
-    let excluded: Vec<String> = gitlinks.map(|(_, path)| format!(":(exclude){path}")).collect();
-    let add: Vec<&str> = ["add", "-A", "--"].iter().chain(paths).copied().chain(excluded.iter().map(String::as_str)).collect();
+    let mut excluded: Vec<String> = gitlinks.map(|(_, path)| format!(":(exclude){path}")).collect();
+    excluded.push(":(exclude,glob)**/Cargo.lock".to_string());
+    let added = paths.iter().filter(|p| !p.ends_with("Cargo.lock")).copied();
+    let add: Vec<&str> = ["add", "-A", "--"].into_iter().chain(added).chain(excluded.iter().map(String::as_str)).collect();
     git(repo, &add, Some(&index));
     let tree = git(repo, &["write-tree"], Some(&index));
     let spec: Vec<String> = paths.iter().map(|p| format!("{}:{p}", tree.trim())).collect();
@@ -197,8 +202,7 @@ fn in_use(dir: &Path, kind: Kind, key: &str) -> Option<Held> {
     (named == held).then(|| Held { dir: dir.to_path_buf(), _lock: lock })
 }
 
-/// Who makes a key: this process, holding `<key>.making`, or the process that
-/// does.
+/// Who makes a key: this process, holding its claim, or the process that does.
 enum Claim {
     Mine(PathBuf, Lock),
     Theirs(PathBuf),
@@ -210,16 +214,17 @@ const MAKER: &str = ".maker";
 static MADE: AtomicU64 = AtomicU64::new(0);
 
 /// Claim the making of `key` in `store`. The claim is a directory made and held
-/// under a name of its own and renamed to `<key>.making`, which a rename never
+/// under a name of its own and renamed to `<key>` among the claims, which a rename never
 /// replaces once it holds anything: so exactly one process holds the name, and
 /// it held it before anybody could see it. One whose holder is dead is taken
 /// away, and claimed afresh.
 fn claim(store: &Path, key: &str) -> Claim {
-    fs::create_dir_all(store).unwrap_or_else(|e| panic!("create {}: {e}", store.display()));
-    let making = store.join(format!("{key}.making"));
+    let claims = claims(store);
+    fs::create_dir_all(&claims).unwrap_or_else(|e| panic!("create {}: {e}", claims.display()));
+    let making = claims.join(key);
     loop {
         let n = MADE.fetch_add(1, Ordering::Relaxed);
-        let mine = store.join(format!("{key}.{}-{n}.partial", std::process::id()));
+        let mine = claims.join(format!("{key}.{}-{n}.partial", std::process::id()));
         fs::create_dir(&mine).unwrap_or_else(|e| panic!("create {}: {e}", mine.display()));
         let lock = Lock::exclusive(&mine, "a probe of a claim just made");
         fs::write(mine.join(MAKER), std::process::id().to_string()).unwrap_or_else(|e| panic!("write {}: {e}", mine.display()));
@@ -230,7 +235,7 @@ fn claim(store: &Path, key: &str) -> Claim {
         }
         drop(lock);
         let Some(dead) = Lock::try_exclusive(&making) else { return Claim::Theirs(making) };
-        let away = store.join(format!("{key}.{}-{n}.gone", std::process::id()));
+        let away = claims.join(format!("{key}.{}-{n}.gone", std::process::id()));
         match fs::rename(&making, &away) {
             Ok(()) => {
                 drop(dead);
@@ -249,6 +254,8 @@ pub(crate) fn publish(made: &Path, dir: &Path) -> bool {
     read_only(made);
     // Renaming a directory writes its `..`, so its own mode waits for the rename.
     set_writable(made, true);
+    let store = dir.parent().expect("a key is in a store");
+    fs::create_dir_all(store).unwrap_or_else(|e| panic!("create {}: {e}", store.display()));
     match fs::rename(made, dir) {
         Ok(()) => {
             set_writable(dir, false);
@@ -312,33 +319,46 @@ pub fn collect(root: &Path, rust_dir: &Path) -> Vec<PathBuf> {
     let mut removed = Vec::new();
     for kind in Kind::ALL {
         let store = kind.dir(rust_dir);
-        for name in entries(&store) {
-            let path = store.join(&name);
-            let whole = !name.contains('.');
-            if whole && kept.contains(&(kind, name.clone())) {
-                continue;
-            }
-            if !whole && maker_alive(&name) {
+        let claims = claims(&store);
+        // A name with a dot is none of this store's: a key is hex.
+        for key in entries(&store).into_iter().filter(|name| !name.contains('.')) {
+            let path = store.join(&key);
+            if kept.contains(&(kind, key.clone())) {
                 continue;
             }
             let Some(held) = Lock::try_exclusive(&path) else { continue };
-            if whole {
-                // Renamed away before anything in it goes, so a collection
-                // that is stopped leaves nothing that passes for whole.
-                let n = MADE.fetch_add(1, Ordering::Relaxed);
-                let away = store.join(format!("{name}.{}-{n}.gone", std::process::id()));
-                set_writable(&path, true);
-                fs::rename(&path, &away).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", path.display(), away.display()));
-                drop(held);
-                remove(&away);
-            } else {
-                drop(held);
-                remove(&path);
+            // Renamed away before anything in it goes, so a collection that is
+            // stopped leaves nothing that passes for whole.
+            let n = MADE.fetch_add(1, Ordering::Relaxed);
+            let away = claims.join(format!("{key}.{}-{n}.gone", std::process::id()));
+            fs::create_dir_all(&claims).unwrap_or_else(|e| panic!("create {}: {e}", claims.display()));
+            set_writable(&path, true);
+            fs::rename(&path, &away).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", path.display(), away.display()));
+            drop(held);
+            remove(&away);
+            removed.push(path);
+        }
+        for name in entries(&claims) {
+            let path = claims.join(&name);
+            // A claim is held from before its name exists; a partial or a
+            // removal, only once its maker holds it.
+            if name.contains('.') && maker_alive(&name) {
+                continue;
             }
+            if Lock::try_exclusive(&path).is_none() {
+                continue;
+            }
+            remove(&path);
             removed.push(path);
         }
     }
     removed
+}
+
+/// Where `store`'s keys are claimed, made and removed: beside it, so the store
+/// itself holds whole keys and nothing else.
+fn claims(store: &Path) -> PathBuf {
+    store.with_extension("making")
 }
 
 /// The names in `store`, none when there is no `store`.
@@ -560,7 +580,8 @@ pub(crate) mod tests {
         });
         assert_eq!(makes.load(Ordering::SeqCst), 1, "one key was made more than once");
         assert!(dirs.iter().all(|d| *d == Kind::Sysroot.dir(&e.rust_dir).join("k")));
-        assert_eq!(entries(&Kind::Sysroot.dir(&e.rust_dir)), ["k"], "a partial outlived its placement");
+        assert_eq!(entries(&Kind::Sysroot.dir(&e.rust_dir)), ["k"]);
+        assert!(entries(&claims(&Kind::Sysroot.dir(&e.rust_dir))).is_empty(), "a claim outlived its placement");
     }
 
     /// **The loser of a race to place a key discards its copy**, and what the
@@ -601,10 +622,10 @@ pub(crate) mod tests {
         let env = [(ROOT, e.same.as_os_str()), (RUST_DIR, e.rust_dir.as_os_str())];
         let maker = Elsewhere::hold("store::tests::a_maker_that_never_finishes", &env);
         assert!(!store.join("k").exists(), "a product was visible under its key before it was whole");
-        assert!(Lock::try_exclusive(&store.join("k.making")).is_none(), "a key being made is not held");
+        assert!(Lock::try_exclusive(&claims(&store).join("k")).is_none(), "a key being made is not held");
         maker.kill();
         assert!(!store.join("k").exists(), "a killed maker left its half under the key");
-        assert!(Lock::try_exclusive(&store.join("k.making")).is_some(), "a dead maker's claim is still held");
+        assert!(Lock::try_exclusive(&claims(&store).join("k")).is_some(), "a dead maker's claim is still held");
 
         let made = Cell::new(0);
         let held = get(&e.same, &e.rust_dir, Kind::Compiler, "k", |dir| {
@@ -613,7 +634,8 @@ pub(crate) mod tests {
         });
         assert_eq!(made.get(), 1);
         assert!(held.dir.join("whole").is_file() && !held.dir.join("half").exists());
-        assert_eq!(entries(&store), ["k"], "a dead maker's claim outlived the key's making");
+        assert_eq!(entries(&store), ["k"]);
+        assert!(entries(&claims(&store)).is_empty(), "a dead maker's claim outlived the key's making");
     }
 
     /// **A collection keeps what a registered worktree records, what `CURRENT`
@@ -626,9 +648,11 @@ pub(crate) mod tests {
         for key in ["named-primary", "named-linked", "held", "current", "orphan"] {
             placed(&store, key, key);
         }
-        for leftover in ["j.making", "k.partial", "k.2000000000-0.partial", "orphan.2000000000-1.gone"] {
-            write(&store.join(leftover).join("x"), "left");
+        let claims = claims(&store);
+        for leftover in ["j", "k.2000000000-0.partial", "orphan.2000000000-1.gone"] {
+            write(&claims.join(leftover).join("x"), "left");
         }
+        write(&store.join("k.partial").join("x"), "none of the store's");
         record(&e.primary, Kind::Sysroot, "named-primary");
         record(&e.a, Kind::Sysroot, "named-linked");
         std::os::unix::fs::symlink("sysroots/current", current(&e.rust_dir)).unwrap();
@@ -636,9 +660,12 @@ pub(crate) mod tests {
 
         let mut removed = collect(&e.primary, &e.rust_dir);
         removed.sort();
-        let gone = ["j.making", "k.2000000000-0.partial", "k.partial", "orphan", "orphan.2000000000-1.gone"].map(|n| store.join(n));
+        let mut gone = vec![store.join("orphan")];
+        gone.extend(["j", "k.2000000000-0.partial", "orphan.2000000000-1.gone"].map(|n| claims.join(n)));
+        gone.sort();
         assert_eq!(removed, gone);
-        assert_eq!(entries(&store), ["current", "held", "named-linked", "named-primary"]);
+        assert_eq!(entries(&store), ["current", "held", "k.partial", "named-linked", "named-primary"]);
+        assert!(entries(&claims).is_empty());
         drop(held);
         assert_eq!(collect(&e.primary, &e.rust_dir), [store.join("held")], "a key nobody names or holds stayed");
 
@@ -678,6 +705,13 @@ pub(crate) mod tests {
         write(&fork.join("build/out"), "ignored");
         assert_eq!(k(), base, "an ignored file moved the key");
         assert_eq!(fs::read(e.primary.join(".git/worktrees/same/index")).unwrap(), index, "asking wrote the index");
+        let lock = || Sources::of(&e.same, &fork).get("Cargo.lock").to_string();
+        let committed = lock();
+        write(&fork.join("Cargo.lock"), "# re-locked by a bootstrap that is running\n");
+        assert_eq!(lock(), committed, "a lockfile a running bootstrap rewrote moved the key");
+        git(&fork, &["add", "Cargo.lock"]);
+        assert_ne!(lock(), committed, "a staged lockfile kept the key");
+        git(&fork, &["reset", "-q", "--hard"]);
 
         let llvm = || Sources::of(&e.same, &fork).get(crate::llvm::LLVM).to_string();
         assert_eq!(llvm(), LLVM_A);

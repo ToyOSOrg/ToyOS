@@ -122,8 +122,7 @@ pub fn is_member(root: &Path, crate_dir: &Path) -> bool {
 /// honoured by a nightly-capable cargo and *silently ignored* by any other, and
 /// nothing a `.cargo/config.toml` can say travels with the shared `target-dir`
 /// it would also carry. This host's rustup default is stable, and
-/// `src/toolchain.rs`'s `host_cargo` lends the `toyos` toolchain whatever cargo
-/// the machine has — stable's, on every CI runner. Sharing on with
+/// every CI runner installs stable alone. Sharing on with
 /// freshness off is the mis-link above, so this function joins one path and
 /// stays out of it.
 pub fn target_dir(root: &Path, crate_dir: &Path) -> PathBuf {

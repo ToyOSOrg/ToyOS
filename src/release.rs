@@ -251,17 +251,11 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     }
     fs::copy(tmp.join("TOOLCHAIN"), build.join("TOOLCHAIN")).map_err(|e| e.to_string())?;
 
-    // The sysroot's `bin/cargo` is a link into this runner's own toolchain;
-    // `Owner::Installed` recreates it. GNU tar's
-    // `--transform` renames the sysroot to the path an installer links, and
-    // `--mode` gives back the write permission the store takes, which the
-    // installer needs to make that link.
+    // GNU tar's `--transform` renames the sysroot to the path an installer links.
     let tarball = tmp.join(ASSET);
     let mut tar = Command::new("tar")
         .arg("-C")
         .arg(&build)
-        .arg(format!("--exclude={sysroot}/bin/cargo"))
-        .arg("--mode=u+w")
         .arg(format!("--transform=s,^{sysroot},{HOST}/stage2,"))
         .args(["-c", &sysroot])
         .args(["toyos-sysroot-witness", "TOOLCHAIN"])
@@ -379,10 +373,9 @@ fn notes(root: &Path, tag: &str, manifest: &str) -> Result<String, String> {
     mkdir -p toyos-toolchain
     curl -sSL {url} | tar --zstd -x -C toyos-toolchain
     rustup toolchain link toyos toyos-toolchain/{HOST}/stage2
-    ln -s \"$(rustup which cargo)\" toyos-toolchain/{HOST}/stage2/bin/cargo
     cargo +toyos build --target x86_64-unknown-toyos
 
-rustc's ToyOS target names `rust-lld` as its linker, and the toolchain carries it where rustc looks for it, so nothing goes on `PATH`. The `cargo` symlink is not shipped because its path would be the publisher's.
+rustc's ToyOS target names `rust-lld` as its linker, and the toolchain carries it where rustc looks for it, so nothing goes on `PATH`. Its `cargo` is the fork's own, built with this `rustc`.
 
 ## C
 
