@@ -217,3 +217,94 @@ pub fn a_name_two_boots_measured_is_refused() {
     assert!(!record.measured.contains_key("latency.p99_us"), "{:?}", record.measured);
     assert_eq!(record.measured.len(), 6, "{:?}", record.measured);
 }
+
+/// Every row `passing` measures, at the values its planted readback carries,
+/// taken under `bios`.
+fn committed(bios: &str, complete_ms: u64) -> Record {
+    let machine = t14();
+    Record {
+        vendor: machine.vendor,
+        product: machine.product,
+        bios: bios.to_string(),
+        measured: [
+            ("boot.passing.complete_ms", complete_ms),
+            ("boot.passing.panel_max_us", 3851),
+            ("boot.passing.panel_us", 21751),
+            ("span.passing.us", 7),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect(),
+    }
+}
+
+/// `passing`'s readback judged against `record`, committed first: whether the
+/// run was red, and the record it left.
+fn judged_against(record: &Record) -> (bool, Record) {
+    let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    let root = toyos_tmpdir::TempDir::new("metal-records");
+    plant(&dir, "passing", PANEL, BOOTED, None);
+    record.save(&root).expect("a committed record");
+    let tests = [("passes", &PASSING)];
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
+    let red = metal::judge_readbacks(&root, &read(&dir, &["passing"]), &runs, &[]);
+    (red, Record::load(&root, &t14()).expect("a readable record").expect("a record"))
+}
+
+/// **A reading past its record reds the run and moves nothing**: one boot,
+/// green against a record it meets and red against one it is past.
+pub fn a_reading_past_its_record_fails_and_moves_nothing() {
+    let bios = t14().bios;
+    let met = committed(&bios, 1165);
+    assert_eq!(judged_against(&met), (false, met));
+    // 1165 ms against a ceiling of 1164.
+    let past = committed(&bios, 582);
+    assert_eq!(judged_against(&past), (true, past));
+}
+
+/// **A run under another BIOS reds and records nothing**, though every reading
+/// meets the record; the same record under this run's own BIOS is green and
+/// gains the row it lacks.
+pub fn a_run_under_another_bios_fails_and_records_nothing() {
+    let lacking = |bios: &str| {
+        let mut record = committed(bios, 1165);
+        record.measured.remove("span.passing.us");
+        record
+    };
+    let older = lacking("N34ET50W (1.50 )");
+    assert_eq!(judged_against(&older), (true, older));
+    let bios = t14().bios;
+    assert_eq!(judged_against(&lacking(&bios)), (false, committed(&bios, 1165)));
+}
+
+/// **A failing shared member fails its boot**: the run is red, and the boot the
+/// member rode adds no row while the boot beside it is recorded whole.
+pub fn a_failing_shared_member_fails_its_boot() {
+    let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    let root = toyos_tmpdir::TempDir::new("metal-records");
+    plant(&dir, "passing", PANEL, BOOTED, None);
+    let exits = format!(
+        "{BOOTED}[2026-09-29 18:22:41 2.310 cpu3] exit: test_rs_std_tls pid=12 code=0 cpu=4ms\n\
+         [2026-09-29 18:22:42 3.120 cpu5] exit: test_rs_fs_large_file pid=13 code=101 cpu=9ms\n"
+    );
+    plant(&dir, "shared", PANEL, &exits, None);
+    let shared = metal::SharedBoot {
+        boot: "shared".to_string(),
+        config: "tests/testcases",
+        params: &[],
+        features: &[],
+        members: const { std::num::NonZeroUsize::new(38).expect("a chunk holds a member") },
+        jobs: vec!["test_rs_std_tls".to_string(), "test_rs_fs_large_file".to_string()],
+        files: Vec::new(),
+        links: Vec::new(),
+    };
+    let tests = [("passes", &PASSING)];
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
+    let readbacks = read(&dir, &["passing", "shared"]);
+    assert!(
+        metal::judge_readbacks(&root, &readbacks, &runs, &[shared]),
+        "a failing member judged green"
+    );
+    let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
+    assert_eq!(record, committed(&t14().bios, 1165));
+}

@@ -2106,22 +2106,35 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         }
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
-    // **Judged before the readback is written, and written into it**, so a
-    // judge reading the directory later reads the verdict this run returns.
-    let verdict = boot_verdict(&armed, &loader, &log).and_then(|ms| {
+    let boot = boot_file(back, stick, &machine, wire.as_ref(), replied);
+    judge_and_write_readback(&armed, &loader, &log, heard.as_ref(), args.readback.as_deref(), &boot)
+        .map(Some)
+}
+
+/// This boot's verdict, **judged before the readback is written, and written
+/// into it**, so a judge reading the directory later reads the verdict this
+/// run returns.
+fn judge_and_write_readback(
+    armed: &[String],
+    loader: &str,
+    log: &str,
+    heard: Option<&(Result<crate::metaltalk::Conversation, String>, Vec<String>)>,
+    readback: Option<&Path>,
+    boot: &str,
+) -> Result<u64, Refusal> {
+    let verdict = boot_verdict(armed, loader, log).and_then(|ms| {
         // After the stick's own verdict, which stays the one that names a boot
         // that never reached its network.
-        if let Some((heard, lines)) = &heard {
+        if let Some((heard, lines)) = heard {
             talk_verdict(heard, lines)?;
         }
         Ok(ms)
     });
-    if let Some(dir) = &args.readback {
-        let boot = boot_file(back, stick, &machine, wire.as_ref(), replied);
-        write_readback(dir, &loader, &log, &boot, &verdict_file(verdict.as_ref().err()))?;
+    if let Some(dir) = readback {
+        write_readback(dir, loader, log, boot, &verdict_file(verdict.as_ref().err()))?;
         println!("readback written to {}", dir.display());
     }
-    verdict.map(Some)
+    verdict
 }
 
 /// The stick's own verdict on one boot, off what its image is armed with, the
@@ -2282,8 +2295,7 @@ pub fn park(text: &str) -> Option<toyos_quiesce::Record> {
 ///
 /// **A number of its own and not [`deadline_lateness_ms`]'s**, because what
 /// bounds it is a different thing: this one lands within one of that detector's
-/// sample periods rather than within one timer period, so a ceiling written for
-/// the poll would say nothing about the counter.
+/// sample periods rather than within one timer period.
 pub fn lockup_lateness_ms(loader: &str) -> Option<Result<i64, String>> {
     let said = loader.lines().find(|l| l.contains(bootlog::LOCKED_UP))?;
     let fields = || {
@@ -2873,6 +2885,49 @@ mod tests {
         for unread in ["", "passed", "passed\nand more\n", "refused\n", "refused\n  \n", "green\n"] {
             assert!(loop_verdict(unread).is_err(), "{unread:?}");
         }
+    }
+
+    /// The writer's half: the verdict the loop returns is the one its readback
+    /// carries, for a boot it refused and for one it passed.
+    #[test]
+    fn the_readback_carries_the_verdict_the_loop_returns() {
+        let dir = toyos_tmpdir::TempDir::new("verdict");
+        let armed = [alloc_deadline()];
+        let boot = "back_secs 40\nstick_secs 0\n";
+        let written = || {
+            let at = dir.join(READBACK_VERDICT);
+            loop_verdict(&std::fs::read_to_string(&at).expect("the verdict is written"))
+        };
+
+        let hung = format!("{}\n{}\n", bootlog::LOADER_FIRST_LINE, bootlog::HUNG_WITHOUT_A_RECORD);
+        assert_eq!(
+            judge_and_write_readback(&armed, &hung, "", None, Some(dir.path()), boot),
+            Err(Refusal::HungWithoutARecord)
+        );
+        assert_eq!(written(), Err(Refusal::HungWithoutARecord.to_string().trim_end().to_string()));
+
+        let loader = format!(
+            "{}\n{}\n{}\n{}\nBlack box: {}, so it handed the machine back on purpose and this \
+             chain ends here\n| {} (16)\n| {}[1.516 cpu0] {}\n{}\n",
+            bootlog::LOADER_FIRST_LINE,
+            bootlog::LOADER_LAST_LINE,
+            bootlog::SEPARATOR,
+            bootlog::LOADER_FIRST_LINE,
+            bootlog::HANDED_BACK,
+            bootlog::LOG_TAIL_HEAD,
+            bootlog::LOG_TAIL,
+            bootlog::REBOOTING,
+            bootlog::CHAIN_ENDS_LINE,
+        );
+        let log = format!(
+            "[kernel 1.151 cpu0] Boot: complete (1151ms)\n{{1.203 init}} {} (Reboot)\n",
+            bootlog::STOPPING
+        );
+        assert_eq!(
+            judge_and_write_readback(&armed, &loader, &log, None, Some(dir.path()), boot),
+            Ok(1151)
+        );
+        assert_eq!(written(), Ok(()));
     }
 
     /// **A boot the cable did not answer is not a boot that answered in the

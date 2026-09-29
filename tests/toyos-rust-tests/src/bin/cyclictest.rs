@@ -46,9 +46,6 @@ const SAMPLES: usize = 10_000;
 /// property of starting rather than of waking.
 const WARMUP: usize = 100;
 
-/// The widest lateness the histogram has a bucket for; a percentile that lands
-/// here is a floor rather than a measurement, and the caller is told so by the
-/// count of samples that had no bucket.
 const BUCKETS: usize = 4096;
 
 /// Why this run measured nothing, as the exit code carries it. Negative,

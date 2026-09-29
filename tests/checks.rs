@@ -653,6 +653,21 @@ mod checks {
     }
 
     #[test]
+    fn metal_reading_past_its_record_fails_and_moves_nothing() {
+        metal_checks::a_reading_past_its_record_fails_and_moves_nothing();
+    }
+
+    #[test]
+    fn metal_run_under_another_bios_fails_and_records_nothing() {
+        metal_checks::a_run_under_another_bios_fails_and_records_nothing();
+    }
+
+    #[test]
+    fn metal_failing_shared_member_fails_its_boot() {
+        metal_checks::a_failing_shared_member_fails_its_boot();
+    }
+
+    #[test]
     fn metal_list_from_parse_reaches_run_without_the_machine() -> Result<(), String> {
         let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
         let mode = testargs::parse(&args)?

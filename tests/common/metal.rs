@@ -101,11 +101,6 @@ pub const fn once(
 /// exit record for it. So they are a boot with a list rather than a row each,
 /// and each member is still reported under its own name.
 ///
-/// The list is **sized to the bound before it is flashed** ([`sized`]): the
-/// runner's deadline runs from boot and ends the whole list, so a list longer
-/// than the bound is a boot whose tail members never run and are reported as
-/// missing records rather than as the boot being too long.
-///
 /// A chunk rides one flash. A member that takes the machine down takes every
 /// member after it *in its chunk* with it, and that is the honest price: on the
 /// T14 there is no `MAX_SHARED_REBOOTS` to answer a dead guest with a new one.
@@ -907,8 +902,6 @@ pub fn run(
     quiet: bool,
 ) -> Verdict {
     let root = super::compile::repo_root();
-    // Before anything is batched: what rides one flash is what the runner's
-    // bound leaves room for, and a boot named once here can be several.
     let shared = sized(shared);
     let shared = shared.as_slice();
     let batches = match batches(tests, shared) {
