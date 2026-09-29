@@ -11,10 +11,7 @@
 //! process name in the record is the symlink it was invoked under. The host
 //! reads both out of the log the stick came back with.
 //!
-//! **Every command's number is a span in microseconds**, and never a rate. The
-//! profile that prices them (`tests/metal-profile.toml`) holds a ceiling per
-//! number, and a ceiling is what a duration has: a rate would have to be judged
-//! from below, against a floor nothing in that file can express. What each span
+//! **Every command's number is a span in microseconds**, and never a rate. What each span
 //! covers is its own module's to say, and the byte count it covers is a
 //! constant there.
 //!

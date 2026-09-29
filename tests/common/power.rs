@@ -2377,8 +2377,7 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
 /// **The re-enumeration, taken off the boot after the reset.** Under QEMU it is
 /// weak on purpose: an emulated stick cannot be wedged, so this arm judges that
 /// the account is produced and that the machine still comes up on the same
-/// device. The T14 is the judge of the device itself, and `tests/metal-profile`
-/// carries its row.
+/// device.
 const STICK_ENUMERATED: &str = "usb-storage: 1 device(s)";
 
 /// Every way this kernel resets a machine, and the account each one leaves.

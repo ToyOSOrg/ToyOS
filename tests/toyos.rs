@@ -1532,8 +1532,7 @@ const METAL_SIM_CLIENTS: &[&str] = &[
 const METAL: &[(&str, metal::Metal)] = &[
     (
         // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer
-        // and NVMe, asserted from the records the shipping kernel writes, with
-        // every span `metalprobe` measured priced in `tests/metal-profile.toml`.
+        // and NVMe, asserted from the records the shipping kernel writes.
         "metal_device_probe",
         metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
     ),
@@ -1830,8 +1829,9 @@ const METAL: &[(&str, metal::Metal)] = &[
             // has.
             judge: |b| {
                 let (p50, p99) = tlb_shootdown_cost(b[0].kernel().text(), b[0].cpus()?)?;
-                b[0].number("tlb.latencycase.p50_ns", p50)?;
-                b[0].number("tlb.latencycase.p99_ns", p99)
+                b[0].measured("tlb.latencycase.p50_ns", p50);
+                b[0].measured("tlb.latencycase.p99_ns", p99);
+                Ok(())
             },
         },
     ),
@@ -2270,6 +2270,7 @@ fn shared_metal(
             config: "tests/testcases",
             params: &[],
             features: &[],
+            members: 38,
             jobs: shipping
                 .iter()
                 .filter(|n| keep(n))
@@ -2288,6 +2289,7 @@ fn shared_metal(
             config: "tests/testcases",
             params: &[],
             features: toyos_build::build::TEST_KERNEL,
+            members: 18,
             jobs: debug.iter().filter(|n| keep(n)).map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
             links: Vec::new(),
@@ -2407,6 +2409,7 @@ fn c_corpus_metal(
         config: "tests/testcases",
         params: &[],
         features: &[],
+        members: 90,
         jobs,
         files,
         links,
@@ -15464,13 +15467,11 @@ fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(u64, u64), String> {
         "  [tlb] {rounds} shootdowns across {across} CPUs: min={min}ns p50={p50}ns p90={p90}ns \
          p99={p99}ns max={max}ns"
     );
-    // The two the metal profile prices; the rest are the shape's own evidence.
     Ok((p50, p99))
 }
 
-/// `latency_wake` on a machine with no console: the p99,
-/// off the kernel's own exit record, against the ceiling the metal profile
-/// holds.
+/// `latency_wake` on a machine with no console: the p99, off the kernel's own
+/// exit record.
 ///
 /// A negative code is `cyclictest`'s refusal and not a fast machine — the sign
 /// is the whole of what separates the two, and that contract is in the binary's
@@ -15483,7 +15484,12 @@ fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
              capability endowed, -2 is the real-time band refused"
         ));
     }
-    boot.number("latency.p99_us", u64::try_from(code).expect("a non-negative code"))
+    // cyclictest's `BUCKETS`: a p99 there is a floor and not a measurement.
+    if code >= 4096 {
+        return Err(format!("cyclictest's p99 is {code} us, past its histogram"));
+    }
+    boot.measured("latency.p99_us", u64::try_from(code).expect("a non-negative code"));
+    Ok(())
 }
 
 /// The negative control, executed: an AP left holding what `INIT` gave it, and

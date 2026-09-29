@@ -23,6 +23,7 @@ use std::process::{Command, Output, Stdio};
 use crate::bootlog;
 use crate::flags::{declare_flags, Flag};
 use crate::image::LBA;
+use crate::metaltimings::Machine;
 
 const CONNECT_SECS: u64 = 10;
 
@@ -186,6 +187,9 @@ pub enum Refusal {
     /// binary in service**: init's words, the machine's answer or ssh
     /// afterwards, each finding by name.
     Swap(Vec<String>),
+    /// The machine did not name itself: its SMBIOS answer is not
+    /// [`Machine::QUERY`]'s three lines.
+    Machine(String),
     Usage(String),
 }
 
@@ -344,6 +348,7 @@ impl fmt::Display for Refusal {
                 "the swap did not put the new binary in service:\n  {}",
                 findings.join("\n  ")
             ),
+            Self::Machine(why) => write!(f, "the machine did not say what it is: {why}"),
             Self::Usage(why) => write!(f, "{why}"),
         }
     }
@@ -1408,8 +1413,7 @@ impl Driver {
     /// **A number and not an implication.** Whether the stick came back is what
     /// the T14 alone can say about the ruling, and before this it was only ever
     /// visible as `mount: special device /dev/sda3 does not exist` — a mount
-    /// that fails for a dozen other reasons too. Waited for by name, priced in
-    /// `tests/metal-profile.toml`, and refused as its own kind.
+    /// that fails for a dozen other reasons too.
     fn wait_for_the_stick(&self) -> Result<u64, Refusal> {
         let node = self.target.node.partition(self.target.log_part);
         let probe = format!("test -b {}", shell_word(&node));
@@ -2006,6 +2010,9 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         identity.vendor,
         identity.model
     );
+    let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
+        .map_err(Refusal::Machine)?;
+    println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
     // Before the flash, because the address a boot of this image could answer
     // on is one only the operating system that is still up can be asked for.
     let wire = match &args.nic {
@@ -2100,7 +2107,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     if let Some(dir) = &args.readback {
-        write_readback(dir, &loader, &log, back, stick, wire.as_ref(), replied)?;
+        write_readback(dir, &loader, &log, back, stick, &machine, wire.as_ref(), replied)?;
         println!("readback written to {}", dir.display());
     }
     // **Named by evidence, before the boot record is missed.** A boot that
@@ -2277,6 +2284,11 @@ pub const READBACK_VOLUME: &str = "log-partition.img";
 pub const BACK_SECS: &str = "back_secs";
 pub const STICK_SECS_KEY: &str = "stick_secs";
 
+/// The machine the boot ran on, as [`Machine::QUERY`] answered before the flash.
+pub const VENDOR_KEY: &str = "machine_vendor";
+pub const PRODUCT_KEY: &str = "machine_product";
+pub const BIOS_KEY: &str = "machine_bios";
+
 /// The cable: the address this loop pinged, the MAC of the function holding it,
 /// and how far the machine's own clock stood from this host's. **All three
 /// together or none**: a judge reading two of them places an observation
@@ -2327,6 +2339,7 @@ fn write_readback(
     log: &str,
     back: u64,
     stick: u64,
+    machine: &Machine,
     wire: Option<&Wire>,
     replied: Option<Reply>,
 ) -> Result<(), Refusal> {
@@ -2341,7 +2354,11 @@ fn write_readback(
     // The boot's own millisecond count is in the kernel log and read from
     // there; this file carries only what the *host* clock measured, which no
     // log can.
-    let mut boot = format!("{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n");
+    let mut boot = format!(
+        "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{VENDOR_KEY} {}\n{PRODUCT_KEY} {}\n\
+         {BIOS_KEY} {}\n",
+        machine.vendor, machine.product, machine.bios
+    );
     if let Some(wire) = wire {
         boot.push_str(&format!(
             "{PING_ADDR_KEY} {}\n{WIRE_MAC_KEY} {}\n{CLOCK_SKEW_KEY} {}\n",
@@ -2396,6 +2413,16 @@ pub fn back_secs(text: &str) -> Option<u64> {
 /// kernel performs may leave a USB device its next host cannot enumerate.
 pub fn stick_secs(text: &str) -> Option<u64> {
     key(text, STICK_SECS_KEY)
+}
+
+/// The machine a readback names, or why it names none.
+pub fn machine(text: &str) -> Result<Machine, String> {
+    match (word(text, VENDOR_KEY), word(text, PRODUCT_KEY), word(text, BIOS_KEY)) {
+        (Some(vendor), Some(product), Some(bios)) => Ok(Machine { vendor, product, bios }),
+        _ => Err(format!(
+            "names no machine: {VENDOR_KEY}, {PRODUCT_KEY} and {BIOS_KEY} are owed together"
+        )),
+    }
 }
 
 /// What one boot's readback says about the cable, or `None` where the loop was
@@ -2750,6 +2777,17 @@ mod tests {
         assert_eq!(back_secs("back_secs 47"), Some(47));
         assert_eq!(back_secs(""), None);
         assert_eq!(back_secs("back_secs later\n"), None);
+    }
+
+    #[test]
+    fn the_machine_crosses_in_the_boot_file() {
+        let dir = toyos_tmpdir::TempDir::new("machine");
+        let t14 = Machine::parse("LENOVO\n20W000T9GE\nN34ET56W (1.56 )\n").expect("three lines");
+        write_readback(&dir, "", "", 47, 0, &t14, None, None).expect("write");
+        let boot = std::fs::read_to_string(dir.join(READBACK_BOOT)).expect("boot.txt");
+        assert_eq!(machine(&boot), Ok(t14));
+        assert_eq!(back_secs(&boot), Some(47));
+        assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
     }
 
     /// **A boot the cable did not answer is not a boot that answered in the

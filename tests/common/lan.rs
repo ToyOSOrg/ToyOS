@@ -15,7 +15,6 @@ use toyos_build::lan::{
     READY,
 };
 use toyos_build::metaldevices;
-use toyos_build::metalprofile::Profile;
 use toyos_i219::lease::{self, Event, Verdict};
 use toyos_i219::phy::PhyRefusal;
 
@@ -23,8 +22,6 @@ use super::metal;
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
 
-/// The boot config the T14 arm flashes, and the name every profile row for that
-/// boot is under.
 pub const CONFIG: &str = "tests/lancase";
 pub const BOOT: &str = "lancase";
 
@@ -104,7 +101,6 @@ pub const NIC: &str = "0000:00:1f.6";
 
 /// The T14's judge: the claim, the card, the lease, and the host's own ping.
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
-    let profile = Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())?;
     let kernel = back.kernel();
     let text = kernel.text();
     let mut bad: Vec<String> = Vec::new();
@@ -151,9 +147,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     match link_up_ms(&netd) {
         Ok(ms) => {
             eprintln!("  [lan] the link came up {ms} ms after the driver did");
-            if let Err(why) = profile.judge(&format!("lan.{}.link_up_ms", back.label), ms) {
-                bad.push(why.to_string());
-            }
+            back.measured(&format!("lan.{}.link_up_ms", back.label), ms);
         }
         Err(why) => bad.push(why),
     }
@@ -164,9 +158,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
                 "  [lan] leased {}/{} from {} in {} ms, gateway {}, dns {:?}",
                 lease.address, lease.prefix, lease.server, lease.ms, lease.gateway, lease.dns
             );
-            if let Err(why) = profile.judge(&format!("lan.{}.lease_ms", back.label), lease.ms) {
-                bad.push(why.to_string());
-            }
+            back.measured(&format!("lan.{}.lease_ms", back.label), lease.ms);
             if lease.address != cable.addr {
                 bad.push(format!(
                     "this boot leased {} and the host pinged {}, which the router hands this \
@@ -185,17 +177,8 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
                 "  [lan] {} answered the host's ping {} s into the window",
                 cable.addr, reply.secs
             );
-            // The bracket first: a reply from the operating system on the other
-            // side of the reset is not this boot's reading, and a ceiling may
-            // only be tightened against a reading this boot answered.
             match bootlog::host_second_inside_this_boot(log.text(), cable.skew, LEASE, reply.at) {
-                Ok(()) => {
-                    if let Err(why) =
-                        profile.judge(&format!("boot.{}.ping_secs", back.label), reply.secs)
-                    {
-                        bad.push(why.to_string());
-                    }
-                }
+                Ok(()) => back.measured(&format!("boot.{}.ping_secs", back.label), reply.secs),
                 Err(why) => bad.push(why),
             }
         }
