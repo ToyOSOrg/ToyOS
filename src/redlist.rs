@@ -132,6 +132,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md",
     },
     Disabled {
+        test: "screen_console_scroll",
+        issue: "issues/build/the-console-loses-typed-keystrokes-under-host-load.md",
+    },
+    Disabled {
         test: "screen_fatal_halt",
         issue: "issues/boot-media/screen-fatal-halt-reds-on-ci-with-a-usb-storage-transport-break-during-boot.md",
     },
