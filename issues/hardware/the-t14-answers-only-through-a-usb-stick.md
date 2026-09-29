@@ -25,13 +25,16 @@ Constraints a reader would otherwise pay to re-derive:
 - **The driver does not live in the kernel** (owner, 2026-09-07). The kernel owns
   the claim of the PCI function; the holder drives the registers, takes the
   interrupts and owns its DMA, which lives in that function's own IOMMU domain.
-- **A machine with no IOMMU unit hands no function to a process** (owner ruling,
-  2026-09-07, on the ordering ruling in
-  `issues/kernel/every-driver-is-still-in-the-kernel.md`). The claim is refused
-  by name, netd exits, and the machine boots on; `iommu_virtio_platform`'s
-  no-unit arm is where that is read back. The T14 has VT-d, so this is not a
-  bound on the bench — but a `pcidev` refusal there is the first thing to check
-  before suspecting the driver.
+- **On a machine with no IOMMU, only a driver signed and shipped in the ToyOS
+  image may claim a device, never a user-installed one** (owner ruling,
+  2026-09-29, superseding the 2026-09-07 ruling on the ordering ruling in
+  `issues/kernel/every-driver-is-still-in-the-kernel.md`). Today every claim on
+  such a machine is still refused by name, netd exits, and the machine boots
+  on; `iommu_virtio_platform`'s no-unit arm is where that is read back
+  (`issues/kernel/a-machine-without-an-iommu-refuses-every-claim.md` tracks
+  the signed-claim path this ruling asks for). The T14 has VT-d, so this is
+  not a bound on the bench — but a `pcidev` refusal there is the first thing
+  to check before suspecting the driver.
 - **ssh is the bench's transport and a real feature**: sshd is built on russh
   and the harness's client is russh too. No host ssh binary, no fork.
 - **Addressing is DHCP with a hostname**, resolved through the router's DNS. The
