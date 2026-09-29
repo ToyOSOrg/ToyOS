@@ -459,9 +459,8 @@ const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "\"gh\"",
         sites: &[],
-        why: "GitHub's CLI, outside the bar: CI's release, protection and nightly-red jobs \
-              (src/ci.rs, src/release.rs) ask GitHub with it. Nothing that builds or boots \
-              reaches it",
+        why: "GitHub's CLI, outside the bar: CI's release jobs (src/release.rs) ask GitHub \
+              with it. Nothing that builds or boots reaches it",
     },
     Spawn {
         arg: "\"curl\"",
