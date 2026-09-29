@@ -2540,7 +2540,7 @@ mod tests {
     fn the_pre_flash_gate_clears_a_valued_parameter_and_refuses_an_actuator() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert_eq!(flashable_params(root, &[format!("{}0x1000", toyos_blackbox::PARAM)]), Ok(()));
-        assert!(flashable_params(root, &["log-storm".to_string()]).is_err());
+        assert!(flashable_params(root, &["wedge-before-reset".to_string()]).is_err());
     }
 
     #[test]

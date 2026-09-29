@@ -299,8 +299,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_THREAD_JOIN => sys_thread_join(a1),
         // Both answer from the boot-time anchor, never the CMOS: NotSupported beats a
         // 1970-epoch number a caller cannot tell from real time.
-        // Local time here, UTC in SYS_CLOCK_EPOCH: seconds-since-epoch are UTC by definition.
-        SYS_CLOCK_REALTIME => crate::clock::local_secs().map_or(
+        SYS_CLOCK_REALTIME => crate::clock::utc_secs().map_or(
             SyscallError::NotSupported.to_u64(),
             |secs| {
                 let now = toyos_wallclock::Civil::from_unix_secs(secs);
@@ -632,6 +631,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     Some(h) => u64::from(h.0),
                     None => SyscallError::InvalidArgument.to_u64(),
                 }
+            }
+            DA::LOG_PATTERNED => {
+                crate::log::storm::emit_patterned(0, a2);
+                0
             }
             _ => SyscallError::InvalidArgument.to_u64(),
         },

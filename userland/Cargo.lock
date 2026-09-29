@@ -1286,7 +1286,6 @@ dependencies = [
  "toyos-blockring",
  "toyos-fat32",
  "toyos-gpt",
- "toyos-wallclock",
 ]
 
 [[package]]

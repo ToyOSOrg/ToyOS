@@ -166,27 +166,9 @@ struct Stream {
     offset: u64,
 }
 
-/// Local seconds since the epoch, the zone FAT stamps in: bracketed so both
-/// readings are of one second, as `userland/logd/src/wall.rs` does.
-fn local_secs() -> u64 {
-    for _ in 0..4 {
-        let (Some(before), Some(local), Some(after)) = (
-            toyos_abi::syscall::clock_epoch(),
-            toyos_abi::syscall::clock_realtime(),
-            toyos_abi::syscall::clock_epoch(),
-        ) else {
-            return 0;
-        };
-        if before != after {
-            continue;
-        }
-        let lsod = local.hours as u64 * 3600 + local.minutes as u64 * 60 + local.seconds as u64;
-        return match toyos_wallclock::resolve(before, lsod) {
-            toyos_wallclock::Recovery::Offset(off) => before.saturating_add_signed(off),
-            // Two real zones a day apart: UTC, which is a time and not a guess.
-            toyos_wallclock::Recovery::Ambiguous { .. } => before,
-        };
-    }
+/// Seconds since the epoch, UTC. FAT specifies local time; this stamps UTC
+/// because the owner ruled the hardware clock is UTC.
+fn utc_secs() -> u64 {
     toyos_abi::syscall::clock_epoch().unwrap_or(0)
 }
 
@@ -386,7 +368,7 @@ fn ram(roots: &[&str], why: &str) -> Box<dyn Volume> {
 }
 
 fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>, String> {
-    FatVolume::mount(disk, writable, local_secs).map(|v| Box::new(v) as Box<dyn Volume>)
+    FatVolume::mount(disk, writable, utc_secs).map(|v| Box::new(v) as Box<dyn Volume>)
 }
 
 struct Server {

@@ -93,7 +93,7 @@ pub struct FatVolume<D: Disk> {
     open: BTreeMap<Node, Open>,
     by_path: BTreeMap<String, Node>,
     next: Node,
-    /// Local seconds since the epoch, which is the zone FAT stamps in.
+    /// Seconds since the epoch this volume stamps its entries with.
     clock: fn() -> u64,
     /// Where a read lands before it goes out: `toyos-fat32` reads into a
     /// slice, and a client's window is never one. Kept, so a read allocates

@@ -2,31 +2,8 @@
 //! back, and which slot's image it handed it to, kept on the stick it boots
 //! from.
 //!
-//! **The bound on a hang, and the machine has no other way out of one.**
-//! `bootnext::point_at_us` aims `BootNext` at this loader before every kernel
-//! handoff, so a kernel that hangs and an owner who cuts power get: firmware,
-//! this loader, the same kernel, the same hang — for ever. The black box cannot
-//! break it, because a power cut is exactly what empties the black box: the next
-//! pass finds nothing to report, arms a fresh record and boots the same kernel
-//! again. The only ways out of that are the firmware's boot menu and pulling the
-//! stick, and neither of those is the loop.
-//!
-//! What survives a power cut is the stick. So the count is a file on the log
-//! partition, beside `loader.log`: **one flash writes a fresh log partition, so
-//! the count is per image and per flash without anything having to say so.** It
-//! carries the partition's own signature anyway, because a file that says what
-//! it counts for is one a reader can be handed on its own.
-//!
 //! One hand per hang, never two: the second attempt of an image whose first
-//! never reported boots no kernel at all. **The same file is the slots'
-//! record** (`toyos_update::record`): the image a pass handed the machine to,
-//! and every image that died on a boot of its own, so the pass after a hang or
-//! a death boots the other slot rather than the one that died.
-//!
-//! Written twice a pass: before the log opens, with the count and whatever the
-//! last boot's end taught, so a pass that dies before its handoff has still
-//! counted; and after the slot is chosen, through the log's own open volume,
-//! with the image it chose.
+//! never reported boots no kernel at all.
 
 use alloc::string::String;
 use toyos_update::record::{self, Record};

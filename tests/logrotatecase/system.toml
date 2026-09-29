@@ -61,9 +61,6 @@ service = true
 receives = ["netd", "launcher"]
 
 # The union its guest binaries need on this machine shape.
-# `logread` is the log gate's own: a spawned test binary does not inherit a
-# `SysCap` dup, so the gate that reads the kernel's records runs inside
-# `test-runner` itself.
 # `power` is the connector `run shutdown` below asks init through.
 [programs.test-runner]
 receives = ["compositor", "soundd", "netd", "power"]

@@ -35,9 +35,6 @@ devices = ["pci:1af4:1041"]
 service = true
 receives = ["netd", "launcher"]
 
-# `logread` is the log gate's own: a spawned test binary does not inherit a
-# `SysCap` dup, so the gate that reads the kernel's records runs inside
-# `test-runner` itself.
 [programs.test-runner]
 receives = ["netd"]
 syscap = ["logread"]

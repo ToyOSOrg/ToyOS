@@ -19,6 +19,5 @@ toyos = { path = "../../toyos" }
 toyos-blockring = { path = "../../toyos-blockring" }
 toyos-gpt = { path = "../../toyos-gpt" }
 toyos-fat32 = { path = "../../toyos-fat32" }
-toyos-wallclock = { path = "../../toyos-wallclock" }
 bcachefs = { path = "../../bcachefs" }
 blockd = { path = "../blockd" }
