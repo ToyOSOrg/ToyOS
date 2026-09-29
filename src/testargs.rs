@@ -42,8 +42,8 @@ impl Shard {
     /// property a verdict depends on and the one the gates below hold.
     ///
     /// **`load` is the run's one accumulator, not this call's.** A suite that
-    /// partitions several pools — the parallel tasks, the serial tail, gate A's
-    /// configs — is one machine's wall clock either way, so the second pool has
+    /// partitions several pools — the parallel tasks and the serial tail — is one
+    /// machine's wall clock either way, so the second pool has
     /// to fill the bins the first left light. Starting each call from
     /// [`bins`](Self::bins) makes each partition good and their sum bad, and
     /// the imbalances add: measured over run `31377439504`'s twelve shards it
@@ -149,11 +149,9 @@ declare_flags!(pub SUITE = {
     pub LIST = "--list", None;
     pub NOCAPTURE = "--nocapture", None;
     pub SHOW_OUTPUT = "--show-output", None;
-    pub AUDIO_GATE = "--audio-gate", Next;
     pub JOBS = "--jobs", Next;
     pub JOBS_SHORT = "-j", Next;
     pub SHARD = "--shard", Next;
-    pub SLOW_USB = "--slow-usb", None;
     pub NIGHTLY = "--nightly", None;
     pub WEEKLY = "--weekly", None;
     /// The metal profile: the registrations that run on the T14, batched into
@@ -212,13 +210,6 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
                 .to_string(),
         );
     }
-    if has(&METAL) && has(&AUDIO_GATE) {
-        return Err(
-            "--metal and --audio-gate are separate tiers on separate machines and cannot be \
-             combined; run one at a time"
-                .to_string(),
-        );
-    }
     if has(&NIGHTLY) && has(&WEEKLY) {
         return Err(
             "--weekly runs the nightly tier too, so a --nightly beside it would be read by \
@@ -227,13 +218,11 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
         );
     }
     for reach in [&NIGHTLY, &WEEKLY] {
-        for other in [&AUDIO_GATE, &METAL] {
-            if has(reach) && has(other) {
-                return Err(format!(
-                    "{} and {} are separate tiers and cannot be combined; run one tier at a time",
-                    reach.name, other.name
-                ));
-            }
+        if has(reach) && has(&METAL) {
+            return Err(format!(
+                "{} and {} are separate tiers and cannot be combined; run one tier at a time",
+                reach.name, METAL.name
+            ));
         }
     }
     Ok(filter)
@@ -267,20 +256,15 @@ mod tests {
     fn a_flags_value_is_not_the_filter() {
         assert_eq!(parse_owned(&["--jobs", "4"]).unwrap(), None);
         assert_eq!(parse_owned(&["-j", "4"]).unwrap(), None);
-        assert_eq!(parse_owned(&["--audio-gate", "30"]).unwrap(), None);
     }
 
     #[test]
-    fn a_reach_and_another_tier_are_refused_by_the_argv_validator() {
-        for (argv, reach, other) in [
-            (vec!["--nightly", "--audio-gate", "30"], "--nightly", "--audio-gate"),
-            (vec!["--audio-gate=30", "--nightly"], "--nightly", "--audio-gate"),
-            (vec!["--weekly", "--audio-gate", "30"], "--weekly", "--audio-gate"),
-            (vec!["--metal", "--nightly"], "--nightly", "--metal"),
-            (vec!["--weekly", "--metal"], "--weekly", "--metal"),
-        ] {
+    fn a_reach_and_the_metal_tier_are_refused_by_the_argv_validator() {
+        for (argv, reach) in
+            [(vec!["--metal", "--nightly"], "--nightly"), (vec!["--weekly", "--metal"], "--weekly")]
+        {
             let refusal = parse_owned(&argv).unwrap_err();
-            assert!(refusal.contains(reach) && refusal.contains(other), "{argv:?}: {refusal}");
+            assert!(refusal.contains(reach) && refusal.contains("--metal"), "{argv:?}: {refusal}");
             assert!(refusal.contains("cannot be combined"), "{argv:?}: {refusal}");
         }
     }
@@ -296,7 +280,7 @@ mod tests {
     fn the_filter_is_the_word_that_is_nobodys_value() {
         assert_eq!(parse_owned(&["process_stats"]).unwrap().as_deref(), Some("process_stats"));
         assert_eq!(
-            parse_owned(&["--audio-gate", "30", "audio_tone", "--nocapture"]).unwrap().as_deref(),
+            parse_owned(&["--jobs", "4", "audio_tone", "--nocapture"]).unwrap().as_deref(),
             Some("audio_tone")
         );
         assert_eq!(
@@ -382,9 +366,9 @@ mod tests {
         assert_eq!(totals, vec![130, 130, 130, 130], "{totals:?}");
     }
 
-    /// **One run is one accumulator.** The suite partitions three pools — the
-    /// parallel tasks, the serial tail, gate A's configs — and a shard runs all
-    /// three, so the second call has to fill the bins the first left light. Two
+    /// **One run is one accumulator.** The suite partitions two pools — the
+    /// parallel tasks and the serial tail — and a shard runs both, so the second
+    /// call has to fill the bins the first left light. Two
     /// pools of `[3 s, 1 s]` across two shards is the smallest case that tells
     /// the two apart: threaded, both shards take 4 s; from a fresh accumulator
     /// each time, the heavy item lands on shard 1 twice and the widest bin is
@@ -449,7 +433,7 @@ mod tests {
     }
 
     /// Every `None` here is a default the run then takes in silence: `--jobs`
-    /// the built-in width, `--audio-gate` the thorough tier off.
+    /// the built-in width.
     #[test]
     fn a_flag_left_without_its_value_is_refused_by_name() {
         for flag in SUITE.0.iter().filter(|f| !matches!(f.value, Value::None | Value::Optional)) {
@@ -501,7 +485,6 @@ mod tests {
             vec!["process_stats"],
             vec!["process_stats", "--nocapture"],
             vec!["--list"],
-            vec!["--audio-gate", "30"],
             vec!["--jobs", "4"],
             vec!["--shard", "2/4"],
             vec!["--nightly"],
@@ -522,7 +505,5 @@ mod tests {
     fn a_readback_directory_alone_selects_no_tier() {
         let refusal = parse_owned(&["--metal-readback", "target/metal"]).unwrap_err();
         assert!(refusal.contains("add --metal"), "{refusal}");
-        let refusal = parse_owned(&["--metal", "--audio-gate", "30"]).unwrap_err();
-        assert!(refusal.contains("cannot be combined"), "{refusal}");
     }
 }

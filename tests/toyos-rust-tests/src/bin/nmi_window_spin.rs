@@ -35,19 +35,14 @@ fn main() {
 
     println!("nmi-window-spin: spinning on SYS_GETPID for {secs}s");
 
-    let started = clock_nanos();
-    let until = started + secs * 1_000_000_000;
+    let until = clock_nanos() + secs * 1_000_000_000;
     let mut done: u64 = 0;
     while clock_nanos() < until {
         chunk();
         done += CHUNK;
     }
-    let elapsed = clock_nanos() - started;
 
-    println!(
-        "nmi-window-spin: {done} syscalls in {elapsed} ns ({} ns each)",
-        elapsed / done.max(1),
-    );
+    println!("nmi-window-spin: {done} syscalls");
 }
 
 /// [`CHUNK`] iterations of exactly four instructions.

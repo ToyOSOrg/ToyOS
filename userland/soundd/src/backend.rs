@@ -2,10 +2,9 @@
 //!
 //! Everything that differs between virtio-sound and HDA is a method below. The
 //! mixer, the ramps, the DLL, the underrun accounting and the suspend/resume
-//! structure are one body of code either way, which is what makes gate A one
-//! instrument for both — and what [`Pipeline`] exists to keep honest, because
-//! the two differ in *who owns a period soundd has not refilled* and nothing
-//! else in the loop can be written without knowing which.
+//! structure are one body of code either way — and [`Pipeline`] exists to keep
+//! that honest, because the two differ in *who owns a period soundd has not
+//! refilled* and nothing else in the loop can be written without knowing which.
 
 use toyos::AsHandle;
 use toyos_abi::audio::AudioCompletionRecord;
@@ -44,8 +43,7 @@ pub(crate) enum Pipeline {
 /// abstraction with no evidence behind it. Both are drivers in this process
 /// now, and what differs between the two devices is exactly the methods below;
 /// the mixer, the ramps, the DLL, the underrun accounting and the
-/// suspend/resume structure are one body of code either way, which is what
-/// makes gate A one instrument for both.
+/// suspend/resume structure are one body of code either way.
 pub(crate) trait Backend {
     /// Who owns a freed period soundd does not refill.
     fn pipeline(&self) -> Pipeline;
@@ -63,11 +61,10 @@ pub(crate) trait Backend {
     /// Period `idx` has played and is soundd's again.
     ///
     /// HDA's engine is cyclic and never stops on its own, so a period nobody
-    /// refills is *replayed* — audible harm gate A's gap detector cannot see.
-    /// Zeroing it as it frees makes a late soundd cost silence instead, which
-    /// is exactly what virtio-sound's device does when it runs dry, so one
-    /// instrument certifies both. virtio's own implementation is empty
-    /// for that reason and not by omission: nothing is published for a period
+    /// refills is *replayed* — audible harm. Zeroing it as it frees makes a late
+    /// soundd cost silence instead, which is exactly what virtio-sound's device
+    /// does when it runs dry. virtio's own implementation is empty for that
+    /// reason and not by omission: nothing is published for a period
     /// that was not filled, so the device is never given it again.
     fn released(&mut self, idx: usize);
 

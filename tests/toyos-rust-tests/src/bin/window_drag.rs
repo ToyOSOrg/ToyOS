@@ -17,8 +17,6 @@
 //! area of the window, so a window that filled the screen would pass a gate
 //! about screen-sized damage without meaning anything.
 
-use std::time::{Duration, Instant};
-
 use window::{Color, Event, Window, MOUSE_PRESS};
 
 /// Short enough that the middle of the screen and the title bar are a known
@@ -35,11 +33,6 @@ const HEIGHT: u32 = 160;
 /// it, so the second is the end of the sequence.
 const PRESSES: usize = 2;
 
-/// A liveness ceiling, not a duration: it costs nothing when the presses
-/// arrive, and bounds a run where the injected pointer never reached this
-/// window at all.
-const RUN_CEILING: Duration = Duration::from_secs(30);
-
 fn main() {
     let mut window = Window::create_with_title(WIDTH, HEIGHT, "drag")
         .unwrap_or_else(|e| panic!("the compositor would not give this a window: {e}"));
@@ -51,10 +44,11 @@ fn main() {
     println!("drag probe: {WIDTH}x{HEIGHT} window up");
     println!("===DRAG_READY===");
 
-    let deadline = Instant::now() + RUN_CEILING;
+    // No deadline: an injected pointer that never reaches this window is a hang
+    // the host's ceiling reds.
     let mut presses = 0;
-    while presses < PRESSES && Instant::now() < deadline {
-        match window.poll_event(Duration::from_millis(200).as_nanos() as u64) {
+    while presses < PRESSES {
+        match window.poll_event(u64::MAX) {
             Some(Event::MouseInput(ev)) if ev.event_type == MOUSE_PRESS && ev.changed == 1 => {
                 presses += 1;
                 println!("drag probe: press at {},{}", ev.x, ev.y);
