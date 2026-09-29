@@ -622,6 +622,13 @@ const HOST_SPAWNS: &[Spawn] = &[
               issues/build/python-and-cc-are-declared.md is about",
     },
     Spawn {
+        arg: "&compiler",
+        sites: &[("src/llvm.rs", 1)],
+        why: "the host's C and C++ compilers, `cc` and `c++` or what `CC` and `CXX` name, asked \
+              their `--version` for the key of the LLVM they build: the `cc` standing failure \
+              issues/build/python-and-cc-are-declared.md is about",
+    },
+    Spawn {
         arg: "\"./x.py\"",
         sites: &[],
         why: "the same bootstrap where the shell wrapper is absent, and the Python is then \

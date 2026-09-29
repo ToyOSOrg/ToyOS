@@ -111,15 +111,15 @@ fn cc_identity() -> &'static str {
                     .find(|candidate| candidate.is_file())
                     .unwrap_or_else(|| panic!("no `{named}` on PATH, and bootstrap builds LLVM with it"))
             };
-            let path = fs::canonicalize(&found).unwrap_or_else(|e| panic!("resolve {}: {e}", found.display()));
-            let out = Command::new(&path)
+            let compiler = fs::canonicalize(&found).unwrap_or_else(|e| panic!("resolve {}: {e}", found.display()));
+            let out = Command::new(&compiler)
                 .arg("--version")
                 .output()
-                .unwrap_or_else(|e| panic!("run {} --version: {e}", path.display()));
-            assert!(out.status.success(), "{} --version failed: {}", path.display(), String::from_utf8_lossy(&out.stderr));
+                .unwrap_or_else(|e| panic!("run {} --version: {e}", compiler.display()));
+            assert!(out.status.success(), "{} --version failed: {}", compiler.display(), String::from_utf8_lossy(&out.stderr));
             identity += &format!(
                 "{var} {}\n{}{}\n",
-                path.display(),
+                compiler.display(),
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
