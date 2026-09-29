@@ -34,6 +34,24 @@ guess. Then build, then test before anyone reviews:
 - The T14 is the orchestrator's. Write the request file the brief names and end with
   `T14 RUN REQUESTED: <image path>`.
 
+## A fork
+
+To edit a fork, clone it beside the monorepo and list it in `.cargo/config.toml`. Fork clones are
+shared by every worktree: explicit paths, never `stash`, never switch a branch in one. A fork keeps
+one branch per upstream base; a fix is a commit appended to it, never a new branch. A fork depends
+on ToyOS crates by version, never by path. Every change is upstream-mergeable: ToyOS enters as a new
+platform, a cross-platform change is written as upstream would accept it, the rationale goes in
+the commit message. A commit you push to a fork branch lands in the same pull request as the bump
+of every lockfile and gitlink that names that branch.
+
+`rust/` is stricter: `library/alloc` and `library/core` have zero delta; a cross-platform file is
+touched only to add a target arm at an existing dispatch site; `src/bootstrap` takes only a general
+capability written to upstream quality; a `change_tracker` entry is carried only with its upstream
+PR number; only merged upstream commits are cherry-picked.
+
+Fork sources live outside this repository: a search for callers must also cover the fork clones or
+`~/.cargo/git/checkouts/`.
+
 ## Commits and the pull request
 
 `git commit -F <file>`, never `-m`. No `--amend`, no rebase, no force: merge `origin/main`, never

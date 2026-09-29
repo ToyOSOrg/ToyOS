@@ -167,9 +167,7 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
     let Some(file) = file.into_regular_file() else {
         return refused(format_args!("{NAME} on the log partition is a directory"));
     };
-    // The exclusive open outlives this function: the file handle it produced is
-    // written to until [`close`], and the loader never gives the machine back
-    // before then.
+    #[expect(clippy::disallowed_methods, reason = "the exclusive open outlives this function, until `close`")]
     core::mem::forget(fs);
     let mut file = file;
     if !truncate {

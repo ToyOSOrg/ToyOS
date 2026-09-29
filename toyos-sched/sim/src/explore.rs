@@ -325,6 +325,7 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
 /// the diagnosis with a drop bomb from the teardown; the run is a dead end
 /// either way, so it is abandoned deliberately rather than unwound.
 fn abandon(vm: Vm<'_>) {
+    #[expect(clippy::disallowed_methods, reason = "a live task dies only by `finalize`, never by a drop")]
     std::mem::forget(vm);
 }
 

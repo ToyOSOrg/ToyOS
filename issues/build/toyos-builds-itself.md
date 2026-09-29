@@ -9,7 +9,7 @@ opened: 2026-09-27
 The north star: ToyOS rebuilds its own sources inside ToyOS and reproduces the
 bytes the host built. A bootstrap from source with no binary seed is out of
 scope (owner, 2026-09-27). The compiler is LLVM throughout: rustc's, and clang
-with lld, one build of one fork, `ToyOSOrg/llvm-project` (`forks.toml`). The C
+with lld, one build of one fork, `ToyOSOrg/llvm-project`. The C
 library stays `userland/libc`, ours. Each stage lands on x86-64 first and on
 AArch64 one step behind, on `issues/kernel/toyos-runs-on-arm64.md`'s track.
 
@@ -57,6 +57,5 @@ builds; what keeps it is that it is the one linker a ToyOS process can run,
 shipped as `/system/bin/toyos-ld` by `system.toml`'s `[programs]` row and named
 by the ToyOS-hosted rustc
 (`issues/build/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). It
-goes when lld runs in the guest: the row, the crate, its host tests and its
-`src/sourcegate.rs` rows go together, the hosted rustc names `rust-lld`, and
+goes when lld runs in the guest: the row, the crate and its host tests go together, the hosted rustc names `rust-lld`, and
 the published crates.io crate is yanked.

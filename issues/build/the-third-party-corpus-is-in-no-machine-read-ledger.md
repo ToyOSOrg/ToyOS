@@ -11,29 +11,7 @@ committed file carrying a NUL, plus everything under `assets/` whether it does
 or not. The clause it half-closes was written over *"every binary file git
 tracks **plus every third-party source corpus**"*.
 
-The corpus is `tests/testcases/` --- 315 tracked files, of which **312** are
-`tinycc/` (the other three, its own `LICENSE`, a `system.toml` and `hello.c`,
-are ours): TinyCC's `tinycc/tests/tests2` under LGPL-2.1 plus picoc under
-BSD-3-Clause. They are compiler *input* rather than
-linked code, so their terms do not reach this repository's own, but the
-attribution is still owed and
-`NOTICE` says where it lives: `tests/testcases/LICENSE`, which says file by file
-what is whose *"with the counts it was established from"*.
-
-**The counts half runs now.**
-`sourcegate::tests::the_corpus_matches_the_counts_its_own_licence_declares`
-reads that licence's own per-population numbers, counts what `git` tracks under
-each population, and reds when they disagree; it also refuses a tracked file
-under the corpus that no population attributes, and the one name `NOTICE` says
-is not to come back --- `b2771acc^:tests/testcases/tinycc/46_grep.c`, "Copyright (C) 1980,
-DECUS", *"but not for profit"*, deleted rather than attributed on 2026-08-08. An
-arrival and a deletion are both caught.
-
-**Any one file's provenance is still owed.** A file swapped for another under
-the same name, or any substitution that leaves both counts intact, passes. The
-counts scan cannot judge that: the binary scan works because `NOTICE` carries a
-digest per file and there are twenty-one of them, and no digest per corpus file
-has ever been established.
+**Any one file's provenance is still owed.**
 
 **And `assets/` is a directory, not a property.** The file scan reaches a
 third-party text file only where it sits, so a byte-identical Phosphor SVG one

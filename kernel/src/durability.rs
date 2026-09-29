@@ -14,7 +14,10 @@ pub struct Owed {
 /// The only value [`Owed::settle`] accepts; minted by [`Owed::snapshot`], so a
 /// discharge is always bounded by a state observed before the work began.
 #[derive(Clone, Copy)]
-pub struct Settlement(u64);
+pub struct Settlement(
+    #[cfg_attr(feature = "durability-settle-blind", expect(dead_code, reason = "the blind clear reads no settlement"))]
+    u64,
+);
 
 impl Owed {
     pub const fn new() -> Self {
