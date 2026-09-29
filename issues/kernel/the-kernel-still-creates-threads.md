@@ -21,10 +21,8 @@ code creates a schedulable task other than the per-CPU idle loop.
 
 **Stages:**
 
-- **K2:** the reaper PR #549 introduces becomes last-thread-out: the victim's
-  last thread tears down its own process on its way out of the kernel, and the
-  scheduler frees that thread's kernel stack after switching away. Blocked on
-  #549 landing.
-- **K4:** `klogd` goes: the owner-approved driver-model design moves the
-  console to logd, and this track owns that move.
-- **K6:** delete the machinery named above. Blocked on K2 and K4.
+- **K4:** `klogd` goes: the console moves to logd, and this track owns that move. The boot before logd runs
+  and the panic path write the console wire (`log::console::drain_inline`,
+  `serial::panic_flush`), so one wire's driver stays in the kernel whatever
+  K4 moves.
+- **K6:** delete the machinery named above. Blocked on K4.

@@ -607,10 +607,7 @@ const HOST_SPAWNS: &[Spawn] = &[
         arg: "\"/usr/bin/hdiutil\"",
         sites: &[],
         why: "the other one: newfs_msdos refuses a plain file, so the fixture is formatted \
-              through a device node. **Two, where CLAUDE.md says four macOS FAT tools**: \
-              `fsck_msdos` came out of all three of its call sites on 2026-08-08 \
-              (issues/filesystem/fat32-suite-needs-macos-binaries.md, which counts two left) \
-              and the sentence was not edited. The owner ruled on 2026-09-01 that `fatfs` \
+              through a device node. The owner ruled on 2026-09-01 that `fatfs` \
               replaces both of these, so this scan is what will notice when it has",
     },
     Spawn {
