@@ -332,9 +332,15 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
      `tests/assembly-llvm/stack-protector/` test for `x86_64-unknown-none`
      checks `%gs:<offset>` in prologue and epilogue and no
      `__stack_chk_guard`; dropping the flags from `context.rs` reds it.
+     The orchestrator's ruling: root `CLAUDE.md`'s dependency rule governs —
+     "a fork carries a change written to upstream quality and goes when
+     upstream has it" — so a general cross-platform option written to
+     upstream quality is admitted when ToyOS needs it and upstream lacks it.
      `src/forkcheck.rs` admits a cross-platform `rust/` file only for a
-     target arm at an existing dispatch site; steps 1 and 2 each add a
-     cross-platform option instead, so both wait on the owner's ruling.
+     target arm at an existing dispatch site today; steps 1 and 2 each add a
+     cross-platform option instead, and the stage that lands them amends its
+     module header to admit exactly such an upstream-quality cross-platform
+     change.
   3. **The kernel.** `PerCpu` holds the guard at `N`, asserted at compile
      time as `stackprotector.h:55` asserts 40. The kernel defines no
      `__stack_chk_guard`, so a toolchain that falls back to the global fails
