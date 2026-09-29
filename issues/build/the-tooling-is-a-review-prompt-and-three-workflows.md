@@ -15,6 +15,9 @@ and the gates that held them go.
 - The toolchain is content-addressed by the four trees that produce it, one
   directory per hash, never mutated; then the sysroot claim, `src/buildlock.rs`
   and `src/worktree.rs` go.
+  The toolchain builds cargo from the Rust fork's submodule and ships it: one
+  cargo matching rustc. The content-addressed store gives every worktree the
+  shared build cache.
 - The nine workflows become three — `pr`, `nightly`, `publish`; then
   `a5b25a75^:src/mergehealth.rs` goes, and the ABI-lands-alone
   rule moves into the review prompt.
