@@ -3561,16 +3561,25 @@ fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String>
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
+fn virt_copyout(arch: toyos_build::arch::Arch) -> &'static [u8] {
+    use toyos_build::arch::Arch;
+    static X86_64: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    static AARCH64: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let built = match arch {
+        Arch::X86_64 => &X86_64,
+        Arch::Aarch64 => &AARCH64,
+    };
+    built.get_or_init(|| {
+        qemu::build_toyos_bin(arch, &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
+    })
+}
+
 /// Boot `tests/virtjobcase` and judge its job `job`:
 /// it ends with exit 0, having said `said`. The kernel carries `SYS_DEBUG`
 /// for `debug_refused`, and every job runs in every boot of the case.
 fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    static COPYOUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    let copyout = COPYOUT.get_or_init(|| {
-        qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
-    });
     let mut qemu = QemuInstance::boot_with_options(
         case,
         &[],
@@ -3579,7 +3588,7 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
             profile,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), copyout.clone())],
+            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), virt_copyout(profile.arch()).to_vec())],
             ..Default::default()
         },
     );
@@ -5327,10 +5336,6 @@ fn run_screen_test(
             // the decode is `toyos-ps2`'s and host-tested, but that a keystroke
             // reaches a machine which has stopped scheduling is a fact about
             // the controller and the poll, not about the table.
-            //
-            // `Profile::Metal` because QEMU routes injected keys to one handler
-            // per device class: every profile with a `usb-kbd` sends them there
-            // instead, and this is the only GOP machine without one.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -16935,6 +16940,24 @@ fn select<'a>(shared: &'a [TestDef], filter: Option<&str>, sharded: bool) -> Sel
     )
 }
 
+fn arch_drop_line(shared: &[TestDef], filter: Option<&str>) -> Option<String> {
+    let (_, _, whole) = select(shared, filter, false);
+    let (_, _, shard) = select(shared, filter, true);
+    let dropped: Vec<&str> = whole
+        .iter()
+        .map(|(name, _, _)| *name)
+        .filter(|name| !shard.iter().any(|(kept, _, _)| kept == name))
+        .collect();
+    (!dropped.is_empty()).then(|| {
+        format!(
+            "{} test(s) NOT run, because a shard boots no guest but {}: {}",
+            dropped.len(),
+            toyos_build::ci::GUEST_ARCH.name(),
+            dropped.join(", ")
+        )
+    })
+}
+
 /// **The property every merged CI run depends on, checked before any of the
 /// twelve processes that would otherwise each discover it separately.** Every
 /// name [`Shard::keep`] is handed for `count` must land in exactly one of
@@ -17432,21 +17455,17 @@ fn main() {
 
     let (tests_to_run, machine_to_run, screen_to_run) = select(&all_tests, filter, shard.is_some());
 
+    if shard.is_some() {
+        if let Some(line) = arch_drop_line(&all_tests, filter) {
+            eprintln!("[toyos] {line}");
+        }
+    }
+
     if tests_to_run.is_empty()
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
-        let (_, _, dropped) = select(&all_tests, filter, false);
-        if dropped.is_empty() {
-            eprintln!("No enabled test matches filter {filter:?}");
-        } else {
-            let names: Vec<&str> = dropped.iter().map(|(n, _, _)| *n).collect();
-            eprintln!(
-                "[toyos] filter {filter:?} matches only {}, and a shard boots no guest but {}",
-                names.join(", "),
-                toyos_build::ci::GUEST_ARCH.name()
-            );
-        }
+        eprintln!("No enabled test matches filter {filter:?}");
         run.exit(1);
     }
 

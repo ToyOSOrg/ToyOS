@@ -574,7 +574,6 @@ mod checks {
         Ok(())
     }
 
-    /// A shared-boot row under `name`, for the checks below.
     fn shared_row(name: &str) -> TestDef {
         TestDef {
             name: name.to_string(),
@@ -586,7 +585,8 @@ mod checks {
     }
 
     /// A run takes every registered test its filter matches, and a shard drops
-    /// exactly the screen rows whose profile is not of [`toyos_build::ci::GUEST_ARCH`].
+    /// exactly the screen rows whose profile is not of [`toyos_build::ci::GUEST_ARCH`],
+    /// saying which.
     #[test]
     fn a_run_selects_by_filter_and_shard() -> Result<(), String> {
         let shared = [shared_row("shared_one")];
@@ -631,6 +631,24 @@ mod checks {
                     want.difference(&got).collect::<Vec<_>>()
                 ));
             }
+        }
+        let named = |filter: Option<&str>| -> Option<(String, BTreeSet<String>)> {
+            let line = arch_drop_line(&shared, filter)?;
+            let (_, rows) = line.rsplit_once(": ").expect("the line names its rows after a colon");
+            let rows = rows.split(", ").map(String::from).collect();
+            Some((line, rows))
+        };
+        let (line, rows) =
+            named(None).ok_or("a shard that drops the rows of another architecture said nothing")?;
+        if rows != foreign || !line.starts_with(&format!("{} test(s)", foreign.len())) {
+            return Err(format!("a shard dropping {foreign:?} said {line:?}"));
+        }
+        let named_el2 = named(Some("el2_drop")).map(|(_, rows)| rows);
+        if named_el2 != Some(names(&["virt_el2_drop"])) {
+            return Err(format!("filter el2_drop: a shard said {named_el2:?}"));
+        }
+        if let Some((line, _)) = named(Some("sshd_")) {
+            return Err(format!("a filter matching no foreign row still had a shard say {line:?}"));
         }
         Ok(())
     }
