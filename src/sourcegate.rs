@@ -67,7 +67,6 @@
 //! architecture is chosen in one place and reached only through the arch
 //! interface. A declared exception is a file row that points at the issue
 //! holding what it owes, and one that no longer holds a needle is refused.
-//! The rust fork's std is `src/forkcheck.rs`'s to govern and is not read here.
 //!
 //! **What none of them reaches is filed rather than implied**, and each table's
 //! own doc names its half: the entries under `issues/build/` say so.
@@ -908,8 +907,7 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|b| *b == 0)
 }
 
-/// The compiler fork, which is upstream's tree and is judged by
-/// `src/forkcheck.rs` rather than by anything here.
+/// The compiler fork, which is upstream's tree.
 #[cfg(test)]
 const NOT_OURS: &str = "rust";
 

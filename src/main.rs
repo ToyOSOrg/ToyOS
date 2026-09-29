@@ -148,12 +148,6 @@ fn main() {
         toyos_build::redlist::dispatch(&args);
         return;
     }
-    // Reads lockfiles and cargo's own checkouts, nothing else: the half of a
-    // "zero callers" ABI sweep a monorepo grep cannot see.
-    if asked(&flags::ABI_CALLERS) {
-        toyos_build::forkcheck::dispatch_callers(&root, &args);
-        return;
-    }
     // Writes one file outside the checkout and builds nothing.
     if asked(&flags::SIGNING_KEY_NEW) {
         match toyos_build::signing::mint_owner_key() {
@@ -250,13 +244,6 @@ fn main() {
 
     if asked(&flags::WORKTREE) {
         toyos_build::worktree::dispatch(&root, &args);
-        return;
-    }
-
-    // On demand and nowhere else: it asks GitHub for every fork branch head, so
-    // neither `cargo test` nor `--land` may reach it.
-    if asked(&flags::CHECK_FORKS) {
-        toyos_build::forkcheck::dispatch(&root);
         return;
     }
 

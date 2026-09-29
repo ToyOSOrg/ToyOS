@@ -385,10 +385,8 @@ delta = "+341/-1"
 tier = "toolchain"
 why = """
 rustc's LLVM and the clang that builds ToyOS's C, built from source by rustc's
-bootstrap: `rust/.gitmodules` names this branch for `src/llvm-project`, and
-`cargo run -- --check-forks` judges the gitlink `rust/` records against its
-head. The delta is `x86_64-unknown-toyos` and `aarch64-unknown-toyos` in
-LLVM's Triple, and a clang target and driver toolchain — `__toyos__`, `ld.lld`,
+bootstrap: `rust/.gitmodules` names this branch for `src/llvm-project`. The delta is `x86_64-unknown-toyos` and
+`aarch64-unknown-toyos` in LLVM's Triple, and a clang target and driver toolchain — `__toyos__`, `ld.lld`,
 a PIE with no interpreter, the sysroot's `include/` and `lib/`, `-ltoyos_c` —
 with a Triple unit test and a driver lit test.
 """

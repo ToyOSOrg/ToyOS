@@ -64,6 +64,12 @@ above; otherwise it is a NOTE.
   unless a hardware document mandates that time and offers no notification, cited at the site.
   Wait on the event itself, bounded by a timeout that fails loudly. Defensive code that hides a
   failure instead of failing fast is a BLOCKER too.
+- **Forks.** A fork change that is not upstream-mergeable (ToyOS as a new platform under
+  `cfg(target_os = "toyos")`, cross-platform code untouched, a path dependency on a ToyOS crate) is a
+  BLOCKER, as is one pushed to a fork branch without its lockfile pin or gitlink bump in the same
+  diff. In `rust/`: any `library/alloc` or `library/core` delta, a cross-platform semantic change, a
+  `change_tracker` entry with no upstream PR number, a copied unmerged upstream PR. A search for
+  callers that skipped the fork clones and `~/.cargo/git/checkouts/` searched part of the tree.
 
 ## Prose is removed, never reviewed
 

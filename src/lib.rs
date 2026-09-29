@@ -14,7 +14,6 @@ pub mod compiler;
 pub mod fingerprint;
 pub mod firmware;
 pub mod flags;
-pub mod forkcheck;
 pub mod hostws;
 pub mod icmp;
 pub mod identity;
