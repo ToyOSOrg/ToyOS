@@ -33,10 +33,13 @@
 //! never a repurposed cfg gate; prefer ToyOS-specific files (`sys/pal/toyos/`,
 //! `os/toyos/`, anything with `toyos` in the path); a cross-platform file is
 //! touched only to add a target arm at an existing platform-dispatch site, never
-//! to change cross-platform semantics or API shape; `library/alloc` and
-//! `library/core` have **zero** delta. Cherry-picking an already-merged upstream
-//! commit is allowed. Copying an unmerged PR is not — the delta must stay
-//! exactly the content of a future upstream PR.
+//! to change cross-platform semantics or API shape, except `src/bootstrap`, which
+//! takes a general bootstrap capability written to upstream quality; a
+//! `change_tracker` entry is carried only with the upstream pull request number
+//! it records, and until one exists the change is recorded in `issues/`;
+//! `library/alloc` and `library/core` have **zero** delta. Cherry-picking an already-merged upstream commit is allowed. Copying
+//! an unmerged PR is not — the delta must stay exactly the content of a future
+//! upstream PR.
 //!
 //! **Coverage, and this is the one that bites:** the fork sources live *outside*
 //! this repository, so a repository-wide search or gate does not reach them. An
@@ -767,11 +770,7 @@ mod tests {
     fn remote(case: &Path, branch: &str) -> (PathBuf, String) {
         let dir = case.join("widget");
         sh(case, &["init", "-q", "-b", branch, "widget"]);
-        sh(&dir, &["config", "user.email", "t@t"]);
-        sh(&dir, &["config", "user.name", "t"]);
-        // The host's global config signs every commit, and a test that waited
-        // on gpg would be a test that hangs.
-        sh(&dir, &["config", "commit.gpgsign", "false"]);
+        crate::pr::tests::configure(&dir);
         let head = commit(&dir, "one");
         (dir, head)
     }
@@ -954,9 +953,7 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let rust = root.join("rust");
         sh(&rust, &["init", "-q"]);
-        sh(&rust, &["config", "user.email", "t@t"]);
-        sh(&rust, &["config", "user.name", "t"]);
-        sh(&rust, &["config", "commit.gpgsign", "false"]);
+        crate::pr::tests::configure(&rust);
         fs::write(
             rust.join(".gitmodules"),
             format!(

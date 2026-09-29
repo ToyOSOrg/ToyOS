@@ -191,9 +191,7 @@ fn signed_header(bs: &BootServices, which: Which, slot: &Slot) -> Result<(Header
 
 /// The version the image the record says the last boot proved carries, read
 /// out of its slot's signed header, verified in this pass; or why no version
-/// is: **the record is on a partition the running system writes**, so its
-/// word is only which slot to read and the digest that slot's header must
-/// hash to.
+/// is.
 pub fn proven(handle: Handle, system_table: &SystemTable<Boot>, booted: &Booted) -> Result<u64, String> {
     let bs = system_table.boot_services();
     let letter = booted.slot.letter();
