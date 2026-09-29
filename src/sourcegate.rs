@@ -726,7 +726,7 @@ const CI_PACKAGES: &[Package] = &[
     Package {
         name: "cmake",
         why: "CMake, which rustc's bootstrap configures LLVM and clang with — a declared host \
-              tool (`ALSO_USED` in src/main.rs, issues/build/python-and-cc-are-declared.md), \
+              tool (`REQUIRED` in src/main.rs, issues/build/python-and-cc-are-declared.md), \
               unpinned where a portability job installs its platform's own",
     },
     Package {

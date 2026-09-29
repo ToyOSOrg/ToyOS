@@ -56,6 +56,9 @@ const RECIPE: &str = "bootstrap build of src/llvm-project/llvm and src/llvm-proj
 ///   compilers it finds, the configuration names by path.
 /// - `TMPDIR` is where those tools write what they discard; the sandbox a build
 ///   runs in may allow no other place.
+///
+/// Everything else is dropped on purpose, the proxy, CA-bundle and Nix
+/// variables a fetch may need among them: such a host's fetch fails loudly.
 const ENVIRONMENT: [&str; 2] = ["PATH", "TMPDIR"];
 
 /// Every host library the pinned LLVM and clang look for, and link when they
@@ -150,21 +153,24 @@ struct HostTools {
 
 fn host_tools() -> &'static HostTools {
     static TOOLS: OnceLock<HostTools> = OnceLock::new();
-    TOOLS.get_or_init(|| {
-        let [cc, cxx, cmake] = ["cc", "c++", "cmake"].map(on_path);
-        let mut identity = String::new();
-        for tool in [&cc, &cxx, &cmake] {
-            let mut version = Command::new(tool);
-            identity += &format!("{}\n{}", tool.display(), asked(version.arg("--version")));
+    TOOLS.get_or_init(|| tools_with(Path::new("xcrun")))
+}
+
+/// [`host_tools`], asking `xcrun` for the SDK, so a test can stand in for it.
+fn tools_with(xcrun: &Path) -> HostTools {
+    let [cc, cxx, cmake] = ["cc", "c++", "cmake"].map(on_path);
+    let mut identity = String::new();
+    for tool in [&cc, &cxx, &cmake] {
+        let mut version = Command::new(tool);
+        identity += &format!("{}\n{}", tool.display(), asked(version.arg("--version")));
+    }
+    if host_triple().ends_with("apple-darwin") {
+        for question in ["--show-sdk-path", "--show-sdk-version"] {
+            let mut sdk = Command::new(xcrun);
+            identity += &asked(sdk.arg(question));
         }
-        if host_triple().ends_with("apple-darwin") {
-            for question in ["--show-sdk-path", "--show-sdk-version"] {
-                let mut sdk = Command::new("xcrun");
-                identity += &asked(sdk.arg(question));
-            }
-        }
-        HostTools { cc, cxx, identity }
-    })
+    }
+    HostTools { cc, cxx, identity }
 }
 
 /// Everything `command` prints, run with the environment [`clear`]ed; a
@@ -606,6 +612,29 @@ mod tests {
         assert!(config.contains(&named), "{config}");
     }
 
+    /// **Two SDK versions are two LLVMs**, though both answer one SDK path, as
+    /// the unversioned `MacOSX.sdk` a Command Line Tools update moves does.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn two_sdk_versions_are_two_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("llvm-sdk");
+        let (_primary, _rust_dir, [same, _a, _b]) = estate(&scratch);
+        let fork = same.join("rust");
+        let [older, newer] = ["26.0", "27.0"].map(|version| {
+            let xcrun = scratch.join(format!("xcrun-{version}"));
+            let answers = format!(
+                "#!/bin/sh\ncase \"$1\" in\n--show-sdk-path) echo /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk ;;\n\
+                 --show-sdk-version) echo {version} ;;\n*) exit 1 ;;\nesac\n"
+            );
+            write(&xcrun, &answers);
+            fs::set_permissions(&xcrun, fs::Permissions::from_mode(0o755)).unwrap();
+            let tools = tools_with(&xcrun);
+            key_of(&fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), &tools), &tools.identity)
+        });
+        assert_ne!(older, newer, "two SDK versions at one SDK path named one LLVM");
+    }
+
     /// **Every host library LLVM looks for is turned off by name**, in the
     /// `build-config` bootstrap passes to CMake after its own options.
     #[test]
@@ -661,7 +690,8 @@ mod tests {
     /// **The caller's environment reaches neither the LLVM build nor its key**:
     /// a process holding every [`AMBIENT`] name keys the LLVM as this one does,
     /// and the bootstrap it runs, a script that writes down its environment,
-    /// sees nothing but [`ENVIRONMENT`] and what a shell sets itself.
+    /// sees nothing but `PATH`, `TMPDIR` and what a shell sets itself, named
+    /// here and not read from [`ENVIRONMENT`].
     #[test]
     fn the_caller_s_environment_reaches_neither_the_build_nor_the_key() {
         use std::os::unix::fs::PermissionsExt;
@@ -677,9 +707,9 @@ mod tests {
         let built = fork.join("build/toyos-llvm");
         assert_eq!(fs::read_to_string(built.join("key")).unwrap(), key(&fork), "the caller's environment moved the key");
         let seen = fs::read_to_string(built.join("environment")).unwrap();
-        let shell = ["BOOTSTRAP_SKIP_TARGET_SANITY", "PWD", "OLDPWD", "SHLVL", "_"];
+        let allowed = ["PATH", "TMPDIR", "BOOTSTRAP_SKIP_TARGET_SANITY", "PWD", "OLDPWD", "SHLVL", "_"];
         for name in seen.lines().filter_map(|l| l.split_once('=')).map(|(name, _)| name) {
-            assert!(ENVIRONMENT.contains(&name) || shell.contains(&name), "the build saw {name}: {seen}");
+            assert!(allowed.contains(&name), "the build saw {name}: {seen}");
         }
         assert!(seen.lines().any(|l| l.starts_with("PATH=")), "the build saw no PATH: {seen}");
     }
@@ -855,6 +885,28 @@ mod tests {
         keystore::record(&b, Keyed::Llvm, &key(&fork));
         assert_eq!(swept(&primary), [first], "the sweep kept an LLVM nobody names, or took a named one");
         assert!(second.dir.is_dir());
+    }
+
+    /// **A sweep stopped halfway leaves no LLVM that passes for whole**: the
+    /// entry is renamed away from its key before anything in it is removed, and
+    /// the next sweep takes what the stopped one left.
+    #[test]
+    fn a_stopped_sweep_leaves_no_llvm_that_passes_for_whole() {
+        let scratch = Scratch::new("llvm-sweep-stopped");
+        let (primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
+        let dir = choose(&a, &rust_dir, &a.join("rust"), fake_build).dir;
+        keystore::forget(&a, Keyed::Llvm);
+        let halfway = |path: &Path| {
+            keystore::writable(path);
+            fs::remove_file(path.join("lib/libLLVMCore.a")).unwrap();
+            panic!("stopped");
+        };
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            keystore::sweep_by(&primary, Keyed::Llvm, &store(&rust_dir), halfway)
+        }));
+        assert!(stopped.is_err(), "the stand-in removal was never asked");
+        assert!(defect(&dir).is_some(), "a stopped sweep left {} passing for whole", dir.display());
+        assert_eq!(keystore::sweep(&primary, Keyed::Llvm, &store(&rust_dir)), [dir.with_extension("swept")]);
     }
 
     /// **An LLVM a worktree resolved stays once nothing uses it**: its record,

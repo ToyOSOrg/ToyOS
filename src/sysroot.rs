@@ -390,14 +390,7 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
     crate::ensure_submodule(fork, "library/backtrace");
     let host = host_triple();
     let build_dir = fork.join("build/toyos-std");
-    fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
-    forget_another_compiler(&build_dir, &host, &compiler.identity());
-    crate::llvm::retire_in_tree(&build_dir);
-    // Bootstrap reuses what it built before and does not see a path dependency
-    // outside the fork move, so each target's std starts from nothing.
-    for target in GUEST_TARGETS {
-        remove(&build_dir.join(&host).join("stage0-std").join(target));
-    }
+    prepare_std_build(&build_dir, &host, &compiler.identity());
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, std_config(&compiler.stage2, &bootstrap_cargo(), &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
@@ -412,6 +405,20 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
         toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std").join(arch.userland()));
     }
     build_dir.join(&host).join("stage0-std")
+}
+
+/// Ready the std build directory `build_dir` for a build by the compiler
+/// `identity` names: nothing another compiler built, no LLVM, and no guest
+/// target's std.
+fn prepare_std_build(build_dir: &Path, host: &str, identity: &str) {
+    fs::create_dir_all(build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
+    forget_another_compiler(build_dir, host, identity);
+    crate::llvm::retire_in_tree(build_dir);
+    // Bootstrap reuses what it built before and does not see a path dependency
+    // outside the fork move, so each target's std starts from nothing.
+    for target in GUEST_TARGETS {
+        remove(&build_dir.join(host).join("stage0-std").join(target));
+    }
 }
 
 /// Empty the std build directory `build_dir` of all but what bootstrap
@@ -781,6 +788,33 @@ mod tests {
             assert!(!file.exists(), "{} was kept for another compiler", file.display());
         }
         assert!(downloaded.iter().all(|f| f.is_file()), "a download went");
+    }
+
+    /// **A std build directory keeps no LLVM, even under the compiler that
+    /// built the rest**: bootstrap's and `download-ci-llvm`'s go with their
+    /// download, and what that compiler built and the other downloads stay.
+    #[test]
+    fn a_std_build_under_the_same_compiler_keeps_no_llvm() {
+        let base = TempDir::new("std-llvm");
+        let (_root, rust_dir, _fork) = keyed(&base);
+        let build = base.join("toyos-std");
+        let host = host_triple();
+        let identity = Compiler::primary(&rust_dir).identity();
+        prepare_std_build(&build, &host, &identity);
+        let llvm = [
+            build.join(&host).join("ci-llvm/lib/libLLVM.dylib"),
+            build.join(&host).join("llvm/bin/llvm-config"),
+            build.join("cache/llvm-ad3d0bc-false/rust-dev.tar.xz"),
+        ];
+        let kept = [build.join("bootstrap/debug/deps/libserde-1.rlib"), build.join("cache/2026-07-13/rustc.tar.xz")];
+        for file in llvm.iter().chain(&kept) {
+            write(file, "built");
+        }
+        prepare_std_build(&build, &host, &identity);
+        for file in &llvm {
+            assert!(!file.exists(), "{} outlived a std build's preparation", file.display());
+        }
+        assert!(kept.iter().all(|f| f.is_file()), "the same compiler's build went");
     }
 
     /// **A std build fetches no LLVM**: it builds none, and the `compiler`

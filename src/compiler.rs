@@ -9,9 +9,10 @@
 //! built by bootstrap in its own fork checkout, under that checkout's
 //! `build/toyos-compiler/`, and placed at `rust/build/compilers/<key>/`, where
 //! the key ([`key`]) is the identity (`src/identity.rs`) of the checkout's
-//! `compiler/`, `src/bootstrap/`, `src/tools/`, `src/stage0` and `Cargo.lock`,
-//! the key of the LLVM it links, and [`RECIPE`]. Nothing writes that directory after its [`SOURCE`] file exists,
-//! and two worktrees naming the same compiler share one copy.
+//! `compiler/`, `src/tools/`, `src/stage0` and `Cargo.lock`, the key of the
+//! LLVM it links, which names `src/bootstrap`, and [`RECIPE`]. Nothing writes
+//! that directory after its [`SOURCE`] file exists, and two worktrees naming
+//! the same compiler share one copy.
 //!
 //! **LLVM is the host's, built from `src/llvm-project`** (`src/llvm.rs`), and
 //! linked through its `llvm-config`. [`source`] names that LLVM's key, so
@@ -55,7 +56,7 @@ use crate::toolchain::{self, host_triple};
 const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM; 5";
 
 /// What a compiler's key is the identity of, in its fork checkout.
-const KEYED: [&str; 5] = ["compiler", "src/bootstrap", "src/tools", "src/stage0", "Cargo.lock"];
+const KEYED: [&str; 4] = ["compiler", "src/tools", "src/stage0", "Cargo.lock"];
 
 /// The submodule a compiler is built against by commit: its LLVM, which
 /// bootstrap builds from that commit, so its content is never read.
@@ -125,7 +126,12 @@ pub fn compilers_dir(rust_dir: &Path) -> PathBuf {
 
 /// [`compiler_source`] and the key of the LLVM it links.
 pub fn source(checkout: &Path) -> String {
-    format!("{} llvm {}", compiler_source(checkout), crate::llvm::key(checkout))
+    source_with(checkout, &crate::llvm::key(checkout))
+}
+
+/// [`source`], with the key of the LLVM `checkout` names.
+fn source_with(checkout: &Path, llvm: &str) -> String {
+    format!("{} llvm {llvm}", compiler_source(checkout))
 }
 
 /// What `checkout`'s `compiler/` is: its commit's tree, and whatever the working
@@ -174,25 +180,29 @@ pub fn forget(rust_dir: &Path) {
 ///
 /// **The source's content, never its files' times**: a checkout that rewrites a
 /// file with the bytes it had is no new compiler.
-fn primary_is(rust_dir: &Path, checkout: &Path) -> Result<bool, std::io::Error> {
-    let names = source(checkout);
+fn primary_is(rust_dir: &Path, checkout: &Path, llvm: &str) -> Result<bool, std::io::Error> {
+    let names = source_with(checkout, llvm);
     Ok(fs::read_to_string(primary_record(rust_dir))?.trim() == names)
 }
 
 /// Whether the primary's `stage2` is built from what its own `rust/compiler/`
 /// holds: false until a bootstrap has finished and [`record`]ed it.
 pub fn primary_is_current(rust_dir: &Path) -> bool {
-    match primary_is(rust_dir, rust_dir) {
+    match primary_is(rust_dir, rust_dir, &crate::llvm::key(rust_dir)) {
         Ok(current) => current,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => panic!("read {}: {e}", primary_record(rust_dir).display()),
     }
 }
 
-/// The key of the compiler `fork`'s sources name: their content, so committing
-/// what was built as local changes names the same compiler.
+/// The key of the compiler `fork`'s sources name: their content.
 pub fn key(fork: &Path) -> String {
-    let parts = [RECIPE.to_string(), tree_identity(fork, &KEYED), crate::llvm::key(fork)];
+    key_with(fork, &crate::llvm::key(fork))
+}
+
+/// [`key`], with the key of the LLVM `fork` names.
+fn key_with(fork: &Path, llvm: &str) -> String {
+    let parts = [RECIPE, &tree_identity(fork, &KEYED), llvm];
     short(parts.join("\n\0\n").as_bytes())
 }
 
@@ -247,7 +257,8 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     if fork == rust_dir {
         return Compiler::primary(rust_dir);
     }
-    let names_primary = primary_is(rust_dir, fork).unwrap_or_else(|e| {
+    let llvm = crate::llvm::key(fork);
+    let names_primary = primary_is(rust_dir, fork, &llvm).unwrap_or_else(|e| {
         panic!(
             "{} cannot be read ({e}), so nothing says which compiler the primary's stage2 is, \
              and no worktree can know whether it names that one.\n\
@@ -267,9 +278,9 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
         }
         return Compiler::primary(rust_dir);
     }
-    let key = key(fork);
+    let key = key_with(fork, &llvm);
     let dir = compilers_dir(rust_dir).join(&key);
-    keystore::record(root, Keyed::Llvm, &crate::llvm::key(fork));
+    keystore::record(root, Keyed::Llvm, &llvm);
     let using = keystore::made(
         root,
         Keyed::Compiler,

@@ -30,11 +30,16 @@ fn record_path(root: &Path, kind: Keyed) -> PathBuf {
 /// Record that `root` uses `kind`'s `key`: whole or not at all, so a sweep
 /// never reads a record half-written.
 pub fn record(root: &Path, kind: Keyed, key: &str) {
+    record_by(root, kind, key, |path, key| fs::write(path, key).unwrap_or_else(|e| panic!("write {}: {e}", path.display())));
+}
+
+/// [`record`], writing with `write`, so a test can stop it.
+fn record_by(root: &Path, kind: Keyed, key: &str, write: impl FnOnce(&Path, &str)) {
     let path = record_path(root, kind);
     let dir = path.parent().expect("a file under target/");
     fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
     let written = path.with_extension("new");
-    fs::write(&written, key).unwrap_or_else(|e| panic!("write {}: {e}", written.display()));
+    write(&written, key);
     fs::rename(&written, &path).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", written.display(), path.display()));
 }
 
@@ -87,6 +92,11 @@ pub fn recorded(root: &Path, kind: Keyed) -> Option<String> {
 /// and nobody is making or using, and every half-made or half-removed one
 /// nobody is making. Returns what went.
 pub fn sweep(root: &Path, kind: Keyed, store: &Path) -> Vec<PathBuf> {
+    sweep_by(root, kind, store, remove)
+}
+
+/// [`sweep`], removing with `remove`, so a test can stop it.
+pub(crate) fn sweep_by(root: &Path, kind: Keyed, store: &Path, remove: impl Fn(&Path) + Copy) -> Vec<PathBuf> {
     let entries = match fs::read_dir(store) {
         Ok(entries) => entries,
         Err(e) if e.kind() == ErrorKind::NotFound => return Vec::new(),
@@ -119,7 +129,7 @@ pub fn sweep(root: &Path, kind: Keyed, store: &Path) -> Vec<PathBuf> {
         for name in names {
             let path = store.join(&name);
             if name == key {
-                retire(&path);
+                retire_by(&path, remove);
             } else {
                 remove(&path);
             }
@@ -217,6 +227,24 @@ mod tests {
         let unreadable = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep(&root, Keyed::Sysroot, &dir)));
         assert!(unreadable.is_err(), "an unreadable record was read as naming nothing");
         assert!(dir.join("linked-named").is_dir(), "an unreadable record's key was swept");
+    }
+
+    /// **A record stopped mid-write leaves the one before it readable**: the
+    /// new key is written beside it and renamed over it whole.
+    #[test]
+    fn a_stopped_record_leaves_the_one_before_it() {
+        let root = TempDir::new("record");
+        record(&root, Keyed::Llvm, "0123456789abcdef");
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            record_by(&root, Keyed::Llvm, "fedcba9876543210", |path, key| {
+                fs::write(path, &key[..8]).unwrap();
+                panic!("stopped");
+            })
+        }));
+        assert!(stopped.is_err(), "the stand-in write was never asked");
+        assert_eq!(recorded(&root, Keyed::Llvm).as_deref(), Some("0123456789abcdef"), "a record stopped mid-write was read");
+        record(&root, Keyed::Llvm, "fedcba9876543210");
+        assert_eq!(recorded(&root, Keyed::Llvm).as_deref(), Some("fedcba9876543210"));
     }
 
     /// **A retire stopped halfway leaves nothing at the name it removes**: what
