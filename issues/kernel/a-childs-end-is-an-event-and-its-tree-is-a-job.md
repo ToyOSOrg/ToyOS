@@ -8,9 +8,10 @@ opened: 2026-09-29
 
 libc cannot start a child: `fork` and `execvp` answer `ENOSYS`, `waitpid`
 `ECHILD` and `system` `-1` (`userland/libc/src/misc.rs`,
-`userland/libc/src/stdio.rs`), and there is no `posix_spawn`. M2 and M4 of `issues/build/toyos-builds-itself.md` and the
-exit of `issues/kernel/toyos-runs-on-arm64.md` need it: a compiler driver runs
-its linker, cargo runs rustc, CMake and Ninja run compilers. **Nothing here is
+`userland/libc/src/stdio.rs`), and there is no `posix_spawn`. M2 and M4 of
+`issues/build/toyos-builds-itself.md` and the exit of
+`issues/kernel/toyos-runs-on-arm64.md` need it: a compiler driver runs its
+linker, cargo runs rustc, CMake and Ninja run compilers. **Nothing here is
 built before the owner answers the questions below.**
 
 What stays: a spawn answers a `Process` handle and is the child's whole
