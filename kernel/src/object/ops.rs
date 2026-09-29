@@ -112,7 +112,7 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         }
 
         let built = if truncate && create {
-            let mtime = crate::clock::nanos_since_boot();
+            let mtime = crate::clock::mtime_now();
             // `NotFound` is not a failure: truncating past a name that was not there is fine.
             // Any `vfs.delete` error other than `NotFound` is propagated, not swallowed: truncating past it could silently create a file over one the mount could not confirm was missing.
             match vfs.delete(target.as_str()) {
@@ -130,7 +130,7 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                     (file_id, mtime, position)
                 }),
                 Err(SyscallError::NotFound) if create => {
-                    let mtime = crate::clock::nanos_since_boot();
+                    let mtime = crate::clock::mtime_now();
                     vfs.create_file(target.as_str(), mtime).map(|file_id| (file_id, mtime, 0))
                 }
                 Err(e) => Err(e),
@@ -533,7 +533,7 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
                 return Some(SyscallError::Io.to_u64());
             }
             state.position += written;
-            state.mtime = crate::clock::nanos_since_boot();
+            state.mtime = crate::clock::mtime_now();
             file_cache::touch(state.file_id, state.mtime);
             Some(written as u64)
         }),
@@ -776,7 +776,7 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
     file.with(|state| {
         file_cache::set_size(state.file_id, size);
-        state.mtime = crate::clock::nanos_since_boot();
+        state.mtime = crate::clock::mtime_now();
         file_cache::touch(state.file_id, state.mtime);
         0
     })

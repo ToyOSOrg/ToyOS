@@ -25,3 +25,6 @@ MAC a different address under ToyOS reds the arm for a fact about the router
 rather than about the boot — a red naming the wrong thing, not a false green.
 Closed by a lancase run whose lease record and whose `ping_addr` are compared,
 which is the first thing that run prints.
+
+The router-lease measurement falsifies this premise:
+`issues/hardware/the-benchs-router-leases-toyos-another-address-than-ubuntu.md`.

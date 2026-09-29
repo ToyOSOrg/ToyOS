@@ -20,6 +20,7 @@ use std::process::Command;
 use toyos_build::bootlog;
 use toyos_build::metalimage;
 use toyos_build::metalprofile::{job_ms_row, Profile, AROUND_THE_LIST_MS};
+use toyos_build::testargs::MetalMode;
 
 use super::serial::Serial;
 
@@ -529,18 +530,6 @@ impl Readback {
     }
 }
 
-/// What a `--metal` invocation was asked to do with the machine.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode {
-    /// Build every image, hand each to `toyos-metal`, judge what came back.
-    Drive,
-    /// Do not touch the machine. Judge the readbacks in the directory if it
-    /// holds one for every boot; otherwise build the images into it and write
-    /// down what to run. **The completeness of the directory decides**, so a
-    /// half-answered run stages the rest instead of reporting on the half.
-    Offline,
-}
-
 /// One image, and every test that rides it.
 struct Batch {
     config: &'static str,
@@ -816,8 +805,6 @@ fn fingerprint(text: &str) -> u64 {
     h.finish()
 }
 
-/// The invocation that turns one image into one readback. Written down in the
-/// staged request and run by [`Mode::Drive`], so the two cannot differ.
 /// Where a talking boot's key lives, beside its image.
 fn talk_home(home: &Path) -> PathBuf {
     home.join("ssh")
@@ -906,7 +893,8 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
 /// What a metal run established.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
-    /// Every selected test passed on the machine.
+    /// Every selected test passed on the machine, or — for [`MetalMode::List`]
+    /// — the selection batched cleanly and nothing was touched.
     Green,
     /// One did not. **A red on the T14 is a red.**
     Red,
@@ -921,8 +909,7 @@ pub enum Verdict {
 // once; a struct holding them would be a second name for the command line.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    mode: Mode,
-    dir: &Path,
+    mode: MetalMode,
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
     rust_bins: &[(String, Vec<u8>)],
@@ -983,12 +970,24 @@ pub fn run(
         return Verdict::Red;
     }
 
+    let (dir, offline): (PathBuf, bool) = match &mode {
+        MetalMode::List => {
+            for (label, batch) in &batches {
+                println!("{label}: {} job(s) — {:?}", batch.jobs.len(), batch.jobs);
+            }
+            return Verdict::Green;
+        }
+        MetalMode::Offline(dir) => (dir.clone(), true),
+        MetalMode::Drive => (root.join("target/metal"), false),
+    };
+    let dir = dir.as_path();
+
     // A directory holding a readback for every boot is a run the machine has
     // already answered, and the only thing left is the judging.
     let answered = batches.keys().all(|label| {
         at(dir, label).join(toyos_build::metal::READBACK_KERNEL).is_file()
     });
-    let judging = mode == Mode::Offline && answered;
+    let judging = offline && answered;
 
     let mut images: BTreeMap<&str, PathBuf> = BTreeMap::new();
     if !judging {
@@ -1016,7 +1015,7 @@ pub fn run(
         }
     }
 
-    if mode == Mode::Offline && !judging {
+    if offline && !judging {
         let mut request = String::from(
             "# One boot per image. Each invocation is `cargo <words>` from this worktree.\n",
         );
@@ -1055,7 +1054,7 @@ pub fn run(
     // and a boot it refused wrote no readback of its own — so a directory still
     // holding files after one is holding somebody else's boot.
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
-    if mode == Mode::Drive {
+    if !offline {
         for (label, image) in &images {
             let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
             // A swapping boot's second invocation is started first: it dials

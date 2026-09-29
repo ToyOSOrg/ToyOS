@@ -18,7 +18,7 @@ fn fail(path: &str, step: &str) {
 }
 
 fn probe(path: &str) {
-    let mtime = crate::clock::nanos_since_boot();
+    let mtime = crate::clock::mtime_now();
     let id = match vfs::lock().create_file(path, mtime) {
         Ok(id) => id,
         Err(e) => return fail(path, &alloc::format!("create: {e:?}")),

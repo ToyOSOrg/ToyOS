@@ -149,15 +149,31 @@ pub fn init_wall(century_reg: Option<u8>) {
         }
     };
 
-    BOOT_SECS.store(civil.to_unix_secs().saturating_sub(nanos_since_boot() / 1_000_000_000), Relaxed);
+    BOOT_SECS.store(civil.to_unix_secs().saturating_sub(nanos_since_boot() / NANOS_PER_SEC), Relaxed);
     WALL_KNOWN.store(true, Release);
     log!("clock: the RTC reads {civil} UTC");
 }
 
-/// Unix seconds, now. `None` if the RTC never answered.
+/// Unix seconds, now — what `SYS_CLOCK_EPOCH` serves: the whole seconds of
+/// [`utc_nanos`]. `None` if the RTC never answered.
 pub fn utc_secs() -> Option<u64> {
+    utc_nanos().map(|nanos| nanos / NANOS_PER_SEC)
+}
+
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// Nanoseconds since the Unix epoch, UTC: the RTC's whole-second reading carried
+/// on by the counter, so its resolution is the counter's and its accuracy the
+/// RTC's second.
+pub fn utc_nanos() -> Option<u64> {
     WALL_KNOWN
         .load(Acquire)
-        .then(|| BOOT_SECS.load(Relaxed) + nanos_since_boot() / 1_000_000_000)
+        .then(|| BOOT_SECS.load(Relaxed).saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot()))
+}
+
+/// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
+/// [`utc_nanos`], and 0 — undated — on a machine whose RTC never answered.
+pub fn mtime_now() -> u64 {
+    utc_nanos().unwrap_or(0)
 }
 

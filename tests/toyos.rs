@@ -445,6 +445,8 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
+    // Its shared run judges `/tmp`'s and `/log`'s stamps; its other modes are machine tests'.
+    "file_mtime",
     "hierarchy_paths",
     "nvme_home_roundtrip",
     "sched_stress",
@@ -1226,6 +1228,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_no_century", Sched::Parallel, Tier::Weekly),
     ("wall_clock_century_register", Sched::Parallel, Tier::Weekly),
     ("wall_clock_utc", Sched::Parallel, Tier::Weekly),
+    ("file_mtime_survives_a_reboot", Sched::Parallel, Tier::Nightly),
+    ("file_mtime_undated", Sched::Parallel, Tier::Nightly),
     // `xhci_slow_connect`'s shape against the disk's port, but its actuator
     // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
     // so what it stages is an ordering with no wall-clock margin on either
@@ -1458,6 +1462,8 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("wall_clock_no_century", &["test_rs_wall_clock_now"]),
     ("wall_clock_century_register", &["test_rs_wall_clock_now"]),
     ("wall_clock_utc", &["test_rs_wall_clock_now"]),
+    ("file_mtime_survives_a_reboot", &["test_rs_file_mtime"]),
+    ("file_mtime_undated", &["test_rs_file_mtime"]),
     ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
@@ -9999,6 +10005,10 @@ fn run_machine_test(
             common::wallclock::century_from_the_register(test_config, c_bins, rust_bins)
         }
         "wall_clock_utc" => common::wallclock::rtc_is_utc(test_config, c_bins, rust_bins),
+        "file_mtime_survives_a_reboot" => {
+            common::wallclock::file_mtime_survives_a_reboot(test_config, c_bins, rust_bins)
+        }
+        "file_mtime_undated" => common::wallclock::file_mtime_undated(test_config, c_bins, rust_bins),
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
         "root_candidate_malformed" => {
             common::volumes::root_candidate_malformed(test_config, c_bins, rust_bins)
@@ -16758,13 +16768,14 @@ fn main() {
     // First, before any lock and before anything is compiled: a flag this suite
     // does not have would otherwise cost nothing and hand its value to the
     // filter below.
-    let filter = match toyos_build::testargs::parse(&args) {
-        Ok(filter) => filter,
+    let parsed = match toyos_build::testargs::parse(&args) {
+        Ok(parsed) => parsed,
         Err(refusal) => {
             eprintln!("[toyos] {refusal}");
             std::process::exit(1);
         }
     };
+    let filter = parsed.filter;
     // The one selection every entry point below takes, the metal's included: a
     // disabled test runs nowhere, and every run names each one with its issue.
     for row in redlist::DISABLED {
@@ -16780,10 +16791,6 @@ fn main() {
     // var is invisible in the command line and easy to leave set, and the whole
     // point of the split is that a run says what it ran.
     let reach = Reach::of(&args);
-    // The metal profile, and where its images and readbacks live. Naming the
-    // directory means the machine is not touched — see `common::metal::Mode`.
-    let metal_mode = SUITE.present(&args, &testargs::METAL);
-    let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
     let nocapture =
         SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
@@ -16829,10 +16836,7 @@ fn main() {
     // guest, so none of the C compile, the HTTPS judge's hosts or the tier
     // arithmetic below is any of its business; running it here is what keeps a
     // `--metal` invocation costing a kernel and a userland and nothing else.
-    if metal_mode {
-        let dir = metal_readback
-            .map_or_else(|| compile::repo_root().join("target/metal"), std::path::PathBuf::from);
-        let mode = if metal_readback.is_some() { metal::Mode::Offline } else { metal::Mode::Drive };
+    if let Some(mode) = parsed.metal {
         let rust_tests_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
         eprintln!("[toyos] Building Rust tests...");
@@ -16863,23 +16867,15 @@ fn main() {
                  members are not filtered by name"
             );
         }
+        let mut boots = shared_metal(&rust_bins, keep);
+        boots.push(c_corpus_metal(&c_bins, keep));
+
         // Three statuses for the three things this can establish, as the
         // ordinary suite has: green, red, and "measured nothing" — a run that
         // staged images and never reached the machine has no claim to make.
         run.exit(
-            match metal::run(
-                mode,
-                &dir,
-                &selected,
-&{
-                    let mut boots = shared_metal(&rust_bins, keep);
-                    boots.push(c_corpus_metal(&c_bins, keep));
-                    boots
-                },
-                &rust_bins,
-                RUST_SKIP,
-                !nocapture && !debug_mode,
-            ) {
+            match metal::run(mode, &selected, &boots, &rust_bins, RUST_SKIP, !nocapture && !debug_mode)
+            {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,
                 metal::Verdict::Staged => 2,
@@ -16934,12 +16930,8 @@ fn main() {
     check_metal_only_unshared(&rust_bins, &c_bins);
     check_shard_partition(&all_tests);
 
-    // The tier filter, and it is not conditional on the name filter: a rule with
-    // an exception for filtered runs is two rules, and the second one is the one
-    // nobody remembers. `cargo test -- screen_diag_boot` refuses below and
-    // says what to type instead, which is the same information a silent skip
-    // would have withheld.
-    let in_tier = |tier: Tier| tier.selected(reach, shard.is_some());
+    // A name filter reaches every tier; a shard still excludes `Tier::Local`.
+    let in_tier = |tier: Tier| tier.selected(reach.for_filter(filter.is_some()), shard.is_some());
     let tests_to_run: Vec<&TestDef> = all_tests
         .iter()
         .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
@@ -16978,7 +16970,6 @@ fn main() {
     }
     let held_back: Vec<(Tier, Vec<String>)> =
         [Tier::Nightly, Tier::Weekly].into_iter().map(|tier| (tier, held(tier))).collect();
-    let widest_held = held_back.iter().rev().find(|(_, names)| !names.is_empty()).map(|(tier, _)| *tier);
     for (tier, names) in held_back.iter().filter(|(_, names)| !names.is_empty()) {
         let flag = tier.flag().expect("a held tier is a reach's");
         eprintln!(
@@ -16994,13 +16985,7 @@ fn main() {
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
-        match widest_held.and_then(Tier::flag) {
-            Some(flag) => eprintln!(
-                "[toyos] filter {filter:?} matches only tests a wider reach runs. Add {flag} to \
-                 run them."
-            ),
-            None => eprintln!("No enabled test matches filter {filter:?}"),
-        }
+        eprintln!("No enabled test matches filter {filter:?}");
         run.exit(1);
     }
 

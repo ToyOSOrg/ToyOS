@@ -8,9 +8,21 @@ opened: 2026-09-03
 
 `kernel/src/elf/cache.rs` now refuses a path whose file changed and a load past
 its byte budget, which closed the record that tracked the cache's lack of both.
-Two things that record carried are not covered by either refusal, and they
+Three things that record carried are not covered by either refusal, and they
 went out of the tracker with it. They are one file because they are one
 residual: what the refusals do **not** reach.
+
+## The identity cannot see a same-size rewrite on an undated machine
+
+`vfs::BackingId` is size plus the mount's mtime, and `/tmp` is the one writable
+mount a kernel `dlopen` reaches. On a machine whose RTC never answered every
+write stamps 0 (`kernel/src/clock.rs`'s `mtime_now`), so there a same-size
+rewrite of a library on `/tmp` carries the identity it had.
+
+*Exit condition:* an identity that does not rest on a clock — a content hash, a
+per-file generation the mount bumps on every write, or a `FileId` plus a write
+counter — with a test that rewrites a library at the same size on the
+`rtc-dead` machine and loads the second image.
 
 ## The budget is a machine-wide, boot-permanent denial
 

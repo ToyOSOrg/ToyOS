@@ -1,0 +1,23 @@
+---
+status: open
+kind: defect
+opened: 2026-09-28
+---
+
+# std calls undated what it did not stat, and sets no mtime it is asked to
+
+`DirEntry::metadata` answers `mtime: 0` without asking, so
+`Metadata::modified` reports a file the kernel has a stamp for as undated: a
+program walking a tree through `read_dir` and comparing
+`entry.metadata()?.modified()?` fails on every entry. `fs::metadata` of a
+directory and `fs::symlink_metadata` of a symlink answer `mtime: 0` too
+(`stat`'s `is_dir` arm and `lstat`'s `readlink` arm), so `modified()` on either
+is `Err(Unsupported)`.
+
+And `File::set_times`, `fs::set_times` and `set_times_nofollow` return `Ok(())`
+having set nothing, so a tool that stamps an output (`touch`, a build system's
+restat) is told it did.
+
+**Exit condition.** `DirEntry::metadata`, a directory's `stat` and a link's
+`lstat` answer the mtime the kernel keeps for that name, and a time-setting
+call sets the stamp through the kernel or is refused as `Unsupported`.

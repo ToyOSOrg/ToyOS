@@ -15,8 +15,7 @@ write. The per-CPU idle stacks already have an unmapped page below them
 (`kernel/src/arch/x86_64/percpu.rs:482`). Linux at `Ubuntu-6.8.0-142.142`,
 under the T14's `CONFIG_VMAP_STACK=y`, maps every task stack in vmalloc space
 between guard pages (`kernel/fork.c:314-318`, `arch/Kconfig:1327-1336`), so
-the first write past the end faults. A row of the hardening table in
-`issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`.
+the first write past the end faults.
 
 **Exit**: every thread's kernel stack has an unmapped page below it; a
 `boot-actuators` arm that recurses a thread past its stack gets a double fault
