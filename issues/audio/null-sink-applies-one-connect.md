@@ -58,8 +58,3 @@ not fire; parked with an absurd one says the timeout was computed wrong; absent
 from every parked list says nothing ever held it, which would move this into
 #142's family rather than audio's. The report paints the panel, so the machine
 with no serial port answers on glass and a photograph is enough.
-
-Until that press happens, the three gates this task landed are what stands
-between the milestone and a silent recurrence: a client through the null sink
-must exit, a second must be taken up while the first streams, and the desktop
-must still answer afterwards.

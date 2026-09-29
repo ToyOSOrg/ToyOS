@@ -3,8 +3,8 @@
 //! The dev machine is a laptop and the owner closes the lid. A run that spans
 //! that is not a slow run, it is an **invalid measurement**: QEMU's virtual
 //! clock, the guest's own millisecond stamps and every device timing in it jump
-//! by however long the machine was away, and every wall-clock verdict in the
-//! serial tail and in gate A is taken against one of those. CLAUDE.md already
+//! by however long the machine was away, and every wall-clock ceiling in the
+//! suite is taken against one of those. CLAUDE.md already
 //! documents the signature — a tight cluster of durations plus a few enormous
 //! outliers — and documents it as something an agent must check *before*
 //! recording a finding, which is to say the harness has never been able to.

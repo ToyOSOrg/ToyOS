@@ -1675,12 +1675,11 @@ fn assert_entry_window_matches_features(features: &str, kernel: &[u8]) {
 /// bound and the container-versus-state-word agreement. The third is the
 /// pass-cost report (`cpu::PassCostReport::PREFIX`), which is a *measurement*
 /// and not an assert: a pass's elapsed time includes any interval a hypervisor
-/// took the CPU away, so it is recorded and gated in the harness rather than
-/// panicked over. Their format strings are the only part of the check build
-/// with a literal the linker keeps, which is what makes the artifact answerable
-/// at all — and the report's literal is kept out of the shipping kernel by
-/// nothing but dead-code elimination, which the `want == false` direction below
-/// is what checks.
+/// took the CPU away, so it is recorded rather than panicked over. Their format
+/// strings are the only part of the check build with a literal the linker keeps,
+/// which is what makes the artifact answerable at all — and the report's literal
+/// is kept out of the shipping kernel by nothing but dead-code elimination,
+/// which the `want == false` direction below is what checks.
 const SCHED_CHECK_LITERALS: [&str; 3] = [
     "sched-check pass-costs cpu=",
     "invariant T: cpu",
@@ -3108,7 +3107,6 @@ mod tests {
         "tests/blockdcase/system.toml",
         "tests/desktopcase/system.toml",
         "tests/desktopaudiocase/system.toml",
-        "tests/doomcase/system.toml",
         "tests/doommusiccase/system.toml",
         "tests/e1000case/system.toml",
         "tests/e1000leasecase/system.toml",

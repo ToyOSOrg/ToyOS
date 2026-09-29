@@ -649,9 +649,9 @@ fn the_audio_pipeline_holds_on_one_cpu() {
 /// Invariant I5 is *alive*, which is a separate claim from I5 being green.
 ///
 /// A fairness check whose contention windows never open reports "clean" on every
-/// scenario in the tree and certifies nothing — which is exactly the shape of
-/// gate A's four instrument defects, and exactly what would happen here if the
-/// window conditions (same runnable set, saturated machine, empty RT band) were
+/// scenario in the tree and certifies nothing — which is exactly what would
+/// happen here if the window conditions (same runnable set, saturated machine,
+/// empty RT band) were
 /// one degree stricter than the workload can satisfy. So the spread is required
 /// to be *non-zero*: some window has to have opened, stayed open long enough for
 /// a real separation to accumulate, and been measured.
@@ -911,9 +911,9 @@ fn a_pass_that_overruns_its_budget_is_recorded() {
 /// The invariant I9 that shipped alongside it could not see this, and the
 /// giveaway was that it needed no change: it compared a *running* task's
 /// `until` against the clock, and a re-armed `until` is by construction fresh.
-/// A check that passes because it stopped measuring is the same failure mode as
-/// gate A's four instrument defects, so I9 is now the cumulative form and this
-/// test is what says so. If it ever stops failing, the check has lost its teeth
+/// A check that passes because it stopped measuring certifies nothing, so I9 is
+/// now the cumulative form and this test is what says so. If it ever stops
+/// failing, the check has lost its teeth
 /// again and every clean I9 report above it means nothing.
 #[test]
 fn old_park_keeping_the_lend_is_caught() {

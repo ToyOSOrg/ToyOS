@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -10,10 +9,7 @@ use toyos::{namespace, port};
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("burn") => {
-            let ms: u64 = std::env::args().nth(2).unwrap().parse().unwrap();
-            child_burn(ms);
-        }
+        Some("burn") => child_burn(),
         Some("sched-info") => child_sched_info(),
         _ => run_tests(),
     }
@@ -26,15 +22,11 @@ fn run_tests() {
     println!("all sched_stress tests passed");
 }
 
-fn child_burn(ms: u64) {
-    let mut count = 0u64;
-    let start = std::time::Instant::now();
-    let dur = Duration::from_millis(ms);
-    while start.elapsed() < dur {
-        count += 1;
-        if count % 1000 == 0 { thread::yield_now(); }
+/// Burns until it is killed.
+fn child_burn() -> ! {
+    loop {
+        std::hint::spin_loop();
     }
-    println!("{count}");
 }
 
 fn child_sched_info() {
@@ -55,53 +47,34 @@ fn child_sched_info() {
 /// readiness signal keyed on "some acceptor" instead of on the object wakes
 /// every waiter in the system, which froze the compositor.
 fn test_acceptor_isolation_io_uring() {
-    let a_ready = Arc::new(AtomicBool::new(false));
-    let b_ready = Arc::new(AtomicBool::new(false));
-    let a_ready2 = Arc::clone(&a_ready);
-    let b_ready2 = Arc::clone(&b_ready);
-
     let (acc_a, con_a) = port::create().expect("port a");
     let (acc_b, _con_b) = port::create().expect("port b");
 
-    // Thread A: watch its acceptor, report whether the poll completed
-    let a = thread::spawn(move || -> bool {
+    // Port a's poll, waited on with no deadline: its connection is the event.
+    let a = thread::spawn(move || {
         let handle = acc_a.into_raw();
-        a_ready2.store(true, Ordering::Release);
         let poller = Poller::new(1);
         poller.watch_raw(handle, READABLE, 0);
-        let mut ready = false;
-        poller.wait(1, 500_000_000, |_| ready = true);
+        poller.wait(1, u64::MAX, |_| ());
         syscall::close(handle);
-        ready
     });
 
-    // Thread B: a different port, watched the same way
-    let b = thread::spawn(move || -> bool {
-        let handle = acc_b.into_raw();
-        b_ready2.store(true, Ordering::Release);
-        let poller = Poller::new(1);
-        poller.watch_raw(handle, READABLE, 0);
-        let mut ready = false;
-        poller.wait(1, 200_000_000, |_| ready = true);
-        syscall::close(handle);
-        ready
-    });
-
-    // Wait for both to be watching
-    while !a_ready.load(Ordering::Acquire) || !b_ready.load(Ordering::Acquire) {
-        thread::yield_now();
-    }
-    thread::sleep(Duration::from_millis(20));
+    // Port b's, registered before the connection and asked only after a's poll
+    // completed: the order, not a window, is what makes its silence a verdict.
+    let b = acc_b.into_raw();
+    let b_poller = Poller::new(1);
+    b_poller.watch_raw(b, READABLE, 0);
 
     // Open a connection through port A's connector only.
     let ns = namespace::build().add("a", &con_a).finish().expect("a namespace naming port a");
     let client = ns.open("a").expect("open a");
     drop(client);
 
-    let a_poll_ready = a.join().unwrap();
-    let b_poll_ready = b.join().unwrap();
+    a.join().expect("port a's watcher panicked");
+    let mut b_poll_ready = false;
+    b_poller.wait(0, 0, |_| b_poll_ready = true);
+    syscall::close(b);
 
-    assert!(a_poll_ready, "port a's poll should have completed (connection pending)");
     assert!(!b_poll_ready, "port b's poll completed spuriously — acceptor isolation broken!");
 
     println!("  acceptor isolation (io_uring): ok");
@@ -113,37 +86,37 @@ fn test_acceptor_isolation_io_uring() {
 fn test_min_vruntime_invariant() {
     let me = "/system/bin/test_rs_sched_stress";
 
-    // Spawn 3 CPU burners to drive min_vruntime forward.
+    // Spawn 3 CPU burners to drive min_vruntime forward, until they are killed.
     let mut burners = Vec::new();
     for _ in 0..3 {
-        burners.push(Command::new(me).arg("burn").arg("1000")
-            .stdout(Stdio::piped()).spawn().expect("spawn burner"));
+        burners.push(Command::new(me).arg("burn").spawn().expect("spawn burner"));
     }
 
-    // Let them run for 500ms to accumulate vruntime.
-    thread::sleep(Duration::from_millis(500));
+    // A process that sleeps briefly (forces Runnable→NonRunnable→Runnable) and
+    // reports lag immediately after wake, asked again until the burners have
+    // moved min_vruntime off zero: a min_vruntime never updated is a hang the
+    // harness ceiling reds.
+    let (vruntime, min_vruntime, lag) = loop {
+        let info_out = Command::new(me).arg("sched-info")
+            .stdout(Stdio::piped()).spawn().expect("spawn sched-info")
+            .wait_with_output().expect("wait sched-info");
+        let output = String::from_utf8_lossy(&info_out.stdout);
+        let parts: Vec<&str> = output.trim().split_whitespace().collect();
+        assert_eq!(parts.len(), 3, "sched-info output should be 'vruntime min_vruntime lag', got: {output:?}");
+        let vruntime: u64 = parts[0].parse().expect("parse vruntime");
+        let min_vruntime: u64 = parts[1].parse().expect("parse min_vruntime");
+        let lag: i64 = parts[2].parse().expect("parse lag");
+        if min_vruntime > 0 {
+            break (vruntime, min_vruntime, lag);
+        }
+    };
 
-    // Spawn a process that sleeps briefly (forces Runnable→NonRunnable→
-    // Runnable) and reports lag immediately after wake.
-    let info_child = Command::new(me).arg("sched-info")
-        .stdout(Stdio::piped()).spawn().expect("spawn sched-info");
-    let info_out = info_child.wait_with_output().expect("wait sched-info");
-    let output = String::from_utf8_lossy(&info_out.stdout);
-    let parts: Vec<&str> = output.trim().split_whitespace().collect();
-    assert_eq!(parts.len(), 3, "sched-info output should be 'vruntime min_vruntime lag', got: {output:?}");
-    let vruntime: u64 = parts[0].parse().expect("parse vruntime");
-    let min_vruntime: u64 = parts[1].parse().expect("parse min_vruntime");
-    let lag: i64 = parts[2].parse().expect("parse lag");
-
-    // Clean up burners.
-    for child in burners {
-        let _ = child.wait_with_output();
+    for mut child in burners {
+        child.kill().expect("kill a burner");
+        child.wait().expect("reap a burner");
     }
 
     println!("  sched_info: vruntime={vruntime} min_vruntime={min_vruntime} lag={lag}");
-
-    assert!(min_vruntime > 0,
-        "min_vruntime is still 0 after 500ms of CPU-bound work — not being updated!");
 
     let max_lag_ns: i64 = 50_000_000;
     assert!(lag.abs() <= max_lag_ns,
