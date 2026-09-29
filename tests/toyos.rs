@@ -541,6 +541,7 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("virt_unmap_touch", Sched::Parallel, Tier::Local),
     ("virt_debug_refused", Sched::Parallel, Tier::Local),
     ("virt_readonly_copyout", Sched::Parallel, Tier::Local),
+    ("virt_smp", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -3570,9 +3571,11 @@ fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String>
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
-/// Boot `tests/virtjobcase` under the EL2 profile and judge its job `job`:
-/// it ends with exit 0, having said `said`. The kernel carries `SYS_DEBUG`
-/// for `debug_refused`, and every job runs in every boot of the case.
+/// Boot `tests/virtjobcase` on one CPU under the EL2 profile and judge its job
+/// `job`: it ends with exit 0, having said `said`. One CPU because `preempt`
+/// and `fp_isolation` see a sibling run only when it took theirs. The kernel
+/// carries `SYS_DEBUG` for `debug_refused`, and every job runs in every boot
+/// of the case.
 fn virt_job(job: &str, said: &str) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
@@ -3581,18 +3584,25 @@ fn virt_job(job: &str, said: &str) -> Result<(), String> {
     let copyout = COPYOUT.get_or_init(|| {
         qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
     });
-    let mut qemu = QemuInstance::boot_with_options(
+    let qemu = QemuInstance::boot_with_options(
         case,
         &[],
         &[],
         BootOptions {
             profile,
+            smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
             extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), copyout.clone())],
             ..Default::default()
         },
     );
+    judge_virt_job(qemu, job, said).map(drop)
+}
+
+/// Wait for `job`'s end on a guest booted with it, and judge it: it ends with
+/// exit 0, having said `said`. Answers everything the PL011 carried.
+fn judge_virt_job(mut qemu: QemuInstance, job: &str, said: &str) -> Result<String, String> {
     let end = format!("===TEST_END {job} ");
     let mut rest = String::new();
     let waited = await_marker(&mut qemu, &mut rest, &end, &format!("the job {job} to end"));
@@ -3611,6 +3621,50 @@ fn virt_job(job: &str, said: &str) -> Result<(), String> {
     if !ended.contains(&format!("===TEST_END {job} exit=0===")) {
         return Err(format!("{ended}\nserial:\n{serial}"));
     }
+    Ok(serial)
+}
+
+/// The CPUs `virt_smp` boots: as many as the roster holds.
+const VIRT_CPUS: u32 = 8;
+
+/// Boot `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs under the EL2 profile, where
+/// PSCI is reached through `SMC`: each is started by `CPU_ON`, holds the
+/// control-register declaration and joins the scheduler, and the case's job
+/// `unmap_seen` ends with exit 0 once a page unmapped beside its reader has
+/// ended the reader's process each time.
+fn virt_smp() -> Result<(), String> {
+    let config = compile::repo_root().join("tests/virtsmpcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::VirtEl2,
+            smp: VIRT_CPUS,
+            ready_marker: "control registers: SCTLR_EL1=",
+            ..Default::default()
+        },
+    );
+    let serial = judge_virt_job(qemu, "unmap_seen", "unmap_seen: 4 reads on another thread of a page just unmapped")?;
+    let psci = serial.lines().find(|l| l.contains("PSCI: ")).unwrap_or_default();
+    if !psci.contains(" through SMC") {
+        return Err(format!("PSCI is not said to be reached through SMC: {psci:?}\nserial:\n{serial}"));
+    }
+    let mut want = vec![
+        format!("SMP: {VIRT_CPUS} of {VIRT_CPUS} MADT CPUs online"),
+        format!("control registers: {VIRT_CPUS} of {VIRT_CPUS} CPUs hold the declaration"),
+    ];
+    for cpu in 1..VIRT_CPUS {
+        want.push(format!("SMP: cpu{cpu} mpidr={cpu:#x} online"));
+        want.push(format!("CPU {cpu}: joining scheduler"));
+    }
+    for want in want {
+        if !serial.contains(&want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    eprintln!("  [virt] {VIRT_CPUS} CPUs online and scheduling");
     Ok(())
 }
 
@@ -5157,6 +5211,7 @@ fn run_screen_test(
             virt_selftest(test_config, &["irq-storm"])
         }
         "virt_timer_floor" => virt_selftest(test_config, &["timer-floor"]),
+        "virt_smp" => virt_smp(),
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:
             // crash_report, capture, panic_flush, halt_all_cpus, render. The

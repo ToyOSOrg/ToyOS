@@ -9,7 +9,7 @@
 //! and the GIC architecture specification (IHI 0069H), chapter 12, for the
 //! `ICC_` registers.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::log;
 
@@ -102,9 +102,12 @@ pub fn tcr() -> u64 {
     TCR | (read!("id_aa64mmfr0_el1") & 0xF) << TCR_IPS_SHIFT
 }
 
+/// CPUs whose registers [`check`] found as declared.
+static CHECKED: AtomicU32 = AtomicU32::new(0);
+
 /// Read every EL1 register the declaration names back, and refuse a CPU that
-/// holds anything else; then say what it holds.
-pub fn check() {
+/// holds anything else; then say what it holds, and that it was entered at `el`.
+pub fn check(el: u64) {
     // `ID_AA64MMFR0_EL1.ASIDBits` = 0b0010: without 16-bit ASIDs `TCR_EL1.AS`
     // is RES0, and the read-back below would name the register, not the reason.
     let asid_bits = read!("id_aa64mmfr0_el1") >> 4 & 0xF;
@@ -120,9 +123,9 @@ pub fn check() {
         assert_eq!(live, value, "control registers: {name} holds {live:#x}, and the declaration says {value:#x}");
     }
     // What the drop from EL2 left, or the EL1 entry kept: EL1, on `SP_EL1`.
-    let (el, spsel) = (read!("CurrentEL") >> 2 & 3, read!("SPSel") & 1);
-    assert_eq!((el, spsel), (1, 1), "control registers: running at EL{el} on SP_EL{spsel}, not EL1 on SP_EL1");
-    let el = ENTRY_EL.load(Ordering::Relaxed);
+    let (now, spsel) = (read!("CurrentEL") >> 2 & 3, read!("SPSel") & 1);
+    assert_eq!((now, spsel), (1, 1), "control registers: running at EL{now} on SP_EL{spsel}, not EL1 on SP_EL1");
+    CHECKED.fetch_add(1, Ordering::Relaxed);
     log!(
         "control registers: SCTLR_EL1={SCTLR:#x} TCR_EL1={:#x} MAIR_EL1={:#x} CPACR_EL1={CPACR:#x} \
          CNTKCTL_EL1={CNTKCTL:#x}, as declared; entered at EL{el}{}",
@@ -134,4 +137,10 @@ pub fn check() {
             ""
         },
     );
+}
+
+/// How many CPUs hold the declaration, said once after the last was started: a
+/// CPU that never reached [`check`] shows as a count below the roster's.
+pub fn report(cpus: u32) {
+    log!("control registers: {} of {cpus} CPUs hold the declaration", CHECKED.load(Ordering::Relaxed));
 }

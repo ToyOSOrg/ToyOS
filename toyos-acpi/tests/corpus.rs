@@ -12,8 +12,8 @@ use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
     dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, memory_windows,
-    reset_register, rtc_century, Century, MadtEntry, MadtHalt, Phys, Reset, Table, TableError,
-    MADT_ENTRIES, MAX_TABLE_LEN,
+    psci, reset_register, rtc_century, Century, MadtEntry, MadtHalt, Phys, Psci, Reset, Table,
+    TableError, MADT_ENTRIES, MAX_TABLE_LEN,
 };
 
 const RSDP_AT: u64 = 0x1_0000;
@@ -395,6 +395,7 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                     let _ = iapc_boot_arch(m, rsdp_at);
                     if let Ok(t) = find_table(m, rsdp_at, b"FACP", 36) {
                         let _ = reset_register(&t);
+                        let _ = psci(&t);
                     }
                     if let Ok(t) = find_table(m, rsdp_at, b"APIC", MADT_ENTRIES) {
                         // Bounded by the table's own length, so a walk that has
@@ -526,6 +527,47 @@ fn reset_fields_are_read_only_from_a_revision_that_defines_them() {
     let mut short = facp(3, SUP, io, 0x0f);
     declare_len(&mut short, 128);
     assert_eq!(reset_of(&short), Reset::Absent);
+}
+
+/// A revision-`rev` FADT carrying `ARM_BOOT_ARCH` `flags` at 129 and `FADT
+/// Minor Version` `minor` at 131.
+fn arm_facp(rev: u8, minor: u8, flags: u16) -> Vec<u8> {
+    let mut body = vec![0u8; 132 - 36];
+    body[129 - 36..131 - 36].copy_from_slice(&flags.to_le_bytes());
+    body[131 - 36] = minor;
+    sdt(b"FACP", rev, &body)
+}
+
+fn psci_of(table: &[u8]) -> Psci {
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, table)];
+    let fadt = Table::open(Machine { regions }, TABLE_AT, b"FACP", 36).expect("a sealed FADT");
+    psci(&fadt)
+}
+
+/// `ARM_BOOT_ARCH` on a FADT that defines it. QEMU 11.1.1's `virt`
+/// publishes revision 6, minor 3 and `PSCI_COMPLIANT`, with `PSCI_USE_HVC`
+/// where the guest has no EL2 (`hw/arm/virt-acpi-build.c:1135-1148`,
+/// `hw/arm/virt.c:2956-2962`).
+#[test]
+fn the_psci_conduit_is_read_off_a_fadt_that_defines_it() {
+    assert_eq!(psci_of(&arm_facp(6, 3, 0b01)), Psci::Smc);
+    assert_eq!(psci_of(&arm_facp(6, 3, 0b11)), Psci::Hvc);
+    assert_eq!(psci_of(&arm_facp(6, 3, 0b10)), Psci::Absent, "USE_HVC without COMPLIANT is no PSCI");
+    assert_eq!(psci_of(&arm_facp(6, 3, 0)), Psci::Absent);
+    assert_eq!(psci_of(&arm_facp(5, 1, 0b01)), Psci::Smc, "5.1 is the first version with the field");
+}
+
+/// Before ACPI 5.1 the three bytes are reserved, and flags written there are
+/// not read; the minor version is the low nibble, the high one an errata letter.
+#[test]
+fn a_fadt_before_acpi_5_1_says_nothing_about_psci() {
+    assert_eq!(psci_of(&arm_facp(5, 0, 0b11)), Psci::Undefined { revision: 5, minor: 0 });
+    assert_eq!(psci_of(&arm_facp(3, 0, 0b01)), Psci::Undefined { revision: 3, minor: 0 });
+    assert_eq!(psci_of(&arm_facp(5, 0x10, 0b01)), Psci::Undefined { revision: 5, minor: 0 });
+
+    let mut short = arm_facp(6, 3, 0b01);
+    declare_len(&mut short, 130);
+    assert_eq!(psci_of(&short), Psci::Undefined { revision: 6, minor: 0 });
 }
 
 /// Where the two firmwares' descriptor lists sit for the sweep below.

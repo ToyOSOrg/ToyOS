@@ -1,6 +1,6 @@
 use core::arch::global_asm;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::alloc::{alloc_zeroed, Layout};
 
@@ -9,17 +9,13 @@ use crate::arch::{apic, percpu, syscall};
 use crate::clock;
 use crate::drivers::acpi::MadtInfo;
 use crate::smp_roster::Roster;
-use crate::time::{Budget, Delay, Duration};
+use crate::time::{Delay, Duration, AP_START};
 use crate::{log, process};
 
 const TRAMPOLINE_PAGE: u64 = 0x8000;
 const TRAMPOLINE_VECTOR: u8 = 0x08;
 const AP_STACK_SIZE: usize = 64 * 1024;
 const DATA_OFFSET: usize = 0xF00;
-
-/// The token the latest-launched AP echoed at `ap_entry`, not a flag, so a stale
-/// AP cannot be read as this one; `0` means none has.
-static AP_STARTED: AtomicU32 = AtomicU32::new(0);
 
 static ROSTER: Roster = Roster::new();
 
@@ -42,7 +38,7 @@ pub fn cpu_count() -> u32 {
 /// LAPIC id of `cpu_id`; panics if `cpu_id` is not online.
 pub fn apic_id_for(cpu_id: u32) -> u32 {
     assert!(cpu_id < cpu_count(), "apic_id_for: cpu {cpu_id} not online");
-    ROSTER.apic_id(cpu_id)
+    ROSTER.hardware_id(cpu_id)
 }
 
 /// True once a shootdown must wait for siblings; the word the APs are released by.
@@ -237,7 +233,6 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         // SAFETY: `target` is reserved physical memory written only here; unaligned because `TrampolineData` is `repr(C, packed)`; this AP has not been sent its SIPI yet, and the loop reaches a second write only after the previous AP committed — which happens in `ap_entry` past every trampoline read — so no CPU is reading it; a failed AP breaks the loop below instead of reaching another write.
         unsafe { core::ptr::write_unaligned(target, data); }
 
-        AP_STARTED.store(0, Ordering::Release);
         AP_TSC.store(0, Ordering::Release);
         // The bracket's lower edge: taken after the previous AP committed and
         // before this one is sent anything, so nothing this AP does precedes it.
@@ -256,24 +251,14 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             apic::send_sipi(ap_id, TRAMPOLINE_VECTOR);
             delay(BETWEEN_SIPIS);
 
-            if AP_STARTED.load(Ordering::Acquire) != attempt.token() {
+            if !ROSTER.echoed(attempt) {
                 apic::send_sipi(ap_id, TRAMPOLINE_VECTOR);
             }
         }
 
-        // Budget, not Tripwire or panic: a slow AP degrades the machine rather than crashing it, and a panic here would be a behaviour change C1's gate forbids.
-        const AP_START: Budget = Budget::of(
-            Duration::from_millis(100),
-            "the machine boots with the CPUs that came up before the first that did not",
-        );
         let deadline = clock::nanos_since_boot() + AP_START.nanos();
-        while AP_STARTED.load(Ordering::Acquire) != attempt.token() {
-            if clock::nanos_since_boot() >= deadline { break; }
-            core::hint::spin_loop();
-        }
-
         // Commit only on this attempt's own token, so `0..cpu_count()` stays dense.
-        if AP_STARTED.load(Ordering::Acquire) == attempt.token() {
+        if ROSTER.await_echo(attempt, || clock::nanos_since_boot() >= deadline) {
             let bracket_hi = cpu::rdtsc();
             if tsc_inside(attempt.id(), bracket_lo, bracket_hi) {
                 bracketed += 1;
@@ -351,30 +336,8 @@ extern "C" fn ap_entry() -> ! {
     apic::init_ap();
 
     // Echo this attempt's token, so the BSP counts this AP for its own attempt.
-    AP_STARTED.store(percpu::ap_token(), Ordering::Release);
+    ROSTER.echo(percpu::ap_token());
 
-    while !ROSTER.released() {
-        core::hint::spin_loop();
-    }
-
-    // Only a committed CPU may join: an uncommitted AP has no scheduler slot and
-    // no shootdown targets it, so it parks. The acquire above makes the count visible.
-    let me = percpu::cpu_id();
-    if me >= cpu_count() {
-        log!("CPU {me}: bring-up did not commit; parking");
-        park_ap();
-    }
-
-    // A parked AP could not take a shootdown IPI, so this flush stands in for the ones missed while spinning.
-    // Must run before touching anything not self-mapped: the acquire on `released` makes the BSP's mappings visible, and this flush discards what the spin cached over them.
-    crate::arch::tlb::join();
-
-    // Once this CPU is committed and about to run something: the counter and
-    // the LVT are per logical CPU, so a CPU nobody arms here is one the
-    // hard-lockup bound does not cover.
-    crate::hardlockup::arm_this_cpu();
-
-    log!("CPU {me}: joining scheduler");
     process::ap_idle();
 }
 
@@ -382,14 +345,6 @@ extern "C" fn ap_entry() -> ! {
 fn delay(span: Delay) {
     let start = clock::nanos_since_boot();
     while clock::nanos_since_boot() - start < span.nanos() {}
-}
-
-/// An uncommitted AP halts for the life of the machine.
-fn park_ap() -> ! {
-    loop {
-        // SAFETY: `cli; hlt` on this CPU only; it takes no lock and touches no shared state.
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
-    }
 }
 
 // Real mode → protected mode → long mode → Rust entry, copied to 0x8000 at runtime; addresses below are offsets into TrampolineData at 0x8F00.

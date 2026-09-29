@@ -248,6 +248,12 @@ impl fmt::Display for Budget {
     }
 }
 
+/// How long the boot CPU waits for an AP it started to echo its token.
+pub const AP_START: Budget = Budget::of(
+    Duration::from_millis(100),
+    "the machine boots with the CPUs that came up before the first that did not",
+);
+
 /// A duration used as a bound on *another* duration, never as a wait.
 /// Nothing expires; there is no caller and no register.
 #[derive(Clone, Copy)]

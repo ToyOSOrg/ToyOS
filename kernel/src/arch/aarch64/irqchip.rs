@@ -16,9 +16,11 @@
 //! zero by the entry from EL2 the two count alike. It is level-triggered, so a
 //! handler that neither re-arms nor stops it takes it again at once.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 
-use toyos_acpi::MadtEntry;
+use alloc::vec::Vec;
+
+use toyos_acpi::{Gicc, MadtEntry};
 use toyos_gicv3::{packed_affinity, FRAME};
 
 use super::{cpu, percpu};
@@ -36,6 +38,8 @@ pub(super) enum Intid {
     /// Asks a CPU for a scheduler pass: x86-64's kick, which rides the
     /// timer's vector there.
     Kick = 0,
+    /// Stops a CPU for good: [`stop_other_cpus`]'s.
+    Halt,
     /// `crate::log::nested`'s delivery, which [`send_self`] raises.
     LogNest,
     /// What `irq-storm` floods this CPU with.
@@ -45,6 +49,7 @@ pub(super) enum Intid {
 }
 
 pub(super) const SGI_KICK: u32 = Intid::Kick as u32;
+pub(super) const SGI_HALT: u32 = Intid::Halt as u32;
 #[cfg(feature = "boot-actuators")]
 pub(super) const SGI_STORM: u32 = Intid::Storm as u32;
 
@@ -82,10 +87,10 @@ const PRIORITY_MASK: u64 = 0xF0;
 /// What the GIC answers `ICC_IAR1_EL1` with when nothing is pending for it.
 const SPURIOUS: u32 = 1023;
 
-/// The timer's PPI, as the GTDT names it; zero until [`init`].
+/// The timer's PPI, as the GTDT names it, and whether it is edge-triggered;
+/// zero until [`init`].
 static TIMER_INTID: AtomicU32 = AtomicU32::new(0);
-/// The distributor's frame, for [`log_state`]; zero until [`init`].
-static GICD: AtomicU64 = AtomicU64::new(0);
+static TIMER_EDGE: AtomicBool = AtomicBool::new(false);
 
 /// Wait until `done`, for at most `1 / per_second` of a second counted at the
 /// rate firmware states: the boot has no calibrated clock yet.
@@ -105,45 +110,57 @@ fn read_sysreg_pmr() -> u64 {
     v
 }
 
-/// Bring the distributor, this CPU's redistributor, its CPU interface and its
-/// timer up: every SGI and the timer's PPI enabled at [`PRIORITY`], the timer
-/// stopped. Interrupts stay masked at `DAIF`; the caller unmasks them.
-pub fn init(rsdp_addr: u64) {
+/// What the MADT says about the machine's GIC that another CPU's bring-up needs.
+pub struct Gic {
+    /// Every GIC CPU interface the MADT names and enables, in its order.
+    pub cpus: Vec<Gicc>,
+    /// Each redistributor range's physical base, and the range, mapped whole.
+    ranges: Vec<(u64, Mmio)>,
+}
+
+impl Gic {
+    /// The physical frame of the redistributor serving the CPU whose packed
+    /// affinity is `affinity`, mapped: the one its GIC CPU interface names, or
+    /// the one in a range whose `GICR_TYPER` says it is that CPU's.
+    pub fn redistributor(&self, affinity: u32) -> u64 {
+        let named = self.cpus.iter().find(|gicc| packed_affinity(gicc.mpidr) == affinity && gicc.gicr_base != 0);
+        if let Some(gicc) = named {
+            crate::mm::paging::map_mmio(gicc.gicr_base, 2 * FRAME, MmioPolicy::Uncacheable);
+            return gicc.gicr_base;
+        }
+        self.ranges
+            .iter()
+            .find_map(|&(base, range)| {
+                toyos_gicv3::find_redistributor(range.size(), affinity, |at| range.read_u64(at + GICR_TYPER))
+                    .map(|offset| base + offset)
+            })
+            .unwrap_or_else(|| panic!("GIC: no redistributor answers for MPIDR affinity {affinity:#x}"))
+    }
+}
+
+/// Bring the distributor up, then this CPU's side of the GIC ([`init_cpu`]),
+/// and answer what the other CPUs' bring-up needs. Interrupts stay masked at
+/// `DAIF`; the caller unmasks them.
+pub fn init(rsdp_addr: u64) -> Gic {
     let madt = toyos_acpi::find_table(direct_phys(), rsdp_addr, b"APIC", toyos_acpi::MADT_ENTRIES)
         .unwrap_or_else(|e| panic!("GIC: the MADT is unusable: {e:?}"));
-    let me = cpu::hardware_id();
-    let (mut gicd, mut own_frame, mut ranges) = (None, None, [(0u64, 0u32); 4]);
-    let mut range_count = 0;
+    let (mut gicd, mut ranges, mut cpus) = (None, Vec::new(), Vec::new());
     for entry in toyos_acpi::madt_entries(&madt) {
         match entry {
             Ok(MadtEntry::Gicd { base, .. }) => gicd = Some(base),
-            Ok(MadtEntry::Gicr { base, length }) => {
-                assert!(range_count < ranges.len(), "GIC: the MADT names more redistributor ranges than {}", ranges.len());
-                ranges[range_count] = (base, length);
-                range_count += 1;
-            }
-            Ok(MadtEntry::Gicc(gicc)) if packed_affinity(gicc.mpidr) == me && gicc.gicr_base != 0 => {
-                own_frame = Some(gicc.gicr_base)
-            }
+            Ok(MadtEntry::Gicr { base, length }) => ranges.push((
+                base,
+                crate::mm::paging::map_mmio(base, u64::from(length), MmioPolicy::Uncacheable),
+            )),
+            Ok(MadtEntry::Gicc(gicc)) if gicc.enabled => cpus.push(gicc),
             Ok(_) => {}
             Err(halt) => panic!("GIC: a MADT entry at +{} declares {} bytes of a {}-byte list", halt.at, halt.declared, halt.list_len),
         }
     }
     let gicd = gicd.expect("GIC: the MADT names no distributor");
     let distributor = crate::mm::paging::map_mmio(gicd, FRAME, MmioPolicy::Uncacheable);
-    GICD.store(gicd, Relaxed);
     let revision = distributor.read_u32(GICD_PIDR2) >> 4 & 0xF;
     assert!(revision >= 3, "GIC: GICD_PIDR2.ArchRev is {revision}, and this kernel drives a GICv3 or later");
-
-    // The frame is found in the ranges when the GICC entry does not name it:
-    // each redistributor says whose it is in `GICR_TYPER`'s affinity.
-    let redistributor = match own_frame {
-        Some(frame) => crate::mm::paging::map_mmio(frame, 2 * FRAME, MmioPolicy::Uncacheable),
-        None => ranges[..range_count]
-            .iter()
-            .find_map(|&(base, length)| find_redistributor(base, u64::from(length), me))
-            .unwrap_or_else(|| panic!("GIC: no redistributor answers for MPIDR affinity {me:#x}")),
-    };
 
     // The distributor: affinity routing on, and Group 1 on.
     distributor.write_u32(GICD_CTLR, CTLR_ARE | CTLR_GRP1);
@@ -152,6 +169,30 @@ pub fn init(rsdp_addr: u64) {
         distributor.read_u32(GICD_CTLR) & CTLR_ARE != 0,
         "GIC: GICD_CTLR.ARE reads clear, so the distributor stays in legacy mode and no redistributor is used"
     );
+
+    let timer = toyos_acpi::gtdt(direct_phys(), rsdp_addr)
+        .unwrap_or_else(|e| panic!("GIC: the GTDT is unusable: {e:?}"))
+        .virtual_el1;
+    assert!((16..32).contains(&timer.gsiv), "GIC: the GTDT puts the virtual timer at INTID {}, which is not a PPI", timer.gsiv);
+    TIMER_INTID.store(timer.gsiv, Relaxed);
+    TIMER_EDGE.store(timer.edge(), Relaxed);
+    log!(
+        "GIC: v{revision} distributor at {gicd:#x}; SGIs and the virtual timer's PPI {} ({}) taken at priority {PRIORITY:#x}",
+        timer.gsiv,
+        if timer.edge() { "edge" } else { "level" },
+    );
+
+    let gic = Gic { cpus, ranges };
+    init_cpu(gic.redistributor(cpu::hardware_id()));
+    gic
+}
+
+/// Bring this CPU's redistributor — the frame at `frame`, which
+/// [`Gic::redistributor`] mapped — its CPU interface and its timer up: every
+/// SGI and the timer's PPI enabled at [`PRIORITY`], the timer stopped.
+/// Interrupts stay masked at `DAIF`.
+pub fn init_cpu(frame: u64) {
+    let redistributor = Mmio::new(DirectMap::from_phys(frame), 2 * FRAME);
 
     // Awake, then every SGI and PPI off and cleared of what firmware left.
     let waker = redistributor.read_u32(GICR_WAKER);
@@ -168,17 +209,13 @@ pub fn init(rsdp_addr: u64) {
         redistributor.write_u32(GICR_IPRIORITYR + word * 4, priorities);
     }
 
-    let timer = toyos_acpi::gtdt(direct_phys(), rsdp_addr)
-        .unwrap_or_else(|e| panic!("GIC: the GTDT is unusable: {e:?}"))
-        .virtual_el1;
-    assert!((16..32).contains(&timer.gsiv), "GIC: the GTDT puts the virtual timer at INTID {}, which is not a PPI", timer.gsiv);
-    TIMER_INTID.store(timer.gsiv, Relaxed);
+    let timer = TIMER_INTID.load(Relaxed);
     // Each PPI's two bits in `GICR_ICFGR1`: 0b10 edge, 0b00 level.
-    let edge = u32::from(timer.edge()) << (2 * (timer.gsiv - 16) + 1);
+    let edge = u32::from(TIMER_EDGE.load(Relaxed)) << (2 * (timer - 16) + 1);
     redistributor.write_u32(GICR_ICFGR1, edge);
 
     stop_timer_hardware();
-    let enabled = 1 << SGI_KICK | 1 << timer.gsiv;
+    let enabled = 1 << SGI_KICK | 1 << SGI_HALT | 1 << timer;
     #[cfg(feature = "boot-actuators")]
     let enabled = enabled | 1 << Intid::LogNest as u32 | 1 << SGI_STORM;
     redistributor.write_u32(GICR_ISENABLER0, enabled);
@@ -216,20 +253,7 @@ pub fn init(rsdp_addr: u64) {
         );
     }
     assert_eq!(read_sysreg_pmr(), PRIORITY_MASK, "GIC: ICC_PMR_EL1 did not take {PRIORITY_MASK:#x}");
-    log!(
-        "GIC: v{revision} distributor at {gicd:#x}, this CPU's redistributor at {:#x}; SGIs and the virtual \
-         timer's PPI {} ({}) enabled at priority {PRIORITY:#x}",
-        redistributor.addr() - crate::mm::PHYS_OFFSET,
-        timer.gsiv,
-        if timer.edge() { "edge" } else { "level" },
-    );
-}
-
-/// The redistributor frame in `[base, base + length)` whose affinity is `me`.
-fn find_redistributor(base: u64, length: u64, me: u32) -> Option<Mmio> {
-    let range = crate::mm::paging::map_mmio(base, length, MmioPolicy::Uncacheable);
-    let offset = toyos_gicv3::find_redistributor(length, me, |at| range.read_u64(at + GICR_TYPER))?;
-    Some(Mmio::new(DirectMap::from_phys(base + offset), 2 * FRAME))
+    log!("GIC: this CPU's redistributor at {frame:#x}, its SGIs and timer enabled");
 }
 
 /// The INTID the GIC hands this CPU, or `None` when it answered spurious.
@@ -253,19 +277,21 @@ pub(super) fn timer_intid() -> u32 {
     TIMER_INTID.load(Relaxed)
 }
 
-/// Raise SGI `intid` on the CPU whose packed affinity is `target`.
-fn sgi(intid: u32, target: u32) {
-    let value = toyos_gicv3::sgi1r(intid, target);
+/// Write `ICC_SGI1R_EL1` whole: the SGI it names is raised.
+fn raise(value: u64) {
     // SAFETY: writes `ICC_SGI1R_EL1`, which raises an SGI and touches no
     // memory; the `ISB` sends it before whatever follows.
     unsafe { core::arch::asm!("msr S3_0_C12_C11_5, {}", "isb", in(reg) value, options(nomem, nostack, preserves_flags)) };
 }
 
-/// Wake `cpu` so it runs a scheduler pass. Before the port's stage 5 the boot
-/// CPU is the only one, so the only `cpu` there is is this one.
+/// Raise SGI `intid` on the CPU whose packed affinity is `target`.
+fn sgi(intid: u32, target: u32) {
+    raise(toyos_gicv3::sgi1r(intid, target));
+}
+
+/// Wake `cpu` so it runs a scheduler pass.
 pub fn kick_cpu(cpu: u32) {
-    assert_eq!(cpu, percpu::cpu_id(), "irqchip: a kick for cpu{cpu}, and other CPUs are the port's stage 5");
-    sgi(SGI_KICK, cpu::hardware_id());
+    sgi(SGI_KICK, super::smp::hardware_id_of(cpu));
 }
 
 pub fn kick_all_but_self() {
@@ -286,8 +312,14 @@ pub fn send_nmi(_cpu: u32) {
     owed!("a pseudo-NMI", "no stage yet")
 }
 
-/// Nothing to stop: before the port's stage 5 the boot CPU is the only one running.
-pub fn stop_other_cpus() {}
+/// Halt every other CPU for good, once the machine has released them: before
+/// that each is waiting for the release with interrupts masked, and the boot
+/// CPU's own interface may not be up to raise anything.
+pub fn stop_other_cpus() {
+    if super::smp::is_ready() {
+        raise(toyos_gicv3::sgi1r_others(SGI_HALT));
+    }
+}
 
 /// `CNTV_CTL_EL0.ENABLE`; `IMASK` stays clear.
 const TIMER_ENABLE: u64 = 1;

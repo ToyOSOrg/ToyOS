@@ -21,6 +21,7 @@ mod shutdown;
 mod spin;
 mod stats;
 mod tone;
+mod unmap_seen;
 mod unmap_touch;
 
 macro_rules! commands {
@@ -36,7 +37,7 @@ macro_rules! commands {
 
 use arch::{first_entry, fp_isolation};
 
-commands!(cat, cp, debug_refused, echo, first_entry, fp_isolation, free, grep, hexdump, locale, ls, mkdir, mv, net, preempt, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone, unmap_touch);
+commands!(cat, cp, debug_refused, echo, first_entry, fp_isolation, free, grep, hexdump, locale, ls, mkdir, mv, net, preempt, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone, unmap_seen, unmap_touch);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

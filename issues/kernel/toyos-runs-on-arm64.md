@@ -28,9 +28,6 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 
 ## Owner rulings, 2026-09-26
 
-- **Parked** (owner ruling, 2026-09-29). No later stage starts now. The Exit
-  (LLVM under emulation) needs stages 4-7; until they are
-  picked up it is unmet.
 - **Hardware discovery is ACPI only** (edk2 MADT, GTDT and SPCR under QEMU); no devicetree.
 - **Start.** Stage 0 (shared groundwork on x86) and stages 1-3 (toolchain,
   loader, kernel reaching serial on QEMU `virt`) start now. Stage 0 waits for
@@ -295,6 +292,22 @@ Each stage names its exit; "measured" means a number from a run.
    `dlopen` test; until it does the kernel refuses `R_AARCH64_TLSDESC` by name
    (`toyos_elf::rela::ExeRefusal::TlsDescriptor` for an executable,
    `toyos_elf::RelocError::TlsDescriptor` for a library).
+   **Every CPU starts, ahead of small-kernel stage 6 as stage 4 did:** it
+   ports no device interrupt, so nothing of the relay. The boot CPU starts
+   each GIC CPU interface the MADT enables with `CPU_ON`, through the conduit
+   the FADT's `ARM_BOOT_ARCH` names; each AP applies the declaration through
+   the boot CPU's own routine, installs its per-CPU block, redistributor and
+   timer, and echoes its attempt's token into the roster both architectures
+   share before it joins the scheduler. SGIs are the kick and the halt.
+   `virt_smp` judges eight CPUs, each holding the declaration, and a page
+   unmapped beside a thread still reading it. Owed before the exit holds:
+   `SYSTEM_RESET`, `SYSTEM_OFF` and `CPU_OFF` behind a reset and power-off
+   seam that takes x86-64's reset register and PM1a out of
+   `drivers/acpi.rs`, and the stop shown on eight CPUs ending in that
+   power-off; a test of the halt SGI; the TLS-descriptor resolver;
+   `issues/kernel/the-crash-evidence-records-x86-fault-registers.md`; and,
+   for the first HVF run, the clean of an AP's start block to the point of
+   coherency, which TCG cannot fail on.
 
 6. **Virtio on `virt`.** virtio-pci (ECAM from MCFG) for blk, net, gpu,
    sound, input and rng. virtio-input replaces the i8042 as the
@@ -330,8 +343,9 @@ ARM is done when LLVM compiles under emulation on the development Mac (owner
 ruling, 2026-09-29). One recipe is timed three ways: macOS natively, a Linux
 arm64 guest under QEMU with HVF, and ToyOS arm64 under QEMU with HVF. All
 three times are recorded, and it passes when ToyOS is at least as fast as the
-Linux guest. ToyOS compiling LLVM is `issues/build/toyos-builds-itself.md`'s
-work on AArch64.
+Linux guest. The timing is one measurement, taken by hand and not automated
+(owner ruling, 2026-09-29). ToyOS compiling LLVM is
+`issues/build/toyos-builds-itself.md`'s work on AArch64.
 
 ## Interactions with other tracks
 
