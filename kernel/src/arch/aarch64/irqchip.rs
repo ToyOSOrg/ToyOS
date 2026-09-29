@@ -302,10 +302,12 @@ fn floor_ticks() -> u64 {
 
 /// The only write of the comparator: fire `ticks` counter ticks from now, or
 /// after [`MIN_ONE_SHOT`] if that is longer, and remember the span as what an
-/// EL1 fire re-arms with.
-fn arm_ticks(ticks: u64) {
+/// EL1 fire re-arms with. Returns the counter value the comparator was set
+/// from, for a caller that must relate CVAL back to it without a second read.
+fn arm_ticks(ticks: u64) -> u64 {
     let ticks = ticks.max(floor_ticks());
     percpu::set_armed_ticks(ticks);
+    let now = cpu::counter();
     // SAFETY: the EL1 virtual timer's comparator and control; CPACR has
     // nothing to say about them and `CNTKCTL_EL1` keeps EL0 out.
     unsafe {
@@ -313,11 +315,12 @@ fn arm_ticks(ticks: u64) {
             "msr cntv_cval_el0, {cval}",
             "msr cntv_ctl_el0, {enable}",
             "isb",
-            cval = in(reg) cpu::counter() + ticks,
+            cval = in(reg) now + ticks,
             enable = in(reg) TIMER_ENABLE,
             options(nomem, nostack, preserves_flags),
         );
     }
+    now
 }
 
 fn stop_timer_hardware() {
@@ -332,8 +335,9 @@ pub fn arm_one_shot(nanos: u64) {
 }
 
 /// This CPU's timer, armed to fire within `nanos`: sooner than it is armed
-/// for, or armed if it is stopped.
-pub fn arm_within(nanos: u64) {
+/// for, or armed if it is stopped. Returns the counter value the comparator
+/// was set from ([`arm_ticks`]).
+pub fn arm_within(nanos: u64) -> u64 {
     let want = crate::clock::counter_ticks(nanos);
     let remaining = match percpu::armed_ticks() {
         0 => want,
@@ -344,7 +348,7 @@ pub fn arm_within(nanos: u64) {
             cval.saturating_sub(cpu::counter())
         }
     };
-    arm_ticks(want.min(remaining));
+    arm_ticks(want.min(remaining))
 }
 
 /// Stop the timer: no interrupt until it is armed again.
@@ -366,7 +370,8 @@ pub(super) fn rearm() {
 /// `timer-floor`: this CPU's timer made due with interrupts masked, then
 /// asked to fire within a quantum, which leaves it nothing to fire within.
 /// The comparator it is left holding must be at least [`MIN_ONE_SHOT`] past
-/// the counter read just before the ask.
+/// the counter value [`arm_within`] set it from — not a counter read framing
+/// the call, which a slow call (a QEMU host under load) widens for no defect.
 #[cfg(feature = "boot-actuators")]
 pub fn floor_selftest() {
     let _guard = crate::arch::IrqGuard::close();
@@ -378,13 +383,12 @@ pub fn floor_selftest() {
         ctl & TIMER_ISTATUS != 0
     };
     settles(100, "the timer armed for its floor", due);
-    let before = cpu::counter();
-    arm_within(toyos_sched::fair::QUANTUM_NS);
+    let now = arm_within(toyos_sched::fair::QUANTUM_NS);
     let cval: u64;
     // SAFETY: reads the EL1 virtual timer's comparator.
     unsafe { core::arch::asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack, preserves_flags)) };
     stop_timer();
-    let (span, floor) = (cval.saturating_sub(before), floor_ticks());
+    let (span, floor) = (cval.saturating_sub(now), floor_ticks());
     let verdict = if span >= floor { "PASS" } else { "FAIL" };
-    log!("timer-floor: {verdict} span={span} floor={floor} ticks: the comparator past the counter before the ask");
+    log!("timer-floor: {verdict} span={span} floor={floor} ticks: the comparator past the counter it was set from");
 }
