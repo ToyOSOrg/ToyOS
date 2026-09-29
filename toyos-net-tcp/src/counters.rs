@@ -4,9 +4,8 @@
 
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
-use core::time::Duration;
 
-use crate::{limits, Endpoint, Event, Instant, Tuple};
+use crate::{limits, Endpoint, Event, Tuple};
 
 toyos_net_wire::counters! {
     ClosedRst = "tcp.closed-rst";
@@ -120,23 +119,4 @@ pub struct Refusal {
     pub rule: Counter,
     pub local: Endpoint,
     pub remote: Endpoint,
-}
-
-/// At most one line per rule in any 10 s, each carrying how many of that rule it stood for.
-pub const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(10);
-
-#[derive(Clone, Debug, Default)]
-pub struct RefusalLog(PerCounter<(Option<Instant>, u64)>);
-
-impl RefusalLog {
-    /// `Some(suppressed)` when this refusal is to be logged, with how many of its rule were not.
-    pub fn admit(&mut self, now: Instant, refusal: &Refusal) -> Option<u64> {
-        let (last, suppressed) = self.0.get_mut(refusal.rule);
-        if last.is_some_and(|at| now.since(at) < REFUSAL_LOG_INTERVAL) {
-            *suppressed = suppressed.saturating_add(1);
-            return None;
-        }
-        *last = Some(now);
-        Some(core::mem::replace(suppressed, 0))
-    }
 }

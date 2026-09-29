@@ -49,7 +49,8 @@ use core::time::Duration;
 use toyos_net_wire::siphash;
 use toyos_net_wire::Port;
 
-pub use counters::{Counter, Counters, Refusal, RefusalLog, REFUSAL_LOG_INTERVAL};
+pub use counters::{Counter, Counters, Refusal, RefusalLog};
+pub use toyos_net_wire::REFUSAL_LOG_INTERVAL;
 pub use seq::Seq;
 pub use stack::{ConnId, Info, ListenerId, Outgoing, Tcp};
 pub use toyos_net_wire::siphash::{siphash24, Key};

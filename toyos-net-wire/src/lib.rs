@@ -52,11 +52,12 @@ macro_rules! reasons {
 }
 
 /// Declares a crate's counters: `Counter`, each variant the name inspect reads it by and, marked
-/// `logged`, a refusal of legacy or insecure input the log names; `Counters`, one value each; and
-/// `PerCounter<T>`, one `T` each.
+/// `logged`, a refusal of legacy or insecure input the log names; `Counters`, one value each;
+/// `PerCounter<T>`, one `T` each; and `RefusalLog`, which admits at most one log line per rule in
+/// any [`REFUSAL_LOG_INTERVAL`].
 #[macro_export]
 macro_rules! counters {
-    ($($variant:ident = $name:literal $(, $logged:ident)?;)*) => {
+    ($($variant:ident = $name:expr $(, $logged:ident)?;)*) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum Counter {
             $($variant,)*
@@ -115,6 +116,23 @@ macro_rules! counters {
                 Counter::ALL.iter().map(|&c| (c.name(), self.get(c)))
             }
         }
+
+        #[derive(Clone, Debug, Default)]
+        pub struct RefusalLog(PerCounter<(Option<$crate::Instant>, u64)>);
+
+        impl RefusalLog {
+            /// `Some(suppressed)` when a refusal of `rule` at `now` is to be logged, with how many
+            /// of that rule were not since the last line.
+            pub fn admit(&mut self, now: $crate::Instant, rule: Counter) -> Option<u64> {
+                let (last, suppressed) = self.0.get_mut(rule);
+                if last.is_some_and(|at| now.since(at) < $crate::REFUSAL_LOG_INTERVAL) {
+                    *suppressed = suppressed.saturating_add(1);
+                    return None;
+                }
+                *last = Some(now);
+                Some(core::mem::replace(suppressed, 0))
+            }
+        }
     };
     (@logged logged) => {
         true
@@ -136,6 +154,8 @@ pub mod tcp;
 pub mod udp;
 
 pub use emit::BuildError;
+
+pub const REFUSAL_LOG_INTERVAL: core::time::Duration = core::time::Duration::from_secs(10);
 
 /// A point on the caller's monotonic clock, in nanoseconds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
