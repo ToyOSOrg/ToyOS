@@ -31,6 +31,13 @@ use super::serial::Serial;
 const PATH_TAKEN: &[&str] =
     &["deadline_lateness_ms", "lockup_lateness_ms", "park_open_operations"];
 
+/// Whether a boot armed with `params` owes nothing for `field` where it produced
+/// none and the profile prices none: a path it did not take, or a field that
+/// crosses only on a page the pass after its reset cleared.
+pub fn owes_nothing(field: &str, params: &[&str]) -> bool {
+    PATH_TAKEN.contains(&field) || toyos_build::metal::clears_its_own_page(params)
+}
+
 /// One boot a metal test needs.
 pub struct Arm {
     /// **The boot this test rides, named.** Two arms naming one boot share an
@@ -1144,9 +1151,7 @@ pub fn run(
                 }
                 // A boot the file prices a path-taken field for and that
                 // produced none is a boot some *other* bound ended.
-                // The foreign-identity boot's page is cleared by the pass that
-                // reads it, so it owes no field that crosses only there.
-                let cleared = toyos_build::metal::clears_its_own_page(&batches[label.as_str()].params);
+                let params = &batches[label.as_str()].params;
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),
@@ -1159,7 +1164,7 @@ pub fn run(
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
-                    if value.is_none() && !priced && (cleared || PATH_TAKEN.contains(&field)) {
+                    if value.is_none() && !priced && owes_nothing(field, params) {
                         continue;
                     }
                     let Some(value) = value else {

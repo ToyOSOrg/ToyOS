@@ -760,6 +760,16 @@ mod checks {
         assert!(judge(&[&readback("foreignrecord", &unbounded, kernel)]).is_err());
     }
 
+    /// The foreign-identity boot owes no fact off the page its next pass
+    /// cleared; any other boot owes each one but a path it did not take.
+    #[test]
+    fn a_cleared_page_owes_no_fact_off_it() {
+        let bound = "boot-deadline=120000";
+        assert!(metal::owes_nothing("panel_us", &[toyos_build::metal::FOREIGN_RECORD_ARM, bound]));
+        assert!(!metal::owes_nothing("panel_us", &[bound]));
+        assert!(metal::owes_nothing("park_open_operations", &[bound]));
+    }
+
     /// A T14 controller's handoff: it publishes USB Legacy Support and
     /// firmware never claimed it. The T14 has two, and each is judged.
     #[test]
