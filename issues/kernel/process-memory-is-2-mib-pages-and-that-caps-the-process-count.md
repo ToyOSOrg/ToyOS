@@ -45,6 +45,15 @@ reserves its frame count when it is made and is refused by name then, never
 killed at a fault. No promotion (the kernel has no thread to do it) and no
 live split of a user leaf.
 
+1. **Scatter-gather user copies** (#593) owe one measurement: what the bulk
+   window's `Vec<Segment>` costs under the kernel heap's lock. It is one
+   heap allocation per bulk copy, taken before the address-space lock; the
+   host A/B in #593's review put a 64 MiB `read` at 1.28–1.31× main's, 32
+   to 40 ns more. No job measures it in-guest yet: the stage owes
+   `copy_cost`, a job beside `syscall_cost` that times `read` into a 64 KiB
+   and a 64 MiB window, and its metal row, so that
+   `cargo test -- --metal copy_cost` at the stage's merge and at its base is
+   the A/B.
 2. **Superframe frame allocator.** 4 KiB frames carved from 2 MiB
    superframes; the pin rule held per superframe, so no pinned frame is
    reissued and no superframe holding one is handed out whole; a watermark
@@ -57,7 +66,10 @@ live split of a user leaf.
    the frames a process owns, with per-process counts; stacks are demand-zero
    and TLS is 4 KiB. A typed syscall value crossing a page is served in
    segments, so `is_user_object` stops refusing a straddle and
-   `abuse_page_straddle`'s refusals become delivery verdicts. Exit: a
+   `abuse_page_straddle`'s refusals become delivery verdicts. A 2 MiB window
+   of 4 KiB leaves from arbitrary frames is up to 512 runs, so the one-run
+   bound `user_ptr::window_split` panics on becomes reachable from userland
+   and goes with the stage. Exit: a
    process's floor on the T14 against the 10 to 14 MB above.
 4. **Demand-zero anonymous `mmap`.** A fault installs a 2 MiB leaf only for a
    whole aligned 2 MiB span of the mapping; unmapping a range no thread touched

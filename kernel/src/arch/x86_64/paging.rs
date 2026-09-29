@@ -42,8 +42,6 @@ const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
 
 /// Every upper-level table entry's flags: present, writable, user.
 const TABLE_FLAGS: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
-/// The rights a ring 3 store needs at every level of its walk.
-const STORE: u64 = PAGE_USER | PAGE_WRITE;
 
 impl Prot {
     /// The permission bits a leaf entry carries; address and cache policy stay the caller's.
@@ -561,20 +559,15 @@ impl AddressSpace {
         self.walk(vaddr).map(|(dm, _, _)| dm)
     }
 
-    /// As [`translate`](Self::translate), but only where a user store would
-    /// land: every level of the walk grants `USER` and `WRITE`, as the MMU
-    /// demands of a ring 3 store under `CR0.WP`. A kernel copy into user
-    /// memory goes through this, so a syscall cannot write a page the process
-    /// itself may not — the clock page, a shared library's `.text`.
-    pub fn translate_writable(&self, vaddr: UserAddr) -> Option<crate::mm::DirectMap> {
-        self.walk(vaddr).and_then(|(dm, rights, _)| (rights & STORE == STORE).then_some(dm))
-    }
-
-    /// `vaddr`'s physical address as [`translate`](Self::translate) or
-    /// [`translate_writable`](Self::translate_writable) answers it for
-    /// `access`, and the bytes from it to the end of the leaf that maps it,
-    /// which that one walk answers for too.
+    /// `vaddr`'s physical address and the bytes from it to the end of the leaf
+    /// that maps it, which that one walk answers for. A `Write` is answered
+    /// only where a user store would land: every level of the walk grants
+    /// `USER` and `WRITE`, as the MMU demands of a ring 3 store under
+    /// `CR0.WP`. A kernel copy into user memory goes through this, so a syscall
+    /// cannot write a page the process itself may not — the clock page, a
+    /// shared library's `.text`.
     pub fn leaf(&self, vaddr: UserAddr, access: toyos_userbound::Access) -> Option<(u64, u64)> {
+        const STORE: u64 = PAGE_USER | PAGE_WRITE;
         let (dm, rights, size) = self.walk(vaddr)?;
         let granted = match access {
             toyos_userbound::Access::Read => true,

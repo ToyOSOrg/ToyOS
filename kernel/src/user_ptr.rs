@@ -72,10 +72,7 @@ fn translate_now(
     addr: UserAddr,
     access: Access,
 ) -> Option<crate::mm::DirectMap> {
-    match access {
-        Access::Read => space.translate(addr),
-        Access::Write => space.translate_writable(addr),
-    }
+    space.leaf(addr, access).map(|(phys, _)| crate::mm::DirectMap::from_phys(phys))
 }
 
 /// Translate a user virtual address to its direct-map address, demand-paging it in if needed; `pub(crate)` because the futex word outlives its syscall.
@@ -103,25 +100,10 @@ fn object_run(ptr: UserAddr, size: usize, align: usize, access: Access) -> Resul
     if !toyos_userbound::is_user_object(ptr.raw(), size as u64, align as u64) {
         return Err(SyscallError::BadAddress);
     }
-    fault_in(ptr, size, access).ok_or(SyscallError::BadAddress)?;
-    let pt = crate::process::current_address_space();
-    let guard = pt.lock();
-    let mut run = None;
-    toyos_userbound::segments(
-        ptr.raw(),
-        size as u64,
-        |at| guard.leaf(UserAddr::new(at), access),
-        |next| {
-            if run.replace(next).is_some() {
-                window_split(ptr, size)
-            }
-        },
-    )
-    .ok_or(SyscallError::BadAddress)?;
-    let run = run.expect("`segments` emits a run whenever it places the window");
-    let pins = FramePins::pin([run], Pmm).ok_or(SyscallError::BadAddress)?;
-    drop(guard);
-    Ok((crate::mm::DirectMap::from_phys(run.phys).as_mut_ptr(), pins))
+    let pins = pinned(ptr, size, access, |_| [Segment { phys: 0, len: 0 }], |one, i, run| one[i] = run)
+        .ok_or(SyscallError::BadAddress)?;
+    let phys = pins.runs()[0].phys;
+    Ok((crate::mm::DirectMap::from_phys(phys).as_mut_ptr(), pins))
 }
 
 /// A 2 MiB window is one frame in order, so it holds at most one run.
@@ -383,13 +365,25 @@ fn fault_in(ptr: UserAddr, len: usize, access: Access) -> Option<usize> {
     Some(windows)
 }
 
-/// Validate `[ptr, ptr+len)` as a user window, walked leaf by leaf into its physical runs, and pin every frame they cover. The pins are taken under the address-space lock over a translation that still names each frame, so a concurrent `munmap` — which needs that same lock to free the range — cannot reissue a frame between the confirmation and the pin. Nothing is allocated or freed under the lock but on a refused pin.
+/// A bulk buffer's runs, one per 2 MiB window at most, allocated before the lock.
 fn window(ptr: UserAddr, len: usize, access: Access) -> Option<FramePins<Vec<Segment>>> {
     if !toyos_userbound::in_user_half(ptr.raw(), len as u64) {
         return None;
     }
+    pinned(ptr, len, access, Vec::with_capacity, |runs, _, run| runs.push(run))
+}
+
+/// Faults `[ptr, ptr+len)` in, walks it leaf by leaf into its physical runs, and pins every frame they cover. `runs` makes the store for as many runs as the range touches 2 MiB windows, and `place` puts run `i` in it. The pins are taken under the address-space lock over a translation that still names each frame, so a concurrent `munmap` — which needs that same lock to free the range — cannot reissue a frame between the confirmation and the pin. Nothing is allocated or freed under the lock but on a refused pin.
+fn pinned<R: AsRef<[Segment]>>(
+    ptr: UserAddr,
+    len: usize,
+    access: Access,
+    runs: impl FnOnce(usize) -> R,
+    mut place: impl FnMut(&mut R, usize, Segment),
+) -> Option<FramePins<R>> {
     let windows = fault_in(ptr, len, access)?;
-    let mut runs = Vec::with_capacity(windows);
+    let mut runs = runs(windows);
+    let mut placed = 0;
     let pt = crate::process::current_address_space();
     let guard = pt.lock();
     toyos_userbound::segments(
@@ -397,10 +391,11 @@ fn window(ptr: UserAddr, len: usize, access: Access) -> Option<FramePins<Vec<Seg
         len as u64,
         |at| guard.leaf(UserAddr::new(at), access),
         |run| {
-            if runs.len() == windows {
+            if placed == windows {
                 window_split(ptr, len)
             }
-            runs.push(run)
+            place(&mut runs, placed, run);
+            placed += 1;
         },
     )?;
     let pins = FramePins::pin(runs, Pmm)?;
