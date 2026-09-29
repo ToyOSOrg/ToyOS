@@ -14,9 +14,6 @@ Rust program with std never links that module.
 
 A C constructor linked into such a binary — doom's C half built by `cc`, or a
 crate using the `ctor` crate — is silently skipped: it is placed in
-`.init_array` by the compiler and nothing ever runs the array. A prior issue
-about a constructor skip covered only pure C programs; nothing records the
-std half.
+`.init_array` by the compiler and nothing ever runs the array.
 
-**Exit**: a std executable with a linked C (or `ctor`) constructor runs it, or
-the gap is documented at the site with the same words.
+**Exit**: a std executable with a linked C (or `ctor`) constructor runs it.
