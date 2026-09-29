@@ -29,8 +29,8 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 ## Owner rulings, 2026-09-26
 
 - **Parked** (owner ruling, 2026-09-29). No later stage starts now. The Exit
-  (LLVM under emulation) needs stages 4-7; until they are
-  picked up it is unmet.
+  (LLVM compile measurement) starts only after the track's stages are complete;
+  until then it is unmet.
 - **Hardware discovery is ACPI only** (edk2 MADT, GTDT and SPCR under QEMU); no devicetree.
 - **Start.** Stage 0 (shared groundwork on x86) and stages 1-3 (toolchain,
   loader, kernel reaching serial on QEMU `virt`) start now. Stage 0 waits for
@@ -300,8 +300,8 @@ Each stage names its exit; "measured" means a number from a run.
 
 ## Exit
 
-ARM is done when LLVM compiles on ToyOS arm64 (owner ruling, 2026-09-29). The
-work starts only after stages 0-8 are complete. Then LLVM is compiled once
+ARM is done when LLVM compiles on ToyOS arm64. The work starts only after the
+track's stages are complete. Then LLVM is compiled once
 natively on the development Mac and once in a Linux arm64 guest (a distro known
 to be fast) under QEMU with HVF, to get the floor; then once on ToyOS arm64
 under QEMU with HVF, with the same source and build settings. A single data
