@@ -6,8 +6,7 @@ opened: 2026-09-26
 
 # The toolchain pins an older commit of three forks userland consumes
 
-Each fork keeps one branch per upstream base, with every fix appended to
-it. Three bases break that: getrandom 0.2 and 0.3, and libloading. The rust
+The rust
 fork's `rust/Cargo.lock` pins `toyos-0.2`, `toyos-0.3` and libloading's
 `toyos` at the commit before `toyos-abi` moved to 0.12, while the tree's own
 workspaces consume `toyos-0.2-sdk-0.12`, `toyos-0.3-sdk-0.12` and

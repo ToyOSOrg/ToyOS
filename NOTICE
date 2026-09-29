@@ -292,8 +292,6 @@ Rust crates and the forks
 -------------------------
 
 Third-party crates keep their own upstream licences; nothing is vendored.
-The audit read all fourteen fork manifests
-and found them permissive throughout: Apache-2.0, MIT, or MIT OR Apache-2.0.
 
 `rust/` is a submodule of a fork of the Rust compiler and standard library, and
 carries upstream's own licensing. Its `src/llvm-project` is ToyOSOrg's fork of

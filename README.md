@@ -182,8 +182,7 @@ hundred third-party crates compiled for ToyOS, the large majority of them
 exactly as published. Doom opens its window through `winit`, presents frames
 through `softbuffer`, and plays through `cpal`; its music is General MIDI
 rendered by `rustysynth`. The handful of crates that needed patches live as
-`toyos` branches of their own repositories, never vendored, and `git log <base>..toyos` in any of them is exactly the ToyOS
-delta.
+branches of their own repositories, never vendored.
 
 **Booting on real hardware.** The first boot on a physical machine — a
 ThinkPad T14 Gen 2, from a USB stick — reached CPU bring-up, x2APIC, I/O APIC,
