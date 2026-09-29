@@ -918,4 +918,32 @@ pub(crate) mod tests {
         git(&fork, &["update-index", "--cacheinfo", &format!("160000,{LLVM_B},{}", crate::llvm::LLVM)]);
         assert_eq!(llvm(), LLVM_B, "a staged gitlink is not what bootstrap checks out");
     }
+
+    /// **A maker lets go of the key it placed before it collects**: a build
+    /// waiting for that key takes it while the collection that follows is held
+    /// back, here by a record of another kind in progress.
+    #[test]
+    fn a_placed_key_is_free_while_its_maker_collects() {
+        use std::time::{Duration, Instant};
+        let e = estate("store-free");
+        let key = Kind::Sysroot.dir(&e.rust_dir).join("k");
+        let recording = Lock::shared(&store(&e.rust_dir, Kind::Llvm), "a record, holding the collection back");
+        let free = std::thread::scope(|s| {
+            let maker = s.spawn(|| get(&e.same, &e.rust_dir, Kind::Sysroot, "k", |dir| write(&dir.join("made-by"), "the maker")));
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let free = loop {
+                if Lock::try_exclusive(&key).is_some() {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            drop(recording);
+            maker.join().unwrap();
+            free
+        });
+        assert!(free, "the key its maker placed stayed held while it collected, 20 s");
+    }
 }
