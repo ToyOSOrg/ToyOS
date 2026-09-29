@@ -110,7 +110,6 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   cpuid -r -l 1; cpuid -r -l 7 -s 0; cpuid -r -l 7 -s 2
   cpuid -r -l 0x80000000; cpuid -r -l 0x80000008; cpuid -r -l 0x80000021
   rdmsr -a 0x10a; rdmsr -a 0x48; rdmsr -a 0x123
-  grep x86_Thread_features /proc/self/status
   mkdir -p rd/bin rd/sys rd/proc && cp /usr/bin/busybox rd/bin/
   printf '#!/bin/busybox sh\n/bin/busybox mount -t sysfs s /sys\n/bin/busybox mount -t proc p /proc\n/bin/busybox cat /proc/version\n/bin/busybox grep . /sys/devices/system/cpu/vulnerabilities/*\n/bin/busybox poweroff -f\n' > rd/init && chmod +x rd/init
   (cd rd && find . | cpio -o -H newc) > s0.cpio && cp /boot/vmlinuz-6.8.0-142-generic .
@@ -188,7 +187,11 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   names and compares each decoded instruction — opcode, immediate and
   normalised relative target — against `clear_bhb_loop`
   (`entry_64.S:1534-1569`) and `__FILL_RETURN_BUFFER` under `RSB_CLEAR_LOOPS`
-  (`nospec-branch.h:132-162`): deleting `3: jmp 4f`/`nop` from the inner loop
+  (`nospec-branch.h:132-162`), excluding `clear_bhb_loop`'s `.align 64, 0xcc`
+  (`entry_64.S:1540,1549`), whose bytes depend on where the linker places the
+  function, and `ASM_CREDIT_CALL_DEPTH` (`nospec-branch.h:161`), which exists
+  only under `CALL_DEPTH_TRACKING`, a mitigation ToyOS has no counterpart for:
+  deleting `3: jmp 4f`/`nop` from the inner loop
   (`entry_64.S:1558-1560`), deleting the `int3` `__FILL_RETURN_SLOT` places
   after each fill `call` (`nospec-branch.h:137-141`), or flattening the `call
   1f`/`call 2f`/`RET` nesting into direct `jmp`s each reds it. A
@@ -291,19 +294,28 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   64 boots also prints its first spawn's three bases, bit-tested by S10's
   rule; a constant-seeded generator repeats them every boot and reds it.
 - **S9 — Kernel stack protector.** `-Zstack-protector=strong` for the kernel
-  and its `core` and `alloc` (`src/toolchain.rs`). On `x86_64-unknown-none`
-  LLVM reads a global `__stack_chk_guard`, which the kernel defines and seeds
-  from `arch::entropy::draw` in a frame that never returns, before any
-  protected frame is entered; a draw still `None` after `entropy::ATTEMPTS`
-  refuses the boot. Linux's canary is per task; that gap is filed as a defect
-  when this stage lands, not before, because it does not reproduce against a
-  kernel with no canary at all.
+  and its `core` and `alloc` (`src/toolchain.rs`). LLVM's `StackProtector`
+  pass reads a per-CPU location instead of one boot-wide symbol once the
+  module carries its `stack-protector-guard`, `-guard-reg` and
+  `-guard-offset` flags (`llvm/lib/CodeGen/StackProtector.cpp`), the flags
+  Clang's `-mstack-protector-guard=sysreg` sets for Linux's own build
+  (`arch/x86/Makefile`); this rust fork's codegen backend gains them so every
+  protected frame reads and compares `%gs:N`. The scheduler writes the
+  incoming thread's own canary into `%gs:N` on every switch, as `switch_to`
+  copies `task_struct.stack_canary` into `fixed_percpu_data.stack_canary`
+  (`arch/x86/kernel/process_64.c`); each thread draws that canary
+  independently from `arch::entropy::draw` at creation, before any protected
+  frame of the thread runs, and a draw still `None` after `entropy::ATTEMPTS`
+  refuses to create it.
   **Exit**: the guest test `kernel_stack_canary` overflows a `boot-actuators`
-  frame with zeros and asserts the panic names the stack protector;
-  `static __stack_chk_guard: u64 = 0` passes the check, returns through a
-  zeroed address and reds it. Each of S10's 64 boots prints the guard, and
-  S10's rule holds for each of its 64 bits; a constant non-zero guard sets
-  every bit in 0 or 64 boots and reds it.
+  frame with zeros on each of two threads and asserts each panic names the
+  stack protector, then asserts the two threads' own canaries, read back
+  through `boot-actuators`, differ; a mutation that shares one
+  `static __stack_chk_guard` across every thread still catches both zeroed
+  overflows but answers the same value for both threads and reds the
+  distinctness assertion. Each of S10's 64 boots prints the guard, and S10's
+  rule holds for each of its 64 bits; a constant non-zero guard sets every bit
+  in 0 or 64 boots and reds it.
 - **S10 — Kernel ASLR, `Tier::Weekly` (`src/tiers.rs`).** Its first step
   times one `boot-actuators` boot of the TCG model and records 64 times that as
   the weekly cost. The loader, which builds the mapping the kernel starts in,

@@ -13,6 +13,6 @@ so a corrupted return address on the data stack is refused rather than taken.
 ToyOS builds no user shadow stack: no program can enable one, and nothing in
 `kernel/src` maps a shadow-stack page or sets `CR4.CET`/`MSR_IA32_U_CET`.
 
-**Exit**: a program can ask for a shadow stack at spawn, the kernel maps and
-enables one, and a `RET` to a return address forged on the data stack is
-refused rather than taken.
+**Exit**: a process can have a shadow stack of its own, the kernel maps and
+enables one for it, and a `RET` to a return address forged on the data stack
+is refused rather than taken.
