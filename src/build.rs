@@ -75,7 +75,7 @@ impl Drop for ArtifactBuildTimer {
 // --- Config ---
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct SystemConfig {
     #[serde(default)]
     programs: BTreeMap<String, ProgramConfig>,
@@ -2253,6 +2253,7 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
 struct TestBuild {
     target: &'static str,
     env: GuestEnv,
+    _sysroot: crate::sysroot::Sysroot,
     _lock: Lock,
     _artifact: Lock,
 }
@@ -2263,7 +2264,7 @@ impl TestBuild {
         let sysroot = crate::toolchain::ensure(root);
         let env = GuestEnv::new(&sysroot);
         invalidate_stale(root, &mut lock, &env.toolchain, stale_targets);
-        TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact(root) }
+        TestBuild { target: arch.userland(), env, _sysroot: sysroot, _lock: lock, _artifact: artifact(root) }
     }
 }
 

@@ -13,12 +13,16 @@ use std::path::{Path, PathBuf};
 
 use crate::llvm;
 use crate::store::{self, Kind, Sources};
-use crate::sysroot::clone_tree;
+use crate::sysroot::{clone_tree, Fork};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is none of them: the
 /// build below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage 2 of compiler/rustc, library and src/tools/cargo linked statically, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM; 8";
+const RECIPE: &str = "bootstrap stage 2 of compiler/rustc, library and src/tools/cargo linked statically, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM, without the links to its source; 9";
+
+/// What bootstrap links into a `stage2` from the checkout that built it, which
+/// a product of the store does not carry (`store::publish`).
+const SOURCE_LINKS: [&str; 2] = ["lib/rustlib/src", "lib/rustlib/rustc-src"];
 
 /// Where a fork checkout builds its compiler, kept between builds so the next
 /// one is incremental.
@@ -42,29 +46,36 @@ pub fn key(sources: &Sources) -> String {
     store::key(RECIPE, &parts)
 }
 
-/// The compiler `sources` name, built from the fork checkout at `fork` if
-/// nobody has built it, and held in use for as long as the returned value
-/// lives. `root` records its key and its LLVM's, so both stay while it builds
-/// with them.
-pub fn resolve(root: &Path, rust_dir: &Path, fork: &Path, sources: &Sources) -> Compiler {
-    choose(root, rust_dir, fork, sources, |fork| build_in_fork(root, rust_dir, fork, sources))
+/// The compiler `sources` name, built from `fork` if nobody has built it, and
+/// held in use for as long as the returned value lives. `root` records its key
+/// and its LLVM's, so both stay while it builds with them.
+pub fn resolve(root: &Path, rust_dir: &Path, fork: &Fork, sources: &Sources) -> Compiler {
+    choose(root, rust_dir, fork, sources, |dir| build_in_fork(root, rust_dir, dir, sources))
 }
 
 /// [`resolve`] with the build that makes a compiler's `stage2` passed in, so a
 /// test can stand in for bootstrap: `build` compiles the fork checkout it is
 /// given and returns the `stage2` it left there.
-fn choose(root: &Path, rust_dir: &Path, fork: &Path, sources: &Sources, build: impl Fn(&Path) -> PathBuf) -> Compiler {
-    store::record(root, Kind::Llvm, &llvm::key(sources));
+fn choose(root: &Path, rust_dir: &Path, fork: &Fork, sources: &Sources, build: impl Fn(&Path) -> PathBuf) -> Compiler {
+    store::record(root, rust_dir, Kind::Llvm, &llvm::key(sources));
     let key = key(sources);
-    let held = store::get(root, rust_dir, Kind::Compiler, &key, |partial| fill(root, fork, &key, partial, &build));
+    let held = store::get(root, rust_dir, Kind::Compiler, &key, |partial| {
+        let checkout = fork.checkout(root);
+        fill(root, &checkout.dir, &key, partial, &build);
+    });
     Compiler { stage2: held.dir.join("stage2"), key, _held: held }
 }
 
-/// Build the compiler `key` names from `fork` into `partial`.
+/// Build the compiler `key` names from the fork checkout at `fork` into
+/// `partial`.
 fn fill(root: &Path, fork: &Path, key: &str, partial: &Path, build: &impl Fn(&Path) -> PathBuf) {
     eprintln!("Building compiler {key} in {}: nobody on this host has", fork.display());
     let stage2 = build(fork);
     clone_tree(&stage2, &partial.join("stage2"));
+    for link in SOURCE_LINKS {
+        let at = partial.join("stage2").join(link);
+        fs::remove_dir_all(&at).unwrap_or_else(|e| panic!("remove {}: {e}", at.display()));
+    }
     let again = self::key(&Sources::of(root, fork));
     assert!(
         again == key,
@@ -165,6 +176,12 @@ mod tests {
         }
         write(&lld.parent().unwrap().parent().unwrap().join("lib/clang/22/include/stddef.h"), "stddef");
         write(&stage2.join("bin/cargo"), "cargo");
+        for link in SOURCE_LINKS {
+            let at = stage2.join(link).join("rust");
+            fs::create_dir_all(at.parent().unwrap()).unwrap();
+            let _ = fs::remove_file(&at);
+            std::os::unix::fs::symlink(fork, &at).unwrap();
+        }
         stage2
     }
 
@@ -185,26 +202,27 @@ mod tests {
             builds.set(builds.get() + 1);
             fake_build(fork)
         };
-        let primary = choose(&e.primary, &e.rust_dir, &e.rust_dir, &sources(&e.primary), counted);
-        let same = choose(&e.same, &e.rust_dir, &e.same.join("rust"), &sources(&e.same), counted);
-        assert_eq!((same.stage2, builds.get()), (primary.stage2, 1), "one compiler/ built two compilers");
+        let primary = choose(&e.primary, &e.rust_dir, &Fork::Checkout(e.rust_dir.clone()), &sources(&e.primary), counted);
+        let same = choose(&e.same, &e.rust_dir, &Fork::Checkout(e.same.join("rust")), &sources(&e.same), counted);
+        assert_eq!((same.stage2, builds.get()), (primary.stage2.clone(), 1), "one compiler/ built two compilers");
+        assert!(SOURCE_LINKS.iter().all(|l| !primary.stage2.join(l).exists()), "a compiler names the checkout that built it");
 
-        let ca = choose(&e.a, &e.rust_dir, &e.a.join("rust"), &sources(&e.a), counted);
-        let cb = choose(&e.b, &e.rust_dir, &e.b.join("rust"), &sources(&e.b), counted);
+        let ca = choose(&e.a, &e.rust_dir, &Fork::Checkout(e.a.join("rust")), &sources(&e.a), counted);
+        let cb = choose(&e.b, &e.rust_dir, &Fork::Checkout(e.b.join("rust")), &sources(&e.b), counted);
         assert_eq!(builds.get(), 3);
         assert_ne!(ca.stage2, cb.stage2, "two compilers were given one directory");
         assert!(fs::read_to_string(ca.stage2.join("bin/rustc")).unwrap().contains("aarch64"));
         assert!(fs::read_to_string(cb.stage2.join("bin/rustc")).unwrap().contains("riscv"));
-        let again = choose(&e.a, &e.rust_dir, &e.a.join("rust"), &sources(&e.a), counted);
+        let again = choose(&e.a, &e.rust_dir, &Fork::Checkout(e.a.join("rust")), &sources(&e.a), counted);
         assert_eq!((again.stage2, builds.get()), (ca.stage2.clone(), 3), "a placed compiler was built again");
 
         let fork = e.a.join("rust");
         write(&fork.join("compiler/rustc_target/src/new_target.rs"), "pub fn t() {}\n");
-        let untracked = choose(&e.a, &e.rust_dir, &fork, &sources(&e.a), counted);
+        let untracked = choose(&e.a, &e.rust_dir, &Fork::Checkout(fork.clone()), &sources(&e.a), counted);
         assert_ne!(untracked.stage2, ca.stage2, "an untracked target spec kept the old compiler");
         git(&fork, &["add", "-A"]);
         git(&fork, &["commit", "-qm", "the target, committed"]);
-        let committed = choose(&e.a, &e.rust_dir, &fork, &sources(&e.a), counted);
+        let committed = choose(&e.a, &e.rust_dir, &Fork::Checkout(fork.clone()), &sources(&e.a), counted);
         assert_eq!((committed.stage2, builds.get()), (untracked.stage2, 4), "a commit rebuilt the compiler");
         assert_eq!(store::recorded(&e.a, Kind::Llvm), Some(llvm::key(&sources(&e.a))), "the LLVM a compiler links went unrecorded");
     }
@@ -241,7 +259,7 @@ mod tests {
             fake_build(fork)
         };
         let said = refusal("a compiler whose sources moved was placed", || {
-            choose(&e.a, &e.rust_dir, &fork, &sources(&e.a), moving);
+            choose(&e.a, &e.rust_dir, &Fork::Checkout(fork.clone()), &sources(&e.a), moving);
         });
         assert!(said.contains("moved while compiler"), "{said}");
         let placed: Vec<_> = fs::read_dir(Kind::Compiler.dir(&e.rust_dir)).into_iter().flatten().flatten().map(|e| e.file_name()).collect();

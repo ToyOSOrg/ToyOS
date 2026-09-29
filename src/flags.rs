@@ -29,7 +29,7 @@ pub(crate) enum Value {
     /// answers about every row, and `--known-red <test>` about one.
     Optional,
     /// Every word after it — the flag names a subcommand that owns the rest of
-    /// the line, as `--ci <job>` does.
+    /// the line.
     Rest,
 }
 
@@ -166,8 +166,8 @@ pub(crate) struct Walk<'a> {
 impl Walk<'_> {
     /// A flag whose value no reader of this line would get — every shape that
     /// reaches a reader as a silent default, and the whole of what either
-    /// command line asks. A flag with nothing after it — the end of the line,
-    /// an empty `--smp=`, or a `--ci` owning no words — answers `None` to
+    /// command line asks. A flag with nothing after it — the end of the line
+    /// or an empty `--smp=` — answers `None` to
     /// [`Vocabulary::value`] and `&[]` to [`Vocabulary::rest`]; a flag written
     /// twice has every use but one dropped; and an inline value is dropped by
     /// exactly two readers, `Value::None` having none and `rest` taking only the

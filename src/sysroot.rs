@@ -7,14 +7,17 @@
 //! the three trees std and `libtoyos_c.a` compile, `toyos-abi`, `toyos` and
 //! `userland/libc`. `sysroots/<key>/` is a whole toolchain — the compiler's
 //! files cloned from its `stage2`, the guest targets' libraries built from this
-//! key's sources — and a build names it as `RUSTUP_TOOLCHAIN`, so two
-//! checkouts with different ABIs never refuse or wait for each other.
+//! key's sources — and a build names it as `RUSTUP_TOOLCHAIN`.
 //!
-//! **Each checkout builds std in a fork checkout of its own** ([`fork_checkout`]):
-//! bootstrap's stage-0 local rebuild, the compiler compiling that checkout's
-//! `library/` for the guest targets into its `build/toyos-std/`. `library/std`
-//! names `toyos-abi` and `toyos` as `../../../`, so the checkout sits beside
-//! this worktree's own.
+//! **The fork a checkout's toolchain is built from is a [`Fork`]**: the
+//! primary's `rust/`, or a linked worktree's own `rust/` where it made one to
+//! edit the fork, keyed as it stands and built where it is; for every other
+//! linked worktree, the commit its tree pins, keyed from the primary's objects
+//! and built in the host's one shared checkout, [`SHARED`], which such builds
+//! hold one at a time. Bootstrap's stage-0 local rebuild compiles a checkout's
+//! `library/` for the guest targets into its `build/toyos-std/`; `library/std`
+//! names `toyos-abi` and `toyos` as `../../../`, so the checkout sits beside the
+//! building worktree's trees, or beside links to them.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,7 +26,7 @@ use std::process::Command;
 use crate::arch::Arch;
 use crate::compiler::{self, Compiler};
 use crate::dirlock::Lock;
-use crate::store::{self, Kind, Sources, ABI_TREES};
+use crate::store::{self, Kind, Relocked, Sources, ABI_TREES};
 use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 
 /// What changes how a key's sources become a sysroot and is none of them: the
@@ -53,7 +56,7 @@ impl Sysroot {
 /// so an installed one is matched to a checkout by the same hashes the store
 /// keys on (`src/release.rs`).
 pub fn witness(root: &Path) -> String {
-    let hashes = store::trees(root, &ABI_TREES);
+    let hashes = store::trees(root, &ABI_TREES, Relocked::No);
     ABI_TREES.iter().zip(hashes).map(|(tree, hash)| format!("{tree}:{hash}\n")).collect()
 }
 
@@ -76,96 +79,169 @@ fn pinned_fork(root: &Path) -> String {
     }
 }
 
-/// Where a linked worktree's std is built when its `rust/` is the empty stub
-/// `git worktree add` leaves: under its ignored `target/`, so `git worktree
-/// remove` takes it with the worktree.
-const BUILT_FORK: &str = "target/fork";
+/// Where, in the primary's `rust/`, the host builds the toolchain of every
+/// linked worktree whose `rust/` is the stub: one git worktree of the primary's
+/// fork repository, sharing its objects, at `rust/`, and `toyos-abi` and
+/// `toyos` beside it as links to the trees of the build that holds it.
+pub const SHARED: &str = "build/fork";
 
-/// The fork checkout `root`'s std is built in.
-///
-/// The primary's is its own `rust/`. A linked worktree whose `rust/` is a
-/// checkout — a git worktree of the primary's fork repository, which is where
-/// the fork is edited — builds there, as it stands, provided it is at or ahead
-/// of the commit this tree pins. Any other linked worktree builds in
-/// [`BUILT_FORK`]`/rust`: a detached git worktree of the primary's fork
-/// repository, sharing its objects, held at the pinned commit, with
-/// `toyos-abi` and `toyos` beside it as links to this worktree's.
-pub fn fork_checkout(root: &Path) -> PathBuf {
-    let primary = match toolchain::owner(root) {
-        Owner::Us => return root.join("rust"),
-        Owner::Installed => panic!("an installed toolchain has no fork checkout to build std in"),
-        Owner::Elsewhere(primary) => primary,
-    };
-    let pinned = pinned_fork(root);
-    let edited = root.join("rust");
-    if edited.join(".git").exists() {
-        let head = git_out(&edited, &["rev-parse", "HEAD"]);
-        let at_or_ahead = Command::new("git")
-            .args(["merge-base", "--is-ancestor", &pinned, head.trim()])
-            .current_dir(&edited)
-            .status()
-            .is_ok_and(|s| s.success());
-        assert!(
-            at_or_ahead,
-            "{} is at {}, and this tree pins the fork at {pinned}, which that is not at or ahead of: a \
-             build here would compile a std this tree does not name. Move it there: `git -C {} \
-             checkout --detach {pinned}`",
-            edited.display(),
-            head.trim(),
-            edited.display(),
-        );
-        return edited;
-    }
-    let base = root.join(BUILT_FORK);
-    let fork = base.join("rust");
-    if !fork.join(".git").exists() {
-        eprintln!("Making {} a fork checkout at {pinned} (a git worktree of the primary's)", fork.display());
-        let theirs = primary.join("rust");
-        git_run(&theirs, &["worktree", "prune"]);
-        fs::create_dir_all(&base).unwrap_or_else(|e| panic!("create {}: {e}", base.display()));
-        git_run(&theirs, &["worktree", "add", "--detach", path_str(&fork), &pinned]);
-        for tree in ["toyos-abi", "toyos"] {
-            std::os::unix::fs::symlink(Path::new("../..").join(tree), base.join(tree))
-                .unwrap_or_else(|e| panic!("link {}: {e}", base.join(tree).display()));
+/// The submodules a toolchain build needs, taken from the primary's own clone
+/// of each where it holds the commit, so no build fetches what the host has.
+const SUBMODULES: [&str; 2] = ["library/backtrace", "src/tools/cargo"];
+
+/// The rust fork a checkout's toolchain is built from.
+pub enum Fork {
+    /// A fork checkout, keyed as it stands and built where it is: the
+    /// primary's `rust/`, or a linked worktree's own, which is where the fork
+    /// is edited.
+    Checkout(PathBuf),
+    /// The commit a linked worktree whose `rust/` is the stub pins, in the fork
+    /// repository at `rust_dir`, the primary's: keyed from its objects and built
+    /// in [`SHARED`].
+    Pinned { rust_dir: PathBuf, commit: String },
+}
+
+impl Fork {
+    /// The fork `root`'s toolchain is built from.
+    ///
+    /// A checkout is used as it stands when it is at or ahead of the commit
+    /// this tree pins. The primary's that is not is refused, since nothing but
+    /// its owner moves it; a linked worktree's is moved there, unless it holds
+    /// uncommitted work, which is refused rather than moved out from under
+    /// whoever made it.
+    pub fn of(root: &Path) -> Fork {
+        let pinned = pinned_fork(root);
+        let own = root.join("rust");
+        match toolchain::owner(root) {
+            Owner::Installed => panic!("an installed toolchain has no fork to build from"),
+            Owner::Us => {
+                let head = git_out(&own, &["rev-parse", "HEAD"]);
+                assert!(
+                    at_or_ahead(&own, &pinned, head.trim()),
+                    "{} is at {}, and this tree pins the fork at {pinned}, which that is not at or ahead \
+                     of: a build here would make a toolchain this tree does not name. Move it there: \
+                     `git -C {} checkout --detach {pinned}`",
+                    own.display(),
+                    head.trim(),
+                    own.display(),
+                );
+                Fork::Checkout(own)
+            }
+            Owner::Elsewhere(_) if own.join(".git").exists() => {
+                let behind = || {
+                    let head = git_out(&own, &["rev-parse", "HEAD"]);
+                    (!at_or_ahead(&own, &pinned, head.trim())).then_some(head)
+                };
+                if behind().is_none() {
+                    return Fork::Checkout(own);
+                }
+                let _held = Lock::exclusive(&own, &format!("{}, behind a build in it", own.display()));
+                if let Some(head) = behind() {
+                    let dirty = git_out(&own, &["status", "--porcelain", "--ignore-submodules=none"]);
+                    assert!(
+                        dirty.is_empty(),
+                        "{} is at {} with uncommitted work, and this tree pins the fork at {pinned}, which \
+                         that is not at or ahead of: a build here would make a toolchain this tree does not \
+                         name, and moving the checkout would lose that work.\n{dirty}",
+                        own.display(),
+                        head.trim(),
+                    );
+                    git_out(&own, &["checkout", "--detach", "-q", &pinned]);
+                    eprintln!("{} was at {}, not at or ahead of this tree's pin {pinned}: checked it out", own.display(), head.trim());
+                }
+                Fork::Checkout(own)
+            }
+            Owner::Elsewhere(primary) => Fork::Pinned { rust_dir: primary.join("rust"), commit: pinned },
         }
-        let backtrace = git_out(&fork, &["ls-tree", "HEAD", "library/backtrace"]);
-        let commit = backtrace.split_whitespace().nth(2).unwrap_or_else(|| {
-            panic!("{} pins no library/backtrace: {backtrace:?}", fork.display())
-        });
-        let theirs = theirs.join("library/backtrace");
-        let held = Command::new("git")
-            .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
-            .current_dir(&theirs)
-            .status()
-            .is_ok_and(|s| s.success());
-        let at = fork.join("library/backtrace");
-        if held {
-            let _ = fs::remove_dir(&at);
-            git_run(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
-        } else {
-            git_run(&fork, &["submodule", "update", "--init", "library/backtrace"]);
+    }
+
+    /// `root`'s sources: its ABI trees as they stand, and this fork's trees.
+    pub fn sources(&self, root: &Path) -> Sources {
+        match self {
+            Fork::Checkout(dir) => Sources::of(root, dir),
+            Fork::Pinned { rust_dir, commit } => Sources::pinned(root, rust_dir, commit),
         }
-        return fork;
     }
-    let head = git_out(&fork, &["rev-parse", "HEAD"]);
-    if head.trim() != pinned {
-        let dirty = git_out(&fork, &["status", "--porcelain"]);
-        assert!(dirty.is_empty(), "{} is the build's own fork checkout and holds edits; the fork is edited in {}:\n{dirty}", fork.display(), edited.display());
-        git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
+
+    /// A checkout to build `root`'s toolchain in, held for it alone for as
+    /// long as the returned value lives: each build there empties the build
+    /// directory the one before it built in.
+    pub fn checkout(&self, root: &Path) -> Checkout {
+        match self {
+            Fork::Checkout(dir) => {
+                Checkout { _held: Lock::exclusive(dir, &format!("a toolchain build in {}", dir.display())), dir: dir.clone() }
+            }
+            Fork::Pinned { rust_dir, commit } => shared(rust_dir, root, commit),
+        }
     }
-    fork
+}
+
+/// A fork checkout held by one build.
+pub struct Checkout {
+    pub dir: PathBuf,
+    _held: Lock,
+}
+
+/// Whether `head`, in the fork checkout `dir`, is `commit` or ahead of it.
+fn at_or_ahead(dir: &Path, commit: &str, head: &str) -> bool {
+    git(dir, &["merge-base", "--is-ancestor", commit, head], None).is_ok()
+}
+
+/// [`SHARED`] in the fork repository at `rust_dir`, held for `root`, at
+/// `commit`, beside links to `root`'s ABI trees. Nothing edits it, so whatever
+/// a build killed in it left goes.
+fn shared(rust_dir: &Path, root: &Path, commit: &str) -> Checkout {
+    let base = rust_dir.join(SHARED);
+    fs::create_dir_all(&base).unwrap_or_else(|e| panic!("create {}: {e}", base.display()));
+    let held = Lock::exclusive(&base, &format!("{}, behind another worktree's toolchain build", base.display()));
+    let dir = base.join("rust");
+    if !dir.join(".git").exists() {
+        eprintln!("Making {} a fork checkout (a git worktree of {})", dir.display(), rust_dir.display());
+        remove(&dir);
+        git_out(rust_dir, &["worktree", "prune"]);
+        git_out(rust_dir, &["worktree", "add", "--detach", path_str(&dir), commit]);
+    }
+    git_out(&dir, &["checkout", "--detach", "--force", "-q", commit]);
+    git_out(&dir, &["clean", "-d", "--force", "-q"]);
+    for path in SUBMODULES {
+        share_submodule(rust_dir, &dir, path);
+    }
+    for tree in ["toyos-abi", "toyos"] {
+        toolchain::swap_link(&root.join(tree), &base.join(tree));
+    }
+    Checkout { dir, _held: held }
+}
+
+/// Check out `fork`'s submodule `path` at the commit its gitlink names from the
+/// primary's clone of it at `rust_dir`, sharing its objects, when that clone
+/// holds the commit; bootstrap fetches it otherwise.
+fn share_submodule(rust_dir: &Path, fork: &Path, path: &str) {
+    let listed = git_out(fork, &["ls-tree", "HEAD", path]);
+    let commit = listed.split_whitespace().nth(2).unwrap_or_else(|| panic!("{} pins no {path}: {listed:?}", fork.display()));
+    let holds = |dir: &Path| git(dir, &["cat-file", "-e", &format!("{commit}^{{commit}}")], None).is_ok();
+    let at = fork.join(path);
+    let theirs = rust_dir.join(path);
+    if at.join(".git").exists() {
+        if holds(&at) {
+            git_out(&at, &["checkout", "--detach", "-q", commit]);
+        }
+    } else if theirs.join(".git").exists() && holds(&theirs) {
+        remove(&at);
+        git_out(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
+    }
 }
 
 /// The sysroot this worktree's sources name, made if nobody has made it, and
 /// held in use for as long as the returned value lives.
 pub fn ensure(root: &Path, rust_dir: &Path) -> Sysroot {
-    let fork = fork_checkout(root);
-    let sources = Sources::of(root, &fork);
+    let fork = Fork::of(root);
+    let sources = fork.sources(root);
     let compiler = compiler::resolve(root, rust_dir, &fork, &sources);
     let key = key(&compiler.key, &sources);
     let held = store::get(root, rust_dir, Kind::Sysroot, &key, |partial| {
-        assemble(&compiler.stage2, partial, |partial| build(root, &compiler, &fork, partial));
-        let again = self::key(&compiler.key, &Sources::of(root, &fork));
+        let checkout = fork.checkout(root);
+        assemble(&compiler.stage2, partial, |partial| build(root, &compiler, &checkout.dir, partial));
+        let again = self::key(&compiler.key, &Sources::of(root, &checkout.dir));
         assert!(
             again == key,
             "the sources moved while sysroot {key} was being built (they are now {again}); \
@@ -192,14 +268,9 @@ fn assemble(stage2: &Path, partial: &Path, fill: impl FnOnce(&Path)) {
 /// with `compiler`, into `partial`.
 fn build(root: &Path, compiler: &Compiler, fork: &Path, partial: &Path) {
     eprintln!("Building a sysroot: std from {}, the compiler {}", fork.display(), compiler.key);
-    {
-        // One std build at a time in a checkout: each empties the build directory
-        // the one before it built in.
-        let _std = Lock::exclusive(fork, &format!("a std build in {}", fork.display()));
-        let built = build_std(root, compiler, fork);
-        for target in GUEST_TARGETS {
-            place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
-        }
+    let built = build_std(root, compiler, fork);
+    for target in GUEST_TARGETS {
+        place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
     }
     // Inside the product being made, which nothing else writes or collects.
     let libc_target = partial.join(".libc-target");
@@ -376,9 +447,9 @@ lld = false
     )
 }
 
-/// Copy `from` to `to`, a symbolic link as a link: `stage2`'s own point at
-/// things that outlive it. `fs::copy` clones on APFS and reflinks where Linux
-/// can, so a sysroot costs the bytes its own libraries differ by.
+/// Copy `from` to `to`, a symbolic link as a link. `fs::copy` clones on APFS
+/// and reflinks where Linux can, so a sysroot costs the bytes its own libraries
+/// differ by.
 pub(crate) fn clone_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap_or_else(|e| panic!("create {}: {e}", to.display()));
     for entry in fs::read_dir(from).unwrap_or_else(|e| panic!("read {}: {e}", from.display())).flatten() {
@@ -402,13 +473,16 @@ fn path_str(path: &Path) -> &str {
     path.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", path.display()))
 }
 
-/// `Err` names the command, the directory and what git said.
-fn git_try(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .map_err(|e| format!("run git in {}: {e}", dir.display()))?;
+/// What `git args` printed in `dir`, with `index` as its index if given: the
+/// build system's one git runner. `Err` names the command, the directory and
+/// what git said.
+pub(crate) fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>, String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(dir);
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    let out = command.output().map_err(|e| format!("run git in {}: {e}", dir.display()))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!("git {args:?} in {}: {}", dir.display(), stderr.trim()));
@@ -417,7 +491,7 @@ fn git_try(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
-    git_try(dir, args).unwrap_or_else(|e| panic!("{e}"))
+    git(dir, args, None).unwrap_or_else(|e| panic!("{e}"))
 }
 
 pub(crate) fn git_out(dir: &Path, args: &[&str]) -> String {
@@ -429,7 +503,7 @@ pub(crate) fn git_out(dir: &Path, args: &[&str]) -> String {
 /// name rather than rewritten into one git does not track.
 pub(crate) fn tracked_files(dir: &Path, pathspecs: &[&str]) -> Result<Vec<String>, String> {
     let args = [&["ls-files", "-z", "--"][..], pathspecs].concat();
-    let listing = git_try(dir, &args)?;
+    let listing = git(dir, &args, None)?;
     let names = listing.split(|b| *b == 0).filter(|f| !f.is_empty());
     names
         .map(|f| {
@@ -439,17 +513,6 @@ pub(crate) fn tracked_files(dir: &Path, pathspecs: &[&str]) -> Result<Vec<String
         })
         .collect()
 }
-
-fn git_run(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .unwrap_or_else(|e| panic!("run git in {}: {e}", dir.display()))
-        .success();
-    assert!(ok, "git {args:?} in {} failed", dir.display());
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -471,6 +534,10 @@ mod tests {
         write(&e.same.join("userland/libc/src/lib.rs"), "pub struct B;\n");
         assert_ne!(k("c1"), base, "a libc edit kept the sysroot");
         git(&e.same, &["checkout", "-q", "--", "userland"]);
+        write(&e.same.join("userland/libc/Cargo.lock"), "# re-locked, and neither staged nor committed\n");
+        assert_ne!(k("c1"), base, "an edit to libc's own lockfile kept the sysroot");
+        git(&e.same, &["checkout", "-q", "--", "userland"]);
+        assert_eq!(k("c1"), base);
         write(&fork.join("library/std/src/lib.rs"), "pub fn b() {}\n");
         assert_ne!(k("c1"), base, "a std edit kept the sysroot");
         git(&fork, &["checkout", "-q", "--", "library"]);
@@ -544,48 +611,80 @@ mod tests {
         assert_eq!(fs::read_to_string(build.join("compiled-by")).unwrap(), "c2");
     }
 
-    /// **A worktree whose `rust/` is the stub builds std in a fork checkout of
-    /// its own under `target/`**, at the commit its tree pins, beside links to
-    /// its own ABI trees; the primary's fork is not touched; a moved pin moves
-    /// the checkout; and plain `git worktree remove` takes it all, because
-    /// nothing is nested where git looks.
+    /// **A worktree whose `rust/` is the stub holds no fork checkout of its
+    /// own**: its toolchain is keyed from the primary's objects at the commit its
+    /// tree pins, which is what a clean checkout of that commit hashes to, and
+    /// built in the host's one shared checkout — held by one build at a time,
+    /// moved to the pin of the build holding it with whatever a killed build left
+    /// gone, beside links to that build's ABI trees. The primary's fork is not
+    /// touched, and plain `git worktree remove` takes the worktree whole.
     #[test]
-    fn a_stub_worktree_builds_std_in_a_checkout_git_worktree_remove_takes() {
-        let e = estate("fork-checkout");
-        let linked = e.same.parent().unwrap().join("stub");
-        git(&e.primary, &["worktree", "add", "-q", "-b", "stub", linked.to_str().unwrap()]);
+    fn a_stub_worktree_builds_in_the_host_s_shared_checkout() {
+        let e = estate("fork-shared");
+        let stub = |name: &str| {
+            let worktree = e.same.parent().unwrap().join(name);
+            git(&e.primary, &["worktree", "add", "-q", "-b", name, worktree.to_str().unwrap()]);
+            worktree
+        };
+        let beside = |dir: &Path, tree: &str| fs::canonicalize(dir.join("library/std/../../..").join(tree)).unwrap();
+        let linked = stub("stub");
         let pinned = git(&e.primary, &["rev-parse", "HEAD:rust"]);
         let before = git(&e.rust_dir, &["rev-parse", "HEAD"]);
 
-        let fork = fork_checkout(&linked);
-        assert_eq!(fork, linked.join(BUILT_FORK).join("rust"));
-        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), pinned);
-        assert_eq!(fs::canonicalize(fork.join("../../../toyos-abi")).unwrap(), fs::canonicalize(linked.join("toyos-abi")).unwrap());
+        let fork = Fork::of(&linked);
+        assert!(matches!(&fork, Fork::Pinned { commit, .. } if *commit == pinned));
+        assert_eq!(fork.sources(&linked), Sources::of(&linked, &e.same.join("rust")), "the pin's trees are not a clean checkout's");
+        assert!(!linked.join("rust/.git").exists() && !linked.join("target").exists(), "a stub worktree holds fork state");
+
+        let checkout = fork.checkout(&linked);
+        assert_eq!(checkout.dir, e.rust_dir.join(SHARED).join("rust"));
+        assert_eq!(git(&checkout.dir, &["rev-parse", "HEAD"]), pinned);
+        assert_eq!(beside(&checkout.dir, "toyos-abi"), fs::canonicalize(linked.join("toyos-abi")).unwrap());
+        assert!(checkout.dir.join("library/backtrace/lib.rs").is_file(), "backtrace was not taken from the primary's clone");
+        assert!(Lock::try_exclusive(&e.rust_dir.join(SHARED)).is_none(), "the shared checkout is not held");
         assert_eq!(git(&e.rust_dir, &["rev-parse", "HEAD"]), before, "the primary's fork moved");
-        assert_eq!(git(&linked, &["status", "--porcelain"]), "", "the worktree is not clean");
+        write(&checkout.dir.join("library/std/src/lib.rs"), "left by a killed build");
+        write(&checkout.dir.join("left.rs"), "left by a killed build");
+        drop(checkout);
 
-        let other = git(&e.a.join("rust"), &["rev-parse", "HEAD"]);
-        git(&linked, &["update-index", "--cacheinfo", &format!("160000,{other},rust")]);
-        assert_eq!(git(&fork_checkout(&linked), &["rev-parse", "HEAD"]), other, "a moved pin kept the old checkout");
+        let other = stub("other");
+        let moved = git(&e.a.join("rust"), &["rev-parse", "HEAD"]);
+        git(&other, &["update-index", "--cacheinfo", &format!("160000,{moved},rust")]);
+        let checkout = Fork::of(&other).checkout(&other);
+        assert_eq!(git(&checkout.dir, &["rev-parse", "HEAD"]), moved, "a moved pin kept the old checkout");
+        assert_eq!(git(&checkout.dir, &["status", "--porcelain"]), "", "what a killed build left stayed");
+        assert_eq!(beside(&checkout.dir, "toyos"), fs::canonicalize(other.join("toyos")).unwrap(), "the links name the last build's trees");
+        drop(checkout);
 
-        git(&linked, &["update-index", "--cacheinfo", &format!("160000,{pinned},rust")]);
         git(&e.primary, &["worktree", "remove", linked.to_str().unwrap()]);
         assert!(!linked.exists(), "git worktree remove left {}", linked.display());
     }
 
-    /// **A worktree whose `rust/` is a checkout builds there, as it stands**,
-    /// and one behind the commit its tree pins is refused by name.
+    /// **A fork checkout is built as it stands when it is at or ahead of its
+    /// pin**; a linked worktree's behind it is moved there when clean and
+    /// refused, its work named, when not; and the primary's behind it is
+    /// refused, since nothing but its owner moves it.
     #[test]
-    fn a_worktree_s_own_fork_checkout_is_built_as_it_stands_or_refused() {
+    fn a_fork_checkout_behind_its_pin_is_moved_or_refused() {
         let e = estate("fork-own");
         let fork = e.a.join("rust");
+        let ahead = git(&fork, &["rev-parse", "HEAD"]);
         write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
-        assert_eq!(fork_checkout(&e.a), fork);
+        assert!(matches!(Fork::of(&e.a), Fork::Checkout(dir) if dir == fork));
         git(&e.a, &["add", "rust"]);
         git(&e.a, &["commit", "-qm", "pins a"]);
         git(&fork, &["checkout", "-q", "HEAD~1"]);
-        let said = refusal("a fork checkout behind its pin was built", || {
-            fork_checkout(&e.a);
+        let said = refusal("a fork checkout behind its pin was moved over uncommitted work", || {
+            Fork::of(&e.a);
+        });
+        assert!(said.contains("uncommitted work") && said.contains("library/std/src/lib.rs"), "{said}");
+        git(&fork, &["checkout", "-q", "--", "library"]);
+        assert!(matches!(Fork::of(&e.a), Fork::Checkout(dir) if dir == fork));
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), ahead, "a clean checkout behind its pin was not moved to it");
+
+        git(&e.primary, &["update-index", "--cacheinfo", &format!("160000,{ahead},rust")]);
+        let said = refusal("the primary's fork behind its pin was built", || {
+            Fork::of(&e.primary);
         });
         assert!(said.contains("is not at or ahead of"), "{said}");
     }

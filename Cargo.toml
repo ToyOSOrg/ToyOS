@@ -93,9 +93,6 @@ exclude = [
     # (`tests/toyos.rs`), and that one is a target of the root package rather
     # than a package of its own.
     "tests",
-    # A linked worktree's own checkout of the fork, `target/fork/rust`
-    # (`src/sysroot.rs`): without this its crates would believe they are ours.
-    "target",
 ]
 
 [package]

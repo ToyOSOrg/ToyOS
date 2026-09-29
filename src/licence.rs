@@ -52,6 +52,8 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::build::Features;
+use crate::sysroot::{Checkout, Fork};
+use crate::toolchain::Owner;
 
 /// What a shipped crate or file may be under. `OR` passes if any branch does,
 /// `AND` only if every part does.
@@ -1121,11 +1123,21 @@ fn metadata(
     serde_json::from_slice(&out).map_err(|e| format!("cargo metadata printed no JSON: {e}"))
 }
 
-/// The fork's `library/`, checked out at the commit this tree pins. A checkout
-/// whose `rust/` was never initialised — a CI runner's — fetches that commit
-/// alone.
-fn std_library(root: &Path) -> Result<PathBuf, String> {
-    let fork = crate::sysroot::fork_checkout(root);
+/// The fork's `library/`, checked out at the commit this tree pins, and the
+/// hold on that checkout while it is read when it is the host's shared one. A
+/// checkout whose `rust/` was never initialised — a CI runner's — fetches that
+/// commit alone.
+fn std_library(root: &Path) -> Result<(PathBuf, Option<Checkout>), String> {
+    let fork = match crate::toolchain::owner(root) {
+        Owner::Elsewhere(_) => match Fork::of(root) {
+            Fork::Checkout(dir) => dir,
+            pinned => {
+                let checkout = pinned.checkout(root);
+                return Ok((checkout.dir.join("library"), Some(checkout)));
+            }
+        },
+        Owner::Us | Owner::Installed => root.join("rust"),
+    };
     if !fork.join("library/Cargo.toml").exists() {
         run(
             Command::new("git")
@@ -1134,7 +1146,7 @@ fn std_library(root: &Path) -> Result<PathBuf, String> {
             "git submodule update --init --depth 1 rust",
         )?;
     }
-    Ok(fork.join("library"))
+    Ok((fork.join("library"), None))
 }
 
 /// One metadata document, and the shipped crates judged out of it.
@@ -1183,7 +1195,7 @@ pub fn judge(root: &Path) -> Result<String, String> {
     // committed lock is stale by design: it is re-locked into a scratch copy,
     // and the fork's is never written. `RUSTC_BOOTSTRAP` because the fork's
     // manifests use cargo features a stable cargo otherwise refuses.
-    let library = std_library(root)?;
+    let (library, _held) = std_library(root)?;
     let scratch = root.join("target/licence");
     std::fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
     let lock = scratch.join("Cargo.lock");

@@ -12,7 +12,7 @@ pub const FEATURES: &str = "std-runtime";
 
 /// Build toyos-libc against the toolchain at `toolchain`, in `target_dir`, and
 /// install it there as `libtoyos_c.a`. Part of making a sysroot
-/// (`src/sysroot.rs`), whose key `userland/libc/src` is one of.
+/// (`src/sysroot.rs`).
 pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     let dest = toolchain.join(format!("lib/rustlib/{}/lib/libtoyos_c.a", arch.userland()));
 
@@ -26,10 +26,12 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     // it, so the installed archive would not be rebuilt and the manifest would
     // then claim something the artifact does not have.
     //
-    // --message-format=json to discover the exact rlib artifacts.
+    // --message-format=json to discover the exact rlib artifacts; --locked here
+    // and in `build_c`, so the lockfile the sysroot's key names is the one built with.
     let output = Command::new("cargo")
         .args([
             "build",
+            "--locked",
             "--release",
             "--target",
             arch.userland(),
@@ -95,7 +97,7 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
 pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     let target = arch.userland();
     let output = Command::new("cargo")
-        .args(["rustc", "--release", "--target", target, "--crate-type", "staticlib", "--manifest-path"])
+        .args(["rustc", "--locked", "--release", "--target", target, "--crate-type", "staticlib", "--manifest-path"])
         .arg(root.join(CRATE).join("Cargo.toml"))
         .arg("--target-dir")
         .arg(target_dir)

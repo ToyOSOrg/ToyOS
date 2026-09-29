@@ -224,21 +224,27 @@ same font the kernel blits.
 - QEMU
 - A C compiler on `PATH` as `cc`, and a Python 3
 - CMake and Ninja
+- Perl and `make`
 
-The last two lines are `rustc`'s and not ToyOS's, and nothing that boots touches
+The last three lines are `rustc`'s and not ToyOS's, and nothing that boots touches
 them. `rustc` links every **host** binary through `cc`, which rustup does not
 install. `rust/x`, the entry point to rustc's own bootstrap, is a shell script
 whose whole job is to find a Python to run `bootstrap.py` with — so a clean
 clone needs one, and so does every toolchain change. And that bootstrap builds
 LLVM and clang from source with CMake and Ninja, whenever the LLVM commit
-`rust/` names has not been built on the machine before.
+`rust/` names has not been built on the machine before. The toolchain's cargo
+is the fork's own, built with its compiler, and it carries its own OpenSSL,
+which `openssl-src` configures with Perl and builds with `make`: upstream cargo
+hard-wires git2's `https` and `ssh`, and `libssh2-sys` needs `openssl-sys` on
+Unix, so no Rust TLS does that job without a change to cargo.
 
 Nothing in the OS goes near any of them. `bootloader/`, `kernel/` and
 `userland/` all link with the toolchain's `rust-lld`, and no image contains a C
-toolchain or a Python. On macOS `cc` and Python arrive with the Xcode Command
-Line Tools, and CMake and Ninja come from Homebrew (`brew install cmake
-ninja`); on Debian and Ubuntu they are `build-essential`, `python3`, `cmake`
-and `ninja-build`.
+toolchain or a Python. On macOS `cc`, Python and `make` arrive with the Xcode
+Command Line Tools and Perl with macOS itself, and CMake and Ninja come from
+Homebrew (`brew install cmake ninja`); on Debian and Ubuntu they are
+`build-essential`, which brings `make` and Perl, `python3`, `cmake` and
+`ninja-build`.
 
 `cargo run` names anything it needs and cannot find, before it does anything
 else — including the Python that only the toolchain bootstrap runs, which

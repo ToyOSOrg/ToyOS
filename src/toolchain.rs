@@ -139,13 +139,12 @@ pub(crate) fn assert_std_built_from(root: &Path, dep_info: &Path) {
         dep_info.display(),
     );
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let foreign: Vec<&String> =
-        sources.iter().filter(|p| !Path::new(p).starts_with(&root)).collect();
+    // Resolved: the shared checkout reaches a worktree's trees through links.
+    let resolved = |p: &String| fs::canonicalize(p).unwrap_or_else(|e| panic!("resolve {p}, which std compiled: {e}"));
+    let foreign: Vec<&String> = sources.iter().filter(|p| !resolved(p).starts_with(&root)).collect();
     assert!(
         foreign.is_empty(),
-        "std was compiled against {} sources that are not this worktree's:\n  {}\n\
-         `library/std` names them as `../../../`, so the fork checkout that built it is not \
-         this worktree's own.",
+        "std was compiled against {} sources that are not this worktree's:\n  {}",
         foreign.len(),
         foreign.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("\n  "),
     );
@@ -288,7 +287,7 @@ fn link(rustup_home: &Path, rust_dir: &Path, sysroot: &Path) {
 }
 
 /// Make `at` a link to `to`, by a rename over whatever `at` was.
-fn swap_link(to: &Path, at: &Path) {
+pub(crate) fn swap_link(to: &Path, at: &Path) {
     if fs::read_link(at).is_ok_and(|now| now == to) {
         return;
     }
@@ -465,8 +464,7 @@ pub fn rust_lld(toolchain: &Path) -> PathBuf {
 /// The host triple, asked of rustc once per process.
 ///
 /// Every path built from it calls this, so an uncached one spent about seven
-/// `rustc --version --verbose` spawns per build call — 0.118 s each, measured —
-/// and they fell inside the windows the build lock now covers.
+/// `rustc --version --verbose` spawns per build call — 0.118 s each, measured.
 pub fn host_triple() -> String {
     static HOST: OnceLock<String> = OnceLock::new();
     HOST.get_or_init(|| {
@@ -601,6 +599,31 @@ mod tests {
         assert_eq!(fs::symlink_metadata(&toyos).unwrap().modified().unwrap(), made, "rustup's own link was made again");
         let left: Vec<_> = fs::read_dir(rust_dir.join("build")).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(left, ["toyos"], "a link's replacement was left beside it");
+    }
+
+    /// **A std is this worktree's when what it compiled resolves into it**: the
+    /// shared checkout reaches a worktree's `toyos-abi` through a link beside
+    /// it, and a link to another worktree's is refused.
+    #[test]
+    fn a_std_compiled_through_links_is_the_worktree_they_resolve_to() {
+        let scratch = TempDir::new("std-through-links");
+        let [mine, theirs, beside, built] = ["mine", "theirs", "shared", "built"].map(|d| scratch.join(d));
+        for worktree in [&mine, &theirs] {
+            fs::create_dir_all(worktree.join("toyos-abi/src")).unwrap();
+            fs::write(worktree.join("toyos-abi/src/lib.rs"), "pub struct A;\n").unwrap();
+        }
+        fs::create_dir_all(&beside).unwrap();
+        fs::create_dir_all(&built).unwrap();
+        let through = beside.join("toyos-abi/src/lib.rs");
+        fs::write(built.join("toyos_abi.d"), format!("{}: {}\n", built.join("libtoyos_abi.rlib").display(), through.display())).unwrap();
+
+        std::os::unix::fs::symlink(mine.join("toyos-abi"), beside.join("toyos-abi")).unwrap();
+        assert_std_built_from(&mine, &built);
+        fs::remove_file(beside.join("toyos-abi")).unwrap();
+        std::os::unix::fs::symlink(theirs.join("toyos-abi"), beside.join("toyos-abi")).unwrap();
+        let refused = std::panic::catch_unwind(|| assert_std_built_from(&mine, &built));
+        let said = refused.expect_err("a std compiled against another worktree's ABI was taken for this one's");
+        assert!(said.downcast_ref::<String>().is_some_and(|s| s.contains(&through.display().to_string())));
     }
 
     /// The negative control is the defect itself: this is verbatim what cargo

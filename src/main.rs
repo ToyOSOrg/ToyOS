@@ -48,6 +48,12 @@ const ALSO_USED: &[Tool] = &[
         why: "rustc's bootstrap builds LLVM and clang with it, under CMake; `brew install \
               ninja` on macOS",
     },
+    Tool {
+        any: &["perl"],
+        why: "a compiler build builds the toolchain's cargo, whose OpenSSL `openssl-src` \
+              configures with Perl",
+    },
+    Tool { any: &["make"], why: "a compiler build builds the toolchain's cargo, whose OpenSSL `openssl-src` builds with make" },
 ];
 
 /// Where the OS would find `name`, if anywhere.
@@ -238,8 +244,6 @@ fn main() {
         toyos_build::ensure_submodules(&root);
     }
 
-    // Toolchain included: `build` holds the build lock across both, so no clean
-    // of this worktree's crate targets can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
     if let Some(out) = update_image {
         toyos_build::build::build_update(&root, &boot, &plan, &out);
