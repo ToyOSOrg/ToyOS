@@ -239,6 +239,42 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
     Ok(filter)
 }
 
+/// What `--metal`'s own flags resolve a run to. The one place that question is
+/// answered, so a future mode flag has one arm to add here rather than a
+/// boolean some later `if` in `tests/toyos.rs` can fall through — which is how
+/// `--metal --list` reached `Drive` and flashed and rebooted the T14 on
+/// 2026-09-29 07:03:35 UTC: nothing asked this before dispatching on `--metal`
+/// alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MetalMode {
+    /// `--metal` was not given: the metal profile is not this run's business.
+    Off,
+    /// `--metal --list`: print what would run, and touch nothing.
+    List,
+    /// `--metal --metal-readback <dir>`: build the images, judge the
+    /// readbacks already at that path. Never reaches the machine either.
+    Offline,
+    /// `--metal` alone: flash and drive the machine.
+    Drive,
+}
+
+/// Resolve [`MetalMode`] from raw argv, asked before anything dispatches on
+/// it. `List` is decided first: whatever else the line names, it never picks
+/// `Offline` or `Drive` once `--list` is on it.
+pub fn metal_mode(args: &[String]) -> MetalMode {
+    if !SUITE.present(args, &METAL) {
+        return MetalMode::Off;
+    }
+    if SUITE.present(args, &LIST) {
+        return MetalMode::List;
+    }
+    if SUITE.value(args, &METAL_READBACK).is_some() {
+        MetalMode::Offline
+    } else {
+        MetalMode::Drive
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,6 +554,31 @@ mod tests {
     fn a_readback_directory_alone_selects_no_tier() {
         let refusal = parse_owned(&["--metal-readback", "target/metal"]).unwrap_err();
         assert!(refusal.contains("add --metal"), "{refusal}");
+    }
+
+    /// **The one that must never resolve to a mode that touches the
+    /// machine.** `--metal --list` reached `Mode::Drive` — the T14, flashed
+    /// and rebooted — on 2026-09-29 07:03:35 UTC, because the mode this run
+    /// takes was decided by an `if metal_mode` that returned before `--list`
+    /// was ever read. `metal_mode` is now the one place that decision is
+    /// made, and it must answer `List` however else the line reads.
+    #[test]
+    fn metal_and_list_never_drives() {
+        assert_eq!(metal_mode(&owned(&["--metal", "--list"])), MetalMode::List);
+        assert_eq!(
+            metal_mode(&owned(&["--metal", "--metal-readback", "target/metal", "--list"])),
+            MetalMode::List
+        );
+    }
+
+    #[test]
+    fn metal_resolves_to_a_mode_that_reaches_the_machine_only_when_asked() {
+        assert_eq!(metal_mode(&owned(&[])), MetalMode::Off);
+        assert_eq!(metal_mode(&owned(&["--metal"])), MetalMode::Drive);
+        assert_eq!(
+            metal_mode(&owned(&["--metal", "--metal-readback", "target/metal"])),
+            MetalMode::Offline
+        );
     }
 
     #[test]

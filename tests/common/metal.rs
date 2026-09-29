@@ -916,6 +916,42 @@ pub enum Verdict {
     Staged,
 }
 
+/// What `--metal --list` prints: every boot this selection would drive, its
+/// jobs, and the sizing check's verdict — the same batching [`run`] does,
+/// stopped before an image is built or a boot ever reaches the machine.
+/// Returns whether the selection batches cleanly.
+pub fn list(tests: &[(&str, &'static Metal)], shared: &[SharedBoot]) -> bool {
+    let root = super::compile::repo_root();
+    let profile = match Profile::load(&root) {
+        Ok(profile) => profile,
+        Err(why) => {
+            eprintln!("[metal] {why}");
+            return false;
+        }
+    };
+    let shared = match sized(shared, &profile) {
+        Ok(shared) => {
+            eprintln!("[metal] sizing: every shared boot fits the runner's bound");
+            shared
+        }
+        Err(why) => {
+            eprintln!("[metal] sizing: {why}");
+            return false;
+        }
+    };
+    let batches = match batches(tests, &shared, &profile) {
+        Ok(batches) => batches,
+        Err(why) => {
+            eprintln!("[metal] {why}");
+            return false;
+        }
+    };
+    for (label, batch) in &batches {
+        println!("{label}: {} job(s) — {:?}", batch.jobs.len(), batch.jobs);
+    }
+    true
+}
+
 /// The whole metal profile: batch, build, drive, judge, report.
 // Each argument is one of the suite's own flags or tables, passed through
 // once; a struct holding them would be a second name for the command line.
