@@ -6,8 +6,7 @@
 //! one of those names at its one tier. Moving a test between tiers is editing
 //! that one word.
 //!
-//! The tiers nest: a plain `cargo test` reaches `Fast`, `--nightly` adds
-//! `Nightly`, and `--weekly` adds `Weekly` to that.
+//! A name filter reaches every tier.
 //!
 //! The local tier is the fourth, and the only one CI never runs: its guests are
 //! of an architecture no hosted runner has been measured to boot.
