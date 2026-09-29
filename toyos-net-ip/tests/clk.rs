@@ -83,7 +83,9 @@ fn s_ip_clk_005_a_jump_owes_one_request() {
 }
 
 /// The trace of a seeded run: every frame, every event, every counter.
-fn trace(secret: [u8; 16], seed: u64) -> (Vec<(u64, Vec<u8>)>, Vec<String>, Vec<u64>, std::time::Duration) {
+type Trace = (Vec<(u64, Vec<u8>)>, Vec<String>, Vec<u64>, std::time::Duration);
+
+fn trace(secret: [u8; 16], seed: u64) -> Trace {
     let mut ip = toyos_net_ip::Ip::new(Instant::from_nanos(0), secret);
     let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_A));
     ip.link_up(Instant::from_nanos(0), if0).unwrap();
@@ -95,7 +97,7 @@ fn trace(secret: [u8; 16], seed: u64) -> (Vec<(u64, Vec<u8>)>, Vec<String>, Vec<
         hex(V_ARP_REPLY_R),
         hex(V_ARP_CONFLICT_B),
         to_a(&hex(V_UDP_HI)),
-        to_a(&hex(V_ICMP_ECHO).iter().copied().collect::<Vec<u8>>()),
+        to_a(&hex(V_ICMP_ECHO)),
         eth(MAC_A, MAC_R, 0x0800, &hex(V_IGMP3_QUERY_GEN)),
     ];
     let mut now = 0u64;

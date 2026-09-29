@@ -71,7 +71,7 @@ fn pseudo(ip: &[u8], protocol: u8, length: usize) -> Vec<u8> {
 }
 
 /// Recomputes every checksum of an IPv4 datagram: header, then UDP, TCP, ICMP or IGMP.
-pub fn fix(ip: &mut Vec<u8>) {
+pub fn fix(ip: &mut [u8]) {
     fix_ip_header(ip);
     let ihl = usize::from(ip[0] & 0x0f) * 4;
     let total = usize::from(u16::from_be_bytes([ip[2], ip[3]]));
@@ -219,7 +219,7 @@ impl H {
         let mut ip = Ip::new(Instant::from_nanos(0), SECRET);
         let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_A));
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
-        Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: Default::default() }
+        Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: std::collections::BTreeMap::default() }
     }
 
     /// `if0` up with no address, at t = 0.
@@ -764,7 +764,7 @@ impl H {
         let mut ip = Ip::new(Instant::from_nanos(0), SECRET);
         let if0 = ip.add_interface(Instant::from_nanos(0), mac(MAC_B));
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
-        let mut h = Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: Default::default() };
+        let mut h = Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: std::collections::BTreeMap::default() };
         h.assign(if0, B, 24, 0);
         let setup = Instant::from_millis(5_000);
         let _ = h.ip.resolve(setup, if0, A);
@@ -785,5 +785,18 @@ pub fn cast_of(d: &Option<toyos_net_ip::Delivery<'_>>) -> Option<toyos_net_ip::C
     match d {
         Some(toyos_net_ip::Delivery::Udp(arrival, _)) | Some(toyos_net_ip::Delivery::Tcp(arrival, _)) => Some(arrival.cast),
         _ => None,
+    }
+}
+
+impl H {
+    /// A host with MAC `m` holding `addr/len`, assigned through conflict detection, nothing learned.
+    pub fn host(m: MacAddr, addr: Ipv4Addr, len: u8) -> Self {
+        let mut ip = Ip::new(Instant::from_nanos(0), SECRET);
+        let if0 = ip.add_interface(Instant::from_nanos(0), mac(m));
+        ip.link_up(Instant::from_nanos(0), if0).unwrap();
+        let mut h = Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: std::collections::BTreeMap::default() };
+        h.assign(if0, addr, len, 0);
+        h.settle();
+        h
     }
 }
