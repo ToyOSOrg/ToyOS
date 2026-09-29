@@ -300,12 +300,16 @@ Each stage names its exit; "measured" means a number from a run.
 
 ## Exit
 
-ARM is done when LLVM compiles under emulation on the development Mac (owner
-ruling, 2026-09-29). One recipe is timed three ways: macOS natively, a Linux
-arm64 guest under QEMU with HVF, and ToyOS arm64 under QEMU with HVF. All
-three times are recorded, and it passes when ToyOS is at least as fast as the
-Linux guest. ToyOS compiling LLVM is `issues/build/toyos-builds-itself.md`'s
-work on AArch64.
+ARM is done when LLVM compiles on ToyOS arm64 (owner ruling, 2026-09-29). The
+work starts only after stages 0-8 are complete. Then LLVM is compiled once
+natively on the development Mac and once in a Linux arm64 guest (a distro known
+to be fast) under QEMU with HVF, to get the floor; then once on ToyOS arm64
+under QEMU with HVF, with the same source and build settings. A single data
+point each is enough. It passes when ToyOS is at least as fast as the Linux
+guest, and the numbers are recorded in this file. This is a one-time manual
+measurement, not an automated test, so the rule that timing verdicts come only
+from metal does not apply to it. ToyOS compiling LLVM is
+`issues/build/toyos-builds-itself.md`'s work on AArch64.
 
 ## Interactions with other tracks
 
