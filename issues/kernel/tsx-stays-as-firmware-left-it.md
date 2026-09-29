@@ -15,10 +15,12 @@ T14's `CONFIG_X86_INTEL_TSX_MODE_OFF=y`, runs `tsx_init`
 (`tsx.c:139-156`), clears enumeration where RTM_ALWAYS_ABORT
 (`tsx.c:108-137,170-176`), and otherwise, where
 `ARCH_CAPABILITIES.TSX_CTRL_MSR`, sets `RTM_DISABLE | TSX_CPUID_CLEAR`
-(`tsx.c:23-41,189-226`). A row of the hardening table in
-`issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`.
+(`tsx.c:23-41,189-226`).
 
-**Exit**: S1 of that track carries `tsx_init`'s decision and every CPU applies
-it; on the T14, ToyOS's reads of 0x122, 0x10F and 0x123 equal S0's Linux reads
+**Exit**:
+`issues/kernel/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
+carries `tsx_init`'s decision and every CPU applies it; on the T14, ToyOS's
+reads of 0x122, 0x10F and 0x123 equal the Linux reads of
+`issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-are-not-committed.md`
 where each exists, and dropping the write leaves 0x122 or 0x10F at firmware's
 value and reds it.
