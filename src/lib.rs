@@ -1,6 +1,3 @@
-/// The actuator-state coupling gate, read by nothing but its own tests.
-#[cfg(test)]
-pub mod actuatorstate;
 pub mod arch;
 pub mod assets;
 pub mod bootlog;
