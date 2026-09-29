@@ -461,6 +461,8 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
+    // Its shared run judges `/tmp`'s and `/log`'s stamps; its other modes are machine tests'.
+    "file_mtime",
     "hierarchy_paths",
     "nvme_home_roundtrip",
     "sched_stress",
@@ -1230,6 +1232,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_no_century", Sched::Parallel, Tier::Weekly),
     ("wall_clock_century_register", Sched::Parallel, Tier::Weekly),
     ("wall_clock_utc", Sched::Parallel, Tier::Weekly),
+    ("file_mtime_survives_a_reboot", Sched::Parallel, Tier::Nightly),
+    ("file_mtime_undated", Sched::Parallel, Tier::Nightly),
     // `xhci_slow_connect`'s shape against the disk's port, but its actuator
     // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
     // so what it stages is an ordering with no wall-clock margin on either
@@ -1482,6 +1486,8 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("wall_clock_no_century", &["test_rs_wall_clock_now"]),
     ("wall_clock_century_register", &["test_rs_wall_clock_now"]),
     ("wall_clock_utc", &["test_rs_wall_clock_now"]),
+    ("file_mtime_survives_a_reboot", &["test_rs_file_mtime"]),
+    ("file_mtime_undated", &["test_rs_file_mtime"]),
     ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
@@ -10100,6 +10106,10 @@ fn run_machine_test(
             common::wallclock::century_from_the_register(test_config, c_bins, rust_bins)
         }
         "wall_clock_utc" => common::wallclock::rtc_is_utc(test_config, c_bins, rust_bins),
+        "file_mtime_survives_a_reboot" => {
+            common::wallclock::file_mtime_survives_a_reboot(test_config, c_bins, rust_bins)
+        }
+        "file_mtime_undated" => common::wallclock::file_mtime_undated(test_config, c_bins, rust_bins),
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
         "root_candidate_malformed" => {
             common::volumes::root_candidate_malformed(test_config, c_bins, rust_bins)

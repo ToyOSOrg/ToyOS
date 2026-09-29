@@ -15,8 +15,7 @@ Linux at `Ubuntu-6.8.0-142.142`, under the T14's
 offset at every syscall entry (`arch/x86/entry/common.c:73`,
 `include/linux/randomize_kstack.h:40,50`), drawn on the exit before it
 (`arch/x86/include/asm/entry-common.h:85`), 7 bits after alignment on x86-64
-(`entry-common.h:76-83`). A row of the hardening table in
-`issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`.
+(`entry-common.h:76-83`).
 
 **Exit**: every syscall's handler runs below an offset drawn per syscall, of at
 least 7 bits; a `boot-actuators` probe records one handler frame's address
