@@ -374,9 +374,9 @@ pub fn init() {
 /// The context a CPU runs on when idle — never a dead task's stack, so a pass can free the previous zombie.
 fn idle_ctx() -> KernelCtx {
     KernelCtx {
-        rsp: 0,
+        sp: 0,
         root: crate::mm::paging::kernel_root(),
-        fs_base: 0,
+        thread_pointer: 0,
         kernel_stack_top: 0,
         id: None,
         // Never read: the idle loop is entered by jump, not switch, and
@@ -394,15 +394,15 @@ fn placement(now: Nanos) -> CpuId {
     cpus().place(start, now)
 }
 
-/// Everything a new thread needs. `entry_rsp` points at the trampoline frame `alloc_kernel_stack` built;
+/// Everything a new thread needs. `entry_sp` points at the trampoline frame `alloc_kernel_stack` built;
 /// `address_space` is not `Option` — every kernel thread uses the kernel address space, so one declaration
 /// decides `cr3`.
 pub struct NewTask {
     pub id: TaskId,
     pub kernel_stack: OwnedAlloc,
-    pub entry_rsp: u64,
+    pub entry_sp: u64,
     pub address_space: PageTables,
-    pub fs_base: u64,
+    pub thread_pointer: u64,
     pub share: Arc<KShare>,
     /// The process's symbol table; a kernel thread names an empty one.
     pub symbols: Arc<crate::symbols::SymbolTable>,
@@ -416,9 +416,9 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
     let root = new.address_space.lock().root();
     let kernel_stack_top = new.kernel_stack.ptr() as u64 + KERNEL_STACK_SIZE as u64;
     let ctx = KernelCtx {
-        rsp: new.entry_rsp,
+        sp: new.entry_sp,
         root,
-        fs_base: new.fs_base,
+        thread_pointer: new.thread_pointer,
         kernel_stack_top,
         id: Some(new.id),
         // The one level `trampoline_entry` discharges before the first `iretq`.
@@ -864,7 +864,7 @@ pub fn for_each_parked(mut f: impl FnMut(ParkedInfo)) -> bool {
 /// preempt-count bracket's other half is owed.
 pub extern "C" fn trampoline_entry() {
     crate::preempt::enable_no_resched();
-    crate::arch::trap::kernel_exit_to_user_check();
+    crate::scheduler::exit_to_user();
 }
 
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -939,30 +939,30 @@ fn check_stack_canary(payload: &KernelPayload) {
 
 /// Does every Ring 3 → Ring 0 entry land on the stack of the task this CPU is running, and is this CPU standing on it?
 ///
-/// A stray `kernel_rsp` or `tss.rsp0` aims a future entry at a stack it did not grow; this catches it before
-/// that entry, not after.
+/// A stray entry stack aims a future entry at a stack it did not grow; this catches it before that entry, not
+/// after.
 #[cfg(feature = "stack-witness")]
 fn check_stack_ownership(payload: &KernelPayload) {
     let bottom = payload.kernel_stack.ptr() as u64;
     let top = bottom + KERNEL_STACK_SIZE as u64;
     // SAFETY: a pass runs on the CPU whose GS base is its own `PerCpu`.
-    let (kernel_rsp, rsp0) = unsafe { percpu::entry_stacks() };
-    let rsp = crate::arch::cpu::stack_pointer();
-    if kernel_rsp == top && rsp0 == top && rsp <= top && rsp > bottom {
+    let (entry, interrupt) = unsafe { percpu::entry_stacks() };
+    let sp = crate::arch::cpu::stack_pointer();
+    if entry == top && interrupt == top && sp <= top && sp > bottom {
         return;
     }
     panic!(
         "STACK WITNESS: cpu{} is passing on tid={} whose stack is \
-         [{bottom:#018x}, {top:#018x}) — kernel_rsp={kernel_rsp:#018x} \
-         (off by {}), tss.rsp0={rsp0:#018x} (off by {}), rsp={rsp:#018x} \
-         ({} bytes below the top). A Ring 3 entry takes its stack from one of \
+         [{bottom:#018x}, {top:#018x}) — the syscall entry's stack {entry:#018x} \
+         (off by {}), the interrupt entry's {interrupt:#018x} (off by {}), sp={sp:#018x} \
+         ({} bytes below the top). An entry from user mode takes its stack from one of \
          those two words, so one that is not this task's top aims the next \
          entry's return addresses into memory another execution owns.",
         percpu::cpu_id(),
         payload.id.1,
-        kernel_rsp.wrapping_sub(top) as i64,
-        rsp0.wrapping_sub(top) as i64,
-        top.wrapping_sub(rsp) as i64,
+        entry.wrapping_sub(top) as i64,
+        interrupt.wrapping_sub(top) as i64,
+        top.wrapping_sub(sp) as i64,
     );
 }
 

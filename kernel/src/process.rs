@@ -842,7 +842,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     // block's address is chosen from, so every pointer in it is final before
     // the mapping exists.
     let block = TlsBlock::build(&tls_modules, tls)?;
-    let (tls_alloc, fs_base, tp_offset) = {
+    let (tls_alloc, thread_pointer, tp_offset) = {
         let parent_data = process_data_arc.lock();
         if crate::actuator::tls_rebase_window() {
             crate::loader::rebase_window::spawning(arg);
@@ -854,7 +854,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     };
     let tls_alloc_tcb = tls_alloc.ptr().wrapping_add(tp_offset);
 
-    let (ks_alloc, ks_rsp) = match alloc_kernel_stack(thread_start, entry, stack_ptr, arg) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(thread_start, entry, stack_ptr, arg) {
         Some(ks) => ks,
         None => {
             tls_alloc.release(&parent_addr_space);
@@ -905,9 +905,9 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     let (sched, _dst) = scheduler::enqueue_new(
         TaskId(parent_process, tid),
         ks_alloc,
-        ks_rsp,
+        ks_sp,
         parent_addr_space,
-        fs_base,
+        thread_pointer,
         symbols,
     );
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
@@ -1474,24 +1474,26 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     }
     dump_region("rip", rip);
 
-    let fs_base = crate::arch::cpu::thread_pointer();
-    if fs_base != 0 {
-        log!("  FS base: {:#x}", fs_base);
-        if let Some(self_ptr) = read_user(fs_base) {
-            log!("  fs:[0] = {:#x} (expected {:#x})", self_ptr, fs_base);
+    let tp = crate::arch::cpu::thread_pointer();
+    if tp != 0 {
+        log!("  Thread pointer: {:#x}", tp);
+        if let Some(first) = read_user(tp) {
+            if matches!(crate::loader::TLS_VARIANT, toyos_elf::tls::Variant::II) {
+                log!("  [TP] = {:#x} (expected {:#x}, variant II's self-pointer)", first, tp);
+            }
             for i in 0..8u64 {
-                let addr = fs_base + i * 8;
+                let addr = tp + i * 8;
                 let Some(val) = read_user(addr) else { break };
                 log!("    TP+{:#x} = {:#018x}", i * 8, val);
             }
             log!("  TLS data before TP:");
             for i in 1..=4u64 {
-                let addr = fs_base - i * 8;
+                let addr = tp - i * 8;
                 let Some(val) = read_user(addr) else { break };
                 log!("    TP-{:#x} = {:#018x}", i * 8, val);
             }
         } else {
-            log!("  FS base {:#x} NOT MAPPED!", fs_base);
+            log!("  Thread pointer {:#x} NOT MAPPED!", tp);
         }
     }
 }

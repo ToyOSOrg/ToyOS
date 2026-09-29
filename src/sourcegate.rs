@@ -205,9 +205,9 @@ const BANS: &[Ban] = &[
         allowed: &[
             // Cache lines to walk, not bytes.
             ("kernel/src/arch/x86_64/control_regs.rs", 1),
-            // Two guard-page sizes: the mapping is 4 KiB because a guard is one
-            // hardware page, and `PAGE_SIZE` is 2 MiB territory here.
-            ("kernel/src/arch/x86_64/percpu.rs", 2),
+            // A guard page's size: a guard is one hardware page, and
+            // `PAGE_SIZE` is 2 MiB territory here.
+            ("kernel/src/arch/x86_64/percpu.rs", 1),
             // A device's TX buffer.
             ("kernel/src/drivers/virtio_console.rs", 1),
             // A VT-d table is 4 KiB by the specification, not by this kernel.
@@ -1452,6 +1452,7 @@ const PURE_CRATES: &[&str] = &[
     "toyos-desktop/",
     "toyos-dma/",
     "toyos-elide/",
+    "toyos-gicv3/",
     "toyos-hda/",
     "toyos-mixer/",
     "toyos-pci/",
@@ -1482,10 +1483,10 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("toyos-abi/src/arch/", "toyos-abi's per-architecture reads: the counter and the thread's id"),
             ("userland/libc/src/arch/", "libc's architecture modules"),
             ("userland/metalprobe/src/arch/", "metalprobe's architecture modules"),
+            ("userland/toybox/src/arch/", "toybox's architecture modules"),
             ("userland/toyos-window/src/arch/", "toyos-window's architecture modules"),
             ("tests/toyos-rust-tests/src/bin/abuse_kernel_addr.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/abuse_page_straddle.rs", USERLAND_ASM),
-            ("tests/toyos-rust-tests/src/bin/abuse_readonly_copyout.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/abuse_tls_alloc.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/copy_out_races_munmap.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/debug_trap.rs", USERLAND_ASM),
@@ -1525,6 +1526,7 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("userland/libc/src/arch/", "libc's architecture modules and their selector"),
             ("userland/toyos-window/src/arch/", "toyos-window's architecture modules and their selector"),
             ("userland/metalprobe/src/arch/", "metalprobe's architecture modules and their selector"),
+            ("userland/toybox/src/arch/", "toybox's architecture modules and their selector"),
         ],
     },
     PlaceRule {
