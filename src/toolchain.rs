@@ -4,18 +4,8 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use crate::arch::Arch;
-use crate::buildlock;
-use crate::buildlock::Scope;
-use crate::sysroot::{self, Sysroot, SYSROOT_SOURCES};
-
-/// Whether the primary's compiler needs a bootstrap. `invalidate_hosted`
-/// separates "the compiler changed" from "the rustup link is missing": only the
-/// first makes the ToyOS-hosted rustc stale, and rebuilding that one costs
-/// minutes.
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct Bootstrap {
-    invalidate_hosted: bool,
-}
+use crate::store::{self, ABI_TREES};
+use crate::sysroot::{self, Sysroot};
 
 /// Which checkout holds the `rust/` submodule and the toolchain built from it.
 pub enum Owner {
@@ -33,15 +23,10 @@ pub enum Owner {
     Installed,
 }
 
-/// One `rust/` per repository, in the primary checkout, and every worktree
-/// compiles against it.
-///
-/// Not a policy — an affordance. A second checkout of that submodule is a
-/// 913 MiB clone (git gives a linked worktree its own, sharing no objects), and
-/// a second `build/` beside it is 47 GiB. `git worktree add` leaves `rust/` an
-/// empty stub, and leaving it empty is what keeps `git status` clean: git
-/// refuses a symlink where a gitlink belongs, and errors out of every command
-/// rather than just that one.
+/// One `rust/` per repository, in the primary checkout, holding the fork's
+/// objects and the store every checkout builds into. A linked worktree never
+/// initialises its own: git would clone the fork's history again, 913 MiB
+/// sharing no objects.
 pub fn owner(root: &Path) -> Owner {
     let primary = crate::primary_checkout(root);
     let same = fs::canonicalize(root).map(|r| r == primary).unwrap_or(false);
@@ -78,12 +63,9 @@ const STD_SOURCES: [&str; 2] = ["toyos-abi/src", "toyos/src"];
 /// Every target a guest artifact is built for: ToyOS userland, the kernel's
 /// bare-metal target, and the UEFI bootloader.
 ///
-/// One home for the list, because it is read four ways that must agree — the
-/// `stage1-std` cleans in [`full_bootstrap`], [`write_config`]'s bootstrap
-/// `target` set, the libraries `src/sysroot.rs` builds and places, and
-/// `src/build.rs`'s external fingerprint. A fifth spelling would silently leave
-/// one of them building or fingerprinting a different set of targets than the
-/// others.
+/// One home for the list, because it is read in ways that must agree: the
+/// libraries `src/sysroot.rs` builds and places, and `src/build.rs`'s external
+/// fingerprint.
 pub const GUEST_TARGETS: [&str; 6] = [
     Arch::X86_64.userland(),
     Arch::X86_64.kernel(),
@@ -93,11 +75,7 @@ pub const GUEST_TARGETS: [&str; 6] = [
     Arch::Aarch64.loader(),
 ];
 
-/// The one ToyOS the hosted rustc (`system.toml`'s `hosted-rustc`) is built to
-/// run on.
-pub const HOSTED_ARCH: Arch = Arch::X86_64;
-
-/// The primary's compiler, which every sysroot is cloned from and compiled by.
+/// Where an installed toolchain is, as `src/release.rs` unpacks it.
 pub(crate) fn stage2(rust_dir: &Path) -> PathBuf {
     rust_dir.join(format!("build/{}/stage2", host_triple()))
 }
@@ -179,21 +157,20 @@ fn witness_path(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/toyos-sysroot-witness")
 }
 
-
 /// The lines of a witness belonging to `trees`.
 fn witness_subset(text: &str, trees: &[&str]) -> String {
     text.lines()
-        .filter(|l| trees.iter().any(|t| l.starts_with(t)))
+        .filter(|l| trees.iter().any(|t| l.starts_with(&format!("{t}:"))))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Which of [`SYSROOT_SOURCES`] this worktree disagrees with the sysroot about.
+/// Which of [`ABI_TREES`] this worktree disagrees with the sysroot about.
 fn differing_trees(recorded: Option<&str>, current: &str) -> String {
     let Some(recorded) = recorded else {
         return "nothing recorded what the sysroot was built from".to_string();
     };
-    let names: Vec<&str> = SYSROOT_SOURCES
+    let names: Vec<&str> = ABI_TREES
         .iter()
         .copied()
         .filter(|t| witness_subset(recorded, &[t]) != witness_subset(current, &[t]))
@@ -250,9 +227,8 @@ fn narrated_binaries(bin: &Path) -> Vec<&'static str> {
 /// "the host cargo" flatly would have taken that away from the dev host and
 /// called it a cleanup.
 ///
-/// The host's is resolved through `rustc --print sysroot` for the same reason
-/// [`link_host_target`] does: it is whatever stable toolchain this machine has,
-/// and it is not a path any artifact can know.
+/// The host's is resolved through `rustc --print sysroot`: it is whatever stable
+/// toolchain this machine has, and it is not a path any artifact can know.
 fn host_cargo() -> &'static Path {
     static CARGO: OnceLock<PathBuf> = OnceLock::new();
     CARGO.get_or_init(|| {
@@ -324,7 +300,7 @@ pub(crate) fn toolchain_defect(stage2: &Path) -> Option<String> {
     if !lld.is_file() {
         return Some(format!(
             "the toyos toolchain at {} carries no {}, the linker every guest target names: \
-             bootstrap puts it there when `write_config` says `lld = true`, and it did not",
+             bootstrap puts it there when its configuration says `lld = true`, and it did not",
             stage2.display(),
             lld.display(),
         ));
@@ -343,178 +319,51 @@ pub(crate) fn assert_toolchain_is_honest(stage2: &Path) {
     }
 }
 
-/// Whether the primary's toolchain lacks what bootstrap does not put there:
-/// `stage2`'s cargo and clang, or the host target in the hosted rustc's sysroot.
-fn incomplete(rust_dir: &Path) -> bool {
-    let stage2 = stage2(rust_dir);
-    cargo_link_stale(&stage2) || crate::clang::defect(&stage2).is_some() || host_target_missing(rust_dir)
-}
-
-/// Give the primary's toolchain what [`incomplete`] finds missing, its clang by
-/// `provision_clang`.
-fn complete(rust_dir: &Path, provision_clang: impl FnOnce(&Path)) {
-    let stage2 = stage2(rust_dir);
-    if cargo_link_stale(&stage2) {
-        provision_toolchain_cargo(&stage2);
-    }
-    if crate::clang::defect(&stage2).is_some() {
-        provision_clang(&stage2);
-    }
-    if host_target_missing(rust_dir) {
-        link_host_target(rust_dir);
-    }
-}
-
-/// Run `bootstrap` in the primary's `rust/` against the LLVM at `llvm`, then
-/// remove the LLVM its build directory built itself (`llvm::retire_in_tree`)
-/// and [`complete`] what it reassembled. Called inside the act that holds the
-/// global lock exclusively.
+/// The sysroot this checkout's sources name, made if nobody has made it
+/// (`src/sysroot.rs`), and held in use for as long as the returned value lives.
 ///
-/// **In the same hold, because bootstrap recreates `stage2` without its cargo
-/// and clang**: a completion under a hold of its own queues behind every sysroot
-/// build that takes the lock shared in between, and those last minutes.
-fn reassemble(rust_dir: &Path, llvm: &Path, bootstrap: impl FnOnce()) {
-    bootstrap();
-    crate::llvm::retire_in_tree(&rust_dir.join("build"));
-    complete(rust_dir, |stage2| crate::clang::provision(stage2, llvm));
-}
-
-/// [`reassemble`] the primary's compiler with `bootstrap`, with nothing recording
-/// which compiler `stage2` is until it is whole: a bootstrap that is stopped is
-/// run again by the primary, and refused by name in every linked worktree.
-fn rebuild_compiler(rust_dir: &Path, llvm: &Path, bootstrap: impl FnOnce()) {
-    crate::compiler::forget(rust_dir);
-    reassemble(rust_dir, llvm, bootstrap);
-    crate::compiler::record(rust_dir);
-}
-
-/// What the primary bootstraps: a new compiler when asked to or when `stage2`
-/// is not the one its `compiler/` names, and the same one again when rustup has
-/// no `toyos` toolchain to run.
-fn bootstrap(force_rebuild: bool, current: bool, toolchain_exists: bool) -> Option<Bootstrap> {
-    if force_rebuild || !current {
-        Some(Bootstrap { invalidate_hosted: true })
-    } else {
-        (!toolchain_exists).then_some(Bootstrap { invalidate_hosted: false })
-    }
-}
-
-/// Ensure the toolchain is up to date, and return the sysroot this checkout's
-/// sources name — made if nobody has made it (`src/sysroot.rs`).
-///
-/// Every step decides under the caller's shared lock and acts under the
-/// exclusive one, so the common answer — nothing to do — costs no
-/// serialisation, and two agents cannot both conclude the compiler is stale
-/// and both start `x.py build` in the same directory. That pair is what left a
-/// half-written `librustc_driver` for cargo to probe, and cargo memoises a
-/// failed probe (`issues/build/`).
-///
-/// The steps are ordered, and each invalidates what it makes stale rather than
-/// threading a `rebuilt` flag through: a step that decides for itself still
-/// decides correctly when the process before it was killed halfway.
-///
-/// Only the primary checkout builds the compiler. Every checkout builds the
-/// sysroot its own sources name, in its own fork checkout.
-///
-/// **The lock only covers builds routed through here.** A `./x.py build` typed
-/// by hand in `rust/` takes no lock at all, and can still lose the race this
-/// serialises: one builder's bootstrap removes and recreates
-/// `stage1-std/<target>/dist/deps` while another's `rustc` creates a temp file
-/// inside it, and the loser dies compiling `core` with `couldn't create a temp
-/// dir: No such file or directory`.
-pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> Sysroot {
+/// Every checkout makes what its own sources name, into the store; nothing is
+/// rebuilt in place. The primary's build alone points the rustup `toyos`
+/// toolchain at what it built ([`link`]).
+pub fn ensure(root: &Path) -> Sysroot {
     let rust_dir = rust_dir(root);
-    let stamps_dir = root.join("target/stamps");
-    fs::create_dir_all(&stamps_dir).ok();
-
-    let owner = owner(root);
-
-    match owner {
-        Owner::Elsewhere(primary) => {
-            assert!(
-                !force_rebuild,
-                "--rebuild-toolchain would replace the compiler at {}, which every worktree of \
-                 this repository builds with.\nRun it in {}.",
-                stage2(&rust_dir).display(),
-                primary.display()
-            );
-            assert!(
-                stage2(&rust_dir).join("bin/rustc").exists(),
-                "there is no compiler to build with: {} does not exist.\n\
-                 The primary checkout builds it — run `cargo run -- --build-only` in {} first.",
-                stage2(&rust_dir).display(),
-                primary.display()
-            );
-            return sysroot::ensure(root, &rust_dir, lock);
-        }
+    match owner(root) {
         Owner::Installed => {
-            check_installed_toolchain(root, &rust_dir, force_rebuild);
-            return Sysroot::installed(stage2(&rust_dir));
+            check_installed_toolchain(root, &rust_dir);
+            Sysroot::installed(stage2(&rust_dir))
         }
-        Owner::Us => {}
+        Owner::Elsewhere(_) => sysroot::ensure(root, &rust_dir),
+        Owner::Us => {
+            let sysroot = sysroot::ensure(root, &rust_dir);
+            let home = rustup_home().expect("a rustup home");
+            link(&home, &rust_dir, &sysroot.dir);
+            sysroot
+        }
     }
+}
 
-    let hosted_stamp = stamps_dir.join("hosted-rustc.stamp");
-    lock.act_if(
-        Scope::Global,
-        "build the rust toolchain",
-        || {
-            let current = crate::compiler::primary_is_current(&rust_dir);
-            let toolchain_exists = Command::new("rustup")
-                .args(["run", "toyos", "rustc", "--version"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            bootstrap(force_rebuild, current, toolchain_exists)
-        },
-        |kind| {
-            eprintln!("Building full toolchain (this takes a while on first run)...");
-            let llvm = crate::llvm::resolve(root, &rust_dir, &rust_dir);
-            rebuild_compiler(&rust_dir, &llvm.dir, || full_bootstrap(root, &rust_dir, &llvm.dir));
-            if kind.invalidate_hosted {
-                let _ = fs::remove_file(&hosted_stamp);
-            }
-        },
-    );
+/// Point the rustup `toyos` toolchain at `sysroot`, through the one stable path
+/// it ever names, [`store::current`]: that link is replaced by a rename, so no
+/// `rustc` run through rustup ever finds the name dangling, and rustup's own
+/// is made once.
+fn link(rustup_home: &Path, rust_dir: &Path, sysroot: &Path) {
+    let current = store::current(rust_dir);
+    let target = sysroot.strip_prefix(current.parent().expect("the link has a parent")).unwrap_or(sysroot);
+    swap_link(target, &current);
+    swap_link(&current, &rustup_home.join("toolchains/toyos"));
+}
 
-    let hosted_rustc = rust_dir.join(format!("build/{}/stage2/bin/rustc", HOSTED_ARCH.userland()));
-    lock.act_if(
-        Scope::Global,
-        "build the ToyOS-hosted rustc",
-        || (!hosted_stamp.exists() || !hosted_rustc.exists()).then_some(()),
-        |()| {
-            let llvm = crate::llvm::resolve(root, &rust_dir, &rust_dir);
-            reassemble(&rust_dir, &llvm.dir, || build_hosted_rustc(&rust_dir, &llvm.dir));
-            assert!(hosted_rustc.exists(), "Failed to build hosted rustc");
-            fs::write(&hosted_stamp, "").unwrap();
-        },
-    );
-
-    let stage2 = stage2(&rust_dir);
-    lock.act_if(
-        Scope::Global,
-        "link the toyos rustup toolchain",
-        || link_stale(&stage2).then_some(()),
-        |()| {
-            let status = Command::new("rustup")
-                .args(["toolchain", "link", "toyos", stage2.to_str().unwrap()])
-                .status()
-                .unwrap_or_else(|e| panic!("Failed to run rustup: {e}"));
-            assert!(status.success(), "rustup toolchain link failed");
-        },
-    );
-
-    lock.act_if(
-        Scope::Global,
-        "complete the toyos toolchain",
-        || incomplete(&rust_dir).then_some(()),
-        |()| complete(&rust_dir, |stage2| crate::clang::provision(stage2, &crate::llvm::resolve(root, &rust_dir, &rust_dir).dir)),
-    );
-    assert_toolchain_is_honest(&stage2);
-
-    sysroot::ensure(root, &rust_dir, lock)
+/// Make `at` a link to `to`, by a rename over whatever `at` was.
+fn swap_link(to: &Path, at: &Path) {
+    if fs::read_link(at).is_ok_and(|now| now == to) {
+        return;
+    }
+    let dir = at.parent().expect("a link has a parent");
+    fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+    let fresh = at.with_extension(format!("{}.new", std::process::id()));
+    let _ = fs::remove_file(&fresh);
+    std::os::unix::fs::symlink(to, &fresh).unwrap_or_else(|e| panic!("link {} -> {}: {e}", fresh.display(), to.display()));
+    fs::rename(&fresh, at).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", fresh.display(), at.display()));
 }
 
 /// Everything a checkout may do with a toolchain it did not build: check that
@@ -524,15 +373,8 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
 /// nothing to decide and the answer is always to publish a toolchain built from
 /// these sources. Its std fork is pinned by the release tag, which is a function
 /// of `rust` (`src/release.rs`).
-fn check_installed_toolchain(root: &Path, rust_dir: &Path, force_rebuild: bool) {
+fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
     let stage2 = stage2(rust_dir);
-    assert!(
-        !force_rebuild,
-        "there is no `rust/` source in {}, so --rebuild-toolchain has nothing to build from.\n\
-         The toolchain at {} arrived as an artifact; rebuild it where it is published.",
-        root.display(),
-        stage2.display(),
-    );
     let linked = rustup_link();
     assert!(
         linked.as_deref() == Some(stage2.as_path()),
@@ -543,15 +385,8 @@ fn check_installed_toolchain(root: &Path, rust_dir: &Path, force_rebuild: bool) 
         stage2.display(),
     );
 
-    // Recreated rather than shipped: both of these point into whatever stable
-    // toolchain this machine has, which is not a path any artifact can know.
-    // This is CI's whole share of the cargo provisioning — it links its
-    // toolchain fresh from the published artifact on every run, so nothing
-    // upstream of the download can have put one there. Its clang is the
-    // artifact's own, so this is not `complete`.
-    if host_target_missing(rust_dir) {
-        link_host_target(rust_dir);
-    }
+    // Recreated rather than shipped: it points into whatever cargo this
+    // machine has, which is not a path any artifact can know.
     if cargo_link_stale(&stage2) {
         provision_toolchain_cargo(&stage2);
     }
@@ -567,31 +402,6 @@ fn check_installed_toolchain(root: &Path, rust_dir: &Path, force_rebuild: bool) 
         stage2.display(),
         differing_trees(recorded.as_deref(), &want),
     );
-}
-
-/// Whether the `toyos` rustup toolchain points anywhere other than `stage2`.
-///
-/// `rustup toolchain link` unlinks and recreates the symlink rather than
-/// replacing it atomically, so every call opens a window in which
-/// `~/.rustup/toolchains/toyos` does not resolve. Any concurrent `rustc` proxy
-/// invocation landing in that window dies with `'rustc' is not installed for the
-/// custom toolchain 'toyos'` — which reads as a broken toolchain rather than as
-/// contention, because a probe run a moment later succeeds.
-///
-/// This ran unconditionally on every `ensure`, i.e. every build. With five
-/// agents building in one tree it cost one of them eleven consecutive
-/// `cargo test` invocations over about fifteen minutes, while
-/// `RUSTUP_TOOLCHAIN=toyos rustc --version` succeeded 20 out of 20 between the
-/// attempts.
-///
-/// A mismatched or absent link still re-links, so a moved tree or a fresh clone
-/// behaves as before; only the no-op case is skipped.
-///
-/// Reached only from the primary checkout, which is what makes the window above
-/// a window of one: a linked worktree that re-linked would point the name at a
-/// stage2 nobody else has.
-fn link_stale(stage2: &Path) -> bool {
-    rustup_link().is_none_or(|current| current != stage2)
 }
 
 /// Run bootstrap in the fork checkout `rust_dir`, streaming its output where it
@@ -717,195 +527,6 @@ pub(crate) fn refuse_on_compile_error(log: &[String], what: &str) {
     panic!("{what} did not compile:\n{}", log[at..end].join("\n"));
 }
 
-/// What an `x build` failure the artifact check is willing to tolerate actually
-/// said, so that "expected" is a claim the reader can check.
-fn tolerated_failure(log: &[String], what: &str) {
-    let errors: Vec<&str> =
-        log.iter().map(String::as_str).filter(|l| l.trim_start().starts_with("error")).collect();
-    eprintln!(
-        "Note: {what} exited non-zero and the artifacts it must produce are all there, so this \
-         is the ToyOS rustdoc link failure. It reported:\n{}",
-        if errors.is_empty() {
-            "  (no line beginning `error`)".to_string()
-        } else {
-            errors.join("\n")
-        }
-    );
-}
-
-fn full_bootstrap(root: &Path, rust_dir: &Path, llvm: &Path) {
-    // Ensure library/backtrace is checked out — std depends on it.
-    // Other rust submodules (llvm, docs, cargo) are handled by bootstrap on demand.
-    crate::ensure_submodule(rust_dir, "library/backtrace");
-
-    // Write bootstrap.toml — ToyOS as target only, not host (fast rebuilds)
-    let host = host_triple();
-    write_config(rust_dir, &host, false, llvm);
-
-    // Clean cached std for all ToyOS targets so bootstrap picks up compiler changes
-    // (e.g. target spec changes like default_uwtable that affect codegen).
-    for target in GUEST_TARGETS {
-        let stage1_std = rust_dir.join(format!("build/{host}/stage1-std/{target}"));
-        if stage1_std.exists() {
-            fs::remove_dir_all(&stage1_std).ok();
-        }
-    }
-
-    let build = ["build", "--stage", "2", "--warnings", "warn"];
-    let (ok, log) = x_build(rust_dir, &build, "the toolchain");
-
-    if !ok {
-        refuse_on_compile_error(&log, "the toolchain");
-        // rustdoc for ToyOS may fail to link; rustc may not be missing.
-        let stage2 = rust_dir.join(format!("build/{host}/stage2"));
-        assert!(
-            stage2.join("bin/rustc").exists(),
-            "the toolchain build failed and {} is not there.\n\
-             Nothing in its output was a compile error, so this is a link or a bootstrap \
-             failure — the last lines above are the whole of what it said.",
-            stage2.join("bin/rustc").display()
-        );
-        tolerated_failure(&log, "the toolchain build");
-    }
-    for arch in Arch::ALL {
-        assert_std_built_from(
-            root,
-            &rust_dir.join(format!("build/{host}/stage1-std/{}", arch.userland())),
-        );
-    }
-}
-
-fn build_hosted_rustc(rust_dir: &Path, llvm: &Path) {
-    eprintln!("Building ToyOS-hosted rustc...");
-    let host = host_triple();
-    write_config(rust_dir, &host, true, llvm);
-
-    let (ok, log) =
-        x_build(rust_dir, &["build", "--stage", "2", "--warnings", "warn"], "the hosted rustc");
-    refuse_on_compile_error(&log, "the hosted rustc");
-
-    // rustdoc for ToyOS may fail to link; rustc and librustc_driver may not.
-    let toyos_stage2 = rust_dir.join(format!("build/{}/stage2", HOSTED_ARCH.userland()));
-    assert!(
-        toyos_stage2.join("bin/rustc").exists(),
-        "the hosted rustc build failed and {} is not there.\n\
-         Nothing in its output was a compile error, so this is a link or a bootstrap failure.",
-        toyos_stage2.join("bin/rustc").display()
-    );
-    assert!(
-        fs::read_dir(toyos_stage2.join("lib"))
-            .map(|d| d.filter_map(|e| e.ok())
-                .any(|e| e.file_name().to_string_lossy().starts_with("librustc_driver")))
-            .unwrap_or(false),
-        "the hosted rustc build failed: librustc_driver*.so is not in {}",
-        toyos_stage2.join("lib").display()
-    );
-    if !ok {
-        tolerated_failure(&log, "the hosted rustc build");
-    }
-
-    // That build reassembled the host's `stage2` without `rust-lld`
-    // (`write_config` says why), so the host-only build runs once more to put
-    // it back: everything it would compile is already built.
-    write_config(rust_dir, &host, false, llvm);
-    let (ok, log) = x_build(
-        rust_dir,
-        &["build", "--stage", "2", "--warnings", "warn"],
-        "the toolchain, reassembled",
-    );
-    refuse_on_compile_error(&log, "the toolchain, reassembled");
-    assert!(
-        rust_lld(&stage2(rust_dir)).is_file(),
-        "the toolchain's reassembly after the hosted rustc left no {}",
-        rust_lld(&stage2(rust_dir)).display()
-    );
-    if !ok {
-        tolerated_failure(&log, "the toolchain's reassembly");
-    }
-}
-
-/// `bootstrap.toml` for the host-only toolchain, or with the ToyOS-hosted rustc.
-///
-/// `lld = true` is what puts `rust-lld` in every stage's sysroot, where rustc
-/// finds the linker every guest target names. The hosted rustc's build cannot
-/// have it: bootstrap would then build LLD for the ToyOS host from C++, which
-/// nothing here can compile yet. Every assemble removes the host's
-/// `stage2` first, so [`build_hosted_rustc`] reassembles it under the host-only
-/// config after.
-///
-/// `clang::LLVM_CONFIG` is the `[llvm]` both builds share, and both link the LLVM
-/// at `llvm` (`src/llvm.rs`), whose LLD every guest target names by path.
-///
-/// The host's `default-linker-linux-override` is pinned off because bootstrap
-/// otherwise ties it to `lld` for `x86_64-unknown-linux-gnu`, and a host rustc
-/// whose build environment flips with the config is rebuilt by each of those
-/// two builds.
-fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool, llvm: &Path) {
-    let host_line = if with_hosted_rustc {
-        format!("host = [\"{host}\", \"{}\"]", HOSTED_ARCH.userland())
-    } else {
-        format!("host = [\"{host}\"]")
-    };
-    let targets = std::iter::once(host)
-        .chain(GUEST_TARGETS)
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let userland: String = Arch::ALL
-        .iter()
-        .map(|arch| {
-            let linker = format!("linker = \"{}\"", llvm.join("bin/lld").display());
-            let hosted = if with_hosted_rustc && *arch == HOSTED_ARCH {
-                // Cranelift because no LLVM is built for a ToyOS host yet, and
-                // only for that reason: the hosted rustc carries LLVM once clang
-                // and libc++ run on ToyOS, and Cranelift is not where the
-                // compiler that builds ToyOS goes.
-                //
-                // The archiver is that LLVM's too: the compiler's crates carry
-                // C built for this target (blake3's assembly), and a host `ar`
-                // that indexes only its own object format, as macOS's does,
-                // leaves those ELF members out of the index lld pulls from.
-                format!(
-                    "\nar = \"{}\"\ncodegen-backends = [\"cranelift\"]",
-                    llvm.join("bin/llvm-ar").display(),
-                )
-            } else {
-                String::new()
-            };
-            format!("[target.{}]\n{linker}{hosted}\nrpath = false\n\n", arch.userland())
-        })
-        .collect();
-    let config = format!(
-        r#"change-id = "ignore"
-profile = "compiler"
-
-[build]
-{host_line}
-target = [{targets}]
-
-[llvm]
-{llvm}
-
-[rust]
-incremental = true
-lld = {lld}
-
-[target.{host}]
-{HOST_LINKER_PIN}
-{external}
-
-{userland}"#,
-        llvm = crate::clang::LLVM_CONFIG,
-        external = crate::llvm::host_lines(llvm),
-        lld = !with_hosted_rustc,
-    );
-    fs::write(rust_dir.join("bootstrap.toml"), config).unwrap();
-}
-
-/// What the host rustc links its own binaries with, held to one answer in every
-/// `bootstrap.toml` that builds a host compiler: [`write_config`] says why.
-pub(crate) const HOST_LINKER_PIN: &str = "default-linker-linux-override = \"off\"";
-
 /// The linker every guest target names, as the toolchain at `toolchain` carries
 /// it: `lib/rustlib/<host>/bin/rust-lld`, where rustc itself looks for it.
 pub fn rust_lld(toolchain: &Path) -> PathBuf {
@@ -934,10 +555,6 @@ pub fn host_triple() -> String {
 }
 
 /// The stable host toolchain's sysroot, as `rustc --print sysroot` reports it.
-///
-/// Both [`host_cargo`] and [`link_host_target`] resolve their answer through it
-/// for the one reason [`host_cargo`]'s doc gives: it is whatever stable
-/// toolchain this machine has, and that is not a path any artifact can name.
 fn host_sysroot() -> PathBuf {
     let output = Command::new("rustc")
         .args(["--print", "sysroot"])
@@ -945,36 +562,6 @@ fn host_sysroot() -> PathBuf {
         .expect("Failed to run rustc");
     let sysroot = String::from_utf8(output.stdout).expect("rustc prints a path");
     PathBuf::from(sysroot.trim())
-}
-
-/// Whether the ToyOS sysroot is missing the host target proc-macros compile against.
-fn host_target_missing(rust_dir: &Path) -> bool {
-    let toyos_sysroot = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
-    toyos_sysroot.exists() && !toyos_sysroot.join(host_triple()).exists()
-}
-
-fn link_host_target(rust_dir: &Path) {
-    let host = host_triple();
-    let host_target_dir = rust_dir
-        .join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()))
-        .join(&host);
-
-    let source = host_sysroot().join("lib/rustlib").join(&host);
-    assert!(
-        source.exists(),
-        "Host target {} not found in stable toolchain at {}",
-        host,
-        source.display()
-    );
-
-    std::os::unix::fs::symlink(&source, &host_target_dir).unwrap_or_else(|e| {
-        panic!(
-            "Failed to symlink {} -> {}: {}",
-            host_target_dir.display(),
-            source.display(),
-            e
-        )
-    });
 }
 
 #[cfg(test)]
@@ -1083,155 +670,25 @@ mod tests {
         assert!(said.contains("clang") && !said.contains("rust-lld,"), "the refusal names clang alone: {said}");
     }
 
-    /// Every build links the host's LLVM, and every guest links through its
-    /// LLD, named by path.
+
+    /// **The rustup `toyos` toolchain names one stable path, ever**: the
+    /// primary's builds move the link at that path, and rustup's own is made
+    /// once and never moved again.
     #[test]
-    fn every_build_links_the_host_s_llvm_and_names_its_lld_by_path() {
-        let rust_dir = TempDir::new("lld-config");
-        let llvm = rust_dir.join("build/llvm/k");
-        let lld = format!("linker = \"{}\"", llvm.join("bin/lld").display());
-        for (hosted, lld_flag) in [(true, "lld = false"), (false, "lld = true")] {
-            write_config(&rust_dir, "h", hosted, &llvm);
-            let config = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
-            assert!(config.contains(lld_flag) && config.contains(&lld) && !config.contains("\"rust-lld\""), "{config}");
-            let host = format!(
-                "[target.h]\ndefault-linker-linux-override = \"off\"\nllvm-config = \"{}/bin/llvm-config\"\nllvm-has-rust-patches = true\n",
-                llvm.display()
-            );
-            assert!(config.contains(&host), "{config}");
-        }
-    }
-
-    /// **A bootstrap leaves the primary nothing that waits on another
-    /// worktree's sysroot build**: the act that reassembles `stage2` completes it
-    /// before its exclusive hold ends, so the step after it — run while a
-    /// sysroot build holds the lock shared — decides it has nothing to do, and
-    /// takes no lock.
-    #[test]
-    fn a_bootstrap_leaves_nothing_to_wait_on_a_sysroot_build_for() {
-        let rust_dir = TempDir::new("no-wait");
-        let stage2 = stage2(&rust_dir);
-        let llvm = store_llvm(&rust_dir);
-        reassemble(&rust_dir, &llvm, || bootstrapped(&rust_dir));
-        assert!(
-            !incomplete(&rust_dir),
-            "a bootstrap let its exclusive hold go with a global step left, which the primary's \
-             build then queues for behind every sysroot build"
-        );
-        assert_eq!(toolchain_defect(&stage2), None, "a bootstrap let its exclusive hold go with stage2 not whole");
-    }
-
-    /// The LLVM `clang::provision` reads, in `rust_dir`'s store.
-    fn store_llvm(rust_dir: &Path) -> PathBuf {
-        let llvm = rust_dir.join("build/llvm/k");
-        for (file, text) in [("bin/clang", "clang"), ("lib/clang/22/include/stddef.h", "stddef")] {
-            fs::create_dir_all(llvm.join(file).parent().unwrap()).unwrap();
-            fs::write(llvm.join(file), text).unwrap();
-        }
-        llvm
-    }
-
-    /// What bootstrap leaves in `rust_dir`: `stage2` made again, with `rustc`
-    /// and the LLVM tools it assembles, and neither cargo nor clang; and the
-    /// hosted rustc's sysroot without the host target.
-    fn bootstrapped(rust_dir: &Path) {
-        let stage2 = stage2(rust_dir);
-        let _ = fs::remove_dir_all(&stage2);
-        let lld = rust_lld(&stage2);
-        for file in [stage2.join("bin/rustc"), lld.clone(), lld.with_file_name("llvm-ar")] {
-            fs::create_dir_all(file.parent().unwrap()).unwrap();
-            fs::write(file, b"").unwrap();
-        }
-        let hosted = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
-        fs::create_dir_all(&hosted).unwrap();
-    }
-
-    /// What a build directory holds of an LLVM of its own: bootstrap's LLVM and
-    /// LLD.
-    fn in_tree_llvm(rust_dir: &Path) -> [PathBuf; 2] {
-        let host = rust_dir.join("build").join(host_triple());
-        let own = [host.join("llvm"), host.join("lld")];
-        for dir in &own {
-            fs::create_dir_all(dir.join("bin")).unwrap();
-            fs::write(dir.join("bin/tool"), "a tool").unwrap();
-        }
-        own
-    }
-
-    /// **A primary whose compiler is built against the store keeps no LLVM of
-    /// its own**: the rebuild that links the store removes the one its build
-    /// directory built.
-    #[test]
-    fn a_rebuilt_compiler_leaves_no_llvm_of_its_own() {
-        let scratch = TempDir::new("in-tree-llvm");
-        let (_primary, rust_dir, _) = crate::compiler::tests::estate(&scratch);
-        let own = in_tree_llvm(&rust_dir);
-        let llvm = store_llvm(&rust_dir);
-        rebuild_compiler(&rust_dir, &llvm, || bootstrapped(&rust_dir));
-        for dir in own {
-            assert!(!dir.exists() && !dir.with_extension("swept").exists(), "{} outlived the rebuild", dir.display());
-        }
-        assert_eq!(toolchain_defect(&stage2(&rust_dir)), None);
-    }
-
-    /// **Landing the store moves an existing primary onto it**: a primary whose
-    /// record was written before its compiler linked the host's LLVM is not
-    /// current, so its next build bootstraps, and that rebuild removes the LLVM
-    /// and LLD its build directory built. Its LLVM checkout sitting at a commit
-    /// its gitlink does not name changes neither answer.
-    #[test]
-    fn a_primary_recorded_before_the_store_is_rebuilt_onto_it() {
-        let scratch = TempDir::new("store-migration");
-        let (_primary, rust_dir, _) = crate::compiler::tests::estate(&scratch);
-        crate::compiler::tests::llvm_checkout(&rust_dir);
-        assert!(crate::compiler::primary_is_current(&rust_dir));
-        crate::compiler::tests::record_before_the_store(&rust_dir);
-        let own = in_tree_llvm(&rust_dir);
-        let kind = bootstrap(false, crate::compiler::primary_is_current(&rust_dir), true);
-        assert!(kind.is_some_and(|k| k.invalidate_hosted), "a primary recorded before the store was taken for current");
-        rebuild_compiler(&rust_dir, &store_llvm(&rust_dir), || bootstrapped(&rust_dir));
-        assert!(own.iter().all(|dir| !dir.exists()), "the rebuild kept the LLVM its build directory built");
-        assert!(crate::compiler::primary_is_current(&rust_dir), "the rebuild recorded a compiler that is not current");
-    }
-
-    /// **A stopped bootstrap is run again**: nothing records which compiler
-    /// `stage2` is while one runs, so the primary's next build is not told the
-    /// old one is current; and the LLVM the old one linked stays.
-    #[test]
-    fn a_stopped_bootstrap_leaves_no_record() {
-        let rust_dir = TempDir::new("stopped");
-        let record = crate::compiler::primary_record(&rust_dir);
-        fs::create_dir_all(record.parent().unwrap()).unwrap();
-        fs::write(&record, "the compiler before").unwrap();
-        let own = in_tree_llvm(&rust_dir);
-        let stopped = std::panic::catch_unwind(|| rebuild_compiler(&rust_dir, Path::new("no-llvm"), || panic!("stopped")));
-        assert!(stopped.is_err());
-        assert!(!record.exists(), "a stopped bootstrap left the record of the compiler before it");
-        assert!(own.iter().all(|dir| dir.join("bin/tool").is_file()), "a stopped bootstrap took the LLVM its compiler linked");
-    }
-
-    /// **The primary bootstraps a new compiler exactly when asked to or when its
-    /// `stage2` is not current, and otherwise only when rustup has none.**
-    #[test]
-    fn the_primary_bootstraps_when_asked_stale_or_missing() {
-        let new = Some(Bootstrap { invalidate_hosted: true });
-        let again = Some(Bootstrap { invalidate_hosted: false });
-        for (force_rebuild, current, toolchain_exists, want) in [
-            (false, true, true, None),
-            (false, true, false, again),
-            (false, false, true, new),
-            (false, false, false, new),
-            (true, true, true, new),
-            (true, true, false, new),
-            (true, false, true, new),
-            (true, false, false, new),
-        ] {
-            assert_eq!(
-                bootstrap(force_rebuild, current, toolchain_exists),
-                want,
-                "force_rebuild {force_rebuild}, current {current}, toolchain_exists {toolchain_exists}"
-            );
-        }
+    fn the_rustup_link_names_one_stable_path() {
+        let scratch = TempDir::new("rustup-link");
+        let (home, rust_dir) = (scratch.join("rustup"), scratch.join("rust"));
+        let [one, two] = ["k1", "k2"].map(|k| store::Kind::Sysroot.dir(&rust_dir).join(k));
+        let toyos = home.join("toolchains/toyos");
+        link(&home, &rust_dir, &one);
+        assert_eq!(fs::read_link(&toyos).unwrap(), store::current(&rust_dir));
+        assert_eq!(fs::read_link(store::current(&rust_dir)).unwrap(), Path::new("sysroots/k1"));
+        let made = fs::symlink_metadata(&toyos).unwrap().modified().unwrap();
+        link(&home, &rust_dir, &two);
+        assert_eq!(fs::read_link(store::current(&rust_dir)).unwrap(), Path::new("sysroots/k2"));
+        assert_eq!(fs::symlink_metadata(&toyos).unwrap().modified().unwrap(), made, "rustup's own link was made again");
+        let left: Vec<_> = fs::read_dir(rust_dir.join("build")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["toyos"], "a link's replacement was left beside it");
     }
 
     /// The negative control is the defect itself: this is verbatim what cargo

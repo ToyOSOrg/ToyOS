@@ -18,14 +18,11 @@ use std::process::{Command, Stdio};
 use sha2::{Digest, Sha256};
 use toyos_tmpdir::TempDir;
 
-use crate::toolchain::HOSTED_ARCH;
-
 /// What the tag hashes, as `git rev-parse HEAD:<tree>` names them. The last is
 /// this file.
 fn trees() -> Vec<&'static str> {
     std::iter::once("rust")
-        .chain(crate::sysroot::SYSROOT_SOURCES)
-        .chain(crate::sysroot::SYSROOT_MANIFESTS)
+        .chain(crate::store::ABI_TREES)
         .chain([crate::clang::SOURCE, file!()])
         .collect()
 }
@@ -239,7 +236,7 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     // the compiler with the guest libraries and `libtoyos_c.a` this tree's
     // sources name, recorded beside the witness an installer checks it by.
     let build = root.join("rust/build");
-    let key = crate::keystore::recorded(root, crate::buildlock::Keyed::Sysroot).ok_or("the build recorded no sysroot key")?;
+    let key = crate::store::recorded(root, crate::store::Kind::Sysroot).ok_or("the build recorded no sysroot key")?;
     let sysroot = format!("sysroots/{key}");
     let stage2 = build.join(&sysroot);
     fs::write(build.join("toyos-sysroot-witness"), crate::sysroot::witness(root))
@@ -254,17 +251,19 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     }
     fs::copy(tmp.join("TOOLCHAIN"), build.join("TOOLCHAIN")).map_err(|e| e.to_string())?;
 
-    // `lib/rustlib/<host>` and the sysroot's `bin/cargo` are links into this
-    // runner's own toolchain; `Owner::Installed` recreates both. GNU tar's
-    // `--transform` renames the sysroot to the path an installer links.
+    // The sysroot's `bin/cargo` is a link into this runner's own toolchain;
+    // `Owner::Installed` recreates it. GNU tar's
+    // `--transform` renames the sysroot to the path an installer links, and
+    // `--mode` gives back the write permission the store takes, which the
+    // installer needs to make that link.
     let tarball = tmp.join(ASSET);
     let mut tar = Command::new("tar")
         .arg("-C")
         .arg(&build)
-        .arg(format!("--exclude={}/stage2/lib/rustlib/{HOST}", HOSTED_ARCH.userland()))
         .arg(format!("--exclude={sysroot}/bin/cargo"))
+        .arg("--mode=u+w")
         .arg(format!("--transform=s,^{sysroot},{HOST}/stage2,"))
-        .args(["-c", &sysroot, &format!("{}/stage2", HOSTED_ARCH.userland())])
+        .args(["-c", &sysroot])
         .args(["toyos-sysroot-witness", "TOOLCHAIN"])
         .stdout(Stdio::piped())
         .spawn()

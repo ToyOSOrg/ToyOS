@@ -21,8 +21,7 @@ pub fn testcases_dir() -> PathBuf {
 pub fn c_sysroot() -> CSysroot {
     static C: OnceLock<CSysroot> = OnceLock::new();
     C.get_or_init(|| {
-        let mut lock = toyos_build::buildlock::shared(&repo_root(), "the C sysroot");
-        let sysroot = toyos_build::toolchain::ensure(&repo_root(), false, &mut lock);
+        let sysroot = toyos_build::toolchain::ensure(&repo_root());
         CSysroot::of(&sysroot.dir, super::qemu::SUITE_ARCH)
     })
     .clone()

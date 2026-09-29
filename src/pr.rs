@@ -32,7 +32,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::buildlock;
 use crate::flags;
 
 /// What `--pr` says last, and exits non-zero on, when it merged `origin/main`
@@ -210,7 +209,7 @@ fn preflight(root: &Path) -> Result<String, String> {
     let branch = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if branch == "main" {
         return Err("[pr] this worktree is on main, so there is nothing to open a pull request \
-                    for. `cargo run -- --worktree add <path>` makes one to work in."
+                    for. `git worktree add --no-track -b wt/<name> <path> origin/main` makes one to work in."
             .to_string());
     }
     if branch == "HEAD" {
@@ -244,17 +243,12 @@ fn preflight(root: &Path) -> Result<String, String> {
 /// and the witness every worktree compares against — silently falls behind
 /// whatever GitHub merged.
 ///
-/// Under the integration lock, which is what is left of its old job: one process
-/// at a time moves this host's `main`, and the primary is a checkout somebody
-/// may be building in.
-///
 /// It is housekeeping and not a gate, so a primary that is dirty or on another
 /// branch is *reported*, not refused. `--land` had to refuse — it was about to
 /// fast-forward that tree onto the branch being landed — and a pull request is
 /// not.
 fn sync(root: &Path) -> Result<String, String> {
     let primary = crate::primary_checkout(root);
-    let _lock = buildlock::integration(root);
 
     git(root, &["fetch", "--quiet", "origin", "main"])
         .map_err(|e| format!("{e}\n[pr] `git fetch origin main` failed, so nothing below could \
@@ -285,26 +279,15 @@ fn sync(root: &Path) -> Result<String, String> {
     let behind = git(&primary, &["rev-list", "--count", "main..origin/main"])?;
     if behind.trim() == "0" {
         return Ok(format!(
-            "fetched origin; this host's main is current at {before}{}",
-            reclaimable(root)
+            "fetched origin; this host's main is current at {before}"
         ));
     }
     git(&primary, &["merge", "--ff-only", "origin/main"]).map_err(|_| stranded(&primary))?;
     let after = git(&primary, &["rev-parse", "--short", "main"])?;
     Ok(format!(
-        "fetched origin; this host's main {before} -> {after} ({} commit(s)){}",
+        "fetched origin; this host's main {before} -> {after} ({} commit(s))",
         behind.trim(),
-        reclaimable(root),
     ))
-}
-
-/// What this host could give back, said where it becomes true.
-///
-/// A worktree whose branch has landed has no reason to hold its build caches,
-/// and `--sync` runs at exactly the moment that becomes true of one.
-fn reclaimable(root: &Path) -> String {
-    crate::worktree::reclaim_line(&crate::worktree::survey(root, false))
-        .map_or_else(String::new, |line| format!("\n[pr] {line}"))
 }
 
 /// This host's `main` has commits GitHub does not, so it is not a cache of

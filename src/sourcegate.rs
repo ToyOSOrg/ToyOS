@@ -644,7 +644,7 @@ const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "std::env::current_exe().unwrap()",
         sites: &[
-            ("src/buildlock.rs", 1),
+            ("src/dirlock.rs", 1),
             ("src/tether.rs", 1),
             ("tests/common/orphan.rs", 1),
             ("toyos-tmpdir/tests/reclaim.rs", 1),

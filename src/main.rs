@@ -185,7 +185,6 @@ fn main() {
     let debug = asked(&flags::DEBUG);
     let build_only = asked(&flags::BUILD_ONLY);
     let dump_audio = asked(&flags::DUMP_AUDIO);
-    let rebuild_toolchain = asked(&flags::REBUILD_TOOLCHAIN);
     let smp = parse_smp(&args);
     let profile = parse_profile(&args);
     let mute = asked(&flags::MUTE);
@@ -206,7 +205,6 @@ fn main() {
         for (other, flag) in [
             (diag, &flags::DIAG_BOOT),
             (console, &flags::CONSOLE_BOOT),
-            (rebuild_toolchain, &flags::REBUILD_TOOLCHAIN),
         ] {
             assert!(!other, "--boot-config {dir} cannot be combined with {}", flag.name);
         }
@@ -248,11 +246,6 @@ fn main() {
         return;
     }
 
-    if asked(&flags::WORKTREE) {
-        toyos_build::worktree::dispatch(&root, &args);
-        return;
-    }
-
     // On demand and nowhere else: it asks GitHub for every fork branch head, so
     // neither `cargo test` nor `--land` may reach it.
     if asked(&flags::CHECK_FORKS) {
@@ -267,15 +260,15 @@ fn main() {
         toyos_build::ensure_submodules(&root);
     }
 
-    // Toolchain included: `build` holds the build lock across both, so no other
-    // agent's clean or bootstrap can land between the two.
+    // Toolchain included: `build` holds the build lock across both, so no clean
+    // of this worktree's crate targets can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
     if let Some(out) = update_image {
-        toyos_build::build::build_update(&root, &boot, rebuild_toolchain, &plan, &out);
+        toyos_build::build::build_update(&root, &boot, &plan, &out);
         println!("Update image: {} (ssh <machine> update < it)", out.display());
         return;
     }
-    let image = toyos_build::build::build(&root, boot, rebuild_toolchain, &plan);
+    let image = toyos_build::build::build(&root, boot, &plan);
     println!("Build finished.");
     println!("Boot image: {}", image.display());
 
