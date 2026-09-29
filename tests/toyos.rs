@@ -2112,13 +2112,21 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
     ],
 )];
 
-/// `perf_request`'s two boots. The first is [`TESTCASES`], whose list carries
-/// `test_rs_perf_state` because a job this row added would land after
-/// `log-close`; the second is its own, since it ends in a panic.
+/// `perf_request`'s two boots. The first is [`TESTCASES`]'s, and names the one
+/// job this row reads so a run that selects no other rider still carries it;
+/// the second is its own, since it ends in a panic.
 const PERF_REQUEST: &[metal::Arm] = &[
-    metal::once("testcases", "tests/testcases", &[], &[]),
-    metal::once("perfdiverge", "tests/testcases", &["perf-request-diverges"], &["test_rs_perf_state"]),
+    metal::once("testcases", "tests/testcases", &[], &["test_rs_perf_state"]),
+    metal::Arm {
+        panics: Some(PERF_REQUEST_DIVERGED),
+        ..metal::once("perfdiverge", "tests/testcases", &["perf-request-diverges"], &["test_rs_perf_state"])
+    },
 ];
+
+/// What `perfdiverge`'s panic says, in `kernel/src/arch/x86_64/control_regs.rs`'s
+/// `hwp_check`: cpu1 holds the request one ratio off the declaration.
+const PERF_REQUEST_DIVERGED: &str =
+    "control_regs: cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04";
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
@@ -17770,9 +17778,8 @@ fn perf_request_on_metal(boot: &metal::Readback) -> Result<(), String> {
 /// was declared — the page after the reset carries it — and a boot whose check
 /// did not assert reaches no such panic.
 fn perf_request_diverged(boot: &metal::Readback) -> Result<(), String> {
-    const NAMED: &str = "control_regs: cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04";
     let after = boot.after_the_reset()?;
-    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, NAMED)?.to_string();
+    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, PERF_REQUEST_DIVERGED)?.to_string();
     eprintln!("  [perf_request] a request moved off the declaration panicked: {}", said.trim());
     Ok(())
 }

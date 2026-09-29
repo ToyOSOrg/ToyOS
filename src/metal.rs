@@ -171,9 +171,12 @@ pub enum Refusal {
     HungWithoutARecord,
     /// **An image armed to stop itself did not, or was not ended by its own
     /// bound.** Said only of an image carrying [`WEDGE_ARM`], for which
-    /// `Rebooting.` is the failure and a sealed `WEDGED` record is the pass —
-    /// the one boot in this loop whose verdict is not `bootlog::verdict`'s.
+    /// `Rebooting.` is the failure and a sealed `WEDGED` record is the pass.
     Wedge { why: &'static str },
+    /// **A boot told to end in a panic carrying `want` did not.** Said only of
+    /// a boot run with `--expect-panic`, for which `Rebooting.` is the failure
+    /// and the kernel's own panic record carrying that line is the pass.
+    Panic { want: String, why: String },
     /// **What the boot said over its own cable is not what a talking boot
     /// owes**: the log it serves, a ping, the command's answer and `reboot`,
     /// each finding by name. Judged after the stick's own verdict, which stays
@@ -204,6 +207,7 @@ impl Refusal {
                 | Self::Talk(_)
                 | Self::Swap(_)
                 | Self::Wedge { .. }
+                | Self::Panic { .. }
         )
     }
 }
@@ -317,6 +321,12 @@ impl fmt::Display for Refusal {
                 f,
                 "this image is armed to stop itself, so it is judged by the record its own \
                  deadline sealed and not by the word a shutdown writes — and {why}"
+            ),
+            Self::Panic { want, why } => write!(
+                f,
+                "this boot is to end in a kernel panic whose record carries {want:?}, so it is \
+                 judged by the record the pass after the reset printed and not by the word a \
+                 shutdown writes — and {why}"
             ),
             Self::HungWithoutARecord => write!(
                 f,
@@ -1551,17 +1561,19 @@ declare_flags!(METAL = {
     SWAP = "--swap", Next;
     BINARY = "--binary", Next;
     HAND_BACK = "--hand-back", None;
+    EXPECT_PANIC = "--expect-panic", Next;
 });
 
 /// The flags a swap of a running machine's service refuses beside it: it
 /// flashes nothing and reboots nothing, so each of these describes a boot it
 /// will not make.
-const NOT_A_SWAP: &[&Flag] = &[&DRY_RUN, &FAT32_CHECK, &NIC, &INSTALL_SUDOERS, &IMAGE];
+const NOT_A_SWAP: &[&Flag] =
+    &[&DRY_RUN, &FAT32_CHECK, &NIC, &INSTALL_SUDOERS, &IMAGE, &EXPECT_PANIC];
 
 /// The flags that describe a boot, as against the ones that say which machine
 /// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
 const ABOUT_A_BOOT: &[&Flag] =
-    &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS, &TALK];
+    &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS, &TALK, &EXPECT_PANIC];
 
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1618,6 +1630,9 @@ pub struct Args {
     /// over ssh: the host saying it is done with a boot held for it. Absent
     /// leaves the machine running, which is the development loop.
     hand_back: bool,
+    /// The line this boot's kernel panic record must carry: the boot is judged
+    /// by that record, and a boot that hands the machine back is its red.
+    expect_panic: Option<String>,
 }
 
 impl Args {
@@ -1652,6 +1667,7 @@ impl Args {
             swap: value(&SWAP).map(str::to_string),
             binary: value(&BINARY).map(PathBuf::from),
             hand_back: METAL.present(args, &HAND_BACK),
+            expect_panic: value(&EXPECT_PANIC).map(str::to_string),
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host.split_once('@').ok_or_else(|| {
@@ -1992,6 +2008,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // image will arm, judged against the only table that has ruled on any of it.
     let armed = arms_are_admissible(asked)?;
     println!("image {}: armed with {armed:?}", image.path.display());
+    let ending = Ending::of(&armed, args.expect_panic.as_deref())?;
     // The client and its key before the machine is asked anything.
     let cable = match (&args.talk, &args.readback) {
         (Some(key), Some(dir)) => Some(Talking::prepare(key, dir)?),
@@ -2124,20 +2141,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     if let Some(said) = reported_and_booted_nothing(&loader, &log) {
         return Err(Refusal::ReportedAndBootedNothing { said });
     }
-    // **An image armed to stop itself is judged by the record its own bound
-    // sealed, not by the word a shutdown writes.** Read off what the image
-    // is armed with rather than off its label or its readback directory: the
-    // arm comes out of the artifact, so no boot can be judged as something
-    // it was not flashed as. *Which* bound sealed it is the page's to say
-    // and not this list's — the arm says a bound was staged, and two of them
-    // can reach a staged boot.
-    let ms = if stages_a_wedge(&armed) {
-        wedged_boot(&loader, &log)?
-    } else {
-        let ms = bootlog::verdict(&log).map_err(Refusal::Log)?;
-        bootlog::handed_back(&loader).map_err(Refusal::Log)?;
-        ms
-    };
+    let ms = ending.judge(&loader, &log)?;
     // After the stick's own verdict, which stays the one that names a boot
     // that never reached its network.
     if let Some((heard, lines)) = &heard {
@@ -2181,6 +2185,74 @@ fn talk_verdict(
         println!("talk: {line}");
     }
     Ok(())
+}
+
+/// How a boot must end to pass, decided before the flash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending<'a> {
+    /// By the shutdown's own last word: every boot not named below.
+    HandedBack,
+    /// By the record one of its own bounds sealed: [`wedged_boot`].
+    Wedged,
+    /// By a kernel panic whose record carries this line: [`panicked_boot`].
+    Panicked(&'a str),
+}
+
+impl<'a> Ending<'a> {
+    /// **A wedge is read off what the image is armed with**, not off its label
+    /// or its readback directory, so no boot is judged as something it was not
+    /// flashed as. A panic is the caller's to expect, because an arm that
+    /// panics a machine with the hardware it moves is an ordinary boot on one
+    /// without it. The two are one boot judged two ways, so they refuse each
+    /// other.
+    fn of(armed: &[String], expect_panic: Option<&'a str>) -> Result<Self, Refusal> {
+        match (stages_a_wedge(armed), expect_panic) {
+            (false, None) => Ok(Self::HandedBack),
+            (true, None) => Ok(Self::Wedged),
+            (false, Some(want)) => Ok(Self::Panicked(want)),
+            (true, Some(want)) => Err(Refusal::Usage(format!(
+                "--expect-panic {want:?} beside an image armed with {armed:?}, which is armed to \
+                 be ended by a bound of its own: a boot ends one way"
+            ))),
+        }
+    }
+
+    /// The boot's millisecond count, where the stick's two files say it ended
+    /// this way.
+    fn judge(self, loader: &str, log: &str) -> Result<u64, Refusal> {
+        match self {
+            Self::HandedBack => {
+                let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
+                bootlog::handed_back(loader).map_err(Refusal::Log)?;
+                Ok(ms)
+            }
+            Self::Wedged => wedged_boot(loader, log),
+            Self::Panicked(want) => panicked_boot(loader, log, want),
+        }
+    }
+}
+
+/// What a boot told to end in a panic owes instead of `Rebooting.`: the pass
+/// after the reset reports a kernel panic whose record carries `want`, and the
+/// kernel reached `Boot: complete` before it.
+fn panicked_boot(loader: &str, log: &str, want: &str) -> Result<u64, Refusal> {
+    let refuse = |why: &str| Refusal::Panic { want: want.to_string(), why: why.to_string() };
+    if bootlog::handed_back(loader).is_ok() {
+        return Err(refuse("it reached the shutdown's own last word, so it never panicked"));
+    }
+    let record = bootlog::panic_record(loader)
+        .ok_or_else(|| refuse("the pass after the reset reports no kernel panic"))?;
+    let Some(said) = record.iter().find(|line| line.contains(want)) else {
+        return Err(refuse(&format!(
+            "the kernel panicked with a record that does not carry it:\n  {}",
+            record.join("\n  ")
+        )));
+    };
+    let ms = bootlog::boot_millis(log).ok_or_else(|| {
+        refuse("the kernel wrote no `Boot: complete`, so it panicked before the jobs ran")
+    })?;
+    println!("{}", said.trim());
+    Ok(ms)
 }
 
 /// What an image armed to stop itself owes instead of `Rebooting.`, and the
@@ -3379,5 +3451,97 @@ mod tests {
         // A sample that landed before the bound is not a negative lateness.
         let early = locked.replace("for 60004 ms", "for 59000 ms");
         assert_eq!(lockup_lateness_ms(&early), None);
+    }
+
+    /// The pass after the reset of the T14's `perf-request-diverges` boot, cut
+    /// to the lines the verdict reads: the panic record, and the log ring the
+    /// loader files after it.
+    fn diverged_pass(named: &str) -> String {
+        format!(
+            "Loader log: the kernel handoff begins, so this file ends here\n\
+             {}\n\
+             Black box: the record below is from the boot armed at 2026-09-29-072056\n\
+             {} 15052 bytes off 0x8000000\n\
+             | {}2): panicked at src/arch/x86_64/control_regs.rs:440:9: \n\
+             | older records dropped to fit this page: 177\n\
+             | {named}\n\
+             | usb-quiesce: xHCI 00:14.0 bus mastering off\n\
+             {} 191 record(s)\n\
+             | [1.519 cpu1] control_regs: cpu1 pm_enable=1 hwp_request=0x80002a05\n\
+             {}\n",
+            bootlog::SEPARATOR,
+            bootlog::PREVIOUS_PANIC,
+            bootlog::PANIC_RECORD,
+            bootlog::TAIL_IN_THE_FILE,
+            bootlog::CHAIN_ENDS_LINE,
+        )
+    }
+
+    /// **A boot told to end in a panic passes on that panic and on nothing
+    /// else**: the line has to be in the kernel's own panic record, not in the
+    /// ring filed after it, not in a wedge's record, and not in a boot that
+    /// handed the machine back.
+    #[test]
+    fn a_boot_expected_to_panic_is_judged_by_its_panic_record() {
+        const WANT: &str =
+            "control_regs: cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04";
+        let booted = "[2026-09-29 07:20:58 1.156 cpu0] Boot: complete (1156ms)\n";
+        let armed = vec!["perf-request-diverges".to_string()];
+        let ending = Ending::of(&armed, Some(WANT)).expect("a panic to expect");
+        assert_eq!(ending.judge(&diverged_pass(WANT), booted), Ok(1156));
+
+        let other = diverged_pass("control_regs: cpu1 holds nothing it was not declared");
+        let why = ending.judge(&other, booted).unwrap_err().to_string();
+        assert!(why.contains("does not carry it"), "{why}");
+
+        // Only in the ring filed after the record, which is not the panic's.
+        let ringed = diverged_pass("usb-recovery: the log ring holds no transport break")
+            .replace("pm_enable=1 hwp_request=0x80002a05", WANT);
+        let why = ending.judge(&ringed, booted).unwrap_err().to_string();
+        assert!(why.contains("does not carry it"), "{why}");
+
+        let wedged = format!(
+            "{}\n{} the last boot read WEDGED\n| {}: a bound of 120000 ms\n| {WANT}\n",
+            bootlog::SEPARATOR,
+            bootlog::PREVIOUS_PANIC,
+            bootlog::DEADLINE_EXPIRED
+        );
+        let why = ending.judge(&wedged, booted).unwrap_err().to_string();
+        assert!(why.contains("reports no kernel panic"), "{why}");
+
+        let done = format!(
+            "{}\nBlack box: {}\n| {}[kernel 1.3 cpu0] {}\n",
+            bootlog::SEPARATOR,
+            bootlog::HANDED_BACK,
+            bootlog::LOG_TAIL,
+            bootlog::REBOOTING
+        );
+        let why = ending.judge(&done, booted).unwrap_err().to_string();
+        assert!(why.contains("never panicked"), "{why}");
+
+        let why = ending.judge(&diverged_pass(WANT), "nothing at all\n").unwrap_err();
+        assert!(why.to_string().contains("no `Boot: complete`"), "{why}");
+        assert!(why.about_the_boot());
+    }
+
+    /// The expectation is the command line's, and a wedge arm's image is one
+    /// it cannot describe.
+    #[test]
+    fn a_boot_ends_one_way() {
+        let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        let plain = armed(&["perf-request-diverges"]);
+        assert_eq!(Ending::of(&plain, None), Ok(Ending::HandedBack));
+        assert_eq!(Ending::of(&plain, Some("x")), Ok(Ending::Panicked("x")));
+        assert_eq!(Ending::of(&armed(&[WEDGE_ARM]), None), Ok(Ending::Wedged));
+        let refusal = Ending::of(&armed(&[WEDGE_ARM]), Some("x")).unwrap_err();
+        assert!(refusal.to_string().contains("a boot ends one way"), "{refusal}");
+
+        let words = |w: &[&str]| -> Vec<String> { w.iter().map(|s| s.to_string()).collect() };
+        let args = Args::parse(&words(&["--image", "i.img", "--expect-panic", "a line"]))
+            .expect("an image and the panic it ends in");
+        assert_eq!(args.expect_panic.as_deref(), Some("a line"));
+        let refusal =
+            Args::parse(&words(&["--install-sudoers", "p", "--expect-panic", "a line"])).unwrap_err();
+        assert!(refusal.to_string().contains("--expect-panic"), "{refusal}");
     }
 }
