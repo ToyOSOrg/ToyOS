@@ -92,8 +92,6 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
     }
 }
 
-/// Only these four device classes block; the rest answer `NotFound` on an
-/// empty blocking read.
 fn read_block_device(claim: &crate::object::device::DeviceClaim) -> ReadBlock {
     match claim.class() {
         device::DeviceType::Keyboard => ReadBlock::Keyboard(Deadline::never()),

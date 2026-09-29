@@ -63,8 +63,7 @@ the AArch64 kernel refuses the claim by name.
 
 **What only the T14 proves.** No QEMU CPU enumerates HWP (TCG's `qemu64`, and
 KVM, which reduces leaf 6 to `ARAT`), so every write and every read of these
-registers runs only there. Under Linux on the T14 (#568's samples, not merged;
-the metal row re-measures them) every CPU held
+registers runs only there. Under Linux on the T14 every CPU held
 `IA32_HWP_REQUEST` `0x80002a04` with `IA32_HWP_CAPABILITIES` `0x010d182a` or
 `0x010e182a`, and the package `IA32_HWP_REQUEST_PKG` `0x8000ff01`.
 `MSR_PLATFORM_INFO` was not read there; its ratio 4 is inferred from Linux's
