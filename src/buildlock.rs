@@ -400,13 +400,6 @@ fn announce(lock: &str, label: &str, holder: &str) {
 
 /// [`take_lock`], saying every 30 s that it is still waiting and who for.
 ///
-/// One opening line is enough for a wait of seconds and not for one of tens of
-/// minutes. On 2026-08-07 eight `--land` processes queued on the integration
-/// lock at once; each printed its line and then went silent for as long as the
-/// seven ahead of it took, which is indistinguishable from a wedge — and an
-/// agent that cannot tell a queue from a wedge kills it and retries, which puts
-/// its gate back at the end of the queue.
-///
 /// The kernel keeps the queue and a thread does the talking: nothing here polls
 /// a lock, so `flock`'s own ordering is given up nowhere. The holder is re-read
 /// each time, so the message follows the queue forward rather than naming the
