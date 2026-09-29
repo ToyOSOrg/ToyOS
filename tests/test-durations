@@ -136,9 +136,6 @@ abuse_tls_alloc 15
 acpi_table_inventory 4601
 allocator_stress 787
 apps_and_home_are_one_filesystem 7263
-audio_idle_suspend 1013
-audio_tone (smp=1) 8450
-audio_tone_load (smp=1) 18139
 bar_placement_is_proven 3297
 blackbox_done_chain 4119
 blackbox_early_panic_sealed 2470
@@ -164,7 +161,6 @@ debug_float 11
 debug_trap 25
 demand_paging_sse 12
 demand_window_race 54
-desktop_audio_client 13791
 desktop_locale_detect 4510
 desktop_typing_damage 14338
 desktop_window_child 40312
@@ -172,12 +168,9 @@ device_claim_lifetime 21
 disk_backtrace 85
 diskless_boot 4475
 dlopen_dedup 40
-doom_music 7514
-doom_sound_flood 5888
 double_fault_stack 5139
 double_panic_names_the_fault 9120
 driver_wait_refused 17739
-dump_nmi_probe 8098
 empty_dir_stat 12
 endowment_denied 10
 esp_filesystem 10123
@@ -203,8 +196,6 @@ handle_transfer 66
 hang_bounded_by_the_stick 3717
 hard_lockup_ends_a_deaf_cpu 20277
 hash_seed_precedes_every_map 4976
-hda_client_stall 19047
-hda_tone 13389
 hda_two_live_refused 4848
 hierarchy_paths 87
 home_backing_revoked 663
@@ -215,7 +206,6 @@ i8042_absent 9221
 i8042_budget_expiry 3135
 i8042_fadt_denial 5736
 i8042_health 9509
-i8042_health_cadence 10236
 i8042_kbd_echo 4770
 i8042_mouse 4310
 i8042_no_spurious_wake 146
@@ -248,7 +238,6 @@ lan_dhcp_lease 3029
 lan_no_lease 32709
 lapic_spurious_vector 6829
 late_storage_connect 6455
-latency_wake 8790
 launcher_refusals 2106
 leak_rollback_selftest 5423
 loader_watchdog_arms 10064
@@ -277,7 +266,6 @@ metal_sim_compositor 8986
 metal_sim_compositor_stall 11390
 metal_sim_input 5065
 metal_sim_ipc_hostile_peer 226
-metal_sim_null_audio 8311
 metal_sim_pointer_churn 16658
 metal_sim_scanout_wc 0
 metal_sim_window_caps 148
@@ -291,15 +279,12 @@ netd_connection_caps 6538
 netd_gone_mid_bind 32
 netd_hostile_peer 4509
 netd_listener_forgery 2649
-null_sink_client_exits 2167
-null_sink_shipped_client 7095
 nvme_home_roundtrip 13
 nvme_large_device 6052
 nvme_wide_sector 3500
 operation_nesting 5075
 page_cache_partition_offset 6984
 panic_before_peripherals_reboots 3227
-panic_key_holds 42033
 panic_reboots 9768
 pci_capability_walk 5775
 pci_claim_caps_truncated 2583
@@ -368,13 +353,10 @@ std_tls_multi_crate 13
 std_unwind 18
 std_unwind_so 20
 swiss_german_layout 5355
-syscall_cost 92
 syscall_window_nmi 6825
 syscall_window_nmi_controls 13090
 sysret_ss_reload 6453
 timer_calibration 6722
-tlb_shootdown_cost 5046
-tlb_shootdown_waits 107
 toybox_cp_volume 18616
 toybox_file_tools 205
 usb_boot_stick_pulled 15650
@@ -393,14 +375,12 @@ va_exhaustion 6159
 virtio_net_no_msix 2039
 virtio_used_ring 4189
 volume_from_another_disk 7122
-wake_storm_cost 337
 wall_clock_century_register 9030
 wall_clock_no_century 6987
 wall_clock_now 13
 wall_clock_rtc_dead 8070
 wall_clock_rtc_unstable 7805
 wall_clock_zone 9347
-watchdog_fed 23405
 watchdog_resets 9393
 window_refusal 16
 writeback_durability 8888

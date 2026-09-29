@@ -63,3 +63,9 @@ deleted.
 
 The `ftruncate-flush-stall` actuator, `tests/common/volumes.rs`; held by the
 orchestrator.
+
+**Unrun since it was disabled**: PR #562 deleted the guest's 150 ms verdict,
+whose panic and harness message the reds above quote. The guest races its ten
+truncates and settles; the host still requires `HELD`, refuses `BROKEN` and
+reads the settled size off the volume. That change has never run: the test's
+first run back is also that change's.

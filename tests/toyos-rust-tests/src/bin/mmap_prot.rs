@@ -24,7 +24,6 @@
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt, SyscallError, SYS_MMAP};
 
@@ -171,9 +170,6 @@ const UNPLACEABLE: [u64; 4] =
     [u64::MAX - PAGE_2M, u64::MAX - (PAGE_2M - 1), u64::MAX, 1 << 47];
 const PAGE_2M: u64 = 2 * 1024 * 1024;
 
-/// A liveness bound on the sibling's round, never a pace: it maps 4 KiB.
-const SIBLING_BOUND: Duration = Duration::from_secs(10);
-
 /// The sibling keeps taking both address-space locks while the main thread
 /// asks for every [`UNPLACEABLE`] length under both prots; told to stop, it
 /// finishes one whole round more, so at least one map and unmap begins after
@@ -203,7 +199,7 @@ fn a_length_no_window_holds_is_refused_and_the_space_still_answers() {
         }
         done_tx.send(rounds).expect("the main thread waits for the last round");
     });
-    started_rx.recv_timeout(SIBLING_BOUND).expect("the sibling never finished its first round");
+    started_rx.recv().expect("the sibling never finished its first round");
 
     let mut answers = Vec::with_capacity(2 * UNPLACEABLE.len());
     for prot in [MmapProt::NONE, MmapProt::READ | MmapProt::WRITE] {
@@ -213,9 +209,8 @@ fn a_length_no_window_holds_is_refused_and_the_space_still_answers() {
     }
 
     stop_tx.send(()).expect("the sibling is still running");
-    let rounds = done_rx.recv_timeout(SIBLING_BOUND).unwrap_or_else(|e| {
-        panic!("the sibling's address space stopped answering after the unplaceable lengths: {e:?}")
-    });
+    // No deadline: a round that never answers is a hang the harness ceiling reds.
+    let rounds = done_rx.recv().expect("the sibling sends its count before it ends");
     sibling.join().expect("the sibling thread");
 
     for (prot, size, ret) in answers {

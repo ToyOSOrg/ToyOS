@@ -59,13 +59,3 @@ none of them**: the retry loop was written for the parallel phase and branched o
 the *run's* width. Half the list had no second sample at all, which is most of
 why the earlier lists looked like they rotated.
 
-**Twelve names came off the list when the wall-clock work landed**, and the
-previous write-up's samples predate it. Run `31252989653` was `ab7f5d6`, which
-does not contain `wt/toyos-clock` (`5b6e192`, and `1cf7fee`, `c546335`,
-`02a3bc9`, `d50a8c9` under it). `metal_sim_client_death`, `metal_sim_window_drag`,
-`metal_sim_pointer_churn`, `metal_sim_compositor_stall`, `desktop_audio_client`,
-`desktop_typing_damage`, `doom_sound_flood`, `i8042_health_cadence`,
-`sshd_fail_closed`, `xhci_hotplug`, `xhci_hid_break` and `screen_pager_keys` are
-all **0 of 5** now, and the "a guest stops making progress and pays its whole
-ceiling" shape with them. Anything read off a run older than `31254054628` is
-about a different tree.

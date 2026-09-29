@@ -14,15 +14,8 @@
 mod netd_stream;
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::mpsc;
-use std::time::Duration;
 
 use netd_stream::HOST;
-
-/// How long netd may take to answer a receive whose datagram is on its way.
-/// A bound, said by name; not a pace. std's `UdpSocket` does not honour a read
-/// timeout, so the receive runs on a thread and this bounds the wait for it.
-const WITHIN: Duration = Duration::from_secs(20);
 
 fn main() {
     let echo: u16 = std::env::args()
@@ -35,17 +28,11 @@ fn main() {
     let datagram: Vec<u8> = (0..200u8).collect();
     assert_eq!(socket.send_to(&datagram, to).expect("send to the echo"), datagram.len());
 
-    let (answered, answer) = mpsc::channel();
-    let receiver = socket.try_clone().expect("a second handle for the receive");
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 512];
-        answered.send(receiver.recv_from(&mut buf).map(|(n, from)| (buf[..n].to_vec(), from)))
-    });
-    let (got, from) = answer
-        .recv_timeout(WITHIN)
-        .unwrap_or_else(|_| panic!("a socket bound to 0.0.0.0 received no reply within {WITHIN:?}"))
-        .expect("the receive");
+    // No deadline: a reply that never comes is a hang the harness ceiling reds.
+    let mut buf = [0u8; 512];
+    let (n, from) = socket.recv_from(&mut buf).expect("the receive");
+    let got = &buf[..n];
     assert_eq!(from, to, "the reply came from somewhere other than the echo");
-    assert_eq!(got, datagram, "the echo's reply is not the datagram sent");
+    assert_eq!(got, &datagram[..], "the echo's reply is not the datagram sent");
     println!("netd_udp_any_address: ok");
 }

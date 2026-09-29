@@ -22,9 +22,7 @@ use super::qemu::{BootOptions, QemuInstance};
 /// either way.
 const GATE: &str = "log-gate";
 
-/// The whole run's ceiling. A liveness guard and never a verdict: the guest has
-/// a ceiling of its own and reports what it had when it gave up, so this only
-/// catches a guest that stopped answering at all.
+/// The whole run's ceiling: a gate that never finishes is what it reds.
 const CEILING: Duration = Duration::from_secs(60);
 
 /// One boot's storm, as the guest reported it.
