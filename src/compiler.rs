@@ -10,24 +10,25 @@
 //! `build/toyos-compiler/`, and placed at `rust/build/compilers/<key>/`, where
 //! the key ([`key`]) is the identity (`src/identity.rs`) of the checkout's
 //! `compiler/`, `src/bootstrap/`, `src/tools/`, `src/stage0` and `Cargo.lock`,
-//! the `src/llvm-project` commit, and [`RECIPE`]. Nothing writes that directory after its [`SOURCE`] file exists,
+//! the key of the LLVM it links, and [`RECIPE`]. Nothing writes that directory after its [`SOURCE`] file exists,
 //! and two worktrees naming the same compiler share one copy.
 //!
-//! **LLVM is built from `src/llvm-project`.**
-//! [`source`] names that commit, so another LLVM is another compiler, and an
-//! LLVM checkout holding what no commit does names none.
+//! **LLVM is the host's, built from `src/llvm-project`** (`src/llvm.rs`), once
+//! per commit and linked through its `llvm-config`. [`source`] names that
+//! commit, so another LLVM is another compiler, and an LLVM checkout holding
+//! what no commit does names none.
 //!
 //! **A compiler of a worktree's own never touches what the others build with**:
 //! not the primary's `stage2`, not its record, not the machine-global rustup
 //! `toyos` link — a sysroot is named by its directory, never by a toolchain
 //! name, so no link is made. The global lock is not taken either; nothing of
-//! the primary's is read.
+//! the primary's is read but the LLVM store, under its key's own lock.
 //!
 //! Locks, in the one order every acquirer takes them: the key's
 //! (`buildlock::keyed_*` with [`Keyed::Compiler`]), with this worktree's build
 //! lock put down, held shared for as long as a sysroot is being made from it;
 //! then, to build, this worktree's exclusively, because its fork build
-//! directory is written.
+//! directory is written; then the LLVM key's, held shared while it is linked.
 //!
 //! A compiler no worktree names any more is removed by [`sweep`], which
 //! `--worktree remove` and every placement run: each build records the key it used in its
@@ -48,14 +49,14 @@ use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is none of them: the
 /// build below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM and clang from src/llvm-project; 4";
+const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM; 5";
 
 /// What a compiler's key is the identity of, in its fork checkout.
 const KEYED: [&str; 5] = ["compiler", "src/bootstrap", "src/tools", "src/stage0", "Cargo.lock"];
 
 /// The submodule a compiler is built against by commit: its LLVM, which
 /// bootstrap builds from that commit, so its content is never read.
-const LLVM: &str = "src/llvm-project";
+pub(crate) const LLVM: &str = "src/llvm-project";
 
 /// The file a finished compiler carries last, naming what it was built from. A
 /// directory without it is a build that did not finish.
@@ -189,7 +190,7 @@ pub fn primary_is_current(rust_dir: &Path) -> bool {
 /// The key of the compiler `fork`'s sources name: their content, so committing
 /// what was built as local changes names the same compiler.
 pub fn key(fork: &Path) -> String {
-    let parts = [RECIPE.to_string(), tree_identity(fork, &KEYED), llvm_commit(fork)];
+    let parts = [RECIPE.to_string(), tree_identity(fork, &KEYED), crate::llvm::key(fork)];
     short(parts.join("\n\0\n").as_bytes())
 }
 
@@ -197,7 +198,7 @@ pub fn key(fork: &Path) -> String {
 /// the one bootstrap checks out and builds whatever the submodule holds. An
 /// LLVM change is a commit there and a gitlink here, so a checkout holding
 /// anything no commit does is refused rather than named by its commit.
-fn llvm_commit(fork: &Path) -> String {
+pub(crate) fn llvm_commit(fork: &Path) -> String {
     let checkout = fork.join(LLVM);
     // Exactly what bootstrap's LLVM stamp hashes beyond the commit; the untracked
     // cache spares each call a walk of the whole tree.
@@ -222,7 +223,7 @@ fn llvm_commit(fork: &Path) -> String {
 /// built if nobody has built it, held in use for as long as the returned value
 /// lives.
 pub fn resolve(root: &Path, rust_dir: &Path, fork: &Path, lock: &mut Held) -> Compiler {
-    lock.without_shared(|| choose(root, rust_dir, fork, build_in_fork))
+    lock.without_shared(|| choose(root, rust_dir, fork, |fork| build_in_fork(root, rust_dir, fork)))
 }
 
 /// [`resolve`] with the build that makes a compiler's `stage2` passed in, so a
@@ -295,15 +296,16 @@ fn place(root: &Path, fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path)
 }
 
 /// Bootstrap's build of the compiler in `fork`, into its own build directory,
-/// and the `stage2` it made, with the cargo and the clang every toolchain
-/// directory carries.
-fn build_in_fork(fork: &Path) -> PathBuf {
+/// against the LLVM `fork` names (`src/llvm.rs`), and the `stage2` it made,
+/// with the cargo and the clang every toolchain directory carries.
+fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     crate::ensure_submodule(fork, "library/backtrace");
+    let llvm = crate::llvm::resolve(root, rust_dir, fork);
     let host = host_triple();
     let build_dir = fork.join("build/toyos-compiler");
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
     let config = build_dir.join("bootstrap.toml");
-    fs::write(&config, config_text(&build_dir, &host)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
+    fs::write(&config, config_text(&build_dir, &host, &llvm.dir)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
     let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library"];
     let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
@@ -312,15 +314,15 @@ fn build_in_fork(fork: &Path) -> PathBuf {
     let stage2 = build_dir.join(&host).join("stage2");
     assert!(stage2.join("bin/rustc").is_file(), "the compiler build left no {}", stage2.join("bin/rustc").display());
     toolchain::provision_toolchain_cargo(&stage2);
-    crate::clang::provision(&stage2);
+    crate::clang::provision(&stage2, &llvm.dir);
     toolchain::assert_toolchain_is_honest(&stage2);
     stage2
 }
 
 /// Bootstrap's configuration for a compiler of a worktree's own: the primary's
 /// `profile` and options, for the host alone, since every guest target's
-/// libraries are the sysroot's to build.
-fn config_text(build_dir: &Path, host: &str) -> String {
+/// libraries are the sysroot's to build, linking the LLVM at `llvm`.
+fn config_text(build_dir: &Path, host: &str, llvm: &Path) -> String {
     format!(
         r#"change-id = "ignore"
 profile = "compiler"
@@ -339,10 +341,12 @@ lld = true
 
 [target.{host}]
 {pin}
+{external}
 "#,
         build_dir = build_dir.display(),
         llvm = crate::clang::LLVM_CONFIG,
         pin = toolchain::HOST_LINKER_PIN,
+        external = crate::llvm::host_lines(llvm),
     )
 }
 
@@ -380,7 +384,7 @@ pub fn sweep(root: &Path, rust_dir: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
 
     use toyos_tmpdir::TempDir;
@@ -388,7 +392,7 @@ mod tests {
 
     use super::*;
 
-    fn git(dir: &Path, args: &[&str]) -> String {
+    pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t"])
             .args(["-c", "protocol.file.allow=always", "-c", "init.defaultBranch=main"])
@@ -400,7 +404,7 @@ mod tests {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
-    fn write(path: &Path, text: &str) {
+    pub(crate) fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
     }
@@ -424,13 +428,13 @@ mod tests {
     }
 
     /// The LLVM commits the fixtures' forks record. Nothing reads their content.
-    const LLVM_A: &str = "1111111111111111111111111111111111111111";
-    const LLVM_B: &str = "2222222222222222222222222222222222222222";
+    pub(crate) const LLVM_A: &str = "1111111111111111111111111111111111111111";
+    pub(crate) const LLVM_B: &str = "2222222222222222222222222222222222222222";
 
     /// A primary whose `rust` pins fork commit `C0` and has built a compiler
     /// from it, and three linked worktrees: `same` pins `C0`, `a` and `b` each
     /// pin a commit whose `compiler/` is its own.
-    fn estate(scratch: &Path) -> (PathBuf, PathBuf, [PathBuf; 3]) {
+    pub(crate) fn estate(scratch: &Path) -> (PathBuf, PathBuf, [PathBuf; 3]) {
         let base = fs::canonicalize(scratch).unwrap();
 
         let fork = base.join("fork-src");

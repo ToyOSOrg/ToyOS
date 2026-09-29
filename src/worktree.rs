@@ -308,8 +308,8 @@ fn gib(bytes: u64) -> String {
 /// a worktree of anything. Once git has let go of it nothing in it is work,
 /// so the whole directory goes.
 ///
-/// Then every sysroot and every compiler no remaining worktree names goes too
-/// (`src/sysroot.rs`, `src/compiler.rs`).
+/// Then every sysroot, compiler and LLVM no remaining worktree names goes too
+/// (`src/sysroot.rs`, `src/compiler.rs`, `src/llvm.rs`).
 pub(crate) fn remove(root: &Path, path: &str) {
     let at = root.join(path);
     remove_fork_checkout(root, &at);
@@ -327,9 +327,14 @@ pub(crate) fn remove(root: &Path, path: &str) {
     if !swept.is_empty() {
         eprintln!("removed {} sysroot(s) no worktree names any more", swept.len());
     }
-    let swept = crate::compiler::sweep(root, &crate::toolchain::rust_dir(root));
+    let rust_dir = crate::toolchain::rust_dir(root);
+    let swept = crate::compiler::sweep(root, &rust_dir);
     if !swept.is_empty() {
         eprintln!("removed {} compiler(s) no worktree names any more", swept.len());
+    }
+    let swept = crate::llvm::sweep(root, &rust_dir);
+    if !swept.is_empty() {
+        eprintln!("removed {} LLVM(s) no worktree names any more", swept.len());
     }
 }
 

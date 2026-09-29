@@ -37,9 +37,11 @@
 //!
 //! **The lock order is a constraint, not a preference:** a compiler
 //! key's lock → a sysroot key's lock → the worktree build lock → the global one
-//! → artifact. A key's lock is taken with the worktree lock put down
-//! ([`Held::without_shared`]), because the key's builder takes the worktree lock
-//! exclusively.
+//! → an LLVM key's lock → artifact. A compiler's or a sysroot's key lock is
+//! taken with the worktree lock put down ([`Held::without_shared`]), because the
+//! key's builder takes the worktree lock exclusively; an LLVM key's is taken
+//! inside the worktree or global lock covering the fork build directory its
+//! builder writes.
 //!
 //! Holder death: `flock` is released by the kernel when the open file
 //! description closes, so a builder that is SIGKILLed mid-phase — routine here
@@ -239,12 +241,14 @@ fn integration_path(root: &Path) -> PathBuf {
     git_lock_dir(root).join("integration")
 }
 
-/// A content-addressed product of the host, locked per key: a sysroot, or a
-/// compiler a worktree's fork checkout names (`src/compiler.rs`).
+/// A content-addressed product of the host, locked per key: a sysroot, a
+/// compiler a worktree's fork checkout names (`src/compiler.rs`), or the LLVM
+/// a compiler links (`src/llvm.rs`).
 #[derive(Clone, Copy)]
 pub enum Keyed {
     Sysroot,
     Compiler,
+    Llvm,
 }
 
 impl Keyed {
@@ -252,6 +256,7 @@ impl Keyed {
         match self {
             Keyed::Sysroot => "sysroots",
             Keyed::Compiler => "compilers",
+            Keyed::Llvm => "llvm",
         }
     }
 
@@ -259,6 +264,7 @@ impl Keyed {
         match self {
             Keyed::Sysroot => "sysroot",
             Keyed::Compiler => "compiler",
+            Keyed::Llvm => "LLVM",
         }
     }
 }
