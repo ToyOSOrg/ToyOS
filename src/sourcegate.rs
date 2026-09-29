@@ -622,6 +622,20 @@ const HOST_SPAWNS: &[Spawn] = &[
               issues/build/python-and-cc-are-declared.md is about",
     },
     Spawn {
+        arg: "tool",
+        sites: &[("src/llvm.rs", 1)],
+        why: "the host's `cc`, `c++` and `cmake`, asked their `--version` for the key of the \
+              LLVM they build: the `cc` and CMake standing failure \
+              issues/build/python-and-cc-are-declared.md is about",
+    },
+    Spawn {
+        arg: "\"xcrun\"",
+        sites: &[],
+        why: "a macOS binary, asked which SDK the host's `cc` compiles against, for the key of \
+              the LLVM it builds: the host C toolchain's identity, under the same `cc` standing \
+              failure issues/build/python-and-cc-are-declared.md is about",
+    },
+    Spawn {
         arg: "\"./x.py\"",
         sites: &[],
         why: "the same bootstrap where the shell wrapper is absent, and the Python is then \
@@ -718,7 +732,7 @@ const CI_PACKAGES: &[Package] = &[
     Package {
         name: "cmake",
         why: "CMake, which rustc's bootstrap configures LLVM and clang with — a declared host \
-              tool (`ALSO_USED` in src/main.rs, issues/build/python-and-cc-are-declared.md), \
+              tool (`REQUIRED` in src/main.rs, issues/build/python-and-cc-are-declared.md), \
               unpinned where a portability job installs its platform's own",
     },
     Package {

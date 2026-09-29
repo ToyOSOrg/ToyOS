@@ -25,8 +25,10 @@ pub mod signing;
 /// but its own tests.
 #[cfg(test)]
 pub mod kernelkeys;
+pub mod keystore;
 pub mod lan;
 pub mod libc;
+pub mod llvm;
 pub mod licence;
 pub mod metal;
 pub mod metaldevices;
