@@ -59,9 +59,10 @@ Python search list (`src/main.rs:18`, `:28`). The expensive half is untouched.
 **CMake and Ninja joined the list on 2026-09-27, by the owner's ruling**: rustc's
 LLVM is built from source, from `ToyOSOrg/llvm-project`, with clang beside it,
 and rustc's bootstrap builds LLVM with CMake driving Ninja. Both are declared
-where the others are — `ALSO_USED` in `src/main.rs`, because a build whose
-LLVM commit this host has already built runs neither — and in the README's
-Prerequisites. On macOS they come from Homebrew (`brew install cmake ninja`),
+where the others are — CMake in `REQUIRED` in `src/main.rs`, because every
+build keys the host's LLVM on `cmake --version` (`src/llvm.rs`), and Ninja in
+`ALSO_USED`, because a build whose LLVM this host has already built runs it
+not — and in the README's Prerequisites. On macOS they come from Homebrew (`brew install cmake ninja`),
 with no workaround; on the nightly's toolchain runner at the versions
 `.github/workflows/nightly.yml` pins from Ubuntu 24.04's archive (`cmake
 3.28.3-1build7`, `ninja-build 1.11.1-2`); the two portability jobs install

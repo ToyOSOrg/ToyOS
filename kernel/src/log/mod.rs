@@ -11,7 +11,7 @@ pub mod read;
 pub mod recovery;
 pub mod registry;
 pub mod shard;
-#[cfg(feature = "boot-actuators")]
+#[cfg(any(feature = "boot-actuators", feature = "test-actuators"))]
 pub mod storm;
 pub mod user;
 

@@ -239,7 +239,7 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     // the compiler with the guest libraries and `libtoyos_c.a` this tree's
     // sources name, recorded beside the witness an installer checks it by.
     let build = root.join("rust/build");
-    let key = crate::sysroot::recorded_key(root).ok_or("the build recorded no sysroot key")?;
+    let key = crate::keystore::recorded(root, crate::buildlock::Keyed::Sysroot).ok_or("the build recorded no sysroot key")?;
     let sysroot = format!("sysroots/{key}");
     let stage2 = build.join(&sysroot);
     fs::write(build.join("toyos-sysroot-witness"), crate::sysroot::witness(root))
@@ -455,6 +455,7 @@ mod tests {
         let out = Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t"])
             .args(["-c", "init.defaultBranch=main"])
+            .args(crate::pr::tests::NO_AUTO_MAINTENANCE)
             .args(args)
             .current_dir(dir)
             .output()

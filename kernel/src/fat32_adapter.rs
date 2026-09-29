@@ -653,10 +653,11 @@ pub struct FatFs {
     repair_named: RepairNotice,
 }
 
-/// A VFS `mtime` as FAT stores it: local time, whole seconds, and the two-second
-/// field of a write time drops the odd one.
+/// A VFS `mtime` as FAT stores it: whole seconds, and the two-second field of a
+/// write time drops the odd one. FAT specifies local time; this stamps UTC
+/// because the owner ruled the hardware clock is UTC.
 fn stamp(mtime: u64) -> FatTime {
-    FatTime::from_unix_secs(crate::clock::local_secs_of(mtime))
+    FatTime::from_unix_secs(mtime / crate::clock::NANOS_PER_SEC)
 }
 
 /// What to stamp on an entry the VFS gave no `mtime` for.
@@ -922,7 +923,7 @@ impl FileSystem for FatFs {
         let role = self.role;
         self.fs
             .metadata(name)
-            .map(|m| crate::clock::mtime_of_local(m.modified_unix))
+            .map(|m| m.modified_unix.saturating_mul(crate::clock::NANOS_PER_SEC))
             .map_err(|e| refused(role, &self.fs, &mut self.repair_named, "metadata", name, e))
     }
 

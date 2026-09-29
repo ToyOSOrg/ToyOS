@@ -104,18 +104,6 @@ impl core::fmt::Display for ResourceError {
     }
 }
 
-/// What one walk of a descriptor list found.
-pub struct Walk {
-    /// How far the list ran: to and including its End Tag, or through the
-    /// descriptor the walk refused, or as far as the reader would go. **This is
-    /// the evidence** — what the bootloader logs the raw bytes of, on a list
-    /// this decoder reads and on one it refuses alike.
-    pub bytes: usize,
-    /// How many memory windows were written into the caller's slice, or why the
-    /// list cannot be used.
-    pub windows: Result<usize, ResourceError>,
-}
-
 /// One descriptor's tag and its whole length, header included.
 struct Item {
     tag: u8,
@@ -161,40 +149,33 @@ fn u64le<P: Phys>(phys: P, at: u64, offset: usize) -> u64 {
     v
 }
 
-/// Every memory window the list at `at` names, written into `out`.
+/// Every memory window the list at `at` names, written into `out`, and how many.
 ///
 /// **A refusal carries no windows at all**: a caller handed the ones decoded
 /// before the refusal would be holding an aperture with a hole in it, and would
 /// place a BAR in the hole.
-pub fn memory_windows<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -> Walk {
+pub fn memory_windows<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -> Result<usize, ResourceError> {
     let mut offset = 0usize;
     let mut found = 0usize;
     loop {
         if offset >= MAX_LIST_BYTES {
-            return Walk { bytes: offset.min(MAX_LIST_BYTES), windows: Err(ResourceError::Unterminated) };
+            return Err(ResourceError::Unterminated);
         }
-        let item = match item(phys, at, offset) {
-            Ok(item) => item,
-            Err(why) => return Walk { bytes: offset, windows: Err(why) },
-        };
+        let item = item(phys, at, offset)?;
         let head = at + offset as u64;
-        // Stepped over the refusing descriptor as well, so the bytes logged
-        // beside a refusal are the ones the refusal is about.
         let through = offset + item.len;
         if item.tag == END_TAG {
-            return Walk { bytes: through.min(MAX_LIST_BYTES), windows: Ok(found) };
+            return Ok(found);
         }
         if item.tag != QWORD_ADDRESS_SPACE {
-            return Walk { bytes: through, windows: Err(ResourceError::UnknownTag { tag: item.tag }) };
+            return Err(ResourceError::UnknownTag { tag: item.tag });
         }
         if item.len < QWORD_BYTES {
-            let why = ResourceError::Short { tag: item.tag, whole: item.len, needed: QWORD_BYTES };
-            return Walk { bytes: through, windows: Err(why) };
+            return Err(ResourceError::Short { tag: item.tag, whole: item.len, needed: QWORD_BYTES });
         }
         let kind = phys.byte(head + RESOURCE_TYPE as u64);
         if !matches!(kind, TYPE_MEMORY | TYPE_IO | TYPE_BUS) {
-            let why = ResourceError::UnknownResourceType { kind };
-            return Walk { bytes: through, windows: Err(why) };
+            return Err(ResourceError::UnknownResourceType { kind });
         }
         if kind == TYPE_MEMORY {
             let min = u64le(phys, head, QWORD_MINIMUM);
@@ -215,14 +196,12 @@ pub fn memory_windows<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -
                     None
                 };
                 if let Some(why) = refusal {
-                    return Walk { bytes: through, windows: Err(why) };
+                    return Err(why);
                 }
                 let room = out.len();
                 match out.get_mut(found) {
                     Some(slot) => *slot = RootBridgeWindow { base: min, length },
-                    None => {
-                        return Walk { bytes: through, windows: Err(ResourceError::TooMany { room }) }
-                    }
+                    None => return Err(ResourceError::TooMany { room }),
                 }
                 found += 1;
             }
