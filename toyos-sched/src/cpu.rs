@@ -1269,19 +1269,8 @@ fn home_of(state: TaskState) -> Option<CpuId> {
 /// term is set by the host's scheduler, which this CPU neither observes nor
 /// controls and no constant bounds. A panic may only assert what its own site
 /// observes and what no workload scales, so the cost of a pass is recorded as a
-/// distribution ([`PassCosts`]) and judged where composed quantities are judged:
-/// in the harness and the simulator.
-///
-/// **The harness's line is not this number, and a measurement is why.** Host
-/// load moves *every* order statistic of the recorded distribution and not only
-/// its tail — twelve CPU-runs an arm, quiet against loaded: median
-/// 65 536 → 131 072 ns and 90th percentile 131 072 → 262 144 ns on one
-/// unchanged tree. So `tests/common/passcost.rs` holds a run to what its own
-/// accelerator has been recorded producing instead. This constant is the policy
-/// number, is what `over` is counted against, and is reported on every run; it
-/// is not the threshold. What that measurement also says about *this* number:
-/// across sixteen CI runs on KVM, 7 612 passes, **not one reached it** and the
-/// largest single pass was 173 906 ns.
+/// distribution ([`PassCosts`]). This constant is the policy number `over` is
+/// counted against.
 pub const MAX_PASS_NS: u64 = 200_000;
 
 /// How long the real-time band may defer one corpse's unwind before that
@@ -2689,6 +2678,7 @@ mod tests {
         /// a live task in it may not be dropped. Forgetting it is what a
         /// running machine does with a task that is still running.
         fn abandon(self) {
+            #[expect(clippy::disallowed_methods, reason = "a live task dies only by `DeadTask::finalize`, never by a drop")]
             core::mem::forget(self);
         }
     }

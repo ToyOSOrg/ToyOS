@@ -43,6 +43,11 @@ actuators! {
     /// refuse by name; read by the loader as [`toyos_abi::boot::WITHHOLD_ROOT_PARAM`].
     loader_withholds_root = "loader-withholds-root";
 
+    /// The loader writes 0 as the `KernelArgs` layout word, which `kernel_main`
+    /// has to refuse by name; read by the loader as
+    /// [`toyos_abi::boot::WRITE_NO_LAYOUT_PARAM`].
+    loader_writes_no_layout = "loader-writes-no-layout";
+
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
@@ -88,9 +93,6 @@ actuators! {
 
     /// Cap the i8042 ISR at 4 bytes and answer empty until the mute verdict is out; `service` then polls the rest, so the verdict beats the sequence on every boot instead of on a loaded shard's luck.
     i8042_split_burst = "i8042-split-burst";
-
-    /// Shorten the idle loop's health/PMM snapshot cadence from 10s to 200ms.
-    sched_fast_health = "sched-fast-health";
 
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
@@ -269,9 +271,6 @@ actuators! {
     /// mid-wait does.
     usb_port_gone = "usb-port-gone";
 
-    /// Hold every mass-storage bulk completion back 2ms before the driver may see it.
-    usb_slow_device = "usb-slow-device";
-
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
 
@@ -305,7 +304,7 @@ actuators! {
     /// Storm the CPU spinning on `syscall` from Ring 3 with NMIs.
     syscall_window_nmi = "syscall-window-nmi";
 
-    /// Take the IST index off vector 2's gate — the negative control on the row above: the CPU builds the NMI frame at whatever `rsp` holds and takes a `#DF`.
+    /// Take the IST index off vector 2's gate — the negative control on the row above: the CPU builds the NMI frame at whatever the stack pointer holds and takes a `#DF`.
     nmi_without_ist = "nmi-without-ist";
 
     /// Return from the NMI handler via `iretq` with a second NMI already pending.
@@ -346,6 +345,14 @@ actuators! {
 
     /// Raise a vector no `idt_vectors!` row claims on this CPU once.
     unclaimed_vector_selftest = "unclaimed-vector-selftest";
+
+    /// Tick the timer at a fixed period while this CPU floods itself with
+    /// interrupts.
+    irq_storm = "irq-storm";
+
+    /// Make this CPU's timer due with interrupts masked, ask it to fire within
+    /// a quantum, and take its interrupts with them open.
+    timer_floor = "timer-floor";
 
     /// Hold a flush of `truncate-race.bin` inside its metadata window and say whether a truncate got in.
     ftruncate_flush_stall = "ftruncate-flush-stall";
@@ -429,9 +436,6 @@ actuators! {
     /// Log the monotonic time and which CPUs are alive every 250ms.
     heartbeat = "heartbeat";
 
-    /// Have every CPU emit patterned log records at once from spawned kernel threads.
-    log_storm = "log-storm";
-
     /// Remove the IF/TF bracket around shard selection through publication — the negative control on the log's interrupt-atomicity claim.
     log_unbracketed_reserve = "log-unbracketed-reserve";
 
@@ -440,9 +444,6 @@ actuators! {
 
     /// The same IPI, sent between the shard-pointer read and the unlocked `xadd` — stages order damage the log gate detects, unlike the row above's invisible corruption.
     log_nested_reserve = "log-nested-reserve";
-
-    /// Turn the reservation's `xadd` into a load, an open interrupt window, and a store.
-    log_shared_reservation = "log-shared-reservation";
 
     /// Let a handle close cancel every poll on the log's watch in the machine.
     log_close_cancels_any_syscap = "log-close-cancels-any-syscap";
@@ -502,9 +503,6 @@ actuators! {
 
     /// Make the century register read `0x21`.
     rtc_century_next = "rtc-century-next";
-
-    /// Make firmware name its own timezone.
-    rtc_zone_east = "rtc-zone-east";
 
     /// Run the leak-rollback controls (device mint, FAT reopen) after mount.
     leak_rollback_selftest = "leak-rollback-selftest";
@@ -697,3 +695,5 @@ const _: () = {
 // spells it as a literal; the two are one name or the build fails.
 #[cfg(feature = "boot-actuators")]
 const _: () = assert!(str_eq("loader-withholds-root", toyos_abi::boot::WITHHOLD_ROOT_PARAM));
+#[cfg(feature = "boot-actuators")]
+const _: () = assert!(str_eq("loader-writes-no-layout", toyos_abi::boot::WRITE_NO_LAYOUT_PARAM));

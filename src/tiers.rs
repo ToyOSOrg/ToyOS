@@ -1,13 +1,12 @@
 //! Which run a registered test belongs to.
 //!
 //! **The table is the registration.** Every row of `tests/toyos.rs`'s
-//! `MACHINE_TESTS`, `SCREEN_TESTS` and `AUDIO_TESTS` carries its [`Tier`] or
-//! does not compile, and the shared boot's discovered tests share one. A
-//! [`Schedule`] is every one of those names at its one tier. Moving a test
-//! between tiers is editing that one word.
+//! `MACHINE_TESTS` and `SCREEN_TESTS` carries its [`Tier`] or does not compile,
+//! and the shared boot's discovered tests share one. A [`Schedule`] is every
+//! one of those names at its one tier. Moving a test between tiers is editing
+//! that one word.
 //!
-//! The tiers nest: a plain `cargo test` reaches `Fast`, `--nightly` adds
-//! `Nightly`, and `--weekly` adds `Weekly` to that.
+//! A name filter reaches every tier.
 //!
 //! The local tier is the fourth, and the only one CI never runs: its guests are
 //! of an architecture no hosted runner has been measured to boot.
@@ -41,6 +40,11 @@ pub enum Reach {
 }
 
 impl Reach {
+    /// A run with a name filter reaches every tier: the name is the selection.
+    pub fn for_filter(self, filtered: bool) -> Self {
+        if filtered { Self::Weekly } else { self }
+    }
+
     /// The reach `args` ask for; `testargs::parse` refuses both flags at once.
     pub fn of(args: &[String]) -> Self {
         if SUITE.present(args, &WEEKLY) {
@@ -154,6 +158,29 @@ mod tests {
         for reach in [Reach::Fast, Reach::Nightly, Reach::Weekly] {
             assert!(Tier::Local.selected(reach, false) && !Tier::Local.selected(reach, true));
         }
+    }
+
+    /// A name filter selects every tier, `Local` alone excepted on a shard; no filter leaves
+    /// the reach as asked.
+    #[test]
+    fn a_name_filter_reaches_every_tier() {
+        for reach in [Reach::Fast, Reach::Nightly, Reach::Weekly] {
+            for tier in EVERY {
+                assert!(tier.selected(reach.for_filter(true), false), "{tier:?} under a filter");
+                assert_eq!(
+                    tier.selected(reach.for_filter(true), true),
+                    tier != Tier::Local,
+                    "{tier:?} under a filtered shard"
+                );
+                assert_eq!(
+                    tier.selected(reach.for_filter(false), true),
+                    tier.selected(reach, true),
+                    "{tier:?} without a filter"
+                );
+            }
+        }
+        assert!(Tier::Weekly.selected(Reach::Fast.for_filter(true), false));
+        assert!(!Tier::Weekly.selected(Reach::Fast.for_filter(false), false));
     }
 
     /// The flag a held-back tier names is the one whose reach selects it.

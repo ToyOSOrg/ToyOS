@@ -803,6 +803,15 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     ("usb-transport-break", Flash::Ok),
+    // It deafens one CPU for a window of its own clock and has the blocked-task
+    // dump kick it and probe it with an NMI. It reaches no device register and
+    // writes no firmware state; the CPU rejoins, and the boot goes on to
+    // userland and ends the way an unarmed one does.
+    ("dump-deaf-cpu", Flash::Ok),
+    // It holds each pipe waiter up to a short budget of its own clock for a post
+    // to land between its condition and its park. It reaches no device and
+    // writes no firmware state, and a hold nothing posts into lapses.
+    ("watch-window", Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(
@@ -3350,7 +3359,7 @@ mod tests {
         let locked = format!(
             "Previous boot's panic: the last boot read WEDGED\n| {}: cpu7 has taken no interrupt \
              for 60004 ms, with `IF` clear at every sample in that span. Its bound is 60000 ms.\n\
-             |   rip=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
+             |   pc=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
             bootlog::LOCKED_UP
         );
         assert_eq!(wedged_boot(&locked, booted), Ok(1200));

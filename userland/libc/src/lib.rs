@@ -1,9 +1,12 @@
 #![no_std]
+#![feature(thread_local)]
 
 extern crate alloc;
 
 mod arch;
 mod ctype;
+mod errno;
+mod link;
 mod math;
 mod memory;
 mod misc;
@@ -30,8 +33,43 @@ mod runtime {
         unsafe extern "C" {
             fn main(argc: i32, argv: *const *const u8) -> i32;
         }
+        // SAFETY: the linker's bounds of the program's constructor array.
+        unsafe {
+            for hook in hooks(&raw const __init_array_start, &raw const __init_array_end) {
+                hook();
+            }
+        }
         let code = unsafe { main(argc, argv) };
         unsafe { crate::misc::exit(code) }
+    }
+
+    /// A constructor or destructor, as `.init_array` and `.fini_array` hold them.
+    type Hook = unsafe extern "C" fn();
+
+    // lld defines each pair for any link that names it, equal when the section
+    // is absent.
+    unsafe extern "C" {
+        static __init_array_start: Hook;
+        static __init_array_end: Hook;
+        static __fini_array_start: Hook;
+        static __fini_array_end: Hook;
+    }
+
+    /// # Safety
+    /// `start` and `end` bound one array of hooks.
+    unsafe fn hooks(start: *const Hook, end: *const Hook) -> &'static [Hook] {
+        let len = (end.addr() - start.addr()) / core::mem::size_of::<Hook>();
+        // SAFETY: the caller's contract.
+        unsafe { core::slice::from_raw_parts(start, len) }
+    }
+
+    /// Run `.fini_array`, last entry first: `exit` calls it after the `atexit`
+    /// handlers and before the streams are flushed.
+    pub(crate) unsafe fn fini() {
+        // SAFETY: the linker's bounds of the program's destructor array.
+        for hook in unsafe { hooks(&raw const __fini_array_start, &raw const __fini_array_end) }.iter().rev() {
+            unsafe { hook() };
+        }
     }
 
     struct Stderr;

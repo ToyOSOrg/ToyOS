@@ -32,12 +32,6 @@ pub const GOP_AT: &str = "GOP: mode";
 const ENDS_AT: &str = "Loader log: the kernel handoff begins, so this file ends here";
 
 /// The last line of a pass that reads the black box and boots no kernel.
-///
-/// It says the reset and not a return, because the reset is what it does:
-/// returning is what leaves this image's exit-boot-services callback registered
-/// for the next operating system to call into, and `end_this_pass` exists to
-/// not do it. A line describing the shape this code was written to avoid is a
-/// line that will be read as evidence one day.
 pub const ENDS_AT_CHAIN: &str =
     "Loader log: the last boot is accounted for, so this pass resets the machine";
 
@@ -78,11 +72,6 @@ static VOLUME: Volume = Volume(UnsafeCell::new(None));
 /// reported on and the pass reporting on it are never read as one.
 pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
 
-/// Open `loader.log` on the partition `guid` names.
-///
-/// `truncate` replaces what the last boot left; a pass that appends has a
-/// *report about* that boot, and the boot's own account has to stay readable
-/// under it. One file for now: per-pass names are their own change.
 /// The handle of the filesystem on the partition `guid` names, or why this
 /// machine has none.
 ///
@@ -178,9 +167,7 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
     let Some(file) = file.into_regular_file() else {
         return refused(format_args!("{NAME} on the log partition is a directory"));
     };
-    // The exclusive open outlives this function: the file handle it produced is
-    // written to until [`close`], and the loader never gives the machine back
-    // before then.
+    #[expect(clippy::disallowed_methods, reason = "the exclusive open outlives this function, until `close`")]
     core::mem::forget(fs);
     let mut file = file;
     if !truncate {

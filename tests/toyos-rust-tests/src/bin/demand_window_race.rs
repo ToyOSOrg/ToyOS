@@ -294,11 +294,9 @@ fn run(exe: &std::path::Path, arg: &str) -> ProcessStats {
     let status = child.wait().unwrap_or_else(|e| panic!("wait {arg}: {e}"));
     let stats = stats_of(&child);
     println!(
-        "  {arg}: {} fills, {} kept, {} ns in faults ({} ns/fill)",
+        "  {arg}: {} fills, {} kept",
         fills(&stats),
         stats.alloc_count,
-        stats.fault_ns,
-        stats.fault_ns / fills(&stats).max(1),
     );
     assert!(status.success(), "the {arg} child exited with {status}");
     stats

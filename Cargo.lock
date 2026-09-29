@@ -1020,6 +1020,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-cpuvuln"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-desktop"
 version = "0.1.0"
 dependencies = [
@@ -1053,6 +1057,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-fat32-check"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-gicv3"
 version = "0.1.0"
 
 [[package]]

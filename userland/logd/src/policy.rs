@@ -94,8 +94,7 @@ use std::time::Duration;
 /// 2026-08-23: the kernel's `SYS_FSYNC` now bounds a slow device itself
 /// (retry inside `block::DEADMAN`, then a device error), so a round here can
 /// outlast this number and still be a durability the machine got.
-/// `usb_flush_optional` is the gate for the error half and `--slow-usb` the
-/// instrument for the slow one.
+/// `usb_flush_optional` is the gate for the error half.
 pub const LOG_WRITE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Which call refused.

@@ -18,11 +18,8 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
-/// `klogd` and `iod`, plus one `log-storm` thread per shard in the actuator build.
-#[cfg(not(feature = "boot-actuators"))]
+/// `klogd` and `iod`.
 const MAX_KERNEL_TASKS: usize = 2;
-#[cfg(feature = "boot-actuators")]
-const MAX_KERNEL_TASKS: usize = 2 + toyos_abi::log::MAX_LOG_SHARDS;
 
 /// Collides with no packed id: neither id map issues `u32::MAX`.
 const NO_TASK: u64 = u64::MAX;
@@ -94,7 +91,7 @@ pub fn open_selftest() {
 
 /// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
 pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched {
-    let (stack, entry_rsp) = crate::loader::alloc_kernel_stack(
+    let (stack, entry_sp) = crate::loader::alloc_kernel_stack(
         crate::loader::kernel_start,
         body as usize as u64,
         0,
@@ -130,7 +127,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     let (sched, _dst) = scheduler::enqueue_new(
         TaskId(pid, tid),
         stack,
-        entry_rsp,
+        entry_sp,
         crate::mm::paging::kernel().clone(),
         0,
         syms,

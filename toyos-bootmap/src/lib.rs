@@ -59,8 +59,7 @@ pub const BOOT_MAP_BYTES: u64 = 4 * GIB;
 /// hold: every slot from there to the root's last.
 pub const DIRECT_MAP_WINDOW: u64 = (512 - ROOT_HIGH_HALF as u64) * GIB_PER_PDPT * GIB;
 
-/// One past the kernel direct map's last byte. Made only by
-/// [`x86_64::direct_map_end`].
+/// One past the kernel direct map's last byte.
 ///
 /// ```compile_fail,E0603
 /// let _ = toyos_bootmap::DirectMapEnd(1 << 52);
@@ -163,6 +162,9 @@ pub enum Refusal {
     Mixed(u64),
     /// Memory that ends here, past [`DIRECT_MAP_WINDOW`].
     PastWindow(u64),
+    /// A range of firmware's map that begins or ends here, off the 4 KiB page
+    /// UEFI describes memory in.
+    OffPage(u64),
 }
 
 impl fmt::Display for Refusal {
@@ -190,6 +192,7 @@ impl fmt::Display for Refusal {
                 f,
                 "memory ends at {end:#x}, past the {DIRECT_MAP_WINDOW:#x} bytes a direct map can hold"
             ),
+            Self::OffPage(at) => write!(f, "a range of firmware's map is bounded at {at:#x}, off a {PAGE_4K:#x}-byte page"),
         }
     }
 }

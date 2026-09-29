@@ -43,7 +43,30 @@ above; otherwise it is a NOTE.
   pure crate, the user/kernel boundary in `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
   legacy: no shim, no workaround, no silent default. No new
-  dependency, host binary or fetch. Nothing outside the brief's fence.
+  dependency or fetch. Nothing outside the brief's fence.
+  Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
+  architecture's own module; `target_arch` only there, in its selector, in `src/arch.rs` and in
+  `src/licence.rs`, which evaluates a dependency's `cfg` as data; `arch::x86_64` and
+  `arch::aarch64` in no generic kernel code; and none of them in a crate whose manifest
+  `description` says pure.
+  A `4096` in the kernel that means a page is a private copy of `mm::PAGE_SIZE`.
+- **Arrivals.** A binary outside Rust's toolchain, git, QEMU and this repository's own Rust is
+  refused, whether the host starts it — `Command::new`, `libc::system`, an `exec` or
+  `posix_spawn`, a tool a build script or `cc::Build` drives — or `.github/` installs it, by
+  whatever manager or `sh -c`. The ones that stand are those
+  `issues/build/python-and-cc-are-declared.md` declares.
+  A third-party action `main` does not use is refused, and every `uses:` pins a 40-hex commit
+  with its tag in a trailing comment or names a local path that resolves.
+  A file added to or deleted from `tests/testcases/tinycc/` moves the count
+  `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back. Nothing
+  else is tracked under `tests/testcases/` but that `LICENSE`, `system.toml` and `hello.c`.
+- **What no gate reads.** A BLOCKER each: a diff that declares a retired ABI name or reuses a
+  retired syscall, `SYS_DEBUG` action or inbox op number (the retired numbers are
+  `kernel/src/syscall/dispatch.rs`'s `retired_syscalls!` and the "formerly …" and "retired and
+  unused" entries in `toyos-abi/src/syscall.rs` and `toyos-abi/src/inbox.rs`; the retired names
+  include `SharedToken` and `services::connect`); a workspace member's `Cargo.toml` declaring `[profile]` or `[patch]`, which
+  cargo ignores with only a warning; a new package without a `description` saying what it is.
+  A new cargo feature or `cfg` arm of one, and every arm a changed `src/clippy.rs` shape stops building, is shown linted in the pull request body: a `mem::forget` planted in that arm turns `cargo run -- --clippy` red.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
   needs a reason you accept; a branch that could delete more than it adds and does not goes back
@@ -59,11 +82,22 @@ above; otherwise it is a NOTE.
   and red there, and one oracle independent of the author.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
-  read, an exit status nobody reads.
+  read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
+  `Untrusted` is an unwrap wearing a check's name.
 - **Waits.** A flat wait — sleep, then assume it happened — is a BLOCKER, in code and in tests,
   unless a hardware document mandates that time and offers no notification, cited at the site.
   Wait on the event itself, bounded by a timeout that fails loudly. Defensive code that hides a
   failure instead of failing fast is a BLOCKER too.
+- **Actuators.** A kernel static of any kind, atomic or `Lock`-wrapped, that an `actuator::` guard's
+  arm reads or writes is touched only under that guard or inside an item compiled only with an
+  actuator feature (`#[cfg(feature = "…-actuators")]`); a `cfg(not(feature = …))` item compiles
+  into shipping and does not count, and any other touch runs on the shipping kernel.
+- **Forks.** A fork change that is not upstream-mergeable is a BLOCKER: ToyOS enters as a new platform, a
+  cross-platform change is written as upstream would accept it, and a path dependency on a ToyOS crate
+  is never mergeable. A pull request that changes a fork's consumed commit changes it in every lockfile and
+  gitlink that names that branch; one it leaves behind is a BLOCKER. In `rust/`: any `library/alloc` or `library/core` delta, a cross-platform semantic change, a
+  `change_tracker` entry with no upstream PR number, a copied unmerged upstream PR. A search for
+  callers that skipped the fork clones and `~/.cargo/git/checkouts/` searched part of the tree.
 
 ## Prose is removed, never reviewed
 

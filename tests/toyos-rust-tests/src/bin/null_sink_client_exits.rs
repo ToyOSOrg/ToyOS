@@ -1,10 +1,9 @@
 //! A client that plays through the null sink must finish and exit.
 //!
 //! `/system/bin/tone` and not this crate's own tone: the T14 hangs on the shipped
-//! binary, which reaches soundd through `cpal`, while the raw-API tone that
-//! `metal_sim_null_audio` runs drains perfectly on the same sink. Whatever the
-//! defect is, only the path a user actually takes shows it — which is why this
-//! spawns the program the shell spawns rather than linking the SDK directly.
+//! binary, which reaches soundd through `cpal`. Whatever the defect is, only the
+//! path a user actually takes shows it — which is why this spawns the program the
+//! shell spawns rather than linking the SDK directly.
 //!
 //! Two of them in series, because one hung client is what the T14 log shows
 //! blocking the *next* connect: if the first exits and the second hangs, the

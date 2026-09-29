@@ -9,7 +9,7 @@ opened: 2026-09-27
 The north star: ToyOS rebuilds its own sources inside ToyOS and reproduces the
 bytes the host built. A bootstrap from source with no binary seed is out of
 scope (owner, 2026-09-27). The compiler is LLVM throughout: rustc's, and clang
-with lld, one build of one fork, `ToyOSOrg/llvm-project` (`forks.toml`). The C
+with lld, one build of one fork, `ToyOSOrg/llvm-project`. The C
 library stays `userland/libc`, ours. Each stage lands on x86-64 first and on
 AArch64 one step behind, on `issues/kernel/toyos-runs-on-arm64.md`'s track.
 
@@ -46,8 +46,7 @@ and the network stack under it (`issues/hardware/the-lan-is-not-yet-production-g
 `issues/design-debt/the-internet-clients-work-unchanged.md`), room for about a
 gigabyte of toolchain, and threads and `mmap` mature enough for LLVM
 (`issues/kernel/std-and-libc-drop-the-answer-thread-join-gives.md`). M3 needs
-thread-local `errno`, locale support or libc++'s no-localization build, and
-`dl_iterate_phdr` in libc. M4 needs git in the guest, storage durable and fast
+locale support or libc++'s no-localization build. M4 needs git in the guest, storage durable and fast
 enough for an LLVM build tree
 (`issues/filesystem/storage-is-layers-and-a-role-is-a-filesystem.md`), and
 memory beyond what 2 MiB process pages allow
@@ -58,6 +57,5 @@ builds; what keeps it is that it is the one linker a ToyOS process can run,
 shipped as `/system/bin/toyos-ld` by `system.toml`'s `[programs]` row and named
 by the ToyOS-hosted rustc
 (`issues/build/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). It
-goes when lld runs in the guest: the row, the crate, its host tests and its
-`src/sourcegate.rs` rows go together, the hosted rustc names `rust-lld`, and
+goes when lld runs in the guest: the row, the crate and its host tests go together, the hosted rustc names `rust-lld`, and
 the published crates.io crate is yanked.

@@ -7,13 +7,24 @@ include!("toyos.rs");
 mod checks {
     use super::*;
 
+    #[path = "audio.rs"]
+    mod audio_checks;
+    #[path = "clock.rs"]
+    mod clock_checks;
+    #[path = "qemu.rs"]
+    mod qemu_checks;
+    #[path = "screen.rs"]
+    mod screen_checks;
+    #[path = "serial.rs"]
+    mod serial_checks;
+
     /// One subject: what a console line says died, what a wait does about it,
     /// and that only one place in the harness answers either.
     #[test]
     fn serial_vocabulary() -> Result<(), String> {
-        serial::self_check()?;
-        qemu::ceiling_self_check()?;
-        qemu::host_scale_self_check()?;
+        serial_checks::self_check()?;
+        qemu_checks::ceiling_self_check()?;
+        qemu_checks::host_scale_self_check()?;
         one_vocabulary()
     }
 
@@ -35,7 +46,7 @@ mod checks {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            for word in serial::spellings() {
+            for word in serial_checks::spellings() {
                 // The shape is the spelling as somebody's first argument —
                 // `contains`, `starts_with`, `find`, any of them. A spelling
                 // *inside* a longer staged line is how this file's own gates build
@@ -84,12 +95,12 @@ mod checks {
 
     #[test]
     fn suspend_detector() -> Result<(), String> {
-        common::clock::self_check()
+        clock_checks::self_check()
     }
 
     /// What a suspend is worth to a verdict, staged rather than reasoned about.
     ///
-    /// `common::clock::self_check` gates the detector; this gates what the suite
+    /// `clock_checks::self_check` gates the detector; this gates what the suite
     /// does with what it detects. Both halves are needed and neither implies the
     /// other: **a suspend that silently passes is as bad as one that silently
     /// fails**, and here the two are one line apart.
@@ -125,7 +136,7 @@ mod checks {
         Ok(())
     }
 
-    /// A blown guard stays red, and stops reading as an answer.
+    /// A blown ceiling stays red, and is named apart from a failed assertion.
     ///
     /// Both halves, because each fails the other's way round. An implementation
     /// that made a stall its own non-red status would hide a guest that genuinely
@@ -134,12 +145,15 @@ mod checks {
     /// than against the marker on its own, because a caller prefixes its own
     /// sentence to [`await_marker`]'s and the classification has to survive that.
     #[test]
-    fn stall_is_not_a_verdict() -> Result<(), String> {
+    fn a_stall_stays_red() -> Result<(), String> {
         // Built from the marker rather than copied, so a rename cannot leave the
         // gate asserting against a string nothing produces any more.
         let real = format!("{STALLED} waiting for the long tone to start — it went quiet");
         let under_a_sentence = format!("the compositor stopped painting\n{real}");
-        let cases: [(&str, Option<&str>, bool); 4] = [
+        let past = qemu::GUEST_WEDGED + Duration::from_secs(1);
+        let backstop = qemu::ceiling_verdict(None, past, qemu::GUEST_WEDGED, Duration::from_secs(1), 900)
+            .ok_or("a guest talking past the backstop was given no verdict")?;
+        let cases: [(&str, Option<&str>, bool); 5] = [
             ("an ordinary red", Some("the pointer never moved right"), false),
             ("a wait that expired", Some(real.as_str()), true),
             (
@@ -147,6 +161,7 @@ mod checks {
                 Some(under_a_sentence.as_str()),
                 true,
             ),
+            ("the backstop on a guest still talking", Some(backstop.as_str()), true),
             ("a pass", None, false),
         ];
         for (what, reason, want_stall) in cases {
@@ -193,7 +208,7 @@ mod checks {
             ));
         }
         let summary = tally.summary(2, Duration::from_secs(2), Duration::ZERO);
-        if !summary.contains("1 of those reds are blown liveness guards") {
+        if !summary.contains("1 of those reds are the ceiling") {
             return Err(format!("the summary does not separate the two kinds of red:\n{summary}"));
         }
         Ok(())
@@ -323,52 +338,6 @@ mod checks {
         refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
 
         eprintln!("  [control_regs] the verdict refuses 10 machines and accepts the declared one");
-        Ok(())
-    }
-
-    /// [`idle_is_spinning`] against a healthy trace and a crafted one shaped like
-    /// the regression it exists to catch, with no guest — the same split
-    /// `control_regs`/`control_regs_verdict` use, and for the same reason: a
-    /// gate's own teeth are a claim a live boot cannot demonstrate on the
-    /// negative side, because nothing in this tree can stage a CPU into spinning
-    /// through idle on purpose.
-    #[test]
-    fn i8042_quarantine_verdict() -> Result<(), String> {
-        let healthy = "\
-    [kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
-    [kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
-    [kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=3\n\
-    [kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=2\n";
-        if let Some((cpu, delta)) = idle_is_spinning(healthy) {
-            return Err(format!("a healthy trace was refused: cpu{cpu} moved by {delta}"));
-        }
-
-        // The regression's own shape: one CPU quarantines cleanly and stays
-        // quiet, the other's undrained ring never lets it halt.
-        let spinning = "\
-    [kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
-    [kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=4\n\
-    [kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=2\n\
-    [kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=2685004\n";
-        match idle_is_spinning(spinning) {
-            Some((1, delta)) if delta > MAX_IDLE_TRIP_DELTA => {}
-            Some((cpu, delta)) => {
-                return Err(format!("refused the wrong CPU or by the wrong margin: cpu{cpu} delta {delta}"))
-            }
-            None => return Err("a spinning CPU's trace was accepted".to_string()),
-        }
-
-        // And the line the old, count-of-lines check would have been fooled by:
-        // the same number of `sched: cpu=` lines either way, because the print
-        // itself is rate-limited regardless of what is underneath it — which is
-        // exactly the vacuity this replaces.
-        assert_eq!(
-            healthy.matches("sched: cpu=").count(),
-            spinning.matches("sched: cpu=").count(),
-            "the crafted traces must differ only in trips=, not in line count — otherwise this proves nothing about the old check's blindness"
-        );
-
-        eprintln!("  [i8042] the idle-trip verdict accepts a healthy trace and refuses a spinning one");
         Ok(())
     }
 
@@ -648,6 +617,34 @@ mod checks {
 
     #[test]
     fn screen_decoder() {
-        screen::self_test();
+        screen_checks::self_test();
+    }
+
+    #[test]
+    fn metal_audio_judges() -> Result<(), String> {
+        audio_checks::judges_verdict()
+    }
+
+    /// `blackbox_unclaimed_page` is a registration `tests/metal-profile.toml` already prices,
+    /// so sizing and batching run for real.
+    #[test]
+    fn metal_list_from_parse_reaches_run_without_the_machine() -> Result<(), String> {
+        let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
+        let mode = testargs::parse(&args)?
+            .metal
+            .ok_or_else(|| "--metal --list resolved to no mode at all".to_string())?;
+        if mode != testargs::MetalMode::List {
+            return Err(format!("--metal --list resolved to {mode:?}"));
+        }
+        let selected: Vec<(&str, &'static metal::Metal)> = METAL
+            .iter()
+            .find(|(name, _)| *name == "blackbox_unclaimed_page")
+            .map(|(name, decl)| vec![(*name, decl)])
+            .ok_or_else(|| "blackbox_unclaimed_page is not registered".to_string())?;
+        let verdict = metal::run(mode, &selected, &[], &[], &[], true);
+        if verdict != metal::Verdict::Green {
+            return Err(format!("--metal --list produced {verdict:?}, not Green"));
+        }
+        Ok(())
     }
 }

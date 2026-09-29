@@ -5,7 +5,7 @@ mod common;
 
 use common::Machine;
 use toyos_abi::boot::RootBridgeWindow;
-use toyos_acpi::{memory_windows, ResourceError, Walk, MAX_LIST_BYTES};
+use toyos_acpi::{memory_windows, ResourceError, MAX_LIST_BYTES};
 
 /// Where a firmware pool allocation sits in the crafted machines below.
 const AT: u64 = 0x7f00_1234;
@@ -44,19 +44,12 @@ fn list(descriptors: &[Vec<u8>]) -> Vec<u8> {
 /// One walk of `bytes`, in a machine holding `bytes` at [`AT`] and nothing
 /// else — so a decoder reading one byte past the list panics rather than
 /// answering.
-fn walk(bytes: &[u8], room: usize) -> (Walk, Vec<RootBridgeWindow>) {
+fn windows(bytes: &[u8], room: usize) -> Result<Vec<RootBridgeWindow>, ResourceError> {
     let regions: &[(u64, &[u8])] = &[(AT, bytes)];
     let mut out = vec![RootBridgeWindow::default(); room];
-    let walked = memory_windows(Machine { regions }, AT, &mut out);
-    if let Ok(count) = walked.windows {
-        out.truncate(count);
-    }
-    (walked, out)
-}
-
-fn windows(bytes: &[u8], room: usize) -> Result<Vec<RootBridgeWindow>, ResourceError> {
-    let (walked, out) = walk(bytes, room);
-    walked.windows.map(|_| out)
+    let count = memory_windows(Machine { regions }, AT, &mut out)?;
+    out.truncate(count);
+    Ok(out)
 }
 
 /// The shape the T14's firmware answers in, as Linux's own journal reports it:
@@ -71,10 +64,8 @@ fn only_the_memory_ranges_of_a_root_bridge_become_windows() {
         qword(MEMORY, 0xa080_0000, 0x1f80_0000, 0),
         qword(MEMORY, 0x40_0000_0000, 0x40_0000_0000, 0),
     ]);
-    let (walked, decoded) = walk(&bytes, 8);
-    assert_eq!(walked.bytes, bytes.len());
     assert_eq!(
-        decoded,
+        windows(&bytes, 8).expect("a list this decoder reads"),
         [
             RootBridgeWindow { base: 0x000a_0000, length: 0x0002_0000 },
             RootBridgeWindow { base: 0xa080_0000, length: 0x1f80_0000 },
@@ -217,32 +208,13 @@ fn a_list_with_no_end_tag_stops_at_the_bound() {
     while bytes.len() < MAX_LIST_BYTES + 46 {
         bytes.extend_from_slice(&qword(IO, 0x1000, 0x10, 0));
     }
-    let (walked, _) = walk(&bytes, 8);
-    assert_eq!(walked.windows, Err(ResourceError::Unterminated));
-    assert_eq!(walked.bytes, MAX_LIST_BYTES);
+    assert_eq!(windows(&bytes, 8), Err(ResourceError::Unterminated));
 }
 
-/// A list the reader runs out of is a refusal naming the bytes it wanted, and
-/// the walk answers with what it did reach — which is what the bootloader logs
-/// beside the refusal.
+/// A list the reader runs out of is a refusal naming the bytes it wanted.
 #[test]
 fn a_list_that_runs_off_the_end_of_what_can_be_read_is_refused() {
     let mut bytes = qword(MEMORY, 0xa080_0000, 0x1000, 0);
     bytes.truncate(40);
-    let (walked, _) = walk(&bytes, 8);
-    assert_eq!(walked.windows, Err(ResourceError::Unreadable { at: AT, len: 46 }));
-    assert_eq!(walked.bytes, 0);
-}
-
-/// A refused list is walked *through* the descriptor that refused it, so the
-/// bytes the bootloader logs beside a refusal are the ones it is about.
-#[test]
-fn the_bytes_a_walk_reports_cover_the_descriptor_it_refused() {
-    let bytes = list(&[
-        qword(MEMORY, 0xa080_0000, 0x1000, 0),
-        qword(MEMORY, 0x1000_0000, 0x1000, 0x4000_0000),
-    ]);
-    let (walked, _) = walk(&bytes, 8);
-    assert_eq!(walked.windows, Err(ResourceError::Translated { min: 0x1000_0000, offset: 0x4000_0000 }));
-    assert_eq!(walked.bytes, 92);
+    assert_eq!(windows(&bytes, 8), Err(ResourceError::Unreadable { at: AT, len: 46 }));
 }

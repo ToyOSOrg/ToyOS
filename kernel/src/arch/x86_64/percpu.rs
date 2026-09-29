@@ -5,6 +5,7 @@ use alloc::alloc::alloc_zeroed;
 use core::alloc::Layout;
 
 use super::cpu;
+use crate::sched::idle_stack::{words, FILL as STACK_FILL, FILL_WORD as STACK_FILL_WORD};
 use crate::log;
 
 const MSR_GS_BASE: u32 = 0xC000_0101;
@@ -310,27 +311,16 @@ pub(crate) mod gs {
     }
 }
 
-/// Same size as a task's kernel stack: a `deferred` [`kobject!`] object may
-/// own an `immediate` one, whose destructor then runs here instead.
-const IDLE_STACK_SIZE: usize = crate::process::KERNEL_STACK_SIZE;
-
-/// One unmapped 4 KiB page below every idle stack: unmapped, not filled like
-/// [`IST_GUARD_SIZE`], so a fault here escalates to IST1's `#DF` rather than silently corrupting memory.
-const IDLE_GUARD_SIZE: usize = 4096;
-
 /// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC` — vectors
 /// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
 pub(crate) const IST_STACKS: usize = 3;
 
-/// One size for every IST stack, for [`IDLE_STACK_SIZE`]'s reason; must leave room to double the measured high water, which `double_fault_stack` asserts.
+/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water, which `double_fault_stack` asserts.
 const IST_STACK_SIZE: usize = 16384;
 
 /// Filled with [`STACK_FILL`], not unmapped: a fault already on IST1 is a triple fault, so detecting after the fact beats trapping it.
 const IST_GUARD_SIZE: usize = 4096;
 
-/// Chosen so a zeroed or ASCII byte cannot be mistaken for untouched stack.
-const STACK_FILL: u8 = 0xA5;
-const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
 
 /// Allocate and initialize `PerCpu` for a CPU; the pointer lives forever, one `write` of the whole struct so a new field must be given a value here.
 fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
@@ -439,78 +429,20 @@ pub fn reserve_log_slot(
     (shard as *const log::Shard, seq, cpu, tid, pid)
 }
 
-/// One idle stack and the guard page under it.
-const IDLE_SLOT: usize = IDLE_GUARD_SIZE + IDLE_STACK_SIZE;
-
-/// Idle stacks come from their own 2 MiB pages, not the kernel heap: the guard's hole in the direct map would split a heap-shared leaf's TLB entry into 512.
-/// Never freed — a leaf returned to the PMM would keep the hole.
-static IDLE_STACKS: crate::sync::Lock<IdleArena> = crate::sync::Lock::new(IdleArena {
-    pages: alloc::vec::Vec::new(),
-    stacks: alloc::vec::Vec::new(),
-    next: 0,
-    left: 0,
-});
-
-struct IdleArena {
-    pages: alloc::vec::Vec<crate::mm::pmm::PhysPage>,
-    /// The bottom of every idle stack, so the deepest any CPU has gone reads from one.
-    stacks: alloc::vec::Vec<u64>,
-    /// Direct-map address of the next free slot.
-    next: u64,
-    left: usize,
-}
-
-/// A 4 KiB-aligned `IDLE_SLOT` from the arena.
-fn alloc_idle_slot() -> u64 {
-    let mut arena = IDLE_STACKS.lock();
-    if arena.left < IDLE_SLOT {
-        let page = crate::mm::pmm::alloc_page(crate::mm::pmm::Category::KernelHeap)
-            .expect("percpu: no physical page for an idle stack");
-        arena.next = page.direct_map().as_mut_ptr::<u8>() as u64;
-        arena.left = crate::mm::PAGE_2M as usize;
-        arena.pages.push(page);
-    }
-    let base = arena.next;
-    arena.next += IDLE_SLOT as u64;
-    arena.left -= IDLE_SLOT;
-    arena.stacks.push(base + IDLE_GUARD_SIZE as u64);
-    base
-}
-
 fn alloc_idle_stack(percpu: &mut PerCpu) {
-    let base = alloc_idle_slot();
-    crate::mm::paging::guard_kernel_page(base);
-    // SAFETY: exactly `IDLE_STACK_SIZE` bytes above the unmapped guard, within the returned `IDLE_SLOT` — filled, not zeroed, so zero can't mark "untouched" for [`idle_stack_high_water`].
-    unsafe {
-        core::ptr::write_bytes(
-            (base + IDLE_GUARD_SIZE as u64) as *mut u8,
-            STACK_FILL,
-            IDLE_STACK_SIZE,
-        )
-    };
-    percpu.idle_stack_top = base + IDLE_SLOT as u64;
+    percpu.idle_stack_top = crate::sched::idle_stack::alloc();
 }
 
 /// How big one idle stack is; read by `SYS_DEBUG` for scale.
 #[cfg(feature = "test-actuators")]
 pub fn idle_stack_size() -> usize {
-    IDLE_STACK_SIZE
+    crate::sched::idle_stack::SIZE
 }
 
-/// The deepest any CPU's idle stack has ever been, in bytes, read from the bottom up: nothing legitimate writes [`STACK_FILL`], so a touched byte stays changed.
+/// The deepest any CPU's idle stack has ever been, in bytes.
 #[cfg(feature = "test-actuators")]
 pub fn idle_stack_high_water() -> usize {
-    let arena = IDLE_STACKS.lock();
-    arena
-        .stacks
-        .iter()
-        .map(|&bottom| {
-            let untouched =
-                words(bottom, IDLE_STACK_SIZE).take_while(|&w| w == STACK_FILL_WORD).count() * 8;
-            IDLE_STACK_SIZE - untouched
-        })
-        .max()
-        .unwrap_or(0)
+    crate::sched::idle_stack::high_water()
 }
 
 /// One stack per [`IST_STACKS`] row; an `ist[n-1]` left zero faults to address 0 unchecked.
@@ -572,11 +504,6 @@ pub fn ist1_report() {
     });
 }
 
-/// Sequential u64s from `base`; every address is inside the caller's already-bounds-checked allocation.
-fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
-    // SAFETY: `i < len/8` bounds each address inside the caller's checked allocation; `read_volatile` keeps the fill-pattern read.
-    (0..len / 8).map(move |i| unsafe { core::ptr::read_volatile((base as *const u64).add(i)) })
-}
 
 /// Initialize per-CPU data for the BSP, and bring this CPU's exception
 /// handlers up. Call after paging + allocator, before `syscall::init`.
@@ -709,15 +636,15 @@ pub fn percpu_ptr() -> *mut PerCpu {
 }
 
 /// Ring 0 timer fires the assembly stub has taken; written with a plain `inc` (IF clear there).
-pub fn ring0_timer_fires() -> u32 {
+pub fn kernel_timer_fires() -> u32 {
     gs::read_u32::<OFF_RING0_TIMER_FIRES>()
 }
 
-pub fn last_seen_ring0_fires() -> u32 {
+pub fn last_seen_kernel_timer_fires() -> u32 {
     gs::read_u32::<OFF_LAST_SEEN_RING0_FIRES>()
 }
 
-pub fn set_last_seen_ring0_fires(v: u32) {
+pub fn set_last_seen_kernel_timer_fires(v: u32) {
     gs::write_u32::<OFF_LAST_SEEN_RING0_FIRES>(v);
 }
 
@@ -729,7 +656,7 @@ pub fn set_last_armed_ticks(ticks: u32) {
 /// The last byte of this CPU's idle guard page — the first byte an overflow reaches.
 #[cfg(feature = "test-actuators")]
 pub fn idle_guard_byte() -> u64 {
-    idle_stack_top() - IDLE_STACK_SIZE as u64 - 1
+    idle_stack_top() - crate::sched::idle_stack::SIZE as u64 - 1
 }
 
 /// Top of this CPU's idle stack.

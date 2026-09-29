@@ -27,6 +27,13 @@ const FRAME: u64 = 0x1000;
 /// The register frame's physical address; zero until [`init`] found one.
 static BASE: AtomicU64 = AtomicU64::new(0);
 
+/// The register frame's physical address, once [`init`] found one: what the
+/// kernel's own tables map before they replace the loader's.
+pub fn frame() -> Option<u64> {
+    let base = BASE.load(Ordering::Relaxed);
+    (base != 0).then_some(base)
+}
+
 fn regs() -> Mmio {
     let base = BASE.load(Ordering::Relaxed);
     assert!(base != 0, "console UART: a byte moved before `init` found the UART");

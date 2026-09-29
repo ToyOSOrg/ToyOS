@@ -605,3 +605,22 @@ impl<D: BlockAccess> Fat32<D> {
         self.write_entry_at(offset, &raw)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write time is the two-second field alone — the odd second a
+    /// [`FatTime`] carries in `tenths` is a creation time's — so what a volume
+    /// answers for when a file was written is the even second at or below it.
+    #[test]
+    fn a_write_time_keeps_the_even_second() {
+        // 2033-03-07 09:14:25.
+        let odd = 1_993_799_665;
+        let mut raw = RawEntry::zeroed();
+        raw.set_write_time(FatTime::from_unix_secs(odd));
+        assert_eq!(raw.write_time().to_unix_secs(), odd - 1);
+        raw.set_write_time(FatTime::from_unix_secs(odd - 1));
+        assert_eq!(raw.write_time().to_unix_secs(), odd - 1);
+    }
+}

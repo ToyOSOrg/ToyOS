@@ -22,9 +22,10 @@ use super::qemu::{BootOptions, QemuInstance};
 /// either way.
 const GATE: &str = "log-gate";
 
-/// The whole run's ceiling. A liveness guard and never a verdict: the guest has
-/// a ceiling of its own and reports what it had when it gave up, so this only
-/// catches a guest that stopped answering at all.
+/// The same gate with its own producer thread storming the log beside it.
+const STORM_GATE: &str = "log-storm";
+
+/// The whole run's ceiling: a gate that never finishes is what it reds.
 const CEILING: Duration = Duration::from_secs(60);
 
 /// One boot's storm, as the guest reported it.
@@ -64,7 +65,11 @@ fn conservation(
     rust_bins: &[(String, Vec<u8>)],
     smp: u32,
 ) -> Result<(), String> {
-    let report = storm(test_config, c_bins, rust_bins, smp, &["log-storm"])?;
+    // The test kernel by build rather than by actuator: the producer's
+    // `SYS_DEBUG` is what needs it, and nothing is armed.
+    let options =
+        BootOptions { smp, kernel_features: toyos_build::build::TEST_KERNEL, ..Default::default() };
+    let report = storm(test_config, c_bins, rust_bins, STORM_GATE, options)?;
     let shards = report.get("shards")?;
     if shards != smp as u64 {
         return Err(format!(
@@ -75,40 +80,43 @@ fn conservation(
     }
     // Non-vacuity, and it is the half a green law cannot supply: a reader that
     // took every record after the storm had ended has proved nothing about
-    // concurrent producers.
+    // concurrent producers, and one the ring never lapped has proved nothing
+    // about `lost`.
     let concurrent = report.get("concurrent")?;
     let dropped = report.get("dropped")?;
     let read = report.get("read")?;
-    if concurrent == 0 || read == 0 {
+    let lost = report.get("lost")?;
+    if concurrent == 0 || read == 0 || lost == 0 {
         return Err(format!(
-            "--smp {smp} read {read} record(s), {concurrent} of them while the storm ran\n{}",
+            "--smp {smp} read {read} record(s), {concurrent} of them while the storm ran, and \
+             lost {lost}\n{}",
             report.stdout
         ));
     }
     eprintln!(
         "  [log] smp={smp}: emitted={} read={read} dropped={dropped} concurrent={concurrent} \
-         lost={} wakes={}",
+         lost={lost} wakes={}",
         report.get("emitted")?,
-        report.get("lost")?,
         report.get("wakes")?,
     );
     Ok(())
 }
 
-pub fn log_conservation_smp1(
+/// **`--smp 2`**, so the producer thread has a CPU the reader is not on.
+pub fn log_conservation_smp2(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    conservation(test_config, c_bins, rust_bins, 1)
+    conservation(test_config, c_bins, rust_bins, 2)
 }
 
 /// The nested-`emit` gate: an interrupt that logs, inside another `emit`, on one CPU.
 ///
 /// **The one case loom cannot express and the host cannot stage.** The
-/// stimulus is a self-IPI sent from inside a record's own body copy, on a
-/// kernel thread — where `IF` is set and `emit`'s IF-off bracket is the only thing
-/// holding the interrupt off. The handler emits exactly one shard generation of
+/// stimulus is a self-IPI sent from inside a record's own body copy, inside
+/// `SYS_LOG_READ` with `IF` opened for it — where `emit`'s IF-off bracket is the
+/// only thing holding the interrupt off. The handler emits exactly one shard generation of
 /// patterned records; the outer record is then dropped by the ring's own
 /// drop-oldest policy, which is what makes "the burst laps the shard" a
 /// statement with an arithmetic behind it.
@@ -127,7 +135,8 @@ pub fn log_nested_emit(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let report = storm(test_config, c_bins, rust_bins, 1, &["log-nested-emit"])?;
+    let options = BootOptions { smp: 1, kernel_params: &["log-nested-emit"], ..Default::default() };
+    let report = storm(test_config, c_bins, rust_bins, GATE, options)?;
     let declared = report.get("declared")?;
     let read = report.get("read")?;
     if read == 0 {
@@ -162,7 +171,8 @@ pub fn log_reserve_window(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let report = storm(test_config, c_bins, rust_bins, 8, &["log-nested-reserve"])?;
+    let options = BootOptions { smp: 8, kernel_params: &["log-nested-reserve"], ..Default::default() };
+    let report = storm(test_config, c_bins, rust_bins, GATE, options)?;
     let declared = report.get("declared")?;
     let read = report.get("read")?;
     let dropped = report.get("dropped")?;
@@ -301,21 +311,8 @@ pub fn log_poll_outlives_a_close(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    close_probe(test_config, c_bins, rust_bins, &[])
-}
-
-fn close_probe(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    params: &'static [&'static str],
-) -> Result<(), String> {
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions { kernel_params: params, ..Default::default() },
-    );
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, c_bins, rust_bins, BootOptions::default());
     let result = qemu.run_test("log-close", CEILING);
     if let Some(err) = &result.error {
         return Err(format!("{err}\nstdout:\n{}", result.stdout));
@@ -335,21 +332,17 @@ fn close_probe(
     Ok(())
 }
 
-/// Boot one machine with the storm armed and read the gate's verdict off it.
+/// Boot one machine as `options` says, run `gate` on it and read its verdict off it.
 fn storm(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
-    smp: u32,
-    params: &'static [&'static str],
+    gate: &str,
+    options: BootOptions,
 ) -> Result<Report, String> {
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions { smp, kernel_params: params, ..Default::default() },
-    );
-    let result = qemu.run_test(GATE, CEILING);
+    let (smp, params) = (options.smp, options.kernel_params);
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let result = qemu.run_test(gate, CEILING);
     if let Some(err) = &result.error {
         return Err(format!(
             "--smp {smp} {params:?}: {err}\nstdout:\n{}\nserial tail:\n{}",
@@ -410,17 +403,8 @@ fn fields(stdout: &str) -> Result<BTreeMap<String, u64>, Contaminated> {
         let Some(rest) = line.split_once("log-gate: ").map(|(_, r)| r) else { continue };
         for word in rest.split_whitespace() {
             let Some((key, value)) = word.split_once('=') else { continue };
-            // `migrated=3/8` is two numbers: the second is the producer count,
-            // which the migration gate reports beside it.
-            let (value, producers) = match value.split_once('/') {
-                Some((a, b)) => (a, b.trim_end_matches(&[',', ';'][..]).parse::<u64>().ok()),
-                None => (value, None),
-            };
             if let Ok(n) = value.trim_end_matches(&[',', ';'][..]).parse::<u64>() {
                 put(&mut out, key, n)?;
-            }
-            if let Some(n) = producers {
-                put(&mut out, "producers", n)?;
             }
         }
         // "N record(s) over M read(s) from S shard(s)" — the shape of the line

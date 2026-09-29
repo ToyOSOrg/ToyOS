@@ -61,7 +61,10 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "msr tcr_el1, x2",
         "msr ttbr0_el1, x3",
         "msr ttbr1_el1, x3",
-        "msr cpacr_el1, xzr",
+        "ldr x1, ={cpacr}",
+        "msr cpacr_el1, x1",
+        "mov x1, #{cntkctl}",
+        "msr cntkctl_el1, x1",
         "tlbi vmalle1",
         "dsb nsh",
         "isb",
@@ -79,11 +82,26 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "mrs x6, hcr_el2",
         "cmp x6, x1",
         "b.ne {refuse_hcr}",
+        // `ICC_SRE_EL2`, whose `Enable` lets EL1 write its own `ICC_SRE_EL1`
+        // (`super::irqchip::init`). Skipped where `ID_AA64PFR0_EL1.GIC` names
+        // no system-register interface: there the write is an undefined
+        // instruction under firmware's vectors and ends the boot silently,
+        // while EL1's own access fails under this kernel's, which report it.
+        "mrs x1, id_aa64pfr0_el1",
+        "ubfx x1, x1, #24, #4",
+        "cbz x1, 4f",
+        "mov x1, #{icc_sre_el2}",
+        "msr S3_4_C12_C9_5, x1",
+        "isb",
+        "4:",
         "msr mair_el1, x4",
         "msr tcr_el1, x2",
         "msr ttbr0_el1, x3",
         "msr ttbr1_el1, x3",
-        "msr cpacr_el1, xzr",
+        "ldr x1, ={cpacr}",
+        "msr cpacr_el1, x1",
+        "mov x1, #{cntkctl}",
+        "msr cntkctl_el1, x1",
         "msr sctlr_el1, x5",
         "mov x1, #{cnthctl}",
         "msr cnthctl_el2, x1",
@@ -128,6 +146,9 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         refuse_hcr = sym refused_hcr_el2_readback,
         cnthctl = const regs::CNTHCTL_EL2,
         cptr = const regs::CPTR_EL2,
+        cpacr = const regs::CPACR,
+        cntkctl = const regs::CNTKCTL,
+        icc_sre_el2 = const regs::ICC_SRE_EL2,
         spsr = const regs::SPSR_EL2_TO_EL1,
         phys_offset = const crate::PHYS_OFFSET,
         entry_el = sym regs::ENTRY_EL,
@@ -238,37 +259,59 @@ pub fn reserved() -> Region {
     Region { start: 0, end: 0 }
 }
 
-/// What the boot learns bringing interrupts up and hands later steps.
-pub struct Platform {
-    never: core::convert::Infallible,
+/// What the boot learns bringing interrupts up and hands later steps: nothing
+/// yet, since the other CPUs the MADT names are the port's stage 5's to read.
+pub struct Platform;
+
+/// Interrupt delivery: this CPU's per-CPU block, the GIC and the timer's
+/// interrupt, and interrupts unmasked. The syscall gate is the vectors' own.
+pub fn interrupts(rsdp_addr: u64) -> Platform {
+    super::percpu::init_bsp();
+    super::irqchip::init(rsdp_addr);
+    super::cpu::enable_interrupts();
+    Platform
 }
 
-/// Interrupt delivery, this CPU's per-CPU block and the syscall gate.
-pub fn interrupts(_rsdp_addr: u64) -> Platform {
-    owed!("interrupt delivery", "stage 4")
-}
-
-/// The clock: the generic timer's counter at `CNTFRQ_EL0`.
+/// The clock: the generic timer's count, at the rate firmware states in
+/// `CNTFRQ_EL0`, which the Arm ARM makes firmware's to program and which is
+/// what the counter counts at. No wall clock: `super::rtc` says why.
 pub fn clock(_args: &KernelArgs) {
-    owed!("the clock", "stage 4")
+    let hz = super::cpu::stated_counter_hz().expect("clock: CNTFRQ_EL0 states no rate for the generic timer");
+    crate::clock::set_counter(super::cpu::counter(), 1_000_000_000_000_000 / hz);
+    log!("clock: the generic timer counts at {hz} Hz; no wall clock is read on this architecture");
 }
 
-/// The per-CPU timer.
+/// Nothing: where the generic timer counts from is firmware's, and no
+/// register says it.
+pub fn report_counter_origin() {}
+
+/// The per-CPU timer counts the clock's own ticks, so there is nothing to
+/// calibrate: it stays stopped until the scheduler first arms it.
 pub fn timer() {
-    owed!("the timer", "stage 4")
+    log!("timer: the EL1 virtual timer, PPI {}, stopped until the scheduler arms it", super::irqchip::timer_intid());
 }
 
 /// The platform's own devices that are not PCI functions: none this kernel
 /// drives on an ACPI Arm machine.
 pub fn platform_devices(_rsdp_addr: u64) {}
 
-/// Every other CPU, running.
-pub fn start_other_cpus(platform: &Platform, _args: &KernelArgs) {
-    match platform.never {}
+/// Every other CPU, running: the port's stage 5, which starts each with PSCI
+/// `CPU_ON`. Until then the boot CPU runs alone.
+pub fn start_other_cpus(_platform: &Platform, _args: &KernelArgs) {
+    log!("smp: the boot CPU runs alone; the other CPUs are the port's stage 5 (PSCI CPU_ON)");
 }
 
 /// The interrupt-controller selftests an actuator asks for.
 #[cfg(feature = "boot-actuators")]
 pub fn interrupt_selftests() {
-    owed!("the interrupt controller", "stage 4")
+    if crate::actuator::timer_floor() {
+        super::irqchip::floor_selftest();
+    }
+    if crate::actuator::irq_storm() {
+        super::trap::storm::run();
+    }
+    assert!(
+        !crate::actuator::lapic_spurious_selftest() && !crate::actuator::unclaimed_vector_selftest(),
+        "the local APIC's selftests are x86-64's, and this machine has a GIC"
+    );
 }

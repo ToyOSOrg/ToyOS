@@ -5,7 +5,7 @@
 //! second — in [`init_wall`], and answered after as that reading plus
 //! [`nanos_since_boot`].
 
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 
 use crate::arch::cpu;
 use crate::time::Instant;
@@ -46,6 +46,7 @@ fn publish_page(counter_at_boot: u64, period_fs: u64) {
         );
     }
     PAGE_PHYS.store(frame.phys(), Release);
+    #[expect(clippy::disallowed_methods, reason = "every address space maps the clock page for the machine's life")]
     core::mem::forget(frame);
 }
 
@@ -88,14 +89,14 @@ pub fn now() -> Instant {
 /// The [`cpu::rdtsc`] value `nanos` in the future, for a wait loop that must
 /// not call the nanosecond clock.
 pub fn tsc_deadline(nanos: u64) -> u64 {
-    cpu::counter().saturating_add(tsc_ticks(nanos))
+    cpu::counter().saturating_add(counter_ticks(nanos))
 }
 
-/// `nanos` as a count of TSC ticks: a span converted once and then compared
-/// against `rdtsc` differences, which is what a sampler that may not divide
+/// `nanos` as a count of [`cpu::counter`] ticks: a span converted once and then compared
+/// against counter differences, which is what a sampler that may not divide
 /// needs. Before [`init`] the period is unknown and this is zero, so a bound
 /// derived from it is one its arm has to refuse.
-pub fn tsc_ticks(nanos: u64) -> u64 {
+pub fn counter_ticks(nanos: u64) -> u64 {
     let period_fs = TSC_PERIOD_FS.load(Relaxed);
     if period_fs == 0 {
         return 0;
@@ -103,7 +104,7 @@ pub fn tsc_ticks(nanos: u64) -> u64 {
     ((nanos as u128 * 1_000_000) / period_fs as u128) as u64
 }
 
-/// The span a count of [`tsc_ticks`] stands for, for a caller that measured
+/// The span a count of [`counter_ticks`] stands for, for a caller that measured
 /// before there was a period to measure with and converts once, afterwards.
 /// Zero while the period is unknown, so a span taken on a machine that never
 /// calibrated reads as no time rather than as an invented one.
@@ -133,20 +134,14 @@ pub fn settles(nanos: u64, ready: impl Fn() -> bool) -> bool {
     true
 }
 
-/// Unix seconds, in the machine's own zone, at `nanos_since_boot() == 0`.
-static BOOT_LOCAL_SECS: AtomicU64 = AtomicU64::new(0);
-/// Seconds to add to the machine's zone to get UTC (`Localtime = UTC - TimeZone`).
-static UTC_OFFSET_SECS: AtomicI64 = AtomicI64::new(0);
-/// Whether the two above mean anything; zero is a valid instant and offset, not a sentinel.
+/// Unix seconds at `nanos_since_boot() == 0`.
+static BOOT_SECS: AtomicU64 = AtomicU64::new(0);
+/// Whether the above means anything; zero is a valid instant, not a sentinel.
 static WALL_KNOWN: AtomicBool = AtomicBool::new(false);
 
-/// Reads the RTC once, after [`init`], and anchors the wall clock to it.
-pub fn init_wall(century_reg: Option<u8>, utc_offset_minutes: Option<i32>) {
-    // OVMF never names a zone, so `rtc_zone_east` is a test actuator forcing
-    // UTC+2 (`Localtime = UTC - TimeZone`, so east is negative: -120).
-    let utc_offset_minutes =
-        if crate::actuator::rtc_zone_east() { Some(-120) } else { utc_offset_minutes };
-
+/// Reads the RTC, which keeps UTC, once, after [`init`], and anchors the wall
+/// clock to it.
+pub fn init_wall(century_reg: Option<u8>) {
     let civil = match crate::arch::rtc::read(century_reg) {
         Ok(civil) => civil,
         Err(fault) => {
@@ -155,29 +150,31 @@ pub fn init_wall(century_reg: Option<u8>, utc_offset_minutes: Option<i32>) {
         }
     };
 
-    let local = civil.to_unix_secs();
-    let offset_secs = utc_offset_minutes.unwrap_or(0) as i64 * 60;
-    BOOT_LOCAL_SECS.store(local.saturating_sub(nanos_since_boot() / 1_000_000_000), Relaxed);
-    UTC_OFFSET_SECS.store(offset_secs, Relaxed);
+    BOOT_SECS.store(civil.to_unix_secs().saturating_sub(nanos_since_boot() / NANOS_PER_SEC), Relaxed);
     WALL_KNOWN.store(true, Release);
-
-    match utc_offset_minutes {
-        Some(minutes) => log!("clock: the RTC reads {civil}, {minutes} minutes from UTC by firmware"),
-        None => log!("clock: the RTC reads {civil}; firmware named no zone, so it is taken as UTC"),
-    }
+    log!("clock: the RTC reads {civil} UTC");
 }
 
-/// Local wall-clock time — what FAT stamps use, since FAT stores local time
-/// by specification. `None` if the RTC never answered.
-pub fn local_secs() -> Option<u64> {
+/// Unix seconds, now — what `SYS_CLOCK_EPOCH` serves: the whole seconds of
+/// [`utc_nanos`]. `None` if the RTC never answered.
+pub fn utc_secs() -> Option<u64> {
+    utc_nanos().map(|nanos| nanos / NANOS_PER_SEC)
+}
+
+pub const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// Nanoseconds since the Unix epoch, UTC: the RTC's whole-second reading carried
+/// on by the counter, so its resolution is the counter's and its accuracy the
+/// RTC's second.
+pub fn utc_nanos() -> Option<u64> {
     WALL_KNOWN
         .load(Acquire)
-        .then(|| BOOT_LOCAL_SECS.load(Relaxed) + nanos_since_boot() / 1_000_000_000)
+        .then(|| BOOT_SECS.load(Relaxed).saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot()))
 }
 
-/// The same instant in Unix seconds (UTC) — what `SYS_CLOCK_EPOCH` serves.
-pub fn utc_secs() -> Option<u64> {
-    let local = local_secs()?;
-    Some(local.saturating_add_signed(UTC_OFFSET_SECS.load(Relaxed)))
+/// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
+/// [`utc_nanos`], and 0 — undated — on a machine whose RTC never answered.
+pub fn mtime_now() -> u64 {
+    utc_nanos().unwrap_or(0)
 }
 

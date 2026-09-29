@@ -102,7 +102,6 @@ pub fn clock(args: &KernelArgs) {
     let hpet_base = acpi::find_hpet_base(args.rsdp_addr)
         .expect("ACPI: HPET not found");
     super::hpet::calibrate_counter(hpet_base);
-    // Century register and time zone both come from ACPI/firmware, not the RTC's own registers.
     let century_reg = match acpi::rtc_century_register(args.rsdp_addr) {
         Ok(reg) => reg,
         Err(e) => {
@@ -110,7 +109,21 @@ pub fn clock(args: &KernelArgs) {
             None
         }
     };
-    crate::clock::init_wall(century_reg, args.rtc_utc_offset());
+    crate::clock::init_wall(century_reg);
+}
+
+/// Where the TSC counts from: `IA32_TSC_ADJUST`, where CPUID says the CPU has
+/// it. Every write to the TSC since reset is added to it (Intel SDM Vol. 3B,
+/// "Time-Stamp Counter Adjustment"), so zero is a counter firmware never wrote
+/// and the TSC is time since power-on.
+pub fn report_counter_origin() {
+    const IA32_TSC_ADJUST: u32 = 0x3b;
+    // Leaf 7 exists when the maximum leaf reaches it.
+    if super::cpu::cpuid(0, 0).0 < 7 || super::cpu::cpuid(7, 0).1 & (1 << 1) == 0 {
+        log!("boot: IA32_TSC_ADJUST not on this CPU");
+        return;
+    }
+    log!("boot: IA32_TSC_ADJUST {}", super::cpu::rdmsr(IA32_TSC_ADJUST) as i64);
 }
 
 /// The per-CPU timer, once the clock converts its bound.
@@ -138,4 +151,8 @@ pub fn interrupt_selftests() {
     if crate::actuator::unclaimed_vector_selftest() {
         idt::unclaimed::selftest();
     }
+    assert!(
+        !crate::actuator::irq_storm() && !crate::actuator::timer_floor(),
+        "irq-storm and timer-floor are the GIC and generic timer's selftests, and this machine has a local APIC"
+    );
 }

@@ -293,17 +293,17 @@ pub fn global_min_vruntime() -> u64 {
 pub fn enqueue_new(
     id: TaskId,
     kernel_stack: crate::process::OwnedAlloc,
-    entry_rsp: u64,
+    entry_sp: u64,
     address_space: crate::process::PageTables,
-    fs_base: u64,
+    thread_pointer: u64,
     symbols: alloc::sync::Arc<crate::symbols::SymbolTable>,
 ) -> (ThreadSched, CpuId) {
     driver::spawn(NewTask {
         id,
         kernel_stack,
-        entry_rsp,
+        entry_sp,
         address_space,
-        fs_base,
+        thread_pointer,
         share: share_for(id.0),
         symbols,
     })
@@ -348,7 +348,7 @@ pub fn may_yield() -> bool {
     crate::preempt::count() == blocking_baseline()
 }
 
-/// Unified preempt entry: the Ring 3 timer path, `kernel_exit_to_user_check`
+/// Unified preempt entry: the user-mode timer path, [`exit_to_user`]
 /// and the `preempt::enable` slow path all funnel through here.
 #[track_caller]
 pub fn do_preempt() {
@@ -367,15 +367,15 @@ pub fn do_preempt() {
     driver::pass(Dispose::None);
 }
 
-/// The last thing a thread does before returning to Ring 3, if either mark it
-/// can carry says it never does. `kernel_exit_to_user_check` is the one caller;
+/// The last thing a thread does before returning to user mode, if either mark it
+/// can carry says it never does. [`exit_to_user`] is the one caller;
 /// `kernel/src/quiesce.rs`'s header says why that boundary is the safe point.
 ///
 /// **One call and one match, so the two marks have no order to disagree
 /// about**: `toyos_sched::task::SafePoint` ranks them, here and in
 /// `CpuSched::place` alike.
 #[track_caller]
-pub fn leave_ring3_if_due() {
+pub fn leave_user_if_due() {
     let Some(due) = driver::current_safe_point(crate::quiesce::stops_this_thread()) else {
         return;
     };
@@ -383,21 +383,56 @@ pub fn leave_ring3_if_due() {
     match due {
         SafePoint::Stop => {
             driver::pass(Dispose::Stop);
-            unreachable!("leave_ring3_if_due: a stopped task was dispatched again");
+            unreachable!("leave_user_if_due: a stopped task was dispatched again");
         }
         SafePoint::Exit => {
-            // `IF` set across the teardown, as a syscall's exit runs it: its
+            // Interrupts open across the teardown, as a syscall's exit runs it: its
             // closes and address-space drop are no interrupt latency. The
             // depth stays this boundary's, which is `do_preempt`'s own.
             crate::arch::cpu::enable_interrupts();
             process::leave(None);
             crate::arch::cpu::disable_interrupts();
             driver::pass(Dispose::Exit);
-            unreachable!("leave_ring3_if_due: returned from the exit pass");
+            unreachable!("leave_user_if_due: returned from the exit pass");
         }
     }
 }
 
+
+/// The deferred-preempt epilogue every return to user mode runs last, with
+/// interrupts masked on entry and on return: a killed or stopped thread leaves
+/// here, and a reschedule owed since the entry is served before the thread
+/// sees user mode again.
+pub fn exit_to_user() {
+    flush_kernel_timer_fires_to_trace();
+    loop {
+        // A killed or stopped thread returns to user mode exactly once more: never.
+        leave_user_if_due();
+        // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
+        if !crate::preempt::need_resched() {
+            #[cfg(feature = "boot-actuators")]
+            if crate::actuator::dump_in_blocking_pass() {
+                crate::sched::dump::staged::note_return_to_user();
+            }
+            return;
+        }
+        assert!(!in_schedule_self(), "exit-to-user inside a scheduler pass");
+        // Not an IrqGuard: both loop exits must open interrupts, not restore a saved value.
+        crate::arch::cpu::enable_interrupts();
+        do_preempt();
+        crate::arch::cpu::disable_interrupts();
+        flush_kernel_timer_fires_to_trace();
+    }
+}
+
+fn flush_kernel_timer_fires_to_trace() {
+    let cur = percpu::kernel_timer_fires();
+    let missed = cur.wrapping_sub(percpu::last_seen_kernel_timer_fires());
+    if missed > 0 {
+        crate::trace::trace(crate::trace::Kind::TimerFireBurst, missed);
+        percpu::set_last_seen_kernel_timer_fires(cur);
+    }
+}
 /// The exit pass of a thread that has left its process (`process::leave`).
 #[track_caller]
 pub fn exit_current() -> ! {
@@ -560,33 +595,15 @@ const SNAPSHOT_INTERVAL: Cadence = Cadence::every(
     "one clock read and one relaxed compare per idle trip, on a CPU already awake",
 );
 
-/// `sched-fast-health`'s cadence: no guest test program this suite runs lives
-/// past [`SNAPSHOT_INTERVAL`] once, let alone the two prints a comparison needs.
-const FAST_SNAPSHOT_INTERVAL: Cadence = Cadence::every(
-    Duration::from_millis(200),
-    "an actuator no boot arms; a test that needs two prints buys them for one boot",
-);
-
-/// Which of the two cadences this boot took, read once per idle trip.
-fn snapshot_interval_ns() -> u64 {
-    if crate::actuator::sched_fast_health() {
-        FAST_SNAPSHOT_INTERVAL.nanos()
-    } else {
-        SNAPSHOT_INTERVAL.nanos()
-    }
-}
-
 /// When each CPU may next print its own line: per CPU, not global, so no
 /// single CPU speaks for all of them.
 static NEXT_HEALTH: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// How many times each CPU has passed through idle since boot, counted on
-/// every trip rather than only the ones that print: `i8042_quarantine` needs
-/// the raw rate to tell a halting CPU from a spinning one.
+/// How many times each CPU has passed through idle since boot.
 static IDLE_TRIPS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// A snapshot of this CPU's run queues, at most once per
-/// [`snapshot_interval_ns`], plus the machine's page pools on the same
+/// [`SNAPSHOT_INTERVAL`], plus the machine's page pools on the same
 /// cadence. Called from the idle loop on every trip; the cadence is wall
 /// clock rather than per-trip because a CPU that declines to sleep loops at
 /// memory speed. Not a heartbeat: a busy CPU prints nothing, so a gap here
@@ -600,7 +617,7 @@ pub fn log_health() {
         .get(cpu as usize)
         .map_or(0, |t| t.fetch_add(1, Ordering::Relaxed) + 1);
     if now >= next_health.load(Ordering::Relaxed) {
-        next_health.store(now + snapshot_interval_ns(), Ordering::Relaxed);
+        next_health.store(now + SNAPSHOT_INTERVAL.nanos(), Ordering::Relaxed);
         let ready = driver::ready_len() + usize::from(percpu::current_tid().is_some());
         let parked = driver::parked_len();
         let dying = driver::dying_len();
@@ -620,12 +637,12 @@ pub fn log_health() {
     static NEXT_PMM_DUMP: AtomicU64 = AtomicU64::new(0);
     let next = NEXT_PMM_DUMP.load(Ordering::Relaxed);
     if next == 0 {
-        NEXT_PMM_DUMP.store(now + snapshot_interval_ns(), Ordering::Relaxed);
+        NEXT_PMM_DUMP.store(now + SNAPSHOT_INTERVAL.nanos(), Ordering::Relaxed);
     } else if now >= next
         && NEXT_PMM_DUMP
             .compare_exchange(
                 next,
-                now + snapshot_interval_ns(),
+                now + SNAPSHOT_INTERVAL.nanos(),
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             )

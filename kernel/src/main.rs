@@ -73,6 +73,7 @@ mod process;
 mod loader;
 mod scheduler;
 mod sched;
+mod hw;
 mod iommu;
 mod preempt;
 mod irq_census;
@@ -115,9 +116,9 @@ use crate::mm::policy::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use arch::{cpu, percpu, smp};
-pub(crate) use arch::hw;
 use drivers::{acpi, gop, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_rootimage::handoff::{held, Descriptor};
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -190,9 +191,9 @@ const DATA_PATHS: [&str; 4] = ["apps", "config", "home", "state"];
 
 /// The boot from power-on, off the loader's TSC readings and `complete`'s, at
 /// the calibrated rate. The TSC counts from reset, so the first span is
-/// firmware's unless firmware wrote the counter, which the loader's
-/// `IA32_TSC_ADJUST` says where the CPU has one.
+/// firmware's unless firmware wrote the counter.
 fn report_power_on(args: &KernelArgs, complete: u64) {
+    arch::boot::report_counter_origin();
     let (entry, handoff) = (args.loader_entry_tsc, args.loader_handoff_tsc);
     if handoff < entry || complete < handoff {
         log!(
@@ -248,6 +249,16 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
+    // Before the first field a layout change can move; `rsdp_addr` sits below
+    // the word, so the refusal reaches the UART.
+    if kernel_args.layout != toyos_abi::boot::LAYOUT {
+        serial::init(kernel_args.rsdp_addr);
+        panic!(
+            "boot: the loader wrote KernelArgs layout {:#x} and this kernel reads layout {:#x}",
+            kernel_args.layout,
+            toyos_abi::boot::LAYOUT
+        );
+    }
     // Beside it, and out of the raw buffer: a panic between here and
     // `params::init` — inside `serial::init`, or on the parameter line's own
     // UTF-8 check — is one the page has to carry past the reset, and neither
@@ -279,6 +290,13 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
+    // The actuator's other half: a loader that ignored it would boot on unrefused.
+    if actuator::loader_writes_no_layout() {
+        panic!(
+            "boot: {} is armed and the loader wrote this kernel's layout anyway",
+            toyos_abi::boot::WRITE_NO_LAYOUT_PARAM
+        );
+    }
     let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
     // Armed here so the next record — the architecture's first — reaches the console and the panel keeps the one before it.
@@ -304,7 +322,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Split into six records: KernelArgs' derived Debug is the one message that exceeds the log's per-record bound.
     log!(
-        "boot: memory map {:#x}+{:#x}, kernel {:#x}+{:#x}, stack {:#x}+{:#x}",
+        "boot: memory map {:#x}+{:#x}, kernel {:#x}+{:#x}, stack image+{:#x}+{:#x}",
         kernel_args.memory_map_addr, kernel_args.memory_map_size,
         kernel_args.kernel_memory_addr, kernel_args.kernel_memory_size,
         kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size
@@ -327,8 +345,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     );
     log!("boot: log partition guid {:02x?}", kernel_args.log_partition_guid);
     log!(
-        "boot: rtc utc offset {} minutes (known={}), cmdline {:#x}+{}",
-        kernel_args.rtc_utc_offset_minutes, kernel_args.rtc_utc_offset_known,
+        "boot: cmdline {:#x}+{}",
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
     // Before `mm::init`, which may hand the parameter's memory out. This record
@@ -348,11 +365,16 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     );
     let kernel_args = &kernel_args;
 
-    let reserved = [
+    // `kernel_stack_addr` is an offset into the image, so the image's region is what keeps the stack.
+    assert!(
+        kernel_args.kernel_stack_addr.checked_add(kernel_args.kernel_stack_size)
+            .is_some_and(|end| end <= kernel_args.kernel_memory_size),
+        "boot: the loader put the stack at image+{:#x}+{:#x}, past the {:#x}-byte image",
+        kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size, kernel_args.kernel_memory_size
+    );
+    let loader = [
         mm::Region { start: kernel_args.kernel_memory_addr, end: kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size },
         mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
-        mm::Region { start: kernel_args.kernel_stack_addr, end: kernel_args.kernel_stack_addr + kernel_args.kernel_stack_size },
-        arch::boot::reserved(),
         // The loader's black-box page, which is ordinary `LoaderData` and so
         // memory the allocator would otherwise hand out. Empty on a boot whose
         // parameter line names none.
@@ -361,6 +383,29 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         // boot the loader handed none.
         root_image,
     ];
+    // A region the loader did not allocate withholds memory nothing uses, so one the firmware map does not hold as `LoaderData` is refused.
+    // Block 1: the ELF region (`kernel_elf_addr`+`kernel_elf_size`) is not page-aligned.
+    for region in loader.iter().filter(|r| r.start < r.end) {
+        assert!(
+            held(
+                maps.iter().map(|e| Descriptor { ty: e.uefi_type, start: e.start, end: e.end }),
+                toyos_bootmap::EFI_LOADER_DATA,
+                region.start,
+                region.end - region.start,
+                1,
+            )
+            .is_some(),
+            "boot: reserving {:#x}..{:#x}, which no LoaderData descriptor in the firmware map holds",
+            region.start, region.end
+        );
+    }
+    // The architecture's own page is not a loader allocation, so it is named
+    // here rather than folded into `loader` above. Destructuring `loader` by
+    // name, rather than indexing it, means a region added to `loader` fails
+    // to compile here instead of compiling and being silently dropped from
+    // what `mm::init` withholds.
+    let [image, elf, black_box, root] = loader;
+    let reserved = [image, elf, black_box, root, arch::boot::reserved()];
 
     // The last point before the first hash container (`mm::init`'s address
     // space), and not earlier: seeding fails only by panicking, and a panic
@@ -609,15 +654,17 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         register_gpu(gpu_driver, gpu_info);
     } else if kernel_args.gop_framebuffer != 0 {
         log!("GPU: using UEFI GOP");
-        let (gpu_driver, gpu_info) = gop::init(
+        match gop::init(
             kernel_args.gop_framebuffer,
             kernel_args.gop_framebuffer_size,
             kernel_args.gop_width,
             kernel_args.gop_height,
             kernel_args.gop_stride,
             kernel_args.gop_pixel_format,
-        );
-        register_gpu(gpu_driver, gpu_info);
+        ) {
+            Some((gpu_driver, gpu_info)) => register_gpu(gpu_driver, gpu_info),
+            None => log!("GPU: none this boot, running headless"),
+        }
     } else {
         log!("GPU: none found, running headless");
     }

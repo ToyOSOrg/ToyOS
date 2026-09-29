@@ -7,6 +7,8 @@ use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
+use crate::time::Timespec;
+
 // Constants (matching POSIX / Linux values)
 
 const O_RDONLY: i32 = 0;
@@ -52,7 +54,7 @@ fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
         SyscallError::Io => EIO,
         _ => EINVAL,
     };
-    unsafe { super::stdio::errno = code; }
+    crate::errno::set(code);
     -1
 }
 
@@ -129,7 +131,7 @@ pub unsafe extern "C" fn lseek(raw_fd: i32, offset: i64, whence: i32) -> i64 {
         SEEK_SET => SeekFrom::Start(offset as u64),
         SEEK_CUR => SeekFrom::Current(offset),
         SEEK_END => SeekFrom::End(offset),
-        _ => { super::stdio::errno = EINVAL; return -1; }
+        _ => { crate::errno::set(EINVAL); return -1; }
     };
     match syscall::seek(fd(raw_fd), pos) {
         Ok(n) => n as i64,
@@ -145,7 +147,10 @@ pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
                 ptr::write_bytes(buf, 0, 1);
                 let s = &mut *buf;
                 s.st_size = st.size as i64;
-                s.st_mtime = st.mtime as i64;
+                s.st_mtim = Timespec {
+                    tv_sec: (st.mtime / NANOS_PER_SEC) as i64,
+                    tv_nsec: (st.mtime % NANOS_PER_SEC) as i64,
+                };
                 s.st_mode = match st.file_type {
                     syscall::FileType::File => S_IFREG | 0o644,
                     syscall::FileType::Pipe => S_IFIFO | 0o644,
@@ -480,17 +485,19 @@ pub struct Stat {
     pub st_dev: u64,
     pub st_ino: u64,
     pub st_mode: u32,
-    pub st_nlink: u32,
+    pub st_nlink: u64,
     pub st_uid: u32,
     pub st_gid: u32,
     pub st_rdev: u64,
     pub st_size: i64,
     pub st_blksize: i64,
     pub st_blocks: i64,
-    pub st_atime: i64,
-    pub st_mtime: i64,
-    pub st_ctime: i64,
+    pub st_atim: Timespec,
+    pub st_mtim: Timespec,
+    pub st_ctim: Timespec,
 }
+
+const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 // mmap/munmap (real implementations using toyos-abi)
 
@@ -551,7 +558,7 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     // watch more is not a bug in this library, so it gets POSIX's own answer
     // for an nfds it cannot serve.
     if nfds > toyos::poller::Poller::MAX_HANDLES {
-        super::stdio::errno = EINVAL;
+        crate::errno::set(EINVAL);
         return -1;
     }
 

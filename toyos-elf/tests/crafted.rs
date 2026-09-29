@@ -347,6 +347,56 @@ fn the_file_bytes_behind_a_vaddr_are_the_containing_segments() {
     assert_eq!(layout.file_bytes_from(0x2400), Some(0x400));
 }
 
+/// `(image offset, bytes, count)` of the table a layout places, for comparing.
+fn table_of(layout: &Layout) -> Option<(u64, u64, u16)> {
+    layout.program_headers().map(|t| (t.image().start().get(), t.image().len(), t.count()))
+}
+
+/// The table is where the segment holding its file bytes puts them, measured
+/// from the image's lowest address, whichever segment that is.
+#[test]
+fn the_program_header_table_is_where_its_segment_places_it() {
+    let two = 2 * PROGRAM_HEADER_SIZE as u64;
+    let at_zero = accepted(Elf::new(0x1000).ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R)).ph(Phdr::tls(0x800, 0, 8, 8)).build());
+    assert_eq!(table_of(&at_zero), Some((PH_OFF as u64, two, 2)));
+
+    // The first segment does not hold the table and the second does, at a
+    // vaddr above the first's: the offset is from the extent's minimum.
+    let second = accepted(
+        Elf::new(0x2000)
+            .entry(0x1000)
+            .ph(Phdr::load(0x1000, 0x1000, 0x1000, 0x1000, PF_R | PF_X))
+            .ph(Phdr::load(0, 0x10_0000, 0x1000, 0x1000, PF_R))
+            .build(),
+    );
+    assert_eq!(table_of(&second), Some((0x10_0000 + PH_OFF as u64 - 0x1000, two, 2)));
+}
+
+/// Held only where the file's bytes are: a segment whose file image stops
+/// inside the table, or one that holds it only as zero-filled memory, holds
+/// no table.
+#[test]
+fn a_table_no_segment_holds_whole_is_absent() {
+    let one = PROGRAM_HEADER_SIZE as u64;
+    let short = PH_OFF as u64 + one;
+    // Two headers; the file image ends one header in.
+    let cut = Elf::new(0x1000).ph(Phdr::load(0, 0, short, 0x1000, PF_R)).ph(Phdr::tls(0x800, 0, 8, 8));
+    assert_eq!(table_of(&accepted(cut.build())), None);
+    // Exactly the table's end and it is held.
+    let whole = Elf::new(0x1000).ph(Phdr::load(0, 0, short + one, 0x1000, PF_R)).ph(Phdr::tls(0x800, 0, 8, 8));
+    assert_eq!(table_of(&accepted(whole.build())), Some((PH_OFF as u64, 2 * one, 2)));
+    // Memory but no file bytes.
+    let zeroes = Elf::new(0x1000).ph(Phdr::load(0, 0, 0, 0x1000, PF_R));
+    assert_eq!(table_of(&accepted(zeroes.build())), None);
+    // A segment that starts past the table's first byte.
+    let after = Elf::new(0x2000).entry(0x1000).ph(Phdr::load(PH_OFF as u64 + 8, 0x1000, 0x1000, 0x1000, PF_R));
+    assert_eq!(table_of(&accepted(after.build())), None);
+    // And one at vaddr 0, so a loader's vaddr-0 checks pass and only the table
+    // refuses it: `abuse_elf_loader`'s `phdrs_unmapped`.
+    let unmapped = accepted(Elf::new(0x2000).ph(Phdr::load(0x1000, 0, 0x1000, 0x1000, PF_R | PF_X)).build());
+    assert_eq!((unmapped.extent().min(), table_of(&unmapped)), (0, None));
+}
+
 #[test]
 fn the_writable_window_spans_every_writable_segment() {
     let layout = accepted(

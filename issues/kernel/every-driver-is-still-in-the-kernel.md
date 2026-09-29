@@ -20,16 +20,23 @@ holding a physical address is an arbitrary read/write primitive over all of
 memory. `kernel/src/pcidev/mod.rs` is where that ruling is enforced for a
 function a process drives: a claim on one this machine cannot give an address
 space of its own is refused by name, so there is no machine on which a driver
-outside the kernel gets an untranslated address.
+outside the kernel gets an untranslated address. The ruling
+for signed in-image drivers on a machine with no IOMMU is
+`issues/kernel/a-machine-without-an-iommu-refuses-every-claim.md`'s.
 `issues/kernel/the-iommu-refuses-nothing-yet.md` still holds the other half —
 every driver *inside* the kernel holds a domain of its own and the refusal there
 is not built.
 
 What is left of the staged work:
 
-1. **The kernel's audio registry is a concrete match on a device type.** The
-   file this was scoped against has since been deleted, so this needs re-scoping
-   before it can start; the GPU trait is the model to copy.
+1. **Audio and virtio-gpu, re-scoped.** `drivers/hda.rs` and
+   `drivers/virtio_sound.rs` bring their device up and gate soundd's register
+   access; `drivers/virtio_gpu.rs` is the only `Gpu` whose `SYS_GPU_*` calls do
+   anything, since GOP's are all no-ops. Each leaves when its userland holder
+   claims the function as `pci`, as netd does, retiring the `hda-audio` and
+   `virtio-sound` classes, their arms of `SYS_DEVICE_REG_READ`/`WRITE`, and
+   `SYS_GPU_*`, which is an ABI change. GOP stays: it is memory the loader
+   hands over, and the panic console paints it.
 2. Done: **BAR sizing and re-assignment onto 2 MiB boundaries** is
    `pcidev::place_bar`, with the overlap refusal kept as the assertion that it
    worked rather than as the mechanism.

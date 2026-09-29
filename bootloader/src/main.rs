@@ -51,16 +51,6 @@ mod slot;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
-///
-/// Nothing here has a caller to return an error to and nothing has run that
-/// could recover, so every check in this file ends in a named panic rather
-/// than an error path. This one exists so that a corrupt or hostile directory
-/// entry is a refusal that says what it refused, instead of a firmware pool
-/// request sized by whatever the ESP claimed.
-///
-/// Policy, and generous: `kernel.elf` is the largest file ToyOS puts on the
-/// ESP, and this bound is orders of magnitude above it while still far below
-/// what a UEFI implementation would serve in one allocation.
 const MAX_ESP_FILE: u64 = 1024 * 1024 * 1024;
 
 /// Descriptors of room held above what the map measured, for the descriptors
@@ -182,8 +172,7 @@ struct BootPartition {
 /// `None` is a machine, not a failure: PXE, an unpartitioned device, and a
 /// signature type firmware chose not to fill in all land here, and the kernel
 /// is expected to boot on all of them knowing it has no partition of its own.
-/// Every early-return below is one of those, so none of them panics — which
-/// makes this the one function in this file that does not.
+/// Every early-return below is one of those, so none of them panics.
 fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<BootPartition> {
     let bs = system_table.boot_services();
     let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
@@ -239,53 +228,6 @@ fn log_partition_guid(handle: Handle, system_table: &SystemTable<Boot>) -> [u8; 
     })
 }
 
-/// What firmware says the machine's time zone is, in minutes to add to the
-/// CMOS RTC's own reading to get UTC.
-///
-/// Asked here because `GetTime` is a runtime service and the kernel never maps
-/// the runtime, and asked at all because the RTC's registers carry no zone: the
-/// same registers read 14:00 on a machine that keeps UTC and on one two hours
-/// east of it that keeps local time, and only firmware can tell those apart.
-/// `EFI_TIME::TimeZone` is the field, and its spec relation is
-/// `Localtime = UTC - TimeZone`.
-///
-/// `None` is a machine and not a failure — the same as [`boot_partition`] — so
-/// this does not panic where the rest of this file does. Firmware that declines
-/// to say (`EFI_UNSPECIFIED_TIMEZONE`, which is what OVMF ships) and firmware
-/// that cannot be asked are one answer to the kernel: it treats the RTC as UTC
-/// and logs that it is doing so.
-///
-/// The range check is on untrusted input in the strict sense — the field is
-/// whatever a vendor's NVRAM holds — and out of range is refused rather than
-/// clamped, because an offset that is not a zone is not evidence about which
-/// zone the machine is in.
-fn rtc_utc_offset(system_table: &SystemTable<Boot>) -> Option<i32> {
-    /// The field's own bounds, from the UEFI spec: a day either side of UTC.
-    const MAX_OFFSET_MINUTES: i32 = 1440;
-
-    let time = match system_table.runtime_services().get_time() {
-        Ok(time) => time,
-        Err(e) => {
-            println!("RTC zone: firmware's GetTime failed ({e:?}), so the kernel assumes UTC");
-            return None;
-        }
-    };
-    let Some(zone) = time.time_zone() else {
-        println!("RTC zone: firmware names none ({time:?}), so the kernel assumes UTC");
-        return None;
-    };
-    let zone = zone as i32;
-    if !(-MAX_OFFSET_MINUTES..=MAX_OFFSET_MINUTES).contains(&zone) {
-        println!(
-            "RTC zone: firmware names {zone} minutes, outside +/-{MAX_OFFSET_MINUTES}, so it is \
-             ignored and the kernel assumes UTC"
-        );
-        return None;
-    }
-    println!("RTC zone: {zone} minutes to add to the RTC for UTC ({time:?})");
-    Some(zone)
-}
-
 /// [`toyos_tco::FIRMWARE_BOUND_MS`] in the seconds `set_watchdog_timer` takes.
 const FIRMWARE_WATCHDOG_SECS: usize = (toyos_tco::FIRMWARE_BOUND_MS / 1_000) as usize;
 
@@ -323,19 +265,6 @@ fn file_range(bytes: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
 }
 
 fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
-    // `toyos-elf` is the tree's one ELF decoder: the crate the kernel reads
-    // every program image with reads the kernel's own image here. Refused by
-    // name before anything is allocated — ELF32, big-endian, a version that is
-    // not `EV_CURRENT`, an `e_type` that is not `ET_DYN`, a machine that is not
-    // this loader's own, no program headers or a table outside the file, more than
-    // `toyos_elf::MAX_LOAD_SEGMENTS` `PT_LOAD`s or none at all, a `PT_LOAD`
-    // with `p_filesz > p_memsz` or a `p_vaddr + p_memsz` or `p_offset +
-    // p_filesz` that overflows, and an `e_entry` no segment covers.
-    //
-    // `p_filesz <= p_memsz` matters for the same reason it does in the kernel's
-    // loader: the pair is a (copy length, destination size) pair here too, as
-    // the image is sized from every `p_memsz` and each segment is then copied
-    // in at `p_filesz`.
     let layout = toyos_elf::Layout::parse(kernel_elf_bytes, arch::ELF_MACHINE)
         .unwrap_or_else(|e| panic!("kernel.elf: {e}"));
 
@@ -590,7 +519,7 @@ fn tsc() -> u64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, root_image: Option<rootimage::RootImage>, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], layout: u32, root_image: Option<rootimage::RootImage>, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -620,10 +549,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
-    // Before the exit: `_print` unwraps a system table uefi-services nulls in its exit callback, so `println!` past it panics.
-    //
-    // Said before it is applied: a machine this refuses leaves the refusal in
-    // `loader.log`, which is the artifact a machine with no console has.
     // Where firmware loaded this image, which is where the x86-64 switch to
     // the boot map runs from: the map holds it wherever that is.
     let loader = {
@@ -716,8 +641,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         boot_partition_guid,
         boot_partition_present,
         log_partition_guid,
-        rtc_utc_offset_minutes: rtc_utc_offset.unwrap_or(0),
-        rtc_utc_offset_known: rtc_utc_offset.is_some() as u32,
+        layout,
         cmdline_addr: cmdline.as_ptr() as u64,
         cmdline_len: cmdline.len() as u64,
         root_bridge_window_count,
@@ -737,9 +661,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 
     kernel_args.loader_handoff_tsc = tsc();
     println!(
-        "Loader TSC: {entry_tsc} at entry, {} at the handoff; {}",
+        "Loader TSC: {entry_tsc} at entry, {} at the handoff",
         kernel_args.loader_handoff_tsc,
-        arch::counter_origin(),
     );
 
     // Last, and after every line above: a console write, a FAT write and a
@@ -781,9 +704,13 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     kernel_args.memory_map_size =
         memory_map.len() as u64 * mem::size_of::<MemoryMapEntry>() as u64;
 
+    #[expect(clippy::disallowed_methods, reason = "`kernel_args.memory_map_addr` hands it to the kernel")]
     mem::forget(memory_map);
+    #[expect(clippy::disallowed_methods, reason = "the kernel runs from these pages")]
     mem::forget(kernel.memory);
+    #[expect(clippy::disallowed_methods, reason = "`kernel_args.kernel_elf_addr` hands it to the kernel")]
     mem::forget(kernel_elf_bytes);
+    #[expect(clippy::disallowed_methods, reason = "`kernel_args.cmdline_addr` hands it to the kernel")]
     mem::forget(cmdline);
 
     let image = (kernel_phys, kernel_args.kernel_memory_size);
@@ -825,14 +752,6 @@ fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
 /// `SIGNAL_EXIT_BOOT_SERVICES` callback that lives here; the next operating
 /// system signals that group from inside its own `ExitBootServices`, and
 /// firmware calls into memory that is no longer ours.
-///
-/// So the event is closed *and* the pass resets. Closing it is the invariant —
-/// a pass that does not hand off leaves nothing registered in the firmware — and
-/// the reset is what makes that invariant not have to be complete: the next
-/// operating system comes up on firmware this image has never run on, for one
-/// reboot. `BootNext` was consumed by this pass and this pass sets none, so the
-/// firmware's own order takes the machine, and the page was cleared as it was
-/// read, so a boot that does come back here boots normally.
 fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
     println!("{}", loaderlog::ENDS_AT_CHAIN);
     loaderlog::close_without_a_kernel();
@@ -849,10 +768,6 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // First: the TSC counts from reset, so this is what firmware took.
     let entry_tsc = tsc();
-    // The event is kept, not discarded: it is a callback *inside this image*
-    // that firmware holds until it is closed, and a pass that returns to the
-    // boot manager is a pass whose image the boot manager then unloads. See
-    // `end_this_pass`.
     let exit_event = uefi_services::init(&mut system_table).unwrap();
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
@@ -1045,6 +960,13 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         .unwrap_or_else(|e| panic!("slot {}'s cmdline is not UTF-8: {e}", chosen.which.letter()));
     println!("Boot parameter: {params:?}");
 
+    let layout = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WRITE_NO_LAYOUT_PARAM) {
+        println!("Kernel arguments: layout 0 on {}", toyos_abi::boot::WRITE_NO_LAYOUT_PARAM);
+        0
+    } else {
+        toyos_abi::boot::LAYOUT
+    };
+
     let root_image = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WITHHOLD_ROOT_PARAM) {
         println!("ROOT: withheld on {}; the kernel is handed no image", toyos_abi::boot::WITHHOLD_ROOT_PARAM);
         chosen.root.free(system_table.boot_services());
@@ -1059,10 +981,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Query UEFI GOP before exiting boot services
     let gop = query_gop(&system_table);
 
-    // Last of the firmware questions and for the same reason as the GOP: both
-    // answers die with Boot Services.
-    let rtc_offset = rtc_utc_offset(&system_table);
-
     // The page says a kernel is running, and `BootNext` says this loader gets the
     // machine again however that kernel ends.
     blackbox::arm(page, armed_at(&system_table), log_guid);
@@ -1074,5 +992,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, root_image, entry_tsc, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, layout, root_image, entry_tsc, system_table);
 }

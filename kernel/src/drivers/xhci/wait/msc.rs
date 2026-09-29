@@ -125,11 +125,6 @@ impl MscDevice {
         self.no_write_cache
     }
 
-    /// Which slot this disk is on.
-    pub fn slot_id(&self) -> u8 {
-        self.slot_id
-    }
-
     /// The port whose slot is owed back to the controller, once: the disk was
     /// taken offline with its endpoints Stopped, and its slot is still enabled.
     pub(in crate::drivers::xhci) fn take_slot_owed(&mut self) -> Option<u8> {
@@ -800,7 +795,7 @@ fn block_witness_holds(dev: &MscDevice, entered: BlockWitness) {
         "USB BOT WITNESS: MscDevice::block changed inside one round trip — the field at \
          {at:#018x} held {:#018x} and now holds {:#018x} (the frame moved by {}). This CPU's \
          Ring 3 entry stack is {top:#018x}, so the field stands {} bytes below it and the \
-         running rsp is {:#018x}. `with_storage` copies the device onto this stack, so a \
+         running stack pointer is {:#018x}. `with_storage` copies the device onto this stack, so a \
          kernel text value here is a return address something else pushed.",
         entered.was,
         dev.block,
