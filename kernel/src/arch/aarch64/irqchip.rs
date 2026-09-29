@@ -363,7 +363,9 @@ pub fn stop_timer() {
 pub(super) fn rearm() {
     match percpu::armed_ticks() {
         0 => stop_timer_hardware(),
-        ticks => arm_ticks(ticks),
+        ticks => {
+            arm_ticks(ticks);
+        }
     }
 }
 
