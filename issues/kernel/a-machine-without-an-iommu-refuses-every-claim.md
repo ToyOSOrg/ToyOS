@@ -31,4 +31,7 @@ Exit: a test that claims a device on a machine with no IOMMU unit
 (`iommu_virtio_platform`'s no-unit arm, or an equivalent) passes for a driver
 the image ships and signs, and still refuses with `ClaimError::Unusable` for
 one that is not; a mutation that deletes the identity check and lets every
-claim through must fail that test.
+claim through must fail that test. The claim succeeding is not the isolation
+guarantee: an isolation test run against that same machine reports "no
+isolation on this machine", never a pass, and that report is part of this
+exit, not a separate one.

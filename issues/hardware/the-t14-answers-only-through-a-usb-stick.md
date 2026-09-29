@@ -28,7 +28,11 @@ Constraints a reader would otherwise pay to re-derive:
 - **On a machine with no IOMMU, only a driver signed and shipped in the ToyOS
   image may claim a device, never a user-installed one** (owner ruling,
   2026-09-29, superseding the 2026-09-07 ruling on the ordering ruling in
-  `issues/kernel/every-driver-is-still-in-the-kernel.md`). Today every claim on
+  `issues/kernel/every-driver-is-still-in-the-kernel.md`). Without an IOMMU a
+  device's DMA is not contained, so a bad signed driver can still corrupt the
+  kernel — the full isolation guarantee needs an IOMMU, and on a machine
+  without one ToyOS states "no isolation" plainly; an isolation test there
+  reports "no isolation on this machine", never a pass. Today every claim on
   such a machine is still refused by name, netd exits, and the machine boots
   on; `iommu_virtio_platform`'s no-unit arm is where that is read back
   (`issues/kernel/a-machine-without-an-iommu-refuses-every-claim.md` tracks

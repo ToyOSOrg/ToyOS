@@ -24,7 +24,11 @@ refusal is now by driver identity, not blanket: only a driver signed and
 shipped in the ToyOS image may claim a device there, and the kernel's DMA
 layer hands it the physical address directly instead of a domain-mapped one**
 (owner ruling, 2026-09-29, superseding the 2026-09-07 ruling recorded in
-`issues/hardware/the-t14-answers-only-through-a-usb-stick.md`) —
+`issues/hardware/the-t14-answers-only-through-a-usb-stick.md`). Without an
+IOMMU a device's DMA is not contained, so a bad signed driver can still
+corrupt the kernel — the full isolation guarantee needs an IOMMU, and on a
+machine without one ToyOS states "no isolation" plainly; an isolation test
+there reports "no isolation on this machine", never a pass.
 `issues/kernel/a-machine-without-an-iommu-refuses-every-claim.md` tracks
 building that distinction; today `pcidev` still refuses every claim there
 regardless of who asks.
