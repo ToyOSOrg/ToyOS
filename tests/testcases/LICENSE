@@ -22,9 +22,9 @@ against tinycc upstream at 64552b3faa39ee7948a9ea21bfcc11045b90c70d
 (repo.or.cz/tinycc.git, 2026-08-05), allowing for the `-` → `_` renames this
 project made to some filenames.
 
-  tinycc/    318 files: 239 byte-identical to tinycc's `tests/tests2`,
+  tinycc/    320 files: 239 byte-identical to tinycc's `tests/tests2`,
                         17 tinycc files this project modified,
-                        62 not upstream at all — 61 cases written here, plus
+                        64 not upstream at all — 63 cases written here, plus
                         `fred.txt`, which is output `40_stdio.c` writes when it
                         runs and which was committed by accident.
 

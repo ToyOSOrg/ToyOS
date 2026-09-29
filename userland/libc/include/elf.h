@@ -1,9 +1,6 @@
 #ifndef _ELF_H
 #define _ELF_H
 
-/* The program header vocabulary <link.h> needs, as the System V gABI spells
-   it; no other part of the gABI is declared here. */
-
 #include <stdint.h>
 
 typedef uint64_t Elf64_Addr;

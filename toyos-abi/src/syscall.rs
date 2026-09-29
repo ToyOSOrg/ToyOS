@@ -2188,10 +2188,8 @@ pub struct ModuleInfo {
     /// Absolute virtual address of the module's program header table: the
     /// kernel loads no module whose table a `PT_LOAD` does not map.
     pub phdr: u64,
-    /// Entries in that table, `e_phnum`.
-    pub phnum: u32,
-    /// Bytes per entry, `e_phentsize`.
-    pub phentsize: u32,
+    /// Entries in that table, `e_phnum`: a `u64` so the record has no padding.
+    pub phnum: u64,
     /// Byte offset of the module's path string within the buffer.
     pub path_offset: u32,
     /// Length of the path string in bytes.
@@ -2201,11 +2199,9 @@ pub struct ModuleInfo {
 /// Every byte belongs to a field: this crosses the boundary through
 /// [`ModuleInfo::as_bytes`], so a gap would publish whatever the kernel stack
 /// held. **This is the type where that matters most**, because the buffer it
-/// is written into is a user address: the four `u32`s pair up after five
-/// `u64`s, 8 bytes a pair at an 8-aligned offset, so there is no padding —
-/// and this is what says so. A field of any other width added here reds here
-/// rather than publishing kernel stack bytes to userland.
-const _: () = assert!(core::mem::size_of::<ModuleInfo>() == 8 + 8 + 8 + 8 + 8 + 4 + 4 + 4 + 4);
+/// is written into is a user address. A field of any other width added here
+/// reds here rather than publishing kernel stack bytes to userland.
+const _: () = assert!(core::mem::size_of::<ModuleInfo>() == 8 + 8 + 8 + 8 + 8 + 8 + 4 + 4);
 
 impl ModuleInfo {
     /// The record's own bytes, which is what `SYS_QUERY_MODULES` writes.
@@ -2348,7 +2344,6 @@ mod tests {
             eh_frame_hdr_size: 0x44,
             phdr: 0x5566_7788_99aa_bbcc,
             phnum: 0x77,
-            phentsize: 0x88,
             path_offset: 0x55,
             path_len: 0x66,
         };
@@ -2359,8 +2354,7 @@ mod tests {
         assert_eq!(u64::from_ne_bytes(b[16..24].try_into().unwrap()), info.eh_frame_hdr);
         assert_eq!(u64::from_ne_bytes(b[24..32].try_into().unwrap()), info.eh_frame_hdr_size);
         assert_eq!(u64::from_ne_bytes(b[32..40].try_into().unwrap()), info.phdr);
-        assert_eq!(u32::from_ne_bytes(b[40..44].try_into().unwrap()), info.phnum);
-        assert_eq!(u32::from_ne_bytes(b[44..48].try_into().unwrap()), info.phentsize);
+        assert_eq!(u64::from_ne_bytes(b[40..48].try_into().unwrap()), info.phnum);
         assert_eq!(u32::from_ne_bytes(b[48..52].try_into().unwrap()), info.path_offset);
         assert_eq!(u32::from_ne_bytes(b[52..56].try_into().unwrap()), info.path_len);
     }
@@ -2373,7 +2367,6 @@ mod tests {
             eh_frame_hdr_size: 0,
             phdr: base + 0x40,
             phnum: 3,
-            phentsize: 56,
             path_offset,
             path_len,
         }

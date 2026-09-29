@@ -492,7 +492,6 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
             eh_frame_hdr_size: eh_size,
             phdr,
             phnum: phnum.into(),
-            phentsize: toyos_elf::header::PROGRAM_HEADER_SIZE as u32,
             path_offset,
             path_len: exe_path_bytes.len() as u32,
         };
@@ -513,7 +512,6 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
                 eh_frame_hdr_size: lib.eh_frame_hdr.map_or(0, |r| r.len()),
                 phdr: (lib.user_base + lib.phdrs.image().start().get()).raw(),
                 phnum: lib.phdrs.count().into(),
-                phentsize: toyos_elf::header::PROGRAM_HEADER_SIZE as u32,
                 path_offset,
                 path_len: lib_path_bytes.len() as u32,
             };
