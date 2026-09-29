@@ -80,28 +80,29 @@ fn conservation(
     }
     // Non-vacuity, and it is the half a green law cannot supply: a reader that
     // took every record after the storm had ended has proved nothing about
-    // concurrent producers.
+    // concurrent producers, and one the ring never lapped has proved nothing
+    // about `lost`.
     let concurrent = report.get("concurrent")?;
     let dropped = report.get("dropped")?;
     let read = report.get("read")?;
-    if concurrent == 0 || read == 0 {
+    let lost = report.get("lost")?;
+    if concurrent == 0 || read == 0 || lost == 0 {
         return Err(format!(
-            "--smp {smp} read {read} record(s), {concurrent} of them while the storm ran\n{}",
+            "--smp {smp} read {read} record(s), {concurrent} of them while the storm ran, and \
+             lost {lost}\n{}",
             report.stdout
         ));
     }
     eprintln!(
         "  [log] smp={smp}: emitted={} read={read} dropped={dropped} concurrent={concurrent} \
-         lost={} wakes={}",
+         lost={lost} wakes={}",
         report.get("emitted")?,
-        report.get("lost")?,
         report.get("wakes")?,
     );
     Ok(())
 }
 
-/// **`--smp 2`**, so the producer thread has a CPU the reader is not on and
-/// runs beside it rather than only between its quanta.
+/// **`--smp 2`**, so the producer thread has a CPU the reader is not on.
 pub fn log_conservation_smp2(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

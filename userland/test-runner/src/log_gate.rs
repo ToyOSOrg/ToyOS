@@ -16,10 +16,11 @@
 //!
 //! **The storm is a thread of this process**, calling `SYS_DEBUG`'s
 //! `LOG_PATTERNED` once per record and counting each call after it returns.
-//! That counter, not any record, is what says the storm is over and which
-//! records were read while it ran. **The interleave is an event, not a
-//! schedule**: the producer stops after [`HANDOVER`] records until this reader
-//! has taken one of them, so a read lands inside the storm on every run.
+//! **Every interleave the verdict rests on is an event, not a schedule**: the
+//! producer stops after [`HANDOVER`] records until this reader has taken one;
+//! this reader then reads nothing until the producer has emitted enough more to
+//! lap its cursor on some shard, so `lost` is never zero; and the producer then
+//! emits until a read has taken storm records while its counter moved.
 //!
 //! **Nothing this reader waits for is a record the ring may drop.** The
 //! termination condition is the *cursor*: the log has been drained and nothing
@@ -30,11 +31,10 @@
 //! to drop is the same mistake wherever it appears.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use toyos::log::{LogTail, Record, MAX_LOG_SHARDS};
 use toyos::poller::{Poller, READABLE};
@@ -81,17 +81,14 @@ const PAYLOAD: usize = 96;
 /// The producer id `LOG_PATTERNED`'s records declare.
 const STORM_PRODUCER: u64 = 0;
 
-/// Records the storm emits: past a shard's 512, so the ring's drop-oldest path
-/// is reachable.
-const STORM_RECORDS: u64 = 1024;
-
 /// Storm records emitted before the producer waits for this reader to take
 /// one: far under a shard's 512, so the ring still holds them when it arrives.
 const HANDOVER: u64 = 64;
 
-/// How long the producer waits at [`HANDOVER`]. A liveness bound that names
-/// the reader which never arrived, inside the host's 60 s for the whole boot.
-const HANDOVER_WAIT: Duration = Duration::from_secs(30);
+/// `kernel/src/log/shard.rs`'s `SHARD_RECORDS`: one more than `shards` times
+/// this, emitted between two reads, puts more than a shard's worth into one
+/// shard, whichever CPUs the producer ran on.
+const SHARD_RECORDS: u64 = 512;
 
 /// `kernel/src/log/nested.rs`'s `NEST_PRODUCER`: the burst an interrupt handler
 /// emits declares itself as this, so it goes through the same per-producer
@@ -152,10 +149,8 @@ struct Run {
     nest: Option<u64>,
     records: u64,
     reads: u64,
-    /// Storm records taken by a read after which the producer had not yet
-    /// returned from its last call. **Zero would mean this reader raced
-    /// nothing**, which is the one way a green conservation law says nothing
-    /// at all; the handover makes it the first batch at least.
+    /// Storm records taken, after the lap, by a read across which the
+    /// producer's counter moved.
     concurrent: u64,
     /// Times the log's readiness source completed a poll.
     completions: u64,
@@ -193,10 +188,13 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
     let mut armed = true;
 
     let produced = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
     let (handover, taken) = mpsc::sync_channel(1);
+    let (lap, lapped) = mpsc::sync_channel(1);
     let mut handover = storm.then_some(handover);
-    let mut producer = storm.then(|| spawn_producer(Arc::clone(&produced), taken));
-    let target = if storm { STORM_RECORDS } else { 0 };
+    let mut producer = storm
+        .then(|| spawn_producer(Arc::clone(&produced), Arc::clone(&stop), taken, lap));
+    let mut after_lap = false;
 
     let mut quiet = 0u32;
     loop {
@@ -210,11 +208,11 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
             armed = false;
         });
 
+        let before = produced.load(Ordering::Acquire);
         let batch = tail
             .read(cap, &mut buf)
             .map_err(|e| format!("SYS_LOG_READ refused a {BATCH}-record buffer: {e:?}"))?;
-        // Loaded after the read returned: below `target` here is below it for the whole read.
-        let during = produced.load(Ordering::Acquire);
+        let moved = produced.load(Ordering::Acquire) != before;
         run.reads += 1;
         if batch.is_empty() {
             quiet += 1;
@@ -227,24 +225,23 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
         for record in batch {
             account(record, &mut run)?;
         }
-        if during < target {
-            run.concurrent += storm_read(&run) - storm_before;
+        let took = storm_read(&run) - storm_before;
+        if after_lap && moved && took > 0 {
+            run.concurrent += took;
+            stop.store(true, Ordering::Release);
         }
-        // Sent only after `during` was loaded, so the read that took this record counts as concurrent.
         if let Some(handover) = handover.take_if(|_| storm_read(&run) > 0) {
-            // Refused only once the producer has returned, and its join says why.
-            if handover.send(()).is_err() {
-                join(producer.take())?;
-            }
+            let records = u64::from(tail.shards()) * SHARD_RECORDS + 1;
+            handover.send(records).map_err(|_| ended(producer.take()))?;
+            lapped.recv().map_err(|_| ended(producer.take()))?;
+            after_lap = true;
         }
 
-        let finished = produced.load(Ordering::Acquire) == target;
-        if quiet >= QUIET_READS && finished {
-            break;
-        }
-        // A producer that returned short of `target` said why; waiting out the host's ceiling would lose it.
-        if !finished && producer.as_ref().is_some_and(JoinHandle::is_finished) {
+        if producer.as_ref().is_some_and(JoinHandle::is_finished) {
             join(producer.take())?;
+        }
+        if quiet >= QUIET_READS && producer.is_none() {
+            break;
         }
         if batch.is_empty() {
             // **Nothing new, so park on the readiness source rather than spin.**
@@ -259,7 +256,7 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
             });
         }
     }
-    join(producer.take())?;
+    let emitted = produced.load(Ordering::Acquire);
 
     // **The readiness source, observed deterministically rather than raced.**
     // If the reads above completed no poll, make one: a child that runs and
@@ -280,35 +277,51 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
         });
     }
 
-    verdict(&tail, &run, storm)
+    verdict(&tail, &run, storm, emitted)
 }
 
-/// The storm: one kernel record per call, counted after each call returns,
-/// paused at [`HANDOVER`] until the reader has taken one.
-fn spawn_producer(produced: Arc<AtomicU64>, taken: Receiver<()>) -> JoinHandle<Result<(), String>> {
+/// The storm: one kernel record per call, counted after each call returns.
+/// [`HANDOVER`] records, then the lap the reader names once it has taken one,
+/// then records until the reader sets `stop`.
+fn spawn_producer(
+    produced: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    taken: Receiver<u64>,
+    lapped: SyncSender<()>,
+) -> JoinHandle<Result<(), String>> {
     std::thread::spawn(move || {
-        for index in 0..STORM_RECORDS {
-            if index == HANDOVER {
-                taken.recv_timeout(HANDOVER_WAIT).map_err(|e| match e {
-                    RecvTimeoutError::Timeout => format!(
-                        "the reader took none of the storm's first {HANDOVER} records within \
-                         {HANDOVER_WAIT:?}"
-                    ),
-                    RecvTimeoutError::Disconnected => {
-                        "the reader ended before it took a storm record".into()
-                    }
-                })?;
-            }
+        let emit = || {
+            let index = produced.load(Ordering::Relaxed);
             let answer = toyos_abi::syscall::debug_with(LOG_PATTERNED, index);
             if answer != 0 {
                 return Err(format!(
                     "SYS_DEBUG LOG_PATTERNED answered {answer:#x} at index {index}"
                 ));
             }
-            produced.fetch_add(1, Ordering::Release);
+            produced.store(index + 1, Ordering::Release);
+            Ok(())
+        };
+        for _ in 0..HANDOVER {
+            emit()?;
+        }
+        let lap = taken.recv().map_err(|_| "the reader ended before it took a storm record")?;
+        for _ in 0..lap {
+            emit()?;
+        }
+        lapped.send(()).map_err(|_| "the reader ended before the storm lapped it")?;
+        while !stop.load(Ordering::Acquire) {
+            emit()?;
         }
         Ok(())
     })
+}
+
+/// Why the producer's end of a channel closed: it returned, and its join says why.
+fn ended(producer: Option<JoinHandle<Result<(), String>>>) -> String {
+    match join(producer) {
+        Err(e) => e,
+        Ok(()) => "the producer returned before the storm lapped this reader".into(),
+    }
 }
 
 fn join(producer: Option<JoinHandle<Result<(), String>>>) -> Result<(), String> {
@@ -452,7 +465,7 @@ fn parse_record(rest: &str) -> Result<(u64, u64), String> {
 
 /// The conservation law, and everything the gate prints for a reader of its
 /// output.
-fn verdict(tail: &LogTail, run: &Run, storm: bool) -> Result<(), String> {
+fn verdict(tail: &LogTail, run: &Run, storm: bool, emitted: u64) -> Result<(), String> {
     let seen: Vec<usize> =
         (0..MAX_LOG_SHARDS).filter(|&i| run.shards[i].first.is_some()).collect();
     if seen.is_empty() {
@@ -504,18 +517,11 @@ fn verdict(tail: &LogTail, run: &Run, storm: bool) -> Result<(), String> {
             return Err("the storm ran and this reader read none of it".into());
         }
         let next = run.producers.get(&STORM_PRODUCER).and_then(|p| p.next).unwrap_or(0);
-        if next > STORM_RECORDS {
+        if next > emitted {
             return Err(format!(
-                "the storm answered index {} of {STORM_RECORDS} emitted",
+                "the storm answered index {} of {emitted} emitted",
                 next - 1
             ));
-        }
-        if run.concurrent == 0 {
-            return Err(
-                "every storm record was read after the producer had finished, so this reader \
-                 raced nothing"
-                    .into(),
-            );
         }
         // The readiness source, asserted where it is reachable: the poll was
         // armed before the storm started, so the records that answer it were
@@ -566,9 +572,9 @@ fn verdict(tail: &LogTail, run: &Run, storm: bool) -> Result<(), String> {
     );
     if storm {
         println!(
-            "log-gate: storm emitted={STORM_RECORDS} read={read_total} dropped={} \
+            "log-gate: storm emitted={emitted} read={read_total} dropped={} \
              concurrent={} wakes={}",
-            STORM_RECORDS - read_total,
+            emitted - read_total,
             run.concurrent,
             run.completions,
         );

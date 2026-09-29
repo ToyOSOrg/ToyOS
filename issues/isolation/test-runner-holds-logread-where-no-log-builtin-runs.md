@@ -13,9 +13,7 @@ read the log inside test-runner (`log-gate`, `log-storm`, `log-close`,
 `tests/toyos.rs`'s one job list naming `log-close` is `tests/testcases`). Seven
 other manifests grant it anyway: `tests/partclaimcase`, `tests/blockdcase`,
 `tests/doommusiccase`, `tests/logrotatecase`, `tests/metalcase`, `tests/netcase`
-and `tests/sshdcase`. Their comments gave the
-log gate as the reason, which none of those boots runs; the comments are gone
-and the grants are not.
+and `tests/sshdcase`.
 
 `partclaimcase` and `blockdcase` also grant `dup`, so there every child
 test-runner spawns receives a `SysCap` duplicate carrying `LOG` as well.
