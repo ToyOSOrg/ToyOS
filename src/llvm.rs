@@ -58,11 +58,13 @@ const RECIPE: &str = "bootstrap build of src/llvm-project/llvm and src/llvm-proj
 ///   runs in may allow no other place.
 const ENVIRONMENT: [&str; 2] = ["PATH", "TMPDIR"];
 
-/// Every host library the pinned LLVM, clang and LLD look for, and link when
-/// they find one, turned off by the CMake option that asks for it
-/// (`llvm/CMakeLists.txt`, `llvm/cmake/config-ix.cmake`, `clang/CMakeLists.txt`,
-/// `lld/CMakeLists.txt`): what a host has installed never decides what is built.
-const NO_HOST_LIBRARIES: [&str; 13] = [
+/// Every host library the pinned LLVM and clang look for, and link when they
+/// find one, turned off by the CMake option that asks for it
+/// (`llvm/CMakeLists.txt`, `llvm/cmake/config-ix.cmake`, `clang/CMakeLists.txt`):
+/// what a host has installed never decides what is built. Bootstrap's LLD step
+/// takes none of these: LLD looks for no library unless asked, and links what this
+/// LLVM chose.
+const NO_HOST_LIBRARIES: [&str; 12] = [
     "LLVM_ENABLE_ZLIB",
     "LLVM_ENABLE_ZSTD",
     "LLVM_ENABLE_LIBXML2",
@@ -75,7 +77,6 @@ const NO_HOST_LIBRARIES: [&str; 13] = [
     "LLVM_ENABLE_ICU",
     "LLVM_ENABLE_ICONV",
     "LLVM_ENABLE_Z3_SOLVER",
-    "LLD_USE_VTUNE",
 ];
 
 /// What of bootstrap's install an LLVM keeps: `build/` beside them is CMake's
@@ -306,11 +307,11 @@ pub fn in_tree(build: &Path) -> Vec<PathBuf> {
     own
 }
 
-/// Remove [`in_tree`]. The caller holds the lock covering `build`, whose
-/// compiler links the host's LLVM.
+/// Remove [`in_tree`]. The caller holds the lock covering `build`, where
+/// nothing builds an LLVM or downloads one any more.
 pub fn retire_in_tree(build: &Path) {
     for dir in in_tree(build) {
-        eprintln!("Removing {}: the compiler built here links the host's LLVM", dir.display());
+        eprintln!("Removing {}: builds here link the host's LLVM or none", dir.display());
         keystore::retire(&dir);
     }
 }
@@ -610,7 +611,7 @@ mod tests {
                    LLVM_ENABLE_LIBXML2 = \"OFF\", CLANG_ENABLE_LIBXML2 = \"OFF\", LLVM_ENABLE_LIBEDIT = \"OFF\", \
                    LLVM_ENABLE_LIBPFM = \"OFF\", LLVM_ENABLE_FFI = \"OFF\", LLVM_ENABLE_CURL = \"OFF\", \
                    LLVM_ENABLE_HTTPLIB = \"OFF\", LLVM_ENABLE_ICU = \"OFF\", LLVM_ENABLE_ICONV = \"OFF\", \
-                   LLVM_ENABLE_Z3_SOLVER = \"OFF\", LLD_USE_VTUNE = \"OFF\" }\n";
+                   LLVM_ENABLE_Z3_SOLVER = \"OFF\" }\n";
         assert!(config.contains(&format!("\n{off}")), "{config}");
     }
 
