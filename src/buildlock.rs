@@ -973,6 +973,7 @@ pub(crate) mod tests {
     fn git(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(crate::pr::tests::NO_AUTO_MAINTENANCE)
             .args(args)
             .current_dir(dir)
             .status()

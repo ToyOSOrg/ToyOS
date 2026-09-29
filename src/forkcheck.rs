@@ -767,11 +767,7 @@ mod tests {
     fn remote(case: &Path, branch: &str) -> (PathBuf, String) {
         let dir = case.join("widget");
         sh(case, &["init", "-q", "-b", branch, "widget"]);
-        sh(&dir, &["config", "user.email", "t@t"]);
-        sh(&dir, &["config", "user.name", "t"]);
-        // The host's global config signs every commit, and a test that waited
-        // on gpg would be a test that hangs.
-        sh(&dir, &["config", "commit.gpgsign", "false"]);
+        crate::pr::tests::configure(&dir);
         let head = commit(&dir, "one");
         (dir, head)
     }
@@ -954,9 +950,7 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let rust = root.join("rust");
         sh(&rust, &["init", "-q"]);
-        sh(&rust, &["config", "user.email", "t@t"]);
-        sh(&rust, &["config", "user.name", "t"]);
-        sh(&rust, &["config", "commit.gpgsign", "false"]);
+        crate::pr::tests::configure(&rust);
         fs::write(
             rust.join(".gitmodules"),
             format!(

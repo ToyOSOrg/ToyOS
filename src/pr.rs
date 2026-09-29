@@ -433,12 +433,22 @@ pub(crate) mod tests {
     /// and a test that waited on gpg would be a test that hangs. No auto
     /// maintenance: git runs it detached, so a repack started by the last
     /// command still writes into the repository while its `TempDir` is removed.
-    fn configure(dir: &Path) {
+    /// **Every git repository a test anywhere in this crate creates sets
+    /// `maintenance.auto` false** — call this on one made by `init` or `clone`;
+    /// a fixture that passes `-c` on every invocation instead of persisting
+    /// config, because it runs against a repository it does not itself `init`
+    /// or `clone` (a submodule's own store), adds [`NO_AUTO_MAINTENANCE`] to
+    /// that same list instead.
+    pub(crate) fn configure(dir: &Path) {
         sh(dir, &["config", "user.email", "t@t"]);
         sh(dir, &["config", "user.name", "t"]);
         sh(dir, &["config", "commit.gpgsign", "false"]);
         sh(dir, &["config", "maintenance.auto", "false"]);
     }
+
+    /// The `-c` form of [`configure`]'s `maintenance.auto false`, for a
+    /// fixture whose `git` helper already passes `-c` on every invocation.
+    pub(crate) const NO_AUTO_MAINTENANCE: [&str; 2] = ["-c", "maintenance.auto=false"];
 
     pub(crate) fn sh(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
