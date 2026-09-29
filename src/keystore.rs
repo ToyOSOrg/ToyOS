@@ -14,6 +14,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::buildlock::{self, Guard, Keyed};
 use crate::sysroot::git_out;
@@ -33,12 +34,15 @@ pub fn record(root: &Path, kind: Keyed, key: &str) {
     record_by(root, kind, key, |path, key| fs::write(path, key).unwrap_or_else(|e| panic!("write {}: {e}", path.display())));
 }
 
+static TEMPS: AtomicU64 = AtomicU64::new(0);
+
 /// [`record`], writing with `write`, so a test can stop it.
 fn record_by(root: &Path, kind: Keyed, key: &str, write: impl FnOnce(&Path, &str)) {
     let path = record_path(root, kind);
     let dir = path.parent().expect("a file under target/");
     fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-    let written = path.with_extension("new");
+    // Its own name: concurrent writers of one record never share a temp file.
+    let written = path.with_extension(format!("{}.{}.new", std::process::id(), TEMPS.fetch_add(1, Ordering::Relaxed)));
     write(&written, key);
     fs::rename(&written, &path).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", written.display(), path.display()));
 }
@@ -245,6 +249,24 @@ mod tests {
         assert_eq!(recorded(&root, Keyed::Llvm).as_deref(), Some("0123456789abcdef"), "a record stopped mid-write was read");
         record(&root, Keyed::Llvm, "fedcba9876543210");
         assert_eq!(recorded(&root, Keyed::Llvm).as_deref(), Some("fedcba9876543210"));
+    }
+
+    /// Concurrent records of one kind never share a temp file, so none fails
+    /// and the record holds one of the keys written whole.
+    #[test]
+    fn concurrent_records_of_one_kind_all_land() {
+        let root = TempDir::new("race");
+        let keys: Vec<String> = (0..8).map(|i| format!("{i:016x}")).collect();
+        for _ in 0..50 {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = keys.iter().map(|key| s.spawn(|| record(&root, Keyed::Llvm, key))).collect();
+                for h in handles {
+                    h.join().expect("a concurrent record panicked");
+                }
+            });
+            let got = recorded(&root, Keyed::Llvm).unwrap();
+            assert!(keys.contains(&got), "the record holds {got:?}, none of the keys written");
+        }
     }
 
     /// **A retire stopped halfway leaves nothing at the name it removes**: what

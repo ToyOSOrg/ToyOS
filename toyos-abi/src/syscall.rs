@@ -686,7 +686,11 @@ pub struct RealTime {
 pub struct Stat {
     pub file_type: FileType,
     pub size: u64,
-    /// Last modification time (nanoseconds since boot).
+    /// When the file was last written: nanoseconds since the Unix epoch, UTC,
+    /// off the wall clock at the write, to the resolution its mount keeps —
+    /// the nanosecond on `/tmp` and DATA, two seconds at the flush on FAT. 0 is
+    /// undated: written on a machine whose RTC never answered, or shipped in
+    /// ROOT's reproducible image.
     pub mtime: u64,
 }
 

@@ -15,10 +15,14 @@ struct stat {
     off_t st_size;
     blksize_t st_blksize;
     blkcnt_t st_blocks;
-    time_t st_atime;
-    time_t st_mtime;
-    time_t st_ctime;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
 };
+
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
 
 #define S_IFMT   0170000
 #define S_IFSOCK 0140000

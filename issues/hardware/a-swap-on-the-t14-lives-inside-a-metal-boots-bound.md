@@ -21,7 +21,7 @@ from netd's first lease (20.9 s of boot time on run 122) to the runner's
 then a flash. Under QEMU the loop has no such bound.
 
 Nothing here is wrong: the bounds are what keep an unattended machine from
-needing a hand. What is owed is a decision: a boot staged for the swap loop
-whose hold is not the runner's — longer, or held until the host lets it go
-over the cable — with the kernel's deadline widened to match, and a ruling on
-what bounds such a boot instead.
+needing a hand. The ruling: a host-renewed lease over the cable bounds a session
+boot, replacing the fixed 60 s runner bound for session boots. The host renews
+the lease while it holds the session, and when the lease expires the T14's
+watchdog resets it, so a host that goes away hands the machine back on its own.
