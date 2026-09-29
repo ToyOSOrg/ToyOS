@@ -18,7 +18,7 @@ iced = "0.14"
 
 [workspace]
 
-# The forks iced's graph reaches on ToyOS (`forks.toml`), and the tree's own
+# The forks iced's graph reaches on ToyOS, and the tree's own
 # SDK crates.
 [patch.crates-io]
 toyos-abi = { path = "../../toyos-abi" }

@@ -815,9 +815,9 @@ mod tests {
         let short = toyos_tmpdir::TempDir::new("left-behind-short");
         std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
         assert!(left_behind(&tmp, &short, &[]).is_ok());
-        std::fs::create_dir(tmp.join("forkcheck-1-current")).unwrap();
+        std::fs::create_dir(tmp.join("stale-1-current")).unwrap();
         let refusal = left_behind(&tmp, &short, &[]).expect_err("a directory left behind is a red");
-        assert!(refusal.contains("forkcheck-1-current"), "{refusal}");
+        assert!(refusal.contains("stale-1-current"), "{refusal}");
     }
 
     /// A short root whose process died while the steps ran is named; one already

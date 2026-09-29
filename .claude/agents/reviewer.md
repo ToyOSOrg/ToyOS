@@ -70,6 +70,12 @@ above; otherwise it is a NOTE.
   unless a hardware document mandates that time and offers no notification, cited at the site.
   Wait on the event itself, bounded by a timeout that fails loudly. Defensive code that hides a
   failure instead of failing fast is a BLOCKER too.
+- **Forks.** A fork change that is not upstream-mergeable is a BLOCKER: ToyOS enters as a new platform, a
+  cross-platform change is written as upstream would accept it, and a path dependency on a ToyOS crate
+  is never mergeable. A pull request that changes a fork's consumed commit changes it in every lockfile and
+  gitlink that names that branch; one it leaves behind is a BLOCKER. In `rust/`: any `library/alloc` or `library/core` delta, a cross-platform semantic change, a
+  `change_tracker` entry with no upstream PR number, a copied unmerged upstream PR. A search for
+  callers that skipped the fork clones and `~/.cargo/git/checkouts/` searched part of the tree.
 
 ## Prose is removed, never reviewed
 

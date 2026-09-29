@@ -16,7 +16,6 @@ pub mod firmware;
 #[cfg(test)]
 pub mod gitfixture;
 pub mod flags;
-pub mod forkcheck;
 pub mod hostws;
 pub mod icmp;
 pub mod identity;
