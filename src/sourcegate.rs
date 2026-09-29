@@ -7,7 +7,7 @@
 //! architecture (`src/clippy.rs`) — so a `clippy.toml` is no longer a wall
 //! with nothing behind it.
 //!
-//! What is behind it is still not these six scans. `disallowed-methods` could
+//! `disallowed-methods` could
 //! take the first one, and would lose what makes it useful: the exceptions
 //! below are per file *and per line count*, so an added `mem::forget` beside a
 //! permitted one reds, which a name-based allow list cannot express. So the first scan bans, over
@@ -21,37 +21,6 @@
 //!
 //! The exceptions are per file and per line count, so an *added* `forget`
 //! beside a permitted one is a red rather than a silence.
-//!
-//! The fourth names two files, the pipe ring and the user-copy windows, where a
-//! slice or an exclusive reference would claim what the mapping does not give.
-//!
-//! The fifth and sixth are the dependency bar, and each closes a spelling
-//! rather than the rule behind it — say what they close, because a scan over
-//! Rust source cannot say more. The fifth reads the text `Command::new(` and
-//! refuses an argument no row declares, with every non-literal argument pinned
-//! to a file and a count; beside it, a one-line `use`/`type` rename of
-//! `Command` after any visibility is refused, because such a line makes every
-//! row unreachable at once. The sixth reads every committed file that carries
-//! a NUL, plus everything under `assets/`, against the digest `NOTICE` records.
-//!
-//! The seventh is the third-party C corpus, and it is a text scan over one
-//! licence file rather than over Rust: it reads the per-population counts
-//! `tests/testcases/LICENSE` states, counts what `git` tracks under each
-//! population, and refuses the one case `NOTICE` names as not to be
-//! re-imported. An arrival, a deletion and that name are what it closes; no
-//! file's provenance is what it does not.
-//!
-//! The eighth and ninth are the same bar over `.github/`: one cuts every
-//! workflow, script and container recipe into shell commands and refuses a
-//! package no row declares, the other reads `uses:`.
-//!
-//! The tenth is the architecture rules, [`ARCH_RULES`]: each a set of
-//! spellings — assembly and `core::arch` intrinsics, `target_arch`, a path into
-//! one architecture's module — stated as the only places they may appear, so an
-//! architecture is chosen in one place and reached only through the arch
-//! interface. A declared exception is a file row that points at the issue
-//! holding what it owes, and one that no longer holds a needle is refused.
-//! The rust fork's std is `src/forkcheck.rs`'s to govern and is not read here.
 //!
 //! **What none of them reaches is filed rather than implied**, and each table's
 //! own doc names its half: the entries under `issues/build/` say so.
