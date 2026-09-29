@@ -614,20 +614,17 @@ mod checks {
         audio::judges_verdict()
     }
 
-    /// The exact call `main` makes for `--metal`'s dispatch: `metal_mode`'s
-    /// answer, unmodified, straight into `metal::run`. `main` no longer holds
-    /// any decision between the two, so this covers what it does with one the
-    /// same way calling `main` itself would — without booting a guest and
-    /// without either compiling or touching the corpus `main` builds first.
-    /// `blackbox_unclaimed_page` stands in for it: a real registration with a
-    /// boot `tests/metal-profile.toml` already prices, so batching and sizing
-    /// run for real and `List` is not exercised against an empty selection
-    /// its own "nothing to run" refusal would answer the same way.
+    /// `blackbox_unclaimed_page` is a registration `tests/metal-profile.toml` already prices,
+    /// so sizing and batching run for real.
     #[test]
     fn metal_list_never_reaches_the_machine_through_mains_own_dispatch() -> Result<(), String> {
         let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
-        let mode = testargs::metal_mode(&args)
+        let mode = testargs::parse(&args)?
+            .metal
             .ok_or_else(|| "--metal --list resolved to no mode at all".to_string())?;
+        if mode != testargs::MetalMode::List {
+            return Err(format!("--metal --list resolved to {mode:?}"));
+        }
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
             .iter()
             .find(|(name, _)| *name == "blackbox_unclaimed_page")

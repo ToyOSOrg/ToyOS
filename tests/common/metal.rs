@@ -805,8 +805,6 @@ fn fingerprint(text: &str) -> u64 {
     h.finish()
 }
 
-/// The invocation that turns one image into one readback. Written down in the
-/// staged request and run by [`MetalMode::Drive`], so the two cannot differ.
 /// Where a talking boot's key lives, beside its image.
 fn talk_home(home: &Path) -> PathBuf {
     home.join("ssh")
@@ -907,10 +905,6 @@ pub enum Verdict {
 }
 
 /// The whole metal profile: batch, build, drive, judge, report.
-/// [`MetalMode::List`] shares every step through sizing and batching with the
-/// other two modes — including the same "nothing to run" refusal — and then
-/// returns before an image is built or the machine is touched, so an empty
-/// selection answers the same way whether or not it was ever going to drive.
 // Each argument is one of the suite's own flags or tables, passed through
 // once; a struct holding them would be a second name for the command line.
 #[allow(clippy::too_many_arguments)]
@@ -976,14 +970,16 @@ pub fn run(
         return Verdict::Red;
     }
 
-    if let MetalMode::List = mode {
-        for (label, batch) in &batches {
-            println!("{label}: {} job(s) — {:?}", batch.jobs.len(), batch.jobs);
+    let (dir, offline): (PathBuf, bool) = match &mode {
+        MetalMode::List => {
+            for (label, batch) in &batches {
+                println!("{label}: {} job(s) — {:?}", batch.jobs.len(), batch.jobs);
+            }
+            return Verdict::Green;
         }
-        return Verdict::Green;
-    }
-    let dir: PathBuf =
-        if let MetalMode::Offline(dir) = &mode { dir.clone() } else { root.join("target/metal") };
+        MetalMode::Offline(dir) => (dir.clone(), true),
+        MetalMode::Drive => (root.join("target/metal"), false),
+    };
     let dir = dir.as_path();
 
     // A directory holding a readback for every boot is a run the machine has
@@ -991,7 +987,7 @@ pub fn run(
     let answered = batches.keys().all(|label| {
         at(dir, label).join(toyos_build::metal::READBACK_KERNEL).is_file()
     });
-    let judging = matches!(mode, MetalMode::Offline(_)) && answered;
+    let judging = offline && answered;
 
     let mut images: BTreeMap<&str, PathBuf> = BTreeMap::new();
     if !judging {
@@ -1019,7 +1015,7 @@ pub fn run(
         }
     }
 
-    if matches!(mode, MetalMode::Offline(_)) && !judging {
+    if offline && !judging {
         let mut request = String::from(
             "# One boot per image. Each invocation is `cargo <words>` from this worktree.\n",
         );
@@ -1058,7 +1054,7 @@ pub fn run(
     // and a boot it refused wrote no readback of its own — so a directory still
     // holding files after one is holding somebody else's boot.
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
-    if mode == MetalMode::Drive {
+    if !offline {
         for (label, image) in &images {
             let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
             // A swapping boot's second invocation is started first: it dials

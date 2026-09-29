@@ -17151,13 +17151,15 @@ fn main() {
     // First, before any lock and before anything is compiled: a flag this suite
     // does not have would otherwise cost nothing and hand its value to the
     // filter below.
-    let filter = match toyos_build::testargs::parse(&args) {
-        Ok(filter) => filter,
+    let parsed = match toyos_build::testargs::parse(&args) {
+        Ok(parsed) => parsed,
         Err(refusal) => {
             eprintln!("[toyos] {refusal}");
             std::process::exit(1);
         }
     };
+    let filter = parsed.filter;
+    let metal_dispatch = parsed.metal;
     // The one selection every entry point below takes, the metal's included: a
     // disabled test runs nowhere, and every run names each one with its issue.
     for row in redlist::DISABLED {
@@ -17173,11 +17175,6 @@ fn main() {
     // var is invisible in the command line and easy to leave set, and the whole
     // point of the split is that a run says what it ran.
     let reach = Reach::of(&args);
-    // `None` is not this run's business at all; a mode carries whatever it
-    // needs — `Offline`'s own directory included — straight into
-    // `metal::run`, which is the one place that decides what it does with the
-    // machine.
-    let metal_dispatch = testargs::metal_mode(&args);
     let nocapture =
         SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
@@ -17257,10 +17254,6 @@ fn main() {
         let mut boots = shared_metal(&rust_bins, keep);
         boots.push(c_corpus_metal(&c_bins, keep));
 
-        // `mode` goes into `metal::run` exactly as `metal_mode` resolved it —
-        // no branch here recomputes it, so there is nothing left in this file
-        // that could pick a different one than the argv named.
-        //
         // Three statuses for the three things this can establish, as the
         // ordinary suite has: green, red, and "measured nothing" — a run that
         // staged images and never reached the machine has no claim to make.

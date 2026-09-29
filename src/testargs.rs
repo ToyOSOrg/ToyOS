@@ -167,12 +167,19 @@ declare_flags!(pub SUITE = {
     pub HOLD = "--hold", Next;
 });
 
-/// Validate the harness's argv and return the run's filter.
+/// The run's filter and `--metal`'s mode, both decided by [`parse`] off one
+/// walk of argv: an unknown flag refuses the line before either is read.
+pub struct Parsed<'a> {
+    pub filter: Option<&'a str>,
+    pub metal: Option<MetalMode>,
+}
+
+/// Validate the harness's argv and return the run's filter and metal mode.
 ///
 /// `Err` is a refusal to print and exit on. It is asked before the sysroot lock
 /// and before anything is compiled, so a stale command line costs a message
 /// rather than a queue behind it.
-pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
+pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
     let line = SUITE.walk(args);
     if let Some(word) = line.unknown {
         return Err(format!(
@@ -237,12 +244,22 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
                 .to_string(),
         );
     }
-    Ok(filter)
+
+    let metal = has(&METAL).then(|| {
+        if has(&LIST) {
+            MetalMode::List
+        } else {
+            match SUITE.value(args, &METAL_READBACK) {
+                Some(dir) => MetalMode::Offline(PathBuf::from(dir)),
+                None => MetalMode::Drive,
+            }
+        }
+    });
+
+    Ok(Parsed { filter, metal })
 }
 
-/// What `--metal`'s own flags resolve a run to. The one place that question is
-/// answered, so a future mode flag has one arm to add here rather than a
-/// boolean some later `if` in `tests/toyos.rs` can fall through.
+/// What `--metal`'s own flags resolve a run to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum MetalMode {
     /// `--metal --list`: print what would run, and touch nothing.
@@ -252,23 +269,6 @@ pub enum MetalMode {
     Offline(PathBuf),
     /// `--metal` alone: flash and drive the machine.
     Drive,
-}
-
-/// Resolve [`MetalMode`] from raw argv, or `None` where `--metal` is not on
-/// the line at all — the metal profile is then not this run's business.
-/// `List` is decided before `--metal-readback` is read, so a line naming both
-/// never resolves to `Offline`.
-pub fn metal_mode(args: &[String]) -> Option<MetalMode> {
-    if !SUITE.present(args, &METAL) {
-        return None;
-    }
-    if SUITE.present(args, &LIST) {
-        return Some(MetalMode::List);
-    }
-    Some(match SUITE.value(args, &METAL_READBACK) {
-        Some(dir) => MetalMode::Offline(PathBuf::from(dir)),
-        None => MetalMode::Drive,
-    })
 }
 
 #[cfg(test)]
@@ -281,7 +281,11 @@ mod tests {
     }
 
     fn parse_owned(args: &[&str]) -> Result<Option<String>, String> {
-        parse(&owned(args)).map(|f| f.map(ToString::to_string))
+        parse(&owned(args)).map(|p| p.filter.map(ToString::to_string))
+    }
+
+    fn metal_owned(args: &[&str]) -> Result<Option<MetalMode>, String> {
+        parse(&owned(args)).map(|p| p.metal)
     }
 
     #[test]
@@ -488,10 +492,6 @@ mod tests {
         }
     }
 
-    /// **The one that drives a physical machine.** `metal_mode` resolves a
-    /// readback value of `None` to `MetalMode::Drive` — the T14, booted off a
-    /// stick — so a `--metal-readback` with no directory after it must never
-    /// reach that resolution.
     #[test]
     fn a_readback_flag_with_no_directory_never_reaches_the_metal_driver() {
         let refusal = parse_owned(&["--metal", "--metal-readback"]).unwrap_err();
@@ -552,26 +552,29 @@ mod tests {
         assert!(refusal.contains("add --metal"), "{refusal}");
     }
 
-    /// **The one that must never resolve to a mode that touches the
-    /// machine.** `metal_mode` must answer `List` however else the line
-    /// reads.
     #[test]
     fn metal_and_list_never_drives() {
-        assert_eq!(metal_mode(&owned(&["--metal", "--list"])), Some(MetalMode::List));
+        assert_eq!(metal_owned(&["--metal", "--list"]).unwrap(), Some(MetalMode::List));
         assert_eq!(
-            metal_mode(&owned(&["--metal", "--metal-readback", "target/metal", "--list"])),
+            metal_owned(&["--metal", "--metal-readback", "target/metal", "--list"]).unwrap(),
             Some(MetalMode::List)
         );
     }
 
     #[test]
     fn metal_resolves_to_a_mode_that_reaches_the_machine_only_when_asked() {
-        assert_eq!(metal_mode(&owned(&[])), None);
-        assert_eq!(metal_mode(&owned(&["--metal"])), Some(MetalMode::Drive));
+        assert_eq!(metal_owned(&[]).unwrap(), None);
+        assert_eq!(metal_owned(&["--metal"]).unwrap(), Some(MetalMode::Drive));
         assert_eq!(
-            metal_mode(&owned(&["--metal", "--metal-readback", "target/metal"])),
+            metal_owned(&["--metal", "--metal-readback", "target/metal"]).unwrap(),
             Some(MetalMode::Offline(PathBuf::from("target/metal")))
         );
+    }
+
+    #[test]
+    fn an_unknown_flag_is_refused_before_metal_decides_a_mode() {
+        let refusal = parse_owned(&["--metal", "--bogus", "--list"]).unwrap_err();
+        assert!(refusal.contains("--bogus"), "{refusal}");
     }
 
     #[test]
