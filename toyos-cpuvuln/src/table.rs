@@ -1,6 +1,7 @@
-//! Linux's three CPU tables, row for row: `cpu_vuln_whitelist` and
-//! `cpu_vuln_blacklist` (`common.c:1182-1344`) and `spectre_bad_microcodes`
-//! (`intel.c:141-163`). A lookup is `x86_match_cpu` (`match.c:36-57`): the
+//! Linux's four CPU tables, row for row: `cpu_vuln_whitelist` and
+//! `cpu_vuln_blacklist` (`common.c:1182-1344`), `spectre_bad_microcodes`
+//! (`intel.c:141-163`) and `amd_check_tsa_microcode`'s (`amd.c:472-515`). A
+//! lookup in the first two is `x86_match_cpu` (`match.c:36-57`): the
 //! first row whose vendor, family, model and stepping all match, `0` matching
 //! any.
 //!
@@ -314,4 +315,34 @@ pub(crate) fn bad_spectre_microcode(id: &Ident, microcode: u32) -> bool {
             .iter()
             .find(|&&(model, stepping, _)| model == id.model && stepping == id.stepping)
             .is_some_and(|&(_, _, bad)| microcode <= bad)
+}
+
+/// `amd_check_tsa_microcode` (`amd.c:472-515`): a Zen3 or Zen4 CPU, which
+/// `bsp_init_amd` names from family 0x19 models 0x00 to 0xAF (`amd.c:619-632`),
+/// whose microcode is at or above its row's.
+pub(crate) fn tsa_microcode(id: &Ident, microcode: u32) -> bool {
+    const ROWS: &[(u32, u32)] = &[
+        (0xa0011, 0x0a0011d7),
+        (0xa0012, 0x0a00123b),
+        (0xa0082, 0x0a00820d),
+        (0xa1011, 0x0a10114c),
+        (0xa1012, 0x0a10124c),
+        (0xa1081, 0x0a108109),
+        (0xa2010, 0x0a20102e),
+        (0xa2012, 0x0a201211),
+        (0xa4041, 0x0a404108),
+        (0xa5000, 0x0a500012),
+        (0xa6012, 0x0a60120a),
+        (0xa7041, 0x0a704108),
+        (0xa7052, 0x0a705208),
+        (0xa7080, 0x0a708008),
+        (0xa70c0, 0x0a70c008),
+        (0xaa002, 0x0aa00216),
+    ];
+    if !(id.vendor == Vendor::Amd && id.family == 0x19 && id.model <= 0xAF) {
+        return false;
+    }
+    // `union zen_patch_rev` (`asm/cpu.h:80-90`) above its `rev` byte.
+    let key = (id.family - 0xf) << 16 | (id.model >> 4) << 12 | (id.model & 0xf) << 4 | id.stepping;
+    ROWS.iter().find(|&&(k, _)| k == key).is_some_and(|&(_, min)| microcode >= min)
 }

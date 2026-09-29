@@ -6,7 +6,11 @@
 //! fields), under the default command line and the pinned config. That Linux is
 //! tag `Ubuntu-6.8.0-142.142` (commit 53e5d07aac02) of Ubuntu's noble kernel
 //! with `/boot/config-6.8.0-142-generic`; every `path:line` here is read there,
-//! and `common.c`, `bugs.c`, `intel.c` and `tsx.c` are in `arch/x86/kernel/cpu/`.
+//! and `common.c`, `bugs.c`, `intel.c`, `amd.c` and `tsx.c` are in
+//! `arch/x86/kernel/cpu/`. The config's `CONFIG_CPU_UNRET_ENTRY`,
+//! `CONFIG_CPU_IBPB_ENTRY`, `CONFIG_CPU_SRSO`, `CONFIG_MITIGATION_TSA` and
+//! `CONFIG_MITIGATION_VMSCAPE` are `y`
+//! (`debian.master/config/annotations:3348,3319,3339,8048,411`).
 //!
 //! Parity is exact or refused: an input whose answer rests on something the
 //! facts do not carry is [`Refused`] whole, and a line that does is
@@ -26,7 +30,7 @@ mod tests;
 use table::{
     blacklisted, whitelisted, GDS, ITS, MMIO, MMIO_SBDS, MSBDS_ONLY, NO_BHI,
     NO_EIBRS_PBRSB, NO_ITLB_MULTIHIT, NO_L1TF, NO_MDS, NO_MELTDOWN, NO_MMIO, NO_SPECTRE_V2,
-    NO_SPECULATION, NO_SSB, RETBLEED, RFDS, SRBDS, VMSCAPE,
+    NO_SPECULATION, NO_SSB, RETBLEED, RFDS, SRBDS, SRSO, TSA, VMSCAPE,
 };
 
 /// The vendors Linux's tables name, by CPUID.0's identification string
@@ -73,12 +77,23 @@ pub struct Facts {
     pub cpuid_8000_0008_ebx: u32,
     /// 0 unless CPUID.0x80000000:EAX reaches 0x80000021 (`common.c:1055-1084`).
     pub cpuid_8000_0021_eax: u32,
+    /// 0 unless CPUID.0x80000000:EAX reaches 0x80000021 (`scattered.c:52-53`).
+    pub cpuid_8000_0021_ecx: u32,
     /// `IA32_ARCH_CAPABILITIES` (0x10A), 0 unless CPUID.(7,0):EDX[29]
     /// enumerates it (`common.c:1353-1361`): the read is `#GP` there.
     pub arch_capabilities: u64,
     /// `IA32_MCU_OPT_CTRL` (0x123), present exactly where
     /// `ARCH_CAPABILITIES.GDS_CTRL` enumerates it.
     pub mcu_opt_ctrl: Option<u64>,
+    /// Whether `rdmsr` of `MSR_AMD64_LS_CFG` (0xC0011020) completes without
+    /// `#GP`, present exactly where `bsp_init_amd` probes it (`amd.c:576-596`):
+    /// AMD family 0x15 to 0x17 enumerating neither `AMD_SSBD` nor `VIRT_SSBD`.
+    pub ls_cfg_readable: Option<bool>,
+    /// Whether `wrmsr` of `IA32_PRED_CMD` with `SBPB` (bit 7) completes without
+    /// `#GP`, present exactly where `early_init_amd` probes it
+    /// (`amd.c:799-806`): AMD from family 0x19, outside a hypervisor, without
+    /// CPUID's `IBPB_BRTYPE`.
+    pub sbpb_write_accepted: Option<bool>,
     /// More than one thread per core, every sibling online: `sched_smt_active()`,
     /// which under the default command line is also `cpu_smt_possible()`.
     pub smt: bool,
@@ -109,7 +124,15 @@ const CPUID_8000_0008_EBX_AMD_SSBD: u32 = 1 << 24;
 const CPUID_8000_0008_EBX_VIRT_SSBD: u32 = 1 << 25;
 const CPUID_8000_0008_EBX_AMD_SSB_NO: u32 = 1 << 26;
 const CPUID_8000_0008_EBX_BTC_NO: u32 = 1 << 29;
+const CPUID_8000_0021_EAX_VERW_CLEAR: u32 = 1 << 5;
 const CPUID_8000_0021_EAX_AUTOIBRS: u32 = 1 << 8;
+const CPUID_8000_0021_EAX_SBPB: u32 = 1 << 27;
+const CPUID_8000_0021_EAX_IBPB_BRTYPE: u32 = 1 << 28;
+const CPUID_8000_0021_EAX_SRSO_NO: u32 = 1 << 29;
+const CPUID_8000_0021_EAX_SRSO_USER_KERNEL_NO: u32 = 1 << 30;
+const CPUID_8000_0021_EAX_SRSO_BP_SPEC_REDUCE: u32 = 1 << 31;
+const CPUID_8000_0021_ECX_TSA_SQ_NO: u32 = 1 << 1;
+const CPUID_8000_0021_ECX_TSA_L1_NO: u32 = 1 << 2;
 
 // `arch/x86/include/asm/msr-index.h:46-54,101-183,215`.
 const ARCH_CAP_RDCL_NO: u64 = 1 << 0;
@@ -161,13 +184,10 @@ impl Ident {
     }
 }
 
-/// An input whose every line rests on features Linux's vendor code synthesizes
-/// from state the facts do not carry.
+/// An input this crate does not decide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// `amd.c` derives `LS_CFG_SSBD` (576-596), the Zen generations (600-648),
-    /// `TSA_*_NO` and `VERW_CLEAR` (517-530) and `IBPB_BRTYPE` (799-806) from
-    /// the family, the microcode revision and MSR probes, from family 0x15 on.
+    /// Every AMD family from 0x15 but 0x17, 0x19 and 0x1A.
     AmdFamily(u32),
     /// `hygon.c` derives `LS_CFG_SSBD` (228-239) from an MSR probe.
     Hygon,
@@ -385,6 +405,29 @@ pub enum Its {
 pub enum Vmscape {
     None,
     IbpbExitToUser,
+    IbpbOnVmexit,
+}
+
+/// `srso_mitigation` where the CPU has SRSO (`bugs.c:2670-2807`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Srso {
+    /// `SRSO_NO` forced: Zen1/2 with the IBPB microcode and no SMT.
+    SmtDisabled,
+    UcodeNeeded,
+    /// The safe-RET return thunk without the IBPB microcode.
+    SafeRetUcodeNeeded,
+    /// The safe-RET return thunk: `srso_alias_return_thunk` on family 0x19,
+    /// `srso_return_thunk` otherwise.
+    SafeRet,
+    IbpbOnVmexit,
+    BpSpecReduce,
+}
+
+/// `tsa_mitigation` where the CPU has TSA (`bugs.c:2918-2962`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tsa {
+    UcodeNeeded,
+    Full,
 }
 
 /// The bugs `cpu_set_bug_bits` (`common.c:1414-1578`) sets that a line or a
@@ -409,13 +452,15 @@ struct Bugs {
     bhi: bool,
     vmscape: bool,
     its: bool,
+    srso: bool,
+    tsa: bool,
     meltdown: bool,
     l1tf: bool,
 }
 
 /// The features Linux has when it selects, after `init_speculation_control`
-/// (`common.c:973-1012`) and `early_init_intel`'s microcode check
-/// (`intel.c:296-309`).
+/// (`common.c:973-1012`), `early_init_intel`'s microcode check
+/// (`intel.c:296-309`) and `bsp_init_amd`'s `LS_CFG_SSBD` (`amd.c:576-596`).
 struct Caps {
     hypervisor: bool,
     ibrs: bool,
@@ -445,6 +490,11 @@ pub struct Decision {
     pub gds: Option<Gds>,
     pub its: Its,
     pub vmscape: Vmscape,
+    pub srso: Option<Srso>,
+    pub tsa: Option<Tsa>,
+    /// `x86_pred_cmd` is `PRED_CMD_SBPB` rather than `PRED_CMD_IBPB`
+    /// (`bugs.c:2677-2678`).
+    pub sbpb: bool,
     /// `CLEAR_CPU_BUF`: `verw` on every return to user.
     pub clear_cpu_buf: bool,
     /// `EFER.AUTOIBRS` in place of `SPEC_CTRL.IBRS`.
@@ -458,8 +508,7 @@ pub struct Decision {
     smt: bool,
 }
 
-/// `cpu_set_bug_bits` (`common.c:1414-1578`). SRSO and TSA are set only on the
-/// AMD families and Hygon [`decide`] refuses, and `SWAPGS`, `SMT_RSB` and
+/// `cpu_set_bug_bits` (`common.c:1414-1578`). `SWAPGS`, `SMT_RSB` and
 /// `IBPB_NO_RET` reach no line and no selection here.
 fn bug_bits(f: &Facts, id: &Ident, caps: &Caps, arch: u64) -> Bugs {
     let mut b = Bugs {
@@ -511,6 +560,14 @@ fn bug_bits(f: &Facts, id: &Ident, caps: &Caps, arch: u64) -> Bugs {
         && id.vendor == Vendor::Intel
         && f.cpuid_7_2_edx & CPUID_7_2_EDX_BHI_CTRL == 0
         && (caps.hypervisor || blacklisted(id, ITS));
+    b.srso = f.cpuid_8000_0021_eax & CPUID_8000_0021_EAX_SRSO_NO == 0 && blacklisted(id, SRSO);
+    // `tsa_init`'s forced `TSA_*_NO` (`amd.c:517-530`) reaches no family the
+    // TSA row names, and the Zen-guest clause reads `X86_FEATURE_ZEN`, which
+    // `init_amd` sets (`amd.c:1039`) from `identify_cpu` (`common.c:1997-1998`),
+    // after `early_identify_cpu` has run this (`common.c:1732`).
+    b.tsa = f.cpuid_8000_0021_ecx & (CPUID_8000_0021_ECX_TSA_SQ_NO | CPUID_8000_0021_ECX_TSA_L1_NO)
+        != CPUID_8000_0021_ECX_TSA_SQ_NO | CPUID_8000_0021_ECX_TSA_L1_NO
+        && blacklisted(id, TSA);
     if whitelisted(id, NO_MELTDOWN) || arch & ARCH_CAP_RDCL_NO != 0 {
         return b;
     }
@@ -539,16 +596,20 @@ fn disable_kernel_rrsba(f: &Facts, arch: u64, spec_ctrl: &mut u64, rrsba_disable
 /// and what it reads.
 ///
 /// Panics where the facts contradict their own documentation: an
-/// `arch_capabilities` read without CPUID.(7,0):EDX[29], or an `mcu_opt_ctrl`
-/// present where `GDS_CTRL` does not say so, or absent where it does.
+/// `arch_capabilities` read without CPUID.(7,0):EDX[29], or an `mcu_opt_ctrl`,
+/// `ls_cfg_readable` or `sbpb_write_accepted` present where Linux does not read
+/// it, or absent where it does.
 pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
     let f = facts;
     let id = Ident::new(f.vendor, f.signature);
     match id.vendor {
-        Vendor::Amd if id.family >= 0x15 => return Err(Refused::AmdFamily(id.family)),
+        Vendor::Amd if id.family >= 0x15 && !matches!(id.family, 0x17 | 0x19 | 0x1A) => {
+            return Err(Refused::AmdFamily(id.family));
+        }
         Vendor::Hygon => return Err(Refused::Hygon),
         _ => {}
     }
+    let amd = id.vendor == Vendor::Amd;
     assert!(
         f.cpuid_7_0_edx & CPUID_7_0_EDX_ARCH_CAPABILITIES != 0 || f.arch_capabilities == 0,
         "ARCH_CAPABILITIES {:#x} without CPUID.(7,0):EDX[29]",
@@ -563,7 +624,20 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
 
     let edx7 = f.cpuid_7_0_edx;
     let ebx8 = f.cpuid_8000_0008_ebx;
+    let eax21 = f.cpuid_8000_0021_eax;
     let hypervisor = f.cpuid_1_ecx & CPUID_1_ECX_HYPERVISOR != 0;
+    let amd_ssbd = ebx8 & (CPUID_8000_0008_EBX_VIRT_SSBD | CPUID_8000_0008_EBX_AMD_SSBD) != 0;
+    assert_eq!(
+        f.ls_cfg_readable.is_some(),
+        amd && (0x15..=0x17).contains(&id.family) && !amd_ssbd,
+        "MSR_AMD64_LS_CFG is probed exactly where amd.c:576-578 probes it"
+    );
+    let brtype_enumerated = eax21 & CPUID_8000_0021_EAX_IBPB_BRTYPE != 0;
+    assert_eq!(
+        f.sbpb_write_accepted.is_some(),
+        amd && id.family >= 0x19 && !hypervisor && !brtype_enumerated,
+        "PRED_CMD.SBPB is probed exactly where amd.c:799-802 probes it"
+    );
     let spec_ctrl_bit = edx7 & CPUID_7_0_EDX_SPEC_CTRL != 0;
     let intel_stibp = edx7 & CPUID_7_0_EDX_INTEL_STIBP != 0;
     let mut caps = Caps {
@@ -572,9 +646,17 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         ibpb: spec_ctrl_bit || ebx8 & CPUID_8000_0008_EBX_AMD_IBPB != 0,
         stibp: intel_stibp || ebx8 & CPUID_8000_0008_EBX_AMD_STIBP != 0,
         ssbd: edx7 & CPUID_7_0_EDX_SPEC_CTRL_SSBD != 0
-            || ebx8 & (CPUID_8000_0008_EBX_VIRT_SSBD | CPUID_8000_0008_EBX_AMD_SSBD) != 0,
-        autoibrs: f.cpuid_8000_0021_eax & CPUID_8000_0021_EAX_AUTOIBRS != 0,
+            || amd_ssbd
+            || f.ls_cfg_readable == Some(true),
+        autoibrs: eax21 & CPUID_8000_0021_EAX_AUTOIBRS != 0,
     };
+    // `early_init_amd` (`amd.c:799-806`).
+    let native_brtype = amd
+        && !hypervisor
+        && ((id.family == 0x17 && ebx8 & CPUID_8000_0008_EBX_AMD_IBPB != 0)
+            || f.sbpb_write_accepted == Some(true));
+    let ibpb_brtype = brtype_enumerated || native_brtype;
+    let sbpb = eax21 & CPUID_8000_0021_EAX_SBPB != 0 || f.sbpb_write_accepted == Some(true);
     if id.vendor == Vendor::Intel
         && !hypervisor
         && (spec_ctrl_bit || intel_stibp || caps.ibrs || caps.ibpb || caps.stibp)
@@ -750,10 +832,50 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         }
     });
 
+    // `srso_select_mitigation` (`bugs.c:2670-2807`) under its default
+    // `SRSO_CMD_SAFE_RET`; `retbleed` is never `IBPB` here.
+    let srso = bugs.srso.then_some(
+        if ibpb_brtype && id.family < 0x19 && !f.smt {
+            Srso::SmtDisabled
+        } else if eax21 & CPUID_8000_0021_EAX_SRSO_USER_KERNEL_NO != 0 {
+            if eax21 & CPUID_8000_0021_EAX_SRSO_BP_SPEC_REDUCE != 0 {
+                Srso::BpSpecReduce
+            } else if ibpb_brtype {
+                Srso::IbpbOnVmexit
+            } else {
+                Srso::UcodeNeeded
+            }
+        } else if ibpb_brtype {
+            Srso::SafeRet
+        } else {
+            Srso::SafeRetUcodeNeeded
+        },
+    );
+    let sbpb = !bugs.srso && sbpb;
+
     let its = if bugs.its && spectre_v2 != SpectreV2::None { Its::AlignedThunks } else { Its::Off };
 
-    let vmscape =
-        if bugs.vmscape && caps.ibpb { Vmscape::IbpbExitToUser } else { Vmscape::None };
+    // `tsa_select_mitigation` (`bugs.c:2918-2962`) and `tsa_init`'s
+    // `VERW_CLEAR` (`amd.c:517-530`).
+    let tsa = bugs.tsa.then(|| {
+        let verw_clear = eax21 & CPUID_8000_0021_EAX_VERW_CLEAR != 0
+            || (!hypervisor && table::tsa_microcode(&id, f.microcode));
+        if verw_clear {
+            clear_cpu_buf = true;
+            Tsa::Full
+        } else {
+            clear_cpu_buf |= hypervisor;
+            Tsa::UcodeNeeded
+        }
+    });
+
+    let vmscape = if !(bugs.vmscape && caps.ibpb) {
+        Vmscape::None
+    } else if srso == Some(Srso::IbpbOnVmexit) {
+        Vmscape::IbpbOnVmexit
+    } else {
+        Vmscape::IbpbExitToUser
+    };
 
     Ok(Decision {
         tsx,
@@ -772,6 +894,9 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         gds,
         its,
         vmscape,
+        srso,
+        tsa,
+        sbpb,
         clear_cpu_buf,
         efer_autoibrs,
         spec_ctrl,
@@ -822,13 +947,13 @@ impl Line<'_> {
         if d.ibrs_fw {
             f.write_str("; IBRS_FW")?;
         }
-        // `stibp_state` (`bugs.c:3174-3193`).
+        // `stibp_state` (`bugs.c:3174-3193`); `Prctl` is selected only with SMT,
+        // which is what enables `switch_to_cond_stibp`.
         if !(d.spectre_v2 == SpectreV2::Eibrs && !d.autoibrs) {
             f.write_str(match d.stibp {
                 Stibp::None => "; STIBP: disabled",
                 Stibp::StrictPreferred => "; STIBP: always-on",
-                Stibp::Prctl if d.smt => "; STIBP: conditional",
-                Stibp::Prctl => "",
+                Stibp::Prctl => "; STIBP: conditional",
             })?;
         }
         // `RSB_CTXSW` (`bugs.c:1741-1789`).
@@ -873,8 +998,8 @@ impl fmt::Display for Line<'_> {
             Vuln::RegFileDataSampling => b.rfds,
             Vuln::IndirectTargetSelection => b.its,
             Vuln::Vmscape => b.vmscape,
-            // Set only on the CPUs `decide` refuses.
-            Vuln::SpecRstackOverflow | Vuln::Tsa => false,
+            Vuln::SpecRstackOverflow => b.srso,
+            Vuln::Tsa => b.tsa,
         };
         if !affected {
             return f.write_str("Not affected");
@@ -978,9 +1103,22 @@ impl fmt::Display for Line<'_> {
             Vuln::Vmscape => f.write_str(match d.vmscape {
                 Vmscape::None => "Vulnerable",
                 Vmscape::IbpbExitToUser => "Mitigation: IBPB before exit to userspace",
+                Vmscape::IbpbOnVmexit => "Mitigation: IBPB on VMEXIT",
             }),
-            Vuln::L1tf | Vuln::ItlbMultihit | Vuln::SpecRstackOverflow | Vuln::Tsa => {
-                unreachable!("{} is refused or never affected above", self.v.name())
+            Vuln::SpecRstackOverflow => f.write_str(match d.srso.expect("set with the bug") {
+                Srso::SmtDisabled => "Mitigation: SMT disabled",
+                Srso::UcodeNeeded => "Vulnerable: No microcode",
+                Srso::SafeRetUcodeNeeded => "Vulnerable: Safe RET, no microcode",
+                Srso::SafeRet => "Mitigation: Safe RET",
+                Srso::IbpbOnVmexit => "Mitigation: IBPB on VMEXIT only",
+                Srso::BpSpecReduce => "Mitigation: Reduced Speculation",
+            }),
+            Vuln::Tsa => f.write_str(match d.tsa.expect("set with the bug") {
+                Tsa::UcodeNeeded => "Vulnerable: Clear CPU buffers attempted, no microcode",
+                Tsa::Full => "Mitigation: Clear CPU buffers",
+            }),
+            Vuln::L1tf | Vuln::ItlbMultihit => {
+                unreachable!("{} is unmodelled wherever affected", self.v.name())
             }
         }
     }
