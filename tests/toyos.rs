@@ -9386,6 +9386,34 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
     Ok(())
 }
 
+/// The i8042 status register (port 0x64), read through the monitor rather
+/// than a guest `in`: nothing here holds the claim once its process is gone,
+/// and the byte sits in the controller whether or not its line is masked.
+fn isa_status_byte(socket: &Path) -> Result<u8, String> {
+    let read = qemu::QmpMonitor::open(socket).human("i/1xb 0x64");
+    read.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("0x"))
+        .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| format!("the monitor's `i/1xb 0x64` did not answer a byte: {read:?}"))
+}
+
+/// Wait, bounded, for the i8042's output buffer to hold a byte: the key an
+/// injected event carries reaches the controller on QEMU's own clock, not
+/// the harness's, and the census below is only true once it has.
+fn wait_for_obf(socket: &Path, ceiling: Duration) -> Result<(), String> {
+    const OBF: u8 = 1 << 0;
+    let deadline = Instant::now() + ceiling;
+    loop {
+        if isa_status_byte(socket)? & OBF != 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("the i8042's output buffer never held a byte in {ceiling:?}"));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// A `test_rs_isa_grant` role that ran to its end: no ceiling, exit 0, and the
 /// line it prints last.
 fn isa_verdict(result: &TestResult, last: &str) -> Result<(), String> {
@@ -13726,9 +13754,13 @@ fn run_machine_test(
             // The claim went with `device`, which read the controller empty
             // first, so a key now raises line 1 again: masked, it reaches no
             // one, and unmasked it is a second first interrupt on a record the
-            // release cleared. `released` runs after the key has been sent.
+            // release cleared. `released` runs after the byte has reached the
+            // controller — OBF sets whether or not the line stayed masked, so
+            // waiting on it orders the census against QEMU's delivery instead
+            // of the host's scheduling of this harness.
             let socket = qemu.qmp_socket().to_path_buf();
             qemu::qmp_send_keys(&socket, &[("a", true), ("a", false)]);
+            wait_for_obf(&socket, Duration::from_secs(5))?;
             let after = qemu.run_test("test_rs_isa_grant released", Duration::from_secs(30));
             isa_verdict(&after, "isa released:")?;
             const FIRST: &str = "isa: the i8042 took its first interrupt";

@@ -187,12 +187,15 @@ fn crash_report_exception(ctx: &ExceptionContext) {
                     .flatten()
                 {
                     match super::super::pio::refused_port(access) {
-                        port if port == access.port => {
+                        Some(port) if port == access.port => {
                             log!("  {access}, which this process holds no grant for")
                         }
-                        port => log!(
+                        Some(port) => log!(
                             "  {access}, reaching port {port:#06x}, which this process holds no grant for"
                         ),
+                        // The decode named a span the bitmap opens whole: the
+                        // fault is real, but blaming a port in it would be a guess.
+                        None => log!("  {access}, which faulted at a port this decode cannot name"),
                     }
                 }
             }

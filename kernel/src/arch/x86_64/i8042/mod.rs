@@ -591,7 +591,15 @@ pub fn service() {
     // Unconditional and first: an undrained `irq_ring` record keeps
     // `any_pending_self` true, spinning a CPU that never halts.
     let recorded = crate::irq_ring::take(IrqSource::I8042).is_some();
-    if QUARANTINE.load(Ordering::Relaxed) {
+    // `swap`, not `load`: two CPUs racing `service()` must not both see the
+    // flood and both run `quarantine()`. `Relaxed` only has to make the swap
+    // itself exclusive; `quarantine()`'s own writes (`ACTIVE`'s `Release`,
+    // the I/O APIC's mask) carry whatever ordering they separately need. No
+    // guest test forces this: the window this closes was a few instructions
+    // between one atomic load and a later, unsynchronized store, narrower
+    // than anything a scheduler-pass-granularity actuator can straddle
+    // without adding a permanent rendezvous to every pass's hottest path.
+    if QUARANTINE.swap(false, Ordering::Relaxed) {
         quarantine();
         return;
     }
@@ -790,7 +798,6 @@ fn drain() -> Drained {
 /// [`ACTIVE`] holds, so a claim that lands once it is clear routes and unmasks
 /// lines nothing here touches again.
 fn quarantine() {
-    QUARANTINE.store(false, Ordering::Relaxed);
     // The pin is about to be masked, so no health verdict follows this line.
     HEALTH.store(HEALTH_DONE, Ordering::Relaxed);
     // The count, not the intent: the log line is only true if the mask took.

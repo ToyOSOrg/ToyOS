@@ -81,12 +81,13 @@ pub fn switch_to(pid: Option<Pid>) {
 }
 
 /// The first port of `access` this CPU refuses Ring 3, which is the port its
-/// #GP faulted on; the process that faulted is still this CPU's.
-pub fn refused_port(access: PortAccess) -> u16 {
+/// #GP faulted on; the process that faulted is still this CPU's. `None` if
+/// every port in the span is open: the decode named a port the bitmap does
+/// not actually refuse, and the kill record must not guess one.
+pub fn refused_port(access: PortAccess) -> Option<u16> {
     (0..u16::from(access.bytes))
         .map(|i| access.port.wrapping_add(i))
         .find(|&port| !super::percpu::port_open(port))
-        .unwrap_or(access.port)
 }
 
 /// An `in` or `out` as decoded from the bytes at a faulting instruction.
