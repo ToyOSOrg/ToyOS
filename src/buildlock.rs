@@ -960,10 +960,6 @@ pub(crate) mod tests {
         assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some(), "a sweep could not remove a key nobody uses");
     }
 
-    /// A wait of minutes that says one line and then goes silent is
-    /// indistinguishable from a wedge, and an agent kills a wedge. Eight
-    /// landings queued on this lock on 2026-08-07; the ones behind saw nothing
-    /// after their opening line for as long as the queue took.
     #[test]
     fn a_lasting_wait_keeps_saying_so() {
         let root = scratch("heartbeat");
