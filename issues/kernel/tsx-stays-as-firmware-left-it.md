@@ -17,8 +17,10 @@ T14's `CONFIG_X86_INTEL_TSX_MODE_OFF=y`, runs `tsx_init`
 `ARCH_CAPABILITIES.TSX_CTRL_MSR`, sets `RTM_DISABLE | TSX_CPUID_CLEAR`
 (`tsx.c:23-41,189-226`).
 
-**Exit**: S1 of
-`issues/kernel/the-kernel-is-at-least-as-secure-as-linux-on-the-t14.md`
+**Exit**:
+`issues/kernel/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
 carries `tsx_init`'s decision and every CPU applies it; on the T14, ToyOS's
-reads of 0x122, 0x10F and 0x123 equal S0's Linux reads where each exists,
-and dropping the write leaves 0x122 or 0x10F at firmware's value and reds it.
+reads of 0x122, 0x10F and 0x123 equal the Linux reads of
+`issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-are-not-committed.md`
+where each exists, and dropping the write leaves 0x122 or 0x10F at firmware's
+value and reds it.
