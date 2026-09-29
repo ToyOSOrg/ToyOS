@@ -1,6 +1,6 @@
 # ToyOS
 
-An operating system built from scratch in Rust, held to a production-grade engineering bar — the bar is the changes, not yet the product. Modern x86-64 hardware (2020+), UEFI only; ARM64 planned — keep the architecture portable. The quality bar is shipping software: correct, efficient, minimal, zero silent debt. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
+A general-purpose operating system built from scratch in Rust for modern hardware, held to a production-grade engineering bar — the bar is the changes, not yet the product. The proving machines decide the feature set, never the design. x86-64 (2020+), UEFI only; ARM64 runs under QEMU on the development machine, for quick runs and to keep the kernel's architecture clean — no ARM hardware is a target. The quality bar is shipping software: correct, efficient, minimal, zero silent debt. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
 
 ## Where the rest of this lives
 
