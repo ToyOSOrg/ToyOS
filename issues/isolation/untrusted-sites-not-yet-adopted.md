@@ -12,8 +12,7 @@ are the only reads of a used ring in the kernel and hand back `Untrusted<u32>`,
 so `Virtqueue::parse_used` is the only path to an index or a length and it names
 its bound at both. The type has no arithmetic, no `Deref`, no `From`, no cast
 and no accessor; the four `compile_fail` doctests on `Untrusted` are what that
-sentence means, and `src/sourcegate.rs` bans the one shape typing cannot stop
-(`at_most(u64::MAX)` and its four siblings).
+sentence means.
 
 **The rest of the class has not adopted it.** Until a site does, its bound is a
 thing an author has to remember rather than a thing the compiler asks for. Each
