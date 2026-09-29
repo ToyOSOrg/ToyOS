@@ -4,10 +4,7 @@ kind: tooling
 opened: 2026-09-29
 ---
 
-# Open and prepared upstream pull requests for the forks, as `forks.toml` held them
-
-`forks.toml` is gone; these facts were held only there, read from
-`git show origin/main:forks.toml`.
+# Open and prepared upstream pull requests for the forks
 
 - **russh** — Eugeny/russh#782 is open (2026-09-26) and is the `rustcrypto`
   cipher backend alone, on the fork's `rustcrypto-backend` branch. The consumed
