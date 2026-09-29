@@ -15,7 +15,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Command, Stdio};
 
 use toyos_build::bootlog;
 use toyos_build::metalimage;
@@ -822,6 +823,49 @@ fn swap_invocation(home: &Path, service: &str) -> Vec<String> {
     .to_vec()
 }
 
+/// A `toyos-metal` run, its stderr echoed here line by line as it comes and
+/// kept, so the verdict names the refusal it ended on and not only its exit.
+struct Driver {
+    what: &'static str,
+    child: Child,
+    said: std::thread::JoinHandle<String>,
+}
+
+impl Driver {
+    fn start(what: &'static str, root: &Path, words: &[String]) -> Result<Self, String> {
+        let mut child = Command::new("cargo")
+            .args(words)
+            .current_dir(root)
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("{what} could not be started: {e}"))?;
+        let mut stderr = BufReader::new(child.stderr.take().expect("stderr was asked for piped"));
+        let said = std::thread::spawn(move || {
+            let (mut kept, mut line) = (String::new(), Vec::new());
+            while stderr.read_until(b'\n', &mut line).expect("the driver's stderr") > 0 {
+                let text = String::from_utf8_lossy(&line);
+                eprint!("{text}");
+                kept.push_str(&text);
+                line.clear();
+            }
+            kept
+        });
+        Ok(Self { what, child, said })
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        let status = self.child.wait().map_err(|e| format!("{}: {e}", self.what))?;
+        let said = self.said.join().expect("the driver's stderr reader");
+        if status.success() {
+            return Ok(());
+        }
+        Err(match toyos_build::metal::said_refusal(&said) {
+            Some(refusal) => format!("{} exited {status}: {refusal}", self.what),
+            None => format!("{} exited {status} and said no refusal", self.what),
+        })
+    }
+}
+
 fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     let home = at(dir, label);
     let read = |name: &str| -> Result<String, String> {
@@ -1023,29 +1067,15 @@ pub fn run(
             let beside = batches[*label].swap.map(|service| {
                 let words = swap_invocation(&at(dir, label), service);
                 eprintln!("[metal] {label}, beside it: cargo {}", words.join(" "));
-                Command::new("cargo").args(&words).current_dir(&root).spawn()
+                Driver::start("toyos-metal --swap", &root, &words)
             });
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
-            let booted = Command::new("cargo").args(&words).current_dir(&root).status();
-            if let Some(swap) = beside {
-                match swap.and_then(|mut child| child.wait()) {
-                    Ok(status) if status.success() => {}
-                    Ok(status) => {
-                        refused.insert(label, format!("toyos-metal --swap exited {status}"));
-                    }
-                    Err(e) => {
-                        refused.insert(label, format!("toyos-metal --swap: {e}"));
-                    }
-                }
+            let booted = Driver::start("toyos-metal", &root, &words).and_then(Driver::finish);
+            if let Some(Err(why)) = beside.map(|swap| swap.and_then(Driver::finish)) {
+                refused.insert(label, why);
             }
-            match booted {
-                Ok(status) if status.success() => {}
-                Ok(status) => {
-                    refused.insert(label, format!("toyos-metal exited {status}"));
-                }
-                Err(e) => {
-                    refused.insert(label, format!("toyos-metal could not be started: {e}"));
-                }
+            if let Err(why) = booted {
+                refused.insert(label, why);
             }
         }
     }

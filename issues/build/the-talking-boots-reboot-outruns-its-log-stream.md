@@ -33,6 +33,13 @@ first 217 lines, ending at `0.493 ... xHCI: configuration set`;
 `logd: serving this boot's log to 192.168.1.47:54752` at 20.996 s and init's
 `power: the machine stops` at 21.591 s: the stream had 595 ms.
 
+The T14 run of PR #609 at `7d2e15c0` gave the same finding at the same 217th
+line, with 262 ms between the admit and the stop. The stall is at a fixed
+byte count, not a fixed time. netd's I219 drops everything past 15 frames in
+flight (`issues/hardware/netds-i219-drops-a-transmit-burst-past-its-ring.md`),
+and the rest of the stream waits for a retransmit timeout that `reboot` beats.
+`converse` now waits for the record (`metaltalk::hand_back`) as of PR #609.
+
 ## Exit condition
 
 `converse` fires `reboot` only once the stream has carried `Boot: complete`
