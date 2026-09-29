@@ -54,7 +54,7 @@ settles it and decide.
 Glance before every merge: the title and body as `main`'s record, the diff's size against the
 brief's fence, tests added or deleted, CI. Then `gh pr ready` and `gh pr merge --auto --merge`.
 After a landing, sync the primary checkout. When a landing changes how agents work, every running
-agent is told the new way in one line before its next round, and merges main before its final gate.
+agent is told the new way in one line and merges main before its next round.
 A red that is not about the diff is fixed at its owner, never re-run away, and nothing but a defect
 may turn `main` red.
 A fix for a red lands ahead of feature work. A nightly name red three nights running gets an owner

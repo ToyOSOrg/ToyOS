@@ -4,7 +4,7 @@ kind: tooling
 opened: 2026-09-29
 ---
 
-# The owner's flash script runs `diskutil`, and no ledger declares it
+# The owner's flash script runs `diskutil`
 
 `diag/flash.sh` writes an image to a USB stick through `diskutil` and `plutil`,
 which are macOS binaries, and through `shasum`, `dd` and `sudo`. The README's
