@@ -63,16 +63,20 @@ impl Machine {
 
     /// Where this machine's record lives, relative to the repository root.
     pub fn path(&self) -> PathBuf {
-        let mut slug = String::new();
-        for c in format!("{} {}", self.vendor, self.product).chars() {
-            if c.is_ascii_alphanumeric() {
-                slug.push(c.to_ascii_lowercase());
-            } else if !slug.is_empty() && !slug.ends_with('-') {
-                slug.push('-');
-            }
-        }
-        Path::new(DIR).join(format!("{}.toml", slug.trim_end_matches('-')))
+        path(&self.vendor, &self.product)
     }
+}
+
+fn path(vendor: &str, product: &str) -> PathBuf {
+    let mut slug = String::new();
+    for c in format!("{vendor} {product}").chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    Path::new(DIR).join(format!("{}.toml", slug.trim_end_matches('-')))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,12 +114,7 @@ impl Record {
     }
 
     pub fn save(&self, root: &Path) -> Result<PathBuf, String> {
-        let machine = Machine {
-            vendor: self.vendor.clone(),
-            product: self.product.clone(),
-            bios: self.bios.clone(),
-        };
-        let at = root.join(machine.path());
+        let at = root.join(path(&self.vendor, &self.product));
         let text = toml::to_string(self).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(root.join(DIR)).map_err(|e| format!("{DIR}: {e}"))?;
         std::fs::write(&at, text).map_err(|e| format!("{}: {e}", at.display()))?;
