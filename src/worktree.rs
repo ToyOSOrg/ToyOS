@@ -121,28 +121,64 @@ fn add(root: &Path, path: &str) {
     eprintln!("Build it with `cargo run -- --build-only` from {}.", path.display());
 }
 
-/// Never a fetch, never a reset.
+/// Never a fetch, never a reset. Every refusal below runs before either
+/// branch is touched, so a half-made worktree never sits behind one.
 fn create_worktree(root: &Path, path: &Path, name: &str) -> String {
     let branch = format!("wt/{name}");
-    let path = path.to_string_lossy();
-    if ok(root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
-        let sha = short_sha(root, &branch);
-        git(root, &["worktree", "add", &path, &branch]);
-        format!("{branch} (resumed at {sha})")
-    } else if ok(root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
-        let upstream = format!("origin/{branch}");
-        let sha = short_sha(root, &upstream);
-        git(root, &["worktree", "add", "--track", "-b", &branch, &path, &upstream]);
-        format!("{branch} (resumed from {upstream} at {sha})")
+    let upstream = format!("origin/{branch}");
+    let local_exists = ok(root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]);
+    let origin_exists = ok(root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/{upstream}")]);
+    let path_str = path.to_string_lossy();
+    if local_exists {
+        refuse_if_landed(root, &branch);
+        if origin_exists {
+            refuse_if_behind_or_diverged(root, &branch, &upstream);
+        }
+        git(root, &["worktree", "add", &path_str, &branch]);
+        format!("{branch} (resumed at {})", short_sha(path, "HEAD"))
+    } else if origin_exists {
+        refuse_if_landed(root, &upstream);
+        git(root, &["worktree", "add", "--track", "-b", &branch, &path_str, &upstream]);
+        format!("{branch} (resumed from {upstream} at {})", short_sha(path, "HEAD"))
     } else {
-        let sha = short_sha(root, "main");
-        git(root, &["worktree", "add", "-b", &branch, &path, "main"]);
-        format!("{branch} (new, from main at {sha})")
+        git(root, &["worktree", "add", "-b", &branch, &path_str, "main"]);
+        format!("{branch} (new, from main at {})", short_sha(path, "HEAD"))
     }
 }
 
-fn short_sha(root: &Path, rev: &str) -> String {
-    capture(root, &["rev-parse", "--short", rev]).trim().to_string()
+/// Refuse by name, before anything is created, when `resolve` is already
+/// merged into `origin/main`: the same ancestry test [`measure`] uses to call
+/// a worktree landed and offer its build caches back, run here before a
+/// resume would start one from an old tip behind main.
+fn refuse_if_landed(root: &Path, resolve: &str) {
+    assert!(
+        !ok(root, &["merge-base", "--is-ancestor", resolve, "origin/main"]),
+        "{resolve} is already in origin/main; pick a new name for the worktree."
+    );
+}
+
+/// Refuse by name, before anything is created, when the local `branch` is not
+/// at or ahead of its own `upstream`: a resume would otherwise pick the local
+/// tip silently, and the push back would refuse for the same reason, later
+/// and less clearly.
+fn refuse_if_behind_or_diverged(root: &Path, branch: &str, upstream: &str) {
+    if ok(root, &["merge-base", "--is-ancestor", upstream, branch]) {
+        return;
+    }
+    let relation = if ok(root, &["merge-base", "--is-ancestor", branch, upstream]) {
+        "is behind"
+    } else {
+        "has diverged from"
+    };
+    panic!(
+        "{branch} ({}) {relation} {upstream} ({}); merge it first.",
+        short_sha(root, branch),
+        short_sha(root, upstream),
+    );
+}
+
+fn short_sha(dir: &Path, rev: &str) -> String {
+    capture(dir, &["rev-parse", "--short", rev]).trim().to_string()
 }
 
 fn list(root: &Path) {
@@ -537,8 +573,6 @@ mod tests {
         assert!(line.contains("2.0 GiB"), "the offer has to say what it is worth: {line}");
     }
 
-    /// A local `wt/<name>` that has diverged from `main` is resumed at its own
-    /// tip, not reset onto `main`'s.
     #[test]
     fn a_local_branch_is_resumed_at_its_own_commit_not_mains() {
         let (dir, _origin, work) = crate::pr::tests::repo("wtresume-local");
@@ -546,6 +580,8 @@ mod tests {
         git(&work, &["branch", "-qD", "wt"]);
         git(&work, &["checkout", "-qb", "wt/foo", "main"]);
         crate::pr::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        git(&work, &["push", "-q", "-u", "origin", "wt/foo"]);
+        crate::pr::tests::commit(&work, "on-branch-2", "more branch work\n", "more branch work");
         git(&work, &["checkout", "-q", "main"]);
         crate::pr::tests::commit(&work, "on-main", "main moved on\n", "main moved on");
 
@@ -555,15 +591,91 @@ mod tests {
         assert!(summary.contains("resumed at"), "{summary}");
         assert!(!summary.contains("main"), "{summary}");
         let branch_sha = capture(&work, &["rev-parse", "wt/foo"]);
+        let origin_sha = capture(&work, &["rev-parse", "origin/wt/foo"]);
         let worktree_sha = capture(&path, &["rev-parse", "HEAD"]);
         let main_sha = capture(&work, &["rev-parse", "main"]);
-        assert_eq!(worktree_sha, branch_sha, "must resume at the branch's own tip");
+        assert_ne!(branch_sha, origin_sha, "the local tip must be ahead of origin's, or this proves nothing");
+        assert_eq!(worktree_sha, branch_sha, "must resume at the local branch's own tip, not origin's");
         assert_ne!(worktree_sha, main_sha, "must not have been reset onto main");
     }
 
-    /// A branch that exists only as `origin/wt/<name>` — its local worktree
-    /// long since removed and the local branch deleted with it — is recreated
-    /// tracking the remote one, at the remote's commit, without a fetch.
+    /// A local branch already merged into `origin/main` is refused by name
+    /// rather than resumed from its old tip behind main.
+    #[test]
+    fn a_landed_local_branch_is_refused_not_resumed() {
+        let (dir, _origin, work) = crate::pr::tests::repo("wtresume-landed-local");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt"]);
+        git(&work, &["checkout", "-qb", "wt/foo", "main"]);
+        crate::pr::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["merge", "-q", "--no-ff", "wt/foo", "-m", "merge wt/foo"]);
+        git(&work, &["push", "-q", "origin", "main"]);
+
+        let path = dir.join("resumed");
+        let refused = std::panic::catch_unwind(|| {
+            create_worktree(&work, &path, "foo")
+        });
+
+        let panic = refused.expect_err("a landed branch must not be resumed");
+        let message = panic.downcast::<String>().expect("the refusal is formatted");
+        assert!(message.contains("wt/foo"), "{message}");
+        assert!(!path.exists(), "nothing must be created before the refusal");
+    }
+
+    /// A local branch behind its own `origin/wt/<name>` is refused rather than
+    /// resumed at the stale local tip.
+    #[test]
+    fn a_local_branch_behind_origin_is_refused() {
+        let (dir, _origin, work) = crate::pr::tests::repo("wtresume-behind");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt"]);
+        git(&work, &["checkout", "-qb", "wt/foo", "main"]);
+        crate::pr::tests::commit(&work, "first", "first\n", "first");
+        crate::pr::tests::commit(&work, "second", "second\n", "second");
+        git(&work, &["push", "-q", "-u", "origin", "wt/foo"]);
+        git(&work, &["reset", "-q", "--hard", "HEAD~1"]);
+
+        let path = dir.join("resumed");
+        let refused = std::panic::catch_unwind(|| {
+            create_worktree(&work, &path, "foo")
+        });
+
+        let panic = refused.expect_err("a local branch behind its origin counterpart must not resume");
+        let message = panic.downcast::<String>().expect("the refusal is formatted");
+        assert!(message.contains("wt/foo"), "{message}");
+        assert!(message.contains("origin/wt/foo"), "{message}");
+        assert!(message.contains("merge it first"), "{message}");
+        assert!(!path.exists(), "nothing must be created before the refusal");
+    }
+
+    /// A local branch that has diverged from `origin/wt/<name>` — neither is
+    /// an ancestor of the other — is refused rather than resumed silently at
+    /// either side.
+    #[test]
+    fn a_local_branch_diverged_from_origin_is_refused() {
+        let (dir, _origin, work) = crate::pr::tests::repo("wtresume-diverged");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt"]);
+        git(&work, &["checkout", "-qb", "wt/foo", "main"]);
+        crate::pr::tests::commit(&work, "side", "origin side\n", "origin side");
+        git(&work, &["push", "-q", "-u", "origin", "wt/foo"]);
+        git(&work, &["reset", "-q", "--hard", "main"]);
+        crate::pr::tests::commit(&work, "side", "local side\n", "local side");
+
+        let path = dir.join("resumed");
+        let refused = std::panic::catch_unwind(|| {
+            create_worktree(&work, &path, "foo")
+        });
+
+        let panic = refused.expect_err("a diverged local branch must not resume");
+        let message = panic.downcast::<String>().expect("the refusal is formatted");
+        assert!(message.contains("wt/foo"), "{message}");
+        assert!(message.contains("origin/wt/foo"), "{message}");
+        assert!(message.contains("merge it first"), "{message}");
+        assert!(!path.exists(), "nothing must be created before the refusal");
+    }
+
     #[test]
     fn an_origin_only_branch_is_recreated_tracking_it() {
         let (dir, _origin, work) = crate::pr::tests::repo("wtresume-origin");
@@ -585,14 +697,37 @@ mod tests {
         let main_sha = capture(&work, &["rev-parse", "main"]);
         assert_eq!(worktree_sha, origin_sha, "must resume at origin's commit");
         assert_ne!(worktree_sha, main_sha, "must not have been reset onto main");
-        assert!(
-            ok(&work, &["show-ref", "--verify", "--quiet", "refs/heads/wt/bar"]),
-            "a local branch must exist to track with"
-        );
+        let tracked = capture(&work, &["rev-parse", "wt/bar@{upstream}"]);
+        assert_eq!(tracked, origin_sha, "the new local branch must track origin/wt/bar");
     }
 
-    /// Neither a local nor an origin `wt/<name>` exists: today's behaviour,
-    /// branched fresh from `main`.
+    /// A branch already merged into `origin/main` and reachable only as a
+    /// stale `origin/wt/<name>` (its GitHub head long deleted, this checkout
+    /// never fetched to notice) is refused rather than recreated behind main.
+    #[test]
+    fn a_landed_origin_only_branch_is_refused() {
+        let (dir, _origin, work) = crate::pr::tests::repo("wtresume-landed-origin");
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-qD", "wt"]);
+        git(&work, &["checkout", "-qb", "wt/bar", "main"]);
+        crate::pr::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        git(&work, &["push", "-q", "-u", "origin", "wt/bar"]);
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["merge", "-q", "--ff-only", "wt/bar"]);
+        git(&work, &["branch", "-qD", "wt/bar"]);
+        git(&work, &["push", "-q", "origin", "main"]);
+
+        let path = dir.join("resumed");
+        let refused = std::panic::catch_unwind(|| {
+            create_worktree(&work, &path, "bar")
+        });
+
+        let panic = refused.expect_err("a landed origin-only branch must not be resumed");
+        let message = panic.downcast::<String>().expect("the refusal is formatted");
+        assert!(message.contains("origin/wt/bar"), "{message}");
+        assert!(!path.exists(), "nothing must be created before the refusal");
+    }
+
     #[test]
     fn with_neither_branch_it_starts_fresh_from_main() {
         let (dir, _origin, work) = crate::pr::tests::repo("wtresume-fresh");
