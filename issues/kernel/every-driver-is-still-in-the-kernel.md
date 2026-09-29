@@ -20,7 +20,9 @@ holding a physical address is an arbitrary read/write primitive over all of
 memory. `kernel/src/pcidev/mod.rs` is where that ruling is enforced for a
 function a process drives: a claim on one this machine cannot give an address
 space of its own is refused by name, so there is no machine on which a driver
-outside the kernel gets an untranslated address.
+outside the kernel gets an untranslated address. The ruling
+for signed in-image drivers on a machine with no IOMMU is
+`issues/kernel/a-machine-without-an-iommu-refuses-every-claim.md`'s.
 `issues/kernel/the-iommu-refuses-nothing-yet.md` still holds the other half —
 every driver *inside* the kernel holds a domain of its own and the refusal there
 is not built.
