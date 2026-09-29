@@ -244,7 +244,6 @@ loader_watchdog_arms 10064
 locale_detect 9959
 locale_detect_unrecognized 160
 log_backing_read_error 4887
-log_conservation_smp1 4686
 log_flush_retry 20526
 log_nested_emit 5008
 log_partition_identity 9516

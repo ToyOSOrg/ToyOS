@@ -1081,7 +1081,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // them reads a clock. A loaded host makes the producers outrun the reader
     // further, which moves records from `read` into `lost` and leaves the law
     // exactly where it was.
-    ("log_conservation_smp1", Sched::Parallel, Tier::Weekly),
+    ("log_conservation_smp2", Sched::Parallel, Tier::Weekly),
     ("log_nested_emit", Sched::Parallel, Tier::Weekly),
     // The same interrupt one window earlier — between a record's shard-pointer
     // read and its `xadd` — and its negative control, which is the only reader
@@ -10132,8 +10132,8 @@ fn run_machine_test(
         // Body in `tests/common/iommu.rs`, same reason.
         "iommu_discovery" => common::iommu::iommu_discovery(test_config, c_bins, rust_bins),
         // Body in `tests/common/logread.rs`, so the hunk here stays one line.
-        "log_conservation_smp1" => {
-            common::logread::log_conservation_smp1(test_config, c_bins, rust_bins)
+        "log_conservation_smp2" => {
+            common::logread::log_conservation_smp2(test_config, c_bins, rust_bins)
         }
         "log_nested_emit" => common::logread::log_nested_emit(test_config, c_bins, rust_bins),
         "log_reserve_window" => {
