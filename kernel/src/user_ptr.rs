@@ -2,11 +2,11 @@
 //! user memory lands only where a ring 3 store from the process itself could.
 //!
 //! SMAP stays enabled; access goes through the direct map, never stac/clac.
-//! Values are copied out, never referenced. **Every copy goes through
-//! [`window`]**, which pins every frame it covers under the address-space lock
-//! for the copy's life — a typed value's as much as a [`UserBytes`]/
-//! [`UserBytesMut`] buffer's — so a sibling's `munmap` cannot reissue the
-//! backing between the translation and the copy, nor under a copy across a park.
+//! Values are copied out, never referenced. **Every copy pins every frame it
+//! covers** under the address-space lock for the copy's life — [`object_run`]
+//! a typed value's, [`window`] a [`UserBytes`]/[`UserBytesMut`] buffer's — so a
+//! sibling's `munmap` cannot reissue the backing between the translation and
+//! the copy, nor under a copy across a park.
 //! A window is the physical runs its pages sit in, and a buffer's copy is cut at
 //! their seams; a typed value lies inside one 2 MiB page, so in one run.
 //! Every single-word user read is `read_volatile`, including the futex word
@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use toyos_abi::syscall::SyscallError;
-use toyos_userbound::Segment;
+use toyos_userbound::{Pinned, Pins, Segment};
 
 use crate::UserAddr;
 
@@ -93,25 +93,42 @@ pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm
 
 /// A `T` at `ptr` as a pinned window; `is_user_object` keeps it aligned and
 /// inside one 2 MiB page.
-fn object<T: UserSafe>(ptr: UserAddr, access: Access) -> Result<(*mut T, FramePins), SyscallError> {
+fn object<T: UserSafe>(ptr: UserAddr, access: Access) -> Result<(*mut T, FramePins<[Segment; 1]>), SyscallError> {
     let (kptr, pins) = object_run(ptr, core::mem::size_of::<T>(), core::mem::align_of::<T>(), access)?;
     Ok((kptr.cast(), pins))
 }
 
-fn object_run(ptr: UserAddr, size: usize, align: usize, access: Access) -> Result<(*mut u8, FramePins), SyscallError> {
+/// The one run a typed value lies in, pinned, with nothing allocated.
+fn object_run(ptr: UserAddr, size: usize, align: usize, access: Access) -> Result<(*mut u8, FramePins<[Segment; 1]>), SyscallError> {
     if !toyos_userbound::is_user_object(ptr.raw(), size as u64, align as u64) {
         return Err(SyscallError::BadAddress);
     }
-    let pins = window(ptr, size, access).ok_or(SyscallError::BadAddress)?;
-    let [run] = pins.0[..] else { object_split(ptr, size, pins.0.len()) };
+    fault_in(ptr, size, access).ok_or(SyscallError::BadAddress)?;
+    let pt = crate::process::current_address_space();
+    let guard = pt.lock();
+    let mut run = None;
+    toyos_userbound::segments(
+        ptr.raw(),
+        size as u64,
+        |at| guard.leaf(UserAddr::new(at), access),
+        |next| {
+            if run.replace(next).is_some() {
+                window_split(ptr, size)
+            }
+        },
+    )
+    .ok_or(SyscallError::BadAddress)?;
+    let run = run.expect("`segments` emits a run whenever it places the window");
+    let pins = FramePins::pin([run], Pmm).ok_or(SyscallError::BadAddress)?;
+    drop(guard);
     Ok((crate::mm::DirectMap::from_phys(run.phys).as_mut_ptr(), pins))
 }
 
-/// A 2 MiB page is one frame in order, so an object inside one is one run.
+/// A 2 MiB window is one frame in order, so it holds at most one run.
 #[cold]
 #[inline(never)]
-fn object_split(ptr: UserAddr, size: usize, runs: usize) -> ! {
-    panic!("a {size}-byte value at {:#x} inside one 2 MiB page lies in {runs} physical runs", ptr.raw())
+fn window_split(ptr: UserAddr, len: usize) -> ! {
+    panic!("[{:#x}, +{len:#x}) lies in more physical runs than it touches 2 MiB windows", ptr.raw())
 }
 
 /// Context for a single syscall invocation; the lifetime `'a` keeps validated references from escaping it.
@@ -176,7 +193,7 @@ impl<'a> SyscallContext<'a> {
 /// [`sub`](UserBytes::sub) view, which borrows the parent's pins through the
 /// returned lifetime.
 enum Runs<'a> {
-    Pinned(FramePins),
+    Pinned(FramePins<Vec<Segment>>),
     Borrowed(&'a [Segment]),
 }
 
@@ -190,16 +207,16 @@ struct View<'a> {
 impl View<'_> {
     fn window(ptr: UserAddr, len: u64, access: Access) -> Option<Self> {
         let len = len as usize;
-        let pins = match len {
-            0 => FramePins(Vec::new()),
-            _ => window(ptr, len, access)?,
+        let runs = match len {
+            0 => Runs::Borrowed(&[]),
+            _ => Runs::Pinned(window(ptr, len, access)?),
         };
-        Some(View { runs: Runs::Pinned(pins), off: 0, len })
+        Some(View { runs, off: 0, len })
     }
 
     fn runs(&self) -> &[Segment] {
         match &self.runs {
-            Runs::Pinned(pins) => &pins.0,
+            Runs::Pinned(pins) => pins.runs(),
             Runs::Borrowed(runs) => runs,
         }
     }
@@ -336,47 +353,59 @@ impl ByteSource for UserBytes<'_> {
 }
 
 /// A pin on every physical run a user-copy window covers: the PMM reissues none of their frames while it lives, so the window's direct-map pointers stay backed even after a sibling unmaps and frees the range across a park.
-struct FramePins(Vec<Segment>);
+type FramePins<R> = Pinned<R, Pmm>;
 
-impl Drop for FramePins {
-    fn drop(&mut self) {
-        for run in &self.0 {
-            crate::mm::pmm::unpin_range(run.phys, run.len as usize);
-        }
+/// The frame allocator's pins.
+struct Pmm;
+
+impl Pins for Pmm {
+    fn pin(&mut self, run: Segment) -> bool {
+        crate::mm::pmm::pin_range(run.phys, run.len as usize)
+    }
+
+    fn unpin(&mut self, run: Segment) {
+        crate::mm::pmm::unpin_range(run.phys, run.len as usize);
     }
 }
 
-/// Validate `[ptr, ptr+len)` as a user window, walked page by page into its physical runs, and pin every frame they cover. The pins are taken under the address-space lock over a translation that still names each frame, so a concurrent `munmap` — which needs that same lock to free the range — cannot reissue a frame between the confirmation and the pin.
-fn window(ptr: UserAddr, len: usize, access: Access) -> Option<FramePins> {
-    if !toyos_userbound::in_user_half(ptr.raw(), len as u64) {
-        return None;
-    }
-    let start = ptr.raw();
-    let end = start + len as u64;
-    // Fault every page of the range in; what it maps is confirmed under the lock below.
+/// Faults every 2 MiB window `[ptr, ptr + len)` touches in, and answers how
+/// many that is; what they map is confirmed under the lock afterwards.
+fn fault_in(ptr: UserAddr, len: usize, access: Access) -> Option<usize> {
     translate_user(ptr, access)?;
-    let mut boundary = (start & !(crate::mm::PAGE_2M - 1)) + crate::mm::PAGE_2M;
+    let end = ptr.raw() + len as u64;
+    let mut windows = 1;
+    let mut boundary = (ptr.raw() & !(crate::mm::PAGE_2M - 1)) + crate::mm::PAGE_2M;
     while boundary < end {
         translate_user(UserAddr::new(boundary), access)?;
         boundary += crate::mm::PAGE_2M;
+        windows += 1;
     }
-    let pt = crate::process::current_address_space();
-    let guard = pt.lock();
-    let mut runs = Vec::new();
-    toyos_userbound::segments(
-        start,
-        len as u64,
-        |at| translate_now(&guard, UserAddr::new(at), access).map(|dm| dm.phys()),
-        |run| runs.push(run),
-    )?;
-    // Cut back to the runs already pinned on a refusal, which the drop then unpins.
-    if let Some(refused) = runs.iter().position(|run| !crate::mm::pmm::pin_range(run.phys, run.len as usize)) {
-        runs.truncate(refused);
-        drop(FramePins(runs));
+    Some(windows)
+}
+
+/// Validate `[ptr, ptr+len)` as a user window, walked leaf by leaf into its physical runs, and pin every frame they cover. The pins are taken under the address-space lock over a translation that still names each frame, so a concurrent `munmap` — which needs that same lock to free the range — cannot reissue a frame between the confirmation and the pin. Nothing is allocated or freed under the lock but on a refused pin.
+fn window(ptr: UserAddr, len: usize, access: Access) -> Option<FramePins<Vec<Segment>>> {
+    if !toyos_userbound::in_user_half(ptr.raw(), len as u64) {
         return None;
     }
+    let windows = fault_in(ptr, len, access)?;
+    let mut runs = Vec::with_capacity(windows);
+    let pt = crate::process::current_address_space();
+    let guard = pt.lock();
+    toyos_userbound::segments(
+        ptr.raw(),
+        len as u64,
+        |at| guard.leaf(UserAddr::new(at), access),
+        |run| {
+            if runs.len() == windows {
+                window_split(ptr, len)
+            }
+            runs.push(run)
+        },
+    )?;
+    let pins = FramePins::pin(runs, Pmm)?;
     drop(guard);
-    Some(FramePins(runs))
+    Some(pins)
 }
 
 /// `copy-meets-a-remap`: a sibling's `munmap` and `mmap` staged between a

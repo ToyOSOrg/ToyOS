@@ -89,7 +89,7 @@ pub enum Access {
     Write,
 }
 
-/// The smallest leaf, and the grain a user window is walked at.
+/// The grain a split window grants rights at.
 pub const PAGE_4K: u64 = 4096;
 
 #[cfg(test)]

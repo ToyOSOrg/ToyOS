@@ -72,6 +72,10 @@ impl AddressSpace {
         match self.never {}
     }
 
+    pub fn leaf(&self, _vaddr: UserAddr, _access: toyos_userbound::Access) -> Option<(u64, u64)> {
+        match self.never {}
+    }
+
     pub fn alloc_region(&mut self, _size: u64, _kind: RegionKind) -> Option<UserAddr> {
         match self.never {}
     }

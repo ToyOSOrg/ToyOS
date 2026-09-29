@@ -3,10 +3,10 @@
 //! **Before a dereference**: is this
 //! address userland's, is the object at it aligned for the type being read, and
 //! does it lie wholly inside one mapping? **Before a copy**: which physical runs
-//! hold a user window, and which of them does each piece of the copy land in?
-//! **Before a placement**: can a length
-//! userland asked for be placed at all, and where does it go? **After a trap**:
-//! which side did the frame come from?
+//! hold a user window, which of them does each piece of the copy land in, and
+//! is every one of them pinned? **Before a placement**: can a length userland
+//! asked for be placed at all, and where does it go? **After a trap**: which
+//! side did the frame come from?
 //!
 //! [`span`] answers the first, [`segment`] the second, [`place`] the third and
 //! [`fault`] the fourth.
@@ -33,7 +33,7 @@ pub mod span;
 
 pub use fault::Ring;
 pub use place::{PageSpan, Window};
-pub use segment::{pieces, segments, Segment};
+pub use segment::{pieces, segments, Pinned, Pins, Segment};
 pub use span::{
     align_2m_checked, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M,
     PAGE_4K, USER_TOP,
