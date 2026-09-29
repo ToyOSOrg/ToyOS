@@ -12,6 +12,13 @@ write time in two-second units (`kernel/src/fat32_adapter.rs`'s
 `stamp`), so the same file opened again answers the even second: one file,
 two mtimes.
 
-**Exit condition.** A handle holds the mtime its mount stores — rounded to the
-mount's precision at the write — or the kernel mounts no FAT volume a process
-writes.
+**Exit condition.** For a FAT file, the mtime `fstat` answers through a handle
+equals the one it answers after the file is closed and opened again, checked by
+a test that writes, `fstat`s, reopens and `fstat`s again; or the kernel mounts
+no FAT volume a process writes.
+
+**Untested.** `fat32_adapter.rs`'s flush stamps its own instant (`now()`), not
+the flushing handle's `_mtime`, because the last handle to close may be a reader
+that opened before the last write. No test closes a reader last and asserts the
+stored time is the flush's: it waits on `epoch()` moving two seconds, never a
+sleep.

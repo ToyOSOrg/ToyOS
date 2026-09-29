@@ -660,7 +660,6 @@ fn stamp(mtime: u64) -> FatTime {
     FatTime::from_unix_secs(mtime / crate::clock::NANOS_PER_SEC)
 }
 
-/// The wall clock now, as [`stamp`] stores it.
 fn now() -> FatTime {
     stamp(crate::clock::mtime_now())
 }
