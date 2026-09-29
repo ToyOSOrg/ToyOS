@@ -239,10 +239,8 @@ impl Serial {
         &self.text
     }
 
-    /// Lines that open a kernel record, whichever writer spelled its head: the
-    /// console's `[kernel …]` and a `/log` file's `[<date> <time> …]` alike.
     pub fn kernel_lines(&self) -> usize {
-        self.text.lines().filter(|l| toyos_logstream::record_ms(l).is_some()).count()
+        self.text.lines().filter(|l| is_kernel_line(l)).count()
     }
 
     /// A line carrying a kernel prefix somewhere other than its start, which
@@ -423,8 +421,7 @@ pub fn self_check() -> Result<(), String> {
     // capture looks like when it is not simply empty, and the case a
     // `text.is_empty()` guard would wave through.
     let mute = Serial::named("test capture", "hello from userland\n");
-    // A T14 readback of `/log`, verbatim from the `testcases` boot whose
-    // `klogd_hosted` was refused as carrying no kernel output.
+    // A readback of `/log`, whose kernel records open with a date.
     let readback = Serial::named(
         "test capture",
         "[2026-09-29 11:11:20 0.000 cpu0 boot] panic console: armed 1920x1080 stride=1920 \
@@ -588,6 +585,9 @@ pub fn self_check() -> Result<(), String> {
         ("libc panic: panicked at src/main.rs:9:1:", Some(Died::Panicked)),
         // The one the naive fix cannot tell from the kernel's, and must.
         ("PANIC: printed by a program that felt like printing it", Some(Died::Panicked)),
+        // A `/log` readback's heads: the kernel's panic, and a program's.
+        ("[2026-09-29 11:11:22 2.000 cpu1] PANIC: nope", Some(Died::Kernel)),
+        ("{2026-09-29 11:11:22 2.000 init} PANIC: printed by init", Some(Died::Panicked)),
         // Nothing died.
         ("[kernel 0.377 cpu0] NVMe: found", None),
         ("hello from userland", None),

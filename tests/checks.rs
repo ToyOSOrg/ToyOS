@@ -655,9 +655,9 @@ mod checks {
     /// The pass before the handoff, which every `loader.log` opens with.
     const HANDOFF: &str = "Loader log: the kernel handoff begins, so this file ends here\n";
 
-    /// Four judges fed what main's T14 run's readbacks carried, verbatim: each
-    /// record they ask for is written after the file was made whole, so it
-    /// crosses only on the sealed page — and a page without it still reds.
+    /// Four judges fed a T14 readback's lines: each record they ask for is
+    /// written after the file was made whole, so it crosses only on the sealed
+    /// page — and a page without it still reds.
     #[test]
     fn metal_judges_read_the_page_for_what_only_the_page_carries() {
         let done = |tail: &str| {
@@ -718,8 +718,33 @@ mod checks {
         assert!(judge(&[&readback("usbload", &wedged(""), kernel)]).is_err());
     }
 
-    /// The selftests boot's handoff on the T14, verbatim: the controller
-    /// publishes USB Legacy Support and firmware never claimed it.
+    /// The foreign-identity arm's pass after the reset: the record it cleared
+    /// was sealed `DONE`, so the stop the arm staged finished.
+    #[test]
+    fn the_foreign_record_judge_demands_the_stop_sealed_done() {
+        let loader = format!(
+            "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
+             Black box: 0x8000000 held a DONE record another image left in this memory ([3e, d4, \
+             0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81], and this stick is [c1, d4, \
+             0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81]), armed at 2026-09-29-131341. \
+             It has been cleared and this pass boots its kernel\n\
+             Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n\
+             {}\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n",
+            bootlog::SEPARATOR,
+            bootlog::HUNG_WITHOUT_A_RECORD
+        );
+        let kernel = "[2026-09-29 13:13:43 1.171 cpu0] Boot: complete (1171ms)\n";
+        let judge = metal_judge("blackbox_foreign_record");
+        assert_eq!(judge(&[&readback("foreignrecord", &loader, kernel)]), Ok(()));
+        for state in ["PANIC", "WEDGED"] {
+            let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
+            assert!(judge(&[&readback("foreignrecord", &ended, kernel)]).is_err());
+        }
+    }
+
+    /// A T14 controller's handoff: it publishes USB Legacy Support and
+    /// firmware never claimed it. The T14 has two, and each is judged.
     #[test]
     fn the_xecp_judge_reads_the_t14s_handoff() {
         let t14 = "[2026-09-29 11:05:25 0.253 cpu0] xHCI: xecp selftest 8/8 malformed lists refused\n\
@@ -730,6 +755,7 @@ mod checks {
                    [2026-09-29 11:05:25 0.253 cpu0] xHCI: controller reset\n\
                    [2026-09-29 11:05:25 0.254 cpu0] xHCI: controller started\n";
         assert_eq!(xhci_xecp(t14), Ok(()));
+        assert_eq!(xhci_xecp(&format!("{t14}{t14}")), Ok(()));
         // Firmware that kept the controller handed nothing over.
         let held = t14.replace(
             "firmware did not claim the controller (USBLEGSUP 0x01002201)",
@@ -737,10 +763,16 @@ mod checks {
              0x01010001) — resetting it anyway",
         );
         assert!(xhci_xecp(&held).is_err());
+        assert!(xhci_xecp(&format!("{t14}{held}")).is_err());
+        // A second controller's handoff with no reset of its own, and a reset
+        // with no handoff before it.
+        let unreset = t14.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&format!("{t14}{unreset}")).is_err());
+        let unhanded = t14.replace("firmware did not claim the controller", "USB 3.1 on ports 2..=5");
+        assert!(xhci_xecp(&format!("{t14}{unhanded}")).is_err());
     }
 
-    /// `dlopen_dedup` reads `test_rs_std_tls` by path, and main's T14 run cut
-    /// the shared list so that `std_tls` rode the other chunk.
+    /// `dlopen_dedup` reads `test_rs_std_tls` by path.
     #[test]
     fn a_shared_chunk_stages_every_binary_its_members_name() {
         let source = "const NEEDS_A_LIB: &str = \"/system/bin/test_rs_std_tls\";\n";
@@ -756,8 +788,8 @@ mod checks {
         assert_eq!(staged, ["bin/test_rs_std_tls", "lib/libfoo.so"]);
     }
 
-    /// `03_struct` on the T14, as `ccheck` printed what the case produced: the
-    /// expectation the corpus stages is that, under the guest's `trim_end`.
+    /// `03_struct`'s output as `ccheck` prints it: the expectation the corpus
+    /// stages is that, under the guest's `trim_end`.
     #[test]
     fn the_c_corpus_stages_the_expectation_the_host_compares() {
         let got = "12\n34\n12\n34\n56\n78\n~fred()";

@@ -1904,9 +1904,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         // Its own boot, and it must not share one: it deliberately leaves the
         // page holding a record no stick owns, and a boot that then read it as
         // a predecessor's is exactly what the arm above judges.
-        // Its own boot: it deliberately leaves the page holding a record no
-        // stick owns, and a boot that then read it as a predecessor's is the
-        // defect.
         "blackbox_foreign_record",
         metal::Metal::Runs {
             arms: &[metal::once(
@@ -1917,8 +1914,9 @@ const METAL: &[(&str, metal::Metal)] = &[
             )],
             judge: |b| {
                 let after = b[0].after_the_reset()?;
-                let said = after.must_say("record another image left in this memory")?.to_string();
-                // Named and cleared, and never reported as this stick's own.
+                // Named and cleared, and never reported as this stick's own; and
+                // `DONE`, so the stop it staged finished.
+                let said = after.must_say(bootlog::FOREIGN_DONE)?.to_string();
                 power::says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
                 power::says_nothing_of(&after, "the last boot read")?;
                 // The hang `toyos-metal` admits for this arm, and only this one.
@@ -14573,7 +14571,7 @@ fn xhci_descriptors(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// Eight malformed extended-capability lists refused, and the handoff on the real controller.
+/// Eight malformed extended-capability lists refused, and the handoff on every controller.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
@@ -14589,36 +14587,52 @@ fn xhci_xecp(log: &str) -> Result<(), String> {
         if !verdict.contains("8/8") {
             return Err(format!("not every malformed list was refused: {verdict}"));
         }
-        // And the handoff on the real controller, in `take_ownership`'s words
-        // for each outcome that leaves the kernel owning it: no capability
+        // And the handoff on every controller, in `take_ownership`'s words for
+        // each outcome that leaves the kernel owning it: no capability
         // (QEMU's), firmware that never claimed it (the T14's), and firmware
-        // that released it.
+        // that released it. Each precedes its own reset — a reset that already
+        // happened is what the whole capability exists to avoid.
         const HANDED_OVER: &[&str] = &[
             "xHCI: no USB Legacy Support capability",
             "xHCI: firmware did not claim the controller",
             "xHCI: firmware released the controller",
         ];
-        let Some(real) = log.lines().find(|l| HANDED_OVER.iter().any(|said| l.contains(said)))
-        else {
-            return Err(format!("no line about the handoff at all:\n{log}"));
-        };
-        // The handoff must precede the reset — a reset that already
-        // happened is what the whole capability exists to avoid.
-        let reset = log
-            .find("xHCI: controller reset")
-            .ok_or_else(|| format!("the controller was never reset:\n{log}"))?;
-        let handoff = log.find(real).expect("just found");
-        if handoff > reset {
-            return Err(format!(
-                "the ownership handoff runs after HCRST, which is no handoff at all:\n{log}"
-            ));
+        const KEPT: &[&str] = &[
+            "xHCI: extended capability list unusable",
+            "runs past the register window — no handoff",
+            "xHCI: firmware still owns the controller",
+        ];
+        let mut handoffs = Vec::new();
+        let mut pending: Option<&str> = None;
+        for line in log.lines() {
+            if KEPT.iter().any(|said| line.contains(said)) {
+                return Err(format!("a controller was never handed over: {line}\n{log}"));
+            }
+            if HANDED_OVER.iter().any(|said| line.contains(said)) {
+                if let Some(earlier) = pending.replace(line) {
+                    return Err(format!("a handoff with no reset of its own: {earlier}\n{log}"));
+                }
+            } else if line.contains("xHCI: controller reset") {
+                let Some(handoff) = pending.take() else {
+                    return Err(format!("a controller reset before its handoff: {line}\n{log}"));
+                };
+                handoffs.push(handoff);
+            }
+        }
+        if let Some(unreset) = pending {
+            return Err(format!("a handoff with no reset of its own: {unreset}\n{log}"));
+        }
+        if handoffs.is_empty() {
+            return Err(format!("no controller was handed over and reset:\n{log}"));
         }
         // A controller that still enumerates its bus afterwards.
         if !log.contains("xHCI: controller started") {
             return Err(format!("the controller did not come up:\n{log}"));
         }
         eprintln!("  [xhci] {}", verdict.trim());
-        eprintln!("  [xhci] {}", real.trim());
+        for handoff in handoffs {
+            eprintln!("  [xhci] {}", handoff.trim());
+        }
         Ok(())
 }
 

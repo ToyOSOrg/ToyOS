@@ -3004,11 +3004,12 @@ pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
     toyos_build::build::build_toyos_bins(&repo, SUITE_ARCH, crate_path, quiet)
 }
 
-/// A kernel record's console line: `klogd` renders every one with this head,
-/// and nothing else writes it — a program's line reaches the console only
-/// through `logd`, under the program's own head.
+/// A kernel record's line, whichever writer spelled its head: `klogd`'s console
+/// `[kernel …]` and a `/log` file's `[<date> <time> …]` alike. Nothing else
+/// writes either — a program's line reaches both only through `logd`, under the
+/// program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
-    line.starts_with(toyos_build::kernelconsole::HEAD)
+    line.starts_with(toyos_build::kernelconsole::HEAD) || toyos_logstream::record_ms(line).is_some()
 }
 
 /// A console line's text as its program wrote it: a program's line without

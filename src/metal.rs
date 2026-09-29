@@ -2148,8 +2148,9 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
         return wedged_boot(loader, log);
     }
     let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
-    // The staged hang's pass reads no `DONE`; its judge reads the hand-back.
-    if !staged_hang {
+    if staged_hang {
+        bootlog::foreign_done(loader).map_err(Refusal::Log)?;
+    } else {
         bootlog::handed_back(loader).map_err(Refusal::Log)?;
     }
     Ok(ms)
@@ -3390,9 +3391,9 @@ mod tests {
         assert_eq!(lockup_lateness_ms(&early), None);
     }
 
-    /// The foreign-record arm's pass after the reset, verbatim from main's T14
-    /// run of `foreignrecord`: the hang it stages is its verdict's premise, and
-    /// the same pass under any other arm is the hang refusal.
+    /// The foreign-record arm's pass after the reset: the hang it stages is its
+    /// verdict's premise, the record it cleared says the stop finished, and the
+    /// same pass under any other arm is the hang refusal.
     #[test]
     fn the_foreign_record_arm_reaches_its_judge_through_the_hang_it_stages() {
         let loader = format!(
@@ -3420,5 +3421,14 @@ mod tests {
             boot_verdict(&armed(&["boot-deadline=120000"]), &loader, log),
             Err(Refusal::HungWithoutARecord)
         );
+        // A stop that panicked or that a bound ended seals under the foreign
+        // identity too, and hands the machine back the same way.
+        for state in ["PANIC", "WEDGED"] {
+            let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
+            assert_eq!(
+                boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &ended, log),
+                Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+            );
+        }
     }
 }

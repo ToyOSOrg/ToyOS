@@ -116,6 +116,12 @@ pub const LOG_TAIL: &str = "log-tail: ";
 /// two registrations whose whole subject is that it stopped.
 pub const HANDED_BACK: &str = "the last boot read DONE";
 
+/// What the loader says, in `bootloader/src/blackbox.rs`, of a `DONE` record
+/// sealed under another stick's identity: the foreign-identity arm's
+/// [`HANDED_BACK`]. The kernel seals every state under that identity, so only
+/// this word says the stop finished rather than panicked or wedged.
+pub const FOREIGN_DONE: &str = "held a DONE record another image left in this memory";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
@@ -317,6 +323,9 @@ pub enum Unfit {
     /// The loader pass after the reset read no `DONE`, or read one with no
     /// [`REBOOTING`] in its tail: the stop never finished.
     NotHandedBack,
+    /// The loader pass after the foreign-identity arm's reset read no
+    /// [`FOREIGN_DONE`]: the stop it staged never finished.
+    NoForeignDone,
 }
 
 impl fmt::Display for Unfit {
@@ -334,6 +343,11 @@ impl fmt::Display for Unfit {
                 "the loader's pass after the reset carries no {HANDED_BACK:?} with {REBOOTING:?} \
                  under {LOG_TAIL:?}: the stop this boot asked for never reached the reset"
             ),
+            Self::NoForeignDone => write!(
+                f,
+                "the loader's pass after the reset carries no {FOREIGN_DONE:?}: the stop this \
+                 boot asked for never sealed its record DONE"
+            ),
         }
     }
 }
@@ -347,6 +361,16 @@ pub fn handed_back(loader: &str) -> Result<(), Unfit> {
         Ok(())
     } else {
         Err(Unfit::NotHandedBack)
+    }
+}
+
+/// The loader's half of a passing foreign-identity boot, whose own chain the
+/// loader ends as a hang: the record it cleared was sealed `DONE`.
+pub fn foreign_done(loader: &str) -> Result<(), Unfit> {
+    if loader.contains(FOREIGN_DONE) {
+        Ok(())
+    } else {
+        Err(Unfit::NoForeignDone)
     }
 }
 
