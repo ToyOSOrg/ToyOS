@@ -17323,12 +17323,8 @@ fn main() {
     check_metal_only_unshared(&rust_bins, &c_bins);
     check_shard_partition(&all_tests);
 
-    // The tier filter, and it is not conditional on the name filter: a rule with
-    // an exception for filtered runs is two rules, and the second one is the one
-    // nobody remembers. `cargo test -- screen_diag_boot` refuses below and
-    // says what to type instead, which is the same information a silent skip
-    // would have withheld.
-    let in_tier = |tier: Tier| tier.selected(reach, shard.is_some());
+    // A name filter reaches every tier; a shard still excludes `Tier::Local`.
+    let in_tier = |tier: Tier| tier.selected(reach.for_filter(filter.is_some()), shard.is_some());
     let tests_to_run: Vec<&TestDef> = all_tests
         .iter()
         .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
@@ -17367,7 +17363,6 @@ fn main() {
     }
     let held_back: Vec<(Tier, Vec<String>)> =
         [Tier::Nightly, Tier::Weekly].into_iter().map(|tier| (tier, held(tier))).collect();
-    let widest_held = held_back.iter().rev().find(|(_, names)| !names.is_empty()).map(|(tier, _)| *tier);
     for (tier, names) in held_back.iter().filter(|(_, names)| !names.is_empty()) {
         let flag = tier.flag().expect("a held tier is a reach's");
         eprintln!(
@@ -17383,13 +17378,7 @@ fn main() {
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
-        match widest_held.and_then(Tier::flag) {
-            Some(flag) => eprintln!(
-                "[toyos] filter {filter:?} matches only tests a wider reach runs. Add {flag} to \
-                 run them."
-            ),
-            None => eprintln!("No enabled test matches filter {filter:?}"),
-        }
+        eprintln!("No enabled test matches filter {filter:?}");
         run.exit(1);
     }
 
