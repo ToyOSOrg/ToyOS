@@ -31,6 +31,7 @@ mod params;
 mod blackbox;
 mod deadline;
 mod quiesce;
+mod perf_state;
 mod hardlockup;
 mod mm;
 mod panic;

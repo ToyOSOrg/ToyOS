@@ -1,4 +1,4 @@
-//! The acknowledgement half of a TLB shootdown, with no hardware in it.
+//! The acknowledgement half of a machine-wide ask, with no hardware in it.
 //! Compiled a second time into `kernel-loom/` against loom's atomics, so this file must hold no `crate::` references.
 //! The read must happen before the flush, or a target could publish a generation its flush has not yet completed.
 
@@ -70,7 +70,7 @@ impl Shootdown {
 
     /// Has `cpu` flushed since `generation` was issued?
     pub fn served(&self, cpu: usize, generation: Generation) -> bool {
-        // Acquire: nothing reads through this edge yet, but `Relaxed` here would be silently unsafe once something does.
+        // Acquire: pairs with `serve`'s Release, so what its closure wrote is visible once this is true.
         self.flushed[cpu].load(Ordering::Acquire) >= generation.0
     }
 

@@ -106,6 +106,9 @@ receives = ["netd"]
 receives = ["netd", "soundd", "log", "compositor"]
 syscap = ["inventory"]
 
+[programs.perfstate]
+devices = ["perf-state"]
+
 [programs.filepicker]
 service = true
 serves = ["filepicker"]

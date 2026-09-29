@@ -31,6 +31,11 @@ use super::serial::Serial;
 const PATH_TAKEN: &[&str] =
     &["deadline_lateness_ms", "lockup_lateness_ms", "park_open_operations"];
 
+/// The panel's census, which a stop or a bound seals and a kernel panic does
+/// not: path-taken fields on a boot told to end in a panic, and owed by every
+/// other boot.
+const NOT_SEALED_BY_A_PANIC: &[&str] = &["panel_max_us", "panel_us"];
+
 /// One boot a metal test needs.
 pub struct Arm {
     /// **The boot this test rides, named.** Two arms naming one boot share an
@@ -83,6 +88,11 @@ pub struct Arm {
     /// service and writes [`toyos_build::metal::READBACK_SWAP`] beside the
     /// stick's files.
     pub swap: Option<&'static str>,
+    /// **The boot ends in a kernel panic whose record carries this text**, and
+    /// the loop judges it by that record rather than by the shutdown's last
+    /// word. `None` on every boot that hands the machine back or is ended by a
+    /// bound its image is armed with.
+    pub panics: Option<&'static str>,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -96,7 +106,17 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false, swap: None }
+    Arm {
+        boot,
+        config,
+        params,
+        jobs,
+        features: &[],
+        nic: None,
+        talk: false,
+        swap: None,
+        panics: None,
+    }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -544,6 +564,8 @@ struct Batch {
     talk: bool,
     /// [`Arm::swap`], carried to the image, the invocation and the second one.
     swap: Option<&'static str>,
+    /// [`Arm::panics`], carried to the invocation.
+    panics: Option<&'static str>,
 }
 
 impl Batch {
@@ -591,6 +613,7 @@ fn batches(
                 nic: None,
                 talk: false,
                 swap: None,
+                panics: None,
             },
         );
         if was.is_some() {
@@ -610,6 +633,7 @@ fn batches(
                 nic: arm.nic,
                 talk: arm.talk,
                 swap: arm.swap,
+                panics: arm.panics,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
@@ -617,21 +641,25 @@ fn batches(
                 || batch.nic != arm.nic
                 || batch.talk != arm.talk
                 || batch.swap != arm.swap
+                || batch.panics != arm.panics
             {
                 return Err(format!(
-                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
-                     rides it as ({}, {:?}, {:?}, {:?}, talk={}); one boot is one image",
+                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}, \
+                     panics={:?}) and another row rides it as ({}, {:?}, {:?}, {:?}, talk={}, \
+                     panics={:?}); one boot is one image",
                     arm.boot,
                     arm.config,
                     arm.params,
                     arm.features,
                     arm.nic,
                     arm.talk,
+                    arm.panics,
                     batch.config,
                     batch.params,
                     batch.features,
                     batch.nic,
-                    batch.talk
+                    batch.talk,
+                    batch.panics
                 ));
             }
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
@@ -810,7 +838,21 @@ fn talk_home(home: &Path) -> PathBuf {
     home.join("ssh")
 }
 
-fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<String> {
+/// `words` as a shell reads them back, for the request a hand runs: a word
+/// holding anything but the characters no shell treats specially is quoted.
+fn command_line(words: &[String]) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "@%+:,./_-".contains(c);
+    let word = |w: &String| {
+        if !w.is_empty() && w.chars().all(plain) {
+            w.clone()
+        } else {
+            format!("'{}'", w.replace('\'', "'\\''"))
+        }
+    };
+    words.iter().map(word).collect::<Vec<_>>().join(" ")
+}
+
+fn invocation(image: &Path, home: &Path, batch: &Batch) -> Vec<String> {
     let mut words = vec![
         "run".to_string(),
         "--bin".to_string(),
@@ -826,11 +868,15 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
         // that wrote them.
         "--fat32-check".to_string(),
     ];
-    if let Some(nic) = nic {
+    if let Some(nic) = batch.nic {
         words.push("--nic".to_string());
         words.push(nic.to_string());
     }
-    if talk {
+    if let Some(line) = batch.panics {
+        words.push("--expect-panic".to_string());
+        words.push(line.to_string());
+    }
+    if batch.talk {
         words.push("--talk".to_string());
         words.push(talk_home(home).join("id_ed25519").display().to_string());
     }
@@ -902,6 +948,50 @@ pub enum Verdict {
     /// run on the machine yet. Neither of the other two: a run that reached no
     /// hardware may not report on any.
     Staged,
+}
+
+/// What one boot's own facts say against the profile and against what every
+/// boot owes, one finding a line; none is a boot whose facts pass. `panicked`
+/// is a boot told to end in a kernel panic ([`Arm::panics`]).
+fn boot_findings(label: &str, back: &Readback, profile: &Profile, panicked: bool) -> Vec<String> {
+    let mut found = Vec::new();
+    let panel = back.panel();
+    // A boot the file prices a path-taken field for and that produced none is
+    // a boot some *other* bound ended.
+    for (field, value) in [
+        ("complete_ms", back.boot_ms),
+        ("back_secs", Some(back.back_secs)),
+        ("stick_secs", Some(back.stick_secs)),
+        ("deadline_lateness_ms", back.deadline_lateness_ms()),
+        ("lockup_lateness_ms", back.lockup_lateness_ms()),
+        ("panel_max_us", panel.map(|panel| panel.max_micros)),
+        ("panel_us", panel.map(|panel| panel.micros)),
+        ("park_open_operations", back.park_open_operations()),
+    ] {
+        let name = format!("boot.{label}.{field}");
+        let priced = profile.row(&name).is_some();
+        let taken = PATH_TAKEN.contains(&field) || (panicked && NOT_SEALED_BY_A_PANIC.contains(&field));
+        if value.is_none() && !priced && taken {
+            continue;
+        }
+        let Some(value) = value else {
+            found.push(format!(
+                "{name}: this boot recorded none, and the profile prices it — so the bound this \
+                 boot was armed for is not the one that ended it"
+            ));
+            continue;
+        };
+        if let Err(why) = profile.judge(&name, value) {
+            found.push(why.to_string());
+        }
+    }
+    // **Every boot, and before any verdict is read out of its log.** A test's
+    // judge reads the file the stick came back with, so a file that stops
+    // before the boot does turns a machine fact into a missing line — and the
+    // missing line is what a reader would have to guess about.
+    found.extend(back.log_reached_the_stick().err());
+    found.extend(back.stop_completed().err());
+    found
 }
 
 /// The whole metal profile: batch, build, drive, judge, report.
@@ -1023,7 +1113,7 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
+                command_line(&invocation(image, &at(dir, label), &batches[*label]))
             ));
             if let Some(service) = batches[*label].swap {
                 request.push_str(&format!(
@@ -1056,7 +1146,7 @@ pub fn run(
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if !offline {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
+            let words = invocation(image, &at(dir, label), &batches[*label]);
             // A swapping boot's second invocation is started first: it dials
             // the machine under its own name for as long as it takes, and
             // waits for the boot.
@@ -1065,7 +1155,7 @@ pub fn run(
                 eprintln!("[metal] {label}, beside it: cargo {}", words.join(" "));
                 Command::new("cargo").args(&words).current_dir(&root).spawn()
             });
-            eprintln!("[metal] {label}: cargo {}", words.join(" "));
+            eprintln!("[metal] {label}: cargo {}", command_line(&words));
             let booted = Command::new("cargo").args(&words).current_dir(&root).status();
             if let Some(swap) = beside {
                 match swap.and_then(|mut child| child.wait()) {
@@ -1124,47 +1214,7 @@ pub fn run(
                         panel.paints, panel.pixels
                     );
                 }
-                // A boot the file prices a path-taken field for and that
-                // produced none is a boot some *other* bound ended.
-                for (field, value) in [
-                    ("complete_ms", back.boot_ms),
-                    ("back_secs", Some(back.back_secs)),
-                    ("stick_secs", Some(back.stick_secs)),
-                    ("deadline_lateness_ms", back.deadline_lateness_ms()),
-                    ("lockup_lateness_ms", back.lockup_lateness_ms()),
-                    ("panel_max_us", panel.map(|panel| panel.max_micros)),
-                    ("panel_us", panel.map(|panel| panel.micros)),
-                    ("park_open_operations", back.park_open_operations()),
-                ] {
-                    let name = format!("boot.{label}.{field}");
-                    let priced = profile.row(&name).is_some();
-                    if value.is_none() && !priced && PATH_TAKEN.contains(&field) {
-                        continue;
-                    }
-                    let Some(value) = value else {
-                        eprintln!(
-                            "    FAIL {name}: this boot recorded none, and the profile prices \
-                             it — so the bound this boot was armed for is not the one that \
-                             ended it"
-                        );
-                        red = true;
-                        continue;
-                    };
-                    if let Err(why) = profile.judge(&name, value) {
-                        eprintln!("    FAIL {why}");
-                        red = true;
-                    }
-                }
-                // **Every boot, and before any verdict is read out of its
-                // log.** A test's judge reads the file the stick came back
-                // with, so a file that stops before the boot does turns a
-                // machine fact into a missing line — and the missing line is
-                // what a reader would have to guess about.
-                if let Err(why) = back.log_reached_the_stick() {
-                    eprintln!("    FAIL {why}");
-                    red = true;
-                }
-                if let Err(why) = back.stop_completed() {
+                for why in boot_findings(label, back, &profile, batches[label].panics.is_some()) {
                     eprintln!("    FAIL {why}");
                     red = true;
                 }
@@ -1253,3 +1303,104 @@ pub fn run(
     }
 }
 
+/// **A run that selects `perf_request` and no other rider of `testcases`
+/// still carries the job the row reads there.**
+#[test]
+fn a_filtered_run_carries_the_job_its_row_reads() -> Result<(), String> {
+    let profile = Profile::load(&super::compile::repo_root()).map_err(|e| e.to_string())?;
+    let alone: Vec<(&str, &'static Metal)> =
+        crate::METAL.iter().filter(|(name, _)| *name == "perf_request").map(|(n, d)| (*n, d)).collect();
+    let boots = batches(&alone, &[], &profile)?;
+    let testcases = boots.get("testcases").ok_or("no testcases boot")?;
+    if !testcases.jobs.iter().any(|job| job == "test_rs_perf_state") {
+        return Err(format!("testcases carries {:?} and not test_rs_perf_state", testcases.jobs));
+    }
+    Ok(())
+}
+
+/// **The boot that is to panic is driven as one and judged as one**: its
+/// invocation tells the loop what the panic record carries, and the
+/// boot's own facts, read off the record the T14 sealed, owe nothing a
+/// panic does not seal — and the same facts from a boot not told to panic
+/// still owe the panel's census.
+#[test]
+fn a_boot_that_is_to_panic_is_told_so_and_owes_no_stop() -> Result<(), String> {
+    // The pass after the reset of the T14's `perfdiverge` boot, less the log
+    // ring the loader files after the record.
+    const DIVERGED: &str = r#"
+Loader log: the kernel handoff begins, so this file ends here
+--- the pass after the reset, reading what the boot above left
+ToyOS Bootloader 1.0
+Boot attempts: this image has had the machine 1 time(s) without reporting; now 0
+Slot A: its image 4cc5b5b9b215561977a75452953bd9752a5c373447d48c3830762c3eb5e68624 died on its last boot, so no pass boots it again until an update replaces it
+Anti-rollback floor: ToyOSImageFloor-Icc9ccdd1ac0cc468 (image scope) holds 0
+Black box: the record below is from the boot armed at 2026-09-29-072056
+Previous boot's panic: 15052 bytes off 0x8000000
+| PANIC (apic 2): panicked at src/arch/x86_64/control_regs.rs:440:9:
+| usb-recovery: the log ring holds no transport break
+| older records dropped to fit this page: 177
+| control_regs: cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04
+| usb-quiesce: no barrier was taken, so this reset is not the shutdown's
+| usb-quiesce: no Bulk-Only command was open, so this reset cuts none
+| usb-quiesce: xHCI 00:0d.0 0/0 connected port(s) reset
+| usb-quiesce: xHCI 00:0d.0 halted=true USBSTS=0x00000001
+| usb-quiesce: xHCI 00:0d.0 reset=true ready=true
+| usb-quiesce: xHCI 00:0d.0 5/5 port(s) unpowered
+| usb-quiesce: xHCI 00:0d.0 bus mastering off
+| usb-quiesce: xHCI 00:14.0 5/5 connected port(s) reset
+| usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000019
+| usb-quiesce: xHCI 00:14.0 reset=true ready=true
+| usb-quiesce: xHCI 00:14.0 16/16 port(s) unpowered
+| usb-quiesce: xHCI 00:14.0 bus mastering off
+| usb-quiesce: 0/0 disk cache(s) flushed, 0 with no cache to flush, 5/5 connected port(s) reset, 2/2 controller(s) halted, 2 reset, 21/21 port(s) unpowered
+Black box: that record's log ring is in loader.log, not on a console the firmware scrolls: 191 record(s)
+Loader log: the last boot is accounted for, so this pass resets the machine
+"#;
+    let profile = Profile::load(&super::compile::repo_root()).map_err(|e| e.to_string())?;
+    let alone: Vec<(&str, &'static Metal)> =
+        crate::METAL.iter().filter(|(name, _)| *name == "perf_request").map(|(n, d)| (*n, d)).collect();
+    let boots = batches(&alone, &[], &profile)?;
+    let diverge = boots.get("perfdiverge").ok_or("no perfdiverge boot")?;
+    let want = diverge.panics.ok_or("perfdiverge expects no panic")?;
+    let words = invocation(Path::new("image.img"), Path::new("perfdiverge"), diverge);
+    if !words.windows(2).any(|pair| pair[0] == "--expect-panic" && pair[1] == want) {
+        return Err(format!("the invocation does not expect {want:?}: {words:?}"));
+    }
+    if !DIVERGED.contains(want) {
+        return Err(format!("the record the T14 sealed does not carry {want:?}"));
+    }
+    let kernel = "[2026-09-29 07:20:58 1.156 cpu0] Boot: complete (1156ms)\n".to_string();
+    let back = Readback {
+        label: "perfdiverge".to_string(),
+        home: PathBuf::new(),
+        loader: DIVERGED.to_string(),
+        boot_ms: bootlog::boot_millis(&kernel),
+        log: kernel.clone(),
+        kernel,
+        back_secs: 101,
+        stick_secs: 0,
+        cable: None,
+    };
+    let found = boot_findings("perfdiverge", &back, &profile, true);
+    if !found.is_empty() {
+        return Err(found.join("\n"));
+    }
+    let owed = boot_findings("perfdiverge", &back, &profile, false);
+    for field in NOT_SEALED_BY_A_PANIC {
+        if !owed.iter().any(|why| why.contains(&format!("boot.perfdiverge.{field}:"))) {
+            return Err(format!("a boot not told to panic owes no {field}: {owed:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// **The request a hand runs is the invocation, word for word**: a word a
+/// shell would read specially is quoted, and a plain one is not.
+#[test]
+fn a_command_line_quotes_every_word_a_shell_would_read() {
+    let words = ["--image", "a/b-1.img", "it's", "$HOME", "a;b", "a b", "", "x=y"].map(str::to_string);
+    assert_eq!(
+        command_line(&words),
+        r#"--image a/b-1.img 'it'\''s' '$HOME' 'a;b' 'a b' '' 'x=y'"#,
+    );
+}

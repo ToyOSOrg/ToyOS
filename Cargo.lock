@@ -1006,6 +1006,7 @@ dependencies = [
  "toyos-keymap",
  "toyos-logstream",
  "toyos-manifest",
+ "toyos-perfstate",
  "toyos-quiesce",
  "toyos-sched",
  "toyos-swap",
@@ -1141,6 +1142,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-pcid"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-perfstate"
 version = "0.1.0"
 
 [[package]]

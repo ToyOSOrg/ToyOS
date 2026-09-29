@@ -263,6 +263,8 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
             device_registry::DeviceType::Framebuffer => None,
             // A partition answers its description and has nothing to wait for.
             device_registry::DeviceType::Partition => None,
+            // A read asks when it runs, so nothing is ready before one.
+            device_registry::DeviceType::PerfState => None,
         },
         // Named unconditionally: the watch alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
@@ -304,7 +306,8 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
             | device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound
             | device_registry::DeviceType::Framebuffer
-            | device_registry::DeviceType::Partition => true,
+            | device_registry::DeviceType::Partition
+            | device_registry::DeviceType::PerfState => true,
         },
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
@@ -389,6 +392,8 @@ pub fn read_device(
         // Every read is the description: a partition's bytes move through
         // `SYS_PARTITION_READ`, never through a read of the claim.
         device_registry::DeviceType::Partition => Some(claim.describe(table, buf)),
+        // A read that does not wait: its ask ends with it.
+        device_registry::DeviceType::PerfState => claim.read_perf_state(&mut None, buf),
         // The description first and interrupts after, the shape the HDA stub
         // has: a driver reads what it is driving once, and everything it reads
         // afterwards is what its device has been doing.
@@ -601,7 +606,8 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             device_registry::DeviceType::PciFunction => FileType::Unknown,
             device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound => FileType::Unknown,
-            device_registry::DeviceType::Partition => FileType::Unknown,
+            device_registry::DeviceType::Partition
+            | device_registry::DeviceType::PerfState => FileType::Unknown,
         }),
     }
 }
@@ -767,7 +773,8 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
         | device_registry::DeviceType::Framebuffer
         | device_registry::DeviceType::HdaAudio
         | device_registry::DeviceType::VirtioSound
-        | device_registry::DeviceType::PciFunction => {
+        | device_registry::DeviceType::PciFunction
+        | device_registry::DeviceType::PerfState => {
             return SyscallError::PermissionDenied.to_u64();
         }
     }
@@ -838,6 +845,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
             }
             device_registry::DeviceType::Framebuffer => true,
             device_registry::DeviceType::Partition => true,
+            device_registry::DeviceType::PerfState => false,
             device_registry::DeviceType::HdaAudio => {
                 !d.info_read() || crate::drivers::hda::has_pending()
             }

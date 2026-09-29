@@ -246,6 +246,12 @@ const RUST_SKIP: &[&str] = &[
     // Meaningful only on `MetalNoUsb`, where no input source exists; on every
     // other machine both claims succeed. `input_claim_absent` runs it.
     "input_absent",
+    // Which of its two branches is right is the machine's to say: QEMU's CPUs
+    // have no HWP and the T14's do. `perf_request` runs it and reads which.
+    "perf_state",
+    // Meaningful only under `perf-state-deaf-cpu`, which grants a claim no
+    // other boot has. `perf_state_silent_cpu` runs it.
+    "perf_state_silent",
     // Needs a display whose mode can change, which is `Profile::VirtioGpu`
     // alone; the shared boot has no display at all. `gpu_set_resolution` runs
     // it there, and `iommu_gpu_scanout_swap` the second.
@@ -585,6 +591,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("irq_census_conservation", Sched::Parallel, Tier::Weekly),
     ("control_regs", Sched::Parallel, Tier::Fast),
     ("control_regs_negative", Sched::Parallel, Tier::Fast),
+    ("perf_request", Sched::Parallel, Tier::Fast),
+    ("perf_state_silent_cpu", Sched::Parallel, Tier::Fast),
     // The boot facts the metal suite reads off a machine's own records: every
     // CPU the firmware named came up and none of their timestamp counters
     // trails the BSP's; the physical memory manager's accounting against the
@@ -1397,6 +1405,8 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
     ("input_claim_absent", &["test_rs_input_absent"]),
+    ("perf_request", &["test_rs_perf_state"]),
+    ("perf_state_silent_cpu", &["test_rs_perf_state_silent"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
     ("userdev_dma_fault", &["test_rs_log_origin"]),
@@ -1566,6 +1576,19 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs {
             arms: TESTCASES,
             judge: |b| control_regs(b[0].kernel().text(), b[0].cpus()?),
+        },
+    ),
+    (
+        // Two boots: `testcases`, whose CPUs hold the declaration and read it
+        // back, and `perfdiverge`, where cpu1's request is moved off it once the
+        // machine is up and the boot's own check must panic naming it.
+        "perf_request",
+        metal::Metal::Runs {
+            arms: PERF_REQUEST,
+            judge: |b| {
+                perf_request_on_metal(b[0])?;
+                perf_request_diverged(b[1])
+            },
         },
     ),
     (
@@ -2088,11 +2111,29 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_audio_tone",
         "test_rs_hda_client_stall",
         "test_rs_abuse_short_sleep",
+        "test_rs_perf_state",
         "test_rs_syscall_cost",
         "test_rs_null_sink_client_exits",
         "log-close",
     ],
 )];
+
+/// `perf_request`'s two boots. The first is [`TESTCASES`]'s, and names the one
+/// job this row reads so a run that selects no other rider still carries it;
+/// the second is its own, since it ends in a panic.
+const PERF_REQUEST: &[metal::Arm] = &[
+    metal::once("testcases", "tests/testcases", &[], &["test_rs_perf_state"]),
+    metal::Arm {
+        panics: Some(PERF_REQUEST_DIVERGED),
+        ..metal::once("perfdiverge", "tests/testcases", &["perf-request-diverges"], &["test_rs_perf_state"])
+    },
+];
+
+/// How `perfdiverge`'s panic opens, in `kernel/src/arch/x86_64/control_regs.rs`'s
+/// `hwp_check`: cpu1 holds a request other than its declaration. The values
+/// are the machine's, so [`perf_request_diverged`] reads the rest against
+/// cpu1's own boot line.
+const PERF_REQUEST_DIVERGED: &str = "control_regs: cpu1 holds hwp_request=";
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
@@ -12123,6 +12164,8 @@ fn run_machine_test(
             control_regs(qemu.boot_log(), CPUS)
         }
         "control_regs_negative" => control_regs_negative(test_config, c_bins, rust_bins),
+        "perf_request" => perf_request(test_config, c_bins, rust_bins),
+        "perf_state_silent_cpu" => perf_state_silent_cpu(test_config, c_bins, rust_bins),
         "guest_dies_with_its_harness" => common::orphan::guest_dies_with_its_harness(test_config),
         "smp_roster_and_tsc_trail" => {
             // Eight, which is the T14's own count and this suite's ceiling.
@@ -17658,5 +17701,312 @@ fn root_withheld_refused(log: &str) -> Result<(), String> {
         }
     }
     eprintln!("  [root] a handoff with no ROOT image refused the boot by name");
+    Ok(())
+}
+
+/// The kernel's performance request, on a machine that cannot hold one: every
+/// QEMU CPU this repository launches has no HWP (`Arch::cpu`'s `qemu64` and
+/// KVM's `host`, whose leaf 6 KVM reduces to `ARAT`), so the kernel refuses it
+/// by name, programs none of it, and a `perf-state` claim is `NotFound`.
+fn perf_request(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const REFUSED: &str = "control_regs: no performance request is declared: no HWP";
+    let mut qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+    let boot = qemu.boot_log().to_string();
+    if !boot.contains(REFUSED) {
+        return Err(format!("the kernel never said {REFUSED:?}:\n{boot}"));
+    }
+    if let Some(line) = boot.lines().find(|l| l.contains(" hwp_request=")) {
+        return Err(format!("a CPU with no HWP was given a request: {line}"));
+    }
+    let result = qemu.run_test("test_rs_perf_state", Duration::from_secs(30));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("perf_state exited {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if !result.stdout.contains("perf-state: refused NotFound") {
+        return Err(format!("the claim was not refused NotFound:\n{}", result.stdout));
+    }
+    eprintln!("  [perf_request] no HWP: refused by name, and the claim refused NotFound");
+    Ok(())
+}
+
+/// The same on a machine whose CPUs have every register the request names:
+/// each CPU's boot line holds the declaration `toyos_perfstate` makes from the
+/// two inputs the line carries, and the guest binary read every CPU back
+/// holding it, each record read on the CPU the kernel's roster names.
+fn perf_request_on_metal(boot: &metal::Readback) -> Result<(), String> {
+    let cpus = boot.cpus()?;
+    let log = boot.kernel();
+    for cpu in 0..cpus {
+        hwp_boot_line(log.text(), cpu)?;
+    }
+    boot.job_passed("test_rs_perf_state")?;
+    let roster = roster(log.text())?;
+    if roster.len() != cpus as usize {
+        return Err(format!("the roster names {} CPUs and {cpus} came up", roster.len()));
+    }
+    let records = records_name_their_cpus(&bootlog::lines_of(boot.log().text(), "test-runner"), &roster)?;
+    eprintln!(
+        "  [perf_request] {cpus} CPUs hold their declared request, and {records} records read \
+         back each named its own CPU"
+    );
+    Ok(())
+}
+
+/// One CPU's `control_regs:` boot line, as `hwp_check` writes it, held to the
+/// declaration `toyos_perfstate` makes from the two inputs the line carries.
+/// Answers that declared request.
+fn hwp_boot_line(log: &str, cpu: u32) -> Result<u64, String> {
+    let head = format!("control_regs: cpu{cpu} pm_enable=");
+    let Some(line) = log.lines().find(|l| l.contains(&head)) else {
+        return Err(format!("cpu{cpu} logged no performance request:\n{log}"));
+    };
+    let field = |name: &str| -> Result<u64, String> {
+        let word = line
+            .split_once(&format!(" {name}="))
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .ok_or_else(|| format!("cpu{cpu}'s line carries no {name}: {line}"))?;
+        match word.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => word.parse(),
+        }
+        .map_err(|e| format!("cpu{cpu}'s {name}={word}: {e}"))
+    };
+    let declared = toyos_perfstate::hwp_request(field("hwp_capabilities")?, field("platform_info")?);
+    for (name, want) in [
+        ("pm_enable", toyos_perfstate::PM_ENABLE),
+        ("hwp_request", declared),
+        ("hwp_request_pkg", toyos_perfstate::HWP_REQUEST_PKG),
+        ("epb", toyos_perfstate::ENERGY_PERF_BIAS),
+    ] {
+        let holds = field(name)?;
+        if holds != want {
+            return Err(format!(
+                "cpu{cpu} holds {name}={holds:#x}, and its line's own inputs declare {want:#x}: {line}"
+            ));
+        }
+    }
+    Ok(declared)
+}
+
+/// The kernel's roster in CPU order: each CPU's hardware ID as its bring-up
+/// record names it.
+fn roster(log: &str) -> Result<Vec<u64>, String> {
+    let number = |line: &str, head: &str| -> Option<u64> {
+        line.split_once(head)?.1.split_whitespace().next()?.parse().ok()
+    };
+    let Some(bsp) = log.lines().find_map(|l| number(l, "percpu: BSP cpu_id=0 lapic_id=")) else {
+        return Err(format!("no `percpu: BSP` record names the BSP's hardware ID:\n{log}"));
+    };
+    let mut ids = vec![bsp];
+    loop {
+        let head = format!("{}{} lapic=", bootlog::AP_BRINGUP, ids.len());
+        let online = |l: &&str| l.trim_end().ends_with(" online");
+        match log.lines().filter(online).find_map(|l| number(l, &head)) {
+            Some(id) => ids.push(id),
+            None => return Ok(ids),
+        }
+    }
+}
+
+/// Every `cpuN hardware_id=K` record line in `text`, held to `roster`: each
+/// record was read on the CPU it is filed under, and every CPU's record was
+/// read as often as every other's. Answers how many records there were.
+fn records_name_their_cpus(text: &str, roster: &[u64]) -> Result<usize, String> {
+    let mut seen = vec![0usize; roster.len()];
+    for line in text.lines() {
+        let Some((head, rest)) = line.split_once(" hardware_id=") else { continue };
+        let cpu: usize = head
+            .rsplit_once("cpu")
+            .and_then(|(_, n)| n.parse().ok())
+            .ok_or_else(|| format!("a record names no CPU: {line}"))?;
+        let id: u64 = rest
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| format!("a record carries no hardware ID: {line}"))?;
+        let Some(&want) = roster.get(cpu) else {
+            return Err(format!("a record for cpu{cpu}, and the roster has {} CPUs: {line}", roster.len()));
+        };
+        if id != want {
+            return Err(format!(
+                "cpu{cpu}'s record was read on the CPU whose hardware ID is {id}, and the roster \
+                 names cpu{cpu} {want}: {line}"
+            ));
+        }
+        seen[cpu] += 1;
+    }
+    if seen[0] == 0 || seen.iter().any(|&n| n != seen[0]) {
+        return Err(format!("want every CPU's record read alike, got {seen:?} per CPU:\n{text}"));
+    }
+    Ok(seen.iter().sum())
+}
+
+/// The second boot: `perf-request-diverges` moves cpu1's request one ratio off
+/// the declaration when it answers `test_rs_perf_state`'s read, and runs the
+/// check boot runs. That check panics naming what cpu1 holds against what it
+/// was declared — the page after the reset carries it — and a boot whose check
+/// did not assert reaches no such panic.
+fn perf_request_diverged(boot: &metal::Readback) -> Result<(), String> {
+    let said = diverged_panic(boot.kernel().text(), boot.loader().text())?;
+    eprintln!("  [perf_request] a request moved off the declaration panicked: {said}");
+    Ok(())
+}
+
+/// The kernel panic's line in `loader`, held to the declaration cpu1's own boot
+/// line in `log` makes: it names that declaration, and a request other than it.
+fn diverged_panic(log: &str, loader: &str) -> Result<String, String> {
+    let declared = hwp_boot_line(log, 1)?;
+    let Some(record) = bootlog::panic_record(loader) else {
+        return Err(format!("the pass after the reset reports no kernel panic:\n{loader}"));
+    };
+    let Some(said) = record.iter().map(|l| l.trim_end()).find(|l| l.starts_with(PERF_REQUEST_DIVERGED)) else {
+        return Err(format!("the panic record carries no {PERF_REQUEST_DIVERGED:?}:\n{}", record.join("\n")));
+    };
+    let tail = format!(", the declaration is {declared:#x}");
+    let held = said
+        .strip_prefix(PERF_REQUEST_DIVERGED)
+        .and_then(|rest| rest.strip_suffix(&tail))
+        .and_then(|held| u64::from_str_radix(held.strip_prefix("0x")?, 16).ok());
+    match held {
+        Some(held) if held != declared => Ok(said.to_string()),
+        _ => Err(format!("cpu1's boot line declares {declared:#x}, and the panic says {said:?}")),
+    }
+}
+
+/// **`perf_request`'s metal judges read the machine's own lines**: the T14's
+/// roster and boot lines pass, a record read on its asker's CPU is refused, a
+/// line holding anything but what its own inputs declare is refused, and the
+/// panic must name the declaration cpu1's own line makes.
+#[test]
+fn perf_request_judges_hold_the_machine_to_its_own_lines() -> Result<(), String> {
+    // Two of the T14's CPUs as its `testcases` boot logged them: the roster
+    // does not number the CPUs in hardware-ID order, and the capabilities
+    // differ in the most efficient level.
+    const LOG: &str = "\
+[2026-09-29 08:10:06 0.000 cpu0 boot] control_regs: cpu0 pm_enable=1 hwp_request=0x80002a04 hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0104182a platform_info=0x0004043df0811800
+[2026-09-29 08:10:06 0.000 cpu0] percpu: BSP cpu_id=0 lapic_id=0
+[2026-09-29 08:10:06 0.166 cpu1] control_regs: cpu1 pm_enable=1 hwp_request=0x80002a04 hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a platform_info=0x0004043df0811800
+[2026-09-29 08:10:06 0.166 cpu0] SMP: AP cpu1 lapic=2 online
+";
+    const PANIC: &str = "\
+--- the pass after the reset, reading what the boot above left
+Previous boot's panic: 15052 bytes off 0x8000000
+| PANIC (apic 2): panicked at src/arch/x86_64/control_regs.rs:440:9:
+| control_regs: cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04
+";
+    let roster = roster(LOG)?;
+    if roster != [0, 2] {
+        return Err(format!("the roster read {roster:?}"));
+    }
+    let records =
+        |ids: [u64; 2]| format!("cpu0 hardware_id={} epb=6\ncpu1 hardware_id={} epb=6\n", ids[0], ids[1]);
+    if records_name_their_cpus(&records([0, 2]), &roster)? != 2 {
+        return Err("two records were not counted as two".to_string());
+    }
+    // Every record read on cpu1, the asker.
+    records_name_their_cpus(&records([2, 2]), &roster)
+        .err()
+        .ok_or("a record read on its asker's CPU passed")?;
+    records_name_their_cpus("cpu0 hardware_id=0\n", &roster).err().ok_or("cpu1's missing record passed")?;
+
+    if hwp_boot_line(LOG, 1)? != 0x8000_2a04 {
+        return Err("cpu1's line declares 0x80002a04".to_string());
+    }
+    let moved =
+        LOG.replace("cpu1 pm_enable=1 hwp_request=0x80002a04", "cpu1 pm_enable=1 hwp_request=0x80002a05");
+    hwp_boot_line(&moved, 1).err().ok_or("a request its own inputs do not declare passed")?;
+    let pkg = LOG.replace(
+        "hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a",
+        "hwp_request_pkg=0x8000ff02 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a",
+    );
+    hwp_boot_line(&pkg, 1).err().ok_or("a package request other than the declaration passed")?;
+
+    diverged_panic(LOG, PANIC)?;
+    // cpu1's line declaring a minimum of 3, which it holds.
+    let other = LOG.replace(
+        "cpu1 pm_enable=1 hwp_request=0x80002a04 hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a platform_info=0x0004043df0811800",
+        "cpu1 pm_enable=1 hwp_request=0x80002a03 hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a platform_info=0x0004033df0811800",
+    );
+    if hwp_boot_line(&other, 1)? != 0x8000_2a03 {
+        return Err("cpu1's altered line declares 0x80002a03".to_string());
+    }
+    diverged_panic(&other, PANIC).err().ok_or("a panic naming another declaration passed")?;
+    let held = PANIC.replace("hwp_request=0x80002a05", "hwp_request=0x80002a04");
+    diverged_panic(LOG, &held).err().ok_or("a panic holding the declaration passed")?;
+    Ok(())
+}
+
+/// A read only its asker answers is refused `Io` once the kernel's bound has
+/// passed, naming the one other CPU — twice. `perf-state-deaf-cpu` grants the
+/// claim on QEMU's CPUs, which have no HWP, and has no CPU but the asker answer
+/// the boot's first three asks, so which CPU the test runs on decides nothing.
+/// A read that did not wait goes first and makes the boot's first ask; the two
+/// refusals must name the second and the third, so a read answered or refused
+/// from an ask that is not its own reds. A read with no bound waits for ever,
+/// and this reds at its ceiling. The fourth ask every CPU answers, and each
+/// record must carry the hardware ID the roster gives its CPU, so a record
+/// read anywhere but on its own CPU reds.
+fn perf_state_silent_cpu(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const CPUS: u32 = 2;
+    const SILENT: &str = " did not answer Generation(";
+    const ASKS: [&str; 2] = [" did not answer Generation(2) ", " did not answer Generation(3) "];
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { smp: CPUS, kernel_params: &["perf-state-deaf-cpu"], ..Default::default() },
+    );
+    let result = qemu.run_test("test_rs_perf_state_silent", Duration::from_secs(30));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) || !result.stdout.contains("===PERF_STATE_SILENT_OK===") {
+        return Err(format!("perf_state_silent exited {:?}:\n{}", result.exit_code, result.serial));
+    }
+    // The kernel's records reach the console through `klogd` and the test's
+    // lines through `logd`, so the refusals may still be on their way.
+    let named = |text: &str| -> Vec<String> {
+        text.lines().filter(|l| l.contains(SILENT)).map(str::to_string).collect()
+    };
+    let mut refusals = named(&result.serial);
+    if refusals.len() < ASKS.len() {
+        let owed = ASKS.len() - refusals.len();
+        let seen = std::cell::Cell::new(0);
+        let more = qemu.drain_until(Duration::from_secs(10), |line| {
+            seen.set(seen.get() + usize::from(line.contains(SILENT)));
+            seen.get() >= owed
+        });
+        refusals.extend(named(&more));
+    }
+    let one_cpu = |l: &String| (0..CPUS).filter(|c| l.contains(&format!("perf_state: cpu{c} "))).count() == 1;
+    let each_once = ASKS.iter().all(|ask| refusals.iter().filter(|l| l.contains(ask)).count() == 1);
+    if refusals.len() != ASKS.len() || !each_once || !refusals.iter().all(one_cpu) {
+        return Err(format!(
+            "want one refusal naming one CPU for each of {ASKS:?}, got {}:\n{}\n{}",
+            refusals.len(),
+            refusals.join("\n"),
+            result.serial,
+        ));
+    }
+    let roster = roster(qemu.boot_log())?;
+    if roster.len() != CPUS as usize {
+        return Err(format!("the roster names {} CPUs and {CPUS} were launched", roster.len()));
+    }
+    records_name_their_cpus(&result.stdout, &roster)?;
+    eprintln!(
+        "  [perf_state_silent_cpu] the second and third asks refused Io, each naming one CPU; \
+         the fourth's records each named its own CPU"
+    );
     Ok(())
 }

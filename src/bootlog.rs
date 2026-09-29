@@ -132,6 +132,25 @@ pub const LOADER_GOP_LINE: &str = "GOP: mode";
 pub const BLACKBOX_HEAD: &str = "Black box:";
 pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 
+/// The first words of a record the kernel's panic path sealed, in
+/// `kernel/src/panic.rs`'s `first_words`. A wedge, a fault and an unsealed page
+/// are reported under [`PREVIOUS_PANIC`] too, and none of them opens with this.
+pub const PANIC_RECORD: &str = "PANIC (apic ";
+
+/// The record a kernel panic sealed, as the pass after the reset printed it:
+/// the lines under [`PREVIOUS_PANIC`], the first of them [`PANIC_RECORD`]'s.
+/// `None` where that pass reports no panic.
+pub fn panic_record(loader: &str) -> Option<Vec<&str>> {
+    let after = &loader[loader.find(SEPARATOR)?..];
+    let record: Vec<&str> = after
+        .lines()
+        .skip_while(|line| !line.starts_with(PREVIOUS_PANIC))
+        .skip(1)
+        .map_while(|line| line.strip_prefix("| "))
+        .collect();
+    record.first().is_some_and(|head| head.starts_with(PANIC_RECORD)).then_some(record)
+}
+
 /// What the loader prints in place of a record's tail, with the count of the
 /// records it filed instead.
 pub const TAIL_IN_THE_FILE: &str =
@@ -688,6 +707,7 @@ mod tests {
                 "kernel/src/drivers/panic_console/mod.rs",
                 format!("CENSUS: &str = \"{PANEL_CENSUS}\""),
             ),
+            ("kernel/src/panic.rs", format!("\"{PANIC_RECORD}{{apic}}): panicked at ")),
             ("kernel/src/log/mod.rs", format!("TAIL_HEAD: &str = \"{LOG_TAIL_HEAD}\"")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
         ] {

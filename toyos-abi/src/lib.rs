@@ -26,6 +26,7 @@ pub mod inventory;
 pub mod log;
 pub mod part;
 pub mod pci;
+pub mod perf;
 pub mod ring;
 pub mod syscall;
 pub mod virtio_sound;

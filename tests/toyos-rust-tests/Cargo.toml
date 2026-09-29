@@ -9,6 +9,7 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-window = { path = "../../userland/toyos-window" }
 toyos-tco = { path = "../../toyos-tco" }
+perfstate = { path = "../../userland/perfstate" }
 toyos-quiesce = { path = "../../toyos-quiesce" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-inspect = { path = "../../toyos-inspect" }

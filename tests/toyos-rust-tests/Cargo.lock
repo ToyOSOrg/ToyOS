@@ -1445,6 +1445,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "perfstate"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-perfstate",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2140,6 +2149,10 @@ name = "toyos-keymap"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-perfstate"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-quiesce"
 version = "0.1.0"
 
@@ -2151,6 +2164,7 @@ dependencies = [
  "cpal",
  "libloading 0.8.9 (git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12)",
  "memmap2",
+ "perfstate",
  "rustls",
  "rustls-pki-types",
  "rustls-rustcrypto",

@@ -1,0 +1,9 @@
+[package]
+name = "toyos-perfstate"
+description = "The CPU performance request the kernel declares on an x86-64 CPU with HWP, and the register layouts a reader checks it against."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]

@@ -1269,6 +1269,11 @@ device_classes! {
     /// Like `pci`, a class whose name is not the whole of the entry —
     /// `part:<GUID>` — and [`DeviceRequest`] is the one parser.
     Partition = 8 => "part",
+    /// The CPU performance envelope's registers, read back: every read answers
+    /// [`crate::perf`]'s records, each CPU's taken on that CPU after the read
+    /// asked. Read-only — the kernel writes the declaration and nothing else
+    /// does. `NotFound` on a machine whose CPUs got no declared request.
+    PerfState = 9 => "perf-state",
 }
 
 /// A PCI function named by what identifies the *card*, not the slot firmware

@@ -290,6 +290,17 @@ actuators! {
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
+    /// Grant a `perf-state` claim where no performance request was declared,
+    /// each record its CPU's identity and zeros, and have no CPU but its asker
+    /// answer the boot's first three asks: what the read's bound refuses, and
+    /// then a read every CPU answers, on a machine QEMU can stage.
+    perf_state_deaf_cpu = "perf-state-deaf-cpu";
+
+    /// Have cpu1 move its HWP request off the declaration when it answers a
+    /// `perf-state` read, then check it as boot does: the negative control on
+    /// that check, which only a CPU with HWP reaches.
+    perf_request_diverges = "perf-request-diverges";
+
     /// On one CPU, file Ctrl+Alt+D's request inside each kind of pass that may not serve it and inside a report, and count the Ring 3 returns each is left pending across.
     dump_in_blocking_pass = "dump-in-blocking-pass";
 

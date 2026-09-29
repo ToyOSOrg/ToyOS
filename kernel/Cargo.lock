@@ -50,6 +50,7 @@ dependencies = [
  "toyos-hda",
  "toyos-pci",
  "toyos-pcid",
+ "toyos-perfstate",
  "toyos-proclife",
  "toyos-ps2",
  "toyos-quiesce",
@@ -138,6 +139,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-pcid"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-perfstate"
 version = "0.1.0"
 
 [[package]]
