@@ -307,13 +307,12 @@ pub fn gone_roots(base: &Path) -> Vec<PathBuf> {
     gone_under(base)
 }
 
-/// Every gone root under `base` that `keep` passes, renamed into `dest` as
-/// `reap-<its name>`; the caller holds [`GLOBAL`]. Both `adopt` and `sweep`
-/// are this with a different filter and destination.
-fn reap_into(base: &Path, dest: &Path, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+/// Every gone root under `base` that `take` passes, renamed into `dest` as
+/// `reap-<its name>`; the caller holds [`GLOBAL`].
+fn reap_into(base: &Path, dest: &Path, take: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut reap = Vec::new();
     for path in gone_under(base) {
-        if !keep(&path) {
+        if !take(&path) {
             continue;
         }
         let name = path.file_name().expect("a root has a name").to_string_lossy();
