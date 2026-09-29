@@ -13,7 +13,7 @@ Loads when you read a file under `src/` — the root cargo project, package name
 ## Other entry points
 
 - `cargo run -- --check-forks` names every lockfile pin behind the fork branch its manifest consumes. **On demand only: it asks the network**, so it is in neither `cargo test` nor the landing gate.
-- **`.github/qemu-version` is the QEMU every guest is measured with, declared once**; every guest job's first step (`src/ci.rs`'s `instrument`) reds on a disagreement. `cargo test --lib` refuses a workflow that installs QEMU without naming its instrument (`src/sourcegate.rs`).
+- **`.github/qemu-version` is the QEMU every guest is measured with, declared once**; every guest job's first step (`src/ci.rs`'s `instrument`) reds on a disagreement.
 - `system.toml` defines which programs to build and the init sequence.
 - **A workflow step runs `cargo run -- --ci <job>` and nothing else; logic in YAML is a defect.**
 
