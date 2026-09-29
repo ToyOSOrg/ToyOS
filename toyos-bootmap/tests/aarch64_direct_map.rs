@@ -82,3 +82,15 @@ fn past_the_window_is_refused() {
 fn a_map_with_no_memory_ends_at_zero() {
     assert_eq!(end(&[e(MMIO, 0x0900_0000, 0x0900_1000)]), Ok(0));
 }
+
+#[test]
+fn a_start_off_a_page_is_refused() {
+    let map = [e(CONVENTIONAL, GIB + 0x800, GIB + PAGE_2M)];
+    assert_eq!(end(&map), Err(Refusal::OffPage(GIB + 0x800)));
+}
+
+#[test]
+fn an_end_below_its_start_is_refused() {
+    let map = [e(CONVENTIONAL, GIB + PAGE_2M, GIB)];
+    assert_eq!(end(&map), Err(Refusal::Extent { base: GIB + PAGE_2M, len: GIB.wrapping_sub(GIB + PAGE_2M) }));
+}

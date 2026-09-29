@@ -14,9 +14,6 @@ instruction holding whatever the kernel left there, kernel stack and heap
 addresses among them. A thread reads the kernel's layout off its own
 registers.
 
-The AArch64 trampoline zeroes every register but the argument before its
-`ERET`, and is the shape to copy.
-
 **Exit condition**: a fresh thread's first instruction sees zero in every
 general register but its stack pointer and its argument, and a guest test that
 reads them at `_start` says so.

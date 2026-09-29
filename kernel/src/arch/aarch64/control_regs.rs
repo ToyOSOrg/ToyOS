@@ -47,8 +47,8 @@ pub const TCR_IPS_SHIFT: u64 = 32;
 
 /// `CPACR_EL1`: `FPEN` = 0b11, so FP and SIMD trap at neither EL1 nor EL0. The
 /// kernel is built soft-float and touches them only to save and restore a
-/// thread's registers across every entry from EL0 (`super::trap`); `ZEN` and
-/// `SMEN` stay clear, so SVE and SME trap everywhere.
+/// thread's registers; `ZEN` and `SMEN` stay clear, so SVE and SME trap
+/// everywhere.
 pub const CPACR: u64 = 0b11 << 20;
 
 /// `CNTKCTL_EL1`: `EL0VCTEN` alone, so EL0 reads the virtual count and its

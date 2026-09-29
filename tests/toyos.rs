@@ -530,6 +530,11 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("virt_user_mode", Sched::Parallel, Tier::Local),
     ("virt_timer_preempts", Sched::Parallel, Tier::Local),
     ("virt_irq_storm", Sched::Parallel, Tier::Local),
+    ("virt_timer_floor", Sched::Parallel, Tier::Local),
+    ("virt_fp_isolation", Sched::Parallel, Tier::Local),
+    ("virt_first_entry", Sched::Parallel, Tier::Local),
+    ("virt_unmap_touch", Sched::Parallel, Tier::Local),
+    ("virt_debug_refused", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -3555,6 +3560,67 @@ fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String>
 /// Run one screen test. `Err` carries the decoded screen, because a failure
 /// here is almost always "the text is not what I expected" and the decoded
 /// grid is the only readable form of that.
+/// Boot `tests/virtjobcase` under the EL2 profile and judge its job `job`:
+/// it ends with exit 0, having said `said`. The kernel carries `SYS_DEBUG`
+/// for `debug_refused`, and every job runs in every boot of the case.
+fn virt_job(job: &str, said: &str) -> Result<(), String> {
+    let config = compile::repo_root().join("tests/virtjobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::VirtEl2,
+            kernel_features: toyos_build::build::TEST_KERNEL,
+            ready_marker: "control registers: SCTLR_EL1=",
+            ..Default::default()
+        },
+    );
+    let end = format!("===TEST_END {job} ");
+    let rest = qemu.drain_until(Duration::from_secs(300), |l| l.contains(&end));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    let Some(ended) = serial.lines().find(|l| l.contains(&end)) else {
+        return Err(format!("the job {job} never ended\nserial:\n{serial}"));
+    };
+    let Some(line) = serial.lines().find(|l| l.contains(said)) else {
+        return Err(format!("{said:?} not on the PL011 ({ended})\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {line}");
+    if !ended.contains(&format!("===TEST_END {job} exit=0===")) {
+        return Err(format!("{ended}\nserial:\n{serial}"));
+    }
+    Ok(())
+}
+
+/// Boot `test_config` under the EL2 profile with the kernel selftest `armed`
+/// names, and judge its one line: `<param>: PASS`.
+fn virt_selftest(test_config: &Path, armed: &'static [&'static str; 1]) -> Result<(), String> {
+    let [param] = armed;
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::VirtEl2,
+            kernel_params: armed,
+            ready_marker: "control registers: SCTLR_EL1=",
+            ..Default::default()
+        },
+    );
+    let said = format!("{param}: ");
+    let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(&said));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    let Some(verdict) = serial.lines().find(|l| l.contains(&said)) else {
+        return Err(format!("{param} never reported\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {verdict}");
+    if !verdict.contains(&format!("{param}: PASS")) {
+        return Err(format!("{verdict}\nserial:\n{serial}"));
+    }
+    Ok(())
+}
+
 fn run_screen_test(
     name: &str,
     test_config: &Path,
@@ -5046,60 +5112,25 @@ fn run_screen_test(
             Ok(())
         }
         "virt_timer_preempts" => {
-            // `preempt` on this machine's one CPU: one thread counts in a loop
-            // that enters the kernel only when an interrupt takes it there, and
-            // the other yields until it has seen the count move twice. It runs
-            // between those reads only when a tick took the CPU from the
-            // counting thread, so a timer that never preempts leaves the line
-            // unsaid, and the ceiling here is the only clock.
-            let config = compile::repo_root().join("tests/virtpreemptcase/system.toml");
-            let case = config.parent().expect("system.toml has a directory");
-            let mut qemu = QemuInstance::boot_with_options(
-                case,
-                &[],
-                &[],
-                BootOptions {
-                    profile: qemu::Profile::VirtEl2,
-                    ready_marker: "control registers: SCTLR_EL1=",
-                    ..Default::default()
-                },
-            );
             // Spelled in `userland/toybox/src/preempt.rs`.
-            const PREEMPTED: &str = "preempt: the counting thread was preempted twice";
-            let rest = qemu.drain_until(Duration::from_secs(300), |l| l.contains(PREEMPTED));
-            let serial = format!("{}\n{rest}", qemu.boot_log());
-            match serial.lines().find(|l| l.contains(PREEMPTED)) {
-                Some(line) => eprintln!("  [virt] {line}"),
-                None => return Err(format!("{PREEMPTED:?} not on the PL011\nserial:\n{serial}")),
-            }
-            Ok(())
+            virt_job("preempt", "preempt: the counting thread was preempted twice")
         }
+        "virt_fp_isolation" => virt_job("fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
+        "virt_first_entry" => virt_job("first_entry", "first_entry: x1-x30 were zero"),
+        "virt_unmap_touch" => virt_job("unmap_touch", "unmap_touch: 4 reads of a page just unmapped"),
+        "virt_debug_refused" => virt_job("debug_refused", "debug_refused: SYS_DEBUG's TLB acknowledgement delay was refused"),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
             // thousand times through the flood, then waits for every SGI it
             // sent. A tick lost or never re-armed, or an SGI lost, leaves the
             // storm running and the verdict unsaid.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                &[],
-                &[],
-                BootOptions {
-                    profile: qemu::Profile::VirtEl2,
-                    kernel_params: &["irq-storm"],
-                    ready_marker: "control registers: SCTLR_EL1=",
-                    ..Default::default()
-                },
-            );
-            let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains("irq-storm: "));
-            let serial = format!("{}\n{rest}", qemu.boot_log());
-            let Some(verdict) = serial.lines().find(|l| l.contains("irq-storm: ")) else {
-                return Err(format!("the storm never reported\nserial:\n{serial}"));
-            };
-            eprintln!("  [virt] {verdict}");
-            if !verdict.contains("irq-storm: PASS") {
-                return Err(format!("{verdict}\nserial:\n{serial}"));
-            }
-            Ok(())
+            virt_selftest(test_config, &["irq-storm"])
+        }
+        "virt_timer_floor" => {
+            // The timer made due and then asked to fire within a quantum: a
+            // re-arm shorter than the floor re-fires on its own return, and
+            // the CPU taking it at EL1 never gets back to say anything.
+            virt_selftest(test_config, &["timer-floor"])
         }
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:

@@ -301,20 +301,20 @@ Each stage names its exit; "measured" means a number from a run.
    the kernel's own tables (`TTBR1_EL1` holding memory and nothing else, each
    user space on `TTBR0_EL1` under a 16-bit ASID from `toyos-pcid`), the
    GICv3's SGIs and the virtual timer's PPI, the EL0 entry, and the context
-   switch carrying FP/SIMD; `virt_user_mode`, `virt_timer_preempts` and
-   `virt_irq_storm` judge it under the EL2 profile, emulated, because HVF
+   switch carrying FP/SIMD; the `virt_` tests other than `virt_early_panic`,
+   `virt_early_fault` and `virt_el2_drop` judge it under the EL2 profile, emulated, because HVF
    exposes no RNDR and the kernel's hash seed refuses there until stage 6's
    virtio-rng. Each judges an event, never a rate: no QEMU test measures time.
    Owed before the exit holds: the interrupts-off window against x86's, a
    measurement only metal can make, with no instrument on either arch yet;
    `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md`, whose
-   `KernelArgs` rename waits on the loader's change to that struct; and the
-   three deletions shown red, which **no QEMU test can do**: QEMU 11.1.1
-   resets `CNTHCTL_EL2` to 3 and `CNTVOFF_EL2` to 0, the declared values, and
-   `CPTR_EL2` to 0, whose `TFP` is as clear as the declaration's
-   (`target/arm/helper.c`); each deletion, and the fourth, of `ICC_SRE_EL2`
-   (constant `0xf` in QEMU, `hw/intc/arm_gicv3_cpuif.c`), stayed green in
-   `virt_user_mode` at `57382f78`. They are shown red on a machine whose
+   `KernelArgs` rename waits on the loader's change to that struct; the
+   instruction-cache maintenance before a mapping is executable
+   (`cache::make_executable`), the break-before-make ordering of a live
+   entry's replacement, and the TLB flush before a reclaimed ASID is issued
+   again, which QEMU's TCG, the only oracle this stage has, cannot fail on:
+   the first HVF run, once stage 6 gives HVF its RNDR, is their exit; and the
+   three deletions shown red. They are shown red on a machine whose
    firmware leaves the registers otherwise, or by a loader that writes the
    opposite values before the handoff. The ITS moves to stage 6: a claimed
    function is its only consumer the small-kernel track leaves, and it needs that

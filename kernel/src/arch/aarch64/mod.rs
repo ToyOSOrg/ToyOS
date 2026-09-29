@@ -2,14 +2,6 @@
 //! AArch64: the Arm A-profile at EL1, found and described through ACPI.
 //!
 //! Every `unsafe` block here carries a one-line `SAFETY:` comment, enforced by the lint above.
-//!
-//! **What exists and what is owed.** One CPU runs the kernel and user mode:
-//! its own page tables, the GICv3 and the generic timer, preemption, and the
-//! entry from EL0. Other CPUs, the IOMMU, an MSI and the platform's own
-//! devices are owed by a stage of the port (`issues/kernel/toyos-runs-on-arm64.md`)
-//! or by none yet, and each item that stands for one here is an [`owed!`]
-//! that panics naming it, or a refusal a caller reports by name. None of them
-//! returns a guess.
 
 /// Stands for work the port owes: panics naming what and which stage of the
 /// track owns it (`issues/kernel/toyos-runs-on-arm64.md`), or that none does yet.

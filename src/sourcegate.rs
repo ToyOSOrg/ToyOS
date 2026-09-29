@@ -1466,6 +1466,7 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("toyos-abi/src/arch/", "toyos-abi's per-architecture reads: the counter and the thread's id"),
             ("userland/libc/src/arch/", "libc's architecture modules"),
             ("userland/metalprobe/src/arch/", "metalprobe's architecture modules"),
+            ("userland/toybox/src/arch/", "toybox's architecture modules"),
             ("userland/toyos-window/src/arch/", "toyos-window's architecture modules"),
             ("tests/toyos-rust-tests/src/bin/abuse_kernel_addr.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/abuse_page_straddle.rs", USERLAND_ASM),
@@ -1509,6 +1510,7 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("userland/libc/src/arch/", "libc's architecture modules and their selector"),
             ("userland/toyos-window/src/arch/", "toyos-window's architecture modules and their selector"),
             ("userland/metalprobe/src/arch/", "metalprobe's architecture modules and their selector"),
+            ("userland/toybox/src/arch/", "toybox's architecture modules and their selector"),
         ],
     },
     PlaceRule {

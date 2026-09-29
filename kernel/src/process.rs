@@ -1477,7 +1477,10 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     let tp = crate::arch::cpu::thread_pointer();
     if tp != 0 {
         log!("  Thread pointer: {:#x}", tp);
-        if read_user(tp).is_some() {
+        if let Some(first) = read_user(tp) {
+            if matches!(crate::loader::TLS_VARIANT, toyos_elf::tls::Variant::II) {
+                log!("  [TP] = {:#x} (expected {:#x}, variant II's self-pointer)", first, tp);
+            }
             for i in 0..8u64 {
                 let addr = tp + i * 8;
                 let Some(val) = read_user(addr) else { break };

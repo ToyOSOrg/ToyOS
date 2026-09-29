@@ -1,0 +1,23 @@
+# One CPU and the AArch64 guest's jobs, each a toybox applet whose line comes
+# only if the kernel kept what that applet asks about.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]
+receives = ["power"]
+# Four minutes from boot rather than one: every job here runs on an emulated
+# CPU, and a job past the bound reboots the guest with the job named.
+args = ["--bound-ms=240000", "preempt", "fp_isolation", "first_entry", "unmap_touch", "debug_refused"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/preempt" = "/system/bin/toybox"
+"bin/fp_isolation" = "/system/bin/toybox"
+"bin/first_entry" = "/system/bin/toybox"
+"bin/unmap_touch" = "/system/bin/toybox"
+"bin/debug_refused" = "/system/bin/toybox"
