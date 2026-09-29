@@ -294,28 +294,83 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   64 boots also prints its first spawn's three bases, bit-tested by S10's
   rule; a constant-seeded generator repeats them every boot and reds it.
 - **S9 — Kernel stack protector.** `-Zstack-protector=strong` for the kernel
-  and its `core` and `alloc` (`src/toolchain.rs`). LLVM's `StackProtector`
-  pass reads a per-CPU location instead of one boot-wide symbol once the
-  module carries its `stack-protector-guard`, `-guard-reg` and
-  `-guard-offset` flags (`llvm/lib/CodeGen/StackProtector.cpp`), the flags
-  Clang's `-mstack-protector-guard=sysreg` sets for Linux's own build
-  (`arch/x86/Makefile`); this rust fork's codegen backend gains them so every
-  protected frame reads and compares `%gs:N`. The scheduler writes the
-  incoming thread's own canary into `%gs:N` on every switch, as `switch_to`
-  copies `task_struct.stack_canary` into `fixed_percpu_data.stack_canary`
-  (`arch/x86/kernel/process_64.c`); each thread draws that canary
-  independently from `arch::entropy::draw` at creation, before any protected
-  frame of the thread runs, and a draw still `None` after `entropy::ATTEMPTS`
-  refuses to create it.
-  **Exit**: the guest test `kernel_stack_canary` overflows a `boot-actuators`
-  frame with zeros on each of two threads and asserts each panic names the
-  stack protector, then asserts the two threads' own canaries, read back
-  through `boot-actuators`, differ; a mutation that shares one
-  `static __stack_chk_guard` across every thread still catches both zeroed
-  overflows but answers the same value for both threads and reds the
-  distinctness assertion. Each of S10's 64 boots prints the guard, and S10's
-  rule holds for each of its 64 bits; a constant non-zero guard sets every bit
-  in 0 or 64 boots and reds it.
+  and its `core` and `alloc` (`src/toolchain.rs`), every protected frame
+  loading and comparing a per-thread guard at `%gs:N`. Linux gets `%gs:40`
+  from a Linux triple under `-mcmodel=kernel` (`arch/x86/Makefile:169`,
+  `arch/x86/include/asm/stackprotector.h:9`). LLVM paths here are
+  `rust/src/llvm-project` at the commit `rust/` pins, a79bc52c1d5e. The
+  kernel's triple is `x86_64-unknown-none` (`kernel/.cargo/config.toml`), and
+  there X86 takes the segment slot only when `hasStackGuardSlotTLS` holds
+  (`llvm/lib/Target/X86/X86ISelLoweringCall.cpp:548-551,564`: glibc, musl,
+  Fuchsia, Android). Otherwise it falls through (`:604`, `:638-640`) to the
+  one global `__stack_chk_guard`
+  (`llvm/lib/CodeGen/TargetLoweringBase.cpp:2388-2411`), and the
+  `stack-protector-guard`, `-reg` and `-offset` module flags act only on
+  those four. No ToyOS-owned mechanism reaches the slot: X86's one
+  other lowering, `LOAD_STACK_GUARD`, is 64-bit Mach-O's alone
+  (`llvm/lib/Target/X86/X86ISelLowering.cpp:2770-2772`), and naming the
+  kernel a glibc or musl triple is a false claim about its environment. S9 is
+  four steps, each with its own test:
+  1. **LLVM.** X86's `getIRStackGuard` takes the segment slot on any triple
+     whose module sets `stack-protector-guard` to `tls`, as RISC-V's does
+     (`llvm/lib/Target/RISCV/RISCVISelLowering.cpp:25703-25707`), and
+     `insertSSPDeclarations` then declares no global. Clang accepts
+     `-mstack-protector-guard=tls` and `-mstack-protector-guard-reg=gs` on
+     every x86 triple (`clang/lib/Driver/ToolChains/Clang.cpp:3479-3491,
+     3561-3570`), and the backend lowers them to the global on a bare one, so
+     the change is an upstream fix. Test: RUN lines in
+     `llvm/test/CodeGen/X86/stack-protector-3.ll` for
+     `x86_64-unknown-none-elf` under `-code-model=kernel`, with `tls`, `gs`
+     and an offset, check `%gs:<offset>` and no `__stack_chk_guard`; the
+     unchanged lowering emits `__stack_chk_guard(%rip)` and reds them.
+  2. **rustc**, which sets none of those flags today.
+     `-Zstack-protector-guard`, `-Zstack-protector-guard-reg` and
+     `-Zstack-protector-guard-offset`
+     (`compiler/rustc_session/src/options.rs`) set them in
+     `compiler/rustc_codegen_llvm/src/context.rs`, as Clang's
+     `clang/lib/CodeGen/CodeGenModule.cpp:1543-1553` does. Test: a
+     `tests/assembly-llvm/stack-protector/` test for `x86_64-unknown-none`
+     checks `%gs:<offset>` in prologue and epilogue and no
+     `__stack_chk_guard`; dropping the flags from `context.rs` reds it.
+     `src/forkcheck.rs` admits a cross-platform `rust/` file only for a
+     target arm at an existing dispatch site; steps 1 and 2 each add a
+     cross-platform option instead, so both wait on the owner's ruling.
+  3. **The kernel.** `PerCpu` holds the guard at `N`, asserted at compile
+     time as `stackprotector.h:55` asserts 40. The kernel defines no
+     `__stack_chk_guard`, so a toolchain that falls back to the global fails
+     its link, and its `__stack_chk_fail` panics naming the stack protector.
+     A frame compares against the slot as it was on entry, so nothing changes
+     the slot under a live frame of the running thread
+     (`stackprotector.h:39-49`). `_start` (`kernel/src/arch/x86_64/boot.rs`)
+     writes the BSP's first `IA32_GS_BASE` and guard before
+     `call kernel_main`, where `percpu::init_bsp` writes the base from Rust
+     today, after the boot's first frames. A later write of the base carries
+     the slot's value over. An AP's `PerCpu` holds its first thread's guard
+     before the trampoline publishes it (`kernel/src/arch/x86_64/smp.rs`), as
+     `cpu_init_stack_canary` does (`stackprotector.h:66-69`,
+     `arch/x86/kernel/smpboot.c:969`). After that only `context_switch`
+     (`kernel/src/arch/x86_64/switch.rs`) writes the slot: the incoming
+     thread's own guard, after the stack switch, as `__switch_to_asm` does
+     (`arch/x86/entry/entry_64.S:193-196`). Each thread draws its guard from
+     `arch::entropy::draw` at creation; a draw still `None` after
+     `entropy::ATTEMPTS` refuses the thread, and `_start` halts on that bound.
+  4. **Exit**: the guest test `kernel_stack_canary` is one boot with
+     `smp: 1`, so two threads share one slot. A `test-actuators` program's
+     threads A and B each call twice a `SYS_DEBUG` action whose frame holds a
+     local array, so it is protected, and which returns the `%gs:N` it reads
+     inside that frame; between its two calls each hands off to the other,
+     through a context switch. The test asserts each thread's two reads
+     agree and A's differ from B's. A then calls an action that writes a
+     given value over its own frame's guard through an out-of-bounds write
+     past that array.
+     Given A's read, it returns, so the frame compares against what `%gs:N`
+     held. Given B's read, the kernel panics naming the stack protector, the
+     boot's last event. Deleting `context_switch`'s write of the incoming
+     thread's guard leaves one value in the slot for both threads: A's and
+     B's reads agree and the overflow with B's guard returns, and both red.
+     Each of S10's 64 boots prints the guard `_start` drew, and S10's rule
+     holds for each of its 64 bits; a constant guard sets every bit in 0 or
+     64 boots and reds it.
 - **S10 — Kernel ASLR, `Tier::Weekly` (`src/tiers.rs`).** Its first step
   times one `boot-actuators` boot of the TCG model and records 64 times that as
   the weekly cost. The loader, which builds the mapping the kernel starts in,
@@ -339,7 +394,8 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   (`bugs.c:1512-1543`), and `arch/x86/mm/tlb.c:442-444` (`cond_mitigation`)
   issues IBPB on a switch between two processes only when either is flagged,
   printing "IBPB: conditional" (`bugs.c:3195-3205`). The flag is S6's.
-- **Probes add no syscall.** They are compiled under `boot-actuators`.
+- **Probes add no syscall.** A probe is compiled under `boot-actuators`, or
+  is a `SYS_DEBUG` action under `test-actuators`.
 
 ## Exit
 
