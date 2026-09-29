@@ -39,9 +39,8 @@ mod depth_probe {
 use crate::log;
 use super::{deadline, enqueue_control, log_unrecoverable, Completion, Trb, TrbRing};
 use super::{XhciController, EVENT_TRANSFER, EVENT_CMD_COMPLETE, USB_TIMEOUT_NS};
-use super::{CC_SUCCESS, CC_SHORT_PACKET};
 use toyos_xhci::call::NotTaken;
-use toyos_xhci::job::{Await, CC_STALL};
+use toyos_xhci::job::{Await, CC_SHORT_PACKET, CC_STALL, CC_SUCCESS};
 use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
 use toyos_xhci::scan;
 

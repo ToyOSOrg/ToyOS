@@ -22,7 +22,7 @@ use crate::log;
 use super::pci::PciDevice;
 use crate::sync::Lock;
 use toyos_untrusted::Untrusted;
-use toyos_xhci::job::{Await, Outcome, Outstanding, Stages};
+use toyos_xhci::job::{Await, Outcome, Outstanding, Stages, CC_SHORT_PACKET, CC_SUCCESS};
 use toyos_xhci::port::{self as portmachine, GaveUp, Gone, PortState, Reset, Step};
 use toyos_xhci::call::AfterBreak;
 use toyos_xhci::recovery::{self, Act, EndpointState, NeedsConfigure, Recovery};
@@ -111,9 +111,6 @@ const EVENT_TRANSFER:     u32 = 32;
 const EVENT_CMD_COMPLETE: u32 = 33;
 const EVENT_PORT_STATUS_CHANGE: u32 = 34;
 
-// CC_SHORT_PACKET is success with a residue, not an error — treating it as one is the classic mass-storage bug.
-const CC_SUCCESS: u32 = 1;
-const CC_SHORT_PACKET: u32 = 13;
 const CC_CONTEXT_STATE_ERROR: u32 = 19;
 /// Stopped, Stopped - Length Invalid and Stopped - Short Packet (Table 6-90): the transfer events a Stop Endpoint raises for the TRB it stopped inside (§4.6.9).
 const CC_STOPPED: core::ops::RangeInclusive<u32> = 26..=28;
