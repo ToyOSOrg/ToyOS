@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -49,5 +49,4 @@ before this: `issues/hardware/the-metal-wedge-judge-reads-a-channel-the-wedge-ca
 ## Exit condition
 
 The three judges read each post-flush record off the pass after the reset,
-and a T14 run of the three names reaches their verdicts; then their rows in
-`src/redlist.rs` and this file are deleted.
+and a T14 run of the three names reaches their verdicts; then this file is deleted.

@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -39,5 +39,4 @@ is not known.
 ## Exit condition
 
 Both tests state the filesystem they judge and are staged only on a boot
-whose `/home` is that filesystem, and two consecutive T14 runs exit both 0;
-then their rows in `src/redlist.rs` and this file are deleted.
+whose `/home` is that filesystem, and two consecutive T14 runs exit both 0; then this file is deleted.

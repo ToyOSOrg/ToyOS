@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -40,5 +40,4 @@ earlier T14 run of the same `main`.
 ## Exit condition
 
 `converse` fires `reboot` only once the stream has carried `Boot: complete`
-or its bound has passed, and two consecutive T14 runs pass `lan_talk`; then
-its row in `src/redlist.rs` and this file are deleted.
+or its bound has passed, and two consecutive T14 runs pass `lan_talk`; then this file is deleted.

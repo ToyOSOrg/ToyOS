@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -35,5 +35,4 @@ lease on is not measured.
 ## Exit condition
 
 The judge's verdict no longer rests on the router repeating one lease across
-the two operating systems, and a T14 run passes `lan_dhcp_lease`; then its
-row in `src/redlist.rs` and this file are deleted.
+the two operating systems, and a T14 run passes `lan_dhcp_lease`; then this file is deleted.

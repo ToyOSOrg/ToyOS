@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -25,5 +25,4 @@ mem_total=16777216000 (15 GB) out of range
 ## Exit condition
 
 The bound derives from what the machine reports rather than from one
-guest's size, and a T14 run of the shared boot exits `allocator_stress` 0;
-then its row in `src/redlist.rs` and this file are deleted.
+guest's size, and a T14 run of the shared boot exits `allocator_stress` 0; then this file is deleted.

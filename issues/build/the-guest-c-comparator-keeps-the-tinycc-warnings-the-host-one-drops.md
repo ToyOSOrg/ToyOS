@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -35,5 +35,4 @@ The case binary itself exited 0 (`exit: test_c_03_struct pid=13 code=0`).
 
 The guest and host comparators apply one rule to an expectation's warning
 lines, with the gate that holds them together reading that rule too, and a
-T14 run of the corpus exits `03_struct` 0; then its row in `src/redlist.rs`
-and this file are deleted.
+T14 run of the corpus exits `03_struct` 0; then this file is deleted.

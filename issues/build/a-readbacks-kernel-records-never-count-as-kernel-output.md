@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -36,11 +36,9 @@ The callers: `klogd_hosted` (`must_be_clean`), `audio::tone_on_metal` and
 `audio::client_stall_on_metal` (`must_not_say`), `power::watchdog_quiet`
 (`kernel.must_not_say`). `hda_tone` and `hda_client_stall` are `METAL_ONLY`
 rows no schedule registers, so `src/redlist.rs` cannot hold them
-(`issues/build/a-metal-only-row-cannot-be-disabled.md`) and they still red.
+(`issues/build/a-metal-only-row-cannot-be-disabled.md`).
 
 ## Exit condition
 
 `Serial::alive` recognises a kernel record in the spelling a readback carries,
-and a T14 run of the four names above reaches each judge's own assertions;
-then the `klogd_hosted` and `loader_watchdog_arms` rows in `src/redlist.rs`
-and this file are deleted.
+and a T14 run of the four names above reaches each judge's own assertions; then this file is deleted.

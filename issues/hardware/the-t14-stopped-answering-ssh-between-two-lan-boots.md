@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -46,5 +46,5 @@ The orchestrator reports both names red on an earlier T14 run of the same
 ## Exit condition
 
 A T14 run in which `lanleasecase` and `lanswapcase` both reach their judges.
-Green: their rows in `src/redlist.rs` and this file are deleted. Red on a
-judge: each red is filed with its own cause and its row moved to it.
+Green: this file is deleted. Red on a
+judge: each red is filed with its own cause.

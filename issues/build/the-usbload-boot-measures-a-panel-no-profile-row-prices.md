@@ -25,9 +25,6 @@ EXIT=1):
     FAIL the metal suite measured "boot.usbload.panel_us" and tests/metal-profile.toml prices no such number; add a row with a ceiling and where it came from, because a measurement with no ceiling cannot fail
 ```
 
-While `usb_reset_records_the_phase_it_cut` is in `src/redlist.rs` no run
-flashes `usbload`, so this red is out of sight rather than gone.
-
 ## Exit condition
 
 `tests/metal-profile.toml` carries `boot.usbload.panel_max_us` and

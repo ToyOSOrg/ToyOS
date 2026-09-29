@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -48,4 +48,4 @@ The kernel's own boot was sound: `Boot: complete (1171ms)`, then init's
 `toyos-metal` hands a boot armed with `blackbox-foreign-identity` to its judge
 instead of refusing the hang it stages, and a T14 run of
 `blackbox_foreign_record` reaches `record another image left in this memory`
-in the judge; then its row in `src/redlist.rs` and this file are deleted.
+in the judge; then this file is deleted.

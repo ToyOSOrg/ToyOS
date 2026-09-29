@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -33,5 +33,4 @@ read /system/bin/test_rs_std_tls: entity not found
 ## Exit condition
 
 A binary a staged job's source names by path is on that job's image whether
-or not it is itself a job there, and a T14 run exits `dlopen_dedup` 0; then
-its row in `src/redlist.rs` and this file are deleted.
+or not it is itself a job there, and a T14 run exits `dlopen_dedup` 0; then this file is deleted.

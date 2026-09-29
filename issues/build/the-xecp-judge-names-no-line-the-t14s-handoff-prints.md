@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-29
 ---
@@ -33,5 +33,4 @@ before the reset:
 ## Exit condition
 
 The judge recognises every line `take_ownership` can print about the
-handoff, and a T14 run of `xhci_xecp_walk` passes; then its row in
-`src/redlist.rs` and this file are deleted.
+handoff, and a T14 run of `xhci_xecp_walk` passes; then this file is deleted.

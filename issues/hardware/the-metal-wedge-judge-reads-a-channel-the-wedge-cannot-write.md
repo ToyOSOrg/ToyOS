@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-09-14
 ---
@@ -56,5 +56,4 @@ reason and says so at the site; the wedge judge was not.
 
 A `deadlinewedge` readback on which `boot_deadline_ends_a_wedge`'s metal arm
 passes, with the two records asserted on the channel that carries them — and
-nothing asserted on `kernel.log` that a wedge cannot write to it. Then the
-`boot_deadline_ends_a_wedge` row in `src/redlist.rs` and this file are deleted.
+nothing asserted on `kernel.log` that a wedge cannot write to it. Then this file is deleted.
