@@ -52,7 +52,7 @@ fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
         SyscallError::Io => EIO,
         _ => EINVAL,
     };
-    unsafe { super::stdio::errno = code; }
+    crate::errno::set(code);
     -1
 }
 
@@ -129,7 +129,7 @@ pub unsafe extern "C" fn lseek(raw_fd: i32, offset: i64, whence: i32) -> i64 {
         SEEK_SET => SeekFrom::Start(offset as u64),
         SEEK_CUR => SeekFrom::Current(offset),
         SEEK_END => SeekFrom::End(offset),
-        _ => { super::stdio::errno = EINVAL; return -1; }
+        _ => { crate::errno::set(EINVAL); return -1; }
     };
     match syscall::seek(fd(raw_fd), pos) {
         Ok(n) => n as i64,
@@ -551,7 +551,7 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     // watch more is not a bug in this library, so it gets POSIX's own answer
     // for an nfds it cannot serve.
     if nfds > toyos::poller::Poller::MAX_HANDLES {
-        super::stdio::errno = EINVAL;
+        crate::errno::set(EINVAL);
         return -1;
     }
 
