@@ -29,8 +29,16 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   small-kernel stage 6 (`issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`),
   so the per-CPU IRQ relay and the i8042 plumbing are not ported and then
   deleted.
-- **ACPI only.** No device tree path. This closes every Snapdragon laptop,
-  whose Linux support boots from DT.
+- **ACPI and devicetree**, superseding this ruling's 2026-09-26 "ACPI only,
+  no device tree path": ToyOS reads ACPI and, per
+  `issues/kernel/the-kernel-reads-hardware-from-a-devicetree.md`, devicetree.
+- **Proprietary-by-nature hardware is out of scope** (owner ruling,
+  2026-09-29): Snapdragon laptops and Apple Silicon are closed for that
+  reason, not for lacking ACPI or a device-tree path. Snapdragon's firmware
+  keeps the IOMMU under its own control, its ACPI serves only Windows'
+  power-plugin PEPs, and reaching EL2 takes a Windows launch path —
+  Qualcomm's Secure Launch running Microsoft's signed `tcblaunch.exe` — not
+  meant for another OS.
 - **EL1 only.** The kernel runs at EL1, dropping from EL2 when entered there.
   No VHE-at-EL2 kernel.
 - **`tcblaunch.exe` is not an allowed exception** to the dependency rule's "no
@@ -38,8 +46,9 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   Qualcomm's Secure Launch running Microsoft's signed `tcblaunch.exe` on the
   CPU (`slbounce`); without EL2, ToyOS does not own the PCIe SMMU there
   (`x1-el2.dtso`: "this IOMMU is controlled by the firmware" while under
-  Gunyah). So no Snapdragon laptop can host userland drivers, and none is a
-  target for now.
+  Gunyah). So no Snapdragon laptop can host userland drivers at EL1 — moot
+  regardless, since proprietary-by-nature hardware is out of scope (owner
+  ruling, 2026-09-29, above).
 - **The memory-model audit is stage 0's**, not discovered on real ARM
   hardware: the kernel's `Relaxed` orderings and `Mmio`'s barrier semantics are
   real latent defects on x86 too (`aaddf38a^:issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
@@ -184,6 +193,18 @@ one cost nobody can estimate from a grep); userland TLS and the toolchain
 ## Hardware evidence
 
 Checked against sources on 2026-09-26. Neither machine is a target now.
+
+**ARM hardware maturity (owner ruling, 2026-09-29).** ARM hardware and
+machines are not yet mature enough: ARM testing stays on
+`qemu-system-aarch64 -M virt` under HVF on the development Mac — real ARM
+cores, virtual devices, QEMU's own SMMUv3 — and no ARM machine is bought yet.
+Shortlist for when this is revisited: the Minisforum MS-R1 (CIX P1:
+GICv3+ITS, SMMUv3 described in IORT, with a firmware bug where the IORT's
+stream table covers 25 of 32 StreamID bits, so ToyOS must check IORT ID
+mappings against observed StreamIDs; out of stock 2026-09-29); the Orange Pi
+6 Plus (same SoC); and RK3588 boards, whose SMMUv3 is described only in
+mainline devicetree, per
+`issues/kernel/the-kernel-reads-hardware-from-a-devicetree.md`.
 
 **Radxa Orion O6N (CIX P1 CD8160, checked 2026-09-26).** SystemReady SR v2.5
 is certified for the sibling **O6**, not the O6N — Radxa states only "SBSA
