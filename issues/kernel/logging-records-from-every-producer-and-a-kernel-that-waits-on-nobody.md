@@ -58,8 +58,8 @@ audio-latency A/B, neither of which is taken today.
 metadata on an append, but the zeros are a burst of writes to the stick, and
 that burst starves a tone playing beside it
 (`issues/audio/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`).
-*Exit:* that issue closed, and parts preallocated with `audio_tone_load`
-green at eight CPUs.
+*Exit:* that issue closed, and on the T14 a `METAL` row plays a tone at
+`underruns=0` while parts are preallocated beside it.
 
 Constraints a reader would otherwise re-derive:
 

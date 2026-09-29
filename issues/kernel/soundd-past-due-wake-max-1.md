@@ -16,6 +16,5 @@ cpu1 both stopped within 100 ms of `soundd: resumed`.
 
 Not fixed here, and deliberately: it is one line in the mix loop, `apic::OneShot`'s
 floor makes it safe, and what it changes is when soundd wakes on a late period —
-audio timing, which is the owner's call and which gate A's thorough tier cannot
-currently adjudicate (`issues/audio/`). With the floor, a past-due grid point now costs up to
+audio timing, which is the owner's call. With the floor, a past-due grid point now costs up to
 10 µs of extra lateness against a 2.9 ms period.

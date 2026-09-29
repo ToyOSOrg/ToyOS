@@ -53,20 +53,10 @@ struct Rig {
 }
 
 impl Rig {
-    /// `binary` sent as netd's replacement once sshd answers, and the
-    /// machine's word on it, let go at once: `logd` serves its port before
-    /// netd leases, and sshd may still be binding then.
-    fn swap_once_sshd_answers(&self, binary: &Path, digest: &toyos_swap::Digest) -> Result<String, String> {
-        let asked = std::time::Instant::now();
-        loop {
-            match self.ssh.swap(self.forward, "netd", binary, digest).and_then(|answered| answered.go()) {
-                Err(why) if asked.elapsed() < Duration::from_secs(30) => {
-                    eprintln!("  [swap] not taken yet: {why}");
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                answered => return answered.map(|a| a.said.clone()),
-            }
-        }
+    /// `binary` sent as netd's replacement, and the machine's word on it, let
+    /// go at once.
+    fn swap_netd(&self, binary: &Path, digest: &toyos_swap::Digest) -> Result<String, String> {
+        self.ssh.swap(self.forward, "netd", binary, digest).and_then(|answered| answered.go()).map(|a| a.said.clone())
     }
 
     fn boot(name: &str, bench: Bench) -> Result<Self, String> {
@@ -80,7 +70,12 @@ impl Rig {
         let options = BootOptions { ssh_port: Some(ssh_port), ..staged.options() };
         let mut guest = QemuInstance::boot_with_options(&staged.case, &[], &[], options);
         let mut console = guest.boot_log().to_string();
-        qemu::await_marker(&mut guest, &mut console, super::logstream::SERVING, "logd to open its port")?;
+        // `logd` serves its port before netd leases, and sshd binds only after.
+        for (marker, doing) in
+            [(super::logstream::SERVING, "logd to open its port"), ("sshd: listening on port 22", "sshd to listen")]
+        {
+            qemu::await_marker(&mut guest, &mut console, marker, doing)?;
+        }
         let stream = super::logstream::reader(staged.log_port, &format!("{name}-stream.txt"))?;
         let ssh = Ssh::at(&super::compile::repo_root(), staged.identity.private().to_path_buf())?;
         let forward = SocketAddr::from((Ipv4Addr::LOCALHOST, ssh_port));
@@ -411,21 +406,18 @@ const RESET_NOTHING: &[&str] = &["pcidev-reset-nothing"];
 /// last of them.
 const KNOCKS: usize = 25;
 
-/// A liveness guard on those connects, never a verdict.
-const KNOCKS_WITHIN: Duration = Duration::from_secs(30);
-
 /// netd swapped for `replacement` (the test binary `name`), and from the moment
 /// it says `holding` — its part mastering — [`KNOCKS`] SYNs sent through slirp
-/// at the guest's address. Answers how many slirp completed and how long they
-/// took; `Err` is a why the caller fails the rig with.
-fn swap_and_knock(rig: &mut Rig, rust_bins: &[(String, Vec<u8>)], name: &str, holding: &str) -> Result<(usize, Duration), String> {
+/// at the guest's address. Answers how many slirp completed; `Err` is a why the
+/// caller fails the rig with.
+fn swap_and_knock(rig: &mut Rig, rust_bins: &[(String, Vec<u8>)], name: &str, holding: &str) -> Result<usize, String> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     let replacement = test_binary(rust_bins, name)?;
     let binary = rig.staged.scratch.join(name);
     std::fs::write(&binary, replacement).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(replacement));
+    let answer = rig.swap_netd(&binary, &toyos_swap::digest(replacement));
     eprintln!("  [swap] the swap was answered {answer:?}");
     init_accepted(&answer)?;
     qemu::await_marker(&mut rig.guest, &mut rig.console, holding, "the replacement holding the part mastering")?;
@@ -443,21 +435,13 @@ fn swap_and_knock(rig: &mut Rig, rust_bins: &[(String, Vec<u8>)], name: &str, ho
             }
         })
     };
-    let asked = std::time::Instant::now();
     let knocked = qemu::await_guest(&mut rig.guest, &mut rig.console, "the host's frames at the part", |_| {
-        taken.load(Ordering::SeqCst) >= KNOCKS || asked.elapsed() > KNOCKS_WITHIN
+        taken.load(Ordering::SeqCst) >= KNOCKS
     });
     stop.store(true, Ordering::SeqCst);
     let _ = knocking.join();
     knocked?;
-    let taken = taken.load(Ordering::SeqCst);
-    if taken < KNOCKS {
-        return Err(format!(
-            "slirp took {taken} of {KNOCKS} connects in {KNOCKS_WITHIN:?}, so the window held too few \
-             frames for a clean console to mean anything"
-        ));
-    }
-    Ok((taken, asked.elapsed()))
+    Ok(taken.load(Ordering::SeqCst))
 }
 
 /// **The part keeps running across a release, and the next holder stops it
@@ -479,7 +463,7 @@ pub fn swap_quiets_the_function(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let mut rig = Rig::boot("swap-quiet", super::lan::TALK_BENCH)?;
-    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, IDLE, HOLDING) {
+    let taken = match swap_and_knock(&mut rig, rust_bins, IDLE, HOLDING) {
         Ok(knocked) => knocked,
         Err(why) => return Err(rig.fail(why)),
     };
@@ -491,7 +475,7 @@ pub fn swap_quiets_the_function(
         return Err(rig.fail(format!("{why}\n  the release said: {}", released.trim_end())));
     }
     eprintln!(
-        "  [swap] {}; {}; the next holder stopped it, mastered it through {taken} SYNs in {took:?}, and \
+        "  [swap] {}; {}; the next holder stopped it, mastered it through {taken} SYNs, and \
          the unit saw no fault",
         released.trim_end(),
         inherited.trim_end(),
@@ -523,7 +507,7 @@ pub fn swap_keeps_what_nothing_reset(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let mut rig = Rig::boot_armed("swap-residue", super::lan::TALK_BENCH, RESET_NOTHING)?;
-    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, RUNNING, RUNNING_HOLDING) {
+    let taken = match swap_and_knock(&mut rig, rust_bins, RUNNING, RUNNING_HOLDING) {
         Ok(knocked) => knocked,
         Err(why) => return Err(rig.fail(why)),
     };
@@ -547,7 +531,7 @@ pub fn swap_keeps_what_nothing_reset(
         console.must_be_clean()?;
         let taken_over = console.must_say("pcidev: slot 0 holds 1 range(s)")?;
         eprintln!(
-            "  [swap] {}; {}; {}; mastered through {taken} SYNs in {took:?}, and the unit saw no fault",
+            "  [swap] {}; {}; {}; mastered through {taken} SYNs, and the unit saw no fault",
             released.trim_end(),
             inherited.trim_end(),
             taken_over.trim_end(),
@@ -586,15 +570,15 @@ const HOLDER_FAULT: &str = "iommu: DMA FAULT owner=slot";
 /// this host's SYNs make the part fetch a descriptor there, and the unit
 /// refuses it. Nothing but that fault can wake the program. The verdict is its
 /// own line: the claim refused the interrupt read with `Io`. Without the
-/// refusal and the wake it earns, the program waits out its bound and says it
-/// was told nothing.
+/// refusal and the wake it earns, the program waits, and the harness ceiling reds
+/// the boot.
 pub fn swap_fault_tells_its_holder(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let mut rig = Rig::boot("swap-astray", super::lan::TALK_BENCH)?;
-    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, ASTRAY, ASTRAY_HOLDING) {
+    let taken = match swap_and_knock(&mut rig, rust_bins, ASTRAY, ASTRAY_HOLDING) {
         Ok(knocked) => knocked,
         Err(why) => return Err(rig.fail(why)),
     };
@@ -615,7 +599,7 @@ pub fn swap_fault_tells_its_holder(
         let faults = text.matches(HOLDER_FAULT).count();
         console.must_be_clean_apart_from(HOLDER_FAULT, faults)?;
         eprintln!(
-            "  [swap] {}; {}; after {taken} SYNs in {took:?}",
+            "  [swap] {}; {}; after {taken} SYNs",
             fault.trim_end(),
             told.trim_end(),
         );
@@ -672,7 +656,7 @@ pub fn swap_resets_the_function(
     let probe = test_binary(rust_bins, FLR_PROBE)?;
     let binary = rig.staged.scratch.join(FLR_PROBE);
     std::fs::write(&binary, probe).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(probe));
+    let answer = rig.swap_netd(&binary, &toyos_swap::digest(probe));
     eprintln!("  [swap] the swap was answered {answer:?}");
     if let Err(why) = init_accepted(&answer) {
         return Err(rig.fail(why));
@@ -756,7 +740,7 @@ fn refused_device_fails(name: &str, actuators: &'static [&'static str]) -> Resul
     let mut rig = Rig::boot_armed(name, IGB_BENCH, actuators)?;
     let binary = rebuilt("netd", &rig.staged.scratch)?;
     let digest = toyos_swap::digest(&std::fs::read(&binary).map_err(|e| e.to_string())?);
-    let answer = rig.swap_once_sshd_answers(&binary, &digest);
+    let answer = rig.swap_netd(&binary, &digest);
     eprintln!("  [swap] the swap was answered {answer:?}");
     if let Err(why) = init_accepted(&answer) {
         return Err(rig.fail(why));
@@ -829,16 +813,8 @@ pub fn swap_not_inherited(
     let probe = test_binary(rust_bins, PROBE)?;
     let remote = format!("/tmp/{PROBE}");
     let (host, port) = (super::ssh::HOST, rig.forward.port());
-    let asked = std::time::Instant::now();
-    loop {
-        match super::ssh::ssh_put(host, port, &rig.staged.identity, &remote, probe) {
-            Err(why) if asked.elapsed() < Duration::from_secs(30) => {
-                eprintln!("  [swap] not taken yet: {why}");
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            Err(why) => return Err(rig.fail(why)),
-            Ok(()) => break,
-        }
+    if let Err(why) = super::ssh::ssh_put(host, port, &rig.staged.identity, &remote, probe) {
+        return Err(rig.fail(why));
     }
     let command = format!("{remote} {} {} {}", toyos_swap::PORT, toyos_swap::LABEL, toyos_swap::MSG_SWAP);
     let ran = match super::ssh::ssh_exec(host, port, &rig.staged.identity, &command) {

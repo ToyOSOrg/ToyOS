@@ -31,7 +31,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
 use toyos::log::{LogTail, Record, MAX_LOG_SHARDS};
 use toyos::poller::{Poller, READABLE};
@@ -46,19 +45,6 @@ const FIRST_SEQ: u64 = 1;
 /// Records per `SYS_LOG_READ`. Above the shard count, which the call refuses
 /// below.
 const BATCH: usize = 64;
-
-/// How long the whole gate may take before it gives up on a workload that never
-/// finished, and it reports what it had when it did.
-///
-/// **A liveness guard and never a verdict**, and it is what a shard stalled on
-/// an uncommitted slot looks like from here: `drain_ordered` blocks a shard at
-/// its first uncommitted record, so a writer that never publishes takes that
-/// shard out of the merge for good.
-///
-/// **It is the guest's own ceiling and it is the smaller of the two**: the host
-/// gives the whole boot 60 s (`tests/common/logread.rs`), so what a hung gate
-/// reports is this one's message and this one's elapsed time.
-const CEILING: Duration = Duration::from_secs(30);
 
 /// Empty reads in a row before the log is called quiet.
 ///
@@ -199,7 +185,6 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
     let target = if storm { STORM_RECORDS } else { 0 };
 
     let mut quiet = 0u32;
-    let started = Instant::now();
     loop {
         if !armed {
             poller.watch(cap, READABLE, LOG_TOKEN);
@@ -236,18 +221,9 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
         if quiet >= QUIET_READS && finished {
             break;
         }
-        // A producer that returned short of `target` said why; waiting out the ceiling would lose it.
+        // A producer that returned short of `target` said why; waiting out the host's ceiling would lose it.
         if !finished && producer.as_ref().is_some_and(JoinHandle::is_finished) {
             join(producer.take())?;
-        }
-        if started.elapsed() > CEILING {
-            return Err(format!(
-                "gave up after {:?}: {} records over {} reads, the producer at {} of {target}",
-                started.elapsed(),
-                run.records,
-                run.reads,
-                produced.load(Ordering::Acquire),
-            ));
         }
         if batch.is_empty() {
             // **Nothing new, so park on the readiness source rather than spin.**

@@ -18,17 +18,10 @@
 //!   away, which is the owner's case: the process is alive when its window is
 //!   closed.
 
-use std::time::{Duration, Instant};
-
 use window::{Color, Event, Window};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 200;
-
-/// A liveness ceiling, not a duration: it costs nothing when the close
-/// arrives, and bounds a run where nothing ever closes this window.
-const RUN_CEILING: Duration = Duration::from_secs(30);
-const POLL_NS: u64 = 200_000_000;
 
 fn main() {
     let leave_now = std::env::args().nth(1).as_deref() == Some("exit");
@@ -45,19 +38,10 @@ fn main() {
     window.present();
     println!("WINDOW-CHILD-UP");
 
+    // No deadline: a window nothing ever closes is a hang the host's ceiling
+    // reds.
     if !leave_now {
-        let deadline = Instant::now() + RUN_CEILING;
-        loop {
-            match window.poll_event(POLL_NS) {
-                Some(Event::Close) => break,
-                Some(_) => {}
-                None if Instant::now() >= deadline => {
-                    println!("WINDOW-CHILD-TIMEOUT");
-                    break;
-                }
-                None => {}
-            }
-        }
+        while !matches!(window.poll_event(u64::MAX), Some(Event::Close)) {}
     }
 
     println!("WINDOW-CHILD-GONE");

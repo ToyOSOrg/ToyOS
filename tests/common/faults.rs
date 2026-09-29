@@ -1099,41 +1099,13 @@ fn parse(line: &str) -> Option<(usize, usize)> {
 /// reported *some* address would satisfy every other line here; only resolving
 /// it against the kernel's own symbols says the report points at where the CPU
 /// actually was.
-pub fn dump_nmi_probe(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            kernel_params: &["dump-deaf-cpu"],
-            ..Default::default()
-        },
-    );
-    // 3 s is the actuator's earliest arming, not its schedule: cpu0 only looks
-    // once per idle-loop iteration, and on a settled guest the next thing that
-    // wakes it is the 10 s health tick. Add 400 ms of deafness and the dump's
-    // 250 ms kick budget, and 20 s is the first round number that clears it.
-    //
-    // **A ceiling now rather than the run.** The guest neither exits nor halts
-    // here — an NMI interrupts a CPU, it does not kill it — so a plain drain
-    // paid the whole twenty seconds on every green run, against a guest that
-    // was done in about a third of it. Both markers, and neither implies the
-    // other's order: the dump is requested while the victim is deaf and the
-    // victim announces its own return when the 400 ms window closes, so which
-    // of the two lands last is a fact about how long the report takes rather
-    // than about the machine.
-    let dumped = std::cell::Cell::new(false);
-    let rejoined = std::cell::Cell::new(false);
-    let log = qemu.drain_until(Duration::from_secs(20), |line| {
-        dumped.set(dumped.get() || line.contains("=== end of dump ==="));
-        rejoined.set(rejoined.get() || line.contains("rejoined after"));
-        dumped.get() && rejoined.get()
-    });
-
+///
+/// **Judged on the T14 and in no QEMU guest.** The deafness is a window of the
+/// actuator's own clock and the dump's kick and NMI budgets are the kernel's,
+/// so a guest the host starves misses the window and reads exactly like the
+/// defect this hunts.
+pub fn dump_nmi_probe_on_metal(kernel: &Serial) -> Result<(), String> {
+    let log = kernel.text();
     if !log.contains("=== blocked-task dump:") {
         return Err(format!("the dump never ran — is `dump-deaf-cpu` on?\n{log}"));
     }

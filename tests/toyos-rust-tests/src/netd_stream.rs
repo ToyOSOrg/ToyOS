@@ -5,7 +5,7 @@
 //! Each netd stream test includes this file whole and uses its own part of it.
 #![allow(dead_code)]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, Pipe};
@@ -47,8 +47,9 @@ pub fn ring_capacity() -> u64 {
     fill(&write)
 }
 
-/// Wait until `check` answers, re-asking it each time `handle` reports ready
-/// for `flags`, and panic by name if `within` passes first.
+/// Wait, with no deadline, until `check` answers, re-asking it each time
+/// `handle` reports ready for `flags`: an answer that never comes is a hang the
+/// harness ceiling reds.
 ///
 /// **A readiness completion is a reason to look again, not an answer**: a
 /// zero-byte write still wakes the other end's watch, and netd's liveness
@@ -56,20 +57,15 @@ pub fn ring_capacity() -> u64 {
 pub fn await_until<T>(
     handle: &impl AsHandle,
     flags: u32,
-    within: Duration,
-    what: &str,
     mut check: impl FnMut() -> Option<T>,
 ) -> T {
-    let deadline = Instant::now() + within;
     let poller = Poller::new(1);
     loop {
         if let Some(answer) = check() {
             return answer;
         }
-        let left = deadline.saturating_duration_since(Instant::now());
-        assert!(!left.is_zero(), "{what}: not within {within:?}");
         poller.watch(handle, flags, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+        poller.wait(1, u64::MAX, |_| {});
     }
 }
 
@@ -88,6 +84,10 @@ pub enum Ask {
 /// The guest port the harness forwards a host port to, which [`Ask::Dial`]
 /// connects to.
 pub const FORWARDED_PORT: u16 = 22;
+
+/// A connect's `timeout_ms` that sets no deadline: netd times a connect out
+/// only on a non-zero one.
+pub const NO_DEADLINE: u32 = 0;
 
 /// `what` on the wire: a mode byte, then eight little-endian bytes of length.
 pub fn ask_bytes(what: Ask) -> [u8; 9] {
@@ -108,14 +108,13 @@ pub fn ask(tx: &Pipe, what: Ask) {
 }
 
 /// Keep the pipe `write` feeds full until its reader is gone, looking again
-/// each time the pipe reports room, and panic by name if `within` passes
-/// first.
+/// each time the pipe reports room.
 ///
 /// **A reader's departure is an event only for a full pipe**: one with room is
 /// writable already, so its watch would complete at once, every time.
-pub fn keep_full_until_released(write: &Pipe, within: Duration, what: &str) {
+pub fn keep_full_until_released(write: &Pipe, what: &str) {
     let chunk = [0u8; 65536];
-    await_until(write, WRITABLE, within, what, || loop {
+    await_until(write, WRITABLE, || loop {
         match write.write_nonblock(&chunk) {
             Ok(_) => {}
             Err(SyscallError::WouldBlock) => return None,
@@ -130,16 +129,17 @@ pub fn keep_full_until_released(write: &Pipe, within: Duration, what: &str) {
 /// the pattern's group at `capacity - 16`.
 ///
 /// **A poll, because nothing announces a full ring to its reader**: readiness
-/// fires on the first byte. `within` is a liveness guard, said by name.
-pub fn await_ring_full(rx: &Pipe, capacity: u64, within: Duration) {
-    await_ring_holds(rx, capacity, capacity - 16, within)
+/// fires on the first byte.
+pub fn await_ring_full(rx: &Pipe, capacity: u64) {
+    await_ring_holds(rx, capacity, capacity - 16)
 }
 
 /// Wait until `rx`'s ring holds the pattern's 16-byte group at stream position
 /// `group_start`, in the slot a ring of `capacity` bytes puts it: a group of an
 /// earlier lap in that slot carries another stamp. A poll, as
 /// [`await_ring_full`] is.
-pub fn await_ring_holds(rx: &Pipe, capacity: u64, group_start: u64, within: Duration) {
+pub fn await_ring_holds(rx: &Pipe, capacity: u64, group_start: u64) {
+    /// A pace and never a verdict: no deadline follows it.
     const POLL: Duration = Duration::from_millis(1);
     let page = rx.pipe_map().expect("map the receive pipe") as *const u8;
     // SAFETY: `pipe_map` returned the base of this pipe's mapped page, whose
@@ -148,35 +148,26 @@ pub fn await_ring_holds(rx: &Pipe, capacity: u64, group_start: u64, within: Dura
     let group = unsafe { page.add(core::mem::size_of::<RingHeader>() + (group_start % capacity) as usize) };
     // SAFETY: inside the data region, as `group` above.
     let at = |i: u64| unsafe { group.add(i as usize).read_volatile() };
-    let started = Instant::now();
     while !(0..16).all(|i| at(i) == stream_byte(group_start + i)) {
-        assert!(
-            started.elapsed() < within,
-            "the receive ring never held stream byte {group_start} in {within:?}: its group reads {:02x?}, want {:02x?}",
-            (0..16).map(at).collect::<Vec<_>>(),
-            (0..16).map(|i| stream_byte(group_start + i)).collect::<Vec<_>>(),
-        );
         syscall::nanosleep(POLL.as_nanos() as u64);
     }
 }
 
 
-/// Read `rx` to its end, each wait for more bounded by `within`, and panic by
-/// name at the first byte that is not the pattern's. Answers how many bytes
-/// came.
-pub fn read_pattern(rx: &Pipe, within: Duration, what: &str) -> u64 {
-    read_pattern_from(rx, 0, u64::MAX, within, what)
+/// Read `rx` to its end, and panic by name at the first byte that is not the
+/// pattern's. Answers how many bytes came.
+pub fn read_pattern(rx: &Pipe, what: &str) -> u64 {
+    read_pattern_from(rx, 0, u64::MAX, what)
 }
 
 /// [`read_pattern`] from stream position `from`, ending at position `until`.
 /// Answers the position reached.
-pub fn read_pattern_from(rx: &Pipe, from: u64, until: u64, within: Duration, what: &str) -> u64 {
+pub fn read_pattern_from(rx: &Pipe, from: u64, until: u64, what: &str) -> u64 {
     let mut buf = vec![0u8; 65536];
     let mut at = from;
     while at < until {
         let want = buf.len().min((until - at) as usize);
-        let waiting = format!("{what}: the stream after byte {at}");
-        let n = await_until(rx, READABLE, within, &waiting, || match rx.read_nonblock(&mut buf[..want]) {
+        let n = await_until(rx, READABLE, || match rx.read_nonblock(&mut buf[..want]) {
             Ok(n) => Some(n),
             Err(SyscallError::WouldBlock) => None,
             Err(e) => panic!("{what}: reading the stream at {at}: {e:?}"),

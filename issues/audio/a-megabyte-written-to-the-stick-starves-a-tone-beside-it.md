@@ -25,5 +25,6 @@ the stick while a tone plays is the same stimulus.
 
 ## Exit condition
 
-`audio_tone_load` at eight CPUs green across repeated boots while a guest
-program writes a mebibyte to `/log` during the tone.
+On the T14, a `METAL` row plays `hda_tone`'s tone while a program writes a
+mebibyte to `/log`, and soundd reports `underruns=0` over the tone's window
+across repeated boots. Owner: the metal suite (`tests/toyos.rs`'s `METAL`).

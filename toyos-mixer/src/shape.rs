@@ -183,8 +183,7 @@ mod tests {
         }
     }
 
-    /// The other side of the same rule, and the number gate A's baseline was
-    /// recorded against: eight periods, five held.
+    /// The other side of the same rule: eight periods, five held.
     #[test]
     fn the_shipped_pipeline_keeps_five_periods_in_reserve() {
         assert_eq!(deferral_floor_nanos(8, PERIOD_NS), Some(5 * PERIOD_NS));

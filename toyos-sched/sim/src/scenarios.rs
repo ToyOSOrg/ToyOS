@@ -704,8 +704,7 @@ pub fn fork_storm() -> Scenario {
 /// invariant-I5 service spread over one contention window actually *is*, per
 /// machine width — as opposed to what the derived bound says it should be.
 ///
-/// This is the same two-tier shape gate A uses and for the same reason. The
-/// bound in `invariants::check_fairness` is derived from the policy's own
+/// The bound in `invariants::check_fairness` is derived from the policy's own
 /// granularity and is **not** moved when the shipped code misses it; that would
 /// fit the gate to the implementation, and a gate fitted to what the code
 /// already does cannot detect the code getting worse. So the derived bound stays
@@ -789,8 +788,8 @@ const FAIRNESS_SAMPLE: &[(usize, u64)] = &[
 /// to 102 ms between 500 and 10 000 seeds at two CPUs, and a ceiling with no
 /// headroom would red on sample size alone.
 ///
-/// What it can detect, stated the way gate A's fast tier states it: a fairness
-/// regression that widens the worst spread by more than 25%. Not a subtle one.
+/// What it can detect: a fairness regression that widens the worst spread by
+/// more than 25%. Not a subtle one.
 /// A width with no recorded sample gets **zero**, so the derived bound governs
 /// it — an allowance is a claim that a measurement was taken, and nobody has
 /// taken one there.
@@ -1440,8 +1439,8 @@ pub fn lopsided_placement(cpus: usize, threads: usize, work: u64) -> Scenario {
 /// The I9 that shipped alongside that park could not see it, and the giveaway
 /// was that it needed no change: it compared a *running* task's `until` against
 /// the clock, and a re-armed `until` is by construction fresh. A check that
-/// passes because it stopped measuring is gate A's instrument-defect shape, so
-/// I9 is the cumulative form now and this is what says so.
+/// passes because it stopped measuring certifies nothing, so I9 is the
+/// cumulative form now and this is what says so.
 ///
 /// **A named constructor rather than a `with_park` at one call site**, which is
 /// what it was until the CLI's `gate` was found to be running eight of the nine

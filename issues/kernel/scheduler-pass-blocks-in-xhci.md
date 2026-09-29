@@ -52,13 +52,3 @@ prologue is outside the window the budget covers, so the pass-cost histogram
 records a microsecond pass while the CPU had been in the driver for two seconds.
 **The measured window has to start where the scheduler entry starts, and that
 half of this issue is still open.**
-
-The other half — that the gate ran nowhere — is closed. `sched_check_build`
-(`tests/toyos.rs`) boots the `sched-check` kernel and `tests/common/passcost.rs`
-judges what it publishes; the second sentence of the paragraph this replaced,
-that invariant P "has never executed against the kernel in any image or any test
-run", was true when it was written and has not been since. Invariant P itself no
-longer exists: a pass's elapsed time is wall clock and a guest's wall clock
-advances while a hypervisor holds its vCPU, so the budget is measured and gated
-in the harness rather than asserted in the kernel (`tests/common/passcost.rs`).
-Widening the window is untouched by that and is what this file still wants.

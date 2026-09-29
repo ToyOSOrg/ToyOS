@@ -911,7 +911,8 @@ pub fn iommu_context_absent(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (log, blocked) = fault_boot(test_config, c_bins, rust_bins, &["iommu-context-absent"])?;
+    let (log, blocked) =
+        fault_boot(test_config, c_bins, rust_bins, &["iommu-context-absent", "panic-reboot-fast"])?;
 
     // Which function the actuator left out is decided in the guest by class
     // code; which function that *is* on this machine is read here from the PCI
@@ -964,7 +965,8 @@ pub fn iommu_empty_domain(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (log, blocked) = fault_boot(test_config, c_bins, rust_bins, &["iommu-empty-domain"])?;
+    let (log, blocked) =
+        fault_boot(test_config, c_bins, rust_bins, &["iommu-empty-domain", "panic-reboot-fast"])?;
 
     let nvme = class_function(&log, "0108").ok_or_else(|| {
         format!("this machine enumerated no NVMe controller to strand\n{}", log.text())
@@ -1189,9 +1191,8 @@ fn foreign_fault(
     unit_is_first(&qemu::profile_argv(&options), arm.name)?;
     // An arm whose device is driven by a process boots that process's config.
     let config = arm.driver.config(test_config);
-    let mut qemu = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
-    let mut log = Serial::boot(&qemu);
-    log.push(&qemu.drain_serial(Duration::from_secs(2)));
+    let qemu = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
+    let log = Serial::boot(&qemu);
     let socket = qemu.qmp_socket();
 
     let blocked = blocked_on(log.must_say(FAULT)?)?;
@@ -1335,7 +1336,6 @@ pub fn iommu_gpu_scanout_swap(
         ));
     }
     log.push(&result.serial);
-    log.push(&qemu.drain_serial(Duration::from_millis(500)));
     log.must_not_say(FAULT)?;
     log.must_be_clean()?;
     let shown = qemu.screendump();
@@ -1801,9 +1801,16 @@ fn fault_boot(
     );
     let mut log = Serial::boot(&qemu);
     // Past the fault, because the claim is that the machine stopped there: the
-    // handler halts every CPU, so anything the boot would have gone on to do
-    // has to be absent from a window that stays open after it.
-    log.push(&qemu.drain_serial(Duration::from_secs(2)));
+    // handler takes the fatal path, and the capture is judged once its reset
+    // has ended QEMU.
+    let mut after = String::new();
+    qemu::await_reset(
+        &mut qemu,
+        &mut after,
+        "the fault's fatal path to reset the machine",
+        &["Boot: complete", qemu::DEFAULT_READY],
+    )?;
+    log.push(&after);
     log.must_not_say("Boot: complete")?;
     log.must_not_say(qemu::DEFAULT_READY)?;
 
@@ -2074,6 +2081,16 @@ pub fn userdev_dma_fault(
         ));
     }
 
+    // netd's answer to the refusal is its own end: `Card::begin_pass` panics
+    // on the claim's `Io`, and it exits 101. Awaited so that the capture below
+    // is the machine's after netd, and a claim that stops refusing reds here.
+    let mut end = String::new();
+    qemu::await_guest(&mut qemu, &mut end, "netd's end on its refused claim", |end| {
+        end.contains("netd: this NIC's claim refused an interrupt read: Io")
+            && end.lines().any(|l| l.contains("exit: netd pid=") && l.contains(" code=101 "))
+    })
+    .map_err(|e| format!("{e}\n{end}\n{}", log.text()))?;
+
     // And the machine is running. This is the assertion the whole stage is
     // for: a guest that answers here is one whose scheduler, spawn path and
     // IPC all survived a device being refused mid-flight.
@@ -2091,13 +2108,30 @@ pub fn userdev_dma_fault(
             result.exit_code, result.stdout
         ));
     }
-    // Nothing panicked on the way, and the staged fault happened **once**:
-    // clearing the function's Bus Master Enable is what bounds a storm, and a
-    // second line would say it did not. Every other boot in the estate reds on
-    // this line through `must_be_clean`; this is the one that staged it.
+    // `end` is the window from the fault to netd's exit, and nothing else
+    // judges it — it goes into the check below rather than staying read only
+    // for the two needles `await_guest` waited on. netd's own panic is
+    // staged, so its location line, immediately above the message already
+    // matched above, is the one line this capture may hold; a second panic,
+    // netd's or anyone else's, has no line here to hide behind.
+    let message_at = end
+        .lines()
+        .position(|l| l.contains("netd: this NIC's claim refused an interrupt read: Io"))
+        .ok_or_else(|| format!("netd's panic message vanished between the wait and the check:\n{end}"))?;
+    let mut lines: Vec<&str> = end.lines().collect();
+    if message_at == 0 || !lines[message_at - 1].contains("panicked at") {
+        return Err(format!("netd's panic message arrived without its location line:\n{end}"));
+    }
+    lines.remove(message_at - 1);
+    let end = lines.join("\n");
+
+    // The staged fault happened **once**: clearing the function's Bus Master
+    // Enable is what bounds a storm, and a second line would say it did not.
+    // Every other boot in the estate reds on this line through
+    // `must_be_clean`; this is the one that staged it.
     let mut after = log;
+    after.push(&end);
     after.push(&result.serial);
-    after.push(&qemu.drain_serial(Duration::from_millis(500)));
     after.must_be_clean_apart_from("iommu: DMA FAULT owner=slot", 1)?;
     eprintln!(
         "  [iommu] the NIC's driver was refused an address it was handed, and the machine ran on"

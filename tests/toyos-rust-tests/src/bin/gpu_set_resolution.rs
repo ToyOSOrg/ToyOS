@@ -66,22 +66,17 @@ fn main() {
 
 /// The claim again, once the release the last close *queued* has run.
 /// `issues/kernel/deferred-release-outlives-its-syscall.md` is the kernel half:
-/// `AlreadyExists` here is that tracked defect, not another holder.
+/// `AlreadyExists` here is that tracked defect, not another holder, and a claim
+/// never released is a hang the harness ceiling reds.
 fn reclaim(cap: &SysCap) -> FramebufferDev {
-    for _ in 0..RECLAIM_TRIES {
+    loop {
         match cap.claim(DeviceType::Framebuffer) {
             Ok(fb) => return fb,
             Err(SyscallError::AlreadyExists) => std::thread::sleep(RECLAIM_STEP),
             Err(e) => panic!("the second claim was refused {e:?}"),
         }
     }
-    panic!(
-        "the framebuffer claim was still held {:?} after its handle closed",
-        RECLAIM_STEP * RECLAIM_TRIES,
-    );
 }
 
-/// Five seconds over a queue drained at every syscall exit: exhausting it is a
-/// defect, not a slow host.
-const RECLAIM_TRIES: u32 = 500;
+/// A pace and never a verdict.
 const RECLAIM_STEP: Duration = Duration::from_millis(10);

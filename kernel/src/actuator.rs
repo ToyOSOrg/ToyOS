@@ -89,9 +89,6 @@ actuators! {
     /// Cap the i8042 ISR at 4 bytes and answer empty until the mute verdict is out; `service` then polls the rest, so the verdict beats the sequence on every boot instead of on a loaded shard's luck.
     i8042_split_burst = "i8042-split-burst";
 
-    /// Shorten the idle loop's health/PMM snapshot cadence from 10s to 200ms.
-    sched_fast_health = "sched-fast-health";
-
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
 
@@ -268,9 +265,6 @@ actuators! {
     /// Have the gate's last read end as one whose port read disconnected
     /// mid-wait does.
     usb_port_gone = "usb-port-gone";
-
-    /// Hold every mass-storage bulk completion back 2ms before the driver may see it.
-    usb_slow_device = "usb-slow-device";
 
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
