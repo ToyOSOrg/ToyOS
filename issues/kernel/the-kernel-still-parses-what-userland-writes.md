@@ -30,7 +30,8 @@ have no bound at all; and two of those ceilings are *already* exceeded by
 artifacts this tree builds.
 
 **It has a deadline.** Nothing shipped is dynamically linked today, so the move
-is pure deletion. The day `hosted-rustc` turns on, a very large shared object is
+is pure deletion. The day an image carries the hosted rustc
+(`issues/build/the-hosted-rustc-is-not-built.md`), a very large shared object is
 dlopened into a kernel whose cache never evicts, and every one of those bounds
 becomes load-bearing at once. Do it after the completion architecture lands and
 before that day. Independent of everything else; may run as soon as a slot frees.

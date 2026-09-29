@@ -3104,7 +3104,7 @@ mod tests {
             receives_have_providers(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig =
-            toml::from_str("init = []\n[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
+            toml::from_str("[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(receives_have_providers(&bad).is_err());
     }
 
@@ -3153,13 +3153,13 @@ mod tests {
             apps_receive_a_served_name(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let provided: SystemConfig = toml::from_str(
-            "init = []\n[apps]\nreceives = [\"surface\"]\n\
+            "[apps]\nreceives = [\"surface\"]\n\
              [programs.terminal]\nprovides = [\"surface\"]\n",
         )
         .unwrap();
         assert!(apps_receive_a_served_name(&provided).is_err());
         let ghost: SystemConfig =
-            toml::from_str("init = []\n[apps]\nreceives = [\"ghost\"]\n").unwrap();
+            toml::from_str("[apps]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(apps_receive_a_served_name(&ghost).is_err());
     }
 
@@ -3190,7 +3190,7 @@ mod tests {
             provides_disjoint_from_serves(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig = toml::from_str(
-            "init = []\n[programs.a]\nserves = [\"x\"]\n[programs.b]\nprovides = [\"x\"]\n",
+            "[programs.a]\nserves = [\"x\"]\n[programs.b]\nprovides = [\"x\"]\n",
         )
         .unwrap();
         assert!(provides_disjoint_from_serves(&bad).is_err());
@@ -3245,7 +3245,7 @@ mod tests {
             .expect_err("the excused entry no longer collides with anything");
         assert!(staged.contains(STAGED_COLLISION.2), "{staged}");
         let bad: SystemConfig = toml::from_str(
-            "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
+            "[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",
         )
         .unwrap();
@@ -3378,7 +3378,7 @@ mod tests {
         }
         let armed_on = |device: &str, args: &str| {
             let cfg: SystemConfig = toml::from_str(&format!(
-                "init = []\n[programs.netd]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
+                "[programs.netd]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
             ))
             .unwrap();
             an_armed_intel_actuator_claims_a_card_the_driver_opens(&cfg, &cards)
@@ -3456,7 +3456,7 @@ mod tests {
         claims_no_device(&load("diag/system.toml"))
             .unwrap_or_else(|e| panic!("diag/system.toml: {e}"));
         let bad: SystemConfig =
-            toml::from_str("init = []\n[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
+            toml::from_str("[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
         assert!(claims_no_device(&bad).is_err());
     }
 
@@ -3476,7 +3476,7 @@ mod tests {
         for cfg in ALL_CONFIGS {
             started_programs_are_declared(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let bad: SystemConfig = toml::from_str("init = []\n[boot]\nstart = [\"ghost\"]\n").unwrap();
+        let bad: SystemConfig = toml::from_str("[boot]\nstart = [\"ghost\"]\n").unwrap();
         assert!(started_programs_are_declared(&bad).is_err());
     }
 

@@ -119,3 +119,13 @@ here too**, because a reviewer refuses any one that is not
   nightly's guest containers and `portability-linux` install: every host
   binary those jobs build links through `cc`, `ring`'s C compiles with it, and
   `portability-linux` builds LLVM with `c++`. Exit: it goes with `cc`.
+- **`perl`** — every compiler build (`src/compiler.rs`) builds the toolchain's
+  cargo, whose `vendored-openssl` builds OpenSSL through `openssl-src`, and
+  its `./Configure` and `util/dofile.pl` are Perl: on any host that builds a
+  compiler, and on the nightly's toolchain runner. No Rust tool does the
+  job: upstream cargo hard-wires git2's `https` and `ssh` features, and
+  `libssh2-sys` depends on `openssl-sys` unconditionally on Unix, so a Rust
+  TLS needs a change to the cargo fork. Exit: the toolchain's cargo links no
+  OpenSSL.
+- **`make`** — the same build: `openssl-src` runs `make depend` and
+  `make build_libs`. Exit: `perl`'s.
