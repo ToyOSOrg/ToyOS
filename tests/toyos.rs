@@ -1854,7 +1854,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "boot_deadline_ends_a_wedge",
         metal::Metal::Runs {
             arms: &[metal::once("deadlinewedge", "tests/jobcase", &["wedge-before-reset"], &[])],
-            judge: |b| power::deadline_wedge_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+            judge: |b| power::deadline_wedge_chain(&b[0].after_the_reset()?),
         },
     ),
     (
@@ -1866,7 +1866,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "usb_reset_records_the_phase_it_cut",
         metal::Metal::Runs {
             arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],
-            judge: |b| power::usb_load_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+            judge: |b| power::usb_load_chain(&b[0].after_the_reset()?),
         },
     ),
     (
@@ -1900,14 +1900,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         // a predecessor's is exactly what the arm above judges.
         // Its own boot: it deliberately leaves the page holding a record no
         // stick owns, and a boot that then read it as a predecessor's is the
-        // defect. The T14 runs the same three passes QEMU does — the loader
-        // points `BootNext` at itself, so they are one flash.
+        // defect.
         "blackbox_foreign_record",
         metal::Metal::Runs {
             arms: &[metal::once(
                 "foreignrecord",
                 "tests/jobcase",
-                &["blackbox-foreign-identity"],
+                &[toyos_build::metal::FOREIGN_RECORD_ARM],
                 &[],
             )],
             judge: |b| {
@@ -1916,6 +1915,8 @@ const METAL: &[(&str, metal::Metal)] = &[
                 // Named and cleared, and never reported as this stick's own.
                 power::says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
                 power::says_nothing_of(&after, "the last boot read")?;
+                // The hang `toyos-metal` admits for this arm, and only this one.
+                after.must_say(bootlog::HUNG_WITHOUT_A_RECORD)?;
                 eprintln!("  [power] {}", said.trim());
                 Ok(())
             },
@@ -1931,7 +1932,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: JOBCASE,
             judge: |b| {
                 power::reset_register_decoded(&b[0].kernel())?;
-                b[0].kernel().must_say(bootlog::REBOOTING).map(|_| ())
+                bootlog::handed_back(b[0].after_the_reset()?.text()).map_err(|why| why.to_string())
             },
         },
     ),
@@ -2355,7 +2356,6 @@ fn c_corpus_metal(
     c_bins: &[(String, Vec<u8>)],
     keep: impl Fn(&str) -> bool,
 ) -> metal::SharedBoot {
-    let dir = compile::testcases_dir();
     let mut jobs = Vec::new();
     let mut files = Vec::new();
     let mut links = Vec::new();
@@ -2364,10 +2364,9 @@ fn c_corpus_metal(
         if !keep(case) || C_METAL_SKIP.iter().any(|(name, _)| name == case) {
             continue;
         }
-        let expect = dir.join(format!("{case}.expect"));
         // A case with no committed expectation is one nothing could judge, and
         // shipping it would be a job that passes by comparing nothing.
-        let Ok(expected) = fs::read(&expect) else { continue };
+        let Some(expected) = c_expectation(case) else { continue };
         // **The kernel truncates a process name**, so two cases whose names
         // agree that far would land under one record. Refused rather than
         // reported, because the second one's verdict would be read as the
@@ -2379,7 +2378,7 @@ fn c_corpus_metal(
                  boot's log cannot tell their verdicts apart"
             );
         }
-        files.push((format!("expect/{case}"), expected));
+        files.push((format!("expect/{case}"), expected.into_bytes()));
         files.push((format!("bin/test_c_{case}"), data.clone()));
         links.push((format!("bin/{case}"), format!("/system/bin/{CCHECK}")));
         jobs.push(case.clone());
@@ -2419,7 +2418,7 @@ fn log_close_survived(back: &metal::Readback) -> Result<(), String> {
              only if the poll outlived the close"
         )
     })?;
-    back.kernel().must_say(bootlog::REBOOTING).map(|_| ())
+    bootlog::handed_back(back.after_the_reset()?.text()).map_err(|why| why.to_string())
 }
 
 /// The renderer's two text colours, as the screendump reports them.
@@ -2870,6 +2869,26 @@ fn kernel_account(result: &TestResult) -> String {
     format!("\n--- what the kernel said{how_many} ---\n{}", lines[dropped..].join("\n"))
 }
 
+/// A case's committed expectation as both comparators read it, the host's and
+/// the guest's `ccheck`, or `None` where none is committed. TinyCC's runner
+/// captured its warnings about the case with its output, and neither compares
+/// them.
+fn c_expectation(case: &str) -> Option<String> {
+    let at = compile::testcases_dir().join(format!("{case}.expect"));
+    let text = match fs::read_to_string(&at) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => panic!("{}: {e}", at.display()),
+    };
+    let warned = format!("{case}.c:");
+    Some(
+        text.lines()
+            .filter(|l| !(l.starts_with(&warned) && l.contains(": warning: ")))
+            .map(|l| format!("{l}\n"))
+            .collect(),
+    )
+}
+
 fn check_c_result(result: &TestResult) -> bool {
     let test_name = result.name.strip_prefix("test_c_").unwrap_or(&result.name);
 
@@ -2880,16 +2899,7 @@ fn check_c_result(result: &TestResult) -> bool {
 
     match result.exit_code {
         Some(0) => {
-            let expect_file = compile::testcases_dir().join(format!("{test_name}.expect"));
-            if expect_file.exists() {
-                // TinyCC's runner captured its warnings about the case with its output.
-                let warned = format!("{test_name}.c:");
-                let expected: String = fs::read_to_string(&expect_file)
-                    .unwrap()
-                    .lines()
-                    .filter(|l| !(l.starts_with(&warned) && l.contains(": warning: ")))
-                    .map(|l| format!("{l}\n"))
-                    .collect();
+            if let Some(expected) = c_expectation(test_name) {
                 // **The one comparison in this suite that reads a whole capture
                 // as one program's output, on a console every process shares.**
                 // `common::console::verdict` takes the lines that are some
@@ -14569,10 +14579,16 @@ fn xhci_xecp(log: &str) -> Result<(), String> {
         if !verdict.contains("8/8") {
             return Err(format!("not every malformed list was refused: {verdict}"));
         }
-        // And the walk on the controller QEMU does provide.
-        let Some(real) = log
-            .lines()
-            .find(|l| l.contains("USB Legacy Support") || l.contains("ownership"))
+        // And the handoff on the real controller, in `take_ownership`'s words
+        // for each outcome that leaves the kernel owning it: no capability
+        // (QEMU's), firmware that never claimed it (the T14's), and firmware
+        // that released it.
+        const HANDED_OVER: &[&str] = &[
+            "xHCI: no USB Legacy Support capability",
+            "xHCI: firmware did not claim the controller",
+            "xHCI: firmware released the controller",
+        ];
+        let Some(real) = log.lines().find(|l| HANDED_OVER.iter().any(|said| l.contains(said)))
         else {
             return Err(format!("no line about the handoff at all:\n{log}"));
         };
@@ -17257,7 +17273,7 @@ fn main() {
         // ordinary suite has: green, red, and "measured nothing" — a run that
         // staged images and never reached the machine has no claim to make.
         run.exit(
-            match metal::run(mode, &selected, &boots, &rust_bins, RUST_SKIP, !nocapture && !debug_mode)
+            match metal::run(mode, &selected, &boots, &rust_bins, !nocapture && !debug_mode)
             {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,

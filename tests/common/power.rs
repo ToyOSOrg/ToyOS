@@ -1867,18 +1867,19 @@ fn one_wedge_phase(params: &'static [&'static str], phase: Phase) -> Result<(), 
 /// (`usb_gate::sweep_under_load`): a CPU that takes none is ended half a bound
 /// earlier by `kernel/src/hardlockup`, which is a different mechanism reported
 /// under this arm's name, so this judge names the bound it demands.
-pub fn usb_load_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
-    kernel.must_say(bootlog::USB_LOAD_RUNNING)?;
+pub fn usb_load_chain(after: &serial::Serial) -> Result<(), String> {
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
+    // The sweep starts inside the stop, after init had the file made whole, so
+    // its records cross only in the page's tail.
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::USB_LOAD_RUNNING)?;
     // A sweep that refused, one the disk stopped answering, and one that swept
     // its whole span before the reset: each is a boot that measured the idle
     // case again under this arm's name.
-    says_nothing_of(kernel, bootlog::USB_LOAD_REFUSED)?;
-    says_nothing_of(kernel, bootlog::USB_LOAD_STOPPED)?;
-    says_nothing_of(kernel, bootlog::USB_LOAD_SWEPT)?;
-    says_nothing_of(kernel, REBOOTING)?;
-
-    after.must_say(bootlog::PREVIOUS_PANIC)?;
-    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
+    says_nothing_of(after, bootlog::USB_LOAD_REFUSED)?;
+    says_nothing_of(after, bootlog::USB_LOAD_STOPPED)?;
+    says_nothing_of(after, bootlog::USB_LOAD_SWEPT)?;
+    says_nothing_of(after, REBOOTING)?;
     // A page that names the other bound is this arm measuring a hard lockup.
     says_nothing_of(after, bootlog::LOCKED_UP)?;
     // **The account reaching the page is itself under test**: it is made a line
@@ -1942,25 +1943,18 @@ fn usb_wedge_chain(
 /// kernel log to the stick, and a wedged boot's `logd` never runs again — so
 /// everything after the wedge exists only in the record ring, and the black box
 /// is the one channel that carries a copy of it across the reset.
-pub fn deadline_wedge_chain(
-    kernel: &serial::Serial,
-    after: &serial::Serial,
-) -> Result<(), String> {
+pub fn deadline_wedge_chain(after: &serial::Serial) -> Result<(), String> {
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?.to_string();
     // The control: the machine reached the staged wedge, and then never reached
     // the reset it was one statement away from.
-    kernel.must_say(bootlog::WEDGE_STAGED)?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
     // And the CPU that asked for it took interrupts again: it comes through the
     // syscall gate with `IF` masked, and one left deaf is what the lockup
     // detector ends a machine for. On this machine the assertion has a counter
     // behind it, which is what the guest's has not.
-    kernel.must_say(bootlog::WEDGE_ARRIVED_DEAF)?;
-    says_nothing_of(kernel, bootlog::REBOOTING)?;
-
-    after.must_say(bootlog::PREVIOUS_PANIC)?;
-    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?.to_string();
-    // The tail crossed with it, which is what makes the record an instrument
-    // and not just a verdict.
-    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_ARRIVED_DEAF)?;
+    says_nothing_of(after, bootlog::REBOOTING)?;
     // **The two bounds composing, on the one machine that has both.** This
     // wedge spins with `IF` set, so every CPU still takes its timer interrupt
     // and every CPU's performance counter still samples it — and the
