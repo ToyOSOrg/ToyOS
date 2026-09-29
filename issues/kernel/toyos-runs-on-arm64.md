@@ -28,8 +28,10 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 
 ## Owner rulings, 2026-09-26
 
-- **Parked** (owner ruling, 2026-09-29). Stages 0-3 have landed; no later
-  stage starts now. ARM is done at the measurement under "Exit" below.
+- **Parked** (owner ruling, 2026-09-29). No later stage starts now. The Exit
+  (LLVM under emulation) needs stages 4-7; until they are
+  picked up it is unmet.
+- **Hardware discovery is ACPI only** (edk2 MADT, GTDT and SPCR under QEMU); no devicetree.
 - **Start.** Stage 0 (shared groundwork on x86) and stages 1-3 (toolchain,
   loader, kernel reaching serial on QEMU `virt`) start now. Stage 0 waits for
   small-kernel stage 2 (PR #513, "One way to wait") to land before its own
