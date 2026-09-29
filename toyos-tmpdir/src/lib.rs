@@ -110,6 +110,18 @@ impl TempDir {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Move every root under `base` that process `pid` made and is gone from
+    /// into this directory, so it goes when this does: for a caller that
+    /// `SIGKILL`ed `pid` after this process's one sweep of `base`. A live root
+    /// is left alone, whatever its name.
+    pub fn adopt(&self, base: &Path, pid: u32) {
+        let prefix = format!("{ROOT_PREFIX}{pid}-");
+        let _global = global(base);
+        reap_into(base, &self.path, |root| {
+            root.file_name().expect("a root has a name").to_string_lossy().starts_with(&prefix)
+        });
+    }
 }
 
 impl Deref for TempDir {
@@ -284,18 +296,7 @@ impl State {
         self.swept = true;
         let root = self.root.as_ref().expect("a sweep runs from a live root");
         let _global = global(&root.tmp);
-        let mut reap = Vec::new();
-        for path in gone_under(&root.tmp) {
-            if path == root.dir {
-                continue;
-            }
-            let name = path.file_name().expect("a root has a name").to_string_lossy();
-            let to = root.dir.join(format!("reap-{name}"));
-            fs::rename(&path, &to)
-                .unwrap_or_else(|e| panic!("move {} to {}: {e}", path.display(), to.display()));
-            reap.push(to);
-        }
-        reap
+        reap_into(&root.tmp, &root.dir, |path| path != root.dir)
     }
 }
 
@@ -304,6 +305,23 @@ impl State {
 pub fn gone_roots(base: &Path) -> Vec<PathBuf> {
     let _global = global(base);
     gone_under(base)
+}
+
+/// Every gone root under `base` that `take` passes, renamed into `dest` as
+/// `reap-<its name>`; the caller holds [`GLOBAL`].
+fn reap_into(base: &Path, dest: &Path, take: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let mut reap = Vec::new();
+    for path in gone_under(base) {
+        if !take(&path) {
+            continue;
+        }
+        let name = path.file_name().expect("a root has a name").to_string_lossy();
+        let to = dest.join(format!("reap-{name}"));
+        fs::rename(&path, &to)
+            .unwrap_or_else(|e| panic!("move {} to {}: {e}", path.display(), to.display()));
+        reap.push(to);
+    }
+    reap
 }
 
 /// [`gone_roots`], with [`GLOBAL`] held by the caller.
