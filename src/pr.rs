@@ -401,10 +401,9 @@ pub(crate) mod tests {
     use toyos_tmpdir::TempDir;
 
     /// A bare "origin" with a `main`, and a clone of it on a branch — the only
-    /// shape `--pr` runs in. Signing off and an identity on each repository:
-    /// the host's global config signs every commit, and a test that waited on
-    /// gpg would be a test that hangs. `sdkversion`'s tests stage in it too. All
-    /// of it is in the directory that comes first, which is the caller's to hold.
+    /// shape `--pr` runs in. Every repository is [`configure`]d. `sdkversion`'s
+    /// tests stage in it too. All of it is in the directory that comes first,
+    /// which is the caller's to hold.
     pub(crate) fn repo(name: &str) -> (TempDir, PathBuf, PathBuf) {
         let dir = TempDir::new(&format!("pr-{name}"));
         let origin = dir.join("origin.git");
@@ -412,7 +411,7 @@ pub(crate) mod tests {
         let seed = dir.join("seed");
         fs::create_dir(&seed).unwrap();
         sh(&seed, &["init", "-q", "-b", "main"]);
-        identify(&seed);
+        configure(&seed);
         fs::write(seed.join("f"), "base\n").unwrap();
         fs::write(seed.join(".gitignore"), "target/\n").unwrap();
         sh(&seed, &["add", "f", ".gitignore"]);
@@ -421,18 +420,35 @@ pub(crate) mod tests {
         // The remote records every value a ref takes, which is the only way a
         // test on this side can see the *order* a push happened in.
         sh(&origin, &["config", "core.logAllRefUpdates", "true"]);
+        // A push runs auto maintenance in the receiving repository.
+        sh(&origin, &["config", "maintenance.auto", "false"]);
 
         sh(&dir, &["clone", "-q", origin.to_str().unwrap(), work.to_str().unwrap()]);
-        identify(&work);
+        configure(&work);
         sh(&work, &["switch", "-q", "-c", "wt"]);
         (dir, origin, work)
     }
 
-    fn identify(dir: &Path) {
+    /// An identity, and no signing: the host's global config signs every commit,
+    /// and a test that waited on gpg would be a test that hangs. No auto
+    /// maintenance: git runs it detached, so a repack started by the last
+    /// command still writes into the repository while its `TempDir` is removed.
+    /// **Every git repository a test anywhere in this crate creates sets
+    /// `maintenance.auto` false** — call this on one made by `init` or `clone`;
+    /// a fixture that passes `-c` on every invocation instead of persisting
+    /// config, because it runs against a repository it does not itself `init`
+    /// or `clone` (a submodule's own store), adds [`NO_AUTO_MAINTENANCE`] to
+    /// that same list instead.
+    pub(crate) fn configure(dir: &Path) {
         sh(dir, &["config", "user.email", "t@t"]);
         sh(dir, &["config", "user.name", "t"]);
         sh(dir, &["config", "commit.gpgsign", "false"]);
+        sh(dir, &["config", "maintenance.auto", "false"]);
     }
+
+    /// The `-c` form of [`configure`]'s `maintenance.auto false`, for a
+    /// fixture whose `git` helper already passes `-c` on every invocation.
+    pub(crate) const NO_AUTO_MAINTENANCE: [&str; 2] = ["-c", "maintenance.auto=false"];
 
     pub(crate) fn sh(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
@@ -469,7 +485,7 @@ pub(crate) mod tests {
         // Someone else lands while this branch is being prepared.
         let theirs = dir.join("theirs");
         sh(&dir, &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
-        identify(&theirs);
+        configure(&theirs);
         commit(&theirs, "h", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
 
@@ -514,7 +530,7 @@ pub(crate) mod tests {
         // Someone else lands, so this host's main is behind origin/main.
         let theirs = dir.join("theirs");
         sh(&dir, &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
-        identify(&theirs);
+        configure(&theirs);
         commit(&theirs, "h", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
 
@@ -555,7 +571,7 @@ pub(crate) mod tests {
 
         let theirs = dir.join("theirs");
         sh(&dir, &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
-        identify(&theirs);
+        configure(&theirs);
         commit(&theirs, "f", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
 

@@ -314,3 +314,48 @@ fn a_directory_the_sweep_cannot_remove_is_reported_and_the_next_process_still_wo
     perms.set_mode(0o755);
     std::fs::set_permissions(&stuck_locked, perms).unwrap();
 }
+
+/// A killed process's root goes into the directory that adopts its pid, and
+/// goes when that does; a live root, and a gone one of a pid that merely
+/// starts with the same digits, stay.
+#[test]
+fn an_adopted_root_goes_with_its_adopter() {
+    let _spawning = spawning();
+    let tmp = TempDir::new("adopt");
+    let live = Holder::start(&tmp);
+    let killed = Holder::start(&tmp);
+    let (pid, root, held) = (killed.child.id(), killed.root(), killed.dir.clone());
+    killed.kill();
+    let other = tmp.join(format!("{ROOT_PREFIX}{pid}0-0"));
+    std::fs::create_dir(&other).unwrap();
+
+    // The adopted pid reused, so its name matches the prefix `adopt` filters
+    // on; only its owner's lock says it is live, and that must still hold.
+    let reused = tmp.join(format!("{ROOT_PREFIX}{pid}-9"));
+    std::fs::create_dir(&reused).unwrap();
+    let reused_owner = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(reused.join(OWNER))
+        .unwrap();
+    reused_owner.lock().unwrap();
+
+    let adopter = TempDir::new("adopter");
+    adopter.adopt(&tmp, pid);
+    assert!(!root.exists(), "{} was not adopted", root.display());
+    let moved = adopter
+        .join(format!("reap-{}", root.file_name().unwrap().to_string_lossy()))
+        .join(held.file_name().unwrap())
+        .join("image.img");
+    assert!(moved.exists(), "{} holds no {}", adopter.display(), moved.display());
+    assert!(other.exists(), "another pid's root was adopted");
+    assert!(live.dir.join("image.img").exists(), "a live root was adopted");
+    assert!(reused.exists(), "a live root of a reused pid was adopted");
+
+    drop(reused_owner);
+    let adopted = adopter.to_path_buf();
+    drop(adopter);
+    assert!(!adopted.exists(), "{} outlived its TempDir", adopted.display());
+    live.finish();
+}

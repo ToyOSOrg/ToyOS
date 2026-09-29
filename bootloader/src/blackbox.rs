@@ -143,17 +143,7 @@ pub fn harvest(
         return (None, None);
     };
     // **A record belongs to the stick that wrote it, and this is not always that
-    // stick.** The page is DRAM at a fixed address and nothing between two
-    // operating systems clears it: on the T14 a `DONE` record outlived two hours
-    // of Ubuntu, and the pass after it — booting a *different* image — read that
-    // record, took itself for its reporting pass, and handed the machine back
-    // without booting a kernel at all. No stamp could have caught it: the record
-    // was written before this boot, which is exactly what a real predecessor's
-    // is.
-    //
-    // Cleared rather than reported, and then this pass goes on to boot its
-    // kernel. A record this stick did not write is one nothing here can report
-    // truthfully, and leaving it would hand the same trap to the boot after.
+    // stick.**
     if was != identity {
         toyos_blackbox::clear(page);
         flush(at);

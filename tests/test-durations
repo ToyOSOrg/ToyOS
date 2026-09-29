@@ -244,7 +244,6 @@ loader_watchdog_arms 10064
 locale_detect 9959
 locale_detect_unrecognized 160
 log_backing_read_error 4887
-log_conservation_smp1 4686
 log_flush_retry 20526
 log_nested_emit 5008
 log_partition_identity 9516
@@ -378,7 +377,6 @@ wall_clock_no_century 6987
 wall_clock_now 13
 wall_clock_rtc_dead 8070
 wall_clock_rtc_unstable 7805
-wall_clock_zone 9347
 watchdog_resets 9393
 window_refusal 16
 writeback_durability 8888

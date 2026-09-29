@@ -8,22 +8,6 @@ Removed. Kernel PML4 has no PML4[0..255] entries. Process page tables start
 empty and build user mappings on demand. SMP trampoline uses the bootloader's
 PML4 for AP transition, then switches to kernel PML4 in ap_entry.
 
-## 2. user_ptr assumes physically contiguous user buffers
-
-`user_ptr::window` walks every 2 MiB boundary a buffer crosses and refuses one
-whose pages are not physically adjacent, so a non-contiguous buffer is a
-`BadAddress` and not a silent misread. What remains is that it *only* refuses:
-ToyOS allocates user memory in contiguous 2 MiB blocks, so nothing produces one
-today, and swap, COW fork or non-contiguous VMAs would turn ordinary reads and
-writes into refusals rather than into corruption.
-
-**Fix, when one of those arrives:** `UserBytes`/`UserBytesMut` already hand out
-no reference, so the change is confined to how a window addresses its pages —
-a run list instead of one base pointer, with `read_at`/`write_at` splitting at
-the boundaries. No caller's signature moves.
-
-**Not urgent while all user allocations are 2MB-aligned contiguous blocks.**
-
 ## ~~3. No DmaAddr newtype~~ DONE
 
 Added `DmaAddr` newtype in addr.rs. `DmaPool::page_phys()` returns `DmaAddr`.

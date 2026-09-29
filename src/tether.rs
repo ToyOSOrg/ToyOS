@@ -1,0 +1,278 @@
+//! [`spawn`] makes the child the controlling process of a pseudo-terminal whose
+//! master only the spawner holds. The kernel closes the master when the
+//! spawner dies, by any signal, and a terminal whose master closes is hung up:
+//! its controlling process gets `SIGHUP`, on Linux and on macOS.
+//! `PR_SET_PDEATHSIG` is Linux's alone and follows the spawning thread rather
+//! than the process, and QEMU's `exit-with-parent` is that on Linux and ends
+//! QEMU alone.
+//!
+//! A process that ends on its own — a build, a one-shot client — is not
+//! spawned here: a build ended mid-way can leave a toolchain half-written.
+
+use std::io::{self, BufRead, BufReader, Read};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
+/// The master: dropping it hangs up the child's terminal.
+pub struct Tether {
+    _master: OwnedFd,
+}
+
+/// Spawn `cmd` as the controlling process of a terminal the returned
+/// [`Tether`] holds; the child owes it an exit on `SIGHUP`, the inherited
+/// descriptor kept open, and no session of its own.
+pub fn spawn(mut cmd: Command) -> io::Result<(Child, Tether)> {
+    let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
+    // SAFETY: a NUL-terminated path, and the descriptor is checked before it is owned.
+    let master = unsafe {
+        let fd = libc::open(c"/dev/ptmx".as_ptr(), flags);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedFd::from_raw_fd(fd)
+    };
+    // SAFETY: `master` is an open pseudo-terminal master.
+    if unsafe { libc::grantpt(master.as_raw_fd()) != 0 || libc::unlockpt(master.as_raw_fd()) != 0 } {
+        return Err(io::Error::last_os_error());
+    }
+    let slave = peer(&master, flags)?;
+    let fd = slave.as_raw_fd();
+    // SAFETY: system calls on the child's own state, between `fork` and `exec`,
+    // allocating nothing.
+    unsafe {
+        cmd.pre_exec(move || {
+            // A mask and a disposition both survive `exec`, and a child that
+            // installs no handler of its own would ignore a blocked or ignored
+            // hangup.
+            let mut hup: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut hup);
+            libc::sigaddset(&mut hup, libc::SIGHUP);
+            if libc::sigprocmask(libc::SIG_UNBLOCK, &hup, std::ptr::null_mut()) != 0
+                || libc::signal(libc::SIGHUP, libc::SIG_DFL) == libc::SIG_ERR
+                || libc::setsid() < 0
+                || libc::ioctl(fd, libc::TIOCSCTTY as _, 0) < 0
+                // Open across `exec`: macOS hangs up only a terminal somebody
+                // holds open.
+                || libc::fcntl(fd, libc::F_SETFD, 0) < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // No hangup precedes the terminal becoming this child's: the child
+            // holds its own copy of the master until `exec` closes it.
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+    Ok((child, Tether { _master: master }))
+}
+
+/// The slave of `master`, opened with `flags`.
+#[cfg(target_os = "linux")]
+fn peer(master: &OwnedFd, flags: libc::c_int) -> io::Result<OwnedFd> {
+    // SAFETY: `master` is an unlocked pseudo-terminal master.
+    let fd = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCGPTPEER, flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a descriptor the ioctl just opened.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// The slave of `master`, opened with `flags`.
+#[cfg(target_os = "macos")]
+fn peer(master: &OwnedFd, flags: libc::c_int) -> io::Result<OwnedFd> {
+    let mut name = [0 as libc::c_char; 128];
+    // SAFETY: `TIOCPTYGNAME` writes a NUL-terminated name of at most 128 bytes.
+    let fd = unsafe {
+        if libc::ioctl(master.as_raw_fd(), libc::TIOCPTYGNAME as _, name.as_mut_ptr()) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        libc::open(name.as_ptr(), flags)
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a descriptor `open` just returned.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// How long a step that waits on nothing but process creation and exit may
+/// take: far above a spawn's or a hangup's, and a step that is stuck never ends.
+const WITHIN: Duration = Duration::from_secs(10);
+
+/// An owner whose tethered children a test watches die with it. Dropped, it is
+/// killed and reaped, so an owner a failed wait left running goes with the test.
+pub struct Owner {
+    child: Child,
+    /// The owner's stdout, line by line; disconnected at its end.
+    said: Receiver<io::Result<String>>,
+    /// The owner's stderr, read to its end and sent here: its end is every
+    /// process that holds it exited, the owner's children among them.
+    closed: Receiver<String>,
+}
+
+impl Owner {
+    /// Spawn `cmd` as an owner: its stdin a pipe only this process writes, so
+    /// it ends when this process does; its stdout read by [`Self::said`]; in a
+    /// process group of its own, which a tethered child leaves and an
+    /// untethered one stays in; and `SIGHUP` blocked and ignored, the worst a
+    /// harness can hand down to what it spawns.
+    pub fn spawn(mut cmd: Command) -> Result<Owner, String> {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+        // SAFETY: two system calls on the child's own state, allocating nothing.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut hup: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut hup);
+                libc::sigaddset(&mut hup, libc::SIGHUP);
+                if libc::sigprocmask(libc::SIG_BLOCK, &hup, std::ptr::null_mut()) != 0
+                    || libc::signal(libc::SIGHUP, libc::SIG_IGN) == libc::SIG_ERR
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn the owner: {e}"))?;
+        let mut stderr = child.stderr.take().expect("a piped stderr");
+        let (tx, closed) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let _ = stderr.read_to_end(&mut text);
+            let _ = tx.send(String::from_utf8_lossy(&text).into_owned());
+        });
+        let stdout = child.stdout.take().expect("a piped stdout");
+        let (tx, said) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(Owner { child, said, closed })
+    }
+
+    /// The rest of the first line the owner prints on stdout after `prefix`,
+    /// wherever on the line it starts: libtest may have begun the line. `Err`
+    /// if the owner ends first, or has not said it `within`.
+    pub fn said(&mut self, prefix: &str, within: Duration) -> Result<String, String> {
+        let deadline = Instant::now() + within;
+        loop {
+            match self.said.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Ok(line)) => {
+                    if let Some((_, rest)) = line.split_once(prefix) {
+                        return Ok(rest.to_string());
+                    }
+                }
+                Ok(Err(e)) => return Err(format!("read the owner's stdout: {e}")),
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!("the owner had not said {prefix:?} within {within:?}"));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let stderr = self.closed.recv_timeout(WITHIN).unwrap_or_default();
+                    return Err(format!("the owner ended without saying {prefix:?}:\n{stderr}"));
+                }
+            }
+        }
+    }
+
+    /// The owner's pid, which names what it leaves behind.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// `SIGKILL` the owner. `Err` if a process holding its stderr is still
+    /// there [`WITHIN`] afterward, naming which of `pids` still answer; the
+    /// owner's group is then killed, and the refusal says whether every
+    /// holder went with it.
+    pub fn killed(mut self, pids: &[u32]) -> Result<(), String> {
+        self.child.kill().map_err(|e| format!("SIGKILL the owner: {e}"))?;
+        // Held past the verdict: `wait` would close it, and a child reading
+        // it would end on that instead of on its tether.
+        let _stdin = self.child.stdin.take();
+        let verdict = match self.closed.recv_timeout(WITHIN) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(self.survived(pids)),
+        };
+        self.child.wait().map_err(|e| format!("reap the owner: {e}"))?;
+        verdict
+    }
+
+    /// What outlived the owner, asked before it is reaped: until then no other
+    /// process can hold its pid, so its group is what it spawned untethered.
+    fn survived(&self, pids: &[u32]) -> String {
+        // SAFETY: signal 0 asks whether the pid exists and delivers nothing.
+        let answered: Vec<u32> =
+            pids.iter().copied().filter(|&pid| unsafe { libc::kill(pid as i32, 0) } == 0).collect();
+        // SAFETY: the group the unreaped owner leads.
+        let group = match unsafe { libc::killpg(self.child.id() as i32, libc::SIGKILL) } {
+            0 => "was killed".to_string(),
+            _ => format!("could not be killed: {}", io::Error::last_os_error()),
+        };
+        let after = if self.closed.recv_timeout(WITHIN).is_ok() {
+            "every holder of its stderr then exited".to_string()
+        } else {
+            format!("a holder of its stderr outside that group still ran {WITHIN:?} later")
+        };
+        format!(
+            "a process holding the owner's stderr still ran {WITHIN:?} after the owner's SIGKILL; \
+             of its tethered children {pids:?}, {answered:?} still answered; the owner's process \
+             group {group}, and {after}"
+        )
+    }
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        // `Ok` on an owner already reaped: its pid is not signalled again.
+        self.child.kill().expect("SIGKILL the owner");
+        self.child.wait().expect("reap the owner");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TETHERED: &str = "tethered ";
+
+    /// This test binary, running the one test `name` on one thread.
+    fn this_test(name: &str) -> Command {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", name, "--include-ignored", "--nocapture", "--test-threads", "1"]);
+        cmd
+    }
+
+    #[test]
+    #[ignore = "the owner `a_tethered_child_dies_with_its_owner` kills; never runs on its own"]
+    fn owner() {
+        let mut parked = this_test("tether::tests::parked");
+        parked.stdout(Stdio::null());
+        let (child, _tether) = spawn(parked).expect("spawn the tethered child");
+        println!("{TETHERED}{}", child.id());
+        io::stdin().read_to_end(&mut Vec::new()).expect("read the owner's stdin");
+    }
+
+    /// A child that never ends on its own while the test runs: its stdin is
+    /// the test's pipe, which the owner's death does not close.
+    #[test]
+    #[ignore = "the tethered child of `owner`; never runs on its own"]
+    fn parked() {
+        io::stdin().read_to_end(&mut Vec::new()).expect("read the parked child's stdin");
+    }
+
+    /// The owner's `SIGKILL` ends its tethered child, which inherited `SIGHUP`
+    /// blocked and ignored.
+    #[test]
+    fn a_tethered_child_dies_with_its_owner() {
+        let mut owner = Owner::spawn(this_test("tether::tests::owner")).unwrap_or_else(|e| panic!("{e}"));
+        let pid: u32 =
+            owner.said(TETHERED, WITHIN).unwrap_or_else(|e| panic!("{e}")).parse().expect("a pid");
+        owner.killed(&[pid]).unwrap_or_else(|e| panic!("{e}"));
+        eprintln!("tethered child {pid} gone after its owner's SIGKILL");
+    }
+}

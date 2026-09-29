@@ -68,7 +68,7 @@ impl AddressSpace {
         match self.never {}
     }
 
-    pub fn translate_writable(&self, _vaddr: UserAddr) -> Option<crate::mm::DirectMap> {
+    pub fn leaf(&self, _vaddr: UserAddr, _access: toyos_userbound::Access) -> Option<(u64, u64)> {
         match self.never {}
     }
 

@@ -10,6 +10,7 @@ use std::{fs, thread};
 
 use super::compile;
 use toyos_build::arch::{Accel, Arch};
+use toyos_build::tether::Tether;
 use toyos_tmpdir::TempDir;
 
 /// The architecture every machine this suite builds and boots is: the suite's
@@ -2655,6 +2656,8 @@ impl ConsoleStream {
 
 pub struct QemuInstance {
     child: Child,
+    /// What ends QEMU when this process dies without dropping this.
+    _tether: Tether,
     stdin: BufWriter<Box<dyn Write + Send>>,
     rx: Receiver<String>,
     console: ConsoleStream,
@@ -3376,6 +3379,10 @@ impl QemuInstance {
             }
             thread::sleep(interval);
         }
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Every console line the guest printed before the ready marker.
@@ -4891,6 +4898,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         console_file,
     } = files;
 
+    // Inherited: `orphan` reads QEMU's exit as the end of its harness's stderr.
     qemu.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -4906,7 +4914,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     if VERBOSE.load(Ordering::Relaxed) {
         eprintln!("[qemu {seq}] Launching QEMU...");
     }
-    let mut child = qemu.spawn().expect("Failed to launch QEMU");
+    let (mut child, tether) = toyos_build::tether::spawn(qemu).expect("Failed to launch QEMU");
 
     let stdin: Box<dyn Write + Send> = match input {
         Some(fifo) => Box::new(fifo),
@@ -4985,6 +4993,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
 
     QemuInstance {
         child,
+        _tether: tether,
         stdin,
         rx,
         _reader_thread: reader_thread,

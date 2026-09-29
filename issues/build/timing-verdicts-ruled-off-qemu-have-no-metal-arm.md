@@ -72,7 +72,7 @@ the event it stands for has no word a test can read:
   `INTO_WINDOW`, and `redirty_mid_flush`'s swept delay.
 - Drains of work handed to another thread: the 200 ms `iod` drains in
   `writeback_durability` and `home_backing_revoked`, `fat_backing_revoked`'s
-  drain, and `log_gate`'s `STORM_SETTLE` and `QUIET_READS`.
+  drain, and `log_gate`'s `QUIET_READS`.
 - Product clocks a QEMU boot races: `boot_deadline_ends_a_wedge`'s 15 s
   deadline against the job list reaching its shutdown,
   `hard_lockup_ends_a_deaf_cpu`'s 30 s, `loader_watchdog_arms` reading
