@@ -44,3 +44,4 @@ cores were not verified against Arm's. The Arm rows belong to
 | GCS | Armv9.4 (`arch/arm64/Kconfig:2236-2254`) |
 | POE | Armv8.9 (`arch/arm64/Kconfig:2198-2213`) |
 | SME | Arm (`arch/arm64/Kconfig:2311-2319`) |
+| NVMe host memory buffer | an NVMe drive whose `id-ctrl` reads HMPRE non-zero; the T14's has not been read, and blockd builds the buffer only once a proving machine's does |

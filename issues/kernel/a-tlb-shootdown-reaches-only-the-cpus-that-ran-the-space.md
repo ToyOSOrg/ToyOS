@@ -17,11 +17,13 @@ PCID can show a switched-out CPU still holding them.
 
 **Exit**: on every proving machine and under TCG, a sibling pinned on another
 CPU touches a page the initiator unmaps and then faults; on each proving
-machine with PCID, the sibling touches the page, blocks off its pinned CPU
-while a thread of another space runs there, and faults on touching it again
-after it wakes there; cases in `kernel-loom/tests/tlb_shootdown.rs` switch a
-CPU into the space, and out of it, while the initiator reads the target set;
-the T14's munmap figure. **Mutation**, each red: a target set that omits a CPU
-the space ran on; a CPU that joins the set after loading CR3; a CPU cleared
-from the set when it switches away from the space. **Oracle**: loom, and each
-proving machine's TLB.
+machine with PCID, the sibling touches the page and blocks off its pinned CPU,
+the initiator unmaps it while the sibling is blocked and a thread of another
+space runs there, and the sibling faults on touching it again after it wakes
+there; cases in `kernel-loom/tests/tlb_shootdown.rs` switch a CPU into the
+space, and out of it, while the initiator reads the target set; the T14's
+munmap figure. **Mutation**, each red: a target set that omits a CPU the space
+ran on; a CPU that joins the set after loading CR3; a CPU cleared from the set
+when it switches away from the space, its red recorded over repeated runs,
+since it rests on the TLB keeping the entry across the block. **Oracle**: loom,
+and each proving machine's TLB.

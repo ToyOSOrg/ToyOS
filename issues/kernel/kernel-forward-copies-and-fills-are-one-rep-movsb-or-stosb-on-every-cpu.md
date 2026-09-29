@@ -15,7 +15,11 @@ either way. The kernel links the sysroot's `compiler_builtins`, which no kernel
 build flag recompiles: the feature is `rustflags = ["-Ctarget-feature=+ermsb"]`
 under `[target.x86_64-unknown-none]` in the std build's `bootstrap.toml`
 (`std_config`, `src/sysroot.rs:522`; bootstrap's `core/config/toml/target.rs:41`),
-and it moves the sysroot key (`RECIPE`, `src/sysroot.rs:65`). One path on every
+and it moves the sysroot key (`RECIPE`, `src/sysroot.rs:65`), which reaches
+CI's installed toolchain only once the release tag's `trees()`
+(`src/release.rs:25-31`) hashes `src/sysroot.rs`, the work of
+`issues/build/the-release-tag-hashes-none-of-the-build-system-that-builds-the-toolchain.md`,
+which lands first. One path on every
 CPU: `rep movsb` is correct without ERMS, CPUID.(7,0):EBX bit 9, and no CPU is
 refused. Zen 2 lacks ERMS (a Ryzen 9 PRO 3900, family 0x17, reads EBX
 0x219C91A9: InstLatx64 ddff8a92,

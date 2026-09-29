@@ -29,4 +29,4 @@ if it beats ToyOS without it. What no proving machine is known to offer is
 - `issues/kernel/a-tlb-shootdown-reaches-only-the-cpus-that-ran-the-space.md`
 - `issues/kernel/fsgsbase-is-measured-then-taken-or-rejected.md`
 - `issues/kernel/idle-cpus-enter-the-c-states-cst-names.md`
-- `issues/hardware/blockd-drives-nvme-apst-and-a-host-memory-buffer-confined-to-its-domain.md`
+- `issues/hardware/blockd-drives-nvme-apst.md`
