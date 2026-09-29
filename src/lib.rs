@@ -15,7 +15,6 @@ pub mod fingerprint;
 pub mod firmware;
 pub mod flags;
 pub mod forkcheck;
-pub mod heartbeat;
 pub mod hostws;
 pub mod icmp;
 pub mod identity;
@@ -44,7 +43,6 @@ pub mod soundfont;
 /// build system at all.
 #[cfg(test)]
 pub mod sourcegate;
-pub mod stamps;
 pub mod sysroot;
 pub mod testargs;
 pub mod tiers;

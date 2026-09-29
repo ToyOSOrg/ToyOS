@@ -4,79 +4,62 @@
 //! stdio leaves behind, and closing one of them is the whole stimulus. The
 //! pipe keeps a reader either way, so `close_read`'s own wake path is not
 //! involved and cannot mask the missing one.
+//!
+//! **The close waits for the park, and nothing here waits on a clock.** The
+//! defect is only visible with the waiter parked — a close that lands first
+//! leaves the completion sitting in the ring and the wait returns at once — so
+//! the close is made once the kernel's roster says the waiter is blocked, and a
+//! waiter the cancellation leaves parked is a hang the harness ceiling reds.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
 
+use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::{Poller, READABLE};
+use toyos::syscap::SysCap;
 use toyos_abi::syscall;
+
+#[path = "../roster.rs"]
+mod roster;
 
 const TOKEN: u64 = 7;
 
-/// How long the waiter's own `wait` may take before this is a hang and not a
-/// slow guest. The cancellation is posted the instant `close` runs, so a
-/// healthy kernel returns in microseconds; seconds of margin cost nothing.
-const PATIENCE: Duration = Duration::from_secs(10);
-
-/// Between the waiter saying it is about to park and the close that cancels
-/// it. Only the ordering matters, and it is benign in both directions — a
-/// close that lands before the park leaves the completion sitting in the ring
-/// and the wait returns at once — but the defect is only visible with the
-/// thread genuinely parked, so this is wide.
-const PARK_MARGIN: Duration = Duration::from_millis(500);
-
-static REGISTERED: AtomicBool = AtomicBool::new(false);
-static RETURNED: AtomicBool = AtomicBool::new(false);
-
 fn main() {
+    let cap: SysCap = Endowments::get()
+        .take(SYSCAP_LABEL)
+        .expect("test-runner endows every binary it spawns a system capability");
+    let registered = AtomicBool::new(false);
     let pipe = syscall::pipe().expect("the pipe the waiter parks on");
     // The second descriptor. Closing this one is what `ops::close` answers polls for,
     // while `pipe.read` keeps the pipe's reader count above zero.
     let dup = syscall::dup(pipe.read).expect("dup the read end");
 
-    let waiter = thread::spawn(move || {
-        let poller = Poller::new(4);
-        poller.watch_raw(pipe.read, READABLE, TOKEN);
-        // A non-blocking enter, so the poll is registered in the kernel before
-        // anything is closed. Without it the close could reach a ring with
-        // nothing pending in it and cancel nothing at all, which is a
-        // different test that would pass on a broken kernel.
-        poller.wait(0, 0, |token| panic!("nothing is ready yet, got token {token}"));
+    let tokens = thread::scope(|s| {
+        let waiter = s.spawn(|| {
+            let poller = Poller::new(4);
+            poller.watch_raw(pipe.read, READABLE, TOKEN);
+            // A non-blocking enter, so the poll is registered in the kernel before
+            // anything is closed. Without it the close could reach a ring with
+            // nothing pending in it and cancel nothing at all, which is a
+            // different test that would pass on a broken kernel.
+            poller.wait(0, 0, |token| panic!("nothing is ready yet, got token {token}"));
 
-        REGISTERED.store(true, Ordering::Release);
-        let start = Instant::now();
-        let mut tokens = Vec::new();
-        poller.wait(1, u64::MAX, |token| tokens.push(token));
-        RETURNED.store(true, Ordering::Release);
-        (start.elapsed(), tokens)
+            registered.store(true, Ordering::Release);
+            let mut tokens = Vec::new();
+            poller.wait(1, u64::MAX, |token| tokens.push(token));
+            tokens
+        });
+
+        // The roster first: its syscall is the loop's preemption point.
+        roster::await_true(|| {
+            roster::my_threads(&cap).iter().any(|&(is_thread, state)| is_thread && state == roster::BLOCKED)
+                && registered.load(Ordering::Acquire)
+        });
+        syscall::close(dup);
+        waiter.join().expect("the waiter thread panicked")
     });
-
-    while !REGISTERED.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(10));
-    }
-    thread::sleep(PARK_MARGIN);
-    syscall::close(dup);
-
-    let deadline = Instant::now() + PATIENCE;
-    while !RETURNED.load(Ordering::Acquire) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    if !RETURNED.load(Ordering::Acquire) {
-        // Nothing can release the waiter now: its poll was cancelled, so the
-        // watcher list no longer names its ring and a write to the pipe would
-        // complete nothing. Report and take the process down rather than hand
-        // the harness a timeout with no message in it.
-        println!(
-            "the waiter is still parked {PATIENCE:?} after its poll was cancelled — \
-             the cancellation posted a completion and woke nobody"
-        );
-        std::process::exit(1);
-    }
-
-    let (took, tokens) = waiter.join().expect("the waiter thread panicked");
     assert_eq!(tokens, [TOKEN], "the wait returned with the wrong completions");
-    println!("a cancelled poll woke its waiter in {took:.2?}");
+    println!("a cancelled poll woke its parked waiter");
 
     syscall::close(pipe.read);
     syscall::close(pipe.write);

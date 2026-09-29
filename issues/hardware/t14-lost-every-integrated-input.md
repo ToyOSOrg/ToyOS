@@ -52,9 +52,7 @@ The cadence fix is what makes the next session decisive rather than a guess:
 after the verdict the counters repeat, at most once per 10 s and **only when the
 pin has asserted since the last line**. That gating is the point — past the
 first repeat, no line means no interrupt, so silence becomes evidence instead of
-absence of evidence. `i8042_health_cadence` gates it, and reverting either half
-(fire on the timer, or make `HEALTH_DONE` terminal again) reds it at 9 lines and
-0 lines respectively against the required 2.
+absence of evidence.
 
 **What the next boot should capture.** A repeat line dated after 6.6 s, or none.
 If bytes are arriving, `undecoded`/`discarded` name the fault in this driver. If

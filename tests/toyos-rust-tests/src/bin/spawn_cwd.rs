@@ -40,8 +40,7 @@ const LOG_DIR: &str = "/log/spawn-cwd/dir";
 const LOG_FILE: &str = "/log/spawn-cwd/file";
 const HOME_DIR: &str = "/home/spawn-cwd/dir";
 const HOME_FILE: &str = "/home/spawn-cwd/file";
-/// Spawns timed from each cwd, so the figure is an average and not one outlier.
-const TIMED: u32 = 8;
+const SPAWNS: u32 = 8;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -199,17 +198,13 @@ fn refusals() {
     println!("spawn-cwd: every refusal arrived under its own name");
 }
 
-/// A cwd with more beneath it than one listing may hold is still a cwd. The
-/// spawns it times are all from `/` or a tmpfs, so they price tmpfs's `is_dir`
-/// and no other filesystem's.
+/// A cwd with more beneath it than one listing may hold is still a cwd.
 fn a_cwd_is_judged_in_its_depth() {
     // Never made by `mkdir`: a directory the VFS carries is answered from its own
     // set, and this one has to be judged by the filesystem its files are on.
     std::fs::File::create(format!("{BIG}/0")).expect("/tmp is writable");
-    // Unmeasured, so the first figure is not the one that pays for a cold start.
-    mean_spawn("/");
-    let from_root = mean_spawn("/");
-    let from_named = mean_spawn(NAMED);
+    spawns_from("/");
+    spawns_from(NAMED);
     // Entered while small, grown after: the process that `cd`s into a build
     // directory is not asked again when the build fills it.
     std::env::set_current_dir(BIG).expect("chdir into a directory this made");
@@ -217,26 +212,18 @@ fn a_cwd_is_judged_in_its_depth() {
         std::fs::File::create(format!("{BIG}/{i}")).expect("/tmp is writable");
     }
     said("own cwd over a large subtree, direct", Command::new(SELF).arg("pwd").output(), BIG);
-    let from_big = mean_spawn(BIG);
+    spawns_from(BIG);
     std::env::set_current_dir("/").expect("chdir to /");
-    println!(
-        "spawn-cwd: a spawn and wait, mean of {TIMED} after {TIMED} unmeasured, no cwd on \
-         bcachefs or FAT32: from / {} us, from {NAMED} {} us, from {BIG} ({BIG_FILES} files) {} us",
-        from_root.as_micros(),
-        from_named.as_micros(),
-        from_big.as_micros(),
-    );
+    println!("spawn-cwd: {SPAWNS} spawns each from /, {NAMED} and {BIG} ({BIG_FILES} files)");
     // Removed by name: a listing of this directory is the very thing it outgrew.
     for i in 0..BIG_FILES {
         std::fs::remove_file(format!("{BIG}/{i}")).expect("remove a file this made");
     }
 }
 
-/// The mean of [`TIMED`] direct spawns-and-waits from `cwd`.
-fn mean_spawn(cwd: &str) -> std::time::Duration {
-    let start = std::time::Instant::now();
-    for _ in 0..TIMED {
-        assert_eq!(spawn_in(cwd), Ok(0), "a timed spawn into {cwd}");
+/// [`SPAWNS`] direct spawns-and-waits from `cwd`, each answered.
+fn spawns_from(cwd: &str) {
+    for _ in 0..SPAWNS {
+        assert_eq!(spawn_in(cwd), Ok(0), "a spawn into {cwd}");
     }
-    start.elapsed() / TIMED
 }

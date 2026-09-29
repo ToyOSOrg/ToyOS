@@ -12,7 +12,6 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::log::{LogTail, Record, MAX_LOG_SHARDS};
@@ -36,9 +35,6 @@ const CHUNKS: usize = 8;
 /// Records per read; above the shard count, which the call refuses.
 const BATCH: usize = 4 * MAX_LOG_SHARDS as usize;
 const LOG_TOKEN: u64 = 1;
-
-/// How long the fsync gets to be refused the second time.
-const PARKS_WITHIN: Duration = Duration::from_secs(5);
 
 fn main() {
     let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
@@ -66,7 +62,6 @@ fn main() {
     let mut tail = LogTail::new();
     let mut buf = [Record::EMPTY; BATCH];
     let poller = Poller::new(1);
-    let give_up = Instant::now() + PARKS_WITHIN;
     poller.watch(&cap, READABLE, LOG_TOKEN);
     poller.wait(0, 0, |_| {});
     loop {
@@ -80,11 +75,9 @@ fn main() {
         if !batch.is_empty() {
             continue;
         }
-        let Some(left) = give_up.checked_duration_since(Instant::now()) else {
-            eprintln!("quiesce_fsync: the fsync of {STAGED} was not refused twice in {PARKS_WITHIN:?}");
-            std::process::exit(1);
-        };
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+        // No deadline: an fsync never refused twice is a hang the harness
+        // ceiling reds.
+        poller.wait(1, u64::MAX, |_| {});
         poller.watch(&cap, READABLE, LOG_TOKEN);
         poller.wait(0, 0, |_| {});
     }

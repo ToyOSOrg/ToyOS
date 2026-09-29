@@ -25,10 +25,6 @@ pub mod fwvars;
 #[allow(dead_code)]
 pub mod gpt;
 #[allow(dead_code)]
-pub mod hda;
-#[allow(dead_code)]
-pub mod hostload;
-#[allow(dead_code)]
 pub mod https;
 #[allow(dead_code)]
 pub mod iommu;
@@ -49,8 +45,6 @@ pub mod origin;
 #[allow(dead_code)]
 pub mod partclaim;
 #[allow(dead_code)]
-pub mod passcost;
-#[allow(dead_code)]
 pub mod pkg;
 #[allow(dead_code)]
 pub mod power;
@@ -65,8 +59,6 @@ pub mod segment;
 pub mod serial;
 #[allow(dead_code)]
 pub mod ssh;
-#[allow(dead_code)]
-pub mod stats;
 #[allow(dead_code)]
 pub mod storage;
 pub mod swap;

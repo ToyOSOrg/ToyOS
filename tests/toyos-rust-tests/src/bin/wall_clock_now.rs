@@ -5,17 +5,7 @@
 //! broken. A machine with no wall clock is not a failure here — printing that
 //! it has none is the answer the host is checking for.
 
-use std::time::Instant;
-
-/// Enough calls that a per-call port handshake would be unmistakable, and few
-/// enough that the loop itself is free. The kernel used to read the CMOS on
-/// every one of these — two port accesses per register, after a wait on the
-/// update-in-progress flag that could take a second.
 const CALLS: u32 = 1000;
-
-/// Both readings come from `SYS_CLOCK_EPOCH` a call apart, so this is a tick
-/// rather than a margin.
-const MAX_CLOCK_SKEW_SECS: u64 = 2;
 
 fn main() {
     let epoch = toyos::system::clock_epoch();
@@ -47,19 +37,20 @@ fn main() {
         .expect("std put the wall clock before the epoch")
         .as_secs();
     println!("wall-clock: std_epoch={std_epoch}");
-    assert!(
-        std_epoch.abs_diff(epoch) <= MAX_CLOCK_SKEW_SECS,
-        "std's SystemTime::now says {std_epoch} and SYS_CLOCK_EPOCH says {epoch}",
-    );
 
-    let began = Instant::now();
     let mut last = 0;
     for _ in 0..CALLS {
         last = toyos::system::clock_epoch().expect("the clock answered once and then stopped");
     }
-    let elapsed = began.elapsed();
-    println!("wall-clock: {CALLS} calls in {}us, last={last}", elapsed.as_micros());
+    println!("wall-clock: {CALLS} calls, last={last}");
 
-    // Monotonic-plus-offset cannot go backwards inside a boot.
+    // Monotonic-plus-offset cannot go backwards inside a boot, and std's
+    // reading sits between the two the kernel gave either side of it: order,
+    // with no margin in it.
     assert!(last >= epoch, "the wall clock went backwards: {epoch} then {last}");
+    assert!(
+        (epoch..=last).contains(&std_epoch),
+        "std's SystemTime::now says {std_epoch}, outside the {epoch}..={last} SYS_CLOCK_EPOCH \
+         answered either side of it",
+    );
 }

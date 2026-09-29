@@ -21,6 +21,9 @@ use toyos::shm::SharedMemory;
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 
+#[path = "../census_wait.rs"]
+mod census_wait;
+
 const SELF_PATH: &str = "/system/bin/test_rs_shm_release_reclaims";
 const PAYLOAD: &[u8] = b"sent-before-the-maker-let-go";
 /// Sixteen rather than one because the arrival check has to be able to fail: a
@@ -29,39 +32,6 @@ const PAYLOAD: &[u8] = b"sent-before-the-maker-let-go";
 const ROUNDS: usize = 16;
 const REGION: usize = 4096;
 const SERVICE: &str = "region";
-
-/// How many 10 ms samples [`settled_census`] takes before it stops asking.
-/// Reaching it is not a failure — the last reading is handed back and the
-/// caller's assertion is still the whole verdict.
-const SETTLE_SAMPLES: usize = 100;
-
-/// The live-object census once the machine has stopped giving objects back.
-///
-/// **A region's pages are not released by the `close` that dropped its last
-/// handle.** The drop queues the region on the object layer's zero-handle
-/// queue and the release happens when some CPU drains that queue;
-/// `object::drain_zero_handles` clears its pending flag before it runs the
-/// hooks, so the CPU that queued them can find the queue empty while another
-/// CPU is still working through the batch, and the release then escapes the
-/// syscall that caused it. `handle_lifetime` carries the measurement and
-/// `issues/kernel/deferred-release-outlives-its-syscall.md` the kernel
-/// half.
-///
-/// **A liveness bound and not a margin**: a kernel that releases nothing holds
-/// a stable, elevated census, is quiescent on the first pair of samples, and
-/// reds immediately.
-fn settled_census() -> Census {
-    let mut last = Census::now();
-    for _ in 0..SETTLE_SAMPLES {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let next = Census::now();
-        if next == last {
-            return next;
-        }
-        last = next;
-    }
-    last
-}
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("donor") {
@@ -73,7 +43,7 @@ fn main() {
     // nothing else in the guest holds or releases a page across the window, and
     // nothing orders that. A live object count moves only when somebody makes
     // or releases one, and it is exact: a leak of one region is `+1`.
-    let start = settled_census();
+    let start = census_wait::settled();
 
     let mut regions = Vec::new();
     for _ in 0..ROUNDS {
@@ -94,13 +64,7 @@ fn main() {
     );
 
     drop(regions);
-    let after = settled_census();
-    let grown: Vec<_> = after.grown_since(&start).collect();
-    assert!(
-        grown.is_empty(),
-        "{ROUNDS} regions were allocated, mapped and dropped, and this was not released: \
-         {grown:?} --- first {start}, then {after}"
-    );
+    census_wait::released_to(&start);
     // The other direction. The donor makes a region, sends it here, and drops
     // its own handle before this process has mapped anything — nobody has the
     // region mapped at that moment, and it is still this process's.
