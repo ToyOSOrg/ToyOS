@@ -1,0 +1,6 @@
+constructor 101
+constructor 102 after 101
+main after 102
+atexit
+destructor 102
+destructor 101, unterminated

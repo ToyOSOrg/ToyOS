@@ -85,9 +85,8 @@ const MODE_UNSET: i32 = -1;
 /// kernel in a single call cannot be split. Buffering is what makes a line one
 /// call. C requires it anyway; this was a conformance gap, not a workaround.
 ///
-/// Not thread-safe: there is no `flockfile`, matching the rest of this libc
-/// (`errno` and the `atexit` table are plain statics too). Concurrent writes to
-/// one stream can interleave inside a line.
+/// Not thread-safe: there is no `flockfile`.
+/// Concurrent writes to one stream can interleave inside a line.
 pub struct FILE {
     fd: i32,
     eof: bool,
@@ -619,6 +618,3 @@ pub unsafe extern "C" fn __assert_fail(expr: *const u8, file: *const u8, _line: 
     fputs(b"\n\0".as_ptr(), unsafe { stderr });
     super::misc::abort();
 }
-
-#[no_mangle]
-pub static mut errno: i32 = 0;

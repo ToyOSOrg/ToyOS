@@ -2589,11 +2589,6 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("pthread condition variables shared across processes: `pthread.h` declares neither `pthread_condattr_setpshared` nor `PTHREAD_PROCESS_SHARED`"),
     },
     NotRun {
-        case: "108_constructor",
-        stage: Stage::Built,
-        why: Why::Declined("libc runs neither `.init_array` nor `.fini_array` (issues/build/libc-runs-no-constructors.md), so it prints `main` alone"),
-    },
-    NotRun {
         case: "113_btdll",
         stage: Stage::NoLink("f_1"),
         why: Why::Declined("three shared libraries built from the same file under -DDLL=1,2,3 and loaded at run time; the harness builds one object and one binary"),
