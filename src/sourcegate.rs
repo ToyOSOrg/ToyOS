@@ -8,7 +8,8 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-const TREES: &[&str] = &["kernel/src"];
+/// The tree [`kernel_lines`] walks.
+const KERNEL_SRC: &str = "kernel/src";
 
 fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
@@ -28,24 +29,6 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
-}
-
-/// Every `(file, count)` where `needle` appears, over [`TREES`].
-fn occurrences(needle: &str) -> Vec<(String, usize)> {
-    let root = repo_root();
-    let mut files = Vec::new();
-    for tree in TREES {
-        rust_files(&root.join(tree), &mut files);
-    }
-    let mut found = Vec::new();
-    for path in files {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let n = text.matches(needle).count();
-        if n > 0 {
-            found.push((rel(&root, &path), n));
-        }
-    }
-    found
 }
 
 /// The names the global registry left behind, and one that is not a name at
@@ -164,11 +147,11 @@ fn named_in_code(needle: &str) -> Vec<String> {
     found
 }
 
-/// Every line of `kernel/src` under a relative path, with its number.
+/// Every line of [`KERNEL_SRC`] under a relative path, with its number.
 fn kernel_lines() -> Vec<(String, usize, String)> {
     let root = repo_root();
     let mut files = Vec::new();
-    rust_files(&root.join("kernel/src"), &mut files);
+    rust_files(&root.join(KERNEL_SRC), &mut files);
     let mut out = Vec::new();
     for path in files {
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
@@ -524,7 +507,11 @@ mod tests {
     /// Both directions: a resurrected early enable reds, and so does a stale row.
     #[test]
     fn bus_mastering_is_armed_at_exactly_the_declared_sites() {
-        let found = occurrences("enable_bus_master(");
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for (file, _, line) in kernel_lines() {
+            *counts.entry(file).or_default() += line.matches("enable_bus_master(").count();
+        }
+        let found: Vec<(String, usize)> = counts.into_iter().filter(|(_, n)| *n > 0).collect();
         for (file, n) in &found {
             let allowed = BUS_MASTER_SITES.iter().find(|(f, _)| f == file).map_or(0, |(_, c)| *c);
             assert_eq!(
@@ -600,35 +587,31 @@ mod tests {
     }
 
     /// The scan has teeth only over the files it opens, and "at least one" is
-    /// a floor a walk of a single file per tree also meets. The floor is the
-    /// tree's own file list: every `.rs` file `git` tracks under it was read.
-    /// An untracked one only adds to the walk.
+    /// a floor a walk of a single file also meets. The floor is the tree's own
+    /// file list: every `.rs` file `git` tracks under it was read. An untracked
+    /// one only adds to the walk.
     #[test]
-    fn the_scan_reaches_the_trees_it_claims_to() {
+    fn the_scan_reaches_the_tree_it_claims_to() {
         let root = repo_root();
-        for tree in TREES {
-            let mut files = Vec::new();
-            rust_files(&root.join(tree), &mut files);
-            let walked: std::collections::BTreeSet<String> =
-                files.iter().map(|p| rel(&root, p)).collect();
-            let tracked: std::collections::BTreeSet<String> =
-                crate::sysroot::tracked_files(&root, &[tree]).unwrap_or_else(|e| panic!("{e}")).into_iter().filter(|p| p.ends_with(".rs")).collect();
-            assert!(
-                tracked.len() > 1,
-                "git tracks {} .rs file(s) under {tree}, so this floor is not one",
-                tracked.len()
-            );
-            let missed: Vec<&String> = tracked.difference(&walked).collect();
-            assert!(
-                missed.is_empty(),
-                "the walk over {tree} read {} of the {} .rs files git tracks there, and missed \
-                 {} of them, the first being {:?}",
-                walked.len(),
-                tracked.len(),
-                missed.len(),
-                missed.first(),
-            );
-        }
+        let walked: std::collections::BTreeSet<String> =
+            kernel_lines().into_iter().map(|(file, _, _)| file).collect();
+        let tracked: std::collections::BTreeSet<String> =
+            crate::sysroot::tracked_files(&root, &[KERNEL_SRC]).unwrap_or_else(|e| panic!("{e}")).into_iter().filter(|p| p.ends_with(".rs")).collect();
+        assert!(
+            tracked.len() > 1,
+            "git tracks {} .rs file(s) under {KERNEL_SRC}, so this floor is not one",
+            tracked.len()
+        );
+        let missed: Vec<&String> = tracked.difference(&walked).collect();
+        assert!(
+            missed.is_empty(),
+            "the walk over {KERNEL_SRC} read {} of the {} .rs files git tracks there, and missed \
+             {} of them, the first being {:?}",
+            walked.len(),
+            tracked.len(),
+            missed.len(),
+            missed.first(),
+        );
     }
 
     /// A page a process can write while the kernel is inside it never becomes a

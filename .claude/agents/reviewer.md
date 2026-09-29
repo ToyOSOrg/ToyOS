@@ -43,20 +43,23 @@ above; otherwise it is a NOTE.
   pure crate, the user/kernel boundary in `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
   legacy: no shim, no workaround, no silent default. No new
-  dependency, host binary or fetch. Nothing outside the brief's fence.
+  dependency or fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
-  architecture's own module, `target_arch` only in a selector, `arch::x86_64` and `arch::aarch64`
-  in no generic kernel code, and none of them in a pure crate.
+  architecture's own module; `target_arch` only there, in its selector, in `src/arch.rs` and in
+  `src/licence.rs`, which evaluates a dependency's `cfg` as data; `arch::x86_64` and
+  `arch::aarch64` in no generic kernel code; and none of them in a crate whose manifest
+  `description` says pure.
   A `4096` in the kernel that means a page is a private copy of `mm::PAGE_SIZE`.
-- **Arrivals.** A host binary `main` does not already run is refused in every spelling that
-  starts one — `Command::new`, `libc::system`, an `exec` or `posix_spawn`, a tool a build script
-  or `cc::Build` drives — unless it is Rust's toolchain, git, QEMU or this repository's own Rust.
-  A package `.github/` installs that `main` does not is refused, whatever manager or `sh -c`
-  installs it.
-  A `uses:` names an action `main` already uses, pinned to a 40-hex commit with its tag in a
-  trailing comment, or it is refused.
+- **Arrivals.** A binary outside Rust's toolchain, git, QEMU and this repository's own Rust is
+  refused, whether the host starts it — `Command::new`, `libc::system`, an `exec` or
+  `posix_spawn`, a tool a build script or `cc::Build` drives — or `.github/` installs it, by
+  whatever manager or `sh -c`. The ones that stand are those
+  `issues/build/python-and-cc-are-declared.md` declares.
+  A third-party action `main` does not use is refused, and every `uses:` pins a 40-hex commit
+  with its tag in a trailing comment or names a local path that resolves.
   A file added to or deleted from `tests/testcases/tinycc/` moves the count
-  `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back.
+  `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back. Nothing
+  else is tracked under `tests/testcases/` but that `LICENSE`, `system.toml` and `hello.c`.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
   needs a reason you accept; a branch that could delete more than it adds and does not goes back
