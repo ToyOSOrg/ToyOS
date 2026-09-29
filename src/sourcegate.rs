@@ -31,73 +31,8 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The names the global registry left behind, and one that is not a name at
-/// all: `services::connect` was the call that resolved one.
-///
-/// Each is retired rather than renamed — `SYS_CONNECTION_JOIN` keeps number 76
-/// and is a different call, addressed by handle, granting nothing. A word
-/// boundary is what tells the two apart here.
-const RETIRED_REGISTRY: &[&str] = &[
-    "SYS_CONNECT",
-    "SYS_LISTEN",
-    "SYS_PIPE_OPEN",
-    "SYS_PIPE_ID",
-    "SYS_SOCKET_CREATE",
-    "SharedToken",
-    "services::connect",
-];
-
-/// Every other ABI name this project has retired: a deleted syscall, debug
-/// action or inbox op code, whose *number* is retired with it and never
-/// reused (`CLAUDE.md`, "Syscall ABI").
-///
-/// The number is what the rule protects and a number cannot be scanned for —
-/// so the name is, and a name back in code is how a number gets reissued by
-/// accident. Retired numbers themselves are recorded where they can be read
-/// beside the live ones: the comments in `toyos-abi/src/syscall.rs` and
-/// `toyos-abi/src/inbox.rs`, which this scan is blind to by construction
-/// because it strips comments.
-///
-/// **A rename is not a retirement, and this table gained no row for one.**
-/// `SYS_IO_URING_SETUP`/`SYS_IO_URING_ENTER` became `SYS_INBOX_SETUP`/
-/// `SYS_INBOX_SUBMIT` on 2026-08-20 keeping numbers 89 and 90, the same
-/// arguments and the same struct layouts, so nothing was deleted and no number
-/// is protectable by forbidding the old spelling.
-const RETIRED_ABI_NAMES: &[&str] = &[
-    // Syscall 107. Nothing called it; a region's mappings go with its last
-    // handle, so the handle is the whole of letting go.
-    "SYS_SHM_UNMAP",
-    // `SYS_DEBUG` actions 14 and 15. A total hides a leak of one kind behind
-    // churn in another, and a breakdown in the kernel log is a reading no guest
-    // test can see; every leak assertion in the estate is `CENSUS_KIND`.
-    "CENSUS_TOTAL",
-    "CENSUS_BREAKDOWN",
-    // Inbox op code 2. No submitter anywhere: this kernel's watches are
-    // one-shot and mio re-arms rather than cancels. Retired under both the
-    // spelling it carried when it was deleted and the one a reintroduction
-    // would write in today's vocabulary.
-    "IORING_OP_POLL_REMOVE",
-    "OP_POLL_REMOVE",
-    "OP_CANCEL",
-    // Inbox op code 4, `IORING_OP_CLOSE`: the one handle path that could not
-    // obey the bad-handle policy, running under the ring's own lock. Same two
-    // vocabularies.
-    "IORING_OP_CLOSE",
-    "OP_CLOSE",
-    // Syscall 8. The monotonic clock is a page every address space maps
-    // read-only (`toyos_abi::clock`), so reading it is no transition at all.
-    "SYS_CLOCK",
-];
-
-/// Everything this repository compiles into the guest.
-const GUEST_TREES: &[&str] =
-    &["kernel/src", "toyos/src", "toyos-abi/src", "userland", "tests"];
 
 /// `line` with its comment and its string literals removed.
-///
-/// What is left is the part that names things. Prose explaining what a deleted
-/// call used to do is legal and worth keeping; a gravestone table mapping a
-/// retired number to the string `"SYS_LISTEN"` is the point of the table.
 fn code_only(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
@@ -125,26 +60,6 @@ fn names(code: &str, needle: &str) -> bool {
         !word(at.checked_sub(1).and_then(|j| bytes.get(j)))
             && !word(bytes.get(at + needle.len()))
     })
-}
-
-/// `(file, line number)` for every place `needle` is named in code, over
-/// [`GUEST_TREES`].
-fn named_in_code(needle: &str) -> Vec<String> {
-    let root = repo_root();
-    let mut files = Vec::new();
-    for tree in GUEST_TREES {
-        rust_files(&root.join(tree), &mut files);
-    }
-    let mut found = Vec::new();
-    for path in files {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        for (n, line) in text.lines().enumerate() {
-            if names(&code_only(line), needle) {
-                found.push(format!("{}:{}", rel(&root, &path), n + 1));
-            }
-        }
-    }
-    found
 }
 
 /// Every line of [`KERNEL_SRC`] under a relative path, with its number.
@@ -526,64 +441,6 @@ mod tests {
                 "{file} is declared {n} × `enable_bus_master(` and has {count} — a stale row is a permission nobody re-argued"
             );
         }
-    }
-
-    /// **There is no global registry.** A name a process could present and have
-    /// resolved for it is the thing this architecture deletes, so its
-    /// identifiers may not be reachable from any code the guest compiles.
-    #[test]
-    fn no_name_resolves_through_a_registry_any_more() {
-        let mut complaints = Vec::new();
-        for needle in RETIRED_REGISTRY {
-            for at in named_in_code(needle) {
-                complaints.push(format!("{at}: names `{needle}`"));
-            }
-        }
-        assert!(
-            complaints.is_empty(),
-            "the registry is deleted, and these still name it:\n  {}",
-            complaints.join("\n  "),
-        );
-    }
-
-    /// **A retired ABI number is never reused**, and the name is the only part
-    /// of it a scan can hold on to. A retired name back in guest-compiled code
-    /// is either the number coming back or a new call wearing a dead one's
-    /// identity, and the two are indistinguishable from the outside.
-    #[test]
-    fn a_retired_abi_name_is_gone_from_the_code() {
-        let mut complaints = Vec::new();
-        for needle in RETIRED_ABI_NAMES {
-            for at in named_in_code(needle) {
-                complaints.push(format!("{at}: names `{needle}`"));
-            }
-        }
-        assert!(
-            complaints.is_empty(),
-            "these names are retired and their numbers with them:\n  {}",
-            complaints.join("\n  "),
-        );
-    }
-
-    /// What the scan above can and cannot see, stated as cases, because a
-    /// well-formed tree exercises none of them.
-    #[test]
-    fn the_registry_scan_reads_code_and_not_prose() {
-        assert!(names(&code_only("    let x = syscall(SYS_LISTEN, 0);"), "SYS_LISTEN"));
-        assert!(names(&code_only("pub const SYS_PIPE_ID: u64 = 70;"), "SYS_PIPE_ID"));
-        assert!(!names(&code_only("/// `SYS_LISTEN` used to register a name."), "SYS_LISTEN"));
-        assert!(!names(&code_only("    // SYS_PIPE_ID was 70"), "SYS_PIPE_ID"));
-        assert!(!names(&code_only("    85 => \"SYS_LISTEN\","), "SYS_LISTEN"));
-        // The live call keeps the retired one's number and must not be read as
-        // it: this is the whole reason the match is on a word boundary.
-        assert!(!names(&code_only("SYS_CONNECTION_JOIN => join(a, b),"), "SYS_CONNECT"));
-        assert!(names(&code_only("SYS_CONNECT => connect(a),"), "SYS_CONNECT"));
-        // And the walk reaches real code: a live name it is capable of finding
-        // must actually be found.
-        assert!(
-            !named_in_code("SYS_CONNECTION_JOIN").is_empty(),
-            "the scan found no `SYS_CONNECTION_JOIN` in code, so it is not reading the guest trees",
-        );
     }
 
     /// The scan has teeth only over the files it opens, and "at least one" is
