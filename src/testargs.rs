@@ -167,8 +167,8 @@ declare_flags!(pub SUITE = {
     pub HOLD = "--hold", Next;
 });
 
-/// The run's filter and `--metal`'s mode, both decided by [`parse`] off one
-/// walk of argv: an unknown flag refuses the line before either is read.
+/// The run's filter and `--metal`'s mode, both decided by [`parse`]: an unknown
+/// flag refuses the line before either is read.
 pub struct Parsed<'a> {
     pub filter: Option<&'a str>,
     pub metal: Option<MetalMode>,
@@ -222,6 +222,24 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
                 .to_string(),
         );
     }
+    if has(&METAL) {
+        for flag in [&SHARD, &JOBS, &JOBS_SHORT] {
+            if has(flag) {
+                return Err(format!(
+                    "{} beside --metal: the metal profile reads no {}, so it would be dropped \
+                     in silence, and a following --list would be taken as its value",
+                    flag.name, flag.name
+                ));
+            }
+        }
+        if SUITE.value(args, &METAL_READBACK).is_some_and(|dir| dir.starts_with('-')) {
+            return Err(
+                "--metal-readback takes a directory, and a word that starts with - is a flag \
+                 that lost its place"
+                    .to_string(),
+            );
+        }
+    }
     if has(&NIGHTLY) && has(&WEEKLY) {
         return Err(
             "--weekly runs the nightly tier too, so a --nightly beside it would be read by \
@@ -264,8 +282,8 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
 pub enum MetalMode {
     /// `--metal --list`: print what would run, and touch nothing.
     List,
-    /// `--metal --metal-readback <dir>`: build the images, judge the
-    /// readbacks already at that path. Never reaches the machine either.
+    /// `--metal --metal-readback <dir>`: judge the readbacks already at that
+    /// path. Never reaches the machine either.
     Offline(PathBuf),
     /// `--metal` alone: flash and drive the machine.
     Drive,
@@ -559,6 +577,30 @@ mod tests {
             metal_owned(&["--metal", "--metal-readback", "target/metal", "--list"]).unwrap(),
             Some(MetalMode::List)
         );
+    }
+
+    #[test]
+    fn metal_refuses_the_flags_it_reads_nothing_of_by_name() {
+        for argv in [
+            &["--metal", "-j", "--list"][..],
+            &["--metal", "--jobs", "--list"],
+            &["--metal", "--shard", "--list"],
+            &["--list", "--metal", "--shard", "2/4"],
+            &["--list", "--metal", "-j", "4"],
+            &["--list", "--metal", "--jobs", "4"],
+            &["--metal", "--shard", "2/4"],
+            &["--metal", "-j", "4"],
+        ] {
+            let refusal = metal_owned(argv).expect_err(&format!("{argv:?} was accepted"));
+            assert!(refusal.contains("beside --metal"), "{argv:?}: {refusal}");
+        }
+        for argv in [
+            &["--metal", "--metal-readback", "--list"][..],
+            &["--metal-readback", "--list", "--metal"],
+        ] {
+            let refusal = metal_owned(argv).expect_err(&format!("{argv:?} was accepted"));
+            assert!(refusal.contains("--metal-readback takes a directory"), "{argv:?}: {refusal}");
+        }
     }
 
     #[test]
