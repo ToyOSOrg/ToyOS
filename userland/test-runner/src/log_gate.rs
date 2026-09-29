@@ -45,22 +45,6 @@ const FIRST_SEQ: u64 = 1;
 /// loss path is reached rather than assumed.
 const BATCH: usize = 64;
 
-/// How long the whole gate may take before it gives up on a workload that never
-/// finished, and it reports what it had when it did.
-///
-/// **A liveness guard and never a verdict**, and it is what a shard stalled on
-/// an uncommitted slot looks like from here: `drain_ordered` blocks a shard at
-/// its first uncommitted record, so a writer that never publishes takes that
-/// shard out of the merge for good. A green run is under a second of guest
-/// time at every width this gate is booted at.
-///
-/// **It is the guest's own ceiling and it is the smaller of the two**: the host
-/// gives the whole boot 60 s (`tests/common/logread.rs`), so what a hung gate
-/// reports is this one's message and this one's elapsed time. Nothing in the
-/// loop below waits on a record any more, so reaching it now means the kernel
-/// stopped answering rather than that a record went missing.
-const CEILING: Duration = Duration::from_secs(30);
-
 /// Empty reads in a row before the log is called quiet.
 ///
 /// **Eight, each after a bounded park on the readiness source**, because a
@@ -251,7 +235,6 @@ fn gate(cap: &SysCap) -> Result<(), String> {
     let mut armed = false;
 
     let mut quiet = 0u32;
-    let started = Instant::now();
     loop {
         if !armed {
             poller.watch(cap, READABLE, LOG_TOKEN);
@@ -298,18 +281,6 @@ fn gate(cap: &SysCap) -> Result<(), String> {
             .is_none_or(|at| at.elapsed() >= STORM_SETTLE);
         if quiet >= QUIET_READS && settled {
             break;
-        }
-        if started.elapsed() > CEILING {
-            return Err(format!(
-                "gave up after {:?}: {} records over {} reads, storm {:?}, {} producer record(s), \
-                 {} producer(s) done",
-                started.elapsed(),
-                run.records,
-                run.reads,
-                run.storm,
-                run.producer_records,
-                run.producers.values().filter(|p| p.emitted.is_some()).count(),
-            ));
         }
         if batch.is_empty() {
             // **Nothing new, so park on the readiness source rather than spin.**

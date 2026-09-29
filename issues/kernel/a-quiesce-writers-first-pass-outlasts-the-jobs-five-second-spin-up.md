@@ -7,10 +7,7 @@ opened: 2026-09-25
 # A `quiesce_writers` writer's first write-and-fsync pass outlasts the job's 5 s spin-up
 
 It asks for the reset only once each of its six writers has
-finished one pass: a create, 64 KiB of writes and an fsync. If a writer is
-still in its first pass after 5 s, the job prints `quiesce_writers: <n> of 6
-writers reached their loop in 5s` and exits 1 without asking, so no stop
-begins. Every sighting below then reads `QEMU never reported stopping: the
+finished one pass: a create, 64 KiB of writes and an fsync. Every sighting below then reads `QEMU never reported stopping: the
 guest asked for a reboot and stayed up`; that misreport is
 `issues/build/a-stopped-boot-whose-job-never-asked-waits-out-the-reset-budget-and-says-it-asked.md`.
 
@@ -71,3 +68,9 @@ first write-and-fsync pass for over 5 s while another writer passes in under a
 third of a second, and the fix is shown against it. Owner: the `/log` write and
 sync path `tests/toyos-rust-tests/src/bin/quiesce_writers.rs` drives; held by
 the orchestrator.
+
+**Unrun since it was disabled**: PR #562 deleted the job's 5 s spin-up.
+`quiesce_writers` waits for every writer's first pass with no deadline, so a
+first pass as slow as those above delays the reset and no longer ends the boot
+unasked. That change has never run: the test's first run back is also that
+change's.

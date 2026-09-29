@@ -26,9 +26,7 @@ soundd and measuring a different machine. Number 96 is retired, and
 
 **What exists is not a substitute, and each instrument fails differently.**
 soundd's `max_wake_lat_ns` (`toyos-mixer/src/stats.rs`, printed by
-`userland/soundd/src/mix.rs`, read by gate A in `tests/common/audio.rs` and
-baselined in `tests/audio-baseline.toml`; the thorough tier runs Mann-Whitney on
-`max_wake_lat_us`) is a **max over a ~2 s window, not a distribution** — no
+`userland/soundd/src/mix.rs`) is a **max over a ~2 s window, not a distribution** — no
 percentiles, no sample count; it measures against a DLL's *prediction of a DMA
 completion* rather than against a programmed timer, so it folds in the device
 model; and it needs soundd plus a sound card to exist at all, which is exactly
