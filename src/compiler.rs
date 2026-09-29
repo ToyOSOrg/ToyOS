@@ -60,6 +60,9 @@ const KEYED: [&str; 5] = ["compiler", "src/bootstrap", "src/tools", "src/stage0"
 /// bootstrap builds from that commit, so its content is never read.
 pub(crate) const LLVM: &str = "src/llvm-project";
 
+/// Where a fork checkout builds a compiler of its own.
+const BUILD_DIR: &str = "build/toyos-compiler";
+
 /// The file a finished compiler carries last, naming what it was built from. A
 /// directory without it is a build that did not finish.
 const SOURCE: &str = "SOURCE";
@@ -290,6 +293,7 @@ fn place(root: &Path, fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path)
     let _worktree = buildlock::worktree_exclusive(root, &what);
     eprintln!("Building compiler {key} in {}: its compiler/ is not the one the primary's was built from", fork.display());
     let stage2 = build(fork);
+    crate::llvm::retire_in_tree(&fork.join(BUILD_DIR));
     let partial = dir.with_extension("partial");
     if partial.exists() {
         fs::remove_dir_all(&partial).unwrap_or_else(|e| panic!("remove {}: {e}", partial.display()));
@@ -314,7 +318,7 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     crate::ensure_submodule(fork, "library/backtrace");
     let llvm = crate::llvm::resolve(root, rust_dir, fork);
     let host = host_triple();
-    let build_dir = fork.join("build/toyos-compiler");
+    let build_dir = fork.join(BUILD_DIR);
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, config_text(&build_dir, &host, &llvm.dir)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
@@ -323,7 +327,6 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
     toolchain::refuse_on_compile_error(&log, "the compiler");
     assert!(ok, "the compiler build in {} failed, and nothing in its output was a compile error", fork.display());
-    crate::llvm::retire_in_tree(&build_dir);
     let stage2 = build_dir.join(&host).join("stage2");
     assert!(stage2.join("bin/rustc").is_file(), "the compiler build left no {}", stage2.join("bin/rustc").display());
     toolchain::provision_toolchain_cargo(&stage2);
@@ -564,7 +567,10 @@ pub(crate) mod tests {
         let llvm = store.join(crate::llvm::key(&fork));
         let sweep = || keystore::sweep(&primary, Keyed::Llvm, &store);
 
+        let own = fork.join(BUILD_DIR).join(host_triple()).join("llvm");
+        write(&own.join("bin/llvm-config"), "the build directory's own");
         drop(choose(&a, &rust_dir, &fork, fake_build));
+        assert!(!own.exists(), "a compiler built against the store left the LLVM its build directory built");
         fs::create_dir_all(&llvm).unwrap();
         assert_eq!(sweep(), Vec::<PathBuf>::new(), "the LLVM of a worktree's own compiler was swept");
 
