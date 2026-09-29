@@ -26,10 +26,34 @@ pub struct Disabled {
 /// Every disabled test.
 pub const DISABLED: &[Disabled] = &[
     Disabled {
+        test: "03_struct",
+        issue: "issues/build/the-guest-c-comparator-keeps-the-tinycc-warnings-the-host-one-drops.md",
+    },
+    Disabled {
+        test: "allocator_stress",
+        issue: "issues/build/allocator-stress-bounds-total-memory-by-a-qemu-guests-size.md",
+    },
+    Disabled {
+        test: "blackbox_foreign_record",
+        issue: "issues/build/the-metal-loop-refuses-the-hang-the-foreign-record-arm-stages.md",
+    },
+    Disabled {
+        test: "boot_deadline_ends_a_wedge",
+        issue: "issues/hardware/the-metal-wedge-judge-reads-a-channel-the-wedge-cannot-write.md",
+    },
+    Disabled {
         test: "console_locale_detect",
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
+    Disabled {
+        test: "dlopen_dedup",
+        issue: "issues/build/a-shared-metal-chunk-stages-no-test-binary-another-member-reads.md",
+    },
+    Disabled {
+        test: "fs_large_file",
+        issue: "issues/build/two-shared-members-assume-a-bcachefs-home-the-t14-boot-did-not-have.md",
+    },
     Disabled {
         test: "ftruncate_flush_race",
         issue: "issues/build/ftruncate-flush-race-reds-intermittently-and-nothing-says-why.md",
@@ -41,13 +65,43 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "handle_transfer", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
+        test: "home_backing_revoked",
+        issue: "issues/build/two-shared-members-assume-a-bcachefs-home-the-t14-boot-did-not-have.md",
+    },
+    Disabled {
         test: "i8042_mouse",
         issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
     },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
+        test: "klogd_hosted",
+        issue: "issues/build/a-readbacks-kernel-records-never-count-as-kernel-output.md",
+    },
+    Disabled {
+        test: "lan_dhcp_lease",
+        issue: "issues/hardware/the-benchs-router-leases-toyos-another-address-than-ubuntu.md",
+    },
+    Disabled {
+        test: "lan_lease_report",
+        issue: "issues/hardware/the-t14-stopped-answering-ssh-between-two-lan-boots.md",
+    },
+    Disabled { test: "lan_swap", issue: "issues/hardware/the-t14-stopped-answering-ssh-between-two-lan-boots.md" },
+    Disabled { test: "lan_talk", issue: "issues/build/the-talking-boots-reboot-outruns-its-log-stream.md" },
+    Disabled {
+        test: "loader_watchdog_arms",
+        issue: "issues/build/a-readbacks-kernel-records-never-count-as-kernel-output.md",
+    },
+    Disabled {
+        test: "log_poll_outlives_a_close",
+        issue: "issues/build/a-metal-judge-reads-the-log-file-for-a-record-written-after-it-was-made-whole.md",
+    },
+    Disabled {
         test: "log_ring_keeps_the_owners_slots",
         issue: "issues/kernel/a-log-rings-owner-is-named-only-when-logd-reads-its-registration.md",
+    },
+    Disabled {
+        test: "machine_reboot",
+        issue: "issues/build/a-metal-judge-reads-the-log-file-for-a-record-written-after-it-was-made-whole.md",
     },
     Disabled {
         test: "netd_refused_accept",
@@ -90,12 +144,20 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/syscall-window-nmi-shortfalls-on-a-contended-host.md",
     },
     Disabled {
+        test: "usb_reset_records_the_phase_it_cut",
+        issue: "issues/build/a-metal-judge-reads-the-log-file-for-a-record-written-after-it-was-made-whole.md",
+    },
+    Disabled {
         test: "usb_transport_break",
         issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
     },
     Disabled {
         test: "user_copy_races_munmap",
         issue: "issues/kernel/copy-meets-a-remap-holds-a-cpu-the-thread-it-waits-on-may-be-queued-behind.md",
+    },
+    Disabled {
+        test: "xhci_xecp_walk",
+        issue: "issues/build/the-xecp-judge-names-no-line-the-t14s-handoff-prints.md",
     },
 ];
 
