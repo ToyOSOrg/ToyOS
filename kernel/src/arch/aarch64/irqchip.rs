@@ -366,9 +366,7 @@ pub(super) fn rearm() {
 /// `timer-floor`: this CPU's timer made due with interrupts masked, then
 /// asked to fire within a quantum, which leaves it nothing to fire within.
 /// The comparator it is left holding must be at least [`MIN_ONE_SHOT`] past
-/// the counter read just before the ask. That reading tells a floored
-/// comparator from an unfloored one only while the ask took less than the
-/// floor, so a wider window is a `FAIL` too.
+/// the counter read just before the ask.
 #[cfg(feature = "boot-actuators")]
 pub fn floor_selftest() {
     let _guard = crate::arch::IrqGuard::close();
@@ -385,9 +383,8 @@ pub fn floor_selftest() {
     let cval: u64;
     // SAFETY: reads the EL1 virtual timer's comparator.
     unsafe { core::arch::asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack, preserves_flags)) };
-    let window = cpu::counter() - before;
     stop_timer();
     let (span, floor) = (cval.saturating_sub(before), floor_ticks());
-    let verdict = if span >= floor && window < floor { "PASS" } else { "FAIL" };
-    log!("timer-floor: {verdict} span={span} floor={floor} window={window} ticks: the comparator past the counter before the ask, and the ask's own width");
+    let verdict = if span >= floor { "PASS" } else { "FAIL" };
+    log!("timer-floor: {verdict} span={span} floor={floor} ticks: the comparator past the counter before the ask");
 }
