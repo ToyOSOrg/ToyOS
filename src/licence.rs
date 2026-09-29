@@ -208,9 +208,7 @@ pub const EXCEPTIONS: &[Exception] = &[
 /// a file nobody can read in review; and everything under `assets/`, text or
 /// not, because that directory is where third-party material arrives. A
 /// third-party *text* file anywhere else — a ninth Phosphor SVG one directory
-/// over — is reached by neither, and the corpus by count alone and no digest;
-/// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
-/// what is left of that gap.
+/// over — is reached by neither.
 pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     // The ACPI tables QEMU 11.1.1 published to a `Profile::Headless` guest,
     // read out of guest physical memory over the monitor. Firmware output, not

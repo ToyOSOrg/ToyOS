@@ -17,7 +17,8 @@ unsafe impl dlmalloc::Allocator for KernelPageSource {
         }
         if let Some(page) = pmm::alloc_page(pmm::Category::KernelHeap) {
             let ptr = page.direct_map().as_mut_ptr::<u8>();
-            core::mem::forget(page); // dlmalloc manages the lifetime
+            #[expect(clippy::disallowed_methods, reason = "dlmalloc owns the page from here on")]
+            core::mem::forget(page);
             #[cfg(feature = "heap-sweep")]
             pages::add(ptr as u64);
             (ptr, PAGE_2M as usize, 0)

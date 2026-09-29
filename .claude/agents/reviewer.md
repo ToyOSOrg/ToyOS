@@ -44,6 +44,19 @@ above; otherwise it is a NOTE.
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
   legacy: no shim, no workaround, no silent default. No new
   dependency, host binary or fetch. Nothing outside the brief's fence.
+  Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
+  architecture's own module, `target_arch` only in a selector, `arch::x86_64` and `arch::aarch64`
+  in no generic kernel code, and none of them in a pure crate.
+  A `4096` in the kernel that means a page is a private copy of `mm::PAGE_SIZE`.
+- **Arrivals.** A host binary `main` does not already run is refused in every spelling that
+  starts one — `Command::new`, `libc::system`, an `exec` or `posix_spawn`, a tool a build script
+  or `cc::Build` drives — unless it is Rust's toolchain, git, QEMU or this repository's own Rust.
+  A package `.github/` installs that `main` does not is refused, whatever manager or `sh -c`
+  installs it.
+  A `uses:` names an action `main` already uses, pinned to a 40-hex commit with its tag in a
+  trailing comment, or it is refused.
+  A file added to or deleted from `tests/testcases/tinycc/` moves the count
+  `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
   needs a reason you accept; a branch that could delete more than it adds and does not goes back
@@ -59,7 +72,8 @@ above; otherwise it is a NOTE.
   and red there, and one oracle independent of the author.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
-  read, an exit status nobody reads.
+  read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
+  `Untrusted` is an unwrap wearing a check's name.
 - **Waits.** A flat wait — sleep, then assume it happened — is a BLOCKER, in code and in tests,
   unless a hardware document mandates that time and offers no notification, cited at the site.
   Wait on the event itself, bounded by a timeout that fails loudly. Defensive code that hides a

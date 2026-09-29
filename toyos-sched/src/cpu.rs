@@ -2678,6 +2678,7 @@ mod tests {
         /// a live task in it may not be dropped. Forgetting it is what a
         /// running machine does with a task that is still running.
         fn abandon(self) {
+            #[expect(clippy::disallowed_methods, reason = "a live task dies only by `DeadTask::finalize`, never by a drop")]
             core::mem::forget(self);
         }
     }

@@ -9,10 +9,8 @@ opened: 2026-09-26
 The owner's ruling of 2026-09-26 puts every `asm!`, `global_asm!`,
 `naked_asm!`, naked function and `core::arch::*` intrinsic inside an
 architecture's own module: `kernel/src/arch/<arch>/`, the bootloader's
-`bootloader/src/arch/`, and `toyos-abi`'s per-arch syscall entry. `src/sourcegate.rs`'s
-`ARCH_RULES` enforces it. The kernel and the loader now hold none outside
-those; what is left is declared in that table as an exception, each row
-pointing here:
+`bootloader/src/arch/`, and `toyos-abi`'s per-arch syscall entry. The kernel and the loader now hold none outside
+those; what is left:
 
 - `userland/toyos-window/src/framebuffer.rs` and `userland/metalprobe/src/fb.rs`:
   `_mm_sfence` after writing a write-combining framebuffer. Userland has no
@@ -32,5 +30,4 @@ pointing here:
 
 **Exit condition**: the SDK gains a per-architecture module (as `toyos-abi`'s
 syscall entry and libc's `arch/` are) holding a scanout flush and DMA barriers; the guest probes move under a per-arch
-directory the harness selects by `Arch`; and every row in `ARCH_RULES` that
-cites this file is deleted.
+directory the harness selects by `Arch`.

@@ -46,6 +46,7 @@ fn publish_page(counter_at_boot: u64, period_fs: u64) {
         );
     }
     PAGE_PHYS.store(frame.phys(), Release);
+    #[expect(clippy::disallowed_methods, reason = "every address space maps the clock page for the machine's life")]
     core::mem::forget(frame);
 }
 

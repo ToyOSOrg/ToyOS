@@ -80,7 +80,8 @@ pub fn init(
         cache: CachePolicy::Normal,
         pages: None,
     };
-    core::mem::forget(cursor_pages); // lives forever (GPU is never torn down)
+    #[expect(clippy::disallowed_methods, reason = "the GPU is never torn down, so its cursor pages outlive every process")]
+    core::mem::forget(cursor_pages);
 
     let info = GpuInfo {
         scanout,

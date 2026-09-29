@@ -239,6 +239,7 @@ impl DmaPool {
         let (base, device, size) = (self.base, self.device, self.size);
         self.space = DeviceSpace::Untranslated;
         for page in core::mem::take(&mut self.pages) {
+            #[expect(clippy::disallowed_methods, reason = "a bound device keeps its pool for the boot, which `Dma<'static>` says")]
             core::mem::forget(page);
         }
         Dma::new(base.as_mut_ptr(), device, size)
