@@ -23,7 +23,7 @@ if it beats ToyOS without it. What no proving machine is known to offer is
 - `issues/kernel/no-test-can-hold-a-thread-on-a-named-cpu.md`
 - `issues/hardware/no-program-measures-toyos-against-linux-on-one-machine.md`
 - `issues/kernel/user-programs-use-avx-under-xsave.md`
-- `issues/kernel/kernel-copies-use-rep-movsb-where-the-cpu-has-erms.md`
+- `issues/kernel/kernel-copies-are-one-rep-movsb-on-every-cpu.md`
 - `issues/kernel/the-direct-map-uses-1-gib-leaves-where-the-cpu-has-them.md`
 - `issues/kernel/a-tlb-shootdown-reaches-only-the-cpus-that-ran-the-space.md`
 - `issues/kernel/fsgsbase-is-measured-then-taken-or-rejected.md`
