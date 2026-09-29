@@ -198,17 +198,21 @@ pub fn watch(row: usize) -> &'static Watch {
 /// begun after it has been; a granted one then raises the flood again.
 #[cfg(feature = "boot-actuators")]
 pub mod straddle {
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
     /// Claims begun this boot.
     static BEGUN: AtomicU64 = AtomicU64::new(0);
-    /// [`BEGUN`] when the quarantine's first step ran; [`NONE`] when it holds none.
+    /// [`BEGUN`] when the quarantine's first step ran; [`NONE`] before it.
     static HELD_FROM: AtomicU64 = AtomicU64::new(NONE);
     const NONE: u64 = u64::MAX;
     /// The lines the first step masked, for the second's log.
     static MASKED: AtomicU32 = AtomicU32::new(0);
-    /// A claim begun after the first step has been answered.
-    static STRADDLED: AtomicBool = AtomicBool::new(false);
+    /// `WAITING` → `STRADDLED` → `RESUMED`, and nothing moves it back: the
+    /// second step runs once.
+    static STEP: AtomicU8 = AtomicU8::new(WAITING);
+    const WAITING: u8 = 0;
+    const STRADDLED: u8 = 1;
+    const RESUMED: u8 = 2;
 
     pub(super) fn begin() -> u64 {
         BEGUN.fetch_add(1, Ordering::SeqCst)
@@ -218,26 +222,25 @@ pub mod straddle {
     /// either way, so only a later one decides anything.
     pub(super) fn answered(begun: u64) {
         let from = HELD_FROM.load(Ordering::SeqCst);
-        if from != NONE && begun >= from {
-            STRADDLED.store(true, Ordering::SeqCst);
+        if from != NONE
+            && begun >= from
+            && STEP.compare_exchange(WAITING, STRADDLED, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        {
+            crate::arch::keyboard_controller::wake_irq_cpu();
         }
     }
 
     /// The quarantine's first step ran and masked `masked` lines.
     pub fn hold(masked: u32) {
         MASKED.store(masked, Ordering::SeqCst);
-        STRADDLED.store(false, Ordering::SeqCst);
         HELD_FROM.store(BEGUN.load(Ordering::SeqCst), Ordering::SeqCst);
         log!("isa: the i8042's quarantine holds after its first step for a claim");
     }
 
-    /// The first step's masked count, once a claim begun after it has been
-    /// answered; the second step is the caller's.
+    /// The first step's masked count, once, after a claim begun after it has
+    /// been answered; the second step is the caller's.
     pub fn resume() -> Option<u32> {
-        if !STRADDLED.swap(false, Ordering::SeqCst) {
-            return None;
-        }
-        HELD_FROM.store(NONE, Ordering::SeqCst);
+        STEP.compare_exchange(STRADDLED, RESUMED, Ordering::SeqCst, Ordering::SeqCst).ok()?;
         log!("isa: a claim was answered between the i8042's quarantine steps");
         Some(MASKED.load(Ordering::SeqCst))
     }

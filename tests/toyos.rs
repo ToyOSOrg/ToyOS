@@ -13850,16 +13850,18 @@ fn run_machine_test(
                     }
                 },
             );
-            isa_verdict(&result, "===ISA_DEVICE_OK===")?;
+            // Each once: the flood is taken, and the quarantine lets go, once per boot.
             for want in [
                 "isa: the i8042's quarantine holds after its first step for a claim",
                 "isa: a claim was answered between the i8042's quarantine steps",
                 "i8042: quarantined",
             ] {
-                if !result.serial.contains(want) {
-                    return Err(format!("the kernel never said {want:?}:\n{}", result.serial));
+                let said = result.serial.matches(want).count();
+                if said != 1 {
+                    return Err(format!("the kernel said {want:?} {said} times:\n{}", result.serial));
                 }
             }
+            isa_verdict(&result, "===ISA_DEVICE_OK===")?;
             eprintln!("  [isa] {}", result.stdout.trim().replace('\n', "\n  [isa] "));
             Ok(())
         }
