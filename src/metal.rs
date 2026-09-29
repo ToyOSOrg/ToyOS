@@ -802,6 +802,15 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     ("usb-transport-break", Flash::Ok),
+    // It deafens one CPU for a window of its own clock and has the blocked-task
+    // dump kick it and probe it with an NMI. It reaches no device register and
+    // writes no firmware state; the CPU rejoins, and the boot goes on to
+    // userland and ends the way an unarmed one does.
+    ("dump-deaf-cpu", Flash::Ok),
+    // It holds each pipe waiter up to a short budget of its own clock for a post
+    // to land between its condition and its park. It reaches no device and
+    // writes no firmware state, and a hold nothing posts into lapses.
+    ("watch-window", Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(
@@ -1776,8 +1785,7 @@ impl Talking {
         };
         println!("asking for {peer:?}'s log");
         let at = self.dir.join(file);
-        crate::metaltalk::Stream::connect(peer, &at, true, by, crate::metalswap::TURNED_AWAY_CEILING)
-            .map_err(Refusal::Cable)
+        crate::metaltalk::Stream::connect(peer, &at, true, by).map_err(Refusal::Cable)
     }
 }
 

@@ -111,7 +111,7 @@ impl Compiler {
 }
 
 /// The primary's record of which `compiler/` its `stage2` was built from.
-fn primary_record(rust_dir: &Path) -> PathBuf {
+pub(crate) fn primary_record(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/toyos-compiler")
 }
 
@@ -147,13 +147,42 @@ fn compiler_source(checkout: &Path) -> String {
 }
 
 /// Record which compiler the primary's `stage2` is. The primary calls this
-/// after a toolchain build, and when the record is missing — its compiler stamp
-/// has just said `stage2` is built from what its `rust/` holds.
+/// after a toolchain build.
 pub fn record(rust_dir: &Path) {
     let at = primary_record(rust_dir);
     let want = source(rust_dir);
     if fs::read_to_string(&at).ok().as_deref() != Some(want.as_str()) {
         fs::write(&at, &want).unwrap_or_else(|e| panic!("write {}: {e}", at.display()));
+    }
+}
+
+/// Remove the record of which compiler the primary's `stage2` is. The primary
+/// calls this before a toolchain build.
+pub fn forget(rust_dir: &Path) {
+    let at = primary_record(rust_dir);
+    match fs::remove_file(&at) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("remove {}: {e}", at.display()),
+        _ => {}
+    }
+}
+
+/// Whether the primary's `stage2` is the compiler `checkout`'s `compiler/`
+/// names — `Err` when nothing records which compiler that is.
+///
+/// **The source's content, never its files' times**: a checkout that rewrites a
+/// file with the bytes it had is no new compiler.
+fn primary_is(rust_dir: &Path, checkout: &Path) -> Result<bool, std::io::Error> {
+    let names = source(checkout);
+    Ok(fs::read_to_string(primary_record(rust_dir))?.trim() == names)
+}
+
+/// Whether the primary's `stage2` is built from what its own `rust/compiler/`
+/// holds: false until a bootstrap has finished and [`record`]ed it.
+pub fn primary_is_current(rust_dir: &Path) -> bool {
+    match primary_is(rust_dir, rust_dir) {
+        Ok(current) => current,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!("read {}: {e}", primary_record(rust_dir).display()),
     }
 }
 
@@ -204,16 +233,15 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     if fork == rust_dir {
         return Compiler::primary(rust_dir);
     }
-    let record = primary_record(rust_dir);
-    let built_from = fs::read_to_string(&record).unwrap_or_else(|e| {
+    let names_primary = primary_is(rust_dir, fork).unwrap_or_else(|e| {
         panic!(
             "{} cannot be read ({e}), so nothing says which compiler the primary's stage2 is, \
              and no worktree can know whether it names that one.\n\
              The primary checkout writes it: run `cargo run -- --build-only` there once.",
-            record.display(),
+            primary_record(rust_dir).display(),
         )
     });
-    if built_from.trim() == source(fork) {
+    if names_primary {
         let _ = fs::remove_file(&recorded);
         return Compiler::primary(rust_dir);
     }
@@ -222,18 +250,16 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     fs::create_dir_all(recorded.parent().expect("a file under target/")).ok();
     fs::write(&recorded, &key).unwrap_or_else(|e| panic!("write {}: {e}", recorded.display()));
     let mut placed = false;
-    let using = loop {
-        let using = buildlock::keyed_using(root, Keyed::Compiler, &key);
-        if dir.join(SOURCE).is_file() {
-            break using;
-        }
-        drop(using);
-        let _building = buildlock::keyed_building(root, Keyed::Compiler, &key);
-        if !dir.join(SOURCE).is_file() {
+    let using = buildlock::keyed_made(
+        root,
+        Keyed::Compiler,
+        &key,
+        || (!dir.join(SOURCE).is_file()).then(|| format!("{} carries no {SOURCE}", dir.display())),
+        || {
             place(root, fork, &key, &dir, &build);
             placed = true;
-        }
-    };
+        },
+    );
     // A compiler edit loop places one per edit, and the one this replaced is
     // named by nobody now; the one in use is held, so the sweep leaves it.
     if placed {
@@ -469,11 +495,7 @@ mod tests {
         let builds = Cell::new(0);
         let fake = |fork: &Path| {
             builds.set(builds.get() + 1);
-            let stage2 = fork.join("build/toyos-compiler/stage2");
-            let spec = fs::read_to_string(fork.join("compiler/rustc_target/src/lib.rs")).unwrap();
-            write(&stage2.join("bin/rustc"), &format!("a rustc knowing {spec}"));
-            write(&stage2.join("lib/librustc_driver-1.dylib"), &spec);
-            stage2
+            fake_build(fork)
         };
 
         let mine = choose(&same, &rust_dir, &same.join("rust"), fake);
@@ -493,7 +515,7 @@ mod tests {
 
         // Found again, not rebuilt; and still both there.
         let again = choose(&a, &rust_dir, &a.join("rust"), fake);
-        assert_eq!((again.stage2.clone(), builds.get()), (ca.stage2.clone(), 2));
+        assert_eq!((again.stage2, builds.get()), (ca.stage2.clone(), 2));
         assert!(ca.stage2.join("bin/rustc").is_file() && cb.stage2.join("bin/rustc").is_file());
 
         // An uncommitted file in `compiler/` is a new compiler too, and
@@ -505,7 +527,7 @@ mod tests {
         git(&a.join("rust"), &["add", "-A"]);
         git(&a.join("rust"), &["commit", "-qm", "the target, committed"]);
         let committed = choose(&a, &rust_dir, &a.join("rust"), fake);
-        assert_eq!((committed.stage2.clone(), builds.get()), (ca2.stage2.clone(), 3), "a commit rebuilt the compiler");
+        assert_eq!((committed.stage2, builds.get()), (ca2.stage2.clone(), 3), "a commit rebuilt the compiler");
         git(&a.join("rust"), &["checkout", "-q", &pinned]);
 
         // The primary's own: nothing under its `build/` but `compilers/` moved.
@@ -519,25 +541,64 @@ mod tests {
 
         // A sweep takes the compiler nobody names, and only that one — and
         // not while it is still in use, though nobody names it any more.
-        let orphan = ca2.stage2.parent().unwrap().to_path_buf();
-        choose(&a, &rust_dir, &a.join("rust"), fake);
-        assert_eq!(sweep(&primary, &rust_dir), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
-        assert!(ca2.stage2.is_dir());
-        drop((mine, ca, cb, again, ca2, committed));
+        let spec = a.join("rust/compiler/rustc_target/src/orphan.rs");
+        write(&spec, "pub fn o() {}\n");
+        let orphan = compilers_dir(&rust_dir).join(key(&a.join("rust")));
+        let user = chosen_elsewhere(&a, &rust_dir);
+        fs::remove_file(&spec).unwrap();
         let kept = choose(&a, &rust_dir, &a.join("rust"), fake);
+        assert_eq!(sweep(&primary, &rust_dir), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
+        assert!(orphan.is_dir() && ca2.stage2.is_dir());
+        user.release();
+        drop(cb);
         assert_eq!(sweep(&primary, &rust_dir), [orphan], "the sweep took a compiler a worktree names, or left one nobody does");
-        assert!(kept.stage2.is_dir());
+        assert!(kept.stage2.is_dir() && ca2.stage2.is_dir());
 
         // A placement sweeps too: the compiler an edit replaces goes once nobody
         // uses it, and the one another worktree names stays.
-        let replaced = kept.stage2.parent().unwrap().to_path_buf();
+        let spec = a.join("rust/compiler/rustc_target/src/another.rs");
+        write(&spec, "pub fn u() {}\n");
+        let replaced = compilers_dir(&rust_dir).join(key(&a.join("rust")));
+        chosen_elsewhere(&a, &rust_dir).release();
         let named = choose(&b, &rust_dir, &b.join("rust"), fake).stage2;
-        drop(kept);
-        write(&a.join("rust/compiler/rustc_target/src/another.rs"), "pub fn u() {}\n");
+        write(&spec, "pub fn v() {}\n");
         let ca3 = choose(&a, &rust_dir, &a.join("rust"), fake);
         assert!(!replaced.exists(), "placing a compiler left the one it replaced, which nobody names");
         assert!(ca3.stage2.is_dir() && named.is_dir());
     }
+
+    const WORKTREE: &str = "TOYOS_COMPILER_TEST_WORKTREE";
+    const RUST_DIR: &str = "TOYOS_COMPILER_TEST_RUST_DIR";
+
+    /// The competing process for the test above: the compiler the worktree in
+    /// [`WORKTREE`] names, chosen and held in use until released.
+    #[test]
+    #[ignore = "the competing process for the test above; never runs on its own"]
+    fn child_role() {
+        let worktree = std::env::var(WORKTREE).unwrap_or_else(|_| panic!("child_role ran without {WORKTREE}; it is not a test"));
+        let worktree = PathBuf::from(worktree);
+        let rust_dir = PathBuf::from(std::env::var(RUST_DIR).unwrap());
+        let chosen = choose(&worktree, &rust_dir, &worktree.join("rust"), fake_build);
+        assert!(!chosen.primary, "the holder was given the primary's compiler, which holds no key");
+        buildlock::tests::hold_until_released();
+    }
+
+    /// The compiler `worktree` names, made if nobody has and held in use by a
+    /// process of its own.
+    fn chosen_elsewhere(worktree: &Path, rust_dir: &Path) -> buildlock::tests::Elsewhere {
+        let env = [(WORKTREE, worktree.as_os_str()), (RUST_DIR, rust_dir.as_os_str())];
+        buildlock::tests::Elsewhere::hold("compiler::tests::child_role", &env)
+    }
+
+    /// Bootstrap's stand-in: a `stage2` that says which target spec it knows.
+    fn fake_build(fork: &Path) -> PathBuf {
+        let stage2 = fork.join("build/toyos-compiler/stage2");
+        let spec = fs::read_to_string(fork.join("compiler/rustc_target/src/lib.rs")).unwrap();
+        write(&stage2.join("bin/rustc"), &format!("a rustc knowing {spec}"));
+        write(&stage2.join("lib/librustc_driver-1.dylib"), &spec);
+        stage2
+    }
+
     /// **A primary with no record of its compiler is refused by name**, never
     /// read as "no compiler": that reading made every worktree build its own.
     #[test]
@@ -557,6 +618,43 @@ mod tests {
         let why = why.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(why.contains("toyos-compiler cannot be read"), "{why}");
         assert_eq!(builds.get(), 0, "a missing record built a compiler");
+    }
+
+    /// **The primary bootstraps when its `compiler/` holds other content, and
+    /// never because its files' times moved**: every file rewritten with its own
+    /// bytes is the compiler just recorded.
+    #[test]
+    fn only_the_compiler_s_content_makes_the_primary_bootstrap() {
+        let scratch = TempDir::new("compiler-current");
+        let (_primary, rust_dir, _) = estate(&scratch);
+        assert!(primary_is_current(&rust_dir), "the compiler just recorded is not current");
+
+        let files = snapshot(&rust_dir.join("compiler"));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        for (file, bytes) in &files {
+            fs::write(file, bytes).unwrap();
+            fs::File::options().write(true).open(file).unwrap().set_modified(later).unwrap();
+            assert_eq!(fs::metadata(file).unwrap().modified().unwrap(), later);
+        }
+        assert!(!files.is_empty());
+        assert!(
+            primary_is_current(&rust_dir),
+            "every file of compiler/ was rewritten with its own bytes, and the primary would bootstrap"
+        );
+
+        let spec = rust_dir.join("compiler/rustc_target/src/lib.rs");
+        let held = fs::read(&spec).unwrap();
+        write(&spec, "pub fn targets() { riscv() }\n");
+        assert!(!primary_is_current(&rust_dir), "a change to compiler/ kept the old stage2");
+        fs::write(&spec, held).unwrap();
+        assert!(primary_is_current(&rust_dir), "compiler/ put back is not the compiler recorded");
+
+        write(&rust_dir.join("compiler/rustc_target/src/new_target.rs"), "pub fn t() {}\n");
+        assert!(!primary_is_current(&rust_dir), "an untracked file in compiler/ kept the old stage2");
+        fs::remove_file(rust_dir.join("compiler/rustc_target/src/new_target.rs")).unwrap();
+
+        fs::remove_file(primary_record(&rust_dir)).unwrap();
+        assert!(!primary_is_current(&rust_dir), "a stage2 nothing recorded was taken for current");
     }
 
     /// `fork`'s LLVM checked out at a commit of its own.

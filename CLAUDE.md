@@ -50,6 +50,8 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 **CPU state** — a CPU's control registers come from one declaration, applied by the BSP and by every AP and asserted on each; no read-modify-write decides what either holds.
 
+**Firmware** — the kernel calls no UEFI service; every UEFI call ToyOS makes is the loader's, before ExitBootServices.
+
 **Input** — the kernel delivers key *transitions*, never what one types; a surface turns one into the other. Translation, layouts, dead keys and escape sequences live in userland, one translator per surface.
 
 **POSIX** — the kernel ABI and SDK are Rust-native and capability-shaped. POSIX lives in `userland/libc` (ours, not a fork) with explicitly relaxed rules. That layer may be ugly; the kernel may not.
@@ -69,9 +71,10 @@ The bar is not yet the tree. The standing failures are declared rather than remo
 
 The testing rules live where they are enforced: known reds in `src/redlist.rs`, tiers in `src/tiers.rs`, the PR gate and the nightly in `.github/workflows/`. Operationally:
 
-- `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo test --workspace --exclude toyos-build` runs every host-crate suite.
-- **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time, and an agent reports only once nothing it started is still running.
+- `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo run -- --ci host` runs every host suite, as the PR gate's required `host` check does.
+- **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time.
 - **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost. A full boot is under a second; incremental builds finish in seconds.
+- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started, removes the worktrees and scratch build output it no longer needs, and never leaves an emulator, a build or a watcher running.
 
 ## Repository layout
 
@@ -91,7 +94,7 @@ The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for 
 - **Never rewrite history, and never touch `main`.** No `--amend`, no `rebase`, no `--force` — on your own branch as much as anywhere: a pushed hash may already be cited. `main` is protected — PR required, no force-push, no deletion, no bypass.
 - **A red test is a defect unless `src/redlist.rs` disables it with its issue (`cargo run -- --known-red <test>`); a flaky test is disabled at once, never re-run.**
 - **A high-risk change names its two checks.** Security boundaries, the scheduler, the ABI, filesystems, devices, memory management, concurrency primitives: the PR names the negative control or mutation that fails if the implementation is wrong, and one epistemically independent oracle — an external specification, a differential implementation, real hardware, a third-party checker, a formal model, or a recorded real failure. A second agent is not independence: five artifacts from one wrong model still agree. A mutation is a negative control only if it reverts the *whole* change onto the base the green arm was measured on — a one-line revert of a change that moved two things measures neither.
-- **Host load is not an excuse.** A load-coincident audio failure is investigated as a real defect, never re-run away as noise; evidence against that assumption goes to the owner, not into quiet workarounds.
+- **Timing and audio verdicts come only from metal.** A QEMU test asserts order, completion, content and counts, never how long something took, and plays no audio; its only clock is a hang ceiling.
 - **Subagents wait in the foreground** — background notifications do not reliably re-wake them: explicit `timeout`s, and for longer work background once and block with a few long foreground waits, polling before each sleep.
 - **An agent never waits on CI.** It arms auto-merge, reports, and exits. Sequencing across landings belongs to the orchestrator, done in passes on its own wake-ups; several finished branches land as one batch PR rather than as one agent babysitting N cycles.
 - **Subagents get an explicit model, never the session default.** The orchestrator scopes, dispatches and verifies; it edits nothing. Match the tier to the judgment in the task: judgment-bearing coding gets a frontier model, mechanical execution from an exact brief a mid tier, and non-coding mechanical work the cheapest. Never encode a temporary usage circumstance as a rule.

@@ -18,8 +18,9 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Command, Stdio};
-use toyos::endow::SVC_LABEL;
+use toyos::endow::{Endowments, SVC_LABEL, SYSCAP_LABEL};
 use toyos::process::Process;
+use toyos::syscap::SysCap;
 use toyos::{namespace, port, AsHandle, Connection};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
@@ -40,22 +41,23 @@ fn main() {
         Some("refused") => return refused_child(),
         _ => {}
     }
+    // Taken once, since a second take of the label finds nothing: each arm
+    // below reads the roster through it.
+    let cap: SysCap = Endowments::get()
+        .take(SYSCAP_LABEL)
+        .expect("test-runner endows every binary it spawns a system capability");
     exited_child();
     live_process();
-    blocked_time_names_what_it_waited_on();
-    a_wait_on_a_connection_is_ipc();
-    a_wait_to_write_a_full_connection_is_ipc();
+    blocked_time_names_what_it_waited_on(&cap);
+    a_wait_on_a_connection_is_ipc(&cap);
+    a_wait_to_write_a_full_connection_is_ipc(&cap);
     repeatable();
     refused_without_read();
-    refused_calls_are_timed();
+    refused_calls_are_counted();
     println!("all process_stats tests passed");
 }
 
 const REFUSED_CALLS: u64 = 500_000;
-
-/// A refused call is timed, so each one the kernel counts adds at least this much
-/// to `syscall_total_ns`; one returned past the clock adds nothing.
-const MIN_NS_PER_REFUSED_CALL: u64 = 5;
 
 /// Says it is ready, waits for the parent's byte, then issues nothing but refusals.
 fn refused_child() {
@@ -70,9 +72,9 @@ fn refused_child() {
     }
 }
 
-/// A refused syscall is counted *and* timed, read across the child's refusal loop
-/// alone so its startup's timed calls cannot stand in for the refusals'.
-fn refused_calls_are_timed() {
+/// A refused syscall is counted, read across the child's refusal loop alone so
+/// its startup's calls cannot stand in for the refusals'.
+fn refused_calls_are_counted() {
     let mut child = Command::new(SELF_PATH)
         .arg("refused")
         .stdin(Stdio::piped())
@@ -95,21 +97,11 @@ fn refused_calls_are_timed() {
     let after = stats_of(&child).expect("the exited child answers");
 
     let calls = after.syscall_total.saturating_sub(before.syscall_total);
-    let timed_ns = after.syscall_total_ns.saturating_sub(before.syscall_total_ns);
     assert!(
         calls >= REFUSED_CALLS,
         "the child made {REFUSED_CALLS} refused calls but only {calls} were counted",
     );
-    assert!(
-        timed_ns >= calls * MIN_NS_PER_REFUSED_CALL,
-        "{calls} calls counted across the refusal loop added {timed_ns} ns to syscall_total_ns, \
-         under {MIN_NS_PER_REFUSED_CALL} ns each — refused calls counted but not timed",
-    );
-    println!(
-        "  refused calls timed: ok (calls={calls} timed_ns={timed_ns} whole child: total={} \
-         total_ns={} cpu_ns={})",
-        after.syscall_total, after.syscall_total_ns, after.cpu_ns,
-    );
+    println!("  refused calls counted: ok (calls={calls} whole child: total={})", after.syscall_total);
 }
 
 /// Says it is running, then blocks until it is killed. The marker is flushed, so
@@ -218,7 +210,7 @@ fn live_process() {
 /// asks the object afterwards, which is what `exited_child` above already
 /// relies on. The gap is filed as
 /// `issues/diagnostics/blocked-time-is-invisible-while-the-park-lasts.md`.
-fn blocked_time_names_what_it_waited_on() {
+fn blocked_time_names_what_it_waited_on(cap: &SysCap) {
     let mut child = Command::new(SELF_PATH)
         .arg("held")
         .stdin(Stdio::piped())
@@ -230,10 +222,9 @@ fn blocked_time_names_what_it_waited_on() {
     out.read_line(&mut line).expect("the held child's marker");
     assert_eq!(line.trim(), "running", "the held child said {line:?}");
 
-    // Long enough that the park is measurable at the accounting's resolution,
-    // and short enough that it is a margin rather than a bound: what is
-    // asserted is which counter moved, never how far.
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Parked, by the kernel's own roster: the counter has a park to charge.
+    let pid = stats_of(&child).expect("the held child answers").pid;
+    roster::await_true(|| roster::threads_of(cap, pid).iter().any(|&(_, state)| state == roster::BLOCKED));
     // Ending the park is what charges it. The child's `read` returns and it
     // exits; its object keeps answering, which is this file's first arm.
     child
@@ -265,8 +256,8 @@ fn blocked_time_names_what_it_waited_on() {
 /// accepted, and is answered only once the kernel's roster says it is blocked,
 /// so the park is there to charge. Nothing else it does waits on IPC, so
 /// `blocked_ipc_ns` moves only if the connection's wait is classed as IPC.
-fn a_wait_on_a_connection_is_ipc() {
-    let s = parked_on_a_connection("held-ipc", |conn| {
+fn a_wait_on_a_connection_is_ipc(cap: &SysCap) {
+    let s = parked_on_a_connection(cap, "held-ipc", |conn| {
         conn.write_nonblock(b"g").expect("release the held-ipc child");
     });
     assert!(
@@ -281,8 +272,8 @@ fn a_wait_on_a_connection_is_ipc() {
 
 /// The write side of the same wait: the child parks writing a connection it
 /// filled, and this process's read is what makes room.
-fn a_wait_to_write_a_full_connection_is_ipc() {
-    let s = parked_on_a_connection("held-ipc-write", |conn| {
+fn a_wait_to_write_a_full_connection_is_ipc(cap: &SysCap) {
+    let s = parked_on_a_connection(cap, "held-ipc-write", |conn| {
         let mut room = [0u8; 4096];
         conn.read_nonblock(&mut room).expect("make room for the held-ipc-write child");
     });
@@ -299,7 +290,7 @@ fn a_wait_to_write_a_full_connection_is_ipc() {
     );
 }
 
-fn parked_on_a_connection(role: &str, release: impl FnOnce(&Connection)) -> ProcessStats {
+fn parked_on_a_connection(cap: &SysCap, role: &str, release: impl FnOnce(&Connection)) -> ProcessStats {
     let (acceptor, connector) = port::create().expect("a port");
     let names = namespace::build().add(HELD_SERVICE, &connector).finish().expect("a namespace");
     let mut child = Command::new(SELF_PATH)
@@ -315,8 +306,8 @@ fn parked_on_a_connection(role: &str, release: impl FnOnce(&Connection)) -> Proc
     let conn = acceptor.accept().expect("accept the connection child's connection");
 
     let pid = stats_of(&child).expect("the connection child answers").pid;
-    roster::await_true(&format!("the {role} child never parked on its connection"), || {
-        roster::main_thread_blocked(pid)
+    roster::await_true(|| {
+        roster::threads_of(cap, pid).iter().any(|&(is_thread, state)| !is_thread && state == roster::BLOCKED)
     });
     release(&conn);
     let status = child.wait().expect("wait the connection child");

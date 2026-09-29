@@ -49,5 +49,4 @@ requiring only that they were named.
 The sibling gate `hda_two_live_refused` is **not** in this record: init claims
 `hda-audio` before it spawns soundd, and soundd reaches the null sink only where
 that endowment is missing, so its existing `must_say(NULL_SINK)` already requires
-`try_claim(HdaAudio)` to have answered `Absent`. That transitivity is now stated
-at the assertion in `tests/common/hda.rs`.
+`try_claim(HdaAudio)` to have answered `Absent`.

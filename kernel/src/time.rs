@@ -196,10 +196,6 @@ impl Tripwire {
         Self { limit, absurd_because }
     }
 
-    pub const fn duration(self) -> Duration {
-        self.limit
-    }
-
     pub const fn nanos(self) -> u64 {
         self.limit.nanos()
     }

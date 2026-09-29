@@ -275,10 +275,7 @@ fn old_migrate_keeping_the_corpse_is_caught() {
 /// never dispatched at all, because the pick asked only `rq.has_rt()` and one
 /// permanently-RT thread that never parks answered yes for ever.
 ///
-/// That shape shipped on this branch between the two fixes, and its failure is
-/// not a slow retire: `scheduler::retire_task` blocks behind a wall-clock
-/// tripwire and **panics the kernel**, from a workload that only needs
-/// `Rights::RT` — which `soundd` holds and `SYS_RT_ENTER` never gives back.
+/// That shape shipped on this branch between the two fixes.
 ///
 /// It must be caught by **I14**, on every seed: nothing in this scenario is a
 /// race. The corpse is queued, the RT thread runs, and the only question is
@@ -320,12 +317,6 @@ fn rt_starving_the_corpse_is_caught() {
 /// The positive half of the same pair: with the kill bit read, no schedule of
 /// that workload puts a corpse in transit, and every retire completes well
 /// inside the derived bound.
-///
-/// The measurement is the point. `retire_task`'s guard is a wall clock two
-/// orders of magnitude wider than [`toyos_sched_sim::explore::Outcome::retire_bound`],
-/// so what this reports is how much of that budget the protocol actually spends
-/// — and a change that starts spending it shows up here as a number long before
-/// it shows up on the owner's laptop as a panic.
 #[test]
 fn a_retire_completes_inside_its_derived_bound() {
     let scenario = scenarios::retire_under_balance();
@@ -658,9 +649,9 @@ fn the_audio_pipeline_holds_on_one_cpu() {
 /// Invariant I5 is *alive*, which is a separate claim from I5 being green.
 ///
 /// A fairness check whose contention windows never open reports "clean" on every
-/// scenario in the tree and certifies nothing — which is exactly the shape of
-/// gate A's four instrument defects, and exactly what would happen here if the
-/// window conditions (same runnable set, saturated machine, empty RT band) were
+/// scenario in the tree and certifies nothing — which is exactly what would
+/// happen here if the window conditions (same runnable set, saturated machine,
+/// empty RT band) were
 /// one degree stricter than the workload can satisfy. So the spread is required
 /// to be *non-zero*: some window has to have opened, stayed open long enough for
 /// a real separation to accumulate, and been measured.
@@ -920,9 +911,9 @@ fn a_pass_that_overruns_its_budget_is_recorded() {
 /// The invariant I9 that shipped alongside it could not see this, and the
 /// giveaway was that it needed no change: it compared a *running* task's
 /// `until` against the clock, and a re-armed `until` is by construction fresh.
-/// A check that passes because it stopped measuring is the same failure mode as
-/// gate A's four instrument defects, so I9 is now the cumulative form and this
-/// test is what says so. If it ever stops failing, the check has lost its teeth
+/// A check that passes because it stopped measuring certifies nothing, so I9 is
+/// now the cumulative form and this test is what says so. If it ever stops
+/// failing, the check has lost its teeth
 /// again and every clean I9 report above it means nothing.
 #[test]
 fn old_park_keeping_the_lend_is_caught() {

@@ -79,9 +79,9 @@ pub const FLUSH_MS: u64 = 5_000;
 /// together after the flush, before a stop.
 pub const SYNC_MS: u64 = 5_000;
 
-/// The thread the kernel's `quiesce-last-park` actuator holds, by the name its
-/// program gives it: held in its `SYS_NANOSLEEP` until it is the one thread the
-/// stop still waits on, so the park it makes next is the stop's last.
+/// The thread the kernel's quiesce-last actuators hold, by the name its
+/// program gives it: held until it is the one thread the stop still waits
+/// on, so the transition it makes next is the stop's last.
 pub const LAST_THREAD: &str = "quiesce-last";
 
 /// What a line of kernel log carrying a [`Record`] begins with.
@@ -161,12 +161,6 @@ impl Record {
     /// Whether every thread that had to stop did.
     pub fn stopped_the_machine(self) -> bool {
         self.sweep.running == 0
-    }
-
-    /// Whether the stop ran to its budget. On a record that stopped the
-    /// machine, that is a wait no transition of its threads ended.
-    pub fn spent_its_budget(self) -> bool {
-        self.elapsed_ms >= self.budget_ms
     }
 }
 
@@ -271,17 +265,6 @@ mod tests {
         );
         assert!(WHOLE.stopped_the_machine());
         assert!(!short().stopped_the_machine());
-    }
-
-    /// The budget is the record's own, so a reader judges a stop against what
-    /// the kernel gave it; the boundary is the kernel's, where `keep_waiting`
-    /// stops.
-    #[test]
-    fn a_stop_that_reached_its_budget_spent_it() {
-        assert!(!WHOLE.spent_its_budget());
-        assert!(!Record { elapsed_ms: 2009, ..WHOLE }.spent_its_budget());
-        assert!(Record { elapsed_ms: 2010, ..WHOLE }.spent_its_budget());
-        assert!(Record { elapsed_ms: 2017, ..WHOLE }.spent_its_budget());
     }
 
     /// **The one declaration, checked both ways.** A reworded arm of `Display`

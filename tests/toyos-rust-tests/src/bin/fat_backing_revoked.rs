@@ -23,7 +23,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Mirrored in `tests/common/volumes.rs::fat_backing_revoked`. Two halves of one
 /// fixture; a change to either alone fails loudly rather than passing quietly.
@@ -40,24 +40,19 @@ const LEN: usize = 8 * 4096;
 const VICTIM_BYTE: u8 = 0xA7;
 const ATTACKER_BYTE: u8 = 0x5C;
 
-/// Five of the 2 s operation budgets behind the kernel's `WouldBlock` refusal
-/// (`kernel/src/block.rs::OPERATION`): device patience is not what this test
-/// is about, so its setup asks again the way logd's flush policy does.
-const SETUP_PATIENCE: Duration = Duration::from_secs(10);
+/// Between two asks of a setup step the kernel refused with `WouldBlock`
+/// (`kernel/src/block.rs::OPERATION`). A pace and never a verdict: device
+/// patience is not what this test is about, so its setup asks again the way
+/// logd's flush policy does.
 const SETUP_PAUSE: Duration = Duration::from_millis(200);
 
-/// One idempotent setup step, asked again on `WouldBlock` until
-/// [`SETUP_PATIENCE`] is spent; anything else panics with the step's message.
+/// One idempotent setup step, asked again on `WouldBlock` with no deadline;
+/// anything else panics with the step's message.
 fn patient<T>(what: &str, mut op: impl FnMut() -> std::io::Result<T>) -> T {
-    let start = Instant::now();
     loop {
         match op() {
             Ok(v) => return v,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                && start.elapsed() < SETUP_PATIENCE =>
-            {
-                thread::sleep(SETUP_PAUSE);
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(SETUP_PAUSE),
             Err(e) => panic!("{what}: {e}"),
         }
     }

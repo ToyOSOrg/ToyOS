@@ -1,8 +1,8 @@
 # The shared boot's shape with `/system/bin/logd` leaving soundd's log ring
 # unread until `test_rs_soundd_log_stall` says the tone has played: the ring
 # fills and stays full while it plays, which is the state its mix thread must
-# never wait in. `soundd_log_stall` runs it, and reads the verdict off `/log` after
-# `run shutdown`.
+# never wait in. The `soundd_log_stall` metal row runs it, and reads the verdict
+# off `/log`.
 
 [boot]
 start = ["logd", "blockd", "fsd", "soundd", "test-runner"]
@@ -21,15 +21,11 @@ serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
 
-# `power` is what `run shutdown` asks init through.
 [programs.test-runner]
-receives = ["soundd", "power"]
+receives = ["soundd"]
 
 [programs.toybox]
 receives = ["soundd"]
-
-[symlinks]
-"bin/shutdown" = "/system/bin/toybox"
 
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes

@@ -251,16 +251,6 @@ pub(crate) fn mix_thread(
     let mut next_stats_ns = toyos_abi::clock::nanos_since_boot() + STATS_INTERVAL_NANOS;
     let mut idle_wakes: u32 = 0;
 
-    // Exactly one emission of one of these markers is gate-asserted: the
-    // `soundd: suspended` printed by the suspend block below, which
-    // `check_suspend_structure` (tests/common/audio.rs) requires after the
-    // last client removal on every audio run. That one must stay a single
-    // format piece so it lands contiguously on the shared console.
-    //
-    // This boot emission is not asserted — the gate's capture opens at
-    // ===TEST_START, long after soundd starts — and `soundd: resumed` is read
-    // by no test at all. Renaming either of those two breaks nothing that
-    // would tell you; they are diagnostics.
     say!("soundd: suspended");
 
     loop {

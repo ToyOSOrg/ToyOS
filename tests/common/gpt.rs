@@ -199,7 +199,7 @@ fn device_saying(log: &str, what: &str) -> Option<u32> {
 /// A boot off the stick with `decoy` on the bus ahead of it, so the decoy's
 /// table is the first the kernel reads.
 fn boot(config: &Path, boot_image: &Path, decoy: &Path) -> Result<String, String> {
-    let mut qemu = QemuInstance::boot_with_options(
+    let qemu = QemuInstance::boot_with_options(
         config.parent().expect("system.toml has a directory"),
         &[],
         &[],
@@ -215,8 +215,7 @@ fn boot(config: &Path, boot_image: &Path, decoy: &Path) -> Result<String, String
             ..Default::default()
         },
     );
-    let mut log = qemu.boot_log().to_string();
-    log.push_str(&qemu.drain_serial(std::time::Duration::from_millis(500)));
+    let log = qemu.boot_log().to_string();
     for bad in ["PANIC:", "panicked at"] {
         if log.contains(bad) {
             return Err(format!("{bad:?} during the boot:\n{log}"));

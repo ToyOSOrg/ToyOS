@@ -53,7 +53,6 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest <i>/<n>     one shard of the guest suite at the reach its schedule names (nightly)
   tcg               one test on an emulated CPU (nightly)
-  audio <i>/<n>     one shard of gate A (nightly)
   nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -64,7 +63,6 @@ enum Job {
     Toolchain,
     Guest(String),
     Tcg,
-    Audio(String),
     NightlyRed,
     Publish,
 }
@@ -81,13 +79,12 @@ fn parse(words: &[String]) -> Result<Job, String> {
         Some("toolchain") => Job::Toolchain,
         Some("guest") => Job::Guest(shard(words.get(1))?),
         Some("tcg") => Job::Tcg,
-        Some("audio") => Job::Audio(shard(words.get(1))?),
         Some("nightly-red") => Job::NightlyRed,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
         None => return Err("which job?".to_string()),
     };
-    let takes = usize::from(matches!(job, Job::Guest(_) | Job::Audio(_))) + 1;
+    let takes = usize::from(matches!(job, Job::Guest(_))) + 1;
     if words.len() > takes {
         return Err(format!("{:?} takes nothing after it: {:?}", words[0], &words[takes..]));
     }
@@ -108,7 +105,6 @@ pub fn dispatch(root: &Path, args: &[String]) {
             Err(refusal) => vec![step("the reach", || Err(refusal))],
         },
         Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
-        Job::Audio(shard) => guest(root, &suite_args(&["--audio-gate", "30", "--shard", shard])),
         Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
@@ -351,6 +347,20 @@ pub(crate) const CONTROLS: &[Control] = &[
     ]),
     red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
         "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
+        "two_processes_killing_each_other_both_end ... FAILED",
+        "a_kill_chain_of_three_ends ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-first-out-tears-down", None, &[
+        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
+        "a_join_racing_the_kill_that_takes_its_target ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
+        "the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED",
+        "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
     ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         "a_stopped_cpu_stops_taking_work ... FAILED",

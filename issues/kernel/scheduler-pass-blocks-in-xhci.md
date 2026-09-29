@@ -23,9 +23,7 @@ sits on the wrong side of the boundary the budget describes.
 What a CPU inside that recovery holds is *every message addressed to it*: an
 `Adopt` carrying a task, a `Wake` for a parked thread, a `Retire`. Nothing in the
 scheduler can shorten it — every reap and every wake is bounded by the owning
-CPU's pass latency by design, which is exactly why the design is sound. The one
-thing in the tree that notices is `scheduler::retire_task`'s 1 s guard, and it
-notices by panicking:
+CPU's pass latency by design, which is exactly why the design is sound.
 
 ```
 retire_task: task not released after 1s: InTransit(CpuId(1))
@@ -33,10 +31,7 @@ retire_task: task not released after 1s: InTransit(CpuId(1))
 
 That panic fired on the owner's T14 at 949.792 s of uptime with doom exiting. The
 *balance*-path half of it is fixed: `hand_off` reaps a killed task rather than
-handing it on, gated by simulator invariant I14. This half is not,
-and it would produce the same panic with `Blocked(CpuId(n))` in the message
-instead — the guard cannot tell a lost message from a busy CPU, which is what it
-is written as if it could.
+handing it on, gated by simulator invariant I14. This half is not.
 
 The second instance of the same shape used to be the idle loop's log flush;
 the idle loop touches no filesystem now — the log is logd's file — and the
@@ -48,7 +43,7 @@ that `drain_irqs` only ever does work it can finish: drain the event ring,
 dispatch HID reports, note that a port or an endpoint owes work. The debounce and
 the port reset were already moved off this path for exactly this reason (CLAUDE.md,
 USB hotplug); the control transfers inside `configure` and `recover_endpoints`
-were not. Until then, `retire_task`'s bound is measuring the USB bus.
+were not.
 
 **And the budget cannot see it.** `cpu::MAX_PASS_NS` is measured against by
 `SchedPass::finish`, from the `now` the pass was entered with to the end of
@@ -57,13 +52,3 @@ prologue is outside the window the budget covers, so the pass-cost histogram
 records a microsecond pass while the CPU had been in the driver for two seconds.
 **The measured window has to start where the scheduler entry starts, and that
 half of this issue is still open.**
-
-The other half — that the gate ran nowhere — is closed. `sched_check_build`
-(`tests/toyos.rs`) boots the `sched-check` kernel and `tests/common/passcost.rs`
-judges what it publishes; the second sentence of the paragraph this replaced,
-that invariant P "has never executed against the kernel in any image or any test
-run", was true when it was written and has not been since. Invariant P itself no
-longer exists: a pass's elapsed time is wall clock and a guest's wall clock
-advances while a hypervisor holds its vCPU, so the budget is measured and gated
-in the harness rather than asserted in the kernel (`tests/common/passcost.rs`).
-Widening the window is untouched by that and is what this file still wants.

@@ -28,17 +28,17 @@ use std::io::Read;
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
-use toyos::endow::Endowments;
+use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::AsHandle;
 use toyos::process::Process;
+use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
 #[path = "../roster.rs"]
 mod roster;
-
-use roster::{await_true, cap};
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_lifecycle";
 
@@ -141,8 +141,10 @@ fn a_wait_before_the_exit_is_woken_by_it() {
         "a process that cannot have exited reported an exit code",
     );
 
+    // Released once the kernel says the wait is parked, so the wake is the
+    // exit's and not a code already there.
     let releaser = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        roster::await_true(main_thread_is_parked);
         drop(release);
     });
     assert_eq!(child.wait().expect("wait").code(), Some(7), "the woken wait");
@@ -176,13 +178,13 @@ fn an_unrelated_wake_does_not_end_the_wait() {
 
     let (mut child, release) = start(5);
     let poker = std::thread::spawn(|| {
-        await_true("the main thread never parked", main_thread_is_parked);
+        roster::await_true(main_thread_is_parked);
         POKED.store(true, Ordering::Release);
         // Returning is the poke: nothing else in this closure matters, because
         // `thread_exit` is what wakes the main thread.
     });
     let releaser = std::thread::spawn(move || {
-        await_true("the poking thread never exited", a_thread_of_mine_has_exited);
+        roster::await_true(a_thread_of_mine_has_exited);
         RELEASED.store(true, Ordering::Release);
         drop(release);
     });
@@ -198,19 +200,26 @@ fn an_unrelated_wake_does_not_end_the_wait() {
     println!("  a wake meant for something else does not end a wait");
 }
 
-/// `SCHED_UNKNOWN`, which `sys_sysinfo` also answers for a thread whose entry
-/// is a zombie. A live thread's scheduler record is installed under the same
-/// table lock that inserts its entry, so a thread of ours reading this has
-/// exited and nothing else.
-const ZOMBIE: u8 = 3;
-
 fn main_thread_is_parked() -> bool {
-    roster::main_thread_blocked(syscall::getpid().raw())
+    roster::my_threads(cap()).iter().any(|&(is_thread, state)| !is_thread && state == roster::BLOCKED)
 }
 
 fn a_thread_of_mine_has_exited() -> bool {
-    let me = syscall::getpid().raw();
-    roster::roster().iter().any(|e| e.pid == me && e.is_thread && e.state == ZOMBIE)
+    roster::my_threads(cap()).iter().any(|&(is_thread, state)| is_thread && state == roster::ZOMBIE)
+}
+
+/// The estate's system capability, taken once.
+///
+/// **Once, because taking is a swap**: a second `take` of the same label finds
+/// `HANDLE_INVALID` and answers `None`, and two arms here want the same cap —
+/// one for the `MANAGE` refusal, one for the roster below.
+fn cap() -> &'static SysCap {
+    static CAP: OnceLock<SysCap> = OnceLock::new();
+    CAP.get_or_init(|| {
+        Endowments::get()
+            .take(SYSCAP_LABEL)
+            .expect("test-runner endows every binary it spawns a system capability")
+    })
 }
 
 /// A second handle is a second name for one object, and the object is where the

@@ -1,10 +1,10 @@
 //! Which run a registered test belongs to.
 //!
 //! **The table is the registration.** Every row of `tests/toyos.rs`'s
-//! `MACHINE_TESTS`, `SCREEN_TESTS` and `AUDIO_TESTS` carries its [`Tier`] or
-//! does not compile, and the shared boot's discovered tests share one. A
-//! [`Schedule`] is every one of those names at its one tier. Moving a test
-//! between tiers is editing that one word.
+//! `MACHINE_TESTS` and `SCREEN_TESTS` carries its [`Tier`] or does not compile,
+//! and the shared boot's discovered tests share one. A [`Schedule`] is every
+//! one of those names at its one tier. Moving a test between tiers is editing
+//! that one word.
 //!
 //! The tiers nest: a plain `cargo test` reaches `Fast`, `--nightly` adds
 //! `Nightly`, and `--weekly` adds `Weekly` to that.

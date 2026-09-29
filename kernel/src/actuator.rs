@@ -89,9 +89,6 @@ actuators! {
     /// Cap the i8042 ISR at 4 bytes and answer empty until the mute verdict is out; `service` then polls the rest, so the verdict beats the sequence on every boot instead of on a loaded shard's luck.
     i8042_split_burst = "i8042-split-burst";
 
-    /// Shorten the idle loop's health/PMM snapshot cadence from 10s to 200ms.
-    sched_fast_health = "sched-fast-health";
-
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
 
@@ -106,6 +103,9 @@ actuators! {
 
     /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
     quiesce_last_park = "quiesce-last-park";
+
+    /// The same for the last thread out of its process, between its leaving and its teardown: that teardown is then the stop's last transition.
+    quiesce_last_teardown = "quiesce-last-teardown";
 
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
@@ -241,9 +241,6 @@ actuators! {
     /// Have the gate's last read end as one whose port read disconnected
     /// mid-wait does.
     usb_port_gone = "usb-port-gone";
-
-    /// Hold every mass-storage bulk completion back 2ms before the driver may see it.
-    usb_slow_device = "usb-slow-device";
 
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
@@ -468,7 +465,7 @@ actuators! {
     /// Run the revoked-backing controls after mount.
     revoked_backing_selftest = "revoked-backing-selftest";
 
-    /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
+    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 
     /// Refuse every read of device block 0 of each disk the kernel drives — its

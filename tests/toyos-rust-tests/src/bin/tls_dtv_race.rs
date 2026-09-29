@@ -15,7 +15,6 @@
 //! not; `tls_rebase_window` runs this there and reads which.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
-use std::time::{Duration, Instant};
 use toyos_abi::syscall;
 
 /// `kernel/src/loader/tls.rs`'s `rebase_window::MARK`.
@@ -27,8 +26,6 @@ const BLOCK: u64 = 2 * 1024 * 1024;
 const DTV_SLOT0: u64 = 16;
 /// Spawn/retire rounds; every one after the first is watched.
 const ROUNDS: u64 = 16;
-/// A liveness bound on another thread's store, never a pace.
-const BOUND: Duration = Duration::from_secs(10);
 
 /// The block base the sibling stores into.
 static TARGET: AtomicU64 = AtomicU64::new(0);
@@ -51,11 +48,10 @@ thread_local! {
     static ANCHOR: u8 = const { 0 };
 }
 
-/// Spin until `done`, or panic naming `what` past [`BOUND`].
-fn until(what: &str, done: impl Fn() -> bool) {
-    let deadline = Instant::now() + BOUND;
+/// Spin until `done`, with no deadline: a store that never comes is a hang the
+/// harness ceiling reds.
+fn until(done: impl Fn() -> bool) {
     while !done() {
-        assert!(Instant::now() < deadline, "tls_dtv_race: {what} did not come within {BOUND:?}");
         core::hint::spin_loop();
     }
 }
@@ -66,7 +62,7 @@ extern "C" fn worker(_arg: u64) {
     let block = ANCHOR.with(|anchor| anchor as *const u8 as u64) & !(BLOCK - 1);
     TARGET.store(block, SeqCst);
     READY.store(true, SeqCst);
-    until("leave to exit", || GO_EXIT.load(SeqCst));
+    until(|| GO_EXIT.load(SeqCst));
     syscall::thread_exit(0);
 }
 
@@ -122,12 +118,12 @@ fn main() {
         // SAFETY: `worker` is a valid entry; `top`/`base` describe the leaked stack.
         let tid = unsafe { syscall::thread_spawn(entry, top, arg, base) };
         assert!(syscall::SyscallError::from_u64(tid).is_none(), "thread_spawn failed: {tid}");
-        until("the worker's start", || READY.load(SeqCst));
-        until("the sibling's store into the block", || ENGAGED.load(SeqCst) > round);
+        until(|| READY.load(SeqCst));
+        until(|| ENGAGED.load(SeqCst) > round);
         // Stood down and acknowledged before the join frees the block, so no
         // store is in flight against a free.
         PAUSE.store(true, SeqCst);
-        until("the sibling standing down", || PAUSED_ACK.load(SeqCst));
+        until(|| PAUSED_ACK.load(SeqCst));
         GO_EXIT.store(true, SeqCst);
         assert_eq!(syscall::thread_join(tid), 0, "round {round}: join");
     }
