@@ -114,14 +114,10 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // The landing protocol, and the command it replaced — **before
-    // `check_prerequisites`**, because none of these builds anything. They are
-    // git, a push, and a refusal.
-    if asked(&flags::LAND) {
-        toyos_build::pr::dispatch_retired_land();
-    }
+    // The landing protocol — **before `check_prerequisites`**, because none of
+    // these builds anything.
     if asked(&flags::PR) {
-        toyos_build::pr::dispatch_pr(&root, &args);
+        toyos_build::pr::dispatch_pr(&root);
         return;
     }
     if asked(&flags::SYNC) {
@@ -253,8 +249,7 @@ fn main() {
         return;
     }
 
-    // On demand and nowhere else: it asks GitHub for every fork branch head, so
-    // neither `cargo test` nor `--land` may reach it.
+    // On demand and nowhere else: it asks GitHub for every fork branch head.
     if asked(&flags::CHECK_FORKS) {
         toyos_build::forkcheck::dispatch(&root);
         return;

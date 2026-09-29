@@ -22,8 +22,7 @@ about the tree at all.
 
 Filed against `cargo run -- --land`, whose gate ran `cargo test` inside the
 integration lock and so made a landing a 14-minute suite serialised against
-nothing in another worktree. That framing is retired: `--land` is gone
-(`src/main.rs:93` answers with `pr::dispatch_retired_land`), `main` moves
+nothing in another worktree. That framing is retired: `--land` is gone, `main` moves
 through a merge queue, and the entry's method note about matching `pgrep -f
 "toyos-build --land"` went with it.
 
