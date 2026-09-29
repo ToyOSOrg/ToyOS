@@ -119,6 +119,7 @@ use arch::{cpu, percpu, smp};
 pub(crate) use arch::hw;
 use drivers::{acpi, gop, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_rootimage::handoff::{held, Descriptor};
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -305,7 +306,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Split into six records: KernelArgs' derived Debug is the one message that exceeds the log's per-record bound.
     log!(
-        "boot: memory map {:#x}+{:#x}, kernel {:#x}+{:#x}, stack {:#x}+{:#x}",
+        "boot: memory map {:#x}+{:#x}, kernel {:#x}+{:#x}, stack image+{:#x}+{:#x}",
         kernel_args.memory_map_addr, kernel_args.memory_map_size,
         kernel_args.kernel_memory_addr, kernel_args.kernel_memory_size,
         kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size
@@ -349,11 +350,16 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     );
     let kernel_args = &kernel_args;
 
-    let reserved = [
+    // `kernel_stack_addr` is an offset into the image, so the image's region is what keeps the stack.
+    assert!(
+        kernel_args.kernel_stack_addr.checked_add(kernel_args.kernel_stack_size)
+            .is_some_and(|end| end <= kernel_args.kernel_memory_size),
+        "boot: the loader put the stack at image+{:#x}+{:#x}, past the {:#x}-byte image",
+        kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size, kernel_args.kernel_memory_size
+    );
+    let loader = [
         mm::Region { start: kernel_args.kernel_memory_addr, end: kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size },
         mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
-        mm::Region { start: kernel_args.kernel_stack_addr, end: kernel_args.kernel_stack_addr + kernel_args.kernel_stack_size },
-        arch::boot::reserved(),
         // The loader's black-box page, which is ordinary `LoaderData` and so
         // memory the allocator would otherwise hand out. Empty on a boot whose
         // parameter line names none.
@@ -362,6 +368,29 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         // boot the loader handed none.
         root_image,
     ];
+    // A region the loader did not allocate withholds memory nothing uses, so one the firmware map does not hold as `LoaderData` is refused.
+    // Block 1: the ELF region (`kernel_elf_addr`+`kernel_elf_size`) is not page-aligned.
+    for region in loader.iter().filter(|r| r.start < r.end) {
+        assert!(
+            held(
+                maps.iter().map(|e| Descriptor { ty: e.uefi_type, start: e.start, end: e.end }),
+                toyos_bootmap::EFI_LOADER_DATA,
+                region.start,
+                region.end - region.start,
+                1,
+            )
+            .is_some(),
+            "boot: reserving {:#x}..{:#x}, which no LoaderData descriptor in the firmware map holds",
+            region.start, region.end
+        );
+    }
+    // The architecture's own page is not a loader allocation, so it is named
+    // here rather than folded into `loader` above. Destructuring `loader` by
+    // name, rather than indexing it, means a region added to `loader` fails
+    // to compile here instead of compiling and being silently dropped from
+    // what `mm::init` withholds.
+    let [image, elf, black_box, root] = loader;
+    let reserved = [image, elf, black_box, root, arch::boot::reserved()];
 
     // The last point before the first hash container (`mm::init`'s address
     // space), and not earlier: seeding fails only by panicking, and a panic
