@@ -607,6 +607,17 @@ fn link_stale(stage2: &Path) -> bool {
 /// enough for the question [`refuse_on_compile_error`] asks, which is what the
 /// failure *was*.
 pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<String>) {
+    x_build_with(rust_dir, args, what, |_| {})
+}
+
+/// [`x_build`], with bootstrap's environment what `environment` makes of this
+/// process's.
+pub(crate) fn x_build_with(
+    rust_dir: &Path,
+    args: &[&str],
+    what: &str,
+    environment: impl FnOnce(&mut Command),
+) -> (bool, Vec<String>) {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::{Arc, Mutex};
 
@@ -621,6 +632,7 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
     } else {
         ("./x.py", Command::new("./x.py"))
     };
+    environment(&mut command);
     let mut child = command
         .args(args)
         .env("BOOTSTRAP_SKIP_TARGET_SANITY", "1")
@@ -1160,6 +1172,24 @@ mod tests {
             assert!(!dir.exists() && !dir.with_extension("swept").exists(), "{} outlived the rebuild", dir.display());
         }
         assert_eq!(toolchain_defect(&stage2(&rust_dir)), None);
+    }
+
+    /// **Landing the store moves an existing primary onto it**: a primary whose
+    /// record was written before its compiler linked the host's LLVM is not
+    /// current, so its next build bootstraps, and that rebuild removes the LLVM
+    /// and LLD its build directory built.
+    #[test]
+    fn a_primary_recorded_before_the_store_is_rebuilt_onto_it() {
+        let scratch = TempDir::new("store-migration");
+        let (_primary, rust_dir, _) = crate::compiler::tests::estate(&scratch);
+        assert!(crate::compiler::primary_is_current(&rust_dir));
+        crate::compiler::tests::record_before_the_store(&rust_dir);
+        let own = in_tree_llvm(&rust_dir);
+        let kind = bootstrap(false, crate::compiler::primary_is_current(&rust_dir), true);
+        assert!(kind.is_some_and(|k| k.invalidate_hosted), "a primary recorded before the store was taken for current");
+        rebuild_compiler(&rust_dir, &store_llvm(&rust_dir), || bootstrapped(&rust_dir));
+        assert!(own.iter().all(|dir| !dir.exists()), "the rebuild kept the LLVM its build directory built");
+        assert!(crate::compiler::primary_is_current(&rust_dir), "the rebuild recorded a compiler that is not current");
     }
 
     /// **A stopped bootstrap is run again**: nothing records which compiler

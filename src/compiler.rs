@@ -14,10 +14,11 @@
 //! and two worktrees naming the same compiler share one copy.
 //!
 //! **LLVM is the host's, built from `src/llvm-project`** (`src/llvm.rs`), and
-//! linked through its `llvm-config`. [`source`] names that commit, so another
-//! LLVM is another compiler, and an LLVM checkout holding what no commit does
-//! names none. A worktree records the LLVM its compiler links for as long as it
-//! builds with that compiler.
+//! linked through its `llvm-config`. [`source`] names that LLVM's key, so
+//! another LLVM is another compiler, the primary's among them, and an LLVM
+//! checkout or a `src/bootstrap` holding what no commit does names none. A
+//! worktree records the LLVM its compiler links for as long as it builds with
+//! that compiler.
 //!
 //! **A compiler of a worktree's own never touches what the others build with**:
 //! not the primary's `stage2`, not its record, not the machine-global rustup
@@ -122,9 +123,9 @@ pub fn compilers_dir(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/compilers")
 }
 
-/// [`compiler_source`] and the LLVM commit it links.
+/// [`compiler_source`] and the key of the LLVM it links.
 pub fn source(checkout: &Path) -> String {
-    format!("{} llvm {}", compiler_source(checkout), llvm_commit(checkout))
+    format!("{} llvm {}", compiler_source(checkout), crate::llvm::key(checkout))
 }
 
 /// What `checkout`'s `compiler/` is: its commit's tree, and whatever the working
@@ -259,30 +260,24 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     if names_primary {
         keystore::forget(root, Keyed::Compiler);
         keystore::forget(root, Keyed::Llvm);
+        let build = fork.join(BUILD_DIR);
+        if !crate::llvm::in_tree(&build).is_empty() {
+            let _worktree = buildlock::worktree_exclusive(root, "removing the LLVM its compiler build built");
+            crate::llvm::retire_in_tree(&build);
+        }
         return Compiler::primary(rust_dir);
     }
     let key = key(fork);
     let dir = compilers_dir(rust_dir).join(&key);
-    keystore::record(root, Keyed::Compiler, &key);
     keystore::record(root, Keyed::Llvm, &crate::llvm::key(fork));
-    let mut placed = false;
-    let using = buildlock::keyed_made(
+    let using = keystore::made(
         root,
         Keyed::Compiler,
+        &compilers_dir(rust_dir),
         &key,
         || (!dir.join(SOURCE).is_file()).then(|| format!("{} carries no {SOURCE}", dir.display())),
-        || {
-            place(root, fork, &key, &dir, &build);
-            placed = true;
-        },
+        || place(root, fork, &key, &dir, &build),
     );
-    // A compiler edit loop places one per edit, and the one this replaced is
-    // named by nobody now; the one in use is held, so the sweep leaves it.
-    if placed {
-        for gone in keystore::sweep(root, Keyed::Compiler, &compilers_dir(rust_dir)) {
-            eprintln!("Removed compiler {}: no worktree names it", gone.display());
-        }
-    }
     Compiler { stage2: dir.join("stage2"), record: dir.join(SOURCE), primary: false, _using: Some(using) }
 }
 
@@ -557,7 +552,8 @@ pub(crate) mod tests {
 
     /// **A worktree names the LLVM of the compiler it builds with, and only
     /// that one**: one it placed or found placed, never one it has gone back to
-    /// the primary's from.
+    /// the primary's from; and its build directory keeps no LLVM of its own
+    /// either way.
     #[test]
     fn the_llvm_record_follows_the_compiler_in_use() {
         let scratch = TempDir::new("compiler-llvm-record");
@@ -580,8 +576,10 @@ pub(crate) mod tests {
         assert_eq!(keystore::recorded(&a, Keyed::Llvm), Some(crate::llvm::key(&fork)), "a placed compiler's LLVM went unrecorded");
 
         git(&fork, &["checkout", "-q", &git(&rust_dir, &["rev-parse", "HEAD"])]);
+        write(&own.join("bin/llvm-config"), "the build directory's own, from before the store");
         assert!(choose(&a, &rust_dir, &fork, never).primary);
         assert_eq!(sweep(), [llvm], "the LLVM of a compiler the worktree no longer builds with stayed");
+        assert!(!own.exists(), "a worktree back on the primary's compiler kept the LLVM its build directory built");
     }
 
     const WORKTREE: &str = "TOYOS_COMPILER_TEST_WORKTREE";
@@ -672,6 +670,12 @@ pub(crate) mod tests {
 
         fs::remove_file(primary_record(&rust_dir)).unwrap();
         assert!(!primary_is_current(&rust_dir), "a stage2 nothing recorded was taken for current");
+    }
+
+    /// Write the primary's record as it was written before its compiler linked
+    /// the host's LLVM: its `compiler/` and its LLVM commit.
+    pub(crate) fn record_before_the_store(rust_dir: &Path) {
+        fs::write(primary_record(rust_dir), format!("{} llvm {}", compiler_source(rust_dir), llvm_commit(rust_dir))).unwrap();
     }
 
     /// `fork`'s LLVM checked out at a commit of its own.
@@ -773,7 +777,7 @@ pub(crate) mod tests {
         let record = primary_record(&rust_dir);
         let recorded = fs::read_to_string(&record).unwrap();
         let (compiler, llvm) = recorded.rsplit_once(" llvm ").expect("the record names its LLVM");
-        assert_eq!(llvm, LLVM_A);
+        assert_eq!(llvm, crate::llvm::key(&rust_dir));
         fs::write(&record, compiler).unwrap();
         assert!(!choose(&same, &rust_dir, &fork, fake).primary, "a record naming no LLVM was taken for this one");
         assert_eq!(builds.get(), 1);

@@ -34,9 +34,10 @@
 //! `os/toyos/`, anything with `toyos` in the path); a cross-platform file is
 //! touched only to add a target arm at an existing platform-dispatch site, never
 //! to change cross-platform semantics or API shape, except `src/bootstrap`, which
-//! takes a general bootstrap capability written to upstream quality with its
-//! `change_tracker` entry; `library/alloc` and `library/core` have **zero**
-//! delta. Cherry-picking an already-merged upstream commit is allowed. Copying
+//! takes a general bootstrap capability written to upstream quality; a
+//! `change_tracker` entry is carried only with the upstream pull request number
+//! it records, and until one exists the change is recorded in `issues/`;
+//! `library/alloc` and `library/core` have **zero** delta. Cherry-picking an already-merged upstream commit is allowed. Copying
 //! an unmerged PR is not — the delta must stay exactly the content of a future
 //! upstream PR.
 //!

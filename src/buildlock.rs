@@ -260,7 +260,7 @@ impl Keyed {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Keyed::Sysroot => "sysroot",
             Keyed::Compiler => "compiler",
@@ -679,7 +679,7 @@ pub(crate) mod tests {
     }
 
     /// This test binary, to run the one `#[ignore]`d test `test` names.
-    fn rerun(test: &str) -> Command {
+    pub(crate) fn rerun(test: &str) -> Command {
         let mut rerun = Command::new(std::env::current_exe().unwrap());
         rerun.args(["--exact", test, "--include-ignored", "--nocapture"]);
         rerun

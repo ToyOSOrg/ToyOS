@@ -62,9 +62,9 @@ const SOURCES: &str = "SOURCES";
 
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, \
+const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
-                      a C sysroot of libc's staticlib and headers per target; 4";
+                      a C sysroot of libc's staticlib and headers per target; 5";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -392,13 +392,14 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
     let build_dir = fork.join("build/toyos-std");
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
     forget_another_compiler(&build_dir, &host, &compiler.identity());
+    crate::llvm::retire_in_tree(&build_dir);
     // Bootstrap reuses what it built before and does not see a path dependency
     // outside the fork move, so each target's std starts from nothing.
     for target in GUEST_TARGETS {
         remove(&build_dir.join(&host).join("stage0-std").join(target));
     }
     let config = build_dir.join("bootstrap.toml");
-    fs::write(&config, std_config(&compiler.stage2, &build_dir, &host))
+    fs::write(&config, std_config(&compiler.stage2, &bootstrap_cargo(), &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
     let targets = GUEST_TARGETS.join(",");
@@ -428,7 +429,7 @@ fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
         return;
     }
     let kept = [(build_dir.to_path_buf(), &["cache", host, "compiled-by"][..]),
-                (build_dir.join(host), &["ci-llvm", "rustfmt"][..])];
+                (build_dir.join(host), &["rustfmt"][..])];
     for (dir, kept) in kept {
         let entries = match fs::read_dir(&dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -510,7 +511,8 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// The linker is the compiler's own `rust-lld`, named by path so that which sysroot
 /// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
 /// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
-fn std_config(compiler: &Path, build_dir: &Path, host: &str) -> String {
+/// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one.
+fn std_config(compiler: &Path, cargo: &Path, build_dir: &Path, host: &str) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
     let linker = toolchain::rust_lld(compiler);
     let userland: String = Arch::ALL
@@ -529,11 +531,14 @@ build-dir = "{build_dir}"
 host = ["{host}"]
 target = [{targets}]
 
+[llvm]
+download-ci-llvm = false
+
 [rust]
 lld = false
 {userland}"#,
         rustc = compiler.join("bin/rustc").display(),
-        cargo = bootstrap_cargo().display(),
+        cargo = cargo.display(),
         build_dir = build_dir.display(),
     )
 }
@@ -746,10 +751,10 @@ mod tests {
             build.join("host/a-directory-bootstrap-adds/lib.rlib"),
             build.join("tmp/cc-rs-out-dir/out.o"),
             build.join("host/a-stamp-bootstrap-writes"),
+            build.join("host/ci-llvm/lib/libLLVM.dylib"),
         ];
         let downloaded = [
-            build.join("cache/llvm-1/llvm.tar.xz"),
-            build.join("host/ci-llvm/lib/libLLVM.dylib"),
+            build.join("cache/2026-07-13/rustc.tar.xz"),
             build.join("host/rustfmt/bin/rustfmt"),
         ];
         let lay = || {
@@ -776,6 +781,14 @@ mod tests {
             assert!(!file.exists(), "{} was kept for another compiler", file.display());
         }
         assert!(downloaded.iter().all(|f| f.is_file()), "a download went");
+    }
+
+    /// **A std build fetches no LLVM**: it builds none, and the `compiler`
+    /// profile would download one.
+    #[test]
+    fn a_std_build_downloads_no_llvm() {
+        let config = std_config(Path::new("/c"), Path::new("/cargo"), Path::new("/b"), "h");
+        assert!(config.contains("\n[llvm]\ndownload-ci-llvm = false\n"), "{config}");
     }
 
     /// **A switch that cannot remove the other compiler's build fails and does

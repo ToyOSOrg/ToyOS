@@ -622,11 +622,18 @@ const HOST_SPAWNS: &[Spawn] = &[
               issues/build/python-and-cc-are-declared.md is about",
     },
     Spawn {
-        arg: "&compiler",
+        arg: "tool",
         sites: &[("src/llvm.rs", 1)],
-        why: "the host's C and C++ compilers, `cc` and `c++` or what `CC` and `CXX` name, asked \
-              their `--version` for the key of the LLVM they build: the `cc` standing failure \
+        why: "the host's `cc`, `c++` and `cmake`, asked their `--version` for the key of the \
+              LLVM they build: the `cc` and CMake standing failure \
               issues/build/python-and-cc-are-declared.md is about",
+    },
+    Spawn {
+        arg: "\"xcrun\"",
+        sites: &[],
+        why: "a macOS binary, asked which SDK the host's `cc` compiles against, for the key of \
+              the LLVM it builds: the host C toolchain's identity, under the same `cc` standing \
+              failure issues/build/python-and-cc-are-declared.md is about",
     },
     Spawn {
         arg: "\"./x.py\"",
