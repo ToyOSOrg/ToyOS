@@ -345,6 +345,18 @@ fn a_blacklist_row_matches_only_its_steppings() {
     assert_eq!(at(0xC), "Mitigation: Aligned branch/return thunks");
 }
 
+/// COMETLAKE_L stepping 0 has its own row without MMIO_SBDS and GDS, ahead of
+/// its any-stepping row that carries both (`common.c:1310-1311`); SRBDS and GDS
+/// are forced by those flags (`common.c:1480-1483`, `1521-1523`).
+#[test]
+fn a_blacklist_row_for_stepping_zero_stands_before_its_any_stepping_row() {
+    let at = |stepping: u32| decide(&Facts { signature: 0x000a_0660 | stepping, ..COMETLAKE });
+    let d = at(0);
+    assert_eq!((d.srbds, d.gds), (None, None));
+    let d = at(1);
+    assert_eq!((d.srbds, d.gds), (Some(Srbds::Full), Some(Gds::UcodeNeeded)));
+}
+
 /// The first matching row decides: SKYLAKE_X's steppings 0 to 5 row, without
 /// ITS, stands before its any-stepping row, with it.
 #[test]
@@ -690,6 +702,16 @@ fn zen4_reads_its_row_of_the_tsa_microcode_table() {
         line(&genoa(0x0a10_114b), Vuln::Tsa),
         "Vulnerable: Clear CPU buffers attempted, no microcode"
     );
+}
+
+/// A Zen3 model 0x08 stepping 2 (signature `0x00a00f82`) keys `amd_check_tsa_microcode`'s
+/// row 0xa0082 by the whole model byte (`amd.c:479-490`, `ZEN3` from `bsp_init_amd`, `amd.c:621`):
+/// microcode 0x0a00820d and up is mitigated, below it is missing.
+#[test]
+fn a_tsa_row_keyed_by_a_model_nibble_of_8_or_more_is_read() {
+    let at = |microcode| Facts { signature: 0x00a0_0f82, ..native_milan(microcode, true) };
+    assert_eq!(decide(&at(0x0a00_820d)).tsa, Some(Tsa::Full));
+    assert_eq!(decide(&at(0x0a00_820c)).tsa, Some(Tsa::UcodeNeeded));
 }
 
 /// An AMD CPU is TSA-affected unless it reports both `TSA_SQ_NO` and
@@ -1188,6 +1210,26 @@ fn hygon_decides_as_linux_does() {
     };
     assert_eq!(state(&d), expected);
     assert_eq!(state(&decide(&dhyana(false))), State { ssb: Ssb::None, ..expected });
+}
+
+/// Family 0x18 is below 0x19, so a Dhyana without SMT has SRSO ruled out by
+/// `SRSO_NO` once `IBPB_BRTYPE` is set (`bugs.c:2689-2691`), shown as "SMT
+/// disabled" (`bugs.c:3284-3285`).
+#[test]
+fn hygon_without_smt_and_with_ibpb_brtype_has_srso_smt_disabled() {
+    let dhyana = Facts {
+        vendor: Vendor::from_id(b"HygonGenuine"),
+        signature: 0x0090_0f01,
+        cpuid_8000_0008_ebx: CPUID_8000_0008_EBX_AMD_IBPB
+            | CPUID_8000_0008_EBX_AMD_IBRS
+            | CPUID_8000_0008_EBX_AMD_STIBP,
+        cpuid_8000_0021_eax: CPUID_8000_0021_EAX_IBPB_BRTYPE,
+        ls_cfg_readable: Some(true),
+        smt: false,
+        ..ZEN1
+    };
+    assert_eq!(decide(&dhyana).srso, Some(Srso::SmtDisabled));
+    assert_eq!(line(&dhyana, Vuln::SpecRstackOverflow), "Mitigation: SMT disabled");
 }
 
 #[test]
