@@ -25,7 +25,7 @@ use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError};
 
 use crate::cache::Cache;
 use crate::disk::{Disk, BLOCK};
-use crate::volume::{parent, Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{parent, Kind, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
@@ -93,7 +93,9 @@ pub struct FatVolume<D: Disk> {
     open: BTreeMap<Node, Open>,
     by_path: BTreeMap<String, Node>,
     next: Node,
-    /// Seconds since the epoch this volume stamps its entries with.
+    /// What this volume stamps its entries with, [`crate::volume::now_nanos`]'s
+    /// unit. FAT specifies local time; this stamps UTC because the owner ruled
+    /// the hardware clock is UTC.
     clock: fn() -> u64,
     /// Where a read lands before it goes out: `toyos-fat32` reads into a
     /// slice, and a client's window is never one. Kept, so a read allocates
@@ -152,7 +154,7 @@ impl<D: Disk> FatVolume<D> {
     }
 
     fn time(&self) -> FatTime {
-        FatTime::from_unix_secs((self.clock)())
+        FatTime::from_unix_secs((self.clock)() / NANOS_PER_SEC)
     }
 
     fn entry(&mut self, node: Node) -> Result<&mut Open, SyscallError> {
@@ -511,7 +513,7 @@ mod tests {
         let mut ram = Ram::new((blocks + 2 * CLEAN_LIMIT) as u64);
         ram.write(0, &image).unwrap();
         let refused = Rc::new(Cell::new(u64::MAX));
-        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, || 1_717_245_296).unwrap();
+        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, || 1_717_245_296 * NANOS_PER_SEC).unwrap();
         (v, refused, spec)
     }
 

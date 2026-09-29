@@ -552,14 +552,16 @@ pub fn file_mtime_survives_a_reboot(
     Ok(())
 }
 
-/// On a machine whose RTC never answered, a file's mtime is undated — 0, which
-/// std reports as an error — and never 1970 plus the boot's uptime.
+/// On a machine whose RTC never answered, a file's mtime on `/tmp` or on fsd's
+/// `/home` is undated — 0, which std reports as an error — and never 1970 plus
+/// the boot's uptime.
 pub fn file_mtime_undated(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    const SAID: &str = "file-mtime: /tmp/file-mtime-undated is undated";
+    const SAID: [&str; 2] =
+        ["file-mtime: /tmp/file-mtime-undated is undated", "file-mtime: /home/file-mtime-undated is undated"];
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
@@ -583,12 +585,12 @@ pub fn file_mtime_undated(
             return Err(format!("{bad:?} on the way down\n{tail}"));
         }
     }
-    if result.exit_code != Some(0) || !result.stdout.contains(SAID) {
+    if result.exit_code != Some(0) || !SAID.iter().all(|said| result.stdout.contains(said)) {
         return Err(format!(
             "`file_mtime undated` exited {:?}:\n{}\nkernel log while it ran:\n{}{}",
             result.exit_code, result.stdout, result.before, result.serial
         ));
     }
-    eprintln!("  [clock] rtc-dead: a file written in /tmp is undated");
+    eprintln!("  [clock] rtc-dead: a file written in /tmp or /home is undated");
     Ok(())
 }

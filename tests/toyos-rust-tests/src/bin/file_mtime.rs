@@ -5,12 +5,13 @@
 //! between two `SYS_CLOCK_EPOCH` readings taken around what made it — a write,
 //! a create with truncation, a create of a missing file, a truncation — and a
 //! later write's stamp is later, which a clock of whole seconds cannot say.
+//! Then `/home`, fsd's DATA, which keeps the nanosecond too.
 //! Then `/log`: FAT keeps the whole seconds of its flush, read back after a
 //! reopen.
 //! `write <path>` makes the first judgement on `path` and `read <path>` only
 //! prints what it finds there. `undated` runs on a machine whose RTC never
-//! answered and never asks the time: a file written there is undated, which
-//! std reports as an error and not as 1970.
+//! answered and never asks the time: a file written there, on `/tmp` or on
+//! `/home`, is undated, which std reports as an error and not as 1970.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -100,6 +101,23 @@ fn main() {
                  {resized} ns"
             );
 
+            let home_first = write_judged("/home/file-mtime-first", b"first");
+            let home_second = write_judged("/home/file-mtime-second", b"second");
+            assert!(
+                home_second > home_first,
+                "on /home a write after another is stamped {home_second} ns and the one before \
+                 it {home_first} ns"
+            );
+            // A whole second is one stamp in 10⁹; two of them are a clock of seconds.
+            assert!(
+                home_first % NANOS_PER_SEC != 0 || home_second % NANOS_PER_SEC != 0,
+                "/home stamps {home_first} ns and {home_second} ns: whole seconds, not the \
+                 nanosecond DATA keeps"
+            );
+            for path in ["/home/file-mtime-first", "/home/file-mtime-second"] {
+                fs::remove_file(path).unwrap_or_else(|e| panic!("remove {path}: {e}"));
+            }
+
             // The flush stamps FAT, which keeps whole seconds and drops an odd one.
             const FAT: &str = "/log/file-mtime";
             let before = epoch();
@@ -114,20 +132,24 @@ fn main() {
                  before its write and {after} s after",
             );
             fs::remove_file(FAT).unwrap_or_else(|e| panic!("remove {FAT}: {e}"));
-            println!("file-mtime: /tmp stamps {first} then {second}, /log {fat}");
+            println!(
+                "file-mtime: /tmp stamps {first} then {second}, /home {home_first} then \
+                 {home_second}, /log {fat}"
+            );
         }
         [_, mode] if mode == "undated" => {
-            const UNDATED: &str = "/tmp/file-mtime-undated";
-            write(UNDATED, b"no clock answered");
-            let meta = fs::metadata(UNDATED).unwrap_or_else(|e| panic!("stat {UNDATED}: {e}"));
-            match meta.modified() {
-                Err(e) if e.kind() == ErrorKind::Unsupported => {}
-                other => panic!(
-                    "{UNDATED} was written on a machine whose RTC never answered, and its mtime \
-                     reads {other:?}"
-                ),
+            for undated in ["/tmp/file-mtime-undated", "/home/file-mtime-undated"] {
+                write(undated, b"no clock answered");
+                let meta = fs::metadata(undated).unwrap_or_else(|e| panic!("stat {undated}: {e}"));
+                match meta.modified() {
+                    Err(e) if e.kind() == ErrorKind::Unsupported => {}
+                    other => panic!(
+                        "{undated} was written on a machine whose RTC never answered, and its \
+                         mtime reads {other:?}"
+                    ),
+                }
+                println!("file-mtime: {undated} is undated");
             }
-            println!("file-mtime: {UNDATED} is undated");
         }
         [_, mode, path] if mode == "write" => {
             let stamp = write_judged(path, b"stamped at its write");

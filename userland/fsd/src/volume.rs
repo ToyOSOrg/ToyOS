@@ -7,6 +7,9 @@
 //! node whose file was unlinked or renamed over answers `Gone` from then on:
 //! its blocks may be another file's.
 
+use std::sync::OnceLock;
+
+use toyos_abi::clock::nanos_since_boot;
 use toyos_abi::syscall::SyscallError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +145,64 @@ pub fn join(dir: &str, name: &str) -> String {
     }
 }
 
-/// Nanoseconds since the Unix epoch, now, to the second the clock reads.
+pub const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
+/// nanoseconds since the Unix epoch, UTC, as the kernel's `clock::mtime_now`
+/// reckons them, and 0 — undated — on a machine whose RTC never answered.
 pub fn now_nanos() -> u64 {
-    toyos_abi::syscall::clock_epoch().map_or(0, |secs| secs.saturating_mul(1_000_000_000))
+    static ANCHOR: OnceLock<Option<u64>> = OnceLock::new();
+    let anchor = ANCHOR.get_or_init(|| {
+        anchor(|| (nanos_since_boot(), toyos_abi::syscall::clock_epoch(), nanos_since_boot()))
+    });
+    anchor.map_or(0, |secs| secs.saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot()))
+}
+
+/// The Unix second at the counter's nanosecond zero, the kernel's `BOOT_SECS`,
+/// out of `read`'s counter reading, `SYS_CLOCK_EPOCH` and counter reading.
+/// The epoch is the anchor plus the whole seconds of the counter at the call,
+/// so readings on either side within one second name it exactly. `None` is the
+/// clock refused.
+fn anchor(mut read: impl FnMut() -> (u64, Option<u64>, u64)) -> Option<u64> {
+    for _ in 0..3 {
+        let (before, epoch, after) = read();
+        let epoch = epoch?;
+        if before / NANOS_PER_SEC == after / NANOS_PER_SEC {
+            return Some(epoch - before / NANOS_PER_SEC);
+        }
+    }
+    panic!("fsd: three calls to the wall clock each straddled a second of the counter");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kernel's arithmetic, `BOOT_SECS + ⌊n/10⁹⌋` at the counter reading
+    /// `n` its call took: the anchor comes back exactly, and a call whose
+    /// readings straddle a second is asked again rather than guessed at.
+    #[test]
+    fn the_anchor_is_the_kernels() {
+        const BOOT_SECS: u64 = 2_000_000_000;
+        let kernel = |n: u64| Some(BOOT_SECS + n / NANOS_PER_SEC);
+
+        assert_eq!(anchor(|| (4_200_000_000, kernel(4_500_000_000), 4_700_000_000)), Some(BOOT_SECS));
+
+        let mut calls = [(4_900_000_000, 5_000_000_100, 5_100_000_000), (5_200_000_000, 5_250_000_000, 5_300_000_000)]
+            .into_iter();
+        let straddled = anchor(|| {
+            let (before, at, after) = calls.next().expect("asked at most twice");
+            (before, kernel(at), after)
+        });
+        assert_eq!(straddled, Some(BOOT_SECS));
+        assert_eq!(calls.next(), None, "the straddled call was asked again");
+
+        assert_eq!(anchor(|| (1, None, 2)), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "each straddled a second")]
+    fn a_clock_that_always_straddles_is_refused_by_name() {
+        anchor(|| (999_999_999, Some(1), 1_000_000_000));
+    }
 }

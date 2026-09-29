@@ -166,12 +166,6 @@ struct Stream {
     offset: u64,
 }
 
-/// Seconds since the epoch, UTC. FAT specifies local time; this stamps UTC
-/// because the owner ruled the hardware clock is UTC.
-fn utc_secs() -> u64 {
-    toyos_abi::syscall::clock_epoch().unwrap_or(0)
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
@@ -368,7 +362,7 @@ fn ram(roots: &[&str], why: &str) -> Box<dyn Volume> {
 }
 
 fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>, String> {
-    FatVolume::mount(disk, writable, utc_secs).map(|v| Box::new(v) as Box<dyn Volume>)
+    FatVolume::mount(disk, writable, fsd::volume::now_nanos).map(|v| Box::new(v) as Box<dyn Volume>)
 }
 
 struct Server {

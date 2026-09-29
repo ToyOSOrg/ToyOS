@@ -56,7 +56,6 @@ fn pinned_overwrite(first: &[u8], second: &[u8]) {
 
     // One reading and no window: the device the host reads after the shutdown's
     // drain is the time-free judge, and this length is what it is held against.
-    // `fs::metadata` is the `file_cache::size` a read bounds itself by.
     let mut lowest = fs::metadata(PINNED).unwrap_or_else(|e| panic!("stat {PINNED}: {e}")).len();
     let mut got = Vec::new();
     File::open(PINNED)
