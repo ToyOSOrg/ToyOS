@@ -18,11 +18,48 @@ where every Linux `path:line` here is read; `bugs.c` and `common.c` are in
 `linux-modules-6.8.0-142-generic_6.8.0-142.142_amd64.deb`, sha256
 3b8533dd9d235ca634ac58f82c5ce1ee35f12ef620693e17033184d2c9ca5890. The
 scoreboard is that kernel's `/sys/devices/system/cpu/vulnerabilities/*` lines
-on the T14, and the config's defaults no line shows: `CONFIG_RANDOMIZE_BASE`,
-`CONFIG_RANDOMIZE_MEMORY`, `CONFIG_STACKPROTECTOR_STRONG`,
-`CONFIG_ARCH_MMAP_RND_BITS=32`, and `CONFIG_SLS`, the one entry of the
-`CPU_MITIGATIONS` menu (`arch/x86/Kconfig:2475-2664`) that no line reports.
-The config leaves `CONFIG_X86_KERNEL_IBT` unset.
+on the T14, and the hardening table below.
+
+## Hardening defaults
+
+The track matches every hardening default the pinned Ubuntu config sets, and
+no more. A hardening default is an option the config sets that, under the
+default command line, makes an attack on the kernel harder and that no
+vulnerabilities line reports; access policy (the LSMs, lockdown, `*_RESTRICT`,
+`STRICT_DEVMEM`) is the capability model's. `CONFIG_SLS` is the one entry of
+the `CPU_MITIGATIONS` menu (`arch/x86/Kconfig:2475-2664`) that no line
+reports. Numbers are the config's lines; each row is closed by its stage, its
+defect, the ToyOS mechanism named, or the reason it does not apply.
+
+| Option | Disposition |
+|---|---|
+| `RANDOMIZE_BASE` (528) | S10 |
+| `RANDOMIZE_MEMORY` (532) | S10 |
+| `ARCH_MMAP_RND_BITS=32` (909) | S8 |
+| `STACKPROTECTOR_STRONG` (882) | S9 |
+| `SLS` (564) | S5 |
+| `X86_USER_SHADOW_STACK` (502) | S0 |
+| `RANDOMIZE_KSTACK_OFFSET_DEFAULT` (933) | `issues/kernel/every-syscall-runs-at-one-kernel-stack-offset.md` |
+| `ZERO_CALL_USED_REGS` (11477) | `issues/kernel/kernel-functions-return-with-their-used-registers-intact.md` |
+| `VMAP_STACK` (930) | `issues/kernel/a-threads-kernel-stack-has-no-guard-page.md` |
+| `STRICT_KERNEL_RWX` (935) | `issues/kernel/kernel-text-is-writable-and-every-kernel-page-executable.md` |
+| `DEBUG_WX` (12074) | `issues/kernel/kernel-text-is-writable-and-every-kernel-page-executable.md` |
+| `SLAB_FREELIST_RANDOM` (1132) | `issues/kernel/the-kernel-heap-has-none-of-slubs-hardening.md` |
+| `SLAB_FREELIST_HARDENED` (1133) | `issues/kernel/the-kernel-heap-has-none-of-slubs-hardening.md` |
+| `RANDOM_KMALLOC_CACHES` (1136) | `issues/kernel/the-kernel-heap-has-none-of-slubs-hardening.md` |
+| `X86_INTEL_TSX_MODE_OFF` (498) | `issues/kernel/tsx-stays-as-firmware-left-it.md` |
+| `INTEL_IOMMU_DEFAULT_ON` (9892) | `issues/kernel/a-device-without-a-domain-of-its-own-reaches-all-memory.md` |
+| `INIT_ON_ALLOC_DEFAULT_ON` (11474), pages | `pmm::alloc_page` and `alloc_contiguous` zero every page they hand out (`kernel/src/mm/pmm.rs:280-282,318-320`) |
+| `SCHED_STACK_END_CHECK` (12084) | every scheduler pass panics on a running thread whose stack-end word changed (`kernel/src/sched/driver.rs:521,592,925-935`), as `schedule_debug` does (`kernel/sched/core.c:5957-5958`) |
+| `HARDENED_USERCOPY` (11376) | the kernel side of every user copy is a slice, a `T` or a ring run, whose extent its type carries, never a bare pointer and length (`kernel/src/user_ptr.rs:146-161,187-214,247-275`) |
+| `X86_UMIP` (493) | `CR4_OPTIONAL` sets UMIP wherever CPUID offers it (`kernel/src/arch/x86_64/control_regs.rs:60,212`), as `setup_umip` does (`common.c:360-370`) |
+| `INIT_ON_ALLOC_DEFAULT_ON` (11474), slab | not applicable: Rust reads no allocation before writing it |
+| `INIT_STACK_ALL_ZERO` (11473) | not applicable: Rust reads no local before writing it, and `copy_out` copies only a `UserSafe` type, which has no padding (`kernel/src/user_ptr.rs:25-28`) |
+| `FORTIFY_SOURCE` (11377) | not applicable: every Rust slice copy checks both lengths |
+| `UBSAN_BOUNDS`, `_SHIFT`, `_BOOL`, `_ENUM` (12040-12045) | not applicable: each reports C undefined behaviour that safe Rust defines or refuses |
+| `STRICT_MODULE_RWX` (937) | not applicable: ToyOS loads no code into the kernel |
+| `LEGACY_VSYSCALL_XONLY` (536) | not applicable: ToyOS maps no vsyscall page |
+| `SHUFFLE_PAGE_ALLOCATOR` (1139) | not applicable: Linux shuffles only under `page_alloc.shuffle=1` (`mm/shuffle.c:12-30`) |
 
 ## What is true today
 
@@ -66,6 +103,7 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   grep . /sys/devices/system/cpu/vulnerabilities/*
   grep microcode /proc/cpuinfo
   cpuid -r -l 1; cpuid -r -l 7 -s 0; cpuid -r -l 7 -s 2
+  cpuid -r -l 0x80000000; cpuid -r -l 0x80000008; cpuid -r -l 0x80000021
   rdmsr -a 0x10a; rdmsr -a 0x48; rdmsr -a 0x123
   grep x86_Thread_features /proc/self/status
   mkdir -p rd/bin rd/sys rd/proc && cp /usr/bin/busybox rd/bin/
@@ -73,26 +111,34 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   (cd rd && find . | cpio -o -H newc) > s0.cpio && cp /boot/vmlinuz-6.8.0-142-generic .
   ```
 
-  and `rdmsr -a 0x122` where 0x10A bit 7 (TSX_CTRL_MSR) is set. `/proc/cpuinfo`'s
-  `microcode` is the revision as Linux reads it
+  and `rdmsr -a 0x122` where 0x10A bit 7 (TSX_CTRL_MSR) is set, and `rdmsr -a
+  0x10f` where CPUID.(7,0):EDX bits 11 and 13 (RTM_ALWAYS_ABORT,
+  TSX_FORCE_ABORT, `arch/x86/include/asm/cpufeatures.h:422-423`) are.
+  `/proc/cpuinfo`'s `microcode` is the revision as Linux reads it
   (`arch/x86/include/asm/microcode.h:62-75`). On the development host, whose
   QEMU is the one `.github/qemu-version` pins, `qemu-system-x86_64 --version`
   and then `qemu-system-x86_64 -nodefaults -machine q35 -cpu
   qemu64,+rdrand,+smap,+fsgsbase,+x2apic,+smep -smp 2 -m 4G -kernel
   vmlinuz-6.8.0-142-generic -initrd s0.cpio -append "console=ttyS0 panic=-1"
-  -serial stdio -display none -no-reboot` capture the TCG model's lines. ToyOS,
-  on the T14 and on the TCG model, prints a `boot-actuators` line with the
-  same CPUID leaves and 0x10A, and 0x48 and 0x123 as read before the kernel's
-  first write to either. The capture is refused unless `/proc/version` names
-  6.8.0-142, both packages are 6.8.0-142.142 and the config's sha256 is the one
-  above. If `x86_Thread_features` shows `shstk`, user shadow stacks are owed
-  and filed as their own track. **Exit**: those outputs committed as S1's
-  fixtures. Ubuntu is wiped from the T14 only after that commit.
+  -serial stdio -display none -no-reboot` capture the TCG model's lines. S0
+  builds ToyOS's `boot-actuators` facts line, printed on the T14 and on the TCG
+  model: the same CPUID leaves, 0x10A, and 0x48 and 0x123 as read before the
+  kernel's first write to either. The capture is refused unless `/proc/version`
+  names 6.8.0-142, both packages are 6.8.0-142.142 and the config's sha256 is
+  the one above. If `x86_Thread_features` shows `shstk`, user shadow stacks are
+  owed and filed as their own track. The capture is one-time: the kernel
+  image, `s0.cpio` and busybox are never committed and no build or test boots
+  them. **Exit**: the captured text outputs committed as S1's fixtures. Ubuntu
+  is wiped from the T14 only after that commit.
 - **S1 — The decision, a host-tested function.** A pure function, in a crate
   the kernel and a host test both build, maps (vendor, family, model,
   stepping, microcode revision, CPUID.1, CPUID.(7,0), CPUID.(7,2),
-  ARCH_CAPABILITIES) to each vulnerability's Linux line and the mitigation
-  ToyOS applies. It carries `cpu_vuln_whitelist` and `cpu_vuln_blacklist`
+  CPUID.0x80000008:EBX, CPUID.0x80000021:EAX, ARCH_CAPABILITIES) to each
+  vulnerability's Linux line and the mitigation ToyOS applies. The two
+  extended leaves are read where CPUID.0x80000000:EAX reaches them, as
+  `get_cpu_cap` does (`common.c:1072-1084`), and carry the AMD bits
+  `init_speculation_control` folds into IBRS, IBPB, STIBP and SSBD
+  (`common.c:994-1011`); the TCG model is AuthenticAMD. It carries `cpu_vuln_whitelist` and `cpu_vuln_blacklist`
   (`common.c:1182-1344`), `cpu_set_bug_bits` (`common.c:1414-1578`),
   `spectre_bad_microcodes` (`arch/x86/kernel/cpu/intel.c:141-163`) and
   `bugs.c`'s selections under the default command line and the pinned config.
@@ -106,12 +152,12 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   `GDS` from the TIGERLAKE_L blacklist row (`common.c:1312`) reds the T14
   case. That match is the only way `X86_BUG_GDS` is set (`common.c:1521-1523`),
   and without the bug `cpu_show_common` answers "Not affected"
-  (`bugs.c:3308-3309`), where the T14 read "Mitigation: Microcode" (59c096b9 on
-  `wt/toyos-llvmbar`).
+  (`bugs.c:3308-3309`).
 - **S2 — SPEC_CTRL and GDS.** The per-CPU base of `IA32_SPEC_CTRL` is declared
-  once with the control registers and asserted by `self_check` on every CPU:
-  IBRS where ARCH_CAPABILITIES.IBRS_ALL (eIBRS, `bugs.c:1930-1937`), BHI_DIS_S
-  where BHI_CTRL (`bugs.c:1795-1805`). S6's SSBD is the one bit a context switch
+  once with the control registers and asserted by `self_check` on every CPU.
+  It is S1's whole `x86_spec_ctrl_base`: every bit `bugs.c` ORs into it, under
+  S1's conditions for each (`RRSBA_DIS_S` at 1736, `BHI_DIS_S` at 1800, `IBRS`
+  at 1934, `SSBD` at 2224). S6's SSBD is the one bit a context switch
   changes, so the assertion is `SPEC_CTRL & !SSBD == base`. Where S1 finds GDS
   and ARCH_CAPABILITIES.GDS_CTRL, `IA32_MCU_OPT_CTRL.GDS_MITG_DIS` is cleared
   and read back and `GDS_MITG_LOCKED` is never written, as `update_gds_msr`
@@ -129,8 +175,16 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   BHI_CTRL is present; Tiger Lake has eIBRS without BHI_CTRL, so the T14 takes
   the loop. The RSB is filled on context switch where S1 selects retpoline,
   LFENCE or IBRS mode and never under eIBRS (`bugs.c:1741-1789`,
-  `entry_64.S:205`). IBPB is conditional (Decisions). **Exit**: a
-  `boot-actuators` per-thread counter the clear sequence increments advances
+  `entry_64.S:205`). IBPB is conditional (Decisions). Each sequence is
+  Linux's: the clear is `clear_bhb_loop`, five outer passes of five inner
+  branches and then `lfence` (`entry_64.S:1534-1569`), and the fill is
+  `__FILL_RETURN_BUFFER` with `RSB_CLEAR_LOOPS`, 32 calls each followed by
+  `int3` and then `lfence` (`arch/x86/include/asm/nospec-branch.h:132,137-162`).
+  **Exit**: a gate over `kernel.elf` decodes both sequences at the symbols it
+  names and compares both loop counts, the fill's call count and each final
+  `lfence` with those; the outer count made 1 (`movl $5,%ecx` to `movl
+  $1,%ecx`), the loop's trailing `lfence` deleted, or a fill of 1 entry reds
+  it. A `boot-actuators` per-thread counter the clear sequence increments advances
   by exactly 1000 over one thread's 1000 syscalls where S1 selects the loop,
   the T14, and by 0 where it does not; inverting the runtime condition gives 0
   on the T14 and reds it. A `boot-actuators` count of RSB fills over a probe's
@@ -143,10 +197,12 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   A→idle→A (none); deciding from the previous root instead, which on A→idle→B
   is idle's kernel root (`kernel/src/arch/x86_64/hw.rs` activates one on every
   switch), reds it. A `boot-actuators` arm drives B, C, idle, B, A, idle, A, B
-  through the switch path on one CPU with only A flagged and counts
-  `IA32_PRED_CMD` writes: 2 (B→A, A→B) where S1 finds IBPB, the T14, and 0
-  where it does not; dropping the write from the switch path gives 0 on the
-  T14 and reds it.
+  through the switch path on one CPU with only A flagged and counts the writes
+  of `PRED_CMD_IBPB`, value 1, to `IA32_PRED_CMD`
+  (`arch/x86/include/asm/msr-index.h:61-62`): 2 (B→A, A→B) where S1 finds
+  IBPB, the T14, and 0 where it does not; dropping the write from the switch
+  path, or writing 0 in place of `PRED_CMD_IBPB`, gives 0 on the T14 and reds
+  it.
 - **S4 — Spectre v1.** SMAP moves to the required set: the kernel refuses to
   boot on an x86-64 CPU without it. With no `swapgs` executed and `FSGSBASE`
   forbidden, Linux's own rule (`bugs.c:943-944`: `FSGSBASE ||
@@ -157,8 +213,10 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   the user half before `translate_user` walks it, as `barrier_nospec` in
   `_copy_from_user` (`lib/usercopy.c:21`) and `mask_user_address`
   (`arch/x86/include/asm/uaccess_64.h:64`) do. **Exit**: a standing guest test
-  boots the TCG model without `+smap` and asserts the refusal names SMAP;
-  moving SMAP back to `CR4_OPTIONAL` boots and reds it. On the T14 a
+  boots without SMAP and asserts the refusal names SMAP; moving SMAP back to
+  `CR4_OPTIONAL` boots and reds it. The harness has one `-cpu` string per
+  accelerator (`src/arch.rs`, `Arch::cpu`), so the stage adds a per-test
+  override: that string without `+smap` under TCG, and `host,-smap` under KVM. On the T14 a
   bounds-check-bypass gadget through each of the three sites recovers a byte
   planted outside the user half in at most 16 of 1000 trials (chance is 1 in
   256; per-site false-red probability 7.6e-7, exact binomial tail). Each
@@ -173,14 +231,16 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   `arch/x86/lib/retpoline.S:371-403`), which the T14 takes
   (`bugs.c:1222-1223,1313-1319`). The retpoline flag is a target modifier, so
   the `x86_64-unknown-none` `core` and `alloc` that `src/toolchain.rs` builds
-  are built under it. Every `ret` and indirect `jmp` is followed by `int3`,
-  as `CONFIG_SLS` builds Linux (`-mharden-sls=all`, `arch/x86/Makefile:210`);
-  the rustc fork has no option for it (`compiler/rustc_session/src/options.rs`).
-  **Exit**: a gate over `kernel.elf` finds no raw indirect `call`/`jmp` or
-  `ret` outside the thunks and the entry sequences it names by symbol, an
-  `int3` after every `ret` and indirect `jmp`, and every aligned thunk's
-  branch ending at `addr & 63 >= 32`; placing a thunk's branch at a cacheline
-  start, or building without the SLS hardening, reds it. Each boot reads its
+  are built under it. Compiled code is then left with no raw `ret` or
+  indirect `jmp`, so SLS is owed in the kernel's own assembly, the thunks and
+  the entry code: every `ret` and indirect `jmp` there is followed by `int3`,
+  as Linux's `RET` and `ASM_RET` are under `CONFIG_SLS`
+  (`arch/x86/include/asm/linkage.h:46-47,58-59`). **Exit**: a gate over
+  `kernel.elf` finds no raw indirect `call`/`jmp` or `ret` outside the thunks
+  and the entry sequences it names by symbol, an `int3` after every `ret` and
+  indirect `jmp` there, and every aligned thunk's branch ending at `addr & 63
+  >= 32`; placing a thunk's branch at a cacheline start, or deleting the `int3`
+  after one thunk's `ret`, reds it. Each boot reads its
   live thunk bodies back and compares them with the body S1 selects over the
   facts it reports: a `thunk_body` that answers the aligned thunk for every
   input puts a bare `jmp *%reg` in the TCG model, whose selection is the
@@ -277,5 +337,5 @@ it is not worse:
 
 Reading ARCH_CAPABILITIES as 0 instead of from 0x10A turns `spectre_v2` into
 "Mitigation: Retpolines; …" and `gather_data_sampling` into "Vulnerable: No
-microcode", and reds it. S1–S6 and S8–S10 are green, and S7 is closed by S0's
-finding or by the owner.
+microcode", and reds it. S1–S6 and S8–S10 are green, S7 is closed by S0's
+finding or by the owner, and every defect the hardening table cites is closed.
