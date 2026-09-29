@@ -29,10 +29,10 @@ below**: it builds and runs on ToyOS, on the self-hosting track
   harness, `toyos-ld`, rustc stage2, clang — and rustc sets `SDKROOT` for it;
   no guest binary links through it, every one links through the toolchain's
   `rust-lld`. And it is the C++ compiler of LLVM, clang, LLD and `rustc_llvm`
-  (`bootstrap.toml`'s `cc`/`cxx`, named in `src/llvm.rs`, with `xcrun` asked for
-  the SDK), and compiles `ring`'s C for `tests/https-server-host` and
-  `tests/https-fetch-host`. No Rust tool does the job: `rust-lld` can take only
-  the link, and nothing replaces the compile but a clang the host did not build.
+  (`bootstrap.toml`'s `cc`/`cxx`, named in `src/llvm.rs`), and compiles `ring`'s
+  C for `tests/https-server-host` and `tests/https-fetch-host`. No Rust tool
+  does the job: `rust-lld` can take only the link, and nothing replaces the
+  compile but a clang the host did not build.
 - **CMake and Ninja.** rustc's bootstrap builds LLVM and clang from
   `ToyOSOrg/llvm-project` with CMake driving Ninja, whenever this host has not
   built that LLVM. CMake is in `REQUIRED` because every build keys the host's
@@ -48,6 +48,9 @@ below**: it builds and runs on ToyOS, on the self-hosting track
 - **`gh`** — Go, so outside the rule. `src/release.rs` asks GitHub whether a
   toolchain release exists, creates it and moves the `sdk-<version>` alias with
   it, on a runner only. Exit: `src/release.rs` speaks GitHub's REST API itself.
+- **`xcrun`** — macOS's, so outside the rule. On macOS `src/llvm.rs` asks it for
+  the SDK's path and version, which the LLVM's key names. Exit: the key names
+  the SDK without asking `xcrun`.
 - **`curl`**, and **`ca-certificates`**, the trust store it verifies against —
   `src/release.rs` downloads the toolchain release, `src/sdkversion.rs` asks
   the crates.io index, and the nightly's container and macOS jobs fetch

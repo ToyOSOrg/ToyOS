@@ -36,9 +36,7 @@ AArch64 one step behind, on `issues/kernel/toyos-runs-on-arm64.md`'s track.
   the host build of the same commit.
 - **M5 — ToyOS rebuilds its own compilers to a fixed point; the host is no
   longer needed.** The guest's toolchain builds the next toolchain, and that
-  one builds itself again to the same bytes. Python (`bootstrap.py`), CMake and
-  Ninja leave the build
-  (`issues/build/the-build-runs-c-and-cxx-tools-toyos-does-not-yet-run.md`).
+  one builds itself again to the same bytes.
   *Exit*: the fixed point, reached with no host in the loop.
 
 **Blocked on other tracks.** M2 needs packages over HTTPS

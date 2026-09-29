@@ -10,7 +10,7 @@ cargo run
 ```
 
 One command, and a complete OS boots. No Make, no Docker, no LLVM to install,
-no cross-toolchain to assemble, no system linker. Everything that boots is
+no cross-toolchain to assemble. Everything that boots is
 built by a toolchain in this repository.
 
 Rust and QEMU, plus the four things `rustc`'s own bootstrap needs on every
