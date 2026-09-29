@@ -70,13 +70,3 @@ ToyOS grows symbolic links, or the two `toolchain.rs` sites need a shape that
 does not need one — a copy, a directory junction, or a sysroot layout that does
 not require aliasing a directory at all. Deciding that is worth more than a
 `#[cfg]` pair, and it decides two of the seven errors.
-
-## Why this is filed now
-
-The shared-target-directory work
-(`issues/build/every-worktree-builds-its-own-copy-of-the-same-crates.md`)
-was designed to be portable by construction — a path join, no platform branch
-anywhere — on the stated requirement that this project compiles on every major
-OS. That requirement is not met today, so the new work would be a portable
-component inside a build system with unconditional Unix dependencies at its
-centre. Worth knowing before the portability of anything else is claimed.
