@@ -1,8 +1,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::{cpu, percpu};
+use crate::hw::MIN_ONE_SHOT;
 use crate::log;
-use crate::time::{Delay, Duration, Floor};
+use crate::time::{Delay, Duration};
 
 /// The local APIC registers and MSRs this file may name.
 // Every variant is an architectural local-APIC register touching no memory or control transfer, so none can make `Reg::write`'s unsafe wrmsr unsound.
@@ -48,8 +49,8 @@ pub const MSI_DOORBELL: u32 = 0xFEE0_0000;
 
 /// The compatibility-format message that raises `vector` on the CPU whose APIC
 /// ID is `dest`: the destination in address bits 19:12, the vector in the data.
-pub fn msi_message(dest: u32, vector: u8) -> (u32, u32) {
-    (MSI_DOORBELL | (dest << 12), vector as u32)
+pub fn msi_message(dest: u32, vector: u8) -> Result<(u32, u32), &'static str> {
+    Ok((MSI_DOORBELL | (dest << 12), vector as u32))
 }
 
 /// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs).
@@ -225,12 +226,6 @@ pub fn init_timer() {
     // machine, so a profile can hold a ceiling against a boot that moved it.
     log!("LAPIC timer: {} ticks/10ms, so {}Hz", ticks_10ms, ticks_10ms as u64 * 100);
 }
-
-// Floor on every arm: a count that expires before the interrupt it schedules retires cannot outlast itself and livelocks the CPU forever.
-const MIN_ONE_SHOT: Floor = Floor::policy(
-    Duration::from_micros(10),
-    "above an interrupt entry and iretq, a thousandth of QUANTUM_NS",
-);
 
 // The only path to Reg::TimerInit / last_armed_ticks — the floor is enforced once here, not at each of the three call sites.
 struct OneShot(u32);

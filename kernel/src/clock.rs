@@ -89,14 +89,14 @@ pub fn now() -> Instant {
 /// The [`cpu::rdtsc`] value `nanos` in the future, for a wait loop that must
 /// not call the nanosecond clock.
 pub fn tsc_deadline(nanos: u64) -> u64 {
-    cpu::counter().saturating_add(tsc_ticks(nanos))
+    cpu::counter().saturating_add(counter_ticks(nanos))
 }
 
-/// `nanos` as a count of TSC ticks: a span converted once and then compared
-/// against `rdtsc` differences, which is what a sampler that may not divide
+/// `nanos` as a count of [`cpu::counter`] ticks: a span converted once and then compared
+/// against counter differences, which is what a sampler that may not divide
 /// needs. Before [`init`] the period is unknown and this is zero, so a bound
 /// derived from it is one its arm has to refuse.
-pub fn tsc_ticks(nanos: u64) -> u64 {
+pub fn counter_ticks(nanos: u64) -> u64 {
     let period_fs = TSC_PERIOD_FS.load(Relaxed);
     if period_fs == 0 {
         return 0;
@@ -104,7 +104,7 @@ pub fn tsc_ticks(nanos: u64) -> u64 {
     ((nanos as u128 * 1_000_000) / period_fs as u128) as u64
 }
 
-/// The span a count of [`tsc_ticks`] stands for, for a caller that measured
+/// The span a count of [`counter_ticks`] stands for, for a caller that measured
 /// before there was a period to measure with and converts once, afterwards.
 /// Zero while the period is unknown, so a span taken on a machine that never
 /// calibrated reads as no time rather than as an invented one.
