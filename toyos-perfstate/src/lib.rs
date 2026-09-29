@@ -5,9 +5,7 @@
 //!
 //! Layouts are the Intel SDM's — Vol. 3B, *Power and Thermal Management*, for
 //! HWP, the energy/performance bias and package thermal status; Vol. 4 for the
-//! addresses. The declared values are the power envelope the self-hosting bar
-//! is measured under (`issues/build/toyos-builds-itself.md`), so a ToyOS run
-//! and the Linux run it is held against ask the CPU for the same thing.
+//! addresses.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -85,8 +83,8 @@ impl Refusal {
             Self::NoLeaf6 => "CPUID has no leaf 6, so no power management is enumerated",
             Self::NoHwp => "no HWP (CPUID.06H:EAX[7] clear)",
             Self::NotIntel => {
-                "HWP on a CPU that is not Intel, whose RAPL and thermal registers are Intel's \
-                 model-specific ones"
+                "HWP on a CPU that is not Intel, and the request's minimum comes from \
+                 MSR_PLATFORM_INFO (0xCE), which is Intel's"
             }
             Self::NotFamily6 => {
                 "an Intel CPU outside DisplayFamily 06H, for which the SDM documents no \

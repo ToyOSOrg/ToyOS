@@ -10,6 +10,10 @@
 //! for a generation was read after that generation was issued. A slot that a
 //! later ask overwrites mid-copy mixes two answers, each read after this one
 //! asked.
+//!
+//! **An ask belongs to the one read that made it** and lives on that read's
+//! stack, so a read that ends — answered, refused, cancelled or not waiting —
+//! leaves nothing a later read could be answered from or refused by.
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -18,7 +22,6 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::arch::perf_state::{self, Declared};
 use crate::shootdown::{Generation, Shootdown, MAX_CPUS};
-use crate::sync::Lock;
 use crate::time::{Budget, Deadline, Duration, Instant};
 use crate::user_ptr::UserBytesMut;
 use crate::watch::Watch;
@@ -29,8 +32,6 @@ static SLOTS: [Slot; MAX_CPUS] = [const { Slot::new() }; MAX_CPUS];
 /// Posted by every answer; a blocked read waits here.
 pub static WATCH: Watch = Watch::new();
 
-/// A kicked CPU reaches a pass within one timer interrupt; this is the
-/// kernel's choice.
 const ANSWER: Budget = Budget::of(
     Duration::from_millis(250),
     "the read is refused `Io`, and the CPUs that did not answer are named",
@@ -57,20 +58,42 @@ impl Slot {
     }
 }
 
-/// One claim's side of the protocol: the proof its reads need, and the ask
-/// its reads wait on — joined by every read of the claim until it is answered
-/// or a reader waiting on it is cancelled.
+/// One claim's side of the protocol: the proof its reads need.
 pub struct Reader {
     /// `None` only under `perf-state-deaf-cpu`, whose claim has no
     /// declaration behind it and answers zeros.
     declared: Option<Declared>,
-    pending: Lock<Option<Ask>>,
 }
 
+/// One read's ask, made by its first look and gone with the read.
 #[derive(Clone, Copy)]
-struct Ask {
+pub struct Ask {
     generation: Generation,
     deadline: Deadline,
+}
+
+impl Ask {
+    /// Issued, this CPU's answer given, and every other CPU kicked — in that
+    /// order, so no kicked CPU can look before the generation it owes exists.
+    fn issue(cpus: usize, now: Instant) -> Self {
+        let generation = ASKS.issue();
+        let me = crate::arch::percpu::cpu_id() as usize;
+        ASKS.serve(me, || SLOTS[me].store(sample(me)));
+        for cpu in (0..cpus).filter(|&cpu| cpu != me) {
+            crate::arch::irqchip::kick_cpu(cpu as u32);
+        }
+        Self { generation, deadline: Deadline::at(now + ANSWER.duration()) }
+    }
+
+    /// Whether every CPU has answered this ask: a blocked read's wake condition.
+    pub fn answered(&self) -> bool {
+        (0..crate::arch::smp::cpu_count() as usize).all(|cpu| ASKS.served(cpu, self.generation))
+    }
+
+    /// Past this the read is refused, so its wait ends here.
+    pub fn deadline(&self) -> Deadline {
+        self.deadline
+    }
 }
 
 impl Reader {
@@ -79,35 +102,27 @@ impl Reader {
         let declared = perf_state::declared().map(Some).or_else(|why| {
             if crate::actuator::perf_state_deaf_cpu() { Ok(None) } else { Err(why) }
         })?;
-        Ok(Self { declared, pending: Lock::new(None) })
+        Ok(Self { declared })
     }
 
-    /// A read that was cancelled takes its ask back, so the next read asks
-    /// afresh and is never answered with registers read before it began.
-    pub fn cancel(&self) {
-        *self.pending.lock() = None;
-    }
-
-    /// The answer's bytes into `buf`, or `None` while a CPU has not answered —
-    /// the caller then waits on [`WATCH`] until [`answered`].
-    pub fn read(&self, buf: &mut UserBytesMut) -> Option<u64> {
+    /// The answer's bytes into `buf`, or `None` while a CPU has not answered
+    /// `ask` — the caller then waits on [`WATCH`] until [`Ask::answered`].
+    /// `ask` is the read's own, `None` until its first look makes it.
+    pub fn read(&self, ask: &mut Option<Ask>, buf: &mut UserBytesMut) -> Option<u64> {
         let cpus = crate::arch::smp::cpu_count() as usize;
         let len = answer_len(cpus);
         if buf.len() < len {
             return Some(SyscallError::ResourceExhausted.to_u64());
         }
         let now = crate::clock::now();
-        let mut pending = self.pending.lock();
-        let ask = *pending.get_or_insert_with(|| self.ask(cpus, now));
-        let answered = (0..cpus).all(|cpu| ASKS.served(cpu, ask.generation));
+        let ask = *ask.get_or_insert_with(|| Ask::issue(cpus, now));
+        let answered = ask.answered();
         if !answered && !ask.deadline.reached(now) {
             return None;
         }
-        *pending = None;
-        drop(pending);
         if !answered {
             for cpu in (0..cpus).filter(|&cpu| !ASKS.served(cpu, ask.generation)) {
-                crate::log!("perf_state: cpu{cpu} did not answer a read within {ANSWER}");
+                crate::log!("perf_state: cpu{cpu} did not answer {:?} within {ANSWER}", ask.generation);
             }
             return Some(SyscallError::Io.to_u64());
         }
@@ -119,38 +134,14 @@ impl Reader {
         }
         Some(len as u64)
     }
-
-    /// Issued, this CPU's answer given, and every other CPU kicked — in that
-    /// order, so no kicked CPU can look before the generation it owes exists.
-    fn ask(&self, cpus: usize, now: Instant) -> Ask {
-        let generation = ASKS.issue();
-        let me = crate::arch::percpu::cpu_id() as usize;
-        if !deaf(me, cpus) {
-            ASKS.serve(me, || SLOTS[me].store(sample(me)));
-        }
-        for cpu in (0..cpus).filter(|&cpu| cpu != me) {
-            crate::arch::irqchip::kick_cpu(cpu as u32);
-        }
-        Ask { generation, deadline: Deadline::at(now + ANSWER.duration()) }
-    }
-}
-
-/// Whether every CPU has answered the latest ask: a blocked read's wake
-/// condition, and a hint — [`Reader::read`] decides.
-pub fn answered() -> bool {
-    (0..crate::arch::smp::cpu_count() as usize).all(|cpu| !ASKS.owes(cpu))
-}
-
-/// How long a blocked read parks before it looks again; its own ask's
-/// deadline is what refuses it.
-pub fn park_deadline() -> Deadline {
-    Deadline::at(crate::clock::now() + ANSWER.duration())
 }
 
 /// This CPU's answer, if one is owed. Called from `drain_irqs` every pass.
+/// Under `perf-state-deaf-cpu` no CPU answers here, so a read is answered by
+/// its asker alone.
 pub fn serve_if_owed() {
     let me = crate::arch::percpu::cpu_id() as usize;
-    if !ASKS.owes(me) || deaf(me, crate::arch::smp::cpu_count() as usize) {
+    if !ASKS.owes(me) || crate::actuator::perf_state_deaf_cpu() {
         return;
     }
     ASKS.serve(me, || SLOTS[me].store(sample(me)));
@@ -180,10 +171,4 @@ fn sample(me: usize) -> CpuRegisters {
             CpuRegisters::default()
         }
     }
-}
-
-/// `perf-state-deaf-cpu`'s silent CPU, the last: it answers no ask, its own
-/// included.
-fn deaf(cpu: usize, cpus: usize) -> bool {
-    crate::actuator::perf_state_deaf_cpu() && cpu + 1 == cpus
 }

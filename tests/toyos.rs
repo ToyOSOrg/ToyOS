@@ -17733,10 +17733,13 @@ fn perf_request_diverged(boot: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// A read one CPU never answers is refused `Io` once the kernel's bound has
-/// passed, naming that CPU and no other — twice, so the claim still answers
-/// after a refusal. `perf-state-deaf-cpu` grants the claim on QEMU's CPUs, which
-/// have no HWP, and silences the last CPU; a read with no bound waits for
+/// A read only its asker answers is refused `Io` once the kernel's bound has
+/// passed, naming the one other CPU — twice, so the claim still answers after
+/// a refusal. `perf-state-deaf-cpu` grants the claim on QEMU's CPUs, which have
+/// no HWP, and has no CPU answer a kick, so which CPU the test runs on decides
+/// nothing. A read that did not wait goes first and makes the boot's first ask;
+/// the two refusals must name the second and the third, so a read answered or
+/// refused from an ask that is not its own reds. A read with no bound waits for
 /// ever, and this reds at its ceiling.
 fn perf_state_silent_cpu(
     test_config: &Path,
@@ -17744,8 +17747,8 @@ fn perf_state_silent_cpu(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     const CPUS: u32 = 2;
-    const SILENT: &str = " did not answer a read within ";
-    const READS: usize = 2;
+    const SILENT: &str = " did not answer Generation(";
+    const ASKS: [&str; 2] = [" did not answer Generation(2) ", " did not answer Generation(3) "];
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
@@ -17765,8 +17768,8 @@ fn perf_state_silent_cpu(
         text.lines().filter(|l| l.contains(SILENT)).map(str::to_string).collect()
     };
     let mut refusals = named(&result.serial);
-    if refusals.len() < READS {
-        let owed = READS - refusals.len();
+    if refusals.len() < ASKS.len() {
+        let owed = ASKS.len() - refusals.len();
         let seen = std::cell::Cell::new(0);
         let more = qemu.drain_until(Duration::from_secs(10), |line| {
             seen.set(seen.get() + usize::from(line.contains(SILENT)));
@@ -17774,16 +17777,16 @@ fn perf_state_silent_cpu(
         });
         refusals.extend(named(&more));
     }
-    let want = format!("perf_state: cpu{}{SILENT}", CPUS - 1);
-    if refusals.len() != READS || !refusals.iter().all(|l| l.contains(&want)) {
+    let one_cpu = |l: &String| (0..CPUS).filter(|c| l.contains(&format!("perf_state: cpu{c} "))).count() == 1;
+    let each_once = ASKS.iter().all(|ask| refusals.iter().filter(|l| l.contains(ask)).count() == 1);
+    if refusals.len() != ASKS.len() || !each_once || !refusals.iter().all(one_cpu) {
         return Err(format!(
-            "want {READS} refusals each naming cpu{} alone, got {}:\n{}\n{}",
-            CPUS - 1,
+            "want one refusal naming one CPU for each of {ASKS:?}, got {}:\n{}\n{}",
             refusals.len(),
             refusals.join("\n"),
             result.serial,
         ));
     }
-    eprintln!("  [perf_state_silent_cpu] {READS} reads refused Io, each naming cpu{}", CPUS - 1);
+    eprintln!("  [perf_state_silent_cpu] the second and third asks refused Io, each naming one CPU");
     Ok(())
 }

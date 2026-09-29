@@ -13,7 +13,7 @@
 //! `IA32_MISC_ENABLE`'s turbo bit is not declared: that register's other bits
 //! are model-specific and firmware's, and writing it whole would decide them.
 
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use toyos_perfstate::msr;
 
@@ -129,6 +129,10 @@ const HWP_UNDECIDED: u8 = 0;
 const HWP_DECLARED: u8 = 1;
 const HWP_REFUSED: u8 = 2;
 
+/// Set by [`report`], once every CPU the roster committed has run [`init`]:
+/// before it, an AP may not have enabled HWP yet.
+static APPLIED: AtomicBool = AtomicBool::new(false);
+
 /// Proof that the machine's declaration carries the performance request, so
 /// every register [`toyos_perfstate::msr`] names but `HWP_INTERRUPT` exists on
 /// every CPU, HWP is enabled there, and reading one is no `#GP`.
@@ -138,11 +142,15 @@ pub struct HwpDeclared(());
 impl HwpDeclared {
     /// The proof, or the reason this machine has none.
     pub fn ask() -> Result<Self, toyos_perfstate::Refusal> {
+        assert!(
+            APPLIED.load(Ordering::Acquire),
+            "control_regs: the performance request is asked about before every CPU applied it",
+        );
         match HWP.load(Ordering::Acquire) {
             HWP_DECLARED => Ok(Self(())),
             HWP_REFUSED => Err(toyos_perfstate::refusal(&perf_cpuid())
                 .expect("every CPU reached the BSP's refusal, this one included")),
-            _ => panic!("control_regs: the performance request is asked about before the BSP declared it"),
+            _ => unreachable!("control_regs: every CPU that ran `init` decided"),
         }
     }
 }
@@ -410,13 +418,13 @@ fn hwp_check(cpu_id: u32, request: u64, notifies: bool) {
     let interrupt = notifies.then(|| cpu::rdmsr(msr::HWP_INTERRUPT));
     log!(
         "control_regs: cpu{} pm_enable={} hwp_request={:#010x} hwp_request_pkg={:#010x} epb={} \
-         hwp_interrupt={} hwp_capabilities={:#010x} platform_info={:#018x}",
+         hwp_interrupt={:x?} hwp_capabilities={:#010x} platform_info={:#018x}",
         cpu_id,
         pm_enable,
         live,
         pkg,
         epb,
-        Enumerated(interrupt),
+        interrupt,
         cpu::rdmsr(msr::HWP_CAPABILITIES),
         cpu::rdmsr(msr::PLATFORM_INFO),
     );
@@ -436,18 +444,6 @@ fn hwp_check(cpu_id: u32, request: u64, notifies: bool) {
     }
 }
 
-/// A register's value, or `absent` where CPUID enumerates no such register.
-struct Enumerated(Option<u64>);
-
-impl core::fmt::Display for Enumerated {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.0 {
-            Some(value) => write!(f, "{value:#x}"),
-            None => f.write_str("absent"),
-        }
-    }
-}
-
 /// How many CPUs hold the declaration, said once after the last of them has
 /// been checked. A divergent CPU panics inside [`self_check`], so what this
 /// line adds is the *count*: a CPU that never reached [`init`] at all is
@@ -464,6 +460,7 @@ pub fn report(cpus: u32) {
         DECLARED_CR4.load(Ordering::Acquire),
         EFER,
     );
+    APPLIED.store(true, Ordering::Release);
 }
 
 fn opt(value: u64, bit: u64, name: &'static str) -> &'static str {

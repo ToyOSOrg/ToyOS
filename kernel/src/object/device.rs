@@ -158,19 +158,16 @@ impl DeviceClaim {
         Some((device, unique))
     }
 
-    /// A performance-state claim's read, which [`crate::perf_state::Reader`] answers.
-    pub fn read_perf_state(&self, buf: &mut crate::user_ptr::UserBytesMut) -> Option<u64> {
+    /// A performance-state claim's read, which [`crate::perf_state::Reader`] answers
+    /// against the read's own `ask`.
+    pub fn read_perf_state(
+        &self,
+        ask: &mut Option<crate::perf_state::Ask>,
+        buf: &mut crate::user_ptr::UserBytesMut,
+    ) -> Option<u64> {
         match &self.described.lock().info {
-            DeviceInfo::PerfState(reader) => reader.read(buf),
+            DeviceInfo::PerfState(reader) => reader.read(ask, buf),
             _ => unreachable!("a {:?} claim is not read as a performance-state one", self.class),
-        }
-    }
-
-    /// A performance-state read that was cancelled while it waited.
-    pub fn cancel_perf_state(&self) {
-        match &self.described.lock().info {
-            DeviceInfo::PerfState(reader) => reader.cancel(),
-            _ => unreachable!("a {:?} claim has no performance-state read to cancel", self.class),
         }
     }
 

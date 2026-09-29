@@ -6,8 +6,8 @@ opened: 2026-09-28
 
 # The kernel owns CPU performance state
 
-The self-hosting bar (`issues/build/toyos-builds-itself.md`) is measured
-under a fixed power envelope that must be read back for a whole build span.
+The self-hosting bar is measured under a fixed power envelope that must be
+read back for a whole build span.
 The kernel declares the envelope from the one CPU-state declaration
 (`kernel/src/arch/x86_64/control_regs.rs`), and a `perf-state` claim reads it
 back per CPU.
@@ -32,6 +32,8 @@ enumerated by CPUID or read at boot under the declaration's proof
   hwp_request_pkg=0x8000ff01 epb=6` and `test_rs_perf_state` exits 0; on
   `perfdiverge` the page after the reset carries the panic `control_regs:
   cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04`.
+  No test launches `/system/bin/perfstate`, so its row's `devices` is
+  unmeasured.
 - **2 — RAPL, declared.** PL1, PL2 and their windows through
   `MSR_PKG_POWER_LIMIT`, and the MMIO mirror in the host bridge's MCHBAR, at
   the bar's values; the peak limit beside them. A limit firmware locked (bit
@@ -61,7 +63,8 @@ the AArch64 kernel refuses the claim by name.
 
 **What only the T14 proves.** No QEMU CPU enumerates HWP (TCG's `qemu64`, and
 KVM, which reduces leaf 6 to `ARAT`), so every write and every read of these
-registers runs only there. Under Linux on the T14 every CPU held
+registers runs only there. Under Linux on the T14 (#568's samples, not merged;
+the metal row re-measures them) every CPU held
 `IA32_HWP_REQUEST` `0x80002a04` with `IA32_HWP_CAPABILITIES` `0x010d182a` or
 `0x010e182a`, and the package `IA32_HWP_REQUEST_PKG` `0x8000ff01`.
 `MSR_PLATFORM_INFO` was not read there; its ratio 4 is inferred from Linux's

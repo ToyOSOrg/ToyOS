@@ -106,8 +106,6 @@ receives = ["netd"]
 receives = ["netd", "soundd", "log", "compositor"]
 syscap = ["inventory"]
 
-# The CPU performance envelope read back once: `perf-state` is the whole of
-# what it holds, and a machine that declared no request has none to give it.
 [programs.perfstate]
 devices = ["perf-state"]
 
