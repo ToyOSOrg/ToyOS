@@ -131,8 +131,11 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   names 6.8.0-142, both packages are 6.8.0-142.142 and the config's sha256 is
   the one above. The capture is one-time: the kernel
   image, `s0.cpio` and busybox are never committed and no build or test boots
-  them. **Exit**: the captured text outputs committed as S1's fixtures. Ubuntu
-  is wiped from the T14 only after that commit.
+  them. **Exit**: the captured text outputs committed as S1's fixtures — done,
+  at `toyos-t14linux/s0/t14/` (the T14, `capture.sh` through sudo) and
+  `toyos-t14linux/s0/tcg/` (the TCG model, `tcg.sh` on QEMU 11.1.1). Ubuntu is
+  wiped from the T14 only after that commit and #568's LLVM-bar capture, which
+  still waits on the T14.
 - **S1 — The decision, a host-tested function.** A pure function, in a crate
   the kernel and a host test both build, maps (vendor, family, model,
   stepping, microcode revision, CPUID.1, CPUID.(7,0), CPUID.(7,2),

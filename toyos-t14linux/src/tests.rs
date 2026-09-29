@@ -1,5 +1,6 @@
-//! Every value here is synthetic: the shape `capture.sh` and `tcg.sh` write,
-//! never a reading of the T14.
+//! Every value here but [`the_committed_capture_reads_and_its_lines_are_s0s`]
+//! is synthetic: the shape `capture.sh` and `tcg.sh` write, never a reading of
+//! the T14.
 
 use super::*;
 
@@ -343,4 +344,32 @@ fn a_tcg_capture_of_another_kernel_qemu_or_file_set_is_refused() {
         files.remove(name);
         assert!(parse_tcg(&files).unwrap_err().contains(name));
     }
+}
+
+/// `s0/t14` and `s0/tcg` are S0's committed capture, not the fixture above:
+/// this is the one test that reads the T14 itself.
+fn s0(leaf: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("s0").join(leaf)
+}
+
+#[test]
+fn the_committed_capture_reads_and_its_lines_are_s0s() {
+    let t14 = T14::read(&s0("t14")).unwrap();
+    let tcg = Tcg::read(&s0("tcg"), &t14).unwrap();
+    assert_eq!(t14.mmap_rnd_bits, 32);
+    assert_eq!(
+        t14.lines["spectre_v2"],
+        "Mitigation: Enhanced / Automatic IBRS; IBPB: conditional; \
+         PBRSB-eIBRS: SW sequence; BHI: SW loop, KVM: SW loop"
+    );
+    assert_eq!(t14.lines["gather_data_sampling"], "Mitigation: Microcode");
+    assert_eq!(
+        t14.lines["indirect_target_selection"],
+        "Mitigation: Aligned branch/return thunks"
+    );
+    assert_eq!(
+        tcg.lines["spectre_v2"],
+        "Mitigation: Retpolines; STIBP: disabled; RSB filling; \
+         PBRSB-eIBRS: Not affected; BHI: Not affected"
+    );
 }

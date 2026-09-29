@@ -1,0 +1,10 @@
+Spectre V1 : Mitigation: usercopy/swapgs barriers and __user pointer sanitization
+Spectre V2 : Spectre BHI mitigation: SW BHB clearing on vm exit
+Spectre V2 : Spectre BHI mitigation: SW BHB clearing on syscall
+Spectre V2 : Mitigation: Enhanced / Automatic IBRS
+Spectre V2 : Spectre v2 / PBRSB-eIBRS: Retire a single CALL on VMEXIT
+Spectre V2 : mitigation: Enabling conditional Indirect Branch Prediction Barrier
+Speculative Store Bypass: Mitigation: Speculative Store Bypass disabled via prctl
+GDS: Mitigation: Microcode
+ITS: Mitigation: Aligned branch/return thunks
+microcode: Current revision: 0x000000be

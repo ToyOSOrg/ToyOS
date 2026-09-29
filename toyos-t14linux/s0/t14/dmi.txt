@@ -1,0 +1,8 @@
+/sys/class/dmi/id/bios_date:05/09/2026
+/sys/class/dmi/id/bios_release:1.71
+/sys/class/dmi/id/bios_vendor:LENOVO
+/sys/class/dmi/id/bios_version:N34ET71W (1.71 )
+/sys/class/dmi/id/ec_firmware_release:1.46
+/sys/class/dmi/id/sys_vendor:LENOVO
+/sys/class/dmi/id/product_name:20W0003AMZ
+/sys/class/dmi/id/product_version:ThinkPad T14 Gen 2i

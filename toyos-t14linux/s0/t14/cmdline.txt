@@ -1,0 +1,1 @@
+BOOT_IMAGE=/vmlinuz-6.8.0-142-generic root=/dev/mapper/ubuntu--vg-ubuntu--lv ro
