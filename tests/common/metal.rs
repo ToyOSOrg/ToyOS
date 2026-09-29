@@ -32,8 +32,7 @@ const PATH_TAKEN: &[&str] =
     &["deadline_lateness_ms", "lockup_lateness_ms", "park_open_operations"];
 
 /// Whether a boot armed with `params` owes nothing for `field` where it produced
-/// none and the profile prices none: a path it did not take, or a field that
-/// crosses only on a page the pass after its reset cleared.
+/// none and the profile prices none.
 pub fn owes_nothing(field: &str, params: &[&str]) -> bool {
     PATH_TAKEN.contains(&field) || toyos_build::metal::clears_its_own_page(params)
 }

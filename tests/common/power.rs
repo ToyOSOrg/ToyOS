@@ -964,11 +964,6 @@ fn armed_and_nothing_else() -> String {
     format!("{} the page still reads {}", bootlog::PREVIOUS_PANIC, State::Armed.named())
 }
 
-/// What it writes about a kernel that handed the machine back on purpose.
-fn done_line() -> String {
-    format!("the last boot read {}", State::Done.named())
-}
-
 /// The two-boot shape both chain judges use: a guest that takes its own reset,
 /// so the loader pass after it is observable.
 fn chained(params: &'static [&'static str]) -> BootOptions {
@@ -1177,7 +1172,7 @@ pub fn blackbox_done_chain(
     first.must_say(&armed_line())?;
 
     let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
-    second.must_say(&done_line())?;
+    second.must_say(bootlog::HANDED_BACK)?;
     done_chain(&second)?;
     ended_in_a_reset(&mut resets)?;
     drop(qemu);
@@ -1691,7 +1686,7 @@ pub fn blackbox_foreign_record(
 /// points `BootNext` at itself before each handoff and a pass with a finding
 /// appends to the same `loader.log` — so the argument is that file's tail.
 pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
-    after.must_say(&done_line())?;
+    after.must_say(bootlog::HANDED_BACK)?;
     the_tail_is_the_stops(after)?;
     // The distinction the whole state machine exists for: a deliberate stop is
     // not a panic and not a kernel that vanished.
@@ -1702,7 +1697,7 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
     // What its transport went through is on every record, in one line where
     // nothing broke.
-    after.must_say_after(&done_line(), toyos_blackbox::RECOVERY_OPENS_WITH)?;
+    after.must_say_after(bootlog::HANDED_BACK, toyos_blackbox::RECOVERY_OPENS_WITH)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
     Ok(())
@@ -1713,7 +1708,7 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
 /// the last word. Read after the seal,
 /// because the same lines are in the capture on the first boot's console.
 fn the_tail_is_the_stops(after: &serial::Serial) -> Result<(), String> {
-    let head = after.must_say_after(&done_line(), bootlog::LOG_TAIL_HEAD)?.to_string();
+    let head = after.must_say_after(bootlog::HANDED_BACK, bootlog::LOG_TAIL_HEAD)?.to_string();
     let tail: Vec<&str> = after
         .text()
         .lines()

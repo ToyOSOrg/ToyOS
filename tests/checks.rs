@@ -800,6 +800,8 @@ mod checks {
         assert!(xhci_xecp(&format!("{unreset}{t14}")).is_err());
         let unhanded = t14.replace("firmware did not claim the controller", "USB 3.1 on ports 2..=5");
         assert!(xhci_xecp(&format!("{t14}{unhanded}")).is_err());
+        let silent = unhanded.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&silent).is_err());
     }
 
     /// `dlopen_dedup` reads `test_rs_std_tls` by path.

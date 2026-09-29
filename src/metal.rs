@@ -3445,5 +3445,14 @@ mod tests {
                 Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
             );
         }
+        // A chain that never went round has no pass after the reset to read.
+        let unreturned = format!(
+            "Black box: 0x8000000 held a DONE record another image left in this memory\n{}\n",
+            bootlog::LOADER_LAST_LINE
+        );
+        assert_eq!(
+            boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &unreturned, log),
+            Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+        );
     }
 }
