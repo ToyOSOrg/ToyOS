@@ -9,7 +9,7 @@ opened: 2026-09-27
 The north star: ToyOS rebuilds its own sources inside ToyOS and reproduces the
 bytes the host built. A bootstrap from source with no binary seed is out of
 scope (owner, 2026-09-27). The compiler is LLVM throughout: rustc's, and clang
-with lld, one build of one fork, `ToyOSOrg/llvm-project` (`forks.toml`). The C
+with lld, one build of one fork, `ToyOSOrg/llvm-project`. The C
 library stays `userland/libc`, ours. Each stage lands on x86-64 first and on
 AArch64 one step behind, on `issues/kernel/toyos-runs-on-arm64.md`'s track.
 

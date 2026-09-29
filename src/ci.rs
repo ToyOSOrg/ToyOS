@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::{flags, pr, release, sdkversion, testargs};
+use crate::{flags, release, sdkversion, sync, testargs};
 
 /// `nightly.yml`'s two schedules: the nightly reach six nights a week, the weekly
 /// reach on the seventh.
@@ -749,8 +749,8 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
-    let tip = pr::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
-    at_tip(&tip, &pr::git(root, &["rev-parse", "HEAD"])?)?;
+    let tip = sync::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
+    at_tip(&tip, &sync::git(root, &["rev-parse", "HEAD"])?)?;
     let plan = sdkversion::plan(root)?;
     sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();
@@ -814,9 +814,9 @@ mod tests {
         let short = toyos_tmpdir::TempDir::new("left-behind-short");
         std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
         assert!(left_behind(&tmp, &short, &[]).is_ok());
-        std::fs::create_dir(tmp.join("forkcheck-1-current")).unwrap();
+        std::fs::create_dir(tmp.join("stale-1-current")).unwrap();
         let refusal = left_behind(&tmp, &short, &[]).expect_err("a directory left behind is a red");
-        assert!(refusal.contains("forkcheck-1-current"), "{refusal}");
+        assert!(refusal.contains("stale-1-current"), "{refusal}");
     }
 
     /// A short root whose process died while the steps ran is named; one already

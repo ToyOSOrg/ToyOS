@@ -10,7 +10,7 @@ opened: 2026-09-28
 and a drop on the last drop only, so a drop is never raced against a
 `strong_count` and a clone only against the last one. It is the atomics'
 last-access gap, which the
-`[loom]` fork in `forks.toml` closes for atomics, on `loom::sync::Arc`.
+loom fork closes for atomics, on `loom::sync::Arc`.
 
 **Evidence:** under stock v0.7.2 and under the fork at `d63fbd07`, this runs
 one execution and sees `{2}`, where `{1, 2, 3}` are all reachable:

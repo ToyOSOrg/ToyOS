@@ -53,14 +53,10 @@ pub(crate) use declare_flags;
 
 declare_flags!(pub CARGO_RUN = {
     pub HELP = "--help", None;
-    pub LAND = "--land", None;
-    pub PR = "--pr", None;
-    pub GATES_AFTER_MERGE = "--gates-after-merge", None;
     pub SYNC = "--sync", None;
     pub CI = "--ci", Rest;
     pub CLIPPY = "--clippy", None;
     pub KNOWN_RED = "--known-red", Optional;
-    pub ABI_CALLERS = "--abi-callers", Next;
     pub DEBUG = "--debug", None;
     pub BUILD_ONLY = "--build-only", None;
     pub DUMP_AUDIO = "--dump-audio", None;
@@ -78,7 +74,6 @@ declare_flags!(pub CARGO_RUN = {
     pub REGEN_WALLPAPER = "--regen-wallpaper", None;
     pub REGEN_SOUNDFONT = "--regen-soundfont", Next;
     pub WORKTREE = "--worktree", Rest;
-    pub CHECK_FORKS = "--check-forks", None;
     /// Mint the owner's image-signing key where `signing::owner_key_path`
     /// says, refusing to replace one.
     pub SIGNING_KEY_NEW = "--signing-key-new", None;
