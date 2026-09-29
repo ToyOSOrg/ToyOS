@@ -80,8 +80,11 @@ changes.
   phase is quiet.
 - **`blocked_dump`** — retired 2026-09-04, green 3 of 3 beside a full fast
   tier.
-- **`screen_console_scroll`** — retired 2026-09-04, green 3 of 3 beside a full
-  fast tier.
+- **`screen_console_scroll`** — the 2026-09-04 retirement above no longer
+  holds: red once more, 2026-09-29, PR #593's Fast run at `fa99614b` on a
+  loaded host, `a keystroke was lost` rather than this file's wall-clock-guard
+  shape. Tracked as `issues/build/the-console-loses-a-typed-keystroke-under-host-load.md`
+  and disabled in `src/redlist.rs`.
 - **`hda_tone`** — added 2026-08-07, hours after the test itself landed. In a
   full run on a host carrying another worktree's suite: `2 mid-tone silences in
   the capture: total 2 [3p×1 4p×1]`, `dither 3.3%`, `phase-breaks 92`. Alone on
