@@ -39,8 +39,8 @@ guess. Then build, then test before anyone reviews:
 To edit a fork, clone it beside the monorepo and list it in `.cargo/config.toml`. Fork clones are
 shared by every worktree: explicit paths, never `stash`, never switch a branch in one. A fork keeps
 one branch per upstream base; a fix is a commit appended to it, never a new branch. A fork depends
-on ToyOS crates by version, never by path. Every change is upstream-mergeable: ToyOS is a new
-platform under `cfg(target_os = "toyos")`, cross-platform code is untouched, the rationale goes in
+on ToyOS crates by version, never by path. Every change is upstream-mergeable: ToyOS enters as a new
+platform, a cross-platform change is written as upstream would accept it, the rationale goes in
 the commit message. A commit you push to a fork branch lands in the same pull request as the bump
 of every lockfile and gitlink that names that branch.
 

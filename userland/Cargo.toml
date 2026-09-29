@@ -60,7 +60,6 @@ raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", bra
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8" }
 winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
-libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
 
 
 # The one profile every guest binary is built with.
