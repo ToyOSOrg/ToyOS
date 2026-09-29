@@ -1874,17 +1874,6 @@ fn blocked_on(line: &str) -> Result<Blocked, String> {
     Ok(Blocked { stream: field("stream")?, address: field("addr")?, access: field("access")?, reason })
 }
 
-/// How far up the identity domain reaches, off the line that built it.
-fn identity_extent(log: &Serial) -> Result<u64, String> {
-    let line = log.must_say("iommu: identity domain")?;
-    let range = line
-        .split_whitespace()
-        .find(|w| w.starts_with("0x0.."))
-        .ok_or_else(|| format!("no extent on {line:?}"))?;
-    let top = range.trim_start_matches("0x0..0x");
-    u64::from_str_radix(top, 16).map_err(|_| format!("unreadable extent on {line:?}"))
-}
-
 /// The one function `pci::enumerate` printed with this class, or none.
 ///
 /// `None` rather than a first match over several: two controllers of one class
