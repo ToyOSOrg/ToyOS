@@ -383,9 +383,13 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
             region.start, region.end
         );
     }
-    // The architecture's own page (the AP trampoline on x86-64, empty on AArch64) is not a
-    // loader allocation, so it is named here rather than folded into `loader` above.
-    let reserved = [loader[0], loader[1], loader[2], loader[3], arch::boot::reserved()];
+    // The architecture's own page is not a loader allocation, so it is named
+    // here rather than folded into `loader` above. Destructuring `loader` by
+    // name, rather than indexing it, means a region added to `loader` fails
+    // to compile here instead of compiling and being silently dropped from
+    // what `mm::init` withholds.
+    let [image, elf, black_box, root] = loader;
+    let reserved = [image, elf, black_box, root, arch::boot::reserved()];
 
     // The last point before the first hash container (`mm::init`'s address
     // space), and not earlier: seeding fails only by panicking, and a panic
