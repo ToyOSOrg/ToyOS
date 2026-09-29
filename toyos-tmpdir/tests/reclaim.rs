@@ -329,6 +329,18 @@ fn an_adopted_root_goes_with_its_adopter() {
     let other = tmp.join(format!("{ROOT_PREFIX}{pid}0-0"));
     std::fs::create_dir(&other).unwrap();
 
+    // The adopted pid reused, so its name matches the prefix `adopt` filters
+    // on; only its owner's lock says it is live, and that must still hold.
+    let reused = tmp.join(format!("{ROOT_PREFIX}{pid}-9"));
+    std::fs::create_dir(&reused).unwrap();
+    let reused_owner = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(reused.join(OWNER))
+        .unwrap();
+    reused_owner.lock().unwrap();
+
     let adopter = TempDir::new("adopter");
     adopter.adopt(&tmp, pid);
     assert!(!root.exists(), "{} was not adopted", root.display());
@@ -339,7 +351,9 @@ fn an_adopted_root_goes_with_its_adopter() {
     assert!(moved.exists(), "{} holds no {}", adopter.display(), moved.display());
     assert!(other.exists(), "another pid's root was adopted");
     assert!(live.dir.join("image.img").exists(), "a live root was adopted");
+    assert!(reused.exists(), "a live root of a reused pid was adopted");
 
+    drop(reused_owner);
     let adopted = adopter.to_path_buf();
     drop(adopter);
     assert!(!adopted.exists(), "{} outlived its TempDir", adopted.display());

@@ -27,8 +27,6 @@ pub fn hold(test_config: &Path, image: &Path) {
 /// blocked and ignored.
 pub fn guest_dies_with_its_harness(test_config: &Path) -> Result<(), String> {
     let tmp = TempDir::new("orphan");
-    // Where the owner's roots under `/tmp` go once it is dead: this process's
-    // one sweep of `/tmp` is behind it by this line, before the owner makes one.
     let short = TempDir::short("orphan");
     let image = tmp.join("boot.img");
     std::fs::write(&image, qemu::build_boot_image(test_config, &[], &[], &[]))
@@ -42,10 +40,10 @@ pub fn guest_dies_with_its_harness(test_config: &Path) -> Result<(), String> {
         // ceiling ends it well inside the backstop on any wait on a guest.
         let pid: u32 =
             owner.said(HELD, qemu::GUEST_WEDGED)?.parse().map_err(|e| format!("the owner's QEMU pid: {e}"))?;
-        owner.killed(&[pid]).map(|took| (pid, took))
+        owner.killed(&[pid]).map(|()| pid)
     })();
     short.adopt(Path::new(toyos_tmpdir::SHORT_BASE), owner_pid);
-    let (pid, took) = verdict?;
-    eprintln!("  [orphan] QEMU {pid} gone {took:?} after its harness's SIGKILL");
+    let pid = verdict?;
+    eprintln!("  [orphan] QEMU {pid} gone after its harness's SIGKILL");
     Ok(())
 }

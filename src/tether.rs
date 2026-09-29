@@ -185,18 +185,17 @@ impl Owner {
         self.child.id()
     }
 
-    /// `SIGKILL` the owner, and how long every process holding its stderr took
-    /// to exit after it. `Err` if one outlived it by [`WITHIN`], naming which
-    /// of `pids` still answer; the owner's group is then killed, and the
-    /// refusal says whether every holder went with it.
-    pub fn killed(mut self, pids: &[u32]) -> Result<Duration, String> {
-        let killed = Instant::now();
+    /// `SIGKILL` the owner. `Err` if a process holding its stderr is still
+    /// there [`WITHIN`] afterward, naming which of `pids` still answer; the
+    /// owner's group is then killed, and the refusal says whether every
+    /// holder went with it.
+    pub fn killed(mut self, pids: &[u32]) -> Result<(), String> {
         self.child.kill().map_err(|e| format!("SIGKILL the owner: {e}"))?;
         // Held past the verdict: `wait` would close it, and a child reading
         // it would end on that instead of on its tether.
         let _stdin = self.child.stdin.take();
         let verdict = match self.closed.recv_timeout(WITHIN) {
-            Ok(_) => Ok(killed.elapsed()),
+            Ok(_) => Ok(()),
             Err(_) => Err(self.survived(pids)),
         };
         self.child.wait().map_err(|e| format!("reap the owner: {e}"))?;
@@ -273,7 +272,7 @@ mod tests {
         let mut owner = Owner::spawn(this_test("tether::tests::owner")).unwrap_or_else(|e| panic!("{e}"));
         let pid: u32 =
             owner.said(TETHERED, WITHIN).unwrap_or_else(|e| panic!("{e}")).parse().expect("a pid");
-        let took = owner.killed(&[pid]).unwrap_or_else(|e| panic!("{e}"));
-        eprintln!("tethered child {pid} gone {took:?} after its owner's SIGKILL");
+        owner.killed(&[pid]).unwrap_or_else(|e| panic!("{e}"));
+        eprintln!("tethered child {pid} gone after its owner's SIGKILL");
     }
 }
