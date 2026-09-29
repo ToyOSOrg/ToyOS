@@ -12,8 +12,7 @@ so a reader that sees a count sees the bytes behind it. No row of `src/ci.rs`'s
 `CONTROLS` weakens that pair, so nothing shows that
 `kernel-loom/tests/i8042_tally.rs` would catch its loss.
 
-**Evidence:** with both orderings weakened to `Relaxed`, under the loom fork
-`forks.toml` pins,
+**Evidence:** with both orderings weakened to `Relaxed`, under the loom fork,
 `cargo test -p kernel-loom --test i8042_tally` exits 101:
 `a_counted_interrupt_carries_its_bytes_with_it` panics with "a reader counted
 an interrupt as having delivered a byte and could not see the byte", and the

@@ -330,9 +330,7 @@ fn dlopen_survives(name: &str, bytes: &[u8]) {
     drop(unsafe { libloading::Library::new(&path) });
 }
 
-/// `dlopen` must refuse this file. A success is the defect: each case here is
-/// an image whose relocations would be written through a range the loader is
-/// at that moment holding a `&[u8]` over, or into a page it maps `ReadExec`.
+/// `dlopen` must refuse this file. A success is the defect.
 fn dlopen_refused(name: &str, bytes: &[u8]) {
     let path = write_file(name, bytes);
     match unsafe { libloading::Library::new(&path) } {
@@ -607,6 +605,14 @@ fn main() {
 
     // 20. The apply-time TLS refusals, each named by its reason in the log.
     tls_apply_time_refusals_are_reached();
+
+    // 21. A program header table no `PT_LOAD` maps: the one segment's file
+    //     bytes start at 0x1000, past the table at 0x40. Its vaddr is 0, so
+    //     `rebase_base` and `load_shared_lib`'s vaddr-0 check pass it and only
+    //     the table refuses it, in `spawn` and in `load_shared_lib` alike.
+    let unmapped = Elf::new(0x2000).ph(Phdr::load(0x1000, 0, 0x1000, 0x1000, PF_R | PF_X)).entry(0).build();
+    spawn_refused("phdrs_unmapped", &unmapped);
+    dlopen_refused("phdrs_unmapped.so", &unmapped);
 
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.

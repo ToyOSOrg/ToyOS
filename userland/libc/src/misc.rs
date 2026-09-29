@@ -432,13 +432,20 @@ pub unsafe extern "C" fn longjmp(_env: *mut u8, _val: i32) -> ! {
 }
 
 // dlopen/dlsym/dlclose
+//
+// A C handle is the kernel's module index plus one: index 0 is a module, and
+// NULL is dlopen's failure.
+
+fn module_index(handle: *mut u8) -> Option<u64> {
+    (handle as u64).checked_sub(1)
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn dlopen(path: *const u8, _flags: i32) -> *mut u8 {
     if path.is_null() { return ptr::null_mut(); }
     let path_bytes = super::posix_io::c_str_to_bytes(path);
     match syscall::dl_open(path_bytes) {
-        Ok(handle) => handle as *mut u8,
+        Ok(index) => (index + 1) as *mut u8,
         Err(_) => ptr::null_mut(),
     }
 }
@@ -446,9 +453,10 @@ pub unsafe extern "C" fn dlopen(path: *const u8, _flags: i32) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn dlsym(handle: *mut u8, symbol: *const u8) -> *mut u8 {
     if symbol.is_null() { return ptr::null_mut(); }
+    let index = module_index(handle).expect("dlsym: RTLD_DEFAULT not implemented");
     let name = super::posix_io::c_str_to_bytes(symbol);
     // SAFETY: handle is from a prior dlopen, name is a valid C string
-    match unsafe { syscall::dl_sym(handle as u64, name) } {
+    match unsafe { syscall::dl_sym(index, name) } {
         Ok(addr) => addr as *mut u8,
         Err(_) => ptr::null_mut(),
     }
@@ -456,7 +464,10 @@ pub unsafe extern "C" fn dlsym(handle: *mut u8, symbol: *const u8) -> *mut u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn dlclose(handle: *mut u8) -> i32 {
-    syscall::dl_close(handle as u64) as i32
+    match module_index(handle) {
+        Some(index) => syscall::dl_close(index) as i32,
+        None => -1,
+    }
 }
 
 #[no_mangle]

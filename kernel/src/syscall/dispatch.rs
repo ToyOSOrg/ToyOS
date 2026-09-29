@@ -113,7 +113,7 @@ fn task_probes() {
         crate::sched_gate::run("syscall");
     }
     if ss {
-        crate::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
+        crate::arch::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
     }
 }
 

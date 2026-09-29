@@ -397,6 +397,7 @@ toyos-blockhold = { path = "../toyos-blockhold" }
 toyos-bootmap = { path = "../toyos-bootmap" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
+toyos-gicv3 = { path = "../toyos-gicv3" }
 toyos-gpt = { path = "../toyos-gpt" }
 toyos-hda = { path = "../toyos-hda" }
 toyos-pci = { path = "../toyos-pci" }

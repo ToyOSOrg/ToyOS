@@ -57,8 +57,8 @@ impl TlsBlock {
             // by no mapping until `publish` maps it after this returns.
             unsafe { rebase(frames, tp_offset, at) }
         })?;
-        let fs_base = (pages.vaddr() + tp_offset as u64).raw();
-        Some((pages, fs_base, tp_offset))
+        let thread_pointer = (pages.vaddr() + tp_offset as u64).raw();
+        Some((pages, thread_pointer, tp_offset))
     }
 }
 

@@ -438,6 +438,9 @@ const RUST_SKIP: &[&str] = &[
 /// assert-carrying build there.
 #[allow(dead_code, reason = "`suite_split` reads it, in `toyos-checks` alone")]
 const DRIVEN_AND_SHARED: &[&str] = &[
+    // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
+    // for AArch64 and runs it on that architecture's job case.
+    "abuse_readonly_copyout",
     // The lost-wake canary: its shared run is the count on the shipping
     // kernel with nothing staged, and `blocking_read_window` drives it again
     // with the watch's window held open.
@@ -513,6 +516,15 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("virt_early_panic", Sched::Parallel, Tier::Local),
     ("virt_early_fault", Sched::Parallel, Tier::Local),
     ("virt_el2_drop", Sched::Parallel, Tier::Local),
+    ("virt_user_mode", Sched::Parallel, Tier::Local),
+    ("virt_timer_preempts", Sched::Parallel, Tier::Local),
+    ("virt_irq_storm", Sched::Parallel, Tier::Local),
+    ("virt_timer_floor", Sched::Parallel, Tier::Local),
+    ("virt_fp_isolation", Sched::Parallel, Tier::Local),
+    ("virt_first_entry", Sched::Parallel, Tier::Local),
+    ("virt_unmap_touch", Sched::Parallel, Tier::Local),
+    ("virt_debug_refused", Sched::Parallel, Tier::Local),
+    ("virt_readonly_copyout", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -3515,6 +3527,82 @@ fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String>
     Ok(())
 }
 
+/// `tests/toyos-rust-tests`' binary that `tests/virtjobcase` runs as its job
+/// `test_rs_abuse_readonly_copyout`.
+const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
+
+/// Boot `tests/virtjobcase` under the EL2 profile and judge its job `job`:
+/// it ends with exit 0, having said `said`. The kernel carries `SYS_DEBUG`
+/// for `debug_refused`, and every job runs in every boot of the case.
+fn virt_job(job: &str, said: &str) -> Result<(), String> {
+    let config = compile::repo_root().join("tests/virtjobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let profile = qemu::Profile::VirtEl2;
+    static COPYOUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let copyout = COPYOUT.get_or_init(|| {
+        qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
+    });
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            kernel_features: toyos_build::build::TEST_KERNEL,
+            ready_marker: "control registers: SCTLR_EL1=",
+            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), copyout.clone())],
+            ..Default::default()
+        },
+    );
+    let end = format!("===TEST_END {job} ");
+    let mut rest = String::new();
+    let waited = await_marker(&mut qemu, &mut rest, &end, &format!("the job {job} to end"));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    if let Err(why) = waited {
+        return Err(format!("{why}\nserial:\n{serial}"));
+    }
+    let ended = serial
+        .lines()
+        .find(|l| l.contains(&end))
+        .expect("await_marker answered Ok, so the marker is in what it drained");
+    let Some(line) = serial.lines().find(|l| l.contains(said)) else {
+        return Err(format!("{said:?} not on the PL011 ({ended})\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {line}");
+    if !ended.contains(&format!("===TEST_END {job} exit=0===")) {
+        return Err(format!("{ended}\nserial:\n{serial}"));
+    }
+    Ok(())
+}
+
+/// Boot `test_config` under the EL2 profile with the kernel selftest `armed`
+/// names, and judge its one line: `<param>: PASS`.
+fn virt_selftest(test_config: &Path, armed: &'static [&'static str; 1]) -> Result<(), String> {
+    let [param] = armed;
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::VirtEl2,
+            kernel_params: armed,
+            ready_marker: "control registers: SCTLR_EL1=",
+            ..Default::default()
+        },
+    );
+    let said = format!("{param}: ");
+    let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(&said));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    let Some(verdict) = serial.lines().find(|l| l.contains(&said)) else {
+        return Err(format!("{param} never reported\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {verdict}");
+    if !verdict.contains(&format!("{param}: PASS")) {
+        return Err(format!("{verdict}\nserial:\n{serial}"));
+    }
+    Ok(())
+}
+
 /// Run one screen test. `Err` carries the decoded screen, because a failure
 /// here is almost always "the text is not what I expected" and the decoded
 /// grid is the only readable form of that.
@@ -4974,6 +5062,62 @@ fn run_screen_test(
             }
             Ok(())
         }
+        "virt_user_mode" => {
+            // The port's stage 4 on one CPU, under the EL2 profile whose
+            // entry also writes what the drop leaves EL2 holding: the kernel's
+            // own tables, the GIC and the timer, and a process at EL0 — init,
+            // whose every page arrives by a demand fault and whose spawn of
+            // `logd` is a syscall the kernel answered. Emulated, and not under
+            // HVF, which exposes no RNDR for the kernel's hash seed.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::VirtEl2,
+                    ready_marker: "control registers: SCTLR_EL1=",
+                    ..Default::default()
+                },
+            );
+            const SPAWNED: &str = "spawn: /system/bin/logd pid=";
+            let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(SPAWNED));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            for want in [
+                "paging: the direct map holds memory below",
+                "percpu: BSP cpu_id=0",
+                "GIC: v",
+                "clock: the generic timer counts at",
+                "spawned /system/bin/init pid=",
+                SPAWNED,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            Ok(())
+        }
+        "virt_timer_preempts" => {
+            // Spelled in `userland/toybox/src/preempt.rs`.
+            virt_job("preempt", "preempt: the counting thread was preempted twice")
+        }
+        "virt_fp_isolation" => virt_job("fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
+        "virt_first_entry" => virt_job("first_entry", "first_entry: x1-x30 were zero"),
+        "virt_unmap_touch" => virt_job("unmap_touch", "unmap_touch: 4 reads of a page just unmapped"),
+        "virt_debug_refused" => virt_job(
+            "debug_refused",
+            "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused",
+        ),
+        "virt_readonly_copyout" => {
+            virt_job(&format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
+        }
+        "virt_irq_storm" => {
+            // The CPU floods itself with SGIs until the timer has fired a
+            // thousand times through the flood, then waits for every SGI it
+            // sent. A tick lost or never re-armed, or an SGI lost, leaves the
+            // storm running and the verdict unsaid.
+            virt_selftest(test_config, &["irq-storm"])
+        }
+        "virt_timer_floor" => virt_selftest(test_config, &["timer-floor"]),
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:
             // crash_report, capture, panic_flush, halt_all_cpus, render. The
@@ -16791,8 +16935,7 @@ fn main() {
     // var is invisible in the command line and easy to leave set, and the whole
     // point of the split is that a run says what it ran.
     let reach = Reach::of(&args);
-    let nocapture =
-        SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
+    let nocapture = SUITE.present(&args, &testargs::NOCAPTURE);
 
     // How many guests the parallel phase runs at once. The serial tail ignores
     // it — that is what it is.
@@ -17094,11 +17237,6 @@ fn main() {
 
     // Three exit statuses, because there are three things a run can establish —
     // see [`Tally::exit_code`], which is where the whole decision now lives.
-    //
-    // A green run is a claim that this tree passed, and `--land`'s gate consumes
-    // exactly this number. A run that spanned a suspend did not establish that:
-    // its liveness ceilings were measured on a clock that stopped with it, so
-    // exit 0 would be a claim it cannot support.
     //
     // Nor may it be 1. A red sends an agent hunting a defect, and the defect is
     // not there — the lid was closed. CLAUDE.md already documents the signature

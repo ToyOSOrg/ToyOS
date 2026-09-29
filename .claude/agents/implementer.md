@@ -34,16 +34,36 @@ guess. Then build, then test before anyone reviews:
 - The T14 is the orchestrator's. Write the request file the brief names and end with
   `T14 RUN REQUESTED: <image path>`.
 
+## A fork
+
+To edit a fork, clone it beside the monorepo and list it in `.cargo/config.toml`. Fork clones are
+shared by every worktree: explicit paths, never `stash`, never switch a branch in one. A fork keeps
+one branch per upstream base; a fix is a commit appended to it, never a new branch. A fork depends
+on ToyOS crates by version, never by path. Every change is upstream-mergeable: ToyOS enters as a new
+platform, a cross-platform change is written as upstream would accept it, the rationale goes in
+the commit message. A commit you push to a fork branch lands in the same pull request as the bump
+of every lockfile and gitlink that names that branch.
+
+`rust/` is stricter: `library/alloc` and `library/core` have zero delta; a cross-platform file is
+touched only to add a target arm at an existing dispatch site; `src/bootstrap` takes only a general
+capability written to upstream quality; a `change_tracker` entry is carried only with its upstream
+PR number; only merged upstream commits are cherry-picked.
+
+Fork sources live outside this repository: a search for callers must also cover the fork clones or
+`~/.cargo/git/checkouts/`.
+
 ## Commits and the pull request
 
 `git commit -F <file>`, never `-m`. No `--amend`, no rebase, no force: merge `origin/main`, never
 rebase onto it. Never touch `toyos-abi/src`, `toyos/src` or `userland/libc/src` unless the brief is
 an ABI brief. No new dependency.
 
-`gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,
+Push from your branch, never `main`, with `git status --porcelain` empty: `git push -u origin
+<branch>`, and `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,
 so keep it true of the branch as it stands: what changed and why, per decision; each gate with its
 exit code; what you are unsure of; and for high-risk code the negative control and the independent
-oracle. Mark it ready when your tests are green. Do not arm auto-merge and do not wait on CI unless
+oracle. Mark it ready when your tests are green: `gh pr ready`, then `gh pr edit --title <what
+landed> --body-file <file>`, never `--fill`. Do not arm auto-merge and do not wait on CI unless
 the brief says so.
 
 ## Answering a review

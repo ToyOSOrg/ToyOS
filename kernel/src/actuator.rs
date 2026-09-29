@@ -275,7 +275,7 @@ actuators! {
     /// Storm the CPU spinning on `syscall` from Ring 3 with NMIs.
     syscall_window_nmi = "syscall-window-nmi";
 
-    /// Take the IST index off vector 2's gate — the negative control on the row above: the CPU builds the NMI frame at whatever `rsp` holds and takes a `#DF`.
+    /// Take the IST index off vector 2's gate — the negative control on the row above: the CPU builds the NMI frame at whatever the stack pointer holds and takes a `#DF`.
     nmi_without_ist = "nmi-without-ist";
 
     /// Return from the NMI handler via `iretq` with a second NMI already pending.
@@ -316,6 +316,14 @@ actuators! {
 
     /// Raise a vector no `idt_vectors!` row claims on this CPU once.
     unclaimed_vector_selftest = "unclaimed-vector-selftest";
+
+    /// Tick the timer at a fixed period while this CPU floods itself with
+    /// interrupts.
+    irq_storm = "irq-storm";
+
+    /// Make this CPU's timer due with interrupts masked, ask it to fire within
+    /// a quantum, and take its interrupts with them open.
+    timer_floor = "timer-floor";
 
     /// Deliver the i8042 vector once at arming with no byte behind it — the arming edge, staged.
     i8042_arm_edge = "i8042-arm-edge";

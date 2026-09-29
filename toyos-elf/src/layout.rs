@@ -10,8 +10,8 @@
 //! address it placed the image at. A raw `p_vaddr` never leaves this module.
 
 use crate::header::{
-    FileHeader, Machine, ProgramHeader, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_LOAD, PT_TLS,
-    SECTION_HEADER_SIZE,
+    FileHeader, Machine, ProgramHeader, PROGRAM_HEADER_SIZE, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_LOAD,
+    PT_TLS, SECTION_HEADER_SIZE,
 };
 use crate::{Error, MAX_LOAD_SEGMENTS, MAX_TLS_ALIGN};
 
@@ -237,6 +237,29 @@ impl DynamicSegment {
     }
 }
 
+/// Where the loaded image holds its own program header table.
+///
+/// Derived from where a `PT_LOAD` copies `e_phoff` out of the file, not from
+/// `PT_PHDR`: that header is the file's claim about this, and this is what the
+/// loader actually puts there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProgramHeaderTable {
+    image: ImageRange,
+    count: u16,
+}
+
+impl ProgramHeaderTable {
+    /// The table's bytes, inside the file-backed part of one `PT_LOAD`.
+    pub const fn image(&self) -> ImageRange {
+        self.image
+    }
+
+    /// `e_phnum`, at least one.
+    pub const fn count(&self) -> u16 {
+        self.count
+    }
+}
+
 /// Where the section header table is, when the file has a usable one.
 ///
 /// Section headers are optional metadata — symbol names for backtraces, and
@@ -271,7 +294,8 @@ impl SectionTableRef {
 /// - the extent runs from the smallest `p_vaddr` to the largest
 ///   `p_vaddr + p_memsz` over those segments, so it covers every one of them;
 /// - the entry point, the file-backed extent of `PT_TLS`, and all of
-///   `PT_DYNAMIC` and `PT_GNU_EH_FRAME`, lie inside the extent;
+///   `PT_DYNAMIC` and `PT_GNU_EH_FRAME`, lie inside the extent, and the
+///   program header table, when one is held, inside one `PT_LOAD`'s file bytes;
 /// - the TLS alignment is zero or a power of two no larger than
 ///   [`MAX_TLS_ALIGN`], so that `!(align - 1)` is a mask and the TLS block's
 ///   size cannot be dominated by a number the file chose.
@@ -289,6 +313,7 @@ pub struct Layout {
     dynamic: Option<DynamicSegment>,
     section_headers: Option<SectionTableRef>,
     eh_frame_hdr: Option<ImageRange>,
+    program_headers: Option<ProgramHeaderTable>,
 }
 
 impl Layout {
@@ -410,6 +435,7 @@ impl Layout {
             None => None,
             Some(e) => Some(extent.range(e.vaddr, e.memsz).ok_or(Error::EhFrameOutsideImage)?),
         };
+        let program_headers = program_header_table(&ehdr, segments.get(..placed).unwrap_or(&[]));
 
         Ok(Layout {
             extent,
@@ -420,6 +446,7 @@ impl Layout {
             dynamic,
             section_headers: section_table(&ehdr),
             eh_frame_hdr,
+            program_headers,
         })
     }
 
@@ -458,6 +485,13 @@ impl Layout {
     /// `PT_GNU_EH_FRAME`, for DWARF unwinding.
     pub const fn eh_frame_hdr(&self) -> Option<ImageRange> {
         self.eh_frame_hdr
+    }
+
+    /// Where the loaded image holds the program header table, or `None` when
+    /// no `PT_LOAD`'s file bytes hold all of it and the table exists only in
+    /// the file.
+    pub const fn program_headers(&self) -> Option<ProgramHeaderTable> {
+        self.program_headers
     }
 
     /// The writable window `[lo, hi)` in image offsets, or `None` when no
@@ -558,6 +592,25 @@ impl Layout {
     fn seg_vaddr(&self, seg: &Segment) -> u64 {
         self.extent.min.wrapping_add(seg.image.start)
     }
+}
+
+/// The program header table as the first `PT_LOAD` whose file bytes hold all
+/// of it places it in the image.
+///
+/// Only `p_filesz` counts: past it a segment is zeroes, not the file.
+fn program_header_table(ehdr: &FileHeader, segments: &[Segment]) -> Option<ProgramHeaderTable> {
+    // A `u16` count of 56-byte entries: the product cannot overflow a `u64`.
+    let len = u64::from(ehdr.phnum) * PROGRAM_HEADER_SIZE as u64;
+    segments.iter().find_map(|seg| {
+        let within = ehdr.phoff.checked_sub(seg.file_offset)?;
+        if within.checked_add(len)? > seg.filesz {
+            return None;
+        }
+        // Inside the segment's own range, which the extent holds: `within +
+        // len <= filesz <= memsz`.
+        let start = seg.image.start + within;
+        Some(ProgramHeaderTable { image: ImageRange { start, len }, count: ehdr.phnum })
+    })
 }
 
 /// A section header table the loader can index, or `None`.

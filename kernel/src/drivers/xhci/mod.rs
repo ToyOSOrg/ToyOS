@@ -1657,6 +1657,7 @@ const BARRIER: crate::time::Duration =
 pub fn seal_shut() {
     match take_within(BARRIER.nanos()) {
         Some(guard) => {
+            #[expect(clippy::disallowed_methods, reason = "the lock never given back is the barrier no transfer starts past")]
             core::mem::forget(guard);
             stop::barrier(stop::Barrier::Taken);
         }

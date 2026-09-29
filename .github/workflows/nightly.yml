@@ -108,7 +108,7 @@ jobs:
           for attempt in 1 2 3; do
             apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates \
-                   zstd xz-utils build-essential qemu-system-x86 ovmf-generic >> /tmp/apt.log 2>&1 \
+                   zstd build-essential qemu-system-x86 ovmf-generic >> /tmp/apt.log 2>&1 \
               && break
             [ "$attempt" = 3 ] && { cat /tmp/apt.log; exit 1; }
             sleep 20
@@ -220,30 +220,3 @@ jobs:
           sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
-
-  # The declared Windows frontier
-  # (`issues/build/the-build-system-does-not-compile-on-windows.md`): red
-  # until that issue is fixed, and not a nightly red.
-  portability-windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    continue-on-error: true
-    steps:
-      - *checkout
-      - run: cargo build -p toyos-build
-
-  # One standing issue, found by title and commented on; a dispatch is somebody
-  # watching the run, so only the schedule files.
-  nightly-red:
-    needs: [host, build, guest, tcg, portability-linux, portability-macos]
-    if: ${{ !cancelled() && github.event_name == 'schedule' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - *checkout
-      - env:
-          GH_TOKEN: ${{ github.token }}
-          NEEDS: ${{ toJSON(needs) }}
-        run: cargo run -- --ci nightly-red

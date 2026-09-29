@@ -49,7 +49,6 @@ toyos-abi = { path = "../toyos-abi" }
 toyos = { path = "../toyos" }
 toyos-window = { path = "toyos-window" }
 
-# Ecosystem forks — see forks.toml for upstream base, tier, and PR status.
 getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
 getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
 getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }
@@ -62,7 +61,6 @@ raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", bra
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8" }
 winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
-libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
 
 
 # The one profile every guest binary is built with.

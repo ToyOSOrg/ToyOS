@@ -114,18 +114,9 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // The landing protocol, and the command it replaced — **before
-    // `check_prerequisites`**, because none of these builds anything. They are
-    // git, a push, and a refusal.
-    if asked(&flags::LAND) {
-        toyos_build::pr::dispatch_retired_land();
-    }
-    if asked(&flags::PR) {
-        toyos_build::pr::dispatch_pr(&root, &args);
-        return;
-    }
+    // **Before `check_prerequisites`**, because it builds nothing.
     if asked(&flags::SYNC) {
-        toyos_build::pr::dispatch_sync(&root);
+        toyos_build::sync::dispatch_sync(&root);
         return;
     }
     // Every CI job. Here for the same reason: the host job's runner has no QEMU,
@@ -146,12 +137,6 @@ fn main() {
     // while a build is broken as often as while one works.
     if asked(&flags::KNOWN_RED) {
         toyos_build::redlist::dispatch(&args);
-        return;
-    }
-    // Reads lockfiles and cargo's own checkouts, nothing else: the half of a
-    // "zero callers" ABI sweep a monorepo grep cannot see.
-    if asked(&flags::ABI_CALLERS) {
-        toyos_build::forkcheck::dispatch_callers(&root, &args);
         return;
     }
     // Writes one file outside the checkout and builds nothing.
@@ -185,7 +170,6 @@ fn main() {
     let debug = asked(&flags::DEBUG);
     let build_only = asked(&flags::BUILD_ONLY);
     let dump_audio = asked(&flags::DUMP_AUDIO);
-    let rebuild_toolchain = asked(&flags::REBUILD_TOOLCHAIN);
     let smp = parse_smp(&args);
     let profile = parse_profile(&args);
     let mute = asked(&flags::MUTE);
@@ -206,7 +190,6 @@ fn main() {
         for (other, flag) in [
             (diag, &flags::DIAG_BOOT),
             (console, &flags::CONSOLE_BOOT),
-            (rebuild_toolchain, &flags::REBUILD_TOOLCHAIN),
         ] {
             assert!(!other, "--boot-config {dir} cannot be combined with {}", flag.name);
         }
@@ -253,13 +236,6 @@ fn main() {
         return;
     }
 
-    // On demand and nowhere else: it asks GitHub for every fork branch head, so
-    // neither `cargo test` nor `--land` may reach it.
-    if asked(&flags::CHECK_FORKS) {
-        toyos_build::forkcheck::dispatch(&root);
-        return;
-    }
-
     // Only where the submodules belong. In a linked worktree `rust/` is an empty
     // stub and initialising it clones the whole rust history again, into a git
     // directory of its own that shares no objects with the one beside it.
@@ -271,11 +247,11 @@ fn main() {
     // agent's clean or bootstrap can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
     if let Some(out) = update_image {
-        toyos_build::build::build_update(&root, &boot, rebuild_toolchain, &plan, &out);
+        toyos_build::build::build_update(&root, &boot, &plan, &out);
         println!("Update image: {} (ssh <machine> update < it)", out.display());
         return;
     }
-    let image = toyos_build::build::build(&root, boot, rebuild_toolchain, &plan);
+    let image = toyos_build::build::build(&root, boot, &plan);
     println!("Build finished.");
     println!("Boot image: {}", image.display());
 

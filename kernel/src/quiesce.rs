@@ -6,7 +6,7 @@
 //!
 //! # Where the stop is taken, and why there
 //!
-//! [`stops_this_thread`] is read by `scheduler::leave_ring3_if_due`, called
+//! [`stops_this_thread`] is read by `scheduler::leave_user_if_due`, called
 //! from `kernel_exit_to_user_check` — the one function every return to Ring 3
 //! in this kernel passes through: the syscall gate, every device interrupt, the
 //! timer, the TLB shootdown IPI, the general trap epilogue and a task's first

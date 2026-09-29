@@ -91,3 +91,31 @@ which is the self-hosting track's last stage
   descriptions upstream carries are an unsupported GN overlay (`BUILD.gn`)
   and a Bazel one. Replacing CMake means writing one of those and keeping it
   in Rust, which is M5's.
+
+**Every other binary outside Rust and QEMU that this tree runs is declared
+here too**, because a reviewer refuses any one that is not
+(`.claude/agents/reviewer.md`, Arrivals). `newfs_msdos` and `hdiutil` are
+`issues/filesystem/fat32-suite-needs-macos-binaries.md`'s, and `diskutil` and
+`plutil` are `issues/build/the-owners-flash-script-runs-diskutil.md`'s.
+
+- **`gh`** — `src/release.rs` asks GitHub whether a toolchain release exists,
+  creates it and moves the `sdk-<version>` alias with it, on a runner only.
+  Exit: `src/release.rs` speaks GitHub's REST API itself.
+- **`curl`**, and **`ca-certificates`**, the trust store it verifies against —
+  `src/release.rs` downloads the toolchain release, `src/sdkversion.rs` asks
+  the crates.io index, and the nightly's container and macOS jobs fetch
+  `rustup-init.sh` with it. Exit: those fetches are Rust's, and a job
+  installs rustup without it.
+- **`tar`** and **`zstd`** — `src/release.rs` packs and unpacks the toolchain
+  release. Exit: both are done in Rust, in-process.
+- **`ssh`** — `src/metal.rs` reaches the T14's Ubuntu with it, only when the
+  metal loop is asked for. Exit: that loop drives the repository's own russh
+  client, `crate::build::ssh_client_host`, which `src/metaltalk.rs` already
+  drives at a booted T14.
+- **`ovmf-generic`** — the guest container's UEFI firmware
+  (`src/firmware.rs`), which Debian packages apart from QEMU. Exit: the
+  instrument's QEMU carries its own firmware.
+- **`build-essential`** — Debian's package for `cc` and `c++`, which the
+  nightly's guest containers and `portability-linux` install: every host
+  binary those jobs build links through `cc`, `ring`'s C compiles with it, and
+  `portability-linux` builds LLVM with `c++`. Exit: it goes with `cc`.
