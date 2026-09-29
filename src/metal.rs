@@ -3374,7 +3374,7 @@ mod tests {
         let locked = format!(
             "Previous boot's panic: the last boot read WEDGED\n| {}: cpu7 has taken no interrupt \
              for 60004 ms, with `IF` clear at every sample in that span. Its bound is 60000 ms.\n\
-             |   rip=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
+             |   pc=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
             bootlog::LOCKED_UP
         );
         assert_eq!(wedged_boot(&locked, booted), Ok(1200));

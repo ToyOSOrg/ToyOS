@@ -26,6 +26,3 @@ gone quietly single-threaded and passed while staging nothing.
 
 `std_threading` asserts only `available_parallelism() > 0`, which a constant 1
 satisfies, so nothing in the estate would catch this changing back either.
-
-The fix is one call and touches the fork, so it lands under `src/forkcheck.rs`'s
-rules.

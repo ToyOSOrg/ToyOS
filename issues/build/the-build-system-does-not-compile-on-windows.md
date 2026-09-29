@@ -25,7 +25,7 @@ there. Every other crate in the graph, first-party and third-party, checked
 clean. The `#[cfg(unix)]` at `src/ci.rs:489` is still the only conditional
 compilation in the build system.
 
-`src/tether.rs` is a fourth: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm; `portability-windows` in run 36351950439 fails on it.
+`src/tether.rs` is a fourth: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
 
 ## The judge, and it needs no Windows host and no download
 
@@ -43,9 +43,7 @@ prepended to each path. It works because the fork vendors `library/windows-sys`
 and `library/windows_link`, so a Windows `std` builds from the tree — a plain
 `cargo check --target x86_64-pc-windows-msvc` instead says *"the
 `x86_64-pc-windows-msvc` target may not be installed"* and asks for
-`rustup target add`. It resolves crates.io through the cargo cache, so it is an
-on-demand command like `cargo run -- --check-forks`, never `cargo test` and
-never the landing gate.
+`rustup target add`. It resolves crates.io through the cargo cache.
 
 ## Compiling is not working, and that is why the cheap half is refused
 
@@ -72,13 +70,3 @@ ToyOS grows symbolic links, or the two `toolchain.rs` sites need a shape that
 does not need one — a copy, a directory junction, or a sysroot layout that does
 not require aliasing a directory at all. Deciding that is worth more than a
 `#[cfg]` pair, and it decides two of the seven errors.
-
-## Why this is filed now
-
-The shared-target-directory work
-(`issues/build/every-worktree-builds-its-own-copy-of-the-same-crates.md`)
-was designed to be portable by construction — a path join, no platform branch
-anywhere — on the stated requirement that this project compiles on every major
-OS. That requirement is not met today, so the new work would be a portable
-component inside a build system with unconditional Unix dependencies at its
-centre. Worth knowing before the portability of anything else is claimed.

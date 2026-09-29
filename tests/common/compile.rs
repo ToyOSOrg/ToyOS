@@ -22,7 +22,7 @@ pub fn c_sysroot() -> CSysroot {
     static C: OnceLock<CSysroot> = OnceLock::new();
     C.get_or_init(|| {
         let mut lock = toyos_build::buildlock::shared(&repo_root(), "the C sysroot");
-        let sysroot = toyos_build::toolchain::ensure(&repo_root(), false, &mut lock);
+        let sysroot = toyos_build::toolchain::ensure(&repo_root(), &mut lock);
         CSysroot::of(&sysroot.dir, super::qemu::SUITE_ARCH)
     })
     .clone()
@@ -88,6 +88,13 @@ pub fn compile_c(name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Link flags a case needs beyond the corpus's, by case name.
+///
+/// An image whose lowest address is 0 hides a table reported from the load bias
+/// instead of the image's first byte; the case prints its lowest `PT_LOAD`, so
+/// an entry that stops reaching its case reds it.
+const LINK_FLAGS: &[(&str, &[&str])] = &[("205_dl_iterate_phdr_image_base", &["-Wl,--image-base=0x200000"])];
+
 /// Link `objects` into a ToyOS executable through the clang driver — which
 /// names `ld.lld` and the sysroot's `libtoyos_c.a`, and makes a PIE — and
 /// return its bytes.
@@ -97,6 +104,7 @@ pub fn link_toyos(objects: &[PathBuf], name: &str) -> Vec<u8> {
     let output = Command::new(&c.clang)
         .args(c.args())
         .args(objects)
+        .args(LINK_FLAGS.iter().filter(|(case, _)| *case == name).flat_map(|(_, flags)| flags.iter()))
         .arg("-o")
         .arg(&out)
         .output()

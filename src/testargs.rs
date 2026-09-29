@@ -149,7 +149,6 @@ declare_flags!(pub SUITE = {
     pub DEBUG = "--debug", None;
     pub LIST = "--list", None;
     pub NOCAPTURE = "--nocapture", None;
-    pub SHOW_OUTPUT = "--show-output", None;
     pub JOBS = "--jobs", Next;
     pub JOBS_SHORT = "-j", Next;
     pub SHARD = "--shard", Next;
@@ -365,7 +364,7 @@ mod tests {
             Some("audio_tone")
         );
         assert_eq!(
-            parse_owned(&["--jobs=4", "futex", "--show-output"]).unwrap().as_deref(),
+            parse_owned(&["--jobs=4", "futex"]).unwrap().as_deref(),
             Some("futex")
         );
     }

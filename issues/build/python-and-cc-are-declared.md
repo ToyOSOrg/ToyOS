@@ -40,7 +40,7 @@ Rust bootstrap again as an incidental fix; do not soften the entry either.
 
 `src/toolchain.rs:749` picks `./x` when `rust/x` exists, which it does. That file
 is a `/bin/sh` script whose whole job is `SEARCH="python3 python py python2 uv"`,
-and it execs `x.py` → `rust/src/bootstrap/bootstrap.py` (55,550 bytes). So a clean
+and it execs `x.py` → `rust/src/bootstrap/bootstrap.py`. So a clean
 clone cannot build a toolchain without Python 3. It is upstream's bootstrap and
 not our code, which is why it is stated rather than blamed — but the bar has no
 upstream exemption, and `bootstrap.py` can never run inside ToyOS.
@@ -70,3 +70,52 @@ their platform's own, which is their premise. Neither reaches a guest. The
 exit condition is Python's: they go when the build no longer needs a host,
 which is the self-hosting track's last stage
 (`issues/build/toyos-builds-itself.md`).
+
+**What removing each takes.**
+
+- **Python.** Upstream has no Python-free entry: `x`, `x.py` and
+  `src/tools/x` all end in `bootstrap.py`. But `src/bootstrap` builds with
+  rustup's stable cargo, `--locked`, and no Python, and the binary downloads
+  its own stage0 (`download_beta_toolchain`) and looks for a Python only to run
+  tests. So `src/toolchain.rs` could build and run it in place of
+  `bootstrap.py`, with no change to the fork, taking over `bootstrap.py`'s
+  environment contract at every fork bump. That removes Python only from a
+  build that reuses a keyed LLVM: LLVM's own CMake requires a Python 3
+  (`find_package(Python3 … REQUIRED)`), so building an LLVM needs one until CMake goes.
+- **`cc` has two jobs**: it links every host binary, and it is
+  the C++ compiler of LLVM, clang, LLD and `rustc_llvm` (`bootstrap.toml`'s
+  `cc`/`cxx`, named in `src/llvm.rs`, with `xcrun` asked for the SDK). It also
+  compiles `ring`'s C for `tests/https-server-host` and
+  `tests/https-fetch-host`. `rust-lld` can take only the link. Nothing replaces the compile but a clang the host did not build.
+- **CMake and Ninja.** LLVM, clang and LLD are described in CMake. The only other build
+  descriptions upstream carries are an unsupported GN overlay (`BUILD.gn`)
+  and a Bazel one. Replacing CMake means writing one of those and keeping it
+  in Rust, which is M5's.
+
+**Every other binary outside Rust and QEMU that this tree runs is declared
+here too**, because a reviewer refuses any one that is not
+(`.claude/agents/reviewer.md`, Arrivals). `newfs_msdos` and `hdiutil` are
+`issues/filesystem/fat32-suite-needs-macos-binaries.md`'s, and `diskutil` and
+`plutil` are `issues/build/the-owners-flash-script-runs-diskutil.md`'s.
+
+- **`gh`** — `src/release.rs` asks GitHub whether a toolchain release exists,
+  creates it and moves the `sdk-<version>` alias with it, on a runner only.
+  Exit: `src/release.rs` speaks GitHub's REST API itself.
+- **`curl`**, and **`ca-certificates`**, the trust store it verifies against —
+  `src/release.rs` downloads the toolchain release, `src/sdkversion.rs` asks
+  the crates.io index, and the nightly's container and macOS jobs fetch
+  `rustup-init.sh` with it. Exit: those fetches are Rust's, and a job
+  installs rustup without it.
+- **`tar`** and **`zstd`** — `src/release.rs` packs and unpacks the toolchain
+  release. Exit: both are done in Rust, in-process.
+- **`ssh`** — `src/metal.rs` reaches the T14's Ubuntu with it, only when the
+  metal loop is asked for. Exit: that loop drives the repository's own russh
+  client, `crate::build::ssh_client_host`, which `src/metaltalk.rs` already
+  drives at a booted T14.
+- **`ovmf-generic`** — the guest container's UEFI firmware
+  (`src/firmware.rs`), which Debian packages apart from QEMU. Exit: the
+  instrument's QEMU carries its own firmware.
+- **`build-essential`** — Debian's package for `cc` and `c++`, which the
+  nightly's guest containers and `portability-linux` install: every host
+  binary those jobs build links through `cc`, `ring`'s C compiles with it, and
+  `portability-linux` builds LLVM with `c++`. Exit: it goes with `cc`.

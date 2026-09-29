@@ -286,9 +286,6 @@ pub fn ssh_refused(host: &str, port: u16, identity: &Identity) -> Result<Refusal
 /// anything. Its last line is the answer; the ones before it, if any, are a
 /// listing's entries.
 fn client(argv: &[&str]) -> Result<String, String> {
-    // Spelled in one expression because `src/sourcegate.rs` reads the argument
-    // text: every host binary this project runs is declared beside the reason,
-    // and a path bound to a name first would reach that scan as nothing.
     let out = Command::new(toyos_build::build::ssh_client_host(&compile::repo_root()))
         .args(argv)
         .output()

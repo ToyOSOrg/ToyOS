@@ -309,6 +309,9 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
         assert!(offset <= span, "offset {offset:#x} past the span {span:#x}");
         image_start.checked_add(offset).expect("an offset inside the span leaves the placement")
     };
+    if let Some(table) = layout.program_headers() {
+        place(table.image().end().get());
+    }
 
     let dyn_bytes = at(&case.bytes, layout.dynamic().ok_or(())?.image());
     let dynamic = Dynamic::parse(dyn_bytes);

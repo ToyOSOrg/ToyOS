@@ -7,13 +7,24 @@ include!("toyos.rs");
 mod checks {
     use super::*;
 
+    #[path = "audio.rs"]
+    mod audio_checks;
+    #[path = "clock.rs"]
+    mod clock_checks;
+    #[path = "qemu.rs"]
+    mod qemu_checks;
+    #[path = "screen.rs"]
+    mod screen_checks;
+    #[path = "serial.rs"]
+    mod serial_checks;
+
     /// One subject: what a console line says died, what a wait does about it,
     /// and that only one place in the harness answers either.
     #[test]
     fn serial_vocabulary() -> Result<(), String> {
-        serial::self_check()?;
-        qemu::ceiling_self_check()?;
-        qemu::host_scale_self_check()?;
+        serial_checks::self_check()?;
+        qemu_checks::ceiling_self_check()?;
+        qemu_checks::host_scale_self_check()?;
         one_vocabulary()
     }
 
@@ -35,7 +46,7 @@ mod checks {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            for word in serial::spellings() {
+            for word in serial_checks::spellings() {
                 // The shape is the spelling as somebody's first argument —
                 // `contains`, `starts_with`, `find`, any of them. A spelling
                 // *inside* a longer staged line is how this file's own gates build
@@ -84,12 +95,12 @@ mod checks {
 
     #[test]
     fn suspend_detector() -> Result<(), String> {
-        common::clock::self_check()
+        clock_checks::self_check()
     }
 
     /// What a suspend is worth to a verdict, staged rather than reasoned about.
     ///
-    /// `common::clock::self_check` gates the detector; this gates what the suite
+    /// `clock_checks::self_check` gates the detector; this gates what the suite
     /// does with what it detects. Both halves are needed and neither implies the
     /// other: **a suspend that silently passes is as bad as one that silently
     /// fails**, and here the two are one line apart.
@@ -606,12 +617,12 @@ mod checks {
 
     #[test]
     fn screen_decoder() {
-        screen::self_test();
+        screen_checks::self_test();
     }
 
     #[test]
     fn metal_audio_judges() -> Result<(), String> {
-        audio::judges_verdict()
+        audio_checks::judges_verdict()
     }
 
     /// `blackbox_unclaimed_page` is a registration `tests/metal-profile.toml` already prices,

@@ -506,8 +506,8 @@ pub mod staged {
         }
     }
 
-    /// From the Ring 3 exit check, once it has nothing more to run.
-    pub fn note_return_to_ring3() {
+    /// From the exit to user mode, once it has nothing more to run.
+    pub fn note_return_to_user() {
         if STAGED.load(Ordering::Acquire) != NOTHING && REQUEST.pending() {
             RETURNS.fetch_add(1, Ordering::AcqRel);
         }
