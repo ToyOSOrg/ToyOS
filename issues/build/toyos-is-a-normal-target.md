@@ -22,7 +22,7 @@ Stages, in order:
 2. **The owner's.** `CARGO_REGISTRY_TOKEN` as a repository secret, then the
    first publish. Until it is there the publish job fails by name on every
    landing, which is the intended noise.
-3. **The forks.** `forks.toml`'s `owed` per fork. softbuffer names
+3. **The forks.** softbuffer names
    `toyos-window` and sits on the v0.4.8 release, and raw-window-handle sits on
    v0.6.2, so nothing the window path goes through is based on a master any
    more. Every fork whose `pr` says "sendable once … is on crates.io" becomes
@@ -54,7 +54,7 @@ Stages, in order:
    rust-windowing/raw-window-handle#223 is released.
 5. **Upstream.** The three backends — winit-toyos, softbuffer's ToyOS backend,
    cpal's ToyOS host — become upstream pull requests rather than forks, which is
-   what the `sibling` tier in `forks.toml` means.
+   what the `sibling` tier means.
 6. **The horizon.** `x86_64-unknown-toyos` as a target in upstream rustc, which
    is what ends the `rust/` fork. Nothing here depends on it and everything here
    is a step toward it.

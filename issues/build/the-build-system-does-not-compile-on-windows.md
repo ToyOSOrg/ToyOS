@@ -43,9 +43,7 @@ prepended to each path. It works because the fork vendors `library/windows-sys`
 and `library/windows_link`, so a Windows `std` builds from the tree — a plain
 `cargo check --target x86_64-pc-windows-msvc` instead says *"the
 `x86_64-pc-windows-msvc` target may not be installed"* and asks for
-`rustup target add`. It resolves crates.io through the cargo cache, so it is an
-on-demand command like `cargo run -- --check-forks`, never `cargo test` and
-never the landing gate.
+`rustup target add`. It resolves crates.io through the cargo cache.
 
 ## Compiling is not working, and that is why the cheap half is refused
 

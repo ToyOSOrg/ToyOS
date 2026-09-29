@@ -34,7 +34,7 @@ nothing.
    | `compositor` | unchanged |
 
    **Exit**: over every tracked path and every text file's content, in the
-   superproject and the `rust/` fork's delta as `src/forkcheck.rs` defines it,
+   superproject and the `rust/` fork,
    excluding the bodies of `issues/` files (recorded evidence), no hit remains
    outside the exclusions, each judged per match and not per line:
    - a case-insensitive substring search for `netd`, `logd`, `soundd`,

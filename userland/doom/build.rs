@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs, path::Path};
 
-/// The upstream doomgeneric commit `/system/bin/doom` is built from. `forks.toml`
-/// records it as the estate's one non-crate third-party source.
+/// The upstream doomgeneric commit `/system/bin/doom` is built from.
 ///
 /// Everything this project measures about doom is a measurement of *these*
 /// sources. Fetching `refs/heads/master` instead made which ones a function of

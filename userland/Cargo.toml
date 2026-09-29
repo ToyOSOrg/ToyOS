@@ -48,7 +48,6 @@ toyos-abi = { path = "../toyos-abi" }
 toyos = { path = "../toyos" }
 toyos-window = { path = "toyos-window" }
 
-# Ecosystem forks — see forks.toml for upstream base, tier, and PR status.
 getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
 getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
 getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }

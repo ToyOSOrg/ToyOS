@@ -182,8 +182,7 @@ hundred third-party crates compiled for ToyOS, the large majority of them
 exactly as published. Doom opens its window through `winit`, presents frames
 through `softbuffer`, and plays through `cpal`; its music is General MIDI
 rendered by `rustysynth`. The handful of crates that needed patches live as
-`toyos` branches of their own repositories, never vendored — `forks.toml` is
-the manifest, and `git log <base>..toyos` in any of them is exactly the ToyOS
+`toyos` branches of their own repositories, never vendored, and `git log <base>..toyos` in any of them is exactly the ToyOS
 delta.
 
 **Booting on real hardware.** The first boot on a physical machine — a
@@ -247,8 +246,7 @@ else — including the Python that only the toolchain bootstrap runs, which
 costs that bootstrap rather than the build.
 Everything this project depends on that it did not write is named
 where it is carried: `NOTICE` lists every committed third-party file with its
-hash, upstream and licence, and `forks.toml` lists every crate ToyOS patches
-with its upstream, pinned base and licence.
+hash, upstream and licence.
 
 Linux and macOS. Windows is a goal, not a claim — the build system still
 assumes Unix in places, and nothing should be advertised until a clean Windows

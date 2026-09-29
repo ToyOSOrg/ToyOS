@@ -113,8 +113,7 @@ userland/doom — GPL-2.0
 
 `/system/bin/doom` links doomgeneric, so the program is GPL-2.0. The C sources are not
 committed: `userland/doom/build.rs` fetches upstream commit `fc60163` into a
-gitignored directory and the toolchain's clang compiles it. `forks.toml` `[doomgeneric]`
-records the pin and why it is a pin.
+gitignored directory and the toolchain's clang compiles it.
 
 The licence text is carried here because the fetch does not bring it: the
 extraction takes only the archive's `doomgeneric/` subdirectory, and upstream's
@@ -293,8 +292,7 @@ Rust crates and the forks
 -------------------------
 
 Third-party crates keep their own upstream licences; nothing is vendored.
-`forks.toml` is the manifest of every crate ToyOS patches, with each fork's
-upstream, pinned base and licence. The audit read all fourteen fork manifests
+The audit read all fourteen fork manifests
 and found them permissive throughout: Apache-2.0, MIT, or MIT OR Apache-2.0.
 
 `rust/` is a submodule of a fork of the Rust compiler and standard library, and

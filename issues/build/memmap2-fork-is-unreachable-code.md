@@ -16,7 +16,7 @@ satisfies rustc's pin.
 Either delete `memmap2/src/toyos.rs` and let `stub.rs` serve, or drop the toyos gate in
 `rustc_data_structures` (the only two APIs rustc uses, `map_copy_read_only` and
 `map_anon`, are correct in the fork). Exactly one of the two should exist. Three
-real bugs in that module were found and fixed 2026-07-28 — see `forks.toml`.
+real bugs in that module were found and fixed 2026-07-28.
 
 **2026-08-25: promoted.** Verified unchanged: all 8 `target_os = "toyos"`
 sites remain in `rust/compiler/rustc_data_structures/src/memmap.rs`, userland

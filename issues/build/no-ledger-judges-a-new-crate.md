@@ -43,7 +43,7 @@ does not judge a crate — it forces somebody to, at the moment one arrives,
 which is the step that is missing.
 
 **The owner refused it on 2026-08-08 as brittle**, along with the other two of
-that day's three, accepting only `cargo run -- --check-forks`. The other two
+that day's three. The other two
 have since become buildable without deciding anything: `NOTICE` was written and
 `CLAUDE.md` now declares the standing failures, so seeding those two ledgers is
 transcription. This one is not in that position. Measured 2026-09-01 by the
