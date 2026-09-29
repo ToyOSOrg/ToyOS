@@ -18,7 +18,7 @@ Pull request #601 holds it. Ubuntu leaves the T14 only after this issue and
 close.
 
 **Exit**: both captures committed, and no Linux image; before the wipe the
-T14's adds CPUID 5, 0x19 and 0x80000001, MSR 0xCF, the split-lock line, and
+T14's adds CPUID 5, 0x19 and 0x80000001, MSR 0xCF, MSR 0x3A (`rdmsr -a 0x3a`, IA32_FEAT_CTL), the split-lock line, and
 the config's `X86_KERNEL_IBT` and `X86_INTEL_MEMORY_PROTECTION_KEYS`.
 **Mutation**: a config hash off by one byte is refused. **Oracle**: that
 Linux.

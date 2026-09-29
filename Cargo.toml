@@ -23,6 +23,7 @@ members = [
     "toyos-blockhold",
     "toyos-blockring",
     "toyos-bootmap",
+    "toyos-cpuvuln",
     "toyos-desktop",
     "toyos-dns",
     "toyos-dma",
