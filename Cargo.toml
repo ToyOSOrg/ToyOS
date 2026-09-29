@@ -54,6 +54,7 @@ members = [
     "toyos-sched/sim",
     "toyos-swap",
     "toyos-symbols",
+    "toyos-t14linux",
     "toyos-tco",
     "toyos-tmpdir",
     "toyos-transport",
