@@ -17328,8 +17328,7 @@ fn main() {
     // var is invisible in the command line and easy to leave set, and the whole
     // point of the split is that a run says what it ran.
     let reach = Reach::of(&args);
-    let nocapture =
-        SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
+    let nocapture = SUITE.present(&args, &testargs::NOCAPTURE);
 
     // How many guests the parallel phase runs at once. The serial tail ignores
     // it — that is what it is.

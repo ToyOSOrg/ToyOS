@@ -388,11 +388,11 @@ fn rebuild_compiler(rust_dir: &Path, llvm: &Path, bootstrap: impl FnOnce()) {
     crate::compiler::record(rust_dir);
 }
 
-/// What the primary bootstraps: a new compiler when asked to or when `stage2`
-/// is not the one its `compiler/` names, and the same one again when rustup has
-/// no `toyos` toolchain to run.
-fn bootstrap(force_rebuild: bool, current: bool, toolchain_exists: bool) -> Option<Bootstrap> {
-    if force_rebuild || !current {
+/// What the primary bootstraps: a new compiler when `stage2` is not the one its
+/// `compiler/` names, and the same one again when rustup has no `toyos`
+/// toolchain to run.
+fn bootstrap(current: bool, toolchain_exists: bool) -> Option<Bootstrap> {
+    if !current {
         Some(Bootstrap { invalidate_hosted: true })
     } else {
         (!toolchain_exists).then_some(Bootstrap { invalidate_hosted: false })
@@ -422,7 +422,7 @@ fn bootstrap(force_rebuild: bool, current: bool, toolchain_exists: bool) -> Opti
 /// `stage1-std/<target>/dist/deps` while another's `rustc` creates a temp file
 /// inside it, and the loser dies compiling `core` with `couldn't create a temp
 /// dir: No such file or directory`.
-pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> Sysroot {
+pub fn ensure(root: &Path, lock: &mut buildlock::Held) -> Sysroot {
     let rust_dir = rust_dir(root);
     let stamps_dir = root.join("target/stamps");
     fs::create_dir_all(&stamps_dir).ok();
@@ -431,13 +431,6 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
 
     match owner {
         Owner::Elsewhere(primary) => {
-            assert!(
-                !force_rebuild,
-                "--rebuild-toolchain would replace the compiler at {}, which every worktree of \
-                 this repository builds with.\nRun it in {}.",
-                stage2(&rust_dir).display(),
-                primary.display()
-            );
             assert!(
                 stage2(&rust_dir).join("bin/rustc").exists(),
                 "there is no compiler to build with: {} does not exist.\n\
@@ -448,7 +441,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
             return sysroot::ensure(root, &rust_dir, lock);
         }
         Owner::Installed => {
-            check_installed_toolchain(root, &rust_dir, force_rebuild);
+            check_installed_toolchain(root, &rust_dir);
             return Sysroot::installed(stage2(&rust_dir));
         }
         Owner::Us => {}
@@ -467,7 +460,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            bootstrap(force_rebuild, current, toolchain_exists)
+            bootstrap(current, toolchain_exists)
         },
         |kind| {
             eprintln!("Building full toolchain (this takes a while on first run)...");
@@ -524,15 +517,8 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
 /// nothing to decide and the answer is always to publish a toolchain built from
 /// these sources. Its std fork is pinned by the release tag, which is a function
 /// of `rust` (`src/release.rs`).
-fn check_installed_toolchain(root: &Path, rust_dir: &Path, force_rebuild: bool) {
+fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
     let stage2 = stage2(rust_dir);
-    assert!(
-        !force_rebuild,
-        "there is no `rust/` source in {}, so --rebuild-toolchain has nothing to build from.\n\
-         The toolchain at {} arrived as an artifact; rebuild it where it is published.",
-        root.display(),
-        stage2.display(),
-    );
     let linked = rustup_link();
     assert!(
         linked.as_deref() == Some(stage2.as_path()),
@@ -1187,7 +1173,7 @@ mod tests {
         assert!(crate::compiler::primary_is_current(&rust_dir));
         crate::compiler::tests::record_before_the_store(&rust_dir);
         let own = in_tree_llvm(&rust_dir);
-        let kind = bootstrap(false, crate::compiler::primary_is_current(&rust_dir), true);
+        let kind = bootstrap(crate::compiler::primary_is_current(&rust_dir), true);
         assert!(kind.is_some_and(|k| k.invalidate_hosted), "a primary recorded before the store was taken for current");
         rebuild_compiler(&rust_dir, &store_llvm(&rust_dir), || bootstrapped(&rust_dir));
         assert!(own.iter().all(|dir| !dir.exists()), "the rebuild kept the LLVM its build directory built");
@@ -1210,26 +1196,22 @@ mod tests {
         assert!(own.iter().all(|dir| dir.join("bin/tool").is_file()), "a stopped bootstrap took the LLVM its compiler linked");
     }
 
-    /// **The primary bootstraps a new compiler exactly when asked to or when its
-    /// `stage2` is not current, and otherwise only when rustup has none.**
+    /// **The primary bootstraps a new compiler exactly when its `stage2` is not
+    /// current, and otherwise only when rustup has none.**
     #[test]
-    fn the_primary_bootstraps_when_asked_stale_or_missing() {
+    fn the_primary_bootstraps_when_stale_or_missing() {
         let new = Some(Bootstrap { invalidate_hosted: true });
         let again = Some(Bootstrap { invalidate_hosted: false });
-        for (force_rebuild, current, toolchain_exists, want) in [
-            (false, true, true, None),
-            (false, true, false, again),
-            (false, false, true, new),
-            (false, false, false, new),
-            (true, true, true, new),
-            (true, true, false, new),
-            (true, false, true, new),
-            (true, false, false, new),
+        for (current, toolchain_exists, want) in [
+            (true, true, None),
+            (true, false, again),
+            (false, true, new),
+            (false, false, new),
         ] {
             assert_eq!(
-                bootstrap(force_rebuild, current, toolchain_exists),
+                bootstrap(current, toolchain_exists),
                 want,
-                "force_rebuild {force_rebuild}, current {current}, toolchain_exists {toolchain_exists}"
+                "current {current}, toolchain_exists {toolchain_exists}"
             );
         }
     }
