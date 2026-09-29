@@ -232,6 +232,24 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
                 ));
             }
         }
+        if let Some(word) = filter {
+            if word.trim().is_empty() {
+                return Err("--metal with an empty filter: name a registration or drop the word"
+                    .to_string());
+            }
+            if let Some(flag) = SUITE.0.iter().find(|f| f.name.trim_start_matches('-') == word) {
+                return Err(format!(
+                    "{word:?} beside --metal is {}'s name without its dashes, and would be \
+                     read as a filter that selects whatever contains it",
+                    flag.name
+                ));
+            }
+        }
+        if has(&LIST) && has(&METAL_READBACK) {
+            return Err("--metal --list prints the plan and reads no readback directory, so \
+                        --metal-readback would be dropped in silence"
+                .to_string());
+        }
         if SUITE.value(args, &METAL_READBACK).is_some_and(|dir| dir.starts_with('-')) {
             return Err(
                 "--metal-readback takes a directory, and a word that starts with - is a flag \
@@ -282,8 +300,6 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
 pub enum MetalMode {
     /// `--metal --list`: print what would run, and touch nothing.
     List,
-    /// `--metal --metal-readback <dir>`: judge the readbacks already at that
-    /// path. Never reaches the machine either.
     Offline(PathBuf),
     /// `--metal` alone: flash and drive the machine.
     Drive,
@@ -573,10 +589,30 @@ mod tests {
     #[test]
     fn metal_and_list_never_drives() {
         assert_eq!(metal_owned(&["--metal", "--list"]).unwrap(), Some(MetalMode::List));
-        assert_eq!(
-            metal_owned(&["--metal", "--metal-readback", "target/metal", "--list"]).unwrap(),
-            Some(MetalMode::List)
-        );
+    }
+
+    #[test]
+    fn metal_list_beside_a_readback_directory_is_refused() {
+        for argv in [
+            &["--metal", "--list", "--metal-readback", "x"][..],
+            &["--metal", "--metal-readback", "x", "--list"],
+        ] {
+            let refusal = metal_owned(argv).expect_err(&format!("{argv:?} was accepted"));
+            assert!(refusal.contains("would be dropped in silence"), "{argv:?}: {refusal}");
+        }
+    }
+
+    #[test]
+    fn metal_refuses_a_filter_that_is_a_flags_name_or_empty() {
+        for word in ["list", "metal", "jobs", "shard", "debug", "nightly", "metal-readback"] {
+            let refusal = metal_owned(&["--metal", word]).expect_err(word);
+            assert!(refusal.contains("without its dashes"), "{word}: {refusal}");
+        }
+        for word in ["", "  "] {
+            let refusal = metal_owned(&["--metal", word]).expect_err("empty filter");
+            assert!(refusal.contains("empty filter"), "{word:?}: {refusal}");
+        }
+        assert!(metal_owned(&["--metal", "abuse_listener_hijack"]).is_ok());
     }
 
     #[test]

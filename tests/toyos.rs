@@ -17159,7 +17159,6 @@ fn main() {
         }
     };
     let filter = parsed.filter;
-    let metal_dispatch = parsed.metal;
     // The one selection every entry point below takes, the metal's included: a
     // disabled test runs nowhere, and every run names each one with its issue.
     for row in redlist::DISABLED {
@@ -17220,7 +17219,7 @@ fn main() {
     // guest, so none of the C compile, the HTTPS judge's hosts or the tier
     // arithmetic below is any of its business; running it here is what keeps a
     // `--metal` invocation costing a kernel and a userland and nothing else.
-    if let Some(mode) = metal_dispatch {
+    if let Some(mode) = parsed.metal {
         let rust_tests_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
         eprintln!("[toyos] Building Rust tests...");
