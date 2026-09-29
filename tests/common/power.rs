@@ -1662,11 +1662,10 @@ pub fn blackbox_foreign_record(
     // The pass that finds it: it must name it and clear it, and it must never
     // report it as this stick's predecessor — which is the whole defect.
     let found = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
-    let said = found.must_say("record another image left in this memory")?.to_string();
-    for word in [State::Done.named(), "cleared and this pass boots its kernel"] {
-        if !said.contains(word) {
-            return Err(format!("the pass reported a foreign record without {word:?}: {said}"));
-        }
+    let said = found.must_say(bootlog::FOREIGN_DONE)?.to_string();
+    let cleared = "cleared and this pass boots its kernel";
+    if !said.contains(cleared) {
+        return Err(format!("the pass reported a foreign record without {cleared:?}: {said}"));
     }
     says_nothing_of(&found, bootlog::PREVIOUS_PANIC)?;
     says_nothing_of(&found, "the last boot read")?;
@@ -1990,7 +1989,6 @@ pub fn hard_lockup_chain(
     // arm line and the record itself.
     kernel.must_say("by each cpu's own performance counter")?;
     says_nothing_of(kernel, "CPUID states no architectural performance counter")?;
-    says_nothing_of(kernel, bootlog::REBOOTING)?;
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();

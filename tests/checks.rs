@@ -751,7 +751,13 @@ mod checks {
         for state in ["PANIC", "WEDGED"] {
             let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
             assert!(judge(&[&readback("foreignrecord", &ended, kernel)]).is_err());
+            let stale = format!(
+                "Black box: 0x8000000 held a DONE record another image left in this memory\n{ended}"
+            );
+            assert!(judge(&[&readback("foreignrecord", &stale, kernel)]).is_err());
         }
+        let unbounded = loader.replace(bootlog::HUNG_WITHOUT_A_RECORD, "");
+        assert!(judge(&[&readback("foreignrecord", &unbounded, kernel)]).is_err());
     }
 
     /// A T14 controller's handoff: it publishes USB Legacy Support and
@@ -775,10 +781,13 @@ mod checks {
         );
         assert!(xhci_xecp(&held).is_err());
         assert!(xhci_xecp(&format!("{t14}{held}")).is_err());
+        let kept = held.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&format!("{t14}{kept}")).is_err());
         // A second controller's handoff with no reset of its own, and a reset
         // with no handoff before it.
         let unreset = t14.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
         assert!(xhci_xecp(&format!("{t14}{unreset}")).is_err());
+        assert!(xhci_xecp(&format!("{unreset}{t14}")).is_err());
         let unhanded = t14.replace("firmware did not claim the controller", "USB 3.1 on ports 2..=5");
         assert!(xhci_xecp(&format!("{t14}{unhanded}")).is_err());
     }
@@ -792,11 +801,16 @@ mod checks {
             .map(|name| ((*name).to_string(), Vec::new()))
             .collect();
         let jobs = vec!["test_rs_dlopen_dedup".to_string()];
-        let staged: Vec<String> = metal::reached(&format!("test_rs_dlopen_dedup\n{source}"), &jobs, &bins)
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect();
-        assert_eq!(staged, ["bin/test_rs_std_tls", "lib/libfoo.so"]);
+        let staged = |text: &str| -> Vec<String> {
+            metal::reached(text, &jobs, &bins).into_iter().map(|(path, _)| path).collect()
+        };
+        assert_eq!(
+            staged(&format!("test_rs_dlopen_dedup\n{source}")),
+            ["bin/test_rs_std_tls", "lib/libfoo.so"]
+        );
+        // A longer name is another binary's.
+        let longer = source.replace("test_rs_std_tls", "test_rs_std_tls_dlopen");
+        assert_eq!(staged(&format!("test_rs_dlopen_dedup\n{longer}")), ["lib/libfoo.so"]);
     }
 
     /// `03_struct`'s output as `ccheck` prints it: the expectation the corpus

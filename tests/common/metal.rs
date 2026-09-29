@@ -436,17 +436,14 @@ impl Readback {
     /// report is. `None` where the chain did not go round — which for a boot
     /// that ended itself is a finding, not an absence.
     pub fn after_the_reset(&self) -> Result<Serial, String> {
-        let at = self.loader.find(bootlog::SEPARATOR).ok_or_else(|| {
+        let after = bootlog::after_the_reset(&self.loader).ok_or_else(|| {
             format!(
                 "{}'s loader.log carries no pass after the reset: the loader did not point \
                  `BootNext` at itself, or the machine went back to the boot manager\n{}",
                 self.label, self.loader
             )
         })?;
-        Ok(Serial::named(
-            &format!("{}'s loader pass after the reset", self.label),
-            &self.loader[at..],
-        ))
+        Ok(Serial::named(&format!("{}'s loader pass after the reset", self.label), after))
     }
 
     /// What the kernel recorded about the process the *runner* spawned as
@@ -697,6 +694,13 @@ pub fn reached(
     jobs: &[String],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Vec<(String, Vec<u8>)> {
+    // Whole: a longer name that opens with this one is another binary's.
+    let names = |staged: &str| {
+        reachable.match_indices(staged).any(|(at, _)| {
+            !reachable[at + staged.len()..]
+                .starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+    };
     let mut out = Vec::new();
     for (name, data) in rust_bins {
         let staged = format!("test_rs_{name}");
@@ -705,7 +709,7 @@ pub fn reached(
         // together are a fraction of one helper binary.
         if name.ends_with(".so") {
             out.push((format!("lib/{name}"), data.clone()));
-        } else if !jobs.contains(&staged) && reachable.contains(&staged) {
+        } else if !jobs.contains(&staged) && names(&staged) {
             out.push((format!("bin/{staged}"), data.clone()));
         }
     }
@@ -1142,8 +1146,7 @@ pub fn run(
                 // produced none is a boot some *other* bound ended.
                 // The foreign-identity boot's page is cleared by the pass that
                 // reads it, so it owes no field that crosses only there.
-                let cleared =
-                    batches[label.as_str()].params.contains(&toyos_build::metal::FOREIGN_RECORD_ARM);
+                let cleared = toyos_build::metal::clears_its_own_page(&batches[label.as_str()].params);
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),

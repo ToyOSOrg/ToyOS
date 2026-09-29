@@ -367,11 +367,17 @@ pub fn handed_back(loader: &str) -> Result<(), Unfit> {
 /// The loader's half of a passing foreign-identity boot, whose own chain the
 /// loader ends as a hang: the record it cleared was sealed `DONE`.
 pub fn foreign_done(loader: &str) -> Result<(), Unfit> {
-    if loader.contains(FOREIGN_DONE) {
-        Ok(())
-    } else {
-        Err(Unfit::NoForeignDone)
+    // The pass before the handoff clears a stale foreign record the same way.
+    match after_the_reset(loader) {
+        Some(after) if after.contains(FOREIGN_DONE) => Ok(()),
+        _ => Err(Unfit::NoForeignDone),
     }
+}
+
+/// `loader.log` from [`SEPARATOR`] on: the pass that read what this boot left,
+/// or `None` where the chain did not go round.
+pub fn after_the_reset(loader: &str) -> Option<&str> {
+    loader.find(SEPARATOR).map(|at| &loader[at..])
 }
 
 /// Init's line saying the machine stops, the last one `log` carries.
@@ -664,6 +670,13 @@ mod tests {
                 path.display()
             );
         }
+        // A format and not a constant: the loader fills its hole with the
+        // state's own word.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src/blackbox.rs");
+        let source = std::fs::read_to_string(&path).expect("a loader module");
+        let format = FOREIGN_DONE.replacen(toyos_blackbox::State::Done.named(), "{}", 1);
+        assert!(source.contains(&format), "{} formats no {format:?}", path.display());
     }
 
     #[test]

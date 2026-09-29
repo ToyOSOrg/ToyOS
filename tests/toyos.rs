@@ -1926,8 +1926,6 @@ const METAL: &[(&str, metal::Metal)] = &[
             )],
             judge: |b| {
                 let after = b[0].after_the_reset()?;
-                // Named and cleared, and never reported as this stick's own; and
-                // `DONE`, so the stop it staged finished.
                 let said = after.must_say(bootlog::FOREIGN_DONE)?.to_string();
                 power::says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
                 power::says_nothing_of(&after, "the last boot read")?;

@@ -875,6 +875,13 @@ pub fn stages_a_wedge(armed: &[String]) -> bool {
     armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_str()))
 }
 
+/// Whether this image is armed so the pass after its reset clears its record
+/// as another image's: nothing crosses on the page but the record's state, and
+/// that pass hands the machine back as a hang.
+pub fn clears_its_own_page(armed: &[impl AsRef<str>]) -> bool {
+    armed.iter().any(|name| name.as_ref() == FOREIGN_RECORD_ARM)
+}
+
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
 pub fn flash_ruling(name: &str) -> Option<Flash> {
     // The two parameters that carry a value are not names: the black-box page's
@@ -2120,7 +2127,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
 /// The stick's own verdict on one boot, off what its image is armed with, the
 /// loader's file and the log.
 fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusal> {
-    let staged_hang = armed.iter().any(|name| name == FOREIGN_RECORD_ARM);
+    let staged_hang = clears_its_own_page(armed);
     // **Named by evidence, before the boot record is missed.** A boot that
     // never happened and a boot that failed both leave no `Boot: complete`,
     // and `Unfit::NoBootRecord` says the second where it is often the first.
@@ -3427,6 +3434,14 @@ mod tests {
             let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
             assert_eq!(
                 boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &ended, log),
+                Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+            );
+            // The pass before the handoff cleared a stale foreign `DONE`.
+            let stale = format!(
+                "Black box: 0x8000000 held a DONE record another image left in this memory\n{ended}"
+            );
+            assert_eq!(
+                boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &stale, log),
                 Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
             );
         }
