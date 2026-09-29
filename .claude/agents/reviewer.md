@@ -44,6 +44,12 @@ above; otherwise it is a NOTE.
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
   legacy: no shim, no workaround, no silent default. No new
   dependency, host binary or fetch. Nothing outside the brief's fence.
+- **What no gate reads.** A BLOCKER each: a diff that declares a retired ABI name or reuses a
+  retired syscall, `SYS_DEBUG` action or inbox op number (the retired numbers are
+  `kernel/src/syscall/dispatch.rs`'s `retired_syscalls!` and the "formerly …" and "retired and
+  unused" entries in `toyos-abi/src/syscall.rs` and `toyos-abi/src/inbox.rs`; the retired names
+  include `SharedToken` and `services::connect`); a workspace member's `Cargo.toml` declaring `[profile]` or `[patch]`, which
+  cargo ignores with only a warning; a new package without a `description` saying what it is.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
   needs a reason you accept; a branch that could delete more than it adds and does not goes back

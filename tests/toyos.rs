@@ -17328,8 +17328,7 @@ fn main() {
     // var is invisible in the command line and easy to leave set, and the whole
     // point of the split is that a run says what it ran.
     let reach = Reach::of(&args);
-    let nocapture =
-        SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
+    let nocapture = SUITE.present(&args, &testargs::NOCAPTURE);
 
     // How many guests the parallel phase runs at once. The serial tail ignores
     // it — that is what it is.
@@ -17631,11 +17630,6 @@ fn main() {
 
     // Three exit statuses, because there are three things a run can establish —
     // see [`Tally::exit_code`], which is where the whole decision now lives.
-    //
-    // A green run is a claim that this tree passed, and `--land`'s gate consumes
-    // exactly this number. A run that spanned a suspend did not establish that:
-    // its liveness ceilings were measured on a clock that stopped with it, so
-    // exit 0 would be a claim it cannot support.
     //
     // Nor may it be 1. A red sends an agent hunting a defect, and the defect is
     // not there — the lid was closed. CLAUDE.md already documents the signature

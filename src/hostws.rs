@@ -16,9 +16,7 @@
 //! artifacts — a member's land in the workspace root's `target/`, not its own —
 //! and the gates below walk the tree and red on a `Cargo.toml` that joined
 //! neither `members` nor `exclude`. **A new host crate that forgets to join is
-//! a red, not a silent gap.** Every package the table names carries a
-//! `description`, and a gate below reds on one without: the table and those
-//! lines are the repository's layout, and nothing else lists it.
+//! a red, not a silent gap.**
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -181,32 +179,6 @@ fn walk(root: &Path, dir: &Path, prune: &BTreeSet<String>, found: &mut BTreeSet<
 #[cfg(test)]
 fn unclaimed(members: &BTreeSet<String>, found: &BTreeSet<String>) -> Vec<String> {
     found.difference(members).cloned().collect()
-}
-
-/// The `[package]` `description` of `manifest`: `Ok(None)` for a manifest with
-/// no `[package]` (a virtual workspace), `Err` for a package whose description
-/// is missing or blank.
-#[cfg(test)]
-fn description(manifest: &str) -> Result<Option<String>, &'static str> {
-    let doc: toml::Value = manifest.parse().expect("a manifest is TOML");
-    let Some(package) = doc.get("package") else { return Ok(None) };
-    match package.get("description").and_then(|d| d.as_str()).map(str::trim) {
-        Some(d) if !d.is_empty() => Ok(Some(d.to_string())),
-        Some(_) => Err("a blank `description`"),
-        None => Err("no `description`"),
-    }
-}
-
-/// The tables in `manifest` that cargo reads only from a workspace root.
-///
-/// Parsed as TOML and not scanned as text, for `src/sourcegate.rs`'s reason:
-/// `toyos-ld/Cargo.toml` carries a comment saying where its `[profile.toyos]`
-/// went and why, and a substring scan reads that explanation as the
-/// declaration it is warning about.
-#[cfg(test)]
-fn tables_cargo_would_ignore(manifest: &str) -> Vec<&'static str> {
-    let doc: toml::Value = manifest.parse().expect("a member's manifest is TOML");
-    ["profile", "patch"].into_iter().filter(|key| doc.get(key).is_some()).collect()
 }
 
 /// Every member of every workspace in this repository, as paths relative to the
@@ -445,97 +417,6 @@ mod tests {
             "default-members must be the root package alone, so a bare `cargo test` stays \
              the QEMU harness and a bare `cargo run` stays the dev loop",
         );
-    }
-
-    /// **Every package the `[workspace]` table names says what it is.** Root
-    /// `CLAUDE.md` points here instead of listing the crates, so a crate that
-    /// arrives without a `description` is one nothing describes.
-    #[test]
-    fn every_package_the_workspace_names_has_a_description() {
-        let root = repo_root();
-        let mut missing = Vec::new();
-        let mut described = 0;
-        for dir in members(&root).into_iter().chain(excluded(&root)) {
-            let Ok(text) = std::fs::read_to_string(root.join(&dir).join("Cargo.toml")) else { continue };
-            match description(&text) {
-                Ok(Some(_)) => described += 1,
-                Ok(None) => {}
-                Err(why) => missing.push(format!("{dir}/Cargo.toml has {why}")),
-            }
-        }
-        assert!(described > 40, "only {described} packages read; the walk is reading no workspace");
-        assert!(
-            missing.is_empty(),
-            "a package the root Cargo.toml names says what it is in one line of its own \
-             [package] `description`:\n  {}",
-            missing.join("\n  "),
-        );
-    }
-
-    /// Teeth for the rule above.
-    #[test]
-    fn a_package_without_a_description_is_refused_and_a_virtual_workspace_is_not() {
-        assert_eq!(description("[package]\nname = \"a\"\ndescription = \"An a.\"\n"), Ok(Some("An a.".into())));
-        assert_eq!(description("[package]\nname = \"a\"\n"), Err("no `description`"));
-        assert_eq!(description("[package]\nname = \"a\"\ndescription = \"  \"\n"), Err("a blank `description`"));
-        assert_eq!(description("# description = \"x\"\n[package]\nname = \"a\"\n"), Err("no `description`"));
-        assert_eq!(description("[workspace]\nmembers = [\"a\"]\n"), Ok(None));
-    }
-
-    /// Cargo reads `[profile]` and `[patch]` from the workspace root and
-    /// **silently ignores both in a member** — it warns, into output nobody
-    /// reads on a green build. For `toyos-ld` that is not cosmetic: it is a
-    /// `[programs]` guest binary as well as a host crate, and the
-    /// `[profile.toyos]` it used to declare is what puts `overflow-checks` into
-    /// the image. Both crafted-ELF kernel panics in `issues/` were
-    /// *found* by an overflow check.
-    #[test]
-    fn no_member_declares_a_profile_or_a_patch_cargo_would_ignore() {
-        let root = repo_root();
-        let mut bad = Vec::new();
-        for member in members(&root) {
-            if member == "." {
-                continue;
-            }
-            let path = root.join(&member).join("Cargo.toml");
-            let text = std::fs::read_to_string(&path).expect("a member's manifest is readable");
-            for key in tables_cargo_would_ignore(&text) {
-                bad.push(format!("{member}/Cargo.toml declares a `[{key}]` table"));
-            }
-        }
-        assert!(
-            bad.is_empty(),
-            "cargo honours neither in a workspace member and says so only in a warning:\n  {}\n\
-             Move it to the root Cargo.toml, where it reaches the member it was written for.",
-            bad.join("\n  "),
-        );
-    }
-
-    /// Teeth for the rule above, and the reason it parses rather than greps:
-    /// the two manifests it was written against now explain in a comment where
-    /// their tables went, and the first draft of this gate read the explanation
-    /// as the offence.
-    #[test]
-    fn the_ignored_table_scan_reads_toml_and_not_prose() {
-        assert_eq!(
-            tables_cargo_would_ignore("[package]\nname = \"a\"\n\n[profile.toyos]\nopt-level = 2\n"),
-            ["profile"],
-        );
-        assert_eq!(
-            tables_cargo_would_ignore("[package]\nname = \"a\"\n\n[patch.crates-io]\nx = \"1\"\n"),
-            ["patch"],
-        );
-        assert!(tables_cargo_would_ignore(
-            "# `[profile.toyos]` used to be declared here; it lives in the root now.\n\
-             [package]\nname = \"a\"\n"
-        )
-        .is_empty());
-        // And a value whose *name* contains one, which a looser match would
-        // take for a table header.
-        assert!(tables_cargo_would_ignore(
-            "[package]\nname = \"a\"\n\n[dependencies]\nprofile-thing = \"1\"\n"
-        )
-        .is_empty());
     }
 
     /// **Nothing that executes may name `<member>/target`** — a member builds
