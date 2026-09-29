@@ -9389,22 +9389,25 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
 /// The i8042 status register (port 0x64), read through the monitor rather
 /// than a guest `in`: nothing here holds the claim once its process is gone,
 /// and the byte sits in the controller whether or not its line is masked.
-fn isa_status_byte(socket: &Path) -> Result<u8, String> {
-    let read = qemu::QmpMonitor::open(socket).human("i/1xb 0x64");
+fn isa_status_byte(monitor: &mut qemu::QmpMonitor) -> Result<u8, String> {
+    let read = monitor.human("i/1xb 0x64");
     read.split_whitespace()
         .find_map(|tok| tok.strip_prefix("0x"))
         .and_then(|hex| u8::from_str_radix(hex, 16).ok())
         .ok_or_else(|| format!("the monitor's `i/1xb 0x64` did not answer a byte: {read:?}"))
 }
 
+/// The i8042 status register's output-buffer-full bit.
+const I8042_OBF: u8 = 1 << 0;
+
 /// Wait, bounded, for the i8042's output buffer to hold a byte: the key an
 /// injected event carries reaches the controller on QEMU's own clock, not
 /// the harness's, and the census below is only true once it has.
 fn wait_for_obf(socket: &Path, ceiling: Duration) -> Result<(), String> {
-    const OBF: u8 = 1 << 0;
+    let mut monitor = qemu::QmpMonitor::open(socket);
     let deadline = Instant::now() + ceiling;
     loop {
-        if isa_status_byte(socket)? & OBF != 0 {
+        if isa_status_byte(&mut monitor)? & I8042_OBF != 0 {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -13759,6 +13762,15 @@ fn run_machine_test(
             // waiting on it orders the census against QEMU's delivery instead
             // of the host's scheduling of this harness.
             let socket = qemu.qmp_socket().to_path_buf();
+            // Empty first, so only this key can satisfy the wait. The monitor
+            // closes before the keys go: the socket serves one connection.
+            let status = isa_status_byte(&mut qemu::QmpMonitor::open(&socket))?;
+            if status & I8042_OBF != 0 {
+                return Err(format!(
+                    "the i8042 held a byte before the key (status {status:#04x}): the wait \
+                     below could not tell the key's from it"
+                ));
+            }
             qemu::qmp_send_keys(&socket, &[("a", true), ("a", false)]);
             wait_for_obf(&socket, Duration::from_secs(5))?;
             let after = qemu.run_test("test_rs_isa_grant released", Duration::from_secs(30));
@@ -13783,7 +13795,8 @@ fn run_machine_test(
             // `isa-claim-straddles-quarantine` holds the quarantine between its
             // two steps until a claim has been answered: refused while the
             // driver holds the controller, and granted after, with lines the
-            // quarantine no longer touches.
+            // quarantine no longer touches even when the grant raises the
+            // flood again, as an ISR in flight at the mask would.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,

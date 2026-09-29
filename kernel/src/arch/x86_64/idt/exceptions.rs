@@ -193,9 +193,9 @@ fn crash_report_exception(ctx: &ExceptionContext) {
                         Some(port) => log!(
                             "  {access}, reaching port {port:#06x}, which this process holds no grant for"
                         ),
-                        // The decode named a span the bitmap opens whole: the
-                        // fault is real, but blaming a port in it would be a guess.
-                        None => log!("  {access}, which faulted at a port this decode cannot name"),
+                        // The bitmap opens the span whole, so the #GP is not
+                        // the port's: a string form's non-canonical `rsi`/`rdi`, say.
+                        None => log!("  {access}, a #GP this decode cannot attribute to a port"),
                     }
                 }
             }

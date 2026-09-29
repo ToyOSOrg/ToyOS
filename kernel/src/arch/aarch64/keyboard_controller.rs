@@ -11,3 +11,7 @@ pub fn service() {}
 
 /// Nothing to report.
 pub fn report_line() {}
+
+/// Nothing floods: no `isa` claim is ever granted here.
+#[cfg(feature = "boot-actuators")]
+pub fn raise_flood() {}

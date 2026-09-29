@@ -91,7 +91,8 @@ actuators! {
 
     /// Hold the i8042's quarantine between its two steps, in two scheduler
     /// passes, until an `isa` claim begun after the first has been answered:
-    /// the claim lands between them on every boot.
+    /// the claim lands between them on every boot. A granted claim then raises
+    /// the flood again, as an ISR still in flight at the mask would.
     isa_claim_straddles_quarantine = "isa-claim-straddles-quarantine";
 
     /// Script the input core directly at end of boot.

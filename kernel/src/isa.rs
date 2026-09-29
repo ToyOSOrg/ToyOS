@@ -79,6 +79,9 @@ pub fn claim(set: IsaId) -> Result<usize, ClaimError> {
         let begun = straddle::begin();
         let answer = mint(set);
         straddle::answered(begun);
+        if answer.is_ok() {
+            crate::arch::keyboard_controller::raise_flood();
+        }
         return answer;
     }
     mint(set)
@@ -192,7 +195,7 @@ pub fn watch(row: usize) -> &'static Watch {
 
 /// The `isa-claim-straddles-quarantine` actuator: a claim answered between the
 /// two steps of the i8042's quarantine, which holds after its first until one
-/// begun after it has been.
+/// begun after it has been; a granted one then raises the flood again.
 #[cfg(feature = "boot-actuators")]
 pub mod straddle {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

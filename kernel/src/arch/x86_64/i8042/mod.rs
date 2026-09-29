@@ -65,7 +65,7 @@ const ISA_IRQ_AUX: u8 = 12;
 const ISR_BURST: usize = 16;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-static QUARANTINE: AtomicBool = AtomicBool::new(false);
+static QUARANTINE: flood::Flood = flood::Flood::new();
 static KBD_EVENTS: AtomicU32 = AtomicU32::new(0);
 static AUX_EVENTS: AtomicU32 = AtomicU32::new(0);
 static LOST_EDGES: AtomicU32 = AtomicU32::new(0);
@@ -106,6 +106,51 @@ static IRQ_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 /// Whether this driver holds the controller, which refuses an `isa` claim on it.
 pub fn drives() -> bool {
     ACTIVE.load(Ordering::Acquire)
+}
+
+/// The flood that quarantines the driver: raised by [`handler`], taken by
+/// [`service`], and taken at most once per boot, since nothing gives the
+/// controller back once the quarantine has let it go.
+mod flood {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    const IDLE: u8 = 0;
+    const RAISED: u8 = 1;
+    const TAKEN: u8 = 2;
+
+    pub struct Flood(AtomicU8);
+
+    /// The boot's one quarantine; only [`Flood::take`] makes one.
+    pub struct Taken(());
+
+    impl Flood {
+        pub const fn new() -> Self {
+            Self(AtomicU8::new(IDLE))
+        }
+
+        /// Only from idle: an ISR still in flight when the quarantine masks
+        /// the lines raises nothing under a claim granted after it.
+        pub fn raise(&self) {
+            // Refused when already raised or taken, which is the point.
+            let _ = self.0.compare_exchange(IDLE, RAISED, Ordering::Relaxed, Ordering::Relaxed);
+        }
+
+        /// The quarantine, to the one caller that moves the flood from raised
+        /// to taken. `Relaxed`: exclusivity is the read-modify-write's own.
+        pub fn take(&self) -> Option<Taken> {
+            self.0
+                .compare_exchange(RAISED, TAKEN, Ordering::Relaxed, Ordering::Relaxed)
+                .ok()
+                .map(|_| Taken(()))
+        }
+    }
+}
+
+/// Under `isa-claim-straddles-quarantine`, the stand-in for an ISR still in
+/// flight at the quarantine's mask: the flood raised as [`handler`] raises it.
+#[cfg(feature = "boot-actuators")]
+pub fn raise_flood() {
+    QUARANTINE.raise();
 }
 
 fn is_irq_cpu() -> bool {
@@ -517,7 +562,7 @@ pub extern "sysv64" fn handler() {
     }
     if n == ISR_BURST && buffer_full(inb(STATUS)) {
         // It cannot mask the line itself — that needs the I/O APIC lock.
-        QUARANTINE.store(true, Ordering::Relaxed);
+        QUARANTINE.raise();
     }
     // Only the first interrupt can be the arming edge (IRR delivers it before
     // any later assertion), and it settles the debt either way.
@@ -591,16 +636,8 @@ pub fn service() {
     // Unconditional and first: an undrained `irq_ring` record keeps
     // `any_pending_self` true, spinning a CPU that never halts.
     let recorded = crate::irq_ring::take(IrqSource::I8042).is_some();
-    // `swap`, not `load`: two CPUs racing `service()` must not both see the
-    // flood and both run `quarantine()`. `Relaxed` only has to make the swap
-    // itself exclusive; `quarantine()`'s own writes (`ACTIVE`'s `Release`,
-    // the I/O APIC's mask) carry whatever ordering they separately need. No
-    // guest test forces this: the window this closes was a few instructions
-    // between one atomic load and a later, unsynchronized store, narrower
-    // than anything a scheduler-pass-granularity actuator can straddle
-    // without adding a permanent rendezvous to every pass's hottest path.
-    if QUARANTINE.swap(false, Ordering::Relaxed) {
-        quarantine();
+    if let Some(taken) = QUARANTINE.take() {
+        quarantine(taken);
         return;
     }
     #[cfg(feature = "boot-actuators")]
@@ -797,7 +834,7 @@ fn drain() -> Drained {
 /// **Masked before the driver lets go**: `isa::claim` refuses only while
 /// [`ACTIVE`] holds, so a claim that lands once it is clear routes and unmasks
 /// lines nothing here touches again.
-fn quarantine() {
+fn quarantine(_: flood::Taken) {
     // The pin is about to be masked, so no health verdict follows this line.
     HEALTH.store(HEALTH_DONE, Ordering::Relaxed);
     // The count, not the intent: the log line is only true if the mask took.
