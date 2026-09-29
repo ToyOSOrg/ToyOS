@@ -21,6 +21,7 @@ pub mod console;
 pub mod devices;
 #[allow(dead_code)]
 pub mod faults;
+pub mod fwvars;
 #[allow(dead_code)]
 pub mod gpt;
 #[allow(dead_code)]

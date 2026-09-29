@@ -601,6 +601,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // clock in the verdict.
     ("root_from_memory", Sched::Parallel, Tier::Nightly),
     ("root_withheld_refused", Sched::Parallel, Tier::Nightly),
+    // A loader built to another `KernelArgs` layout is refused by name before
+    // the kernel reads a field the layout could have moved.
+    ("kernel_args_layout_refused", Sched::Parallel, Tier::Nightly),
     // The boot from power-on, as the kernel converts the loader's TSC readings:
     // judged against the loader's raw counts and the kernel's own rate.
     ("boot_from_power_on", Sched::Parallel, Tier::Nightly),
@@ -1226,7 +1229,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Weekly),
     ("wall_clock_no_century", Sched::Parallel, Tier::Weekly),
     ("wall_clock_century_register", Sched::Parallel, Tier::Weekly),
-    ("wall_clock_zone", Sched::Parallel, Tier::Weekly),
+    ("wall_clock_utc", Sched::Parallel, Tier::Weekly),
     // `xhci_slow_connect`'s shape against the disk's port, but its actuator
     // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
     // so what it stages is an ordering with no wall-clock margin on either
@@ -1478,7 +1481,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("wall_clock_rtc_unstable", &["test_rs_wall_clock_now"]),
     ("wall_clock_no_century", &["test_rs_wall_clock_now"]),
     ("wall_clock_century_register", &["test_rs_wall_clock_now"]),
-    ("wall_clock_zone", &["test_rs_wall_clock_now"]),
+    ("wall_clock_utc", &["test_rs_wall_clock_now"]),
     ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
@@ -10086,9 +10089,7 @@ fn run_machine_test(
         "wall_clock_century_register" => {
             common::wallclock::century_from_the_register(test_config, c_bins, rust_bins)
         }
-        "wall_clock_zone" => {
-            common::wallclock::zone_from_firmware(test_config, c_bins, rust_bins)
-        }
+        "wall_clock_utc" => common::wallclock::rtc_is_utc(test_config, c_bins, rust_bins),
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
         "root_candidate_malformed" => {
             common::volumes::root_candidate_malformed(test_config, c_bins, rust_bins)
@@ -12150,6 +12151,20 @@ fn run_machine_test(
             );
             // Both channels: this kernel dies before virtio-console init.
             root_withheld_refused(&format!("{}{}", qemu.boot_log(), qemu.uart_log()))
+        }
+        "kernel_args_layout_refused" => {
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &[LAYOUT_ZERO_PARAM],
+                    ready_marker: LAYOUT_REFUSAL,
+                    ..Default::default()
+                },
+            );
+            // Both channels: this kernel dies before virtio-console init.
+            kernel_args_layout_refused(&format!("{}{}", qemu.boot_log(), qemu.uart_log()))
         }
         "acpi_table_inventory" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
@@ -17565,7 +17580,6 @@ fn root_from_memory(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The loader's line: its TSC at entry, at the handoff, and `IA32_TSC_ADJUST`.
 const LOADER_TSC: &str = "Loader TSC: ";
 /// The kernel's line, followed by its four spans in milliseconds.
 const POWER_ON: &str = "boot: power-on to loader ";
@@ -17619,6 +17633,31 @@ fn boot_from_power_on(log: &str) -> Result<(), String> {
          ms), kernel {to_complete} ms; IA32_TSC_ADJUST {}",
         log.split("IA32_TSC_ADJUST ").nth(1).and_then(|rest| rest.lines().next()).unwrap_or("unsaid")
     );
+    Ok(())
+}
+
+/// `toyos_abi::boot::WRITE_NO_LAYOUT_PARAM`.
+const LAYOUT_ZERO_PARAM: &str = toyos_abi::boot::WRITE_NO_LAYOUT_PARAM;
+/// The kernel's refusal of a `KernelArgs` layout word of 0, up to the layout
+/// it reads.
+const LAYOUT_REFUSAL: &str = "boot: the loader wrote KernelArgs layout 0x0 and this kernel reads layout 0x";
+/// `blackbox::arm`'s record, the kernel's first read of a field after the word.
+const BLACK_BOX_ARMED: &str = "black box: ";
+
+/// A loader that wrote another layout is a boot refused by name, before the
+/// kernel read the boot parameter. Checked against the kernel's own word,
+/// `toyos_abi::boot::LAYOUT` in hex, and not merely the message's prefix: a
+/// kernel that printed its own `kernel_args.layout` instead would still be 0x0
+/// and still match the prefix.
+fn kernel_args_layout_refused(log: &str) -> Result<(), String> {
+    let refusal = format!("{LAYOUT_REFUSAL}{:x}", toyos_abi::boot::LAYOUT);
+    if !log.contains(&refusal) {
+        return Err(format!("no {refusal:?} in the boot log"));
+    }
+    if log.contains(BLACK_BOX_ARMED) {
+        return Err(format!("a boot refused its layout still said {BLACK_BOX_ARMED:?}"));
+    }
+    eprintln!("  [boot] a loader that wrote layout 0 was refused by name before the boot parameter");
     Ok(())
 }
 

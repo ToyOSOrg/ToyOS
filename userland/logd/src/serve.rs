@@ -85,20 +85,20 @@ struct Shared {
     network: AtomicUsize,
     local: AtomicUsize,
     /// The wall clock the boot started at, for a line a reader is owed.
-    boot_local: Option<u64>,
+    boot_secs: Option<u64>,
 }
 
 impl Hub {
     /// Start serving the network, where the manifest gave this program netd.
     /// A reader on this machine is handed over by the `log` port's thread
     /// ([`Hub::read`]).
-    pub fn start(cap: usize, boot_local: Option<u64>) -> Self {
+    pub fn start(cap: usize, boot_secs: Option<u64>) -> Self {
         let shared = Arc::new(Shared {
             replay: Mutex::new(Replay::new(cap)),
             grew: Condvar::new(),
             network: AtomicUsize::new(0),
             local: AtomicUsize::new(0),
-            boot_local,
+            boot_secs,
         });
         // A row with no `receives` gives this program no namespace, so no netd,
         // and no thread to learn so on: its exit would be a kernel record at a
@@ -333,7 +333,7 @@ fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
                     }
                     Next::Evicted { lost, at: resume } => {
                         at = resume;
-                        break evicted(shared.boot_local, lost);
+                        break evicted(shared.boot_secs, lost);
                     }
                     Next::CaughtUp => {
                         replay = shared.grew.wait(replay).expect("logd: the replay is poisoned");
@@ -350,11 +350,11 @@ fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
 }
 
 /// The line a reader gets in place of what the replay no longer holds.
-fn evicted(boot_local: Option<u64>, lost: u64) -> Vec<u8> {
+fn evicted(boot_secs: Option<u64>, lost: u64) -> Vec<u8> {
     let at_ns = toyos_abi::clock::nanos_since_boot();
     let text = format!("logd: the first {lost} bytes of this boot are no longer held here; /log has them");
     let tag = Tag::new(LOGD).expect("logd's own name is a tag");
-    let stamp = crate::stamp(boot_local, at_ns);
+    let stamp = crate::stamp(boot_secs, at_ns);
     let line = ProgramLine {
         stamp: &stamp,
         at_ns,

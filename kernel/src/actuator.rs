@@ -43,6 +43,11 @@ actuators! {
     /// refuse by name; read by the loader as [`toyos_abi::boot::WITHHOLD_ROOT_PARAM`].
     loader_withholds_root = "loader-withholds-root";
 
+    /// The loader writes 0 as the `KernelArgs` layout word, which `kernel_main`
+    /// has to refuse by name; read by the loader as
+    /// [`toyos_abi::boot::WRITE_NO_LAYOUT_PARAM`].
+    loader_writes_no_layout = "loader-writes-no-layout";
+
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
@@ -491,9 +496,6 @@ actuators! {
     /// Make the century register read `0x21`.
     rtc_century_next = "rtc-century-next";
 
-    /// Make firmware name its own timezone.
-    rtc_zone_east = "rtc-zone-east";
-
     /// Run the leak-rollback controls (device mint, FAT reopen) after mount.
     leak_rollback_selftest = "leak-rollback-selftest";
 
@@ -685,3 +687,5 @@ const _: () = {
 // spells it as a literal; the two are one name or the build fails.
 #[cfg(feature = "boot-actuators")]
 const _: () = assert!(str_eq("loader-withholds-root", toyos_abi::boot::WITHHOLD_ROOT_PARAM));
+#[cfg(feature = "boot-actuators")]
+const _: () = assert!(str_eq("loader-writes-no-layout", toyos_abi::boot::WRITE_NO_LAYOUT_PARAM));
