@@ -3595,15 +3595,19 @@ fn virt_job(job: &str, said: &str) -> Result<(), String> {
     );
     let end = format!("===TEST_END {job} ");
     let mut rest = String::new();
-    let waited = await_marker(&mut qemu, &mut rest, &end, &format!("the job {job} to end"));
+    // A job that dies never reaches its `TEST_END`, so the kernel's own record of a non-zero exit ends the wait too: the verdict then names the code.
+    let died = format!("exit: {job} ");
+    let died_nonzero = |l: &str| l.contains(&died) && !l.contains(" code=0 ");
+    let waited = await_guest(&mut qemu, &mut rest, &format!("the job {job} to end"), |log| {
+        log.contains(&end) || log.lines().any(died_nonzero)
+    });
     let serial = format!("{}\n{rest}", qemu.boot_log());
     if let Err(why) = waited {
         return Err(format!("{why}\nserial:\n{serial}"));
     }
-    let ended = serial
-        .lines()
-        .find(|l| l.contains(&end))
-        .expect("await_marker answered Ok, so the marker is in what it drained");
+    let Some(ended) = serial.lines().find(|l| l.contains(&end) || died_nonzero(l)) else {
+        unreachable!("await_guest answered Ok, so a line ends the job");
+    };
     let Some(line) = serial.lines().find(|l| l.contains(said)) else {
         return Err(format!("{said:?} not on the PL011 ({ended})\nserial:\n{serial}"));
     };
@@ -5146,8 +5150,6 @@ fn run_screen_test(
             "debug_refused",
             "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused",
         ),
-        // `tests/toyos-rust-tests/src/bin/abuse_readonly_copyout.rs`, which
-        // exits with one bit per arm that let a write through.
         "virt_readonly_copyout" => {
             virt_job(&format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
         }
