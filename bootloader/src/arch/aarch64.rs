@@ -24,15 +24,6 @@ pub fn counter() -> u64 {
     count
 }
 
-/// What the loader's report says beside the counter: its rate. Where it counts
-/// from is firmware's to say and no register here does.
-pub fn counter_origin() -> alloc::string::String {
-    let hz: u64;
-    // SAFETY: reads a register EL1 and EL2 may always read.
-    unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) hz, options(nomem, nostack, preserves_flags)) };
-    alloc::format!("CNTFRQ_EL0 {hz} Hz; the counter's origin is firmware's")
-}
-
 /// What the loader says about the CPU as firmware handed it over, or why the
 /// kernel cannot run on it: entered at EL2 on a CPU without FEAT_E2H0,
 /// `HCR_EL2.E2H` is RES1, so the kernel's entry cannot clear it and every

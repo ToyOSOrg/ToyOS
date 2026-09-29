@@ -29,7 +29,7 @@
 //! exclusively (its fork build directory is written); then, if the compiler is
 //! the primary's, the global one shared, because it is read.
 //!
-//! A sysroot no worktree names any more is removed by [`sweep`], which
+//! A sysroot no worktree names any more is removed by `keystore::sweep`, which
 //! `--worktree remove` runs: each build records the key it used in its
 //! worktree's `target/`, and a key no registered worktree records, that nobody
 //! is making or using, goes.
@@ -62,12 +62,9 @@ const SOURCES: &str = "SOURCES";
 
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, \
+const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
-                      a C sysroot of libc's staticlib and headers per target; 4";
-
-/// Where each build records the key it compiled against, for [`sweep`].
-const RECORD: &str = "target/toyos-sysroot-key";
+                      a C sysroot of libc's staticlib and headers per target; 5";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -294,11 +291,6 @@ pub fn fork_checkout(root: &Path) -> PathBuf {
     fork
 }
 
-/// The key `root`'s last build compiled against.
-pub fn recorded_key(root: &Path) -> Option<String> {
-    fs::read_to_string(root.join(RECORD)).ok().map(|k| k.trim().to_string())
-}
-
 /// Why `dir` is not a finished sysroot, if it is not: no [`SOURCES`], or not a
 /// whole toolchain (`toolchain::toolchain_defect`). One found with the first and
 /// not the second is made again rather than trusted — all of it even when only
@@ -324,9 +316,7 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     let compiler = compiler::resolve(root, rust_dir, &fork, lock);
     let key = key(root, &compiler, &fork);
     let dir = sysroots_dir(rust_dir).join(&key);
-    let record = root.join(RECORD);
-    fs::create_dir_all(record.parent().expect("a file under target/")).ok();
-    fs::write(&record, &key).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
+    crate::keystore::record(root, Keyed::Sysroot, &key);
 
     let using = lock.without_shared(|| held(root, &key, &dir, || build(root, &compiler, &fork, &key, &dir)));
     Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
@@ -400,15 +390,9 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
     crate::ensure_submodule(fork, "library/backtrace");
     let host = host_triple();
     let build_dir = fork.join("build/toyos-std");
-    fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
-    forget_another_compiler(&build_dir, &host, &compiler.identity());
-    // Bootstrap reuses what it built before and does not see a path dependency
-    // outside the fork move, so each target's std starts from nothing.
-    for target in GUEST_TARGETS {
-        remove(&build_dir.join(&host).join("stage0-std").join(target));
-    }
+    prepare_std_build(&build_dir, &host, &compiler.identity());
     let config = build_dir.join("bootstrap.toml");
-    fs::write(&config, std_config(&compiler.stage2, &build_dir, &host))
+    fs::write(&config, std_config(&compiler.stage2, &bootstrap_cargo(), &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
     let targets = GUEST_TARGETS.join(",");
@@ -421,6 +405,20 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
         toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std").join(arch.userland()));
     }
     build_dir.join(&host).join("stage0-std")
+}
+
+/// Ready the std build directory `build_dir` for a build by the compiler
+/// `identity` names: nothing another compiler built, no LLVM, and no guest
+/// target's std.
+fn prepare_std_build(build_dir: &Path, host: &str, identity: &str) {
+    fs::create_dir_all(build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
+    forget_another_compiler(build_dir, host, identity);
+    crate::llvm::retire_in_tree(build_dir);
+    // Bootstrap reuses what it built before and does not see a path dependency
+    // outside the fork move, so each target's std starts from nothing.
+    for target in GUEST_TARGETS {
+        remove(&build_dir.join(host).join("stage0-std").join(target));
+    }
 }
 
 /// Empty the std build directory `build_dir` of all but what bootstrap
@@ -438,7 +436,7 @@ fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
         return;
     }
     let kept = [(build_dir.to_path_buf(), &["cache", host, "compiled-by"][..]),
-                (build_dir.join(host), &["ci-llvm", "rustfmt"][..])];
+                (build_dir.join(host), &["rustfmt"][..])];
     for (dir, kept) in kept {
         let entries = match fs::read_dir(&dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -520,7 +518,8 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// The linker is the compiler's own `rust-lld`, named by path so that which sysroot
 /// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
 /// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
-fn std_config(compiler: &Path, build_dir: &Path, host: &str) -> String {
+/// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one.
+fn std_config(compiler: &Path, cargo: &Path, build_dir: &Path, host: &str) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
     let linker = toolchain::rust_lld(compiler);
     let userland: String = Arch::ALL
@@ -539,11 +538,14 @@ build-dir = "{build_dir}"
 host = ["{host}"]
 target = [{targets}]
 
+[llvm]
+download-ci-llvm = false
+
 [rust]
 lld = false
 {userland}"#,
         rustc = compiler.join("bin/rustc").display(),
-        cargo = bootstrap_cargo().display(),
+        cargo = cargo.display(),
         build_dir = build_dir.display(),
     )
 }
@@ -593,36 +595,6 @@ pub(crate) fn clone_tree(from: &Path, to: &Path) {
                 .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", src.display(), dst.display()));
         }
     }
-}
-
-/// Remove every sysroot no registered worktree records and nobody is making
-/// or using, and every half-built one nobody is making. Returns what went.
-pub fn sweep(root: &Path) -> Vec<PathBuf> {
-    let rust_dir = toolchain::rust_dir(root);
-    let dir = sysroots_dir(&rust_dir);
-    let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
-    let named: BTreeSet<String> = git_out(root, &["worktree", "list", "--porcelain"])
-        .lines()
-        .filter_map(|l| l.strip_prefix("worktree "))
-        .filter_map(|w| fs::read_to_string(Path::new(w).join(RECORD)).ok())
-        .map(|k| k.trim().to_string())
-        .collect();
-    let mut removed = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let (key, whole) = match name.split_once('.') {
-            Some((key, _)) => (key.to_string(), false),
-            None => (name.clone(), true),
-        };
-        if whole && named.contains(&key) {
-            continue;
-        }
-        let Some(_idle) = buildlock::keyed_idle(root, Keyed::Sysroot, &key) else { continue };
-        let path = entry.path();
-        fs::remove_dir_all(&path).unwrap_or_else(|e| panic!("remove {}: {e}", path.display()));
-        removed.push(path);
-    }
-    removed
 }
 
 fn path_str(path: &Path) -> &str {
@@ -787,10 +759,10 @@ mod tests {
             build.join("host/a-directory-bootstrap-adds/lib.rlib"),
             build.join("tmp/cc-rs-out-dir/out.o"),
             build.join("host/a-stamp-bootstrap-writes"),
+            build.join("host/ci-llvm/lib/libLLVM.dylib"),
         ];
         let downloaded = [
-            build.join("cache/llvm-1/llvm.tar.xz"),
-            build.join("host/ci-llvm/lib/libLLVM.dylib"),
+            build.join("cache/2026-07-13/rustc.tar.xz"),
             build.join("host/rustfmt/bin/rustfmt"),
         ];
         let lay = || {
@@ -817,6 +789,41 @@ mod tests {
             assert!(!file.exists(), "{} was kept for another compiler", file.display());
         }
         assert!(downloaded.iter().all(|f| f.is_file()), "a download went");
+    }
+
+    /// **A std build directory keeps no LLVM, even under the compiler that
+    /// built the rest**: bootstrap's and `download-ci-llvm`'s go with their
+    /// download, and what that compiler built and the other downloads stay.
+    #[test]
+    fn a_std_build_under_the_same_compiler_keeps_no_llvm() {
+        let base = TempDir::new("std-llvm");
+        let (_root, rust_dir, _fork) = keyed(&base);
+        let build = base.join("toyos-std");
+        let host = host_triple();
+        let identity = Compiler::primary(&rust_dir).identity();
+        prepare_std_build(&build, &host, &identity);
+        let llvm = [
+            build.join(&host).join("ci-llvm/lib/libLLVM.dylib"),
+            build.join(&host).join("llvm/bin/llvm-config"),
+            build.join("cache/llvm-ad3d0bc-false/rust-dev.tar.xz"),
+        ];
+        let kept = [build.join("bootstrap/debug/deps/libserde-1.rlib"), build.join("cache/2026-07-13/rustc.tar.xz")];
+        for file in llvm.iter().chain(&kept) {
+            write(file, "built");
+        }
+        prepare_std_build(&build, &host, &identity);
+        for file in &llvm {
+            assert!(!file.exists(), "{} outlived a std build's preparation", file.display());
+        }
+        assert!(kept.iter().all(|f| f.is_file()), "the same compiler's build went");
+    }
+
+    /// **A std build fetches no LLVM**: it builds none, and the `compiler`
+    /// profile would download one.
+    #[test]
+    fn a_std_build_downloads_no_llvm() {
+        let config = std_config(Path::new("/c"), Path::new("/cargo"), Path::new("/b"), "h");
+        assert!(config.contains("\n[llvm]\ndownload-ci-llvm = false\n"), "{config}");
     }
 
     /// **A switch that cannot remove the other compiler's build fails and does
@@ -1040,36 +1047,6 @@ mod tests {
         });
         assert!(said.starts_with("sysroot made was made, and is not whole") && said.contains("/clang"), "{said}");
         assert_eq!(made.get(), 1);
-    }
-
-    /// A key no registered worktree records goes, and so does a half-built one;
-    /// a key a worktree records stays, and so does one somebody is using.
-    #[test]
-    fn a_sweep_removes_what_no_worktree_names_and_nobody_uses() {
-        let root = TempDir::new("sweep");
-        git(&root, &["init", "-q"]);
-        write(&root.join("f"), "x\n");
-        git(&root, &["add", "f"]);
-        git(&root, &["commit", "-qm", "init"]);
-        let linked = root.join("linked");
-        git(&root, &["worktree", "add", "-q", "-b", "wt", linked.to_str().unwrap()]);
-
-        let dir = sysroots_dir(&root.join("rust"));
-        for name in ["named", "linked-named", "in-use", "orphan", "named.partial"] {
-            fs::create_dir_all(dir.join(name)).unwrap();
-        }
-        write(&root.join(RECORD), "named");
-        write(&linked.join(RECORD), "linked-named");
-        let user = buildlock::tests::sysroot_used_elsewhere(&root, "in-use");
-
-        let mut removed = sweep(&root);
-        removed.sort();
-        assert_eq!(removed, [dir.join("named.partial"), dir.join("orphan")]);
-        for stays in ["named", "linked-named", "in-use"] {
-            assert!(dir.join(stays).is_dir(), "{stays} was swept");
-        }
-        user.release();
-        assert_eq!(sweep(&root), [dir.join("in-use")]);
     }
 
     /// **What a stage-0 std build made is what its stamp names**: its
