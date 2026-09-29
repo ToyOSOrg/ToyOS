@@ -70,8 +70,10 @@ above; otherwise it is a NOTE.
   unless a hardware document mandates that time and offers no notification, cited at the site.
   Wait on the event itself, bounded by a timeout that fails loudly. Defensive code that hides a
   failure instead of failing fast is a BLOCKER too.
-- **Actuators.** A kernel static that an `actuator::` guard's arm writes is touched only under
-  that guard or inside a `#[cfg(...-actuators)]` item; any other touch runs on the shipping kernel.
+- **Actuators.** A kernel static of any kind, atomic or `Lock`-wrapped, that an `actuator::` guard's
+  arm reads or writes is touched only under that guard or inside an item compiled only with an
+  actuator feature (`#[cfg(feature = "…-actuators")]`); a `cfg(not(feature = …))` item compiles
+  into shipping and does not count, and any other touch runs on the shipping kernel.
 
 ## Prose is removed, never reviewed
 
