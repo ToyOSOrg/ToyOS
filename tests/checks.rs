@@ -11,6 +11,8 @@ mod checks {
     mod audio_checks;
     #[path = "clock.rs"]
     mod clock_checks;
+    #[path = "metal.rs"]
+    mod metal_checks;
     #[path = "qemu.rs"]
     mod qemu_checks;
     #[path = "screen.rs"]
@@ -623,6 +625,31 @@ mod checks {
     #[test]
     fn metal_audio_judges() -> Result<(), String> {
         audio_checks::judges_verdict()
+    }
+
+    #[test]
+    fn metal_stop_owes_its_record_and_leaves_no_operation_open() {
+        metal_checks::the_stop_owes_its_record_and_leaves_no_operation_open();
+    }
+
+    #[test]
+    fn metal_bound_fires_within_one_period_of_itself() {
+        metal_checks::a_bound_fires_within_one_period_of_itself();
+    }
+
+    #[test]
+    fn metal_name_measured_twice_is_refused() {
+        metal_checks::a_name_measured_twice_is_refused();
+    }
+
+    #[test]
+    fn metal_boot_with_a_failure_of_its_own_adds_no_row() {
+        metal_checks::a_boot_with_a_failure_of_its_own_adds_no_row();
+    }
+
+    #[test]
+    fn metal_name_two_boots_measured_is_refused() {
+        metal_checks::a_name_two_boots_measured_is_refused();
     }
 
     #[test]
