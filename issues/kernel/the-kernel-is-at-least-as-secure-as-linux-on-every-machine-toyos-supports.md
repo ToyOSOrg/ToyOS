@@ -10,8 +10,7 @@ Parity with Linux at `Ubuntu-6.8.0-142.142`, pinned by the first issue below,
 is the floor on every CPU ToyOS supports, and the kernel also takes every
 security feature such a CPU offers. The proving machines are the T14 and the
 nightly's AMD EPYC KVM guests; the PR gate's TCG model proves wiring only. A
-probe is a `boot-actuators` arm or a `test-actuators` `SYS_DEBUG` action,
-never a syscall.
+probe is a `boot-actuators` arm or a `test-actuators` `SYS_DEBUG` action.
 
 **Exit**: every issue below is closed, in the order listed.
 
@@ -19,6 +18,7 @@ never a syscall.
 - `issues/kernel/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
 - `issues/kernel/spec-ctrl-and-gds-stay-as-firmware-left-them.md`
 - `issues/kernel/no-program-runs-with-speculative-store-bypass-disabled.md`
+- `issues/build/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/kernel/no-entry-or-switch-clears-the-bhb-fills-the-rsb-or-issues-an-ibpb.md`
 - `issues/kernel/user-pointer-checks-have-no-spectre-v1-fence-and-smap-is-optional.md`
 - `issues/kernel/indirect-branches-and-returns-run-without-thunks.md`

@@ -16,7 +16,9 @@ address spaces one of which asked for it (`arch/x86/mm/tlb.c:384`). In ToyOS
 the ask is the flag of
 `issues/kernel/no-program-runs-with-speculative-store-bypass-disabled.md`.
 
-**Exit**: a gate matches `kernel.elf` against both of Linux's sequences; on
+**Exit**: a gate over `kernel.elf`, on the decoder of
+`issues/build/no-gate-decodes-kernel-elfs-instructions.md`, matches it against
+both of Linux's sequences; on
 every proving machine probes count what
 `issues/kernel/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
 selects for it: a clear per syscall where it selects the loop, a fill per

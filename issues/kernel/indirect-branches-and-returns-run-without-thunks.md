@@ -14,8 +14,9 @@ thunk its decision selects: ITS's on the T14; on AMD, retbleed's untrained
 return (`arch/x86/kernel/cpu/bugs.c:1125`) or SRSO's safe RET, in its alias
 form on family 0x19 (`bugs.c:2726-2732`).
 
-**Exit**: a gate finds no raw indirect branch or `ret` in `kernel.elf` outside
-the thunks and entry, an `int3` after each, and every placement Linux's linker
+**Exit**: a gate over `kernel.elf`, on the decoder of
+`issues/build/no-gate-decodes-kernel-elfs-instructions.md`, finds no raw
+indirect branch or `ret` outside the thunks and entry, an `int3` after each, and every placement Linux's linker
 script asserts (`arch/x86/kernel/vmlinux.lds.S:510-539`):
 `retbleed_return_thunk` and `srso_safe_ret` at a line start, the SRSO alias
 pair's addresses differing in exactly bits 2, 8, 14 and 20, and each ITS

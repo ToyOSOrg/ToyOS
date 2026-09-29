@@ -18,6 +18,7 @@ on the function attribute `zero-call-used-regs`
 
 **Exit**: the kernel, `core` and `alloc` build under a rustc option that sets
 `zero-call-used-regs=used-gpr` on every function, carried in the fork to
-upstream quality; a gate over `kernel.elf` finds each function's used
+upstream quality; a gate over `kernel.elf`, on the decoder of
+`issues/build/no-gate-decodes-kernel-elfs-instructions.md`, finds each function's used
 call-clobbered general registers zeroed before its return thunk, and a build
 without the option reds it.

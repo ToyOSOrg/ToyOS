@@ -12,8 +12,12 @@ at sshd's RustCrypto versions; pipe round trips, and throughput at 64 B to 64
 KiB; munmaps per second of a page a sibling on another CPU touched; lateness
 past a 1 ms timer; NVMe reads, read-only; an idle minute's package energy; and
 the T14's PCI, USB, NVMe and cpuidle identity. It runs on the T14 under its
-Ubuntu before the wipe and under the shipped ToyOS kernel.
+Ubuntu before the wipe and under the shipped ToyOS kernel. A munmap pair's two
+sides each read their x2APIC ID from CPUID.0BH:EDX before and after the timed
+window, and a pure function over the four readings refuses the figure when the
+two sides' IDs match or either side's changed across the window.
 
-**Exit**: the outputs committed as fixtures. **Mutation**: a munmap pair on
-one CPU, as each side reads its x2APIC ID from CPUID.0BH:EDX, is refused.
-**Oracle**: Linux.
+**Exit**: the outputs committed as fixtures, and that function host-tested.
+**Mutation**, each red: a pair on one CPU passes; only the readings before the
+window compared, so a sibling that moved onto the initiator's CPU inside it
+passes. **Oracle**: Linux.
