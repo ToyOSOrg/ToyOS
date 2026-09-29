@@ -139,12 +139,6 @@ fn main() {
         toyos_build::redlist::dispatch(&args);
         return;
     }
-    // Reads lockfiles and cargo's own checkouts, nothing else: the half of a
-    // "zero callers" ABI sweep a monorepo grep cannot see.
-    if asked(&flags::ABI_CALLERS) {
-        toyos_build::forkcheck::dispatch_callers(&root, &args);
-        return;
-    }
     // Writes one file outside the checkout and builds nothing.
     if asked(&flags::SIGNING_KEY_NEW) {
         match toyos_build::signing::mint_owner_key() {
@@ -234,12 +228,6 @@ fn main() {
 
     if let Some(bank) = CARGO_RUN.value(&args, &flags::REGEN_SOUNDFONT) {
         toyos_build::soundfont::regen(&root, Path::new(bank));
-        return;
-    }
-
-    // On demand and nowhere else: it asks GitHub for every fork branch head.
-    if asked(&flags::CHECK_FORKS) {
-        toyos_build::forkcheck::dispatch(&root);
         return;
     }
 

@@ -16,7 +16,7 @@ from memmap2 entirely, so no caller is misled today; the branch still says
 something false.
 
 Appending the fix to `toyos` alone would leave `rust/Cargo.lock` one commit
-behind the branch, which `cargo run -- --check-forks` reports as a drift, and
+behind the branch, and
 re-locking `rust/Cargo.lock` is a change to the compiler's own dependency
 graph.
 

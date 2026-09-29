@@ -771,8 +771,7 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|b| *b == 0)
 }
 
-/// The compiler fork, which is upstream's tree and is judged by
-/// `src/forkcheck.rs` rather than by anything here.
+/// The compiler fork, which is upstream's tree.
 #[cfg(test)]
 const NOT_OURS: &str = "rust";
 
