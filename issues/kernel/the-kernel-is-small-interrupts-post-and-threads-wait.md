@@ -149,16 +149,16 @@ times:
    1. **The panic console takes no input, and an `isa` claim grants a process
       exact ports through the TSS I/O permission bitmap and its ISA lines as
       records** (`kernel/src/isa.rs`). **Done** (#592).
-   2. **ps2d**, the server over that claim, feeding the kernel's keyboard and
-      mouse streams so Ctrl+Alt+D and the merge with USB HID stay where they
-      are; the kernel's driver, its vector, its actuators and the
+   2. **ps2server**, the server over that claim, feeding the kernel's keyboard
+      and mouse streams so Ctrl+Alt+D and the merge with USB HID stay where
+      they are; the kernel's driver, its vector, its actuators and the
       `keyboard_controller` seam deleted. Constraints: the harness paces typed
       input on the kernel's `i8042: drain bytes=` trace (`shell_type_once`,
       every `i8042-trace` boot), every boot config that types needs the server,
       and a keyboard claim is refused while no source exists, which init's
       order of endowment then decides. **Exit**: every keyboard and mouse guest
       test green with no i8042 code in the kernel, and typing resumes after
-      ps2d is killed and restarted.
+      ps2server is killed and restarted.
 
 ## Standing
 
