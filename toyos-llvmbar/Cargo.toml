@@ -1,0 +1,13 @@
+# A member of the host workspace (root `Cargo.toml`): the T14 LLVM bar's steps
+# and its judge.
+
+[package]
+name = "toyos-llvmbar"
+description = "The T14 LLVM bar: the steps its Linux run takes on the T14, and the judge of the files they write."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.rust]
+warnings = "deny"

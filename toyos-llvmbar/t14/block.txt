@@ -1,0 +1,12 @@
+W=$HOME/llvm-baseline; SHA=52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04
+mkdir -p $W; cd $W
+git init -q src && git -C src remote add origin https://github.com/rust-lang/llvm-project.git
+git -C src fetch -q --depth 1 origin $SHA && git -C src checkout -q FETCH_HEAD
+CONF="-G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS=clang;lld -DLLVM_ENABLE_RUNTIMES=libcxx;libcxxabi;libunwind -DLIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY=ON -DLLVM_TARGETS_TO_BUILD=X86;AArch64 -DLLVM_ENABLE_ASSERTIONS=OFF -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF"
+LIBCXX="-DLLVM_ENABLE_LIBCXX=ON -DLLVM_STATIC_LINK_CXX_STDLIB=ON"
+rm -rf s1; cmake -S src/llvm -B s1 $CONF -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ > s1-config.log
+/usr/bin/time -v -o s1-time.txt ninja -C s1 -j8 clang lld runtimes > s1-build.log
+rm -rf s2; PATH=$W/s1/bin:$PATH cmake -S src/llvm -B s2 $CONF $LIBCXX -DCMAKE_C_COMPILER=$W/s1/bin/clang -DCMAKE_CXX_COMPILER=$W/s1/bin/clang++ -DLLVM_ENABLE_LLD=ON > s2-config.log
+PATH=$W/s1/bin:$PATH /usr/bin/time -v -o s2-time.txt ninja -C s2 -j8 clang lld runtimes > s2-build.log
+rm -rf s3; PATH=$W/s2/bin:$PATH cmake -S src/llvm -B s3 $CONF $LIBCXX -DCMAKE_C_COMPILER=$W/s2/bin/clang -DCMAKE_CXX_COMPILER=$W/s2/bin/clang++ -DLLVM_ENABLE_LLD=ON > s3-config.log
+PATH=$W/s2/bin:$PATH /usr/bin/time -v -o s3-time.txt ninja -C s3 -j8 clang lld > s3-build.log
