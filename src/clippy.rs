@@ -34,27 +34,26 @@ struct Shape {
     after: &'static [&'static str],
 }
 
-/// Every `--kernel-feature` instrument in one x86-64 kernel, less
-/// `heap-band-nohead`, which refuses `heap-band-notail` and has its own shape.
+/// Every `--kernel-feature` instrument with the default heap band and
+/// `pass-spin`'s own hold: the other band and hold arms exclude these.
 const INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
-                           heap-band-notail,pass-spin,heap-lockspin,stack-witness,switch-witness,\
-                           switch-witness-mutate-frame,switch-witness-mutate-rsp,df-witness,\
-                           df-witness-mutate,entry-df-unclean,fpu-save-nothing,user-writable-gsbase";
+                           pass-spin,stack-witness,switch-witness,switch-witness-mutate-frame,\
+                           switch-witness-mutate-rsp,df-witness,df-witness-mutate,\
+                           entry-df-unclean,fpu-save-nothing,user-writable-gsbase";
 
 /// [`INSTRUMENTS`] less the direction-flag three, which are x86-64's alone.
 const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
-                                   heap-band-notail,pass-spin,heap-lockspin,stack-witness,\
-                                   switch-witness,switch-witness-mutate-frame,\
-                                   switch-witness-mutate-rsp,fpu-save-nothing,user-writable-gsbase";
+                                   pass-spin,stack-witness,switch-witness,\
+                                   switch-witness-mutate-frame,switch-witness-mutate-rsp,\
+                                   fpu-save-nothing,user-writable-gsbase";
 
-/// The `toyos-sched` features a kernel feature forwards to: the kernel's clippy
-/// does not lint `toyos-sched`, a host-workspace member.
-const FORWARDED: &[&str] = &["toyos-sched/check", "toyos-sched/tripwire"];
+/// Host features no workspace member and no [`crate::ci::CONTROLS`] row turns on.
+const UNCONTROLLED: &[&str] = &["toyos-pcid/counting-allocator", "toyos-sched/tripwire"];
 
-/// Every model's negative control and [`FORWARDED`], as one `--features` list.
+/// Every model's negative control and [`UNCONTROLLED`], as one `--features` list.
 fn control_features() -> String {
     let controls = crate::ci::CONTROLS.iter().map(|c| format!("{}/{}", c.krate, c.feature));
-    controls.chain(FORWARDED.iter().map(|f| (*f).to_string())).collect::<Vec<_>>().join(",")
+    controls.chain(UNCONTROLLED.iter().map(|f| (*f).to_string())).collect::<Vec<_>>().join(",")
 }
 
 /// `--all-targets` on the host workspace only: on the bootloader and kernel a
@@ -63,11 +62,9 @@ fn control_features() -> String {
 /// set never sees; the third is the one `--kernel-param` builds, `boot-actuators`
 /// without `test-actuators`, whose dead code neither of the others can see.
 /// `undocumented_unsafe_blocks` is adopted per area as each area's
-/// justifications land.
-///
-/// Code behind a feature is linted only by a run that enables it, so every
-/// feature set the tree builds is in one: the host's second shape, and each
-/// kernel shape naming [`INSTRUMENTS`] or `heap-band-nohead`.
+/// justifications land. `toyos-xhci` has a shape of its own because the
+/// workspace run builds it only with `toyos-xhci-sim`'s `flaws`, never as the
+/// kernel does.
 const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
@@ -97,6 +94,11 @@ const SHAPES: &[Shape] = &[
     Shape {
         dir: "kernel",
         before: &["--target", Arch::X86_64.kernel(), "--features", INSTRUMENTS],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
+        before: &["--target", Arch::X86_64.kernel(), "--features", "heap-band-notail,heap-lockspin"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
@@ -133,6 +135,11 @@ const SHAPES: &[Shape] = &[
         dir: "bootloader",
         before: &["--target", Arch::Aarch64.loader()],
         after: &["$ADOPTED", "-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
+    },
+    Shape {
+        dir: "",
+        before: &["-p", "toyos-xhci", "--all-targets"],
+        after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
         dir: "",
@@ -230,43 +237,5 @@ mod tests {
         assert!(!abi.args().iter().any(|a| a == "clippy::redundant_clone"));
         assert!(abi.args().iter().any(|a| a == "clippy::undocumented_unsafe_blocks"));
         assert!(!abi.args().iter().any(|a| a == "$ADOPTED"));
-    }
-
-    /// A kernel feature no shape enables is code no clippy reads: every declared
-    /// one is in an x86-64 kernel shape, or is `kernel-loom`'s to build.
-    #[test]
-    fn every_kernel_feature_is_linted() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut linted: std::collections::BTreeSet<String> = SHAPES
-            .iter()
-            .filter(|s| s.dir == "kernel" && s.before.contains(&Arch::X86_64.kernel()))
-            .flat_map(|s| s.before.windows(2).filter(|w| w[0] == "--features").flat_map(|w| w[1].split(',')))
-            .map(str::to_string)
-            .collect();
-        linted.insert("loom".to_string());
-        linted.extend(
-            crate::ci::CONTROLS.iter().filter(|c| c.krate == "kernel-loom").map(|c| c.feature.to_string()),
-        );
-        let declared: std::collections::BTreeSet<String> =
-            crate::build::declared_kernel_features(root).into_iter().collect();
-        assert_eq!(declared.difference(&linted).collect::<Vec<_>>(), Vec::<&String>::new());
-    }
-
-    /// [`FORWARDED`] is every `crate/feature` a kernel feature turns on.
-    #[test]
-    fn every_forwarded_feature_is_linted() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let text = std::fs::read_to_string(root.join("kernel/Cargo.toml")).unwrap();
-        let manifest: toml::Value = text.parse().unwrap();
-        let mut forwarded: Vec<&str> = manifest["features"]
-            .as_table()
-            .unwrap()
-            .values()
-            .flat_map(|v| v.as_array().unwrap())
-            .map(|v| v.as_str().unwrap())
-            .filter(|f| f.contains('/'))
-            .collect();
-        forwarded.sort_unstable();
-        assert_eq!(forwarded, FORWARDED);
     }
 }

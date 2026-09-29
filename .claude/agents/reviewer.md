@@ -61,12 +61,12 @@ above; otherwise it is a NOTE.
   `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back. Nothing
   else is tracked under `tests/testcases/` but that `LICENSE`, `system.toml` and `hello.c`.
 - **What no gate reads.** A BLOCKER each: a diff that declares a retired ABI name or reuses a
-  retired syscall, `SYS_DEBUG` action or inbox op number; a workspace member's `Cargo.toml`
-  declaring `[profile]` or `[patch]`, which cargo ignores with only a warning; a new package
-  without a `description` saying what it is. The retired numbers are
+  retired syscall, `SYS_DEBUG` action or inbox op number (the retired numbers are
   `kernel/src/syscall/dispatch.rs`'s `retired_syscalls!` and the "formerly …" and "retired and
-  unused" entries in `toyos-abi/src/syscall.rs` and `toyos-abi/src/inbox.rs`. The retired names
-  include `SharedToken` and `services::connect`.
+  unused" entries in `toyos-abi/src/syscall.rs` and `toyos-abi/src/inbox.rs`; the retired names
+  include `SharedToken` and `services::connect`); a workspace member's `Cargo.toml` declaring `[profile]` or `[patch]`, which
+  cargo ignores with only a warning; a new package without a `description` saying what it is.
+  A new cargo feature, or a new `cfg` arm of one, is compiled by a `src/clippy.rs` shape in the same diff.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
   needs a reason you accept; a branch that could delete more than it adds and does not goes back

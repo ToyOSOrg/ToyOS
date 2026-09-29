@@ -94,8 +94,7 @@ which is the self-hosting track's last stage
 
 **Every other binary outside Rust and QEMU that this tree runs is declared
 here too**, because a reviewer refuses any one that is not
-(`.claude/agents/reviewer.md`, Arrivals). None reaches a guest, and no build, QEMU boot or
-host test runs one. `newfs_msdos` and `hdiutil` are
+(`.claude/agents/reviewer.md`, Arrivals). `newfs_msdos` and `hdiutil` are
 `issues/filesystem/fat32-suite-needs-macos-binaries.md`'s, and `diskutil` and
 `plutil` are `issues/build/the-owners-flash-script-runs-diskutil.md`'s.
 
@@ -116,6 +115,7 @@ host test runs one. `newfs_msdos` and `hdiutil` are
 - **`ovmf-generic`** — the guest container's UEFI firmware
   (`src/firmware.rs`), which Debian packages apart from QEMU. Exit: the
   instrument's QEMU carries its own firmware.
-- **`xz-utils`** — installed by the guest container, and nothing in `src/` or
-  `.github/` runs `xz`, so its use is unmeasured. Exit: a guest job green
-  without it, which deletes it.
+- **`build-essential`** — Debian's package for `cc` and `c++`, which the
+  nightly's guest containers and `portability-linux` install: every host
+  binary those jobs build links through `cc`, `ring`'s C compiles with it, and
+  `portability-linux` builds LLVM with `c++`. Exit: it goes with `cc`.

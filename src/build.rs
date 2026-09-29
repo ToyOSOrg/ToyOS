@@ -1348,7 +1348,7 @@ struct KernelManifest {
     features: BTreeMap<String, Vec<String>>,
 }
 
-pub(crate) fn declared_kernel_features(root: &Path) -> Vec<String> {
+fn declared_kernel_features(root: &Path) -> Vec<String> {
     let path = root.join("kernel/Cargo.toml");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
