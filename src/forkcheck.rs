@@ -770,7 +770,7 @@ mod tests {
     fn remote(case: &Path, branch: &str) -> (PathBuf, String) {
         let dir = case.join("widget");
         sh(case, &["init", "-q", "-b", branch, "widget"]);
-        crate::pr::tests::configure(&dir);
+        crate::gitfixture::configure(&dir);
         let head = commit(&dir, "one");
         (dir, head)
     }
@@ -953,7 +953,7 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
         let rust = root.join("rust");
         sh(&rust, &["init", "-q"]);
-        crate::pr::tests::configure(&rust);
+        crate::gitfixture::configure(&rust);
         fs::write(
             rust.join(".gitmodules"),
             format!(

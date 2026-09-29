@@ -28,9 +28,7 @@ image-build spans with their content key and cache hit or miss, QEMU and vCPU
 scheduling intervals where the host exposes them, and the guest progress markers
 the tests already emit. A sighting is then a join, not an inference.
 
-**What exists, and why each is not the thing.** `src/buildlock.rs` already
-names holders (`records_holder`) but the record is transient: it exists while
-the guard is held and is gone when the question is asked. The committed shard
+**What exists, and why it is not the thing.** The committed shard
 input is per-test duration only, which is why
 `issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md`
 charges an image build to whichever test followed it.

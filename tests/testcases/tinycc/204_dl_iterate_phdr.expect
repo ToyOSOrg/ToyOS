@@ -1,0 +1,8 @@
+executable: ""
+modules: 1
+stopped at 1 of 1: visited 1, returned 1
+executable: ""
+library: /system/lib/libtls_lib.so
+modules: 2
+stopped at 1 of 2: visited 1, returned 7
+stopped at 2 of 2: visited 2, returned -1

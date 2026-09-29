@@ -24,7 +24,7 @@ use crate::log;
 use crate::panic_reboot::Bound;
 use crate::time::{Budget, Cadence, Duration};
 use crate::mm::policy::MmioPolicy;
-use crate::mm::{self, DirectMap, align_2m};
+use crate::mm::{self, DirectMap};
 
 /// 1 bpp 8x16, codepoints 0x20..=0x7E, one byte per row, bit 7 leftmost.
 /// `tests/common/screen.rs` decodes this same file, so decoder and renderer cannot drift.
@@ -495,6 +495,13 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     }
 }
 
+/// The scanout the panel paints, `(phys, bytes)`, while it is armed: what a
+/// direct map that holds only memory maps before the boot's next record paints.
+pub fn scanout() -> Option<(u64, u64)> {
+    let phys = RAW_PHYS.load(Ordering::Relaxed);
+    (phys != 0).then(|| (phys, RAW_SIZE.load(Ordering::Relaxed)))
+}
+
 /// Re-establish the mapping after `mm::init` replaces the bootloader's page
 /// tables.
 pub fn remap() {
@@ -503,7 +510,7 @@ pub fn remap() {
         return;
     }
     let size = RAW_SIZE.load(Ordering::Relaxed);
-    mm::paging::map_mmio(phys, align_2m(size as usize) as u64, MmioPolicy::WriteCombining);
+    mm::paging::map_mmio(phys, size, MmioPolicy::WriteCombining);
     rearm();
 }
 

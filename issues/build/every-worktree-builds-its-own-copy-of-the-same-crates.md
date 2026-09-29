@@ -12,8 +12,8 @@ primary checkout's `target/` is 16 GB, and cargo's share of it is 12.5 GB
 286 MB, `aarch64-apple-darwin` 285 MB. The remaining 3.5 GB — `bootable*.img`,
 `nvme.img` 1.0 GB, the staged `kernel-*`/`bootloader.efi-*` copies, `target/stamps/` —
 is the build system's own output and is **per-worktree by design**: `kernel_key`
-hashes profile and features and not content, and `buildlock::artifact` is a lock
-under `<worktree>/.build-locks`. Only cargo's 12.5 GB is a candidate for
+hashes profile and features and not content, and `build::artifact` is a lock
+on `<worktree>/target`. Only cargo's 12.5 GB is a candidate for
 sharing. Beside `target/`, a worktree also holds `kernel/target` 318 MB,
 `bootloader/target` 194 MB and `userland/target` 1.4 GB.
 
@@ -91,9 +91,7 @@ cost the compile phase and never the guest phase.
 `hostws::target_dir` is the function that answers "where did cargo put this
 crate's output", and it is the only place the answer should be derived —
 `<primary>/target` via `primary_checkout()`, degenerating to `<root>/target`
-where there are no worktrees. Two sites build the path themselves and would have
-to go through it: `src/build.rs`'s `stage_artifact` and `src/pr.rs`'s merge-file
-directory.
+where there are no worktrees.
 
 It also needs an absolute `build.target-dir` in each worktree's gitignored
 `.cargo/config.toml`, because agents type `cargo test` by hand. Measured: such a
@@ -174,14 +172,6 @@ carries the shared `target-dir` to a hand-typed cargo perfectly well; it cannot
 carry the freshness mode with it. That pair — sharing on, freshness off, no
 diagnostic — is exactly the mis-link in the first table.
 
-**And the fork does not supply the nightly cargo.** `rustup run toyos cargo
---version` answers `cargo 1.96.0-nightly (f298b8c82 2026-02-24)`, but
-`toolchain::host_cargo` is why: it symlinks `stage2/bin/cargo` to
-`~/.rustup/toolchains/nightly-<host>/bin/cargo` **if this machine has one**, and
-to the host's stable cargo otherwise. Every CI runner installs `--profile
-minimal --default-toolchain stable`, so there the `toyos` toolchain's cargo *is*
-stable's. The nightly is the dev host's, not the fork's.
-
 This host's rustup default is `stable-aarch64-apple-darwin`. A hand-typed `cargo
 test --workspace --exclude toyos-build` here is an mtime cargo, and that is the
 command agents type most.
@@ -192,8 +182,7 @@ directory is worth, and neither is an agent's to choose:
 - **a generated `rust-toolchain.toml`** (channel `nightly`, or `toyos`) — needs
   `/rust-toolchain.toml` added to `.gitignore` to stay untracked, and makes the
   host crates compile with a different compiler locally than in CI, which
-  installs stable. With `channel = "toyos"` the guarantee is only as good as the
-  machine having a rustup nightly, which is the assumption that just failed.
+  installs stable.
 - **a sentinel that makes a stable cargo refuse** — `-Zunstable-options` in the
   generated config's host-triple `rustflags` errors on a stable rustc and is a
   no-op on a nightly one, so it tracks the freshness predicate exactly. It also

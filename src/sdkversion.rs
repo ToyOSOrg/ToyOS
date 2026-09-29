@@ -46,7 +46,7 @@ pub fn plan(root: &Path) -> Result<Vec<Release>, String> {
 
 /// A crate's `HEAD` tree and its manifest.
 fn source(root: &Path, krate: &Crate) -> Result<(String, String), String> {
-    let tree = crate::pr::git(root, &["rev-parse", &format!("HEAD:{}", krate.dir)])?;
+    let tree = crate::sync::git(root, &["rev-parse", &format!("HEAD:{}", krate.dir)])?;
     Ok((tree, manifest(root, krate)?))
 }
 
@@ -145,7 +145,7 @@ fn manifest(root: &Path, krate: &Crate) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr::tests::{commit, repo};
+    use crate::gitfixture::{commit, repo};
     use std::collections::BTreeMap;
     use toyos_tmpdir::TempDir;
 

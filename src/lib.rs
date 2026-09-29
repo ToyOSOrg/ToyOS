@@ -13,6 +13,8 @@ pub mod dirlock;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
 pub mod firmware;
+#[cfg(test)]
+pub mod gitfixture;
 pub mod flags;
 pub mod forkcheck;
 pub mod hostws;
@@ -34,7 +36,6 @@ pub mod metalimage;
 pub mod metalprofile;
 pub mod metalswap;
 pub mod metaltalk;
-pub mod pr;
 pub mod redlist;
 pub mod release;
 pub mod sdkversion;
@@ -44,6 +45,7 @@ pub mod soundfont;
 #[cfg(test)]
 pub mod sourcegate;
 pub mod store;
+pub mod sync;
 pub mod sysroot;
 pub mod testargs;
 pub mod tether;
