@@ -484,11 +484,15 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
         let mut path_offset = (module_count * info_size) as u32;
 
         let (eh_addr, eh_size) = data.elf.exe_eh_frame_hdr;
+        let (phdr, phnum) = data.elf.exe_phdrs;
         let exe_info = ModuleInfo {
             base: data.elf.elf_base.raw(),
             text_end: data.elf.exe_vaddr_max,
             eh_frame_hdr: eh_addr,
             eh_frame_hdr_size: eh_size,
+            phdr,
+            phnum: phnum.into(),
+            phentsize: toyos_elf::header::PROGRAM_HEADER_SIZE as u32,
             path_offset,
             path_len: exe_path_bytes.len() as u32,
         };
@@ -507,6 +511,9 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
                 text_end: lib.user_end(),
                 eh_frame_hdr: lib.eh_frame_hdr.map_or(0, |r| (lib.user_base + r.start().get()).raw()),
                 eh_frame_hdr_size: lib.eh_frame_hdr.map_or(0, |r| r.len()),
+                phdr: (lib.user_base + lib.phdrs.image().start().get()).raw(),
+                phnum: lib.phdrs.count().into(),
+                phentsize: toyos_elf::header::PROGRAM_HEADER_SIZE as u32,
                 path_offset,
                 path_len: lib_path_bytes.len() as u32,
             };

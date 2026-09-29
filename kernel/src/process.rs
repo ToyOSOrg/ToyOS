@@ -492,6 +492,8 @@ pub struct ElfInfo {
     pub exe_eh_frame_hdr: (u64, u64),
     /// One past the executable's last byte.
     pub exe_vaddr_max: u64,
+    /// The executable's program header table as (address, count), `(0, 0)` with no executable.
+    pub exe_phdrs: (u64, u16),
     /// Paths of dlopen'd libraries (parallel to loaded_libs).
     pub lib_paths: Vec<String>,
 }
@@ -510,6 +512,7 @@ impl ElfInfo {
             elf_base: UserAddr::new(0),
             exe_eh_frame_hdr: (0, 0),
             exe_vaddr_max: 0,
+            exe_phdrs: (0, 0),
             lib_paths: Vec::new(),
         }
     }

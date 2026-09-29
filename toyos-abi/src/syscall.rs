@@ -2184,6 +2184,13 @@ pub struct ModuleInfo {
     pub eh_frame_hdr: u64,
     /// Size of `.eh_frame_hdr` in bytes.
     pub eh_frame_hdr_size: u64,
+    /// Absolute virtual address of the module's program header table: the
+    /// kernel loads no module whose table a `PT_LOAD` does not map.
+    pub phdr: u64,
+    /// Entries in that table, `e_phnum`.
+    pub phnum: u32,
+    /// Bytes per entry, `e_phentsize`.
+    pub phentsize: u32,
     /// Byte offset of the module's path string within the buffer.
     pub path_offset: u32,
     /// Length of the path string in bytes.
@@ -2193,11 +2200,11 @@ pub struct ModuleInfo {
 /// Every byte belongs to a field: this crosses the boundary through
 /// [`ModuleInfo::as_bytes`], so a gap would publish whatever the kernel stack
 /// held. **This is the type where that matters most**, because the buffer it
-/// is written into is a user address: the two `u32`s sit at the end of four
-/// `u64`s, which is 8 bytes together at an 8-aligned offset, so there is no
-/// tail padding today — and this is what says so. A field of any other width
-/// added here reds here rather than publishing kernel stack bytes to userland.
-const _: () = assert!(core::mem::size_of::<ModuleInfo>() == 8 + 8 + 8 + 8 + 4 + 4);
+/// is written into is a user address: the four `u32`s pair up after five
+/// `u64`s, 8 bytes a pair at an 8-aligned offset, so there is no padding —
+/// and this is what says so. A field of any other width added here reds here
+/// rather than publishing kernel stack bytes to userland.
+const _: () = assert!(core::mem::size_of::<ModuleInfo>() == 8 + 8 + 8 + 8 + 8 + 4 + 4 + 4 + 4);
 
 impl ModuleInfo {
     /// The record's own bytes, which is what `SYS_QUERY_MODULES` writes.
@@ -2230,6 +2237,28 @@ impl ModuleInfo {
 /// the array ends.
 pub fn query_modules(buf: &mut [u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_QUERY_MODULES, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0)).map(|n| n as usize)
+}
+
+/// Every record of one [`query_modules`] answer with its path, executable
+/// first: `answer` is the `n` bytes the call reported.
+///
+/// A record or path outside `answer` is a kernel that broke the layout above,
+/// and panics.
+pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
+    let size = core::mem::size_of::<ModuleInfo>();
+    let record = move |i: usize| {
+        let bytes = &answer[i * size..(i + 1) * size];
+        // SAFETY: `bytes` holds `size_of::<ModuleInfo>()` bytes, read without
+        // an alignment requirement, and every bit pattern of its integer
+        // fields is a `ModuleInfo`.
+        unsafe { (bytes.as_ptr() as *const ModuleInfo).read_unaligned() }
+    };
+    let count = if answer.is_empty() { 0 } else { record(0).path_offset as usize / size };
+    (0..count).map(move |i| {
+        let info = record(i);
+        let path = info.path_offset as usize;
+        (info, &answer[path..path + info.path_len as usize])
+    })
 }
 
 /// Scheduler info for the calling process.
@@ -2316,17 +2345,73 @@ mod tests {
             text_end: 0x2233_4455_6677_8899,
             eh_frame_hdr: 0x3344_5566_7788_99aa,
             eh_frame_hdr_size: 0x44,
+            phdr: 0x5566_7788_99aa_bbcc,
+            phnum: 0x77,
+            phentsize: 0x88,
             path_offset: 0x55,
             path_len: 0x66,
         };
         let b = info.as_bytes();
-        assert_eq!(b.len(), 40);
+        assert_eq!(b.len(), 56);
         assert_eq!(u64::from_ne_bytes(b[0..8].try_into().unwrap()), info.base);
         assert_eq!(u64::from_ne_bytes(b[8..16].try_into().unwrap()), info.text_end);
         assert_eq!(u64::from_ne_bytes(b[16..24].try_into().unwrap()), info.eh_frame_hdr);
         assert_eq!(u64::from_ne_bytes(b[24..32].try_into().unwrap()), info.eh_frame_hdr_size);
-        assert_eq!(u32::from_ne_bytes(b[32..36].try_into().unwrap()), info.path_offset);
-        assert_eq!(u32::from_ne_bytes(b[36..40].try_into().unwrap()), info.path_len);
+        assert_eq!(u64::from_ne_bytes(b[32..40].try_into().unwrap()), info.phdr);
+        assert_eq!(u32::from_ne_bytes(b[40..44].try_into().unwrap()), info.phnum);
+        assert_eq!(u32::from_ne_bytes(b[44..48].try_into().unwrap()), info.phentsize);
+        assert_eq!(u32::from_ne_bytes(b[48..52].try_into().unwrap()), info.path_offset);
+        assert_eq!(u32::from_ne_bytes(b[52..56].try_into().unwrap()), info.path_len);
+    }
+
+    fn record(base: u64, path_offset: u32, path_len: u32) -> ModuleInfo {
+        ModuleInfo {
+            base,
+            text_end: base + 0x1000,
+            eh_frame_hdr: 0,
+            eh_frame_hdr_size: 0,
+            phdr: base + 0x40,
+            phnum: 3,
+            phentsize: 56,
+            path_offset,
+            path_len,
+        }
+    }
+
+    /// An answer laid out as the kernel writes one — records, then the paths
+    /// packed in module order — decodes to those records and paths, in order,
+    /// at an offset whatever alignment the buffer has.
+    #[test]
+    fn modules_decodes_every_record_and_its_path() {
+        let size = core::mem::size_of::<ModuleInfo>() as u32;
+        let exe = record(0x100_0000_0000, 2 * size, 9);
+        let lib = record(0x200_0000_0000, 2 * size + 9, 13);
+        let mut answer = [0u8; 1 + 2 * 56 + 9 + 13];
+        let wire = &mut answer[1..];
+        wire[..56].copy_from_slice(exe.as_bytes());
+        wire[56..112].copy_from_slice(lib.as_bytes());
+        wire[112..121].copy_from_slice(b"/bin/prog");
+        wire[121..].copy_from_slice(b"/lib/libx.so\0");
+        let got: [(u64, u64, &[u8]); 2] = {
+            let mut it = modules(&answer[1..]).map(|(m, path)| (m.base, m.phdr, path));
+            let pair = [it.next().unwrap(), it.next().unwrap()];
+            assert!(it.next().is_none(), "two records, and no third read out of the paths");
+            pair
+        };
+        assert_eq!(got[0], (exe.base, exe.phdr, &b"/bin/prog"[..]));
+        assert_eq!(got[1], (lib.base, lib.phdr, &b"/lib/libx.so\0"[..]));
+        assert_eq!(modules(&[]).count(), 0);
+    }
+
+    /// A path the kernel says runs past its own answer is a broken layout,
+    /// not a shorter name.
+    #[test]
+    #[should_panic]
+    fn modules_refuses_a_path_past_the_answer() {
+        let size = core::mem::size_of::<ModuleInfo>() as u32;
+        let mut answer = [0u8; 56 + 4];
+        answer[..56].copy_from_slice(record(0, size, 5).as_bytes());
+        modules(&answer).for_each(drop);
     }
 
     /// Four lowercase hex digits each and nothing else, because two spellings
