@@ -4,7 +4,7 @@ kind: track
 opened: 2026-09-26
 ---
 
-# ToyOS runs on ARM64: QEMU `virt` first, EL1 only
+# ToyOS runs on ARM64: QEMU `virt`, EL1 only
 
 Supersedes `8a277bb2^:issues/kernel/arm64-is-a-decision-nobody-has-made.md`, which is
 folded in below and deleted. It keeps that file's settled points: compile-time
@@ -13,6 +13,12 @@ dispatch (one `cfg_attr(path)` module choice, no `dyn Arch`, no `Kernel<A>`,
 2 MiB L2 blocks, and the driver boundary of
 `issues/kernel/a-driver-is-tested-on-the-host-and-its-real-implementation-is-one-instruction-deep.md`
 as a precondition for the drivers it names.
+
+**Purpose** (owner ruling, 2026-09-29): ARM is for quick runs on the
+development Mac under QEMU with HVF, and for keeping the kernel's
+architecture clean by being its second one. ToyOS's arm64 target is QEMU
+`virt` on that Mac; no ARM hardware is a target and no work goes into one,
+because ARM hardware is too proprietary today.
 
 **Motivation, measured on this development machine (an M4 Pro):**
 `qemu-system-aarch64 -M virt,gic-version=3 -accel hvf -cpu host -smp 4` reaches
@@ -23,9 +29,7 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 ## Owner rulings, 2026-09-26
 
 - **Parked** (owner ruling, 2026-09-29). Stages 0-3 have landed; no later
-  stage starts now. ARM is done at the measurement under "Exit" below, and no
-  ARM hardware is bought now. Embedded is not a target now, and nothing may close the door
-  on it.
+  stage starts now. ARM is done at the measurement under "Exit" below.
 - **Start.** Stage 0 (shared groundwork on x86) and stages 1-3 (toolchain,
   loader, kernel reaching serial on QEMU `virt`) start now. Stage 0 waits for
   small-kernel stage 2 (PR #513, "One way to wait") to land before its own
@@ -33,27 +37,11 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   small-kernel stage 6 (`issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`),
   so the per-CPU IRQ relay and the i8042 plumbing are not ported and then
   deleted.
-- **ACPI and devicetree**, superseding this ruling's 2026-09-26 "ACPI only,
-  no device tree path": ToyOS reads ACPI and, per
-  `issues/kernel/the-kernel-reads-hardware-from-a-devicetree.md`, devicetree.
-- **Proprietary-by-nature hardware is out of scope** (owner ruling,
-  2026-09-29): Snapdragon laptops and Apple Silicon are closed for that
-  reason, not for lacking ACPI or a device-tree path. Snapdragon's firmware
-  keeps the IOMMU under its own control, its ACPI serves only Windows'
-  power-plugin PEPs, and reaching EL2 takes a Windows launch path —
-  Qualcomm's Secure Launch running Microsoft's signed `tcblaunch.exe` — not
-  meant for another OS.
 - **EL1 only.** The kernel runs at EL1, dropping from EL2 when entered there.
   No VHE-at-EL2 kernel.
-- **`tcblaunch.exe` is not an allowed exception** to the dependency rule's "no
-  binary outside Rust and QEMU". Reaching EL2 on a Snapdragon laptop needs
-  Qualcomm's Secure Launch running Microsoft's signed `tcblaunch.exe` on the
-  CPU (`slbounce`); without EL2, ToyOS does not own the PCIe SMMU there
-  (`x1-el2.dtso`: "this IOMMU is controlled by the firmware" while under
-  Gunyah).
-- **The memory-model audit is stage 0's**, not discovered on real ARM
-  hardware: the kernel's `Relaxed` orderings and `Mmio`'s barrier semantics are
-  real latent defects on x86 too (`aaddf38a^:issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
+- **The memory-model audit is stage 0's**: the kernel's `Relaxed` orderings
+  and `Mmio`'s barrier semantics are real latent defects on x86 too
+  (`aaddf38a^:issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
   is one instance).
 - **C on AArch64 goes through clang**, whose driver knows
   `aarch64-unknown-toyos` (`issues/build/toyos-builds-itself.md`); doomgeneric
@@ -66,10 +54,6 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 - **The CI runner for the aarch64 tier** is decided at stage 8, after
   measuring whether hosted `ubuntu-24.04-arm` exposes `/dev/kvm` and whether
   HVF is usable inside a hosted `macos-latest` runner's VM.
-- **Hardware: none is bought now.** See "Hardware evidence" below; neither
-  researched machine is a target. A shortlist is kept for when that changes:
-  the Radxa Orion O6N stage 9 names, the Minisforum MS-R1 and the Orange Pi 6
-  Plus (all three CIX P1), and RK3588 boards.
 
 ## Measured, on `main` at `03b1b4db`
 
@@ -91,9 +75,6 @@ lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 **x86-only pure crates, 1,305 lines:** `toyos-ps2` 377, `toyos-tco` 313,
 `toyos-pcid` 388 (it becomes an ASID allocator), `toyos-bootmap` 227
 (PML4[0]/PML4[256], `toyos-bootmap/src/lib.rs:21-29`).
-
-**Hardware ARM lacks.** `toyos-i219` (9,250 lines) is the T14's NIC: portable
-code for hardware no ARM board in scope has.
 
 **Inline assembly**, 834 lines by a paren-depth scan of
 `asm!`/`naked_asm!`/`global_asm!` bodies (undercounts: macro bodies like
@@ -193,39 +174,6 @@ one cost nobody can estimate from a grep); userland TLS and the toolchain
 (variant I and TLSDESC across `toyos-ld`, the kernel loader and std); the test harness (33,907 lines in
 `tests/common/`, written against q35, i8042, OVMF, KVM, `intel-iommu`).
 
-## Hardware evidence
-
-Checked against sources on 2026-09-26. Neither machine is a target now.
-
-**Radxa Orion O6N (CIX P1 CD8160, checked 2026-09-26).** SystemReady SR v2.5
-is certified for the sibling **O6**, not the O6N — Radxa states only "SBSA
-Level 6" for the O6N, and no O6N certificate was found. EDK2 UEFI firmware
-offers ACPI or DT. Mainline's `sky1.dtsi` declares `arm,gic-v3` with
-`arm,gic-v3-its`, `arm,armv8-timer`, `arm,psci-1.0` (method `smc`) — SR's BSA
-requires all three. **No SMMU is named in mainline `sky1.dtsi`, and no source
-confirms one exists** — unverified, and ToyOS's userland-driver model needs
-one; read it from firmware IORT before relying on it. CPUs are 12-core and
-**heterogeneous**: 4× Cortex-A720 performance, 4× A720 balanced, 4×
-Cortex-A520 efficiency — a live case for
-`issues/kernel/all-cores-are-assumed-equal-and-arm64-breaks-that.md`. Serial
-is a real PL011 (UART2 on the 40-pin header, 115200 8n1). PCIe is CIX's own
-host bridge (5 controllers); an M.2 M-key NVMe slot is Gen4 x4; the xHCI IP
-is unverified. Idle power on the O6 measures 15.8-16.6 W; no O6N figure was
-found.
-
-**Lenovo ThinkPad T14s Gen 6 (Snapdragon X1E-78-100, checked 2026-09-26).**
-The firmware boots the OS at **EL1 under Gunyah/QHEE**; EL2 is reachable only
-through `slbounce`, which runs Microsoft's signed `tcblaunch.exe` on the CPU
-(ruled out above). Qualcomm's ACPI targets Windows PEP power plugins; Linux
-boots this platform with DT, installed by `DtbLoader.efi`. `x1-el2.dtso`
-states plainly that under Gunyah "this IOMMU is controlled by the firmware"
-and "ITS emulation in Gunyah is broken so we can't use MSI on some PCIe
-controllers in EL1" — at EL1 the OS does not own the PCIe SMMU, so this
-laptop cannot host userland drivers. No community
-source documents an exposed debug UART on this board — treat as none. GOP
-works only at a fixed 1360×855, with no native-resolution mode even from the
-EFI shell.
-
 ## Sharing, not forking
 
 Each of these keeps a single copy that both arches use, and each can land
@@ -246,7 +194,7 @@ before any aarch64 file exists, with x86 as its only user:
   required on ARM. Doorbells become explicit.
 - **ACPI decoding stays in `toyos-acpi`** for both arches (MADT's LAPIC and
   GICC entries, GTDT, SPCR, IORT, PPTT), so the kernel reads one description
-  language on SystemReady hardware.
+  language.
 - **Pure crates stay arch-free.** A per-arch decision that becomes pure lives
   in its own crate, as `toyos-bootmap` does: it grows a TTBR plan, and
   `toyos-pcid` becomes an ASID/PCID allocator.
@@ -284,8 +232,7 @@ Each stage names its exit; "measured" means a number from a run.
    no fork work needed). Entry is `extern "C"` rather than `sysv64`.
    `toyos-bootmap` grows a TTBR0/TTBR1 plan. The loader's TSC/CPUID/MSR and
    TCO lines become per-arch. `KernelArgs` carries what the arch needs.
-   **Exit**: under
-   `qemu-system-aarch64 -M virt` with edk2, the loader reads ROOT through
+   **Exit**: under `qemu-system-aarch64 -M virt` with edk2, the loader reads ROOT through
    firmware block I/O (small-kernel stage 1), exits boot services, and jumps
    to a kernel stub that writes one line to the PL011 SPCR names.
 
@@ -349,24 +296,6 @@ Each stage names its exit; "measured" means a number from a run.
    tier on whatever runner that measurement picks; a test red on only one
    arch is a named known-red, not a skip.
 
-9. **The SystemReady board (Orion O6N), if its SMMU confirms.** Outside the
-   exit below, and blocked on hardware being bought. The same
-   image boots from USB on the board's own UEFI+ACPI with no board-specific
-   code: SPCR selects the UART, MADT/GTDT/IORT/PPTT describe the rest. NVMe
-   and xHCI drivers on real PCIe. An RTL8126/8125 driver in netd, or a USB
-   NIC, for the answer path. A per-core capacity model from PPTT/`MIDR` for
-   the A720/A520 split
-   (`issues/kernel/all-cores-are-assumed-equal-and-arm64-breaks-that.md`).
-   The metal loop gains a serial channel on the header's UART2. **Exit**: an
-   unattended boot over the metal loop reports through serial and the log
-   partition; NVMe root, USB keyboard and network all work; the black box's
-   "DRAM survives reset" invariant is measured on this board, not assumed.
-
-10. **The laptop — rejected for now.** The owner ruling above declines
-    `tcblaunch.exe`; at EL1 a Snapdragon laptop does not give ToyOS its PCIe
-    SMMU (`x1-el2.dtso`, quoted above), so it cannot host userland drivers.
-    No Snapdragon laptop is a target.
-
 ## Exit
 
 ARM is done when LLVM compiles under emulation on the development Mac (owner
@@ -392,15 +321,6 @@ work on AArch64.
   is the stated precondition: its four traits (registers, clock, DMA,
   interrupt arrival) are the arch seam for drivers, and ARM is the second
   implementation that makes them real boundaries.
-- **The black box and the T14 bench** (`toyos-blackbox`, `src/metal.rs`):
-  the black box's DRAM-survives-reset assumption is re-measured per ARM
-  machine, not carried over. The loop's watchdog is Intel TCO; ARM
-  SystemReady offers the SBSA generic watchdog through GTDT.
-  `toyos-metal`'s flash-over-ssh design transfers to the O6N unchanged and
-  gains a serial channel.
-- **Heterogeneous cores**
-  (`issues/kernel/all-cores-are-assumed-equal-and-arm64-breaks-that.md`): the
-  O6N makes it real at stage 9.
 - **Page size**
   (`issues/kernel/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`):
   2 MiB L2 blocks map identically on both arches, so no change is forced by
