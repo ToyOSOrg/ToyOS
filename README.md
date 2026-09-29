@@ -225,8 +225,7 @@ same font the kernel blits.
 - A C compiler on `PATH` as `cc`, and a Python 3
 - CMake and Ninja
 
-The last two lines are `rustc`'s and not ToyOS's, and nothing that boots touches
-them. `rustc` links every **host** binary through `cc`, which rustup does not
+`rustc` links every **host** binary through `cc`, which rustup does not
 install. `rust/x`, the entry point to rustc's own bootstrap, is a shell script
 whose whole job is to find a Python to run `bootstrap.py` with — so a clean
 clone needs one, and so does every toolchain change. And that bootstrap builds
