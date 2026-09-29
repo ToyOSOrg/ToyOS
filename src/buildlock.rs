@@ -265,14 +265,14 @@ impl Keyed {
 
 /// Make what `key` names: exclusive, and waited for by every other process that
 /// wants the same key, which then finds it made.
-pub fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
     let lock = format!("{} lock", kind.name());
     exclusive(&keyed_lock_path(root, kind, key), &lock, &format!("building {} {key}", kind.name()))
 }
 
 /// Use what `key` names: shared, so any number of builds use it at once, a
 /// builder of it is waited for, and a sweep cannot remove it.
-pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
     let path = keyed_lock_path(root, kind, key);
     let file = open_lock_file(&path);
     if !try_lock(&file, LOCK_SH) {
@@ -284,6 +284,33 @@ pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
         take_lock_announcing(&file, LOCK_SH, &path, &lock, &what);
     }
     Guard { file, records_holder: false }
+}
+
+/// What `key` names, held in use and whole: made by `make` under
+/// [`keyed_building`] while `defect`, which says why it is not whole, says it is
+/// not. A `make` that leaves it not whole is refused by that defect rather than
+/// run again.
+pub fn keyed_made(
+    root: &Path,
+    kind: Keyed,
+    key: &str,
+    defect: impl Fn() -> Option<String>,
+    mut make: impl FnMut(),
+) -> Guard {
+    loop {
+        let using = keyed_using(root, kind, key);
+        if defect().is_none() {
+            return using;
+        }
+        drop(using);
+        let _building = keyed_building(root, kind, key);
+        if defect().is_some() {
+            make();
+            if let Some(defect) = defect() {
+                panic!("{} {key} was made, and is not whole: {defect}", kind.name());
+            }
+        }
+    }
 }
 
 /// What `key` names, exclusively and only if nobody is making or using it: what
@@ -530,8 +557,9 @@ fn try_lock(file: &fs::File, op: i32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::process::{Child, Command};
     use std::time::Duration;
     use toyos_tmpdir::TempDir;
@@ -543,6 +571,87 @@ mod tests {
     // ordinary `cargo test` never runs the child half on its own.
     const ROLE: &str = "TOYOS_BUILDLOCK_TEST_ROLE";
     const ROOT: &str = "TOYOS_BUILDLOCK_TEST_ROOT";
+    const MARKS: &str = "TOYOS_BUILDLOCK_TEST_MARKS";
+    const KEY: &str = "TOYOS_BUILDLOCK_TEST_KEY";
+
+    /// A lock held by a process of its own, which [`Elsewhere::release`] waits
+    /// to exit.
+    ///
+    /// A test never asserts free a lock this process has held: another test
+    /// thread's spawn copies every descriptor open at that moment into its child
+    /// until the child's exec, and the copy holds the lock past the drop.
+    pub(crate) struct Elsewhere {
+        child: Child,
+        marks: TempDir,
+        released: bool,
+    }
+
+    impl Elsewhere {
+        /// Run the `#[ignore]`d test `role` names, with `env`, and return once
+        /// it has called [`hold_until_released`].
+        pub(crate) fn hold(role: &str, env: &[(&str, &OsStr)]) -> Self {
+            let marks = TempDir::new("buildlock-elsewhere");
+            let mut child = rerun(role)
+                .envs(env.iter().copied())
+                .env(MARKS, &marks)
+                .spawn()
+                .expect("spawn the holder");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !marks.join("held").exists() {
+                if let Some(status) = child.try_wait().unwrap() {
+                    panic!("{role} exited before it took its lock: {status}");
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    panic!("{role} never took its lock in 20 s, killed: {}", child.wait().unwrap());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Elsewhere { child, marks, released: false }
+        }
+
+        pub(crate) fn id(&self) -> u32 {
+            self.child.id()
+        }
+
+        /// Let go, and return once the holder has exited.
+        pub(crate) fn release(mut self) {
+            self.released = true;
+            touch(&self.marks.join("release"));
+            assert!(self.child.wait().unwrap().success(), "the holder failed");
+        }
+    }
+
+    impl Drop for Elsewhere {
+        /// An assertion between `hold` and `release` skips `release`; without
+        /// this, the holder it leaked keeps running and its lock held past
+        /// the test that dropped it.
+        fn drop(&mut self) {
+            if self.released {
+                return;
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// The holder's half of [`Elsewhere`].
+    pub(crate) fn hold_until_released() {
+        let marks = PathBuf::from(std::env::var(MARKS).expect("a holder runs under Elsewhere::hold"));
+        touch(&marks.join("held"));
+        assert!(appeared(&marks.join("release"), Duration::from_secs(20)), "the holder was never released");
+    }
+
+    /// Sysroot `key` of `root`, held in use by a process of its own.
+    pub(crate) fn sysroot_used_elsewhere(root: &Path, key: &str) -> Elsewhere {
+        let env = [(ROLE, OsStr::new("use-sysroot")), (ROOT, root.as_os_str()), (KEY, OsStr::new(key))];
+        Elsewhere::hold("buildlock::tests::child_role", &env)
+    }
+
+    /// What `role` of [`child_role`] takes in `root`, held by a process of its own.
+    fn held_elsewhere(root: &Path, role: &str) -> Elsewhere {
+        Elsewhere::hold("buildlock::tests::child_role", &[(ROLE, OsStr::new(role)), (ROOT, root.as_os_str())])
+    }
 
     /// A git repository, because the global scope is keyed on the common
     /// directory and a scratch tree that is not one would exercise a path the
@@ -563,9 +672,15 @@ mod tests {
         root.join(LOCK_DIR)
     }
 
+    /// This test binary, to run the one `#[ignore]`d test `test` names.
+    fn rerun(test: &str) -> Command {
+        let mut rerun = Command::new(std::env::current_exe().unwrap());
+        rerun.args(["--exact", test, "--include-ignored", "--nocapture"]);
+        rerun
+    }
+
     fn child(root: &Path, role: &str) -> Child {
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "buildlock::tests::child_role", "--include-ignored", "--nocapture"])
+        rerun("buildlock::tests::child_role")
             .env(ROLE, role)
             .env(ROOT, root)
             .spawn()
@@ -627,15 +742,7 @@ mod tests {
         match role.as_str() {
             "hold-exclusive" => {
                 let mut held = shared(&root, "child");
-                held.act_if(
-                    Scope::Worktree,
-                    "child exclusive phase",
-                    || (!root.join("release").exists()).then_some(()),
-                    |()| {
-                        touch(&root.join("held"));
-                        appeared(&root.join("release"), Duration::from_secs(20));
-                    },
-                );
+                held.act_if(Scope::Worktree, "child exclusive phase", || Some(()), |()| hold_until_released());
             }
             "hold-exclusive-forever" => {
                 let mut held = shared(&root, "child");
@@ -651,8 +758,7 @@ mod tests {
             }
             "hold-integration" => {
                 let _landing = integration(&root);
-                touch(&root.join("held"));
-                appeared(&root.join("release"), Duration::from_secs(20));
+                hold_until_released();
             }
             "hold-integration-forever" => {
                 let _landing = integration(&root);
@@ -669,8 +775,7 @@ mod tests {
             }
             "hold-sysroot-build" => {
                 let _building = keyed_building(&root, Keyed::Sysroot, "k1");
-                touch(&root.join("held"));
-                appeared(&root.join("release"), Duration::from_secs(20));
+                hold_until_released();
                 note(&root, "built");
             }
             "want-integration" => {
@@ -680,6 +785,10 @@ mod tests {
             "want-sysroot" => {
                 let _using = keyed_using(&root, Keyed::Sysroot, "k1");
                 note(&root, "used");
+            }
+            "use-sysroot" => {
+                let _using = keyed_using(&root, Keyed::Sysroot, &std::env::var(KEY).unwrap());
+                hold_until_released();
             }
             "clean" | "clean-unlocked" => {
                 touch(&root.join("cleaner-ready"));
@@ -705,8 +814,7 @@ mod tests {
     #[test]
     fn exclusive_excludes_every_other_acquirer() {
         let root = scratch("exclusive");
-        let mut kid = child(&root, "hold-exclusive");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
+        let kid = held_elsewhere(&root, "hold-exclusive");
 
         let state = open_lock_file(&worktree_lock_dir(&root).join("state"));
         assert!(!try_lock(&state, LOCK_SH), "a build got in while an exclusive phase ran");
@@ -718,8 +826,7 @@ mod tests {
             "the waiting side cannot name the holder: {holder}"
         );
 
-        touch(&root.join("release"));
-        assert!(kid.wait().unwrap().success());
+        kid.release();
         drop(state);
         let _mine = shared(&root, "parent");
     }
@@ -748,8 +855,7 @@ mod tests {
     #[test]
     fn two_landings_serialise() {
         let root = scratch("integration");
-        let mut kid = child(&root, "hold-integration");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
+        let kid = held_elsewhere(&root, "hold-integration");
 
         let mine = open_lock_file(&integration_path(&root));
         assert!(!try_lock(&mine, LOCK_EX), "two landings held the integration lock at once");
@@ -759,8 +865,7 @@ mod tests {
             "the queued landing cannot name the one ahead of it: {holder}"
         );
 
-        touch(&root.join("release"));
-        assert!(kid.wait().unwrap().success());
+        kid.release();
         drop(mine);
         let _mine = integration(&root);
     }
@@ -840,29 +945,18 @@ mod tests {
             mine.worktree_dir, theirs.worktree_dir,
             "two worktrees share one target-directory lock"
         );
-        drop(theirs);
-        drop(mine);
 
         // Naming one path is not yet excluding on it: `flock` conflicts between
         // open file descriptions, so a second handle on the shared file is the
-        // question a second process would ask.
-        let held = acquire(&root.join(LOCK_DIR), LOCK_SH, "a build in the primary", BUILD);
-        let global = open_lock_file(&git_common_lock_dir(&linked).join("state"));
-        assert!(
-            try_lock(&global, LOCK_EX),
-            "the worktree lock excluded a global phase it knows nothing about"
-        );
-        drop(global);
-        drop(held);
-
-        // A build compiles against its own sysroot and reads no compiler, so a
-        // toolchain rebuild does not wait for it; a sysroot being made reads the
-        // compiler, so the rebuild waits for that.
-        let building = shared(&linked, "a build in the worktree");
+        // question a second process would ask. A build compiles against its own
+        // sysroot and reads no compiler, so a toolchain rebuild waits for no
+        // build in either worktree; a sysroot being made reads the compiler, so
+        // the rebuild waits for that.
         let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(try_lock(&global, LOCK_EX), "a build kept the toolchain from being rebuilt");
         drop(global);
-        drop(building);
+        drop(theirs);
+        drop(mine);
         let making = compiler_shared(&linked, "a sysroot build in the worktree");
         let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(
@@ -914,6 +1008,17 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "ex\nsh\n");
     }
 
+    /// [`Elsewhere::release`] returns only once the holder has exited and been
+    /// reaped: a zombie still answers `kill(pid, 0)`.
+    #[test]
+    fn a_released_holder_is_gone() {
+        let root = scratch("released");
+        let user = sysroot_used_elsewhere(&root, "k");
+        let pid = user.id() as i32;
+        user.release();
+        assert!(!alive(pid), "release returned before the holder was reaped");
+    }
+
     /// **One key is built once, and two keys never meet.** A second process
     /// wanting the key being built waits on the builder's lock — not on a
     /// timer — and gets it only once the build is done; a process making
@@ -922,8 +1027,7 @@ mod tests {
     #[test]
     fn a_key_being_built_is_waited_for_and_another_key_is_not() {
         let root = scratch("sysroot-keys");
-        let mut builder = child(&root, "hold-sysroot-build");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "the builder never started");
+        let builder = held_elsewhere(&root, "hold-sysroot-build");
 
         assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key being built");
         let other = keyed_building(&root, Keyed::Sysroot, "k2");
@@ -934,15 +1038,14 @@ mod tests {
             !appeared(&root.join("order.log"), Duration::from_millis(300)),
             "a build used a sysroot while it was still being made"
         );
-        touch(&root.join("release"));
-        assert!(builder.wait().unwrap().success());
+        builder.release();
         assert!(user.wait().unwrap().success());
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "built\nused\n");
 
-        let using = keyed_using(&root, Keyed::Sysroot, "k1");
+        let user = sysroot_used_elsewhere(&root, "k1");
         assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key in use");
-        drop(using);
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some());
+        user.release();
+        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some(), "a sweep could not remove a key nobody uses");
     }
 
     /// A wait of minutes that says one line and then goes silent is
@@ -955,8 +1058,7 @@ mod tests {
         let mut holder = child(&root, "hold-integration-forever");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
 
-        let mut queued = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "buildlock::tests::child_role", "--include-ignored", "--nocapture"])
+        let mut queued = rerun("buildlock::tests::child_role")
             .env(ROLE, "want-integration")
             .env(ROOT, &root)
             .stderr(std::process::Stdio::piped())

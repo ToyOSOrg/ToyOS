@@ -112,9 +112,7 @@ What is left to build:
   `issues/kernel/the-split-window-tlb-cost-is-unpriced.md`,
   `issues/kernel/ap-control-registers-inherit-init.md`,
   `issues/kernel/ap-tsc-trail-is-assumed-and-never-checked.md`,
-  `issues/audio/hda-ring-fix-unverified-on-metal.md`,
-  `issues/audio/t14-wake-lateness-is-bimodal-per-boot.md`,
-  `issues/audio/gate-a-has-no-runner-baseline.md` (a metal sample), and the
+  `issues/audio/hda-ring-fix-unverified-on-metal.md`, and the
   IOMMU track's three hardware-only answers — isolation scopes and reserved
   regions, the 2× cost bar, and the compatibility-format question in
   `issues/kernel/qemu-passes-compatibility-format-interrupts.md`

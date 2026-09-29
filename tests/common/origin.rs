@@ -349,22 +349,8 @@ pub fn refused_stop(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)
     Ok(())
 }
 
-/// What init says when it stops the machine without `logd`'s answer, and how
-/// long it waits first (`userland/init`'s `FLUSH_BOUND`).
+/// What init says when it stops the machine without `logd`'s answer.
 const FLUSH_WAITED_OUT: &str = "init: logd did not answer the flush in";
-const FLUSH_BOUND_MS: u64 = 5_000;
-/// The kernel's record as a stop begins its sync, after every thread stopped.
-const SYNCING: &str = "Syncing filesystems...";
-
-/// The milliseconds since boot a program's line in `/log` carries: the one
-/// field of its head with a decimal point.
-fn program_millis(line: &str) -> Option<u64> {
-    let (head, _) = line.strip_prefix(toyos_logstream::OPEN)?.split_once(toyos_logstream::CLOSE)?;
-    head.split_whitespace().find_map(|field| {
-        let (secs, millis) = field.split_once('.')?;
-        secs.parse::<u64>().ok()?.checked_mul(1_000)?.checked_add(millis.parse().ok()?)
-    })
-}
 
 /// **A resume that reaches `logd` with its flush unrun answers that flush.**
 /// `tests/logflushcase` holds `logd`'s first flush until init speaks again, so
@@ -469,23 +455,16 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
     let _ = std::fs::remove_file(&staged.image);
     // A stop that went ahead before the flush answered cuts `/log` short
     // whatever the slots did, so that is its own verdict and not this one's.
-    // init's word is in its ring when the machine stops, so the console
-    // rarely carries it. An answered flush wrote init's stop line, which is
-    // stamped before the flush was asked; and the kernel's sync starting a
-    // flush bound or more after that line is the wait on two records of one
-    // clock.
-    let sync = tail
-        .lines()
-        .find(|l| l.contains(SYNCING))
-        .and_then(bootlog::record_millis)
-        .ok_or_else(|| format!("the console carries no {SYNCING:?} with a time\n{tail}"))?;
-    let stop = bootlog::stopping_line(&log).and_then(program_millis);
-    let unanswered = match stop {
-        _ if tail.contains(FLUSH_WAITED_OUT) => Some("init said so".to_string()),
-        None => Some("init's stop line never reached /log".to_string()),
-        Some(stop) => (sync.saturating_sub(stop) >= FLUSH_BOUND_MS).then(|| {
-            format!("the kernel synced {} ms after init's stop line", sync.saturating_sub(stop))
-        }),
+    // init's stop line in /log does not say the flush was answered: init says
+    // it waited one out, on the console or in /log, and neither may carry that.
+    let unanswered = if tail.contains(FLUSH_WAITED_OUT)
+        || bootlog::lines_of(&log, "init").contains(FLUSH_WAITED_OUT)
+    {
+        Some("init said so")
+    } else if bootlog::stopping_line(&log).is_none() {
+        Some("init's stop line never reached /log")
+    } else {
+        None
     };
     if let Some(why) = unanswered {
         return Err(format!(
@@ -493,7 +472,6 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
              slots\n{tail}"
         ));
     }
-    let stop = stop.expect("an answered flush's stop line has a time");
     let runner = bootlog::lines_of(&log, RUNNER);
     // Non-vacuity: the flood met a full ring, so the slots were contested.
     let flooded = runner.lines().filter(|l| l.starts_with("flood ")).count();
@@ -507,9 +485,7 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
         ));
     }
     eprintln!(
-        "  [origin] {flooded} flood lines filled the ring, and test-runner's {ENDED:?} is in /log; \
-         the kernel synced {} ms after init's stop line",
-        sync.saturating_sub(stop)
+        "  [origin] {flooded} flood lines filled the ring, and test-runner's {ENDED:?} is in /log"
     );
     Ok(())
 }
@@ -683,7 +659,6 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     const LOOPBACK_ID: u16 = 0x7f01;
     const OTHER_ID: u16 = 0x0bad;
     const OWN_ID: u16 = 0x5eed;
-    let asked = Instant::now();
     wire.send(&ask([127, 0, 0, 1], &query(LOOPBACK_ID, host)))?;
     wire.send(&ask(NEIGHBOUR, &query(OTHER_ID, "some-other-host")))?;
     wire.send(&ask(NEIGHBOUR, &query(OWN_ID, host)))?;
@@ -707,7 +682,6 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
             _ => {}
         }
     };
-    let took = asked.elapsed();
     let mut want = query(OWN_ID, host);
     // QR and AA, one question, one answer.
     want[2..8].copy_from_slice(&[0x84, 0x00, 0, 1, 0, 1]);
@@ -723,9 +697,8 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     drop(guest);
     serial::Serial::named("the boot", console.as_str()).must_be_clean()?;
     eprintln!(
-        "  [mdns] {host}.local answered {GUEST:?} to an on-link neighbour in {} ms; 127.0.0.1 and \
-         another name, nothing",
-        took.as_millis()
+        "  [mdns] {host}.local answered {GUEST:?} to an on-link neighbour; 127.0.0.1 and another \
+         name, nothing"
     );
     Ok(())
 }

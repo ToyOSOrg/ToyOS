@@ -23,9 +23,7 @@ twelve guests sharing one host spent the budget waiting for the xHCI
 controller lock and demand-paged executables faulted at `_start+0x0`.
 
 **Reproduction.** Not reached in a suite yet: the data path was, and this one
-shares its mechanism and its device. `usb-slow-device` holds every mass-storage
-completion back, and a boot armed with it that also spawns under load is the
-shape to try.
+shares its mechanism and its device.
 
 **Exit condition.** A refused metadata read is retried on a fresh budget above
 the cache lock, bounded by `block::DEADMAN`, or the mount reports it as the

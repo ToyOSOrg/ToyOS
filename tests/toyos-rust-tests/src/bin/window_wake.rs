@@ -18,19 +18,14 @@
 
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use toyos_abi::syscall::SyscallError;
-use window::{Waiter, Window, Woke};
+use window::{Waiter, Window};
 
 const ROUNDS: u32 = 200;
 
 /// More than a new `Waiter` has room for once the wake is counted.
 const WINDOWS: usize = 4;
-
-/// A liveness ceiling, not a duration: a delivered wake ends the wait at once,
-/// and only a lost one reaches this.
-const CEILING: Duration = Duration::from_secs(10);
 
 fn main() {
     let mut windows: Vec<Window> = (0..WINDOWS)
@@ -57,13 +52,12 @@ fn main() {
         let pending_first = round % 2 == 0;
         go.send(()).expect("the helper is alive until `go` drops");
         if pending_first {
-            raised.recv_timeout(CEILING).expect("the helper raised the wake");
+            raised.recv().expect("the helper raised the wake");
         }
+        // No deadline: a lost wake leaves this wait blocked, and the host's
+        // ceiling reds it.
         loop {
-            if waiter.wait(windows.iter().map(Window::handle), Some(CEILING)) == Woke::TimedOut {
-                println!("WINDOW-WAKE-LOST round={round}");
-                std::process::exit(1);
-            }
+            waiter.wait(windows.iter().map(Window::handle), None);
             if waiter.take_wake() {
                 break;
             }
@@ -73,7 +67,7 @@ fn main() {
             }
         }
         if !pending_first {
-            raised.recv_timeout(CEILING).expect("the helper raised the wake");
+            raised.recv().expect("the helper raised the wake");
         }
     }
     drop(go);
@@ -81,14 +75,11 @@ fn main() {
 
     let flood = pipe_capacity() + 1;
     let waker = waiter.waker();
-    let raising = Instant::now();
     for _ in 0..flood {
         waker.wake();
     }
-    let raised_in = raising.elapsed();
-    if waiter.wait(windows.iter().map(Window::handle), Some(CEILING)) == Woke::TimedOut
-        || !waiter.take_wake()
-    {
+    waiter.wait(windows.iter().map(Window::handle), None);
+    if !waiter.take_wake() {
         println!("WINDOW-WAKE-LOST after a flood of {flood} wakes");
         std::process::exit(1);
     }
@@ -96,7 +87,7 @@ fn main() {
         println!("WINDOW-WAKE-LOST a flood of {flood} wakes was not taken by one take");
         std::process::exit(1);
     }
-    println!("WINDOW-WAKE-OK rounds={ROUNDS} windows={WINDOWS} flood={flood} raised in {raised_in:?}");
+    println!("WINDOW-WAKE-OK rounds={ROUNDS} windows={WINDOWS} flood={flood}");
 }
 
 /// The bytes a fresh pipe holds before a write would block.
