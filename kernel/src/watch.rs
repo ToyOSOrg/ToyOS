@@ -254,7 +254,8 @@ mod window {
 /// once the outer post lets go of it and before any pass can run. A hold counts
 /// the posts made on its CPU: the outer one and the handler's are two, and a
 /// hold that saw fewer by its budget lapsed. One run, on whichever idle loop
-/// reaches it first; its verdict is one [`handler_post::SAID`] line.
+/// reaches it first with interrupts open; its verdict is one
+/// [`handler_post::SAID`] line.
 #[cfg(feature = "boot-actuators")]
 pub mod handler_post {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
@@ -277,7 +278,8 @@ pub mod handler_post {
     static POSTS: AtomicU64 = AtomicU64::new(0);
 
     pub fn run() {
-        if RAN.load(Relaxed) || RAN.swap(true, Relaxed) {
+        // A hold is a CPU that takes interrupts while it holds.
+        if RAN.load(Relaxed) || !crate::arch::cpu::interrupts_enabled() || RAN.swap(true, Relaxed) {
             return;
         }
         let me = crate::arch::percpu::cpu_id();
