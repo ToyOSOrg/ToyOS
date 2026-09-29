@@ -19,19 +19,10 @@ it.** Moving a driver out without translation *costs* security — a descriptor
 holding a physical address is an arbitrary read/write primitive over all of
 memory. `kernel/src/pcidev/mod.rs` is where that ruling is enforced for a
 function a process drives: a claim on one this machine cannot give an address
-space of its own is refused by name. **On a machine with no IOMMU at all, the
-refusal is now by driver identity, not blanket: only a driver signed and
-shipped in the ToyOS image may claim a device there, and the kernel's DMA
-layer hands it the physical address directly instead of a domain-mapped one**
-(owner ruling, 2026-09-29, superseding the 2026-09-07 ruling recorded in
-`issues/hardware/the-t14-answers-only-through-a-usb-stick.md`). Without an
-IOMMU a device's DMA is not contained, so a bad signed driver can still
-corrupt the kernel — the full isolation guarantee needs an IOMMU, and on a
-machine without one ToyOS states "no isolation" plainly; an isolation test
-there reports "no isolation on this machine", never a pass.
-`issues/kernel/a-machine-without-an-iommu-refuses-every-claim.md` tracks
-building that distinction; today `pcidev` still refuses every claim there
-regardless of who asks.
+space of its own is refused by name, so there is no machine on which a driver
+outside the kernel gets an untranslated address. The owner's 2026-09-29 ruling
+for signed in-image drivers on a machine with no IOMMU is
+`issues/kernel/a-machine-without-an-iommu-refuses-every-claim.md`'s.
 `issues/kernel/the-iommu-refuses-nothing-yet.md` still holds the other half —
 every driver *inside* the kernel holds a domain of its own and the refusal there
 is not built.
