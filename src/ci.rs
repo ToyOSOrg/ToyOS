@@ -935,9 +935,6 @@ mod tests {
         assert!(at_tip("", tip).is_err());
     }
 
-    /// `main`'s ruleset requires the check `host`, so `ci.yml` runs a job of that
-    /// name on every pull request and in the merge queue: a queue waiting on a
-    /// check nothing reports times out rather than failing.
     #[test]
     fn the_required_check_is_a_job_on_every_pull_request() {
         let text = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
