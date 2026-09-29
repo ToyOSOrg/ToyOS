@@ -1303,12 +1303,29 @@ pub fn run(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// **A run that selects `perf_request` and no other rider of `testcases`
+/// still carries the job the row reads there.**
+#[test]
+fn a_filtered_run_carries_the_job_its_row_reads() -> Result<(), String> {
+    let profile = Profile::load(&super::compile::repo_root()).map_err(|e| e.to_string())?;
+    let alone: Vec<(&str, &'static Metal)> =
+        crate::METAL.iter().filter(|(name, _)| *name == "perf_request").map(|(n, d)| (*n, d)).collect();
+    let boots = batches(&alone, &[], &profile)?;
+    let testcases = boots.get("testcases").ok_or("no testcases boot")?;
+    if !testcases.jobs.iter().any(|job| job == "test_rs_perf_state") {
+        return Err(format!("testcases carries {:?} and not test_rs_perf_state", testcases.jobs));
+    }
+    Ok(())
+}
 
-    /// The pass after the reset of the T14's `perfdiverge` boot, less the log
-    /// ring the loader files after the record.
+/// **The boot that is to panic is driven as one and judged as one**: its
+/// invocation tells the loop which line the panic record carries, and the
+/// boot's own facts, read off the record the T14 sealed, owe nothing a
+/// panic does not seal.
+#[test]
+fn a_boot_that_is_to_panic_is_told_so_and_owes_no_stop() -> Result<(), String> {
+    // The pass after the reset of the T14's `perfdiverge` boot, less the log
+    // ring the loader files after the record.
     const DIVERGED: &str = r#"
 Loader log: the kernel handoff begins, so this file ends here
 --- the pass after the reset, reading what the boot above left
@@ -1338,59 +1355,34 @@ Previous boot's panic: 15052 bytes off 0x8000000
 Black box: that record's log ring is in loader.log, not on a console the firmware scrolls: 191 record(s)
 Loader log: the last boot is accounted for, so this pass resets the machine
 "#;
-
-    fn perf_request_alone() -> Result<(BTreeMap<String, Batch>, Profile), String> {
-        let profile = Profile::load(&super::super::compile::repo_root()).map_err(|e| e.to_string())?;
-        let selected: Vec<(&str, &'static Metal)> =
-            crate::METAL.iter().filter(|(name, _)| *name == "perf_request").map(|(n, d)| (*n, d)).collect();
-        assert_eq!(selected.len(), 1, "one perf_request row");
-        Ok((batches(&selected, &[], &profile)?, profile))
+    let profile = Profile::load(&super::compile::repo_root()).map_err(|e| e.to_string())?;
+    let alone: Vec<(&str, &'static Metal)> =
+        crate::METAL.iter().filter(|(name, _)| *name == "perf_request").map(|(n, d)| (*n, d)).collect();
+    let boots = batches(&alone, &[], &profile)?;
+    let diverge = boots.get("perfdiverge").ok_or("no perfdiverge boot")?;
+    let want = diverge.panics.ok_or("perfdiverge expects no panic")?;
+    let words = invocation(Path::new("image.img"), Path::new("perfdiverge"), diverge);
+    if !words.windows(2).any(|pair| pair[0] == "--expect-panic" && pair[1] == want) {
+        return Err(format!("the invocation does not expect {want:?}: {words:?}"));
     }
-
-    /// **A run that selects `perf_request` and no other rider of `testcases`
-    /// still carries the job the row reads there.**
-    #[test]
-    fn a_filtered_run_carries_the_job_its_row_reads() -> Result<(), String> {
-        let (boots, _) = perf_request_alone()?;
-        let testcases = boots.get("testcases").ok_or("no testcases boot")?;
-        if !testcases.jobs.iter().any(|job| job == "test_rs_perf_state") {
-            return Err(format!("testcases carries {:?} and not test_rs_perf_state", testcases.jobs));
-        }
-        Ok(())
+    if !DIVERGED.contains(want) {
+        return Err(format!("the record the T14 sealed does not carry {want:?}"));
     }
-
-    /// **The boot that is to panic is driven as one and judged as one**: its
-    /// invocation tells the loop which line the panic record carries, and the
-    /// boot's own facts, read off the record the T14 sealed, owe nothing a
-    /// panic does not seal.
-    #[test]
-    fn a_boot_that_is_to_panic_is_told_so_and_owes_no_stop() -> Result<(), String> {
-        let (boots, profile) = perf_request_alone()?;
-        let diverge = boots.get("perfdiverge").ok_or("no perfdiverge boot")?;
-        let want = diverge.panics.ok_or("perfdiverge expects no panic")?;
-        let words = invocation(Path::new("image.img"), Path::new("perfdiverge"), diverge);
-        if !words.windows(2).any(|pair| pair[0] == "--expect-panic" && pair[1] == want) {
-            return Err(format!("the invocation does not expect {want:?}: {words:?}"));
-        }
-        if !DIVERGED.contains(want) {
-            return Err(format!("the record the T14 sealed does not carry {want:?}"));
-        }
-        let kernel = "[2026-09-29 07:20:58 1.156 cpu0] Boot: complete (1156ms)\n".to_string();
-        let back = Readback {
-            label: "perfdiverge".to_string(),
-            home: PathBuf::new(),
-            loader: DIVERGED.to_string(),
-            boot_ms: bootlog::boot_millis(&kernel),
-            log: kernel.clone(),
-            kernel,
-            back_secs: 101,
-            stick_secs: 0,
-            cable: None,
-        };
-        let found = boot_findings("perfdiverge", &back, &profile);
-        if !found.is_empty() {
-            return Err(found.join("\n"));
-        }
-        Ok(())
+    let kernel = "[2026-09-29 07:20:58 1.156 cpu0] Boot: complete (1156ms)\n".to_string();
+    let back = Readback {
+        label: "perfdiverge".to_string(),
+        home: PathBuf::new(),
+        loader: DIVERGED.to_string(),
+        boot_ms: bootlog::boot_millis(&kernel),
+        log: kernel.clone(),
+        kernel,
+        back_secs: 101,
+        stick_secs: 0,
+        cable: None,
+    };
+    let found = boot_findings("perfdiverge", &back, &profile);
+    if !found.is_empty() {
+        return Err(found.join("\n"));
     }
+    Ok(())
 }
