@@ -1,5 +1,7 @@
-# One CPU and the AArch64 guest's jobs, each a toybox applet whose line comes
-# only if the kernel kept what that applet asks about.
+# One CPU and the AArch64 guest's jobs, each a toybox applet or, last because
+# a kernel it fails on rewrites the clock page every reader asserts on, the
+# suite's `test_rs_abuse_readonly_copyout`, which the harness puts on ROOT;
+# each job's line comes only if the kernel kept what that job asks about.
 [boot]
 start = ["logd", "test-runner"]
 
@@ -11,7 +13,7 @@ syscap = ["logread"]
 receives = ["power"]
 # Four minutes from boot rather than one: every job here runs on an emulated
 # CPU, and a job past the bound reboots the guest with the job named.
-args = ["--bound-ms=240000", "preempt", "fp_isolation", "first_entry", "unmap_touch", "debug_refused"]
+args = ["--bound-ms=240000", "preempt", "fp_isolation", "first_entry", "unmap_touch", "debug_refused", "test_rs_abuse_readonly_copyout"]
 
 [programs.toybox]
 

@@ -1490,7 +1490,6 @@ const ARCH_RULES: &[PlaceRule] = &[
             ("userland/toyos-window/src/arch/", "toyos-window's architecture modules"),
             ("tests/toyos-rust-tests/src/bin/abuse_kernel_addr.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/abuse_page_straddle.rs", USERLAND_ASM),
-            ("tests/toyos-rust-tests/src/bin/abuse_readonly_copyout.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/abuse_tls_alloc.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/copy_out_races_munmap.rs", USERLAND_ASM),
             ("tests/toyos-rust-tests/src/bin/debug_trap.rs", USERLAND_ASM),

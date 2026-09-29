@@ -3004,6 +3004,13 @@ pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
     toyos_build::build::build_toyos_bins(&repo, SUITE_ARCH, crate_path, quiet)
 }
 
+/// One binary of a test crate, built for `arch`: for a guest the crate's other
+/// binaries do not all build for.
+pub fn build_toyos_bin(arch: Arch, crate_path: &Path, name: &str) -> Vec<u8> {
+    let quiet = !VERBOSE.load(Ordering::Relaxed);
+    toyos_build::build::build_toyos_bin(&compile::repo_root(), arch, crate_path, name, quiet)
+}
+
 /// A kernel record's console line: `klogd` renders every one with this head,
 /// and nothing else writes it — a program's line reaches the console only
 /// through `logd`, under the program's own head.

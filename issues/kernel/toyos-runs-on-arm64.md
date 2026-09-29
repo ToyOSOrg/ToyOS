@@ -268,8 +268,7 @@ Each stage names its exit; "measured" means a number from a run.
    virtio-rng. Each judges an event, never a rate: no QEMU test measures time.
    Owed before the exit holds: the interrupts-off window against x86's, a
    measurement only metal can make, with no instrument on either arch yet;
-   `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md`, whose
-   `KernelArgs` rename waits on the loader's change to that struct; the
+   `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md`; the
    instruction-cache maintenance before a mapping is executable
    (`cache::make_executable`), the break-before-make ordering of a live
    entry's replacement, and the TLB flush before a reclaimed ASID is issued

@@ -454,6 +454,9 @@ const RUST_SKIP: &[&str] = &[
 /// assert-carrying build there.
 #[allow(dead_code, reason = "`suite_split` reads it, in `toyos-checks` alone")]
 const DRIVEN_AND_SHARED: &[&str] = &[
+    // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
+    // for AArch64 and runs it on that architecture's job case.
+    "abuse_readonly_copyout",
     // The lost-wake canary: its shared run is the count on the shipping
     // kernel with nothing staged, and `blocking_read_window` drives it again
     // with the watch's window held open.
@@ -537,6 +540,7 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("virt_first_entry", Sched::Parallel, Tier::Local),
     ("virt_unmap_touch", Sched::Parallel, Tier::Local),
     ("virt_debug_refused", Sched::Parallel, Tier::Local),
+    ("virt_readonly_copyout", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -3562,20 +3566,30 @@ fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String>
     Ok(())
 }
 
+/// `tests/toyos-rust-tests`' binary that `tests/virtjobcase` runs as its job
+/// `test_rs_abuse_readonly_copyout`.
+const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
+
 /// Boot `tests/virtjobcase` under the EL2 profile and judge its job `job`:
 /// it ends with exit 0, having said `said`. The kernel carries `SYS_DEBUG`
 /// for `debug_refused`, and every job runs in every boot of the case.
 fn virt_job(job: &str, said: &str) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
+    let profile = qemu::Profile::VirtEl2;
+    static COPYOUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let copyout = COPYOUT.get_or_init(|| {
+        qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
+    });
     let mut qemu = QemuInstance::boot_with_options(
         case,
         &[],
         &[],
         BootOptions {
-            profile: qemu::Profile::VirtEl2,
+            profile,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
+            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), copyout.clone())],
             ..Default::default()
         },
     );
@@ -5132,6 +5146,11 @@ fn run_screen_test(
             "debug_refused",
             "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused",
         ),
+        // `tests/toyos-rust-tests/src/bin/abuse_readonly_copyout.rs`, which
+        // exits with one bit per arm that let a write through.
+        "virt_readonly_copyout" => {
+            virt_job(&format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
+        }
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
             // thousand times through the flood, then waits for every SGI it

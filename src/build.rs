@@ -2286,6 +2286,21 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
     results
 }
 
+/// The one binary `name` of the crate at `crate_path`, built for `arch`: for an
+/// architecture the crate's other binaries do not all build for.
+pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, quiet: bool) -> Vec<u8> {
+    let target = arch.userland();
+    let mut lock = buildlock::shared(root, "a test binary");
+    let sysroot = crate::toolchain::ensure(root, false, &mut lock);
+    let env = GuestEnv::new(&sysroot);
+    invalidate_stale(root, &mut lock, &env.toolchain, &[(crate_path.to_path_buf(), Clean::All)]);
+    // Built and read under one hold, as `build_toyos_bins`' are.
+    let _artifact = buildlock::artifact(root);
+    cargo_build(crate_path, target, &["--bin", name], &env, &[], quiet);
+    let binary = crate_path.join(format!("target/{target}/{PROFILE}/{name}"));
+    fs::read(&binary).unwrap_or_else(|e| panic!("read the test binary {}: {e}", binary.display()))
+}
+
 // --- Internal helpers ---
 
 /// The ToyOS-hosted rustc, and the target libraries it compiles against: this
