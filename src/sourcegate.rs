@@ -31,7 +31,6 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-
 /// `line` with its comment and its string literals removed.
 fn code_only(line: &str) -> String {
     let mut out = String::with_capacity(line.len());

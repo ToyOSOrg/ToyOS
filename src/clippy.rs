@@ -47,7 +47,6 @@ const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tr
                                    switch-witness-mutate-frame,switch-witness-mutate-rsp,\
                                    fpu-save-nothing,user-writable-gsbase";
 
-/// Host features no workspace member and no [`crate::ci::CONTROLS`] row turns on.
 const UNCONTROLLED: &[&str] = &["toyos-pcid/counting-allocator", "toyos-sched/tripwire"];
 
 /// Every model's negative control and [`UNCONTROLLED`], as one `--features` list.
@@ -64,7 +63,8 @@ fn control_features() -> String {
 /// `undocumented_unsafe_blocks` is adopted per area as each area's
 /// justifications land. `toyos-xhci` has a shape of its own because the
 /// workspace run builds it only with `toyos-xhci-sim`'s `flaws`, never as the
-/// kernel does.
+/// kernel does. `toyos-sched-loom` has one because `victim-retires-mid-probe`'s
+/// test arm excludes `no-preempt-guard`, which `$CONTROLS` turns on beside it.
 const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
@@ -139,6 +139,18 @@ const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
         before: &["-p", "toyos-xhci", "--all-targets"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "",
+        before: &[
+            "-p",
+            "toyos-sched-loom",
+            "--test",
+            "loom_mailbox",
+            "--features",
+            "victim-retires-mid-probe",
+        ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {

@@ -66,7 +66,7 @@ above; otherwise it is a NOTE.
   unused" entries in `toyos-abi/src/syscall.rs` and `toyos-abi/src/inbox.rs`; the retired names
   include `SharedToken` and `services::connect`); a workspace member's `Cargo.toml` declaring `[profile]` or `[patch]`, which
   cargo ignores with only a warning; a new package without a `description` saying what it is.
-  A new cargo feature, or a new `cfg` arm of one, is compiled by a `src/clippy.rs` shape in the same diff.
+  A new cargo feature or `cfg` arm of one, and every arm a changed `src/clippy.rs` shape stops building, is shown linted in the pull request body: a `mem::forget` planted in that arm turns `cargo run -- --clippy` red.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
   needs a reason you accept; a branch that could delete more than it adds and does not goes back
