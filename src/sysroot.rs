@@ -10,8 +10,8 @@
 //! key's sources — and a build names it as `RUSTUP_TOOLCHAIN`.
 //!
 //! **The fork a checkout's toolchain is built from is a [`Fork`]**: the
-//! primary's `rust/`, or a linked worktree's own `rust/` where it made one to
-//! edit the fork, keyed as it stands and built where it is; for every other
+//! primary's `rust/`, or a linked worktree's own `rust/` while it holds work
+//! the pin does not, keyed as it stands and built where it is; for every other
 //! linked worktree, the commit its tree pins, keyed from the primary's objects
 //! and built in the host's one shared checkout, [`SHARED`], which such builds
 //! hold one at a time. Bootstrap's stage-0 local rebuild compiles a checkout's
@@ -95,63 +95,65 @@ pub enum Fork {
     /// primary's `rust/`, or a linked worktree's own, which is where the fork
     /// is edited.
     Checkout(PathBuf),
-    /// The commit a linked worktree whose `rust/` is the stub pins, in the fork
-    /// repository at `rust_dir`, the primary's: keyed from its objects and built
-    /// in [`SHARED`].
+    /// The commit a linked worktree pins, in the fork repository at `rust_dir`,
+    /// the primary's: keyed from its objects and built in [`SHARED`].
     Pinned { rust_dir: PathBuf, commit: String },
 }
 
 impl Fork {
     /// The fork `root`'s toolchain is built from.
     ///
-    /// A checkout is used as it stands when it is at or ahead of the commit
-    /// this tree pins. The primary's that is not is refused, since nothing but
-    /// its owner moves it; a linked worktree's is moved there, unless it holds
-    /// uncommitted work, which is refused rather than moved out from under
-    /// whoever made it.
+    /// A linked worktree's own checkout is built where it is only while it
+    /// holds work its pin does not, uncommitted or committed ahead of it; at
+    /// the pin and clean it is the pin. One behind its pin is moved there,
+    /// unless it holds uncommitted work, which is refused rather than moved out
+    /// from under whoever made it. The primary's is built as it stands, and
+    /// refused behind its pin, since nothing but its owner moves it.
     pub fn of(root: &Path) -> Fork {
         let pinned = pinned_fork(root);
         let own = root.join("rust");
-        match toolchain::owner(root) {
+        let head = || git_out(&own, &["rev-parse", "HEAD"]).trim().to_string();
+        let primary = match toolchain::owner(root) {
             Owner::Installed => panic!("an installed toolchain has no fork to build from"),
             Owner::Us => {
-                let head = git_out(&own, &["rev-parse", "HEAD"]);
+                let head = head();
                 assert!(
-                    at_or_ahead(&own, &pinned, head.trim()),
-                    "{} is at {}, and this tree pins the fork at {pinned}, which that is not at or ahead \
-                     of: a build here would make a toolchain this tree does not name. Move it there: \
-                     `git -C {} checkout --detach {pinned}`",
+                    at_or_ahead(&own, &pinned, &head),
+                    "{} is at {head}, and this tree pins the fork at {pinned}, which that is not at or \
+                     ahead of: a build here would make a toolchain this tree does not name. Move it \
+                     there: `git -C {} checkout --detach {pinned}`",
                     own.display(),
-                    head.trim(),
                     own.display(),
                 );
-                Fork::Checkout(own)
+                return Fork::Checkout(own);
             }
-            Owner::Elsewhere(_) if own.join(".git").exists() => {
-                let behind = || {
-                    let head = git_out(&own, &["rev-parse", "HEAD"]);
-                    (!at_or_ahead(&own, &pinned, head.trim())).then_some(head)
-                };
-                if behind().is_none() {
-                    return Fork::Checkout(own);
-                }
-                let _held = Lock::exclusive(&own, &format!("{}, behind a build in it", own.display()));
-                if let Some(head) = behind() {
-                    let dirty = git_out(&own, &["status", "--porcelain", "--ignore-submodules=none"]);
-                    assert!(
-                        dirty.is_empty(),
-                        "{} is at {} with uncommitted work, and this tree pins the fork at {pinned}, which \
-                         that is not at or ahead of: a build here would make a toolchain this tree does not \
-                         name, and moving the checkout would lose that work.\n{dirty}",
-                        own.display(),
-                        head.trim(),
-                    );
-                    git_out(&own, &["checkout", "--detach", "-q", &pinned]);
-                    eprintln!("{} was at {}, not at or ahead of this tree's pin {pinned}: checked it out", own.display(), head.trim());
-                }
-                Fork::Checkout(own)
+            Owner::Elsewhere(primary) => primary,
+        };
+        let shared = Fork::Pinned { rust_dir: primary.join("rust"), commit: pinned.clone() };
+        if !own.join(".git").exists() {
+            return shared;
+        }
+        let edits = || git_out(&own, &["status", "--porcelain", "--ignore-submodules=none"]);
+        if !at_or_ahead(&own, &pinned, &head()) {
+            let _held = Lock::exclusive(&own, &format!("{}, behind a build in it", own.display()));
+            let was = head();
+            if !at_or_ahead(&own, &pinned, &was) {
+                let edits = edits();
+                assert!(
+                    edits.is_empty(),
+                    "{} is at {was} with uncommitted work, and this tree pins the fork at {pinned}, which \
+                     that is not at or ahead of: a build here would make a toolchain this tree does not \
+                     name, and moving the checkout would lose that work.\n{edits}",
+                    own.display(),
+                );
+                git_out(&own, &["checkout", "--detach", "-q", &pinned]);
+                eprintln!("{} was at {was}, not at or ahead of this tree's pin {pinned}: checked it out", own.display());
             }
-            Owner::Elsewhere(primary) => Fork::Pinned { rust_dir: primary.join("rust"), commit: pinned },
+        }
+        if head() == pinned && edits().is_empty() {
+            shared
+        } else {
+            Fork::Checkout(own)
         }
     }
 
@@ -660,26 +662,32 @@ mod tests {
         assert!(!linked.exists(), "git worktree remove left {}", linked.display());
     }
 
-    /// **A fork checkout is built as it stands when it is at or ahead of its
-    /// pin**; a linked worktree's behind it is moved there when clean and
-    /// refused, its work named, when not; and the primary's behind it is
+    /// **A linked worktree's own fork checkout is built where it is only while
+    /// it holds work its pin does not**: commits ahead or uncommitted work are
+    /// built as they stand, where they are; at the pin and clean it is the pin,
+    /// built in the shared checkout; behind the pin it is moved there when clean
+    /// and refused, its work named, when not. The primary's behind its pin is
     /// refused, since nothing but its owner moves it.
     #[test]
-    fn a_fork_checkout_behind_its_pin_is_moved_or_refused() {
+    fn a_fork_checkout_is_built_where_its_work_is() {
         let e = estate("fork-own");
         let fork = e.a.join("rust");
         let ahead = git(&fork, &["rev-parse", "HEAD"]);
-        write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
-        assert!(matches!(Fork::of(&e.a), Fork::Checkout(dir) if dir == fork));
+        let where_it_is = |f: Fork| matches!(f, Fork::Checkout(dir) if dir == fork);
+        let as_the_pin = |f: Fork| matches!(f, Fork::Pinned { commit, .. } if commit == ahead);
+        assert!(where_it_is(Fork::of(&e.a)), "commits ahead of the pin were built as the pin");
         git(&e.a, &["add", "rust"]);
         git(&e.a, &["commit", "-qm", "pins a"]);
+        assert!(as_the_pin(Fork::of(&e.a)), "a clean checkout at its pin was built where it is");
+        write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
+        assert!(where_it_is(Fork::of(&e.a)), "uncommitted work was built as the pin");
         git(&fork, &["checkout", "-q", "HEAD~1"]);
         let said = refusal("a fork checkout behind its pin was moved over uncommitted work", || {
             Fork::of(&e.a);
         });
         assert!(said.contains("uncommitted work") && said.contains("library/std/src/lib.rs"), "{said}");
         git(&fork, &["checkout", "-q", "--", "library"]);
-        assert!(matches!(Fork::of(&e.a), Fork::Checkout(dir) if dir == fork));
+        assert!(as_the_pin(Fork::of(&e.a)), "a clean checkout behind its pin was not built as the pin");
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), ahead, "a clean checkout behind its pin was not moved to it");
 
         git(&e.primary, &["update-index", "--cacheinfo", &format!("160000,{ahead},rust")]);
