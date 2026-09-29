@@ -78,7 +78,7 @@ The testing rules live where they are enforced: known reds in `src/redlist.rs`, 
 
 ## Repository layout
 
-The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for every crate in the tree, and `src/hostws.rs` reds on one in neither; every package they name says what it is in its `description`, and a gate there reds on one without.
+The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for every crate in the tree, and `src/hostws.rs` reds on one in neither; every package they name says what it is in its `description`.
 
 ## Workflow
 
