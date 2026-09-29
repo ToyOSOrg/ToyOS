@@ -7,8 +7,7 @@ use toyos_abi::syscall;
 /// a reader that walks off by a field the day one of them moves.
 pub use toyos_abi::syscall::{SYSINFO_ENTRY_SIZE, SYSINFO_HEADER_SIZE};
 
-/// The time of day in the machine's own zone, or `None` on a machine whose
-/// clock never answered.
+/// The time of day, or `None` on a machine whose clock never answered.
 pub fn clock_realtime() -> Option<RealTime> {
     syscall::clock_realtime()
 }

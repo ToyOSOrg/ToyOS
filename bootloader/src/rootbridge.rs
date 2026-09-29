@@ -15,9 +15,6 @@
 use core::ffi::c_void;
 use core::ptr::read_volatile;
 
-use alloc::string::String;
-use core::fmt::Write;
-
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{memory_windows, Phys, MAX_LIST_BYTES};
 use uefi::prelude::*;
@@ -132,23 +129,7 @@ pub fn windows(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -
         }
 
         let list = List { at: resources as u64 };
-        let walk = memory_windows(list, list.at, &mut out[found..]);
-
-        // `readable` again here rather than resting on the walk's: `Phys`'s
-        // contract is that a byte is asked for only where a `readable` in the
-        // same reach accepted it, and a reader that argues its bound across two
-        // functions is one an edit to either can break silently.
-        let mut hex = String::with_capacity(walk.bytes * 2);
-        for i in 0..walk.bytes {
-            let at = list.at + i as u64;
-            if !list.readable(at, 1) {
-                break;
-            }
-            let _ = write!(hex, "{:02x}", list.byte(at));
-        }
-        println!("{HEAD} {index} (segment {}) {} bytes: {hex}", bridge.segment_number, walk.bytes);
-
-        match walk.windows {
+        match memory_windows(list, list.at, &mut out[found..]) {
             Ok(count) => found += count,
             Err(why) => {
                 println!("{HEAD} {index} (segment {}) {why}, so the kernel is handed no window", bridge.segment_number);

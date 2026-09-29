@@ -281,6 +281,10 @@ pub fn clock(_args: &KernelArgs) {
     log!("clock: the generic timer counts at {hz} Hz; no wall clock is read on this architecture");
 }
 
+/// Nothing: where the generic timer counts from is firmware's, and no
+/// register says it.
+pub fn report_counter_origin() {}
+
 /// The per-CPU timer counts the clock's own ticks, so there is nothing to
 /// calibrate: it stays stopped until the scheduler first arms it.
 pub fn timer() {

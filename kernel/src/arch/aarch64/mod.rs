@@ -104,18 +104,6 @@ pub unsafe fn percpu_fetch_add(
     _guard: &IrqGuard,
 ) -> u64 {
     let previous = counter.load(core::sync::atomic::Ordering::Relaxed);
-    // Under `log-shared-reservation`, open the window the guard closes, so a
-    // nested record can land between the load and the store.
-    if crate::actuator::log_shared_reservation() && crate::log::nested::inject() {
-        // SAFETY: each writes `DAIF.I` and touches no memory.
-        unsafe {
-            core::arch::asm!("msr daifclr, #2");
-            for _ in 0..256 {
-                core::hint::spin_loop();
-            }
-            core::arch::asm!("msr daifset, #2");
-        }
-    }
     // A load and a store, not an atomic add: the guard masks the only other
     // writer this CPU has, and no other CPU writes the counter.
     counter.store(previous + 1, core::sync::atomic::Ordering::Relaxed);

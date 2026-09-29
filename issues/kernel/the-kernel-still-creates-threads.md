@@ -25,10 +25,8 @@ code creates a schedulable task other than the per-CPU idle loop.
   last thread tears down its own process on its way out of the kernel, and the
   scheduler frees that thread's kernel stack after switching away. Blocked on
   #549 landing.
-- **K3:** the test-only `logstorm`/`lognest` producers are deleted if the log
-  gate does not need kernel-context producers. Blocked on nothing.
 - **K4:** `klogd` goes: the owner-approved driver-model design moves the
   console to logd, and this track owns that move.
 - **K5:** `iod` goes with the kernel's write-back queue; met only when #536
   lands with no new `kthread::spawn`.
-- **K6:** delete the machinery named above. Blocked on K2–K5.
+- **K6:** delete the machinery named above. Blocked on K2, K4 and K5.

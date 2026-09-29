@@ -18,12 +18,6 @@
 //! partition guid [16] | count u8 | booted u8 ('A', 'B' or 0) | 0 [6]
 //! | version u64 | signed-header sha256 [32] | dead A [32] | dead B [32]
 //! ```
-//!
-//! A boot that hands the machine back on purpose proves its image, and the
-//! pass that reads so raises the anti-rollback floor ([`crate::policy`]) —
-//! **never to a version read here**: the file is on a partition the running
-//! system writes, so what it names is only which slot's signed header the
-//! loader verifies again, and the digest that header must hash to.
 
 use crate::slots::Which;
 use crate::Digest;

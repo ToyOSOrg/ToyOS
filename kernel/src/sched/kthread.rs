@@ -18,11 +18,8 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
-/// `klogd` and `iod`, plus one `log-storm` thread per shard in the actuator build.
-#[cfg(not(feature = "boot-actuators"))]
+/// `klogd` and `iod`.
 const MAX_KERNEL_TASKS: usize = 2;
-#[cfg(feature = "boot-actuators")]
-const MAX_KERNEL_TASKS: usize = 2 + toyos_abi::log::MAX_LOG_SHARDS;
 
 /// Collides with no packed id: neither id map issues `u32::MAX`.
 const NO_TASK: u64 = u64::MAX;
