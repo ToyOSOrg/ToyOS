@@ -30,7 +30,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::os::toyos::process::CommandExt;
 use toyos::device::Keyboard;
 use toyos::endow::Endowments;
@@ -47,9 +47,7 @@ const EVENT_SIZE: usize = std::mem::size_of::<RawKeyEvent>();
 
 /// The host's end-of-run marker for `layout`: the HID usage for the End key.
 /// The same sentinel and the same reason as `i8042_keyboard.rs` — nothing
-/// `swiss_german_layout` injects presses End, so its release is unambiguous,
-/// and without one the mode below spends its whole fallback deadline on a
-/// keyboard that has nothing left to say.
+/// `swiss_german_layout` injects presses End, so its release is unambiguous.
 const SENTINEL: u8 = 0x4D;
 
 const TOKEN_KEYBOARD: u64 = 1;
@@ -161,16 +159,11 @@ fn layout(mut surface: Surface, connector: &Connector) {
     surface.drain_notices();
     println!("===SWISS_READY===");
 
-    // A liveness ceiling, not the measurement: the host's sequence ends on
-    // [`SENTINEL`]'s release, so the normal path leaves as soon as the last
-    // transition it typed has been reported, and only a run that lost the
-    // sentinel pays this. It used to be the whole run — eight seconds of an
-    // idle keyboard on every green `swiss_german_layout`, against half a second
-    // of injection.
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // No deadline: the host's sequence ends on [`SENTINEL`]'s release, and a
+    // run that lost it is a hang the host's ceiling reds.
     let mut seen = 0;
     let mut ended = false;
-    while !ended && Instant::now() < deadline {
+    while !ended {
         surface.drain_keyboard(|key, text| {
             println!("kev usage=0x{:02x} mods=0x{:02x} tr={:?}", key.keycode, key.modifiers, text);
             seen += 1;
@@ -214,8 +207,8 @@ fn detect(mut surface: Surface, connector: &Connector) {
     });
 
     let poller = Poller::new(1 + Host::POLL_HANDLES);
-    let deadline = Instant::now() + Duration::from_secs(25);
-    while !wizard_done.load(Ordering::Relaxed) && Instant::now() < deadline {
+    // No deadline: a wizard that never ends is a hang the host's ceiling reds.
+    while !wizard_done.load(Ordering::Relaxed) {
         poller.watch(&surface.keyboard, READABLE, TOKEN_KEYBOARD);
         poller.watch_raw(surface.host.acceptor_handle(), READABLE, TOKEN_LISTEN);
         for client in surface.host.client_handles() {
@@ -223,6 +216,8 @@ fn detect(mut surface: Surface, connector: &Connector) {
         }
 
         let mut ready = [false; 4];
+        // A pace, and never a verdict: `wizard_done` is a flag and not a handle,
+        // so it is looked at again at least this often.
         poller.wait(1, 50_000_000, |token| {
             if (token as usize) < ready.len() {
                 ready[token as usize] = true;
@@ -238,9 +233,6 @@ fn detect(mut surface: Surface, connector: &Connector) {
         // arrives between two of them, and a transition read before the grab
         // was granted would be translated into nothing anyone is reading.
         surface.drain_keyboard(|_, _| {});
-    }
-    if !wizard_done.load(Ordering::Relaxed) {
-        println!("locale_gate: the wizard was still running after 25s");
     }
     println!("===DETECT_DRAINED===");
 

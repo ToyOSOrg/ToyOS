@@ -42,22 +42,21 @@ use super::volumes::{self, Entry};
 const RTC_BASE: &str = "2033-03-07T09:14:25";
 const RTC_BASE_SECS: i64 = 1_993_799_665;
 /// What a file named for that instant begins with. The date and not the time,
-/// because the seconds move on while the machine boots and
-/// [`MAX_BOOT_DRIFT_SECS`] is what bounds that — the timestamp inside the entry
-/// is where this is checked to the second.
+/// because the seconds move on while the machine boots and [`after_the_base`]
+/// is what bounds that — the timestamp inside the entry is where this is
+/// checked to the second.
 const RTC_BASE_DATE: &str = "2033-03-07-";
 
-/// How far past [`RTC_BASE`] the guest may have got by the time it names its
-/// log file.
-///
-/// The guest's clock runs from the base at host speed, so this is a boot's own
-/// wall-clock duration and nothing else — a machine that reaches its log sink
-/// in under a second on a quiet host, and in a good deal more on a busy one.
-/// Five minutes is three orders of magnitude above the former, which keeps this
-/// from being a wall-clock margin the way the serial-tail tests' verdicts are:
-/// nothing in the phase can slow a boot by that much, and a kernel that got the
-/// century wrong is out by a hundred years rather than by seconds.
-const MAX_BOOT_DRIFT_SECS: i64 = 300;
+/// Whether `secs` past [`RTC_BASE`] is a time this guest's clock can have read:
+/// not before the instant the host staged, and not after the RTC — which runs
+/// from that instant at the host's own pace from the moment QEMU starts — had
+/// got to by the time the boot was read back, `lived` after the launch. Both
+/// ends are causality and neither is a margin: a slower host only widens the
+/// second, and a kernel that got the century or a zone wrong is out by years or
+/// hours.
+fn after_the_base(secs: i64, lived: Duration) -> bool {
+    (0..=lived.as_secs_f64().ceil() as i64).contains(&secs)
+}
 
 /// What [`boot_and_read`] makes the guest print into the window between the
 /// ready marker and the first test it runs.
@@ -116,7 +115,7 @@ fn boot_and_read(
     image_name: &str,
     params: &'static [&'static str],
     stage: &[(String, Vec<u8>)],
-) -> Result<(Vec<Entry>, String), String> {
+) -> Result<(Vec<Entry>, String, Duration), String> {
     let image_path = super::lane::dir().join(image_name);
     let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, params);
     std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
@@ -127,6 +126,8 @@ fn boot_and_read(
         std::fs::write(&image_path, &image).map_err(|e| format!("rewrite the boot image: {e}"))?;
     }
 
+    // Before the launch, so the RTC the guest reads has run no longer than this.
+    let launched = std::time::Instant::now();
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
@@ -185,7 +186,7 @@ fn boot_and_read(
     }
     let entries = volumes::root_entries(&after[start..start + len])?;
     let _ = std::fs::remove_file(&image_path);
-    Ok((entries, log))
+    Ok((entries, log, launched.elapsed()))
 }
 
 /// A firmware-named zone separates local time from UTC, in the direction UEFI
@@ -206,7 +207,7 @@ pub fn zone_from_firmware(
     /// What `clock::init_wall` stages, in seconds: two hours east of UTC.
     const OFFSET_SECS: i64 = -120 * 60;
 
-    let (entries, log) =
+    let (entries, log, lived) =
         boot_and_read(test_config, c_bins, rust_bins, "wall-clock-zone.img", PARAMS, &[])?;
     let logs = logs(&entries);
 
@@ -223,7 +224,7 @@ pub fn zone_from_firmware(
         ));
     }
     let stamp_drift = only.modified - RTC_BASE_SECS;
-    if !(0..=MAX_BOOT_DRIFT_SECS).contains(&stamp_drift) {
+    if !after_the_base(stamp_drift, lived) {
         return Err(format!(
             "a zone moved this boot's FAT timestamp by {stamp_drift}s, and FAT stores local time"
         ));
@@ -236,7 +237,7 @@ pub fn zone_from_firmware(
         ));
     };
     let drift = epoch - (RTC_BASE_SECS + OFFSET_SECS);
-    if !(0..=MAX_BOOT_DRIFT_SECS).contains(&drift) {
+    if !after_the_base(drift, lived) {
         let unshifted = epoch - RTC_BASE_SECS;
         return Err(format!(
             "with firmware naming -120 minutes, `SYS_CLOCK_EPOCH` answered {epoch}: {drift}s from \
@@ -263,7 +264,7 @@ pub fn undated(
     params: &'static [&'static str],
     because: &str,
 ) -> Result<(), String> {
-    let (entries, log) = boot_and_read(test_config, c_bins, rust_bins, image_name, params, &[])?;
+    let (entries, log, _) = boot_and_read(test_config, c_bins, rust_bins, image_name, params, &[])?;
     let logs = logs(&entries);
 
     // The refusal, by name and with its reason. A kernel that silently took
@@ -329,7 +330,7 @@ pub fn no_century(
     // *next* century separates them: honouring the table gives 2033 and
     // ignoring it gives 2133.
     const PARAMS: &[&str] = &["rtc-no-century", "rtc-century-next"];
-    let (entries, log) =
+    let (entries, log, _) =
         boot_and_read(test_config, c_bins, rust_bins, "wall-clock-no-century.img", PARAMS, &[])?;
     let logs = logs(&entries);
 
@@ -370,7 +371,7 @@ pub fn century_from_the_register(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     const PARAMS: &[&str] = &["rtc-century-next"];
-    let (entries, log) =
+    let (entries, log, _) =
         boot_and_read(test_config, c_bins, rust_bins, "wall-clock-century.img", PARAMS, &[])?;
     let logs = logs(&entries);
 
@@ -424,7 +425,9 @@ fn mtime_boot(
     data: &Path,
     rtc_base: &'static str,
     mode: &str,
-) -> Result<u64, String> {
+) -> Result<(u64, Duration), String> {
+    // Before the launch, so the RTC the guest reads has run no longer than this.
+    let launched = std::time::Instant::now();
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
@@ -456,14 +459,14 @@ fn mtime_boot(
             result.stdout, result.before, result.serial
         ));
     }
-    printed
+    printed.map(|n| (n, launched.elapsed()))
 }
 
 /// A file's mtime is the wall clock at its write, and a reboot carries it
 /// unchanged.
 ///
 /// The oracle is the instant the host staged with `-rtc base=`: the guest's
-/// stamp for a file on DATA lies within [`MAX_BOOT_DRIFT_SECS`] of it, the
+/// stamp for a file on DATA lies within [`after_the_base`] of it, the
 /// DATA volume read off the image by the host's own `bcachefs` reader holds
 /// that same stamp, and a second boot with the clock a day on reads it back
 /// unchanged. A stamp since boot is decades short of the instant.
@@ -477,9 +480,9 @@ pub fn file_mtime_survives_a_reboot(
     let data = super::lane::dir().join("file-mtime-data.img");
     toyos_build::build::create_sparse(&data, qemu::NVME_SMALL);
 
-    let written = mtime_boot(test_config, c_bins, rust_bins, &data, RTC_BASE, "write")?;
+    let (written, lived) = mtime_boot(test_config, c_bins, rust_bins, &data, RTC_BASE, "write")?;
     let drift = (written / NANOS_PER_SEC) as i64 - RTC_BASE_SECS;
-    if !(0..=MAX_BOOT_DRIFT_SECS).contains(&drift) {
+    if !after_the_base(drift, lived) {
         return Err(format!(
             "{MTIME_PATH} is stamped {written} ns, {drift} s from the {RTC_BASE} the host set the \
              RTC to"
@@ -499,7 +502,7 @@ pub fn file_mtime_survives_a_reboot(
         ));
     }
 
-    let read = mtime_boot(test_config, c_bins, rust_bins, &data, RTC_NEXT_DAY, "read")?;
+    let (read, _) = mtime_boot(test_config, c_bins, rust_bins, &data, RTC_NEXT_DAY, "read")?;
     if read != written {
         return Err(format!(
             "{MTIME_PATH} was stamped {written} ns and reads {read} ns after a reboot with the RTC \

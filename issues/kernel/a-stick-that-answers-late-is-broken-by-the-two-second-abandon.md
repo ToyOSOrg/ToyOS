@@ -95,6 +95,4 @@ recording a mass-storage completion nobody is waiting on.
 ## Exit condition
 
 A T14 boot in which a CSW arrives more than two seconds after its CBW and the
-command completes on the caller's retry with no `transport broke` record, or a
-QEMU boot with `usb-slow-device` widened past the operation budget doing the
-same.
+command completes on the caller's retry with no `transport broke` record.

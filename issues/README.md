@@ -102,7 +102,7 @@ renamed in the commit that corrects the body, with every citation moved.
 
 ## Pointing at one
 
-**Name the file, not the directory.** `issues/audio/hda-tone-phase-check.md`
+**Name the file, not the directory.** `issues/audio/null-sink-applies-one-connect.md`
 is a claim something can check; `issues/audio/` is a claim that an area
 exists, which says nothing about whether the entry you meant is still there.
 

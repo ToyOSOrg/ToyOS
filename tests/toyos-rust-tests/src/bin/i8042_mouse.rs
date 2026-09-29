@@ -5,7 +5,7 @@
 //! host's clock as well as its evidence. Not a standalone test — in RUST_SKIP
 //! for that reason.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use toyos::device::Mouse;
 use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
@@ -17,21 +17,18 @@ const EVENT_SIZE: usize = 6;
 /// PS/2 bit 1 is right and so is HID boot-mouse bit 1.
 const RIGHT: u8 = 0x02;
 
-/// A liveness ceiling, not a duration: the run ends on the marker's release,
-/// so this only bounds a machine that lost it.
-const RUN_CEILING: Duration = Duration::from_secs(60);
-
 fn main() {
     let mouse: Mouse =
         capability().claim(DeviceType::Mouse).expect("i8042_mouse: no mouse device");
     println!("===I8042_MOUSE_READY===");
 
-    let deadline = Instant::now() + RUN_CEILING;
     let mut buf = [0u8; 1024];
     let mut seen = 0;
     let mut right_down = false;
     let mut ended = false;
-    while !ended && Instant::now() < deadline {
+    // No deadline: the run ends on the marker's release, and a machine that
+    // lost it is a hang the host's ceiling reds.
+    while !ended {
         let n = mouse.read_nonblock(&mut buf).unwrap_or(0);
         if n == 0 {
             std::thread::sleep(Duration::from_millis(2));
