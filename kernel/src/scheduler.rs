@@ -595,33 +595,15 @@ const SNAPSHOT_INTERVAL: Cadence = Cadence::every(
     "one clock read and one relaxed compare per idle trip, on a CPU already awake",
 );
 
-/// `sched-fast-health`'s cadence: no guest test program this suite runs lives
-/// past [`SNAPSHOT_INTERVAL`] once, let alone the two prints a comparison needs.
-const FAST_SNAPSHOT_INTERVAL: Cadence = Cadence::every(
-    Duration::from_millis(200),
-    "an actuator no boot arms; a test that needs two prints buys them for one boot",
-);
-
-/// Which of the two cadences this boot took, read once per idle trip.
-fn snapshot_interval_ns() -> u64 {
-    if crate::actuator::sched_fast_health() {
-        FAST_SNAPSHOT_INTERVAL.nanos()
-    } else {
-        SNAPSHOT_INTERVAL.nanos()
-    }
-}
-
 /// When each CPU may next print its own line: per CPU, not global, so no
 /// single CPU speaks for all of them.
 static NEXT_HEALTH: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// How many times each CPU has passed through idle since boot, counted on
-/// every trip rather than only the ones that print: `i8042_quarantine` needs
-/// the raw rate to tell a halting CPU from a spinning one.
+/// How many times each CPU has passed through idle since boot.
 static IDLE_TRIPS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// A snapshot of this CPU's run queues, at most once per
-/// [`snapshot_interval_ns`], plus the machine's page pools on the same
+/// [`SNAPSHOT_INTERVAL`], plus the machine's page pools on the same
 /// cadence. Called from the idle loop on every trip; the cadence is wall
 /// clock rather than per-trip because a CPU that declines to sleep loops at
 /// memory speed. Not a heartbeat: a busy CPU prints nothing, so a gap here
@@ -635,7 +617,7 @@ pub fn log_health() {
         .get(cpu as usize)
         .map_or(0, |t| t.fetch_add(1, Ordering::Relaxed) + 1);
     if now >= next_health.load(Ordering::Relaxed) {
-        next_health.store(now + snapshot_interval_ns(), Ordering::Relaxed);
+        next_health.store(now + SNAPSHOT_INTERVAL.nanos(), Ordering::Relaxed);
         let ready = driver::ready_len() + usize::from(percpu::current_tid().is_some());
         let parked = driver::parked_len();
         let dying = driver::dying_len();
@@ -655,12 +637,12 @@ pub fn log_health() {
     static NEXT_PMM_DUMP: AtomicU64 = AtomicU64::new(0);
     let next = NEXT_PMM_DUMP.load(Ordering::Relaxed);
     if next == 0 {
-        NEXT_PMM_DUMP.store(now + snapshot_interval_ns(), Ordering::Relaxed);
+        NEXT_PMM_DUMP.store(now + SNAPSHOT_INTERVAL.nanos(), Ordering::Relaxed);
     } else if now >= next
         && NEXT_PMM_DUMP
             .compare_exchange(
                 next,
-                now + snapshot_interval_ns(),
+                now + SNAPSHOT_INTERVAL.nanos(),
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             )

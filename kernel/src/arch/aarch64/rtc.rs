@@ -1,5 +1,5 @@
-//! The wall clock at boot: on an ACPI Arm machine, the UEFI runtime's
-//! `GetTime` or a PL031 the tables name, the port's stage 6.
+//! The wall clock at boot: on an ACPI Arm machine, a PL031 the tables name,
+//! the port's stage 6.
 
 use core::fmt;
 

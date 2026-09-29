@@ -344,11 +344,6 @@ fn port_answers() -> bool {
     !crate::actuator::xhci_deaf_port()
 }
 
-/// How long a mass-storage bulk transfer's completion is held back before the driver may see it.
-///
-/// A kernel feature: QEMU cannot stage a slow-answering drive, only a failing one.
-const SLOW_TRANSFER_NS: u64 = 2_000_000;
-
 /// The boot-time connect settle reads the same interval the per-port machine uses.
 use portmachine::DEBOUNCE_NS as PORT_DEBOUNCE_NS;
 
@@ -767,9 +762,6 @@ pub struct XhciController {
     /// Replaces the register, not a verdict: the port reads PED clear for every reader until reset (§4.19.1.1.3).
     software_disabled: PortMask,
 
-    /// The event ring slot a slow device's completion is held in, and when it was first seen. See [`SLOW_TRANSFER_NS`].
-    held_event: Option<(u16, u64)>,
-
     /// What the disk call now inside this controller may still spend, once its transport has broken; closed between calls.
     after_break: AfterBreak,
 
@@ -893,9 +885,6 @@ impl XhciController {
         }
         barrier::dma_rmb();
         let event: Trb = self.event_ring.read(at);
-        if crate::actuator::usb_slow_device() && !self.slow_device_would_have_answered(&event) {
-            return None;
-        }
         // A controller that has not answered yet, which QEMU cannot be: it
         // posts a command's completion inside the write to the doorbell.
         #[cfg(feature = "boot-actuators")]
@@ -904,29 +893,6 @@ impl XhciController {
         }
         self.advance_event_ring();
         Some(event)
-    }
-
-    /// Whether a stick this slow would have answered yet; `true` for anything that is not a bound disk's bulk completion. See [`SLOW_TRANSFER_NS`].
-    ///
-    /// Keyed on ring position: the head does not advance while an event is held, so a second look finds the same first-seen time.
-    fn slow_device_would_have_answered(&mut self, event: &Trb) -> bool {
-        let slot = ((event.control >> 24) & 0xFF) as u8;
-        let dci = ((event.control >> 16) & 0x1F) as u8;
-        let is_disk_bulk = (event.control >> 10) & 0x3F == EVENT_TRANSFER
-            && dci >= 2
-            && self.msc.iter().any(|b| b.disk.is_some_and(|d| d.dev.slot_id() == slot));
-        if !is_disk_bulk {
-            return true;
-        }
-        let now = crate::clock::nanos_since_boot();
-        let since = match self.held_event {
-            Some((head, at)) if head == self.event_head => at,
-            _ => {
-                self.held_event = Some((self.event_head, now));
-                now
-            }
-        };
-        now.saturating_sub(since) >= SLOW_TRANSFER_NS
     }
 
     /// Give an event to the device it names; an interrupt completion dropped here leaves the device's ring empty for the life of the boot.

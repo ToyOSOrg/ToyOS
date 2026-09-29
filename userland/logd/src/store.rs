@@ -6,8 +6,8 @@
 //!
 //! **A part is not preallocated.** Its whole length in zeros is a burst of
 //! writes to the stick at every part's start, and a burst that size starves a
-//! tone playing beside it (`audio_tone_load` at eight CPUs); an append's
-//! cluster chain and directory entry are the price instead.
+//! tone playing beside it; an append's cluster chain and directory entry are
+//! the price instead.
 //!
 //! **Every boot keeps its first part** ([`retire`]): a boot that floods the
 //! volume deletes older parts of its own and never another boot's start.

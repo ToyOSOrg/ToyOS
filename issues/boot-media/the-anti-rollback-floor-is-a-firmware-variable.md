@@ -34,6 +34,11 @@ to the disk can lower it, because the variable is unreachable once
   refuses rather than boot with no floor, so nothing boots until the
   firmware's variables are reset. OVMF deletes one made with time-based
   authenticated write, so no guest reaches that refusal.
+- **an older image at the floor's security version** — once stage 3 of
+  `the-loader-does-only-what-must-precede-the-handover.md` makes the floor
+  count one, any build the same key signed at that version boots, so a hole
+  whose fix did not raise the version stays open, which is the cost the
+  owner accepted for a security version.
 
 `/system/bin/update`'s own check — newer than the running image — reads the
 versions in the slot table, which is on the disk and is advisory; the loader's

@@ -142,11 +142,6 @@ impl MscDevice {
         self.no_write_cache
     }
 
-    /// Which slot this disk is on.
-    pub fn slot_id(&self) -> u8 {
-        self.slot_id
-    }
-
     /// The port whose slot is owed back to the controller, once: the disk was
     /// taken offline with its endpoints Stopped, and its slot is still enabled.
     pub(in crate::drivers::xhci) fn take_slot_owed(&mut self) -> Option<u8> {

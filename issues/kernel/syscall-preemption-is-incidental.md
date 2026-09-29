@@ -36,5 +36,4 @@ This was masked until the preempt count was made conserved across a context
 switch (the scheduler's own baselines needed it): before that the count drifted,
 so a lock drop inside a syscall reached zero at random and preempted at random.
 The behaviour is now deterministic, and deterministically weaker than the model
-assumes. Whether that matters is measurable — gate A's wake-lateness
-distribution is the instrument — and it did not move at N=8.
+assumes.

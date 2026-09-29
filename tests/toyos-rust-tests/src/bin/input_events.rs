@@ -7,7 +7,7 @@
 //! parses them with the same two functions. Not a standalone test: on its own
 //! it would report nothing, which is why it is in RUST_SKIP.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use toyos::device::{Keyboard, Mouse};
 use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
@@ -29,15 +29,14 @@ fn main() {
     let mut translator = window::configured_translator();
     println!("===INPUT_READY===");
 
-    // A liveness ceiling, not a duration: the host's sequence ends on the
-    // release of the right button, which nothing else in it produces, so a
-    // path that delivers nothing fails rather than hangs.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // No deadline: the host's sequence ends on the release of the right
+    // button, which nothing else in it produces, and a path that delivers
+    // nothing is a hang the host's ceiling reds.
     let mut buf = [0u8; 1024];
     let (mut keys, mut pointer) = (0, 0);
     let mut right_down = false;
     let mut ended = false;
-    while !ended && Instant::now() < deadline {
+    while !ended {
         let mut idle = true;
 
         let n = keyboard.read_nonblock(&mut buf).unwrap_or(0);

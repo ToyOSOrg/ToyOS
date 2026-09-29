@@ -1,7 +1,4 @@
-//! Shared tone playback for the audio glitch tests (audio_tone,
-//! audio_tone_load). The host-side harness records what the virtio-sound
-//! device plays into a wav and asserts the tone contains no mid-signal
-//! silence (underruns) and no hard discontinuities (clicks).
+//! Shared tone playback: a deterministic sine.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;

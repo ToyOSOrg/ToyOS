@@ -30,7 +30,6 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
-    Disabled { test: "doom_sound_flood", issue: "issues/audio/doom-sound-flood-played-full-scale-once.md" },
     Disabled {
         test: "ftruncate_flush_race",
         issue: "issues/build/ftruncate-flush-race-reds-intermittently-and-nothing-says-why.md",
@@ -41,13 +40,11 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md",
     },
     Disabled { test: "handle_transfer", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
-    Disabled { test: "hda_tone", issue: "issues/audio/hda-tone-phase-check.md" },
     Disabled {
         test: "i8042_mouse",
         issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
     },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
-    Disabled { test: "latency_wake", issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md" },
     Disabled {
         test: "log_ring_keeps_the_owners_slots",
         issue: "issues/kernel/a-log-rings-owner-is-named-only-when-logd-reads-its-registration.md",
@@ -79,10 +76,6 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "root_chunk_refused_on_a_usb_stick",
         issue: "issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md",
-    },
-    Disabled {
-        test: "sched_check_build",
-        issue: "issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",
     },
     Disabled {
         test: "screen_fatal_halt",

@@ -441,7 +441,6 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         ports_dirty: false,
         outstanding: Outstanding::EMPTY,
         software_disabled: [0u64; 4],
-        held_event: None,
         after_break: toyos_xhci::call::AfterBreak::CLOSED,
         bulk_began: 0,
         stopped: None,

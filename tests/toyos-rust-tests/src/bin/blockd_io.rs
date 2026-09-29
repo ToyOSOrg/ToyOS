@@ -36,8 +36,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{self, Receiver};
 
 use blockd::nvme::{Controller, Owner};
 use blockd::region::Region;
@@ -80,12 +79,6 @@ const FILE_BYTES: usize = 48 * 1024;
 /// Mirrored: the file written after the restart, on the same mount.
 const AFTER: &str = "/AFTER.BIN";
 
-/// How long a restart waits for the claim of the process it stopped to come
-/// back. **A compromise over a kernel defect, the one init makes for the same
-/// reason** (`issues/kernel/deferred-release-outlives-its-syscall.md`): a
-/// process's end is published before the release its handles queued has run.
-const CLAIM_RETURN: Duration = Duration::from_secs(2);
-
 /// Mirrored in `tests/common/blockd.rs`: the most a claim may hold across its
 /// grants and what it lends (`pcidev::MAX_GRANT_TOTAL`), one region, and the
 /// addresses a device domain has under `iommu-domain-narrow`
@@ -93,14 +86,6 @@ const CLAIM_RETURN: Duration = Duration::from_secs(2);
 const GRANT_TOTAL: u64 = 32 * 1024 * 1024;
 const REGION: usize = 2 * 1024 * 1024;
 const NARROW: u64 = 128 * 1024 * 1024;
-
-/// How long a read this process aims may go unanswered before the role fails:
-/// a liveness bound, far past what one block takes.
-const AIMED: Duration = Duration::from_secs(10);
-
-/// How long `hostile-head` waits for blockd to withhold its write's answer, and
-/// then for the reset that ends its session: a liveness bound.
-const SILENCE_ENDS: Duration = Duration::from_secs(30);
 
 fn guid(text: &str) -> [u8; 16] {
     PartGuid::parse(text).unwrap_or_else(|| panic!("{text} is no GUID")).0
@@ -158,16 +143,7 @@ impl Blockd {
     /// write's answer: the write is done on the device, and its session never
     /// hears.
     fn spawn(&mut self, args: &[&str], kill_on_withheld: bool) {
-        let asked = Instant::now();
-        let claim: toyos::Device = loop {
-            match self.syscap.claim_pci(BLOCKD) {
-                Err(SyscallError::AlreadyExists) if asked.elapsed() < CLAIM_RETURN => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Ok(claim) => break claim,
-                Err(e) => fail(format!("the controller's claim was refused: {e:?}")),
-            }
-        };
+        let claim: toyos::Device = claim_when_free(&self.syscap);
         let acceptor = toyos_abi::syscall::dup(self.acceptor.as_handle())
             .unwrap_or_else(|e| fail(format!("the acceptor would not duplicate: {e:?}")));
         let mut command = Command::new("/system/bin/blockd");
@@ -198,18 +174,15 @@ impl Blockd {
         self.said = Some(said);
     }
 
-    /// Wait, at most `bound`, for the running blockd to say a line holding
+    /// Wait, with no deadline, for the running blockd to say a line holding
     /// `needle`.
-    fn says(&self, needle: &str, bound: Duration) {
+    fn says(&self, needle: &str) {
         let said = self.said.as_ref().expect("spawned");
-        let asked = Instant::now();
         loop {
-            let left = bound.saturating_sub(asked.elapsed());
-            match said.recv_timeout(left) {
+            match said.recv() {
                 Ok(line) if line.contains(needle) => return,
                 Ok(_) => {}
-                Err(RecvTimeoutError::Timeout) => fail(format!("blockd did not say {needle:?} in {bound:?}")),
-                Err(RecvTimeoutError::Disconnected) => fail(format!("blockd ended before it said {needle:?}")),
+                Err(_) => fail(format!("blockd ended before it said {needle:?}")),
             }
         }
     }
@@ -248,15 +221,14 @@ fn chunks(blocks: u64, salt: u8) -> Vec<Vec<u8>> {
 }
 
 /// Write `chunks` from block 0, `in_flight` requests at a time; flush. Answers
-/// how long the flushes took and how many there were: an acknowledged write
-/// holds its arena blocks until a flush covers it, so a full arena is where
-/// one is asked.
-fn write_all(s: &mut Session, chunks: &[Vec<u8>], in_flight: usize) -> (Duration, u32) {
+/// how many flushes there were: an acknowledged write holds its arena blocks
+/// until a flush covers it, so a full arena is where one is asked.
+fn write_all(s: &mut Session, chunks: &[Vec<u8>], in_flight: usize) -> u32 {
     let mut next = 0usize;
     let mut lba = 0u64;
     let mut outstanding = 0usize;
     let mut full = false;
-    let (mut flushing, mut flushes) = (Duration::ZERO, 0u32);
+    let mut flushes = 0u32;
     while next < chunks.len() || outstanding > 0 {
         while next < chunks.len() && outstanding < in_flight && !full {
             match s.submit_write(lba, &chunks[next]) {
@@ -282,16 +254,13 @@ fn write_all(s: &mut Session, chunks: &[Vec<u8>], in_flight: usize) -> (Duration
             }
         }
         if full && outstanding == 0 {
-            let started = Instant::now();
             flushed(s);
-            flushing += started.elapsed();
             flushes += 1;
             full = false;
         }
     }
-    let started = Instant::now();
     flushed(s);
-    (flushing + started.elapsed(), flushes + 1)
+    flushes + 1
 }
 
 fn flushed(s: &mut Session) {
@@ -429,13 +398,8 @@ fn holder_role(expect: &str) {
     println!("blockd_io: a second client of the slot refused with {got}, as expected");
 }
 
-fn mb_per_s(blocks: u64, took: Duration) -> f64 {
-    (blocks * BLOCK_BYTES as u64) as f64 / (1024.0 * 1024.0) / took.as_secs_f64()
-}
-
-/// The same bytes through the kernel's driver and through blockd, the data
-/// built before and checked after what is timed, so each number is the
-/// driver's path and nothing of this binary's.
+/// The same bytes through the kernel's driver and through blockd, one request
+/// at a time and then as many as the arena holds.
 fn bench() {
     // The kernel's driver, through a partition claim on the first controller:
     // one request at a time, as it moves them.
@@ -448,21 +412,17 @@ fn bench() {
         .iter()
         .map(|c| c.chunks(BLOCK_BYTES).map(|b| b.try_into().expect("a block")).collect())
         .collect();
-    let started = Instant::now();
     let mut lba = 0u64;
     for chunk in &blocks {
         part.write(lba, chunk).unwrap_or_else(|e| fail(format!("a kernel write: {e:?}")));
         lba += chunk.len() as u64;
     }
     part.sync().unwrap_or_else(|e| fail(format!("the kernel's fsync: {e:?}")));
-    let kernel_write = started.elapsed();
     let mut read = vec![[0u8; BLOCK_BYTES]; BENCH_BLOCKS as usize];
     let per = toyos_abi::part::MAX_BLOCKS_PER_CALL;
-    let started = Instant::now();
     for (i, chunk) in read.chunks_mut(per).enumerate() {
         part.read((i * per) as u64, chunk).unwrap_or_else(|e| fail(format!("a kernel read: {e:?}")));
     }
-    let kernel_read = started.elapsed();
     holds(&read.concat(), &written, "the kernel's bench partition");
     drop(part);
 
@@ -472,26 +432,15 @@ fn bench() {
     let mut runs = Vec::new();
     for (salt, in_flight) in [(0x3D, 1usize), (0x3C, 15)] {
         let written = chunks(BENCH_BLOCKS, salt);
-        let started = Instant::now();
-        let (flushing, flushes) = write_all(&mut s, &written, in_flight);
-        let write = started.elapsed();
-        let started = Instant::now();
+        let flushes = write_all(&mut s, &written, in_flight);
         let read = read_all(&mut s, BENCH_BLOCKS, in_flight);
-        let took = started.elapsed();
         holds(&read, &written, "blockd's bench partition");
-        runs.push(format!(
-            "{in_flight} in flight: write {:.1} MiB/s ({flushes} Flushes, {} ms of it) read {:.1} MiB/s",
-            mb_per_s(BENCH_BLOCKS, write),
-            flushing.as_millis(),
-            mb_per_s(BENCH_BLOCKS, took),
-        ));
+        runs.push(format!("{in_flight} in flight with {flushes} Flushes"));
     }
     println!(
-        "blockd_io: bench {} MiB each way: kernel driver write {:.1} MiB/s (its one fsync issues no \
-         Flush) read {:.1} MiB/s; blockd {}; at most {} requests on the wire",
+        "blockd_io: bench {} MiB each way through the kernel driver and through blockd {}; at \
+         most {} requests on the wire",
         BENCH_BLOCKS * BLOCK_BYTES as u64 / (1024 * 1024),
-        mb_per_s(BENCH_BLOCKS, kernel_write),
-        mb_per_s(BENCH_BLOCKS, kernel_read),
         runs.join("; "),
         s.peak_on_the_wire()
     );
@@ -506,15 +455,11 @@ fn reset() {
         Ok(Outcome::Done) => {}
         other => fail(format!("the first write was answered {other:?}")),
     }
-    let started = Instant::now();
     match s.write(1, &pattern(0x71, 1)) {
         Ok(Outcome::Device) => {}
         other => fail(format!("the withheld write was answered {other:?}, not Device")),
     }
-    println!(
-        "blockd_io: the withheld write was answered Device after {} ms",
-        started.elapsed().as_millis()
-    );
+    println!("blockd_io: the withheld write was answered Device");
     // The reset may have dropped the device's cache: the write acknowledged
     // before it goes out again, inside this flush.
     flushed(&mut s);
@@ -555,12 +500,12 @@ fn hostile_head() {
     }
     words[SQ_TAIL].store(1, Ordering::Release);
     conn.write_nonblock(&[1]).unwrap_or_else(|e| fail(format!("the doorbell: {e:?}")));
-    blockd.says("WITHHELD", SILENCE_ENDS);
+    blockd.says("WITHHELD");
     let tail = words[CQ_TAIL].load(Ordering::Acquire);
     words[CQ_HEAD].store(tail.wrapping_sub(DEPTH), Ordering::Release);
     conn.write_nonblock(&[1]).unwrap_or_else(|e| fail(format!("the doorbell: {e:?}")));
     println!("blockd_io: with a write on the device, the client moved its completion head {DEPTH} behind the tail");
-    blockd.says("closed after", SILENCE_ENDS);
+    blockd.says("closed after");
     println!("blockd_io: blockd ended the session and runs on");
     let mut next = open(blockd.names(), TARGET);
     let block = pattern(0x6B, 0);
@@ -815,9 +760,7 @@ fn dma(role: &str) {
 fn refused(ctrl: &mut Controller, region: &SharedMemory, at: u64, what: &str) {
     let answered = transfer(ctrl, 0, at);
     println!("blockd_io: the device answered a read aimed {what} with {answered:?}");
-    if !refused_within(ctrl, Duration::from_secs(5)) {
-        fail(format!("a read aimed {what} left the claim answering; the unit did not refuse it"));
-    }
+    await_refusal(ctrl);
     if !region.as_slice().iter().all(|b| *b == 0xA5) {
         fail(format!("a read aimed {what} changed the lent region"));
     }
@@ -827,46 +770,39 @@ fn refused(ctrl: &mut Controller, region: &SharedMemory, at: u64, what: &str) {
     );
 }
 
-/// One read of device block `block` into device address `at`, waited for on
-/// the claim's interrupt, with nothing else on the device: whether the device
-/// did it, or the claim's refusal once the unit refused the function an
-/// access — which is how a read aimed outside the function's domain ends.
+/// One read of device block `block` into device address `at`, waited for with
+/// no deadline on the claim's interrupt, with nothing else on the device:
+/// whether the device did it, or the claim's refusal once the unit refused the
+/// function an access — which is how a read aimed outside the function's
+/// domain ends.
 fn transfer(ctrl: &mut Controller, block: u64, at: u64) -> Result<bool, SyscallError> {
     if ctrl.busy() != 0 {
         fail("a waited read beside other commands".into());
     }
     ctrl.submit_io(false, block, 1, at, Owner::Driver);
     let poller = Poller::new(1);
-    let start = Instant::now();
     let mut done = Vec::new();
     loop {
         ctrl.reap(&mut done);
         if let Some(d) = done.pop() {
             return Ok(d.ok);
         }
-        let Some(left) = AIMED.checked_sub(start.elapsed()) else {
-            fail(format!("a read aimed at {at:#x} was not answered in {AIMED:?}"));
-        };
         poller.watch(ctrl.claim(), READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+        poller.wait(1, u64::MAX, |_| {});
         ctrl.take_interrupt()?;
     }
 }
 
-/// Wait, at most `bound`, for the claim to answer with the unit's refusal —
-/// what every call on a claim answers once its function was refused an access;
-/// whether it did.
-fn refused_within(ctrl: &Controller, bound: Duration) -> bool {
+/// Wait, with no deadline, for the claim to answer with the unit's refusal —
+/// what every call on a claim answers once its function was refused an access.
+/// A unit that never refuses leaves this waiting, and the harness ceiling reds
+/// it.
+fn await_refusal(ctrl: &Controller) {
     let poller = Poller::new(1);
-    let start = Instant::now();
-    while start.elapsed() < bound {
-        if ctrl.take_interrupt() == Err(SyscallError::Io) {
-            return true;
-        }
+    while ctrl.take_interrupt() != Err(SyscallError::Io) {
         poller.watch(ctrl.claim(), READABLE, 0);
-        poller.wait(1, bound.saturating_sub(start.elapsed()).as_nanos() as u64, |_| {});
+        poller.wait(1, u64::MAX, |_| {});
     }
-    ctrl.take_interrupt() == Err(SyscallError::Io)
 }
 
 /// A kernel driver's own pool is not the holder's to lend, though it is
@@ -993,14 +929,15 @@ fn dma_churn() {
     println!("blockd_io: PASS dma-churn");
 }
 
-/// The controller's claim once the last holder's release has run.
-fn claim_when_free(syscap: &SysCap) -> toyos::PciDev {
-    let asked = Instant::now();
+/// The controller's claim once the last holder's release has run, waited for with
+/// no deadline: a process's end is published before the release its handles
+/// queued has run (`issues/kernel/deferred-release-outlives-its-syscall.md`).
+fn claim_when_free<T: toyos::endow::FromHandle>(syscap: &SysCap) -> T {
     loop {
         match syscap.claim_pci(BLOCKD) {
-            Err(SyscallError::AlreadyExists) if asked.elapsed() < CLAIM_RETURN => {
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            // A pace, so the CPU this runs on can reach the idle loop that
+            // drains the release.
+            Err(SyscallError::AlreadyExists) => std::thread::sleep(std::time::Duration::from_millis(1)),
             Ok(claim) => return claim,
             Err(e) => fail(format!("the controller's claim was refused: {e:?}")),
         }
@@ -1013,7 +950,7 @@ fn claim_when_free(syscap: &SysCap) -> toyos::PciDev {
 fn dma_residue() {
     let syscap = capability();
     let first = {
-        let dev = claim_when_free(&syscap);
+        let dev: toyos::PciDev = claim_when_free(&syscap);
         let mut ctrl = Controller::open(dev, None).unwrap_or_else(|e| fail(format!("the controller: {e}")));
         let mut region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
         region.as_mut_slice().fill(0xA5);
@@ -1026,7 +963,7 @@ fn dma_residue() {
     };
     println!("blockd_io: claim 1 lent a region at {first:#x}, the device read into it, and the claim ended holding it");
     for n in [2, 3] {
-        let dev = claim_when_free(&syscap);
+        let dev: toyos::PciDev = claim_when_free(&syscap);
         let region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
         let mapping = dev.dma_map(region.as_handle()).unwrap_or_else(|e| fail(format!("claim {n}'s dma_map: {e:?}")));
         if mapping.device_addr == first {
