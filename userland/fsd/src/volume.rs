@@ -147,14 +147,20 @@ pub fn join(dir: &str, name: &str) -> String {
 
 pub const NANOS_PER_SEC: u64 = 1_000_000_000;
 
+static ANCHOR: OnceLock<Option<u64>> = OnceLock::new();
+
+/// Anchors [`now_nanos`]. fsd does it once, at its start: a clock that will
+/// not anchor is a panic, and there it holds no client's data.
+pub fn take_anchor() {
+    let taken = anchor(|| (nanos_since_boot(), toyos_abi::syscall::clock_epoch(), nanos_since_boot()));
+    ANCHOR.set(taken).expect("the anchor is taken once");
+}
+
 /// What a file written now is stamped with (`toyos_abi::syscall::Stat::mtime`):
 /// nanoseconds since the Unix epoch, UTC, as the kernel's `clock::mtime_now`
 /// reckons them, and 0 — undated — on a machine whose RTC never answered.
 pub fn now_nanos() -> u64 {
-    static ANCHOR: OnceLock<Option<u64>> = OnceLock::new();
-    let anchor = ANCHOR.get_or_init(|| {
-        anchor(|| (nanos_since_boot(), toyos_abi::syscall::clock_epoch(), nanos_since_boot()))
-    });
+    let anchor = ANCHOR.get().expect("fsd takes the anchor at its start");
     anchor.map_or(0, |secs| secs.saturating_mul(NANOS_PER_SEC).saturating_add(nanos_since_boot()))
 }
 

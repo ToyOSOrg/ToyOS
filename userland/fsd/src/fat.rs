@@ -207,15 +207,15 @@ impl<D: Disk> Volume for FatVolume<D> {
         }
         if let Some(open) = self.by_path.get(path).and_then(|n| self.open.get(n)) {
             let len = open.file.len();
-            let mtime = self.fs.metadata(path).map(|m| m.modified_unix).unwrap_or(0);
-            return Ok(Meta { kind: Kind::File, size: len, mtime: mtime * 1_000_000_000 });
+            let mtime = self.fs.metadata(path).map_err(|e| logged("metadata", path, e))?.modified_unix;
+            return Ok(Meta { kind: Kind::File, size: len, mtime: mtime * NANOS_PER_SEC });
         }
         let meta = self.fs.metadata(path).map_err(|e| match e {
             Error::NotADirectory => SyscallError::NotFound,
             e => logged("metadata", path, e),
         })?;
         let kind = if meta.is_dir { Kind::Dir } else { Kind::File };
-        Ok(Meta { kind, size: if meta.is_dir { 0 } else { meta.len }, mtime: meta.modified_unix * 1_000_000_000 })
+        Ok(Meta { kind, size: if meta.is_dir { 0 } else { meta.len }, mtime: meta.modified_unix * NANOS_PER_SEC })
     }
 
     fn read_link(&mut self, path: &str) -> Result<String, SyscallError> {
@@ -229,7 +229,7 @@ impl<D: Disk> Volume for FatVolume<D> {
             .into_iter()
             .map(|e| {
                 let kind = if e.is_dir { Kind::Dir } else { Kind::File };
-                (e.name, Meta { kind, size: if e.is_dir { 0 } else { e.len }, mtime: e.modified_unix * 1_000_000_000 })
+                (e.name, Meta { kind, size: if e.is_dir { 0 } else { e.len }, mtime: e.modified_unix * NANOS_PER_SEC })
             })
             .collect())
     }
@@ -305,8 +305,8 @@ impl<D: Disk> Volume for FatVolume<D> {
     fn node_meta(&mut self, node: Node) -> Result<Meta, SyscallError> {
         let open = self.entry(node)?;
         let (path, size) = (open.path.clone(), open.file.len());
-        let mtime = self.fs.metadata(&path).map(|m| m.modified_unix).unwrap_or(0);
-        Ok(Meta { kind: Kind::File, size, mtime: mtime * 1_000_000_000 })
+        let mtime = self.fs.metadata(&path).map_err(|e| logged("metadata", &path, e))?.modified_unix;
+        Ok(Meta { kind: Kind::File, size, mtime: mtime * NANOS_PER_SEC })
     }
 
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {
@@ -561,6 +561,22 @@ mod tests {
         assert_eq!(v.lstat("a.txt").unwrap().size, 6000);
         v.close(b).unwrap();
         assert_eq!(v.lstat("sub/b.txt").unwrap().size, 6000);
+    }
+
+    /// An open file's entry the device will not read is `Io` to a stat,
+    /// never mtime 0, which is "undated".
+    #[test]
+    fn an_unreadable_entry_is_io_and_not_undated() {
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        let (mut v, refused, _) = spec_fat();
+        let a = v.open("a.txt", CREATE).unwrap();
+        v.write(a, 0, &[1; 3000]).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        evict(&v);
+        refused.set((spec_volume::cluster_offset(spec_volume::ROOT_CLUSTER) / BLOCK) as u64);
+
+        assert_eq!(v.lstat("a.txt"), Err(SyscallError::Io));
+        assert_eq!(v.node_meta(a), Err(SyscallError::Io));
     }
 
     /// What the driver says of a volume that stopped answering is `Io`, which

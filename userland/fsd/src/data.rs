@@ -356,7 +356,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                     return Ok(Meta { kind, size: open.size, mtime: open.mtime });
                 }
                 let (_, size) = mapped("a lookup", path, self.fs.file_extents(path))?.ok_or(SyscallError::NotFound)?;
-                let mtime = mapped("a lookup", path, self.fs.file_mtime(path))?.unwrap_or(0);
+                let mtime = mapped("a lookup", path, self.fs.file_mtime(path))?.ok_or(SyscallError::NotFound)?;
                 Ok(Meta { kind, size, mtime })
             }
             None if self.is_dir(path) => Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 }),
@@ -415,7 +415,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                 Some(Kind::File) => {
                     let (extents, size) =
                         mapped("open", path, self.fs.file_extents(path))?.ok_or(SyscallError::NotFound)?;
-                    let mtime = mapped("open", path, self.fs.file_mtime(path))?.unwrap_or(0);
+                    let mtime = mapped("open", path, self.fs.file_mtime(path))?.ok_or(SyscallError::NotFound)?;
                     self.new_node(path, extents, size, mtime)
                 }
                 // A link the resolver did not follow is one with nothing behind it.

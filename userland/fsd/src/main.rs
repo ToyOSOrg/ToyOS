@@ -194,6 +194,7 @@ fn main() {
             extra => panic!("fsd: a second partition, {extra}, after {guid:?}"),
         }
     }
+    fsd::volume::take_anchor();
     let caps = capabilities(role);
     let roots: Vec<String> = caps.iter().map(|c| c.root.clone()).collect();
     let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
