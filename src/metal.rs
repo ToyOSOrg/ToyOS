@@ -2107,7 +2107,8 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     if let Some(dir) = &args.readback {
-        write_readback(dir, &loader, &log, back, stick, &machine, wire.as_ref(), replied)?;
+        let boot = boot_file(back, stick, &machine, wire.as_ref(), replied);
+        write_readback(dir, &loader, &log, &boot)?;
         println!("readback written to {}", dir.display());
     }
     // **Named by evidence, before the boot record is missed.** A boot that
@@ -2333,16 +2334,7 @@ pub fn clear_readback(dir: &Path) -> Result<(), Refusal> {
     Ok(())
 }
 
-fn write_readback(
-    dir: &Path,
-    loader: &str,
-    log: &str,
-    back: u64,
-    stick: u64,
-    machine: &Machine,
-    wire: Option<&Wire>,
-    replied: Option<Reply>,
-) -> Result<(), Refusal> {
+fn write_readback(dir: &Path, loader: &str, log: &str, boot: &str) -> Result<(), Refusal> {
     let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
         std::fs::write(path, text)
             .map_err(|e| Refusal::File { path: path.display().to_string(), why: e.to_string() })
@@ -2351,9 +2343,18 @@ fn write_readback(
         .map_err(|e| Refusal::File { path: dir.display().to_string(), why: e.to_string() })?;
     wrote(&dir.join(READBACK_LOADER), loader)?;
     wrote(&dir.join(READBACK_KERNEL), log)?;
-    // The boot's own millisecond count is in the kernel log and read from
-    // there; this file carries only what the *host* clock measured, which no
-    // log can.
+    wrote(&dir.join(READBACK_BOOT), boot)
+}
+
+/// [`READBACK_BOOT`]'s text: what the host measured about the boot, and the
+/// machine it ran on.
+fn boot_file(
+    back: u64,
+    stick: u64,
+    machine: &Machine,
+    wire: Option<&Wire>,
+    replied: Option<Reply>,
+) -> String {
     let mut boot = format!(
         "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{VENDOR_KEY} {}\n{PRODUCT_KEY} {}\n\
          {BIOS_KEY} {}\n",
@@ -2368,7 +2369,7 @@ fn write_readback(
             boot.push_str(&format!("{PING_SECS_KEY} {}\n{PING_AT_KEY} {}\n", reply.secs, reply.at));
         }
     }
-    wrote(&dir.join(READBACK_BOOT), &boot)
+    boot
 }
 
 /// Whether this boot was a loader pass that reported a record and booted no
@@ -2781,10 +2782,8 @@ mod tests {
 
     #[test]
     fn the_machine_crosses_in_the_boot_file() {
-        let dir = toyos_tmpdir::TempDir::new("machine");
         let t14 = Machine::parse("LENOVO\n20W000T9GE\nN34ET56W (1.56 )\n").expect("three lines");
-        write_readback(&dir, "", "", 47, 0, &t14, None, None).expect("write");
-        let boot = std::fs::read_to_string(dir.join(READBACK_BOOT)).expect("boot.txt");
+        let boot = boot_file(47, 0, &t14, None, None);
         assert_eq!(machine(&boot), Ok(t14));
         assert_eq!(back_secs(&boot), Some(47));
         assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
