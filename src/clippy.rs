@@ -26,12 +26,35 @@ const ADOPTED: &[&str] = &[
 
 /// One `cargo clippy`. `dir` is relative to the repository root and empty for
 /// the root itself — `.cargo/config.toml` is found from the working directory,
-/// so the kernel and bootloader run from their own; a `$ADOPTED` token in
-/// `after` splices [`ADOPTED`] there.
+/// so the kernel and bootloader run from their own; a `$ADOPTED` token splices
+/// [`ADOPTED`] there, and a `$CONTROLS` token [`control_features`].
 struct Shape {
     dir: &'static str,
     before: &'static [&'static str],
     after: &'static [&'static str],
+}
+
+/// Every `--kernel-feature` instrument in one x86-64 kernel, less
+/// `heap-band-nohead`, which refuses `heap-band-notail` and has its own shape.
+const INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
+                           heap-band-notail,pass-spin,heap-lockspin,stack-witness,switch-witness,\
+                           switch-witness-mutate-frame,switch-witness-mutate-rsp,df-witness,\
+                           df-witness-mutate,entry-df-unclean,fpu-save-nothing,user-writable-gsbase";
+
+/// [`INSTRUMENTS`] less the direction-flag three, which are x86-64's alone.
+const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
+                                   heap-band-notail,pass-spin,heap-lockspin,stack-witness,\
+                                   switch-witness,switch-witness-mutate-frame,\
+                                   switch-witness-mutate-rsp,fpu-save-nothing,user-writable-gsbase";
+
+/// The `toyos-sched` features a kernel feature forwards to: the kernel's clippy
+/// does not lint `toyos-sched`, a host-workspace member.
+const FORWARDED: &[&str] = &["toyos-sched/check", "toyos-sched/tripwire"];
+
+/// Every model's negative control and [`FORWARDED`], as one `--features` list.
+fn control_features() -> String {
+    let controls = crate::ci::CONTROLS.iter().map(|c| format!("{}/{}", c.krate, c.feature));
+    controls.chain(FORWARDED.iter().map(|f| (*f).to_string())).collect::<Vec<_>>().join(",")
 }
 
 /// `--all-targets` on the host workspace only: on the bootloader and kernel a
@@ -41,10 +64,19 @@ struct Shape {
 /// without `test-actuators`, whose dead code neither of the others can see.
 /// `undocumented_unsafe_blocks` is adopted per area as each area's
 /// justifications land.
+///
+/// Code behind a feature is linted only by a run that enables it, so every
+/// feature set the tree builds is in one: the host's second shape, and each
+/// kernel shape naming [`INSTRUMENTS`] or `heap-band-nohead`.
 const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
         before: &["--workspace", "--all-targets", "--keep-going"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "",
+        before: &["--workspace", "--all-targets", "--keep-going", "--features", "$CONTROLS"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
@@ -64,6 +96,16 @@ const SHAPES: &[Shape] = &[
     },
     Shape {
         dir: "kernel",
+        before: &["--target", Arch::X86_64.kernel(), "--features", INSTRUMENTS],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
+        before: &["--target", Arch::X86_64.kernel(), "--features", "heap-band-nohead"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
         before: &["--target", Arch::Aarch64.kernel()],
         after: &["$ADOPTED", "-D", "warnings"],
     },
@@ -75,6 +117,11 @@ const SHAPES: &[Shape] = &[
     Shape {
         dir: "kernel",
         before: &["--target", Arch::Aarch64.kernel(), "--features", "boot-actuators"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
+        before: &["--target", Arch::Aarch64.kernel(), "--features", AARCH64_INSTRUMENTS],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
@@ -100,7 +147,7 @@ pub const BARE_TARGETS: [&str; 4] =
     [Arch::X86_64.kernel(), Arch::X86_64.loader(), Arch::Aarch64.kernel(), Arch::Aarch64.loader()];
 
 impl Shape {
-    /// The command as a reader writes it, `$ADOPTED` unexpanded.
+    /// The command as a reader writes it, `$ADOPTED` and `$CONTROLS` unexpanded.
     fn line(&self) -> String {
         let mut parts = vec!["cargo clippy".to_string()];
         parts.extend(self.before.iter().map(|s| (*s).to_string()));
@@ -109,10 +156,14 @@ impl Shape {
         parts.join(" ")
     }
 
-    /// The arguments to `cargo clippy`, `$ADOPTED` spliced in — what actually
+    /// The arguments to `cargo clippy`, both tokens spliced in — what actually
     /// runs.
     fn args(&self) -> Vec<String> {
-        let mut args: Vec<String> = self.before.iter().map(|s| (*s).to_string()).collect();
+        let mut args: Vec<String> = self
+            .before
+            .iter()
+            .map(|s| if *s == "$CONTROLS" { control_features() } else { (*s).to_string() })
+            .collect();
         args.push("--".to_string());
         for token in self.after {
             if *token == "$ADOPTED" {
@@ -179,5 +230,43 @@ mod tests {
         assert!(!abi.args().iter().any(|a| a == "clippy::redundant_clone"));
         assert!(abi.args().iter().any(|a| a == "clippy::undocumented_unsafe_blocks"));
         assert!(!abi.args().iter().any(|a| a == "$ADOPTED"));
+    }
+
+    /// A kernel feature no shape enables is code no clippy reads: every declared
+    /// one is in an x86-64 kernel shape, or is `kernel-loom`'s to build.
+    #[test]
+    fn every_kernel_feature_is_linted() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut linted: std::collections::BTreeSet<String> = SHAPES
+            .iter()
+            .filter(|s| s.dir == "kernel" && s.before.contains(&Arch::X86_64.kernel()))
+            .flat_map(|s| s.before.windows(2).filter(|w| w[0] == "--features").flat_map(|w| w[1].split(',')))
+            .map(str::to_string)
+            .collect();
+        linted.insert("loom".to_string());
+        linted.extend(
+            crate::ci::CONTROLS.iter().filter(|c| c.krate == "kernel-loom").map(|c| c.feature.to_string()),
+        );
+        let declared: std::collections::BTreeSet<String> =
+            crate::build::declared_kernel_features(root).into_iter().collect();
+        assert_eq!(declared.difference(&linted).collect::<Vec<_>>(), Vec::<&String>::new());
+    }
+
+    /// [`FORWARDED`] is every `crate/feature` a kernel feature turns on.
+    #[test]
+    fn every_forwarded_feature_is_linted() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(root.join("kernel/Cargo.toml")).unwrap();
+        let manifest: toml::Value = text.parse().unwrap();
+        let mut forwarded: Vec<&str> = manifest["features"]
+            .as_table()
+            .unwrap()
+            .values()
+            .flat_map(|v| v.as_array().unwrap())
+            .map(|v| v.as_str().unwrap())
+            .filter(|f| f.contains('/'))
+            .collect();
+        forwarded.sort_unstable();
+        assert_eq!(forwarded, FORWARDED);
     }
 }

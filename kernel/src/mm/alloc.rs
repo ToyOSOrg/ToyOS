@@ -233,10 +233,8 @@ mod tripwire {
     /// `fill` is the first byte of a band this module armed.
     unsafe fn band_words(fill: *const u8) -> [u64; 4] {
         let mut out = [FILL_WORD; 4];
-        let mut i = 0;
-        while i < 4 && (i + 1) * 8 <= TAIL_FILL {
-            out[i] = fill.add(i * 8).cast::<u64>().read_unaligned();
-            i += 1;
+        for (i, word) in out.iter_mut().enumerate().take(TAIL_FILL / 8) {
+            *word = fill.add(i * 8).cast::<u64>().read_unaligned();
         }
         out
     }
