@@ -153,11 +153,12 @@ struct HostTools {
 
 fn host_tools() -> &'static HostTools {
     static TOOLS: OnceLock<HostTools> = OnceLock::new();
-    TOOLS.get_or_init(|| tools_with(Path::new("xcrun")))
+    TOOLS.get_or_init(|| tools_with(|question| asked(Command::new("xcrun").arg(question))))
 }
 
-/// [`host_tools`], asking `xcrun` for the SDK, so a test can stand in for it.
-fn tools_with(xcrun: &Path) -> HostTools {
+/// [`host_tools`], with `xcrun`'s answer to each question it is asked, so a
+/// test can stand in for it.
+fn tools_with(xcrun: impl Fn(&str) -> String) -> HostTools {
     let [cc, cxx, cmake] = ["cc", "c++", "cmake"].map(on_path);
     let mut identity = String::new();
     for tool in [&cc, &cxx, &cmake] {
@@ -166,8 +167,7 @@ fn tools_with(xcrun: &Path) -> HostTools {
     }
     if host_triple().ends_with("apple-darwin") {
         for question in ["--show-sdk-path", "--show-sdk-version"] {
-            let mut sdk = Command::new(xcrun);
-            identity += &asked(sdk.arg(question));
+            identity += &xcrun(question);
         }
     }
     HostTools { cc, cxx, identity }
@@ -617,19 +617,15 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn two_sdk_versions_are_two_keys() {
-        use std::os::unix::fs::PermissionsExt;
         let scratch = Scratch::new("llvm-sdk");
         let (_primary, _rust_dir, [same, _a, _b]) = estate(&scratch);
         let fork = same.join("rust");
         let [older, newer] = ["26.0", "27.0"].map(|version| {
-            let xcrun = scratch.join(format!("xcrun-{version}"));
-            let answers = format!(
-                "#!/bin/sh\ncase \"$1\" in\n--show-sdk-path) echo /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk ;;\n\
-                 --show-sdk-version) echo {version} ;;\n*) exit 1 ;;\nesac\n"
-            );
-            write(&xcrun, &answers);
-            fs::set_permissions(&xcrun, fs::Permissions::from_mode(0o755)).unwrap();
-            let tools = tools_with(&xcrun);
+            let tools = tools_with(|question| match question {
+                "--show-sdk-path" => "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk\n".to_string(),
+                "--show-sdk-version" => format!("{version}\n"),
+                other => panic!("xcrun was asked {other}"),
+            });
             key_of(&fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), &tools), &tools.identity)
         });
         assert_ne!(older, newer, "two SDK versions at one SDK path named one LLVM");
