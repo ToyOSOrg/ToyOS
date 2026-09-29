@@ -56,6 +56,13 @@ owner, never re-run away, and nothing but a defect may turn `main` red.
 A fix for a red lands ahead of feature work. A nightly name red three nights running gets an owner
 issue that day, and is deleted if nobody owns it a week later.
 
+## Runs
+
+Orchestration state (checklists, queue scripts, run logs, patches) lives outside /tmp, which a CLI restart wipes; PR evidence is posted to the PR. After a restart, first list and kill by PID every queue, watcher and metal run left from before, and revert any mutation a killed run left applied.
+Guest runs go through one serial queue script: each mutation is `git apply --check`, `git apply`, its tests run by name, `git apply -R`, and the worktree is clean after. A queue script never passes a flag where a test name belongs.
+Metal runs are yours alone, one at a time, never through the generic mutation helper, never while an agent edits that worktree.
+A finished agent's report is acted on before new work is dispatched. An agent the permission check refuses stops and reports; you ask the owner and never route around it.
+
 ## The bench
 
 You alone run the T14. Before every flash, save the stick's log partition: the flash destroys the
