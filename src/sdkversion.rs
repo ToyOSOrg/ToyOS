@@ -145,7 +145,7 @@ fn manifest(root: &Path, krate: &Crate) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::tests::{commit, repo};
+    use crate::gitfixture::{commit, repo};
     use std::collections::BTreeMap;
     use toyos_tmpdir::TempDir;
 

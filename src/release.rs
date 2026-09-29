@@ -455,7 +455,7 @@ mod tests {
         let out = Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t"])
             .args(["-c", "init.defaultBranch=main"])
-            .args(crate::sync::tests::NO_AUTO_MAINTENANCE)
+            .args(crate::gitfixture::NO_AUTO_MAINTENANCE)
             .args(args)
             .current_dir(dir)
             .output()

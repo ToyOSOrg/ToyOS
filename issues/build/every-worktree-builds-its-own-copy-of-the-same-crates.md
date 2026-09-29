@@ -91,8 +91,7 @@ cost the compile phase and never the guest phase.
 `hostws::target_dir` is the function that answers "where did cargo put this
 crate's output", and it is the only place the answer should be derived —
 `<primary>/target` via `primary_checkout()`, degenerating to `<root>/target`
-where there are no worktrees. `src/build.rs`'s `stage_artifact` builds the path
-itself and would have to go through it.
+where there are no worktrees.
 
 It also needs an absolute `build.target-dir` in each worktree's gitignored
 `.cargo/config.toml`, because agents type `cargo test` by hand. Measured: such a

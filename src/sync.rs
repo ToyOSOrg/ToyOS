@@ -20,9 +20,6 @@ pub fn dispatch_sync(root: &Path) {
 /// **`origin/main` is the truth and the local one is a cache.** Without this
 /// the primary's tree — which owns `rust/`, the sysroot and the witness every
 /// worktree compares against — silently falls behind whatever GitHub merged.
-///
-/// It is housekeeping and not a gate, so a primary that is dirty or on another
-/// branch is *reported*, not refused.
 fn sync(root: &Path) -> Result<String, String> {
     let primary = crate::primary_checkout(root);
 
@@ -51,26 +48,36 @@ fn sync(root: &Path) -> Result<String, String> {
         }
     }
 
-    let before = git(&primary, &["rev-parse", "--short", "main"])?;
-    let behind = git(&primary, &["rev-list", "--count", "main..origin/main"])?;
-    if behind.trim() == "0" {
-        return Ok(format!(
-            "fetched origin; this host's main is current at {before}{}",
-            reclaimable(root)
-        ));
-    }
     let ahead = git(&primary, &["rev-list", "--count", "origin/main..main"])?;
     if ahead.trim() != "0" {
         return Err(stranded(&primary));
     }
-    // A concurrent `--sync` holds git's index or ref lock, and git refuses this.
-    git(&primary, &["merge", "--ff-only", "origin/main"])?;
-    let after = git(&primary, &["rev-parse", "--short", "main"])?;
-    Ok(format!(
-        "fetched origin; this host's main {before} -> {after} ({} commit(s)){}",
-        behind.trim(),
-        reclaimable(root),
-    ))
+    let behind = git(&primary, &["rev-list", "--count", "main..origin/main"])?;
+    if behind.trim() == "0" {
+        let at = git(&primary, &["rev-parse", "--short", "main"])?;
+        return Ok(format!(
+            "fetched origin; this host's main is current at {at}{}",
+            reclaimable(root)
+        ));
+    }
+    let said = match fast_forward(&primary)? {
+        Some((before, after, commits)) => format!("{before} -> {after} ({commits} commit(s))"),
+        None => format!("already at {}", git(&primary, &["rev-parse", "--short", "main"])?),
+    };
+    Ok(format!("fetched origin; this host's main {said}{}", reclaimable(root)))
+}
+
+/// The move this call made, or `None` when a concurrent `--sync` had already
+/// made it. A concurrent one holds git's index or ref lock, and git refuses
+/// this one.
+fn fast_forward(primary: &Path) -> Result<Option<(String, String, String)>, String> {
+    let out = git(primary, &["merge", "--ff-only", "origin/main"])?;
+    let Some(range) = out.lines().find_map(|l| l.strip_prefix("Updating ")) else {
+        return Ok(None);
+    };
+    let (before, after) = range.split_once("..").unwrap_or_else(|| panic!("git said {range:?}"));
+    let commits = git(primary, &["rev-list", "--count", range])?;
+    Ok(Some((before.to_string(), after.to_string(), commits)))
 }
 
 /// What this host could give back, said where it becomes true.
@@ -122,77 +129,10 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
+    use crate::gitfixture::{commit, configure, repo, sh};
     use std::fs;
-    use std::path::PathBuf;
-    use toyos_tmpdir::TempDir;
-
-    /// A bare "origin" with a `main`, and a clone of it on a branch. Every
-    /// repository is [`configure`]d. `sdkversion`'s
-    /// tests stage in it too. All of it is in the directory that comes first,
-    /// which is the caller's to hold.
-    pub(crate) fn repo(name: &str) -> (TempDir, PathBuf, PathBuf) {
-        let dir = TempDir::new(&format!("repo-{name}"));
-        let origin = dir.join("origin.git");
-        let work = dir.join("work");
-        let seed = dir.join("seed");
-        fs::create_dir(&seed).unwrap();
-        sh(&seed, &["init", "-q", "-b", "main"]);
-        configure(&seed);
-        fs::write(seed.join("f"), "base\n").unwrap();
-        fs::write(seed.join(".gitignore"), "target/\n").unwrap();
-        sh(&seed, &["add", "f", ".gitignore"]);
-        sh(&seed, &["commit", "-qm", "base"]);
-        sh(&seed, &["clone", "-q", "--bare", ".", origin.to_str().unwrap()]);
-        // A push runs auto maintenance in the receiving repository.
-        sh(&origin, &["config", "maintenance.auto", "false"]);
-
-        sh(&dir, &["clone", "-q", origin.to_str().unwrap(), work.to_str().unwrap()]);
-        configure(&work);
-        sh(&work, &["switch", "-q", "-c", "wt"]);
-        (dir, origin, work)
-    }
-
-    /// An identity, and no signing: the host's global config signs every commit,
-    /// and a test that waited on gpg would be a test that hangs. No auto
-    /// maintenance: git runs it detached, so a repack started by the last
-    /// command still writes into the repository while its `TempDir` is removed.
-    /// **Every git repository a test anywhere in this crate creates sets
-    /// `maintenance.auto` false** — call this on one made by `init` or `clone`;
-    /// a fixture that passes `-c` on every invocation instead of persisting
-    /// config, because it runs against a repository it does not itself `init`
-    /// or `clone` (a submodule's own store), adds [`NO_AUTO_MAINTENANCE`] to
-    /// that same list instead.
-    pub(crate) fn configure(dir: &Path) {
-        sh(dir, &["config", "user.email", "t@t"]);
-        sh(dir, &["config", "user.name", "t"]);
-        sh(dir, &["config", "commit.gpgsign", "false"]);
-        sh(dir, &["config", "maintenance.auto", "false"]);
-    }
-
-    /// The `-c` form of [`configure`]'s `maintenance.auto false`, for a
-    /// fixture whose `git` helper already passes `-c` on every invocation.
-    pub(crate) const NO_AUTO_MAINTENANCE: [&str; 2] = ["-c", "maintenance.auto=false"];
-
-    pub(crate) fn sh(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .expect("run git")
-            .success();
-        assert!(ok, "git {args:?} in {}", dir.display());
-    }
-
-    pub(crate) fn commit(dir: &Path, file: &str, text: &str, msg: &str) {
-        if let Some(parent) = Path::new(file).parent() {
-            fs::create_dir_all(dir.join(parent)).unwrap();
-        }
-        fs::write(dir.join(file), text).unwrap();
-        sh(dir, &["add", file]);
-        sh(dir, &["commit", "-qm", msg]);
-    }
 
     /// Someone else lands, so `origin/main` is ahead of every clone.
     fn land_elsewhere(dir: &Path, origin: &Path) {
@@ -272,5 +212,49 @@ pub(crate) mod tests {
         let refusal = sync(&wt).expect_err("a main with commits of its own cannot fast-forward");
         assert!(refusal.contains("carries commits origin/main has not got"), "{refusal}");
         assert!(refusal.contains("committed on main"), "{refusal}");
+    }
+
+    /// Commits on `main` with nothing new on GitHub are still stranded.
+    #[test]
+    fn a_main_ahead_and_not_behind_is_refused_as_stranded() {
+        let (_dir, _origin, wt) = repo("sync-ahead-only");
+        sh(&wt, &["switch", "-q", "main"]);
+        commit(&wt, "g", "local\n", "committed on main");
+
+        let refusal = sync(&wt).expect_err("a main ahead of origin/main is not current");
+        assert!(refusal.contains("carries commits origin/main has not got"), "{refusal}");
+        assert!(refusal.contains("committed on main"), "{refusal}");
+    }
+
+    /// A concurrent `--sync` already made the move: this run says where `main`
+    /// is and claims no move.
+    #[test]
+    fn a_fast_forward_a_concurrent_run_made_is_not_reported_as_this_ones() {
+        let (dir, origin, wt) = repo("sync-already");
+        sh(&wt, &["switch", "-q", "main"]);
+        land_elsewhere(&dir, &origin);
+        git(&wt, &["fetch", "--quiet", "origin", "main"]).unwrap();
+
+        let (before, after, commits) =
+            fast_forward(&wt).unwrap().expect("the first fast-forward moves main");
+        assert_ne!(before, after);
+        assert_eq!(commits, "1");
+        assert_eq!(fast_forward(&wt).unwrap(), None, "main was already there");
+    }
+
+    /// A primary that is not this checkout and has uncommitted work is left alone.
+    #[test]
+    fn a_dirty_primary_that_is_another_checkout_is_left_where_it_is() {
+        let (dir, origin, primary) = repo("sync-dirty-elsewhere");
+        sh(&primary, &["switch", "-q", "main"]);
+        let asking = dir.join("asking");
+        sh(&primary, &["worktree", "add", "-q", "-b", "task", asking.to_str().unwrap()]);
+        land_elsewhere(&dir, &origin);
+        fs::write(primary.join("f"), "dirty\n").unwrap();
+        let before = git(&primary, &["rev-parse", "main"]).unwrap();
+
+        let said = sync(&asking).expect("a dirty primary is reported, never refused");
+        assert!(said.contains("has uncommitted work in it"), "{said}");
+        assert_eq!(git(&primary, &["rev-parse", "main"]).unwrap(), before);
     }
 }

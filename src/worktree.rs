@@ -588,15 +588,15 @@ mod tests {
 
     #[test]
     fn a_local_branch_is_resumed_at_its_own_commit_not_mains() {
-        let (dir, _origin, work) = crate::sync::tests::repo("wtresume-local");
+        let (dir, _origin, work) = crate::gitfixture::repo("wtresume-local");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt"]);
         git(&work, &["checkout", "-qb", "wt/foo", "main"]);
-        crate::sync::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        crate::gitfixture::commit(&work, "on-branch", "branch work\n", "branch work");
         git(&work, &["push", "-q", "-u", "origin", "wt/foo"]);
-        crate::sync::tests::commit(&work, "on-branch-2", "more branch work\n", "more branch work");
+        crate::gitfixture::commit(&work, "on-branch-2", "more branch work\n", "more branch work");
         git(&work, &["checkout", "-q", "main"]);
-        crate::sync::tests::commit(&work, "on-main", "main moved on\n", "main moved on");
+        crate::gitfixture::commit(&work, "on-main", "main moved on\n", "main moved on");
 
         let path = dir.join("resumed");
         let summary = create_worktree(&work, &path, "foo");
@@ -616,11 +616,11 @@ mod tests {
     /// rather than resumed from its old tip behind main.
     #[test]
     fn a_landed_local_branch_is_refused_not_resumed() {
-        let (dir, _origin, work) = crate::sync::tests::repo("wtresume-landed-local");
+        let (dir, _origin, work) = crate::gitfixture::repo("wtresume-landed-local");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt"]);
         git(&work, &["checkout", "-qb", "wt/foo", "main"]);
-        crate::sync::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        crate::gitfixture::commit(&work, "on-branch", "branch work\n", "branch work");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["merge", "-q", "--no-ff", "wt/foo", "-m", "merge wt/foo"]);
         git(&work, &["push", "-q", "origin", "main"]);
@@ -642,7 +642,7 @@ mod tests {
     /// created, for the reason that is true of it, never "landed".
     #[test]
     fn an_untouched_branch_is_refused_not_resumed() {
-        let (dir, _origin, work) = crate::sync::tests::repo("wtresume-untouched");
+        let (dir, _origin, work) = crate::gitfixture::repo("wtresume-untouched");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt"]);
         git(&work, &["checkout", "-qb", "wt/foo", "main"]);
@@ -665,12 +665,12 @@ mod tests {
     /// resumed at the stale local tip.
     #[test]
     fn a_local_branch_behind_origin_is_refused() {
-        let (dir, _origin, work) = crate::sync::tests::repo("wtresume-behind");
+        let (dir, _origin, work) = crate::gitfixture::repo("wtresume-behind");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt"]);
         git(&work, &["checkout", "-qb", "wt/foo", "main"]);
-        crate::sync::tests::commit(&work, "first", "first\n", "first");
-        crate::sync::tests::commit(&work, "second", "second\n", "second");
+        crate::gitfixture::commit(&work, "first", "first\n", "first");
+        crate::gitfixture::commit(&work, "second", "second\n", "second");
         git(&work, &["push", "-q", "-u", "origin", "wt/foo"]);
         git(&work, &["reset", "-q", "--hard", "HEAD~1"]);
 
@@ -692,14 +692,14 @@ mod tests {
     /// either side.
     #[test]
     fn a_local_branch_diverged_from_origin_is_refused() {
-        let (dir, _origin, work) = crate::sync::tests::repo("wtresume-diverged");
+        let (dir, _origin, work) = crate::gitfixture::repo("wtresume-diverged");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt"]);
         git(&work, &["checkout", "-qb", "wt/foo", "main"]);
-        crate::sync::tests::commit(&work, "side", "origin side\n", "origin side");
+        crate::gitfixture::commit(&work, "side", "origin side\n", "origin side");
         git(&work, &["push", "-q", "-u", "origin", "wt/foo"]);
         git(&work, &["reset", "-q", "--hard", "main"]);
-        crate::sync::tests::commit(&work, "side", "local side\n", "local side");
+        crate::gitfixture::commit(&work, "side", "local side\n", "local side");
 
         let path = dir.join("resumed");
         let refused = std::panic::catch_unwind(|| {
@@ -716,15 +716,15 @@ mod tests {
 
     #[test]
     fn an_origin_only_branch_is_recreated_tracking_it() {
-        let (dir, _origin, work) = crate::sync::tests::repo("wtresume-origin");
+        let (dir, _origin, work) = crate::gitfixture::repo("wtresume-origin");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt"]);
         git(&work, &["checkout", "-qb", "wt/bar", "main"]);
-        crate::sync::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        crate::gitfixture::commit(&work, "on-branch", "branch work\n", "branch work");
         git(&work, &["push", "-q", "-u", "origin", "wt/bar"]);
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt/bar"]);
-        crate::sync::tests::commit(&work, "on-main", "main moved on\n", "main moved on");
+        crate::gitfixture::commit(&work, "on-main", "main moved on\n", "main moved on");
 
         let path = dir.join("resumed");
         let summary = create_worktree(&work, &path, "bar");
@@ -744,11 +744,11 @@ mod tests {
     /// never fetched to notice) is refused rather than recreated behind main.
     #[test]
     fn a_landed_origin_only_branch_is_refused() {
-        let (dir, _origin, work) = crate::sync::tests::repo("wtresume-landed-origin");
+        let (dir, _origin, work) = crate::gitfixture::repo("wtresume-landed-origin");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt"]);
         git(&work, &["checkout", "-qb", "wt/bar", "main"]);
-        crate::sync::tests::commit(&work, "on-branch", "branch work\n", "branch work");
+        crate::gitfixture::commit(&work, "on-branch", "branch work\n", "branch work");
         git(&work, &["push", "-q", "-u", "origin", "wt/bar"]);
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["merge", "-q", "--ff-only", "wt/bar"]);
@@ -768,10 +768,10 @@ mod tests {
 
     #[test]
     fn with_neither_branch_it_starts_fresh_from_main() {
-        let (dir, _origin, work) = crate::sync::tests::repo("wtresume-fresh");
+        let (dir, _origin, work) = crate::gitfixture::repo("wtresume-fresh");
         git(&work, &["checkout", "-q", "main"]);
         git(&work, &["branch", "-qD", "wt"]);
-        crate::sync::tests::commit(&work, "on-main", "main moved on\n", "main moved on");
+        crate::gitfixture::commit(&work, "on-main", "main moved on\n", "main moved on");
 
         let path = dir.join("resumed");
         let summary = create_worktree(&work, &path, "baz");
@@ -785,7 +785,7 @@ mod tests {
     /// A linked worktree of a fresh repository whose `.gitignore` names `target/`,
     /// both in the directory that comes first.
     fn linked(name: &str) -> (TempDir, PathBuf, PathBuf) {
-        let (dir, _origin, work) = crate::sync::tests::repo(name);
+        let (dir, _origin, work) = crate::gitfixture::repo(name);
         let tree = dir.join("linked");
         git(&work, &["worktree", "add", "-q", "-b", "linked", tree.to_str().unwrap()]);
         (dir, work, tree)
