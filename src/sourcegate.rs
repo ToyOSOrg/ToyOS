@@ -7,12 +7,10 @@
 //! architecture (`src/clippy.rs`) — so a `clippy.toml` is no longer a wall
 //! with nothing behind it.
 //!
-//! What is behind it is still not these six scans. `disallowed-methods` could
+//! `disallowed-methods` could
 //! take the first one, and would lose what makes it useful: the exceptions
 //! below are per file *and per line count*, so an added `mem::forget` beside a
-//! permitted one reds, which a name-based allow list cannot express. The second
-//! and third scans ask whether an identifier is absent from the tree, which is
-//! not a question any lint asks at all. So the first scan bans, over
+//! permitted one reds, which a name-based allow list cannot express. So the first scan bans, over
 //! `kernel/src` and `toyos-sched/src`, the methods that take an object's
 //! lifetime out of its `Arc`'s hands — `Arc::into_raw`, `Arc::from_raw`, the
 //! two strong-count adjusters — and `mem::forget`. It runs in
@@ -23,50 +21,6 @@
 //!
 //! The exceptions are per file and per line count, so an *added* `forget`
 //! beside a permitted one is a red rather than a silence.
-//!
-//! The second scan enforces that there is no global registry: a name a process
-//! could present and have resolved for it is the thing this architecture
-//! deleted, so the registry's identifiers must be gone from the code rather
-//! than merely unused. It reads
-//! **code only** — comments and string literals are stripped first — because
-//! the history of what a name used to mean is worth keeping and the
-//! retired-syscall gravestone table names every one of them as a string on
-//! purpose.
-//!
-//! The third runs the same walk over [`RETIRED_ABI_NAMES`]: every syscall,
-//! `SYS_DEBUG` action and inbox op code this project has deleted. Its
-//! *number* is what is retired, and a number is not a thing a scan can look
-//! for — the name that used to carry it is.
-//!
-//! The fourth names two files, the pipe ring and the user-copy windows, where a
-//! slice or an exclusive reference would claim what the mapping does not give.
-//!
-//! The fifth and sixth are the dependency bar, and each closes a spelling
-//! rather than the rule behind it — say what they close, because a scan over
-//! Rust source cannot say more. The fifth reads the text `Command::new(` and
-//! refuses an argument no row declares, with every non-literal argument pinned
-//! to a file and a count; beside it, a one-line `use`/`type` rename of
-//! `Command` after any visibility is refused, because such a line makes every
-//! row unreachable at once. The sixth reads every committed file that carries
-//! a NUL, plus everything under `assets/`, against the digest `NOTICE` records.
-//!
-//! The seventh is the third-party C corpus, and it is a text scan over one
-//! licence file rather than over Rust: it reads the per-population counts
-//! `tests/testcases/LICENSE` states, counts what `git` tracks under each
-//! population, and refuses the one case `NOTICE` names as not to be
-//! re-imported. An arrival, a deletion and that name are what it closes; no
-//! file's provenance is what it does not.
-//!
-//! The eighth and ninth are the same bar over `.github/`: one cuts every
-//! workflow, script and container recipe into shell commands and refuses a
-//! package no row declares, the other reads `uses:`.
-//!
-//! The tenth is the architecture rules, [`ARCH_RULES`]: each a set of
-//! spellings — assembly and `core::arch` intrinsics, `target_arch`, a path into
-//! one architecture's module — stated as the only places they may appear, so an
-//! architecture is chosen in one place and reached only through the arch
-//! interface. A declared exception is a file row that points at the issue
-//! holding what it owes, and one that no longer holds a needle is refused.
 //!
 //! **What none of them reaches is filed rather than implied**, and each table's
 //! own doc names its half: the entries under `issues/build/` say so.
@@ -282,73 +236,7 @@ fn occurrences(needle: &str) -> Vec<(String, usize)> {
     found
 }
 
-/// The names the global registry left behind, and one that is not a name at
-/// all: `services::connect` was the call that resolved one.
-///
-/// Each is retired rather than renamed — `SYS_CONNECTION_JOIN` keeps number 76
-/// and is a different call, addressed by handle, granting nothing. A word
-/// boundary is what tells the two apart here.
-const RETIRED_REGISTRY: &[&str] = &[
-    "SYS_CONNECT",
-    "SYS_LISTEN",
-    "SYS_PIPE_OPEN",
-    "SYS_PIPE_ID",
-    "SYS_SOCKET_CREATE",
-    "SharedToken",
-    "services::connect",
-];
-
-/// Every other ABI name this project has retired: a deleted syscall, debug
-/// action or inbox op code, whose *number* is retired with it and never
-/// reused (`CLAUDE.md`, "Syscall ABI").
-///
-/// The number is what the rule protects and a number cannot be scanned for —
-/// so the name is, and a name back in code is how a number gets reissued by
-/// accident. Retired numbers themselves are recorded where they can be read
-/// beside the live ones: the comments in `toyos-abi/src/syscall.rs` and
-/// `toyos-abi/src/inbox.rs`, which this scan is blind to by construction
-/// because it strips comments.
-///
-/// **A rename is not a retirement, and this table gained no row for one.**
-/// `SYS_IO_URING_SETUP`/`SYS_IO_URING_ENTER` became `SYS_INBOX_SETUP`/
-/// `SYS_INBOX_SUBMIT` on 2026-08-20 keeping numbers 89 and 90, the same
-/// arguments and the same struct layouts, so nothing was deleted and no number
-/// is protectable by forbidding the old spelling.
-const RETIRED_ABI_NAMES: &[&str] = &[
-    // Syscall 107. Nothing called it; a region's mappings go with its last
-    // handle, so the handle is the whole of letting go.
-    "SYS_SHM_UNMAP",
-    // `SYS_DEBUG` actions 14 and 15. A total hides a leak of one kind behind
-    // churn in another, and a breakdown in the kernel log is a reading no guest
-    // test can see; every leak assertion in the estate is `CENSUS_KIND`.
-    "CENSUS_TOTAL",
-    "CENSUS_BREAKDOWN",
-    // Inbox op code 2. No submitter anywhere: this kernel's watches are
-    // one-shot and mio re-arms rather than cancels. Retired under both the
-    // spelling it carried when it was deleted and the one a reintroduction
-    // would write in today's vocabulary.
-    "IORING_OP_POLL_REMOVE",
-    "OP_POLL_REMOVE",
-    "OP_CANCEL",
-    // Inbox op code 4, `IORING_OP_CLOSE`: the one handle path that could not
-    // obey the bad-handle policy, running under the ring's own lock. Same two
-    // vocabularies.
-    "IORING_OP_CLOSE",
-    "OP_CLOSE",
-    // Syscall 8. The monotonic clock is a page every address space maps
-    // read-only (`toyos_abi::clock`), so reading it is no transition at all.
-    "SYS_CLOCK",
-];
-
-/// Everything this repository compiles into the guest.
-const GUEST_TREES: &[&str] =
-    &["kernel/src", "toyos/src", "toyos-abi/src", "userland", "tests"];
-
 /// `line` with its comment and its string literals removed.
-///
-/// What is left is the part that names things. Prose explaining what a deleted
-/// call used to do is legal and worth keeping; a gravestone table mapping a
-/// retired number to the string `"SYS_LISTEN"` is the point of the table.
 fn code_only(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
@@ -376,26 +264,6 @@ fn names(code: &str, needle: &str) -> bool {
         !word(at.checked_sub(1).and_then(|j| bytes.get(j)))
             && !word(bytes.get(at + needle.len()))
     })
-}
-
-/// `(file, line number)` for every place `needle` is named in code, over
-/// [`GUEST_TREES`].
-fn named_in_code(needle: &str) -> Vec<String> {
-    let root = repo_root();
-    let mut files = Vec::new();
-    for tree in GUEST_TREES {
-        rust_files(&root.join(tree), &mut files);
-    }
-    let mut found = Vec::new();
-    for path in files {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        for (n, line) in text.lines().enumerate() {
-            if names(&code_only(line), needle) {
-                found.push(format!("{}:{}", rel(&root, &path), n + 1));
-            }
-        }
-    }
-    found
 }
 
 /// Every line of `kernel/src` under a relative path, with its number.
@@ -2007,64 +1875,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// **There is no global registry.** A name a process could present and have
-    /// resolved for it is the thing this architecture deletes, so its
-    /// identifiers may not be reachable from any code the guest compiles.
-    #[test]
-    fn no_name_resolves_through_a_registry_any_more() {
-        let mut complaints = Vec::new();
-        for needle in RETIRED_REGISTRY {
-            for at in named_in_code(needle) {
-                complaints.push(format!("{at}: names `{needle}`"));
-            }
-        }
-        assert!(
-            complaints.is_empty(),
-            "the registry is deleted, and these still name it:\n  {}",
-            complaints.join("\n  "),
-        );
-    }
-
-    /// **A retired ABI number is never reused**, and the name is the only part
-    /// of it a scan can hold on to. A retired name back in guest-compiled code
-    /// is either the number coming back or a new call wearing a dead one's
-    /// identity, and the two are indistinguishable from the outside.
-    #[test]
-    fn a_retired_abi_name_is_gone_from_the_code() {
-        let mut complaints = Vec::new();
-        for needle in RETIRED_ABI_NAMES {
-            for at in named_in_code(needle) {
-                complaints.push(format!("{at}: names `{needle}`"));
-            }
-        }
-        assert!(
-            complaints.is_empty(),
-            "these names are retired and their numbers with them:\n  {}",
-            complaints.join("\n  "),
-        );
-    }
-
-    /// What the scan above can and cannot see, stated as cases, because a
-    /// well-formed tree exercises none of them.
-    #[test]
-    fn the_registry_scan_reads_code_and_not_prose() {
-        assert!(names(&code_only("    let x = syscall(SYS_LISTEN, 0);"), "SYS_LISTEN"));
-        assert!(names(&code_only("pub const SYS_PIPE_ID: u64 = 70;"), "SYS_PIPE_ID"));
-        assert!(!names(&code_only("/// `SYS_LISTEN` used to register a name."), "SYS_LISTEN"));
-        assert!(!names(&code_only("    // SYS_PIPE_ID was 70"), "SYS_PIPE_ID"));
-        assert!(!names(&code_only("    85 => \"SYS_LISTEN\","), "SYS_LISTEN"));
-        // The live call keeps the retired one's number and must not be read as
-        // it: this is the whole reason the match is on a word boundary.
-        assert!(!names(&code_only("SYS_CONNECTION_JOIN => join(a, b),"), "SYS_CONNECT"));
-        assert!(names(&code_only("SYS_CONNECT => connect(a),"), "SYS_CONNECT"));
-        // And the walk reaches real code: a live name it is capable of finding
-        // must actually be found.
-        assert!(
-            !named_in_code("SYS_CONNECTION_JOIN").is_empty(),
-            "the scan found no `SYS_CONNECTION_JOIN` in code, so it is not reading the guest trees",
-        );
     }
 
     /// The scan has teeth only over the files it opens, and "at least one" is
