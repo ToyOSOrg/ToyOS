@@ -32,7 +32,9 @@ scaffolding, deleted once its question is answered.
 
 Every task gets a fresh agent with an explicit model matched to the judgment in it: the strongest
 for drivers, security boundaries and reviews of them, and a mid tier for mechanical fixes from an
-exact list. A resumed agent only ever finishes its own interrupted task.
+exact list. A resumed agent only ever finishes its own interrupted task. A finished agent's report
+is acted on before the next agent is dispatched: its guest runs queued, its review spawned, or its
+fix round sent. When the permission check refuses an agent, ask the owner and never route around it.
 A brief is the fence: what to build, where it may touch, the worktree and branch, the scratchpad
 for its logs, and the two checks expected of high-risk code. The role files carry the standing
 rules, so a brief carries only the task.
@@ -58,17 +60,24 @@ issue that day, and is deleted if nobody owns it a week later.
 
 ## Runs
 
-Orchestration state (checklists, queue scripts, run logs, patches) lives outside /tmp, which a CLI restart wipes; PR evidence is posted to the PR. After a restart, first list and kill by PID every queue, watcher and metal run left from before, and revert any mutation a killed run left applied.
-Guest runs go through one serial queue script: each mutation is `git apply --check`, `git apply`, its tests run by name, `git apply -R`, and the worktree is clean after. A queue script never passes a flag where a test name belongs.
-Metal runs are yours alone, one at a time, never through the generic mutation helper, never while an agent edits that worktree.
-A finished agent's report is acted on before new work is dispatched. An agent the permission check refuses stops and reports; you ask the owner and never route around it.
+You keep orchestration state (checklists, queue scripts, run logs, patches) in the session's job
+directory, `~/.claude/jobs/<session>/`, which survives a CLI restart; PR evidence is posted to the
+PR. After a restart, kill every queue, watcher and metal process left from before by PID, found by
+its script path under the job directory, and revert any mutation a killed run left applied. A T14
+left mid-flash or mid-boot is power-cycled by the owner and comes back to Ubuntu: BootNext is
+one-shot.
+
+A mutation loop, guest or metal, starts on a clean worktree at the head under review and leaves it
+clean: `git apply --check`, `git apply`, the tests by name, `git apply -R`. None runs while an
+agent edits that worktree. A queue script passes only flags `src/testargs.rs` declares: any other
+word becomes the run's filter, and a one-test run reports as a pass.
 
 ## The bench
 
-You alone run the T14. Before every flash, save the stick's log partition: the flash destroys the
-previous boot's only record. Verify the image's hash and its armed line in the same command that
-flashes. A boot that needs the machine and cannot have it waits; nothing is built on a guess in the
-meantime.
+You alone run the T14, one boot at a time. Before every flash, save the stick's log partition: the
+flash destroys the previous boot's only record. Verify the image's hash and its armed line in the
+same command that flashes. A boot that needs the machine and cannot have it waits; nothing is built
+on a guess in the meantime.
 
 The bench is the fast loop and CI the slow one: build confidence on the machine, then push once and
 move on. Ubuntu on the T14 is recovery, not a tool. Every question the bench raises — a log, the
