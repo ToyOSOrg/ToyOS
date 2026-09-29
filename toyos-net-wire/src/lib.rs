@@ -1,4 +1,7 @@
 //! Ethernet, ARP, IPv4, ICMPv4, IGMP, UDP and TCP, parsed in place and built: a parse refuses by the first rule its input breaks, a build refuses what it cannot represent.
+//!
+//! It is also what every net crate above it shares: the caller's clock, the keyed function, and
+//! the declaration of a crate's counters.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -48,6 +51,79 @@ macro_rules! reasons {
     };
 }
 
+/// Declares a crate's counters: `Counter`, each variant the name inspect reads it by and, marked
+/// `logged`, a refusal of legacy or insecure input the log names; `Counters`, one value each; and
+/// `PerCounter<T>`, one `T` each.
+#[macro_export]
+macro_rules! counters {
+    ($($variant:ident = $name:literal $(, $logged:ident)?;)*) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Counter {
+            $($variant,)*
+        }
+
+        impl Counter {
+            pub const ALL: &'static [Counter] = &[$(Counter::$variant,)*];
+
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)*
+                }
+            }
+
+            pub const fn logged(self) -> bool {
+                match self {
+                    $(Self::$variant => $crate::counters!(@logged $($logged)?),)*
+                }
+            }
+        }
+
+        #[allow(non_snake_case)]
+        #[derive(Clone, Debug, Default)]
+        struct PerCounter<T> {
+            $($variant: T,)*
+        }
+
+        impl<T> PerCounter<T> {
+            fn get(&self, counter: Counter) -> &T {
+                match counter {
+                    $(Counter::$variant => &self.$variant,)*
+                }
+            }
+
+            fn get_mut(&mut self, counter: Counter) -> &mut T {
+                match counter {
+                    $(Counter::$variant => &mut self.$variant,)*
+                }
+            }
+        }
+
+        #[derive(Clone, Debug, Default)]
+        pub struct Counters(PerCounter<u64>);
+
+        impl Counters {
+            pub fn get(&self, counter: Counter) -> u64 {
+                *self.0.get(counter)
+            }
+
+            pub(crate) fn add(&mut self, counter: Counter, n: u64) {
+                let value = self.0.get_mut(counter);
+                *value = value.saturating_add(n);
+            }
+
+            pub fn iter(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+                Counter::ALL.iter().map(|&c| (c.name(), self.get(c)))
+            }
+        }
+    };
+    (@logged logged) => {
+        true
+    };
+    (@logged) => {
+        false
+    };
+}
+
 pub mod arp;
 pub mod checksum;
 mod emit;
@@ -55,10 +131,38 @@ pub mod ethernet;
 pub mod icmp;
 pub mod igmp;
 pub mod ipv4;
+pub mod siphash;
 pub mod tcp;
 pub mod udp;
 
 pub use emit::BuildError;
+
+/// A point on the caller's monotonic clock, in nanoseconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Instant(u64);
+
+impl Instant {
+    pub const fn from_nanos(ns: u64) -> Self {
+        Self(ns)
+    }
+
+    pub const fn from_millis(ms: u64) -> Self {
+        Self(ms.saturating_mul(1_000_000))
+    }
+
+    pub const fn nanos(self) -> u64 {
+        self.0
+    }
+
+    pub fn after(self, d: core::time::Duration) -> Self {
+        Self(self.0.saturating_add(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)))
+    }
+
+    /// Zero when `earlier` is not earlier.
+    pub const fn since(self, earlier: Self) -> core::time::Duration {
+        core::time::Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Port(core::num::NonZeroU16);

@@ -8,56 +8,7 @@ use core::time::Duration;
 
 use crate::{limits, Endpoint, Event, Instant, Tuple};
 
-macro_rules! counters {
-    ($($variant:ident = $name:literal $(, $logged:ident)?;)*) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum Counter {
-            $($variant,)*
-        }
-
-        impl Counter {
-            pub const ALL: &'static [Counter] = &[$(Counter::$variant,)*];
-
-            pub const fn name(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $name,)*
-                }
-            }
-
-            /// A refusal the log names: legacy or insecure input ToyOS does not implement.
-            pub const fn logged(self) -> bool {
-                match self {
-                    $(Self::$variant => counters!(@logged $($logged)?),)*
-                }
-            }
-        }
-
-        /// One `T` per counter.
-        #[allow(non_snake_case)]
-        #[derive(Clone, Debug, Default)]
-        struct PerCounter<T> {
-            $($variant: T,)*
-        }
-
-        impl<T> PerCounter<T> {
-            fn get(&self, counter: Counter) -> &T {
-                match counter {
-                    $(Counter::$variant => &self.$variant,)*
-                }
-            }
-
-            fn get_mut(&mut self, counter: Counter) -> &mut T {
-                match counter {
-                    $(Counter::$variant => &mut self.$variant,)*
-                }
-            }
-        }
-    };
-    (@logged logged) => { true };
-    (@logged) => { false };
-}
-
-counters! {
+toyos_net_wire::counters! {
     ClosedRst = "tcp.closed-rst";
     ClosedRstLimited = "tcp.closed-rst-limited";
     SynRst = "tcp.syn-rst", logged;
@@ -116,24 +67,6 @@ counters! {
     PersistProbe = "tcp.persist-probe";
     KeepaliveProbe = "tcp.keepalive-probe";
     EventOverflow = "tcp.event-overflow";
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Counters(PerCounter<u64>);
-
-impl Counters {
-    pub fn get(&self, counter: Counter) -> u64 {
-        *self.0.get(counter)
-    }
-
-    fn add(&mut self, counter: Counter, n: u64) {
-        let value = self.0.get_mut(counter);
-        *value = value.saturating_add(n);
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
-        Counter::ALL.iter().map(|&c| (c.name(), self.get(c)))
-    }
 }
 
 /// The counters and the events the shell has not drained: a refusal is both.
