@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::{flags, pr, release, sdkversion, testargs};
+use crate::{flags, release, sdkversion, sync, testargs};
 
 /// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
 /// a minimum, never an equality, so a name GitHub requires and this does not
@@ -896,8 +896,8 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
-    let tip = pr::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
-    at_tip(&tip, &pr::git(root, &["rev-parse", "HEAD"])?)?;
+    let tip = sync::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
+    at_tip(&tip, &sync::git(root, &["rev-parse", "HEAD"])?)?;
     let plan = sdkversion::plan(root)?;
     sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();

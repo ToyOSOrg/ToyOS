@@ -53,7 +53,6 @@ pub(crate) use declare_flags;
 
 declare_flags!(pub CARGO_RUN = {
     pub HELP = "--help", None;
-    pub PR = "--pr", None;
     pub SYNC = "--sync", None;
     pub CI = "--ci", Rest;
     pub CLIPPY = "--clippy", None;

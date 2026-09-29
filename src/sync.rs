@@ -1,69 +1,18 @@
-//! `cargo run -- --pr` and `cargo run -- --sync` — the landing protocol.
+//! `cargo run -- --sync`: this machine's `main` onto `origin/main`.
 //!
 //! Nothing here rewrites history and nothing pushes `main`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn dispatch_pr(root: &Path) {
-    report(push(root));
-}
-
 pub fn dispatch_sync(root: &Path) {
-    report(sync(root).map(|line| format!("[sync] {line}")));
-}
-
-fn report(outcome: Result<String, String>) {
-    match outcome {
-        Ok(text) => println!("{text}"),
+    match sync(root) {
+        Ok(line) => println!("[sync] {line}"),
         Err(refusal) => {
             eprintln!("{refusal}");
             std::process::exit(1);
         }
     }
-}
-
-/// The refusals the merge queue cannot make, then the push, then the `gh` line.
-fn push(root: &Path) -> Result<String, String> {
-    let branch = preflight(root)?;
-    // Asked before the push: a second later the answer is the wrong one for ever.
-    let first_push = git(root, &["ls-remote", "--heads", "origin", &branch])?.trim().is_empty();
-    git(root, &["push", "-u", "origin", &branch])?;
-    Ok(if first_push {
-        format!(
-            "[pr] pushed {branch}; CI runs on a pull request and nothing else, so open its draft \
-             now:\n\
-             [pr]   gh pr create --draft --base main --head {branch} --title \"{branch}: in \
-             progress\" --body \"opened early; CI on every push\""
-        )
-    } else {
-        format!(
-            "[pr] pushed {branch}; when it is finished (never `--fill`: the title and body become \
-             the merge commit's):\n\
-             [pr]   gh pr edit {branch} --title \"<what landed>\" --body-file <file> && gh pr \
-             ready {branch}"
-        )
-    })
-}
-
-/// The refusals that do not need the network.
-fn preflight(root: &Path) -> Result<String, String> {
-    let branch = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    if branch == "main" {
-        return Err("[pr] this worktree is on main, so there is nothing to open a pull request \
-                    for. `cargo run -- --worktree add <path>` makes one to work in."
-            .to_string());
-    }
-    let dirty = git(root, &["status", "--porcelain"])?;
-    if !dirty.is_empty() {
-        return Err(format!(
-            "[pr] this worktree has uncommitted work, and CI would gate a tree main is not going \
-             to get:\n{dirty}\n\
-             [pr] commit it — on your own branch that is free — then re-run \
-             `cargo run -- --pr`."
-        ));
-    }
-    Ok(branch)
 }
 
 /// `git fetch origin`, then this machine's `main` onto `origin/main`.
@@ -78,7 +27,7 @@ fn sync(root: &Path) -> Result<String, String> {
     let primary = crate::primary_checkout(root);
 
     git(root, &["fetch", "--quiet", "origin", "main"])
-        .map_err(|e| format!("{e}\n[pr] `git fetch origin main` failed, so nothing below could \
+        .map_err(|e| format!("{e}\n[sync] `git fetch origin main` failed, so nothing below could \
                               be judged against what GitHub has."))?;
 
     // The fast-forward runs on whatever branch the primary has out, so the
@@ -130,7 +79,7 @@ fn sync(root: &Path) -> Result<String, String> {
 /// and `--sync` runs at exactly the moment that becomes true of one.
 fn reclaimable(root: &Path) -> String {
     crate::worktree::reclaim_line(&crate::worktree::survey(root, false))
-        .map_or_else(String::new, |line| format!("\n[pr] {line}"))
+        .map_or_else(String::new, |line| format!("\n[sync] {line}"))
 }
 
 /// This host's `main` has commits GitHub does not, so it is not a cache of
@@ -140,14 +89,14 @@ fn stranded(primary: &Path) -> String {
     let holders = git(primary, &["branch", "--contains", "main", "--list", "wt/*"])
         .unwrap_or_else(|e| e);
     format!(
-        "[pr] this host's main carries commits origin/main has not got, so it cannot be \
+        "[sync] this host's main carries commits origin/main has not got, so it cannot be \
          fast-forwarded and it is no longer a copy of what GitHub has:\n{extra}\n\
-         [pr] branches that already contain all of them:\n{}\n\
-         [pr] If one of those holds every commit above, nothing is lost — open a pull request \
+         [sync] branches that already contain all of them:\n{}\n\
+         [sync] If one of those holds every commit above, nothing is lost — open a pull request \
          for it and put this host's main back with \
          `git -C {} reset --hard origin/main`. If none does, do not reset anything: work out \
          where those commits live first.",
-        if holders.trim().is_empty() { "[pr]     none".to_string() } else { holders },
+        if holders.trim().is_empty() { "[sync]     none".to_string() } else { holders },
         primary.display(),
     )
 }
@@ -179,12 +128,12 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use toyos_tmpdir::TempDir;
 
-    /// A bare "origin" with a `main`, and a clone of it on a branch — the only
-    /// shape `--pr` runs in. Every repository is [`configure`]d. `sdkversion`'s
+    /// A bare "origin" with a `main`, and a clone of it on a branch. Every
+    /// repository is [`configure`]d. `sdkversion`'s
     /// tests stage in it too. All of it is in the directory that comes first,
     /// which is the caller's to hold.
     pub(crate) fn repo(name: &str) -> (TempDir, PathBuf, PathBuf) {
-        let dir = TempDir::new(&format!("pr-{name}"));
+        let dir = TempDir::new(&format!("repo-{name}"));
         let origin = dir.join("origin.git");
         let work = dir.join("work");
         let seed = dir.join("seed");
@@ -291,7 +240,24 @@ pub(crate) mod tests {
 
         let said = sync(&wt).expect("with the lock gone the fast-forward runs");
         assert!(said.contains("(1 commit(s))"), "{said}");
-        assert_eq!(git(&wt, &["rev-parse", "main"]).unwrap(), git(&wt, &["rev-parse", "origin/main"]).unwrap());
+        assert_eq!(
+            git(&wt, &["rev-parse", "main"]).unwrap(),
+            git(&wt, &["rev-parse", "origin/main"]).unwrap()
+        );
+    }
+
+    /// A primary that is this checkout skips the dirty question, so its dirt
+    /// reaches the fast-forward: git's refusal is reported, not stranded commits.
+    #[test]
+    fn a_dirty_primary_that_is_this_checkout_gets_gits_refusal() {
+        let (dir, origin, wt) = repo("sync-dirty-self");
+        sh(&wt, &["switch", "-q", "main"]);
+        land_elsewhere(&dir, &origin);
+        fs::write(wt.join("h"), "untracked\n").unwrap();
+
+        let refusal = sync(&wt).expect_err("an untracked file in the way must refuse");
+        assert!(refusal.contains("untracked working tree files would be overwritten"), "{refusal}");
+        assert!(!refusal.contains("carries commits origin/main has not got"), "{refusal}");
     }
 
     /// `main` ahead of `origin/main` is refused with what is stranded, before
@@ -306,43 +272,5 @@ pub(crate) mod tests {
         let refusal = sync(&wt).expect_err("a main with commits of its own cannot fast-forward");
         assert!(refusal.contains("carries commits origin/main has not got"), "{refusal}");
         assert!(refusal.contains("committed on main"), "{refusal}");
-    }
-
-    /// Each refusal pushes nothing: the remote never learns of the branch.
-    #[test]
-    fn a_dirty_worktree_and_main_itself_are_refused_by_name() {
-        let (_dir, _origin, wt) = repo("dirty");
-        commit(&wt, "g", "mine\n", "work");
-        fs::write(wt.join("g"), "not committed\n").unwrap();
-        assert!(push(&wt).expect_err("uncommitted work must refuse").contains("uncommitted"));
-        assert!(git(&wt, &["ls-remote", "--heads", "origin", "wt"]).unwrap().is_empty());
-
-        sh(&wt, &["checkout", "-q", "--", "g"]);
-        sh(&wt, &["switch", "-q", "main"]);
-        assert!(push(&wt).expect_err("main is not a branch to land").contains("on main"));
-    }
-
-    /// **The draft has to be the answer on the push that creates the branch**,
-    /// because that is the only moment an agent is reading for what to do next
-    /// and CI runs on a pull request and on nothing else.
-    #[test]
-    fn the_first_push_is_told_to_open_a_draft_and_later_ones_are_not() {
-        let (_dir, _origin, wt) = repo("first-push");
-        commit(&wt, "g", "mine\n", "work");
-
-        let first = push(&wt).expect("the first --pr should push and print");
-        assert!(first.contains("gh pr create --draft"), "{first}");
-        assert!(!first.contains("--fill"), "{first}");
-        let head = git(&wt, &["rev-parse", "HEAD"]).unwrap();
-        let pushed = git(&wt, &["ls-remote", "--heads", "origin", "wt"]).unwrap();
-        assert!(pushed.starts_with(&head), "{pushed}");
-
-        commit(&wt, "g2", "more\n", "more work");
-        let later = push(&wt).expect("a later --pr should push and print");
-        assert!(later.contains("gh pr ready"), "{later}");
-        assert!(!later.contains("gh pr create"), "{later}");
-        let head = git(&wt, &["rev-parse", "HEAD"]).unwrap();
-        let pushed = git(&wt, &["ls-remote", "--heads", "origin", "wt"]).unwrap();
-        assert!(pushed.starts_with(&head), "{pushed}");
     }
 }
