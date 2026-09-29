@@ -7,8 +7,7 @@
 //!
 //! The whitelist's `NSC` and `VORTEX` rows are left out: x86-64 Linux builds
 //! neither vendor (`CONFIG_CPU_SUP_CYRIX_32`, `CONFIG_CPU_SUP_VORTEX_32`), so
-//! no CPU it identifies matches them. The Hygon rows are left out: `decide`
-//! refuses Hygon.
+//! no CPU it identifies matches them.
 
 use crate::{Ident, Vendor};
 
@@ -83,6 +82,9 @@ const fn intel_steppings(model: u32, steppings: u32, flags: Bl) -> Row<Bl> {
 }
 const fn amd<F>(family: u32, flags: F) -> Row<F> {
     row(Some(Vendor::Amd), family, ANY, flags)
+}
+const fn hygon<F>(family: u32, flags: F) -> Row<F> {
+    row(Some(Vendor::Hygon), family, ANY, flags)
 }
 
 fn lookup<F: Copy>(rows: &[Row<F>], id: &Ident) -> Option<F> {
@@ -213,6 +215,7 @@ const WHITELIST: &[Row<Wl>] = &[
     amd(0x12, wl!(NO_MELTDOWN | NO_SSB | NO_L1TF | NO_MDS | NO_SWAPGS | NO_ITLB_MULTIHIT | NO_MMIO | NO_BHI)),
 
     amd(ANY, wl!(NO_MELTDOWN | NO_L1TF | NO_MDS | NO_SWAPGS | NO_ITLB_MULTIHIT | NO_MMIO | NO_EIBRS_PBRSB | NO_BHI)),
+    hygon(ANY, wl!(NO_MELTDOWN | NO_L1TF | NO_MDS | NO_SWAPGS | NO_ITLB_MULTIHIT | NO_MMIO | NO_EIBRS_PBRSB | NO_BHI)),
 
     row(Some(Vendor::Centaur), 7, ANY, wl!(NO_SPECTRE_V2 | NO_SWAPGS | NO_MMIO | NO_BHI)),
     row(Some(Vendor::Zhaoxin), 7, ANY, wl!(NO_SPECTRE_V2 | NO_SWAPGS | NO_MMIO | NO_BHI)),
@@ -276,12 +279,13 @@ const BLACKLIST: &[Row<Bl>] = &[
     amd(0x15, bl!(RETBLEED)),
     amd(0x16, bl!(RETBLEED)),
     amd(0x17, bl!(RETBLEED | SMT_RSB | SRSO | VMSCAPE)),
+    hygon(0x18, bl!(RETBLEED | SMT_RSB | SRSO | VMSCAPE)),
     amd(0x19, bl!(SRSO | TSA | VMSCAPE)),
 ];
 
 /// `bad_spectre_microcode` (`intel.c:165-182`) over `spectre_bad_microcodes`
-/// (`intel.c:141-163`): an Intel CPU outside a hypervisor whose microcode is
-/// at or below its row's broke the speculation controls.
+/// (`intel.c:141-163`), whose caller is Intel's (`intel.c:296-299`): a CPU
+/// whose microcode is at or below its row's broke the speculation controls.
 pub(crate) fn bad_spectre_microcode(id: &Ident, microcode: u32) -> bool {
     const ROWS: &[(u32, u32, u32)] = &[
         (KABYLAKE, 0x0B, 0x80),
@@ -315,7 +319,8 @@ pub(crate) fn bad_spectre_microcode(id: &Ident, microcode: u32) -> bool {
 
 /// `amd_check_tsa_microcode` (`amd.c:472-515`): a CPU whose microcode is at or
 /// above its row's. Every row keys a family 0x19 model `bsp_init_amd` names
-/// Zen3 or Zen4 (`amd.c:619-632`).
+/// Zen3 or Zen4 (`amd.c:619-632`), the only family TSA's row names
+/// (`common.c:1342`).
 pub(crate) fn tsa_microcode(id: &Ident, microcode: u32) -> bool {
     const ROWS: &[(u32, u32)] = &[
         (0xa0011, 0x0a0011d7),
@@ -335,9 +340,6 @@ pub(crate) fn tsa_microcode(id: &Ident, microcode: u32) -> bool {
         (0xa70c0, 0x0a70c008),
         (0xaa002, 0x0aa00216),
     ];
-    if !(id.vendor == Vendor::Amd && id.family == 0x19) {
-        return false;
-    }
     // `union zen_patch_rev` (`asm/cpu.h:80-90`) above its `rev` byte.
     let key = (id.family - 0xf) << 16 | (id.model >> 4) << 12 | (id.model & 0xf) << 4 | id.stepping;
     ROWS.iter().find(|&&(k, _)| k == key).is_some_and(|&(_, min)| microcode >= min)

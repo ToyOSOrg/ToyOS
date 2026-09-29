@@ -6,14 +6,13 @@
 //! fields), under the default command line and the pinned config. That Linux is
 //! tag `Ubuntu-6.8.0-142.142` (commit 53e5d07aac02) of Ubuntu's noble kernel
 //! with `/boot/config-6.8.0-142-generic`; every `path:line` here is read there,
-//! and `common.c`, `bugs.c`, `intel.c`, `amd.c` and `tsx.c` are in
-//! `arch/x86/kernel/cpu/`. The config's `CONFIG_CPU_UNRET_ENTRY`,
+//! and `common.c`, `bugs.c`, `intel.c`, `amd.c`, `hygon.c`, `feat_ctl.c` and
+//! `tsx.c` are in `arch/x86/kernel/cpu/`. The config's `CONFIG_CPU_UNRET_ENTRY`,
 //! `CONFIG_CPU_IBPB_ENTRY`, `CONFIG_CPU_SRSO`, `CONFIG_MITIGATION_TSA` and
-//! `CONFIG_MITIGATION_VMSCAPE` are `y`
-//! (`debian.master/config/annotations:3348,3319,3339,8048,411`).
+//! `CONFIG_MITIGATION_VMSCAPE` are `y`, and `CONFIG_KVM_INTEL` is `m`
+//! (`debian.master/config/annotations:3348,3319,3339,8048,411,7262`).
 //!
-//! Parity is exact or refused: an input whose answer rests on something the
-//! facts do not carry is [`Refused`] whole, and a line that does is
+//! Parity is exact: a line that rests on something the facts do not carry is
 //! [`Unmodelled`], never approximated.
 //!
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the facts.
@@ -85,9 +84,14 @@ pub struct Facts {
     /// `IA32_MCU_OPT_CTRL` (0x123), present exactly where
     /// `ARCH_CAPABILITIES.GDS_CTRL` enumerates it.
     pub mcu_opt_ctrl: Option<u64>,
+    /// `IA32_FEAT_CTL` (0x3A) where `init_ia32_feat_ctl` reads it, for Intel,
+    /// Centaur and Zhaoxin (`intel.c:715`, `centaur.c:217`, `zhaoxin.c:97`), and
+    /// the read completes; `None` where it is `#GP` (`feat_ctl.c:119-123`).
+    pub feat_ctl: Option<u64>,
     /// Whether `rdmsr` of `MSR_AMD64_LS_CFG` (0xC0011020) completes without
-    /// `#GP`, present exactly where `bsp_init_amd` probes it (`amd.c:576-596`):
-    /// AMD family 0x15 to 0x17 enumerating neither `AMD_SSBD` nor `VIRT_SSBD`.
+    /// `#GP`, present exactly where it is probed: AMD family 0x15 to 0x17
+    /// (`amd.c:576-596`) and Hygon (`hygon.c:228-239`), enumerating neither
+    /// `AMD_SSBD` nor `VIRT_SSBD`.
     pub ls_cfg_readable: Option<bool>,
     /// Whether `wrmsr` of `IA32_PRED_CMD` with `SBPB` (bit 7) completes without
     /// `#GP`, present exactly where `early_init_amd` probes it
@@ -101,6 +105,7 @@ pub struct Facts {
 
 // Linux's feature bits (`arch/x86/include/asm/cpufeatures.h`,
 // `scattered.c:26-57`) at their CPUID positions.
+const CPUID_1_ECX_VMX: u32 = 1 << 5;
 const CPUID_1_ECX_AVX: u32 = 1 << 28;
 const CPUID_1_ECX_RDRAND: u32 = 1 << 30;
 const CPUID_1_ECX_HYPERVISOR: u32 = 1 << 31;
@@ -134,7 +139,7 @@ const CPUID_8000_0021_EAX_SRSO_BP_SPEC_REDUCE: u32 = 1 << 31;
 const CPUID_8000_0021_ECX_TSA_SQ_NO: u32 = 1 << 1;
 const CPUID_8000_0021_ECX_TSA_L1_NO: u32 = 1 << 2;
 
-// `arch/x86/include/asm/msr-index.h:46-54,101-183,215`.
+// `arch/x86/include/asm/msr-index.h:46-54,101-183,215,821-823`.
 const ARCH_CAP_RDCL_NO: u64 = 1 << 0;
 const ARCH_CAP_IBRS_ALL: u64 = 1 << 1;
 const ARCH_CAP_RSBA: u64 = 1 << 2;
@@ -155,6 +160,8 @@ const ARCH_CAP_RFDS_NO: u64 = 1 << 27;
 const ARCH_CAP_RFDS_CLEAR: u64 = 1 << 28;
 const ARCH_CAP_ITS_NO: u64 = 1 << 62;
 const GDS_MITG_LOCKED: u64 = 1 << 5;
+const FEAT_CTL_LOCKED: u64 = 1 << 0;
+const FEAT_CTL_VMX_ENABLED_OUTSIDE_SMX: u64 = 1 << 2;
 pub const SPEC_CTRL_IBRS: u64 = 1 << 0;
 pub const SPEC_CTRL_STIBP: u64 = 1 << 1;
 pub const SPEC_CTRL_RRSBA_DIS_S: u64 = 1 << 6;
@@ -184,22 +191,12 @@ impl Ident {
     }
 }
 
-/// An input this crate does not decide.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refused {
-    /// `bsp_init_hygon`'s `MSR_AMD64_LS_CFG` probe (`hygon.c:228-239`), which
-    /// [`Facts::ls_cfg_readable`] does not carry.
-    Hygon,
-}
-
 /// An affected CPU's line that rests on state the facts do not carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unmodelled {
     /// The e820 map against `x86_cache_bits` (`bugs.c:2538-2583`) and
     /// `kvm_intel`'s state (`bugs.c:3074-3089`).
     L1tf,
-    /// `IA32_FEAT_CTL` and `CR4.VMXE` (`bugs.c:3091-3102`).
-    ItlbMultihit,
 }
 
 /// The vulnerabilities files, in the order `drivers/base/cpu.c:615-631` lists
@@ -282,37 +279,24 @@ pub enum Tsx {
     Disable,
 }
 
-/// `spectre_v2_enabled` (`bugs.c:1860-2045`).
+/// `spectre_v2_enabled` where the CPU has Spectre v2 (`bugs.c:1860-2045`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpectreV2 {
-    None,
     Retpoline,
     Eibrs,
     Ibrs,
 }
 
-/// What `bhi_select_mitigation` (`bugs.c:1831-1858`) chose, as
-/// `spectre_bhi_state` (`bugs.c:3220-3236`) reads it.
+/// What `bhi_select_mitigation` (`bugs.c:1831-1858`) chose where the CPU has
+/// BHI, as `spectre_bhi_state` (`bugs.c:3220-3236`) reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bhi {
-    NotAffected,
     /// `SPEC_CTRL.BHI_DIS_S`.
     BhiDisS,
     /// `clear_bhb_loop` on syscall entry and VM exit.
     SwLoop,
     /// Retpolines with RRSBA disabled.
     Retpoline,
-    Vulnerable,
-}
-
-/// Whether and how `switch_mm` issues IBPB (`bugs.c:1527-1550`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ibpb {
-    /// The CPU has no IBPB.
-    Absent,
-    Disabled,
-    /// Between two processes when either asked for it by prctl.
-    Conditional,
 }
 
 /// `spectre_v2_user_stibp` (`bugs.c:1492-1591`).
@@ -339,35 +323,31 @@ pub enum Ssb {
     Prctl,
 }
 
-/// `mds_mitigation` (`bugs.c:266-283`).
+/// `mds_mitigation` where the CPU has MDS (`bugs.c:266-283`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mds {
-    Off,
     Full,
     Vmwerv,
 }
 
-/// `taa_mitigation` (`bugs.c:327-382`).
+/// `taa_mitigation` where the CPU has TAA (`bugs.c:327-382`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Taa {
-    Off,
     UcodeNeeded,
     Verw,
     TsxDisabled,
 }
 
-/// `mmio_mitigation` (`bugs.c:424-478`).
+/// `mmio_mitigation` where the CPU has MMIO Stale Data (`bugs.c:424-478`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mmio {
-    Off,
     UcodeNeeded,
     Verw,
 }
 
-/// `rfds_mitigation` (`bugs.c:520-533`).
+/// `rfds_mitigation` where the CPU has RFDS (`bugs.c:520-533`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rfds {
-    Off,
     Verw,
     UcodeNeeded,
 }
@@ -390,13 +370,6 @@ pub enum Gds {
     /// Firmware locked the mitigation on.
     FullLocked,
     Hypervisor,
-}
-
-/// `its_mitigation` (`bugs.c:1254-1335`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Its {
-    Off,
-    AlignedThunks,
 }
 
 /// `vmscape_mitigation` (`bugs.c:2849-2869`).
@@ -459,7 +432,7 @@ struct Bugs {
 
 /// The features Linux has when it selects, after `init_speculation_control`
 /// (`common.c:973-1012`), `early_init_intel`'s microcode check
-/// (`intel.c:296-309`) and `bsp_init_amd`'s `LS_CFG_SSBD` (`amd.c:576-596`).
+/// (`intel.c:296-309`) and the `LS_CFG_SSBD` probe.
 struct Caps {
     hypervisor: bool,
     ibrs: bool,
@@ -473,21 +446,25 @@ struct Caps {
 #[derive(Clone, Copy, Debug)]
 pub struct Decision {
     pub tsx: Tsx,
-    pub spectre_v2: SpectreV2,
-    pub bhi: Bhi,
-    pub ibpb: Ibpb,
+    pub spectre_v2: Option<SpectreV2>,
+    pub bhi: Option<Bhi>,
+    /// `USE_IBPB`, with `switch_mm` issuing it conditionally
+    /// (`bugs.c:1527-1550`): the CPU has IBPB and Spectre v2.
+    pub ibpb: bool,
     /// `USE_IBRS_FW`: IBRS around firmware calls.
     pub ibrs_fw: bool,
     pub stibp: Stibp,
     pub retbleed: Retbleed,
     pub ssb: Ssb,
-    pub mds: Mds,
-    pub taa: Taa,
-    pub mmio: Mmio,
-    pub rfds: Rfds,
+    pub mds: Option<Mds>,
+    pub taa: Option<Taa>,
+    pub mmio: Option<Mmio>,
+    pub rfds: Option<Rfds>,
     pub srbds: Option<Srbds>,
     pub gds: Option<Gds>,
-    pub its: Its,
+    /// ITS's aligned branch and return thunks (`bugs.c:1254-1335`), wherever
+    /// the CPU has ITS.
+    pub its: bool,
     pub vmscape: Vmscape,
     pub srso: Option<Srso>,
     pub tsa: Option<Tsa>,
@@ -505,6 +482,8 @@ pub struct Decision {
     hypervisor: bool,
     autoibrs: bool,
     smt: bool,
+    /// `X86_FEATURE_MSR_IA32_FEAT_CTL` and `X86_FEATURE_VMX`.
+    vmx: bool,
 }
 
 /// `cpu_set_bug_bits` (`common.c:1414-1578`). `SWAPGS`, `SMT_RSB` and
@@ -526,7 +505,9 @@ fn bug_bits(f: &Facts, id: &Ident, caps: &Caps, arch: u64) -> Bugs {
     b.eibrs_pbrsb =
         b.ibrs_enhanced && !whitelisted(id, NO_EIBRS_PBRSB) && arch & ARCH_CAP_PBRSB_NO == 0;
     b.mds = !whitelisted(id, NO_MDS) && arch & ARCH_CAP_MDS_NO == 0;
-    b.msbds_only = b.mds && whitelisted(id, MSBDS_ONLY);
+    // `MSBDS_ONLY` is set within MDS (`common.c:1447-1451`), and only MDS's line
+    // reads it.
+    b.msbds_only = whitelisted(id, MSBDS_ONLY);
     b.taa = arch & ARCH_CAP_TAA_NO == 0
         && (f.cpuid_7_0_ebx & CPUID_7_0_EBX_RTM != 0 || arch & ARCH_CAP_TSX_CTRL_MSR != 0);
     b.srbds = (f.cpuid_1_ecx & CPUID_1_ECX_RDRAND != 0 || f.cpuid_7_0_ebx & CPUID_7_0_EBX_RDSEED != 0)
@@ -563,7 +544,8 @@ fn bug_bits(f: &Facts, id: &Ident, caps: &Caps, arch: u64) -> Bugs {
     // `tsa_init`'s forced `TSA_*_NO` (`amd.c:517-530`) reaches no family the
     // TSA row names, and the Zen-guest clause reads `X86_FEATURE_ZEN`, which
     // `init_amd` sets (`amd.c:1039`) from `identify_cpu` (`common.c:1997-1998`),
-    // after `early_identify_cpu` has run this (`common.c:1732`).
+    // after `early_identify_cpu` has run this (`common.c:1732`). Only AMD rows
+    // name TSA, so the AMD vendor test (`common.c:1555`) is the table's.
     b.tsa = f.cpuid_8000_0021_ecx & (CPUID_8000_0021_ECX_TSA_SQ_NO | CPUID_8000_0021_ECX_TSA_L1_NO)
         != CPUID_8000_0021_ECX_TSA_SQ_NO | CPUID_8000_0021_ECX_TSA_L1_NO
         && blacklisted(id, TSA);
@@ -575,20 +557,17 @@ fn bug_bits(f: &Facts, id: &Ident, caps: &Caps, arch: u64) -> Bugs {
     b
 }
 
-/// `spec_ctrl_disable_kernel_rrsba` (`bugs.c:1723-1739`).
-fn disable_kernel_rrsba(f: &Facts, arch: u64, spec_ctrl: &mut u64, rrsba_disabled: &mut bool) {
-    if *rrsba_disabled {
-        return;
-    }
+/// `spec_ctrl_disable_kernel_rrsba` (`bugs.c:1723-1739`), its first call:
+/// whether the kernel's RET predictions are RSB-only after it.
+fn disable_kernel_rrsba(f: &Facts, arch: u64, spec_ctrl: &mut u64) -> bool {
     if arch & ARCH_CAP_RRSBA == 0 {
-        *rrsba_disabled = true;
-        return;
+        return true;
     }
     if f.cpuid_7_2_edx & CPUID_7_2_EDX_RRSBA_CTRL == 0 {
-        return;
+        return false;
     }
     *spec_ctrl |= SPEC_CTRL_RRSBA_DIS_S;
-    *rrsba_disabled = true;
+    true
 }
 
 /// Linux's selection over `facts`: `cpu_select_mitigations` (`bugs.c:149-199`)
@@ -596,15 +575,15 @@ fn disable_kernel_rrsba(f: &Facts, arch: u64, spec_ctrl: &mut u64, rrsba_disable
 ///
 /// Panics where the facts contradict their own documentation: an
 /// `arch_capabilities` read without CPUID.(7,0):EDX[29], or an `mcu_opt_ctrl`,
-/// `ls_cfg_readable` or `sbpb_write_accepted` present where Linux does not read
-/// it, or absent where it does.
-pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
+/// `feat_ctl`, `ls_cfg_readable` or `sbpb_write_accepted` present where Linux
+/// does not read it, or one of the first, third or fourth absent where it
+/// does.
+pub fn decide(facts: &Facts) -> Decision {
     let f = facts;
     let id = Ident::new(f.vendor, f.signature);
-    if id.vendor == Vendor::Hygon {
-        return Err(Refused::Hygon);
-    }
     let amd = id.vendor == Vendor::Amd;
+    // `X86_VENDOR_AMD || X86_VENDOR_HYGON` (`bugs.c:1103-1104,2030-2031,3268-3269`).
+    let amd_or_hygon = amd || id.vendor == Vendor::Hygon;
     assert!(
         f.cpuid_7_0_edx & CPUID_7_0_EDX_ARCH_CAPABILITIES != 0 || f.arch_capabilities == 0,
         "ARCH_CAPABILITIES {:#x} without CPUID.(7,0):EDX[29]",
@@ -616,6 +595,11 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         arch & ARCH_CAP_GDS_CTRL != 0,
         "IA32_MCU_OPT_CTRL is read exactly where ARCH_CAPABILITIES.GDS_CTRL"
     );
+    assert!(
+        f.feat_ctl.is_none()
+            || matches!(id.vendor, Vendor::Intel | Vendor::Centaur | Vendor::Zhaoxin),
+        "IA32_FEAT_CTL is read only where intel.c:715, centaur.c:217 and zhaoxin.c:97 read it"
+    );
 
     let edx7 = f.cpuid_7_0_edx;
     let ebx8 = f.cpuid_8000_0008_ebx;
@@ -624,8 +608,8 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
     let amd_ssbd = ebx8 & (CPUID_8000_0008_EBX_VIRT_SSBD | CPUID_8000_0008_EBX_AMD_SSBD) != 0;
     assert_eq!(
         f.ls_cfg_readable.is_some(),
-        amd && (0x15..=0x17).contains(&id.family) && !amd_ssbd,
-        "MSR_AMD64_LS_CFG is probed exactly where amd.c:576-578 probes it"
+        !amd_ssbd && ((amd && (0x15..=0x17).contains(&id.family)) || id.vendor == Vendor::Hygon),
+        "MSR_AMD64_LS_CFG is probed exactly where amd.c:576-578 and hygon.c:228-229 probe it"
     );
     let brtype_enumerated = eax21 & CPUID_8000_0021_EAX_IBPB_BRTYPE != 0;
     assert_eq!(
@@ -633,28 +617,27 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         amd && id.family >= 0x19 && !hypervisor && !brtype_enumerated,
         "PRED_CMD.SBPB is probed exactly where amd.c:799-802 probes it"
     );
-    let spec_ctrl_bit = edx7 & CPUID_7_0_EDX_SPEC_CTRL != 0;
-    let intel_stibp = edx7 & CPUID_7_0_EDX_INTEL_STIBP != 0;
     let mut caps = Caps {
         hypervisor,
-        ibrs: spec_ctrl_bit || ebx8 & CPUID_8000_0008_EBX_AMD_IBRS != 0,
-        ibpb: spec_ctrl_bit || ebx8 & CPUID_8000_0008_EBX_AMD_IBPB != 0,
-        stibp: intel_stibp || ebx8 & CPUID_8000_0008_EBX_AMD_STIBP != 0,
+        ibrs: edx7 & CPUID_7_0_EDX_SPEC_CTRL != 0 || ebx8 & CPUID_8000_0008_EBX_AMD_IBRS != 0,
+        ibpb: edx7 & CPUID_7_0_EDX_SPEC_CTRL != 0 || ebx8 & CPUID_8000_0008_EBX_AMD_IBPB != 0,
+        stibp: edx7 & CPUID_7_0_EDX_INTEL_STIBP != 0 || ebx8 & CPUID_8000_0008_EBX_AMD_STIBP != 0,
         ssbd: edx7 & CPUID_7_0_EDX_SPEC_CTRL_SSBD != 0
             || amd_ssbd
             || f.ls_cfg_readable == Some(true),
         autoibrs: eax21 & CPUID_8000_0021_EAX_AUTOIBRS != 0,
     };
-    // `early_init_amd` (`amd.c:799-806`).
-    let native_brtype = amd
-        && !hypervisor
+    // `early_init_amd` (`amd.c:799-806`). Only SRSO reads it, and of SRSO's rows
+    // (`common.c:1340-1342`) only AMD's names family 0x17.
+    let native_brtype = !hypervisor
         && ((id.family == 0x17 && ebx8 & CPUID_8000_0008_EBX_AMD_IBPB != 0)
             || f.sbpb_write_accepted == Some(true));
     let ibpb_brtype = brtype_enumerated || native_brtype;
     let sbpb = eax21 & CPUID_8000_0021_EAX_SBPB != 0 || f.sbpb_write_accepted == Some(true);
-    if id.vendor == Vendor::Intel
-        && !hypervisor
-        && (spec_ctrl_bit || intel_stibp || caps.ibrs || caps.ibpb || caps.stibp)
+    // `SPEC_CTRL` and `INTEL_STIBP` are in the test at `intel.c:296-299` too,
+    // but each already set `IBRS` or `STIBP` (`common.c:981-988`).
+    if !hypervisor
+        && (caps.ibrs || caps.ibpb || caps.stibp)
         && table::bad_spectre_microcode(&id, f.microcode)
     {
         caps.ibrs = false;
@@ -673,25 +656,32 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
     };
     let rtm = f.cpuid_7_0_ebx & CPUID_7_0_EBX_RTM != 0 && tsx == Tsx::NotSupported;
 
+    // `X86_FEATURE_MSR_IA32_FEAT_CTL` and `X86_FEATURE_VMX` after
+    // `init_ia32_feat_ctl` (`feat_ctl.c:112-184`), which without tboot locks an
+    // unlocked MSR with VMX enabled for `CONFIG_KVM_INTEL`.
+    let vmx = f.cpuid_1_ecx & CPUID_1_ECX_VMX != 0
+        && f.feat_ctl.is_some_and(|m| {
+            m & FEAT_CTL_LOCKED == 0 || m & FEAT_CTL_VMX_ENABLED_OUTSIDE_SMX != 0
+        });
+
     let mut spec_ctrl = 0;
-    let mut rrsba_disabled = false;
     let mut efer_autoibrs = false;
 
     // `spectre_v2_select_mitigation` (`bugs.c:1860-2045`). Where the CPU is
     // unaffected it returns before any of it, leaving `spectre_v2_cmd` at
     // `SPECTRE_V2_CMD_NONE`.
-    let mut spectre_v2 = SpectreV2::None;
-    let mut bhi = if bugs.bhi { Bhi::Vulnerable } else { Bhi::NotAffected };
+    let mut spectre_v2 = None;
+    let mut bhi = None;
     let mut ibrs_fw = false;
     if bugs.spectre_v2 {
-        spectre_v2 = if bugs.ibrs_enhanced {
+        let mode = if bugs.ibrs_enhanced {
             SpectreV2::Eibrs
         } else if bugs.retbleed && caps.ibrs && id.vendor == Vendor::Intel {
             SpectreV2::Ibrs
         } else {
             SpectreV2::Retpoline
         };
-        let ibrs_mode = matches!(spectre_v2, SpectreV2::Eibrs | SpectreV2::Ibrs);
+        let ibrs_mode = matches!(mode, SpectreV2::Eibrs | SpectreV2::Ibrs);
         if ibrs_mode {
             if caps.autoibrs {
                 efer_autoibrs = true;
@@ -699,23 +689,22 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
                 spec_ctrl |= SPEC_CTRL_IBRS;
             }
         }
-        if spectre_v2 == SpectreV2::Retpoline {
-            disable_kernel_rrsba(f, arch, &mut spec_ctrl, &mut rrsba_disabled);
-        }
+        let rrsba_disabled =
+            mode == SpectreV2::Retpoline && disable_kernel_rrsba(f, arch, &mut spec_ctrl);
         // `bhi_select_mitigation` (`bugs.c:1831-1858`); its own call of
         // `spec_ctrl_disable_kernel_rrsba` repeats the one just above.
         if bugs.bhi {
-            bhi = if spectre_v2 == SpectreV2::Retpoline && rrsba_disabled {
+            bhi = Some(if rrsba_disabled {
                 Bhi::Retpoline
             } else if f.cpuid_7_2_edx & CPUID_7_2_EDX_BHI_CTRL != 0 {
                 spec_ctrl |= SPEC_CTRL_BHI_DIS_S;
                 Bhi::BhiDisS
             } else {
                 Bhi::SwLoop
-            };
+            });
         }
-        ibrs_fw =
-            !(bugs.retbleed && caps.ibpb && id.vendor == Vendor::Amd) && caps.ibrs && !ibrs_mode;
+        ibrs_fw = !(bugs.retbleed && caps.ibpb && amd_or_hygon) && caps.ibrs && !ibrs_mode;
+        spectre_v2 = Some(mode);
     }
 
     // `retbleed_select_mitigation` (`bugs.c:1054-1194`).
@@ -723,30 +712,24 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         Retbleed::None
     } else if id.vendor == Vendor::Intel {
         match spectre_v2 {
-            SpectreV2::Ibrs => Retbleed::Ibrs,
-            SpectreV2::Eibrs => Retbleed::Eibrs,
-            SpectreV2::None | SpectreV2::Retpoline => Retbleed::None,
+            Some(SpectreV2::Ibrs) => Retbleed::Ibrs,
+            Some(SpectreV2::Eibrs) => Retbleed::Eibrs,
+            Some(SpectreV2::Retpoline) | None => Retbleed::None,
         }
-    } else if id.vendor == Vendor::Amd {
+    } else if amd_or_hygon {
         Retbleed::Unret
     } else {
         Retbleed::None
     };
 
     // `spectre_v2_user_select_mitigation` (`bugs.c:1492-1591`) and
-    // `cpu_bugs_smt_update` (`bugs.c:2964-3058`).
-    let user_cmd_none = !bugs.spectre_v2;
-    let ibpb = if !caps.ibpb {
-        Ibpb::Absent
-    } else if user_cmd_none {
-        Ibpb::Disabled
-    } else {
-        Ibpb::Conditional
-    };
-    let stibp = if user_cmd_none
+    // `cpu_bugs_smt_update` (`bugs.c:2964-3058`). Without Spectre v2 the user
+    // command is `NONE`, which skips both IBPB and STIBP (`bugs.c:1507-1508`).
+    let ibpb = caps.ibpb && bugs.spectre_v2;
+    let stibp = if !bugs.spectre_v2
         || !caps.stibp
         || !f.smt
-        || (matches!(spectre_v2, SpectreV2::Eibrs) && !caps.autoibrs)
+        || (spectre_v2 == Some(SpectreV2::Eibrs) && !caps.autoibrs)
     {
         Stibp::None
     } else if ebx8 & CPUID_8000_0008_EBX_AMD_STIBP_ALWAYS_ON != 0 || retbleed == Retbleed::Unret {
@@ -763,45 +746,40 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
     // bug it selects for again is already selected.
     let md_clear = edx7 & CPUID_7_0_EDX_MD_CLEAR != 0;
     let mut clear_cpu_buf = false;
-    let mds = if !bugs.mds {
-        Mds::Off
-    } else {
+    let mds = bugs.mds.then(|| {
         clear_cpu_buf = true;
         if md_clear { Mds::Full } else { Mds::Vmwerv }
-    };
-    let taa = if !bugs.taa {
-        Taa::Off
-    } else if !rtm {
-        Taa::TsxDisabled
-    } else {
-        clear_cpu_buf = true;
-        if md_clear && !(arch & ARCH_CAP_MDS_NO != 0 && arch & ARCH_CAP_TSX_CTRL_MSR == 0) {
-            Taa::Verw
+    });
+    // With RTM left on, `tsx_init` found no `TSX_CTRL` (`tsx.c:188-192`), so
+    // the `MDS_NO && !TSX_CTRL_MSR` test (`bugs.c:367-369`) is `MDS_NO` here.
+    let taa = bugs.taa.then(|| {
+        if !rtm {
+            Taa::TsxDisabled
         } else {
-            Taa::UcodeNeeded
-        }
-    };
-    let mmio = if !bugs.mmio_stale_data || bugs.mmio_unknown {
-        Mmio::Off
-    } else {
-        if bugs.mds || (bugs.taa && rtm) {
             clear_cpu_buf = true;
+            if md_clear && arch & ARCH_CAP_MDS_NO == 0 { Taa::Verw } else { Taa::UcodeNeeded }
         }
-        let flush_l1d = edx7 & CPUID_7_0_EDX_FLUSH_L1D != 0;
-        if arch & ARCH_CAP_FB_CLEAR != 0 || (md_clear && flush_l1d && arch & ARCH_CAP_MDS_NO == 0) {
+    });
+    // `MMIO_UNKNOWN` is set only without `MMIO_STALE_DATA` (`common.c:1495-1500`),
+    // and the `CLEAR_CPU_BUF` MDS or TAA would set here (`bugs.c:440-442`) they
+    // have set already.
+    let mmio = bugs.mmio_stale_data.then_some(
+        if arch & ARCH_CAP_FB_CLEAR != 0
+            || (md_clear && edx7 & CPUID_7_0_EDX_FLUSH_L1D != 0 && arch & ARCH_CAP_MDS_NO == 0)
+        {
             Mmio::Verw
         } else {
             Mmio::UcodeNeeded
+        },
+    );
+    let rfds = bugs.rfds.then(|| {
+        if arch & ARCH_CAP_RFDS_CLEAR != 0 {
+            clear_cpu_buf = true;
+            Rfds::Verw
+        } else {
+            Rfds::UcodeNeeded
         }
-    };
-    let rfds = if !bugs.rfds {
-        Rfds::Off
-    } else if arch & ARCH_CAP_RFDS_CLEAR != 0 {
-        clear_cpu_buf = true;
-        Rfds::Verw
-    } else {
-        Rfds::UcodeNeeded
-    };
+    });
 
     let srbds = bugs.srbds.then_some(
         if arch & ARCH_CAP_MDS_NO != 0 && !rtm && !bugs.mmio_stale_data {
@@ -848,8 +826,6 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
     );
     let sbpb = !bugs.srso && sbpb;
 
-    let its = if bugs.its && spectre_v2 != SpectreV2::None { Its::AlignedThunks } else { Its::Off };
-
     // `tsa_select_mitigation` (`bugs.c:2918-2962`) and `tsa_init`'s
     // `VERW_CLEAR` (`amd.c:517-530`).
     let tsa = bugs.tsa.then(|| {
@@ -872,7 +848,7 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         Vmscape::IbpbExitToUser
     };
 
-    Ok(Decision {
+    Decision {
         tsx,
         spectre_v2,
         bhi,
@@ -887,7 +863,7 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         rfds,
         srbds,
         gds,
-        its,
+        its: bugs.its,
         vmscape,
         srso,
         tsa,
@@ -899,7 +875,8 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
         hypervisor,
         autoibrs: caps.autoibrs,
         smt: f.smt,
-    })
+        vmx,
+    }
 }
 
 impl Decision {
@@ -907,7 +884,6 @@ impl Decision {
     pub fn line(&self, v: Vuln) -> Result<Line<'_>, Unmodelled> {
         match v {
             Vuln::L1tf if self.bugs.l1tf => Err(Unmodelled::L1tf),
-            Vuln::ItlbMultihit if self.bugs.itlb_multihit => Err(Unmodelled::ItlbMultihit),
             _ => Ok(Line { d: self, v }),
         }
     }
@@ -928,23 +904,21 @@ impl Line<'_> {
     /// under `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y` and no module is loaded.
     fn spectre_v2(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let d = self.d;
-        f.write_str(match d.spectre_v2 {
-            SpectreV2::None => "Vulnerable",
+        let mode = d.spectre_v2.expect("set with the bug");
+        f.write_str(match mode {
             SpectreV2::Retpoline => "Mitigation: Retpolines",
             SpectreV2::Eibrs => "Mitigation: Enhanced / Automatic IBRS",
             SpectreV2::Ibrs => "Mitigation: IBRS",
         })?;
-        f.write_str(match d.ibpb {
-            Ibpb::Absent => "",
-            Ibpb::Disabled => "; IBPB: disabled",
-            Ibpb::Conditional => "; IBPB: conditional",
-        })?;
+        if d.ibpb {
+            f.write_str("; IBPB: conditional")?;
+        }
         if d.ibrs_fw {
             f.write_str("; IBRS_FW")?;
         }
         // `stibp_state` (`bugs.c:3174-3193`); `Prctl` is selected only with SMT,
         // which is what enables `switch_to_cond_stibp`.
-        if !(d.spectre_v2 == SpectreV2::Eibrs && !d.autoibrs) {
+        if !(mode == SpectreV2::Eibrs && !d.autoibrs) {
             f.write_str(match d.stibp {
                 Stibp::None => "; STIBP: disabled",
                 Stibp::StrictPreferred => "; STIBP: always-on",
@@ -952,22 +926,21 @@ impl Line<'_> {
             })?;
         }
         // `RSB_CTXSW` (`bugs.c:1741-1789`).
-        if matches!(d.spectre_v2, SpectreV2::Retpoline | SpectreV2::Ibrs) {
+        if matches!(mode, SpectreV2::Retpoline | SpectreV2::Ibrs) {
             f.write_str("; RSB filling")?;
         }
-        // `pbrsb_eibrs_state` (`bugs.c:3207-3218`): every mode but `None`
-        // sets `RSB_VMEXIT` or `RSB_VMEXIT_LITE`.
-        f.write_str(match (d.bugs.eibrs_pbrsb, d.spectre_v2) {
-            (false, _) => "; PBRSB-eIBRS: Not affected",
-            (true, SpectreV2::None) => "; PBRSB-eIBRS: Vulnerable",
-            (true, _) => "; PBRSB-eIBRS: SW sequence",
+        // `pbrsb_eibrs_state` (`bugs.c:3207-3218`): every mode sets
+        // `RSB_VMEXIT` or `RSB_VMEXIT_LITE`.
+        f.write_str(if d.bugs.eibrs_pbrsb {
+            "; PBRSB-eIBRS: SW sequence"
+        } else {
+            "; PBRSB-eIBRS: Not affected"
         })?;
         f.write_str(match d.bhi {
-            Bhi::NotAffected => "; BHI: Not affected",
-            Bhi::BhiDisS => "; BHI: BHI_DIS_S",
-            Bhi::SwLoop => "; BHI: SW loop, KVM: SW loop",
-            Bhi::Retpoline => "; BHI: Retpoline",
-            Bhi::Vulnerable => "; BHI: Vulnerable",
+            None => "; BHI: Not affected",
+            Some(Bhi::BhiDisS) => "; BHI: BHI_DIS_S",
+            Some(Bhi::SwLoop) => "; BHI: SW loop, KVM: SW loop",
+            Some(Bhi::Retpoline) => "; BHI: Retpoline",
         })
     }
 }
@@ -1012,37 +985,40 @@ impl fmt::Display for Line<'_> {
                 Ssb::Prctl => "Mitigation: Speculative Store Bypass disabled via prctl",
             }),
             Vuln::Mds => {
-                f.write_str(match d.mds {
-                    Mds::Off => "Vulnerable",
+                f.write_str(match d.mds.expect("set with the bug") {
                     Mds::Full => "Mitigation: Clear CPU buffers",
                     Mds::Vmwerv => "Vulnerable: Clear CPU buffers attempted, no microcode",
                 })?;
                 if d.hypervisor {
                     f.write_str("; SMT Host state unknown")
                 } else if b.msbds_only {
-                    let smt = match (d.mds, d.smt) {
-                        (Mds::Off, _) => "vulnerable",
-                        (_, true) => "mitigated",
-                        (_, false) => "disabled",
-                    };
-                    write!(f, "; SMT {smt}")
+                    f.write_str(if d.smt { "; SMT mitigated" } else { "; SMT disabled" })
                 } else {
                     write!(f, "; SMT {}", self.smt())
                 }
             }
             Vuln::TsxAsyncAbort => {
-                f.write_str(match d.taa {
-                    Taa::Off => "Vulnerable",
+                let taa = d.taa.expect("set with the bug");
+                f.write_str(match taa {
                     Taa::UcodeNeeded => "Vulnerable: Clear CPU buffers attempted, no microcode",
                     Taa::Verw => "Mitigation: Clear CPU buffers",
-                    Taa::TsxDisabled => "Mitigation: TSX disabled",
+                    Taa::TsxDisabled => return f.write_str("Mitigation: TSX disabled"),
                 })?;
-                match d.taa {
-                    Taa::Off | Taa::TsxDisabled => Ok(()),
-                    _ if d.hypervisor => f.write_str("; SMT Host state unknown"),
-                    _ => write!(f, "; SMT {}", self.smt()),
+                if d.hypervisor {
+                    f.write_str("; SMT Host state unknown")
+                } else {
+                    write!(f, "; SMT {}", self.smt())
                 }
             }
+            // `itlb_multihit_show_state` under `CONFIG_KVM_INTEL`
+            // (`bugs.c:3091-3102`). No VM runs: KVM sets `CR4.VMXE` only while
+            // one exists (`arch/x86/kvm/vmx/vmx.c:2802`, from `KVM_CREATE_VM`,
+            // `virt/kvm/kvm_main.c:1272,5658-5660`).
+            Vuln::ItlbMultihit => f.write_str(if d.vmx {
+                "KVM: Mitigation: VMX disabled"
+            } else {
+                "KVM: Mitigation: VMX unsupported"
+            }),
             Vuln::Srbds => f.write_str(match d.srbds.expect("set with the bug") {
                 Srbds::UcodeNeeded => "Vulnerable: No microcode",
                 Srbds::Full => "Mitigation: Microcode",
@@ -1050,11 +1026,10 @@ impl fmt::Display for Line<'_> {
                 Srbds::Hypervisor => "Unknown: Dependent on hypervisor status",
             }),
             Vuln::MmioStaleData => {
-                if b.mmio_unknown {
+                let Some(mmio) = d.mmio else {
                     return f.write_str("Unknown: No mitigations");
-                }
-                f.write_str(match d.mmio {
-                    Mmio::Off => return f.write_str("Vulnerable"),
+                };
+                f.write_str(match mmio {
                     Mmio::UcodeNeeded => "Vulnerable: Clear CPU buffers attempted, no microcode",
                     Mmio::Verw => "Mitigation: Clear CPU buffers",
                 })?;
@@ -1068,7 +1043,8 @@ impl fmt::Display for Line<'_> {
                 Retbleed::None => f.write_str("Vulnerable"),
                 Retbleed::Ibrs => f.write_str("Mitigation: IBRS"),
                 Retbleed::Eibrs => f.write_str("Mitigation: Enhanced IBRS"),
-                // Selected on AMD alone, so never "on non-AMD based uarch".
+                // Selected on AMD and Hygon alone, so never "on non-AMD based
+                // uarch".
                 Retbleed::Unret => {
                     let smt = if !d.smt {
                         "disabled"
@@ -1086,15 +1062,13 @@ impl fmt::Display for Line<'_> {
                 Gds::FullLocked => "Mitigation: Microcode (locked)",
                 Gds::Hypervisor => "Unknown: Dependent on hypervisor status",
             }),
-            Vuln::RegFileDataSampling => f.write_str(match d.rfds {
-                Rfds::Off => "Vulnerable",
+            Vuln::RegFileDataSampling => f.write_str(match d.rfds.expect("set with the bug") {
                 Rfds::Verw => "Mitigation: Clear Register File",
                 Rfds::UcodeNeeded => "Vulnerable: No microcode",
             }),
-            Vuln::IndirectTargetSelection => f.write_str(match d.its {
-                Its::Off => "Vulnerable",
-                Its::AlignedThunks => "Mitigation: Aligned branch/return thunks",
-            }),
+            Vuln::IndirectTargetSelection => {
+                f.write_str("Mitigation: Aligned branch/return thunks")
+            }
             Vuln::Vmscape => f.write_str(match d.vmscape {
                 Vmscape::None => "Vulnerable",
                 Vmscape::IbpbExitToUser => "Mitigation: IBPB before exit to userspace",
@@ -1112,9 +1086,7 @@ impl fmt::Display for Line<'_> {
                 Tsa::UcodeNeeded => "Vulnerable: Clear CPU buffers attempted, no microcode",
                 Tsa::Full => "Mitigation: Clear CPU buffers",
             }),
-            Vuln::L1tf | Vuln::ItlbMultihit => {
-                unreachable!("{} is unmodelled wherever affected", self.v.name())
-            }
+            Vuln::L1tf => unreachable!("l1tf is unmodelled wherever affected"),
         }
     }
 }
