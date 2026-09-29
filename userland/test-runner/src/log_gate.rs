@@ -17,7 +17,9 @@
 //! **The storm is a thread of this process**, calling `SYS_DEBUG`'s
 //! `LOG_PATTERNED` once per record and counting each call after it returns.
 //! That counter, not any record, is what says the storm is over and which
-//! records were read while it ran.
+//! records were read while it ran. **The interleave is an event, not a
+//! schedule**: the producer stops after [`HANDOVER`] records until this reader
+//! has taken one of them, so a read lands inside the storm on every run.
 //!
 //! **Nothing this reader waits for is a record the ring may drop.** The
 //! termination condition is the *cursor*: the log has been drained and nothing
@@ -29,8 +31,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use toyos::log::{LogTail, Record, MAX_LOG_SHARDS};
 use toyos::poller::{Poller, READABLE};
@@ -80,6 +84,14 @@ const STORM_PRODUCER: u64 = 0;
 /// Records the storm emits: past a shard's 512, so the ring's drop-oldest path
 /// is reachable.
 const STORM_RECORDS: u64 = 1024;
+
+/// Storm records emitted before the producer waits for this reader to take
+/// one: far under a shard's 512, so the ring still holds them when it arrives.
+const HANDOVER: u64 = 64;
+
+/// How long the producer waits at [`HANDOVER`]. A liveness bound that names
+/// the reader which never arrived, inside the host's 60 s for the whole boot.
+const HANDOVER_WAIT: Duration = Duration::from_secs(30);
 
 /// `kernel/src/log/nested.rs`'s `NEST_PRODUCER`: the burst an interrupt handler
 /// emits declares itself as this, so it goes through the same per-producer
@@ -143,7 +155,7 @@ struct Run {
     /// Storm records taken by a read after which the producer had not yet
     /// returned from its last call. **Zero would mean this reader raced
     /// nothing**, which is the one way a green conservation law says nothing
-    /// at all.
+    /// at all; the handover makes it the first batch at least.
     concurrent: u64,
     /// Times the log's readiness source completed a poll.
     completions: u64,
@@ -181,7 +193,9 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
     let mut armed = true;
 
     let produced = Arc::new(AtomicU64::new(0));
-    let mut producer = storm.then(|| spawn_producer(Arc::clone(&produced)));
+    let (handover, taken) = mpsc::sync_channel(1);
+    let mut handover = storm.then_some(handover);
+    let mut producer = storm.then(|| spawn_producer(Arc::clone(&produced), taken));
     let target = if storm { STORM_RECORDS } else { 0 };
 
     let mut quiet = 0u32;
@@ -215,6 +229,13 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
         }
         if during < target {
             run.concurrent += storm_read(&run) - storm_before;
+        }
+        // Sent only after `during` was loaded, so the read that took this record counts as concurrent.
+        if let Some(handover) = handover.take_if(|_| storm_read(&run) > 0) {
+            // Refused only once the producer has returned, and its join says why.
+            if handover.send(()).is_err() {
+                join(producer.take())?;
+            }
         }
 
         let finished = produced.load(Ordering::Acquire) == target;
@@ -262,10 +283,22 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
     verdict(&tail, &run, storm)
 }
 
-/// The storm: one kernel record per call, counted after each call returns.
-fn spawn_producer(produced: Arc<AtomicU64>) -> JoinHandle<Result<(), String>> {
+/// The storm: one kernel record per call, counted after each call returns,
+/// paused at [`HANDOVER`] until the reader has taken one.
+fn spawn_producer(produced: Arc<AtomicU64>, taken: Receiver<()>) -> JoinHandle<Result<(), String>> {
     std::thread::spawn(move || {
         for index in 0..STORM_RECORDS {
+            if index == HANDOVER {
+                taken.recv_timeout(HANDOVER_WAIT).map_err(|e| match e {
+                    RecvTimeoutError::Timeout => format!(
+                        "the reader took none of the storm's first {HANDOVER} records within \
+                         {HANDOVER_WAIT:?}"
+                    ),
+                    RecvTimeoutError::Disconnected => {
+                        "the reader ended before it took a storm record".into()
+                    }
+                })?;
+            }
             let answer = toyos_abi::syscall::debug_with(LOG_PATTERNED, index);
             if answer != 0 {
                 return Err(format!(
