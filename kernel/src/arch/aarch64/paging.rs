@@ -467,25 +467,33 @@ impl AddressSpace {
 
     /// Checked here, not at the callers: only a user address names user memory.
     pub fn translate(&self, vaddr: UserAddr) -> Option<DirectMap> {
-        self.walk(vaddr).map(|(at, _)| at)
+        self.walk(vaddr).map(|(at, _, _)| at)
     }
 
-    /// As [`translate`](Self::translate), but only where an EL0 store would
-    /// land: a leaf EL0 may write. A kernel copy into user memory goes
-    /// through this, so a syscall cannot write a page the process itself may
-    /// not — the clock page, a shared library's `.text`.
-    pub fn translate_writable(&self, vaddr: UserAddr) -> Option<DirectMap> {
-        self.walk(vaddr).and_then(|(at, leaf)| (leaf & (AP_EL0 | AP_READ_ONLY) == AP_EL0).then_some(at))
+    /// `vaddr`'s physical address and the bytes from it to the end of the leaf
+    /// that maps it, which that one walk answers for. A `Write` is answered
+    /// only where an EL0 store would land: a leaf EL0 may write, and no table
+    /// descriptor this file writes sets `APTable`. A kernel copy into user
+    /// memory goes through this, so a syscall cannot write a page the process
+    /// itself may not — the clock page, a shared library's `.text`.
+    pub fn leaf(&self, vaddr: UserAddr, access: toyos_userbound::Access) -> Option<(u64, u64)> {
+        let (at, leaf, size) = self.walk(vaddr)?;
+        let granted = match access {
+            toyos_userbound::Access::Read => true,
+            toyos_userbound::Access::Write => leaf & (AP_EL0 | AP_READ_ONLY) == AP_EL0,
+        };
+        granted.then(|| (at.phys(), size - (vaddr.raw() & (size - 1))))
     }
 
-    fn walk(&self, vaddr: UserAddr) -> Option<(DirectMap, u64)> {
+    /// The direct-map address of `vaddr`, the leaf descriptor that maps it, and the size that leaf maps.
+    fn walk(&self, vaddr: UserAddr) -> Option<(DirectMap, u64, u64)> {
         let va = vaddr.raw();
         if !toyos_userbound::is_user_addr(va) {
             return None;
         }
         let (leaf, size) = self.tables.leaf(va)?;
         let base = leaf & if size == PAGE_2M { ADDR_2M } else { ADDR };
-        Some((DirectMap::from_phys(base + (va & (size - 1))), leaf))
+        Some((DirectMap::from_phys(base + (va & (size - 1))), leaf, size))
     }
 
     pub fn alloc_region(&mut self, size: u64, kind: RegionKind) -> Option<UserAddr> {

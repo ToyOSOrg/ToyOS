@@ -554,21 +554,28 @@ impl AddressSpace {
     /// Checked here, not at the callers: a user space shallow-copies the
     /// kernel PML4 half, so a kernel address would otherwise walk to a writable kernel page.
     pub fn translate(&self, vaddr: UserAddr) -> Option<crate::mm::DirectMap> {
-        self.walk(vaddr).map(|(dm, _)| dm)
+        self.walk(vaddr).map(|(dm, _, _)| dm)
     }
 
-    /// As [`translate`](Self::translate), but only where a user store would
-    /// land: every level of the walk grants `USER` and `WRITE`, as the MMU
-    /// demands of a ring 3 store under `CR0.WP`. A kernel copy into user
-    /// memory goes through this, so a syscall cannot write a page the process
-    /// itself may not — the clock page, a shared library's `.text`.
-    pub fn translate_writable(&self, vaddr: UserAddr) -> Option<crate::mm::DirectMap> {
+    /// `vaddr`'s physical address and the bytes from it to the end of the leaf
+    /// that maps it, which that one walk answers for. A `Write` is answered
+    /// only where a user store would land: every level of the walk grants
+    /// `USER` and `WRITE`, as the MMU demands of a ring 3 store under
+    /// `CR0.WP`. A kernel copy into user memory goes through this, so a syscall
+    /// cannot write a page the process itself may not — the clock page, a
+    /// shared library's `.text`.
+    pub fn leaf(&self, vaddr: UserAddr, access: toyos_userbound::Access) -> Option<(u64, u64)> {
         const STORE: u64 = PAGE_USER | PAGE_WRITE;
-        self.walk(vaddr).and_then(|(dm, rights)| (rights & STORE == STORE).then_some(dm))
+        let (dm, rights, size) = self.walk(vaddr)?;
+        let granted = match access {
+            toyos_userbound::Access::Read => true,
+            toyos_userbound::Access::Write => rights & STORE == STORE,
+        };
+        granted.then(|| (dm.phys(), size - (vaddr.raw() & (size - 1))))
     }
 
-    /// The direct-map address of `vaddr` and the rights every level of its walk grants in common.
-    fn walk(&self, vaddr: UserAddr) -> Option<(crate::mm::DirectMap, u64)> {
+    /// The direct-map address of `vaddr`, the rights every level of its walk grants in common, and the size of the leaf that maps it.
+    fn walk(&self, vaddr: UserAddr) -> Option<(crate::mm::DirectMap, u64, u64)> {
         let va = vaddr.raw();
         if !toyos_userbound::is_user_addr(va) {
             return None;
@@ -591,11 +598,11 @@ impl AddressSpace {
                 return None;
             }
             let dm = crate::mm::DirectMap::from_phys((pte & ADDR_MASK) + (va & 0xFFF));
-            return Some((dm, rights & pte));
+            return Some((dm, rights & pte, 4096));
         }
         let page_phys = pde & ADDR_MASK_2M;
         let offset = va & (PAGE_2M - 1);
-        Some((crate::mm::DirectMap::from_phys(page_phys + offset), rights))
+        Some((crate::mm::DirectMap::from_phys(page_phys + offset), rights, PAGE_2M))
     }
 
     /// Allocate a virtual address range and register the region.
