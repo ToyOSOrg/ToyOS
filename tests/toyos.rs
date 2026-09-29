@@ -19654,7 +19654,7 @@ fn boot_from_power_on(log: &str, host: Duration) -> Result<(), String> {
 }
 
 /// `toyos_abi::boot::WRITE_NO_LAYOUT_PARAM`.
-const LAYOUT_ZERO_PARAM: &str = "loader-writes-no-layout";
+const LAYOUT_ZERO_PARAM: &str = toyos_abi::boot::WRITE_NO_LAYOUT_PARAM;
 /// The kernel's refusal of a `KernelArgs` layout word of 0, up to the layout
 /// it reads.
 const LAYOUT_REFUSAL: &str = "boot: the loader wrote KernelArgs layout 0x0 and this kernel reads layout 0x";
@@ -19662,10 +19662,14 @@ const LAYOUT_REFUSAL: &str = "boot: the loader wrote KernelArgs layout 0x0 and t
 const BLACK_BOX_ARMED: &str = "black box: ";
 
 /// A loader that wrote another layout is a boot refused by name, before the
-/// kernel read the boot parameter.
+/// kernel read the boot parameter. Checked against the kernel's own word,
+/// `toyos_abi::boot::LAYOUT` in hex, and not merely the message's prefix: a
+/// kernel that printed its own `kernel_args.layout` instead would still be 0x0
+/// and still match the prefix.
 fn kernel_args_layout_refused(log: &str) -> Result<(), String> {
-    if !log.contains(LAYOUT_REFUSAL) {
-        return Err(format!("no {LAYOUT_REFUSAL:?} in the boot log"));
+    let refusal = format!("{LAYOUT_REFUSAL}{:x}", toyos_abi::boot::LAYOUT);
+    if !log.contains(&refusal) {
+        return Err(format!("no {refusal:?} in the boot log"));
     }
     if log.contains(BLACK_BOX_ARMED) {
         return Err(format!("a boot refused its layout still said {BLACK_BOX_ARMED:?}"));

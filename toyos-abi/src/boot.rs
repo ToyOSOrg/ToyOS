@@ -111,9 +111,8 @@ pub struct KernelArgs {
 }
 
 /// [`KernelArgs::layout`] for the struct this file declares: the struct's own
-/// size folded in, so any field added or removed moves it. Never within
-/// -1440..=1440 as an `i32`: a loader older than the word wrote a firmware
-/// zone in minutes at its offset.
+/// size folded in. Never within -1440..=1440 as an `i32`: a loader older than
+/// the word wrote a firmware zone in minutes at its offset.
 pub const LAYOUT: u32 = 0x5459_0000 | core::mem::size_of::<KernelArgs>() as u32;
 
 /// The boot parameter on which the loader writes 0 as [`KernelArgs::layout`],
@@ -204,9 +203,7 @@ impl KernelArgs {
 ///
 /// The size and alignment are here for the other half of the contract: the
 /// bootloader writes this struct and the kernel reads it, and the two are
-/// separate binaries built for separate targets. They share this file, so they
-/// cannot disagree about the layout — but only as long as nothing else does
-/// the arithmetic by hand.
+/// separate binaries built for separate targets.
 const _: () = {
     use core::mem::{align_of, offset_of, size_of};
     assert!(offset_of!(KernelArgs, kernel_memory_addr) == 16);
