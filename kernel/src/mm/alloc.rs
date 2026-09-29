@@ -17,7 +17,8 @@ unsafe impl dlmalloc::Allocator for KernelPageSource {
         }
         if let Some(page) = pmm::alloc_page(pmm::Category::KernelHeap) {
             let ptr = page.direct_map().as_mut_ptr::<u8>();
-            core::mem::forget(page); // dlmalloc manages the lifetime
+            #[expect(clippy::disallowed_methods, reason = "dlmalloc owns the page from here on")]
+            core::mem::forget(page);
             #[cfg(feature = "heap-sweep")]
             pages::add(ptr as u64);
             (ptr, PAGE_2M as usize, 0)
@@ -232,10 +233,8 @@ mod tripwire {
     /// `fill` is the first byte of a band this module armed.
     unsafe fn band_words(fill: *const u8) -> [u64; 4] {
         let mut out = [FILL_WORD; 4];
-        let mut i = 0;
-        while i < 4 && (i + 1) * 8 <= TAIL_FILL {
-            out[i] = fill.add(i * 8).cast::<u64>().read_unaligned();
-            i += 1;
+        for (i, word) in out.iter_mut().enumerate().take(TAIL_FILL / 8) {
+            *word = fill.add(i * 8).cast::<u64>().read_unaligned();
         }
         out
     }

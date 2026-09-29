@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 pub const GLYPH_W: usize = 8;
 pub const GLYPH_H: usize = 16;
-const FIRST_CH: u8 = 0x20;
+pub(crate) const FIRST_CH: u8 = 0x20;
 const GLYPHS: usize = 95;
 
 /// A cell that matches no glyph. Distinct from every decoded character, so an
@@ -262,8 +262,7 @@ const CELL: usize = GLYPH_W * GLYPH_H;
 /// rendered the log" and "the console never ran and the kernel's paint is still
 /// up" cannot be confused for one another.
 pub struct ConsoleFont {
-    by_cell: HashMap<[u8; CELL], char>,
-    by_char: HashMap<char, [u8; CELL]>,
+    pub(crate) by_cell: HashMap<[u8; CELL], char>,
 }
 
 impl ConsoleFont {
@@ -280,7 +279,6 @@ impl ConsoleFont {
         let alpha = 8 + count * 4;
 
         let mut by_cell: HashMap<[u8; CELL], char> = HashMap::new();
-        let mut by_char: HashMap<char, [u8; CELL]> = HashMap::new();
         let mut ascii_clash: Vec<(char, char)> = Vec::new();
         for i in 0..count {
             let cp = u32::from_le_bytes([
@@ -297,7 +295,6 @@ impl ConsoleFont {
             let Some(ch) = char::from_u32(cp) else { continue };
             let mut cell = [0u8; CELL];
             cell.copy_from_slice(&raw[alpha + i * CELL..alpha + (i + 1) * CELL]);
-            by_char.insert(ch, cell);
             // Lowest codepoint wins, so U+00A0 does not take the blank cell
             // away from a space. A clash *inside* printable ASCII would make
             // every assertion in the suite ambiguous, so it is refused here
@@ -315,7 +312,7 @@ impl ConsoleFont {
             "the console font rasterizes these printable ASCII pairs identically at \
              8x16, so a decoded screen cannot say which was drawn: {ascii_clash:?}"
         );
-        ConsoleFont { by_cell, by_char }
+        ConsoleFont { by_cell }
     }
 
     fn lookup(&self, cell: &[u8; CELL]) -> char {
@@ -332,7 +329,6 @@ impl ConsoleFont {
 }
 
 pub struct Font {
-    bitmaps: Vec<[u8; GLYPH_H]>,
     by_bitmap: HashMap<[u8; GLYPH_H], char>,
 }
 
@@ -344,12 +340,10 @@ impl Font {
     pub fn load() -> Font {
         let raw = std::fs::read(Font::path()).expect("font8x16.bin not found");
         assert_eq!(raw.len(), GLYPHS * GLYPH_H, "font8x16.bin has the wrong size");
-        let mut bitmaps = Vec::with_capacity(GLYPHS);
         let mut by_bitmap = HashMap::new();
         for i in 0..GLYPHS {
             let mut g = [0u8; GLYPH_H];
             g.copy_from_slice(&raw[i * GLYPH_H..(i + 1) * GLYPH_H]);
-            bitmaps.push(g);
             // A duplicate would make decoding ambiguous. Nothing on the
             // generator side checks for it, so this assert is the only check
             // there is — it runs on every suite via screen_decoder.
@@ -358,105 +352,10 @@ impl Font {
                 "font8x16.bin: two glyphs share a bitmap"
             );
         }
-        Font { bitmaps, by_bitmap }
+        Font { by_bitmap }
     }
 
     fn lookup(&self, cell: &[u8; GLYPH_H]) -> char {
         *self.by_bitmap.get(cell).unwrap_or(&UNKNOWN)
     }
-}
-
-/// Render `lines` the way the kernel would and decode them back, proving the
-/// decoder against a bitmap it fully controls before it is pointed at a real
-/// screendump. Panics on mismatch.
-pub fn self_test() {
-    let font = Font::load();
-    let lines = [
-        "PANIC: panicked at src/loader.rs:952:40",
-        "  0xffff80007d102adc kernel::loader::spawn_kernel+0x28e",
-        "the quick brown fox JUMPS over 13 lazy dogs {}[]<>|~",
-    ];
-    let cols = lines.iter().map(|l| l.len()).max().unwrap();
-    let width = cols * GLYPH_W;
-    let height = lines.len() * GLYPH_H;
-    // Dark red fill and white text: the same colours render() uses, so the
-    // threshold is exercised, not bypassed.
-    let mut pixels = vec![[0x60u8, 0x00, 0x00]; width * height];
-    for (row, line) in lines.iter().enumerate() {
-        for (col, ch) in line.bytes().enumerate() {
-            let g = font.bitmaps[(ch - FIRST_CH) as usize];
-            for (r, bits) in g.iter().enumerate() {
-                for c in 0..GLYPH_W {
-                    if bits & (0x80 >> c) != 0 {
-                        let x = col * GLYPH_W + c;
-                        let y = row * GLYPH_H + r;
-                        pixels[y * width + x] = [0xFF, 0xFF, 0xFF];
-                    }
-                }
-            }
-        }
-    }
-
-    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-    for p in &pixels {
-        ppm.extend_from_slice(p);
-    }
-
-    let decoded = Ppm::parse(&ppm).text();
-    let expected = lines.map(|l| l.trim_end()).join("\n");
-    assert_eq!(decoded, expected, "screen decoder round-trip failed");
-
-    console_self_test();
-}
-
-/// The same round trip for the console's font, and one thing the kernel's
-/// cannot have: the two tables must not decode each other. `ConsoleFont::load`
-/// has already refused an ambiguous printable-ASCII table by the time this
-/// runs.
-fn console_self_test() {
-    let font = ConsoleFont::load();
-    let lines = [
-        "[kernel 0.099] i8042: ok selftest=0x55 cfg=0x77->0x64 port1=ok port2=ok",
-        "/> echo hello",
-        "the quick brown fox JUMPS over 13 lazy dogs {}[]<>|~",
-    ];
-    let cols = lines.iter().map(|l| l.len()).max().unwrap();
-    let width = cols * GLYPH_W;
-    let height = lines.len() * GLYPH_H;
-    // White on black: `draw_char`'s blend then reduces to the alpha itself,
-    // which is what makes the decode exact rather than a nearest match.
-    let mut pixels = vec![[0u8, 0, 0]; width * height];
-    for (row, line) in lines.iter().enumerate() {
-        for (col, ch) in line.chars().enumerate() {
-            let cell = font.by_char[&ch];
-            for r in 0..GLYPH_H {
-                for c in 0..GLYPH_W {
-                    let a = cell[r * GLYPH_W + c];
-                    pixels[(row * GLYPH_H + r) * width + col * GLYPH_W + c] = [a, a, a];
-                }
-            }
-        }
-    }
-
-    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-    for p in &pixels {
-        ppm.extend_from_slice(p);
-    }
-    let dump = Ppm::parse(&ppm);
-    let expected = lines.map(|l| l.trim_end()).join("\n");
-    assert_eq!(
-        dump.console_text(&font),
-        expected,
-        "console screen decoder round-trip failed"
-    );
-
-    // The non-vacuity property the console tests lean on, measured rather than
-    // argued: a screen the *kernel* painted carries the thresholded form of
-    // these glyphs, and the two tables are not interchangeable in either
-    // direction.
-    assert!(
-        !dump.text().contains("i8042: ok selftest"),
-        "the kernel's 1-bit table decodes anti-aliased console glyphs, so a \
-         console test could pass on a screen the console never touched"
-    );
 }

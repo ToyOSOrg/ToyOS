@@ -1759,12 +1759,7 @@ fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: A
 }
 
 /// Full build: kernel, bootloader, all programs, boot image. Returns the image.
-pub fn build(
-    root: &Path,
-    boot: Boot,
-    rebuild_toolchain: bool,
-    plan: &Plan,
-) -> PathBuf {
+pub fn build(root: &Path, boot: Boot, plan: &Plan) -> PathBuf {
     // Every lock below is `build_test_image`'s own, and the flags it cannot
     // combine with were refused before any of them.
     if boot.case {
@@ -1775,7 +1770,7 @@ pub fn build(
         return image_path;
     }
 
-    let (kernel_bytes, bl_bytes, root_bytes) = shipped_parts(root, &boot, rebuild_toolchain, plan);
+    let (kernel_bytes, bl_bytes, root_bytes) = shipped_parts(root, &boot, plan);
     let key = said_key(plan);
     // A machine this image is flashed onto updates itself, so it carries
     // the second slot an update is written to, with room for a ROOT twice
@@ -1804,9 +1799,9 @@ pub fn build(
 /// The image `ssh <machine> update` takes, of the boot `boot` names, written
 /// to `out`: the same kernel, parameter and ROOT [`build`] would put in a
 /// slot, signed with this run's key at the plan's version.
-pub fn build_update(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan, out: &Path) {
+pub fn build_update(root: &Path, boot: &Boot, plan: &Plan, out: &Path) {
     assert!(!boot.case, "an update image is built from a mode's config, and a case's image is a test's");
-    let (kernel_bytes, _, root_bytes) = shipped_parts(root, boot, rebuild_toolchain, plan);
+    let (kernel_bytes, _, root_bytes) = shipped_parts(root, boot, plan);
     let key = said_key(plan);
     let bytes = image::update_image(
         &kernel_bytes,
@@ -1833,14 +1828,14 @@ fn said_key(plan: &Plan) -> &'static crate::signing::Key {
 }
 
 /// The kernel, the loader and ROOT a mode's image is made of.
-fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let kernel_features = plan.features.join(",");
     let arch = plan.arch;
 
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
-    let sysroot = toolchain::ensure(root, rebuild_toolchain, &mut lock);
+    let sysroot = toolchain::ensure(root, &mut lock);
 
     let env = GuestEnv::new(&sysroot);
     let config = parse_config(&boot.config);
@@ -2075,7 +2070,7 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let sysroot = crate::toolchain::ensure(root, false, &mut lock);
+    let sysroot = crate::toolchain::ensure(root, &mut lock);
     let env = GuestEnv::new(&sysroot);
 
     invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
@@ -2188,11 +2183,6 @@ fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
 /// nothing in the tree can produce any more — into the ROOT image, into the test list,
 /// and over the name of whatever gets it next.
 pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool) -> Vec<(String, Vec<u8>)> {
-    let target = arch.userland();
-    let mut lock = buildlock::shared(root, "test binaries");
-    let sysroot = crate::toolchain::ensure(root, false, &mut lock);
-    let env = GuestEnv::new(&sysroot);
-
     let mut targets = vec![(crate_path.to_path_buf(), Clean::All)];
     for entry in fs::read_dir(crate_path).into_iter().flatten().flatten() {
         let sub_path = entry.path();
@@ -2200,17 +2190,11 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
             targets.push((sub_path, Clean::All));
         }
     }
-    invalidate_stale(root, &mut lock, &env.toolchain, &targets);
+    let build = TestBuild::begin(root, arch, "test binaries", &targets);
+
+    let (target, env) = (build.target, &build.env);
 
     let mut results = Vec::new();
-
-    // Every build→read pair below is under one hold, for the reason the
-    // "Artifact staging" section above gives: cargo keys an artifact path on
-    // (crate, target, profile), so a second `cargo test` in this tree writes the
-    // very `.so` and test binaries this one reads back. Between the `read_dir`
-    // and the `read` that was enough to kill a run outright — four concurrent
-    // suites, one dead on `Result::unwrap()` on a `NotFound` naming no file.
-    let _artifact = buildlock::artifact(root);
 
     // Build cdylib subcrates first
     let mut lib_search_dirs = Vec::new();
@@ -2233,7 +2217,7 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
         if !quiet {
             eprintln!("[build] Building cdylib subcrate: {lib_name}");
         }
-        cargo_build(&sub_path, target, &[], &env, &[], quiet);
+        cargo_build(&sub_path, target, &[], env, &[], quiet);
 
         let lib_out = sub_path.join(format!("target/{target}/{PROFILE}"));
         lib_search_dirs.push(lib_out.clone());
@@ -2260,7 +2244,7 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
     } else {
         vec![("RUSTFLAGS", link_flags.trim_end())]
     };
-    cargo_build(crate_path, target, &["--bins"], &env, &extra_env, quiet);
+    cargo_build(crate_path, target, &["--bins"], env, &extra_env, quiet);
 
     let bin_dir = crate_path.join(format!("target/{target}/{PROFILE}"));
     let bin_src = crate_path.join("src/bin");
@@ -2284,6 +2268,42 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
     }
 
     results
+}
+
+/// What building test binaries starts from, held until the read of what was built is done.
+///
+/// Every build→read pair is under one hold, for the reason the "Artifact
+/// staging" section above gives: cargo keys an artifact path on (crate, target,
+/// profile), so a second `cargo test` in this tree writes the very `.so` and
+/// test binaries this one reads back. Between the `read_dir` and the `read`
+/// that was enough to kill a run outright — four concurrent suites, one dead on
+/// `Result::unwrap()` on a `NotFound` naming no file.
+struct TestBuild {
+    target: &'static str,
+    env: GuestEnv,
+    _lock: buildlock::Held,
+    _artifact: buildlock::Guard,
+}
+
+impl TestBuild {
+    fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[(PathBuf, Clean)]) -> Self {
+        let mut lock = buildlock::shared(root, what);
+        let sysroot = crate::toolchain::ensure(root, &mut lock);
+        let env = GuestEnv::new(&sysroot);
+        invalidate_stale(root, &mut lock, &env.toolchain, stale_targets);
+        let artifact = buildlock::artifact(root);
+        TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
+    }
+}
+
+/// The one binary `name` of the crate at `crate_path`, built for `arch`: for an
+/// architecture the crate's other binaries do not all build for.
+pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, quiet: bool) -> Vec<u8> {
+    let build = TestBuild::begin(root, arch, "a test binary", &[(crate_path.to_path_buf(), Clean::All)]);
+    let (target, env) = (build.target, &build.env);
+    cargo_build(crate_path, target, &["--bin", name], env, &[], quiet);
+    let binary = crate_path.join(format!("target/{target}/{PROFILE}/{name}"));
+    fs::read(&binary).unwrap_or_else(|e| panic!("read the test binary {}: {e}", binary.display()))
 }
 
 // --- Internal helpers ---
@@ -3140,6 +3160,7 @@ mod tests {
         "tests/testcases/system.toml",
         "tests/toolkitcase/system.toml",
         "tests/updatecase/system.toml",
+        "tests/virtjobcase/system.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {

@@ -375,7 +375,13 @@ impl PciDevice {
         let dest = if crate::actuator::iommu_dest_apic1() { 1 } else { MSG_DEST };
         match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, dest) {
             // The same CPU the remappable one would name.
-            crate::iommu::Delivery::Direct => Some(crate::arch::msi_message(dest, vector)),
+            crate::iommu::Delivery::Direct => match crate::arch::msi_message(dest, vector) {
+                Ok(message) => Some(message),
+                Err(why) => {
+                    log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);
+                    None
+                }
+            },
             crate::iommu::Delivery::Remapped(m) => Some((m.address, m.data)),
             crate::iommu::Delivery::Refused(why) => {
                 log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);

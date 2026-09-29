@@ -31,6 +31,7 @@ members = [
     "toyos-elide",
     "toyos-fat32",
     "toyos-fat32-check",
+    "toyos-gicv3",
     "toyos-gpt",
     "toyos-hda",
     "toyos-i219",

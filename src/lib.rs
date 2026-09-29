@@ -1,6 +1,3 @@
-/// The actuator-state coupling gate, read by nothing but its own tests.
-#[cfg(test)]
-pub mod actuatorstate;
 pub mod arch;
 pub mod assets;
 pub mod bootlog;
@@ -13,8 +10,9 @@ pub mod compiler;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
 pub mod firmware;
+#[cfg(test)]
+pub mod gitfixture;
 pub mod flags;
-pub mod forkcheck;
 pub mod hostws;
 pub mod icmp;
 pub mod identity;
@@ -36,7 +34,6 @@ pub mod metalimage;
 pub mod metalprofile;
 pub mod metalswap;
 pub mod metaltalk;
-pub mod pr;
 pub mod redlist;
 pub mod release;
 pub mod sdkversion;
@@ -45,6 +42,7 @@ pub mod soundfont;
 /// build system at all.
 #[cfg(test)]
 pub mod sourcegate;
+pub mod sync;
 pub mod sysroot;
 pub mod testargs;
 pub mod tether;
