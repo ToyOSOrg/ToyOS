@@ -276,9 +276,7 @@ fn dlopen_survives(name: &str, bytes: &[u8]) {
     drop(unsafe { libloading::Library::new(&path) });
 }
 
-/// `dlopen` must refuse this file. A success is the defect: each case here is
-/// an image whose relocations would be written through a range the loader is
-/// at that moment holding a `&[u8]` over, or into a page it maps `ReadExec`.
+/// `dlopen` must refuse this file. A success is the defect.
 fn dlopen_refused(name: &str, bytes: &[u8]) {
     let path = write_file(name, bytes);
     match unsafe { libloading::Library::new(&path) } {
