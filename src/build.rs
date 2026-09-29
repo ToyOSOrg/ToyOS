@@ -1756,12 +1756,7 @@ fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: A
 }
 
 /// Full build: kernel, bootloader, all programs, boot image. Returns the image.
-pub fn build(
-    root: &Path,
-    boot: Boot,
-    rebuild_toolchain: bool,
-    plan: &Plan,
-) -> PathBuf {
+pub fn build(root: &Path, boot: Boot, plan: &Plan) -> PathBuf {
     // Every lock below is `build_test_image`'s own, and the flags it cannot
     // combine with were refused before any of them.
     if boot.case {
@@ -1772,7 +1767,7 @@ pub fn build(
         return image_path;
     }
 
-    let (kernel_bytes, bl_bytes, root_bytes) = shipped_parts(root, &boot, rebuild_toolchain, plan);
+    let (kernel_bytes, bl_bytes, root_bytes) = shipped_parts(root, &boot, plan);
     let key = said_key(plan);
     // A machine this image is flashed onto updates itself, so it carries
     // the second slot an update is written to, with room for a ROOT twice
@@ -1801,9 +1796,9 @@ pub fn build(
 /// The image `ssh <machine> update` takes, of the boot `boot` names, written
 /// to `out`: the same kernel, parameter and ROOT [`build`] would put in a
 /// slot, signed with this run's key at the plan's version.
-pub fn build_update(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan, out: &Path) {
+pub fn build_update(root: &Path, boot: &Boot, plan: &Plan, out: &Path) {
     assert!(!boot.case, "an update image is built from a mode's config, and a case's image is a test's");
-    let (kernel_bytes, _, root_bytes) = shipped_parts(root, boot, rebuild_toolchain, plan);
+    let (kernel_bytes, _, root_bytes) = shipped_parts(root, boot, plan);
     let key = said_key(plan);
     let bytes = image::update_image(
         &kernel_bytes,
@@ -1830,14 +1825,14 @@ fn said_key(plan: &Plan) -> &'static crate::signing::Key {
 }
 
 /// The kernel, the loader and ROOT a mode's image is made of.
-fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let kernel_features = plan.features.join(",");
     let arch = plan.arch;
 
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
-    let sysroot = toolchain::ensure(root, rebuild_toolchain, &mut lock);
+    let sysroot = toolchain::ensure(root, &mut lock);
 
     let env = GuestEnv::new(&sysroot);
     let config = parse_config(&boot.config);
@@ -2072,7 +2067,7 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let sysroot = crate::toolchain::ensure(root, false, &mut lock);
+    let sysroot = crate::toolchain::ensure(root, &mut lock);
     let env = GuestEnv::new(&sysroot);
 
     invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
@@ -2290,7 +2285,7 @@ struct TestBuild {
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[(PathBuf, Clean)]) -> Self {
         let mut lock = buildlock::shared(root, what);
-        let sysroot = crate::toolchain::ensure(root, false, &mut lock);
+        let sysroot = crate::toolchain::ensure(root, &mut lock);
         let env = GuestEnv::new(&sysroot);
         invalidate_stale(root, &mut lock, &env.toolchain, stale_targets);
         let artifact = buildlock::artifact(root);

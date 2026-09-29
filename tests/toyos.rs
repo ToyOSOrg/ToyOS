@@ -17284,8 +17284,7 @@ fn main() {
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
     let list_mode = SUITE.present(&args, &testargs::LIST);
-    let nocapture =
-        SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
+    let nocapture = SUITE.present(&args, &testargs::NOCAPTURE);
 
     // How many guests the parallel phase runs at once. The serial tail ignores
     // it — that is what it is.

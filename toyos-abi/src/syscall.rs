@@ -175,8 +175,7 @@ pub const SYS_TLS_ALLOC_BLOCK: u64 = 88;
 /// that a deleted syscall's number is retired and never reused is about a
 /// *deleted* call: 89 and 90 kept their arguments and their struct layouts when
 /// `SYS_IO_URING_SETUP`/`SYS_IO_URING_ENTER` became these, so no number was
-/// taken and `RETIRED_ABI_NAMES` in `src/sourcegate.rs` carries no row for
-/// either.
+/// taken.
 pub const SYS_INBOX_SETUP: u64 = 89;
 /// Hand queued submissions to the kernel and/or wait for completions. See
 /// [`inbox_submit`]; on the number, see [`SYS_INBOX_SETUP`].
