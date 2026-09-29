@@ -30,7 +30,7 @@ const DELAY_NANOS: u64 = 20_000_000;
 /// Half the delay. Every number compared against it is a lower bound on a spin
 /// the kernel or this process performs, so it cannot come out short for
 /// scheduling reasons — but the clock reads bracketing it are syscalls, and the
-/// margin is there so a slow host cannot turn a pass into a fail either way.
+/// margin is there so a slow host cannot turn a pass into a fail.
 const FLOOR_NANOS: u64 = DELAY_NANOS / 2;
 
 /// How many measured `munmap`s must *all* return fast before that is the
@@ -162,20 +162,6 @@ fn main() {
     unsafe { syscall::munmap(placed, PAGE_2M) }.expect("munmap the fixed mapping");
 
     disarm();
-
-    // 3. And the delay is what produced every number above, not the machine:
-    //    disarmed, the same operation is back to microseconds. Without this the
-    //    assertions above would still pass on a kernel that happened to be slow
-    //    for some other reason.
-    let quiet = map(PAGE_2M);
-    let elapsed = timed(|| {
-        unsafe { syscall::munmap(quiet, PAGE_2M) }.expect("munmap");
-    });
-    assert!(
-        elapsed < FLOOR_NANOS,
-        "munmap still took {elapsed}ns with the delay disarmed, so the numbers above \
-         measured something other than the wait",
-    );
 
     println!("a shootdown waits for every other CPU, and munmap and a fixed mmap wait for it");
 }

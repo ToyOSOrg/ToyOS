@@ -118,8 +118,7 @@ pub fn metal_device_probe(
             .and_then(|(_, rest)| rest.split_whitespace().next())
             .and_then(|v| v.parse().ok())
             .ok_or_else(|| format!("unreadable exit record: {line:?}"))?;
-        let span = measurement(job, code)?;
-        eprintln!("  [devices] {job}: {span} us");
+        measurement(job, code)?;
     }
 
     // **The positive control for the safety instrument**, and this machine is

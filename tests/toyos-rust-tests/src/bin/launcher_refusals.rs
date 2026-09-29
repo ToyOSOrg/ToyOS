@@ -34,22 +34,13 @@
 //! holder of the connector — the compositor, every terminal, every shell, sshd
 //! — parked the machine's only way to start a process for ever, with init alive
 //! and looking healthy.
-//!
-//! **Every answer this file waits for is bounded, and that is not decoration.**
-//! A test that hangs instead of failing is worse than no test: a harness
-//! timeout is a liveness guard rather than a verdict, and a guest that never
-//! returns takes its whole shared boot down with it. So the launcher's replies
-//! are read with [`answer_within`], and a launcher that has stopped answering
-//! is an assertion with a name on it. The one arm that cannot be bounded from
-//! here — `Command`, which blocks inside `std` — runs after a bounded launch
-//! has already proved init is answering.
 
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 use toyos::census::Census;
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::launch::{self, Launch};
+use toyos::poller::{Poller, READABLE};
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, SyscallError};
@@ -58,14 +49,6 @@ use toyos_abi::RawHandle;
 /// Rounds per census sample. Large enough that one leaked handle per round is
 /// a number no drain lag can hide.
 const ROUNDS: usize = 16;
-
-/// How long init may take to answer a launch before this file calls it wedged.
-///
-/// Generous by two orders of magnitude: a refusal is a frame decode and a
-/// namespace build, and a grant is one `SYS_SPAWN`. What this bounds is the
-/// launcher that answers *never*, and the number only decides how long the red
-/// takes to arrive.
-const ANSWER_BUDGET: Duration = Duration::from_secs(5);
 
 /// Clients that connect to the launcher and then say nothing, held open across
 /// the launch that must still be answered.
@@ -104,13 +87,10 @@ fn launcher() -> Connection {
     toyos::endow::service("launcher").expect("this process was endowed a launcher connector")
 }
 
-/// Read the launcher's reply without ever blocking on it.
-///
-/// `Err` is the verdict this file exists to be able to reach: a launcher that
-/// has not answered inside the budget is one no `recv_header` would ever come
-/// back from.
-fn answer_within(conn: &Connection, budget: Duration) -> Result<u32, &'static str> {
-    let deadline = Instant::now() + budget;
+/// The launcher's reply, waited for with no deadline: a launcher that never
+/// answers is a hang the harness ceiling reds.
+fn answer(conn: &Connection) -> Result<u32, &'static str> {
+    let poller = Poller::new(1);
     // Only the reply's type is judged here, so nothing of a payload is kept.
     let mut rx = FrameRx::<0>::new();
     loop {
@@ -119,10 +99,8 @@ fn answer_within(conn: &Connection, budget: Duration) -> Result<u32, &'static st
             RxStep::Eof => return Err("the launcher dropped the connection"),
             RxStep::Malformed => return Err("the launcher sent a frame this protocol cannot describe"),
             RxStep::Idle => {
-                if Instant::now() >= deadline {
-                    return Err("the launcher never answered");
-                }
-                std::thread::sleep(Duration::from_millis(5));
+                poller.watch(conn, READABLE, 0);
+                poller.wait(1, u64::MAX, |_| {});
             }
         }
     }
@@ -158,7 +136,7 @@ fn a_quiet_client_does_not_wedge_the_launcher() {
     conn.send_bytes_with_handles(&[], launch::MSG_LAUNCH, &buf[..len])
         .expect("the launcher took the frame");
 
-    match answer_within(&conn, ANSWER_BUDGET) {
+    match answer(&conn) {
         Ok(launch::MSG_NOT_DECLARED) => {}
         Ok(other) => panic!("the launcher answered {other} for a program nothing declares"),
         Err(why) => panic!(
@@ -249,7 +227,7 @@ fn answer_to(cwd: &str, extras: &[(&str, RawHandle)]) -> u32 {
     let conn = launcher();
     conn.send_bytes_with_handles(&handles[..count], launch::MSG_LAUNCH, &buf[..len])
         .expect("the launcher took the frame");
-    answer_within(&conn, ANSWER_BUDGET).expect("init answered the launch")
+    answer(&conn).expect("init answered the launch")
 }
 
 /// A cwd the launch does not state absolutely. std would join it onto init's

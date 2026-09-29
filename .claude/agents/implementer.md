@@ -19,7 +19,9 @@ one clause; do not work around it.
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test before anyone reviews:
 
-- `cargo test`, never `cargo run`: the run path opens a window on the owner's desktop.
+- Host tests only: `cargo test --workspace --exclude toyos-build`, and `cargo run -- --build-only`
+  at most for the image. Never a guest test or `cargo run` without `--build-only`: the orchestrator
+  runs every guest test.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the job scratchpad the brief

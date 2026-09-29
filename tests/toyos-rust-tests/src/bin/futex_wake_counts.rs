@@ -51,8 +51,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, MmapFlags, MmapProt};
 use toyos_abi::RawHandle;
+
+#[path = "../roster.rs"]
+mod roster;
 
 /// Two futex words in one page, `FUTEX_BUCKETS * 4` bytes apart, so
 /// `(phys >> 2) % 64` is the same for both.
@@ -69,15 +74,10 @@ static WORDS: SameBucket = SameBucket {
     sibling: AtomicU32::new(0),
 };
 
-/// How long the waiters are given to reach their `futex_wait` before the first
-/// wake. **A margin and not a bound**: every assertion in [`counts`] is about a
-/// *number returned*, so a waiter that had not parked yet makes that arm
-/// weaker rather than wrong — it would count one fewer, and the count-limit
-/// assertions would fail loudly rather than pass vacuously.
-const PARK_MARGIN: Duration = Duration::from_millis(300);
-
 static WORD_RETURNED: AtomicU32 = AtomicU32::new(0);
 static SIBLING_RETURNED: AtomicU32 = AtomicU32::new(0);
+/// [`counts`]' waiters that have reached their `futex_wait`.
+static COUNTS_ARMED: AtomicU32 = AtomicU32::new(0);
 
 /// This binary's own path. The sweeper is another *process* asking about
 /// frames this one freed, which is the whole of what the third arm is about,
@@ -110,9 +110,12 @@ fn main() {
         Some(LET_GO) => return let_go(),
         _ => {}
     }
-    counts();
-    claim_semantics();
-    orphaned_by_unmap();
+    let cap: SysCap = Endowments::get()
+        .take(SYSCAP_LABEL)
+        .expect("test-runner endows every binary it spawns a system capability");
+    counts(&cap);
+    claim_semantics(&cap);
+    orphaned_by_unmap(&cap);
     revoked_while_still_mapped();
     timeout_is_its_own_answer();
     println!("futex_wake respects its count, names its word, says how many it woke, and ends");
@@ -144,7 +147,7 @@ fn timeout_is_its_own_answer() {
     assert_eq!(changed, 0, "a futex wait whose word did not match answered {changed}");
 
     let waiter = thread::spawn(|| unsafe { syscall::futex_wait(WOKEN.as_ptr(), 7, None) });
-    thread::sleep(PARK_MARGIN);
+    wait_until_parked(&WOKEN, 1);
     WOKEN.store(8, Ordering::SeqCst);
     unsafe { syscall::futex_wake(WOKEN.as_ptr(), 1) };
     let woken = waiter.join().expect("the woken waiter panicked");
@@ -152,10 +155,15 @@ fn timeout_is_its_own_answer() {
 }
 
 /// A count-limited wake names its word and answers how many it woke.
-fn counts() {
+///
+/// **Parked by the kernel's roster, not by a probe**: a probe is a wake, and
+/// the waiters it claims are still on their way back to the word when the
+/// first wake below looks for them.
+fn counts(cap: &SysCap) {
     let waiters: Vec<_> = (0..2)
         .map(|_| {
             thread::spawn(|| {
+                COUNTS_ARMED.fetch_add(1, Ordering::SeqCst);
                 // Returns only once the word has actually changed: the kernel's
                 // `futex_wait` re-reads it after every wake, which is what makes
                 // "was this thread told" observable at all.
@@ -165,10 +173,11 @@ fn counts() {
         })
         .collect();
     let sibling = thread::spawn(|| {
+        COUNTS_ARMED.fetch_add(1, Ordering::SeqCst);
         unsafe { syscall::futex_wait(WORDS.sibling.as_ptr(), 0, None) };
         SIBLING_RETURNED.fetch_add(1, Ordering::SeqCst);
     });
-    thread::sleep(PARK_MARGIN);
+    await_armed_and_blocked(cap, &COUNTS_ARMED, 3);
 
     // The word changes first, so a waiter that is told goes home instead of
     // re-parking — otherwise it would re-arm and be counted twice.
@@ -180,7 +189,11 @@ fn counts() {
         "futex_wake(count=1) with two waiters answered {one}, and the ABI's answer is \
          the number of threads woken",
     );
-    thread::sleep(PARK_MARGIN);
+    // No deadline: the woken waiter's return is the event, and one that never
+    // comes is a hang the harness ceiling reds.
+    while WORD_RETURNED.load(Ordering::SeqCst) == 0 {
+        thread::yield_now();
+    }
     let returned = WORD_RETURNED.load(Ordering::SeqCst);
     assert_eq!(
         returned, 1,
@@ -214,11 +227,12 @@ fn counts() {
 
 static CLAIM_WORD: AtomicU32 = AtomicU32::new(0);
 static CLAIM_RETURNED: AtomicU32 = AtomicU32::new(0);
+/// [`claim_semantics`]' waiters that have reached their `futex_wait`.
+static CLAIM_ARMED: AtomicU32 = AtomicU32::new(0);
+/// [`orphaned_by_unmap`]'s waiters that have reached their `futex_wait`.
+static ORPHANS_ARMED: AtomicU32 = AtomicU32::new(0);
 static SPINNERS_STOP: AtomicU32 = AtomicU32::new(0);
 
-/// How long the machine is left alone for two waiters to park on an idle CPU,
-/// and for the spinners to reach their loops afterwards.
-const SETTLE: Duration = Duration::from_millis(120);
 /// How many times the arrangement below is rebuilt before its own failure to
 /// hold is the verdict.
 const ATTEMPTS: usize = 6;
@@ -242,37 +256,43 @@ const ATTEMPTS: usize = 6;
 /// dispatched until a quantum ends — 10 ms, against the microseconds the three
 /// wakes below take between them.
 ///
-/// The waiters park **before** the spinners start, on an otherwise idle
-/// machine, and are proved parked by a probe that answers how many claims it
-/// won. Nothing posts to their word between that proof and the first wake
-/// below, so "both are parked" is not a guess. What is left is the one thing
+/// The waiters park **before** the spinners start, and are proved parked by the
+/// roster, as [`counts`]' are: a probe is a wake, and the waiters it claims are
+/// still on the bucket when the first wake below walks it. Nothing posts to
+/// their word between that proof and the first wake below, so "both are
+/// parked" is not a guess. What is left is the one thing
 /// the arrangement cannot make impossible — a quantum boundary landing inside
 /// those microseconds — and that is *checked* rather than assumed: a waiter
 /// that got out shows up in [`CLAIM_RETURNED`], and the attempt is rebuilt
 /// instead of asserted on.
-fn claim_semantics() {
+fn claim_semantics(cap: &SysCap) {
     for attempt in 1..=ATTEMPTS {
         CLAIM_WORD.store(0, Ordering::SeqCst);
         CLAIM_RETURNED.store(0, Ordering::SeqCst);
+        CLAIM_ARMED.store(0, Ordering::SeqCst);
         let waiters: Vec<_> = (0..2)
             .map(|_| {
                 thread::spawn(|| {
+                    CLAIM_ARMED.fetch_add(1, Ordering::SeqCst);
                     unsafe { syscall::futex_wait(CLAIM_WORD.as_ptr(), 0, None) };
                     CLAIM_RETURNED.fetch_add(1, Ordering::SeqCst);
                 })
             })
             .collect();
-
-        // Parked, and proved so: the probe answers the number of claims it won,
-        // and a waiter whose word has not changed re-parks. The machine is idle
-        // here, so the re-park is immediate and the settle below is generous.
-        wait_until_parked(&CLAIM_WORD, 2);
-        thread::sleep(SETTLE);
+        await_armed_and_blocked(cap, &CLAIM_ARMED, 2);
 
         // Now make every CPU busy, so nothing the three wakes claim can be
-        // dispatched before the last of them has run.
+        // dispatched before the last of them has run: this thread runs on one,
+        // and the roster shows a spinner running on every other.
         let spinners = start_spinners();
-        thread::sleep(SETTLE);
+        let others = syscall::cpu_count() as usize - 1;
+        roster::await_true(|| {
+            roster::my_threads(cap)
+                .iter()
+                .filter(|&&(is_thread, state)| is_thread && state == roster::RUNNING)
+                .count()
+                == others
+        });
 
         // Changed first, so a waiter that does get out goes home and says so
         // rather than re-parking invisibly.
@@ -326,7 +346,8 @@ fn claim_semantics() {
     }
 }
 
-/// Wake `word` until the kernel answers that it claimed `want` waiters.
+/// Wake `word` until the kernel answers that it claimed `want` waiters, with no
+/// deadline: waiters that never park are a hang the harness ceiling reds.
 ///
 /// The word must still hold what the waiters are waiting for, so every waiter
 /// this probe wakes re-checks and re-parks; what it costs is a round trip, and
@@ -335,13 +356,22 @@ fn claim_semantics() {
 /// parked and unclaimed waiters answers `want` under every arithmetic this file
 /// is about.
 fn wait_until_parked(word: &AtomicU32, want: u64) {
-    for _ in 0..200 {
-        if unsafe { syscall::futex_wake(word.as_ptr(), 10) } == want {
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("{want} waiters never parked on the word");
+    wait_until_parked_raw(word.as_ptr(), want);
+}
+
+/// Until `armed` reads `want` and the roster shows `want` of this process's
+/// threads blocked, with no deadline. Each waiter counts itself into `armed`
+/// with nothing but its `futex_wait` after, and they are the only threads of
+/// this process that block, so a blocked one is blocked there.
+fn await_armed_and_blocked(cap: &SysCap, armed: &AtomicU32, want: u32) {
+    roster::await_true(|| {
+        armed.load(Ordering::SeqCst) == want
+            && roster::my_threads(cap)
+                .iter()
+                .filter(|&&(is_thread, state)| is_thread && state == roster::BLOCKED)
+                .count()
+                == want as usize
+    });
 }
 
 /// One never-yielding thread per CPU, so the kernel has no sleeping target to
@@ -366,8 +396,6 @@ fn stop_spinners(spinners: Vec<thread::JoinHandle<()>>) {
     }
 }
 
-static ORPHAN_RETURNED: AtomicU32 = AtomicU32::new(0);
-
 /// A wait whose word is unmapped ends there, and the frame carries no claim
 /// away with it.
 ///
@@ -379,7 +407,7 @@ static ORPHAN_RETURNED: AtomicU32 = AtomicU32::new(0);
 /// stale nodes either has one of them stolen by the sweeper — a wake reported
 /// to a process with nothing parked — or, if no frame came back its way, leaves
 /// every waiter here parked on memory that is gone.
-fn orphaned_by_unmap() {
+fn orphaned_by_unmap(cap: &SysCap) {
     let mut sweeper = Command::new(SELF)
         .arg(SWEEP)
         .stdin(Stdio::piped())
@@ -409,15 +437,14 @@ fn orphaned_by_unmap() {
         .iter()
         .map(|&addr| {
             thread::spawn(move || {
+                ORPHANS_ARMED.fetch_add(1, Ordering::SeqCst);
                 unsafe { syscall::futex_wait(addr as *const u32, 0, None) };
-                ORPHAN_RETURNED.fetch_add(1, Ordering::SeqCst);
             })
         })
         .collect();
-    for &addr in &regions {
-        wait_until_parked_raw(addr as *const u32, 1);
-    }
-    thread::sleep(SETTLE);
+    // By the roster and not by a probe: a waiter a probe woke is still on its
+    // way back to its word when the unmap below looks for it.
+    await_armed_and_blocked(cap, &ORPHANS_ARMED, STALE_FRAMES as u32);
 
     // The unmap. Every frame behind these regions goes back to the PMM here,
     // and `mmap` hands the lowest free one to the next asker.
@@ -435,19 +462,9 @@ fn orphaned_by_unmap() {
         status.code().unwrap_or(-1),
     );
 
-    for _ in 0..100 {
-        if ORPHAN_RETURNED.load(Ordering::SeqCst) as usize == STALE_FRAMES {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let home = ORPHAN_RETURNED.load(Ordering::SeqCst) as usize;
-    assert_eq!(
-        home, STALE_FRAMES,
-        "{home} of {STALE_FRAMES} waiters came back after the word each was parked on was \
-         unmapped — nothing can ever post to a frame that has gone back to the PMM, so a wait \
-         an unmap orphans is a wait nothing will end",
-    );
+    // No deadline: nothing can ever post to a frame that has gone back to the
+    // PMM, so a wait an unmap orphans and does not end is a hang the harness
+    // ceiling reds.
     for waiter in waiters {
         waiter.join().expect("an orphaned waiter panicked");
     }
@@ -456,16 +473,12 @@ fn orphaned_by_unmap() {
 
 /// [`wait_until_parked`] for a word that is not a `static`.
 fn wait_until_parked_raw(word: *const u32, want: u64) {
-    for _ in 0..200 {
-        if unsafe { syscall::futex_wake(word, 10) } == want {
-            return;
-        }
+    // A pace, and never a verdict: the probe's wake re-parks the waiters it
+    // finds, so each look waits for them to be back.
+    while unsafe { syscall::futex_wake(word, 10) } != want {
         thread::sleep(Duration::from_millis(10));
     }
-    panic!("{want} waiters never parked on a mapped word");
 }
-
-static REVOKED_RETURNED: AtomicU32 = AtomicU32::new(0);
 
 /// A wait a revoke ended stays ended while its word still reads `expected`.
 ///
@@ -482,11 +495,7 @@ fn revoked_while_still_mapped() {
     let word = window.wrapping_add(4096) as usize;
     let expected = unsafe { (word as *const u32).read_volatile() };
 
-    let waiter = thread::spawn(move || {
-        let answer = unsafe { syscall::futex_wait(word as *const u32, expected, None) };
-        REVOKED_RETURNED.store(1, Ordering::SeqCst);
-        answer
-    });
+    let waiter = thread::spawn(move || unsafe { syscall::futex_wait(word as *const u32, expected, None) });
     // A wake to an unchanged word re-parks inside the call, so the
     // registration the revoke must find is still there.
     wait_until_parked_raw(word as *const u32, 1);
@@ -506,18 +515,9 @@ fn revoked_while_still_mapped() {
         out.status.code(),
     );
 
-    for _ in 0..500 {
-        if REVOKED_RETURNED.load(Ordering::SeqCst) == 1 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(
-        REVOKED_RETURNED.load(Ordering::SeqCst),
-        1,
-        "a waiter whose registration a revoke ended is still in futex_wait 5 s after it, \
-         its word still mapped and still {expected:#x}: nothing can ever post to that wait",
-    );
+    // No deadline: a waiter whose registration the revoke ended and that goes
+    // round its phase 1 for ever, its word still mapped and unchanged, is a
+    // hang the harness ceiling reds.
     waiter.join().expect("the revoked waiter panicked");
     syscall::close(ends.read);
     syscall::close(ends.write);

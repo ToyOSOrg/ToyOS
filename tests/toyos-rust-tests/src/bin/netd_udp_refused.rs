@@ -31,9 +31,6 @@
 #[path = "../netd_stream.rs"]
 mod netd_stream;
 
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
-
 use netd_stream::{fill, HOST};
 use toyos::ipc::{FrameRx, RxStep};
 use toyos::net::{
@@ -53,10 +50,6 @@ const ROOM: usize = 100;
 
 /// Bytes in each datagram: more than [`ROOM`], less than one Ethernet frame.
 const DATAGRAM: usize = 1000;
-
-/// How long netd may take to answer a receive. A bound, said by name; not a
-/// pace.
-const WITHIN: Duration = Duration::from_secs(20);
 
 fn main() {
     let echo: u16 = std::env::args()
@@ -153,7 +146,7 @@ fn send(socket: UdpSocketId, tx: &Pipe, echo: u16, byte: u8) {
 }
 
 /// The sockets netd's stack holds that no table entry names, as its own
-/// `inspect` answers, within [`WITHIN`]. Every program's sockets are in the
+/// `inspect` answers, waited for with no deadline. Every program's sockets are in the
 /// table and the resolver's are left out, so only netd's own and one that
 /// outlived its entry move it.
 fn untabled() -> u64 {
@@ -161,7 +154,6 @@ fn untabled() -> u64 {
     conn.signal(MSG_INSPECT).expect("netd takes an inspect request");
     let poller = Poller::new(1);
     let mut rx: Box<FrameRx<MAX_SNAPSHOT_BYTES>> = Box::new(FrameRx::new());
-    let deadline = Instant::now() + WITHIN;
     loop {
         match rx.pump(&conn) {
             RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len } => {
@@ -175,19 +167,13 @@ fn untabled() -> u64 {
             RxStep::Idle => {}
             other => panic!("netd answered inspect with {other:?}, not a snapshot"),
         }
-        let left = deadline.saturating_duration_since(Instant::now());
-        assert!(!left.is_zero(), "netd did not answer inspect within {WITHIN:?}");
         poller.watch(&conn, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+        poller.wait(1, u64::MAX, |_| {});
     }
 }
 
-/// Ask netd for `socket`'s next datagram, and panic by name if no answer
-/// comes within [`WITHIN`].
+/// Ask netd for `socket`'s next datagram, with no deadline: an answer that
+/// never comes is a hang the harness ceiling reds.
 fn recv(socket: UdpSocketId) -> Result<UdpRecvResponse, NetError> {
-    let (answered, answer) = mpsc::channel();
-    std::thread::spawn(move || answered.send(udp_recv_from(socket, DATAGRAM as u32)));
-    answer
-        .recv_timeout(WITHIN)
-        .unwrap_or_else(|_| panic!("netd did not answer a receive on socket {} within {WITHIN:?}", socket.0))
+    udp_recv_from(socket, DATAGRAM as u32)
 }
