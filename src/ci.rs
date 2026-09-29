@@ -3,12 +3,11 @@
 //! verdict.
 //!
 //! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
-//! the merge queue and boots no guest: [`Job::Host`] and then
-//! [`Job::GateStage`] run as `host`. Every test that boots no guest is in
-//! [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
-//! everything that boots a guest, `host` again to write the cache the merge
-//! queue restores, and portability. `publish.yml` puts a landing's crates on
-//! crates.io.
+//! the merge queue and boots no guest: [`Job::Host`] runs as `host`. Every
+//! test that boots no guest is in [`Job::Host`], so a merge is gated on all of
+//! them. `nightly.yml` runs everything that boots a guest, `host` again to
+//! write the cache the merge queue restores, and portability. `publish.yml`
+//! puts a landing's crates on crates.io.
 //!
 //! A host job runs every step and reds if any failed; a guest job stops at the
 //! first failure among the instrument, the toolchain and the suite, because
@@ -32,14 +31,6 @@ use std::process::Command;
 use crate::arch::Arch;
 use crate::{flags, release, sdkversion, sync, testargs};
 
-/// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
-/// a minimum, never an equality, so a name GitHub requires and this does not
-/// is reported rather than refused.
-pub(crate) const REQUIRED_CHECKS: &[&str] = &["host"];
-
-/// The one issue a red nightly files or comments on, found by title.
-const NIGHTLY_RED: &str = "nightly is red";
-
 /// `nightly.yml`'s two schedules: the nightly reach six nights a week, the weekly
 /// reach on the seventh.
 const NIGHTLY_CRON: &str = "0 3 * * 1-6";
@@ -49,21 +40,17 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the host workspace, the licences of what ships, clippy, the
                     model controls, userland and the SDK (ci.yml, nightly)
-  gate-stage        what protects main, read back from GitHub (ci.yml)
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest <i>/<n>     one shard of the guest suite at the reach its schedule names (nightly)
   tcg               one test on an emulated CPU (nightly)
-  nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Host,
-    GateStage,
     Toolchain,
     Guest(String),
     Tcg,
-    NightlyRed,
     Publish,
 }
 
@@ -75,11 +62,9 @@ fn parse(words: &[String]) -> Result<Job, String> {
     };
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
-        Some("gate-stage") => Job::GateStage,
         Some("toolchain") => Job::Toolchain,
         Some("guest") => Job::Guest(shard(words.get(1))?),
         Some("tcg") => Job::Tcg,
-        Some("nightly-red") => Job::NightlyRed,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
         None => return Err("which job?".to_string()),
@@ -98,14 +83,12 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     let steps = match &job {
         Job::Host => host(root),
-        Job::GateStage => vec![step("what protects main", || gate_stage(root))],
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest(shard) => match guest_reach() {
             Ok(reach) => guest(root, &suite_args(&["--shard", shard, "--jobs", "1", reach])),
             Err(refusal) => vec![step("the reach", || Err(refusal))],
         },
         Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
-        Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
@@ -562,74 +545,6 @@ fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf]) -> Result<String, S
     Err(said.join("; "))
 }
 
-/// What protects `main` is configured outside the repository, so it is read
-/// back: every [`REQUIRED_CHECKS`] name required, deletion and force-push
-/// refused, and merge the only method.
-fn gate_stage(root: &Path) -> Result<String, String> {
-    let out = Command::new("gh")
-        .args(["api", "repos/{owner}/{repo}/rules/branches/main"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("gh: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("gh api: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let rules: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("GitHub's rules: {e}"))?;
-    let (bad, said) = protection(&rules);
-    summary(&format!("### what protects main\n\n{}", said.join("\n")));
-    println!("{}", said.join("\n"));
-    if bad.is_empty() {
-        Ok("main is protected".into())
-    } else {
-        Err(bad.join("; "))
-    }
-}
-
-/// The refusals and the report, from `rules/branches/main`'s JSON.
-fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
-    let all = rules.as_array().map(Vec::as_slice).unwrap_or_default();
-    let of = |kind: &'static str| all.iter().filter(move |r| r["type"] == kind);
-    let types: Vec<&str> = all.iter().filter_map(|r| r["type"].as_str()).collect();
-    let live: Vec<&str> = of("required_status_checks")
-        .flat_map(|r| r["parameters"]["required_status_checks"].as_array().into_iter().flatten())
-        .filter_map(|c| c["context"].as_str())
-        .collect();
-    let mut methods: Vec<&str> = of("pull_request")
-        .flat_map(|r| r["parameters"]["allowed_merge_methods"].as_array().into_iter().flatten())
-        .filter_map(|m| m.as_str())
-        .collect();
-    methods.sort_unstable();
-
-    let mut bad = Vec::new();
-    for want in REQUIRED_CHECKS {
-        if !live.contains(want) {
-            bad.push(format!("main does not require the check `{want}`"));
-        }
-    }
-    for want in ["deletion", "non_fast_forward", "pull_request", "required_status_checks"] {
-        if !types.contains(&want) {
-            bad.push(format!("main has no `{want}` rule"));
-        }
-    }
-    if methods != ["merge"] {
-        bad.push(format!("main allows merge methods {methods:?}, not merge alone"));
-    }
-    let mut said = vec![
-        format!("- rules: `{}`", types.join(" ")),
-        format!("- required checks: `{}`", live.join(" ")),
-        format!(
-            "- merge queue: `{}`, merge methods: `{}`",
-            types.contains(&"merge_queue"),
-            methods.join(",")
-        ),
-    ];
-    for extra in live.iter().filter(|c| !REQUIRED_CHECKS.contains(c)) {
-        said.push(format!("- `{extra}` is required at GitHub and not named in src/ci.rs"));
-    }
-    (bad, said)
-}
-
 // --- The guest jobs ------------------------------------------------------------
 
 /// The reach flag of the run that started this job: the weekly one on the weekly
@@ -818,68 +733,7 @@ pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     })
 }
 
-// --- The nightly's alarm and the publisher -------------------------------------
-
-/// The jobs `$NEEDS` (`toJSON(needs)`) says did not succeed, as `name(result)`.
-fn failed_jobs(needs: &serde_json::Value) -> Vec<String> {
-    let Some(jobs) = needs.as_object() else {
-        return vec!["NEEDS is not an object".into()];
-    };
-    jobs.iter()
-        .filter_map(|(name, job)| {
-            let result = job["result"].as_str().unwrap_or("unknown");
-            (result != "success").then(|| format!("{name}({result})"))
-        })
-        .collect()
-}
-
-/// One standing issue for a red nightly, found by title and commented on
-/// rather than filed twice. Every red is adjudicated into a fix, a
-/// `src/redlist.rs` row or a tier move; the issue is the alarm, not the record.
-fn nightly_red() -> Result<String, String> {
-    let needs = std::env::var("NEEDS").map_err(|_| "NEEDS carries no job results".to_string())?;
-    let needs: serde_json::Value =
-        serde_json::from_str(&needs).map_err(|e| format!("NEEDS is not JSON: {e}"))?;
-    let failed = failed_jobs(&needs);
-    if failed.is_empty() {
-        return Ok("every job was green".into());
-    }
-    let var = |k: &str| std::env::var(k).unwrap_or_default();
-    let body = format!(
-        "Run: {}/{}/actions/runs/{}\nFailed jobs: {}",
-        var("GITHUB_SERVER_URL"),
-        var("GITHUB_REPOSITORY"),
-        var("GITHUB_RUN_ID"),
-        failed.join(" ")
-    );
-    let found = Command::new("gh")
-        .args(["issue", "list", "--state", "open", "--limit", "30", "--json", "number,title"])
-        .args(["--search", &format!("in:title \"{NIGHTLY_RED}\"")])
-        .output()
-        .map_err(|e| format!("gh: {e}"))?;
-    if !found.status.success() {
-        // An unanswered search read as "none open" would file a duplicate.
-        return Err(format!("gh issue list: {}", String::from_utf8_lossy(&found.stderr).trim()));
-    }
-    let open: serde_json::Value =
-        serde_json::from_slice(&found.stdout).map_err(|e| format!("gh issue list: {e}"))?;
-    let number = open
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|i| i["title"] == NIGHTLY_RED)
-        .and_then(|i| i["number"].as_u64());
-    let mut gh = Command::new("gh");
-    match number {
-        Some(n) => gh.args(["issue", "comment", &n.to_string(), "--body", &body]),
-        None => gh.args(["issue", "create", "--title", NIGHTLY_RED, "--body", &body]),
-    };
-    let status = gh.status().map_err(|e| format!("gh: {e}"))?;
-    if !status.success() {
-        return Err(format!("gh exited {status}"));
-    }
-    Ok(format!("reported {}", failed.join(" ")))
-}
+// --- The publisher -------------------------------------------------------------
 
 /// Each SDK crate, under the version [`sdkversion::plan`] assigns it, in
 /// dependency order, waiting for each to be readable before the next resolves
@@ -1059,41 +913,6 @@ mod tests {
         assert!(judge_control(catches, true, "").is_err());
     }
 
-    /// The rules as `gh api repos/ToyOSOrg/ToyOS/rules/branches/main` answered,
-    /// and the same with the protections this reads taken away.
-    #[test]
-    fn protection_is_read_back_and_a_loosened_rule_is_refused() {
-        let live = r#"[{"type":"deletion"},{"type":"non_fast_forward"},
-            {"type":"pull_request","parameters":{"allowed_merge_methods":["merge"]}},
-            {"type":"required_status_checks","parameters":{"required_status_checks":[
-              {"context":"host"},{"context":"abi-split"},{"context":"gate-stage"},
-              {"context":"guest-suite"},{"context":"build"}]}},
-            {"type":"merge_queue","parameters":{}}]"#;
-        let (bad, said) = protection(&serde_json::from_str(live).unwrap());
-        assert!(bad.is_empty(), "{bad:?}");
-        assert!(said.iter().any(|l| l.contains("`guest-suite` is required at GitHub")), "{said:?}");
-
-        let loose = r#"[{"type":"pull_request","parameters":{"allowed_merge_methods":["merge","squash"]}},
-            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]"#;
-        let (bad, _) = protection(&serde_json::from_str(loose).unwrap());
-        assert!(bad.iter().any(|b| b.contains("does not require the check `host`")), "{bad:?}");
-        assert!(bad.iter().any(|b| b.contains("no `deletion` rule")), "{bad:?}");
-        assert!(bad.iter().any(|b| b.contains("merge methods")), "{bad:?}");
-        let (bad, _) = protection(&serde_json::json!({"message": "Not Found"}));
-        assert!(!bad.is_empty());
-    }
-
-    #[test]
-    fn the_nightly_names_every_job_that_did_not_succeed() {
-        let needs = serde_json::json!({
-            "host": {"result": "success", "outputs": {}},
-            "guest": {"result": "failure", "outputs": {}},
-            "tcg": {"result": "skipped", "outputs": {}},
-        });
-        assert_eq!(failed_jobs(&needs), ["guest(failure)", "tcg(skipped)"]);
-        assert!(failed_jobs(&serde_json::json!({"host": {"result": "success"}})).is_empty());
-    }
-
     #[test]
     fn the_summary_keeps_the_count_and_the_verdicts() {
         let log = "test result: ok. 3 passed\n\
@@ -1116,17 +935,12 @@ mod tests {
         assert!(at_tip("", tip).is_err());
     }
 
-    /// Every name `gate-stage` holds the ruleset to is a job `ci.yml` runs on a
-    /// pull request and in the merge queue, so a required check always has
-    /// something reporting it.
     #[test]
-    fn every_required_check_is_a_job_on_every_pull_request() {
+    fn the_required_check_is_a_job_on_every_pull_request() {
         let text = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
             .expect("ci.yml is readable");
         assert!(text.contains("\n  pull_request:\n") && text.contains("\n  merge_group:"));
-        for name in REQUIRED_CHECKS {
-            assert!(text.contains(&format!("\n  {name}:")), "ci.yml runs no job `{name}`");
-        }
+        assert!(text.contains("\n  host:"), "ci.yml runs no job `host`");
     }
 
     /// Every workflow's `pull_request:` trigger names `main` alone, and none

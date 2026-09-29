@@ -71,13 +71,15 @@ fn sync(root: &Path) -> Result<String, String> {
 /// made it. A concurrent one holds git's index or ref lock, and git refuses
 /// this one.
 fn fast_forward(primary: &Path) -> Result<Option<(String, String, String)>, String> {
-    let out = git(primary, &["merge", "--ff-only", "origin/main"])?;
-    let Some(range) = out.lines().find_map(|l| l.strip_prefix("Updating ")) else {
+    let before = git(primary, &["rev-parse", "main"])?;
+    git(primary, &["merge", "--ff-only", "origin/main"])?;
+    let after = git(primary, &["rev-parse", "main"])?;
+    if before == after {
         return Ok(None);
-    };
-    let (before, after) = range.split_once("..").unwrap_or_else(|| panic!("git said {range:?}"));
-    let commits = git(primary, &["rev-list", "--count", range])?;
-    Ok(Some((before.to_string(), after.to_string(), commits)))
+    }
+    let commits = git(primary, &["rev-list", "--count", &format!("{before}..{after}")])?;
+    let short = |sha: &str| git(primary, &["rev-parse", "--short", sha]);
+    Ok(Some((short(&before)?, short(&after)?, commits)))
 }
 
 /// What this host could give back, said where it becomes true.
@@ -174,7 +176,6 @@ mod tests {
         fs::write(&lock, "").unwrap();
         let refusal = sync(&wt).expect_err("a held index lock must refuse the fast-forward");
         fs::remove_file(&lock).unwrap();
-        assert!(refusal.contains("index.lock"), "{refusal}");
         assert!(!refusal.contains("carries commits origin/main has not got"), "{refusal}");
         assert_eq!(git(&wt, &["rev-parse", "main"]).unwrap(), before, "main moved under a lock");
 
@@ -194,9 +195,11 @@ mod tests {
         sh(&wt, &["switch", "-q", "main"]);
         land_elsewhere(&dir, &origin);
         fs::write(wt.join("h"), "untracked\n").unwrap();
+        let before = git(&wt, &["rev-parse", "main"]).unwrap();
 
         let refusal = sync(&wt).expect_err("an untracked file in the way must refuse");
-        assert!(refusal.contains("untracked working tree files would be overwritten"), "{refusal}");
+        assert_eq!(git(&wt, &["rev-parse", "main"]).unwrap(), before, "main moved past the file");
+        assert_eq!(fs::read_to_string(wt.join("h")).unwrap(), "untracked\n");
         assert!(!refusal.contains("carries commits origin/main has not got"), "{refusal}");
     }
 

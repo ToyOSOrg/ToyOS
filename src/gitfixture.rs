@@ -5,10 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use toyos_tmpdir::TempDir;
 
-/// A bare "origin" with a `main`, and a clone of it on a branch. Every
-/// repository is [`configure`]d. `sdkversion`'s
-/// tests stage in it too. All of it is in the directory that comes first,
-/// which is the caller's to hold.
 pub(crate) fn repo(name: &str) -> (TempDir, PathBuf, PathBuf) {
     let dir = TempDir::new(&format!("repo-{name}"));
     let origin = dir.join("origin.git");
