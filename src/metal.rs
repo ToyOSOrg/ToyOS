@@ -2106,11 +2106,27 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         }
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
+    // **Judged before the readback is written, and written into it**, so a
+    // judge reading the directory later reads the verdict this run returns.
+    let verdict = boot_verdict(&armed, &loader, &log).and_then(|ms| {
+        // After the stick's own verdict, which stays the one that names a boot
+        // that never reached its network.
+        if let Some((heard, lines)) = &heard {
+            talk_verdict(heard, lines)?;
+        }
+        Ok(ms)
+    });
     if let Some(dir) = &args.readback {
         let boot = boot_file(back, stick, &machine, wire.as_ref(), replied);
-        write_readback(dir, &loader, &log, &boot)?;
+        write_readback(dir, &loader, &log, &boot, &verdict_file(verdict.as_ref().err()))?;
         println!("readback written to {}", dir.display());
     }
+    verdict.map(Some)
+}
+
+/// The stick's own verdict on one boot, off what its image is armed with, the
+/// loader's file and the log.
+fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusal> {
     // **Named by evidence, before the boot record is missed.** A boot that
     // never happened and a boot that failed both leave no `Boot: complete`,
     // and `Unfit::NoBootRecord` says the second where it is often the first.
@@ -2124,7 +2140,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) {
         return Err(Refusal::HungWithoutARecord);
     }
-    if let Some(said) = reported_and_booted_nothing(&loader, &log) {
+    if let Some(said) = reported_and_booted_nothing(loader, log) {
         return Err(Refusal::ReportedAndBootedNothing { said });
     }
     // **An image armed to stop itself is judged by the record its own bound
@@ -2134,19 +2150,12 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // it was not flashed as. *Which* bound sealed it is the page's to say
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
-    let ms = if stages_a_wedge(&armed) {
-        wedged_boot(&loader, &log)?
-    } else {
-        let ms = bootlog::verdict(&log).map_err(Refusal::Log)?;
-        bootlog::handed_back(&loader).map_err(Refusal::Log)?;
-        ms
-    };
-    // After the stick's own verdict, which stays the one that names a boot
-    // that never reached its network.
-    if let Some((heard, lines)) = &heard {
-        talk_verdict(heard, lines)?;
+    if stages_a_wedge(armed) {
+        return wedged_boot(loader, log);
     }
-    Ok(Some(ms))
+    let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
+    bootlog::handed_back(loader).map_err(Refusal::Log)?;
+    Ok(ms)
 }
 
 /// Where a conversation's facts are written, beside the stick's files.
@@ -2228,18 +2237,35 @@ fn sealed_by(loader: &str) -> Option<&str> {
 }
 
 /// The lateness of a deadline that expired, in milliseconds past the bound it
-/// was armed with, out of the line the pass after the reset printed.
+/// was armed with, out of the line the pass after the reset printed; `None` on
+/// a boot whose deadline did not expire.
 ///
-/// **The one number this arm measures.** The bound is a parameter and the
-/// expiry is what the poll actually reached, so the difference is what the
-/// timer entry costs a wedged machine — and it is the number a slower poll
-/// would move.
-pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
+/// **Counted from the kernel's own record of arming it** (`log`): the bound
+/// runs from the arm and the expiry is quoted since boot, so the difference
+/// alone is the boot's first tens of milliseconds and not the poll's lateness.
+/// Signed, because both instants are floored milliseconds: an expiry at its
+/// bound can read one early, and one before it is a reading, not an absence.
+pub fn deadline_lateness_ms(loader: &str, log: &str) -> Option<Result<i64, String>> {
     let said = loader.lines().find(|l| l.contains(bootlog::DEADLINE_EXPIRED))?;
-    let (_, rest) = said.split_once("a bound of ")?;
-    let (bound, rest) = rest.split_once(" ms, reached at ")?;
-    let (reached, _) = rest.split_once(" ms,")?;
-    reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
+    let fields = || {
+        let (_, rest) = said.split_once("a bound of ")?;
+        let (bound, rest) = rest.split_once(" ms, reached at ")?;
+        let (reached, _) = rest.split_once(" ms,")?;
+        Some((bound.parse::<i64>().ok()?, reached.parse::<i64>().ok()?))
+    };
+    let armed = || {
+        let line = log.lines().find(|line| line.contains(bootlog::DEADLINE_ARMED))?;
+        i64::try_from(bootlog::record_millis(line)?).ok()
+    };
+    Some(match (fields(), armed()) {
+        (Some((bound, reached)), Some(armed)) => Ok(reached - armed - bound),
+        (None, _) => Err(format!("{said:?} is not the expiry the kernel writes")),
+        (_, None) => Err(format!(
+            "the deadline expired and this boot's log carries no {:?} record to count its bound \
+             from",
+            bootlog::DEADLINE_ARMED
+        )),
+    })
 }
 
 /// What the kernel's stop wrote about itself in `text`: the loader's pass after
@@ -2258,13 +2284,16 @@ pub fn park(text: &str) -> Option<toyos_quiesce::Record> {
 /// bounds it is a different thing: this one lands within one of that detector's
 /// sample periods rather than within one timer period, so a ceiling written for
 /// the poll would say nothing about the counter.
-pub fn lockup_lateness_ms(loader: &str) -> Option<u64> {
+pub fn lockup_lateness_ms(loader: &str) -> Option<Result<i64, String>> {
     let said = loader.lines().find(|l| l.contains(bootlog::LOCKED_UP))?;
-    let (_, rest) = said.split_once("has taken no interrupt for ")?;
-    let (reached, rest) = rest.split_once(" ms,")?;
-    let (_, rest) = rest.split_once("Its bound is ")?;
-    let (bound, _) = rest.split_once(" ms")?;
-    reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
+    let fields = || {
+        let (_, rest) = said.split_once("has taken no interrupt for ")?;
+        let (reached, rest) = rest.split_once(" ms,")?;
+        let (_, rest) = rest.split_once("Its bound is ")?;
+        let (bound, _) = rest.split_once(" ms")?;
+        Some(reached.parse::<i64>().ok()? - bound.parse::<i64>().ok()?)
+    };
+    Some(fields().ok_or_else(|| format!("{said:?} is not the lockup record the kernel writes")))
 }
 
 /// What the two files and this boot's own facts are called under `--readback`.
@@ -2276,6 +2305,35 @@ pub fn lockup_lateness_ms(loader: &str) -> Option<u64> {
 pub const READBACK_LOADER: &str = "loader.log";
 pub const READBACK_KERNEL: &str = "kernel.log";
 pub const READBACK_BOOT: &str = "boot.txt";
+
+/// The loop's own verdict on the boot: [`PASSED`], or [`REFUSED`] and the
+/// refusal on the lines after it. Written last, so a directory holding it holds
+/// the whole readback, and read by every judge of it, so a run judging these
+/// files later rules on the boot as the run that wrote them did.
+pub const READBACK_VERDICT: &str = "verdict.txt";
+const PASSED: &str = "passed";
+const REFUSED: &str = "refused";
+
+/// [`READBACK_VERDICT`]'s text.
+pub fn verdict_file(refused: Option<&Refusal>) -> String {
+    match refused {
+        None => format!("{PASSED}\n"),
+        Some(why) => format!("{REFUSED}\n{why}\n"),
+    }
+}
+
+/// The loop's verdict a readback carries: `Err` with the refusal's own words
+/// for a boot it refused, or with why the file says neither.
+pub fn loop_verdict(text: &str) -> Result<(), String> {
+    match text.split_once('\n') {
+        Some((PASSED, "")) => Ok(()),
+        Some((REFUSED, why)) if !why.trim().is_empty() => Err(why.trim_end().to_string()),
+        _ => Err(format!(
+            "{READBACK_VERDICT} reads {text:?}, which is neither {PASSED:?} nor {REFUSED:?} and a \
+             reason"
+        )),
+    }
+}
 
 /// The log partition's own bytes, kept beside them under `--fat32-check`: what
 /// the outside judge read, so a complaint can be looked at rather than retold.
@@ -2306,8 +2364,15 @@ pub const PING_AT_KEY: &str = "ping_at";
 
 /// Every file a readback directory carries, so a run that writes none of them
 /// leaves none of the last run's behind.
-pub const READBACK_FILES: &[&str] =
-    &[READBACK_LOADER, READBACK_KERNEL, READBACK_BOOT, READBACK_VOLUME, READBACK_STREAM, READBACK_TALK];
+pub const READBACK_FILES: &[&str] = &[
+    READBACK_LOADER,
+    READBACK_KERNEL,
+    READBACK_BOOT,
+    READBACK_VERDICT,
+    READBACK_VOLUME,
+    READBACK_STREAM,
+    READBACK_TALK,
+];
 
 /// Empty a readback directory, before this run can leave any of it standing.
 ///
@@ -2334,7 +2399,13 @@ pub fn clear_readback(dir: &Path) -> Result<(), Refusal> {
     Ok(())
 }
 
-fn write_readback(dir: &Path, loader: &str, log: &str, boot: &str) -> Result<(), Refusal> {
+fn write_readback(
+    dir: &Path,
+    loader: &str,
+    log: &str,
+    boot: &str,
+    verdict: &str,
+) -> Result<(), Refusal> {
     let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
         std::fs::write(path, text)
             .map_err(|e| Refusal::File { path: path.display().to_string(), why: e.to_string() })
@@ -2343,7 +2414,8 @@ fn write_readback(dir: &Path, loader: &str, log: &str, boot: &str) -> Result<(),
         .map_err(|e| Refusal::File { path: dir.display().to_string(), why: e.to_string() })?;
     wrote(&dir.join(READBACK_LOADER), loader)?;
     wrote(&dir.join(READBACK_KERNEL), log)?;
-    wrote(&dir.join(READBACK_BOOT), boot)
+    wrote(&dir.join(READBACK_BOOT), boot)?;
+    wrote(&dir.join(READBACK_VERDICT), verdict)
 }
 
 /// [`READBACK_BOOT`]'s text: what the host measured about the boot, and the
@@ -2782,11 +2854,25 @@ mod tests {
 
     #[test]
     fn the_machine_crosses_in_the_boot_file() {
-        let t14 = Machine::parse("LENOVO\n20W000T9GE\nN34ET56W (1.56 )\n").expect("three lines");
+        let t14 = Machine::parse("LENOVO\n20W0003AMZ\nN34ET71W (1.71 )\n").expect("three lines");
         let boot = boot_file(47, 0, &t14, None, None);
         assert_eq!(machine(&boot), Ok(t14));
         assert_eq!(back_secs(&boot), Some(47));
         assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
+    }
+
+    /// A judge reading the readback later rules on the boot as the loop did.
+    #[test]
+    fn the_loops_verdict_crosses_in_the_readback() {
+        assert_eq!(loop_verdict(&verdict_file(None)), Ok(()));
+        let refused = Refusal::HungWithoutARecord;
+        assert_eq!(
+            loop_verdict(&verdict_file(Some(&refused))),
+            Err(refused.to_string().trim_end().to_string())
+        );
+        for unread in ["", "passed", "passed\nand more\n", "refused\n", "refused\n  \n", "green\n"] {
+            assert!(loop_verdict(unread).is_err(), "{unread:?}");
+        }
     }
 
     /// **A boot the cable did not answer is not a boot that answered in the
@@ -3342,20 +3428,30 @@ mod tests {
         assert_eq!(ok.bytes % u64::from(LBA), 0);
         assert_ne!(ok.esp.guid, toyos_gpt::Guid::ZERO);
     }
-    /// The lateness comes off the line the kernel writes, and a boot that wrote
-    /// none measures nothing rather than zero.
+    /// The lateness comes off the line the kernel writes, counted from the
+    /// record of arming the bound, and a boot that wrote none measures nothing
+    /// rather than zero.
     #[test]
-    fn the_deadlines_lateness_is_read_off_the_record_the_loader_printed() {
+    fn the_deadlines_lateness_is_counted_from_its_arm() {
         let said = format!(
-            "| {}: a bound of 120000 ms, reached at 120153 ms, with this machine in `complete`. \
+            "| {}: a bound of 120000 ms, reached at 120064 ms, with this machine in `complete`. \
              The tail of the log ring follows.\n",
             bootlog::DEADLINE_EXPIRED
         );
-        assert_eq!(deadline_lateness_ms(&said), Some(153));
-        assert_eq!(deadline_lateness_ms("Previous boot's panic: nothing of the kind\n"), None);
-        // A bound the expiry did not reach is not a negative lateness.
-        let early = said.replace("reached at 120153", "reached at 119000");
-        assert_eq!(deadline_lateness_ms(&early), None);
+        let log = format!(
+            "[2026-09-29 18:22:39 0.060 cpu0] {}120000 ms, after which this kernel seals a \
+             WEDGED record and writes the reset register itself\n",
+            bootlog::DEADLINE_ARMED
+        );
+        assert_eq!(deadline_lateness_ms(&said, &log), Some(Ok(4)));
+        assert_eq!(deadline_lateness_ms("Previous boot's panic: nothing of the kind\n", &log), None);
+        // An expiry before its bound is a reading, not an absence.
+        let early = said.replace("reached at 120064", "reached at 119000");
+        assert_eq!(deadline_lateness_ms(&early, &log), Some(Ok(-1060)));
+        // An expiry with no arm to count from, or one not in the kernel's shape.
+        assert!(matches!(deadline_lateness_ms(&said, "nothing armed\n"), Some(Err(_))));
+        let unread = said.replace("reached at", "reached by");
+        assert!(matches!(deadline_lateness_ms(&unread, &log), Some(Err(_))));
     }
 
     /// The one boot judged by its sealed record and not by the shutdown's word:
@@ -3400,16 +3496,18 @@ mod tests {
             bootlog::LOCKED_UP
         );
         assert_eq!(wedged_boot(&locked, booted), Ok(1200));
-        assert_eq!(lockup_lateness_ms(&locked), Some(4));
+        assert_eq!(lockup_lateness_ms(&locked), Some(Ok(4)));
         // Each bound's lateness is read off its own record and off no other.
-        assert_eq!(deadline_lateness_ms(&locked), None);
+        assert_eq!(deadline_lateness_ms(&locked, booted), None);
         let expired = format!(
             "| {}: a bound of 120000 ms, reached at 120153 ms, with this machine in `complete`.\n",
             bootlog::DEADLINE_EXPIRED
         );
         assert_eq!(lockup_lateness_ms(&expired), None);
-        // A sample that landed before the bound is not a negative lateness.
+        // A sample that landed before the bound is a reading, not an absence.
         let early = locked.replace("for 60004 ms", "for 59000 ms");
-        assert_eq!(lockup_lateness_ms(&early), None);
+        assert_eq!(lockup_lateness_ms(&early), Some(Ok(-1000)));
+        let unread = locked.replace("Its bound is", "Its bound was");
+        assert!(matches!(lockup_lateness_ms(&unread), Some(Err(_))));
     }
 }

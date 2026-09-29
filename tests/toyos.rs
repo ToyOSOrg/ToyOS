@@ -1829,9 +1829,8 @@ const METAL: &[(&str, metal::Metal)] = &[
             // has.
             judge: |b| {
                 let (p50, p99) = tlb_shootdown_cost(b[0].kernel().text(), b[0].cpus()?)?;
-                b[0].measured("tlb.latencycase.p50_ns", p50);
-                b[0].measured("tlb.latencycase.p99_ns", p99);
-                Ok(())
+                b[0].measured("tlb.latencycase.p50_ns", p50)?;
+                b[0].measured("tlb.latencycase.p99_ns", p99)
             },
         },
     ),
@@ -1879,8 +1878,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         // One boot: a machine writing to the stick continuously, reset out from
         // under itself by the deadline with the controller mid-transfer, and
         // the stick enumerable on the next host afterwards.
-        // `boot.usbload.stick_secs` is that, refused by the loop before this
-        // judge runs.
         "usb_reset_records_the_phase_it_cut",
         metal::Metal::Runs {
             arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],
@@ -2270,7 +2267,7 @@ fn shared_metal(
             config: "tests/testcases",
             params: &[],
             features: &[],
-            members: 38,
+            members: const { std::num::NonZeroUsize::new(38).expect("a chunk holds a member") },
             jobs: shipping
                 .iter()
                 .filter(|n| keep(n))
@@ -2289,7 +2286,7 @@ fn shared_metal(
             config: "tests/testcases",
             params: &[],
             features: toyos_build::build::TEST_KERNEL,
-            members: 18,
+            members: const { std::num::NonZeroUsize::new(18).expect("a chunk holds a member") },
             jobs: debug.iter().filter(|n| keep(n)).map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
             links: Vec::new(),
@@ -2409,7 +2406,7 @@ fn c_corpus_metal(
         config: "tests/testcases",
         params: &[],
         features: &[],
-        members: 90,
+        members: const { std::num::NonZeroUsize::new(90).expect("a chunk holds a member") },
         jobs,
         files,
         links,
@@ -15470,9 +15467,6 @@ fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(u64, u64), String> {
     Ok((p50, p99))
 }
 
-/// `latency_wake` on a machine with no console: the p99, off the kernel's own
-/// exit record.
-///
 /// A negative code is `cyclictest`'s refusal and not a fast machine — the sign
 /// is the whole of what separates the two, and that contract is in the binary's
 /// own module header.
@@ -15480,16 +15474,11 @@ fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
     let code = boot.exit_code("test_rs_cyclictest")?;
     if code < 0 {
         return Err(format!(
-            "cyclictest exited {code}, which is a refusal and not a measurement: -1 is no \
-             capability endowed, -2 is the real-time band refused"
+            "cyclictest exited {code}, which is a refusal and not a measurement; its own last \
+             line in the boot's log says which"
         ));
     }
-    // cyclictest's `BUCKETS`: a p99 there is a floor and not a measurement.
-    if code >= 4096 {
-        return Err(format!("cyclictest's p99 is {code} us, past its histogram"));
-    }
-    boot.measured("latency.p99_us", u64::try_from(code).expect("a non-negative code"));
-    Ok(())
+    boot.measured("latency.p99_us", u64::try_from(code).expect("a non-negative code"))
 }
 
 /// The negative control, executed: an AP left holding what `INIT` gave it, and

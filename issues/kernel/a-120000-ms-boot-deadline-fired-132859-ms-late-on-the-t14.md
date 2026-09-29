@@ -142,5 +142,4 @@ is owed; a cause is.
   than the poll's one call site.
 
 **Exit condition**: the cause of a `poll` that ran 132859 ms past its bound is
-named with evidence and either removed or priced, so that a T14 expiry's
-lateness is held to the row that already exists.
+named with evidence and either removed or priced.

@@ -145,10 +145,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     }
 
     match link_up_ms(&netd) {
-        Ok(ms) => {
-            eprintln!("  [lan] the link came up {ms} ms after the driver did");
-            back.measured(&format!("lan.{}.link_up_ms", back.label), ms);
-        }
+        Ok(ms) => eprintln!("  [lan] the link came up {ms} ms after the driver did"),
         Err(why) => bad.push(why),
     }
 
@@ -158,7 +155,6 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
                 "  [lan] leased {}/{} from {} in {} ms, gateway {}, dns {:?}",
                 lease.address, lease.prefix, lease.server, lease.ms, lease.gateway, lease.dns
             );
-            back.measured(&format!("lan.{}.lease_ms", back.label), lease.ms);
             if lease.address != cable.addr {
                 bad.push(format!(
                     "this boot leased {} and the host pinged {}, which the router hands this \
@@ -177,10 +173,9 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
                 "  [lan] {} answered the host's ping {} s into the window",
                 cable.addr, reply.secs
             );
-            match bootlog::host_second_inside_this_boot(log.text(), cable.skew, LEASE, reply.at) {
-                Ok(()) => back.measured(&format!("boot.{}.ping_secs", back.label), reply.secs),
-                Err(why) => bad.push(why),
-            }
+            bad.extend(
+                bootlog::host_second_inside_this_boot(log.text(), cable.skew, LEASE, reply.at).err(),
+            );
         }
         None => bad.push(format!(
             "nothing answered a ping at {} while this machine was between its two operating \

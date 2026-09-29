@@ -41,7 +41,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         match measurement(job, code) {
             Err(why) => bad.push(why),
             Ok(span) => {
-                back.measured(&format!("{job}.{}.span_us", back.label), span);
+                bad.extend(back.measured(&format!("{job}.{}.span_us", back.label), span).err());
             }
         }
     }
