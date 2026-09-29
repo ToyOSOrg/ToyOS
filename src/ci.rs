@@ -29,10 +29,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::{flags, pr, release, sdkversion};
+use crate::{flags, release, sdkversion, sync};
 
-/// Every guest lane boots x86-64 guests: no hosted runner has been measured
-/// for an aarch64 one.
 pub const GUEST_ARCH: Arch = Arch::X86_64;
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
@@ -708,8 +706,8 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
-    let tip = pr::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
-    at_tip(&tip, &pr::git(root, &["rev-parse", "HEAD"])?)?;
+    let tip = sync::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
+    at_tip(&tip, &sync::git(root, &["rev-parse", "HEAD"])?)?;
     let plan = sdkversion::plan(root)?;
     sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();
