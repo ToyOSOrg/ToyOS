@@ -22,15 +22,16 @@ on the T14, and the hardening table below.
 
 ## Hardening defaults
 
-The track matches every hardening default the pinned Ubuntu config sets, and
-no more. A hardening default is an option the config sets that, under the
-default command line, makes an attack on the kernel or a process harder and
-that no vulnerabilities line reports; access policy (the LSMs, lockdown,
+Parity with the pinned Ubuntu kernel is the floor, and the T14 also gets every
+security feature its CPU and platform support. A hardening default is an
+option the config sets that, under the default command line, makes an attack
+on the kernel or a process harder and that no vulnerabilities line reports; access policy (the LSMs, lockdown,
 `*_RESTRICT`, `STRICT_DEVMEM`) is the capability model's. `CONFIG_SLS` is the
 one entry of
 the `CPU_MITIGATIONS` menu (`arch/x86/Kconfig:2475-2664`) that no line
 reports. Numbers are the config's lines; each row is closed by its stage, its
-defect, the ToyOS mechanism named, or the reason it does not apply.
+defect, the ToyOS mechanism named, or the reason it does not apply. A row the
+config leaves unset names the stage that goes past it.
 
 | Option | Disposition |
 |---|---|
@@ -39,7 +40,9 @@ defect, the ToyOS mechanism named, or the reason it does not apply.
 | `ARCH_MMAP_RND_BITS=32` (909) | S8 |
 | `STACKPROTECTOR_STRONG` (882) | S9 |
 | `SLS` (564) | S5 |
-| `X86_USER_SHADOW_STACK` (502) | `issues/kernel/user-programs-run-without-a-shadow-stack.md` |
+| `X86_USER_SHADOW_STACK` (502) | S11 |
+| `X86_KERNEL_IBT` (496), unset | S12 |
+| `X86_INTEL_MEMORY_PROTECTION_KEYS` (497) | S14 |
 | `RESET_ATTACK_MITIGATION` (2457) | `issues/boot-media/the-loader-never-sets-the-firmwares-memory-overwrite-request.md` |
 | `RANDOMIZE_KSTACK_OFFSET_DEFAULT` (933) | `issues/kernel/every-syscall-runs-at-one-kernel-stack-offset.md` |
 | `ZERO_CALL_USED_REGS` (11477) | `issues/kernel/kernel-functions-return-with-their-used-registers-intact.md` |
@@ -84,7 +87,10 @@ direct map sits at the fixed `PHYS_OFFSET` (`kernel/src/mm/mod.rs`) and the
 kernel image at `PHYS_OFFSET` plus wherever firmware allocated it
 (`bootloader/src/main.rs`): nothing draws either. The kernel target is
 `x86_64-unknown-none` with no stack-protector or `cf-protection` flag
-(`kernel/.cargo/config.toml`).
+(`kernel/.cargo/config.toml`). `CR4.CET`, `CR4.PKE`, `CR4.KL` and
+`CR4.OSXSAVE` are in no declaration (`control_regs.rs`), nothing writes
+`IA32_S_CET`, `IA32_U_CET` or `MSR_MEMORY_CTRL`, and a thread's saved user
+state is `FXSAVE64`'s 512 bytes (`kernel/src/arch/x86_64/fpu.rs`).
 
 ## Stages
 
@@ -96,7 +102,10 @@ nightly's `guest` and `audio` shards run KVM with `-cpu host`
 branches gated on those bits run on whatever CPU the runner has. A QEMU test
 therefore asserts wiring only: what the guest applied equals S1 applied to
 the facts the guest itself reports on a `boot-actuators` line. Independence
-comes from S1's T14 fixture and the T14 run, never from KVM.
+comes from S1's T14 fixture and the T14 run, never from KVM. TCG enumerates
+PKU and none of the bits S11–S13 and S15–S17 read (`TCG_7_0_ECX_FEATURES`,
+`target/i386/cpu.c:992-995`; `TCG_7_0_EDX_FEATURES`, `:1003`), so those run
+on the T14 alone.
 
 - **S0 — Evidence.** On the T14 under its stock Ubuntu boot, as root:
 
@@ -109,6 +118,9 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   grep microcode /proc/cpuinfo
   cpuid -r -l 1; cpuid -r -l 7 -s 0; cpuid -r -l 7 -s 2
   cpuid -r -l 0x80000000; cpuid -r -l 0x80000008; cpuid -r -l 0x80000021
+  cpuid -r -l 5; cpuid -r -l 7 -s 1; cpuid -r -l 0xd -s 0; cpuid -r -l 0xd -s 1
+  cpuid -r -l 0x19; cpuid -r -l 0x80000001
+  dmesg | grep -e 'x86/tme' -e 'x86/split lock detection'
   rdmsr -a 0x10a; rdmsr -a 0x48; rdmsr -a 0x123
   mkdir -p rd/bin rd/sys rd/proc && cp /usr/bin/busybox rd/bin/
   printf '#!/bin/busybox sh\n/bin/busybox mount -t sysfs s /sys\n/bin/busybox mount -t proc p /proc\n/bin/busybox cat /proc/version\n/bin/busybox grep . /sys/devices/system/cpu/vulnerabilities/*\n/bin/busybox poweroff -f\n' > rd/init && chmod +x rd/init
@@ -117,9 +129,11 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
 
   and `rdmsr -a 0x122` where 0x10A bit 7 (TSX_CTRL_MSR) is set, and `rdmsr -a
   0x10f` where CPUID.(7,0):EDX bits 11 and 13 (RTM_ALWAYS_ABORT,
-  TSX_FORCE_ABORT, `arch/x86/include/asm/cpufeatures.h:422-423`) are.
-  `/proc/cpuinfo`'s `microcode` is the revision as Linux reads it
-  (`arch/x86/include/asm/microcode.h:62-75`). On the development host, whose
+  TSX_FORCE_ABORT, `arch/x86/include/asm/cpufeatures.h:422-423`) are,
+  `rdmsr -a 0x982` where CPUID.(7,0):ECX bit 13 (TME, `cpufeatures.h:399`) is,
+  and `rdmsr -a 0xcf` where CPUID.(7,0):EDX bit 30 (CORE_CAPABILITIES,
+  `cpufeatures.h:438`) is. `/proc/cpuinfo`'s `microcode` is the revision as
+  Linux reads it (`arch/x86/include/asm/microcode.h:62-75`). On the development host, whose
   QEMU is the one `.github/qemu-version` pins, `qemu-system-x86_64 --version`
   and then `qemu-system-x86_64 -nodefaults -machine q35 -cpu
   qemu64,+rdrand,+smap,+fsgsbase,+x2apic,+smep -smp 2 -m 4G -kernel
@@ -132,7 +146,8 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   the one above. The capture is one-time: the kernel
   image, `s0.cpio` and busybox are never committed and no build or test boots
   them. **Exit**: the captured text outputs committed as S1's fixtures. Ubuntu
-  is wiped from the T14 only after that commit.
+  is wiped from the T14 only after that commit and P0's of
+  `issues/kernel/toyos-uses-what-the-t14s-hardware-offers-for-speed.md`.
 - **S1 — The decision, a host-tested function.** A pure function, in a crate
   the kernel and a host test both build, maps (vendor, family, model,
   stepping, microcode revision, CPUID.1, CPUID.(7,0), CPUID.(7,2),
@@ -393,6 +408,133 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   them (per-bit false-red probability 1.0e-7, exact binomial tail); a fixed
   base reds it.
 
+S11–S17 go past the config where it stops. Intel places CET and Key Locker in
+Tiger Lake as a family (SDM 325462-093US, Vol. 1 Table 5-2), and TME, CET and
+Key Locker in the 11th-generation family (datasheet 631121-012,
+§2.3.13-2.3.15), never in the i5-1135G7 by name, and names no Tiger Lake part
+for PKU or split-lock disable. So each stage's first step confirms its bit in
+S0's capture, and a bit S0 finds clear closes the stage.
+
+- **S11 — User shadow stacks.** First, CPUID.(7,0):ECX bit 7 (SHSTK,
+  `cpufeatures.h:393`); the datasheet enables either ring's shadow stack on its
+  own (§2.3.14.1). As `CONFIG_X86_USER_SHADOW_STACK` does: `CR4.CET` joins the
+  declaration (it needs `CR0.WP`, SDM Vol. 3A §5.1.3), the kernel maps each
+  thread a shadow stack as it creates the thread (`shstk_alloc_thread_stack`,
+  `arch/x86/kernel/shstk.c:195`) in shadow-stack pages, read-only and dirty in
+  the leaf and writable above it (SDM Vol. 3A §5.6.1), and a thread's
+  `IA32_U_CET` (0x6A0, `SH_STK_EN` bit 0) and `IA32_PL3_SSP` (0x6A7)
+  (`arch/x86/include/asm/msr-index.h:478-480,493`) switch with it as XSAVES's
+  CET_U component (`arch/x86/include/asm/fpu/types.h:120`), so it waits on P1
+  of `issues/kernel/toyos-uses-what-the-t14s-hardware-offers-for-speed.md`.
+  Where Linux lets each process choose (`shstk_prctl`, `shstk.c:548`), every
+  ToyOS program is built with `-Zcf-protection=return`
+  (`rust/compiler/rustc_session/src/options.rs:2377` at the `rust/` commit,
+  1b236638), and on a CPU with shadow stacks the loader refuses an object whose
+  `.note.gnu.property` lacks `GNU_PROPERTY_X86_FEATURE_1_SHSTK`. Two paths
+  leave a frame other than by `RET` and must pop it: std's unwinder,
+  `unwinding` 0.2.10 (`rust/library/Cargo.lock`), whose source has no
+  `incssp`, and libc's `longjmp` (`userland/libc/src/misc.rs`). A shadow stack
+  costs its thread a 2 MiB page until
+  `issues/kernel/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`
+  lands. **Exit**, T14: a `test-actuators` program writes a planted
+  function's address over its return address and returns, in its first thread
+  and in a second, and is ended naming `#CP` NEAR-RET (error code 1, SDM Vol.
+  3A §7.15, Event 21); a caught panic in it returns normally. `SH_STK_EN`
+  left clear lets the forged return reach the planted function, which says so
+  and reds it; the second thread handed the first's shadow stack reds its
+  first return; the unwinder without its `incssp` reds the panic. The oracle
+  is the T14's CPU.
+- **S12 — Kernel IBT**, which the config leaves unset (496) and upstream's
+  Kconfig defaults on (`arch/x86/Kconfig:1840-1842`). First, CPUID.(7,0):EDX
+  bit 20 (IBT, `cpufeatures.h:429`). `-Zcf-protection=branch` for the kernel
+  and the `core` and `alloc` `src/toolchain.rs` builds. SYSCALL and every
+  event leave the ring-0 tracker waiting for an `endbr64` (SDM Vol. 1
+  §18.3.3.1), so `syscall_entry` and every IDT stub begin with one, as
+  `entry_SYSCALL_64` does (`arch/x86/entry/entry_64.S:89`). `IA32_S_CET`
+  (0x6A2) holds `ENDBR_EN` (bit 2), declared with `CR4.CET` and asserted on
+  every CPU, as `setup_cet` writes it (`common.c:587-592`); `NOTRACK_EN`
+  stays clear, so the kernel has no jump table (`arch/x86/Makefile:73-83`).
+  **Exit**: a gate over `kernel.elf` finds `endbr64` at every symbol the IDT
+  and `IA32_LSTAR` name and no `notrack`-prefixed branch; deleting the
+  `endbr64` from `syscall_entry` reds it. On the T14 a `boot-actuators`
+  indirect call to a function with no `endbr64`, as `ibt_selftest` makes
+  (`arch/x86/kernel/ibt_selftest.S:6-17`), panics naming `#CP` ENDBRANCH
+  (error code 3), the boot's last event; `IA32_S_CET` declared without
+  `ENDBR_EN` lets the call return and reds it. The oracle is the T14's CPU.
+- **S13 — Kernel shadow stack**, which Linux does not build: its supervisor
+  CET state is `XFEATURE_CET_KERNEL_UNUSED` (`fpu/types.h:121`). S11's bit
+  enumerates it. `SH_STK_EN` joins S12's `IA32_S_CET`. Each thread's kernel
+  stack gets a shadow stack topped by a supervisor shadow-stack token (SDM
+  Vol. 1 §18.2.3). SYSCALL sets SSP to 0 at ring 0 (SDM Vol. 2B, SYSCALL), so
+  `syscall_entry` takes the thread's from `IA32_PL0_SSP` (0x6A4) with
+  `SETSSBSY` and frees it with `CLRSSBSY` before `sysretq`; IST entries take
+  theirs through `IA32_INT_SSP_TAB` (0x6A8, `msr-index.h:490-494`);
+  `context_switch` moves SSP with `SAVEPREVSSP` and `RSTORSSP` (SDM Vol. 1
+  §18.2.5). A shadow-stack page is protected only through its own mapping
+  (SDM Vol. 3A §5.6.1), so its frame leaves the direct map's writable 2 MiB
+  leaves, the split `issues/kernel/a-threads-kernel-stack-has-no-guard-page.md`
+  needs too. **Exit**, T14: a `boot-actuators` frame writes a planted
+  function's address over its return address and returns, and the kernel
+  panics naming `#CP` NEAR-RET; `IA32_S_CET` without `SH_STK_EN` reaches the
+  planted function, which reds it. S9's `kernel_stack_canary` boot runs with
+  kernel shadow stacks, and a `context_switch` that leaves SSP where it was
+  `#CP`s at the first return after a switch and reds it. The oracle is the
+  T14's CPU.
+- **S14 — User protection keys.** First, CPUID.(7,0):ECX bit 3 (PKU,
+  `cpufeatures.h:389`): Table 5-2 introduces PKU with Comet Lake and names no
+  Tiger Lake part. `CR4.PKE` joins the declaration, as `setup_pku` sets it
+  (`common.c:506-515`); PKRU is per thread and an XSAVE component, so it
+  waits on P1. A process allocates a key and puts a mapping under it, as
+  `pkey_alloc` and `pkey_mprotect` do (`mm/mprotect.c:836-872`); that is an
+  ABI change, discussed with the owner before the stage starts. The key is
+  the leaf's bits 62:59 (SDM Vol. 3A §5.6.2). **Exit**, under TCG with `+pku`
+  and on the T14: a thread that denies itself writes to a key with `WRPKRU`
+  and writes a page under it is ended naming a page fault with PK set (bit 5,
+  SDM Vol. 3A §5.7), and another thread of the process writes the same page.
+  No key written into the entry lets the first write through and reds it; a
+  PKRU not switched per thread faults the second and reds it. TCG and the T14
+  are two implementations of §5.6.2.
+- **S15 — Key Locker**, which no `arch/x86` file at the pinned tag names.
+  First, CPUID.(7,0):ECX bit 23 (KL, Intel Key Locker Specification
+  343965-001US §1.3). `CPUID.19H:EBX[0]` (AESKLE) reads 1 only once `CR4.KL`
+  is set and firmware has enabled Key Locker (§1.3), so ToyOS's first boot
+  with `CR4.KL` declared prints it; a 0 there closes the stage unless the
+  T14's setup enables it, which is the owner's. As §5.1 has it, the BSP loads
+  a random IWKey with `LOADIWKEY`, copies it out with
+  `IA32_COPY_LOCAL_TO_PLATFORM` and every AP copies it in with
+  `IA32_COPY_PLATFORM_TO_LOCAL` (§4.2-4.3), so a handle works on every CPU,
+  and no process runs with `CR4.KL` unless that succeeded. No ToyOS program
+  holds a long-lived AES key yet, so the test is the only user until one
+  does. **Exit**, T14: a program wraps FIPS-197 Appendix C.1's key with
+  `ENCODEKEY128` on one CPU and encrypts that appendix's plaintext with
+  `AESENC128KL` on another, getting its ciphertext; each CPU loading its own
+  random IWKey fails the handle on the second CPU (ZF set) and reds it.
+  FIPS-197 is the oracle.
+- **S16 — TME, read back.** Firmware enables and locks it (datasheet
+  §2.3.13), and its availability varies by processor line (§1.3); Linux only
+  reports it and disables MKTME when CPUs disagree (`detect_tme_early`,
+  `arch/x86/kernel/cpu/intel.c:204-234`). First, CPUID.(7,0):ECX bit 13 and
+  0x982 from S0; TME present but not enabled is the owner's to turn on in the
+  T14's setup. ToyOS reads `IA32_TME_ACTIVATE` (0x982) on every CPU, prints
+  it, and refuses the boot by name when two CPUs disagree. **Exit**, T14:
+  every CPU reads enabled and locked (bits 1 and 0, `intel.c:187-188`),
+  matching S0's `x86/tme:` line; a `boot-actuators` arm reporting cpu1's value
+  with bit 1 flipped is refused, and deleting the comparison boots it and reds
+  it.
+- **S17 — Split-lock disable**, Linux's default with no config option:
+  `sld_state_setup` takes `sld_warn` (`intel.c:1081-1101`) where
+  `IA32_CORE_CAPABILITIES` (0xCF) bit 5 is set, and TIGERLAKE_L is not in its
+  model list (`intel.c:1308-1313`). A split-locked access locks the bus for
+  every core (SDM Vol. 3A §11.1.2.3). First, 0xCF bit 5 from S0.
+  `MSR_MEMORY_CTRL` (0x33) bit 29 joins the declaration (SDM Vol. 4, MSR 33H);
+  a split lock then raises `#AC(0)` whatever `CR0.AM` holds (§11.1.2.3, note
+  1), so the kernel gains an `#AC` handler: in ring 3 it ends the process
+  naming the split lock, where Linux warns and slows it (`split_lock_warn`,
+  `intel.c:1191-1230`), and in ring 0 it panics. **Exit**, T14: a
+  `test-actuators` program's `lock add` across a cache-line boundary is ended
+  naming the split lock; bit 29 left clear lets it exit 0 and reds it. S0's
+  `x86/split lock detection:` line is the oracle for the T14's support.
+
 ## Decisions
 
 - **IBPB is conditional**, Linux's default: `spectre_v2_user_select_mitigation`
@@ -419,5 +561,6 @@ it is not worse:
 
 Reading ARCH_CAPABILITIES as 0 instead of from 0x10A turns `spectre_v2` into
 "Mitigation: Retpolines; …" and `gather_data_sampling` into "Vulnerable: No
-microcode", and reds it. S1–S6 and S8–S10 are green, S7 is closed by S0's
-finding or by the owner, and every defect the hardening table cites is closed.
+microcode", and reds it. S1–S6 and S8–S17 are green or closed by S0's
+finding, S7 is closed by S0's finding or by the owner, and every defect the
+hardening table cites is closed.
