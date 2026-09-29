@@ -79,7 +79,7 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "screen_console_scroll",
-        issue: "issues/build/the-console-loses-a-typed-keystroke-under-host-load.md",
+        issue: "issues/build/the-console-loses-typed-keystrokes-under-host-load.md",
     },
     Disabled {
         test: "screen_fatal_halt",
