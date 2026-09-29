@@ -17151,13 +17151,14 @@ fn main() {
     // First, before any lock and before anything is compiled: a flag this suite
     // does not have would otherwise cost nothing and hand its value to the
     // filter below.
-    let filter = match toyos_build::testargs::parse(&args) {
-        Ok(filter) => filter,
+    let parsed = match toyos_build::testargs::parse(&args) {
+        Ok(parsed) => parsed,
         Err(refusal) => {
             eprintln!("[toyos] {refusal}");
             std::process::exit(1);
         }
     };
+    let filter = parsed.filter;
     // The one selection every entry point below takes, the metal's included: a
     // disabled test runs nowhere, and every run names each one with its issue.
     for row in redlist::DISABLED {
@@ -17173,10 +17174,6 @@ fn main() {
     // var is invisible in the command line and easy to leave set, and the whole
     // point of the split is that a run says what it ran.
     let reach = Reach::of(&args);
-    // The metal profile, and where its images and readbacks live. Naming the
-    // directory means the machine is not touched — see `common::metal::Mode`.
-    let metal_mode = SUITE.present(&args, &testargs::METAL);
-    let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
     let nocapture =
         SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
@@ -17222,10 +17219,7 @@ fn main() {
     // guest, so none of the C compile, the HTTPS judge's hosts or the tier
     // arithmetic below is any of its business; running it here is what keeps a
     // `--metal` invocation costing a kernel and a userland and nothing else.
-    if metal_mode {
-        let dir = metal_readback
-            .map_or_else(|| compile::repo_root().join("target/metal"), std::path::PathBuf::from);
-        let mode = if metal_readback.is_some() { metal::Mode::Offline } else { metal::Mode::Drive };
+    if let Some(mode) = parsed.metal {
         let rust_tests_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
         eprintln!("[toyos] Building Rust tests...");
@@ -17256,23 +17250,15 @@ fn main() {
                  members are not filtered by name"
             );
         }
+        let mut boots = shared_metal(&rust_bins, keep);
+        boots.push(c_corpus_metal(&c_bins, keep));
+
         // Three statuses for the three things this can establish, as the
         // ordinary suite has: green, red, and "measured nothing" — a run that
         // staged images and never reached the machine has no claim to make.
         run.exit(
-            match metal::run(
-                mode,
-                &dir,
-                &selected,
-&{
-                    let mut boots = shared_metal(&rust_bins, keep);
-                    boots.push(c_corpus_metal(&c_bins, keep));
-                    boots
-                },
-                &rust_bins,
-                RUST_SKIP,
-                !nocapture && !debug_mode,
-            ) {
+            match metal::run(mode, &selected, &boots, &rust_bins, RUST_SKIP, !nocapture && !debug_mode)
+            {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,
                 metal::Verdict::Staged => 2,
