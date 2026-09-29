@@ -12,14 +12,27 @@
 use std::process::Command;
 
 use toyos_abi::clock::{ClockPage, CLOCK_MAGIC, CLOCK_PAGE};
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, OpenFlags, SyscallError, SYS_FSTAT, SYS_READ};
+use toyos_abi::syscall::{
+    self, MmapFlags, MmapProt, OpenFlags, SeekFrom, SyscallError, SYS_FSTAT, SYS_READ, SYS_WRITE,
+};
 use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_readonly_copyout";
 const CHILD_ARG: &str = "reads-the-clock";
 const PAGE_2M: usize = 2 * 1024 * 1024;
+const PAGE_4K: u64 = 4096;
 /// Longer than `Stat`, and ends inside the file this reads.
 const LEN: usize = 64;
+/// Bytes `0..=255`, so a probe can offer any page its own byte back, then the
+/// bytes the straddling `read` offers, at [`STRADDLE_AT`].
+const PROBE_PATH: &[u8] = b"/tmp/abuse_readonly_copyout.bin";
+const STRADDLE_AT: u64 = 256;
+/// The straddling `read`: half on the last writable page, half on the next.
+const STRADDLE: usize = 16;
+
+/// In `.bss`, so its 2 MiB window also holds the pages past the image's end,
+/// which the pager maps read-only.
+static mut BSS: u8 = 0;
 
 /// The typed wrappers take a `&mut [u8]`, which a read-only page cannot be.
 fn raw(num: u64, a1: u64, a2: u64, a3: u64) -> u64 {
@@ -66,6 +79,55 @@ fn refused(what: &str, addr: u64) {
     syscall::close(fd);
 }
 
+/// The first page at or above [`BSS`], inside its 2 MiB window, a `read` may
+/// not write; each page below it took a 1-byte `read` of its own first byte.
+fn first_unwritable_page(probe: RawHandle) -> u64 {
+    let pipe = syscall::pipe().expect("pipe");
+    let bss = &raw const BSS as u64;
+    let window_end = (bss & !(PAGE_2M as u64 - 1)) + PAGE_2M as u64;
+    let mut page = bss & !(PAGE_4K - 1);
+    while page < window_end {
+        let ret = raw(SYS_WRITE, pipe.write.0 as u64, page, 1);
+        assert_eq!(ret, 1, "write from {page:#x}, in .bss's window: {ret:#x}");
+        syscall::read(pipe.read, &mut [0u8; 1]).expect("drain the pipe");
+        let own = unsafe { (page as *const u8).read_volatile() };
+        syscall::seek(probe, SeekFrom::Start(own as u64)).expect("seek the probe");
+        let ret = raw(SYS_READ, probe.0 as u64, page, 1);
+        if SyscallError::from_u64(ret) == Some(SyscallError::BadAddress) {
+            syscall::close(pipe.read);
+            syscall::close(pipe.write);
+            return page;
+        }
+        assert_eq!(ret, 1, "a 1-byte read into {page:#x}: {ret:#x}");
+        page += PAGE_4K;
+    }
+    panic!("no page above .bss at {bss:#x} refuses a write below {window_end:#x}: the image ends on its window's edge");
+}
+
+/// A `read` that starts on a writable page and runs into the read-only page
+/// after it, in one 2 MiB window, is refused whole.
+fn refused_across_pages() {
+    let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
+    let probe = syscall::open(PROBE_PATH, flags).expect("create the probe file");
+    let every: Vec<u8> = (0..=255).collect();
+    syscall::write(probe, &every).expect("fill the probe file");
+    let page = first_unwritable_page(probe);
+    assert!(page > &raw const BSS as u64, "BSS's own page refuses a write");
+    let at = page - (STRADDLE / 2) as u64;
+    let before = snapshot(at);
+    // The writable half is offered its own bytes and the read-only half their
+    // complement, so a write to the read-only page shows and one below harms nothing.
+    let offered: [u8; STRADDLE] = core::array::from_fn(|i| if i < STRADDLE / 2 { before[i] } else { !before[i] });
+    syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
+    syscall::write(probe, &offered).expect("write the straddle's bytes");
+    syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
+    let ret = raw(SYS_READ, probe.0 as u64, at, STRADDLE as u64);
+    assert_eq!(before, snapshot(at), "read wrote across a writable page into the read-only one at {page:#x}");
+    assert_eq!(SyscallError::from_u64(ret), Some(SyscallError::BadAddress), "read across into {page:#x}: {ret:#x}");
+    syscall::close(probe);
+    syscall::delete(PROBE_PATH).expect("delete the probe file");
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some(CHILD_ARG) {
         let page = unsafe { core::ptr::read_volatile(CLOCK_PAGE as *const ClockPage) };
@@ -95,6 +157,7 @@ fn main() {
     unsafe { syscall::munmap(ro, PAGE_2M) }.expect("munmap");
 
     refused("this program's own text", main as *const () as u64);
+    refused_across_pages();
 
     // Last: a written clock page asserts in every stamp this process and every
     // other one takes, the verdict's own path included, so the arms whose harm

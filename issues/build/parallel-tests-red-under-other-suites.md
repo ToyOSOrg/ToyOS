@@ -80,8 +80,6 @@ changes.
   phase is quiet.
 - **`blocked_dump`** — retired 2026-09-04, green 3 of 3 beside a full fast
   tier.
-- **`screen_console_scroll`** — retired 2026-09-04, green 3 of 3 beside a full
-  fast tier.
 - **`hda_tone`** — added 2026-08-07, hours after the test itself landed. In a
   full run on a host carrying another worktree's suite: `2 mid-tone silences in
   the capture: total 2 [3p×1 4p×1]`, `dither 3.3%`, `phase-breaks 92`. Alone on
