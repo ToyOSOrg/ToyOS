@@ -154,7 +154,8 @@ mod flood {
 
 /// Interrupts closed on [`IRQ_CPU`]: the vector's CPU, and the only one that
 /// drives the controller by polled I/O. The quarantine runs under one, so every
-/// port access the kernel makes precedes its let-go in one CPU's program order.
+/// port access that drives the controller precedes its let-go in one CPU's
+/// program order; a status read may follow it.
 struct Pinned {
     _irq: crate::arch::IrqGuard,
 }
@@ -894,7 +895,8 @@ fn quarantine_step(pinned: &Pinned) -> bool {
 /// [`ACTIVE`] holds, so a claim that lands once it is clear routes and unmasks
 /// lines nothing here touches again. **And let go last on [`IRQ_CPU`]**: the
 /// handler reads no port once the flood is taken, and the aux re-enable reads
-/// [`ACTIVE`] there, so no kernel access to the controller follows a grant.
+/// [`ACTIVE`] there, so no kernel access that drives the controller follows a
+/// grant.
 fn quarantine(_: flood::Taken, pinned: &Pinned) {
     // The pin is about to be masked, so no health verdict follows this line.
     HEALTH.store(HEALTH_DONE, Ordering::Relaxed);
