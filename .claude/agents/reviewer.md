@@ -50,6 +50,9 @@ above; otherwise it is a NOTE.
   `arch::aarch64` in no generic kernel code; and none of them in a crate whose manifest
   `description` says pure.
   A `4096` in the kernel that means a page is a private copy of `mm::PAGE_SIZE`.
+- **Instructions.** A change that removes or renames a command, flag or step an agent runs updates
+  every prompt that names it — each `CLAUDE.md` and `.claude/agents/*.md` — in the same diff,
+  saying what to do instead; an instruction left pointing at what is gone is a BLOCKER.
 - **Arrivals.** A host tool outside Rust and QEMU, however started or installed, is a C or C++
   tool ToyOS can one day build, declared in `check_prerequisites` and
   `issues/build/the-build-runs-c-and-cxx-tools-toyos-does-not-yet-run.md`; the PR says why no
