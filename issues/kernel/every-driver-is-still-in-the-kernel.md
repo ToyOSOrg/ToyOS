@@ -29,9 +29,14 @@ is not built.
 
 What is left of the staged work:
 
-1. **The kernel's audio registry is a concrete match on a device type.** The
-   file this was scoped against has since been deleted, so this needs re-scoping
-   before it can start; the GPU trait is the model to copy.
+1. **Audio and virtio-gpu, re-scoped.** `drivers/hda.rs` and
+   `drivers/virtio_sound.rs` bring their device up and gate soundd's register
+   access; `drivers/virtio_gpu.rs` is the only `Gpu` whose `SYS_GPU_*` calls do
+   anything, since GOP's are all no-ops. Each leaves when its userland holder
+   claims the function as `pci`, as netd does, retiring the `hda-audio` and
+   `virtio-sound` classes, their arms of `SYS_DEVICE_REG_READ`/`WRITE`, and
+   `SYS_GPU_*`, which is an ABI change. GOP stays: it is memory the loader
+   hands over, and the panic console paints it.
 2. Done: **BAR sizing and re-assignment onto 2 MiB boundaries** is
    `pcidev::place_bar`, with the overlap refusal kept as the assertion that it
    worked rather than as the mechanism.
