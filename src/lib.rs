@@ -45,6 +45,7 @@ pub mod soundfont;
 pub mod sourcegate;
 pub mod sysroot;
 pub mod testargs;
+pub mod tether;
 pub mod tiers;
 pub mod toolchain;
 pub mod userlandhost;
