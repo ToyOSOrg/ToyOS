@@ -34,7 +34,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     let root = super::compile::repo_root();
     let profile = Profile::load(&root).map_err(|why| why.to_string())?;
-    let mut bad = metaldevices::unmet(back.loader().text(), back.kernel().text());
+    let mut bad = metaldevices::unmet(back.loader().text(), back.log().text());
 
     for job in JOBS {
         let code = match back.exit_code(job) {
@@ -59,7 +59,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     // ceiling or writes an inventory row next has to read, and they exist only
     // in a log that came off the machine.
     eprintln!("  [devices] what {} answered:", back.label);
-    for line in metaldevices::inventory(back.kernel().text()) {
+    for line in metaldevices::inventory(back.log().text()) {
         eprintln!("    {line}");
     }
 
