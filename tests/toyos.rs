@@ -5156,7 +5156,7 @@ fn run_screen_test(
             Ok(())
         }
         "virt_user_mode" => {
-            // The port's stage 4 on one CPU, under the EL2 profile whose
+            // The port's stage 4, under the EL2 profile whose
             // entry also writes what the drop leaves EL2 holding: the kernel's
             // own tables, the GIC and the timer, and a process at EL0 — init,
             // whose every page arrives by a demand fault and whose spawn of
