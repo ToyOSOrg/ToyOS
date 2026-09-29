@@ -29,14 +29,15 @@ PR #539 does not land. Its pieces:
   `stick_readonly`; and `update_trial_writes_nothing_of_the_kept_slot`,
   rewritten for priorities;
 - stage 2 of `issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md`
-  takes what it uses of the bench: `src/metalbench.rs`, `tests/common/bench.rs`,
+  takes the bench: `src/metalbench.rs`, `tests/common/bench.rs`,
   `tests/bench*case`, `--bench-image` with `build::bench_image`,
   `src/image.rs`' `update_of`, `tests/common/metal.rs`' `Reach`, `stage` and
-  bench `invocation`, `--metal-via-ubuntu`, toybox `date`, `Ssh::probe` and
+  bench `invocation`, toybox `date`, `Ssh::probe` and
   `Ssh::fetch` with `ssh-client-host`'s `probe` and `fetch`,
   `build::AUTHORIZED_ON_ROOT`, and `src/bootlog.rs`' `LOADER_PREVIOUS_LOG`,
   `MOUNTED_FROM_MEMORY` and `BOOT_PARAMETER`;
-- deleted: `update --boot-next <esp>` with `slots::Next::Esp`, `Guid::parse`,
+- deleted: `--metal-via-ubuntu`, because that stage takes Ubuntu out of the
+  loop; `update --boot-next <esp>` with `slots::Next::Esp`, `Guid::parse`,
   `bootvars.rs`' `BootNext` and entry-after-its-own writes, and
   `update_boot_next_boots_the_entry_once`'s other half; the panic handler's
   fall to the next boot entry, with the two issues #539 filed about it,
@@ -249,8 +250,8 @@ Each stage lands on its own, in this order.
      differs from `LAST_LAYOUT` (stage 4's derived value, pinned as a literal)
      and `assert!(LAYOUT != LAST_LAYOUT)` builds. This stage is an ABI change.
    - `update --boot-first` writes only the request. The loader writes its own
-     `HD(…)/File(…)` entry and puts it first. Once `bootnext.rs` is deleted
-     (stage 7), that is the only boot-variable write.
+     `HD(…)/File(…)` entry and puts it first. Once stage 7 deletes
+     `bootnext.rs`, that is the only boot-variable write.
    - This stage deletes the floor issue's "a floor that never rises" bullet
      and its exit's second half.
 
