@@ -36,8 +36,8 @@ pub struct PerCpu {
     need_resched: AtomicU8,
     fault_state: AtomicU8,
     /// Timer interrupts taken at EL1, which only count and ask for a pass.
-    ring0_timer_fires: AtomicU32,
-    last_seen_ring0_fires: AtomicU32,
+    kernel_timer_fires: AtomicU32,
+    last_seen_kernel_timer_fires: AtomicU32,
     /// Counter ticks the timer was last armed for: what a timer interrupt
     /// taken at EL1 re-arms it with, and zero when it is stopped.
     armed_ticks: AtomicU64,
@@ -83,8 +83,8 @@ pub fn init_bsp() {
         preempt_count: AtomicU32::new(0),
         need_resched: AtomicU8::new(0),
         fault_state: AtomicU8::new(CpuFaultState::Normal as u8),
-        ring0_timer_fires: AtomicU32::new(0),
-        last_seen_ring0_fires: AtomicU32::new(0),
+        kernel_timer_fires: AtomicU32::new(0),
+        last_seen_kernel_timer_fires: AtomicU32::new(0),
         armed_ticks: AtomicU64::new(0),
         kernel_stack: AtomicU64::new(0),
         idle_stack_top: crate::sched::idle_stack::alloc(),
@@ -298,20 +298,20 @@ pub fn faulting() -> bool {
 }
 
 /// Timer interrupts taken at EL1.
-pub fn ring0_timer_fires() -> u32 {
-    this().ring0_timer_fires.load(Relaxed)
+pub fn kernel_timer_fires() -> u32 {
+    this().kernel_timer_fires.load(Relaxed)
 }
 
-pub fn last_seen_ring0_fires() -> u32 {
-    this().last_seen_ring0_fires.load(Relaxed)
+pub fn last_seen_kernel_timer_fires() -> u32 {
+    this().last_seen_kernel_timer_fires.load(Relaxed)
 }
 
-pub fn set_last_seen_ring0_fires(v: u32) {
-    this().last_seen_ring0_fires.store(v, Relaxed);
+pub fn set_last_seen_kernel_timer_fires(v: u32) {
+    this().last_seen_kernel_timer_fires.store(v, Relaxed);
 }
 
-pub(super) fn note_ring0_timer_fire() {
-    this().ring0_timer_fires.fetch_add(1, Relaxed);
+pub(super) fn note_kernel_timer_fire() {
+    this().kernel_timer_fires.fetch_add(1, Relaxed);
 }
 
 /// What the timer was last armed for, in counter ticks; zero is stopped.

@@ -864,7 +864,7 @@ pub fn for_each_parked(mut f: impl FnMut(ParkedInfo)) -> bool {
 /// preempt-count bracket's other half is owed.
 pub extern "C" fn trampoline_entry() {
     crate::preempt::enable_no_resched();
-    crate::arch::trap::kernel_exit_to_user_check();
+    crate::scheduler::exit_to_user();
 }
 
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;

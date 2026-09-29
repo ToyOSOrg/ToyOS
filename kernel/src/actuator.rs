@@ -342,8 +342,12 @@ actuators! {
     unclaimed_vector_selftest = "unclaimed-vector-selftest";
 
     /// Tick the timer at a fixed period while this CPU floods itself with
-    /// interrupts, and say whether any tick went a whole period untaken.
+    /// interrupts.
     irq_storm = "irq-storm";
+
+    /// Make this CPU's timer due with interrupts masked, ask it to fire within
+    /// a quantum, and take its interrupts with them open.
+    timer_floor = "timer-floor";
 
     /// Hold a flush of `truncate-race.bin` inside its metadata window and say whether a truncate got in.
     ftruncate_flush_stall = "ftruncate-flush-stall";

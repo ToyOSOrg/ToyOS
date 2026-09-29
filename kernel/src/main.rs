@@ -73,6 +73,7 @@ mod process;
 mod loader;
 mod scheduler;
 mod sched;
+mod hw;
 mod iommu;
 mod preempt;
 mod irq_census;
@@ -115,7 +116,6 @@ use crate::mm::policy::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use arch::{cpu, percpu, smp};
-pub(crate) use arch::hw;
 use drivers::{acpi, gop, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 

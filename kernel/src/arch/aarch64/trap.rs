@@ -151,13 +151,13 @@ fn irq(from_el0: bool) {
             // Only an EL0 tick reaches here, so the interrupted context is user
             // code and holds no `Lock`.
             assert_eq!(crate::preempt::count(), 0, "a timer interrupt from EL0 found a preempt depth");
-            let hw = &super::hw::HW;
+            let hw = &crate::hw::HW;
             hw.trace(TraceEvent { ts: hw.now(), cpu: CpuId(percpu::cpu_id()), kind: TraceKind::TimerFire });
             irqchip::end(intid);
             crate::scheduler::do_preempt();
         } else {
             crate::preempt::set_need_resched();
-            percpu::note_ring0_timer_fire();
+            percpu::note_kernel_timer_fire();
             irqchip::end(intid);
         }
         return;
@@ -458,20 +458,9 @@ pub fn install() {
     }
 }
 
-/// The numbers the generic drivers program as an interrupt's identity. On
-/// AArch64 [`LOG_NEST_VECTOR`] is the SGI `irqchip::send_self` raises; the
-/// other two name a message-signalled interrupt, which `super::msi_message`
-/// refuses on this machine.
-#[repr(u8)]
-enum Vector {
-    LogNest = 1,
-    Hda,
-    VirtioSound,
-}
-
-pub const HDA_VECTOR: u8 = Vector::Hda as u8;
-pub const VIRTIO_SOUND_VECTOR: u8 = Vector::VirtioSound as u8;
-pub const LOG_NEST_VECTOR: u8 = Vector::LogNest as u8;
+pub const HDA_VECTOR: u8 = irqchip::Intid::Hda as u8;
+pub const VIRTIO_SOUND_VECTOR: u8 = irqchip::Intid::VirtioSound as u8;
+pub const LOG_NEST_VECTOR: u8 = irqchip::Intid::LogNest as u8;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the
@@ -480,7 +469,7 @@ pub(crate) fn report_panic(message: &core::panic::PanicInfo, frame: u64) {
     alert!("PANIC: {}", message);
     log!("  Backtrace:");
     crate::symbols::kernel_backtrace(frame, 20);
-    super::hw::report_contexts(cpu::stack_pointer(), None);
+    crate::hw::report_contexts(cpu::stack_pointer(), None);
     let Some(pid) = percpu::current_pid() else { return };
     log!("  Running: pid={} tid={:?}", pid, percpu::current_tid());
     if percpu::in_syscall() {
@@ -501,24 +490,22 @@ pub(crate) const fn frame_interrupts_enabled(spsr: u64) -> bool {
 /// Nothing to report: the vectors run on the stack they interrupted.
 pub(crate) fn report_fault_stack() {}
 
-/// Every return to EL0's last word, and a new thread's first.
-pub fn kernel_exit_to_user_check() {
-    crate::scheduler::exit_to_user();
-}
-
 /// x86-64's lands a `#DF` on its IST stack; AArch64 has no double fault, and
-/// an exception on a broken stack takes the same vector again.
+/// an exception on a broken stack takes the same vector again, so the call is
+/// refused.
 #[cfg(feature = "test-actuators")]
-pub(crate) fn provoke_double_fault() -> ! {
-    panic!("SYS_DEBUG: AArch64 has no double fault to provoke");
+pub(crate) fn provoke_double_fault() -> u64 {
+    toyos_abi::syscall::SyscallError::NotSupported.to_u64()
 }
 
-/// `irq-storm`: this CPU floods itself with SGIs until the timer has fired
-/// `TICKS_OWED` times through the flood, then waits for every SGI it
-/// sent to be taken. A tick lost, or never re-armed, leaves the flood running
-/// and an SGI lost leaves the wait running, so neither says anything: the
-/// harness's ceiling is the only clock this judges by, and the one verdict
-/// the storm can say is `FAIL` for an SGI taken that was never sent.
+/// `irq-storm`: this CPU floods itself with SGIs, sending each as soon as the
+/// last is taken, until the timer has fired `TICKS_OWED` times through the
+/// flood, then waits for the last SGI to be taken. One at a time, because an
+/// SGI sent while the last is still pending merges with it. A tick lost, or
+/// never re-armed, leaves the flood running and an SGI lost leaves the wait
+/// running, so neither says anything: the harness's ceiling is the only clock
+/// this judges by, and the one verdict the storm can say is `FAIL` for an SGI
+/// taken that was never sent.
 #[cfg(feature = "boot-actuators")]
 pub(crate) mod storm {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -556,8 +543,10 @@ pub(crate) mod storm {
         let mut sent = 0u64;
         crate::arch::cpu::enable_interrupts();
         while TICKS.load(Relaxed) < TICKS_OWED {
-            irqchip::send_self(irqchip::SGI_STORM as u8);
-            sent += 1;
+            if SGIS.load(Relaxed) == sent {
+                irqchip::send_self(irqchip::SGI_STORM as u8);
+                sent += 1;
+            }
         }
         RUNNING.store(false, Relaxed);
         irqchip::stop_timer();

@@ -122,5 +122,5 @@ pub fn hardware_id() -> u32 {
     let mpidr: u64;
     // SAFETY: reads an ID register.
     unsafe { asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack, preserves_flags)) };
-    ((mpidr & 0xFF_FFFF) | ((mpidr >> 8) & 0xFF00_0000)) as u32
+    toyos_gicv3::packed_affinity(mpidr)
 }

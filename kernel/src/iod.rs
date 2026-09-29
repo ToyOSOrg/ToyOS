@@ -25,7 +25,7 @@ extern "C" fn body(_arg: u64) -> ! {
     // The SS-reload probe rides iod rather than spawning a task of its own.
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::sysret_ss_probe() {
-        crate::hw::sysret_ss_probe(&parkable);
+        crate::arch::hw::sysret_ss_probe(&parkable);
     }
     // Held across the loop: a push during a drain must still find this watch armed.
     let armed = watch::arm(

@@ -96,14 +96,14 @@ pub fn bench() {
     panic!("tlb-shootdown-bench: AArch64 invalidates by broadcast, so there is no IPI round trip to measure");
 }
 
-/// x86-64's delays an acknowledgement, and there is none here.
+/// x86-64's delays an acknowledgement, and there is none here: refused.
 #[cfg(feature = "test-actuators")]
 pub fn debug_arm_ack_delay(_nanos: u64) -> u64 {
-    panic!("SYS_DEBUG: AArch64 invalidates by broadcast, so there is no acknowledgement to delay");
+    toyos_abi::syscall::SyscallError::NotSupported.to_u64()
 }
 
-/// x86-64's delays an acknowledgement, and there is none here.
+/// x86-64's delays an acknowledgement, and there is none here: refused.
 #[cfg(feature = "test-actuators")]
 pub fn debug_disarm_ack_delay() -> u64 {
-    panic!("SYS_DEBUG: AArch64 invalidates by broadcast, so there is no acknowledgement to delay");
+    toyos_abi::syscall::SyscallError::NotSupported.to_u64()
 }

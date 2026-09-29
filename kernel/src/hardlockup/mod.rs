@@ -132,15 +132,15 @@ static SPIN_AT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 #[must_use]
 pub fn start(deadline_ms: u64) -> Armed {
     let ms = toyos_tco::hard_lockup_bound_ms(deadline_ms);
-    let ticks = crate::clock::tsc_ticks(ms.saturating_mul(1_000_000));
-    let per_ms = crate::clock::tsc_ticks(1_000_000);
+    let ticks = crate::clock::counter_ticks(ms.saturating_mul(1_000_000));
+    let per_ms = crate::clock::counter_ticks(1_000_000);
     if ms == 0 || ticks == 0 || per_ms == 0 {
         return Armed { ms: 0, sampled: false };
     }
     BOUND_MS.store(ms, Relaxed);
     BOUND_TSC.store(ticks, Relaxed);
     TICKS_PER_MS.store(per_ms, Relaxed);
-    PERIOD.store(crate::clock::tsc_ticks(SAMPLE_NS), Relaxed);
+    PERIOD.store(crate::clock::counter_ticks(SAMPLE_NS), Relaxed);
     arm_this_cpu();
     Armed { ms, sampled: has_a_counter(percpu::cpu_id() as usize) }
 }

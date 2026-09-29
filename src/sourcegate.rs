@@ -1435,6 +1435,7 @@ const PURE_CRATES: &[&str] = &[
     "toyos-desktop/",
     "toyos-dma/",
     "toyos-elide/",
+    "toyos-gicv3/",
     "toyos-hda/",
     "toyos-mixer/",
     "toyos-pci/",

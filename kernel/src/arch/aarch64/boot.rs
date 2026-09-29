@@ -300,6 +300,9 @@ pub fn start_other_cpus(_platform: &Platform, _args: &KernelArgs) {
 /// The interrupt-controller selftests an actuator asks for.
 #[cfg(feature = "boot-actuators")]
 pub fn interrupt_selftests() {
+    if crate::actuator::timer_floor() {
+        super::irqchip::floor_selftest();
+    }
     if crate::actuator::irq_storm() {
         super::trap::storm::run();
     }

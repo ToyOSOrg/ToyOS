@@ -636,15 +636,15 @@ pub fn percpu_ptr() -> *mut PerCpu {
 }
 
 /// Ring 0 timer fires the assembly stub has taken; written with a plain `inc` (IF clear there).
-pub fn ring0_timer_fires() -> u32 {
+pub fn kernel_timer_fires() -> u32 {
     gs::read_u32::<OFF_RING0_TIMER_FIRES>()
 }
 
-pub fn last_seen_ring0_fires() -> u32 {
+pub fn last_seen_kernel_timer_fires() -> u32 {
     gs::read_u32::<OFF_LAST_SEEN_RING0_FIRES>()
 }
 
-pub fn set_last_seen_ring0_fires(v: u32) {
+pub fn set_last_seen_kernel_timer_fires(v: u32) {
     gs::write_u32::<OFF_LAST_SEEN_RING0_FIRES>(v);
 }
 

@@ -19,20 +19,34 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use toyos_acpi::MadtEntry;
+use toyos_gicv3::{packed_affinity, FRAME};
 
 use super::{cpu, percpu};
 use crate::drivers::acpi::direct_phys;
 use crate::log;
 use crate::mm::policy::MmioPolicy;
 use crate::mm::{DirectMap, Mmio};
-use crate::time::{Duration, Floor};
+use crate::hw::MIN_ONE_SHOT;
 
-/// The SGI that asks a CPU for a scheduler pass: x86-64's kick, which rides
-/// the timer's vector there.
-pub(super) const SGI_KICK: u32 = 0;
-/// The SGI `irq-storm` floods this CPU with.
+/// Every INTID this kernel names, in one space: the SGIs it raises, then the
+/// identities the generic drivers program for a message-signalled interrupt,
+/// which `super::msi_message` refuses on this machine.
+#[repr(u8)]
+pub(super) enum Intid {
+    /// Asks a CPU for a scheduler pass: x86-64's kick, which rides the
+    /// timer's vector there.
+    Kick = 0,
+    /// `crate::log::nested`'s delivery, which [`send_self`] raises.
+    LogNest,
+    /// What `irq-storm` floods this CPU with.
+    Storm,
+    Hda,
+    VirtioSound,
+}
+
+pub(super) const SGI_KICK: u32 = Intid::Kick as u32;
 #[cfg(feature = "boot-actuators")]
-pub(super) const SGI_STORM: u32 = 2;
+pub(super) const SGI_STORM: u32 = Intid::Storm as u32;
 
 /// `GICD_CTLR`, and its `ARE` (affinity routing — `ARE_NS` as a non-secure
 /// access sees it) and Group 1 enable (`EnableGrp1` or `EnableGrp1A`, the
@@ -44,16 +58,12 @@ const RWP: u32 = 1 << 31;
 /// `GICD_PIDR2.ArchRev`, bits 7:4: 3 is GICv3, 4 is GICv4.
 const GICD_PIDR2: u64 = 0xFFE8;
 
-/// A redistributor's frames: `RD_base`, then `SGI_base` 64 KiB above it, and
-/// two more for virtual LPIs where `GICR_TYPER.VLPIS` says so.
+/// A redistributor's frames: `RD_base`, then `SGI_base` 64 KiB above it.
 const GICR_CTLR: u64 = 0x0000;
 const GICR_TYPER: u64 = 0x0008;
 const GICR_WAKER: u64 = 0x0014;
 const WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;
 const WAKER_CHILDREN_ASLEEP: u32 = 1 << 2;
-const TYPER_VLPIS: u64 = 1 << 1;
-const TYPER_LAST: u64 = 1 << 4;
-const FRAME: u64 = 0x1_0000;
 const SGI_BASE: u64 = FRAME;
 const GICR_IGROUPR0: u64 = SGI_BASE + 0x0080;
 const GICR_ISENABLER0: u64 = SGI_BASE + 0x0100;
@@ -170,7 +180,7 @@ pub fn init(rsdp_addr: u64) {
     stop_timer_hardware();
     let enabled = 1 << SGI_KICK | 1 << timer.gsiv;
     #[cfg(feature = "boot-actuators")]
-    let enabled = enabled | 1 << u32::from(super::trap::LOG_NEST_VECTOR) | 1 << SGI_STORM;
+    let enabled = enabled | 1 << Intid::LogNest as u32 | 1 << SGI_STORM;
     redistributor.write_u32(GICR_ISENABLER0, enabled);
 
     // The CPU interface in system registers, as the declaration says.
@@ -215,27 +225,11 @@ pub fn init(rsdp_addr: u64) {
     );
 }
 
-/// `MPIDR_EL1`'s four affinity fields packed as `cpu::hardware_id` packs
-/// them, and as `GICR_TYPER` carries them in its top word.
-fn packed_affinity(mpidr: u64) -> u32 {
-    ((mpidr & 0xFF_FFFF) | ((mpidr >> 8) & 0xFF00_0000)) as u32
-}
-
 /// The redistributor frame in `[base, base + length)` whose affinity is `me`.
 fn find_redistributor(base: u64, length: u64, me: u32) -> Option<Mmio> {
     let range = crate::mm::paging::map_mmio(base, length, MmioPolicy::Uncacheable);
-    let mut offset = 0;
-    while offset + 2 * FRAME <= length {
-        let typer = range.read_u64(offset + GICR_TYPER);
-        if (typer >> 32) as u32 == me {
-            return Some(Mmio::new(DirectMap::from_phys(base + offset), 2 * FRAME));
-        }
-        if typer & TYPER_LAST != 0 {
-            return None;
-        }
-        offset += if typer & TYPER_VLPIS != 0 { 4 * FRAME } else { 2 * FRAME };
-    }
-    None
+    let offset = toyos_gicv3::find_redistributor(length, me, |at| range.read_u64(at + GICR_TYPER))?;
+    Some(Mmio::new(DirectMap::from_phys(base + offset), 2 * FRAME))
 }
 
 /// The INTID the GIC hands this CPU, or `None` when it answered spurious.
@@ -261,9 +255,7 @@ pub(super) fn timer_intid() -> u32 {
 
 /// Raise SGI `intid` on the CPU whose packed affinity is `target`.
 fn sgi(intid: u32, target: u32) {
-    let (aff0, aff1, aff2, aff3) =
-        (u64::from(target & 0xFF), u64::from(target >> 8 & 0xFF), u64::from(target >> 16 & 0xFF), u64::from(target >> 24));
-    let value = aff3 << 48 | (aff0 >> 4) << 44 | aff2 << 32 | u64::from(intid) << 24 | aff1 << 16 | 1 << (aff0 & 0xF);
+    let value = toyos_gicv3::sgi1r(intid, target);
     // SAFETY: writes `ICC_SGI1R_EL1`, which raises an SGI and touches no
     // memory; the `ISB` sends it before whatever follows.
     unsafe { core::arch::asm!("msr S3_0_C12_C11_5, {}", "isb", in(reg) value, options(nomem, nostack, preserves_flags)) };
@@ -297,19 +289,22 @@ pub fn send_nmi(_cpu: u32) {
 /// Nothing to stop: before the port's stage 5 the boot CPU is the only one running.
 pub fn stop_other_cpus() {}
 
-/// The shortest one-shot this kernel arms: above an interrupt's entry and
-/// return, as x86-64's floor is.
-const MIN_ONE_SHOT: Floor = Floor::policy(Duration::from_micros(10), "above an interrupt entry and eret, a thousandth of QUANTUM_NS");
-
-fn counter_ticks(nanos: u64) -> u64 {
-    crate::clock::tsc_ticks(nanos).max(crate::clock::tsc_ticks(MIN_ONE_SHOT.nanos())).max(1)
-}
-
 /// `CNTV_CTL_EL0.ENABLE`; `IMASK` stays clear.
 const TIMER_ENABLE: u64 = 1;
+/// `CNTV_CTL_EL0.ISTATUS`: the timer's condition is met.
+#[cfg(feature = "boot-actuators")]
+const TIMER_ISTATUS: u64 = 1 << 2;
 
-/// Fire `ticks` counter ticks from now, and remember it as what an EL1 fire re-arms with.
+/// [`MIN_ONE_SHOT`] in counter ticks, and never none.
+fn floor_ticks() -> u64 {
+    crate::clock::counter_ticks(MIN_ONE_SHOT.nanos()).max(1)
+}
+
+/// The only write of the comparator: fire `ticks` counter ticks from now, or
+/// after [`MIN_ONE_SHOT`] if that is longer, and remember the span as what an
+/// EL1 fire re-arms with.
 fn arm_ticks(ticks: u64) {
+    let ticks = ticks.max(floor_ticks());
     percpu::set_armed_ticks(ticks);
     // SAFETY: the EL1 virtual timer's comparator and control; CPACR has
     // nothing to say about them and `CNTKCTL_EL1` keeps EL0 out.
@@ -332,14 +327,14 @@ fn stop_timer_hardware() {
 
 /// This CPU's timer, armed to fire `nanos` from now, or after [`MIN_ONE_SHOT`] if that is longer.
 pub fn arm_one_shot(nanos: u64) {
-    arm_ticks(counter_ticks(nanos));
+    arm_ticks(crate::clock::counter_ticks(nanos));
     crate::trace::trace(crate::trace::Kind::TimerArm, nanos as u32);
 }
 
 /// This CPU's timer, armed to fire within `nanos`: sooner than it is armed
 /// for, or armed if it is stopped.
 pub fn arm_within(nanos: u64) {
-    let want = counter_ticks(nanos);
+    let want = crate::clock::counter_ticks(nanos);
     let remaining = match percpu::armed_ticks() {
         0 => want,
         _ => {
@@ -349,7 +344,7 @@ pub fn arm_within(nanos: u64) {
             cval.saturating_sub(cpu::counter())
         }
     };
-    arm_ticks(want.min(remaining).max(1));
+    arm_ticks(want.min(remaining));
 }
 
 /// Stop the timer: no interrupt until it is armed again.
@@ -366,4 +361,35 @@ pub(super) fn rearm() {
         0 => stop_timer_hardware(),
         ticks => arm_ticks(ticks),
     }
+}
+
+/// `timer-floor`: this CPU's timer made due with interrupts masked, then
+/// asked to fire within a quantum, which leaves it nothing to fire within;
+/// then [`FLOOR_FIRES`] of its interrupts taken at EL1 with them open. A
+/// re-arm shorter than [`MIN_ONE_SHOT`] is what an EL1 fire repeats, and one
+/// that re-fires on its own return leaves this CPU no progress to say
+/// anything with.
+#[cfg(feature = "boot-actuators")]
+pub fn floor_selftest() {
+    const FLOOR_FIRES: u32 = 100;
+    let _guard = crate::arch::IrqGuard::close();
+    arm_one_shot(0);
+    let due = || {
+        let ctl: u64;
+        // SAFETY: reads the EL1 virtual timer's control.
+        unsafe { core::arch::asm!("mrs {}, cntv_ctl_el0", out(reg) ctl, options(nomem, nostack, preserves_flags)) };
+        ctl & TIMER_ISTATUS != 0
+    };
+    settles(100, "the timer armed for its floor", due);
+    arm_within(toyos_sched::fair::QUANTUM_NS);
+    let (armed, floor) = (percpu::armed_ticks(), floor_ticks());
+    let before = percpu::kernel_timer_fires();
+    cpu::enable_interrupts();
+    while percpu::kernel_timer_fires().wrapping_sub(before) < FLOOR_FIRES {
+        core::hint::spin_loop();
+    }
+    cpu::disable_interrupts();
+    stop_timer();
+    let verdict = if armed >= floor { "PASS" } else { "FAIL" };
+    log!("timer-floor: {verdict} armed={armed} floor={floor} ticks: {FLOOR_FIRES} fires taken at EL1 re-armed for the floor");
 }

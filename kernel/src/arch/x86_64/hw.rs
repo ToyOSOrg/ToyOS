@@ -1,158 +1,20 @@
-//! `KernelHw` — the kernel's side of the scheduler-core hardware boundary.
-//!
-//! Everything here is x2APIC, TSC or a single instruction; nothing here
-//! makes scheduling decisions. The simulator that exercises the scheduler
-//! core replaces this file and nothing else.
+//! x86-64's half of `crate::hw::KernelHw`: the halt and the context switch.
 
 use core::arch::asm;
 
-use toyos_sched::cpu::SleepToken;
 use toyos_sched::cpu::RunToken;
-use toyos_sched::fair::QUANTUM_NS;
-use toyos_sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
+use toyos_sched::hw::Hw;
 use toyos_sched::task::{TaskAccounting, TaskKey};
 
-use crate::arch::{apic, cpu, percpu};
+use crate::arch::{cpu, percpu};
+use crate::hw::{report_contexts, KernelHw};
 use super::switch::context_switch;
 use crate::sched::payload::{KernelCtx, KernelPayload};
 
-/// The one instance; zero-sized, holds no per-CPU state.
-pub static HW: KernelHw = KernelHw;
-
-pub struct KernelHw;
-
-/// The scheduler clock, in raw nanoseconds.
-pub fn now_ns() -> u64 {
-    HW.now().0
-}
-
-impl Kicker for KernelHw {
-    fn kick(&self, target: CpuId) {
-        apic::kick_cpu(target.0);
-    }
-}
-
-impl Machine for KernelHw {
-    fn now(&self) -> Nanos {
-        Nanos(crate::clock::nanos_since_boot())
-    }
-
-    /// Converts the trait's absolute deadline to the one-shot timer's relative count; a deadline
-    /// already past saturates to zero rather than firing immediately, which would spin the Ring 0
-    /// stub in a reload loop.
-    fn set_timer(&self, deadline: Nanos) {
-        apic::arm_one_shot(deadline.0.saturating_sub(self.now().0));
-    }
-
-    fn stop_timer(&self) {
-        apic::stop_timer();
-    }
-
-    fn halt(&self) {
-        // SAFETY: `sti; hlt` is the atomic enable-and-wait pair — a wake landing between the two is not lost.
-        unsafe { asm!("sti; hlt", options(nomem, nostack)); }
-    }
-
-    /// A kick IPI is how a remote CPU's `need_resched` gets set — there is no way to write it directly.
-    fn need_resched(&self, cpu: CpuId) {
-        if cpu.0 == percpu::cpu_id() {
-            crate::preempt::set_need_resched();
-        } else {
-            self.kick(cpu);
-        }
-    }
-
-    fn trace(&self, ev: TraceEvent) {
-        crate::trace::record(ev);
-    }
-
-    /// Diagnostic builds arm a periodic wake before halting so a quiescent CPU still reports.
-    fn idle_wait(&self, token: SleepToken) {
-        let _consumed = token;
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::diag_tick() {
-            apic::arm_within(DIAG_TICK_NS);
-        }
-        self.halt();
-        // **A CPU that is executing has a one-shot armed, and this is where
-        // that becomes true again.** `TimerPlan::Stop` left this one at zero
-        // before the halt above and only a pass reaching `apply_timer` arms
-        // another, so a CPU woken by an IPI or a device — never by its own
-        // timer, which is stopped — and then held in Ring 0 takes no timer
-        // interrupt at all. `crate::deadline`'s poll and
-        // `crate::hardlockup`'s sample both rest on some CPU taking one.
-        // Arming earlier than the scheduler planned is a spurious pass and
-        // never a missed deadline (`toyos_sched::timer::TimerPlan`), and the
-        // next pass replaces it either way.
-        //
-        // Asked, because it is only those two that need it: a boot under no
-        // bound pays an x2APIC read and two writes per wake for nothing.
-        if crate::deadline::armed() {
-            apic::arm_within(QUANTUM_NS);
-        }
-    }
-}
-
-/// Longest sleep on a `diag-tick` build; kept under `heartbeat`'s reporting period so a healthy CPU reports on every line.
-#[cfg(feature = "boot-actuators")]
-const DIAG_TICK_NS: u64 = 100_000_000;
-
-/// Which context each CPU last switched onto; read by [`report_contexts`] on crash, since a
-/// sibling's real `CpuSched` is `!Sync` and unreadable directly.
-static RUNNING_CTX: [core::sync::atomic::AtomicU64; crate::sched::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; crate::sched::MAX_CPUS];
-
-/// Prints which CPU is standing on which context and stack, on every kernel crash.
-///
-/// `subject` (`None` for this CPU's own) is the context flagged as "the same".
-///
-/// Allocates, locks or formats nothing but integers, since a crash may already hold any lock this
-/// could try to take.
-pub fn report_contexts(rsp: u64, subject: Option<u64>) {
-    let me = percpu::cpu_id() as usize;
-    let count = (crate::arch::smp::cpu_count() as usize).min(crate::sched::MAX_CPUS);
-    let mine = RUNNING_CTX
-        .get(me)
-        .map_or(0, |slot| slot.load(core::sync::atomic::Ordering::Relaxed));
-    let subject = subject.unwrap_or(mine);
-    crate::log!("  Contexts: cpu{me} crashed at rsp={rsp:#018x}, asking about ctx {subject:#x}");
-    for (cpu, slot) in RUNNING_CTX.iter().enumerate().take(count) {
-        let held = slot.load(core::sync::atomic::Ordering::Relaxed);
-        if !crate::mm::is_kernel_addr(held) || !held.is_multiple_of(8) {
-            crate::log!("  cpu{cpu} is on ctx {held:#x} (never switched, or not a context)");
-            continue;
-        }
-        // SAFETY: `held` is a pointer this kernel's own `Hw::switch` stored, into the boxed, always-mapped direct map.
-        let ctx = unsafe { &*(held as *const KernelCtx) };
-        let top = ctx.kernel_stack_top;
-        let same = held == subject && cpu != me;
-        // `top != 0` excludes idle contexts, whose stack top is zero by construction — the
-        // containment test below never fires for one; that is a gap in this report, not a bug.
-        let on_its_stack = cpu != me
-            && top != 0
-            && rsp <= top
-            && rsp > top.wrapping_sub(crate::process::KERNEL_STACK_SIZE as u64);
-        // idle's `kernel_stack_top` is zero by construction; rendering it as a task would misread as corruption.
-        match ctx.id {
-            None => crate::log!(
-                "  cpu{cpu} is on ctx {held:#x} (its idle context) stack_top={top:#018x} \
-                 saved_rsp={:#018x}{}{}",
-                ctx.sp,
-                if same { "  <== THE SAME CONTEXT" } else { "" },
-                if top == 0 { "" } else { "  <== AN IDLE CONTEXT'S STACK TOP IS ZERO BY CONSTRUCTION" },
-            ),
-            Some(id) => crate::log!(
-                "  cpu{cpu} is on ctx {held:#x} pid={} tid={} stack_top={top:#018x} \
-                 saved_rsp={:#018x}{}{}",
-                id.0.raw(),
-                id.1.raw(),
-                ctx.sp,
-                if same { "  <== THE SAME CONTEXT" } else { "" },
-                if on_its_stack { "  <== AND THIS CRASH IS ON THAT STACK" } else { "" },
-            ),
-        }
-    }
-    crate::mm::report_on_crash();
+/// `sti; hlt`, the atomic enable-and-wait pair: a wake landing between the two is not lost.
+pub fn halt() {
+    // SAFETY: enables interrupts and waits for one; touches no memory.
+    unsafe { asm!("sti; hlt", options(nomem, nostack)); }
 }
 
 /// Panics before the wild `ret` would restore register state that makes the failure unnameable.
@@ -450,8 +312,7 @@ impl Hw for KernelHw {
                     incoming.root.activate();
                 }
             }
-            RUNNING_CTX[percpu::cpu_id() as usize]
-                .store(restore as u64, core::sync::atomic::Ordering::Relaxed);
+            crate::hw::note_running(restore);
             // AMD's `SYSRET` reloads SS's selector but not its cached descriptor, so
             // a `sysretq` onto a task an IDT entry left with SS NULL hands userland an
             // unusable SS; reloading it here keeps it valid (`X86_BUG_SYSRET_SS_ATTRS`).
