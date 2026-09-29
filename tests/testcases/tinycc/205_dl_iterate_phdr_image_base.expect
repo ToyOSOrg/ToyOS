@@ -1,0 +1,4 @@
+lowest PT_LOAD: 0x200000
+dlpi_phnum is e_phnum: yes
+dlpi_phdr is __ehdr_start + e_phoff: yes
+__ehdr_start is dlpi_addr + the lowest p_vaddr: yes

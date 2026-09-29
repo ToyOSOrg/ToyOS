@@ -47,7 +47,7 @@ pub use gnu_hash::GnuHash;
 pub use header::{FileHeader, Machine};
 pub use layout::{
     DynamicSegment, Extent, ImageOffset, ImageRange, Layout, Segment, SegmentFlags,
-    SectionTableRef, StackedImage, TlsSegment,
+    ProgramHeaderTable, SectionTableRef, StackedImage, TlsSegment,
 };
 pub use rela::{Op, Rela, RelaCounts, RelaTable, Reloc, RelocError, RelocKind, Rules, TlsRef};
 pub use section::{SectionHeader, SectionTable};

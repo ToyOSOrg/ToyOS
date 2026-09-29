@@ -37,6 +37,11 @@ fn a_toyos_ld_binary_parses_to_what_readelf_says() {
     assert_eq!(layout.tls().unwrap().memsz(), 0x90);
     assert_eq!(layout.tls().unwrap().align(), 0x40);
 
+    // `e_phoff` 0x40, six headers of 56 bytes, inside the text segment's file
+    // bytes at offset 0.
+    let table = layout.program_headers().map(|t| (t.image().start().get(), t.image().len(), t.count()));
+    assert_eq!(table, Some((0x40, 6 * 56, 6)));
+
     let sections = layout.section_headers().expect("a section header table");
     assert_eq!((sections.count, sections.entry_size), (9, 64));
 

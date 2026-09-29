@@ -62,7 +62,7 @@ Only **Rust** and **QEMU** (for development), on any host OS and architecture �
 
 Vendor firmware a device verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`, and loaded only by that device's own driver through its IOMMU domain; it never executes on the CPU.
 
-The bar is not yet the tree. The standing failures are declared rather than removed — Python via `rust/x`, `cc` for every host link, four macOS FAT tools. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
+The bar is not yet the tree. The standing failures are declared rather than removed — Python via `rust/x`, `cc` for every host link, two macOS FAT tools. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
 
 - **toyos-ld** — frozen: everything links with rust-lld, and toyos-ld stays only as the linker inside ToyOS until lld runs there, then goes.
 - **rust/** — Rust compiler/std fork with ToyOS platform support (submodule). Auto-bootstraps; kept current with upstream. Its rules: `src/forkcheck.rs`'s module header.

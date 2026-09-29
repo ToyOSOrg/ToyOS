@@ -25,7 +25,7 @@
 //! that has not moved is a CPU that has taken nothing at all. A CPU whose count
 //! is stale for [`toyos_tco::hard_lockup_bound_ms`] of
 //! the bound this boot named, *and* whose sampled frame has `IF` clear, is
-//! stuck: it seals a `WEDGED` record naming itself, its `rip` and `rsp` from the
+//! stuck: it seals a `WEDGED` record naming itself, its `pc` and `sp` from the
 //! NMI frame, the lock it is spinning on if `Lock::lock` recorded one, a line
 //! for every other CPU, and the tail of the log ring — then writes the reset
 //! register through `acpi::reset_now`.
@@ -107,9 +107,9 @@ static STOOD_DOWN: AtomicBool = AtomicBool::new(false);
 static PROGRESS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static STILL_SINCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static AT_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static AT_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static AT_RSP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static AT_RFLAGS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static AT_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static AT_SP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static AT_FLAGS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static ARMED_PMU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
 /// The lock a CPU is spinning on and the `#[track_caller]` site that asked for
@@ -132,15 +132,15 @@ static SPIN_AT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 #[must_use]
 pub fn start(deadline_ms: u64) -> Armed {
     let ms = toyos_tco::hard_lockup_bound_ms(deadline_ms);
-    let ticks = crate::clock::tsc_ticks(ms.saturating_mul(1_000_000));
-    let per_ms = crate::clock::tsc_ticks(1_000_000);
+    let ticks = crate::clock::counter_ticks(ms.saturating_mul(1_000_000));
+    let per_ms = crate::clock::counter_ticks(1_000_000);
     if ms == 0 || ticks == 0 || per_ms == 0 {
         return Armed { ms: 0, sampled: false };
     }
     BOUND_MS.store(ms, Relaxed);
     BOUND_TSC.store(ticks, Relaxed);
     TICKS_PER_MS.store(per_ms, Relaxed);
-    PERIOD.store(crate::clock::tsc_ticks(SAMPLE_NS), Relaxed);
+    PERIOD.store(crate::clock::counter_ticks(SAMPLE_NS), Relaxed);
     arm_this_cpu();
     Armed { ms, sampled: has_a_counter(percpu::cpu_id() as usize) }
 }
@@ -225,7 +225,7 @@ pub fn bound_ms() -> u64 {
 /// Called from `arch::trap::nmi`'s `note` and nowhere else. Returns on every NMI
 /// that is not this CPU's own overflow, so the diagnostic senders — the blocked
 /// task dump's probe, the syscall-window storm — cost one load and one compare.
-pub fn sample(rip: u64, rsp: u64, rflags: u64) {
+pub fn sample(pc: u64, sp: u64, flags: u64) {
     if BOUND_TSC.load(Relaxed) == 0 || STOOD_DOWN.load(Relaxed) {
         return;
     }
@@ -241,9 +241,9 @@ pub fn sample(rip: u64, rsp: u64, rflags: u64) {
         return;
     }
     let now = cpu::counter();
-    AT_RIP[me].store(rip, Relaxed);
-    AT_RSP[me].store(rsp, Relaxed);
-    AT_RFLAGS[me].store(rflags, Relaxed);
+    AT_PC[me].store(pc, Relaxed);
+    AT_SP[me].store(sp, Relaxed);
+    AT_FLAGS[me].store(flags, Relaxed);
     AT_TSC[me].store(now, Relaxed);
 
     let taken = crate::irq_census::taken_here();
@@ -251,10 +251,10 @@ pub fn sample(rip: u64, rsp: u64, rflags: u64) {
     // `IF` set is the whole difference between this bound and the deadline's: a
     // CPU that can still take an interrupt is one the timer entry's poll
     // reaches, and this mechanism is not about it.
-    if moved || trap::frame_interrupts_enabled(rflags) {
+    if moved || trap::frame_interrupts_enabled(flags) {
         STILL_SINCE[me].store(now, Relaxed);
     } else if now.wrapping_sub(STILL_SINCE[me].load(Relaxed)) >= BOUND_TSC.load(Relaxed) {
-        locked_up(me, rip, rsp, now)
+        locked_up(me, pc, sp, now)
     }
     // **After the decision and never before it.** Re-arming clears the mask
     // hardware set on delivery; leaving it set is what stops a second NMI
@@ -269,11 +269,11 @@ pub fn sample(rip: u64, rsp: u64, rflags: u64) {
 /// Seal where every CPU is and hand the machine back.
 ///
 /// Runs on the stuck CPU itself, from its own NMI frame, which is the only
-/// context that has its `rip`. No CPU is asked anything from here: an NMI sent
+/// context that has its `pc`. No CPU is asked anything from here: an NMI sent
 /// to a sibling already inside its own would enter `nested_nmi` and stop the
 /// machine instead of resetting it, so the record is built out of what each CPU
 /// last wrote about itself.
-fn locked_up(me: usize, rip: u64, rsp: u64, now: u64) -> ! {
+fn locked_up(me: usize, pc: u64, sp: u64, now: u64) -> ! {
     if !crate::deadline::claim_the_reset() {
         // Another CPU is already sealing and resetting. This one has nothing to
         // add and must not race it into the page.
@@ -281,7 +281,7 @@ fn locked_up(me: usize, rip: u64, rsp: u64, now: u64) -> ! {
     }
     crate::drivers::panic_console::seal_wedge(format_args!(
         "{}",
-        Report { me, rip, rsp, now, cpus: (smp::cpu_count() as usize).min(MAX_CPUS) }
+        Report { me, pc, sp, now, cpus: (smp::cpu_count() as usize).min(MAX_CPUS) }
     ));
     // The seal first, because the USB stop `reset_now` makes before it writes
     // the register is bounded but not instant, and this record is the
@@ -370,7 +370,7 @@ impl fmt::Display for Waiting {
     }
 }
 
-/// Where a `rip` is, spelled without saying a word: `symbols::resolve_kernel`
+/// Where a `pc` is, spelled without saying a word: `symbols::resolve_kernel`
 /// writes a log record, which is the one thing this path may not do.
 struct At(u64);
 
@@ -391,15 +391,15 @@ impl fmt::Display for At {
 /// What the machine looked like from the CPU that ended it.
 struct Report {
     me: usize,
-    rip: u64,
-    rsp: u64,
+    pc: u64,
+    sp: u64,
     now: u64,
     cpus: usize,
 }
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { me, rip, rsp, now, cpus } = *self;
+        let Self { me, pc, sp, now, cpus } = *self;
         writeln!(
             f,
             "{LOCKED_UP}: cpu{me} has taken no interrupt for {}, with `IF` clear at every sample \
@@ -407,8 +407,8 @@ impl fmt::Display for Report {
             Ms(now.wrapping_sub(STILL_SINCE[me].load(Relaxed))),
             BOUND_MS.load(Relaxed),
         )?;
-        writeln!(f, "  rip={}", At(rip))?;
-        writeln!(f, "  rsp={rsp:#018x}{}", Waiting(me))?;
+        writeln!(f, "  pc={}", At(pc))?;
+        writeln!(f, "  sp={sp:#018x}{}", Waiting(me))?;
         // Every CPU, and each line is what that CPU last wrote about itself:
         // the holder of whatever the stuck one is waiting for is somewhere in
         // this list, and nothing else in a wedged machine can point at it.
@@ -432,8 +432,8 @@ impl fmt::Display for Report {
                 "  cpu{cpu} irqs={irqs} (={} when sampled {} ago) if={} at {}{}",
                 PROGRESS[cpu].load(Relaxed),
                 Ms(now.wrapping_sub(at)),
-                u8::from(trap::frame_interrupts_enabled(AT_RFLAGS[cpu].load(Relaxed))),
-                At(AT_RIP[cpu].load(Relaxed)),
+                u8::from(trap::frame_interrupts_enabled(AT_FLAGS[cpu].load(Relaxed))),
+                At(AT_PC[cpu].load(Relaxed)),
                 Waiting(cpu),
             )?;
         }

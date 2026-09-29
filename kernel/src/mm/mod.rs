@@ -159,7 +159,7 @@ impl core::fmt::Debug for DirectMap {
 pub fn init(memory_map: &[MemoryMapEntry], reserved: &[Region]) {
     alloc::init_early();
     pmm::init(memory_map, reserved);
-    DIRECT_MAP_END.set(paging::init(memory_map));
+    DIRECT_MAP_END.set(paging::init(memory_map, crate::drivers::panic_console::scanout()));
     alloc::init();
     paging::seal_kernel_half();
 }
