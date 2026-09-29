@@ -76,11 +76,20 @@ fn safe_read_u64(addr: u64, user_pml4: *const u64) -> Option<u64> {
         // SAFETY: the walk's argument, one level down again.
         let pde = unsafe { *pd.add(pd_idx) };
         if pde & 1 == 0 { return None; }
-        let page_phys = pde & 0x000F_FFFF_FFE0_0000;
-        let offset = addr & (mm::PAGE_2M - 1);
-        // SAFETY: the walk's argument — a direct-map read of a byte inside the
-        // present 2 MiB leaf the three entries above resolved.
-        Some(unsafe { *crate::DirectMap::from_phys(page_phys + offset).as_ptr::<u64>() })
+        let leaf = if pde & (1 << 7) != 0 {
+            (pde & 0x000F_FFFF_FFE0_0000) + (addr & (mm::PAGE_2M - 1))
+        } else {
+            // A window of mixed rights — an image's text beside its data — is
+            // split into 4 KiB leaves one level down.
+            let pt = crate::DirectMap::from_phys(pde & 0x000F_FFFF_FFFF_F000).as_ptr::<u64>();
+            // SAFETY: the walk's argument, one level down again.
+            let pte = unsafe { *pt.add(((addr >> 12) & 0x1FF) as usize) };
+            if pte & 1 == 0 { return None; }
+            (pte & 0x000F_FFFF_FFFF_F000) + (addr & 0xFFF)
+        };
+        // SAFETY: the walk's argument — a direct-map read of 8 aligned bytes
+        // inside the present leaf the entries above resolved.
+        Some(unsafe { *crate::DirectMap::from_phys(leaf).as_ptr::<u64>() })
     } else if mm::is_kernel_addr(addr) {
         // SAFETY: `addr` is 8-aligned (checked at the top) and a kernel address
         // (checked in this arm), so it is inside the direct map.
