@@ -114,18 +114,9 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // The landing protocol, and the command it replaced — **before
-    // `check_prerequisites`**, because none of these builds anything. They are
-    // git, a push, and a refusal.
-    if asked(&flags::LAND) {
-        toyos_build::pr::dispatch_retired_land();
-    }
-    if asked(&flags::PR) {
-        toyos_build::pr::dispatch_pr(&root, &args);
-        return;
-    }
+    // **Before `check_prerequisites`**, because it builds nothing.
     if asked(&flags::SYNC) {
-        toyos_build::pr::dispatch_sync(&root);
+        toyos_build::sync::dispatch_sync(&root);
         return;
     }
     // Every CI job. Here for the same reason: the host job's runner has no QEMU,
@@ -185,7 +176,6 @@ fn main() {
     let debug = asked(&flags::DEBUG);
     let build_only = asked(&flags::BUILD_ONLY);
     let dump_audio = asked(&flags::DUMP_AUDIO);
-    let rebuild_toolchain = asked(&flags::REBUILD_TOOLCHAIN);
     let smp = parse_smp(&args);
     let profile = parse_profile(&args);
     let mute = asked(&flags::MUTE);
@@ -206,7 +196,6 @@ fn main() {
         for (other, flag) in [
             (diag, &flags::DIAG_BOOT),
             (console, &flags::CONSOLE_BOOT),
-            (rebuild_toolchain, &flags::REBUILD_TOOLCHAIN),
         ] {
             assert!(!other, "--boot-config {dir} cannot be combined with {}", flag.name);
         }
@@ -253,8 +242,7 @@ fn main() {
         return;
     }
 
-    // On demand and nowhere else: it asks GitHub for every fork branch head, so
-    // neither `cargo test` nor `--land` may reach it.
+    // On demand and nowhere else: it asks GitHub for every fork branch head.
     if asked(&flags::CHECK_FORKS) {
         toyos_build::forkcheck::dispatch(&root);
         return;
@@ -271,11 +259,11 @@ fn main() {
     // agent's clean or bootstrap can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
     if let Some(out) = update_image {
-        toyos_build::build::build_update(&root, &boot, rebuild_toolchain, &plan, &out);
+        toyos_build::build::build_update(&root, &boot, &plan, &out);
         println!("Update image: {} (ssh <machine> update < it)", out.display());
         return;
     }
-    let image = toyos_build::build::build(&root, boot, rebuild_toolchain, &plan);
+    let image = toyos_build::build::build(&root, boot, &plan);
     println!("Build finished.");
     println!("Boot image: {}", image.display());
 
