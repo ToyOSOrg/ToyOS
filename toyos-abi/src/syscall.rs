@@ -688,9 +688,9 @@ pub struct Stat {
     pub size: u64,
     /// When the file was last written: nanoseconds since the Unix epoch, UTC,
     /// off the wall clock at the write, to the resolution its mount keeps —
-    /// the nanosecond on `/tmp` and DATA, two seconds on FAT. 0 is undated:
-    /// written on a machine whose RTC never answered, or shipped in ROOT's
-    /// reproducible image.
+    /// the nanosecond on `/tmp` and DATA, two seconds at the flush on FAT. 0 is
+    /// undated: written on a machine whose RTC never answered, or shipped in
+    /// ROOT's reproducible image.
     pub mtime: u64,
 }
 

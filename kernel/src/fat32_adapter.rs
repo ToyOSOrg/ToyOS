@@ -660,7 +660,7 @@ fn stamp(mtime: u64) -> FatTime {
     FatTime::from_unix_secs(mtime / crate::clock::NANOS_PER_SEC)
 }
 
-/// What to stamp on an entry the VFS gave no `mtime` for.
+/// The wall clock now, as [`stamp`] stores it.
 fn now() -> FatTime {
     stamp(crate::clock::mtime_now())
 }
@@ -1049,10 +1049,12 @@ impl FileSystem for FatFs {
         &mut self,
         file_id: FileId,
         size: u64,
-        mtime: u64,
+        _mtime: u64,
     ) -> Result<(), SyscallError> {
         let role = self.role;
-        let time = stamp(mtime);
+        // The flush's own instant, not the flushing handle's `mtime`: the last
+        // handle to close may be a reader that opened before the last write.
+        let time = now();
         let name = {
             let known = self.open.get(&file_id).ok_or(SyscallError::NotFound)?;
             let (name, was) = (known.name.clone(), known.file.len());

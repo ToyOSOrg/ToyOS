@@ -461,7 +461,7 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
-    // Its shared run judges `/tmp`'s stamps; its other modes are machine tests'.
+    // Its shared run judges `/tmp`'s and `/log`'s stamps; its other modes are machine tests'.
     "file_mtime",
     "hierarchy_paths",
     "nvme_home_roundtrip",

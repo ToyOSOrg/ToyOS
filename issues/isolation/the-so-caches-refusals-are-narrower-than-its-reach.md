@@ -12,16 +12,15 @@ Three things that record carried are not covered by either refusal, and they
 went out of the tracker with it. They are one file because they are one
 residual: what the refusals do **not** reach.
 
-## The identity cannot see a same-size rewrite on a FAT32 mount
+## The identity cannot see a same-size rewrite
 
 `vfs::BackingId` is size plus the mount's mtime.
 
 `/log` is FAT32, mounted `UserAccess::ReadWrite` (`kernel/src/main.rs:461`), and
 **FAT stores seconds in units of two**: `toyos-fat32/src/time.rs:5-15` states
 the encoding's three lossy properties, `dir.rs:92` passes 0 for the tenths
-field, and `kernel/src/fat32_adapter.rs:849` stamps whatever `now()` gives. So
-two writes of the same length inside one 2-second bucket carry one mtime, and
-the second load is served the first image — the staleness the refusal exists to
+field. So two writes of the same length inside one 2-second bucket carry one
+mtime, and the second load is served the first image — the staleness the refusal exists to
 prevent, on the one writable FAT mount a process can reach.
 
 **Mechanism read off the code; not reproduced.** Planting it needs a same-size
@@ -29,9 +28,14 @@ rewrite of a library inside 2 s on `/log`, and a 1.9 MB write to the
 USB-backed log volume takes about 5.8 s, so the window closes before the second
 write lands.
 
+On a machine whose RTC never answered every write stamps 0
+(`kernel/src/clock.rs`'s `mtime_now`), so there a same-size rewrite of a
+library on any writable mount carries the identity it had.
+
 *Exit condition:* an identity that does not rest on a clock — a content hash, a
 per-file generation the mount bumps on every write, or a `FileId` plus a write
-counter — or a demonstration that no library can be reached on a FAT mount.
+counter — with a test that rewrites a library at the same size on the
+`rtc-dead` machine and loads the second image.
 
 ## The budget is a machine-wide, boot-permanent denial
 

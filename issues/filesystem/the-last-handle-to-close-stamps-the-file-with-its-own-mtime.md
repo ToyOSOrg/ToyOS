@@ -18,10 +18,6 @@ closed by the writer and then by the reader, is flushed with `t0`: the stored
 mtime says the file has not changed since before the write, and a build tool
 that compares mtimes does not rebuild from it.
 
-It reaches FAT as well as DATA and `/tmp`: `kernel/src/fat32_adapter.rs`'s
-`update_metadata` stores the flushing handle's mtime, where before it stored
-the flush's own instant.
-
 **Mechanism read off the code; not reproduced.**
 
 **Exit condition.** The mtime is the file's and not a handle's — each write

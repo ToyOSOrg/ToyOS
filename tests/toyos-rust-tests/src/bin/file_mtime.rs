@@ -5,6 +5,8 @@
 //! between two `SYS_CLOCK_EPOCH` readings taken around what made it — a write,
 //! a create with truncation, a create of a missing file, a truncation — and a
 //! later write's stamp is later, which a clock of whole seconds cannot say.
+//! Then `/log`: FAT keeps the whole seconds of its flush, read back after a
+//! reopen.
 //! `write <path>` makes the first judgement on `path` and `read <path>` only
 //! prints what it finds there. `undated` runs on a machine whose RTC never
 //! answered and never asks the time: a file written there is undated, which
@@ -97,7 +99,22 @@ fn main() {
                 "{TRUNCATED} was created at {created} ns and a later truncation stamped it \
                  {resized} ns"
             );
-            println!("file-mtime: /tmp stamps {first} then {second}");
+
+            // The flush stamps FAT, which keeps whole seconds and drops an odd one.
+            const FAT: &str = "/log/file-mtime";
+            let before = epoch();
+            write(FAT, b"on FAT");
+            let fat = mtime(FAT);
+            let after = epoch();
+            assert!(
+                (before - 1) * NANOS_PER_SEC <= fat
+                    && fat <= after * NANOS_PER_SEC
+                    && fat % NANOS_PER_SEC == 0,
+                "{FAT} reads back {fat} ns after a reopen, and the wall clock read {before} s \
+                 before its write and {after} s after",
+            );
+            fs::remove_file(FAT).unwrap_or_else(|e| panic!("remove {FAT}: {e}"));
+            println!("file-mtime: /tmp stamps {first} then {second}, /log {fat}");
         }
         [_, mode] if mode == "undated" => {
             const UNDATED: &str = "/tmp/file-mtime-undated";
