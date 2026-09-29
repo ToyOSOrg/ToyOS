@@ -7,17 +7,17 @@ opened: 2026-09-29
 # Newer hardware offers what the T14 lacks
 
 Owner ruling: the T14 gets every security and speed feature its hardware has
-(`issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`,
+(`issues/kernel/the-kernel-is-at-least-as-secure-as-linux-on-the-t14.md`,
 `issues/kernel/toyos-uses-what-the-t14s-hardware-offers-for-speed.md`), and
-what only other modern systems have is written down here. A feature becomes
-work when ToyOS gains a machine that has it. Intel's parts are named by the
+what only other modern systems have is written down here. It is blocked on a
+machine that has the feature; its exit is every row a stage on that
+machine's track or a `rejected` issue. Intel's parts are named by the
 SDM 325462-093US, Vol. 1 Table 5-2 ("SDM"), or by the ISE reference
 319433-062, Table 1-2 ("ISE"), neither of which places any of these in Tiger
 Lake. AMD's and Arm's are read in Linux at tag `v7.2`; the AMD parts that
 carry each were not verified against AMD's documents, and the Arm cores were
 not verified against Arm's. The Arm rows belong to
-`issues/kernel/toyos-runs-on-arm64.md`'s CPU-state declaration, which names
-none of them yet.
+`issues/kernel/toyos-runs-on-arm64.md`'s CPU-state declaration.
 
 | Feature | Hardware | Why it matters to ToyOS |
 |---|---|---|
@@ -34,6 +34,7 @@ none of them yet.
 | Thread Director, HRESET | Alder Lake (SDM) | The core-class hints `issues/kernel/all-cores-are-assumed-equal-and-arm64-breaks-that.md` needs on a hybrid part |
 | TDX | Emerald Rapids (ISE) | ToyOS as a confidential guest; ToyOS runs no guest today |
 | Total Storage Encryption | Panther Lake (ISE) | A platform engine encrypts storage under a key `PBNDKB` wraps to the platform (SDM Vol. 2B, PBNDKB), so disk encryption's key reaches memory only wrapped |
+| TME | 11th-generation Core lines that set CPUID.(7,0):ECX bit 13, which varies by line (datasheet 631121-012 §1.3); the T14 reads ECX 0x18c05fde, bit 13 clear | Memory encrypted under a key firmware activates and locks; the kernel reads `IA32_TME_ACTIVATE` on every CPU and refuses a boot where two disagree, where Linux only reports it (`detect_tme_early`) |
 | INVLPGB, TLBSYNC | AMD, CPUID 0x80000008:EBX bit 3 (`arch/x86/include/asm/cpufeatures.h:331,335`) | Broadcast TLB invalidation without IPIs, which Linux v7.2 uses (`arch/x86/mm/tlb.c:276-285,407-448`); it would replace speed track P4's shootdown IPIs, as `TLBI IS` does on Arm |
 | SEV-SNP | AMD, CPUID 0x8000001F:EAX bit 4 (`cpufeatures.h:448,453`) | ToyOS as a confidential guest; ToyOS runs no guest today |
 | Shadow stack on AMD | AMD; unverified: that AMD enumerates it through the bit Linux reads for Intel, CPUID.(7,0):ECX bit 7 (`cpufeatures.h:390,397`), and which parts set it | Security S11 and S13 would run there unchanged |

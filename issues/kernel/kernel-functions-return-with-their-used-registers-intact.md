@@ -14,8 +14,7 @@ builds with `-fzero-call-used-regs=used-gpr` (`Makefile:891-894`). LLVM acts
 on the function attribute `zero-call-used-regs`
 (`llvm/lib/CodeGen/PrologEpilogInserter.cpp:1212`), and the rustc fork at
 1b236638 has no option that sets it
-(`compiler/rustc_session/src/options.rs`). A row of the hardening table in
-`issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`.
+(`compiler/rustc_session/src/options.rs`).
 
 **Exit**: the kernel, `core` and `alloc` build under a rustc option that sets
 `zero-call-used-regs=used-gpr` on every function, carried in the fork to
