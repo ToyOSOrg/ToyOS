@@ -7,6 +7,10 @@ use crate::irq_ring::IrqSource;
 extern "sysv64" fn isa0_handler() {
     crate::arch::percpu::irq_took!(UserDev);
     crate::isa::isr(0);
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::isa_claim_straddles_quarantine() {
+        crate::arch::i8042::stage_late_edge();
+    }
     crate::irq_ring::isr_publish(IrqSource::UserDev, crate::clock::nanos_since_boot());
     crate::preempt::set_need_resched();
     crate::arch::apic::eoi();

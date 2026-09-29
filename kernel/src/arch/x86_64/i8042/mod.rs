@@ -189,6 +189,14 @@ pub fn wake_irq_cpu() {
     }
 }
 
+/// Under `isa-claim-straddles-quarantine`, the edge a flood leaves in IRR,
+/// delivered with the holder's byte in OBF.
+#[cfg(feature = "boot-actuators")]
+pub fn stage_late_edge() {
+    assert!(is_irq_cpu(), "i8042: the holder's line is not on IRQ_CPU");
+    crate::arch::apic::send_self(I8042_VECTOR);
+}
+
 fn is_irq_cpu() -> bool {
     IRQ_CPU.load(Ordering::Relaxed) == crate::arch::percpu::cpu_id()
 }
@@ -575,7 +583,7 @@ fn buffer_full(status: u8) -> bool {
 /// anything to it.
 pub extern "sysv64" fn handler() {
     crate::arch::percpu::irq_took!(I8042);
-    // A late edge, executed or held in IRR, on a controller the quarantine
+    // A late edge, held in IRR, on a controller the quarantine
     // may have handed on: the take ran here with interrupts closed.
     if QUARANTINE.taken() {
         crate::arch::apic::eoi();
