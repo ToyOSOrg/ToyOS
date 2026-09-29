@@ -1,11 +1,12 @@
 # The T14 answering the development host over its own cable: netd serving the
-# I219 for as long as the boot lasts, `logd` streaming every record to the
-# listener the parameter line names, and sshd taking a command — `reboot`
-# among them, which is how the host hands the machine back.
+# I219 for as long as the boot lasts, `logd` serving the boot's log to whoever
+# connects, and sshd taking a command — `reboot` among them, which is how the
+# host hands the machine back.
 #
 # `tests/e1000talkcase` is the same boot in front of QEMU's 82574; the two
-# differ by the one `devices` row, for the reason `tests/lancase` and
-# `tests/e1000case` do. Nothing here reaches the internal NVMe: no `[disks]`
+# differ by the one `devices` row, because a program that names a card the
+# machine does not have costs an `init:` refusal line on every boot, and no
+# machine has both. Nothing here reaches the internal NVMe: no `[disks]`
 # row, and the only device any program claims is the PCI function below.
 
 [boot]

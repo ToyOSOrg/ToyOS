@@ -335,16 +335,20 @@ mod sizing_tests {
     }
 
     /// **`lan_hold` sleeps a bound this file prices.** The guest binary holds
-    /// the machine up for `toyos_tco::LEASE_BOUND_MS`, and the boot's own job
-    /// allowance has to outlast it or the runner's deadline cuts the window the
-    /// host reaches that machine across.
+    /// the machine up for `toyos_tco::LEASE_BOUND_MS`, and every boot that runs
+    /// it has to allow more or the runner's deadline cuts the hold short; the
+    /// talking boot's link and lease are priced at that bound, which is netd's.
     #[test]
     fn the_window_lan_hold_sleeps_is_the_window_this_file_prices() {
         let profile = Profile::load(root()).expect(PATH);
         let hold = toyos_tco::LEASE_BOUND_MS;
-        let job = profile.row(&job_ms_row("lancase")).expect("lancase's own allowance");
-        assert!(job.ceiling > hold, "{} against a {hold} ms hold", job.ceiling);
-        for name in ["lan.lancase.link_up_ms", "lan.lancase.lease_ms"] {
+        for boot in ["lanicscase", "testcases-deaf"] {
+            let job = profile
+                .row(&job_ms_row(boot))
+                .unwrap_or_else(|| panic!("{boot}'s own allowance"));
+            assert!(job.ceiling > hold, "{boot}: {} against a {hold} ms hold", job.ceiling);
+        }
+        for name in ["lan.lantalkcase.link_up_ms", "lan.lantalkcase.lease_ms"] {
             let row = profile.row(name).unwrap_or_else(|| panic!("{name} is priced"));
             assert_eq!(row.ceiling, hold, "{name}");
         }

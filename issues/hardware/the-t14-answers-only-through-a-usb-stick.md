@@ -8,17 +8,21 @@ opened: 2026-09-07
 
 Every result from the bench rides a stick and a reboot into Ubuntu. The laptop
 is on a cable on the same LAN as the development Mac and its NIC is the onboard
-Intel I219 at `00:1f.6`, `8086:15fc`, which the kernel enumerates and nothing
-claims. The track is to make that cable the answer path.
+Intel I219 at `00:1f.6`, `8086:15fc`, which netd claims and drives
+(`toyos-i219`). The track is to make that cable the answer path.
 
-The substrate a process needs to drive a PCI function itself is built
-(`kernel/src/pcidev/mod.rs`, `userland/netd/src/virtio_net.rs`). What is left is
-the I219 driver in netd, with DHCP under the hostname `toyos-t14` and a first
-ping and ssh from the Mac; the log a boot serves, read from the Mac while it
-is booting; command execution, file
-transfer both ways and key auth in sshd, with the harness running userland tests
-over ssh through a russh client; and a netboot spike in which the firmware
-fetches the loader over HTTP so the stick leaves the boot path.
+Built and read on the T14 (`lan_talk`, `lan_swap`): netd leases as
+`toyos-t14`, the Mac finds `toyos-t14.local` and reads the boot's log from its
+first line while it runs, pings it, runs a command over ssh under the image's
+key and hands the machine back with `reboot`, and a service is swapped over ssh
+without a reboot. Every LAN metal row but the delivery probe rides the one
+talking boot. What is left is file transfer both ways and a refused key on the
+T14, which sshd serves and only QEMU has read; the harness running userland
+tests over ssh through a russh client, which saves a flash only on a boot held
+open past the runner's bound
+(`issues/hardware/a-swap-on-the-t14-lives-inside-a-metal-boots-bound.md`); and
+a netboot spike in which the firmware fetches the loader over HTTP so the stick
+leaves the boot path.
 
 Constraints a reader would otherwise pay to re-derive:
 
@@ -34,9 +38,9 @@ Constraints a reader would otherwise pay to re-derive:
   before suspecting the driver.
 - **ssh is the bench's transport and a real feature**: sshd is built on russh
   and the harness's client is russh too. No host ssh binary, no fork.
-- **Addressing is DHCP with a hostname**, resolved through the router's DNS. The
-  T14's MAC is the same under ToyOS and Ubuntu, so the lease is the one `t14`
-  already resolves to. Wi-Fi is out — the AX210 needs a firmware image.
+- **Addressing is DHCP with a hostname**, and the Mac asks for the machine by
+  that name, never by an address it read under Ubuntu. Wi-Fi is out — the AX210
+  needs a firmware image.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by

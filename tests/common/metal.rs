@@ -63,11 +63,6 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
-    /// The PCI function this boot's image claims, where the loop reaches the
-    /// boot over its cable while it runs. **`None` on every boot that does not
-    /// ask**: a boot whose judges read no cable would be refused for a fact
-    /// none of them looks at.
-    pub nic: Option<&'static str>,
     /// **The boot is talked to over its own cable.** Its image authorizes a
     /// key minted beside it, and the loop — told `--talk` — reads the log the
     /// machine serves under its name, pings the address the name answers with,
@@ -95,7 +90,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false, swap: None }
+    Arm { boot, config, params, jobs, features: &[], talk: false, swap: None }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -229,10 +224,6 @@ pub struct Readback {
     /// this machine holds, and it is a row rather than the reason a mount
     /// happened to work.
     pub stick_secs: u64,
-    /// What the host asked the cable while the machine was between its two
-    /// operating systems, and `None` on every boot that named no function to
-    /// ask over.
-    pub cable: Option<toyos_build::metal::Cable>,
 }
 
 impl Readback {
@@ -267,24 +258,6 @@ impl Readback {
         let at = self.home.join(toyos_build::metal::READBACK_SWAP_STREAM);
         let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
         Ok((swapped, stream.split_inclusive('\n').map(str::to_string).collect()))
-    }
-
-    /// One file off the log volume that is neither the loader's nor `logd`'s,
-    /// read out of the partition's own bytes; `None` where the volume has no
-    /// such file.
-    ///
-    /// **The loop copies two kinds of file off the mount and this is neither**,
-    /// so it comes out of `metal::READBACK_VOLUME` — which the loop keeps on
-    /// every boot that came back, because the outside judge runs on every one.
-    pub fn log_volume_file(&self, name: &str) -> Result<Option<String>, String> {
-        let at = self.home.join(toyos_build::metal::READBACK_VOLUME);
-        let volume = std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        let found = super::volumes::read_files(&volume, &[name])?.pop().flatten();
-        found
-            .map(|bytes| {
-                String::from_utf8(bytes).map_err(|e| format!("{}'s {name}: {e}", self.label))
-            })
-            .transpose()
     }
 
     /// Every `logd` file this boot wrote, as one text, less every program's
@@ -549,8 +522,6 @@ struct Batch {
     jobs: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
     links: Vec<(String, String)>,
-    /// [`Arm::nic`], carried to the invocation that drives this boot.
-    nic: Option<&'static str>,
     /// [`Arm::talk`], carried to the image and to the invocation.
     talk: bool,
     /// [`Arm::swap`], carried to the image, the invocation and the second one.
@@ -599,7 +570,6 @@ fn batches(
                 jobs: boot.jobs.clone(),
                 files: boot.files.clone(),
                 links: boot.links.clone(),
-                nic: None,
                 talk: false,
                 swap: None,
             },
@@ -618,30 +588,26 @@ fn batches(
                 jobs: Vec::new(),
                 files: Vec::new(),
                 links: Vec::new(),
-                nic: arm.nic,
                 talk: arm.talk,
                 swap: arm.swap,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
-                || batch.nic != arm.nic
                 || batch.talk != arm.talk
                 || batch.swap != arm.swap
             {
                 return Err(format!(
-                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
-                     rides it as ({}, {:?}, {:?}, {:?}, talk={}); one boot is one image",
+                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, talk={}) and another row rides \
+                     it as ({}, {:?}, {:?}, talk={}); one boot is one image",
                     arm.boot,
                     arm.config,
                     arm.params,
                     arm.features,
-                    arm.nic,
                     arm.talk,
                     batch.config,
                     batch.params,
                     batch.features,
-                    batch.nic,
                     batch.talk
                 ));
             }
@@ -823,7 +789,7 @@ fn talk_home(home: &Path) -> PathBuf {
     home.join("ssh")
 }
 
-fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<String> {
+fn invocation(image: &Path, home: &Path, talk: bool) -> Vec<String> {
     let mut words = vec![
         "run".to_string(),
         "--bin".to_string(),
@@ -839,10 +805,6 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
         // that wrote them.
         "--fat32-check".to_string(),
     ];
-    if let Some(nic) = nic {
-        words.push("--nic".to_string());
-        words.push(nic.to_string());
-    }
     if talk {
         words.push("--talk".to_string());
         words.push(talk_home(home).join("id_ed25519").display().to_string());
@@ -889,7 +851,6 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
     let stick_secs = toyos_build::metal::stick_secs(&boot)
         .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
-    let cable = toyos_build::metal::cable(&boot).map_err(|why| format!("{label}: {why}"))?;
     Ok(Readback {
         label: label.to_string(),
         home,
@@ -899,7 +860,6 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         log,
         back_secs,
         stick_secs,
-        cable,
     })
 }
 
@@ -1024,7 +984,7 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
+                invocation(image, &at(dir, label), batches[*label].talk).join(" ")
             ));
             if let Some(service) = batches[*label].swap {
                 request.push_str(&format!(
@@ -1057,7 +1017,7 @@ pub fn run(
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if mode == Mode::Drive {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
+            let words = invocation(image, &at(dir, label), batches[*label].talk);
             // A swapping boot's second invocation is started first: it dials
             // the machine under its own name for as long as it takes, and
             // waits for the boot.

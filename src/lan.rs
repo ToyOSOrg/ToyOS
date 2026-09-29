@@ -78,6 +78,22 @@ pub fn lease_in(text: &str) -> Result<Lease, String> {
     })
 }
 
+/// The lease, where it is the address this machine was reached at under its
+/// own name: the address that served the boot's log, answered the ping and ran
+/// the command. A lease of any other address is not the one the machine
+/// answered on.
+pub fn leased_where_it_answered(netd: &str, peer: Ipv4Addr) -> Result<Lease, String> {
+    let lease = lease_in(netd)?;
+    if lease.address != peer {
+        return Err(format!(
+            "netd leased {} and {HOSTNAME}.local was reached at {peer}: the address that served \
+             this boot's log is not the one this boot leased",
+            lease.address
+        ));
+    }
+    Ok(lease)
+}
+
 /// How long after the driver came up the link did, out of the driver's own
 /// record.
 pub fn link_up_ms(text: &str) -> Result<u64, String> {
@@ -310,6 +326,19 @@ mod tests {
         assert!(why.contains("a resolver"), "{why}");
         let why = lease_in(&LEASED.replace("412 ms", "later ms")).expect_err("no milliseconds");
         assert!(why.contains("a millisecond count"), "{why}");
+    }
+
+    /// The lease is judged against the address the machine answered at, and
+    /// an answer from any other address refuses it with both named.
+    #[test]
+    fn a_lease_is_the_address_the_machine_answered_at() {
+        let at = Ipv4Addr::new(10, 0, 2, 15);
+        assert_eq!(leased_where_it_answered(LEASED, at).map(|l| l.address), Ok(at));
+        let why = leased_where_it_answered(LEASED, Ipv4Addr::new(10, 0, 2, 16))
+            .expect_err("another address answered");
+        assert!(why.contains("leased 10.0.2.15") && why.contains("at 10.0.2.16"), "{why}");
+        let why = leased_where_it_answered("nothing here\n", at).expect_err("no lease");
+        assert!(why.contains("took no address"), "{why}");
     }
 
     /// netd's lines and nothing else: a kernel record spelled like netd's,

@@ -51,7 +51,7 @@ const PROVOKE_MESSAGE: &str = "--provoke-message";
 /// the window ends, and where none is, what the bring-up and the link said.
 ///
 /// **A lease is a frame out and a frame in, answered by a server this machine
-/// does not control**, which is the claim the probe is flashed for; the lines
+/// does not control**, which is the claim the probe is armed for; the lines
 /// beside it say what the driver and the MAC counted each way, and so which
 /// half went missing on a boot that got none. Armed the same way as
 /// [`PROVOKE_MESSAGE`] and never beside it.
@@ -60,11 +60,9 @@ const EXIT_WITH_LEASE: &str = "--exit-with-lease";
 /// How long [`EXIT_WITH_LEASE`] serves before it ends, counted from this
 /// process's start.
 ///
-/// **It ends inside the job that holds its boot open**: `test_rs_lan_hold`
-/// sleeps `toyos_tco::LEASE_BOUND_MS` from a start after this process's, so
-/// the exit record and the report's last line land before the runner reboots,
-/// with two seconds to spare. Every moment of it after the lease is a moment
-/// the machine answers the host's ping at the leased address.
+/// **Inside netd's own lease bound**, `toyos_tco::LEASE_BOUND_MS`, with two
+/// seconds to spare: a reader that waits that bound out from any moment after
+/// this process started sees the exit record and the report's last line.
 const LEASE_WINDOW: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS - 2_000);
 
 /// The two, which cannot share a boot.

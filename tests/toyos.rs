@@ -270,9 +270,9 @@ const RUST_SKIP: &[&str] = &[
     "netd_refused_pipes",
     "netd_refused_accept",
     "netd_lookup_let_go",
-    // It asserts nothing at all: it holds a `tests/lancase` boot open for
-    // twenty seconds so the host can reach this machine over the cable. On a
-    // shared boot it would be twenty seconds of nothing.
+    // It asserts nothing at all: it holds a metal boot open for twenty seconds
+    // while netd or an actuator acts. On a shared boot it would be twenty
+    // seconds of nothing.
     "lan_hold",
     // The same for `tests/lantalkcase`, held until the runner's bound is near
     // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
@@ -1520,20 +1520,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
     ),
     (
+        // Rides the talking boot: the host reaches the lease there by name.
         "lan_dhcp_lease",
-        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
+        metal::Metal::Runs { arms: LANTALKCASE, judge: |b| lan::on_metal(b[0]) },
     ),
     (
-        // Folded into `lan_dhcp_lease`'s judge once the PHY is brought up
-        // (#453): lancase's own first-message record then carries this fact.
         "lan_message_delivery",
         metal::Metal::Runs { arms: LANICSCASE, judge: |b| lan::provoked_on_metal(b[0]) },
     ),
     (
-        // The first byte: a lease from the bench's own router, read off the
-        // stick, while the host pings the address this machine had before.
         "lan_lease_report",
-        metal::Metal::Runs { arms: LANLEASECASE, judge: |b| lan::leased_on_metal(b[0]) },
+        metal::Metal::QemuOnly(
+            "the T14's lease is `lan_dhcp_lease`'s, read off netd's own lines on the talking \
+             boot; this probe's exit code and report file are how its QEMU arm reads a link \
+             flap, and on the T14 they would be a flash for a fact already read",
+        ),
     ),
     (
         "lan_talk",
@@ -2120,27 +2121,11 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
-/// The cable's own boot: netd in front of the T14's I219, and one job that
-/// holds the machine up long enough for the host to reach it. The one arm in
-/// this suite that names a PCI function for the loop to reach the boot over.
-const LANCASE: &[metal::Arm] =
-    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
-
-/// The cable's boot with netd's delivery actuator armed. **A count of no
-/// messages is two facts** — a part nothing made speak and a message that
-/// reached no CPU — so this boot asks the part for a message and `LANCASE` does
-/// not. It names no PCI function: its judge reads the kernel's own records and
-/// asks the cable nothing.
+/// netd in front of the T14's I219 with its delivery actuator armed. **A count
+/// of no messages is two facts** — a part nothing made speak and a message that
+/// reached no CPU — so this boot asks the part for a message and
+/// [`LANTALKCASE`] does not. Its judge reads the kernel's own records.
 const LANICSCASE: &[metal::Arm] = &[metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS)];
-
-/// The cable's boot with netd's lease probe armed: netd's exit code is the
-/// lease's verdict, read out of the kernel's own `exit:` record, and its report
-/// is on the log volume. It names the I219 for the loop to ping over the cable,
-/// as [`LANCASE`] does.
-const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
-    nic: Some(lan::NIC),
-    ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
-}];
 
 /// The boot the host talks to over its own cable: the loop reads the log it
 /// serves under its name, pings it, runs a command on it and tells it to
