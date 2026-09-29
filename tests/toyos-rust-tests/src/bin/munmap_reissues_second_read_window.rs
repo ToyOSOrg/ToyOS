@@ -76,10 +76,14 @@ fn main() {
         })
     };
 
+    // A read the kernel refuses returns without parking.
     roster::await_true(|| {
-        roster::my_threads(&cap).iter().any(|&(is_thread, state)| is_thread && state == roster::BLOCKED)
-            && ready.load(Ordering::SeqCst) == 1
+        result.load(Ordering::SeqCst) != i64::MIN
+            || roster::my_threads(&cap).iter().any(|&(is_thread, state)| is_thread && state == roster::BLOCKED)
+                && ready.load(Ordering::SeqCst) == 1
     });
+    let early = result.load(Ordering::SeqCst);
+    assert_eq!(early, i64::MIN, "the reader's read answered {early} before it parked");
 
     unsafe { munmap(upper, PAGE_2M) }.expect("munmap the buffer's second mapping");
 
