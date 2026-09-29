@@ -266,18 +266,6 @@ pub fn wait_uncancellable_until(p: &Parkable, watch: &Watch, token: u64, ready: 
     }
 }
 
-/// Parks forever rather than exiting: exiting frees a stack a producer may still write to.
-#[cfg(feature = "boot-actuators")]
-#[track_caller]
-pub fn park_forever() -> ! {
-    let parkable = crate::scheduler::Parkable::at_entry();
-    let handle = crate::sched::driver::current_handle().expect("a kernel thread is a task");
-    let armed = arm(handle.watch(), 0, WaitClass::Other).expect("a task can arm");
-    loop {
-        let _ = wait(&parkable, &armed, Deadline::never());
-    }
-}
-
 #[track_caller]
 fn wait_inner(
     _p: &Parkable,

@@ -461,6 +461,8 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
+    // Its shared run judges `/tmp`'s and `/log`'s stamps; its other modes are machine tests'.
+    "file_mtime",
     "hierarchy_paths",
     "nvme_home_roundtrip",
     "sched_stress",
@@ -571,6 +573,7 @@ const GRAFFITI: [u8; 3] = [0x00, 0xC0, 0x00];
 /// tidy.
 const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("ioapic_topology", Sched::Parallel, Tier::Fast),
+    ("guest_dies_with_its_harness", Sched::Parallel, Tier::Fast),
     // The interrupt census adds up, and every device interrupt is still cpu0's.
     // **The second half is what makes this the track's instrument rather than a
     // tidiness check**: it states the present-state fact
@@ -600,6 +603,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // clock in the verdict.
     ("root_from_memory", Sched::Parallel, Tier::Nightly),
     ("root_withheld_refused", Sched::Parallel, Tier::Nightly),
+    // A loader built to another `KernelArgs` layout is refused by name before
+    // the kernel reads a field the layout could have moved.
+    ("kernel_args_layout_refused", Sched::Parallel, Tier::Nightly),
     // The boot from power-on, as the kernel converts the loader's TSC readings:
     // judged against the loader's raw counts and the kernel's own rate.
     ("boot_from_power_on", Sched::Parallel, Tier::Nightly),
@@ -1081,7 +1087,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // them reads a clock. A loaded host makes the producers outrun the reader
     // further, which moves records from `read` into `lost` and leaves the law
     // exactly where it was.
-    ("log_conservation_smp1", Sched::Parallel, Tier::Weekly),
+    ("log_conservation_smp2", Sched::Parallel, Tier::Weekly),
     ("log_nested_emit", Sched::Parallel, Tier::Weekly),
     // The same interrupt one window earlier — between a record's shard-pointer
     // read and its `xadd` — and its negative control, which is the only reader
@@ -1225,7 +1231,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Weekly),
     ("wall_clock_no_century", Sched::Parallel, Tier::Weekly),
     ("wall_clock_century_register", Sched::Parallel, Tier::Weekly),
-    ("wall_clock_zone", Sched::Parallel, Tier::Weekly),
+    ("wall_clock_utc", Sched::Parallel, Tier::Weekly),
+    ("file_mtime_survives_a_reboot", Sched::Parallel, Tier::Nightly),
+    ("file_mtime_undated", Sched::Parallel, Tier::Nightly),
     // `xhci_slow_connect`'s shape against the disk's port, but its actuator
     // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
     // so what it stages is an ordering with no wall-clock margin on either
@@ -1477,7 +1485,9 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("wall_clock_rtc_unstable", &["test_rs_wall_clock_now"]),
     ("wall_clock_no_century", &["test_rs_wall_clock_now"]),
     ("wall_clock_century_register", &["test_rs_wall_clock_now"]),
-    ("wall_clock_zone", &["test_rs_wall_clock_now"]),
+    ("wall_clock_utc", &["test_rs_wall_clock_now"]),
+    ("file_mtime_survives_a_reboot", &["test_rs_file_mtime"]),
+    ("file_mtime_undated", &["test_rs_file_mtime"]),
     ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
@@ -10085,9 +10095,11 @@ fn run_machine_test(
         "wall_clock_century_register" => {
             common::wallclock::century_from_the_register(test_config, c_bins, rust_bins)
         }
-        "wall_clock_zone" => {
-            common::wallclock::zone_from_firmware(test_config, c_bins, rust_bins)
+        "wall_clock_utc" => common::wallclock::rtc_is_utc(test_config, c_bins, rust_bins),
+        "file_mtime_survives_a_reboot" => {
+            common::wallclock::file_mtime_survives_a_reboot(test_config, c_bins, rust_bins)
         }
+        "file_mtime_undated" => common::wallclock::file_mtime_undated(test_config, c_bins, rust_bins),
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
         "root_candidate_malformed" => {
             common::volumes::root_candidate_malformed(test_config, c_bins, rust_bins)
@@ -10132,8 +10144,8 @@ fn run_machine_test(
         // Body in `tests/common/iommu.rs`, same reason.
         "iommu_discovery" => common::iommu::iommu_discovery(test_config, c_bins, rust_bins),
         // Body in `tests/common/logread.rs`, so the hunk here stays one line.
-        "log_conservation_smp1" => {
-            common::logread::log_conservation_smp1(test_config, c_bins, rust_bins)
+        "log_conservation_smp2" => {
+            common::logread::log_conservation_smp2(test_config, c_bins, rust_bins)
         }
         "log_nested_emit" => common::logread::log_nested_emit(test_config, c_bins, rust_bins),
         "log_reserve_window" => {
@@ -12111,6 +12123,7 @@ fn run_machine_test(
             control_regs(qemu.boot_log(), CPUS)
         }
         "control_regs_negative" => control_regs_negative(test_config, c_bins, rust_bins),
+        "guest_dies_with_its_harness" => common::orphan::guest_dies_with_its_harness(test_config),
         "smp_roster_and_tsc_trail" => {
             // Eight, which is the T14's own count and this suite's ceiling.
             const CPUS: u32 = 8;
@@ -12148,6 +12161,20 @@ fn run_machine_test(
             );
             // Both channels: this kernel dies before virtio-console init.
             root_withheld_refused(&format!("{}{}", qemu.boot_log(), qemu.uart_log()))
+        }
+        "kernel_args_layout_refused" => {
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &[LAYOUT_ZERO_PARAM],
+                    ready_marker: LAYOUT_REFUSAL,
+                    ..Default::default()
+                },
+            );
+            // Both channels: this kernel dies before virtio-console init.
+            kernel_args_layout_refused(&format!("{}{}", qemu.boot_log(), qemu.uart_log()))
         }
         "acpi_table_inventory" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
@@ -17134,13 +17161,14 @@ fn main() {
     // First, before any lock and before anything is compiled: a flag this suite
     // does not have would otherwise cost nothing and hand its value to the
     // filter below.
-    let filter = match toyos_build::testargs::parse(&args) {
-        Ok(filter) => filter,
+    let parsed = match toyos_build::testargs::parse(&args) {
+        Ok(parsed) => parsed,
         Err(refusal) => {
             eprintln!("[toyos] {refusal}");
             std::process::exit(1);
         }
     };
+    let filter = parsed.filter;
     // The one selection every entry point below takes, the metal's included: a
     // disabled test runs nowhere, and every run names each one with its issue.
     for row in redlist::DISABLED {
@@ -17156,10 +17184,6 @@ fn main() {
     // var is invisible in the command line and easy to leave set, and the whole
     // point of the split is that a run says what it ran.
     let reach = Reach::of(&args);
-    // The metal profile, and where its images and readbacks live. Naming the
-    // directory means the machine is not touched — see `common::metal::Mode`.
-    let metal_mode = SUITE.present(&args, &testargs::METAL);
-    let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
     let nocapture =
         SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
@@ -17187,6 +17211,14 @@ fn main() {
     // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
+    if let Some(image) = SUITE.value(&args, &testargs::HOLD) {
+        common::orphan::hold(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases"),
+            Path::new(image),
+        );
+        run.exit(0);
+    }
+
     check_registration();
 
     if nocapture || debug_mode {
@@ -17197,10 +17229,7 @@ fn main() {
     // guest, so none of the C compile, the HTTPS judge's hosts or the tier
     // arithmetic below is any of its business; running it here is what keeps a
     // `--metal` invocation costing a kernel and a userland and nothing else.
-    if metal_mode {
-        let dir = metal_readback
-            .map_or_else(|| compile::repo_root().join("target/metal"), std::path::PathBuf::from);
-        let mode = if metal_readback.is_some() { metal::Mode::Offline } else { metal::Mode::Drive };
+    if let Some(mode) = parsed.metal {
         let rust_tests_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
         eprintln!("[toyos] Building Rust tests...");
@@ -17231,23 +17260,15 @@ fn main() {
                  members are not filtered by name"
             );
         }
+        let mut boots = shared_metal(&rust_bins, keep);
+        boots.push(c_corpus_metal(&c_bins, keep));
+
         // Three statuses for the three things this can establish, as the
         // ordinary suite has: green, red, and "measured nothing" — a run that
         // staged images and never reached the machine has no claim to make.
         run.exit(
-            match metal::run(
-                mode,
-                &dir,
-                &selected,
-&{
-                    let mut boots = shared_metal(&rust_bins, keep);
-                    boots.push(c_corpus_metal(&c_bins, keep));
-                    boots
-                },
-                &rust_bins,
-                RUST_SKIP,
-                !nocapture && !debug_mode,
-            ) {
+            match metal::run(mode, &selected, &boots, &rust_bins, RUST_SKIP, !nocapture && !debug_mode)
+            {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,
                 metal::Verdict::Staged => 2,
@@ -17302,12 +17323,8 @@ fn main() {
     check_metal_only_unshared(&rust_bins, &c_bins);
     check_shard_partition(&all_tests);
 
-    // The tier filter, and it is not conditional on the name filter: a rule with
-    // an exception for filtered runs is two rules, and the second one is the one
-    // nobody remembers. `cargo test -- screen_diag_boot` refuses below and
-    // says what to type instead, which is the same information a silent skip
-    // would have withheld.
-    let in_tier = |tier: Tier| tier.selected(reach, shard.is_some());
+    // A name filter reaches every tier; a shard still excludes `Tier::Local`.
+    let in_tier = |tier: Tier| tier.selected(reach.for_filter(filter.is_some()), shard.is_some());
     let tests_to_run: Vec<&TestDef> = all_tests
         .iter()
         .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
@@ -17346,7 +17363,6 @@ fn main() {
     }
     let held_back: Vec<(Tier, Vec<String>)> =
         [Tier::Nightly, Tier::Weekly].into_iter().map(|tier| (tier, held(tier))).collect();
-    let widest_held = held_back.iter().rev().find(|(_, names)| !names.is_empty()).map(|(tier, _)| *tier);
     for (tier, names) in held_back.iter().filter(|(_, names)| !names.is_empty()) {
         let flag = tier.flag().expect("a held tier is a reach's");
         eprintln!(
@@ -17362,13 +17378,7 @@ fn main() {
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
-        match widest_held.and_then(Tier::flag) {
-            Some(flag) => eprintln!(
-                "[toyos] filter {filter:?} matches only tests a wider reach runs. Add {flag} to \
-                 run them."
-            ),
-            None => eprintln!("No enabled test matches filter {filter:?}"),
-        }
+        eprintln!("No enabled test matches filter {filter:?}");
         run.exit(1);
     }
 
@@ -17555,7 +17565,6 @@ fn root_from_memory(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The loader's line: its TSC at entry, at the handoff, and `IA32_TSC_ADJUST`.
 const LOADER_TSC: &str = "Loader TSC: ";
 /// The kernel's line, followed by its four spans in milliseconds.
 const POWER_ON: &str = "boot: power-on to loader ";
@@ -17609,6 +17618,31 @@ fn boot_from_power_on(log: &str) -> Result<(), String> {
          ms), kernel {to_complete} ms; IA32_TSC_ADJUST {}",
         log.split("IA32_TSC_ADJUST ").nth(1).and_then(|rest| rest.lines().next()).unwrap_or("unsaid")
     );
+    Ok(())
+}
+
+/// `toyos_abi::boot::WRITE_NO_LAYOUT_PARAM`.
+const LAYOUT_ZERO_PARAM: &str = toyos_abi::boot::WRITE_NO_LAYOUT_PARAM;
+/// The kernel's refusal of a `KernelArgs` layout word of 0, up to the layout
+/// it reads.
+const LAYOUT_REFUSAL: &str = "boot: the loader wrote KernelArgs layout 0x0 and this kernel reads layout 0x";
+/// `blackbox::arm`'s record, the kernel's first read of a field after the word.
+const BLACK_BOX_ARMED: &str = "black box: ";
+
+/// A loader that wrote another layout is a boot refused by name, before the
+/// kernel read the boot parameter. Checked against the kernel's own word,
+/// `toyos_abi::boot::LAYOUT` in hex, and not merely the message's prefix: a
+/// kernel that printed its own `kernel_args.layout` instead would still be 0x0
+/// and still match the prefix.
+fn kernel_args_layout_refused(log: &str) -> Result<(), String> {
+    let refusal = format!("{LAYOUT_REFUSAL}{:x}", toyos_abi::boot::LAYOUT);
+    if !log.contains(&refusal) {
+        return Err(format!("no {refusal:?} in the boot log"));
+    }
+    if log.contains(BLACK_BOX_ARMED) {
+        return Err(format!("a boot refused its layout still said {BLACK_BOX_ARMED:?}"));
+    }
+    eprintln!("  [boot] a loader that wrote layout 0 was refused by name before the boot parameter");
     Ok(())
 }
 

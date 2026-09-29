@@ -25,8 +25,9 @@ phase() {
   echo "== $1 $(date -u +%FT%T.%3NZ)"
 }
 trap 'echo stop >&3' EXIT
-# The kernel, command line, mitigations and microcode by S0's own commands
-# (issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md), then the BIOS and the boot.
+# The kernel, command line, mitigations and microcode by the commands of Linux's T14 capture
+# (issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-are-not-committed.md), then the
+# BIOS and the boot.
 machine() {
   { cat /proc/version /proc/cmdline; grep . /sys/devices/system/cpu/vulnerabilities/*; grep microcode /proc/cpuinfo
     grep -H . /sys/class/dmi/id/bios_version /proc/sys/kernel/random/boot_id; } > $R/$1.txt

@@ -7,7 +7,7 @@
 //! produces a shard whose `at_ns` descends, which `Descent::advance` and the
 //! log gate assume cannot happen.
 
-/// Producer id the burst's records use — outside the range any real storm thread can have.
+/// Producer id the burst's records use — one the log gate's own producer never takes.
 #[cfg(feature = "boot-actuators")]
 pub const NEST_PRODUCER: u64 = u64::MAX;
 
@@ -16,9 +16,8 @@ mod armed {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use crate::log::shard::SHARD_RECORDS;
-    use crate::sched::kthread;
 
-    /// One-shot for the body-copy injection point, consumed by `mid_body` or, under `log-shared-reservation`, by the outer `inject`.
+    /// One-shot for the body-copy injection point, consumed by `mid_body`.
     static ARMED: AtomicBool = AtomicBool::new(false);
 
     /// One-shot for the reservation-window injection point, consumed by [`reserve_window`]; kept separate from `ARMED` so it can't starve the body window.
@@ -36,17 +35,19 @@ mod armed {
         // Both actuators name the same injection; arming both would inject into one record twice.
         assert!(
             !(crate::actuator::log_nested_emit() && crate::actuator::log_nested_reserve()),
-            "log-nested-emit and log-nested-reserve both name the one injection this thread arms"
+            "log-nested-emit and log-nested-reserve both name the one injection this read arms"
         );
         if STARTED.swap(true, Ordering::Relaxed) {
             return;
         }
         crate::log!("lognest start records={SHARD_RECORDS}");
-        // A kernel thread, not the syscall that arms it: `IF` is clear for a whole syscall, so injecting there would never test the guard.
-        kthread::spawn("lognest", body, 0);
+        // `IF` is clear for a whole syscall, so injecting with it clear would never test the guard; Ring 0 is not preempted, so the body runs whole on this CPU.
+        crate::arch::cpu::enable_interrupts();
+        body();
+        crate::arch::cpu::disable_interrupts();
     }
 
-    extern "C" fn body(_arg: u64) -> ! {
+    fn body() {
         if crate::actuator::log_nested_reserve() {
             ARMED_RESERVE.store(true, Ordering::Relaxed);
             crate::log!(
@@ -61,12 +62,10 @@ mod armed {
             ARMED.store(false, Ordering::Relaxed);
         }
         crate::log!("lognest done emitted={SHARD_RECORDS}");
-
-        crate::watch::park_forever();
     }
 
     /// Consumes the one-shot and sends this CPU its own IPI; `true` if this call sent it.
-    pub fn inject() -> bool {
+    fn inject() -> bool {
         if !ARMED.swap(false, Ordering::Relaxed) {
             return false;
         }
@@ -108,19 +107,10 @@ mod armed {
     }
 }
 
-/// Arms the injection on a dedicated kernel thread, once; compiled only under `boot-actuators`.
+/// Arms the injection and emits the record it lands in, inline in the calling `SYS_LOG_READ`, once; compiled only under `boot-actuators`.
 #[cfg(feature = "boot-actuators")]
 pub fn start_once() {
-    #[cfg(feature = "boot-actuators")]
     armed::start_once();
-}
-
-/// Consumes the one-shot at the reservation, for `log-shared-reservation`; `true` if an IPI went out.
-pub fn inject() -> bool {
-    #[cfg(feature = "boot-actuators")]
-    return armed::inject();
-    #[cfg(not(feature = "boot-actuators"))]
-    false
 }
 
 /// Injection point halfway through a record's body copy; always compiled so `kernel-loom`'s separate copy of `log::shard` names one path.

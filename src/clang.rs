@@ -149,9 +149,9 @@ fn resource_version(llvm: &Path) -> PathBuf {
     }
 }
 
-/// Give `stage2` the C toolchain of the LLVM bootstrap installed beside it.
-pub(crate) fn provision(stage2: &Path) {
-    let llvm = &stage2.parent().expect("stage2 is under a build directory").join("llvm");
+/// Give `stage2` the C toolchain of the LLVM at `llvm` (`src/llvm.rs`), the one
+/// its rustc links.
+pub(crate) fn provision(stage2: &Path, llvm: &Path) {
     let bin = bin(stage2);
     let from = llvm.join("bin/clang");
     let to = bin.join("clang");
@@ -208,7 +208,7 @@ mod tests {
         let said = refused.downcast_ref::<String>().expect("a formatted refusal");
         assert!(said.contains("clang") && said.contains("ld.lld") && said.contains("include"), "{said}");
 
-        provision(&stage2);
+        provision(&stage2, &llvm);
         assert_eq!(defect(&stage2), None);
         assert_eq!(fs::read_to_string(bin(&stage2).join("clang")).unwrap(), "the clang");
         assert!(!fs::symlink_metadata(bin(&stage2).join("clang")).unwrap().file_type().is_symlink(), "clang is a copy, not the link");
@@ -221,7 +221,7 @@ mod tests {
         // Provisioning again, from another LLVM, replaces what was there.
         fs::remove_dir_all(llvm.join("lib/clang/22")).unwrap();
         write(&llvm.join("lib/clang/23/include/stddef.h"), "v23");
-        provision(&stage2);
+        provision(&stage2, &llvm);
         assert!(!resource_parent(&stage2).join("22").exists(), "the old headers stayed beside the new");
         assert_eq!(fs::read_to_string(resource_parent(&stage2).join("23/include/stddef.h")).unwrap(), "v23");
 

@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::{compile, serial};
+use toyos_build::tether::Tether;
 
 /// Where the host arm sees the servers the guest reaches at
 /// [`qemu::GUEST_VIEW_OF_HOST`]. The judge's certificate carries both.
@@ -277,6 +278,8 @@ fn fetch_on_host(url: &str, ca: &Path) -> Result<String, String> {
 /// The host servers, killed when this goes out of scope.
 struct Server {
     child: Child,
+    /// What ends the servers when this process dies without dropping this.
+    _tether: Tether,
     ca: PathBuf,
     body_bytes: usize,
     body_sha: String,
@@ -287,11 +290,9 @@ impl Server {
     fn start() -> Result<Self, String> {
         let out = super::lane::dir().join("https-judge");
         std::fs::create_dir_all(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
-        let mut child = Command::new(toyos_build::build::https_test_server(&compile::repo_root()))
-            .arg("--out")
-            .arg(&out)
-            .stdout(Stdio::piped())
-            .spawn()
+        let mut cmd = Command::new(toyos_build::build::https_test_server(&compile::repo_root()));
+        cmd.arg("--out").arg(&out).stdout(Stdio::piped());
+        let (mut child, tether) = toyos_build::tether::spawn(cmd)
             .map_err(|e| format!("start the judge's servers: {e}"))?;
 
         let stdout = child.stdout.take().expect("a piped stdout");
@@ -322,7 +323,7 @@ impl Server {
             let _ = child.kill();
             return Err("the judge's servers never announced a CA and a body".to_string());
         };
-        Ok(Server { child, ca, body_bytes, body_sha, ports })
+        Ok(Server { child, _tether: tether, ca, body_bytes, body_sha, ports })
     }
 
     fn port(&self, role: &str) -> Result<u16, String> {

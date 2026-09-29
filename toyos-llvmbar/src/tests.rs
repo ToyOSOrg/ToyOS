@@ -74,13 +74,13 @@ fn machine(bios: &str, boot: &str) -> String {
     )
 }
 
-/// S0's text: its lines among others it prints.
-fn s0_text() -> String {
+/// The capture's text: its lines among others it prints.
+fn capture_text() -> String {
     format!("Reading package lists...\n{VERSION}\nBOOT_IMAGE=/vmlinuz-{KERNEL} ro\n{}{}0x0000000000000000\n", vulnerabilities(), microcodes())
 }
 
-fn s0() -> S0 {
-    S0::parse(&s0_text()).expect("the fixture's S0 parses")
+fn capture() -> Capture {
+    Capture::parse(&capture_text()).expect("the fixture's capture parses")
 }
 
 /// The T14's row at `t` seconds into its day, for `span`, tagged `read`.
@@ -133,7 +133,7 @@ fn run() -> BTreeMap<String, String> {
 }
 
 fn judged(files: &BTreeMap<String, String>) -> Run {
-    judge(&|name: &str| files.get(name).cloned(), &s0())
+    judge(&|name: &str| files.get(name).cloned(), &capture())
 }
 
 fn edit(files: &mut BTreeMap<String, String>, name: &str, f: impl FnOnce(&str) -> String) {
@@ -283,7 +283,7 @@ fn a_missing_machine_read_is_refused() {
 }
 
 #[test]
-fn the_machine_reads_agree_with_each_other_and_with_s0() {
+fn the_machine_reads_agree_with_each_other_and_with_the_capture() {
     type Change = fn(&str) -> String;
     let cases: [(&str, Change, &str); 5] = [
         (
@@ -299,7 +299,7 @@ fn the_machine_reads_agree_with_each_other_and_with_s0() {
         (
             "s3-1-machine-start.txt",
             |t| t.replacen("spectre_v1:Mitigation: fixture", "spectre_v1:Vulnerable", 1),
-            "vulnerabilities lines are not S0's",
+            "vulnerabilities lines are not the capture's",
         ),
         (
             "s3-1-machine-start.txt",
@@ -315,7 +315,7 @@ fn the_machine_reads_agree_with_each_other_and_with_s0() {
         (
             "s3-1-machine-end.txt",
             |t| t.replacen(": 0xbe", ": 0xbc", 1),
-            "microcode lines are not S0's",
+            "microcode lines are not the capture's",
         ),
     ];
     for (name, change, words) in cases {
@@ -393,10 +393,10 @@ fn a_wall_clock_reads_both_of_gnu_times_forms() {
 }
 
 #[test]
-fn s0_is_refused_without_one_version_or_every_cpus_microcode() {
-    assert!(S0::parse(&format!("{}{VERSION}\n", s0_text())).is_err());
-    assert!(S0::parse(&s0_text().replacen("microcode\t: 0xbe\n", "", 1)).is_err());
-    assert!(S0::parse(&s0_text().replace(VULNERABILITY, "/elsewhere/")).is_err());
+fn a_capture_is_refused_without_one_version_or_every_cpus_microcode() {
+    assert!(Capture::parse(&format!("{}{VERSION}\n", capture_text())).is_err());
+    assert!(Capture::parse(&capture_text().replacen("microcode\t: 0xbe\n", "", 1)).is_err());
+    assert!(Capture::parse(&capture_text().replace(VULNERABILITY, "/elsewhere/")).is_err());
 }
 
 #[test]

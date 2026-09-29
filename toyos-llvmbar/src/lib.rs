@@ -2,9 +2,9 @@
 //!
 //! On the T14, `t14/sampler.sh <dir>` runs as root and `t14/driver.sh <dir>` as
 //! the build's user, `<dir>` holding `t14/block.txt`. The judge reads what they
-//! leave there, and the text S0 of
-//! `issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`
-//! captured.
+//! leave there, and the T14 capture of
+//! `issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-are-not-committed.md`:
+//! its `/proc/version`, vulnerabilities and `/proc/cpuinfo` text.
 //!
 //! A stage-3 span `s3-<k>`, `k >= 1`, is a valid sample when:
 //! - `samples-s3-<k>.log` opens with a `read=start` row and closes with a
@@ -17,8 +17,8 @@
 //! - `s3-<k>-time.txt`, GNU `time -v`'s, reads exit status 0 and file system
 //!   inputs 0;
 //! - `s3-<k>-machine-start.txt` and `s3-<k>-machine-end.txt` both read kernel
-//!   [`KERNEL`], one command line, one BIOS version and one boot, and S0's
-//!   `/proc/version`, vulnerabilities and microcode lines;
+//!   [`KERNEL`], one command line, one BIOS version and one boot, and the
+//!   capture's `/proc/version`, vulnerabilities and microcode lines;
 //! - it is warm: `s3-<k-1>` exited 0, and its end read precedes this span's
 //!   start read.
 //!
@@ -33,7 +33,7 @@ pub const CPUS: usize = 8;
 pub const SAMPLES: usize = 3;
 /// The longest a span may go between the starts of two reads.
 pub const MAX_GAP_MS: u64 = 61_000;
-/// The kernel S0 pins.
+/// The kernel the capture pins.
 pub const KERNEL: &str = "6.8.0-142-generic";
 /// The microcode revision, `IA32_BIOS_SIGN_ID` (0x8B) bits 63:32, on every CPU.
 pub const MICROCODE: u32 = 0xbe;
@@ -109,25 +109,25 @@ pub fn wanted() -> Vec<(&'static str, String)> {
     want
 }
 
-/// What S0 captured that a span's machine reads must repeat.
+/// What Linux's T14 capture read that a span's machine reads must repeat.
 #[derive(Debug)]
-pub struct S0 {
+pub struct Capture {
     version: String,
     vulnerabilities: Vec<String>,
     microcode: Vec<String>,
 }
 
-impl S0 {
+impl Capture {
     /// Takes the `/proc/version`, vulnerabilities and microcode lines out of
-    /// S0's text, whatever else it holds.
-    pub fn parse(text: &str) -> Result<S0, String> {
+    /// the capture's text, whatever else it holds.
+    pub fn parse(text: &str) -> Result<Capture, String> {
         let versions: Vec<&str> = text
             .lines()
             .filter(|l| l.starts_with("Linux version "))
             .collect();
         let [version] = versions[..] else {
             return Err(format!(
-                "S0 holds {} /proc/version lines, not 1",
+                "the capture holds {} /proc/version lines, not 1",
                 versions.len()
             ));
         };
@@ -138,16 +138,16 @@ impl S0 {
             .collect();
         vulnerabilities.sort();
         if vulnerabilities.is_empty() {
-            return Err("S0 holds no vulnerabilities line".into());
+            return Err("the capture holds no vulnerabilities line".into());
         }
         let microcode: Vec<String> = text.lines().filter_map(microcode).collect();
         if microcode.len() != CPUS {
             return Err(format!(
-                "S0 holds {} microcode lines, not {CPUS}",
+                "the capture holds {} microcode lines, not {CPUS}",
                 microcode.len()
             ));
         }
-        Ok(S0 {
+        Ok(Capture {
             version: version.into(),
             vulnerabilities,
             microcode,
@@ -453,7 +453,7 @@ impl Verdict {
 
 /// Judges `s3-<k>`, `k >= 1`, reading the run directory through `read`, which
 /// answers `None` for a file that is not there.
-pub fn judge_span(read: &dyn Fn(&str) -> Option<String>, s0: &S0, k: u32) -> Verdict {
+pub fn judge_span(read: &dyn Fn(&str) -> Option<String>, capture: &Capture, k: u32) -> Verdict {
     assert!(
         k >= 1,
         "s3-0 is the line the first span follows, never a sample"
@@ -490,14 +490,17 @@ pub fn judge_span(read: &dyn Fn(&str) -> Option<String>, s0: &S0, k: u32) -> Ver
         }
         let each = format!("{MICROCODE:#x}");
         let checks = [
-            (m.version == s0.version, "its /proc/version is not S0's"),
             (
-                m.vulnerabilities == s0.vulnerabilities,
-                "its vulnerabilities lines are not S0's",
+                m.version == capture.version,
+                "its /proc/version is not the capture's",
             ),
             (
-                m.microcode == s0.microcode,
-                "its microcode lines are not S0's",
+                m.vulnerabilities == capture.vulnerabilities,
+                "its vulnerabilities lines are not the capture's",
+            ),
+            (
+                m.microcode == capture.microcode,
+                "its microcode lines are not the capture's",
             ),
             (
                 m.microcode.iter().all(|r| *r == each),
@@ -565,7 +568,7 @@ pub struct Run {
 }
 
 /// Judges `s3-1` onwards until a span that left no file at all.
-pub fn judge(read: &dyn Fn(&str) -> Option<String>, s0: &S0) -> Run {
+pub fn judge(read: &dyn Fn(&str) -> Option<String>, capture: &Capture) -> Run {
     let left_any = |k: u32| {
         [
             format!("samples-s3-{k}.log"),
@@ -577,7 +580,7 @@ pub fn judge(read: &dyn Fn(&str) -> Option<String>, s0: &S0) -> Run {
     };
     let verdicts: Vec<Verdict> = (1..)
         .take_while(|&k| left_any(k))
-        .map(|k| judge_span(read, s0, k))
+        .map(|k| judge_span(read, capture, k))
         .collect();
     let walls: Vec<u64> = verdicts
         .iter()

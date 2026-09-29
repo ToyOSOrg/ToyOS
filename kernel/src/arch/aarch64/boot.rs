@@ -253,6 +253,10 @@ pub fn clock(_args: &KernelArgs) {
     owed!("the clock", "stage 4")
 }
 
+/// Nothing: where the generic timer counts from is firmware's, and no
+/// register says it.
+pub fn report_counter_origin() {}
+
 /// The per-CPU timer.
 pub fn timer() {
     owed!("the timer", "stage 4")

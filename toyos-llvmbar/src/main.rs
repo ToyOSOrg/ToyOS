@@ -1,36 +1,36 @@
-//! `toyos-llvmbar <run directory> <S0 capture>`: every stage-3 span's verdict
+//! `toyos-llvmbar <run directory> <Linux capture>`: every stage-3 span's verdict
 //! and the bar. Exits 0 when the bar is set, 1 when it is not, 2 when it
 //! cannot judge.
 
 use std::path::Path;
 use std::process::exit;
 
-use toyos_llvmbar::{judge, show_wall, S0, SAMPLES};
+use toyos_llvmbar::{judge, show_wall, Capture, SAMPLES};
 
 fn refuse(why: String) -> ! {
-    eprintln!("toyos-llvmbar: {why}\nusage: toyos-llvmbar <run directory> <S0 capture>");
+    eprintln!("toyos-llvmbar: {why}\nusage: toyos-llvmbar <run directory> <Linux capture>");
     exit(2)
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [dir, s0] = &args[..] else {
+    let [dir, capture] = &args[..] else {
         refuse(format!("two arguments, not {}", args.len()))
     };
     let dir = Path::new(dir);
     if !dir.is_dir() {
         refuse(format!("{} is not a directory", dir.display()));
     }
-    let s0 = std::fs::read_to_string(s0)
-        .map_err(|e| format!("read {s0}: {e}"))
-        .and_then(|t| S0::parse(&t))
+    let capture = std::fs::read_to_string(capture)
+        .map_err(|e| format!("read {capture}: {e}"))
+        .and_then(|t| Capture::parse(&t))
         .unwrap_or_else(|why| refuse(why));
     let read = |name: &str| match std::fs::read_to_string(dir.join(name)) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => panic!("read {}: {e}", dir.join(name).display()),
     };
-    let run = judge(&read, &s0);
+    let run = judge(&read, &capture);
     for v in &run.verdicts {
         if v.valid() {
             println!(

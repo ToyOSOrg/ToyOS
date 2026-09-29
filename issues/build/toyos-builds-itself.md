@@ -87,21 +87,22 @@ is the rule a sample is valid by.
   reaches them.
 - *Machine*: i5-1135G7, 8 threads, 16476082176 B RAM; microcode revision
   `0xbe` on every CPU; Ubuntu 24.04.4 with the kernel
-  `issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`
+  `issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-are-not-committed.md`
   pins, 6.8.0-142-generic; ext4 on LVM.
-- *Mitigations*: that track's S0 capture is the one read of them. A sample
+- *Mitigations*: that issue's T14 capture is the one read of them. A sample
   reads the kernel, the vulnerabilities and the microcode at its start and
-  its end with S0's own commands, and the judge refuses it unless they are
-  S0's.
+  its end with the capture's own commands, and the judge refuses it unless
+  they are the capture's.
 
 The bar is the best of three valid samples, and it is not set: no sample is
 valid by the judge.
 
 Owed once the T14 answers again
 (`issues/hardware/a-t14-measurement-has-no-way-back-when-the-t14-stops-answering.md`),
-and Ubuntu is wiped only after S0's fixtures and the bar are both committed:
+and Ubuntu is wiped only after the capture and the bar are both committed:
 
-- S0's capture, whose text is the judge's second argument;
+- the capture on `main`, whose `/proc/version`, vulnerabilities and
+  `/proc/cpuinfo` text is the judge's second argument;
 - `t14/driver.sh` under `t14/sampler.sh`, run until `toyos-llvmbar` exits
   0, and the bar, the BIOS version and the kernel command line it prints
   recorded here;
@@ -117,23 +118,28 @@ flags, by a clang+lld built by the recipe above, on this T14, warm, whose
 `ninja` exits 0 at or under the bar, read back as the judge reads a Linux
 sample: the envelope at its cadence from a start read to an end read, and at
 the span's start and end the microcode, the BIOS version (SMBIOS type 0)
-equal to the Linux sample's, and for each entry S0 captures as a mitigation
-that track's *Exit* line with its mechanism in force on every CPU:
+equal to the Linux sample's, and for each entry the capture shows as a
+mitigation the line
+`issues/kernel/each-boot-prints-the-vulnerabilities-lines-linux-prints.md`
+requires, with its mechanism in force on every CPU:
 
 - `gather_data_sampling`: `IA32_MCU_OPT_CTRL` (0x123) `GDS_MITG_DIS` clear
-  (S2);
-- `spectre_v2`: `IA32_SPEC_CTRL` (0x48) at S0's Linux read with SSBD masked
-  (S2);
-- `indirect_target_selection`: the live thunk bodies equal to the body S1
-  selects (S5);
-- `spectre_v1`: CR4.SMAP set (S4);
-- `spec_store_bypass`: where S0 captures Linux's prctl mode, SSBD is set only
-  in a process that asked by prctl, so parity is SSBD set in exactly the
-  build's processes that ask Linux, read on the switch into each (S6); which
-  of them ask is owed.
+  (`issues/kernel/spec-ctrl-and-gds-stay-as-firmware-left-them.md`);
+- `spectre_v2`: `IA32_SPEC_CTRL` (0x48) at the capture's read with SSBD
+  masked (the same issue);
+- `indirect_target_selection`: the live thunk bodies equal to the body
+  `issues/kernel/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
+  selects (`issues/kernel/indirect-branches-and-returns-run-without-thunks.md`);
+- `spectre_v1`: CR4.SMAP set
+  (`issues/kernel/user-pointer-checks-have-no-spectre-v1-fence-and-smap-is-optional.md`);
+- `spec_store_bypass`: where the capture shows Linux's prctl mode, SSBD is
+  set only in a process that asked, so parity is SSBD set in exactly the
+  build's processes that ask Linux, read on the switch into each
+  (`issues/kernel/no-program-runs-with-speculative-store-bypass-disabled.md`);
+  which of them ask is owed.
 
-An entry S0 captures as a mitigation that this list does not name holds the
-exit until it is named here.
+An entry the capture shows as a mitigation that this list does not name holds
+the exit until it is named here.
 
 **What M2 must do to delete toyos-ld.** It is frozen and links nothing the host
 builds; what keeps it is that it is the one linker a ToyOS process can run,

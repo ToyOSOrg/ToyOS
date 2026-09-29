@@ -8,9 +8,6 @@
 //! `EFI_VARIABLE_RUNTIME_ACCESS` it is neither readable nor writable once
 //! `ExitBootServices` has run), so no kernel this loader hands the machine to
 //! — and nothing it lets write the disk — can lower it.
-//!
-//! What it cannot defend is `toyos_update::policy`'s to say: anything booted
-//! before this loader, and the firmware's own reset of its variables.
 
 use alloc::string::String;
 use alloc::vec::Vec;

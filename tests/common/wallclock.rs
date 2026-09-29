@@ -25,9 +25,10 @@
 //! and everything downstream of it shipped code.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::fwvars;
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
 use super::volumes::{self, Entry};
@@ -79,7 +80,6 @@ fn names(entries: &[&Entry]) -> String {
     entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
-/// The clock lines from a boot log, for a failure message that says why.
 /// What `wall_clock_now` printed for `SYS_CLOCK_EPOCH`.
 fn probed_epoch(log: &str) -> Option<i64> {
     let line = log.lines().find(|l| l.contains("wall-clock: epoch="))?;
@@ -115,6 +115,7 @@ fn boot_and_read(
     image_name: &str,
     params: &'static [&'static str],
     stage: &[(String, Vec<u8>)],
+    firmware_vars: Option<PathBuf>,
 ) -> Result<(Vec<Entry>, String, Duration), String> {
     let image_path = super::lane::dir().join(image_name);
     let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, params);
@@ -137,6 +138,7 @@ fn boot_and_read(
             boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: params,
             rtc_base: Some(RTC_BASE),
+            firmware_vars,
             ..Default::default()
         },
     );
@@ -156,8 +158,6 @@ fn boot_and_read(
     writeln!(qemu.stdin_mut(), "run echo {WINDOW_MARKER}")
         .map_err(|e| format!("stage the between-tests window: {e}"))?;
     qemu.flush_stdin();
-    // What the two clock syscalls answer, which nothing on the volume can show:
-    // the file name is local time and `SYS_CLOCK_EPOCH` serves UTC.
     let probe = qemu.run_test("test_rs_wall_clock_now", Duration::from_secs(30));
     log.push_str(&probe.before);
     log.push_str(&probe.stdout);
@@ -189,36 +189,59 @@ fn boot_and_read(
     Ok((entries, log, launched.elapsed()))
 }
 
-/// A firmware-named zone separates local time from UTC, in the direction UEFI
-/// defines.
-///
-/// The clock the RTC reads is local by firmware's account, so the file name and
-/// every FAT stamp stay on the staged instant; only `SYS_CLOCK_EPOCH` moves.
-/// UEFI's relation is `Localtime = UTC - TimeZone`, so the two hours east this
-/// stages report -120 and UTC comes out *behind* the RTC — the sign that a
-/// reader of the field gets backwards, and the one that would put a dual-booted
-/// laptop four hours out rather than two.
-pub fn zone_from_firmware(
+/// `PcatRealTimeClockRuntimeDxe`'s `FILE_GUID`, `378D7B65-8DA9-4773-B6E4-A47826A833E1`,
+/// in the byte order `EFI_GUID` stores: the vendor of the `RTC` variable its
+/// `PcRtcInit` reads `EFI_TIME::TimeZone` out of (edk2
+/// `PcAtChipsetPkg/PcatRealTimeClockRuntimeDxe/PcRtc.c`).
+const PC_RTC_VENDOR: [u8; 16] =
+    [0x65, 0x7b, 0x8d, 0x37, 0xa9, 0x8d, 0x73, 0x47, 0xb6, 0xe4, 0xa4, 0x78, 0x26, 0xa8, 0x33, 0xe1];
+/// `EFI_VARIABLE_NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS`, what
+/// `PcRtcSetTime` stores the zone with.
+const PC_RTC_ATTRIBUTES: u32 = 0x7;
+/// UTC+2 in `EFI_TIME::TimeZone`, whose relation is `Localtime = UTC - TimeZone`.
+const FIRMWARE_ZONE_MINUTES: i16 = -120;
+
+/// How far `h:m:s` is past the staged instant's own time of day; the base is
+/// far enough from midnight that no boot crosses one.
+fn past_the_base(h: &str, m: &str, s: &str) -> Option<i64> {
+    let [h, m, s] = [h, m, s].map(|field| field.parse::<i64>().ok());
+    Some(h? * 3_600 + m? * 60 + s? - RTC_BASE_SECS.rem_euclid(86_400))
+}
+
+/// What `wall_clock_now` printed for `SYS_CLOCK_REALTIME`, past the base.
+fn probed_realtime(log: &str) -> Option<i64> {
+    let line = log.lines().find(|l| l.contains("wall-clock: epoch="))?;
+    let hms = line.split("realtime=").nth(1)?.split_whitespace().next()?;
+    let [h, m, s] = hms.split(':').collect::<Vec<_>>()[..] else { return None };
+    past_the_base(h, m, s)
+}
+
+pub fn rtc_is_utc(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    const PARAMS: &[&str] = &["rtc-zone-east"];
-    /// What `clock::init_wall` stages, in seconds: two hours east of UTC.
-    const OFFSET_SECS: i64 = -120 * 60;
-
-    let (entries, log, lived) =
-        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-zone.img", PARAMS, &[])?;
+    let vars = super::lane::dir().join("wall-clock-utc-vars.fd");
+    toyos_build::firmware::of(qemu::Profile::Metal.arch())?.fresh_vars(&vars)?;
+    let zone = u32::from(FIRMWARE_ZONE_MINUTES as u16).to_le_bytes();
+    fwvars::plant(&vars, &PC_RTC_VENDOR, "RTC", PC_RTC_ATTRIBUTES, &zone)?;
+    let booted =
+        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-utc.img", &[], &[], Some(vars.clone()));
+    let _ = std::fs::remove_file(&vars);
+    let (entries, log, lived) = booted?;
     let logs = logs(&entries);
 
     let [only] = logs.as_slice() else {
         return Err(format!("the volume holds {} logs, wanted one: {}", logs.len(), names(&logs)));
     };
-    // Unmoved: FAT stores local time by specification, and so does the name.
-    if !only.name.starts_with(RTC_BASE_DATE) {
+    let named = only.name.strip_prefix(RTC_BASE_DATE).and_then(|hms| hms.strip_suffix(".log")).and_then(|hms| {
+        let (h, ms) = hms.split_at_checked(2)?;
+        let (m, s) = ms.split_at_checked(2)?;
+        past_the_base(h, m, s)
+    });
+    if !named.is_some_and(|drift| after_the_base(drift, lived)) {
         return Err(format!(
-            "a zone moved this boot's *local* time: the log is {} and the host staged \
-             {RTC_BASE}\n{}",
+            "the log is {} and the host staged {RTC_BASE}\n{}",
             only.name,
             clock_lines(&log)
         ));
@@ -226,7 +249,8 @@ pub fn zone_from_firmware(
     let stamp_drift = only.modified - RTC_BASE_SECS;
     if !after_the_base(stamp_drift, lived) {
         return Err(format!(
-            "a zone moved this boot's FAT timestamp by {stamp_drift}s, and FAT stores local time"
+            "this boot's FAT timestamp is {stamp_drift}s from the staged instant\n{}",
+            clock_lines(&log)
         ));
     }
 
@@ -236,20 +260,30 @@ pub fn zone_from_firmware(
             clock_lines(&log)
         ));
     };
-    let drift = epoch - (RTC_BASE_SECS + OFFSET_SECS);
+    let drift = epoch - RTC_BASE_SECS;
     if !after_the_base(drift, lived) {
-        let unshifted = epoch - RTC_BASE_SECS;
         return Err(format!(
-            "with firmware naming -120 minutes, `SYS_CLOCK_EPOCH` answered {epoch}: {drift}s from \
-             the UTC that implies, and {unshifted}s from the RTC's own reading. Zero for the \
-             second means the offset was dropped; {}s means its sign is inverted\n{}",
-            -OFFSET_SECS * 2,
+            "`SYS_CLOCK_EPOCH` answered {epoch}, {drift}s from the staged instant\n{}",
+            clock_lines(&log)
+        ));
+    }
+    let Some(realtime_drift) = probed_realtime(&log) else {
+        return Err(format!(
+            "the guest never printed what `SYS_CLOCK_REALTIME` answered\n{}",
+            clock_lines(&log)
+        ));
+    };
+    if !after_the_base(realtime_drift, lived) {
+        return Err(format!(
+            "`SYS_CLOCK_REALTIME` answered a time of day {realtime_drift}s from the staged \
+             instant's\n{}",
             clock_lines(&log)
         ));
     }
     eprintln!(
-        "  [clock] firmware naming -120 minutes: {} keeps local time, epoch is {}s behind it",
-        only.name, -OFFSET_SECS
+        "  [clock] with firmware naming {FIRMWARE_ZONE_MINUTES} minutes, {}, its FAT stamp, epoch \
+         {epoch} and the time of day sit on the staged instant",
+        only.name
     );
     Ok(())
 }
@@ -264,7 +298,8 @@ pub fn undated(
     params: &'static [&'static str],
     because: &str,
 ) -> Result<(), String> {
-    let (entries, log, _) = boot_and_read(test_config, c_bins, rust_bins, image_name, params, &[])?;
+    let (entries, log, _) =
+        boot_and_read(test_config, c_bins, rust_bins, image_name, params, &[], None)?;
     let logs = logs(&entries);
 
     // The refusal, by name and with its reason. A kernel that silently took
@@ -331,7 +366,7 @@ pub fn no_century(
     // ignoring it gives 2133.
     const PARAMS: &[&str] = &["rtc-no-century", "rtc-century-next"];
     let (entries, log, _) =
-        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-no-century.img", PARAMS, &[])?;
+        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-no-century.img", PARAMS, &[], None)?;
     let logs = logs(&entries);
 
     if !log.contains("ACPI: the FADT names no RTC century register") {
@@ -372,7 +407,7 @@ pub fn century_from_the_register(
 ) -> Result<(), String> {
     const PARAMS: &[&str] = &["rtc-century-next"];
     let (entries, log, _) =
-        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-century.img", PARAMS, &[])?;
+        boot_and_read(test_config, c_bins, rust_bins, "wall-clock-century.img", PARAMS, &[], None)?;
     let logs = logs(&entries);
 
     let [only] = logs.as_slice() else {
@@ -389,5 +424,171 @@ pub fn century_from_the_register(
         ));
     }
     eprintln!("  [clock] century register 0x21: {}, a century past the staged clock", only.name);
+    Ok(())
+}
+
+/// Where [`file_mtime_survives_a_reboot`] writes, on DATA: the one volume a
+/// file outlives its boot on.
+const MTIME_PATH: &str = "/home/file-mtime.bin";
+
+/// The second boot's RTC, a day past [`RTC_BASE`]: a stamp taken again at the
+/// mount or the open would carry this day, so an unchanged one was carried.
+const RTC_NEXT_DAY: &str = "2033-03-08T09:14:25";
+
+/// What `file_mtime` printed for [`MTIME_PATH`], in nanoseconds.
+fn printed_mtime(result: &qemu::TestResult) -> Result<u64, String> {
+    let head = format!("file-mtime: {MTIME_PATH} mtime=");
+    result
+        .stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(head.as_str()))
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "`{}` printed no {head:?} line (exit {:?})\n{}{}{}",
+                result.name, result.exit_code, result.before, result.stdout, result.serial
+            )
+        })
+}
+
+/// One boot of the image `data` carries DATA on, with the RTC at `rtc_base`,
+/// running `file_mtime <mode> MTIME_PATH`, then shut down.
+fn mtime_boot(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    data: &Path,
+    rtc_base: &'static str,
+    mode: &str,
+) -> Result<(u64, Duration), String> {
+    // Before the launch, so the RTC the guest reads has run no longer than this.
+    let launched = std::time::Instant::now();
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            nvme_image: Some(data.to_path_buf()),
+            rtc_base: Some(rtc_base),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    if boot.contains("are a tmpfs") {
+        return Err(format!("/home fell back to tmpfs, so no file of it outlives the boot:\n{boot}"));
+    }
+    let result = qemu.run_test(&format!("test_rs_file_mtime {mode} {MTIME_PATH}"), Duration::from_secs(60));
+    let printed = printed_mtime(&result);
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "`file_mtime {mode}` failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    printed.map(|n| (n, launched.elapsed()))
+}
+
+/// A file's mtime is the wall clock at its write, and a reboot carries it
+/// unchanged.
+///
+/// The oracle is the instant the host staged with `-rtc base=`: the guest's
+/// stamp for a file on DATA lies within [`after_the_base`] of it, the
+/// DATA volume read off the image by the host's own `bcachefs` reader holds
+/// that same stamp, and a second boot with the clock a day on reads it back
+/// unchanged. A stamp since boot is decades short of the instant.
+pub fn file_mtime_survives_a_reboot(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+    let data = super::lane::dir().join("file-mtime-data.img");
+    toyos_build::build::create_sparse(&data, qemu::NVME_SMALL);
+
+    let (written, lived) = mtime_boot(test_config, c_bins, rust_bins, &data, RTC_BASE, "write")?;
+    let drift = (written / NANOS_PER_SEC) as i64 - RTC_BASE_SECS;
+    if !after_the_base(drift, lived) {
+        return Err(format!(
+            "{MTIME_PATH} is stamped {written} ns, {drift} s from the {RTC_BASE} the host set the \
+             RTC to"
+        ));
+    }
+
+    let io = super::storage::FileBlocks::open(&data)?;
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
+        .map_err(|e| format!("the DATA volume does not mount on the host: {e:?}"))?;
+    let on_device = fs
+        .file_mtime(MTIME_PATH.trim_start_matches('/'))
+        .map_err(|e| format!("reading {MTIME_PATH}'s mtime off the image: {e:?}"))?;
+    drop(fs);
+    if on_device != Some(written) {
+        return Err(format!(
+            "the guest read {written} ns for {MTIME_PATH} and the device holds {on_device:?}"
+        ));
+    }
+
+    let (read, _) = mtime_boot(test_config, c_bins, rust_bins, &data, RTC_NEXT_DAY, "read")?;
+    if read != written {
+        return Err(format!(
+            "{MTIME_PATH} was stamped {written} ns and reads {read} ns after a reboot with the RTC \
+             at {RTC_NEXT_DAY}"
+        ));
+    }
+    let _ = std::fs::remove_file(&data);
+    eprintln!(
+        "  [clock] {MTIME_PATH} stamped {drift} s past the staged RTC, the same {written} ns on \
+         the device and after a reboot a day on"
+    );
+    Ok(())
+}
+
+/// On a machine whose RTC never answered, a file's mtime is undated — 0, which
+/// std reports as an error — and never 1970 plus the boot's uptime.
+pub fn file_mtime_undated(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const SAID: &str = "file-mtime: /tmp/file-mtime-undated is undated";
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { kernel_params: &["rtc-dead"], ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    if !boot.contains("clock: this machine will not say what time it is") {
+        return Err(format!(
+            "with rtc-dead armed the kernel never refused the clock\n{}",
+            clock_lines(&boot)
+        ));
+    }
+    let result = qemu.run_test("test_rs_file_mtime undated", Duration::from_secs(60));
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    if result.exit_code != Some(0) || !result.stdout.contains(SAID) {
+        return Err(format!(
+            "`file_mtime undated` exited {:?}:\n{}\nkernel log while it ran:\n{}{}",
+            result.exit_code, result.stdout, result.before, result.serial
+        ));
+    }
+    eprintln!("  [clock] rtc-dead: a file written in /tmp is undated");
     Ok(())
 }

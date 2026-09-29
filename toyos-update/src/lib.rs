@@ -18,13 +18,6 @@
 //! marked slot, and falls back to the other where the marked one is refused or
 //! died on its last boot ([`record`]); the updater writes only the slot the
 //! machine is not running, and moves the mark last.
-//!
-//! **What anti-rollback is here** ([`policy`]): the loader refuses an image
-//! whose version is below the highest version a boot has proven, and keeps
-//! that floor in a firmware variable no running kernel can write, one per
-//! signing key ([`floor`]); the updater refuses an image older than what the
-//! machine runs. Neither can defend a machine whose firmware variables anyone
-//! with the machine in hand can reset.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]

@@ -6,6 +6,7 @@
 //! whole vocabulary, and [`SUITE`] is the only way to read a word off its argv.
 
 use crate::flags::declare_flags;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// One machine's slice of the suite.
@@ -161,14 +162,24 @@ declare_flags!(pub SUITE = {
     /// machine is not touched**: the run builds the images and writes down what
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
+    /// The owner `guest_dies_with_its_harness` kills: the image it names,
+    /// booted and held until stdin ends. Alone on its line.
+    pub HOLD = "--hold", Next;
 });
 
-/// Validate the harness's argv and return the run's filter.
+/// The run's filter and `--metal`'s mode, both decided by [`parse`]: an unknown
+/// flag refuses the line before either is read.
+pub struct Parsed<'a> {
+    pub filter: Option<&'a str>,
+    pub metal: Option<MetalMode>,
+}
+
+/// Validate the harness's argv and return the run's filter and metal mode.
 ///
 /// `Err` is a refusal to print and exit on. It is asked before the sysroot lock
 /// and before anything is compiled, so a stale command line costs a message
 /// rather than a queue behind it.
-pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
+pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
     let line = SUITE.walk(args);
     if let Some(word) = line.unknown {
         return Err(format!(
@@ -181,6 +192,7 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
     if let Some(refusal) = line.malformed() {
         return Err(refusal);
     }
+    let flags = line.seen.len();
 
     let mut filter: Option<&str> = None;
     for word in line.positionals {
@@ -210,6 +222,42 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
                 .to_string(),
         );
     }
+    if has(&METAL) {
+        for flag in [&SHARD, &JOBS, &JOBS_SHORT] {
+            if has(flag) {
+                return Err(format!(
+                    "{} beside --metal: the metal profile reads no {}, so it would be dropped \
+                     in silence, and a following --list would be taken as its value",
+                    flag.name, flag.name
+                ));
+            }
+        }
+        if let Some(word) = filter {
+            if word.trim().is_empty() {
+                return Err("--metal with an empty filter: name a registration or drop the word"
+                    .to_string());
+            }
+            if let Some(flag) = SUITE.0.iter().find(|f| f.name.trim_start_matches('-') == word) {
+                return Err(format!(
+                    "{word:?} beside --metal is {}'s name without its dashes, and would be \
+                     read as a filter that selects whatever contains it",
+                    flag.name
+                ));
+            }
+        }
+        if has(&LIST) && has(&METAL_READBACK) {
+            return Err("--metal --list prints the plan and reads no readback directory, so \
+                        --metal-readback would be dropped in silence"
+                .to_string());
+        }
+        if SUITE.value(args, &METAL_READBACK).is_some_and(|dir| dir.starts_with('-')) {
+            return Err(
+                "--metal-readback takes a directory, and a word that starts with - is a flag \
+                 that lost its place"
+                    .to_string(),
+            );
+        }
+    }
     if has(&NIGHTLY) && has(&WEEKLY) {
         return Err(
             "--weekly runs the nightly tier too, so a --nightly beside it would be read by \
@@ -225,7 +273,36 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
             ));
         }
     }
-    Ok(filter)
+    if has(&HOLD) && (flags != 1 || filter.is_some()) {
+        return Err(
+            "--hold boots the image it names and holds it, and reads nothing else on the line; \
+             every other word would be dropped in silence"
+                .to_string(),
+        );
+    }
+
+    let metal = has(&METAL).then(|| {
+        if has(&LIST) {
+            MetalMode::List
+        } else {
+            match SUITE.value(args, &METAL_READBACK) {
+                Some(dir) => MetalMode::Offline(PathBuf::from(dir)),
+                None => MetalMode::Drive,
+            }
+        }
+    });
+
+    Ok(Parsed { filter, metal })
+}
+
+/// What `--metal`'s own flags resolve a run to.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum MetalMode {
+    /// `--metal --list`: print what would run, and touch nothing.
+    List,
+    Offline(PathBuf),
+    /// `--metal` alone: flash and drive the machine.
+    Drive,
 }
 
 #[cfg(test)]
@@ -238,7 +315,11 @@ mod tests {
     }
 
     fn parse_owned(args: &[&str]) -> Result<Option<String>, String> {
-        parse(&owned(args)).map(|f| f.map(ToString::to_string))
+        parse(&owned(args)).map(|p| p.filter.map(ToString::to_string))
+    }
+
+    fn metal_owned(args: &[&str]) -> Result<Option<MetalMode>, String> {
+        parse(&owned(args)).map(|p| p.metal)
     }
 
     #[test]
@@ -445,10 +526,6 @@ mod tests {
         }
     }
 
-    /// **The one that drives a physical machine.** `tests/toyos.rs` reads the
-    /// readback directory to decide `metal::Mode`, and `None` there is
-    /// `Mode::Drive` — the T14, booted off a stick. A `--metal-readback` with
-    /// no directory after it must therefore never reach that reader.
     #[test]
     fn a_readback_flag_with_no_directory_never_reaches_the_metal_driver() {
         let refusal = parse_owned(&["--metal", "--metal-readback"]).unwrap_err();
@@ -493,6 +570,8 @@ mod tests {
             vec!["--debug"],
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
+            vec!["--hold", "boot.img"],
+            vec!["--hold=boot.img"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
         }
@@ -505,5 +584,87 @@ mod tests {
     fn a_readback_directory_alone_selects_no_tier() {
         let refusal = parse_owned(&["--metal-readback", "target/metal"]).unwrap_err();
         assert!(refusal.contains("add --metal"), "{refusal}");
+    }
+
+    #[test]
+    fn metal_and_list_never_drives() {
+        assert_eq!(metal_owned(&["--metal", "--list"]).unwrap(), Some(MetalMode::List));
+    }
+
+    #[test]
+    fn metal_list_beside_a_readback_directory_is_refused() {
+        for argv in [
+            &["--metal", "--list", "--metal-readback", "x"][..],
+            &["--metal", "--metal-readback", "x", "--list"],
+        ] {
+            let refusal = metal_owned(argv).expect_err(&format!("{argv:?} was accepted"));
+            assert!(refusal.contains("would be dropped in silence"), "{argv:?}: {refusal}");
+        }
+    }
+
+    #[test]
+    fn metal_refuses_a_filter_that_is_a_flags_name_or_empty() {
+        for word in ["list", "metal", "jobs", "shard", "debug", "nightly", "metal-readback"] {
+            let refusal = metal_owned(&["--metal", word]).expect_err(word);
+            assert!(refusal.contains("without its dashes"), "{word}: {refusal}");
+        }
+        for word in ["", "  "] {
+            let refusal = metal_owned(&["--metal", word]).expect_err("empty filter");
+            assert!(refusal.contains("empty filter"), "{word:?}: {refusal}");
+        }
+        assert!(metal_owned(&["--metal", "abuse_listener_hijack"]).is_ok());
+    }
+
+    #[test]
+    fn metal_refuses_the_flags_it_reads_nothing_of_by_name() {
+        for argv in [
+            &["--metal", "-j", "--list"][..],
+            &["--metal", "--jobs", "--list"],
+            &["--metal", "--shard", "--list"],
+            &["--list", "--metal", "--shard", "2/4"],
+            &["--list", "--metal", "-j", "4"],
+            &["--list", "--metal", "--jobs", "4"],
+            &["--metal", "--shard", "2/4"],
+            &["--metal", "-j", "4"],
+        ] {
+            let refusal = metal_owned(argv).expect_err(&format!("{argv:?} was accepted"));
+            assert!(refusal.contains("beside --metal"), "{argv:?}: {refusal}");
+        }
+        for argv in [
+            &["--metal", "--metal-readback", "--list"][..],
+            &["--metal-readback", "--list", "--metal"],
+        ] {
+            let refusal = metal_owned(argv).expect_err(&format!("{argv:?} was accepted"));
+            assert!(refusal.contains("--metal-readback takes a directory"), "{argv:?}: {refusal}");
+        }
+    }
+
+    #[test]
+    fn metal_resolves_to_a_mode_that_reaches_the_machine_only_when_asked() {
+        assert_eq!(metal_owned(&[]).unwrap(), None);
+        assert_eq!(metal_owned(&["--metal"]).unwrap(), Some(MetalMode::Drive));
+        assert_eq!(
+            metal_owned(&["--metal", "--metal-readback", "target/metal"]).unwrap(),
+            Some(MetalMode::Offline(PathBuf::from("target/metal")))
+        );
+    }
+
+    #[test]
+    fn an_unknown_flag_is_refused_before_metal_decides_a_mode() {
+        let refusal = parse_owned(&["--metal", "--bogus", "--list"]).unwrap_err();
+        assert!(refusal.contains("--bogus"), "{refusal}");
+    }
+
+    #[test]
+    fn hold_is_alone_on_its_line() {
+        for argv in [
+            &["--hold", "boot.img", "boot"][..],
+            &["--hold", "boot.img", "--nightly"],
+            &["-j", "2", "--hold", "boot.img"],
+            &["--hold"],
+        ] {
+            let refusal = parse_owned(argv).unwrap_err();
+            assert!(refusal.contains("--hold"), "{argv:?}: {refusal}");
+        }
     }
 }

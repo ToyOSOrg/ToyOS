@@ -686,7 +686,11 @@ pub struct RealTime {
 pub struct Stat {
     pub file_type: FileType,
     pub size: u64,
-    /// Last modification time (nanoseconds since boot).
+    /// When the file was last written: nanoseconds since the Unix epoch, UTC,
+    /// off the wall clock at the write, to the resolution its mount keeps —
+    /// the nanosecond on `/tmp` and DATA, two seconds at the flush on FAT. 0 is
+    /// undated: written on a machine whose RTC never answered, or shipped in
+    /// ROOT's reproducible image.
     pub mtime: u64,
 }
 
@@ -855,6 +859,9 @@ pub mod debug_action {
     /// shipped field, and the install and the close that follow are the shipped
     /// paths making the shipped decision (`kernel::object::handle`).
     pub const SLOT_TO_LAST_GENERATION: u64 = 20;
+    /// Emit one patterned kernel log record, `logstorm t=0 i=<arg> …`, whose
+    /// text the reader regenerates from its two numbers.
+    pub const LOG_PATTERNED: u64 = 21;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`
@@ -1097,8 +1104,6 @@ pub fn random(buf: &mut [u8]) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0))
 }
 
-/// The time of day in the zone the machine keeps its clock in.
-///
 /// `None` is a machine that never said what time it is — an RTC that is absent,
 /// wedged, or answering with something that is not a date. It is `None` for the
 /// whole of such a boot rather than intermittently, because the kernel reads

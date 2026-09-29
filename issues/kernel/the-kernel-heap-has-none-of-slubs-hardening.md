@@ -17,8 +17,7 @@ pointer XORed with a per-cache secret and its own address
 (`mm/slub.c:479-490`), `CONFIG_SLAB_FREELIST_RANDOM` shuffles each slab's
 free list (`mm/slub.c:2228,2290`), and `CONFIG_RANDOM_KMALLOC_CACHES` spreads
 each size over 16 caches chosen by call site and a per-boot seed
-(`include/linux/slab.h:340-341,398-401`). Three rows of the hardening table in
-`issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`.
+(`include/linux/slab.h:340-341,398-401`).
 
 **Exit**: a free-list link is stored encoded with a per-boot secret and
 checked on every unlink, a size class's allocation order is drawn per boot,

@@ -14,7 +14,7 @@ fn fat_reopen_census() {
 
     const PATH: &str = "/log/lrfile";
 
-    let mtime = crate::clock::nanos_since_boot();
+    let mtime = crate::clock::mtime_now();
     let id = match vfs::lock().create_file(PATH, mtime) {
         Ok(id) => id,
         Err(e) => {
