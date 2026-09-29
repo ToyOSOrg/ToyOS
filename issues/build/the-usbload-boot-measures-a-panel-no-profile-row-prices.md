@@ -15,8 +15,7 @@ run that flashes `usbload` reds for it, whatever
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1):
+(EXIT=1):
 
 ```
   usbload: Boot: complete 1166 ms, back in 164 s, the stick enumerated 0 s after that
@@ -28,5 +27,6 @@ EXIT=1):
 ## Exit condition
 
 `tests/metal-profile.toml` carries `boot.usbload.panel_max_us` and
-`boot.usbload.panel_us` rows, and a T14 run that flashes `usbload` prints
+`boot.usbload.panel_us` rows, each ceiling taken from a measurement of that
+boot rather than chosen, and a T14 run that flashes `usbload` prints
 neither refusal.

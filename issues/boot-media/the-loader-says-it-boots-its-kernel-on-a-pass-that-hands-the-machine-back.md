@@ -16,7 +16,7 @@ carries two lines that contradict each other. The QEMU test
 `blackbox_foreign_record` asserts the first phrase on exactly that pass.
 
 Seen on the T14 run of `main` at `7e151819`,
-`/Users/jan/Dev/jan/toyos-metalmain/target/metal/foreignrecord/loader.log`,
+the `foreignrecord` readback's `loader.log`,
 second pass: the foreign-record line, then `Slot A: its image ... died on its
 last boot`, then the hand-back line.
 

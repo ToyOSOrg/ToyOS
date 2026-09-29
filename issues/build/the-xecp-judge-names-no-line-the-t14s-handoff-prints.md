@@ -17,10 +17,8 @@ capability with firmware not owning them, and that line is
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1): `FAIL xhci_xecp_walk: no line about the handoff at all:`. The
-`selftests` readback
-(`/Users/jan/Dev/jan/toyos-metalmain/target/metal/selftests/kernel.log`)
+(EXIT=1): `FAIL xhci_xecp_walk: no line about the handoff at all:`. The
+`selftests` readback's `kernel.log`
 carries, for each of the two controllers, the self-test and the handoff
 before the reset:
 

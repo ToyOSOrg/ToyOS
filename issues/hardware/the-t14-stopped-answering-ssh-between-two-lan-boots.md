@@ -15,8 +15,7 @@ and why the bench's `ssh` went away is not established by anything kept.
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1), in the order the loop ran them:
+(EXIT=1), in the order the loop ran them:
 
 ```
 [metal] lanicscase: ...
@@ -33,18 +32,10 @@ toyos-metal: the swap did not put the new binary in service:
   FAIL lan_swap: toyos-metal exited exit status: 2
 ```
 
-Host file times under `/Users/jan/Dev/jan/toyos-metalmain/target/metal/`:
-`lanicscase/boot.txt` 12:47:18, `lanswapcase/swap-stream.log` 12:50:47,
-`lantalkcase/stream.log` 12:58:43 — the machine answered `ssh` for the
-`lanicscase` readback and again for the `lantalkcase` flash, and not between.
-`lanicscase`'s 20 s back is the shortest of the run; every other boot's is
-44 s or more, excluding `lanswapcase` and `lanleasecase`, which have none.
-
-The orchestrator reports both names red on an earlier T14 run of the same
-`main` as well; that run's log was lost, and its cause is not known.
-
 ## Exit condition
 
-A T14 run in which `lanleasecase` and `lanswapcase` both reach their judges.
-Green: this file is deleted. Red on a
-judge: each red is filed with its own cause.
+`lan_lease_report` and `lan_swap` are owned by this file until it closes.
+Three consecutive T14 metal runs each reach both judges, `lanleasecase` and
+`lanswapcase`, without an `ssh` timeout before either flash; then this file is
+deleted. A red on a judge in any of the three is filed as its own issue file
+naming that test and its cause before this one closes.

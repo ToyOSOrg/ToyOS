@@ -4,7 +4,7 @@ kind: tooling
 opened: 2026-09-29
 ---
 
-# `allocator_stress` bounds total memory by a QEMU guest's size, so the T14's 16 GB reds it
+# `allocator_stress` bounds total memory by a QEMU guest's size, so the T14's 15 GB reds it
 
 `test_memory_stats` (`tests/toyos-rust-tests/src/bin/allocator_stress.rs`)
 asserts `sysinfo`'s total is 2 to 9 GB, because "QEMU is configured with
@@ -13,8 +13,7 @@ asserts `sysinfo`'s total is 2 to 9 GB, because "QEMU is configured with
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1), boot `shared`, after every earlier check printed `ok`:
+(EXIT=1), boot `shared`, after every earlier check printed `ok`:
 
 ```
 thread 'main' (1) panicked at src/bin/allocator_stress.rs:270:5:

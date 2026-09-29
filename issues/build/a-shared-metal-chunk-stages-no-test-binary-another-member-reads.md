@@ -17,8 +17,7 @@ is on an image only when it is a job there. `sized` cut the shared list into
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1), boot `shared`, after the two dedup checks passed:
+(EXIT=1), boot `shared`, after the two dedup checks passed:
 
 ```
 PASS: 8 concurrent loads of one name returned one handle (1)

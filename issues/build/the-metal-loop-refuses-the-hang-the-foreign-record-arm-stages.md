@@ -20,8 +20,7 @@ whatever the image is armed with.
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1):
+(EXIT=1):
 
 ```
 toyos-metal: the last boot of this image was handed the machine and never reported: no panic, no fault and no deliberate handover, which is a hang. This pass refused to boot the same kernel again and gave the machine back, so the machine is free and nothing needs a hand — but this boot measured no test, and why that kernel stopped is the boot before it
@@ -30,7 +29,7 @@ toyos-metal: the last boot of this image was handed the machine and never report
 ```
 
 The pass after the reset
-(`/Users/jan/Dev/jan/toyos-metalmain/target/metal/foreignrecord/loader.log`)
+(`loader.log`)
 carries the line the judge asks for, then the hang:
 
 ```

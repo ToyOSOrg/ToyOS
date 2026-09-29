@@ -16,8 +16,7 @@ and this run measured it false: the router gave ToyOS `.49` twice and Ubuntu
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1), boot `lancase`:
+(EXIT=1), boot `lancase`:
 
 ```
   [lan] leased 192.168.1.49/24 from 192.168.1.1 in 13315 ms, gateway 192.168.1.1, dns [194.230.55.96, 212.98.37.130]

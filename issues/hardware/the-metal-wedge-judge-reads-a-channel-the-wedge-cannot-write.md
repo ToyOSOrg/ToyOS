@@ -45,8 +45,7 @@ page kept the oldest records that fit, which is
 `issues/diagnostics/a-wedged-boots-record-outgrows-both-channels-that-carry-it.md`.
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1) reds with the same refusal: `wedge: staged` is at `loader.log:258` of
+(EXIT=1) reds with the same refusal: `wedge: staged` is at `loader.log:258` of
 its `deadlinewedge` readback and in no line of its `kernel.log`.
 
 `power::hard_lockup_chain` beside it was already moved off that channel for this

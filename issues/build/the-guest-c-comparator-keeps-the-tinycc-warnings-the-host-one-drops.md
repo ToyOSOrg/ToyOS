@@ -19,8 +19,7 @@ the one staged case whose expectation carries a warning.
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1), boot `ccorpus`:
+(EXIT=1), boot `ccorpus`:
 
 ```
 ccheck: 03_struct: differed at byte 0 — 25 byte(s) produced against 90 expected

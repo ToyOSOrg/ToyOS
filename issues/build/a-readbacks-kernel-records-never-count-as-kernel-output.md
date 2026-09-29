@@ -17,8 +17,7 @@ count is zero whatever the boot wrote. `must_not_say` and `must_be_clean` call
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1), all four off one `testcases` boot that reached `Boot: complete` in
+(EXIT=1), all four off one `testcases` boot that reached `Boot: complete` in
 1165 ms:
 
 ```
@@ -28,8 +27,7 @@ FAIL hda_client_stall: the testcases's log carried no kernel output at all (6929
 FAIL loader_watchdog_arms: the testcases's kernel log carried no kernel output at all (56038 bytes): every assertion below it would be a claim about nothing
 ```
 
-The readback's first line
-(`/Users/jan/Dev/jan/toyos-metalmain/target/metal/testcases/kernel.log`):
+The `testcases` readback's `kernel.log` first line:
 `[2026-09-29 11:11:20 0.000 cpu0 boot] panic console: armed 1920x1080 ...`.
 
 The callers: `klogd_hosted` (`must_be_clean`), `audio::tone_on_metal` and

@@ -22,8 +22,7 @@ judges still ask `Readback::kernel()` for such a record:
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1):
+(EXIT=1):
 
 ```
 FAIL log_poll_outlives_a_close: "Rebooting." never reached the testcases's kernel log:
@@ -31,8 +30,7 @@ FAIL usb_reset_records_the_phase_it_cut: "usb-load: sweeping disk 0" never reach
 FAIL machine_reboot: "Rebooting." never reached the jobcase's kernel log:
 ```
 
-Each record is on the page, in `loader.log` under
-`/Users/jan/Dev/jan/toyos-metalmain/target/metal/<boot>/`:
+Each record is on the page, in each boot's `loader.log`:
 
 ```
 testcases/loader.log:53:| log-tail: [12.838 cpu0] Rebooting.
@@ -42,9 +40,6 @@ usbload/loader.log:77:| [1.526 cpu0] usb-load: sweeping disk 0 from block 656933
 
 and in no `kernel.log` of the three. Every other assertion these judges make
 before the refused one passed.
-
-`boot_deadline_ends_a_wedge` fails the same way for its own reason, filed
-before this: `issues/hardware/the-metal-wedge-judge-reads-a-channel-the-wedge-cannot-write.md`.
 
 ## Exit condition
 

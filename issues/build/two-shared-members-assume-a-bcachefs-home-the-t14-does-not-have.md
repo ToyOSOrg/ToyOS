@@ -4,20 +4,21 @@ kind: tooling
 opened: 2026-09-29
 ---
 
-# Two shared members assume a bcachefs `/home`, and the T14 boot that redded them had a tmpfs one
+# Two shared members assume a bcachefs `/home`, and the T14 has no data partition
 
 `fs_large_file` asserts a 4096-byte name is refused because "no btree value
 can hold" it, and `home_backing_revoked` asserts a read through a deleted
 file's descriptor is refused because `/home`'s `NvmeBacking` revokes freed
-blocks. Both premises are bcachefs's. The `shared` boot that redded them
-found no `TOYOS-DATA` partition and put `/home` on tmpfs, which has no name
+blocks. Both premises are bcachefs's. The T14 carries no `TOYOS-DATA` partition, so `/home` is a tmpfs, which has no name
 bound (`kernel/src/tmpfs.rs`) and keeps an unlinked open file's bytes.
 
 ## Measured
 
+Every one of the 32 storage lines in that log says 0 TOYOS-DATA partitions and a
+tmpfs, the `shared` boot's included: both tests are red on the T14, always.
+
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1), boot `shared`:
+(EXIT=1), boot `shared`:
 
 ```
 storage: this machine carries 0 TOYOS-DATA partitions, and a data volume is one
@@ -31,10 +32,6 @@ byte 0 read through the deleted file's descriptor is 0xa7, not zero — the back
 ```
 
 `0xa7` is the victim's own byte, not the attacker's `0x5c`.
-
-**Flaky, not stable:** the orchestrator reports both names green on an earlier
-T14 run of the same `main`, whose log was lost; what `/home` was on that boot
-is not known.
 
 ## Exit condition
 

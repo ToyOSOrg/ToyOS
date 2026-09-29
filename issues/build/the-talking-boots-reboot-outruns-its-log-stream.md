@@ -16,8 +16,7 @@ itself sends.
 ## Measured
 
 The full T14 run of `main` at `7e151819`
-(`/Users/jan/.claude/jobs/2280e09e/tmp/scratchpad/orch/main-metal-full.log`,
-EXIT=1), boot `lantalkcase`:
+(EXIT=1), boot `lantalkcase`:
 
 ```
 toyos-metal: the boot did not say over its own cable what a talking boot owes:
@@ -26,16 +25,13 @@ toyos-metal: the boot did not say over its own cable what a talking boot owes:
   FAIL lan_talk: toyos-metal exited exit status: 1
 ```
 
-Its readback (`/Users/jan/Dev/jan/toyos-metalmain/target/metal/lantalkcase/`):
+Its readback:
 `talk.txt` says the ping, the command (`status 0`, 495 ms) and the `reboot`
 all succeeded, with `talk_stream_end open`. `stream.log` is `kernel.log`'s
 first 217 lines, ending at `0.493 ... xHCI: configuration set`;
 `Boot: complete (1167ms)` is `kernel.log:289`. `kernel.log` has
 `logd: serving this boot's log to 192.168.1.47:54752` at 20.996 s and init's
 `power: the machine stops` at 21.591 s: the stream had 595 ms.
-
-**Flaky, not stable:** the orchestrator reports `lan_talk` green on an
-earlier T14 run of the same `main`.
 
 ## Exit condition
 

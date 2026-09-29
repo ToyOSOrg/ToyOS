@@ -18,15 +18,10 @@ row before any boot.
 
 `hda_tone` and `hda_client_stall` red on the T14 run of `main` at `7e151819`
 (`issues/build/a-readbacks-kernel-records-never-count-as-kernel-output.md`).
-With a `hda_tone` row added to `src/redlist.rs`, `cargo run -- --known-red
-hda_tone` answers `YES, disabled — it does not run.` and
-`cargo test --test toyos-build -- --list` exits 1 with:
-
-```
-[toyos] src/redlist.rs: hda_tone is disabled and nothing registers it: a renamed or deleted test takes its row with it
-```
-
-The same tree without that row lists and exits 0.
+Only the code reading is verified: `check_redlist` tests `schedule.contains`, and
+the metal branch filters `METAL` rows through the same `keep`. Running
+`--known-red hda_tone` and `--list` against a tree with such a row is owed and
+not in this tree's record.
 
 ## Exit condition
 
