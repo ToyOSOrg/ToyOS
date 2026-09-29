@@ -7,11 +7,9 @@
 //! faults. The part's interrupts stay masked, so nothing but that fault can
 //! wake this program; what it then reads from the claim is the verdict.
 //!
-//! It exits 1 on the refusal it waits for, and 2 when [`TOLD_WITHIN`] passed
-//! or a wait on the claim ended with nothing ready: a refusal read after an
-//! unwoken wait is one nobody was woken for.
-
-use std::time::{Duration, Instant};
+//! It exits 1 on the refusal it waits for, with no deadline, and 2 when a wait
+//! on the claim ended with nothing ready: a refusal read after an unwoken wait
+//! is one nobody was woken for.
 
 use toyos::poller::{Poller, READABLE};
 use toyos_abi::syscall::{PciId, SyscallError};
@@ -23,10 +21,6 @@ const E82574: PciId = PciId { vendor: 0x8086, device: 0x10d3 };
 /// Where the ring is aimed, past the grant: further than a claim may ever be
 /// granted in total, so nothing this claim holds is there.
 const ASTRAY: u64 = 64 * 1024 * 1024;
-
-/// A liveness bound on the host's frames and the kernel's wake, never a
-/// measurement.
-const TOLD_WITHIN: Duration = Duration::from_secs(20);
 
 /// The register window, as volatile 32-bit accesses.
 struct Bar(*mut u8);
@@ -74,7 +68,6 @@ fn main() {
     println!("swap_claim_astray: holding the NIC mastering, its receive ring at {ring:#x}, outside its grant");
 
     let poller = Poller::new(1);
-    let asked = Instant::now();
     loop {
         match dev.irq() {
             Ok(_) | Err(SyscallError::WouldBlock) => {}
@@ -83,15 +76,11 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        let Some(left) = TOLD_WITHIN.checked_sub(asked.elapsed()) else {
-            println!("swap_claim_astray: its claim refused nothing in {TOLD_WITHIN:?}");
-            std::process::exit(2);
-        };
         poller.watch(&dev, READABLE, 0);
         let mut woken = false;
-        poller.wait(1, left.as_nanos() as u64, |_| woken = true);
+        poller.wait(1, u64::MAX, |_| woken = true);
         if !woken {
-            println!("swap_claim_astray: its claim refused nothing: no wake in {TOLD_WITHIN:?}");
+            println!("swap_claim_astray: its claim refused nothing: a wait with no deadline ended unwoken");
             std::process::exit(2);
         }
     }

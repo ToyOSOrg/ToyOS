@@ -265,14 +265,14 @@ impl Keyed {
 
 /// Make what `key` names: exclusive, and waited for by every other process that
 /// wants the same key, which then finds it made.
-pub fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
     let lock = format!("{} lock", kind.name());
     exclusive(&keyed_lock_path(root, kind, key), &lock, &format!("building {} {key}", kind.name()))
 }
 
 /// Use what `key` names: shared, so any number of builds use it at once, a
 /// builder of it is waited for, and a sweep cannot remove it.
-pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
     let path = keyed_lock_path(root, kind, key);
     let file = open_lock_file(&path);
     if !try_lock(&file, LOCK_SH) {
@@ -284,6 +284,33 @@ pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
         take_lock_announcing(&file, LOCK_SH, &path, &lock, &what);
     }
     Guard { file, records_holder: false }
+}
+
+/// What `key` names, held in use and whole: made by `make` under
+/// [`keyed_building`] while `defect`, which says why it is not whole, says it is
+/// not. A `make` that leaves it not whole is refused by that defect rather than
+/// run again.
+pub fn keyed_made(
+    root: &Path,
+    kind: Keyed,
+    key: &str,
+    defect: impl Fn() -> Option<String>,
+    mut make: impl FnMut(),
+) -> Guard {
+    loop {
+        let using = keyed_using(root, kind, key);
+        if defect().is_none() {
+            return using;
+        }
+        drop(using);
+        let _building = keyed_building(root, kind, key);
+        if defect().is_some() {
+            make();
+            if let Some(defect) = defect() {
+                panic!("{} {key} was made, and is not whole: {defect}", kind.name());
+            }
+        }
+    }
 }
 
 /// What `key` names, exclusively and only if nobody is making or using it: what

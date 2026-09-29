@@ -13,11 +13,6 @@
 //! from.
 
 /// The pipeline, in periods and bytes.
-///
-/// The shape the HDA stub presents too, and deliberately: soundd's mix loop,
-/// its client ring depth and gate A's recorded counters are all sized against
-/// eight periods of 512 bytes, so a second backend that chose differently would
-/// be a second instrument as well as a second device.
 pub const PERIODS: usize = 8;
 pub const PERIOD_BYTES: usize = 512;
 

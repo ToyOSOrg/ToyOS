@@ -202,21 +202,6 @@ pub extern "C" fn DG_SetWindowTitle(_title: *const u8) {}
 pub extern "C" fn DG_AudioWrite(_buf: *const u8, _len: u32) {}
 
 fn main() {
-    // The producer that overflowed is doom's own game thread inside
-    // `S_UpdateSounds`, so nothing outside this process can drive it; the
-    // actuator lives in the binary that owns it. Driven by
-    // `tests/toyos-rust-tests/src/bin/doom_sound_flood.rs`.
-    if std::env::args().any(|arg| arg == "--sound-stress") {
-        std::process::exit(sound::sound_stress());
-    }
-
-    // The shipped SoundFont reaching the device, without a window, a compositor
-    // or 30 seconds of title screen in the way. Driven by
-    // `tests/toyos-rust-tests/src/bin/doom_music.rs`.
-    if std::env::args().any(|arg| arg == "--music-check") {
-        std::process::exit(sound::music_check());
-    }
-
     // What the renderer draws, as one hash over a demo's frames, with no window
     // in the way. Driven by `tests/toyos-rust-tests/src/bin/doom_frames.rs`.
     if std::env::args().any(|arg| arg == "--frame-check") {
