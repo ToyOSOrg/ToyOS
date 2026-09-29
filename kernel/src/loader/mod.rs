@@ -396,6 +396,12 @@ pub fn spawn(
     // Where the image's first byte lands: every `ImageOffset` the file's
     // numbers were parsed into is added to it, and its span fits above it.
     let image_start = UserAddr::new(USER_VM_BASE);
+    // `SYS_QUERY_MODULES` answers with the mapped table, so an image without
+    // one has no true answer to give.
+    let Some(phdrs) = layout.program_headers() else {
+        log!("spawn: {}: no PT_LOAD maps the program header table", path);
+        return Err(SyscallError::InvalidArgument.into());
+    };
 
     let exe = read_exe_tables(backing.as_ref(), &layout, path)?;
     let t1 = crate::clock::nanos_since_boot();
@@ -597,6 +603,7 @@ pub fn spawn(
                 .eh_frame_hdr()
                 .map_or((0, 0), |r| ((image_start + r.start().get()).raw(), r.len())),
             exe_vaddr_max: image_end,
+            exe_phdrs: ((image_start + phdrs.image().start().get()).raw(), phdrs.count()),
             lib_paths,
         },
         mmap_regions: Vec::new(),

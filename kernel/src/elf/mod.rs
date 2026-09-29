@@ -27,7 +27,10 @@ use crate::UserAddr;
 use toyos_elf::dynamic::{Dynamic, InitArray};
 use toyos_elf::section::{SectionTable, SHT_DYNSYM};
 use toyos_elf::sym::{Sym, SymTab};
-use toyos_elf::{rela, Extent, GnuHash, ImageRange, Layout, Rela, RelaTable, Reloc, RelocError, SymIndex, TlsSegment};
+use toyos_elf::{
+    rela, Extent, GnuHash, ImageRange, Layout, ProgramHeaderTable, Rela, RelaTable, Reloc, RelocError, SymIndex,
+    TlsSegment,
+};
 
 /// `toyos_elf::MAX_TLS_ALIGN` must equal the kernel's largest page.
 const _: () = assert!(toyos_elf::MAX_TLS_ALIGN == PAGE_2M);
@@ -101,6 +104,8 @@ pub struct LoadedLib {
     rules: rela::Rules,
     /// `PT_GNU_EH_FRAME`, for DWARF unwinding.
     pub eh_frame_hdr: Option<ImageRange>,
+    /// The program header table, which `load_shared_lib` refuses a module without.
+    pub phdrs: ProgramHeaderTable,
     /// `DT_INIT_ARRAY`.
     pub init_array: Option<InitArray>,
     /// Bytes between the image's lowest and highest virtual address.
@@ -355,6 +360,8 @@ pub fn load_shared_lib(
     if extent.min() != 0 {
         return Err("ELF: a shared object must begin at vaddr 0");
     }
+    // `SYS_QUERY_MODULES` answers with the mapped table.
+    let phdrs = layout.program_headers().ok_or("ELF: no PT_LOAD maps the program header table")?;
     // No writable segment yields an empty window; no relocation can target it.
     let (rw_lo, rw_hi) = layout.writable_window().unwrap_or((layout.span(), layout.span()));
 
@@ -513,6 +520,7 @@ pub fn load_shared_lib(
             cached_relocs: None,
             rules,
             eh_frame_hdr: layout.eh_frame_hdr(),
+            phdrs,
             init_array,
             span: layout.span(),
             rw_lo,

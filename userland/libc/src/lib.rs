@@ -6,6 +6,7 @@ extern crate alloc;
 mod arch;
 mod ctype;
 mod errno;
+mod link;
 mod math;
 mod memory;
 mod misc;
