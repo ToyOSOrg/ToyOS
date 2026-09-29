@@ -282,7 +282,7 @@ const BLACKLIST: &[Row<Bl>] = &[
     amd(0x19, bl!(SRSO | TSA | VMSCAPE)),
 ];
 
-/// `bad_spectre_microcode` (`intel.c:165-180`) over `spectre_bad_microcodes`
+/// `bad_spectre_microcode` (`intel.c:165-182`) over `spectre_bad_microcodes`
 /// (`intel.c:141-163`): an Intel CPU outside a hypervisor whose microcode is
 /// at or below its row's broke the speculation controls.
 pub(crate) fn bad_spectre_microcode(id: &Ident, microcode: u32) -> bool {

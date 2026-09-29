@@ -30,7 +30,7 @@ use table::{
 };
 
 /// The vendors Linux's tables name, by CPUID.0's identification string
-/// (`get_cpu_vendor`, `common.c:912-935`, over each `cpu_dev`'s `c_ident`).
+/// (`get_cpu_vendor`, `common.c:912-936`, over each `cpu_dev`'s `c_ident`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vendor {
     Intel,
@@ -165,11 +165,11 @@ impl Ident {
 /// from state the facts do not carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// `amd.c` derives `LS_CFG_SSBD` (576-594), the Zen generations (600-640),
-    /// `TSA_*_NO` and `VERW_CLEAR` (517-530) and `IBPB_BRTYPE` (799-805) from
+    /// `amd.c` derives `LS_CFG_SSBD` (576-596), the Zen generations (600-648),
+    /// `TSA_*_NO` and `VERW_CLEAR` (517-530) and `IBPB_BRTYPE` (799-806) from
     /// the family, the microcode revision and MSR probes, from family 0x15 on.
     AmdFamily(u32),
-    /// `hygon.c` derives `LS_CFG_SSBD` (228-238) from an MSR probe.
+    /// `hygon.c` derives `LS_CFG_SSBD` (228-239) from an MSR probe.
     Hygon,
 }
 
@@ -177,7 +177,7 @@ pub enum Refused {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unmodelled {
     /// The e820 map against `x86_cache_bits` (`bugs.c:2538-2583`) and
-    /// `kvm_intel`'s state (`bugs.c:3074-3090`).
+    /// `kvm_intel`'s state (`bugs.c:3074-3089`).
     L1tf,
     /// `IA32_FEAT_CTL` and `CR4.VMXE` (`bugs.c:3091-3102`).
     ItlbMultihit,
@@ -251,7 +251,7 @@ impl Vuln {
     }
 }
 
-/// `tsx_ctrl_state` after `tsx_init` (`tsx.c:158-229`) under
+/// `tsx_ctrl_state` after `tsx_init` (`tsx.c:158-245`) under
 /// `CONFIG_X86_INTEL_TSX_MODE_OFF=y`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tsx {
@@ -263,7 +263,7 @@ pub enum Tsx {
     Disable,
 }
 
-/// `spectre_v2_enabled` (`bugs.c:1860-1946`).
+/// `spectre_v2_enabled` (`bugs.c:1860-2045`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpectreV2 {
     None,
@@ -286,7 +286,7 @@ pub enum Bhi {
     Vulnerable,
 }
 
-/// Whether and how `switch_mm` issues IBPB (`bugs.c:1531-1552`).
+/// Whether and how `switch_mm` issues IBPB (`bugs.c:1527-1550`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ibpb {
     /// The CPU has no IBPB.
@@ -304,7 +304,7 @@ pub enum Stibp {
     StrictPreferred,
 }
 
-/// `retbleed_mitigation` (`bugs.c:1054-1206`).
+/// `retbleed_mitigation` (`bugs.c:1054-1194`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Retbleed {
     None,
@@ -320,7 +320,7 @@ pub enum Ssb {
     Prctl,
 }
 
-/// `mds_mitigation` (`bugs.c:266-289`).
+/// `mds_mitigation` (`bugs.c:266-283`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mds {
     Off,
@@ -328,7 +328,7 @@ pub enum Mds {
     Vmwerv,
 }
 
-/// `taa_mitigation` (`bugs.c:327-386`).
+/// `taa_mitigation` (`bugs.c:327-382`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Taa {
     Off,
@@ -337,7 +337,7 @@ pub enum Taa {
     TsxDisabled,
 }
 
-/// `mmio_mitigation` (`bugs.c:424-480`).
+/// `mmio_mitigation` (`bugs.c:424-478`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mmio {
     Off,
@@ -345,7 +345,7 @@ pub enum Mmio {
     Verw,
 }
 
-/// `rfds_mitigation` (`bugs.c:520-535`).
+/// `rfds_mitigation` (`bugs.c:520-533`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rfds {
     Off,
@@ -353,7 +353,7 @@ pub enum Rfds {
     UcodeNeeded,
 }
 
-/// `srbds_mitigation` where the CPU has SRBDS (`bugs.c:678-697`).
+/// `srbds_mitigation` where the CPU has SRBDS (`bugs.c:678-700`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Srbds {
     UcodeNeeded,
@@ -362,7 +362,7 @@ pub enum Srbds {
     Hypervisor,
 }
 
-/// `gds_mitigation` where the CPU has GDS (`bugs.c:814-866`).
+/// `gds_mitigation` where the CPU has GDS (`bugs.c:814-867`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gds {
     UcodeNeeded,
@@ -373,7 +373,7 @@ pub enum Gds {
     Hypervisor,
 }
 
-/// `its_mitigation` (`bugs.c:1254-1334`).
+/// `its_mitigation` (`bugs.c:1254-1335`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Its {
     Off,
@@ -600,7 +600,7 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
     let mut rrsba_disabled = false;
     let mut efer_autoibrs = false;
 
-    // `spectre_v2_select_mitigation` (`bugs.c:1860-2046`). Where the CPU is
+    // `spectre_v2_select_mitigation` (`bugs.c:1860-2045`). Where the CPU is
     // unaffected it returns before any of it, leaving `spectre_v2_cmd` at
     // `SPECTRE_V2_CMD_NONE`.
     let mut spectre_v2 = SpectreV2::None;
@@ -641,7 +641,7 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
             !(bugs.retbleed && caps.ibpb && id.vendor == Vendor::Amd) && caps.ibrs && !ibrs_mode;
     }
 
-    // `retbleed_select_mitigation` (`bugs.c:1054-1206`).
+    // `retbleed_select_mitigation` (`bugs.c:1054-1194`).
     let retbleed = if !bugs.retbleed {
         Retbleed::None
     } else if id.vendor == Vendor::Intel {
@@ -657,7 +657,7 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
     };
 
     // `spectre_v2_user_select_mitigation` (`bugs.c:1492-1591`) and
-    // `cpu_bugs_smt_update` (`bugs.c:2964-3060`).
+    // `cpu_bugs_smt_update` (`bugs.c:2964-3058`).
     let user_cmd_none = !bugs.spectre_v2;
     let ibpb = if !caps.ibpb {
         Ibpb::Absent
@@ -681,7 +681,7 @@ pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
 
     let ssb = if caps.ssbd && bugs.ssb { Ssb::Prctl } else { Ssb::None };
 
-    // `md_clear_select_mitigation` (`bugs.c:603-615`). Its update pass
+    // `md_clear_select_mitigation` (`bugs.c:603-616`). Its update pass
     // (`bugs.c:555-601`) changes nothing under the default command line: each
     // bug it selects for again is already selected.
     let md_clear = edx7 & CPUID_7_0_EDX_MD_CLEAR != 0;
@@ -853,7 +853,7 @@ impl Line<'_> {
 }
 
 impl fmt::Display for Line<'_> {
-    /// `cpu_show_common` (`bugs.c:3305-3371`) and the `*_show_state` it calls.
+    /// `cpu_show_common` (`bugs.c:3305-3377`) and the `*_show_state` it calls.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let d = self.d;
         let b = &d.bugs;

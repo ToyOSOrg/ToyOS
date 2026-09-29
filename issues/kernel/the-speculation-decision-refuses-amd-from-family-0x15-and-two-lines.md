@@ -10,13 +10,13 @@ opened: 2026-09-29
 state they do not carry, at `Ubuntu-6.8.0-142.142`:
 
 - **AMD family 0x15 and later, and Hygon**, refused whole. `amd.c` derives
-  `LS_CFG_SSBD` (576-594), the Zen generations (600-640), `TSA_SQ_NO`,
+  `LS_CFG_SSBD` (576-596), the Zen generations (600-648), `TSA_SQ_NO`,
   `TSA_L1_NO` and `VERW_CLEAR` from a microcode table (517-530) and
-  `IBPB_BRTYPE`/`SBPB` from a `PRED_CMD` write probe (799-805); `hygon.c`
-  derives `LS_CFG_SSBD` (228-238). Each feeds SSB, RETBLEED, SRSO or TSA.
+  `IBPB_BRTYPE`/`SBPB` from a `PRED_CMD` write probe (799-806); `hygon.c`
+  derives `LS_CFG_SSBD` (228-239). Each feeds SSB, SRSO or TSA.
 - **`l1tf` on an affected CPU**: the line reads the e820 map against
   `x86_cache_bits` (`bugs.c:2538-2583`) and `kvm_intel`'s state
-  (`bugs.c:3074-3090`).
+  (`bugs.c:3074-3089`).
 - **`itlb_multihit` on an affected CPU**: the line reads `IA32_FEAT_CTL` and
   `CR4.VMXE` (`bugs.c:3091-3102`).
 
