@@ -222,7 +222,7 @@ mod tests {
         assert_ne!(untracked.stage2, ca.stage2, "an untracked target spec kept the old compiler");
         git(&fork, &["add", "-A"]);
         git(&fork, &["commit", "-qm", "the target, committed"]);
-        let committed = choose(&e.a, &e.rust_dir, &Fork::Checkout(fork.clone()), &sources(&e.a), counted);
+        let committed = choose(&e.a, &e.rust_dir, &Fork::Checkout(fork), &sources(&e.a), counted);
         assert_eq!((committed.stage2, builds.get()), (untracked.stage2, 4), "a commit rebuilt the compiler");
         assert_eq!(store::recorded(&e.a, Kind::Llvm), Some(llvm::key(&sources(&e.a))), "the LLVM a compiler links went unrecorded");
     }
