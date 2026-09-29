@@ -363,13 +363,8 @@ pub(crate) fn x_build_with(
         Restore::holding(&rust_dir.join("Cargo.lock")),
         Restore::holding(&rust_dir.join("library/Cargo.lock")),
     ];
-    // Two literals and not one variable: `src/sourcegate::every_binary_the_host_runs_is_declared`
-    // reads the argument, and a name assembled at run time is a name nobody declared.
-    let (x, mut command) = if rust_dir.join("x").exists() {
-        ("./x", Command::new("./x"))
-    } else {
-        ("./x.py", Command::new("./x.py"))
-    };
+    let x = if rust_dir.join("x").exists() { "./x" } else { "./x.py" };
+    let mut command = Command::new(x);
     environment(&mut command);
     let mut child = command
         .args(args)

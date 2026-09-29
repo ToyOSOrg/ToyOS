@@ -704,9 +704,13 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     kernel_args.memory_map_size =
         memory_map.len() as u64 * mem::size_of::<MemoryMapEntry>() as u64;
 
+    #[expect(clippy::disallowed_methods, reason = "`kernel_args.memory_map_addr` hands it to the kernel")]
     mem::forget(memory_map);
+    #[expect(clippy::disallowed_methods, reason = "the kernel runs from these pages")]
     mem::forget(kernel.memory);
+    #[expect(clippy::disallowed_methods, reason = "`kernel_args.kernel_elf_addr` hands it to the kernel")]
     mem::forget(kernel_elf_bytes);
+    #[expect(clippy::disallowed_methods, reason = "`kernel_args.cmdline_addr` hands it to the kernel")]
     mem::forget(cmdline);
 
     let image = (kernel_phys, kernel_args.kernel_memory_size);
