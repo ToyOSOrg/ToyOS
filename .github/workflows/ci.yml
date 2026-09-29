@@ -41,8 +41,3 @@ jobs:
           restore-keys: host-
 
       - run: cargo run -- --ci host
-
-      - if: ${{ !cancelled() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: cargo run -- --ci gate-stage

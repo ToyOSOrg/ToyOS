@@ -13,8 +13,8 @@ vector delivered to an xAPIC id. A GICv3 message names an LPI through the ITS
 (a 32-bit event id, translated to an INTID above 8191) and a redistributor,
 and neither fits a `u8`.
 
-Owned by stage 4 of `issues/kernel/toyos-runs-on-arm64.md`, which brings up
-the GIC and its ITS.
+Owned by stage 6 of `issues/kernel/toyos-runs-on-arm64.md`, which brings up
+the GICv3 ITS for the claimed functions its SMMUv3 translates.
 
 **Exit condition**: a PCI function's interrupt is programmed from an
 arch-provided message (address and data, as `arch::msi` already provides the
