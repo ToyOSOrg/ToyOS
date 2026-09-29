@@ -185,6 +185,9 @@ toyos-sched = { path = "toyos-sched", features = ["check"] }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }
+# The performance request, so `perf_request`'s metal row holds each CPU's boot
+# line to the declaration the kernel makes from that line's own inputs.
+toyos-perfstate = { path = "toyos-perfstate" }
 # The second reader `pkg_install_gbae` is judged against: what is read back off
 # the guest's volume is compared with a third party's decoding of the committed
 # archive, never with `userland/pkg`'s own. The archive itself is committed

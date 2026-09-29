@@ -291,9 +291,9 @@ actuators! {
     dump_deaf_cpu = "dump-deaf-cpu";
 
     /// Grant a `perf-state` claim where no performance request was declared,
-    /// answering zeros, and have no CPU answer a kick, so every CPU but a
-    /// read's asker is silent: what the read's bound refuses, on a machine
-    /// QEMU can stage.
+    /// each record its CPU's identity and zeros, and have no CPU but its asker
+    /// answer the boot's first three asks: what the read's bound refuses, and
+    /// then a read every CPU answers, on a machine QEMU can stage.
     perf_state_deaf_cpu = "perf-state-deaf-cpu";
 
     /// Have cpu1 move its HWP request off the declaration when it answers a

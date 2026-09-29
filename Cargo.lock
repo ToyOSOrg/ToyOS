@@ -1006,6 +1006,7 @@ dependencies = [
  "toyos-keymap",
  "toyos-logstream",
  "toyos-manifest",
+ "toyos-perfstate",
  "toyos-quiesce",
  "toyos-sched",
  "toyos-swap",

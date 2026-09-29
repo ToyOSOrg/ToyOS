@@ -24,18 +24,16 @@ use toyos_build::metalprofile::{job_ms_row, Profile, AROUND_THE_LIST_MS};
 use super::serial::Serial;
 
 /// The fields only the boots that took that path produce: the two bounds'
-/// lateness, the stop's own count, and the panel's census, which a stop or a
-/// bound seals and a kernel panic does not. Absent **and** unpriced is a boot
-/// that did not take the path and owes nothing; absent and priced is a boot
-/// armed for one path that ended on another, which is a red the pricing loop
-/// names.
-const PATH_TAKEN: &[&str] = &[
-    "deadline_lateness_ms",
-    "lockup_lateness_ms",
-    "park_open_operations",
-    "panel_max_us",
-    "panel_us",
-];
+/// lateness, and the stop's own count. Absent **and** unpriced is a boot that
+/// did not take the path and owes nothing; absent and priced is a boot armed
+/// for one path that ended on another, which is a red the pricing loop names.
+const PATH_TAKEN: &[&str] =
+    &["deadline_lateness_ms", "lockup_lateness_ms", "park_open_operations"];
+
+/// The panel's census, which a stop or a bound seals and a kernel panic does
+/// not: path-taken fields on a boot told to end in a panic, and owed by every
+/// other boot.
+const NOT_SEALED_BY_A_PANIC: &[&str] = &["panel_max_us", "panel_us"];
 
 /// One boot a metal test needs.
 pub struct Arm {
@@ -89,7 +87,7 @@ pub struct Arm {
     /// service and writes [`toyos_build::metal::READBACK_SWAP`] beside the
     /// stick's files.
     pub swap: Option<&'static str>,
-    /// **The boot ends in a kernel panic whose record carries this line**, and
+    /// **The boot ends in a kernel panic whose record carries this text**, and
     /// the loop judges it by that record rather than by the shutdown's last
     /// word. `None` on every boot that hands the machine back or is ended by a
     /// bound its image is armed with.
@@ -853,14 +851,15 @@ fn talk_home(home: &Path) -> PathBuf {
     home.join("ssh")
 }
 
-/// `words` as a shell reads them back, for the request a hand runs: a word with
-/// a space in it, which an expected panic line has, is quoted.
+/// `words` as a shell reads them back, for the request a hand runs: a word
+/// holding anything but the characters no shell treats specially is quoted.
 fn command_line(words: &[String]) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "@%+:,./_-".contains(c);
     let word = |w: &String| {
-        if w.contains(char::is_whitespace) {
-            format!("'{}'", w.replace('\'', "'\\''"))
-        } else {
+        if !w.is_empty() && w.chars().all(plain) {
             w.clone()
+        } else {
+            format!("'{}'", w.replace('\'', "'\\''"))
         }
     };
     words.iter().map(word).collect::<Vec<_>>().join(" ")
@@ -964,8 +963,9 @@ pub enum Verdict {
 }
 
 /// What one boot's own facts say against the profile and against what every
-/// boot owes, one finding a line; none is a boot whose facts pass.
-fn boot_findings(label: &str, back: &Readback, profile: &Profile) -> Vec<String> {
+/// boot owes, one finding a line; none is a boot whose facts pass. `panicked`
+/// is a boot told to end in a kernel panic ([`Arm::panics`]).
+fn boot_findings(label: &str, back: &Readback, profile: &Profile, panicked: bool) -> Vec<String> {
     let mut found = Vec::new();
     let panel = back.panel();
     // A boot the file prices a path-taken field for and that produced none is
@@ -982,7 +982,8 @@ fn boot_findings(label: &str, back: &Readback, profile: &Profile) -> Vec<String>
     ] {
         let name = format!("boot.{label}.{field}");
         let priced = profile.row(&name).is_some();
-        if value.is_none() && !priced && PATH_TAKEN.contains(&field) {
+        let taken = PATH_TAKEN.contains(&field) || (panicked && NOT_SEALED_BY_A_PANIC.contains(&field));
+        if value.is_none() && !priced && taken {
             continue;
         }
         let Some(value) = value else {
@@ -1214,7 +1215,7 @@ pub fn run(
                         panel.paints, panel.pixels
                     );
                 }
-                for why in boot_findings(label, back, &profile) {
+                for why in boot_findings(label, back, &profile, batches[label].panics.is_some()) {
                     eprintln!("    FAIL {why}");
                     red = true;
                 }
@@ -1319,9 +1320,10 @@ fn a_filtered_run_carries_the_job_its_row_reads() -> Result<(), String> {
 }
 
 /// **The boot that is to panic is driven as one and judged as one**: its
-/// invocation tells the loop which line the panic record carries, and the
+/// invocation tells the loop what the panic record carries, and the
 /// boot's own facts, read off the record the T14 sealed, owe nothing a
-/// panic does not seal.
+/// panic does not seal — and the same facts from a boot not told to panic
+/// still owe the panel's census.
 #[test]
 fn a_boot_that_is_to_panic_is_told_so_and_owes_no_stop() -> Result<(), String> {
     // The pass after the reset of the T14's `perfdiverge` boot, less the log
@@ -1380,9 +1382,26 @@ Loader log: the last boot is accounted for, so this pass resets the machine
         stick_secs: 0,
         cable: None,
     };
-    let found = boot_findings("perfdiverge", &back, &profile);
+    let found = boot_findings("perfdiverge", &back, &profile, true);
     if !found.is_empty() {
         return Err(found.join("\n"));
     }
+    let owed = boot_findings("perfdiverge", &back, &profile, false);
+    for field in NOT_SEALED_BY_A_PANIC {
+        if !owed.iter().any(|why| why.contains(&format!("boot.perfdiverge.{field}:"))) {
+            return Err(format!("a boot not told to panic owes no {field}: {owed:?}"));
+        }
+    }
     Ok(())
+}
+
+/// **The request a hand runs is the invocation, word for word**: a word a
+/// shell would read specially is quoted, and a plain one is not.
+#[test]
+fn a_command_line_quotes_every_word_a_shell_would_read() {
+    let words = ["--image", "a/b-1.img", "it's", "$HOME", "a;b", "a b", "", "x=y"].map(str::to_string);
+    assert_eq!(
+        command_line(&words),
+        r#"--image a/b-1.img 'it'\''s' '$HOME' 'a;b' 'a b' '' 'x=y'"#,
+    );
 }

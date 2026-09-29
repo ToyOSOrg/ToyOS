@@ -1,8 +1,9 @@
 //! What a read of a `perf-state` claim answers: one [`PackageRegisters`], then
 //! one [`CpuRegisters`] per CPU in CPU order — the machine's whole CPU count,
 //! or the read is refused whole with `ResourceExhausted`, and with `Io` when a
-//! CPU did not answer within the kernel's bound. Every field is the
-//! register's raw value, named by its x86-64 MSR; decoding is the reader's.
+//! CPU did not answer within the kernel's bound. Every field but
+//! [`CpuRegisters::hardware_id`] is the register's raw value, named by its
+//! x86-64 MSR; decoding is the reader's.
 
 /// The package-wide registers, read on whichever CPU answered the read.
 #[repr(C)]
@@ -20,6 +21,11 @@ pub struct PackageRegisters {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CpuRegisters {
+    /// The CPU's own hardware identity, on x86-64 its x2APIC ID from CPUID
+    /// (leaf 1FH or 0BH `EDX`, else 01H `EBX[31:24]`): what the kernel's roster
+    /// names it by. Only that CPU can read it, so a record taken anywhere else
+    /// carries another CPU's.
+    pub hardware_id: u64,
     /// `IA32_PM_ENABLE`, 0x770.
     pub pm_enable: u64,
     /// `IA32_HWP_CAPABILITIES`, 0x771.
@@ -35,7 +41,7 @@ pub struct CpuRegisters {
 // Every byte belongs to a field: both cross the boundary as bytes, so a gap
 // would publish whatever the kernel stack held.
 const _: () = assert!(core::mem::size_of::<PackageRegisters>() == 3 * 8);
-const _: () = assert!(core::mem::size_of::<CpuRegisters>() == 5 * 8);
+const _: () = assert!(core::mem::size_of::<CpuRegisters>() == 6 * 8);
 
 /// The bytes a read answers on a machine of `cpus` CPUs.
 pub const fn answer_len(cpus: usize) -> usize {
@@ -86,6 +92,7 @@ mod tests {
     #[test]
     fn a_record_round_trips_through_its_bytes() {
         let cpu = CpuRegisters {
+            hardware_id: 2,
             pm_enable: 1,
             hwp_capabilities: 0x010d_182a,
             hwp_request: 0x8000_2a04,
@@ -96,6 +103,6 @@ mod tests {
         assert_eq!(CpuRegisters::read_from(&cpu.as_bytes()[1..]), None);
         let pkg = PackageRegisters { package_therm_status: 0x8830_0000, ..Default::default() };
         assert_eq!(PackageRegisters::read_from(pkg.as_bytes()), Some(pkg));
-        assert_eq!(answer_len(8), 24 + 8 * 40);
+        assert_eq!(answer_len(8), 24 + 8 * 48);
     }
 }

@@ -27,11 +27,7 @@ enumerated by CPUID or read at boot under the declaration's proof
   `perf-state` claim, together with the turbo bit and package thermal status
   (`/system/bin/perfstate`). *Exit*: in QEMU, `perf_request` (the refusal) and
   `perf_state_silent_cpu` (a CPU that never answers is refused `Io` by name);
-  on the T14, **owed**, `perf_request`'s metal row: on `testcases` every CPU
-  logs `control_regs: cpuN pm_enable=1 hwp_request=0x80002a04
-  hwp_request_pkg=0x8000ff01 epb=6` and `test_rs_perf_state` exits 0; on
-  `perfdiverge` the page after the reset carries the panic `control_regs:
-  cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04`.
+  on the T14, `perf_request`'s metal row.
   No test launches `/system/bin/perfstate`, so its row's `devices` is
   unmeasured.
 - **2 — RAPL, declared.** PL1, PL2 and their windows through
@@ -57,14 +53,10 @@ enumerated by CPUID or read at boot under the declaration's proof
   the owner rules on, never the `perfstate` row any session can launch.
   *Exit*: one valid span on the T14.
 
-**Not covered.** A hybrid CPU is refused: its HWP scale is not its ratio scale
-and the declared minimum is a ratio. AMD's CPPC and AArch64 declare nothing;
-the AArch64 kernel refuses the claim by name.
+**Not covered.** Hybrid Intel and AMD CPPC are refused:
+`issues/kernel/the-perf-state-declaration-refuses-hybrid-intel-and-amd-cppc.md`.
+AArch64 declares nothing, and the AArch64 kernel refuses the claim by name.
 
 **What only the T14 proves.** No QEMU CPU enumerates HWP (TCG's `qemu64`, and
 KVM, which reduces leaf 6 to `ARAT`), so every write and every read of these
-registers runs only there. Under Linux on the T14 every CPU held
-`IA32_HWP_REQUEST` `0x80002a04` with `IA32_HWP_CAPABILITIES` `0x010d182a` or
-`0x010e182a`, and the package `IA32_HWP_REQUEST_PKG` `0x8000ff01`.
-`MSR_PLATFORM_INFO` was not read there; its ratio 4 is inferred from Linux's
-`cpuinfo_min_freq` of 400000 kHz, and ToyOS's boot line prints the register.
+registers runs only there.

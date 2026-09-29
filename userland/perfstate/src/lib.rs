@@ -27,8 +27,9 @@ pub fn read_back(claim: &Device) -> Result<(), String> {
         let regs = CpuRegisters::read_from(&buf[answer_len(cpu)..])
             .expect("the buffer holds every CPU's record");
         println!(
-            "cpu{cpu} pm_enable={} hwp_request={:#010x} {:?} epb={} turbo={} \
+            "cpu{cpu} hardware_id={} pm_enable={} hwp_request={:#010x} {:?} epb={} turbo={} \
              hwp_capabilities={:#010x}",
+            regs.hardware_id,
             regs.pm_enable,
             regs.hwp_request,
             HwpRequest::of(regs.hwp_request),

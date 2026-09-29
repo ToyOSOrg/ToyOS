@@ -2123,10 +2123,11 @@ const PERF_REQUEST: &[metal::Arm] = &[
     },
 ];
 
-/// What `perfdiverge`'s panic says, in `kernel/src/arch/x86_64/control_regs.rs`'s
-/// `hwp_check`: cpu1 holds the request one ratio off the declaration.
-const PERF_REQUEST_DIVERGED: &str =
-    "control_regs: cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04";
+/// How `perfdiverge`'s panic opens, in `kernel/src/arch/x86_64/control_regs.rs`'s
+/// `hwp_check`: cpu1 holds a request other than its declaration. The values
+/// are the machine's, so [`perf_request_diverged`] reads the rest against
+/// cpu1's own boot line.
+const PERF_REQUEST_DIVERGED: &str = "control_regs: cpu1 holds hwp_request=";
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
@@ -17750,26 +17751,116 @@ fn perf_request(
     Ok(())
 }
 
-/// The same on the T14, whose CPUs have every register the request names:
-/// each CPU holds the bar's power envelope — the `IA32_HWP_REQUEST`,
-/// `IA32_HWP_REQUEST_PKG` and EPB the Linux run it is held against held — and
-/// the guest binary read every CPU back holding its declaration.
+/// The same on a machine whose CPUs have every register the request names:
+/// each CPU's boot line holds the declaration `toyos_perfstate` makes from the
+/// two inputs the line carries, and the guest binary read every CPU back
+/// holding it, each record read on the CPU the kernel's roster names.
 fn perf_request_on_metal(boot: &metal::Readback) -> Result<(), String> {
-    const BAR: &str = "pm_enable=1 hwp_request=0x80002a04 hwp_request_pkg=0x8000ff01 epb=6 ";
     let cpus = boot.cpus()?;
     let log = boot.kernel();
     for cpu in 0..cpus {
-        let head = format!("control_regs: cpu{cpu} pm_enable=");
-        let Some(line) = log.text().lines().find(|l| l.contains(&head)) else {
-            return Err(format!("cpu{cpu} logged no performance request:\n{}", log.text()));
-        };
-        if !line.contains(&format!("control_regs: cpu{cpu} {BAR}")) {
-            return Err(format!("cpu{cpu} does not hold the bar's envelope {BAR:?}: {line}"));
-        }
+        hwp_boot_line(log.text(), cpu)?;
     }
     boot.job_passed("test_rs_perf_state")?;
-    eprintln!("  [perf_request] {cpus} CPUs hold the bar's request and read it back");
+    let roster = roster(log.text())?;
+    if roster.len() != cpus as usize {
+        return Err(format!("the roster names {} CPUs and {cpus} came up", roster.len()));
+    }
+    let records = records_name_their_cpus(&bootlog::lines_of(boot.log().text(), "test-runner"), &roster)?;
+    eprintln!(
+        "  [perf_request] {cpus} CPUs hold their declared request, and {records} records read \
+         back each named its own CPU"
+    );
     Ok(())
+}
+
+/// One CPU's `control_regs:` boot line, as `hwp_check` writes it, held to the
+/// declaration `toyos_perfstate` makes from the two inputs the line carries.
+/// Answers that declared request.
+fn hwp_boot_line(log: &str, cpu: u32) -> Result<u64, String> {
+    let head = format!("control_regs: cpu{cpu} pm_enable=");
+    let Some(line) = log.lines().find(|l| l.contains(&head)) else {
+        return Err(format!("cpu{cpu} logged no performance request:\n{log}"));
+    };
+    let field = |name: &str| -> Result<u64, String> {
+        let word = line
+            .split_once(&format!(" {name}="))
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .ok_or_else(|| format!("cpu{cpu}'s line carries no {name}: {line}"))?;
+        match word.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => word.parse(),
+        }
+        .map_err(|e| format!("cpu{cpu}'s {name}={word}: {e}"))
+    };
+    let declared = toyos_perfstate::hwp_request(field("hwp_capabilities")?, field("platform_info")?);
+    for (name, want) in [
+        ("pm_enable", toyos_perfstate::PM_ENABLE),
+        ("hwp_request", declared),
+        ("hwp_request_pkg", toyos_perfstate::HWP_REQUEST_PKG),
+        ("epb", toyos_perfstate::ENERGY_PERF_BIAS),
+    ] {
+        let holds = field(name)?;
+        if holds != want {
+            return Err(format!(
+                "cpu{cpu} holds {name}={holds:#x}, and its line's own inputs declare {want:#x}: {line}"
+            ));
+        }
+    }
+    Ok(declared)
+}
+
+/// The kernel's roster in CPU order: each CPU's hardware ID as its bring-up
+/// record names it.
+fn roster(log: &str) -> Result<Vec<u64>, String> {
+    let number = |line: &str, head: &str| -> Option<u64> {
+        line.split_once(head)?.1.split_whitespace().next()?.parse().ok()
+    };
+    let Some(bsp) = log.lines().find_map(|l| number(l, "percpu: BSP cpu_id=0 lapic_id=")) else {
+        return Err(format!("no `percpu: BSP` record names the BSP's hardware ID:\n{log}"));
+    };
+    let mut ids = vec![bsp];
+    loop {
+        let head = format!("{}{} lapic=", bootlog::AP_BRINGUP, ids.len());
+        let online = |l: &&str| l.trim_end().ends_with(" online");
+        match log.lines().filter(online).find_map(|l| number(l, &head)) {
+            Some(id) => ids.push(id),
+            None => return Ok(ids),
+        }
+    }
+}
+
+/// Every `cpuN hardware_id=K` record line in `text`, held to `roster`: each
+/// record was read on the CPU it is filed under, and every CPU's record was
+/// read as often as every other's. Answers how many records there were.
+fn records_name_their_cpus(text: &str, roster: &[u64]) -> Result<usize, String> {
+    let mut seen = vec![0usize; roster.len()];
+    for line in text.lines() {
+        let Some((head, rest)) = line.split_once(" hardware_id=") else { continue };
+        let cpu: usize = head
+            .rsplit_once("cpu")
+            .and_then(|(_, n)| n.parse().ok())
+            .ok_or_else(|| format!("a record names no CPU: {line}"))?;
+        let id: u64 = rest
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| format!("a record carries no hardware ID: {line}"))?;
+        let Some(&want) = roster.get(cpu) else {
+            return Err(format!("a record for cpu{cpu}, and the roster has {} CPUs: {line}", roster.len()));
+        };
+        if id != want {
+            return Err(format!(
+                "cpu{cpu}'s record was read on the CPU whose hardware ID is {id}, and the roster \
+                 names cpu{cpu} {want}: {line}"
+            ));
+        }
+        seen[cpu] += 1;
+    }
+    if seen[0] == 0 || seen.iter().any(|&n| n != seen[0]) {
+        return Err(format!("want every CPU's record read alike, got {seen:?} per CPU:\n{text}"));
+    }
+    Ok(seen.iter().sum())
 }
 
 /// The second boot: `perf-request-diverges` moves cpu1's request one ratio off
@@ -17778,20 +17869,105 @@ fn perf_request_on_metal(boot: &metal::Readback) -> Result<(), String> {
 /// was declared — the page after the reset carries it — and a boot whose check
 /// did not assert reaches no such panic.
 fn perf_request_diverged(boot: &metal::Readback) -> Result<(), String> {
-    let after = boot.after_the_reset()?;
-    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, PERF_REQUEST_DIVERGED)?.to_string();
-    eprintln!("  [perf_request] a request moved off the declaration panicked: {}", said.trim());
+    let said = diverged_panic(boot.kernel().text(), boot.loader().text())?;
+    eprintln!("  [perf_request] a request moved off the declaration panicked: {said}");
+    Ok(())
+}
+
+/// The kernel panic's line in `loader`, held to the declaration cpu1's own boot
+/// line in `log` makes: it names that declaration, and a request other than it.
+fn diverged_panic(log: &str, loader: &str) -> Result<String, String> {
+    let declared = hwp_boot_line(log, 1)?;
+    let Some(record) = bootlog::panic_record(loader) else {
+        return Err(format!("the pass after the reset reports no kernel panic:\n{loader}"));
+    };
+    let Some(said) = record.iter().map(|l| l.trim_end()).find(|l| l.starts_with(PERF_REQUEST_DIVERGED)) else {
+        return Err(format!("the panic record carries no {PERF_REQUEST_DIVERGED:?}:\n{}", record.join("\n")));
+    };
+    let tail = format!(", the declaration is {declared:#x}");
+    let held = said
+        .strip_prefix(PERF_REQUEST_DIVERGED)
+        .and_then(|rest| rest.strip_suffix(&tail))
+        .and_then(|held| u64::from_str_radix(held.strip_prefix("0x")?, 16).ok());
+    match held {
+        Some(held) if held != declared => Ok(said.to_string()),
+        _ => Err(format!("cpu1's boot line declares {declared:#x}, and the panic says {said:?}")),
+    }
+}
+
+/// **`perf_request`'s metal judges read the machine's own lines**: the T14's
+/// roster and boot lines pass, a record read on its asker's CPU is refused, a
+/// line holding anything but what its own inputs declare is refused, and the
+/// panic must name the declaration cpu1's own line makes.
+#[test]
+fn perf_request_judges_hold_the_machine_to_its_own_lines() -> Result<(), String> {
+    // Two of the T14's CPUs as its `testcases` boot logged them: the roster
+    // does not number the CPUs in hardware-ID order, and the capabilities
+    // differ in the most efficient level.
+    const LOG: &str = "\
+[2026-09-29 08:10:06 0.000 cpu0 boot] control_regs: cpu0 pm_enable=1 hwp_request=0x80002a04 hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0104182a platform_info=0x0004043df0811800
+[2026-09-29 08:10:06 0.000 cpu0] percpu: BSP cpu_id=0 lapic_id=0
+[2026-09-29 08:10:06 0.166 cpu1] control_regs: cpu1 pm_enable=1 hwp_request=0x80002a04 hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a platform_info=0x0004043df0811800
+[2026-09-29 08:10:06 0.166 cpu0] SMP: AP cpu1 lapic=2 online
+";
+    const PANIC: &str = "\
+--- the pass after the reset, reading what the boot above left
+Previous boot's panic: 15052 bytes off 0x8000000
+| PANIC (apic 2): panicked at src/arch/x86_64/control_regs.rs:440:9:
+| control_regs: cpu1 holds hwp_request=0x80002a05, the declaration is 0x80002a04
+";
+    let roster = roster(LOG)?;
+    if roster != [0, 2] {
+        return Err(format!("the roster read {roster:?}"));
+    }
+    let records =
+        |ids: [u64; 2]| format!("cpu0 hardware_id={} epb=6\ncpu1 hardware_id={} epb=6\n", ids[0], ids[1]);
+    if records_name_their_cpus(&records([0, 2]), &roster)? != 2 {
+        return Err("two records were not counted as two".to_string());
+    }
+    // Every record read on cpu1, the asker.
+    records_name_their_cpus(&records([2, 2]), &roster)
+        .err()
+        .ok_or("a record read on its asker's CPU passed")?;
+    records_name_their_cpus("cpu0 hardware_id=0\n", &roster).err().ok_or("cpu1's missing record passed")?;
+
+    if hwp_boot_line(LOG, 1)? != 0x8000_2a04 {
+        return Err("cpu1's line declares 0x80002a04".to_string());
+    }
+    let moved =
+        LOG.replace("cpu1 pm_enable=1 hwp_request=0x80002a04", "cpu1 pm_enable=1 hwp_request=0x80002a05");
+    hwp_boot_line(&moved, 1).err().ok_or("a request its own inputs do not declare passed")?;
+    let pkg = LOG.replace(
+        "hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a",
+        "hwp_request_pkg=0x8000ff02 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a",
+    );
+    hwp_boot_line(&pkg, 1).err().ok_or("a package request other than the declaration passed")?;
+
+    diverged_panic(LOG, PANIC)?;
+    // cpu1's line declaring a minimum of 3, which it holds.
+    let other = LOG.replace(
+        "cpu1 pm_enable=1 hwp_request=0x80002a04 hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a platform_info=0x0004043df0811800",
+        "cpu1 pm_enable=1 hwp_request=0x80002a03 hwp_request_pkg=0x8000ff01 epb=6 hwp_interrupt=Some(0) hwp_capabilities=0x0110182a platform_info=0x0004033df0811800",
+    );
+    if hwp_boot_line(&other, 1)? != 0x8000_2a03 {
+        return Err("cpu1's altered line declares 0x80002a03".to_string());
+    }
+    diverged_panic(&other, PANIC).err().ok_or("a panic naming another declaration passed")?;
+    let held = PANIC.replace("hwp_request=0x80002a05", "hwp_request=0x80002a04");
+    diverged_panic(LOG, &held).err().ok_or("a panic holding the declaration passed")?;
     Ok(())
 }
 
 /// A read only its asker answers is refused `Io` once the kernel's bound has
-/// passed, naming the one other CPU — twice, so the claim still answers after
-/// a refusal. `perf-state-deaf-cpu` grants the claim on QEMU's CPUs, which have
-/// no HWP, and has no CPU answer a kick, so which CPU the test runs on decides
-/// nothing. A read that did not wait goes first and makes the boot's first ask;
-/// the two refusals must name the second and the third, so a read answered or
-/// refused from an ask that is not its own reds. A read with no bound waits for
-/// ever, and this reds at its ceiling.
+/// passed, naming the one other CPU — twice. `perf-state-deaf-cpu` grants the
+/// claim on QEMU's CPUs, which have no HWP, and has no CPU but the asker answer
+/// the boot's first three asks, so which CPU the test runs on decides nothing.
+/// A read that did not wait goes first and makes the boot's first ask; the two
+/// refusals must name the second and the third, so a read answered or refused
+/// from an ask that is not its own reds. A read with no bound waits for ever,
+/// and this reds at its ceiling. The fourth ask every CPU answers, and each
+/// record must carry the hardware ID the roster gives its CPU, so a record
+/// read anywhere but on its own CPU reds.
 fn perf_state_silent_cpu(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -17838,6 +18014,14 @@ fn perf_state_silent_cpu(
             result.serial,
         ));
     }
-    eprintln!("  [perf_state_silent_cpu] the second and third asks refused Io, each naming one CPU");
+    let roster = roster(qemu.boot_log())?;
+    if roster.len() != CPUS as usize {
+        return Err(format!("the roster names {} CPUs and {CPUS} were launched", roster.len()));
+    }
+    records_name_their_cpus(&result.stdout, &roster)?;
+    eprintln!(
+        "  [perf_state_silent_cpu] the second and third asks refused Io, each naming one CPU; \
+         the fourth's records each named its own CPU"
+    );
     Ok(())
 }

@@ -14,9 +14,10 @@ pub fn declared() -> Result<Declared, &'static str> {
     Declared::ask().map_err(toyos_perfstate::Refusal::reason)
 }
 
-/// This CPU's own registers.
+/// This CPU's own identity and registers.
 pub fn read_cpu(_: &Declared) -> CpuRegisters {
     CpuRegisters {
+        hardware_id: u64::from(cpu::hardware_id()),
         pm_enable: cpu::rdmsr(msr::PM_ENABLE),
         hwp_capabilities: cpu::rdmsr(msr::HWP_CAPABILITIES),
         hwp_request: cpu::rdmsr(msr::HWP_REQUEST),
