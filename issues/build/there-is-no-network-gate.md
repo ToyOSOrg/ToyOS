@@ -11,9 +11,6 @@ idle→packet wake fix shipped with no regression coverage at all. The gate was
 scheduled after the first bare-metal attempt by the owner on 2026-07-31; that
 attempt has since happened many times.
 
-**It mirrors gate A deliberately**, because four things about gate A were worth
-copying and one capability the audio gate never had is available here.
-
 - **Device-side ground truth.** QEMU's `-object filter-dump` writes a pcap of
   the virtual wire; the harness parses it offline. Byte-exact payloads,
   checksum and length validity of every frame ToyOS emits, ARP sanity, and
@@ -28,8 +25,7 @@ copying and one capability the audio gate never had is available here.
   the analyser against known-good and known-bad captures before trusting it.
 
 **The new capability is `-netdev socket`: the harness owns the other end of the
-Ethernet link at frame level.** That makes three things possible that gate A
-could not do — adversarial frames (truncated headers, wrong length fields, giant
+Ethernet link at frame level.** That makes three things possible — adversarial frames (truncated headers, wrong length fields, giant
 and zero-length, garbage: the kernel must return errors and never panic, netd
 may drop but must not wedge), deterministic impairment (seeded loss, reorder,
 delay, duplication, so smoltcp's retransmission becomes reproducible rather than

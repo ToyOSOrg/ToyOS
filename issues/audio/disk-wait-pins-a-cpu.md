@@ -21,17 +21,6 @@ the log sink; it is that this kernel cannot touch a disk without pinning a CPU
 for the whole device round trip. The log sink is only the writer that runs
 continuously, which is why it is the one gate A sees.
 
-`usb-slow-device` (kernel feature) holds every mass-storage bulk completion back
-2 ms, which is what a USB stick's erase block does to a 4 KiB write and what
-QEMU's `usb-storage` has no device, drive or machine property to express.
-`cargo test --test toyos-build -- audio_tone --slow-usb` stages the T14's harm
-on this host: soundd's worst wake goes 7,117 → 165,948 µs at smp=1 and
-10,632 → 259,706 µs at smp=8 — 7 to 11 whole 23.2 ms pipelines — drains appear
-on three of the four configs, and one boot of three submitted 76 silent periods
-and tripped gate A's own harm verdict. Baseline arm at host load 5.0–6.6, slow
-arm at 1.3–1.5, so the direction is not the host's. Both arms, one session, one
-tree.
-
 The log-flush deferral fix — whose affordability heuristic left the kernel with
 the log architecture, so no CPU takes a flush now — and
 [`stop-the-device-voice-keep-the-wake.md`](stop-the-device-voice-keep-the-wake.md)

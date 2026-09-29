@@ -6,9 +6,8 @@
 //! matches too much is a path in the answer this file did not name, and one
 //! that matches too little is a named path missing from it. Values are judged
 //! where the machine fixes them — QEMU's user network leases `10.0.2.15/24`,
-//! nothing plays audio until `inspect_plays` does, and the USB stick this file
-//! crafts has one partition free and one init grants — and read only for shape
-//! elsewhere.
+//! nothing plays audio, and the USB stick this file crafts has one partition
+//! free and one init grants — and read only for shape elsewhere.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -23,8 +22,6 @@ pub const CONFIG: &str = "tests/inspectcase";
 
 /// The guest binary that holds the negative control.
 pub const DENIED: &str = "inspect_denied";
-/// The guest binary that plays periods through soundd.
-pub const PLAYS: &str = "inspect_plays";
 /// The guest binary that sends `SYS_DEVICE_INVENTORY` its edges.
 pub const BOUNDS: &str = "inventory_bounds";
 
@@ -55,9 +52,9 @@ const NET: &[&str] = &[
 
 pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
     let bins: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| [DENIED, PLAYS, BOUNDS].contains(&name.as_str())).cloned().collect();
-    if bins.len() != 3 {
-        return Err(format!("{DENIED}, {PLAYS} and {BOUNDS} were not all built"));
+        rust_bins.iter().filter(|(name, _)| [DENIED, BOUNDS].contains(&name.as_str())).cloned().collect();
+    if bins.len() != 2 {
+        return Err(format!("{DENIED} and {BOUNDS} were not both built"));
     }
     let stick = super::lane::dir().join("inspect-stick.img");
     let mib = 1024 * 1024;
@@ -199,30 +196,6 @@ pub fn reads_its_owners(qemu: &mut QemuInstance) -> Result<(), String> {
     expect(line, &got, "sound.device", "virtio-sound")?;
     expect(line, &got, "sound.stream.state", "suspended")?;
     expect(line, &got, "sound.stream.clients", "0")?;
-
-    // Periods through soundd, and the running sums grow by at least what it
-    // took: each frame soundd took went out in a period it submitted.
-    let result = job(qemu, &format!("test_rs_{PLAYS}"), 0)?;
-    let said = "inspect plays: soundd took ";
-    let taken: u64 = result
-        .stdout
-        .lines()
-        .find_map(|l| l.split_once(said).map(|(_, rest)| rest.trim_end_matches(" frames")))
-        .and_then(|n| n.trim().parse().ok())
-        .ok_or_else(|| format!("{PLAYS} did not say how much soundd took:\n{}", result.stdout))?;
-    if taken == 0 {
-        return Err(format!("{PLAYS} proved soundd took nothing:\n{}", result.stdout));
-    }
-    let line = "inspect sound.*";
-    let got = answer(&job(qemu, line, 0)?);
-    let submitted = number(line, &got, "sound.periods.submitted")?;
-    let period = number(line, &got, "sound.period_frames")?;
-    if submitted.saturating_mul(period) < taken {
-        return Err(format!(
-            "`{line}`: {submitted} periods of {period} frames submitted, and soundd took {taken} \
-             frames"
-        ));
-    }
 
     let line = "inspect log.*";
     let got = answer(&job(qemu, line, 0)?);

@@ -31,11 +31,9 @@
 #[path = "../netd_stream.rs"]
 mod netd_stream;
 
-use std::time::{Duration, Instant};
-
 use netd_stream::{
     ask, ask_bytes, await_ring_full, await_until, keep_full_until_released, read_pattern, ring_capacity, Ask,
-    FORWARDED_PORT, HOST,
+    FORWARDED_PORT, HOST, NO_DEADLINE,
 };
 use toyos::net::{
     MsgType, NetError, NetdConn, TcpBindPipedRequest, TcpBindResponse, TcpConnectPipedRequest,
@@ -45,10 +43,6 @@ use toyos::poller::READABLE;
 use toyos::Pipe;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom, SyscallError};
 use toyos_abi::RawHandle;
-
-/// How long netd may take to act on something it has been handed. Orders of
-/// magnitude over a pass; a bound, said by name, not a pace.
-const WITHIN: Duration = Duration::from_secs(20);
 
 /// Bytes a round trip asks for: more than one pipe write and one TCP segment,
 /// far less than a ring.
@@ -83,10 +77,9 @@ fn main() {
         ("a notify end at its size limit, owed a wake", &|| notify_end_is_a_full_file(port)),
     ];
     for (case, run) in cases {
-        let started = Instant::now();
         run();
         round_trip(port, &format!("after {case}"));
-        println!("netd_refused_pipes: {case}, and a round trip after it, in {} ms", started.elapsed().as_millis());
+        println!("netd_refused_pipes: {case}, and a round trip after it");
     }
     println!("netd_refused_pipes: ok");
 }
@@ -99,7 +92,7 @@ fn connect_with(port: u16, to_client: RawHandle, from_client: Pipe) {
         .request_with_handles(
             &[to_client, from_client.into_raw()],
             MsgType::TcpConnectPiped,
-            &TcpConnectPipedRequest { addr: HOST, port, _pad: 0, timeout_ms: 30_000 },
+            &TcpConnectPipedRequest { addr: HOST, port, _pad: 0, timeout_ms: NO_DEADLINE },
         )
         .expect("netd takes the request")
         .response()
@@ -154,7 +147,7 @@ fn receive_end_is_a_read_end(port: u16) {
         Ok(n) => assert_eq!(n, asked.len(), "telling the host what to send"),
         Err(e) => assert_eq!(e, SyscallError::Gone, "telling the host what to send"),
     }
-    keep_full_until_released(&watch, WITHIN, "a read end handed over as the receive pipe");
+    keep_full_until_released(&watch, "a read end handed over as the receive pipe");
 }
 
 fn send_end_is_a_write_end(port: u16) {
@@ -165,7 +158,7 @@ fn send_end_is_a_write_end(port: u16) {
     // this program reads as EOF.
     let what = "a write end handed over as the send pipe";
     let mut buf = [0u8; 64];
-    let got = await_until(&rx, READABLE, WITHIN, what, || match rx.read_nonblock(&mut buf) {
+    let got = await_until(&rx, READABLE, || match rx.read_nonblock(&mut buf) {
         Err(SyscallError::WouldBlock) => None,
         other => Some(other),
     });
@@ -175,13 +168,13 @@ fn send_end_is_a_write_end(port: u16) {
 fn notify_end_is_a_read_end() {
     let (read_end, watch) = toyos::pipe_pair().expect("a pipe");
     bind_with(0, read_end.into_raw());
-    keep_full_until_released(&watch, WITHIN, "a read end handed over as the notify pipe");
+    keep_full_until_released(&watch, "a read end handed over as the notify pipe");
 }
 
 fn receive_end_dropped_while_held(port: u16, capacity: u64) {
-    let conn = toyos::net::tcp_connect(HOST, port, 30_000).expect("connect to the host server");
+    let conn = toyos::net::tcp_connect(HOST, port, NO_DEADLINE).expect("connect to the host server");
     ask(&conn.tx, Ask::Stream(capacity + PAST_THE_RING));
-    await_ring_full(&conn.rx, capacity, WITHIN);
+    await_ring_full(&conn.rx, capacity);
     drop(conn.rx);
     println!("netd_refused_pipes: dropped a full receive end with the host still sending");
 }
@@ -191,7 +184,7 @@ fn receive_end_is_a_full_file(port: u16) {
     connect_with(port, file_at_its_limit(), from_client);
     ask(&tx, Ask::Stream(64));
     // netd ends the connection by closing the send pipe's read end.
-    keep_full_until_released(&tx, WITHIN, "a file at its size limit handed over as the receive pipe");
+    keep_full_until_released(&tx, "a file at its size limit handed over as the receive pipe");
     std::fs::remove_file(FILE_PATH).expect("remove the file");
 }
 
@@ -200,10 +193,10 @@ fn notify_end_is_a_full_file(port: u16) {
     // The host dials the listener and writes into the connection until it is
     // refused, which a listener netd has closed does at the host's next
     // segment; it then ends this connection.
-    let dial = toyos::net::tcp_connect(HOST, port, 30_000).expect("connect to the host server");
+    let dial = toyos::net::tcp_connect(HOST, port, NO_DEADLINE).expect("connect to the host server");
     ask(&dial.tx, Ask::Dial);
     let what = "a file at its size limit handed over as the notify pipe, and the host dialling in";
-    assert_eq!(read_pattern(&dial.rx, WITHIN, what), 0, "{what}: the host sent bytes, not its FIN");
+    assert_eq!(read_pattern(&dial.rx, what), 0, "{what}: the host sent bytes, not its FIN");
     assert_eq!(
         toyos::net::tcp_accept(listener).err(),
         Some(NetError::NotConnected),
@@ -213,10 +206,10 @@ fn notify_end_is_a_full_file(port: u16) {
 }
 
 fn round_trip(port: u16, what: &str) {
-    let conn = toyos::net::tcp_connect(HOST, port, 30_000)
+    let conn = toyos::net::tcp_connect(HOST, port, NO_DEADLINE)
         .unwrap_or_else(|e| panic!("{what}: netd did not connect: {e:?}"));
     ask(&conn.tx, Ask::Stream(ROUND_TRIP));
-    let got = read_pattern(&conn.rx, WITHIN, what);
+    let got = read_pattern(&conn.rx, what);
     assert_eq!(got, ROUND_TRIP, "{what}: the stream ended after {got} of {ROUND_TRIP} bytes");
     println!("netd_refused_pipes: round trip {what}: {got} bytes");
 }

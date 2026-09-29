@@ -1,19 +1,17 @@
 //! Threads that make kernel records as fast as they can while this one has
 //! the kernel go fatal (`SYS_DEBUG` action 3). A sibling still running after
-//! the fatal path began is a record stamped after the fatal one;
-//! `panic_halts_the_others_first` reads the console for one.
+//! the fatal path stopped the other CPUs is a record past the fatal path's own
+//! line after the stop; `panic_halts_the_others_first` reads the console for
+//! one.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 /// A retired syscall's number: each call is refused and is one kernel record
 /// naming it.
 const RETIRED: u64 = 26;
 /// One per other CPU of the boot that runs this.
 const SIBLINGS: usize = 3;
-/// A liveness guard on the siblings' first records.
-const STARTED_WITHIN: Duration = Duration::from_secs(10);
 
 fn retired() {
     let ret: u64;
@@ -37,9 +35,9 @@ fn main() {
             }
         });
     }
-    let until = Instant::now() + STARTED_WITHIN;
+    // No deadline: siblings that never make a record are a hang the harness
+    // ceiling reds.
     while started.load(Ordering::Acquire) < SIBLINGS {
-        assert!(Instant::now() < until, "the siblings made no record in {STARTED_WITHIN:?}");
         std::hint::spin_loop();
     }
     let rc = toyos_abi::syscall::debug(toyos_abi::syscall::debug_action::FATAL_HALT);
