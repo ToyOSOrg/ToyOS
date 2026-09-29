@@ -679,7 +679,7 @@ pub(crate) mod tests {
     }
 
     /// `fork`'s LLVM checked out at a commit of its own.
-    fn llvm_checkout(fork: &Path) -> PathBuf {
+    pub(crate) fn llvm_checkout(fork: &Path) -> PathBuf {
         let llvm = fork.join(LLVM);
         git(&llvm, &["init", "-q"]);
         write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core;\n");

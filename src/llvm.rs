@@ -253,12 +253,16 @@ fn place(fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     let checkout = fork.join(LLVM);
     assert!(checkout.join(".git").exists(), "the LLVM build left no checkout at {}", checkout.display());
     let (built_from, commit) = (git_out(&checkout, &["rev-parse", "HEAD"]), llvm_commit(fork));
+    // Bootstrap's `Llvm` step checks the gitlink's commit out before it builds,
+    // so a checkout behind it, the key never reads, is moved first.
     assert!(
         built_from.trim() == commit,
         "{} is checked out at {}, and its gitlink names {commit}: bootstrap built the commit checked \
-         out, which is not LLVM {key}'s; nothing was kept",
+         out, which is not LLVM {key}'s; nothing was kept. `git -C {} submodule update {LLVM}` checks \
+         the gitlink's commit out",
         checkout.display(),
         built_from.trim(),
+        fork.display(),
     );
     fs::write(partial.join(SOURCE), format!("{key}\n"))
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCE).display()));
@@ -615,6 +619,27 @@ mod tests {
         assert!(config.contains(&format!("\n{off}")), "{config}");
     }
 
+    /// **A checkout behind its gitlink names the gitlink's LLVM**: the key
+    /// reads the gitlink and never the checkout, and the build, which checks the
+    /// gitlink's commit out first as bootstrap's `Llvm` step does, stores it.
+    #[test]
+    fn a_checkout_behind_its_gitlink_is_built_at_the_gitlink() {
+        let scratch = Scratch::new("llvm-behind");
+        let (_primary, rust_dir, [same, a, _b]) = estate_built(&scratch);
+        let (fork, at_gitlink) = (a.join("rust"), same.join("rust"));
+        for fork in [&fork, &at_gitlink] {
+            pin_llvm(fork, "B");
+        }
+        check_out_llvm(&fork, "A");
+        assert_eq!(key(&fork), key(&at_gitlink), "a checkout behind its gitlink moved the key");
+        let updating = |fork: &Path| {
+            check_out_llvm(fork, "B");
+            fake_build(fork)
+        };
+        let llvm = choose(&a, &rust_dir, &fork, updating);
+        assert_eq!((llvm.dir.clone(), defect(&llvm.dir)), (store(&rust_dir).join(key(&at_gitlink)), None));
+    }
+
     const FORK: &str = "TOYOS_LLVM_TEST_FORK";
 
     /// What a caller's environment may hold that would reach an LLVM build:
@@ -744,7 +769,7 @@ mod tests {
         let said = refusal("an LLVM checkout other than the gitlink's was stored", || {
             choose(&a, &rust_dir, &fork, lagging);
         });
-        assert!(said.contains("is checked out at"), "{said}");
+        assert!(said.contains("is checked out at") && said.contains("submodule update src/llvm-project"), "{said}");
         check_out_llvm(&fork, "B");
 
         let moving = |fork: &Path| {

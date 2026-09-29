@@ -1177,11 +1177,13 @@ mod tests {
     /// **Landing the store moves an existing primary onto it**: a primary whose
     /// record was written before its compiler linked the host's LLVM is not
     /// current, so its next build bootstraps, and that rebuild removes the LLVM
-    /// and LLD its build directory built.
+    /// and LLD its build directory built. Its LLVM checkout sitting at a commit
+    /// its gitlink does not name changes neither answer.
     #[test]
     fn a_primary_recorded_before_the_store_is_rebuilt_onto_it() {
         let scratch = TempDir::new("store-migration");
         let (_primary, rust_dir, _) = crate::compiler::tests::estate(&scratch);
+        crate::compiler::tests::llvm_checkout(&rust_dir);
         assert!(crate::compiler::primary_is_current(&rust_dir));
         crate::compiler::tests::record_before_the_store(&rust_dir);
         let own = in_tree_llvm(&rust_dir);
