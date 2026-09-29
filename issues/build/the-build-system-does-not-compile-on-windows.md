@@ -25,7 +25,7 @@ there. Every other crate in the graph, first-party and third-party, checked
 clean. The `#[cfg(unix)]` at `src/ci.rs:489` is still the only conditional
 compilation in the build system.
 
-`src/tether.rs` is a fourth: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm; `portability-windows` in run 36351950439 fails on it.
+`src/tether.rs` is a fourth: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
 
 ## The judge, and it needs no Windows host and no download
 
