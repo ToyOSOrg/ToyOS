@@ -58,10 +58,12 @@ Fork sources live outside this repository: a search for callers must also cover 
 rebase onto it. Never touch `toyos-abi/src`, `toyos/src` or `userland/libc/src` unless the brief is
 an ABI brief. No new dependency.
 
-`gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,
+Push from your branch, never `main`, with `git status --porcelain` empty: `git push -u origin
+<branch>`, and `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,
 so keep it true of the branch as it stands: what changed and why, per decision; each gate with its
 exit code; what you are unsure of; and for high-risk code the negative control and the independent
-oracle. Mark it ready when your tests are green. Do not arm auto-merge and do not wait on CI unless
+oracle. Mark it ready when your tests are green: `gh pr ready`, then `gh pr edit --title <what
+landed> --body-file <file>`, never `--fill`. Do not arm auto-merge and do not wait on CI unless
 the brief says so.
 
 ## Answering a review

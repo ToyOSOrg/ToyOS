@@ -114,18 +114,9 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // The landing protocol, and the command it replaced — **before
-    // `check_prerequisites`**, because none of these builds anything. They are
-    // git, a push, and a refusal.
-    if asked(&flags::LAND) {
-        toyos_build::pr::dispatch_retired_land();
-    }
-    if asked(&flags::PR) {
-        toyos_build::pr::dispatch_pr(&root, &args);
-        return;
-    }
+    // **Before `check_prerequisites`**, because it builds nothing.
     if asked(&flags::SYNC) {
-        toyos_build::pr::dispatch_sync(&root);
+        toyos_build::sync::dispatch_sync(&root);
         return;
     }
     // Every CI job. Here for the same reason: the host job's runner has no QEMU,
