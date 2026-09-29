@@ -4,15 +4,13 @@ kind: defect
 opened: 2026-09-29
 ---
 
-# The speculation decision refuses AMD 0x15, 0x16, Hygon, and two lines
+# The speculation decision refuses Hygon and two lines
 
 `toyos_cpuvuln::decide` answers only from its facts, and at
 `Ubuntu-6.8.0-142.142` these inputs are not decided:
 
-- **AMD family 0x15, 0x16, 0x18 and from 0x1B, and Hygon**, refused whole.
-  The pinned Linux names 0x15 and 0x16 for Retbleed (`common.c:1338-1339`),
-  and `hygon.c` derives `LS_CFG_SSBD` from its own probe (228-239); no fixture
-  holds a reading of any of them.
+- **Hygon**, refused whole: `bsp_init_hygon` sets `LS_CFG_SSBD` from its own
+  `MSR_AMD64_LS_CFG` probe (`hygon.c:228-239`), which `Facts` does not carry.
 - **`l1tf` on an affected CPU**: the line reads the e820 map against
   `x86_cache_bits` (`bugs.c:2538-2583`) and `kvm_intel`'s state
   (`bugs.c:3074-3089`).

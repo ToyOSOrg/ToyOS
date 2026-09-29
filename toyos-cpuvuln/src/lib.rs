@@ -187,9 +187,8 @@ impl Ident {
 /// An input this crate does not decide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// Every AMD family from 0x15 but 0x17, 0x19 and 0x1A.
-    AmdFamily(u32),
-    /// `hygon.c` derives `LS_CFG_SSBD` (228-239) from an MSR probe.
+    /// `bsp_init_hygon`'s `MSR_AMD64_LS_CFG` probe (`hygon.c:228-239`), which
+    /// [`Facts::ls_cfg_readable`] does not carry.
     Hygon,
 }
 
@@ -602,12 +601,8 @@ fn disable_kernel_rrsba(f: &Facts, arch: u64, spec_ctrl: &mut u64, rrsba_disable
 pub fn decide(facts: &Facts) -> Result<Decision, Refused> {
     let f = facts;
     let id = Ident::new(f.vendor, f.signature);
-    match id.vendor {
-        Vendor::Amd if id.family >= 0x15 && !matches!(id.family, 0x17 | 0x19 | 0x1A) => {
-            return Err(Refused::AmdFamily(id.family));
-        }
-        Vendor::Hygon => return Err(Refused::Hygon),
-        _ => {}
+    if id.vendor == Vendor::Hygon {
+        return Err(Refused::Hygon);
     }
     let amd = id.vendor == Vendor::Amd;
     assert!(

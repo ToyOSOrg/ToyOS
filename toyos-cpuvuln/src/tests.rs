@@ -58,7 +58,7 @@ const TCG: Facts = Facts {
 /// of the nightly's EPYC 7763) as a KVM guest: InstLatx64's bare-metal dump
 /// `AuthenticAMD/AuthenticAMD0A00F11_K19_Milan_CPUID1.txt` (commit 2dc186e9)
 /// with CPUID.1:ECX[31] set, `-smp cores=N`, and no microcode revision, which
-/// no line reads under a hypervisor. It does not enumerate ARCH_CAPABILITIES.
+/// no line reads under a hypervisor.
 const MILAN_GUEST: Facts = Facts {
     vendor: Vendor::from_id(b"AuthenticAMD"),
     signature: 0x00a0_0f11,
@@ -443,39 +443,197 @@ fn zen2_selects_by_smt() {
     );
 }
 
-/// A Milan outside a hypervisor: its `PRED_CMD.SBPB` probe decides SRSO's
-/// microcode, and `amd_check_tsa_microcode`'s row for 0xA0011 decides TSA's.
-#[test]
-fn zen3_native_reads_its_probe_and_its_tsa_microcode() {
-    let milan = |microcode, sbpb| Facts {
+/// [`MILAN_GUEST`] outside a hypervisor, its `PRED_CMD.SBPB` probe answering
+/// `sbpb`.
+const fn native_milan(microcode: u32, sbpb: bool) -> Facts {
+    Facts {
         microcode,
         cpuid_1_ecx: MILAN_GUEST.cpuid_1_ecx & !CPUID_1_ECX_HYPERVISOR,
         sbpb_write_accepted: Some(sbpb),
         ..MILAN_GUEST
-    };
-    let native = State {
-        spectre_v2: SpectreV2::Retpoline,
-        ibpb: Ibpb::Conditional,
-        ibrs_fw: true,
-        ssb: Ssb::Prctl,
-        vmscape: Vmscape::IbpbExitToUser,
-        ..NONE
-    };
-    let d = decide(&milan(0x0a00_11d6, false)).expect("decided");
+    }
+}
+
+/// What [`native_milan`] selects whatever its microcode and probe.
+const NATIVE_MILAN: State = State {
+    spectre_v2: SpectreV2::Retpoline,
+    ibpb: Ibpb::Conditional,
+    ibrs_fw: true,
+    ssb: Ssb::Prctl,
+    vmscape: Vmscape::IbpbExitToUser,
+    ..NONE
+};
+
+/// A Milan outside a hypervisor: its `PRED_CMD.SBPB` probe decides SRSO's
+/// microcode, and `amd_check_tsa_microcode`'s row for 0xA0011 decides TSA's.
+#[test]
+fn zen3_native_reads_its_probe_and_its_tsa_microcode() {
+    let d = decide(&native_milan(0x0a00_11d6, false)).expect("decided");
     assert_eq!(
         state(&d),
         State {
             srso: Some(Srso::SafeRetUcodeNeeded),
             tsa: Some(Tsa::UcodeNeeded),
-            ..native
+            ..NATIVE_MILAN
         }
     );
-    let d = decide(&milan(0x0a00_11d7, true)).expect("decided");
+    let d = decide(&native_milan(0x0a00_11d7, true)).expect("decided");
     assert_eq!(
         state(&d),
-        State { srso: Some(Srso::SafeRet), tsa: Some(Tsa::Full), clear_cpu_buf: true, ..native }
+        State { srso: Some(Srso::SafeRet), tsa: Some(Tsa::Full), clear_cpu_buf: true, ..NATIVE_MILAN }
     );
     assert_eq!(d.line(Vuln::Tsa).expect("modelled").to_string(), "Mitigation: Clear CPU buffers");
+}
+
+/// A Genoa, family 0x19 model 0x11 stepping 1, which `bsp_init_amd` names Zen4
+/// (`amd.c:625-627`): `tsa_init` sets `VERW_CLEAR` (`amd.c:522-525`) from row
+/// 0xa1011's microcode 0x0a10114c up (`amd.c:491,514`), and without it TSA's
+/// microcode is missing (`bugs.c:2928-2929`; `tsa_strings`, 2889 and 2892).
+#[test]
+fn zen4_reads_its_row_of_the_tsa_microcode_table() {
+    let genoa = |microcode| Facts { signature: 0x00a1_0f11, ..native_milan(microcode, true) };
+    let d = decide(&genoa(0x0a10_114c)).expect("decided");
+    assert_eq!((d.tsa, d.clear_cpu_buf), (Some(Tsa::Full), true));
+    assert_eq!(line(&genoa(0x0a10_114c), Vuln::Tsa), "Mitigation: Clear CPU buffers");
+    let d = decide(&genoa(0x0a10_114b)).expect("decided");
+    assert_eq!((d.tsa, d.clear_cpu_buf), (Some(Tsa::UcodeNeeded), false));
+    assert_eq!(
+        line(&genoa(0x0a10_114b), Vuln::Tsa),
+        "Vulnerable: Clear CPU buffers attempted, no microcode"
+    );
+}
+
+/// An AMD CPU is TSA-affected unless it reports both `TSA_SQ_NO` and
+/// `TSA_L1_NO` (`common.c:1555-1561`), CPUID.0x80000021:ECX bits 1 and 2
+/// (`scattered.c:52-53`). A guest's TSA microcode is missing
+/// (`bugs.c:2928-2929`, `tsa_strings` 2889).
+#[test]
+fn tsa_is_ruled_out_only_by_both_its_no_bits() {
+    let at = |ecx| line(&Facts { cpuid_8000_0021_ecx: ecx, ..MILAN_GUEST }, Vuln::Tsa);
+    let affected = "Vulnerable: Clear CPU buffers attempted, no microcode";
+    assert_eq!(at(CPUID_8000_0021_ECX_TSA_SQ_NO), affected);
+    assert_eq!(at(CPUID_8000_0021_ECX_TSA_L1_NO), affected);
+    assert_eq!(at(CPUID_8000_0021_ECX_TSA_SQ_NO | CPUID_8000_0021_ECX_TSA_L1_NO), "Not affected");
+}
+
+/// A native Milan with SMT: no retbleed row names family 0x19, so STIBP
+/// always-on comes from `AMD_STIBP_ALWAYS_ON` alone (`bugs.c:1575-1577`);
+/// `update_stibp_strict` sets `SPEC_CTRL.STIBP` for it (`bugs.c:2054-2068`,
+/// 2976-2977) and `stibp_state` prints it (`bugs.c:3185-3186`).
+#[test]
+fn amd_stibp_always_on_is_strict_without_the_untrained_return_thunk() {
+    assert_ne!(MILAN_GUEST.cpuid_8000_0008_ebx & CPUID_8000_0008_EBX_AMD_STIBP_ALWAYS_ON, 0);
+    let milan = Facts { smt: true, ..native_milan(0x0a00_11d7, true) };
+    let d = decide(&milan).expect("decided");
+    assert_eq!(
+        state(&d),
+        State {
+            stibp: Stibp::StrictPreferred,
+            srso: Some(Srso::SafeRet),
+            tsa: Some(Tsa::Full),
+            clear_cpu_buf: true,
+            spec_ctrl: SPEC_CTRL_STIBP,
+            ..NATIVE_MILAN
+        }
+    );
+    assert_eq!(
+        line(&milan, Vuln::SpectreV2),
+        "Mitigation: Retpolines; IBPB: conditional; IBRS_FW; STIBP: always-on; RSB filling; \
+         PBRSB-eIBRS: Not affected; BHI: Not affected"
+    );
+}
+
+/// AMD families 0x15 to 0x17 enumerating neither `AMD_SSBD` nor `VIRT_SSBD`
+/// have SSBD exactly where `MSR_AMD64_LS_CFG` reads (`amd.c:576-596`), and SSB's
+/// prctl mode needs SSBD (`bugs.c:2177-2178,2200-2202`; `ssb_strings`, 2123 and
+/// 2125). Family 0x17 model 1 is Zen1 (`amd.c:602-607`).
+#[test]
+fn amd_0x15_to_0x17_take_ssbd_from_the_ls_cfg_probe() {
+    for signature in [0x0060_0f00, 0x0070_0f00, 0x0080_0f11] {
+        let at = |readable| Facts {
+            signature,
+            cpuid_1_ecx: 0,
+            cpuid_8000_0008_ebx: MILAN_GUEST.cpuid_8000_0008_ebx
+                & !(CPUID_8000_0008_EBX_AMD_SSBD | CPUID_8000_0008_EBX_VIRT_SSBD),
+            cpuid_8000_0021_eax: 0,
+            ls_cfg_readable: Some(readable),
+            ..MILAN_GUEST
+        };
+        let d = decide(&at(true)).expect("decided");
+        assert_eq!(d.ssb, Ssb::Prctl, "{signature:#x}");
+        assert_eq!(
+            line(&at(true), Vuln::SpecStoreBypass),
+            "Mitigation: Speculative Store Bypass disabled via prctl"
+        );
+        let d = decide(&at(false)).expect("decided");
+        assert_eq!(d.ssb, Ssb::None, "{signature:#x}");
+        assert_eq!(line(&at(false), Vuln::SpecStoreBypass), "Vulnerable");
+    }
+}
+
+/// A native family 0x19 reporting `SRSO_USER_KERNEL_NO` leaves safe RET for
+/// the VM-exit arm (`bugs.c:2715-2716`): `SRSO_BP_SPEC_REDUCE` first
+/// (2771-2775), then IBPB on VM exit given `IBPB_BRTYPE` (2777-2781), which
+/// VMSCAPE takes up (2861-2863); without either the microcode is missing
+/// (2703). `srso_strings` 2634, 2639 and 2640; `vmscape_strings` 2822-2823.
+#[test]
+fn srso_user_kernel_no_mitigates_only_the_vm_exit() {
+    let at = |bp_spec_reduce, sbpb| {
+        let facts = Facts {
+            cpuid_8000_0021_eax: MILAN_GUEST.cpuid_8000_0021_eax
+                | CPUID_8000_0021_EAX_SRSO_USER_KERNEL_NO
+                | bp_spec_reduce,
+            ..native_milan(0x0a00_11d7, sbpb)
+        };
+        let d = decide(&facts).expect("decided");
+        (d.srso, d.vmscape, line(&facts, Vuln::SpecRstackOverflow), line(&facts, Vuln::Vmscape))
+    };
+    let exit_to_user = "Mitigation: IBPB before exit to userspace";
+    assert_eq!(
+        at(CPUID_8000_0021_EAX_SRSO_BP_SPEC_REDUCE, true),
+        (
+            Some(Srso::BpSpecReduce),
+            Vmscape::IbpbExitToUser,
+            "Mitigation: Reduced Speculation".into(),
+            exit_to_user.into()
+        )
+    );
+    assert_eq!(
+        at(0, true),
+        (
+            Some(Srso::IbpbOnVmexit),
+            Vmscape::IbpbOnVmexit,
+            "Mitigation: IBPB on VMEXIT only".into(),
+            "Mitigation: IBPB on VMEXIT".into()
+        )
+    );
+    assert_eq!(
+        at(0, false),
+        (
+            Some(Srso::UcodeNeeded),
+            Vmscape::IbpbExitToUser,
+            "Vulnerable: No microcode".into(),
+            exit_to_user.into()
+        )
+    );
+}
+
+/// A KABYLAKE guest, family 6 model 0x9E stepping 0xA, without
+/// `ARCH_CAPABILITIES`: its blacklist row gives SRBDS (`common.c:1303`), whose
+/// mitigation a guest cannot know (`bugs.c:691-692`, `srbds_strings` 636), and
+/// no `MDS_NO` gives MDS (`common.c:1447-1449`), whose host SMT state a guest
+/// cannot know (`bugs.c:3117-3119`).
+#[test]
+fn an_intel_guest_cannot_know_its_srbds_mitigation_or_its_hosts_smt() {
+    let guest = Facts {
+        signature: 0x0009_06ea,
+        cpuid_1_ecx: T14.cpuid_1_ecx | CPUID_1_ECX_HYPERVISOR,
+        arch_capabilities: 0,
+        mcu_opt_ctrl: None,
+        ..T14
+    };
+    assert_eq!(line(&guest, Vuln::Srbds), "Unknown: Dependent on hypervisor status");
+    assert_eq!(line(&guest, Vuln::Mds), "Mitigation: Clear CPU buffers; SMT Host state unknown");
 }
 
 #[test]
@@ -485,13 +643,7 @@ fn a_native_zen3_without_its_probe_is_a_contradiction() {
 }
 
 #[test]
-fn amd_outside_0x17_0x19_0x1a_from_0x15_and_hygon_are_refused() {
-    for (signature, family) in [(0x0060_0f00, 0x15), (0x0070_0f00, 0x16), (0x00c0_0f00, 0x1B)] {
-        assert_eq!(
-            decide(&Facts { signature, ..TCG }).err(),
-            Some(Refused::AmdFamily(family))
-        );
-    }
+fn hygon_is_refused() {
     let hygon = Facts { vendor: Vendor::from_id(b"HygonGenuine"), ..TCG };
     assert_eq!(decide(&hygon).err(), Some(Refused::Hygon));
 }
