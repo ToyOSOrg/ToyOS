@@ -32,7 +32,7 @@ thread_local! {
 ///
 /// Test duration profiles are execution prices, not ownership of a shared
 /// cache miss. Without this distinction, each CI shard charges its first
-/// shipping- and test-kernel users tens of seconds, relegating those names;
+/// shipping- and test-kernel users tens of seconds;
 /// the next run then charges the same builds to two different names. The raw
 /// suite wall clock still includes every build. Only per-test prices use this
 /// mark to remove construction of memoized kernel, bootloader, and root-image

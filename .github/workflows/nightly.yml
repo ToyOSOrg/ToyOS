@@ -1,15 +1,14 @@
 name: nightly
 
 # Everything that boots a guest, the host gate again to write the cache the
-# merge queue restores, and portability: on main every night, the weekly tier
-# on Sundays, and on any branch by `gh workflow run nightly.yml --ref <branch>`.
+# merge queue restores, and portability: on main every night, and on any branch
+# by `gh workflow run nightly.yml --ref <branch>`.
 # Every job's logic is `cargo run -- --ci <job>` (src/ci.rs); this file says
 # where each one runs.
 
 on:
   schedule:
-    - cron: '0 3 * * 1-6'
-    - cron: '0 3 * * 0'
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
 # Never cancelled: `build` may be an hour into a bootstrap.

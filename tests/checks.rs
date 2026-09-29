@@ -441,7 +441,7 @@ mod checks {
                  each entry — coverage of the binary an image ships is what it costs."
             ));
         }
-        // **The other shape [`schedule`] cannot see**: a binary a machine
+        // **The other shape [`registered`] cannot see**: a binary a machine
         // test drives under a *different* name is still discovered here, still runs
         // on the shared boot, and there passes on its exit code with nothing staged
         // for it to act on.
@@ -563,43 +563,57 @@ mod checks {
         Ok(())
     }
 
-    /// Whether a run that did not attempt most of the suite's measured cost says so.
-    ///
-    /// **The failure mode the tier introduces is silence, not a wrong answer.** A
-    /// green run holding back 60 tests and a green run holding back none print the
-    /// same word, and the difference between them is the whole reason a reach flag
-    /// exists. Nothing else can see whether the *run* mentions it, and a run nobody
-    /// can tell apart from a full one is how a temporary measure becomes permanent.
-    ///
-    /// Both directions, because the second is the one that rots quietly: a suite
-    /// that ran everything must not claim to have held anything back either, or the
-    /// line stops carrying information the day somebody makes it unconditional.
+    /// A run takes every registered test its filter matches, and a shard, which
+    /// only a CI guest lane runs, drops exactly the rows of an architecture that
+    /// lane does not boot.
     #[test]
-    fn nightly_tier_is_announced() -> Result<(), String> {
-        let held = vec![
-            (Tier::Nightly, vec!["desktop_window_child".to_string(), "sshd_exec".to_string()]),
-            (Tier::Weekly, vec!["iommu_empty_domain".to_string()]),
-        ];
-        let announced = Tally::new().holding_back(held).summary(1, Duration::ZERO, Duration::ZERO);
-        for want in [
-            "not run without --nightly:",
-            "desktop_window_child, sshd_exec",
-            "`cargo test --test toyos-build -- --nightly` runs them",
-            "not run without --weekly:",
-            "`cargo test --test toyos-build -- --weekly` runs them",
-            "2 held back for --nightly, 1 held back for --weekly",
-        ] {
-            if !announced.contains(want) {
-                return Err(format!("a run holding tests back never says {want:?}:\n{announced}"));
-            }
+    fn a_run_selects_every_test_its_host_boots() -> Result<(), String> {
+        let shared = [TestDef {
+            name: "shared_one".to_string(),
+            qemu_name: "test_rs_shared_one".to_string(),
+            timeout: Duration::from_secs(1),
+            check: |_| true,
+            settle: no_settle,
+        }];
+        let taken = |filter: Option<&str>, sharded: bool| -> BTreeSet<String> {
+            let (tests, machine, screen) = select(&shared, filter, sharded);
+            tests
+                .iter()
+                .map(|t| t.name.clone())
+                .chain(machine.iter().chain(&screen).map(|(n, _)| n.to_string()))
+                .collect()
+        };
+        let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
+        let enabled = |n: &&str| redlist::disabled(redlist::DISABLED, n).is_none();
+        let every: BTreeSet<String> =
+            declared().chain(["shared_one"]).filter(enabled).map(String::from).collect();
+        let foreign: BTreeSet<String> = SCREEN_TESTS
+            .iter()
+            .filter(|(_, _, arch)| *arch != toyos_build::ci::GUEST_ARCH)
+            .map(|(n, _, _)| *n)
+            .filter(enabled)
+            .map(String::from)
+            .collect();
+        if !foreign.contains("virt_el2_drop") {
+            return Err(format!("the premise: virt_el2_drop is a guest no CI lane boots, and {foreign:?} lacks it"));
         }
-        let whole = Tally::new().holding_back(vec![(Tier::Weekly, Vec::new())]).summary(
-            1,
-            Duration::ZERO,
-            Duration::ZERO,
-        );
-        if whole.contains("--") || whole.contains("held back") {
-            return Err(format!("a run that held nothing back says it did:\n{whole}"));
+        let cases = [
+            (None, false, every.clone()),
+            (None, true, every.difference(&foreign).cloned().collect()),
+            (Some("virt_el2"), false, names(&["virt_el2_drop"])),
+            (Some("virt_el2"), true, BTreeSet::new()),
+            (Some("sshd_"), true, names(&["sshd_exec", "sshd_files", "sshd_key_auth"])),
+            (Some("shared_one"), true, names(&["shared_one"])),
+        ];
+        for (filter, sharded, want) in cases {
+            let got = taken(filter, sharded);
+            if got != want {
+                return Err(format!(
+                    "filter {filter:?}, sharded {sharded}: took {:?} it should not and left out {:?}",
+                    got.difference(&want).collect::<Vec<_>>(),
+                    want.difference(&got).collect::<Vec<_>>()
+                ));
+            }
         }
         Ok(())
     }
