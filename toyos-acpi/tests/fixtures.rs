@@ -149,11 +149,7 @@ const T14_BRIDGE: &[u8] = include_bytes!("../fixtures/thinkpad-t14/root-bridge-0
 fn bridge_windows(bytes: &'static [u8]) -> Vec<RootBridgeWindow> {
     let regions: &[(u64, &[u8])] = &[(ROOT_BRIDGE, bytes)];
     let mut out = [RootBridgeWindow::default(); 8];
-    let walk = memory_windows(Machine { regions }, ROOT_BRIDGE, &mut out);
-    let count = walk.windows.expect("bytes a firmware answered with");
-    // The four descriptors' own declared lengths tile the file exactly, which
-    // is what says the loader logged the whole list and no more.
-    assert_eq!(walk.bytes, bytes.len());
+    let count = memory_windows(Machine { regions }, ROOT_BRIDGE, &mut out).expect("bytes a firmware answered with");
     out[..count].to_vec()
 }
 

@@ -20,24 +20,6 @@ pub fn counter() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
-/// What the loader's report says beside the counter: `IA32_TSC_ADJUST`,
-/// where CPUID says the CPU has it — every write to the TSC since reset is
-/// added to it (Intel SDM Vol. 3B, "Time-Stamp Counter Adjustment"), so zero
-/// is a counter firmware never wrote and the TSC is time since power-on.
-pub fn counter_origin() -> alloc::string::String {
-    let max = core::arch::x86_64::__cpuid(0).eax;
-    // Leaf 7 exists when the maximum leaf reaches it.
-    if max < 7 || core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 1) == 0 {
-        return alloc::string::String::from("IA32_TSC_ADJUST not on this CPU");
-    }
-    let (lo, hi): (u32, u32);
-    // SAFETY: the loader runs at CPL 0, and CPUID.07H:EBX[1] says the MSR exists.
-    unsafe {
-        core::arch::asm!("rdmsr", in("ecx") 0x3bu32, out("eax") lo, out("edx") hi, options(nomem, nostack))
-    };
-    alloc::format!("IA32_TSC_ADJUST {}", ((u64::from(hi) << 32) | u64::from(lo)) as i64)
-}
-
 /// `CLFLUSH`'s line on every x86-64 part.
 const LINE: u64 = 64;
 
