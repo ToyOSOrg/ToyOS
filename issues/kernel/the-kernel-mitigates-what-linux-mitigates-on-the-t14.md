@@ -24,9 +24,10 @@ on the T14, and the hardening table below.
 
 The track matches every hardening default the pinned Ubuntu config sets, and
 no more. A hardening default is an option the config sets that, under the
-default command line, makes an attack on the kernel harder and that no
-vulnerabilities line reports; access policy (the LSMs, lockdown, `*_RESTRICT`,
-`STRICT_DEVMEM`) is the capability model's. `CONFIG_SLS` is the one entry of
+default command line, makes an attack on the kernel or a process harder and
+that no vulnerabilities line reports; access policy (the LSMs, lockdown,
+`*_RESTRICT`, `STRICT_DEVMEM`) is the capability model's. `CONFIG_SLS` is the
+one entry of
 the `CPU_MITIGATIONS` menu (`arch/x86/Kconfig:2475-2664`) that no line
 reports. Numbers are the config's lines; each row is closed by its stage, its
 defect, the ToyOS mechanism named, or the reason it does not apply.
@@ -38,7 +39,8 @@ defect, the ToyOS mechanism named, or the reason it does not apply.
 | `ARCH_MMAP_RND_BITS=32` (909) | S8 |
 | `STACKPROTECTOR_STRONG` (882) | S9 |
 | `SLS` (564) | S5 |
-| `X86_USER_SHADOW_STACK` (502) | S0 |
+| `X86_USER_SHADOW_STACK` (502) | `issues/kernel/user-programs-run-without-a-shadow-stack.md` |
+| `RESET_ATTACK_MITIGATION` (2457) | `issues/boot-media/the-loader-never-sets-the-firmwares-memory-overwrite-request.md` |
 | `RANDOMIZE_KSTACK_OFFSET_DEFAULT` (933) | `issues/kernel/every-syscall-runs-at-one-kernel-stack-offset.md` |
 | `ZERO_CALL_USED_REGS` (11477) | `issues/kernel/kernel-functions-return-with-their-used-registers-intact.md` |
 | `VMAP_STACK` (930) | `issues/kernel/a-threads-kernel-stack-has-no-guard-page.md` |
@@ -60,6 +62,9 @@ defect, the ToyOS mechanism named, or the reason it does not apply.
 | `STRICT_MODULE_RWX` (937) | not applicable: ToyOS loads no code into the kernel |
 | `LEGACY_VSYSCALL_XONLY` (536) | not applicable: ToyOS maps no vsyscall page |
 | `SHUFFLE_PAGE_ALLOCATOR` (1139) | not applicable: Linux shuffles only under `page_alloc.shuffle=1` (`mm/shuffle.c:12-30`) |
+| `BPF_JIT_ALWAYS_ON` (124) | not applicable: ToyOS has no BPF |
+| `MODULE_SIG` (982) | not applicable: ToyOS loads no modules |
+| `KEXEC_SIG` (318) | not applicable: ToyOS has no kexec |
 
 ## What is true today
 
@@ -125,8 +130,7 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   model: the same CPUID leaves, 0x10A, and 0x48 and 0x123 as read before the
   kernel's first write to either. The capture is refused unless `/proc/version`
   names 6.8.0-142, both packages are 6.8.0-142.142 and the config's sha256 is
-  the one above. If `x86_Thread_features` shows `shstk`, user shadow stacks are
-  owed and filed as their own track. The capture is one-time: the kernel
+  the one above. The capture is one-time: the kernel
   image, `s0.cpio` and busybox are never committed and no build or test boots
   them. **Exit**: the captured text outputs committed as S1's fixtures. Ubuntu
   is wiped from the T14 only after that commit.
@@ -181,10 +185,14 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   `__FILL_RETURN_BUFFER` with `RSB_CLEAR_LOOPS`, 32 calls each followed by
   `int3` and then `lfence` (`arch/x86/include/asm/nospec-branch.h:132,137-162`).
   **Exit**: a gate over `kernel.elf` decodes both sequences at the symbols it
-  names and compares both loop counts, the fill's call count and each final
-  `lfence` with those; the outer count made 1 (`movl $5,%ecx` to `movl
-  $1,%ecx`), the loop's trailing `lfence` deleted, or a fill of 1 entry reds
-  it. A `boot-actuators` per-thread counter the clear sequence increments advances
+  names and compares each decoded instruction — opcode, immediate and
+  normalised relative target — against `clear_bhb_loop`
+  (`entry_64.S:1534-1569`) and `__FILL_RETURN_BUFFER` under `RSB_CLEAR_LOOPS`
+  (`nospec-branch.h:132-162`): deleting `3: jmp 4f`/`nop` from the inner loop
+  (`entry_64.S:1558-1560`), deleting the `int3` `__FILL_RETURN_SLOT` places
+  after each fill `call` (`nospec-branch.h:137-141`), or flattening the `call
+  1f`/`call 2f`/`RET` nesting into direct `jmp`s each reds it. A
+  `boot-actuators` per-thread counter the clear sequence increments advances
   by exactly 1000 over one thread's 1000 syscalls where S1 selects the loop,
   the T14, and by 0 where it does not; inverting the runtime condition gives 0
   on the T14 and reds it. A `boot-actuators` count of RSB fills over a probe's
@@ -233,9 +241,8 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   the `x86_64-unknown-none` `core` and `alloc` that `src/toolchain.rs` builds
   are built under it. Compiled code is then left with no raw `ret` or
   indirect `jmp`, so SLS is owed in the kernel's own assembly, the thunks and
-  the entry code: every `ret` and indirect `jmp` there is followed by `int3`,
-  as Linux's `RET` and `ASM_RET` are under `CONFIG_SLS`
-  (`arch/x86/include/asm/linkage.h:46-47,58-59`). **Exit**: a gate over
+  the entry code: every `ret` and indirect `jmp` there is followed by `int3`.
+  **Exit**: a gate over
   `kernel.elf` finds no raw indirect `call`/`jmp` or `ret` outside the thunks
   and the entry sequences it names by symbol, an `int3` after every `ret` and
   indirect `jmp` there, and every aligned thunk's branch ending at `addr & 63
@@ -288,8 +295,9 @@ comes from S1's T14 fixture and the T14 run, never from KVM.
   LLVM reads a global `__stack_chk_guard`, which the kernel defines and seeds
   from `arch::entropy::draw` in a frame that never returns, before any
   protected frame is entered; a draw still `None` after `entropy::ATTEMPTS`
-  refuses the boot. Linux's canary is per task; that gap is
-  `issues/kernel/the-kernel-stack-canary-is-one-global-not-per-task.md`.
+  refuses the boot. Linux's canary is per task; that gap is filed as a defect
+  when this stage lands, not before, because it does not reproduce against a
+  kernel with no canary at all.
   **Exit**: the guest test `kernel_stack_canary` overflows a `boot-actuators`
   frame with zeros and asserts the panic names the stack protector;
   `static __stack_chk_guard: u64 = 0` passes the check, returns through a

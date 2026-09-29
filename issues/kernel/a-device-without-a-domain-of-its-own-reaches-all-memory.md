@@ -15,8 +15,7 @@ under the T14's `CONFIG_INTEL_IOMMU_DEFAULT_ON=y` and
 `CONFIG_IOMMU_DEFAULT_DMA_LAZY=y`, turns DMA remapping on
 (`drivers/iommu/intel/iommu.c:227`) and gives every device a translated
 default domain (`drivers/iommu/iommu.c:197-210`), which maps only what its
-driver maps. The refusal `issues/kernel/the-iommu-refuses-nothing-yet.md`
-tracks is this defect's fix, and this is the bar it meets. A row of the
+driver maps. A row of the
 hardening table in
 `issues/kernel/the-kernel-mitigates-what-linux-mitigates-on-the-t14.md`.
 
