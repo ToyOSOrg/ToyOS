@@ -17173,12 +17173,11 @@ fn main() {
     // var is invisible in the command line and easy to leave set, and the whole
     // point of the split is that a run says what it ran.
     let reach = Reach::of(&args);
-    // The metal profile, and where its images and readbacks live. Naming the
-    // directory means the machine is not touched — see `common::metal::Mode`.
-    // `metal_dispatch` is the one place that decides which of the profile's
-    // modes this run gets — see `testargs::metal_mode`.
+    // `None` is not this run's business at all; a mode carries whatever it
+    // needs — `Offline`'s own directory included — straight into
+    // `metal::run`, which is the one place that decides what it does with the
+    // machine.
     let metal_dispatch = testargs::metal_mode(&args);
-    let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
     let nocapture =
         SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
@@ -17224,9 +17223,7 @@ fn main() {
     // guest, so none of the C compile, the HTTPS judge's hosts or the tier
     // arithmetic below is any of its business; running it here is what keeps a
     // `--metal` invocation costing a kernel and a userland and nothing else.
-    if metal_dispatch != testargs::MetalMode::Off {
-        let dir = metal_readback
-            .map_or_else(|| compile::repo_root().join("target/metal"), std::path::PathBuf::from);
+    if let Some(mode) = metal_dispatch {
         let rust_tests_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
         eprintln!("[toyos] Building Rust tests...");
@@ -17260,43 +17257,21 @@ fn main() {
         let mut boots = shared_metal(&rust_bins, keep);
         boots.push(c_corpus_metal(&c_bins, keep));
 
-        // **The mode was already decided, by `testargs::metal_mode` alone** —
-        // this match only carries out what it said, so no branch here can pick
-        // `Mode::Drive` for a run that asked for `List`. That inversion — a
-        // dispatch that resolved `Drive` before it had read `--list` — flashed
-        // and rebooted the T14 on 2026-09-29 07:03:35 UTC.
-        match metal_dispatch {
-            testargs::MetalMode::List => {
-                run.exit(if metal::list(&selected, &boots) { 0 } else { 1 });
-            }
-            testargs::MetalMode::Offline | testargs::MetalMode::Drive => {
-                let mode = if metal_dispatch == testargs::MetalMode::Offline {
-                    metal::Mode::Offline
-                } else {
-                    metal::Mode::Drive
-                };
-                // Three statuses for the three things this can establish, as
-                // the ordinary suite has: green, red, and "measured nothing"
-                // — a run that staged images and never reached the machine
-                // has no claim to make.
-                run.exit(
-                    match metal::run(
-                        mode,
-                        &dir,
-                        &selected,
-                        &boots,
-                        &rust_bins,
-                        RUST_SKIP,
-                        !nocapture && !debug_mode,
-                    ) {
-                        metal::Verdict::Green => 0,
-                        metal::Verdict::Red => 1,
-                        metal::Verdict::Staged => 2,
-                    },
-                );
-            }
-            testargs::MetalMode::Off => unreachable!("the enclosing `if` already refused Off"),
-        }
+        // `mode` goes into `metal::run` exactly as `metal_mode` resolved it —
+        // no branch here recomputes it, so there is nothing left in this file
+        // that could pick a different one than the argv named.
+        //
+        // Three statuses for the three things this can establish, as the
+        // ordinary suite has: green, red, and "measured nothing" — a run that
+        // staged images and never reached the machine has no claim to make.
+        run.exit(
+            match metal::run(mode, &selected, &boots, &rust_bins, RUST_SKIP, !nocapture && !debug_mode)
+            {
+                metal::Verdict::Green => 0,
+                metal::Verdict::Red => 1,
+                metal::Verdict::Staged => 2,
+            },
+        );
     }
 
     let c_names = discover_c_tests();
