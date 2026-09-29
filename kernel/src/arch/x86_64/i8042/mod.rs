@@ -105,7 +105,7 @@ static IRQ_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Whether this driver holds the controller, which refuses an `isa` claim on it.
 pub fn drives() -> bool {
-    ACTIVE.load(Ordering::Relaxed)
+    ACTIVE.load(Ordering::Acquire)
 }
 
 fn is_irq_cpu() -> bool {
@@ -595,6 +595,13 @@ pub fn service() {
         quarantine();
         return;
     }
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::isa_claim_straddles_quarantine() {
+        if let Some(masked) = crate::isa::straddle::resume() {
+            let_go(masked);
+            return;
+        }
+    }
     if !ACTIVE.load(Ordering::Relaxed) {
         return;
     }
@@ -778,15 +785,14 @@ fn drain() -> Drained {
 
 /// A controller producing bytes faster than the ISR's bound can drain them.
 /// One masked line and a dead keyboard, never a spinning CPU.
+///
+/// **Masked before the driver lets go**: `isa::claim` refuses only while
+/// [`ACTIVE`] holds, so a claim that lands once it is clear routes and unmasks
+/// lines nothing here touches again.
 fn quarantine() {
     QUARANTINE.store(false, Ordering::Relaxed);
-    ACTIVE.store(false, Ordering::Relaxed);
     // The pin is about to be masked, so no health verdict follows this line.
     HEALTH.store(HEALTH_DONE, Ordering::Relaxed);
-    // Force-released: nothing else can lift a held key or pointer button
-    // once the line is masked.
-    crate::keyboard::release_all();
-    crate::mouse::release_buttons(crate::mouse::PointerSource::PS2);
     // The count, not the intent: the log line is only true if the mask took.
     let mut masked = 0;
     for line in [KEYBOARD_GSI.load(Ordering::Relaxed), AUX_GSI.load(Ordering::Relaxed)] {
@@ -794,6 +800,22 @@ fn quarantine() {
             masked += 1;
         }
     }
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::isa_claim_straddles_quarantine() {
+        crate::isa::straddle::hold(masked);
+        return;
+    }
+    let_go(masked);
+}
+
+/// The quarantine's second step, once `masked` of the lines are down.
+fn let_go(masked: u32) {
+    // `Release`: a claim that reads the driver gone finds the lines masked.
+    ACTIVE.store(false, Ordering::Release);
+    // Force-released: nothing else can lift a held key or pointer button
+    // once the line is masked.
+    crate::keyboard::release_all();
+    crate::mouse::release_buttons(crate::mouse::PointerSource::PS2);
     log!(
         "i8042: quarantined — output buffer never emptied, masked={} (kbd={} aux={} lost={})",
         masked,

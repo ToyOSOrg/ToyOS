@@ -16,8 +16,11 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+use toyos_build::bootlog;
+
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial::Serial;
+use super::{compile, logstream};
 
 /// The line `ist1_report` writes to the UART.
 const MARKER: &str = "[ist1] used ";
@@ -1297,4 +1300,70 @@ pub fn dump_left_pending_is_owed(
 fn unstamped(line: &str) -> &str {
     let line = line.trim();
     line.strip_prefix("[kernel ").and_then(|rest| rest.split_once("] ")).map_or(line, |(_, said)| said)
+}
+
+/// Where `test_rs_fault_gate_child`'s kernel arms aim: the direct map's first
+/// words, which no process may name.
+const KERNEL_RSP: &str = "0xffff800000000000";
+const KERNEL_RBP: &str = "0xffff800000000010";
+const KERNEL_READ: &str = "0xffff800000000008";
+
+/// **A crash report reads a faulting process's memory only at user
+/// addresses.** One child dies with its stack and frame pointers aimed at the
+/// kernel's direct map, another reading there; the report names each refusal,
+/// and neither the console nor `/log` carries a word from behind them or the
+/// kernel's page walk for the read.
+pub fn crash_report_reads_no_kernel_memory(
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const CONFIG: &str = "tests/testcases";
+    let staged = logstream::stage(CONFIG, "crash-report-kernel-reads", c_bins, rust_bins)?;
+    let options = BootOptions {
+        boot_image: Some(qemu::Staged::Written(staged.image.clone())),
+        ..Default::default()
+    };
+    let mut guest = QemuInstance::boot_with_options(
+        &compile::repo_root().join(CONFIG),
+        c_bins,
+        rust_bins,
+        options,
+    );
+    let mut console = guest.boot_log().to_string();
+    let mut said = String::new();
+    for (kind, header) in [("kernel_stack", "SIGILL tid="), ("kernel_page", "SEGFAULT tid=")] {
+        let ran = guest.run_test(&format!("test_rs_fault_gate_child {kind}"), Duration::from_secs(30));
+        if ran.exit_code == Some(0) || ran.stdout.contains("survived") {
+            return Err(format!("{kind} survived its fault\n{}", ran.stdout));
+        }
+        // The premise: the kernel reported this child's fault at all.
+        if !ran.serial.contains(header) {
+            return Err(format!("{kind}: no {header:?} report\n{}", ran.serial));
+        }
+        said.push_str(&ran.before);
+        said.push_str(&ran.serial);
+    }
+    let log = logstream::shut_down(guest, &mut console, &staged)?.concat();
+    let _ = std::fs::remove_file(&staged.image);
+    let kernel = bootlog::kernel_records(&log);
+    for (what, text) in [("the console", said.as_str()), ("/log's kernel records", kernel.as_str())] {
+        for refused in [
+            format!("Stack (from RSP): {KERNEL_RSP} refused: no user address"),
+            format!("rbp {KERNEL_RBP} refused: no user address"),
+            format!("Page walk for {KERNEL_READ} refused: no user address"),
+        ] {
+            if !text.contains(&refused) {
+                return Err(format!("{what} carries no {refused:?}\n{text}"));
+            }
+        }
+        // A stack word the report read is `[address] = value`, and the walk's
+        // header is `Page walk for address [PML4=…`.
+        let walk = format!("Page walk for {KERNEL_READ} [");
+        let leaked = |l: &&str| (l.contains("[0xffff8") && l.contains("] = ")) || l.contains(&walk);
+        if let Some(line) = text.lines().find(leaked) {
+            return Err(format!("{what} carries kernel memory a crash report read: {line:?}"));
+        }
+    }
+    eprintln!("  [crash] both reports refused the direct map, on the console and in /log");
+    Ok(())
 }

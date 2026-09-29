@@ -69,10 +69,24 @@ pub fn set_masked(line: Line, masked: bool) {
 pub fn switch_to(pid: Option<Pid>) {
     for (row, grantable) in GRANTABLE.iter().enumerate() {
         let open = pid.is_some_and(|pid| crate::isa::bound_to(row, pid));
+        // A row's ports open and close together, so its first bit is its state.
+        let Some(&first) = grantable.ports.first() else { continue };
+        if super::percpu::port_open(first) == open {
+            continue;
+        }
         for &port in grantable.ports {
             super::percpu::set_port_open(port, open);
         }
     }
+}
+
+/// The first port of `access` this CPU refuses Ring 3, which is the port its
+/// #GP faulted on; the process that faulted is still this CPU's.
+pub fn refused_port(access: PortAccess) -> u16 {
+    (0..u16::from(access.bytes))
+        .map(|i| access.port.wrapping_add(i))
+        .find(|&port| !super::percpu::port_open(port))
+        .unwrap_or(access.port)
 }
 
 /// An `in` or `out` as decoded from the bytes at a faulting instruction.

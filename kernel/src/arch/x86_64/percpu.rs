@@ -693,6 +693,16 @@ pub fn set_port_open(port: u16, open: bool) {
     }
 }
 
+/// Whether this CPU's bitmap opens `port` to Ring 3; every port past it is
+/// refused by the TSS limit. Panic-free: the crash report asks it.
+pub fn port_open(port: u16) -> bool {
+    let (byte, bit) = (port as usize / 8, 1u8 << (port % 8));
+    let percpu = gs::read_u64::<OFF_SELF_PTR>() as *const PerCpu;
+    // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`; `get` keeps the read
+    // inside the array, and a `u8` has no alignment a packed struct could break.
+    unsafe { (*percpu).tss.io_bitmap.get(byte).is_some_and(|&b| b & bit == 0) }
+}
+
 /// The two words [`set_kernel_stack`] writes: `kernel_rsp` (syscall entry) and `tss.rsp0` (Ring 3 interrupt entry); read only by an instrument.
 /// # Safety: must be called from the CPU whose GS base points to the relevant PerCpu.
 #[cfg(feature = "stack-witness")]

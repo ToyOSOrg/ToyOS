@@ -36,8 +36,7 @@ it by saying where the log will be, and cannot put a line in it.
 (`kernel/src/drivers/panic_console/mod.rs:639`), and a compositor claiming the
 framebuffer sets it. So on `bootable.img` the last kernel screenful ever painted
 is the one at `Boot: complete`, the desktop overwrites it a few tens of
-milliseconds later, and no key pauses it: `page_forever` is reached only from
-`halt_all_cpus`, so a *successful* boot never pages.
+milliseconds later, and no key pauses it.
 
 **The durable answer landed and is not this.** "A log sink that survives
 userland" is `/system/bin/logd`: the kernel keeps the record ring and the console and

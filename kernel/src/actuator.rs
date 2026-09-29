@@ -89,6 +89,11 @@ actuators! {
     /// Cap the i8042 ISR at 4 bytes and answer empty until the mute verdict is out; `service` then polls the rest, so the verdict beats the sequence on every boot instead of on a loaded shard's luck.
     i8042_split_burst = "i8042-split-burst";
 
+    /// Hold the i8042's quarantine between its two steps, in two scheduler
+    /// passes, until an `isa` claim begun after the first has been answered:
+    /// the claim lands between them on every boot.
+    isa_claim_straddles_quarantine = "isa-claim-straddles-quarantine";
+
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
 

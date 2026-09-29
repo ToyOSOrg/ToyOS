@@ -370,10 +370,10 @@ pub fn halt_all_cpus() -> ! {
     unsafe { serial::panic_flush(); }
     // Must follow the flush — it's the deepest stack this path reaches.
     crate::arch::trap::report_fault_stack();
-    // page_forever runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
+    // hold_the_panel runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
     // Only the CPU that painted watches the bound; the rest halt below.
     if painted {
-        crate::drivers::panic_console::page_forever(bound);
+        crate::drivers::panic_console::hold_the_panel(bound);
     }
     cpu::halt();
 }

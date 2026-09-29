@@ -1,6 +1,6 @@
 ---
-status: owner
-kind: question
+status: open
+kind: defect
 opened: 2026-09-28
 ---
 
@@ -21,5 +21,10 @@ the controller's protocol, a syscall or a trapped instruction per access in
 place of the bitmap; keeping 0x64 in the kernel means the keyboard driver is
 not wholly userland, which the owner ruled it must be.
 
-**Exit**: the owner rules that the keyboard's holder may hold the reset line,
-or names which of the two costs to pay.
+A recorded weakness of the power broker's track
+(`issues/isolation/the-power-broker-authority-with-a-human-in-the-loop.md`),
+which owns it (owner ruling).
+
+**Exit**: resetting the machine is the power broker's decision alone: the
+keyboard's holder reaches the controller's reset line only through the broker,
+or not at all.

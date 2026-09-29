@@ -127,8 +127,7 @@ times:
    10. **usbd**, stage 5's second half: the whole xHCI moves, HID to the
        keyboard claim and mass storage over `toyos-blockring`, and the kernel
        USB bridge is deleted. **What must work with no userland stays off
-       USB**: the panic console pages its report by itself and needs no
-       keyboard; the kernel's one
+       USB**: the kernel's one
        hotkey, Ctrl+Alt+D (`kernel/src/keyboard.rs`, the blocked-task dump),
        is recognised on the i8042's transitions and no longer on a USB
        keyboard's, which from here reach the kernel only as usbd's keyboard
@@ -149,9 +148,7 @@ times:
    userland, and a dead kernel takes no input, with no emergency way.
    1. **The panic console takes no input, and an `isa` claim grants a process
       exact ports through the TSS I/O permission bitmap and its ISA lines as
-      records** (`kernel/src/isa.rs`). **Done** (#592): `kernel/src` grew from
-      64984 to 65370 lines, the mechanism landing before the driver it
-      replaces is deleted.
+      records** (`kernel/src/isa.rs`). **Done** (#592).
    2. **ps2d**, the server over that claim, feeding the kernel's keyboard and
       mouse streams so Ctrl+Alt+D and the merge with USB HID stay where they
       are; the kernel's driver, its vector, its actuators and the

@@ -11,10 +11,15 @@
 //!   is the harness's to read.
 //! - `device`: the real controller the kernel gave up on at boot, driven from
 //!   here until a keystroke arrives as a record and a byte.
+//! - `straddled`: `device`, on a controller the kernel drove until its
+//!   quarantine, the claim asked for until the kernel lets it go.
+//! - `released`: nothing, run after `device` has ended, so the key the host
+//!   presses in between has had its interrupt.
 //!
 //! The children: `unbound` holds the claim and never read it, `bound` read it
-//! and steps one port past what it was granted, `unclaimed` holds nothing, and
-//! `moved` was handed a claim its parent had already bound.
+//! and steps one port past what it was granted, `wide` read it and makes a
+//! two-byte access at its data port, `unclaimed` holds nothing, and `moved` was
+//! handed a claim its parent had already bound.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -47,16 +52,23 @@ const CONTROLLER: Duration = Duration::from_secs(1);
 /// this long is not coming.
 const KEYSTROKE: Duration = Duration::from_secs(20);
 
-/// Set 1's make code for `a`: the controller translates the keyboard's set 2.
+/// Set 1's make and break codes for `a`: the controller translates the
+/// keyboard's set 2.
 const A_MAKE: u8 = 0x1E;
+const A_BREAK: u8 = 0x9E;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("driven") => driven(&syscap()),
         Some("grant") => grant(&syscap()),
-        Some("device") => device(&syscap()),
+        Some("device") => {
+            device(claim(&syscap(), I8042).expect("isa device: the kernel gave the controller up at boot"))
+        }
+        Some("straddled") => device(claim_once_let_go(&syscap())),
+        Some("released") => println!("isa released: the claim before this one is gone"),
         Some("unbound") => unbound(),
         Some("bound") => bound(),
+        Some("wide") => wide(),
         Some("unclaimed") => unclaimed(),
         Some("moved") => moved(),
         other => panic!("isa_grant: unknown role {other:?}"),
@@ -83,6 +95,15 @@ fn inb(port: u16) -> u8 {
     // for faults it, which is what the refusing roles exist to show.
     unsafe {
         core::arch::asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack));
+    }
+    value
+}
+
+fn inw(port: u16) -> u16 {
+    let value: u16;
+    // SAFETY: as `inb`; the access spans `port` and the port after it.
+    unsafe {
+        core::arch::asm!("in ax, dx", in("dx") port, out("ax") value, options(nomem, nostack));
     }
     value
 }
@@ -158,6 +179,8 @@ fn grant(cap: &SysCap) {
     // The claim died with its unbound holder, so the row is free again.
     let held = claim(cap, I8042).expect("isa: the row came back from a holder that never bound it");
     killed_after("bound", child("bound", Some(held)), "bound: in from 0x61");
+    let held = claim(cap, I8042).expect("isa: the row came back from the bound child");
+    killed_after("wide", child("wide", Some(held)), "wide: in of two bytes from 0x60");
     killed_after("unclaimed", child("unclaimed", None), "unclaimed: in from 0x60");
 
     // The ports went back with the process that bound them.
@@ -200,6 +223,14 @@ fn bound() {
     println!("bound: survived");
 }
 
+fn wide() {
+    let claim = taken();
+    bind(&claim);
+    println!("wide: in of two bytes from 0x60");
+    let _ = inw(DATA);
+    println!("wide: survived");
+}
+
 fn unclaimed() {
     println!("unclaimed: in from 0x60");
     let _ = inb(DATA);
@@ -232,10 +263,11 @@ fn command(byte: u8) {
     outb(STATUS, byte);
 }
 
-fn device(cap: &SysCap) {
-    let claim = claim(cap, I8042).expect("isa device: the kernel gave the controller up at boot");
+/// Drive the controller through `claim` until a keystroke arrives as a record
+/// and a byte.
+fn device(claim: Device) {
     bind(&claim);
-    // Whatever the kernel's aborted probe left behind.
+    // Whatever the kernel left behind.
     for _ in 0..32 {
         if inb(STATUS) & OBF == 0 {
             break;
@@ -269,6 +301,34 @@ fn device(cap: &SysCap) {
     wait_status("had the byte behind its interrupt", |s| s & OBF != 0);
     let byte = inb(DATA);
     assert_eq!(byte, A_MAKE, "isa device: the interrupt carried {byte:#04x}, not `a`'s make");
+    // The key's release too, so the output buffer is empty when this claim
+    // goes and the host's next key would raise the line.
+    wait_status("had the key's release", |s| s & OBF != 0);
+    let released = inb(DATA);
+    assert_eq!(released, A_BREAK, "isa device: the release carried {released:#04x}, not `a`'s break");
     println!("isa device: {count} interrupt(s), scancode {byte:#04x}");
     println!("===ISA_DEVICE_OK===");
+}
+
+/// The claim on a controller the kernel drives, asked for until the kernel lets
+/// it go: at least one refusal first, or the kernel never drove it here.
+fn claim_once_let_go(cap: &SysCap) -> Device {
+    println!("===ISA_CLAIMING===");
+    let by = Instant::now() + KEYSTROKE;
+    let mut refused = 0u32;
+    let claim = loop {
+        match claim(cap, I8042) {
+            Ok(claim) => break claim,
+            Err(SyscallError::PermissionDenied) => refused += 1,
+            Err(other) => panic!("isa straddled: a claim answered {other:?}"),
+        }
+        assert!(
+            Instant::now() < by,
+            "isa straddled: the kernel never let the controller go in {KEYSTROKE:?}"
+        );
+        std::thread::yield_now();
+    };
+    assert!(refused > 0, "isa straddled: the first claim was granted, so the kernel never drove the controller");
+    println!("isa straddled: {refused} claim(s) refused before the kernel let the controller go");
+    claim
 }

@@ -327,7 +327,6 @@ screen_i8042_health 4495
 screen_late_panic 3926
 screen_loader_lines 3991
 screen_log_absent 1823
-screen_paged_scrollback 7384
 screen_panic_muted 4416
 shipped_config_boots 3024
 shm_release_reclaims 29

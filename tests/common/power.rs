@@ -739,7 +739,11 @@ fn panic_armed() -> String {
     format!("{PANIC_ARMED_HEAD} {PANIC_FAST_SECS} s, timed by ")
 }
 
-/// A guest whose kernel panicked and armed the bound.
+/// A guest whose kernel panicked and armed the bound. `Profile::Metal`: QEMU
+/// routes an injected key to one handler per device class, and this is the only
+/// GOP profile with an i8042 and no `usb-kbd` to send it to instead, so
+/// `panic_ignores_keys`' key reaches the controller a kernel that read input
+/// would read.
 fn panicked() -> BootOptions {
     BootOptions {
         profile: qemu::Profile::Metal,

@@ -74,6 +74,17 @@ static WATCHES: [Watch; MAX_ROWS] = [const { Watch::new() }; MAX_ROWS];
 
 /// Mint the claim on the row `set` names, lines routed and unmasked.
 pub fn claim(set: IsaId) -> Result<usize, ClaimError> {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::isa_claim_straddles_quarantine() {
+        let begun = straddle::begin();
+        let answer = mint(set);
+        straddle::answered(begun);
+        return answer;
+    }
+    mint(set)
+}
+
+fn mint(set: IsaId) -> Result<usize, ClaimError> {
     let row = GRANTABLE
         .iter()
         .position(|g| {
@@ -177,4 +188,54 @@ pub fn drain_pending() {
 
 pub fn watch(row: usize) -> &'static Watch {
     &WATCHES[row]
+}
+
+/// The `isa-claim-straddles-quarantine` actuator: a claim answered between the
+/// two steps of the i8042's quarantine, which holds after its first until one
+/// begun after it has been.
+#[cfg(feature = "boot-actuators")]
+pub mod straddle {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    /// Claims begun this boot.
+    static BEGUN: AtomicU64 = AtomicU64::new(0);
+    /// [`BEGUN`] when the quarantine's first step ran; [`NONE`] when it holds none.
+    static HELD_FROM: AtomicU64 = AtomicU64::new(NONE);
+    const NONE: u64 = u64::MAX;
+    /// The lines the first step masked, for the second's log.
+    static MASKED: AtomicU32 = AtomicU32::new(0);
+    /// A claim begun after the first step has been answered.
+    static STRADDLED: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn begin() -> u64 {
+        BEGUN.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// A claim that began before the first step read the controller as driven
+    /// either way, so only a later one decides anything.
+    pub(super) fn answered(begun: u64) {
+        let from = HELD_FROM.load(Ordering::SeqCst);
+        if from != NONE && begun >= from {
+            STRADDLED.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The quarantine's first step ran and masked `masked` lines.
+    pub fn hold(masked: u32) {
+        MASKED.store(masked, Ordering::SeqCst);
+        STRADDLED.store(false, Ordering::SeqCst);
+        HELD_FROM.store(BEGUN.load(Ordering::SeqCst), Ordering::SeqCst);
+        log!("isa: the i8042's quarantine holds after its first step for a claim");
+    }
+
+    /// The first step's masked count, once a claim begun after it has been
+    /// answered; the second step is the caller's.
+    pub fn resume() -> Option<u32> {
+        if !STRADDLED.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        HELD_FROM.store(NONE, Ordering::SeqCst);
+        log!("isa: a claim was answered between the i8042's quarantine steps");
+        Some(MASKED.load(Ordering::SeqCst))
+    }
 }

@@ -508,7 +508,6 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // compositor is holding it. The verdict is the report on the panel.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
-    ("screen_paged_scrollback", Sched::Parallel, Tier::Weekly),
     ("screen_panic_muted", Sched::Parallel, Tier::Weekly),
     ("screen_console_panic", Sched::Parallel, Tier::Fast),
     ("screen_fatal_halt", Sched::Parallel, Tier::Fast),
@@ -612,11 +611,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The `isa` claim, a boot each: refused where the kernel drives the i8042,
     // its ports granted and refused by the I/O permission bitmap where there is
     // none, and a real controller the kernel gave up on driven to a keystroke.
-    // Every verdict is a guest's line or the kernel's record of a kill; the one
-    // wait is on the guest's own ready line.
+    // Every verdict is a guest's line or the kernel's record.
     ("isa_claim_refused_where_the_kernel_drives", Sched::Parallel, Tier::Nightly),
     ("isa_ports_are_the_binders_alone", Sched::Parallel, Tier::Fast),
+    ("isa_ports_close_on_one_cpu", Sched::Parallel, Tier::Fast),
     ("isa_lines_reach_their_holder", Sched::Parallel, Tier::Nightly),
+    ("isa_claim_straddles_the_quarantine", Sched::Parallel, Tier::Nightly),
     // One boot; every verdict is a PPM header field or a console line, and no
     // clock is in any of them.
     ("gpu_set_resolution", Sched::Parallel, Tier::Fast),
@@ -964,6 +964,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The exception entry's own seal, off the page's bytes on an ordinary boot.
     ("blackbox_fault_sealed", Sched::Parallel, Tier::Nightly),
     ("double_fault_stack", Sched::Parallel, Tier::Nightly),
+    // A boot of its own: its verdict reads `/log` off the volume after it.
+    ("crash_report_reads_no_kernel_memory", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
     // CPL 0 with a user `rsp`, against how many landed in Ring 3, both off the
@@ -1400,7 +1402,9 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("input_claim_absent", &["test_rs_input_absent"]),
     ("isa_claim_refused_where_the_kernel_drives", &["test_rs_isa_grant"]),
     ("isa_ports_are_the_binders_alone", &["test_rs_isa_grant"]),
+    ("isa_ports_close_on_one_cpu", &["test_rs_isa_grant"]),
     ("isa_lines_reach_their_holder", &["test_rs_isa_grant"]),
+    ("isa_claim_straddles_the_quarantine", &["test_rs_isa_grant"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
     ("userdev_dma_fault", &["test_rs_log_origin"]),
@@ -1451,6 +1455,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("writeback_durability", &["test_rs_writeback_durability"]),
     ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
+    ("crash_report_reads_no_kernel_memory", &["test_rs_fault_gate_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
     ("syscall_panic_halts", &["test_rs_test_panic_child"]),
     ("syscall_fault_halts", &["test_rs_test_panic_child"]),
@@ -3398,7 +3403,7 @@ fn print_screen(name: &str, text: &str) {
 ///
 /// The three summary strings are the answer; the absence of a `[page n/m]`
 /// footer is what makes one photograph the *whole* answer, because Ctrl+Alt+D
-/// paints once and never enters the pager — a report that needed two pages
+/// paints once — a report that needed two pages
 /// would leave the verdict on one nobody can reach. And the fill is the report
 /// having taken the panel rather than sitting on a client's screen, which is
 /// the half `boot_checkpoint` deliberately will not do.
@@ -3518,38 +3523,6 @@ fn check_wrap(dump: &screen::Ppm) -> Result<(), String> {
             "the tail of the demangled symbol never reached the screen — clipped? \
              {} row(s) of wrap before the next frame\n{}",
             end - head,
-            dump.text()
-        ));
-    }
-    Ok(())
-}
-
-/// Every row on the panel is text the log actually carries.
-///
-/// **The check the panel's grid owes**: `panic_console` writes only the cells
-/// whose character or colour moved, so a cell it fails to write is one the
-/// previous paint left standing, and past the end of a line that replaced a
-/// longer one that is a string no line of the log contains.
-fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String> {
-    let said: String = console
-        .replace("[kernel ", "[")
-        .bytes()
-        .map(|byte| match byte {
-            b'\n' => '\n',
-            b'\t' => ' ',
-            0x20..=0x7E => byte as char,
-            _ => '.',
-        })
-        .collect();
-    for row in dump.rows() {
-        let row = row.trim_end();
-        if row.is_empty() || row.starts_with("[page ") || said.contains(row) {
-            continue;
-        }
-        return Err(format!(
-            "the panel row {row:?} is in no line of the log, so a cell the paint that put \
-             this screen up did not write is still standing from the one before \
-             it\ndecoded screen:\n{}",
             dump.text()
         ));
     }
@@ -5034,10 +5007,7 @@ fn run_screen_test(
             );
             // Here the marker reaches serial *before* the paint — the drain is
             // what emits it — so unlike the halt paths this one has to look
-            // more than once. And once the report outgrows one screen the
-            // pager cycles it, so the window in which any given page is up is
-            // `PAGE_HOLD_NS`, not forever: the timeout has to cover a whole
-            // cycle rather than just the paint.
+            // more than once.
             let dump = qemu.screendump_until("PANIC:", Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
@@ -5073,116 +5043,6 @@ fn run_screen_test(
             }
             Ok(())
         }
-        "screen_paged_scrollback" => {
-            // The screen is smaller than the report, and on the target laptop
-            // there is no key to press for the rest of it. So the claim under
-            // test is not "the console renders" — `screen_late_panic` has that
-            // — but "a line the report page cannot hold reaches the screen
-            // anyway, with no input". Same feature and image as
-            // `screen_late_panic`, so it costs a boot and no rebuild.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Gop,
-                    qmp: true,
-                    kernel_params: &["test-late-panic"],
-                    ready_marker: "PANIC:",
-                    ..Default::default()
-                },
-            );
-
-            // The first kernel line of the boot, and the one a photograph of
-            // the final screen has never been able to show.
-            const HEAD: &str = "panic console: armed";
-            const TAIL: &str = "PANIC:";
-
-            let mut pages: Vec<String> = Vec::new();
-            let mut report: Option<String> = None;
-            let mut head_seen = false;
-            // **The only incremental paints a guest makes**: the report's own
-            // paint follows a fill, and every page the pager puts up after it
-            // is written against the grid the one before left — which is the
-            // paint `check_no_stale_cells` exists for. The footers of the
-            // settled captures it judged, and two of them, because the first is
-            // the page the fill painted.
-            const JUDGED_PAGES: usize = 2;
-            let mut judged: Vec<String> = Vec::new();
-            let mut before: Option<String> = None;
-            // A liveness ceiling on a machine that is halted and paging, so
-            // there is no console to read progress off and this is the case
-            // `qemu::budget` exists for.
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(40));
-            while Instant::now() < deadline
-                && !(head_seen && report.is_some() && judged.len() >= JUDGED_PAGES)
-            {
-                let dump = qemu.screendump();
-                let text = dump.text();
-                let Some(footer) = text.lines().rev().find(|l| l.starts_with("[page ")) else {
-                    // Before the panic the screen still carries a boot
-                    // checkpoint; only a paginated screen has a footer.
-                    before = None;
-                    thread::sleep(Duration::from_millis(200));
-                    continue;
-                };
-                if !pages.contains(&footer.to_string()) {
-                    pages.push(footer.to_string());
-                }
-                if text.contains(TAIL) {
-                    report = Some(text.clone());
-                }
-                head_seen |= text.contains(HEAD);
-                // **A screendump is not a shutter**: one taken across a paint
-                // carries the rows already written above the rows the paint
-                // replaced, and a row half of each is in no line of any log. Two
-                // identical captures are a paint that finished.
-                if before.as_deref() == Some(text.as_str()) {
-                    check_no_stale_cells(&dump, &qemu.console_stream().since(0))?;
-                    if !judged.contains(&footer.to_string()) {
-                        judged.push(footer.to_string());
-                    }
-                }
-                before = Some(text.clone());
-                thread::sleep(Duration::from_millis(200));
-            }
-
-            let seen = pages.join(" ");
-            print_screen(name, &format!("footers seen: {seen}"));
-            let Some(report) = report else {
-                return Err(format!(
-                    "{STALLED} {TAIL:?} never reached the screen; footers seen: {seen}"
-                ));
-            };
-            // The premise. If one screen holds both ends there is nothing to
-            // page and the rest of this test would pass vacuously — which is
-            // the shape the metal-track review kept finding.
-            if report.contains(HEAD) {
-                return Err(format!(
-                    "one screen holds both {HEAD:?} and {TAIL:?}; nothing to page\n{report}"
-                ));
-            }
-            if !head_seen {
-                return Err(format!(
-                    "{HEAD:?} never reached the screen — the pager did not advance past the \
-                     report. footers seen: {seen}\nreport page:\n{report}"
-                ));
-            }
-            if pages.len() < 2 {
-                return Err(format!(
-                    "only one page footer ever appeared ({seen}); the pager is not cycling"
-                ));
-            }
-            if judged.len() < JUDGED_PAGES {
-                return Err(format!(
-                    "only {} settled page(s) were judged for stale cells ({}), so no paint made \
-                     against the grid the one before it left was ever read",
-                    judged.len(),
-                    judged.join(" ")
-                ));
-            }
-            Ok(())
-        }
         "screen_fatal_halt" => {
             // The steady-state fatal path: userland is up, the display is
             // idle, and SYS_DEBUG action 3 runs halt_all_cpus for real.
@@ -5210,8 +5070,6 @@ fn run_screen_test(
             ) {
                 return Err(format!("{FATAL_HALT_NONCE:?} never reached the console"));
             }
-            // Polled, not sampled once: the report is longer than a screen
-            // here, so the nonce is on one page of a cycling set.
             let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
@@ -5253,7 +5111,7 @@ fn run_screen_test(
             // go fatal once it holds the latch, so the fatal path meets a
             // holder beneath itself; the report must take the screen
             // regardless, and its CPU must go on to watch the reset bound,
-            // which is what the paging proves.
+            // which is what the reset proves.
             const HELD: &str = "panel: a painter holding the panel went fatal";
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
@@ -5262,7 +5120,7 @@ fn run_screen_test(
                 BootOptions {
                     profile: qemu::Profile::Gop,
                     qmp: true,
-                    kernel_params: &["panel-painter-stalls"],
+                    kernel_params: &["panel-painter-stalls", "panic-reboot-fast"],
                     ..Default::default()
                 },
             );
@@ -5287,17 +5145,8 @@ fn run_screen_test(
                     dump.fill()
                 ));
             }
-            // The pager runs only on the CPU that claimed the panel, and it is
-            // the loop that watches the reset bound: a second page is its proof.
-            let paged = qemu.screendump_while(Duration::from_secs(20), Duration::from_millis(200), |d| {
-                d.rows().iter().any(|r| r.contains("[page ")) && d.text() != text
-            });
-            if paged.text() == text {
-                return Err(format!(
-                    "the report never paged, so no CPU is watching the reset bound\ndecoded \
-                     screen:\n{text}"
-                ));
-            }
+            let mut tail = String::new();
+            qemu::await_reset(&mut qemu, &mut tail, "the CPU that took the panel to reset the machine", &[])?;
             Ok(())
         }
         "screen_fatal_halt_composited" => {
@@ -5348,8 +5197,7 @@ fn run_screen_test(
                 );
             }
 
-            // The probe fires 5 s after the claim; the poll is for that plus
-            // the pager cycling pages.
+            // The probe fires 5 s after the claim; the poll is for that.
             const MARKER: &str = "metal-panic-probe";
             let dump = qemu.screendump_while(
                 Duration::from_secs(40),
@@ -9553,6 +9401,58 @@ fn isa_verdict(result: &TestResult, last: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `test_rs_isa_grant grant` on `smp` CPUs, and every access it makes that the
+/// kernel must refuse, named by the kernel.
+fn isa_ports(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    smp: u32,
+) -> Result<(), String> {
+    // No i8042 at all, so the kernel drives nothing the claim names and the
+    // ports float: the bitmap is the only thing between a process and them.
+    let options = BootOptions {
+        profile: qemu::Profile::MetalNoUsb,
+        i8042: false,
+        smp,
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    if !qemu.boot_log().contains("i8042: absent") {
+        return Err(format!("the i8042 is not absent:\n{}", qemu.boot_log()));
+    }
+    let result = qemu.run_test("test_rs_isa_grant grant", Duration::from_secs(60));
+    isa_verdict(&result, "===ISA_GRANT_OK===")?;
+    // Each refused access is the kernel's to name: the port, and whose grant it
+    // is not. The unbound holder and the moved claim both die at 0x64, the
+    // bound child one port past what it holds, the wide one on the port its
+    // access spans past the grant, and the process holding nothing at the data
+    // port.
+    const NAMED: [(&str, usize); 4] = [
+        ("in of 1 byte(s) from port 0x0064", 2),
+        ("in of 1 byte(s) from port 0x0061", 1),
+        ("in of 1 byte(s) from port 0x0060", 1),
+        ("in of 2 byte(s) from port 0x0060, reaching port 0x0061", 1),
+    ];
+    for (access, times) in NAMED {
+        let named = format!("{access}, which this process holds no grant for");
+        let seen = result.serial.matches(named.as_str()).count();
+        if seen != times {
+            return Err(format!(
+                "the kernel named {named:?} {seen} time(s), want {times}:\n{}",
+                result.serial
+            ));
+        }
+    }
+    for want in ["isa: the i8042's ports are pid", "isa: the i8042's ports went back with pid"] {
+        if !result.serial.contains(want) {
+            return Err(format!("the kernel never said {want:?}:\n{}", result.serial));
+        }
+    }
+    eprintln!("  [isa] {}", result.stdout.trim().replace('\n', "\n  [isa] "));
+    Ok(())
+}
+
 /// Run one machine-shape test. Like `run_screen_test`, each of these owns its
 /// QEMU — the machine shape *is* the test — except for the runs of adjacent
 /// names that share one through `held` (see [`group_boot`]).
@@ -10101,6 +10001,9 @@ fn run_machine_test(
             common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
         }
         "double_fault_stack" => faults::double_fault_stack(test_config, c_bins, rust_bins),
+        "crash_report_reads_no_kernel_memory" => {
+            faults::crash_report_reads_no_kernel_memory(c_bins, rust_bins)
+        }
         "syscall_window_nmi" => faults::syscall_window_nmi(test_config, c_bins, rust_bins),
         "syscall_window_nmi_controls" => {
             faults::syscall_window_nmi_controls(test_config, c_bins, rust_bins)
@@ -13792,48 +13695,10 @@ fn run_machine_test(
             eprintln!("  [isa] the claim on the controller the kernel drives was refused");
             Ok(())
         }
-        "isa_ports_are_the_binders_alone" => {
-            // No i8042 at all, so the kernel drives nothing the claim names and
-            // the ports float: the bitmap is the only thing between a process
-            // and them.
-            let options = BootOptions {
-                profile: qemu::Profile::MetalNoUsb,
-                i8042: false,
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            if !qemu.boot_log().contains("i8042: absent") {
-                return Err(format!("the i8042 is not absent:\n{}", qemu.boot_log()));
-            }
-            let result = qemu.run_test("test_rs_isa_grant grant", Duration::from_secs(60));
-            isa_verdict(&result, "===ISA_GRANT_OK===")?;
-            // Each refused access is the kernel's to name: the port, and whose
-            // grant it is not. The unbound holder and the moved claim both die
-            // at 0x64, the bound child one port past what it holds, and the
-            // process holding nothing at the data port.
-            for (port, times) in [("0x0064", 2), ("0x0061", 1), ("0x0060", 1)] {
-                let named = format!(
-                    "in of 1 byte(s) from port {port}, which this process holds no grant for"
-                );
-                let seen = result.serial.matches(named.as_str()).count();
-                if seen != times {
-                    return Err(format!(
-                        "the kernel named {named:?} {seen} time(s), want {times}:\n{}",
-                        result.serial
-                    ));
-                }
-            }
-            for want in
-                ["isa: the i8042's ports are pid", "isa: the i8042's ports went back with pid"]
-            {
-                if !result.serial.contains(want) {
-                    return Err(format!("the kernel never said {want:?}:\n{}", result.serial));
-                }
-            }
-            eprintln!("  [isa] {}", result.stdout.trim().replace('\n', "\n  [isa] "));
-            Ok(())
-        }
+        "isa_ports_are_the_binders_alone" => isa_ports(test_config, c_bins, rust_bins, 2),
+        // One CPU: every child runs where the one before it ran, so a switch
+        // that fails to close the row leaves the next child its ports.
+        "isa_ports_close_on_one_cpu" => isa_ports(test_config, c_bins, rust_bins, 1),
         "isa_lines_reach_their_holder" => {
             // `i8042-budget-expired` has the kernel give the controller up
             // before it arms a line, so a real i8042 is here for a claim.
@@ -13858,8 +13723,70 @@ fn run_machine_test(
                 |socket| qemu::qmp_send_keys(socket, &[("a", true), ("a", false)]),
             );
             isa_verdict(&result, "===ISA_DEVICE_OK===")?;
-            if !result.serial.contains("isa: the i8042 took its first interrupt") {
-                return Err(format!("the line's first interrupt was never said:\n{}", result.serial));
+            // The claim went with `device`, which read the controller empty
+            // first, so a key now raises line 1 again: masked, it reaches no
+            // one, and unmasked it is a second first interrupt on a record the
+            // release cleared. `released` runs after the key has been sent.
+            let socket = qemu.qmp_socket().to_path_buf();
+            qemu::qmp_send_keys(&socket, &[("a", true), ("a", false)]);
+            let after = qemu.run_test("test_rs_isa_grant released", Duration::from_secs(30));
+            isa_verdict(&after, "isa released:")?;
+            const FIRST: &str = "isa: the i8042 took its first interrupt";
+            let said = format!("{}{}{}", result.serial, after.before, after.serial);
+            match said.matches(FIRST).count() {
+                1 => {}
+                seen => {
+                    return Err(format!(
+                        "the kernel said {FIRST:?} {seen} time(s), want once: a key after the \
+                         claim went reached its line\n{said}"
+                    ))
+                }
+            }
+            eprintln!("  [isa] {}", result.stdout.trim().replace('\n', "\n  [isa] "));
+            eprintln!("  [isa] a key after the claim went raised nothing");
+            Ok(())
+        }
+        "isa_claim_straddles_the_quarantine" => {
+            // The kernel drives the i8042 until a flood quarantines it, and
+            // `isa-claim-straddles-quarantine` holds the quarantine between its
+            // two steps until a claim has been answered: refused while the
+            // driver holds the controller, and granted after, with lines the
+            // quarantine no longer touches.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Metal,
+                    qmp: true,
+                    kernel_params: &["i8042-fault", "isa-claim-straddles-quarantine"],
+                    ..Default::default()
+                },
+            );
+            if !qemu.boot_log().contains("i8042: fault injection armed") {
+                return Err(format!("the fault was never armed:\n{}", qemu.boot_log()));
+            }
+            // The first key floods the driver into its quarantine, the second
+            // is the holder's keystroke.
+            let result = qemu.run_test_paced(
+                "test_rs_isa_grant straddled",
+                Duration::from_secs(90),
+                |socket, line| {
+                    if line.contains("===ISA_CLAIMING===") || line.contains("===ISA_DEVICE_READY===") {
+                        let socket = socket.expect("this boot has a QMP socket");
+                        qemu::qmp_send_keys(socket, &[("a", true), ("a", false)]);
+                    }
+                },
+            );
+            isa_verdict(&result, "===ISA_DEVICE_OK===")?;
+            for want in [
+                "isa: the i8042's quarantine holds after its first step for a claim",
+                "isa: a claim was answered between the i8042's quarantine steps",
+                "i8042: quarantined",
+            ] {
+                if !result.serial.contains(want) {
+                    return Err(format!("the kernel never said {want:?}:\n{}", result.serial));
+                }
             }
             eprintln!("  [isa] {}", result.stdout.trim().replace('\n', "\n  [isa] "));
             Ok(())
