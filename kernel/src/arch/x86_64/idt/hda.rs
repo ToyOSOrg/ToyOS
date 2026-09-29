@@ -1,6 +1,6 @@
 use super::device_irq::device_irq_entry;
 
-// Lock-free, heap-free: may interrupt a CPU holding the controller lock (preemption disabled, not interrupts).
+// Heap-free, and takes only interrupts-off locks: may interrupt a CPU holding the controller lock (preemption disabled, not interrupts).
 extern "sysv64" fn hda_handler() {
     crate::arch::percpu::irq_took!(Hda);
     crate::drivers::hda::isr_complete();

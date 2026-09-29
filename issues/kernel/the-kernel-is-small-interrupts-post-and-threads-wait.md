@@ -144,10 +144,41 @@ times:
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
    stick misbehaves.
-6. **The scheduler knows nothing about devices.** Interrupt handlers only post
-   to their device's `Watch`, and the device's thread does the work. The
-   per-CPU IRQ relay, the driver list in the scheduler pass and the idle
-   special cases are deleted.
+6. **The scheduler knows nothing about devices.** A handler posts its
+   device's `Watch` and ends its interrupt; the thread waiting on that watch
+   does the work, and no step creates a kernel thread. `irq_ring`, the driver
+   list in `drain_irqs` and the idle loop's device checks are gone by step 5.
+   Each step measures the kernel's lines, and from step 2 the longest
+   interrupts-off and preemption-off windows, against stage 6's first commit.
+   1. **Interrupts post.** A post is legal in a handler: a watch's list and a
+      poll ring's completions sit behind interrupts-off leaf locks nothing
+      allocates or frees under, and a post frees nothing, since the next
+      registration sweeps what it fired. A claimed function's vector, the
+      IOMMU's refusal and both audio backends post from the handler, and
+      `irq_ring`'s `UserDev` and `Audio` and their arms in `drain_irqs` go.
+      The thread is the holder's: netd's, blockd's, soundd's mix thread, and
+      the `isa` claim's when #592 lands. **Exit**: `handler_post_without_a_pass`,
+      a vector taken inside a post of its own watch on a CPU holding
+      preemption off posting once the outer post lets go and before any pass,
+      red on the base; the watch's loom models over the new post.
+   2. **The windows, measured**: the longest interrupts-off and preemption-off
+      windows per CPU, reported beside the IRQ census and fed by each
+      architecture's masking primitives and entries, the number the ARM
+      track's stage 4 owes as well. After step 1 because the ARM track is
+      reshaping those primitives now; applied to stage 6's first commit for
+      the baseline. **Exit**: both windows read off the T14 at stage 6's start
+      and at step 1's head.
+   3. **The i8042's thread is ps2server's** (#592's i8042 stage): `irq_ring`'s
+      `I8042`, `keyboard_controller::service` and the idle loop's
+      `verdict_due` go with the kernel's driver. **Exit**: that stage's.
+   4. **xHCI's thread is usbd's** (step 10 above): `Xhci`, `poll_if_pending`
+      and `port_work_pending` go with the kernel's driver, and `irq_ring` with
+      them. **Exit**: step 10's.
+   5. **The pass is the scheduler's.** `drain_irqs` goes: the blocked-task
+      dump with its panel hold, and the heartbeat, become `pass`'s own, and
+      the TCO feed stays, since what it proves is that passes run. **Exit**:
+      `pass` and the idle loop call no driver, and both windows are measured
+      against stage 6's start.
 
 ## Standing
 

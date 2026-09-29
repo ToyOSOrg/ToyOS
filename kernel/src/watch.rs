@@ -8,10 +8,10 @@
 //! thread's state word, which its own next commit reads. Nothing here keeps a
 //! record of what was posted — a waiter re-reads the object, never the post.
 //!
-//! **A post allocates nothing and may be made under any lock but a poll
-//! ring's** (`crate::inbox`), so a driver posts from its scheduler-pass drain
-//! and never from its ISR, which publishes to `irq_ring` and nothing else.
-//! Registration allocates, in the syscall that registers.
+//! **A post allocates and frees nothing and may be made under any lock but a
+//! poll ring's** (`crate::inbox`), so a device's interrupt handler posts its
+//! watch itself: every lock a post takes is a `KernelLock`, held with
+//! interrupts off. Registration allocates, in the syscall that registers.
 //!
 //! A [`Watch`] is a borrowed reference for the whole of a wait: [`Armed`]
 //! holds it, so an object cannot be freed under a thread waiting on it, and
@@ -54,6 +54,8 @@ impl Watch {
     }
 
     fn post_as(&self, cause: WakeCause) {
+        #[cfg(feature = "boot-actuators")]
+        handler_post::note_post();
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
             self.0.post(cause, &env);
@@ -243,6 +245,81 @@ mod window {
                 return;
             }
             core::hint::spin_loop();
+        }
+    }
+}
+
+/// `handler-post`: claim slot 0's vector, raised on this CPU inside a post of
+/// that slot's own watch while the CPU holds preemption off, posts the watch
+/// once the outer post lets go of it and before any pass can run. A hold counts
+/// the posts made on its CPU: the outer one and the handler's are two, and a
+/// hold that saw fewer by its budget lapsed. One run, on whichever idle loop
+/// reaches it first; its verdict is one [`handler_post::SAID`] line.
+#[cfg(feature = "boot-actuators")]
+pub mod handler_post {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
+
+    use crate::time::{Budget, Deadline, Duration};
+
+    /// The verdict line's words; the counts follow them.
+    pub const SAID: &str = "handler-post:";
+    const HOLDS: u32 = 4;
+    const WINDOW: Budget = Budget::of(
+        Duration::from_secs(1),
+        "the hold is counted as lapsed, and the verdict line says so",
+    );
+
+    const NOBODY: u32 = u32::MAX;
+    static RAN: AtomicBool = AtomicBool::new(false);
+    /// The CPU whose next leaf lock raises the vector inside itself.
+    static RAISE_INSIDE: AtomicU32 = AtomicU32::new(NOBODY);
+    static HOLDING: AtomicU32 = AtomicU32::new(NOBODY);
+    static POSTS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn run() {
+        if RAN.load(Relaxed) || RAN.swap(true, Relaxed) {
+            return;
+        }
+        let me = crate::arch::percpu::cpu_id();
+        let (mut posted, mut lapsed) = (0, 0);
+        crate::sched::driver::preempt_off(|_| {
+            HOLDING.store(me, Relaxed);
+            for _ in 0..HOLDS {
+                let before = POSTS.load(Relaxed);
+                RAISE_INSIDE.store(me, Relaxed);
+                crate::pcidev::watch(0).post();
+                let deadline = Deadline::at(crate::clock::now() + WINDOW.duration());
+                loop {
+                    if POSTS.load(Relaxed) >= before + 2 {
+                        posted += 1;
+                        break;
+                    }
+                    if deadline.reached(crate::clock::now()) {
+                        lapsed += 1;
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+            }
+            HOLDING.store(NOBODY, Relaxed);
+        });
+        crate::log!("{SAID} {HOLDS} holds, {posted} posted into by a handler, {lapsed} lapsed");
+    }
+
+    /// From inside every `KernelLock`: the staged CPU's next one raises the
+    /// vector while it holds.
+    pub fn raise_if_staged() {
+        let staged = RAISE_INSIDE.load(Relaxed);
+        if staged != NOBODY && staged == crate::arch::percpu::cpu_id() {
+            RAISE_INSIDE.store(NOBODY, Relaxed);
+            crate::arch::irqchip::send_self(crate::pcidev::VECTORS[0]);
+        }
+    }
+
+    pub fn note_post() {
+        let holding = HOLDING.load(Relaxed);
+        if holding != NOBODY && holding == crate::arch::percpu::cpu_id() {
+            POSTS.fetch_add(1, Relaxed);
         }
     }
 }

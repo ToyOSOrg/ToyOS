@@ -1725,7 +1725,11 @@ pub fn take_record(slot: usize) -> Result<Option<DeviceIrqRecord>, SyscallError>
     if IRQ[slot].faulted() {
         return Err(SyscallError::Io);
     }
-    Ok(IRQ[slot].take().map(|count| DeviceIrqRecord { count }))
+    let taken = IRQ[slot].take();
+    if taken.is_some() && IRQ[slot].take_unannounced() {
+        log!("pcidev: slot {slot} took its first message on vector {:#x}", VECTORS[slot]);
+    }
+    Ok(taken.map(|count| DeviceIrqRecord { count }))
 }
 
 /// Whether a read of the claim answers at once: a message is waiting, or the
@@ -1734,42 +1738,22 @@ pub fn has_irq(slot: usize) -> bool {
     IRQ[slot].armed() || IRQ[slot].faulted()
 }
 
-/// Records one message. Called from the vector's ISR, so it takes no lock and
-/// allocates nothing; `record.rs` owns the counting, and `kernel-loom` models
-/// it against a concurrent reader.
+/// Records one message and posts the claim's watch. Called from the vector's
+/// handler, so it allocates nothing; `record.rs` owns the counting, and
+/// `kernel-loom` models it against a concurrent reader.
 pub fn isr(slot: usize) {
     IRQ[slot].took();
-}
-
-/// Turn every message taken since the last pass into a wake.
-///
-/// On the scheduler pass rather than in the ISR, like every other device in
-/// this kernel: a wake takes the inbox lock and an ISR may not.
-pub fn drain_pending() {
-    for (slot, irq) in IRQ.iter().enumerate() {
-        if !irq.take_pending() {
-            continue;
-        }
-        // A fault's wake is no message.
-        if !irq.faulted() && irq.take_unannounced() {
-            log!(
-                "pcidev: slot {slot} took its first message on vector {:#x}",
-                VECTORS[slot]
-            );
-        }
-        WATCHES[slot].post();
-    }
+    WATCHES[slot].post();
 }
 
 /// The unit refused this function an access.
 ///
-/// Called from the fault handler, which takes no lock: every call the claim
-/// answers refuses from here on, its interrupt read included, and this CPU's
-/// next scheduler pass wakes whoever waits on the claim to read that refusal —
-/// the pass a message earns, posted the way its ISR posts it.
+/// Called from the fault handler: every call the claim answers refuses from
+/// here on, its interrupt read included, and the post wakes whoever waits on
+/// the claim to read that refusal, as a message's does.
 pub fn note_fault(slot: usize) {
     IRQ[slot].fault();
-    crate::irq_ring::isr_publish(crate::irq_ring::IrqSource::UserDev, crate::clock::nanos_since_boot());
+    WATCHES[slot].post();
     crate::preempt::set_need_resched();
 }
 

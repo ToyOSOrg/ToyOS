@@ -1,6 +1,6 @@
 use super::device_irq::device_irq_entry;
 
-// Lock-free and heap-free: may interrupt a CPU holding the controller lock, which disables preemption but not interrupts.
+// Heap-free, and takes only interrupts-off locks: may interrupt a CPU holding the controller lock, which disables preemption but not interrupts.
 extern "sysv64" fn virtio_sound_handler() {
     crate::arch::percpu::irq_took!(Sound);
     crate::drivers::virtio_sound::isr_complete();

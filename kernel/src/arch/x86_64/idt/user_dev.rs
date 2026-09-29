@@ -6,18 +6,16 @@
 //! wake every user driver in the machine on any of their interrupts, which is
 //! one process learning when another's device is busy.
 //!
-//! Lock-free and heap-free like every other device entry here: the record is
-//! atomics and the wake happens on the next scheduler pass.
+//! Heap-free like every other device entry here: the record is atomics, and
+//! the claim's watch is posted from the handler.
 
 use super::device_irq::device_irq_entry;
-use crate::irq_ring::IrqSource;
 
 fn took(slot: usize) {
     crate::arch::percpu::irq_took!(UserDev);
     crate::pcidev::isr(slot);
-    crate::irq_ring::isr_publish(IrqSource::UserDev, crate::clock::nanos_since_boot());
-    // Force resched now, so `drain_irqs` turns the record into a wake before
-    // the next quantum tick rather than after it.
+    // A holder the post woke on this CPU runs at the interrupt's exit, not at
+    // the next quantum tick.
     crate::preempt::set_need_resched();
     crate::arch::apic::eoi();
 }

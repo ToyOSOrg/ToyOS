@@ -1279,6 +1279,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
     ("blocking_read_window", Sched::Parallel, Tier::Nightly),
+    // A claimed function's vector posts its watch from the handler: raised
+    // inside a post of that watch on a CPU holding preemption off, it posts
+    // once the outer post lets go and before any pass. One boot; the verdict
+    // is counts.
+    ("handler_post_without_a_pass", Sched::Parallel, Tier::Fast),
     // A sibling's munmap and mmap staged between a typed copy's translation
     // and its store (`copy-meets-a-remap`): the store never reaches the region
     // mapped after it.
@@ -12335,6 +12340,19 @@ fn run_machine_test(
         "smp_failed_ap_leaves_no_hole" => {
             smp_failed_ap_leaves_no_hole(test_config, c_bins, rust_bins)
         }
+        "handler_post_without_a_pass" => {
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { kernel_params: &["handler-post"], ..Default::default() },
+            );
+            let mut log = qemu.boot_log().to_string();
+            if !log.lines().any(handler_post_said) {
+                log += &qemu.drain_until(Duration::from_secs(30), handler_post_said);
+            }
+            handler_post(&log)
+        }
         "input_merge" => {
             // The check runs in the kernel and panics on mismatch, so a
             // failure arrives as a dead boot; the marker is the only proof it
@@ -14833,6 +14851,29 @@ fn sysret_ss(log: &str) -> Result<(), String> {
         }
         eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
         Ok(())
+}
+
+/// `kernel/src/watch.rs`'s `handler_post::SAID`, and the counts every hold
+/// posted into gives it.
+const HANDLER_POST_SAID: &str = "handler-post:";
+const HANDLER_POST_POSTED: &str = "handler-post: 4 holds, 4 posted into by a handler, 0 lapsed";
+
+fn handler_post_said(line: &str) -> bool {
+    line.contains(HANDLER_POST_SAID)
+}
+
+/// Every hold was posted into by the handler of the vector raised inside it.
+fn handler_post(log: &str) -> Result<(), String> {
+    let Some(said) = log.lines().find(|line| handler_post_said(line)) else {
+        return Err(format!("`handler-post` never said its verdict:\n{log}"));
+    };
+    if !said.contains(HANDLER_POST_POSTED) {
+        return Err(format!(
+            "a hold lapsed with no handler's post in it — the wake waited for a pass:\n{said}\n{log}"
+        ));
+    }
+    eprintln!("  [handler-post] {}", said.trim());
+    Ok(())
 }
 
 /// The input core merged what it was handed.

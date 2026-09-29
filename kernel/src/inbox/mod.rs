@@ -19,20 +19,25 @@
 //! process's ring or say something no object said. A post writes at most one
 //! entry, and a ring holds at most [`MAX_PENDING_WATCHES`] polls.
 //!
-//! **Locks.** A ring's own lock takes nothing under it and is never taken under
-//! a watch's: a post fires its polls with its list let go. A ring's own watch
-//! holds only threads, because no handle names a ring as a thing to watch.
+//! **Locks.** What a completion writes sits behind a `KernelLock` of its own,
+//! held with interrupts off, because a post fires its polls under its list lock
+//! and a device's handler posts; nothing is taken under it. The rest of a ring,
+//! its submissions and its polls, is its `Lock`'s, which no post reaches. A
+//! ring's own watch holds only threads, because no handle names a ring as a
+//! thing to watch.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
+use toyos_sched::sync::LeafLock;
 use toyos_sched::task::WaitClass;
 use toyos_sched::watch::{Fire, Ring};
 
 use crate::object::shm::SharedMemObject;
 use crate::object::{ops, KObjectRef};
 use crate::process::{self, Pid};
+use crate::sched::payload::KernelLock;
 use crate::scheduler;
 use crate::sync::Lock;
 use crate::time::{Deadline, Duration};
@@ -62,6 +67,8 @@ impl InboxRef {
 
 impl Drop for InboxRef {
     fn drop(&mut self) {
+        // First, so no post writes into the page this drop lets go of.
+        self.0.completions.with(|c| *c = None);
         // Taken out under the lock and let go of outside it: the unmap flushes.
         let Some(mut state) = self.0.state.lock().take() else {
             unreachable!("an inbox is torn down by its one reference, once");
@@ -193,6 +200,8 @@ const MAX_PENDING_WATCHES: usize = 1024;
 pub struct Inbox {
     /// `None` once the ring's one reference let go of it.
     state: Lock<Option<RingState>>,
+    /// `None` from the moment that reference starts letting go of it.
+    completions: KernelLock<Option<Completions>>,
     /// Threads parked in `submit`; never a poll — see the module header.
     watch: Watch,
 }
@@ -202,47 +211,32 @@ struct RingState {
     /// A ring's page has no lifetime of its own; it goes with the last handle to the ring.
     shm: Arc<SharedMemObject>,
     submission_size: u32,
-    completion_size: u32,
-    /// The kernel's own copy of the completion tail, the only one it reads.
-    completion_tail: u32,
     /// Polls still armed as of the last registration, which sweeps the rest.
     pending: Vec<Arc<Poll>>,
     owner_pid: Pid,
 }
 
-impl RingState {
-    // No accessor below returns a Rust reference into this page — the process
-    // maps it writable, so only atomics or `read_volatile` are sound here.
+// No accessor below returns a Rust reference into a ring's page — the process
+// maps it writable, so only atomics or `read_volatile` are sound here.
 
-    /// One atomic word of one ring header; never `&RingHeader` — see the block above.
-    fn ring_word(&self, ring_off: u64, field_off: usize) -> &core::sync::atomic::AtomicU32 {
-        let ptr = self.shm_phys.as_mut_ptr::<u8>();
-        // SAFETY: offset is in-bounds and 4-aligned within the 2 MiB page; `AtomicU32` is sound over memory the process also writes.
-        unsafe {
-            core::sync::atomic::AtomicU32::from_ptr(
-                ptr.add(ring_off as usize + field_off) as *mut u32,
-            )
-        }
+/// One atomic word of one ring header; never `&RingHeader` — see the block above.
+fn ring_word(page: &DirectMap, ring_off: u64, field_off: usize) -> &core::sync::atomic::AtomicU32 {
+    let ptr = page.as_mut_ptr::<u8>();
+    // SAFETY: offset is in-bounds and 4-aligned within the 2 MiB page, which lives as long as the borrow of its holder; `AtomicU32` is sound over memory the process also writes.
+    unsafe {
+        core::sync::atomic::AtomicU32::from_ptr(
+            ptr.add(ring_off as usize + field_off) as *mut u32,
+        )
     }
+}
 
+impl RingState {
     fn submission_head(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, head))
+        ring_word(&self.shm_phys, SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, head))
     }
 
     fn submission_tail(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
-    }
-
-    fn completion_head(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, head))
-    }
-
-    fn completion_tail_word(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
-    }
-
-    fn completion_dropped(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, dropped))
+        ring_word(&self.shm_phys, SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
     }
 
     /// One submission entry, copied out by value via `read_volatile` — never a `&Submission`.
@@ -251,10 +245,34 @@ impl RingState {
         // SAFETY: `index` is masked by `submission_size` (≤256), keeping the read in-bounds and aligned within the page.
         unsafe { (ptr.add(SUBMISSIONS_OFF as usize + index as usize * core::mem::size_of::<Submission>()) as *const Submission).read_volatile() }
     }
+}
+
+/// What a poll's completion writes, which a post from an interrupt handler
+/// reaches. Its page lives while it is `Some`: the teardown takes it to `None`
+/// before it lets the page go.
+struct Completions {
+    page: DirectMap,
+    completion_size: u32,
+    /// The kernel's own copy of the completion tail, the only one it reads.
+    completion_tail: u32,
+}
+
+impl Completions {
+    fn completion_head(&self) -> &core::sync::atomic::AtomicU32 {
+        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, head))
+    }
+
+    fn completion_tail_word(&self) -> &core::sync::atomic::AtomicU32 {
+        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
+    }
+
+    fn completion_dropped(&self) -> &core::sync::atomic::AtomicU32 {
+        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, dropped))
+    }
 
     /// The address of one completion entry — a pointer, never a `&mut` minted from a shared borrow.
     fn completion_at(&self, index: u32) -> *mut Completion {
-        let ptr = self.shm_phys.as_mut_ptr::<u8>();
+        let ptr = self.page.as_mut_ptr::<u8>();
         // SAFETY: `index` is masked by `completion_size` (≤512), keeping the offset inside the page.
         unsafe { ptr.add(COMPLETION_RING_OFF as usize + core::mem::size_of::<RingHeader>() + index as usize * core::mem::size_of::<Completion>()) as *mut Completion }
     }
@@ -269,7 +287,7 @@ impl RingState {
             return;
         }
         let idx = tail & (self.completion_size - 1);
-        // SAFETY: `idx` is masked to ring size; the ring's lock serializes kernel writers.
+        // SAFETY: `idx` is masked to ring size; the completions' lock serializes kernel writers.
         unsafe { self.completion_at(idx).write(Completion { token: user_data, result, flags }) };
         self.completion_tail = tail.wrapping_add(1);
         self.completion_tail_word().store(tail.wrapping_add(1), Ordering::Release);
@@ -292,14 +310,20 @@ impl Inbox {
     /// Post one completion and wake whoever waits in `submit`. A ring already
     /// torn down takes nothing and wakes nobody.
     fn complete(&self, user_data: u64, result: i32) {
-        let posted = self.with_state(|state| state.post_completion(user_data, result, 0));
-        if posted.is_ok() {
+        let posted = self
+            .completions
+            .with(|c| c.as_mut().map(|c| c.post_completion(user_data, result, 0)));
+        if posted.is_some() {
             self.watch.post();
         }
     }
 
     fn with_state<R>(&self, f: impl FnOnce(&mut RingState) -> R) -> Result<R, SyscallError> {
         self.state.lock().as_mut().map(f).ok_or(SyscallError::NotFound)
+    }
+
+    fn with_completions<R>(&self, f: impl FnOnce(&Completions) -> R) -> Result<R, SyscallError> {
+        self.completions.with(|c| c.as_ref().map(f)).ok_or(SyscallError::NotFound)
     }
 }
 
@@ -359,10 +383,13 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
             shm_phys,
             shm,
             submission_size,
-            completion_size,
-            completion_tail: 0,
             pending: Vec::new(),
             owner_pid: pid,
+        })),
+        completions: KernelLock::new(Some(Completions {
+            page: shm_phys,
+            completion_size,
+            completion_tail: 0,
         })),
         watch: Watch::new(),
     });
@@ -391,7 +418,7 @@ pub fn submit(
     }
 
     loop {
-        let (count, dropped) = inbox.with_state(|s| (s.completion_count(), s.dropped()))?;
+        let (count, dropped) = inbox.with_completions(|c| (c.completion_count(), c.dropped()))?;
 
         if count >= min_complete || min_complete == 0 {
             return Ok(count);
@@ -418,7 +445,7 @@ pub fn submit(
             0,
             WaitClass::Io,
             deadline,
-            || inbox.with_state(|s| s.completion_count()).map_or(true, |n| n >= min_complete),
+            || inbox.with_completions(|c| c.completion_count()).map_or(true, |n| n >= min_complete),
         )
         .is_err()
         {

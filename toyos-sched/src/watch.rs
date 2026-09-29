@@ -15,16 +15,17 @@
 //! waiting side does between its registration and its park can be skipped:
 //! `park::prepare` consumes the flag, and the commit consumes the claim.
 //!
-//! **A post allocates nothing.** Every ring entry is one-shot, so a post takes
-//! them all out of the list and fires them with the list lock let go; what it
-//! frees is those entries. A registration sweeps the entries a withdrawal left
-//! behind, so the list never holds more than the polls live at its last post or
-//! registration, plus that one.
+//! **A post allocates and frees nothing, so an interrupt handler may make
+//! one.** It fires every ring entry where it stands; an entry is one-shot, so a
+//! fired one is dead, and the next registration sweeps the dead out. Nothing
+//! allocates or frees under the list lock at all: a registration grows the list
+//! and drops what it swept with the lock let go.
 //!
-//! **Lock order.** The list lock is a leaf the environment supplies:
-//! [`Ring::fire`] is always called with it let go, and so is the drop of every
-//! entry the list lets go of, because an entry's last reference may own another
-//! watch. So a post may be made under any lock but a ring's own.
+//! **Lock order.** A post fires its rings under the list lock, so beneath it
+//! are each ring's own lock and the watch that ring's submitters park on, which
+//! holds threads and no ring and so nests nothing. The drop of every entry the
+//! list lets go of runs with it let go, because an entry's last reference may
+//! own another watch. So a post may be made under any lock but a ring's own.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -50,8 +51,10 @@ pub enum Fire {
 pub trait Ring {
     /// Post this poll's completion. One-shot across every watch the poll is
     /// registered on: an entry that already fired, or whose poll was withdrawn,
-    /// posts nothing. Called with no watch's list lock held; may take only its
-    /// ring's own lock and post only the watch its ring's submitters park on.
+    /// posts nothing. Called with at most the posting watch's list lock held,
+    /// from wherever a post is made, an interrupt handler included: may take
+    /// only its ring's own lock and post only the watch its ring's submitters
+    /// park on, and allocates and frees nothing.
     fn fire(&self, how: Fire);
     /// Whether a fire would still post anything. `false` is permanent.
     fn live(&self) -> bool;
@@ -119,24 +122,18 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
     pub fn register(&self, task: &Arc<TaskShared<M>>, token: u64) {
         assert!(task.set_waiting(), "a task waits on at most one watch");
         task.forget_posts();
-        let dead = self.list.with(|w| {
-            w.threads.push(Waiter {
-                task: task.clone(),
-                token,
-            });
-            sweep(&mut w.rings)
-        });
-        drop(dead);
+        self.sweep();
+        self.push(Waiter { task: task.clone(), token }, |w| &mut w.threads);
     }
 
     /// End one wait. Idempotent against [`Self::revoke`], which may have taken
     /// the registration out already.
     pub fn unregister(&self, task: &Arc<TaskShared<M>>) {
-        self.list.with(|w| {
-            if let Some(at) = w.threads.iter().position(|t| Arc::ptr_eq(&t.task, task)) {
-                w.threads.remove(at);
-            }
+        let gone = self.list.with(|w| {
+            let at = w.threads.iter().position(|t| Arc::ptr_eq(&t.task, task))?;
+            Some(w.threads.remove(at))
         });
+        drop(gone);
         task.clear_waiting();
     }
 
@@ -144,26 +141,72 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
     /// after this returns and fires the entry itself if the object is already
     /// ready — the ring's half of the same order a thread keeps.
     pub fn add_ring(&self, entry: R) {
-        let dead = self.list.with(|w| {
-            let dead = sweep(&mut w.rings);
-            w.rings.push(entry);
-            dead
-        });
-        drop(dead);
+        self.sweep();
+        self.push(entry, |w| &mut w.rings);
     }
 
-    /// Something changed: wake every registered thread, and fire and let go of
-    /// every ring entry.
+    /// Something changed: wake every registered thread, and fire every ring
+    /// entry where it stands.
     pub fn post<K: Kicker, P: PreemptGuard>(&self, cause: WakeCause, env: &Poster<'_, M, K, P>) {
-        let fired = self.list.with(|w| {
+        self.list.with(|w| {
             for waiter in &w.threads {
                 notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
             }
-            core::mem::take(&mut w.rings)
+            for ring in &w.rings {
+                ring.fire(Fire::Ready);
+            }
         });
-        for ring in &fired {
-            ring.fire(Fire::Ready);
+    }
+
+    /// Put `item` on the list `list` picks, growing it with the lock let go
+    /// when it is full.
+    fn push<T>(&self, item: T, list: fn(&mut Waiters<M, R>) -> &mut Vec<T>) {
+        let mut item = item;
+        loop {
+            let full = self.list.with(|w| {
+                let v = list(w);
+                if v.len() < v.capacity() {
+                    v.push(item);
+                    return None;
+                }
+                Some((v.capacity(), item))
+            });
+            let Some((seen, back)) = full else { return };
+            item = back;
+            // Swapped in unless another registration grew it first; whichever
+            // buffer loses is dropped out here.
+            let mut room = Vec::with_capacity((seen * 2).max(4));
+            self.list.with(|w| {
+                let v = list(w);
+                if v.capacity() == seen {
+                    room.append(v);
+                    core::mem::swap(v, &mut room);
+                }
+            });
+            drop(room);
         }
+    }
+
+    /// Take out the ring entries that can no longer fire, and drop them — and
+    /// allocate the room they are taken into — with the lock let go.
+    fn sweep(&self) {
+        let dead = self.list.with(|w| w.rings.iter().filter(|r| !r.live()).count());
+        if dead == 0 {
+            return;
+        }
+        let mut out = Vec::with_capacity(dead);
+        self.list.with(|w| {
+            let mut at = 0;
+            // Order is nothing to a ring entry: every post fires them all.
+            while at < w.rings.len() && out.len() < out.capacity() {
+                if w.rings[at].live() {
+                    at += 1;
+                } else {
+                    out.push(w.rings.swap_remove(at));
+                }
+            }
+        });
+        drop(out);
     }
 
     /// Wake at most `limit` threads registered with `token`, in registration
@@ -295,12 +338,6 @@ fn gate_fence() {
     if cfg!(not(feature = "gate-fence-off")) {
         fence(Ordering::SeqCst);
     }
-}
-
-/// Take out the entries that can no longer fire, for the caller to drop once
-/// the list lock is let go.
-fn sweep<R: Ring>(rings: &mut Vec<R>) -> Vec<R> {
-    rings.extract_if(.., |r| !r.live()).collect()
 }
 
 /// An object that ends with polls still registered answers them: dropping a
@@ -639,9 +676,27 @@ mod tests {
         withdrawn.withdraw();
         let fresh = Arc::new(Poll::default());
         w.add_ring(fresh);
-        assert_eq!(Arc::strong_count(&fired), 1, "a post lets go of what it fired");
+        assert_eq!(Arc::strong_count(&fired), 1, "a fired entry is swept");
         assert_eq!(Arc::strong_count(&withdrawn), 1, "a withdrawn entry is swept");
         assert_eq!(w.live_rings(), 1);
+    }
+
+    /// A post fires where the entry stands and lets go of nothing: the entry
+    /// it fired is still the list's until a registration sweeps it.
+    #[test]
+    fn a_post_fires_in_place_and_drops_nothing() {
+        let (handles, _rx) = cpus();
+        let env = Poster { cpus: &handles, kicker: &NoKick, preempt: &NoPreempt };
+        let w = watch();
+        let poll = Arc::new(Poll::default());
+        w.add_ring(poll.clone());
+        w.post(woken(), &env);
+        assert_eq!(poll.posts.load(Ordering::Acquire), 1);
+        assert_eq!(Arc::strong_count(&poll), 2, "the post let go of the entry it fired");
+        let t = task(1);
+        w.register(&t, 0);
+        assert_eq!(Arc::strong_count(&poll), 1, "the registration did not sweep it");
+        w.unregister(&t);
     }
 
     #[test]

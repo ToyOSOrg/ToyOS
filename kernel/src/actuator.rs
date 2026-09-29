@@ -281,6 +281,10 @@ actuators! {
     /// parking, so a post lands in the window its commit must refuse the park over.
     watch_window = "watch-window";
 
+    /// Raise claim slot 0's vector inside a post of its own watch while the CPU
+    /// holds preemption off, and count whether the handler posted it there.
+    handler_post = "handler-post";
+
     /// Starve the four xHCI bring-up register waits in `init_one`.
     xhci_deaf_controller = "xhci-deaf-controller";
 

@@ -49,6 +49,7 @@ use toyos_sched_loom::park::{prepare, Cancel, Commit, CurrentTask};
 use toyos_sched_loom::task::{
     Claim, Refused, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason,
 };
+use toyos_sched_loom::sync::LeafLock;
 use toyos_sched_loom::watch::{Fire, Gate, Poster, Ring, Waiters, Watch};
 
 #[path = "../../../kernel/src/inbox/once.rs"]
@@ -592,5 +593,122 @@ fn a_poll_on_two_watches_racing_both_posts_completes_exactly_once() {
             "the replaced poll was answered {} time(s), withdrawn={withdrew}",
             older.posts(),
         );
+    });
+}
+
+/// A poll ring as the kernel's is: its completions behind a lock of its own,
+/// and a watch its submitter parks on, which holds threads and no ring.
+struct PollRing {
+    cpus: CpuHandles<Msg>,
+    kicks: Kicks,
+    written: LoomLock<u32>,
+    parked: RingWatch,
+}
+
+/// One of that ring's polls, registered on one device's watch.
+struct RingPoll {
+    ring: Arc<PollRing>,
+    state: once::Once,
+}
+
+struct RingEntry(Arc<RingPoll>);
+
+type RingWatch = Watch<Msg, RingEntry, LoomLock<Waiters<Msg, RingEntry>>>;
+
+impl Ring for RingEntry {
+    fn fire(&self, _how: Fire) {
+        if self.0.state.fire() {
+            let ring = &self.0.ring;
+            ring.written.with(|n| *n += 1);
+            let env = Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
+            ring.parked.post(WakeCause::new(WakeReason::Woken), &env);
+        }
+    }
+
+    fn live(&self) -> bool {
+        self.0.state.armed()
+    }
+}
+
+/// **A post fires its rings under its own list lock**, so beneath it are the
+/// ring's lock and the ring's watch. Two devices' watches each hold a poll of
+/// one ring and are posted at once, while the ring's submitter waits for both
+/// completions: the three locks nest in one order, so no schedule deadlocks,
+/// each poll completes once, and a submitter parked with both completions
+/// written was owed the wake the second one posted.
+#[test]
+fn two_posts_through_one_rings_lock_complete_it_once_each_and_lose_no_wake() {
+    model(|| {
+        let (tx, mut rx) = mailbox::<Msg>();
+        let ring = Arc::new(PollRing {
+            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)]),
+            kicks: Kicks::new(),
+            written: LoomLock::new(0),
+            parked: Watch::new(watch_list()),
+        });
+        let devices: Vec<Arc<RingWatch>> =
+            (0..2).map(|_| Arc::new(Watch::new(watch_list()))).collect();
+        for device in &devices {
+            device.add_ring(RingEntry(Arc::new(RingPoll {
+                ring: ring.clone(),
+                state: once::Once::new(),
+            })));
+        }
+        let submitter = task(1);
+
+        let waiting = {
+            let ring = ring.clone();
+            let submitter = submitter.clone();
+            loom::thread::spawn(move || {
+                ring.parked.register(&submitter, 0);
+                // Each post ends at most one iteration.
+                for _ in 0..4 {
+                    if ring.written.with(|n| *n) == 2 {
+                        return false;
+                    }
+                    let Ok(ticket) =
+                        prepare(&CurrentTask::new(&submitter, CPU0), Cancel::Answers, WaitClass::Io)
+                    else {
+                        continue;
+                    };
+                    match ticket.commit() {
+                        Commit::Parked(_) => return true,
+                        Commit::AlreadyWoken => continue,
+                        Commit::Killed => unreachable!("nothing retires in this model"),
+                    }
+                }
+                unreachable!("two posts ended more than three iterations")
+            })
+        };
+        let posters: Vec<_> = devices
+            .iter()
+            .map(|device| {
+                let (device, ring) = (device.clone(), ring.clone());
+                loom::thread::spawn(move || {
+                    let env =
+                        Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
+                    device.post(WakeCause::new(WakeReason::Woken), &env);
+                })
+            })
+            .collect();
+
+        let parked = waiting.join().unwrap();
+        for poster in posters {
+            poster.join().unwrap();
+        }
+        let guard = PreemptModel::new();
+        let msgs = drain(&mut rx, &guard);
+
+        assert_eq!(ring.written.with(|n| *n), 2, "a poll was completed other than once");
+        if parked {
+            assert_eq!(
+                msgs,
+                [Msg::Wake(TaskKey(1), WakeReason::Woken)],
+                "parked with both completions written and no wake owed: a ring's post was lost",
+            );
+        } else {
+            assert!(msgs.is_empty(), "a submitter that never parked is owed nothing: {msgs:?}");
+        }
+        ring.parked.unregister(&submitter);
     });
 }

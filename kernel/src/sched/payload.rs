@@ -19,7 +19,10 @@ use crate::process::{OwnedAlloc, PageTables, ProcessAccounting, TaskId};
 use crate::symbols::SymbolTable;
 use crate::sync::Lock;
 
-/// The environment's leaf lock; holding it raises the preempt count, making a wake path a legal mailbox producer.
+/// The environment's leaf lock, held with interrupts off, so an interrupt
+/// handler may take one and never finds it held by the context it interrupted;
+/// holding it raises the preempt count, making a wake path a legal mailbox
+/// producer.
 pub struct KernelLock<T>(Lock<T>);
 
 impl<T> KernelLock<T> {
@@ -30,7 +33,17 @@ impl<T> KernelLock<T> {
 
 impl<T: Send> LeafLock<T> for KernelLock<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(&mut self.0.lock())
+        // Raised first, so the lock's own release never reaches depth zero, and
+        // a pass, with interrupts masked.
+        crate::sched::driver::preempt_off(|_| {
+            let _irq = crate::arch::IrqGuard::close();
+            let mut held = self.0.lock();
+            #[cfg(feature = "boot-actuators")]
+            crate::watch::handler_post::raise_if_staged();
+            let out = f(&mut held);
+            drop(held);
+            out
+        })
     }
 }
 

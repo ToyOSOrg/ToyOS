@@ -56,10 +56,10 @@ shard-publish-relaxed = []
 # `src/durability.rs`'s `settle` becomes the pre-generation blind clear, and
 # `durability` reds.
 durability-settle-blind = []
-# `src/pcidev/record.rs`'s two read-modify-writes become a load and a store, so
-# a message the ISR records between a reader's two halves is lost and a wake can
-# be owed twice, and `device_irq` reds. That pair *is* the record's design, so
-# turning it off reverts the whole of what the model claims.
+# `src/pcidev/record.rs`'s read-modify-writes become a load and a store, so a
+# message the ISR records between a reader's two halves is lost, and
+# `device_irq` reds. They *are* the record's design, so turning them off reverts
+# the whole of what the model claims.
 device-irq-lossy = []
 # `src/sched/dump_request.rs`'s `take` and `end_report` go `Relaxed`, so the next report
 # is unordered against the last one's writes, and `dump_request` reds.

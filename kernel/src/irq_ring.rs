@@ -12,17 +12,12 @@ use crate::scheduler::MAX_CPUS;
 /// Interrupt sources that drive scheduling; exhaustive, so a new variant requires updating every `match`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IrqSource {
-    Audio,
-    /// Every vector a claimed PCI function delivers on, coalesced into one
-    /// slot: the record only says a pass is owed, and `pcidev` keeps the
-    /// per-slot flag that says whose.
-    UserDev,
     Xhci,
     I8042,
 }
 
 impl IrqSource {
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 2;
 }
 
 /// 64-byte aligned so two CPUs' slots never share a cache line.
