@@ -767,6 +767,12 @@ unit = "ms"
 ceiling = 1400
 ceiling_from = "as list.jobcase.job_ms — the same list"
 
+[[number]]
+name = "list.perfdiverge.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms — the same one job, test_rs_perf_state, that testcases' own list already prices"
+
 # --- the boots the split above adds ---
 
 [[number]]
