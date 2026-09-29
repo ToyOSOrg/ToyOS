@@ -18,7 +18,7 @@ pointing here:
   `_mm_sfence` after writing a write-combining framebuffer. Userland has no
   portable way to say "drain my stores to the scanout"; the SDK (`toyos/src`)
   owes one, and it is also only changed under an ABI brief.
-- Twenty guest probes in `tests/toyos-rust-tests/src/bin/`, whose subject
+- Guest probes in `tests/toyos-rust-tests/src/bin/`, whose subject
   is an x86 instruction (`rdgsbase`, `fxsave64`, `int1`, x87 control words)
   or the raw `syscall` gate with arguments no SDK call will pass. They run in
   the x86-64 suite, which is the only suite until the harness gains its arch

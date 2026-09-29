@@ -139,7 +139,7 @@ fn go_deaf(me: usize, bound_ms: u64) -> ! {
     while cpu::counter() < until {
         core::hint::spin_loop();
     }
-    // Never acquires. The detector's NMI is what ends this CPU, and its `rip`
+    // Never acquires. The detector's NMI is what ends this CPU, and its `pc`
     // is inside `Lock::lock`'s spin when it does.
     let _never = PROBE_LOCK.lock();
     loop {
