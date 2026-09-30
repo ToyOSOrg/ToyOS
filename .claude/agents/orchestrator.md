@@ -38,6 +38,7 @@ fix round sent. When the permission check refuses an agent, ask the owner and ne
 A brief is the fence: what to build, where it may touch, the worktree and branch, the scratchpad
 for its logs, and the two checks expected of high-risk code. The role files carry the standing
 rules, so a brief carries only the task.
+Every brief names the agents working on overlapping code, so they can talk to each other.
 A brief asks for the agent's own attribution lines, never pastes the orchestrator's: a subagent's
 model differs from its caller's.
 
@@ -59,6 +60,8 @@ After a landing, sync the primary checkout. A red that is not about the diff is 
 owner, never re-run away, and nothing but a defect may turn `main` red.
 A fix for a red lands ahead of feature work. A nightly name red three nights running gets an owner
 issue that day, and is deleted if nobody owns it a week later.
+The orchestrator runs one full guest run of a finished pull request and its metal runs; a pull
+request's negative controls are the implementer's and the reviewer's, not the orchestrator's.
 
 ## Runs
 
@@ -69,10 +72,8 @@ its script path under the job directory, and revert any mutation a killed run le
 left mid-flash or mid-boot is power-cycled by the owner and comes back to Ubuntu: BootNext is
 one-shot.
 
-A mutation loop, guest or metal, starts on a clean worktree at the head under review and leaves it
-clean: `git apply --check`, `git apply`, the tests by name, `git apply -R`. None runs while an
-agent edits that worktree. A queue script passes only flags `src/testargs.rs` declares: any other
-word becomes the run's filter, and a one-test run reports as a pass.
+A queue script passes only flags `src/testargs.rs` declares: any other word becomes the run's
+filter, and a one-test run reports as a pass.
 A run is the whole suite, or a positional filter that reaches any enabled test.
 
 ## The bench
