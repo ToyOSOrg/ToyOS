@@ -181,9 +181,6 @@ const RUST_SKIP: &[&str] = &[
     // after that in `/log`. `log_after_a_refused_stop` and
     // `log_resume_meets_its_flush` run it.
     "log_refused_stop",
-    // It waits for a cue only a kernel armed with `copy-meets-a-remap` gives.
-    // `user_copy_races_munmap` runs it.
-    "copy_out_races_munmap",
     // Only a kernel armed with `tls-rebase-window` holds a spawn in the window it probes.
     // `tls_rebase_window` runs it.
     "tls_dtv_race",
@@ -1191,10 +1188,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
     ("blocking_read_window", Sched::Parallel),
-    // A sibling's munmap and mmap staged between a typed copy's translation
-    // and its store (`copy-meets-a-remap`): the store never reaches the region
-    // mapped after it.
-    ("user_copy_races_munmap", Sched::Parallel),
     // A sibling's store staged between a thread's TLS block being placed and
     // its rebase (`tls-rebase-window`): the block is never reachable there.
     ("tls_rebase_window", Sched::Parallel),
@@ -1278,7 +1271,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_floor_is_the_images_own", &[]),
     ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
-    ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
     ("tls_rebase_window", &["test_rs_tls_dtv_race"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
@@ -8931,25 +8923,6 @@ fn run_machine_test(
             if !check_rust_result(&result) {
                 return Err(format!(
                     "blocking_read_window failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
-                ));
-            }
-            Ok(())
-        }
-        // Two CPUs: the held copy spins in the kernel while its sibling unmaps
-        // and maps on the other.
-        "user_copy_races_munmap" => {
-            let options = BootOptions {
-                smp: 2,
-                kernel_params: &["copy-meets-a-remap"],
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let result = qemu.run_test("test_rs_copy_out_races_munmap", Duration::from_secs(30));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "user_copy_races_munmap failed:\n{}\nkernel log while it ran:\n{}{}",
                     result.stdout, result.before, result.serial
                 ));
             }

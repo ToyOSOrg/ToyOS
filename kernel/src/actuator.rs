@@ -180,7 +180,7 @@ actuators! {
     /// Hold a typed copy into user memory whose destination carries
     /// `user_ptr::remap_race`'s mark between its translation and its store,
     /// until its own process has mapped memory again: a sibling's `munmap`
-    /// and `mmap` staged inside the copy. Judged by `user_copy_races_munmap`.
+    /// and `mmap` staged inside the copy.
     copy_meets_a_remap = "copy-meets-a-remap";
 
     /// Hold a thread spawn whose argument carries `loader::rebase_window`'s
