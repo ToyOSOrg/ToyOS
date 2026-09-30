@@ -2905,7 +2905,8 @@ mod tests {
     }
 
     /// The writer's half: the verdict the loop returns is the one its readback
-    /// carries, for a boot it refused and for one it passed.
+    /// carries, for a boot it refused, for one it passed, and for one whose
+    /// conversation it refused.
     #[test]
     fn the_readback_carries_the_verdict_the_loop_returns() {
         let dir = toyos_tmpdir::TempDir::new("verdict");
@@ -2945,6 +2946,14 @@ mod tests {
             Ok(1151)
         );
         assert_eq!(written(), Ok(()));
+
+        let unheard = Refusal::Talk(vec!["unheard".to_string()]);
+        let heard = (Err("unheard".to_string()), Vec::new());
+        assert_eq!(
+            judge_and_write_readback(&armed, &loader, &log, Some(&heard), Some(dir.path()), boot),
+            Err(unheard.clone())
+        );
+        assert_eq!(written(), Err(unheard.to_string().trim_end().to_string()));
     }
 
     /// **A boot the cable did not answer is not a boot that answered in the

@@ -133,10 +133,6 @@ fn chunk_name(boot: &str, index: usize) -> String {
     }
 }
 
-/// **A list nothing sized loses its tail without saying so.** The runner's
-/// bound ends the whole list rather than the job it is inside, so every member
-/// past the cut is reported as a missing exit record.
-///
 /// **A chunk carries only the files and links its own members name.** The C
 /// corpus stages a binary and an expectation per case; putting all of both on
 /// every chunk would double a flash that is already written over `ssh`.
