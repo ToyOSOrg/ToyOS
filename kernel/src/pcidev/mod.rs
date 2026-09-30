@@ -117,7 +117,7 @@ use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
 use crate::sync::Lock;
-use crate::watch::Watch;
+use crate::watch::IrqWatch;
 
 /// How many functions this machine can hand out at once.
 ///
@@ -280,7 +280,7 @@ static BOUND: [Lock<Option<Bound>>; MAX_FUNCTIONS] =
 
 /// What a claimed function's poll waits on, one per slot: two processes each driving a
 /// function must not learn when the other's device is busy.
-static WATCHES: [Watch; MAX_FUNCTIONS] = [const { Watch::new() }; MAX_FUNCTIONS];
+static WATCHES: [IrqWatch; MAX_FUNCTIONS] = [const { IrqWatch::new() }; MAX_FUNCTIONS];
 
 /// Every function this machine enumerated, and the two windows a BAR may be
 /// moved into.
@@ -1758,6 +1758,6 @@ pub fn note_fault(slot: usize) {
 }
 
 /// The watch of the function a claim holds at `slot`.
-pub fn watch(slot: usize) -> &'static Watch {
+pub fn watch(slot: usize) -> &'static IrqWatch {
     &WATCHES[slot]
 }

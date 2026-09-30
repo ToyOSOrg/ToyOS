@@ -14,8 +14,6 @@ use super::device_irq::device_irq_entry;
 fn took(slot: usize) {
     crate::arch::percpu::irq_took!(UserDev);
     crate::pcidev::isr(slot);
-    // A holder the post woke on this CPU runs at the interrupt's exit, not at
-    // the next quantum tick.
     crate::preempt::set_need_resched();
     crate::arch::apic::eoi();
 }

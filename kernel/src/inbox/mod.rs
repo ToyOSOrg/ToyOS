@@ -19,29 +19,28 @@
 //! process's ring or say something no object said. A post writes at most one
 //! entry, and a ring holds at most [`MAX_PENDING_WATCHES`] polls.
 //!
-//! **Locks.** What a completion writes sits behind a `KernelLock` of its own,
-//! held with interrupts off, because a device's interrupt handler posts in
-//! place, firing its polls under its list lock; nothing is taken under it. The
-//! rest of a ring, its submissions and its polls, is its `Lock`'s, which no
-//! post reaches. A ring's own watch holds only threads, because no handle names
-//! a ring as a thing to watch.
+//! **Locks.** What a completion writes, and the page it is written into, sit
+//! behind an [`IrqLock`] of their own, because a device's interrupt handler
+//! posts in place, firing its polls under its list lock; nothing is taken
+//! under it. The rest of a ring, its submissions and its polls, is its
+//! `Lock`'s, which no post reaches. A ring's own watch is an [`IrqWatch`] and
+//! holds only threads, because no handle names a ring as a thing to watch.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
-use toyos_sched::sync::LeafLock;
+use toyos_sched::sync::CellLock;
 use toyos_sched::task::WaitClass;
 use toyos_sched::watch::{Fire, Ring};
 
 use crate::object::shm::SharedMemObject;
 use crate::object::{ops, KObjectRef};
 use crate::process::{self, Pid};
-use crate::sched::payload::KernelLock;
 use crate::scheduler;
 use crate::sync::Lock;
 use crate::time::{Deadline, Duration};
-use crate::watch::Watch;
+use crate::watch::{IrqLock, IrqWatch};
 use crate::DirectMap;
 
 use toyos_abi::inbox::{
@@ -67,9 +66,12 @@ impl InboxRef {
 
 impl Drop for InboxRef {
     fn drop(&mut self) {
-        // First, so no post writes into the page this drop lets go of.
-        self.0.completions.with(|c| *c = None);
-        // Taken out under the lock and let go of outside it: the unmap flushes.
+        // The page is the completions', so it goes only once no post can reach
+        // them. Both halves are taken out under their locks and let go of
+        // outside them: the unmap flushes.
+        let Some(completions) = self.0.completions.with(Option::take) else {
+            unreachable!("an inbox is torn down by its one reference, once");
+        };
         let Some(mut state) = self.0.state.lock().take() else {
             unreachable!("an inbox is torn down by its one reference, once");
         };
@@ -77,7 +79,7 @@ impl Drop for InboxRef {
             poll.withdraw();
         }
         // `Unmapped`'s drop flushes; the `Arc` drop after it frees the pages.
-        drop(state.shm.unmap_from(state.owner_pid));
+        drop(completions.shm.unmap_from(state.owner_pid));
     }
 }
 
@@ -201,15 +203,15 @@ pub struct Inbox {
     /// `None` once the ring's one reference let go of it.
     state: Lock<Option<RingState>>,
     /// `None` from the moment that reference starts letting go of it.
-    completions: KernelLock<Option<Completions>>,
+    completions: IrqLock<Option<Completions>>,
     /// Threads parked in `submit`; never a poll — see the module header.
-    watch: Watch,
+    watch: IrqWatch,
 }
 
 struct RingState {
+    /// The page's address. The page is [`Completions`]'s, which the teardown
+    /// lets go of only after it has taken this.
     shm_phys: DirectMap,
-    /// A ring's page has no lifetime of its own; it goes with the last handle to the ring.
-    shm: Arc<SharedMemObject>,
     submission_size: u32,
     /// Polls still armed as of the last registration, which sweeps the rest.
     pending: Vec<Arc<Poll>>,
@@ -222,7 +224,7 @@ struct RingState {
 /// One atomic word of one ring header; never `&RingHeader` — see the block above.
 fn ring_word(page: &DirectMap, ring_off: u64, field_off: usize) -> &core::sync::atomic::AtomicU32 {
     let ptr = page.as_mut_ptr::<u8>();
-    // SAFETY: offset is in-bounds and 4-aligned within the 2 MiB page, which lives as long as the borrow of its holder; `AtomicU32` is sound over memory the process also writes.
+    // SAFETY: offset is in-bounds and 4-aligned within the 2 MiB page, which outlives both of the ring's halves that name it; `AtomicU32` is sound over memory the process also writes.
     unsafe {
         core::sync::atomic::AtomicU32::from_ptr(
             ptr.add(ring_off as usize + field_off) as *mut u32,
@@ -248,9 +250,10 @@ impl RingState {
 }
 
 /// What a poll's completion writes, which a post from an interrupt handler
-/// reaches. Its page lives while it is `Some`: the teardown takes it to `None`
-/// before it lets the page go.
+/// reaches, and the ring's page, which goes only with these.
 struct Completions {
+    /// A ring's page has no lifetime of its own; it goes with the last handle to the ring.
+    shm: Arc<SharedMemObject>,
     page: DirectMap,
     completion_size: u32,
     /// The kernel's own copy of the completion tail, the only one it reads.
@@ -310,9 +313,13 @@ impl Inbox {
     /// Post one completion and wake whoever waits in `submit`. A ring already
     /// torn down takes nothing and wakes nobody.
     fn complete(&self, user_data: u64, result: i32) {
-        let posted = self
-            .completions
-            .with(|c| c.as_mut().map(|c| c.post_completion(user_data, result, 0)));
+        let posted = self.completions.with(|c| {
+            // Inside the section whatever lock it is, so `handler-post` reds
+            // on one that leaves interrupts open.
+            #[cfg(feature = "boot-actuators")]
+            crate::watch::handler_post::raise_if_staged();
+            c.as_mut().map(|c| c.post_completion(user_data, result, 0))
+        });
         if posted.is_some() {
             // In place: an interrupt handler's post reaches here through the
             // poll it fires.
@@ -383,19 +390,61 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
     let inbox = Arc::new(Inbox {
         state: Lock::new(Some(RingState {
             shm_phys,
-            shm,
             submission_size,
             pending: Vec::new(),
             owner_pid: pid,
         })),
-        completions: KernelLock::new(Some(Completions {
+        completions: IrqLock::new(Some(Completions {
+            shm,
             page: shm_phys,
             completion_size,
             completion_tail: 0,
         })),
-        watch: Watch::new(),
+        watch: IrqWatch::new(),
     });
     Ok((InboxRef(inbox), shm_vaddr))
+}
+
+/// `handler-post`'s ring: the kernel's own, mapped into no process and
+/// submitted to by nobody, which polls a watch and completes as a submission
+/// does.
+#[cfg(feature = "boot-actuators")]
+pub(crate) struct Staged(Arc<Inbox>);
+
+#[cfg(feature = "boot-actuators")]
+impl Staged {
+    pub(crate) fn new() -> Self {
+        // Room for every completion the actuator's holds write.
+        let depth = toyos_sched::watch::handler_post::HOLDS;
+        let shm = SharedMemObject::create(crate::mm::PAGE_2M).expect("handler-post: a ring's page");
+        let page = shm.phys_before_mapping();
+        write_ring_page(page, depth, depth * 2);
+        Self(Arc::new(Inbox {
+            state: Lock::new(None),
+            completions: IrqLock::new(Some(Completions {
+                shm,
+                page,
+                completion_size: depth * 2,
+                completion_tail: 0,
+            })),
+            watch: IrqWatch::new(),
+        }))
+    }
+
+    /// A poll of this ring on `watch`, which that watch's next post completes.
+    pub(crate) fn poll(&self, watch: &IrqWatch) {
+        let poll = Arc::new(Poll {
+            inbox: self.0.clone(),
+            user_data: 0,
+            handle: RawHandle(0),
+            state: Once::new(),
+        });
+        watch.add_poll(PollEntry { poll, direction: Readiness { readable: true, writable: false } });
+    }
+
+    pub(crate) fn complete(&self) {
+        self.0.complete(0, 0);
+    }
 }
 
 /// Processes submissions and waits for completions; called from the syscall handler.

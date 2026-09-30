@@ -62,7 +62,7 @@ macro_rules! bump {
 
 /// What the ISR writes and the claim reads back.
 ///
-/// Atomics only: the handler takes no lock and allocates nothing.
+/// Atomics only: the handler allocates nothing.
 pub struct Interrupt {
     /// Messages since the holder's last read.
     count: AtomicU32,
@@ -136,8 +136,8 @@ impl Interrupt {
         take_word!(self.unannounced, false)
     }
 
-    /// The unit refused this function an access. Called from the fault handler,
-    /// which takes no lock: every call the claim answers refuses from here on.
+    /// The unit refused this function an access. Called from the fault handler:
+    /// every call the claim answers refuses from here on.
     pub fn fault(&self) {
         self.faulted.store(true, ORDER);
     }

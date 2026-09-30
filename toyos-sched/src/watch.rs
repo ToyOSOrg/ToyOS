@@ -17,11 +17,13 @@
 //!
 //! **Nothing allocates or frees under the list lock**, because an interrupt
 //! handler's post can interrupt the allocator's holder while another CPU holds
-//! the list waiting for the allocator. A registration grows the list and drops
-//! what it swept with the lock let go. [`Watch::post`] takes every ring entry
-//! out and fires and frees them with the lock let go; [`Watch::post_in_place`],
-//! for a handler, which may not free at all, fires them where they stand, and
-//! the next registration sweeps the dead out, since an entry is one-shot.
+//! the list waiting for the allocator. A registration takes the entries that
+//! can no longer fire out [`FEW`] at a time, grows a full list in a buffer
+//! allocated with the lock let go, and drops both with it let go.
+//! [`Watch::post`] takes every ring entry out and fires and frees them with the
+//! lock let go; [`Watch::post_in_place`], for a handler, which may not free at
+//! all, fires them where they stand, and later registrations sweep the dead
+//! out, since an entry is one-shot.
 //!
 //! **Lock order.** A post in place fires its rings under the list lock, so
 //! beneath it are each ring's own lock and the watch that ring's submitters
@@ -37,7 +39,7 @@ use crate::cpu::CpuHandles;
 use crate::hw::Kicker;
 use crate::mailbox::{PreemptGuard, SchedMsg};
 use crate::park::{notify, revoke};
-use crate::sync::{fence, Arc, AtomicU32, LeafLock, Ordering};
+use crate::sync::{fence, Arc, AtomicU32, CellLock, Ordering};
 use crate::task::{TaskShared, WakeCause};
 
 /// Why a ring entry is posted.
@@ -63,7 +65,7 @@ pub trait Ring {
     fn live(&self) -> bool;
 }
 
-/// Everything a watch holds, behind the environment's leaf lock.
+/// Everything a watch holds.
 pub struct Waiters<M, R> {
     /// In registration order, so a bounded post reaches the longest waiter
     /// first.
@@ -103,12 +105,16 @@ pub struct Poster<'a, M, K, P> {
     pub preempt: &'a P,
 }
 
-pub struct Watch<M, R: Ring, L: LeafLock<Waiters<M, R>>> {
+/// How many ring entries one section takes out of the list to drop with the
+/// lock let go, on the stack and so allocating nothing.
+const FEW: usize = 4;
+
+pub struct Watch<M, R: Ring, L: CellLock<Waiters<M, R>>> {
     list: L,
     _msg: PhantomData<fn() -> (M, R)>,
 }
 
-impl<M, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
+impl<M, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
     pub const fn new(list: L) -> Self {
         Self {
             list,
@@ -117,7 +123,7 @@ impl<M, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
     }
 }
 
-impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
+impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
     /// Register the running task for one wait. After this, and before its
     /// condition is read: that order is the whole lost-wake argument. A post
     /// that reached this task during an earlier wait is forgotten here, before
@@ -125,18 +131,17 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
     pub fn register(&self, task: &Arc<TaskShared<M>>, token: u64) {
         assert!(task.set_waiting(), "a task waits on at most one watch");
         task.forget_posts();
-        self.sweep();
-        self.push(Waiter { task: task.clone(), token }, |w| &mut w.threads);
+        self.admit(Waiter { task: task.clone(), token }, |w| &mut w.threads);
     }
 
     /// End one wait. Idempotent against [`Self::revoke`], which may have taken
     /// the registration out already.
     pub fn unregister(&self, task: &Arc<TaskShared<M>>) {
-        let gone = self.list.with(|w| {
-            let at = w.threads.iter().position(|t| Arc::ptr_eq(&t.task, task))?;
-            Some(w.threads.remove(at))
+        self.list.with(|w| {
+            if let Some(at) = w.threads.iter().position(|t| Arc::ptr_eq(&t.task, task)) {
+                w.threads.remove(at);
+            }
         });
-        drop(gone);
         task.clear_waiting();
     }
 
@@ -144,20 +149,27 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
     /// after this returns and fires the entry itself if the object is already
     /// ready — the ring's half of the same order a thread keeps.
     pub fn add_ring(&self, entry: R) {
-        self.sweep();
-        self.push(entry, |w| &mut w.rings);
+        self.admit(entry, |w| &mut w.rings);
     }
 
     /// Something changed: wake every registered thread, and fire and let go of
     /// every ring entry, with the list lock let go.
     pub fn post<K: Kicker, P: PreemptGuard>(&self, cause: WakeCause, env: &Poster<'_, M, K, P>) {
-        let fired = self.list.with(|w| {
+        let mut few: [Option<R>; FEW] = [const { None }; FEW];
+        let many = self.list.with(|w| {
             for waiter in &w.threads {
                 notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
             }
-            core::mem::take(&mut w.rings)
+            // [`FEW`] leave the list's buffer to the next registration.
+            if w.rings.len() > FEW {
+                return core::mem::take(&mut w.rings);
+            }
+            for (slot, ring) in few.iter_mut().zip(w.rings.drain(..)) {
+                *slot = Some(ring);
+            }
+            Vec::new()
         });
-        for ring in &fired {
+        for ring in few.iter().flatten().chain(&many) {
             ring.fire(Fire::Ready);
         }
     }
@@ -180,55 +192,44 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
         });
     }
 
-    /// Put `item` on the list `list` picks, growing it with the lock let go
-    /// when it is full.
-    fn push<T>(&self, item: T, list: fn(&mut Waiters<M, R>) -> &mut Vec<T>) {
+    /// Put `item` on the list `list` picks, taking out up to [`FEW`] ring
+    /// entries that can no longer fire first. One section while the list has
+    /// room; a full one grows in a buffer allocated with the lock let go, and
+    /// what a section took out is dropped with it let go.
+    fn admit<T>(&self, item: T, list: fn(&mut Waiters<M, R>) -> &mut Vec<T>) {
         let mut item = item;
+        let mut room = Vec::new();
         loop {
+            let mut dead: [Option<R>; FEW] = [const { None }; FEW];
             let full = self.list.with(|w| {
+                let (mut at, mut taken) = (0, 0);
+                // Order is nothing to a ring entry: every post fires them all.
+                while at < w.rings.len() && taken < FEW {
+                    if w.rings[at].live() {
+                        at += 1;
+                    } else {
+                        dead[taken] = Some(w.rings.swap_remove(at));
+                        taken += 1;
+                    }
+                }
                 let v = list(w);
+                // Only a buffer that holds the whole list and `item`: another
+                // registration may have outgrown it since it was sized.
+                if v.len() == v.capacity() && room.capacity() > v.len() {
+                    room.append(v);
+                    core::mem::swap(v, &mut room);
+                }
                 if v.len() < v.capacity() {
                     v.push(item);
                     return None;
                 }
                 Some((v.capacity(), item))
             });
+            drop(dead);
             let Some((seen, back)) = full else { return };
             item = back;
-            // Swapped in unless another registration grew it first; whichever
-            // buffer loses is dropped out here.
-            let mut room = Vec::with_capacity((seen * 2).max(4));
-            self.list.with(|w| {
-                let v = list(w);
-                if v.capacity() == seen {
-                    room.append(v);
-                    core::mem::swap(v, &mut room);
-                }
-            });
-            drop(room);
+            room = Vec::with_capacity((seen * 2).max(FEW));
         }
-    }
-
-    /// Take out the ring entries that can no longer fire, and drop them — and
-    /// allocate the room they are taken into — with the lock let go.
-    fn sweep(&self) {
-        let dead = self.list.with(|w| w.rings.iter().filter(|r| !r.live()).count());
-        if dead == 0 {
-            return;
-        }
-        let mut out = Vec::with_capacity(dead);
-        self.list.with(|w| {
-            let mut at = 0;
-            // Order is nothing to a ring entry: every post fires them all.
-            while at < w.rings.len() && out.len() < out.capacity() {
-                if w.rings[at].live() {
-                    at += 1;
-                } else {
-                    out.push(w.rings.swap_remove(at));
-                }
-            }
-        });
-        drop(out);
     }
 
     /// Wake at most `limit` threads registered with `token`, in registration
@@ -364,7 +365,7 @@ fn gate_fence() {
 
 /// An object that ends with polls still registered answers them: dropping a
 /// watch fires every live ring entry as [`Fire::Gone`].
-impl<M, R: Ring, L: LeafLock<Waiters<M, R>>> Drop for Watch<M, R, L> {
+impl<M, R: Ring, L: CellLock<Waiters<M, R>>> Drop for Watch<M, R, L> {
     fn drop(&mut self) {
         let ended = self.list.with(|w| core::mem::take(&mut w.rings));
         for ring in &ended {
@@ -383,6 +384,42 @@ pub mod window {
     pub const HELD: &str = "watch-window: a post landed in the held window";
     /// One line per this many holds a post ended.
     pub const STEP: u64 = 64;
+}
+
+/// The `handler-post` actuator's line: the kernel writes it once, and the
+/// harness compares it whole against [`Verdict::GREEN`].
+///
+/// [`Verdict::GREEN`]: handler_post::Verdict::GREEN
+pub mod handler_post {
+    use core::fmt;
+
+    /// The line's first word, which the harness waits for.
+    pub const SAID: &str = "handler-post:";
+    /// Holds staged per arm.
+    pub const HOLDS: u32 = 4;
+
+    /// The holds a handler's post ended, per arm: its vector raised inside a
+    /// watch's list lock, and inside a ring's completions.
+    #[derive(Clone, Copy)]
+    pub struct Verdict {
+        pub in_a_list: u32,
+        pub in_a_ring: u32,
+    }
+
+    impl Verdict {
+        pub const GREEN: Self = Self { in_a_list: HOLDS, in_a_ring: HOLDS };
+    }
+
+    impl fmt::Display for Verdict {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "{SAID} of {HOLDS} holds per arm, a handler posted into {} inside a list lock \
+                 and {} inside a ring's completions",
+                self.in_a_list, self.in_a_ring,
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -415,7 +452,7 @@ mod tests {
     }
 
     struct StdLock<T>(Mutex<T>);
-    impl<T: Send> LeafLock<T> for StdLock<T> {
+    impl<T: Send> CellLock<T> for StdLock<T> {
         fn with<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
             f(&mut self.0.lock().unwrap())
         }
@@ -666,7 +703,7 @@ mod tests {
     }
 
     struct SharedLock(std::sync::Arc<Mutex<Waiters<Msg, Tattler>>>);
-    impl LeafLock<Waiters<Msg, Tattler>> for SharedLock {
+    impl CellLock<Waiters<Msg, Tattler>> for SharedLock {
         fn with<U>(&self, f: impl FnOnce(&mut Waiters<Msg, Tattler>) -> U) -> U {
             f(&mut self.0.lock().unwrap())
         }

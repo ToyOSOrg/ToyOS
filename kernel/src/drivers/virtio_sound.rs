@@ -109,7 +109,6 @@ pub fn isr_complete() {
     }
     isr_push_completion(mask, timestamp);
     super::AUDIO_WATCH.post_in_place();
-    // soundd, woken on this CPU, runs at the interrupt's exit, not at the next tick.
     crate::preempt::set_need_resched();
 }
 

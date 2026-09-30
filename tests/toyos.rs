@@ -1270,10 +1270,10 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
     ("blocking_read_window", Sched::Parallel),
-    // A claimed function's vector posts its watch from the handler: raised
-    // inside a post of that watch on a CPU holding preemption off, it posts
-    // once the outer post lets go and before any pass. One boot; the verdict
-    // is counts.
+    // A claimed function's vector posts its watch from the handler: raised on
+    // a CPU holding preemption off, inside a post of that watch or inside a
+    // completion into a ring polling it, it posts once that section lets go
+    // and before any pass. One boot; the verdict is counts.
     ("handler_post_without_a_pass", Sched::Parallel),
     // A sibling's munmap and mmap staged between a typed copy's translation
     // and its store (`copy-meets-a-remap`): the store never reaches the region
@@ -14882,10 +14882,7 @@ fn sysret_ss(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// `kernel/src/watch.rs`'s `handler_post::SAID`, and the counts every hold
-/// posted into gives it.
-const HANDLER_POST_SAID: &str = "handler-post:";
-const HANDLER_POST_POSTED: &str = "handler-post: 4 holds, 4 posted into by a handler, 0 lapsed";
+use toyos_sched::watch::handler_post::{Verdict as HandlerPost, SAID as HANDLER_POST_SAID};
 
 fn handler_post_said(line: &str) -> bool {
     line.contains(HANDLER_POST_SAID)
@@ -14896,7 +14893,7 @@ fn handler_post(log: &str) -> Result<(), String> {
     let Some(said) = log.lines().find(|line| handler_post_said(line)) else {
         return Err(format!("`handler-post` never said its verdict:\n{log}"));
     };
-    if !said.contains(HANDLER_POST_POSTED) {
+    if !said.contains(&HandlerPost::GREEN.to_string()) {
         return Err(format!(
             "a hold lapsed with no handler's post in it — the wake waited for a pass:\n{said}\n{log}"
         ));

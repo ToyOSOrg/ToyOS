@@ -4,39 +4,45 @@
 //!
 //! The allocator below counts every allocation and free this thread makes
 //! while it holds a list lock, and every one it makes inside a post in place.
+//! The list lock counts its sections, and can run a stage between two of them.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::{AcqRel, Acquire, Relaxed}};
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU32, Ordering::{AcqRel, Acquire, Relaxed}};
 use std::sync::{Arc, Mutex};
 
 use toyos_sched::cpu::{CpuHandle, CpuHandles};
 use toyos_sched::hw::{CpuId, Kicker};
 use toyos_sched::mailbox::{mailbox, PreemptGuard, SchedMsg};
 use toyos_sched::park::{prepare, Cancel, Commit, CurrentTask};
-use toyos_sched::sync::LeafLock;
+use toyos_sched::sync::CellLock;
 use toyos_sched::task::{TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason};
 use toyos_sched::watch::{Fire, Poster, Ring, Waiters, Watch};
 
 thread_local! {
     static HELD: Cell<bool> = const { Cell::new(false) };
     static POSTING: Cell<bool> = const { Cell::new(false) };
+    static UNDER_LOCK: Cell<usize> = const { Cell::new(0) };
+    static IN_POST: Cell<usize> = const { Cell::new(0) };
+    static SECTIONS: Cell<usize> = const { Cell::new(0) };
+    /// Sections left to start before [`BETWEEN`] runs, ahead of the last one.
+    static COUNTDOWN: Cell<usize> = const { Cell::new(0) };
+    static BETWEEN: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
 }
-
-static UNDER_LOCK: AtomicUsize = AtomicUsize::new(0);
-static IN_POST: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
 impl Counting {
     fn note(&self) {
         // `try_with`: a thread allocates while its locals are torn down.
-        if HELD.try_with(Cell::get).unwrap_or(false) {
-            UNDER_LOCK.fetch_add(1, Relaxed);
-        }
-        if POSTING.try_with(Cell::get).unwrap_or(false) {
-            IN_POST.fetch_add(1, Relaxed);
-        }
+        let count = |flag: &'static std::thread::LocalKey<Cell<bool>>,
+                     counter: &'static std::thread::LocalKey<Cell<usize>>| {
+            if flag.try_with(Cell::get).unwrap_or(false) {
+                let _ = counter.try_with(|n| n.set(n.get() + 1));
+            }
+        };
+        count(&HELD, &UNDER_LOCK);
+        count(&POSTING, &IN_POST);
     }
 }
 
@@ -67,14 +73,37 @@ static ALLOCATOR: Counting = Counting;
 /// The list lock, marking this thread as holding it.
 struct Watched<T>(Mutex<T>);
 
-impl<T: Send> LeafLock<T> for Watched<T> {
+impl<T: Send> CellLock<T> for Watched<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        // Before the lock is taken, so a stage lands between two sections.
+        let due = COUNTDOWN.get();
+        if due > 0 {
+            COUNTDOWN.set(due - 1);
+            if due == 1 {
+                let between = BETWEEN.take().expect("a countdown is staged with its stage");
+                between();
+            }
+        }
+        SECTIONS.set(SECTIONS.get() + 1);
         let mut guard = self.0.lock().unwrap();
         let was = HELD.replace(true);
         let out = f(&mut guard);
         HELD.set(was);
         out
     }
+}
+
+/// Run `between` with no list lock held, just before the `nth` section from
+/// here takes its lock.
+fn stage(nth: usize, between: impl FnOnce() + 'static) {
+    BETWEEN.set(Some(Box::new(between)));
+    COUNTDOWN.set(nth);
+}
+
+fn sections(f: impl FnOnce()) -> usize {
+    let before = SECTIONS.get();
+    f();
+    SECTIONS.get() - before
 }
 
 #[derive(Debug)]
@@ -118,11 +147,21 @@ impl Ring for Entry {
     }
 }
 
+type TestWatch = Watch<Msg, Entry, Watched<Waiters<Msg, Entry>>>;
+
 const C0: CpuId = CpuId(0);
 
+fn watch() -> TestWatch {
+    Watch::new(Watched(Mutex::new(Waiters::new())))
+}
+
+fn task(key: u64) -> Arc<TaskShared<Msg>> {
+    Arc::new(TaskShared::new(TaskKey(key), TaskState::Running(C0)))
+}
+
 fn clean(phase: &str) {
-    assert_eq!(UNDER_LOCK.load(Relaxed), 0, "{phase} allocated or freed under the list lock");
-    assert_eq!(IN_POST.load(Relaxed), 0, "{phase}: a post in place allocated or freed");
+    assert_eq!(UNDER_LOCK.get(), 0, "{phase} allocated or freed under the list lock");
+    assert_eq!(IN_POST.get(), 0, "{phase}: a post in place allocated or freed");
 }
 
 #[test]
@@ -130,12 +169,10 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_noth
     let (tx, mut rx) = mailbox::<Msg>();
     let cpus = CpuHandles::new(vec![CpuHandle::new(C0, tx)]);
     let env = Poster { cpus: &cpus, kicker: &NoKick, preempt: &NoPreempt };
-    let w: Watch<Msg, Entry, Watched<Waiters<Msg, Entry>>> =
-        Watch::new(Watched(Mutex::new(Waiters::new())));
+    let w = watch();
 
     // Nine of each grows both lists from nothing three times over.
-    let tasks: Vec<_> =
-        (0..9).map(|k| Arc::new(TaskShared::new(TaskKey(k), TaskState::Running(C0)))).collect();
+    let tasks: Vec<_> = (0..9).map(task).collect();
     for (token, t) in tasks.iter().enumerate() {
         w.register(t, token as u64);
         let ticket = prepare(&CurrentTask::new(t, C0), Cancel::Answers, WaitClass::Other)
@@ -154,21 +191,29 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_noth
     clean("posting in place");
     assert!(polls.iter().all(|p| p.0.load(Acquire) == 1), "a post in place fired every entry");
 
-    // Every entry is dead now, and a withdrawn one joins them: these two
-    // registrations sweep all ten.
+    // Every entry is dead now, and a withdrawn one joins them: these three
+    // registrations sweep all ten, more than one section takes out.
     let withdrawn = Arc::new(Poll::default());
-    w.add_ring(Entry(withdrawn.clone()));
+    let first = Entry(withdrawn.clone());
+    assert_eq!(sections(|| w.add_ring(first)), 1, "a re-arm after a post in place took the lock twice");
     withdrawn.0.store(2, Relaxed);
-    w.add_ring(Entry(Arc::new(Poll::default())));
+    let fresh: Vec<_> = (0..2).map(|_| Arc::new(Poll::default())).collect();
+    for poll in &fresh {
+        w.add_ring(Entry(poll.clone()));
+    }
     clean("sweeping");
     assert!(polls.iter().all(|p| Arc::strong_count(p) == 1), "the sweep let go of every fired entry");
+    assert_eq!(Arc::strong_count(&withdrawn), 1, "the sweep let go of the withdrawn entry");
 
-    // A thread's post frees what it fired, with the lock let go.
+    // A thread's post frees what it fired, with the lock let go, and leaves
+    // the list's buffer to the next registration.
     let later = Arc::new(Poll::default());
     w.add_ring(Entry(later.clone()));
     w.post(WakeCause::new(WakeReason::Woken), &env);
     clean("posting");
     assert_eq!(Arc::strong_count(&later), 1, "the post let go of the entry it fired");
+    let rearmed = Entry(Arc::new(Poll::default()));
+    assert_eq!(sections(|| w.add_ring(rearmed)), 1, "a re-arm after a post regrew the list");
 
     assert_eq!(w.post_n(3, 1, WakeCause::new(WakeReason::Woken), &env), 0, "every waiter is claimed");
     assert_eq!(w.revoke(|token| token % 2 == 0, WakeCause::new(WakeReason::Woken), &env), 5);
@@ -181,4 +226,31 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_noth
     while rx.pop(&NoPreempt).is_some() {}
     drop(w);
     clean("dropping");
+}
+
+/// A registration that finds the list full sizes a bigger buffer with the lock
+/// let go. Registrations that fill the list past that buffer before it comes
+/// back leave it too small to take the list, and moving the list into it then
+/// would grow it under the lock.
+#[test]
+fn a_list_outgrowing_the_buffer_sized_for_it_is_not_moved_into_it() {
+    let w = Arc::new(watch());
+    let tasks: Vec<_> = (0..17).map(task).collect();
+    // Four fill the list's first buffer, so the fifth grows it.
+    for t in &tasks[..4] {
+        w.register(t, 0);
+    }
+    // Twelve more fill it to sixteen, the buffer the fifth sized holds eight.
+    let (others, rest) = (w.clone(), tasks[5..].to_vec());
+    stage(2, move || {
+        for t in &rest {
+            others.register(t, 0);
+        }
+    });
+    w.register(&tasks[4], 0);
+    clean("growing past a buffer sized before");
+    assert_eq!(w.threads(), 17, "a registration was lost");
+    for t in &tasks {
+        w.unregister(t);
+    }
 }

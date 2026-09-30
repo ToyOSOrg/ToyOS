@@ -16,7 +16,8 @@ use crate::time::Deadline;
 use crate::pipe::{self, PipeId};
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
-use crate::watch::Watch;
+use crate::inbox::PollEntry;
+use crate::watch::{IrqWatch, Watch};
 use crate::{device as device_registry, keyboard, mouse};
 
 use super::device::DeviceClaim;
@@ -231,14 +232,24 @@ pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
 pub enum WatchRef {
     Static(&'static Watch),
     Shared(Arc<Watch>),
+    /// A device's, which its interrupt handler posts.
+    Irq(&'static IrqWatch),
 }
 
-impl core::ops::Deref for WatchRef {
-    type Target = Watch;
-    fn deref(&self) -> &Watch {
+impl WatchRef {
+    pub(crate) fn add_poll(&self, entry: PollEntry) {
         match self {
-            Self::Static(watch) => watch,
-            Self::Shared(watch) => watch,
+            Self::Static(watch) => watch.add_poll(entry),
+            Self::Shared(watch) => watch.add_poll(entry),
+            Self::Irq(watch) => watch.add_poll(entry),
+        }
+    }
+
+    pub fn cancel_polls(&self) {
+        match self {
+            Self::Static(watch) => watch.cancel_polls(),
+            Self::Shared(watch) => watch.cancel_polls(),
+            Self::Irq(watch) => watch.cancel_polls(),
         }
     }
 }
@@ -255,10 +266,10 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
             device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
             device_registry::DeviceType::Mouse => Some(WatchRef::Static(&mouse::WATCH)),
             device_registry::DeviceType::PciFunction => {
-                d.pci_slot().map(|slot| WatchRef::Static(crate::pcidev::watch(slot)))
+                d.pci_slot().map(|slot| WatchRef::Irq(crate::pcidev::watch(slot)))
             }
             device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
-                Some(WatchRef::Static(&crate::drivers::AUDIO_WATCH))
+                Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH))
             }
             device_registry::DeviceType::Framebuffer => None,
             // A partition answers its description and has nothing to wait for.
