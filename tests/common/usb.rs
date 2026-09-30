@@ -818,7 +818,8 @@ fn optional_flush_keeps_the_log(
     // the sink is still running, and the only place that is visible is the
     // device while the machine is up. A stick with no write cache that cost
     // the machine its log is a hang here.
-    let give_up = std::time::Instant::now() + qemu.budget(Duration::from_secs(99));
+    let mut ceiling = qemu::Ceiling::new(qemu.budget(Duration::from_secs(99)));
+    let mut during = String::new();
     loop {
         let on_device = String::from_utf8_lossy(
             &super::volumes::newest_log(&image_path, start, len)?.1,
@@ -827,20 +828,19 @@ fn optional_flush_keeps_the_log(
         if on_device.contains("Boot: complete") {
             break;
         }
-        if std::time::Instant::now() >= give_up {
+        if let Some(why) = ceiling.verdict(&during, std::time::Instant::now()) {
             return Err(format!(
-                "{} waiting for `Boot: complete` in the log on a stick with no write cache: {} \
-                 bytes there",
-                qemu::STALLED,
+                "waiting for `Boot: complete` in the log on a stick with no write cache, {} \
+                 bytes there: {why}\n{during}",
                 on_device.len()
             ));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        during.push_str(&qemu.drain_serial(Duration::from_millis(50)));
     }
 
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
-    let log = format!("{boot}{}", qemu.drain_serial(Duration::from_secs(20)));
+    let log = format!("{boot}{during}{}", qemu.drain_serial(Duration::from_secs(20)));
     drop(qemu);
     for bad in ["PANIC:", "panicked at"] {
         if log.contains(bad) {

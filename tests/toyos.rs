@@ -7930,9 +7930,9 @@ fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop", "test_rs_winit_loop")?;
     let log = &mut log;
-    let give_up = Instant::now() + qemu.budget(Duration::from_secs(35));
+    let mut ceiling = qemu::Ceiling::new(qemu.budget(Duration::from_secs(35)));
     let mut closed = false;
-    while Instant::now() < give_up {
+    loop {
         let said = &log[launched..];
         if said.contains("WINIT-LOOP-OK") {
             // Up to the kept window's close: a window the app still held is
@@ -7975,9 +7975,11 @@ fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
             }
             continue;
         }
+        if let Some(why) = ceiling.verdict(said, Instant::now()) {
+            return Err(format!("test_rs_winit_loop never finished: {why}\n{said}"));
+        }
         log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
     }
-    Err(format!("test_rs_winit_loop never finished:\n{}", &log[launched..]))
 }
 
 /// Redraw pacing: an application that asks for its next frame from inside
@@ -7992,8 +7994,8 @@ fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_pace", "test_rs_winit_pace")?;
     let log = &mut log;
     let drew = format!("WINIT-PACE drew {PACE_FRAMES} frames");
-    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(53));
-    while live.working(log) && !log[launched..].contains(&drew) {
+    let mut ceiling = qemu::Ceiling::new(qemu.budget(Duration::from_secs(53)));
+    while !log[launched..].contains(&drew) {
         let said = &log[launched..];
         if said.contains("WINIT-PACE-FAIL") || said.contains("panicked") {
             return Err(format!("the animation failed:\n{said}"));
@@ -8001,10 +8003,14 @@ fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         if said.contains("exit: test_rs_winit_pace pid=") {
             return Err(format!("test_rs_winit_pace left before it finished drawing:\n{said}"));
         }
+        if let Some(why) = ceiling.verdict(said, Instant::now()) {
+            return Err(format!("the animation never said it was done: {why}\n{said}"));
+        }
         log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
     }
-    let (client, _) = opened_window(&log[launched..])
-        .ok_or_else(|| format!("the animation never said it was done:\n{}", &log[launched..]))?;
+    let (client, _) = opened_window(&log[launched..]).ok_or_else(|| {
+        format!("the compositor opened no window for the animation:\n{}", &log[launched..])
+    })?;
     let closing = log.len();
     if !close_focused_window(&mut qemu, log, closing) {
         return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));

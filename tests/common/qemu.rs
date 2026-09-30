@@ -557,21 +557,63 @@ pub fn ceiling_verdict(
             ceiling.as_secs()
         ));
     }
-    // The backstop, for a guest that is stuck *and* chatty and so never trips
-    // the silence guard; never before a guest silent since its ceiling has been
-    // silent for [`GUEST_QUIET`].
-    let backstop = (ceiling * 2).max(ceiling + GUEST_QUIET);
-    if elapsed > backstop {
+    let far = backstop(ceiling);
+    if elapsed > far {
         if let Some(line) = dying {
             return Some(kernel_died_here(line));
         }
         return Some(format!(
             "{TIMED_OUT} {}s, with the guest still talking {quiet:.0?} ago ({lines} \
              console line(s) while it ran) — it was working and did not finish",
-            backstop.as_secs()
+            far.as_secs()
         ));
     }
     None
+}
+
+/// Where [`ceiling_verdict`] ends a wait on a guest that is stuck *and* chatty
+/// and so never trips the silence guard; never before a guest silent since
+/// `ceiling` has been silent for [`GUEST_QUIET`].
+pub fn backstop(ceiling: Duration) -> Duration {
+    (ceiling * 2).max(ceiling + GUEST_QUIET)
+}
+
+/// [`ceiling_verdict`] for a wait that keeps its own capture, which it only
+/// ever appends to: the time since the capture last grew is the guest's
+/// silence, and the first kernel death in it is the one the verdict names.
+pub struct Ceiling {
+    ceiling: Duration,
+    start: Instant,
+    grew: Instant,
+    seen: usize,
+    dying: Option<String>,
+}
+
+impl Ceiling {
+    /// `ceiling` already paid out ([`QemuInstance::budget`]), running from now.
+    pub fn new(ceiling: Duration) -> Self {
+        let start = Instant::now();
+        Self { ceiling, start, grew: start, seen: 0, dying: None }
+    }
+
+    /// What ended the wait at `now`, if it is over, carrying the capture.
+    pub fn verdict(&mut self, capture: &str, now: Instant) -> Option<WaitVerdict> {
+        if capture.len() != self.seen {
+            if self.dying.is_none() {
+                self.dying = super::serial::kernel_death(&capture[self.seen..]).map(str::to_string);
+            }
+            self.seen = capture.len();
+            self.grew = now;
+        }
+        let sentence = ceiling_verdict(
+            self.dying.as_deref(),
+            now.saturating_duration_since(self.start),
+            self.ceiling,
+            now.saturating_duration_since(self.grew),
+            capture.lines().count(),
+        )?;
+        Some(WaitVerdict::new(sentence, &[capture]))
+    }
 }
 
 /// Collect console output until `done` reads true of the whole capture, or the
@@ -4701,7 +4743,7 @@ fn publish_line(
 
 /// A boot's ceiling: [`budget_smp`]'s rule over the tests that are one boot and
 /// one trivial command.
-const BOOT_CEILING: Duration = Duration::from_secs(30);
+pub const BOOT_CEILING: Duration = Duration::from_secs(30);
 
 /// Returns every line seen on the way to the marker — see [`QemuInstance::boot_log`].
 fn wait_for_ready(

@@ -558,8 +558,10 @@ pub fn kernel_log_file(
     // was put there by `/system/bin/logd` while the machine was running.
     //
     // Polled until logd has written through `Boot: complete`: when logd writes
-    // is its own business, and one that never does is a hang.
-    let give_up = std::time::Instant::now() + qemu.budget(Duration::from_secs(54));
+    // is its own business, and one that never does is a hang. The console read
+    // between polls is what tells the ceiling whether the guest still talks.
+    let mut ceiling = qemu::Ceiling::new(qemu.budget(Duration::from_secs(54)));
+    let mut during = String::new();
     let mut running;
     let mut running_text;
     let mut running_name;
@@ -569,16 +571,15 @@ pub fn kernel_log_file(
         if running_text.contains("Boot: complete") {
             break;
         }
-        if std::time::Instant::now() >= give_up {
+        if let Some(why) = ceiling.verdict(&during, std::time::Instant::now()) {
             return Err(format!(
-                "{} waiting for logd to write `Boot: complete` to the device: {} bytes there, \
-                 starting {:?}",
-                qemu::STALLED,
+                "waiting for logd to write `Boot: complete` to the device, {} bytes there and \
+                 starting {:?}: {why}\n{during}",
                 running.len(),
                 running_text.chars().take(120).collect::<String>()
             ));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        during.push_str(&qemu.drain_serial(Duration::from_millis(50)));
     }
     if !running_text.contains(&nonce) {
         return Err(format!(
@@ -599,7 +600,7 @@ pub fn kernel_log_file(
 
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
-    let tail = qemu.drain_serial(Duration::from_secs(20));
+    let tail = format!("{during}{}", qemu.drain_serial(Duration::from_secs(20)));
     drop(qemu);
     for bad in ["PANIC:", "panicked at"] {
         if tail.contains(bad) {

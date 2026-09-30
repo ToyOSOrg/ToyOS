@@ -26,6 +26,7 @@ mod checks {
     fn serial_vocabulary() -> Result<(), String> {
         serial_checks::self_check()?;
         qemu_checks::ceiling_self_check()?;
+        qemu_checks::capture_ceiling_self_check()?;
         qemu_checks::host_scale_self_check()?;
         one_vocabulary()
     }

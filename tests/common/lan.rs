@@ -399,18 +399,20 @@ pub fn lan_no_lease(
     let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
     let mut console = guest.boot_log().to_string();
     // Drained until netd's `ready` after its give-up, and not awaited: the
-    // guest says nothing at all until netd gives up on its own clock, which
-    // every wait in this harness reads as a machine that stopped.
+    // guest says nothing at all until netd gives up on its own clock, and only
+    // the ceiling lets a guest be silent inside its budget.
     let gave_up = format!("{NO_LEASE}{HOSTNAME} in ");
-    let given_up = std::cell::Cell::new(false);
-    let served = std::cell::Cell::new(false);
-    console.push_str(&guest.drain_until(std::time::Duration::from_secs(99), |line| {
-        given_up.set(given_up.get() || line.contains(&gave_up));
-        served.set(given_up.get() && line.contains(READY));
-        served.get()
-    }));
-    if !served.get() {
-        return Err(format!("{} waiting for {gave_up:?} and then {READY:?}\n{console}", qemu::STALLED));
+    let from = console.len();
+    let mut ceiling = qemu::Ceiling::new(guest.budget(std::time::Duration::from_secs(99)));
+    loop {
+        let said = &console[from..];
+        if said.find(&gave_up).is_some_and(|at| said[at..].contains(READY)) {
+            break;
+        }
+        if let Some(why) = ceiling.verdict(said, std::time::Instant::now()) {
+            return Err(format!("waiting for {gave_up:?} and then {READY:?}: {why}\n{console}"));
+        }
+        console.push_str(&guest.drain_serial(std::time::Duration::from_millis(200)));
     }
     let log = serial::Serial::named("the lan boot with no server", console.as_str());
     if let Ok(lease) = lease_in(log.text()) {
