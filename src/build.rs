@@ -1069,8 +1069,6 @@ impl Boot {
 
     /// The config declares no `devices`, so nothing started there claims the
     /// framebuffer and the kernel's last boot checkpoint stays on screen.
-    /// `screen_diag_boot` boots this same config, so the tested image and the
-    /// flashed image are the same image.
     pub fn diag(root: &Path) -> Self {
         Self::mode(root, &root.join("diag"))
     }

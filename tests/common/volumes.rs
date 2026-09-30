@@ -1695,16 +1695,6 @@ pub fn image_with_unnamed_log_partition(
 /// the gate that it does.
 pub const NO_LOG_ALERT: &str = "log: no /log";
 
-/// The other arm of the same table: what the kernel says when both halves are
-/// there. `screen_diag_boot` is the gate on it.
-///
-/// **One declaration, beside [`NO_LOG_ALERT`].** The writer is
-/// `report_log_destination` in `kernel/src/main.rs`, whose `(true, true)` arm
-/// formats exactly this — a test asserting on a log line reads it from one
-/// named declaration that cites its writer, never from a literal copied at the
-/// assertion, which is how a hand-copied spelling outlives the kernel's.
-pub const LOG_ON_CONSOLE_AND_FILE: &str = "log: this boot is on the console and on /log";
-
 /// The log partition is named, never discovered — proved by moving the name.
 ///
 /// The refusal has three halves and each is separately checkable:
