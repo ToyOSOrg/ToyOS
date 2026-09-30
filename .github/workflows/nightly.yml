@@ -62,7 +62,7 @@ jobs:
           fetch-depth: 0
 
       # CMake and Ninja are what bootstrap builds LLVM and clang with, pinned to
-      # the versions Ubuntu 24.04 released (src/main.rs's `ALSO_USED`).
+      # the versions Ubuntu 24.04 released.
       - name: disk, QEMU, CMake and Ninja
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
