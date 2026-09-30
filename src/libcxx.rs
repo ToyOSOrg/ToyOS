@@ -1,7 +1,7 @@
 //! The C++ runtime of a C sysroot (`clang::CSysroot`): LLVM's libc++,
-//! libc++abi and libunwind, built by CMake and Ninja from the runtimes' sources
-//! the LLVM carries (`src/llvm.rs`), with that LLVM's clang, against the C
-//! library the sysroot already holds (`src/libc.rs`).
+//! libc++abi and libunwind, built by CMake and n2 ([`ninja`]) from the
+//! runtimes' sources the LLVM carries (`src/llvm.rs`), with that LLVM's clang,
+//! against the C library the sysroot already holds (`src/libc.rs`).
 //!
 //! **One archive, `lib/libc++.a`, is the whole runtime**: libc++abi is linked
 //! into it and libunwind into that, so the `-lc++` the ToyOS driver names for a
@@ -9,7 +9,7 @@
 //! driver looks. [`OPTIONS`] is the configuration, each choice with its reason.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
@@ -55,9 +55,30 @@ pub(crate) const OPTIONS: [(&str, &str); 20] = [
     ("LIBCXX_INCLUDE_TESTS", "OFF"),
 ];
 
+/// The crate that builds n2.
+const N2: &str = "toyos-n2";
+
+/// Build n2 from the commit and lock `toyos-n2/` pins, and return it: a binary
+/// named `ninja`, the name under which it speaks the Ninja CMake asks for.
+pub fn ninja(root: &Path) -> PathBuf {
+    let at = root.join(N2);
+    let status = Command::new("cargo")
+        .args(["build", "--release", "--locked"])
+        .current_dir(&at)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
+        .env_remove("RUSTFLAGS")
+        .status()
+        .unwrap_or_else(|e| panic!("cargo failed to launch in {}: {e}", at.display()));
+    assert!(status.success(), "{N2} did not build");
+    at.join("target/release/ninja")
+}
+
 /// Build `arch`'s C++ runtime from the runtimes' `sources` into `c`, which holds
-/// the C library already, in `scratch`, which it removes when done.
-pub fn build(c: &CSysroot, arch: Arch, sources: &Path, scratch: &Path) {
+/// the C library already, under `ninja`, in `scratch`, which it removes when
+/// done.
+pub fn build(c: &CSysroot, arch: Arch, sources: &Path, ninja: &Path, scratch: &Path) {
+    eprintln!("Building the C++ runtime for {} under {}", c.target, ninja.display());
     if scratch.exists() {
         fs::remove_dir_all(scratch).unwrap_or_else(|e| panic!("remove {}: {e}", scratch.display()));
     }
@@ -78,12 +99,13 @@ pub fn build(c: &CSysroot, arch: Arch, sources: &Path, scratch: &Path) {
     definitions.push(("CMAKE_RANLIB".into(), path(&ranlib)));
     definitions.push(("CMAKE_SYSROOT".into(), path(&c.dir)));
     definitions.push(("CMAKE_INSTALL_PREFIX".into(), path(&c.dir)));
+    definitions.push(("CMAKE_MAKE_PROGRAM".into(), path(ninja)));
 
     let mut configure = Command::new("cmake");
     configure.args(["-G", "Ninja", "-Wno-dev", "-S"]).arg(sources.join("runtimes")).arg("-B").arg(scratch);
     configure.args(definitions.iter().map(|(name, value)| format!("-D{name}={value}")));
     run(configure, "configuration", c.target);
-    let mut install = Command::new("ninja");
+    let mut install = Command::new(ninja);
     install.arg("-C").arg(scratch).arg("install");
     run(install, "build", c.target);
 

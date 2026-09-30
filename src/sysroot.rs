@@ -66,7 +66,7 @@ const SOURCES: &str = "SOURCES";
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
                       a C sysroot of libc's staticlib and headers per target, and its C++ runtime \
-                      built from the runtimes' sources of the compiler's LLVM; 6";
+                      built under n2 from the runtimes' sources of the compiler's LLVM; 7";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -350,9 +350,11 @@ fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &s
         }
         let _ = fs::remove_dir_all(&libc_target);
         let llvm = crate::llvm::held(root, rust_dir, fork);
+        let ninja = crate::libcxx::ninja(root);
         for arch in Arch::ALL {
             let scratch = dir.with_extension(format!("libcxx-{}", arch.name()));
-            crate::libcxx::build(&crate::clang::CSysroot::of(partial, arch), arch, &llvm.dir.join("src"), &scratch);
+            let c = crate::clang::CSysroot::of(partial, arch);
+            crate::libcxx::build(&c, arch, &llvm.dir.join("src"), &ninja, &scratch);
         }
 
         // The sources the key named are the ones built, or this is not that key's.

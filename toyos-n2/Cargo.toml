@@ -1,0 +1,20 @@
+[package]
+name = "toyos-n2"
+description = "n2, the Rust Ninja, at a pinned commit and under the name `ninja`: what the C++ runtime's CMake build runs under."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# n2 reads the name it was run by, and as `ninja` it speaks the Ninja CMake asks
+# for.
+[[bin]]
+name = "ninja"
+path = "src/main.rs"
+
+[dependencies]
+# Without its default jemalloc, which is C.
+n2 = { git = "https://github.com/evmar/n2", rev = "b1fead52ccda0c497d816696f23f4099c3e8ec1f", default-features = false }
+
+[lints.rust]
+warnings = "deny"

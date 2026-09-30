@@ -29,8 +29,8 @@ const REQUIRED: &[Tool] = &[
     },
     Tool {
         any: &["ninja"],
-        why: "rustc's bootstrap builds LLVM and clang with it, and every sysroot build the \
-              C++ runtime; `brew install ninja` on macOS",
+        why: "rustc's bootstrap builds LLVM and clang with it, and refuses every sysroot's \
+              std build, which runs none, without it; `brew install ninja` on macOS",
     },
     Tool {
         any: &["python3", "python"],
