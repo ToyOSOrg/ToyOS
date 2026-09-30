@@ -103,7 +103,7 @@ It serves each case: Ctrl+C ends what the shell started for the line, and what
 those started; a closed window ends the terminal, its shell and everything
 under them; a dropped SSH session ends that session's process and its tree; a
 test past its deadline is killed with everything it started, and the next test
-starts once all of it is gone; Ninja's `kill(-pgid)` kills that command's
+starts once all of it is gone; Ninja's `kill(-pgid)` ends that command's
 process and its tree, and nothing Ninja started outlives Ninja.
 
 What changes, plainly:
