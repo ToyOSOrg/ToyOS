@@ -27,7 +27,8 @@ pub(crate) const SOURCES: [&str; 7] = ["runtimes", "cmake", "llvm/cmake", "libun
 pub(crate) const OPTIONS: [(&str, &str); 20] = [
     ("CMAKE_BUILD_TYPE", "Release"),
     // CMake has no platform module for ToyOS, and `UNIX` is how it says what
-    // the runtimes' build needs to know of one: an ELF system with POSIX threads.
+    // the runtimes' build needs to know of one: an ELF system with POSIX threads
+    // (`issues/build/the-cxx-runtime-names-toyos-to-cmake-as-unix.md`).
     ("CMAKE_SYSTEM_NAME", "ToyOS"),
     ("UNIX", "ON"),
     ("LLVM_ENABLE_RUNTIMES", "libunwind;libcxxabi;libcxx"),

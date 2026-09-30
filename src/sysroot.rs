@@ -349,7 +349,7 @@ fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &s
             crate::libc::build_c(root, partial, &libc_target, arch);
         }
         let _ = fs::remove_dir_all(&libc_target);
-        let llvm = crate::llvm::resolve(root, rust_dir, fork);
+        let llvm = crate::llvm::held(root, rust_dir, fork);
         for arch in Arch::ALL {
             let scratch = dir.with_extension(format!("libcxx-{}", arch.name()));
             crate::libcxx::build(&crate::clang::CSysroot::of(partial, arch), arch, &llvm.dir.join("src"), &scratch);
