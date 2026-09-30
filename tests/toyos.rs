@@ -307,10 +307,6 @@ const RUST_SKIP: &[&str] = &[
     // ever answers it. `swiss_german_layout`, `locale_detect` and
     // `locale_detect_unrecognized` drive it.
     "locale_gate",
-    // A victim, not a test: it spins on `SYS_GETPID` so that another CPU's NMIs
-    // have somewhere to land, and on its own it asserts nothing and costs ten
-    // seconds. `syscall_window_nmi_controls` runs it on the kernel that storms it.
-    "nmi_window_spin",
     // A victim, not a test: the load `dump-in-blocking-pass` files Ctrl+Alt+D
     // inside, and on its own it asserts nothing. `dump_left_pending_is_owed` runs
     // it on the kernel that stages it.
@@ -839,15 +835,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // The exception entry's own seal, off the page's bytes on an ordinary boot.
     ("blackbox_fault_sealed", Sched::Parallel),
     ("double_fault_stack", Sched::Parallel),
-    // Two controls on the syscall window's NMI storm: the kernel with vector
-    // 2's IST index taken off, which must double fault at the entry on the NMI
-    // aimed at the CPU the storm holds inside it, with `cr2 = rsp - 8` at the
-    // held `rsp`, and
-    // the one nested NMI an early `iretq` can stage, which must take the loud
-    // path. Both boots end in a halted machine that has to be drained past its
-    // own report, which is where the price is. Nothing in either verdict is a
-    // duration.
-    ("syscall_window_nmi_controls", Sched::Parallel),
+    ("nested_nmi_is_loud", Sched::Parallel),
     // Its own boot, its own feature, and it drives the guest only through
     // stdin — nothing it touches is shared with another test.
     ("idle_stack_guard", Sched::Parallel),
@@ -1253,7 +1241,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("lock_across_switch_halts", &["test_rs_test_panic_child"]),
     ("heap_over_ceiling_halts", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
-    ("syscall_window_nmi_controls", &["test_rs_nmi_window_spin"]),
     ("partition_claim", &["test_rs_partition_claimant"]),
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
@@ -8632,9 +8619,7 @@ fn run_machine_test(
         }
         "blockd_serves_nothing" => common::blockd::blockd_serves_nothing(test_config, c_bins, rust_bins),
         "double_fault_stack" => faults::double_fault_stack(test_config, c_bins, rust_bins),
-        "syscall_window_nmi_controls" => {
-            faults::syscall_window_nmi_controls(test_config, c_bins, rust_bins)
-        }
+        "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config, c_bins, rust_bins),
         "idle_stack_guard" => faults::idle_stack_guard(test_config, c_bins, rust_bins),
         "dump_left_pending_is_owed" => {
             faults::dump_left_pending_is_owed(test_config, c_bins, rust_bins)

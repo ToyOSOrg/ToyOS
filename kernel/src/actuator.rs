@@ -181,10 +181,7 @@ actuators! {
     /// decision; on hardware the counter does it and nothing is sent.
     hard_lockup_probe = "hard-lockup-probe";
 
-    /// Storm the CPU spinning on `syscall` from Ring 3 with NMIs.
-    syscall_window_nmi = "syscall-window-nmi";
-
-    /// Return from the NMI handler via `iretq` with a second NMI already pending.
+    /// Send one NMI from the idle loop, and return from its handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
 
     /// Report an empty root hub for the xHCI driver's `SLOW_CONNECT_NS` after a controller powers its ports.
@@ -391,7 +388,6 @@ const IMPLIES: &[(&str, &[&str])] = &[
     ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
-    ("syscall-window-nmi", &["diag-tick"]),
     // The staged CPU has to still be deaf when its bound passes, and this boot
     // would otherwise have handed the machine back at the end of its job list —
     // so the control that ends a machine no other bound ends is staged over the

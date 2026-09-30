@@ -25,8 +25,6 @@ pub mod i8042;
 pub mod idt;
 pub mod ioapic;
 pub mod mtrr;
-#[cfg(feature = "boot-actuators")]
-pub mod nmi_gate;
 pub mod paging;
 pub mod pat;
 pub mod percpu;

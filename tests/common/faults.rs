@@ -472,70 +472,36 @@ pub fn diskless_boot(
     Ok(())
 }
 
-/// How long the guest spins. The storm arms about 190 ms after the spinner
-/// starts — a million syscalls at its measured rate — and this is what covers a
-/// slow arming plus the storm itself on a shard with company.
-const SPIN_SECS: u32 = 10;
+/// The line `nested_nmi` writes to the UART, and this boot's ready marker: the
+/// machine halts on it.
+const NESTED: &str = "NESTED NMI";
 
-/// The negative control on the NMI storm `syscall-window-nmi` arms: an NMI
-/// handler that returns early through `iretq` un-masks NMIs while still standing
-/// on IST2, which is the one way a second NMI can enter on that stack. The check
-/// has to fire and say so.
-pub fn syscall_window_nmi_controls(
+/// An NMI handler that returns early through `iretq` un-masks NMIs while still
+/// standing on IST2, which is the one way a second NMI can enter on that stack.
+/// The check has to fire and say so.
+pub fn nested_nmi_is_loud(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let nested = storm(
+    let qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
         rust_bins,
-        &["syscall-window-nmi", "nmi-nested"],
-        SPIN_SECS,
-        |l| l.contains("NESTED NMI"),
-    )?;
-    let Some(loud) = nested.lines().find(|l| l.contains("NESTED NMI")) else {
-        return Err(format!(
-            "a second NMI entered on IST2 and the machine said nothing: the outer handler's \
-             frame was overwritten silently, which is the failure this check exists for\n{nested}"
-        ));
-    };
-    eprintln!("  [nmi-window] nested: {}", loud.trim());
+        BootOptions {
+            kernel_params: &["nmi-nested"],
+            // `double_fault_stack`'s profile and for its reason: the nested-NMI
+            // report is a raw write — that handler may not reach the log ring
+            // at all (`arch::idt::nmi`) — so on any other profile it lands on a
+            // UART nothing here is reading.
+            profile: qemu::Profile::Metal,
+            ready_marker: NESTED,
+            ..Default::default()
+        },
+    );
+    let loud = Serial::boot(&qemu).must_say(NESTED)?.to_string();
+    eprintln!("  [nmi] nested: {}", loud.trim());
     Ok(())
-}
-
-/// One storm boot: the spinner in Ring 3, the kernel's NMIs at it, drained until
-/// `done` or the ceiling.
-///
-/// The ceiling is a ceiling and not the run — every arm here ends either with
-/// the kernel's report or with a halted machine, and a halted machine neither
-/// exits QEMU nor disconnects the drain.
-fn storm(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    params: &'static [&'static str],
-    secs: u32,
-    done: impl Fn(&str) -> bool,
-) -> Result<String, String> {
-    let options = BootOptions {
-        kernel_params: params,
-        // `double_fault_stack`'s profile and for its reason: on Metal the 16550
-        // *is* the console, so `serial::panic_raw`'s bytes and the ordinary log
-        // stream arrive on one channel and one reader sees both. The nested-NMI
-        // report is a raw write — that handler may not reach the log ring at all
-        // (`arch::idt::nmi`) — so on any other profile it lands on a UART
-        // nothing here is reading.
-        profile: qemu::Profile::Metal,
-        // Four, so that the scheduler has somewhere to put the spinner that is
-        // not the CPU whose idle loop does the storming.
-        smp: 4,
-        ..Default::default()
-    };
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-    writeln!(qemu.stdin_mut(), "run test_rs_nmi_window_spin {secs}").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    Ok(qemu.drain_until(Duration::from_secs(u64::from(secs) + 20), |line| done(line)))
 }
 
 /// `[ist1] used N of M bytes, ...`

@@ -88,8 +88,6 @@ pub(super) extern "sysv64" fn nmi_entry() {
 
 extern "sysv64" fn note(rip: u64, rsp: u64, rflags: u64) {
     crate::arch::percpu::irq_took!(Nmi);
-    #[cfg(feature = "boot-actuators")]
-    crate::arch::nmi_gate::observe();
     crate::sched::dump::note_nmi(rip);
     // After the probe's store and before the nested-NMI staging: a hard lockup
     // ends the machine from here, so the sibling asking where this CPU is still
@@ -97,7 +95,44 @@ extern "sysv64" fn note(rip: u64, rsp: u64, rflags: u64) {
     // sealing a record.
     crate::hardlockup::sample(rip, rsp, rflags);
     #[cfg(feature = "boot-actuators")]
-    crate::arch::nmi_gate::stage_nested_if_armed();
+    stage_nested_if_armed();
+}
+
+/// Stages one nested NMI entry (an early `iretq` on IST2) if `nmi_nested` is armed; one shot per boot.
+#[cfg(feature = "boot-actuators")]
+fn stage_nested_if_armed() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::arch::{apic, percpu};
+
+    if !crate::actuator::nmi_nested() {
+        return;
+    }
+    static STAGED: AtomicBool = AtomicBool::new(false);
+    if STAGED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    apic::send_nmi(percpu::cpu_id());
+    // No nomem/nostack: the block pushes five words and the NMI it admits may touch any memory.
+    // SAFETY: the frame is this CPU's own ss/rsp/rflags/cs with rip = the label below, so `iretq` resumes here with control flow and the stack unchanged.
+    unsafe {
+        core::arch::asm!(
+            "mov {tmp}, rsp",
+            "xor {seg:e}, {seg:e}",
+            "mov {seg:x}, ss",
+            "push {seg}",
+            "push {tmp}",
+            "pushfq",
+            "mov {seg:x}, cs",
+            "push {seg}",
+            "lea {tmp}, [rip + 2f]",
+            "push {tmp}",
+            "iretq",
+            "2:",
+            tmp = out(reg) _,
+            seg = out(reg) _,
+        );
+    }
 }
 
 /// A second NMI on a stack the first is still standing on.
