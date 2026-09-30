@@ -253,6 +253,9 @@ struct Service {
 /// A session decided on and not yet told to its client.
 struct Opening {
     region: Region,
+    /// Made before the client is told: it reads them the moment it hears, and
+    /// a region it opens again holds the last server's until they are.
+    rings: ServerRings,
     device_addr: u64,
     first: u64,
     blocks: u64,
@@ -309,7 +312,8 @@ impl Service {
         let (first, blocks) = self.place(guid)?;
         match self.ctrl.up().claim().dma_map(region.handle()) {
             Ok(mapping) if mapping.bytes == SESSION_BYTES as u64 => {
-                Ok(Opening { region, device_addr: mapping.device_addr, first, blocks, unique: guid })
+                let rings = layout::server(region.words());
+                Ok(Opening { region, rings, device_addr: mapping.device_addr, first, blocks, unique: guid })
             }
             // A region longer than a session would spend the claim's bound on
             // the kernel's side for every other client: refused whole.
@@ -334,14 +338,13 @@ impl Service {
     fn admit(&mut self, opening: Opening, conn: Connection) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let rings = layout::server(opening.region.words());
         self.sessions.insert(
             id,
             Served {
                 conn,
                 region: opening.region,
                 device_addr: opening.device_addr,
-                rings,
+                rings: opening.rings,
                 state: ServerSession::new(opening.first, opening.blocks),
                 unique: opening.unique,
                 closing: false,

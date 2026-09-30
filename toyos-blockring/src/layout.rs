@@ -62,6 +62,9 @@ pub fn client<W: Word>(page: &[W; RING_WORDS]) -> ClientRings {
 
 /// The server's ends of a session page it was sent, every word it owns set to
 /// 0. Whatever the client left in its own is bounded when first looked at.
+///
+/// Made before the open is answered: a client that reconnects sends the page
+/// its last server wrote, and reads these two words the moment it hears.
 pub fn server<W: Word>(page: &[W; RING_WORDS]) -> ServerRings {
     (Consumer::new(page, REQUESTS), Producer::new(page, COMPLETIONS))
 }
