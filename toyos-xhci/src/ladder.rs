@@ -31,8 +31,6 @@
 //! again asks the same question of the same device: the next break climbs on.
 //! Only a completed round trip ends the run.
 
-use crate::portsc::Portsc;
-
 /// One rung of the ladder.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Rung {
@@ -186,20 +184,6 @@ pub const PORT_RESET: [PortStep; 7] = [
 /// USB 2.0 §7.1.7.5 has a device answer 10 ms after a reset (TRSTRCY); this is
 /// the 50 ms Linux's hub driver waits, for the firmware that needs it.
 pub const RESET_RECOVERY_NS: u64 = 50_000_000;
-
-/// Whether a port still holds the device a rung is about: connected, and with
-/// no connect change the driver has not consumed, which would be a disconnect
-/// (xHCI 1.2 §5.4.8's CSC).
-///
-/// **Asked again when a rung ends unverified**, because the reset's completion
-/// cannot answer it on a USB2 port: the port detects no disconnect while it
-/// drives the reset (§4.19.1.1.2, note 57) and reads Enabled once the reset
-/// ends (§4.19.1.1.4), whether or not its device then stays. A device its port
-/// no longer holds left: that is no break, no rung above reaches it, and its
-/// port's teardown owns what it held (§4.4).
-pub fn holds(port: Portsc) -> bool {
-    port.connected() && !port.connect_changed()
-}
 
 /// Whether a failed `step` ends [`Rung::PortReset`].
 pub fn ends_the_rung(step: PortStep) -> bool {
@@ -374,18 +358,6 @@ mod tests {
         for step in PORT_RESET {
             assert_eq!(ends_the_rung(step), step != PortStep::Quiesce, "{step:?}");
         }
-    }
-
-    /// The T14's USB2 port under the port rung's reset: before it, at its
-    /// completion, and once its SuperSpeed stick had left for the USB3 half of
-    /// the receptacle.
-    #[test]
-    fn a_port_holds_its_device_only_while_it_reads_connected_with_no_change_unconsumed() {
-        assert!(holds(Portsc::from_raw(0x0000_0e03)), "Enabled at high speed");
-        assert!(holds(Portsc::from_raw(0x0020_0e03)), "a reset that ended is no connect change");
-        assert!(!holds(Portsc::from_raw(0x0002_02a0)), "Disconnected (§4.19.1.1.2), unconsumed");
-        assert!(!holds(Portsc::from_raw(0x0000_02a0)), "Disconnected, its change consumed");
-        assert!(!holds(Portsc::from_raw(0x0002_02e1)), "Disabled on a connect since: another connection");
     }
 
     #[test]

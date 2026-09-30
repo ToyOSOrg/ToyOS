@@ -166,6 +166,12 @@ actuators! {
     /// See `xhci::msc::reset_moves`; judged by `usb_transport_break`.
     usb_reset_moves_after = "usb-reset-moves-after";
 
+    /// The same hold, once the port rung has configured the device again and
+    /// before its TEST UNIT READY: a device that leaves after every step of
+    /// the rung was answered. See `xhci::msc::reset_moves`; judged by
+    /// `usb_transport_break`.
+    usb_reset_moves_configured = "usb-reset-moves-configured";
+
     /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
     /// while its device holds a write it reported complete and no flush has
     /// emptied: a device that leaves then may have lost it. Judged by

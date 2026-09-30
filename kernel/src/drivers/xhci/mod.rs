@@ -975,11 +975,9 @@ impl XhciController {
             (dev.ep_addr, dev.int_ep_dci, dev.port_idx, dev.block);
 
         // Disconnect wins the race: a transaction-error code from a pulled device is indistinguishable from a bad cable, only the port register tells them apart.
-        //
-        // CSC as well as CCS: a replug reads connected again but the transfer still died with the old device.
         let slot = self.slot(slot_id);
         let portsc = self.read_portsc(port_idx);
-        if !portsc.connected() || portsc.connect_changed() {
+        if !portsc.holds() {
             log!("xHCI: USB {kind} on {slot}: interrupt endpoint {ep_addr:#04x} \
                  completed with {} as its port went away; leaving it to the disconnect",
                 Completion(code));
@@ -1179,8 +1177,7 @@ impl XhciController {
         const MAX_EFFECTS: usize = 16;
         for _ in 0..MAX_EFFECTS {
             let portsc = self.read_portsc(port_idx);
-            // CCS or CSC: a replug between two looks reads connected again, but the device that was here has still gone.
-            if !portsc.connected() || portsc.connect_changed() {
+            if !portsc.holds() {
                 self.cancel_recovery_on(port_idx);
                 device::cancel_on(self, port_idx);
             }

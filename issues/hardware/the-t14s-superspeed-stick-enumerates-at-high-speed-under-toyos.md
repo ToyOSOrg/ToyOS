@@ -35,8 +35,12 @@ lose the volume's disk number
 (`issues/kernel/a-disk-taken-offline-is-never-brought-back.md`).
 
 Not investigated. What is not known: what the firmware leaves the two ports in,
-whether the boot scan's own reset of port 1 is what keeps the stick there, and
-whether the USB3 port reads connected at the scan.
+whether the boot scan's own reset of port 1 is what keeps the stick there,
+whether the USB3 port reads connected at the scan, and why the port rung's
+reset moved the stick where the scan's reset of the same port 0.8 s earlier
+did not. xHCI 1.2 says why the USB2 port cannot see the stick leave, not why
+the stick leaves: that is the USB 3.x specification's device-side rule, which
+nobody here has read.
 
 ## Exit condition
 

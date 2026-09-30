@@ -305,9 +305,6 @@ enum Climbed {
     /// A step before the TEST UNIT READY was not answered, and said so; the
     /// device was asked nothing after it.
     Failed,
-    /// The port reads empty: the device is no longer on the bus, and its
-    /// port's teardown owns what it held.
-    Gone,
 }
 
 /// Abandon one bulk transfer without waiting, once per boot, on the first
@@ -541,25 +538,26 @@ pub(in crate::drivers::xhci) mod reset_break {
 /// What the port rung's reset is made for, in its line.
 const RECOVERING: &str = "recovering";
 
-/// Hold the port rung's first reset, once, until the port reads empty: QEMU
-/// cannot move a device off its port on a reset, so the host takes it off and
-/// plugs the same backing in on another port. `usb-reset-moves` holds before
-/// the reset's completion is read, so the rung reads the port empty;
-/// `usb-reset-moves-after` holds once it has been read with the device on the
-/// port, as a USB2 port reads a device that leaves under its reset
-/// (`toyos_xhci::ladder::holds`).
+/// Hold the port rung, once, until its port reads empty: QEMU cannot move a
+/// device off its port on a reset, so the host takes it off and plugs the same
+/// backing in on another port. `usb-reset-moves` holds before the reset's
+/// completion is read, so the rung reads the port empty;
+/// `usb-reset-moves-after` once it has been read with the device on the port,
+/// as a USB2 port reads a device that leaves under its reset;
+/// `usb-reset-moves-configured` once the rung has configured the device again,
+/// so its TEST UNIT READY meets an empty port.
 #[cfg(feature = "boot-actuators")]
 pub(in crate::drivers::xhci) mod reset_moves {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     static UNSPENT: AtomicBool = AtomicBool::new(true);
 
-    /// What the held reset says, which the host acts on.
+    /// What each hold says, which the host acts on.
     pub const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
-
-    /// What the reset held after its completion was read says.
     pub const HELD_AFTER: &str =
         "is held, reset with its device on it, for the host to move the device (usb-reset-moves-after)";
+    pub const HELD_CONFIGURED: &str = "is held, configured again, for the host to move the device \
+        (usb-reset-moves-configured)";
 
     /// The cue the host moves the device on, written to the console directly:
     /// the record above reaches it only when `klogd` runs, which it may not
@@ -567,12 +565,9 @@ pub(in crate::drivers::xhci) mod reset_moves {
     /// rung's bound stages a device that left too late.
     const MOVE_NOW: &[u8] = b"usb-reset-moves: move the device now\n";
 
-    pub fn take() -> bool {
-        crate::actuator::usb_reset_moves() && UNSPENT.swap(false, Ordering::Relaxed)
-    }
-
-    pub fn take_after() -> bool {
-        crate::actuator::usb_reset_moves_after() && UNSPENT.swap(false, Ordering::Relaxed)
+    /// Whether the hold `staged` arms is taken here: one hold per boot.
+    pub fn take(staged: bool) -> bool {
+        staged && UNSPENT.swap(false, Ordering::Relaxed)
     }
 
     pub fn cue() {
@@ -1123,19 +1118,17 @@ impl XhciController {
                     self.after_break.took(rung);
                     return true;
                 }
-                // As a round trip whose port read disconnected mid-wait: a
-                // reset aimed at an empty port would only spend its bound.
-                Climbed::Gone => {
-                    dev.failed = true;
-                    dev.left = true;
-                    return false;
-                }
                 Climbed::OutOfStep(why) => Some(why),
                 Climbed::Failed => None,
             };
             let ended = Unverified { rung, broke: out_of_step.as_ref() };
+            // A device its port no longer holds left, which is no break and
+            // which no rung above reaches: its port's teardown owns what it
+            // held. Asked of the port here, since a USB2 port detects no
+            // disconnect while it drives a reset (xHCI 1.2 §4.19.1.1.2, note
+            // 57) and reads Enabled once the reset ends (§4.19.1.1.4).
             let port = self.read_portsc(dev.port_idx);
-            if !ladder::holds(port) {
+            if !port.holds() {
                 log!("usb-storage: {slot} {ended}, and port {} no longer holds the device (PORTSC \
                      {:#010x}): its port's teardown takes it from here",
                     u32::from(dev.port_idx) + 1, port.raw());
@@ -1227,18 +1220,15 @@ impl XhciController {
         let before = self.read_portsc(port_idx);
         let protocol = self.protocols.of(port_idx);
         let kind = port::offline_reset(protocol);
-        let here = ladder::holds(before);
+        let here = before.holds();
         let finished = here && {
             self.write_portsc(port_idx, port::reset_write(kind, before));
             dev.reset_at = Some(crate::clock::nanos_since_boot());
             self.settles_within_call(|| self.read_portsc(port_idx).reset_finished())
         };
         #[cfg(feature = "boot-actuators")]
-        if finished && why == RECOVERING && reset_moves::take() {
-            log!("xHCI: {} port {} {}", self.slot(dev.slot_id), u32::from(port_idx) + 1,
-                reset_moves::HELD);
-            reset_moves::cue();
-            let _ = self.settles_within_call(|| !self.read_portsc(port_idx).connected());
+        if finished && why == RECOVERING && reset_moves::take(crate::actuator::usb_reset_moves()) {
+            self.hold_for_the_move(dev, reset_moves::HELD);
         }
         let after = self.read_portsc(port_idx);
         if finished {
@@ -1271,13 +1261,23 @@ impl XhciController {
             after.speed(),
         );
         #[cfg(feature = "boot-actuators")]
-        if left == AfterReset::Enumerate && why == RECOVERING && reset_moves::take_after() {
-            log!("xHCI: {} port {} {}", self.slot(dev.slot_id), u32::from(port_idx) + 1,
-                reset_moves::HELD_AFTER);
-            reset_moves::cue();
-            let _ = self.settles_within_call(|| !self.read_portsc(port_idx).connected());
+        if left == AfterReset::Enumerate
+            && why == RECOVERING
+            && reset_moves::take(crate::actuator::usb_reset_moves_after())
+        {
+            self.hold_for_the_move(dev, reset_moves::HELD_AFTER);
         }
         left
+    }
+
+    /// Say `held`, cue the host, and hold the rung until the device's port
+    /// reads empty (`reset_moves`).
+    #[cfg(feature = "boot-actuators")]
+    fn hold_for_the_move(&self, dev: &MscDevice, held: &str) {
+        let port_idx = dev.port_idx;
+        log!("xHCI: {} port {} {held}", self.slot(dev.slot_id), u32::from(port_idx) + 1);
+        reset_moves::cue();
+        let _ = self.settles_within_call(|| !self.read_portsc(port_idx).connected());
     }
 
     /// The ladder's second rung: the port reset, and the enumeration a reset
@@ -1293,14 +1293,8 @@ impl XhciController {
                 PortStep::Quiesce => {
                     self.quiesce_bulk_pair(dev, broke, "stopping it before its port is reset")
                 }
-                PortStep::Reset => match self.reset_port(dev, RECOVERING) {
-                    AfterReset::Enumerate => true,
-                    AfterReset::Left => return Climbed::Gone,
-                    // `reset_port` has said which.
-                    AfterReset::NeverFinished
-                    | AfterReset::NotEnabled
-                    | AfterReset::SpeedChanged { .. } => false,
-                },
+                // `reset_port` has said which way it did not.
+                PortStep::Reset => self.reset_port(dev, RECOVERING) == AfterReset::Enumerate,
                 PortStep::Settle => {
                     let _ = crate::clock::settles(
                         self.after_break
@@ -1338,6 +1332,10 @@ impl XhciController {
             if !took && ladder::ends_the_rung(step) {
                 return Climbed::Failed;
             }
+        }
+        #[cfg(feature = "boot-actuators")]
+        if reset_moves::take(crate::actuator::usb_reset_moves_configured()) {
+            self.hold_for_the_move(dev, reset_moves::HELD_CONFIGURED);
         }
         match self.bot(dev, &Cdb::TEST_UNIT_READY, None, Asks::Verification(Rung::PortReset)) {
             Ok(answer) => {

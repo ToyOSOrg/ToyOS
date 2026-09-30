@@ -3,9 +3,7 @@ use serial::Serial;
 
 /// The metal verdict on the boot stick's staged transport break, off the
 /// records the T14 wrote when its stick left the USB2 half of its receptacle
-/// under the port rung's reset: as the ladder told it when it climbed on past
-/// the stick that had left, which the verdict has to refuse, and as it tells
-/// it now, which it has to pass — beside the shapes on either side of it.
+/// under the port rung's reset, beside the shapes on either side of it.
 pub fn transport_break_verdict() -> Result<(), String> {
     let judged = |what: &str, log: &str, green: bool| {
         match (usb::transport_break_recovered(&Serial::named(what, log)), green) {
