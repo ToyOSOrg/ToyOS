@@ -1520,6 +1520,7 @@ pub fn usb_transport_break(
     transport_gives_up(test_config, c_bins, rust_bins)?;
     abandoned_write_is_taken_offline(test_config, c_bins, rust_bins)?;
     a_stick_its_reset_moved_carries_on(Moved::SameStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::AfterItsReset)?;
     a_stick_its_reset_moved_carries_on(Moved::AnotherStick)?;
     a_stick_its_reset_moved_carries_on(Moved::SlowStick)?;
     a_stick_its_reset_moved_carries_on(Moved::OwedFlush)?;
@@ -1631,6 +1632,11 @@ enum Moved {
     /// reset can move a stick from the USB2 half of its receptacle to the USB3
     /// half.
     SameStick,
+    /// The stick itself, moved only once its port's reset has been read
+    /// complete with it on the port (`usb-reset-moves-after`): a device that
+    /// leaves under a USB2 port's reset. The rung's next step fails on an empty
+    /// port, and the rung ends as the stick leaving rather than as a break.
+    AfterItsReset,
     /// The same backing under another serial number, which is everything a
     /// second unit of the same model shares with the first — INQUIRY,
     /// capacity, USB ids — and the negative control: it must not be adopted.
@@ -1671,6 +1677,8 @@ enum Moved {
 /// the bind is another CPU's, read off the kernel's own stamps.
 fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
+    const HELD_AFTER: &str =
+        "is held, reset with its device on it, for the host to move the device (usb-reset-moves-after)";
     const MOVE_NOW: &str = "usb-reset-moves: move the device now";
     const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
     const OWED: &str = ", and it left owing a flush of writes it had reported complete, so the \
@@ -1688,6 +1696,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         out again on it";
     let params: &'static [&'static str] = match moved {
         Moved::SameStick | Moved::AnotherStick => &["usb-transport-break", "usb-reset-moves"],
+        Moved::AfterItsReset => &["usb-transport-break", "usb-reset-moves-after"],
         Moved::SlowStick => &["usb-transport-break", "usb-reset-moves", "usb-slow-return"],
         Moved::OwedFlush => &["usb-transport-break-owed", "usb-reset-moves"],
         Moved::FlushedStick => &["usb-transport-break-flushed", "usb-reset-moves"],
@@ -1696,6 +1705,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     let case = super::compile::repo_root().join("tests/jobcase");
     let (name, serial) = match moved {
         Moved::SameStick => ("usb-reset-moves-same.img", qemu::BOOT_STICK_SERIAL),
+        Moved::AfterItsReset => ("usb-reset-moves-after.img", qemu::BOOT_STICK_SERIAL),
         Moved::AnotherStick => ("usb-reset-moves-another.img", "TOYOS0OTHERSTICK"),
         Moved::SlowStick => ("usb-reset-moves-slow.img", qemu::BOOT_STICK_SERIAL),
         Moved::OwedFlush => ("usb-reset-moves-owed.img", qemu::BOOT_STICK_SERIAL),
@@ -1738,7 +1748,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     // which may come on either side of it.
     let ends = |c: &str| {
         let last = match moved {
-            Moved::SameStick | Moved::SlowStick | Moved::FlushedStick => {
+            Moved::SameStick | Moved::AfterItsReset | Moved::SlowStick | Moved::FlushedStick => {
                 c.contains(toyos_build::bootlog::REBOOTING)
             }
             Moved::AnotherStick => c.contains(" did not come back within "),
@@ -1768,16 +1778,27 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         }
         Ok(())
     };
-    let left = [
-        format!("usb-storage: {under_test} is owed the data of the command that broke"),
-        HELD.to_string(),
+    let held = " after this driver reset it; it is held ".to_string();
+    let mut left = vec![format!("usb-storage: {under_test} is owed the data of the command that broke")];
+    if moved == Moved::AfterItsReset {
+        left.extend([
+            HELD_AFTER.to_string(),
+            format!(
+                "usb-storage: {under_test} the port reset was not answered, and port 1 no longer \
+                 holds the device (PORTSC "
+            ),
+        ]);
+    } else {
+        left.push(HELD.to_string());
+    }
+    left.extend([
         // Its port read empty inside the rung, or — when the host's move came
         // after the rung's bound and the reset verified — disconnected at the
         // next look: run 79's shape and run 74's, both a device that left
         // under a reset of this driver's.
         "usb-storage: disk 0 left port 1 (".to_string(),
-        " after this driver reset it; it is held ".to_string(),
-    ];
+        held.clone(),
+    ]);
     let inside_the_rung = log.contains("usb-storage: disk 0 left port 1 (its port read empty)");
     let back = [
         "xHCI: port 3 connected".to_string(),
@@ -1818,7 +1839,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     };
     let came_back = "usb-storage: disk 0 came back on port 3 slot ";
     match moved {
-        Moved::SameStick | Moved::SlowStick | Moved::FlushedStick => {
+        Moved::SameStick | Moved::AfterItsReset | Moved::SlowStick | Moved::FlushedStick => {
             if moved == Moved::FlushedStick {
                 let flushed = line_with(&log, AFTER_A_FLUSH)?;
                 if !log.split_once(staged).is_some_and(|(before, _)| before.contains(flushed)) {
@@ -1827,6 +1848,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             }
             // First, and the debt first of all, so a debt the stick came back
             // with is named as one.
+            let offline = format!("usb-storage: {under_test} is offline");
             for never in [
                 OWED,
                 FLUSH_LOST,
@@ -1834,6 +1856,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                 " did not come back within ",
                 "disk 1 ready",
                 " is not disk 0 come back",
+                offline.as_str(),
             ] {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {
                     return Err(format!("{moved:?}: {line:?} of a stick that came back as itself\n{log}"));
@@ -1852,11 +1875,11 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             // stall, or every CPU inside a call on the held disk, so no CPU
             // took the pass that binds — and the write was asked again.
             let shape = if moved != Moved::SlowStick && held_end.ends_with(": it completed") {
-                in_order(&[left[3].clone(), came_back.to_string(), held_end.to_string()])?;
+                in_order(&[held.clone(), came_back.to_string(), held_end.to_string()])?;
                 held_call(came_back)?;
                 "the write that waited went out again on it"
             } else if held_end.contains(STILL_HELD) {
-                in_order(&[left[3].clone(), held_end.to_string()])?;
+                in_order(&[held.clone(), held_end.to_string()])?;
                 held_call(if moved == Moved::SlowStick { STALLED } else { came_back })?;
                 "the call that waited ended on its bound and the write was asked again"
             } else {
@@ -1876,6 +1899,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                     "after the rung's reset verified"
                 },
                 match moved {
+                    Moved::AfterItsReset => ", once its reset had been read complete with it there",
                     Moved::SlowStick => ", though its bind was stalled past the window",
                     Moved::FlushedStick => {
                         ", owing no flush: it broke after a flush that succeeded over its last write"
@@ -2108,44 +2132,50 @@ fn no_command_was_refused(log: &str) -> Result<(), String> {
 }
 
 /// The staged break on a real stick: the transfer abandoned on the boot stick's
-/// first WRITE(10) is recovered, the write completes, the disk stays online,
-/// and the boot goes on to the deliberate reboot that ends its chain.
-///
-/// Which rung brought it back is the stick's to decide — one that does not
-/// honour the class reset is brought back by the port reset — so that one of
-/// them verified is asserted, and which is printed.
+/// first WRITE(10) is recovered, the write completes, the disk keeps its
+/// number, and the boot goes on to the deliberate reboot that ends its chain.
 pub fn transport_break_on_metal(
     kernel: &serial::Serial,
     after: &serial::Serial,
 ) -> Result<(), String> {
+    transport_break_recovered(kernel)?;
+    super::power::done_chain(after)
+}
+
+/// The kernel log's half of [`transport_break_on_metal`].
+///
+/// **The ladder enters at the port reset**: the break leaves the stick owed a
+/// WRITE's data, across which no class reset may be asked. The stick decides
+/// the rest. It answers the rung's TEST UNIT READY on its port, and the write
+/// goes out again there; or it leaves its port under the reset — a SuperSpeed
+/// stick enumerated on the USB2 half of its receptacle trains on the USB3 half
+/// — is held, comes back as the same device, and the write goes out again on
+/// it. **Either way no rung takes it offline.**
+pub fn transport_break_recovered(kernel: &serial::Serial) -> Result<(), String> {
     let staged = kernel.must_say(
         "transport broke on SCSI 0x2a: a staged break skipped the data phase wait; break 1 of ",
     )?;
     let under_test = broke_on(staged)?;
-    // T14 runs 74 and 79: the port reset can move the stick to the other half
-    // of its receptacle. Then no rung verifies on the old slot, and what says
-    // the volume carried on is the same device taking its disk number back and
-    // the command that broke completing on it.
-    if let Ok(left) = kernel.must_say(" after this driver reset it; it is held ") {
-        eprintln!("  [usb] {left}");
-        let back = kernel.must_say(" as the same device (USB ")?;
-        eprintln!("  [usb] {back}");
-        kernel.must_say("is back, and the operation it was asked went out again on it: it completed")?;
-        kernel.must_not_say(" did not come back within ")?;
-        return super::power::done_chain(after);
-    }
-    let rungs = [
-        format!("usb-storage: {under_test} Reset Recovery took"),
-        format!("usb-storage: {under_test} the port reset took"),
-    ];
-    let took = rungs
-        .iter()
-        .find_map(|rung| kernel.must_say(rung).ok())
-        .ok_or_else(|| format!("neither {:?} nor {:?}: no rung verified", rungs[0], rungs[1]))?;
-    eprintln!("  [usb] {took}");
-    kernel.must_say(&format!("usb-storage: {under_test} SCSI 0x2a completed after "))?;
+    let entered = kernel.must_say_after(
+        staged,
+        &format!("usb-storage: {under_test} is owed the data of the command that broke"),
+    )?;
     kernel.must_not_say(&format!("usb-storage: {under_test} is offline"))?;
-    super::power::done_chain(after)
+    kernel.must_not_say(" did not come back within ")?;
+    if let Ok(left) = kernel.must_say_after(entered, " after this driver reset it; it is held ") {
+        let back = kernel.must_say_after(left, " as the same device (USB ")?;
+        kernel.must_say_after(
+            back,
+            "is back, and the operation it was asked went out again on it: it completed",
+        )?;
+        eprintln!("  [usb] {left}");
+        eprintln!("  [usb] {back}");
+        return Ok(());
+    }
+    let took = kernel.must_say_after(entered, &format!("usb-storage: {under_test} the port reset took"))?;
+    kernel.must_say_after(took, &format!("usb-storage: {under_test} SCSI 0x2a completed after "))?;
+    eprintln!("  [usb] {took}");
+    Ok(())
 }
 
 /// A read whose port reads gone is a break the driver does not recover: no

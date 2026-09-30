@@ -17,6 +17,8 @@ mod checks {
     mod screen_checks;
     #[path = "serial.rs"]
     mod serial_checks;
+    #[path = "usb.rs"]
+    mod usb_checks;
 
     /// One subject: what a console line says died, what a wait does about it,
     /// and that only one place in the harness answers either.
@@ -623,6 +625,11 @@ mod checks {
     #[test]
     fn metal_audio_judges() -> Result<(), String> {
         audio_checks::judges_verdict()
+    }
+
+    #[test]
+    fn metal_usb_judge() -> Result<(), String> {
+        usb_checks::transport_break_verdict()
     }
 
     /// `blackbox_unclaimed_page` is a registration `tests/metal-profile.toml` already prices,

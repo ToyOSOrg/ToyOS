@@ -157,10 +157,14 @@ actuators! {
     usb_reset_break = "usb-reset-break";
 
     /// Hold the port rung's first reset, once, until the port reads empty, so
-    /// the host can move the device to another port as a reset moved T14 run
-    /// 79's stick. See `xhci::msc::reset_moves`; judged by
-    /// `usb_transport_break`.
+    /// the host can move the device to another port. See
+    /// `xhci::msc::reset_moves`; judged by `usb_transport_break`.
     usb_reset_moves = "usb-reset-moves";
+
+    /// The same hold, once the reset's completion has been read with the
+    /// device on the port: a device that leaves under a USB2 port's reset.
+    /// See `xhci::msc::reset_moves`; judged by `usb_transport_break`.
+    usb_reset_moves_after = "usb-reset-moves-after";
 
     /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
     /// while its device holds a write it reported complete and no flush has
