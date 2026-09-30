@@ -346,20 +346,6 @@ changes.
   twelve. `screen_loader_lines` grows 12 or 13 rows there for 14 or 15 lines;
   the lines between its two markers are the same on both trees, so what moves
   its growth is how far the loader has got when the GOP-query dump lands.
-  `quiesce_leaves_the_volume_whole` was red in four of the six branch runs and
-  none of `main`'s, each `ALONE … GREEN`, all under `quiesce-fsync-refuse`: twice
-  `FAT 1 differs from FAT 0 at entry 45` in the volume the stop left, once with
-  a cluster no entry reaches, and twice `log-volume: … was left with a chain its
-  entry does not reach: corrupt cluster chain` — the stop's second stage, since
-  removed, on a boot that now carries 13 MiB of ROOT where it carried 619.
-  Not the host: `main`'s own FAT refusal defects at `b0adc600`, which the
-  branch reaches by timing: a refused link write leaked the cluster
-  `append_cluster` had just claimed, and a refused free split the FATs; a
-  forced interleaving reddened both trees. #510 closed both with
-  `toyos-fat32/src/repair.rs`: the same forcing patch, alone, is red 2 of 2 on
-  this branch before the merge (`5b3cf8ae`, each of its four boots leaving one
-  cluster no directory entry reaches) and green 3 of 3 with `main` `5e36908c`
-  merged (`d5c2d9c9`).
   `metal_job_reboot` was red in one of the six, `ALONE` red too, and in one
   further branch run (`the job drain carried no kernel output at all (24
   bytes)`), and green alone three times on each tree, alternating;

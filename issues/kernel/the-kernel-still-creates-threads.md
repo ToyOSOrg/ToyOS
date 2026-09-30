@@ -25,6 +25,4 @@ code creates a schedulable task other than the per-CPU idle loop.
   and the panic path write the console wire (`log::console::drain_inline`,
   `serial::panic_flush`), so one wire's driver stays in the kernel whatever
   K4 moves.
-- **K5:** `iod` goes with the kernel's write-back queue; met only when #536
-  lands with no new `kthread::spawn`.
-- **K6:** delete the machinery named above. Blocked on K4 and K5.
+- **K6:** delete the machinery named above. Blocked on K4.

@@ -16,7 +16,7 @@
 assets = ["assets"]
 
 [boot]
-start = ["logd", "console"]
+start = ["logd", "blockd", "fsd", "console"]
 
 # `/system/bin/console` owns the screen and provides the surface its shell and the
 # shell's children inherit. No compositor here, so nothing receives one.
@@ -64,3 +64,20 @@ syscap = ["roster"]
 "bin/rm" = "/system/bin/toybox"
 "bin/shutdown" = "/system/bin/toybox"
 "bin/stats" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

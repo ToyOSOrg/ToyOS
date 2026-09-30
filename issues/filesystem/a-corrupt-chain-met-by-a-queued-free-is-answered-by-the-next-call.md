@@ -11,9 +11,9 @@ call starts (`settle_first`, `toyos-fat32/src/repair.rs`). A queued
 `Repair::Free` walks the rest of a chain whose name is already gone, and a
 walk that meets a cyclic or out-of-range link answers `Error::CorruptChain`.
 That error is returned by whichever call came next, for a chain it never
-named, and the call did not start. The kernel adapter logs it as that call
-failing (`refused` in `kernel/src/fat32_adapter.rs`: "`<op>` of `<name>`:
-corrupt cluster chain") and its caller reads `SyscallError::Io`.
+named, and the call did not start. fsd logs it as that call failing
+(`logged` in `userland/fsd/src/fat.rs`: "`<op>` of '`<name>`': corrupt cluster
+chain") and its client reads `SyscallError::Io`.
 
 Two things are lost:
 

@@ -2,17 +2,17 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bcachefs::Extent;
-use crate::block::{BlockError, BlockResult};
-use crate::page_cache;
+use crate::block::BlockResult;
+use crate::object::shm::SharedMemObject;
 use crate::rootfs::MemoryImage;
-use crate::sync::Lock;
-use crate::time::Deadline;
+use toyos_abi::syscall::SyscallError;
 
 /// `mm::PAGE_SIZE`: `usize` for buffer sizing, `u64` for file offsets.
 const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 const BLOCK_SIZE_U64: u64 = crate::mm::PAGE_SIZE;
 
-/// Backing store for a memory-mapped file; callers don't know if it's NVMe, RAM, or something else.
+/// Backing store for a memory-mapped file: ROOT's image, an image a caller
+/// handed over, or a tmpfs file; callers do not know which.
 pub trait FileBacking: Send + Sync {
     /// Reads one page of file data at `file_offset` into `buf`, zero-filling past EOF.
     #[must_use = "a failed read left the buffer zeroed; it does not hold the file's bytes"]
@@ -20,102 +20,6 @@ pub trait FileBacking: Send + Sync {
 
     /// Total file size in bytes.
     fn file_size(&self) -> u64;
-}
-
-/// Which blocks a `/home` file's data lives in, and whether they are still that file's.
-pub struct FileBlocks {
-    /// `None` once the filesystem has taken the blocks back.
-    extents: Lock<Option<Vec<Extent>>>,
-}
-
-impl FileBlocks {
-    pub fn new(extents: Vec<Extent>) -> Arc<Self> {
-        Arc::new(Self { extents: Lock::new(Some(extents)) })
-    }
-
-    /// Gives the blocks up; every read through a backing that shares this fails from here on.
-    pub fn revoke(&self) {
-        // Not refcounted: a read after this must fail, not extend a freed block's life.
-        *self.extents.lock() = None;
-    }
-
-    /// Runs `f` over the current extent list, or `None` if the file is gone.
-    pub fn with<R>(&self, f: impl FnOnce(&mut Vec<Extent>) -> R) -> Option<R> {
-        // Lock stays held across `f`: the write path resolves and allocates inside it.
-        self.extents.lock().as_mut().map(f)
-    }
-
-    /// Keep the first `keep` blocks and hand back the dropped tail runs, for
-    /// the caller to free once the shortened record is on the device. Every
-    /// backing sharing this cell reads the dropped range as a hole from here on.
-    pub fn truncate_to_blocks(&self, keep: u64) -> Vec<Extent> {
-        let mut guard = self.extents.lock();
-        let Some(runs) = guard.as_mut() else { return Vec::new() };
-        let mut dropped = Vec::new();
-        let mut remaining = keep;
-        let mut kept = Vec::with_capacity(runs.len());
-        for run in runs.drain(..) {
-            let count = run.block_count as u64;
-            if remaining >= count {
-                remaining -= count;
-                kept.push(run);
-            } else {
-                if remaining > 0 {
-                    kept.push(Extent {
-                        start_block: run.start_block,
-                        block_count: remaining as u32,
-                        _reserved: 0,
-                    });
-                }
-                dropped.push(Extent {
-                    start_block: run.start_block + remaining,
-                    block_count: (count - remaining) as u32,
-                    _reserved: 0,
-                });
-                remaining = 0;
-            }
-        }
-        *runs = kept;
-        dropped
-    }
-}
-
-/// One block of `cache`, retried while the refusal is the budget's.
-///
-/// A `BudgetExpired` is a claim about the caller's clock and never a loss, and
-/// each attempt here is above `block::Partition`'s device lock, so it queues
-/// afresh with a whole `block::OPERATION` to spend. Bounded by
-/// `block::DEADMAN`, which is what bounds the run of attempts in both the
-/// kernel's other ladders (`writeback::drain_retrying`, `ops::fsync`).
-///
-/// It cannot park or yield between attempts, unlike either of those: a
-/// demand-paging fill runs under the process-data lock, where a park is the
-/// runtime panic `kernel/CLAUDE.md` names. Re-acquiring the device lock is the
-/// only wait, so the deadline is checked before each attempt and the caller
-/// gets the device's own last word when it is reached.
-fn read_block_retrying(
-    cache: &page_cache::Cached,
-    block: u64,
-    raw: &mut [u8; BLOCK_SIZE],
-) -> BlockResult {
-    let began = crate::clock::now();
-    let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
-    let mut attempts = 0u32;
-    loop {
-        attempts += 1;
-        let answer = cache.raw_read(block, raw);
-        if answer != Err(BlockError::BudgetExpired) {
-            return answer;
-        }
-        if deadman.reached(crate::clock::now()) {
-            log!(
-                "file: block {block} refused on the operation budget {attempts} time(s) in {} — {}",
-                crate::clock::now() - began,
-                crate::block::DEADMAN,
-            );
-            return answer;
-        }
-    }
 }
 
 /// The block holding `file_offset`, if the extents reach that far.
@@ -132,52 +36,9 @@ fn offset_to_block(extents: &[Extent], file_offset: u64) -> Option<u64> {
     None
 }
 
-/// File backed by blocks of the partition one page cache serves.
-pub struct NvmeBacking {
-    cache: Arc<page_cache::Cached>,
-    blocks: Arc<FileBlocks>,
-    size: u64,
-}
-
-impl NvmeBacking {
-    pub fn new(cache: Arc<page_cache::Cached>, blocks: Arc<FileBlocks>, size: u64) -> Self {
-        Self { cache, blocks, size }
-    }
-}
-
-impl FileBacking for NvmeBacking {
-    fn read_page(&self, file_offset: u64, buf: &mut [u8; BLOCK_SIZE]) -> BlockResult {
-        buf.fill(0);
-        if file_offset >= self.size {
-            return Ok(());
-        }
-        // Unlinked: blocks may already belong to another file.
-        let Some(block) = self.blocks.with(|extents| offset_to_block(extents, file_offset)) else {
-            log!("file: read through a backing whose file was deleted");
-            return Err(BlockError::Device);
-        };
-        if let Some(block) = block {
-            // Bypasses block page cache; file cache is the sole cache for file data.
-            let mut raw = [0u8; BLOCK_SIZE];
-            // `buf` is already zeroed, so a failed read here returns a hole, not stale data.
-            if let Err(e) = read_block_retrying(&self.cache, block, &mut raw) {
-                log!("file: read of block {block} failed");
-                return Err(e);
-            }
-            let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
-            buf[..valid].copy_from_slice(&raw[..valid]);
-        }
-        Ok(())
-    }
-
-    fn file_size(&self) -> u64 {
-        self.size
-    }
-}
-
 /// File on ROOT, backed by a fixed extent list over the image in memory.
 ///
-/// No revocation cell, unlike [`NvmeBacking`]: nothing can delete or truncate a
+/// No revocation cell: nothing can delete or truncate a
 /// file here, so the blocks a backing was opened over stay that file's for as
 /// long as it lives. A block outside the image is refused by
 /// [`MemoryImage::read`], which is where every bound on a number the image
@@ -212,6 +73,59 @@ impl FileBacking for ReadOnlyBacking {
         }
         let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
         buf[..valid].copy_from_slice(&raw[..valid]);
+        Ok(())
+    }
+
+    fn file_size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// An executable a caller read into a shared memory object of its
+/// own and handed over by handle: what a program in `/apps` is spawned and
+/// paged from, since no file server's volume is the kernel's.
+///
+/// **Nothing is copied at the call, and every page is copied once when it is
+/// read.** The object is the caller's memory, charged to it and alive while
+/// any process pages from it; its bytes stay the caller's to change. So each
+/// read takes one copy of the page into the reader's own buffer and what the
+/// loader keeps is that copy: a change after the hand-off reaches only pages
+/// not yet read, which is the caller changing its own child's program, and
+/// never a value the kernel checked and then read again.
+pub struct SharedImage {
+    object: Arc<SharedMemObject>,
+    size: u64,
+}
+
+impl SharedImage {
+    /// The first `len` bytes of `object`. Refused unless they are ordinary
+    /// memory the kernel allocated — a device aperture is no program, and a
+    /// read of one is a device access — and the object holds them all.
+    pub fn over(object: Arc<SharedMemObject>, len: u64) -> Result<Self, SyscallError> {
+        if len > object.size() || object.ram().is_none() {
+            return Err(SyscallError::InvalidArgument);
+        }
+        Ok(Self { object, size: len })
+    }
+}
+
+impl FileBacking for SharedImage {
+    fn read_page(&self, file_offset: u64, buf: &mut [u8; BLOCK_SIZE]) -> BlockResult {
+        buf.fill(0);
+        if file_offset >= self.size {
+            return Ok(());
+        }
+        let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
+        // SAFETY: `over` held `size` inside the object, which is one physically
+        // contiguous run the kernel allocated (`ram`) and keeps while `object`
+        // lives, so `file_offset + valid <= size` bytes from its direct-map
+        // address are mapped; `buf` is the reader's own and never the object.
+        // No reference is formed over the object's bytes, which its holders
+        // may be writing: this is the one fetch of each.
+        unsafe {
+            let from = self.object.phys().as_ptr::<u8>().add(file_offset as usize);
+            core::ptr::copy_nonoverlapping(from, buf.as_mut_ptr(), valid);
+        }
         Ok(())
     }
 

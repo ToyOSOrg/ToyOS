@@ -9,10 +9,9 @@ opened: 2026-08-01
 `pci::enumerate` returns every function now, so a driver taking the first match
 does so visibly. Two do, and both are deliberate:
 
-- **NVMe.** `nvme::init` takes the first class-0108 controller. A machine with
-  two NVMe drives loses the second, and there is nowhere to put it:
-  `page_cache::init` takes a single `Box<dyn BlockDevice>`. Making this an
-  enumerate-all is a storage-stack change, not a PCI one.
+- **NVMe.** blockd serves one controller, the first its row's claim names
+  (`userland/blockd`); a machine with two NVMe drives loses the second.
+  Making this an enumerate-all is a block-service change, not a PCI one.
 - **The four virtio drivers.** Each takes the first device with its
   (vendor, device) pair. A second NIC or a second GPU would be dropped. These
   are QEMU-only devices — no virtio function appears on the T14 — so the

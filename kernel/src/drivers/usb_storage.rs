@@ -13,7 +13,7 @@ use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId, Handle}
 use crate::log;
 use super::xhci;
 
-/// Where USB disks start in the [`DeviceId`] space; must stay clear of NVMe's range, or `block::register` refuses the second driver's disk.
+/// Where USB disks start in the [`DeviceId`] space.
 const USB_DEVICE_ID_BASE: DeviceId = 16;
 
 /// Disk numbers issued this boot; `0..count()` names every bound disk, and a number never moves or is reissued.

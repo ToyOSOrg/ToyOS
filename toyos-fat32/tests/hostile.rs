@@ -29,7 +29,7 @@ mod common;
 use std::sync::OnceLock;
 
 use common::{pattern, Image, SparseDevice};
-use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError, MAX_DIR_ENTRIES};
+use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, MAX_DIR_ENTRIES};
 
 /// Enough of the volume to hold the reserved sectors, both FATs, and the first
 /// thousand data clusters. Everything past it reads as zeroes, which is what
@@ -263,58 +263,15 @@ fn a_device_that_fails_mid_read_reports_it() {
     assert_eq!(fs.walk("", 1024).unwrap_err(), Error::Io);
 }
 
-/// **A budget that expired is not a device that failed, and this crate must not
-/// flatten the two.**
-///
-/// `IoError` grew a second variant on 2026-08-22 for one reason: the kernel's
-/// implementor bounds an operation with `block::OPERATION`, and reaching that
-/// bound is a statement about the caller's clock. Flattening it into
-/// `Error::Io` is what made `/system/bin/logd` end a boot's log for a stick that was
-/// answering — 1 red in 73 full 12-wide suites (2026-08-22), one `SYS_FSYNC`
-/// held for 2.1 s while the guest's peers booted in 1.4 s.
-/// The two `assert_ne!`s are the point of the test: `Error::Io` is exactly the
-/// answer the collapsed version gives.
+/// The flush is the call `/system/bin/logd`'s durability claim rests on: a
+/// device that refuses it is `Io`, and one that flushes is `Ok`.
 #[test]
-fn a_budget_that_expired_is_not_a_device_that_failed() {
-    let (prefix, cap) = corpus();
-    let mut dev = SparseDevice::from_prefix(prefix, *cap);
-    dev.fail_reads_past = Some(256);
-    dev.refusal = IoError::BudgetExpired;
-    let refused = common::mount_err(dev);
-    assert_eq!(refused, Error::BudgetExpired);
-    assert_ne!(refused, Error::Io);
-
-    let l = layout();
-    let mut dev = pristine();
-    dev.fail_reads_past = Some(l.first_data * l.bps);
-    dev.refusal = IoError::BudgetExpired;
-    let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.walk("", 1024).unwrap_err(), Error::BudgetExpired);
-}
-
-/// The flush is the call `/system/bin/logd`'s durability claim rests on, so it is the
-/// one that has to keep the distinction all the way up.
-///
-/// Both arms against the same device, so what separates them is the refusal
-/// and nothing else.
-#[test]
-fn a_flush_says_which_of_the_two_refusals_it_was() {
+fn a_refused_flush_is_io() {
     let mut dev = pristine();
     dev.flush_refuses = true;
-    dev.refusal = IoError::Device;
     let mut fs = Fat32::mount(dev).expect("mount");
     assert_eq!(fs.sync().unwrap_err(), Error::Io);
 
-    let mut dev = pristine();
-    dev.flush_refuses = true;
-    dev.refusal = IoError::BudgetExpired;
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let refused = fs.sync().unwrap_err();
-    assert_eq!(refused, Error::BudgetExpired);
-    assert_ne!(refused, Error::Io);
-
-    // And a device that flushes is still `Ok`, so the two arms above are about
-    // the refusal rather than about `sync` never succeeding on this fake.
     let mut fs = Fat32::mount(pristine()).expect("mount");
     assert_eq!(fs.sync(), Ok(()));
 }

@@ -9,9 +9,7 @@ opened: 2026-08-08
 **The judge is ours as of 2026-08-08.** `fsck_msdos` is gone from all three
 places it was used — `src/image.rs`, `tests/common/volumes.rs` and
 `toyos-fat32/tests/common/mod.rs` — replaced by `toyos-fat32-check/`, written
-from fatgen103 and derived from neither our writer nor our reader. The owner's
-rule that made that mandatory: "no dependencies on binaries that dont come with
-rust or qemu". The stale FAT mirror and duplicate 8.3 names, both of which
+from fatgen103 and derived from neither our writer nor our reader. The stale FAT mirror and duplicate 8.3 names, both of which
 `fsck_msdos` silently accepted, are among the twelve corruptions the new
 checker catches and it did not.
 

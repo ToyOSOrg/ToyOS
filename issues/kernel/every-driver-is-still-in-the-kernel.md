@@ -44,12 +44,6 @@ What is left of the staged work:
    `SYS_DEVICE_BAR_MAP` and `SYS_DEVICE_DMA_ALLOC`, with config space readable
    and unwritable and the interrupt delivered as a record on the claim.
 
-Two constraints that were not obvious before the code was read:
-
 - **USB HID cannot move to userspace without moving the boot block device or
   splitting the controller.** It shares the controller, the event ring and the
   lock with the boot disk.
-- The exception criterion is "a driver stays in the kernel only if the kernel
-  needs it while userspace is dead". A widening to "if a *service the kernel
-  itself provides* needs it while userspace is dead" — which keeps NVMe and
-  changes nothing else — is waiting on the owner.

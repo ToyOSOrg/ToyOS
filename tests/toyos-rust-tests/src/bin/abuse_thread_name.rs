@@ -1,10 +1,8 @@
 //! `SYS_SET_THREAD_NAME` used to clamp an oversized name with `(a2 as
 //! usize).min(THREAD_NAME_LEN)` and set the truncated prefix — a silent
-//! clamp, and the shape
-//! `issues/isolation/untrusted-sites-not-yet-adopted.md` named for the
-//! whole of `kernel/src/syscall/`. `Untrusted::at_most` replaced it
-//! with a refusal, which is a behaviour change worth its own gate: this
-//! proves the refusal actually fires, rather than the clamp it replaced.
+//! clamp. `Untrusted::at_most` replaced it with a refusal, which is a
+//! behaviour change worth its own gate: this proves the refusal actually
+//! fires, rather than the clamp it replaced.
 //!
 //! `toyos_abi::syscall::set_thread_name` throws its own return value away —
 //! it always has, and that is not this test's to fix — so the return code

@@ -16,8 +16,8 @@ during a `set_len` then `flush_meta`: `DIR_FileSize is 2560 bytes, which needs 5
 clusters, and the chain holds 2`. It needs no refusal: a machine that stops
 between a successful shrink and its flush leaves the same volume.
 
-The kernel's `truncate_to` and `update_metadata` (`kernel/src/fat32_adapter.rs`)
-are the two callers that shrink.
+fsd's `FatVolume::truncate` and `FatVolume::level` (`userland/fsd/src/fat.rs`)
+are the two callers: the first shrinks, the second writes the entry.
 
 ## Exit condition
 

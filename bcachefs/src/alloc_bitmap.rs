@@ -82,21 +82,30 @@ impl BitmapAllocator {
         Ok(self.alloc_exact(io, 1)?.start)
     }
 
-    /// Reserve as much of `wanted` as one contiguous run can cover.
+    /// Whether `block` is free.
+    pub fn is_free(&self, io: &dyn BlockIO, block: BlockNum) -> Result<bool, FsError> {
+        let (bitmap_block, byte_off, bit) = self.bit_of(block);
+        let mut buf = BlockBuf::zeroed();
+        io.read(bitmap_block, &mut buf)?;
+        Ok(buf.0[byte_off] & (1 << bit) == 0)
+    }
+
+    /// Reserve as much of `wanted` as one contiguous run can cover, scanning
+    /// from block `from`.
     ///
     /// The run is never empty and may be shorter than asked for, so every
     /// caller has to loop or has to be wrong.
-    pub fn alloc_up_to(&mut self, io: &dyn BlockIO, wanted: u32) -> Result<Run, FsError> {
+    pub fn alloc_up_to(&mut self, io: &dyn BlockIO, from: u64, wanted: u32) -> Result<Run, FsError> {
         // A zero-length run would let a caller's loop spin without progress.
         let wanted = wanted.max(1);
-        let (start, len) = self.longest_free_run(io, wanted)?;
+        let (start, len) = self.longest_free_run(io, from % self.total_blocks, wanted)?;
         self.reserve(io, start, len.min(wanted))
     }
 
     /// Reserve all of `count` or nothing, for callers that cannot place a
     /// short run. Nothing is marked used unless the whole run is there.
     pub fn alloc_exact(&mut self, io: &dyn BlockIO, count: u32) -> Result<Run, FsError> {
-        let (start, len) = self.longest_free_run(io, count)?;
+        let (start, len) = self.longest_free_run(io, self.next_alloc, count)?;
         if len < count {
             return Err(FsError::NoSpace {
                 requested: count,
@@ -122,9 +131,9 @@ impl BitmapAllocator {
         Ok(Run { start: start_block, len })
     }
 
-    /// The longest free run found scanning from the `next_alloc` cursor,
-    /// wrapping once, stopping early once `wanted` blocks are in hand.
-    fn longest_free_run(&self, io: &dyn BlockIO, wanted: u32) -> Result<(u64, u32), FsError> {
+    /// The longest free run found scanning from block `start_pos`, wrapping
+    /// once, stopping early once `wanted` blocks are in hand.
+    fn longest_free_run(&self, io: &dyn BlockIO, start_pos: u64, wanted: u32) -> Result<(u64, u32), FsError> {
         if self.free_blocks == 0 {
             return Err(FsError::NoSpace {
                 requested: wanted,
@@ -133,11 +142,10 @@ impl BitmapAllocator {
         }
 
         let total = self.total_blocks;
-        let start_pos = self.next_alloc;
         let mut best_start = None;
         let mut best_count = 0u32;
 
-        // Scan from cursor, wrap once
+        // Scan from start_pos, wrap once
         let mut pos = start_pos;
         let mut wrapped = false;
         let mut run_start = None;

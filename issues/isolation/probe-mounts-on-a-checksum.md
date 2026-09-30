@@ -6,9 +6,11 @@ opened: 2026-08-01
 
 # `probe()` mounts on a checksum, and a stamp over a used volume does not reformat
 
-Two things, from reading `bcachefs_adapter::probe` against the crate:
+Two things, from reading DATA's probe (`DataVolume::probe` in
+`userland/fsd/src/data.rs`, the kernel's `bcachefs_adapter::probe` before it)
+against the crate:
 
-**The threshold does not match the consequence.** `Storage::Ours` is a
+**The threshold does not match the consequence.** `Probed::Mounted` is a
 read-write mount: `sync()` rewrites both superblocks, and any file operation
 writes the bitmap, btree nodes and data. So mounting a stranger's disk modifies
 it, which is a weaker form of the wrong the designation stamp exists to prevent.
@@ -32,8 +34,8 @@ Recommendation, for the owner to decide:
   longer has an unchecked extent reaching a block read — or a bitmap write —
   behind it. The residual bound this left — `read_link` sizing one kernel
   allocation from the volume rather than the smaller heap ceiling — was closed
-  by giving `Mounted::read_link` a `max_len` the adapter passes as
-  `MAX_LINK_TARGET`, refused as `FsError::TargetTooLong` before the allocation.
+  by giving `Mounted::read_link` a `max_len` its caller passes (fsd's
+  `MAX_LINK`), refused as `FsError::TargetTooLong` before the allocation.
 - **The real fix, if the threat model wants one:** read-write requires
   something the attacker cannot compute — a keyed MAC, or a designation-like
   stamp — and everything else mounts read-only. ToyOS has no key store and no

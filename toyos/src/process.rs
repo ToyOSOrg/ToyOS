@@ -10,6 +10,7 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 
 use crate::endow::FromHandle;
+use crate::shm::SharedMemory;
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
 pub struct Process(pub(crate) OwnedHandle);
@@ -68,5 +69,55 @@ impl AsHandle for Process {
 impl FromHandle for Process {
     unsafe fn from_handle(raw: RawHandle) -> Self {
         Self(OwnedHandle(raw))
+    }
+}
+
+/// A program's bytes in a memory object of this process's own, which the
+/// kernel pages a child from: how a program the kernel does not serve is
+/// spawned (`SpawnArgs::image`).
+pub struct Image {
+    object: SharedMemory,
+    len: u64,
+}
+
+/// Why [`Image::read`] made no image.
+#[derive(Debug)]
+pub enum ImageRefused<E> {
+    /// The program is an empty file.
+    Empty,
+    /// No memory object would hold it.
+    Memory(SyscallError),
+    /// The reader ran out before the length it was read at.
+    Shrank,
+    /// The reader refused.
+    Read(E),
+}
+
+impl Image {
+    /// `len` bytes, from `read` asked until it has given them all.
+    pub fn read<E>(
+        len: u64,
+        mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
+    ) -> Result<Self, ImageRefused<E>> {
+        let size = usize::try_from(len).map_err(|_| ImageRefused::Memory(SyscallError::InvalidArgument))?;
+        if size == 0 {
+            return Err(ImageRefused::Empty);
+        }
+        let mut object = SharedMemory::create(size).map_err(ImageRefused::Memory)?;
+        let bytes = object.as_mut_slice();
+        let mut done = 0;
+        while done < size {
+            match read(&mut bytes[done..]).map_err(ImageRefused::Read)? {
+                0 => return Err(ImageRefused::Shrank),
+                n => done += n,
+            }
+        }
+        Ok(Self { object, len })
+    }
+
+    /// What `SpawnArgs::image` and `SpawnArgs::image_len` carry. The object is
+    /// this process's until the spawn returns; the child keeps its own.
+    pub fn spawn_words(&self) -> (u64, u64) {
+        (u64::from(self.object.as_handle().0), self.len)
     }
 }

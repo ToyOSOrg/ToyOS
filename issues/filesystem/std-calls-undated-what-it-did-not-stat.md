@@ -6,8 +6,7 @@ opened: 2026-09-28
 
 # std calls undated what it did not stat, and sets no mtime it is asked to
 
-The fork's `library/std/src/sys/fs/toyos.rs` reads a file's mtime only off
-`SYS_FSTAT`. `DirEntry::metadata` answers `mtime: 0` without asking, so
+`DirEntry::metadata` answers `mtime: 0` without asking, so
 `Metadata::modified` reports a file the kernel has a stamp for as undated: a
 program walking a tree through `read_dir` and comparing
 `entry.metadata()?.modified()?` fails on every entry. `fs::metadata` of a

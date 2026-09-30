@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::vec::Vec;
 
-use super::region::{Body, Ring, LANE_SLOTS, RING_BYTES, SHARED_SLOTS};
+use super::region::{Body, Ring, CHILD_KEEP, LANE_SLOTS, RING_BYTES, SHARED_SLOTS};
 use super::ring::{push, push_lane, push_leaving, Pushed, Reader, Shared, Slots};
 use super::stdio::compose;
 use toyos_abi::log::Severity;
@@ -361,4 +361,28 @@ fn a_ring_has_four_lanes_to_claim() {
         assert!(ring.claim_lane(1, tid).is_some());
     }
     assert!(ring.claim_lane(1, 4).is_none());
+}
+
+/// A ring laid out exactly as `init`'s `new_ring` lays each program's out —
+/// through [`Ring::lay_out_with_placeholder_owner`], the same call — keeps
+/// its owner's slots from every pid, because none of them is the placeholder,
+/// until the real owner is named.
+#[test]
+fn a_placeholder_owned_ring_keeps_its_slots_from_every_pid_until_named() {
+    let mut words = std::vec![0u64; RING_BYTES / 8];
+    let base = core::ptr::NonNull::new(words.as_mut_ptr() as *mut u8).unwrap();
+    // SAFETY: as for `region`.
+    let ring = unsafe { Ring::at(base) };
+    ring.lay_out_with_placeholder_owner();
+
+    let body = |pid| Body { pid, ..Body::EMPTY };
+    let limit = (SHARED_SLOTS - CHILD_KEEP) as usize;
+    for _ in 0..limit {
+        assert_eq!(ring.push(&body(7)), Pushed::Written);
+    }
+    assert_eq!(ring.push(&body(7)), Pushed::Refused, "the placeholder still keeps its owner's slots");
+    assert_eq!(ring.push(&body(9)), Pushed::Refused, "no pid is the placeholder's owner");
+
+    ring.own(7);
+    assert_eq!(ring.push(&body(7)), Pushed::Written, "the named owner may take its kept slots");
 }
