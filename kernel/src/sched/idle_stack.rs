@@ -19,11 +19,6 @@ pub const SIZE: usize = crate::process::KERNEL_STACK_SIZE;
 /// One unmapped 4 KiB page below every idle stack.
 const GUARD: usize = crate::mm::PAGE_BYTES;
 
-/// What an untouched byte of a filled stack holds: chosen so a zeroed or ASCII
-/// byte cannot be mistaken for one.
-pub const FILL: u8 = 0xA5;
-pub const FILL_WORD: u64 = u64::from_ne_bytes([FILL; 8]);
-
 /// One idle stack and the guard page under it.
 const SLOT: usize = GUARD + SIZE;
 
@@ -57,12 +52,4 @@ pub fn alloc() -> u64 {
     let base = alloc_slot();
     crate::mm::paging::kernel().lock().guard_4k(DirectMap::phys_of(base as *const u8));
     base + SLOT as u64
-}
-
-/// Sequential u64s from `base`; every address is inside the caller's
-/// already-bounds-checked allocation.
-pub fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
-    // SAFETY: `i < len/8` bounds each address inside the caller's checked
-    // allocation; `read_volatile` keeps the fill-pattern read.
-    (0..len / 8).map(move |i| unsafe { core::ptr::read_volatile((base as *const u64).add(i)) })
 }

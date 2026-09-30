@@ -5,7 +5,6 @@ use alloc::alloc::alloc_zeroed;
 use core::alloc::Layout;
 
 use super::cpu;
-use crate::sched::idle_stack::{words, FILL as STACK_FILL, FILL_WORD as STACK_FILL_WORD};
 use crate::log;
 
 const MSR_GS_BASE: u32 = 0xC000_0101;
@@ -313,6 +312,17 @@ const IST_STACK_SIZE: usize = 16384;
 
 /// Filled with [`STACK_FILL`], not unmapped: a fault already on IST1 is a triple fault, so detecting after the fact beats trapping it.
 const IST_GUARD_SIZE: usize = 4096;
+
+const STACK_FILL: u8 = 0xA5;
+const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
+
+/// Sequential u64s from `base`; every address is inside the caller's
+/// already-bounds-checked allocation.
+fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
+    // SAFETY: `i < len/8` bounds each address inside the caller's checked
+    // allocation; `read_volatile` keeps the fill-pattern read.
+    (0..len / 8).map(move |i| unsafe { core::ptr::read_volatile((base as *const u64).add(i)) })
+}
 
 
 /// Allocate and initialize `PerCpu` for a CPU; the pointer lives forever, one `write` of the whole struct so a new field must be given a value here.
