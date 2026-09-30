@@ -15,8 +15,8 @@ nothing establishes that it runs the POSIX shell language build files are
 written in.
 
 Blocked on `posix_spawn`, stage 3 of
-`issues/kernel/a-childs-end-is-an-event-and-its-tree-is-a-job.md`. Where the
-path comes from is
+`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`.
+Where the path comes from is
 `issues/isolation/every-program-sees-only-the-files-it-was-given.md`'s.
 
 **Exit**: inside ToyOS, Ninja builds a file whose commands chain with `&&`,

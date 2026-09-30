@@ -6,9 +6,10 @@ opened: 2026-09-30
 
 # The child-process track waits on the owner's rulings
 
-What `issues/kernel/a-childs-end-is-an-event-and-its-tree-is-a-job.md` builds
-from stage 2 on waits on these. Each ruling goes into the track as one line,
-and its entry here is deleted.
+Stages 2, 3, 6 and 7 of
+`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
+wait on these. Each ruling goes into the track as one line, and its entry here
+is deleted.
 
 ## Q2. How a program ended (stage 2)
 
@@ -46,17 +47,20 @@ ToyOS has no signals, and its kernel never will: nothing is ever sent from one
 process to another as a signal. A signal exists only inside libc, imitated for
 the C programs written around them, out of ToyOS events libc sees itself.
 
-**`SIGCHLD`.** libc raises it once for each end of a child it started, which it
-learns from stage 1's event. It runs the program's handler only while the
-program is blocked in a libc call that leaves `SIGCHLD` unblocked — `ppoll`
-under its mask, or `poll` — and that call then answers `EINTR`, as POSIX says.
-Once the handler has run for an end, that end never raises it again, even
-while the child is not yet waited for. With `SIGCHLD` set to `SIG_IGN`, or
-`SA_NOCLDWAIT` asked for, libc drops an ended child without a wait, as POSIX
-says, so it stops counting against how many children a process may have.
-`sigaction` records handlers, where today it answers `0` and records nothing. A
-program that waits for `SIGCHLD` without blocking in libc never gets it. This
-is what the build tools use: Ninja blocks `SIGCHLD` except inside `ppoll`
+**`SIGCHLD`.** libc raises it once for each end of a child it started, which
+its own thread learns from stage 1's event. libc runs a handler for any signal
+it imitates where POSIX would: inside a blocking libc call — `ppoll` under its
+mask, or `poll` — of a thread that leaves the signal unblocked, and that call
+then answers `EINTR`; while no such thread is in one, at once on libc's own
+thread, as POSIX lets a signal sent to a process run on any thread that does
+not block it; and while every thread blocks it, it stays pending, which
+`sigpending` reports, until a call unblocks it. Once the handler has run for
+an end, that end never raises it again, even while the child is not yet waited
+for. With `SIGCHLD` set to `SIG_IGN`, or `SA_NOCLDWAIT` asked for, libc drops
+an ended child without a wait, as POSIX says, so it stops counting against how
+many children a process may have.
+`sigaction` records handlers, where today it answers `0` and records nothing.
+This is what the build tools use: Ninja blocks `SIGCHLD` except inside `ppoll`
 (v1.13.1 `src/subprocess-posix.cc`), and libuv, without kqueue, learns of a
 child from a handler that writes its own pipe (v1.53.0 `src/unix/process.c`),
 which an `EINTR` from `poll` serves.
@@ -80,91 +84,52 @@ children (libuv's kqueue shape would fit the handle's event), a fork per
 program for what one libc routine serves; and POSIX's default inheritance, for
 the split in authority above.
 
-## Q4. One mechanism: a program owns what it starts (stage 4)
-
-The track takes this as the one mechanism the owner asked for; the ruling asked
-is whether it stands. Today a kill ends one process, and what it started runs
-on.
-
-- A program owns what it starts. Killing a process ends it, everything it
-  started and everything those started; so does the process ending on its own,
-  however it ends. A parent's wait for a child completes once the child's whole
-  tree is gone.
-- The `Process` handle is the only control. The kernel remembers which process
-  started which, only to find a tree; no call takes a pid, and being a parent
-  grants nothing — holding the handle does.
-- A program started through the launcher belongs to whoever asked, so nothing
-  the shell starts escapes a Ctrl+C or a closed window: each process holds a
-  handle to itself that std and libc send with every launch, so a launch costs
-  one handle copy, and no object or nesting level. A service
-  (`service = true` in `system.toml`) belongs to init, however it is started.
-
-It serves each case: Ctrl+C ends what the shell started for the line, and what
-those started; a closed window ends the terminal, its shell and everything
-under them; a dropped SSH session ends that session's process and its tree; a
-test past its deadline is killed with everything it started, and the next test
-starts once all of it is gone; Ninja's `kill(-pgid)` ends that command's
-process and its tree, and nothing Ninja started outlives Ninja.
-
-What changes, plainly:
-
-- A kill reaches the whole tree: std's `Child::kill` and libc's
-  `kill(pid, SIGKILL)` end the child's descendants too, where Unix ends the
-  child alone.
-- Nothing outlives what started it but a service. A helper a program starts
-  and leaves running when it ends — a server started with `&` from a script
-  that then exits, sccache's server, tmux's server — ends with it; what must
-  outlive its starter is a service. `/system/bin/sshd &`, the way `system.toml`
-  says sshd is started by hand, keeps working: sshd is a service, so it runs
-  under init.
-
-*Recommended.* Rejected:
-
-- A job object beside the process: a fourteenth object kind,
-  `SYS_JOB_CREATE`, a job in `SpawnArgs`, and a kill that takes either. A
-  process holds no handle to its own job, so std and libc would create one
-  before every launch: a job object and a nesting level per hop, and a chain of
-  launches deeper than 32 refused. Two things to kill, two to watch, two places
-  a child lands.
-- One mechanism where a process that exits leaves what it started running: its
-  end would then say nothing about what it left, so a supervisor that kills the
-  rest — init replacing a service whose leftover still holds its device,
-  test-runner before the next test — would need a second event to learn it is
-  gone.
-- A process killed when its last handle closes (`pdfork` without `PD_DAEMON`):
-  Rust documents that a dropped `Child` "will continue to run", and here it
-  does, until its parent ends.
-- The parent relation as authority, which ToyOS retired with `SYS_KILL` (65):
-  here it only says how far a kill reaches.
-
-## Q6. Asking a program to quit (stage 5)
+## Q6. Asking a program to quit (stages 6 and 7)
 
 Today the only end one program can cause another is a kill, which leaves it no
-chance to save. Proposed: two operations on the one handle a parent holds —
-quit and kill.
+chance to save, and quitting gracefully is a parent's job before it ends.
+Proposed: two operations on the one handle a parent holds — quit and kill.
 
 - **Quit** is a new syscall, `SYS_PROCESS_QUIT` = 124,
-  `(process: RawHandle) -> ()`, needing `MANAGE` as the kill does, and `Ok` for
-  a process already ended or already asked. It interrupts nothing: each process
-  is started holding a quit notice, a handle under the label `quit` that
-  becomes `READABLE` once its process is asked to quit, and the program waits
-  on it beside any other event, then saves and exits.
+  `(process: RawHandle, reason) -> ()`, needing `MANAGE` as the kill does, and
+  `Ok` for a process already ended. The reason is interrupt (Ctrl+C), hang-up
+  (a closed window, a dropped connection) or terminate (shutdown, a deadline),
+  which a program needs as much as libc: Ctrl+C in a shell or an editor stops
+  what it is doing and ends nothing. It interrupts nothing: each process is
+  started holding a quit notice, a handle under the label `quit` that is
+  `READABLE` while a reason is asked and not yet read, and the program waits
+  on it beside any other event.
 - A program that has never watched its notice is killed by a quit instead,
-  with its tree, as a Unix program with no handler for `SIGINT` dies of Ctrl+C
-  at once.
-- Whoever asks waits for the program's end with a deadline of its own and
-  kills it if the end has not come. The terminal asks on Ctrl+C and kills on a
-  second Ctrl+C or at its deadline; a closed window, a dropped SSH session,
-  shutdown and a test past its deadline are the same pair.
-- libc: a handler for `SIGINT`, `SIGTERM` or `SIGHUP` watches the notice, and a
-  quit runs the first of those the program handles inside a blocking libc
-  call, as `SIGCHLD` does; `kill` with `SIGINT`, `SIGTERM` or `SIGHUP` is a
-  quit, and with `SIGKILL` a kill. std: the SDK hands a program its notice to
-  register in its poller.
+  with its tree, as a Unix program with no handler dies of Ctrl+C at once.
+- Whoever asks kills when the end it wants has not come. The terminal asks
+  with interrupt on Ctrl+C and kills on a second; a closed window and a
+  dropped SSH session ask with hang-up, shutdown and a test past its deadline
+  with terminate, each killing at a deadline of its own.
+- std: `os::toyos` hands a program its notice — a blocking wait for a reason,
+  and the handle for a poller. The `ctrlc` fork `rust/Cargo.toml` patches in,
+  whose ToyOS arm parks its waiting thread forever today, waits there
+  instead, for the reasons its Unix arm maps; and rustc stops skipping its
+  handler on ToyOS (`rust/compiler/rustc_driver_impl/src/lib.rs`,
+  `install_ctrlc_handler`). An unchanged Rust program's `ctrlc` handler then
+  runs on a quit.
+- libc: from the first `sigaction` that installs a handler for `SIGINT`,
+  `SIGHUP` or `SIGTERM`, libc's own thread watches the notice, and each reason
+  runs its signal's handler by Q3's rule — interrupt `SIGINT`, hang-up
+  `SIGHUP`, terminate `SIGTERM`. A reason whose signal is ignored is dropped,
+  and one with neither handler nor ignore takes the default action, which ends
+  the process with exit code 128 plus the signal's number: `waitpid` reads it
+  as an exit, not `WIFSIGNALED`. So a quit ends clang at once: LLVM's handler
+  removes its output files, restores the default action and raises the signal
+  again (`rust/src/llvm-project/llvm/lib/Support/Unix/Signals.inc`,
+  `SignalHandler`). A handler that only sets a flag leaves the program running
+  until it acts on the flag, and a daemon's `SIGHUP` reload stays a reload.
+  `kill` with one of the three is a quit with that reason, and with `SIGKILL`
+  a kill.
 
 What it adds to the ABI: the syscall (124, never assigned), the notice — a
-fourteenth object kind, one bit and a watch — and its label, installed in every
-process the kernel starts. The kill is unchanged.
+fourteenth object kind, three reason bits, a read that takes them, and a
+watch — and its label, installed in every process the kernel starts. The kill
+is unchanged.
 
 *Recommended.* Rejected:
 
@@ -173,6 +138,9 @@ process the kernel starts. The kill is unchanged.
   did, every launch carries one more, a program started any other way has
   none, and one that never listens ends only when its asker's deadline runs
   out.
+- A quit with no reason: a daemon that reloads on `SIGHUP` and exits on
+  `SIGTERM` would exit when asked to reload, and no program could tell Ctrl+C
+  from shutdown.
 - Quit as a second mode of the kill (109): one number for two operations with
   different effects.
 - A signal delivered into the program's own code, a handler that interrupts

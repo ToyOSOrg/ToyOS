@@ -9,10 +9,9 @@ opened: 2026-09-30
 Three things a C build runs open it by path: Ninja as every command's stdin
 (v1.13.1 `src/subprocess-posix.cc:107`), LLVM for a redirect to nowhere
 (llvmorg-21.1.0 `llvm/lib/Support/Unix/Program.inc:97`, `:127`), and libuv for
-each stdio of a child left unset (v1.53.0 `src/unix/process.c:679-685`), which
-is how CMake starts a child (v4.1.2 `Source/cmSystemTools.cxx`,
-`RunSingleCommand`). ToyOS has no `/dev`: `/` holds exactly the names
-`kernel/src/vfs.rs`'s `ROOT_ENTRIES` lists.
+each stdio of a child left unset (v1.53.0 `src/unix/process.c:679-685`).
+ToyOS has no `/dev`: `/` holds exactly the names `kernel/src/vfs.rs`'s
+`ROOT_ENTRIES` lists.
 
 Owed: a name that opens to an object every read of which answers end of file
 and every write to which is taken and dropped. Where the name lives, in `/` or

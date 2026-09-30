@@ -47,7 +47,7 @@ and the network stack under it (`issues/hardware/the-lan-is-not-yet-production-g
 gigabyte of toolchain, and threads and `mmap` mature enough for LLVM
 (`issues/kernel/std-and-libc-drop-the-answer-thread-join-gives.md`).
 M2 and M4 also need libc to start a child process
-(`issues/kernel/a-childs-end-is-an-event-and-its-tree-is-a-job.md`). M3 needs
+(`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`). M3 needs
 locale support or libc++'s no-localization build. M4 needs git in the guest, storage durable and fast
 enough for an LLVM build tree
 (`issues/filesystem/storage-is-layers-and-a-role-is-a-filesystem.md`), and
