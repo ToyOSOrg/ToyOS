@@ -605,7 +605,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.0"
-source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#7e9775d5dc50b0da933fb947c806bd420ff6e85d"
+source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#18f2db21c709234f80dffff0cb813a7dda4a7dc4"
 dependencies = [
  "alsa",
  "block2 0.6.2",
