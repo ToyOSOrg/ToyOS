@@ -9,9 +9,7 @@ opened: 2026-09-30
 `src/sysroot.rs` builds each target's libc++, libc++abi and libunwind into the
 C sysroot after libc, so every change the sysroot key sees, an edit to
 `toyos-abi/src`, `toyos/src` or libc's `src/` among them, configures and
-builds both targets' runtimes again. On the development host one target's
-configure took 4.4 s and its build 6.0 s (`cmake`, and n2's `install`, x86_64,
-LLVM `1425e623e612b348`).
+builds both targets' runtimes again.
 
 The runtime is a function of the LLVM key, libc's `include/` and
 `src/libcxx.rs` only if no configure probe links: the runtimes' `try_compile`
