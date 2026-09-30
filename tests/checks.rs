@@ -641,10 +641,202 @@ mod checks {
             .find(|(name, _)| *name == "blackbox_unclaimed_page")
             .map(|(name, decl)| vec![(*name, decl)])
             .ok_or_else(|| "blackbox_unclaimed_page is not registered".to_string())?;
-        let verdict = metal::run(mode, &selected, &[], &[], &[], true);
+        let verdict = metal::run(mode, &selected, &[], &[], true);
         if verdict != metal::Verdict::Green {
             return Err(format!("--metal --list produced {verdict:?}, not Green"));
         }
         Ok(())
+    }
+
+    /// The judge a metal registration runs.
+    fn metal_judge(name: &str) -> fn(&[&metal::Readback]) -> Result<(), String> {
+        match METAL.iter().find(|(row, _)| *row == name) {
+            Some((_, metal::Metal::Runs { judge, .. })) => *judge,
+            _ => panic!("{name} runs no metal judge"),
+        }
+    }
+
+    /// One boot's readback, out of a `loader.log` and a `logd` text.
+    fn readback(label: &str, loader: &str, log: &str) -> metal::Readback {
+        let boot = "back_secs 50\nstick_secs 0\n";
+        metal::Readback::new(label, std::path::PathBuf::new(), loader.into(), log.into(), boot)
+            .expect("a boot file naming both numbers")
+    }
+
+    /// The pass before the handoff, which every `loader.log` opens with.
+    const HANDOFF: &str = "Loader log: the kernel handoff begins, so this file ends here\n";
+
+    /// Four judges fed a T14 readback's lines: each record they ask for is
+    /// written after the file was made whole, so it crosses only on the sealed
+    /// page — and a page without it still reds.
+    #[test]
+    fn metal_judges_read_the_page_for_what_only_the_page_carries() {
+        let done = |tail: &str| {
+            format!(
+                "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
+                 Black box: the last boot read DONE, so it handed the machine back on purpose and \
+                 this chain ends here\n\
+                 | log: this boot's newest records follow, newest first (16)\n{tail}\
+                 Loader log: the last boot is accounted for, so this pass resets the machine\n",
+                bootlog::SEPARATOR
+            )
+        };
+        let rebooted = "| log-tail: [1.516 cpu0] Rebooting.\n";
+        let synced = "| log-tail: [1.516 cpu0] Syncing filesystems...\n";
+
+        let jobcase =
+            "[2026-09-29 10:40:36 0.000 cpu0 boot] ACPI: reset register SystemIO 0xcf9 <- 0x06\n";
+        let judge = metal_judge("machine_reboot");
+        assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
+        assert!(judge(&[&readback("jobcase", &done(synced), jobcase)]).is_err());
+
+        let testcases = "[2026-09-29 11:11:32 12.720 cpu2] exit: test_rs_null_sink_client_ex pid=12 \
+                         code=0 cpu=42ms\n\
+                         [2026-09-29 11:11:32 12.725 cpu7] exit: echo pid=15 code=0 cpu=0ms\n";
+        let judge = metal_judge("log_poll_outlives_a_close");
+        assert_eq!(judge(&[&readback("testcases", &done(rebooted), testcases)]), Ok(()));
+        assert!(judge(&[&readback("testcases", &done(synced), testcases)]).is_err());
+
+        let wedged = |tail: &str| {
+            format!(
+                "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
+                 Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it \
+                 and this chain ends here\n\
+                 | the boot deadline expired: a bound of 120000 ms, reached at 120061 ms, with this \
+                 machine in `complete`. The tail of the log ring follows ... which is what nothing \
+                 was draining.\n\
+                 | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n{tail}\
+                 Loader log: the last boot is accounted for, so this pass resets the machine\n",
+                bootlog::SEPARATOR
+            )
+        };
+        let kernel = "[2026-09-29 10:33:28 0.000 cpu0 boot] panic console: armed 1920x1080 \
+                      stride=1920 format=1 at 0x4000000000, write-combining\n";
+        let wedge = "| [1.509 cpu0] wedge: staged, and only the boot deadline ends this machine: \
+                     every CPU stops taking scheduler passes from here\n\
+                     | [1.509 cpu0] wedge: cpu0 arrived with interrupts off, through the syscall \
+                     gate, and takes them again here\n\
+                     | [1.509 cpu1] wedge: cpu1 arrived with interrupts on\n";
+        let judge = metal_judge("boot_deadline_ends_a_wedge");
+        assert_eq!(judge(&[&readback("deadlinewedge", &wedged(wedge), kernel)]), Ok(()));
+        assert!(judge(&[&readback("deadlinewedge", &wedged(""), kernel)]).is_err());
+
+        let sweep = "| [1.526 cpu0] usb-load: sweeping disk 0 from block 6569336 to 7507812, \
+                     rewriting each run with the bytes just read from it, until this machine is \
+                     reset out from under it\n";
+        let judge = metal_judge("usb_reset_records_the_phase_it_cut");
+        assert_eq!(judge(&[&readback("usbload", &wedged(sweep), kernel)]), Ok(()));
+        assert!(judge(&[&readback("usbload", &wedged(""), kernel)]).is_err());
+    }
+
+    /// The foreign-identity arm's pass after the reset: the record it cleared
+    /// was sealed `DONE`, so the stop the arm staged finished.
+    #[test]
+    fn the_foreign_record_judge_demands_the_stop_sealed_done() {
+        let loader = format!(
+            "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
+             Black box: 0x8000000 held a DONE record another image left in this memory ([3e, d4, \
+             0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81], and this stick is [c1, d4, \
+             0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81]), armed at 2026-09-29-131341. \
+             It has been cleared and this pass boots its kernel\n\
+             Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n\
+             {}\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n",
+            bootlog::SEPARATOR,
+            bootlog::HUNG_WITHOUT_A_RECORD
+        );
+        let kernel = "[2026-09-29 13:13:43 1.171 cpu0] Boot: complete (1171ms)\n";
+        let judge = metal_judge("blackbox_foreign_record");
+        assert_eq!(judge(&[&readback("foreignrecord", &loader, kernel)]), Ok(()));
+        for state in ["PANIC", "WEDGED"] {
+            let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
+            assert!(judge(&[&readback("foreignrecord", &ended, kernel)]).is_err());
+            let stale = format!(
+                "Black box: 0x8000000 held a DONE record another image left in this memory\n{ended}"
+            );
+            assert!(judge(&[&readback("foreignrecord", &stale, kernel)]).is_err());
+        }
+        let unbounded = loader.replace(bootlog::HUNG_WITHOUT_A_RECORD, "");
+        assert!(judge(&[&readback("foreignrecord", &unbounded, kernel)]).is_err());
+    }
+
+    /// The foreign-identity boot owes no fact off the page its next pass
+    /// cleared; any other boot owes each one but a path it did not take.
+    #[test]
+    fn a_cleared_page_owes_no_fact_off_it() {
+        let bound = "boot-deadline=120000";
+        assert!(metal::owes_nothing("panel_us", &[toyos_build::metal::FOREIGN_RECORD_ARM, bound]));
+        assert!(!metal::owes_nothing("panel_us", &[bound]));
+        assert!(metal::owes_nothing("park_open_operations", &[bound]));
+    }
+
+    /// A T14 controller's handoff: it publishes USB Legacy Support and
+    /// firmware never claimed it. The T14 has two, and each is judged.
+    #[test]
+    fn the_xecp_judge_reads_the_t14s_handoff() {
+        let t14 = "[2026-09-29 11:05:25 0.253 cpu0] xHCI: xecp selftest 8/8 malformed lists refused\n\
+                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: firmware did not claim the controller \
+                   (USBLEGSUP 0x01002201)\n\
+                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: USBLEGCTLSTS 0xe0000000 -> 0x00000000 \
+                   (SMI generation off)\n\
+                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: controller reset\n\
+                   [2026-09-29 11:05:25 0.254 cpu0] xHCI: controller started\n";
+        assert_eq!(xhci_xecp(t14), Ok(()));
+        assert_eq!(xhci_xecp(&format!("{t14}{t14}")), Ok(()));
+        // Firmware that kept the controller handed nothing over.
+        let held = t14.replace(
+            "firmware did not claim the controller (USBLEGSUP 0x01002201)",
+            "firmware still owns the controller after 1000ms (USBLEGSUP 0x01010001 -> \
+             0x01010001) — resetting it anyway",
+        );
+        assert!(xhci_xecp(&held).is_err());
+        assert!(xhci_xecp(&format!("{t14}{held}")).is_err());
+        let kept = held.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&format!("{t14}{kept}")).is_err());
+        // A second controller's handoff with no reset of its own, and a reset
+        // with no handoff before it.
+        let unreset = t14.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&format!("{t14}{unreset}")).is_err());
+        assert!(xhci_xecp(&format!("{unreset}{t14}")).is_err());
+        let unhanded = t14.replace("firmware did not claim the controller", "USB 3.1 on ports 2..=5");
+        assert!(xhci_xecp(&format!("{t14}{unhanded}")).is_err());
+        let silent = unhanded.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&silent).is_err());
+    }
+
+    /// `dlopen_dedup` reads `test_rs_std_tls` by path.
+    #[test]
+    fn a_shared_chunk_stages_every_binary_its_members_name() {
+        let source = "const NEEDS_A_LIB: &str = \"/system/bin/test_rs_std_tls\";\n";
+        let bins: Vec<(String, Vec<u8>)> = ["dlopen_dedup", "std_tls", "fs_large_file", "libfoo.so"]
+            .iter()
+            .map(|name| ((*name).to_string(), Vec::new()))
+            .collect();
+        let jobs = vec!["test_rs_dlopen_dedup".to_string()];
+        let staged = |text: &str| -> Vec<String> {
+            metal::reached(text, &jobs, &bins).into_iter().map(|(path, _)| path).collect()
+        };
+        assert_eq!(
+            staged(&format!("test_rs_dlopen_dedup\n{source}")),
+            ["bin/test_rs_std_tls", "lib/libfoo.so"]
+        );
+        // A longer name is another binary's.
+        let longer = source.replace("test_rs_std_tls", "test_rs_std_tls_dlopen");
+        assert_eq!(staged(&format!("test_rs_dlopen_dedup\n{longer}")), ["lib/libfoo.so"]);
+    }
+
+    /// `03_struct`'s output as `ccheck` prints it: the expectation the corpus
+    /// stages is that, under the guest's `trim_end`.
+    #[test]
+    fn the_c_corpus_stages_the_expectation_the_host_compares() {
+        let got = "12\n34\n12\n34\n56\n78\n~fred()";
+        let boot = c_corpus_metal(&[("03_struct".to_string(), Vec::new())], |_| true);
+        let staged = boot
+            .files
+            .iter()
+            .find(|(path, _)| path == "expect/03_struct")
+            .map(|(_, bytes)| String::from_utf8(bytes.clone()).expect("an expectation is text"))
+            .expect("03_struct's expectation is staged");
+        assert_eq!(staged.trim_end(), got);
     }
 }
