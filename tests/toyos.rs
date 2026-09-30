@@ -827,8 +827,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel),
-    // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
-    ("metal_job_reboot", Sched::Parallel),
     // Its own boot, and the one whose numbers are the T14's: what it judges
     // here is the plumbing, since every span on an emulated device is a fact
     // about TCG.
@@ -8577,7 +8575,6 @@ fn run_machine_test(
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
-        "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
         "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),

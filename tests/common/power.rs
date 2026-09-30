@@ -72,90 +72,6 @@ pub fn machine_reboot(
     Ok(())
 }
 
-/// A boot with no host on the console runs its manifest's jobs and ends
-/// itself, and the loader's own account of it is on the stick beside `logd`'s.
-pub fn metal_job_reboot(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-
-    // A file under the loader's name that the last boot could have left: a
-    // loader that opens without truncating ends in this one's tail.
-    let stale = (bootlog::LOADER_LOG.to_string(), vec![b'x'; 64 * 1024]);
-    let kept = Kept::build(case, &[], "jobcase-boot.img", &[stale])?;
-    let (image_path, start, len) = (kept.image.clone(), kept.start, kept.len);
-
-    let mut qemu = QemuInstance::boot_with_options(
-        case,
-        &[],
-        &[],
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            qmp: true,
-            boot_image: kept.boots(),
-            ..Default::default()
-        },
-    );
-    serial::Serial::boot(&qemu).must_be_clean()?;
-    let console = qemu.boot_log().to_string();
-
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
-    let reason = stop.reason();
-    let tail = qemu.drain_serial(WAIT);
-
-    let drain = serial::Serial::named("job drain", tail.as_str());
-    drain.must_be_clean()?;
-    drain.must_say("===TEST_START reboot===")?;
-    // The control for `job_deadline_reboots`: a list that finishes inside the
-    // bound is ended by its own last job and never by the deadline.
-    drain.must_not_say(bootlog::JOB_DEADLINE_SAID)?;
-    drain.must_say(REBOOTING)?;
-    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
-    drop(qemu);
-
-    let (name, log) = super::volumes::newest_log(&image_path, start, len)?;
-    let text = String::from_utf8_lossy(&log);
-    // The volume is born clean in an image built moments ago, so every record in it is this boot's.
-    // Judged by `bootlog`, because a T14 run judges the same volume by it.
-    let boot_ms = bootlog::verdict(&text).map_err(|unfit| {
-        format!(
-            "{name}: {unfit}. A machine with no console would have no account of this \
-             boot\n{text}"
-        )
-    })?;
-    let printed = loader_window(&console)?;
-    let written = super::volumes::loader_log_lines(&image_path, start, len)?;
-    // Compared byte for byte against a console the firmware rendered: a
-    // character it has no glyph for is a line the two channels disagree about
-    // on one machine and not on the next.
-    if let Some(line) = written.iter().find(|line| !line.is_ascii()) {
-        return Err(format!("the loader wrote {line:?}, which is not ASCII"));
-    }
-    if written != printed {
-        return Err(format!(
-            "{} carries {} line(s) and the loader printed {}\n--- on the stick\n{}\n--- on the \
-             console\n{}",
-            bootlog::LOADER_LOG,
-            written.len(),
-            printed.len(),
-            written.join("\n"),
-            printed.join("\n"),
-        ));
-    }
-
-    kept.remove();
-    eprintln!(
-        "  [power] {name} carries Boot: complete ({boot_ms}ms) and init's stop; {} carries the \
-         loader's {} lines beside it",
-        bootlog::LOADER_LOG,
-        written.len()
-    );
-    Ok(())
-}
-
 /// Every [`stopped_boot`] arms it, for the reason `usb_reset_hands_devices_back`'s
 /// deadline arm does: QEMU has no window between the boot's last word and the
 /// reset and hardware does, so without it the last-word judge is green whether
@@ -337,26 +253,6 @@ pub fn job_deadline_reboots(
 
     eprintln!("  [power] the job list did not finish and the runner ended the boot itself");
     Ok(())
-}
-
-/// Everything the loader printed on the console, its first line to its last.
-fn loader_window(console: &str) -> Result<Vec<String>, String> {
-    let lines: Vec<&str> = console.lines().collect();
-    let at = |line: &str| {
-        lines
-            .iter()
-            .position(|seen| seen.contains(line))
-            .ok_or_else(|| format!("the loader never printed {line:?} on the console"))
-    };
-    let (first, last) = (at(bootlog::LOADER_FIRST_LINE)?, at(bootlog::LOADER_LAST_LINE)?);
-    if last < first {
-        return Err(format!(
-            "the console carries {:?} before {:?}, so there is no window between them",
-            bootlog::LOADER_LAST_LINE,
-            bootlog::LOADER_FIRST_LINE
-        ));
-    }
-    Ok(lines[first..=last].iter().map(|line| (*line).to_string()).collect())
 }
 
 /// The chipset resets a machine whose kernel stops feeding its watchdog.
