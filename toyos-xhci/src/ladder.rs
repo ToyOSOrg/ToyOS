@@ -140,6 +140,50 @@ impl Run {
     pub fn over(&mut self) -> u8 {
         core::mem::replace(self, Self::NONE).breaks
     }
+
+    /// The rung this run last climbed ended `ended`, below [`Rung::Offline`],
+    /// on a port that `holds` its device or not (`Portsc::holds`, read once
+    /// the rung has ended).
+    ///
+    /// **A device its port no longer holds left, whichever rung it was and
+    /// however the rung ended.** That is no break, and no rung above reaches
+    /// the device: its port's teardown owns what it held. Otherwise the rung
+    /// is the next break.
+    pub fn unverified<W>(&mut self, ended: &Unverified<W>, holds: bool) -> AfterRung {
+        if !holds {
+            return AfterRung::Left;
+        }
+        // After a step that was not answered the event is spent: the rung has
+        // commanded the pair since, and only the fields speak for it now.
+        let broke = match ended {
+            Unverified::OutOfStep(why) => why.event(),
+            Unverified::Failed => None,
+        };
+        // A rung's own TEST UNIT READY has no data phase to be left in.
+        AfterRung::Climbs { climb: self.broke(Left::Elsewhere), broke }
+    }
+}
+
+/// How a rung below [`Rung::Offline`] ended without bringing its device back
+/// in step; `W` is the driver's reason for a silence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unverified<W> {
+    /// Every step before its TEST UNIT READY was answered, and that broke this
+    /// way: a break like the one recovered from.
+    OutOfStep(crate::bot::Broke<W>),
+    /// A step before its TEST UNIT READY was not answered; the device was
+    /// asked nothing after it.
+    Failed,
+}
+
+/// What a climb does after a rung that did not verify ([`Run::unverified`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AfterRung {
+    /// The device left.
+    Left,
+    /// The next break: the rung it climbs, and the transfer event that rung
+    /// quiesces against, where one ended the round trip.
+    Climbs { climb: Climb, broke: Option<(crate::reset_recovery::Pipe, u32)> },
 }
 
 /// One step of [`Rung::PortReset`], in the order taken.
@@ -212,6 +256,13 @@ impl AfterReset {
     /// Whether the device was reset: the last thing it was sent is one.
     pub fn finished(self) -> bool {
         !matches!(self, Self::NeverFinished | Self::Left)
+    }
+
+    /// Whether the port rung goes on past its reset: only for the device it
+    /// was enumerated as, on its port. Any other reading ends the rung, and
+    /// nothing is sent to a port that reads empty.
+    pub fn goes_on(self) -> bool {
+        self == Self::Enumerate
     }
 }
 
@@ -307,6 +358,49 @@ mod tests {
         assert!(!run.broke(Left::OwedDataOut).skips_class_reset, "the class reset was climbed");
     }
 
+    /// Every run that reaches a rung below [`Rung::Offline`], each way that
+    /// rung can end unverified: its device left exactly where its port no
+    /// longer holds it, which is no break; otherwise the rung is the next
+    /// break, and the next rung quiesces against the event that ended the
+    /// TEST UNIT READY, where one did.
+    #[test]
+    fn a_rung_that_did_not_verify_left_exactly_where_its_port_no_longer_holds_the_device() {
+        use crate::bot::{Broke, Phase};
+        use crate::reset_recovery::Pipe;
+        let stalled = Broke::<()>::Code { phase: Phase::Command, code: 6, pipe: Pipe::Out };
+        let endings = [
+            (Unverified::Failed, None),
+            (Unverified::OutOfStep(stalled), Some((Pipe::Out, 6))),
+            (Unverified::OutOfStep(Broke::Gone { phase: Phase::Command }), None),
+            (Unverified::OutOfStep(Broke::Silence { phase: Phase::Status, why: () }), None),
+        ];
+        let runs: [(&[Left], Rung); 3] = [
+            (&[Left::Elsewhere], Rung::ClassReset),
+            (&[Left::Elsewhere, Left::Elsewhere], Rung::PortReset),
+            (&[Left::OwedDataOut], Rung::PortReset),
+        ];
+        for (breaks, rung) in runs {
+            let mut at = Run::NONE;
+            for left in breaks {
+                at.broke(*left);
+            }
+            assert_eq!(at.climbed, Some(rung), "{breaks:?}");
+            for (ended, event) in endings {
+                let mut run = at;
+                assert_eq!(run.unverified(&ended, false), AfterRung::Left, "{rung:?} {ended:?}");
+                assert_eq!(run, at, "a device that left is no break: {rung:?} {ended:?}");
+                let mut next = at;
+                let climb = next.broke(Left::Elsewhere);
+                assert_eq!(
+                    run.unverified(&ended, true),
+                    AfterRung::Climbs { climb, broke: event },
+                    "{rung:?} {ended:?}"
+                );
+                assert_eq!(run, next, "{rung:?} {ended:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_break_elsewhere_climbs_every_rung() {
         assert_eq!(next(None, Left::Elsewhere), Rung::ClassReset);
@@ -373,6 +467,15 @@ mod tests {
         }
         for left in [AfterReset::Enumerate, AfterReset::NotEnabled, AfterReset::SpeedChanged { was: 3, now: 4 }] {
             assert!(left.finished(), "{left:?}");
+        }
+        assert!(AfterReset::Enumerate.goes_on());
+        for after in [
+            AfterReset::NeverFinished,
+            AfterReset::Left,
+            AfterReset::NotEnabled,
+            AfterReset::SpeedChanged { was: 3, now: 4 },
+        ] {
+            assert!(!after.goes_on(), "{after:?}");
         }
     }
 }

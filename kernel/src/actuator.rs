@@ -135,20 +135,20 @@ actuators! {
     /// ladder, once: a device that answers nothing on any rung.
     usb_reset_break = "usb-reset-break";
 
-    /// Hold the port rung's first reset, once, until the port reads empty, so
-    /// the host can move the device to another port. See
-    /// `xhci::msc::reset_moves`; judged by `usb_transport_break`.
+    /// Hold the port rung's first reset, once, until the port reads empty. See
+    /// `xhci::msc::reset_moves`; judged by `usb_transport_break` and
+    /// `usb_stick_left`.
     usb_reset_moves = "usb-reset-moves";
 
     /// The same hold, once the reset's completion has been read with the
     /// device on the port: a device that leaves under a USB2 port's reset.
-    /// See `xhci::msc::reset_moves`; judged by `usb_transport_break`.
+    /// See `xhci::msc::reset_moves`; judged by `usb_stick_left`.
     usb_reset_moves_after = "usb-reset-moves-after";
 
     /// The same hold, once the port rung has configured the device again and
     /// before its TEST UNIT READY: a device that leaves after every step of
     /// the rung was answered. See `xhci::msc::reset_moves`; judged by
-    /// `usb_transport_break`.
+    /// `usb_stick_left`.
     usb_reset_moves_configured = "usb-reset-moves-configured";
 
     /// `usb-transport-break`'s break, on the first WRITE(10) that goes out

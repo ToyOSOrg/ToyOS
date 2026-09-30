@@ -27,7 +27,7 @@ use toyos_xhci::configure::{self, BulkEndpoint};
 use toyos_xhci::flush::Debt;
 use toyos_xhci::identity::{self, Identity, Serial, UsbId};
 use toyos_xhci::job::CC_SUCCESS;
-use toyos_xhci::ladder::{self, AfterReset, Left, PortStep, Run, Rung};
+use toyos_xhci::ladder::{self, AfterReset, AfterRung, Left, PortStep, Run, Rung};
 use toyos_xhci::port;
 use toyos_xhci::reset_recovery::{self, Answered, GaveUp, Look, Pipe, Quiescing, SlotGoes, Step};
 use toyos_xhci::scsi::{self, BringUp, Cdb, Fail, Flushed, Geometry, Heard, Moved, Printable, Reply};
@@ -39,6 +39,9 @@ type DataPhase = Option<Dma<'static>>;
 
 /// Why a round trip broke, with this driver's reason for a silence.
 type Broke = bot::Broke<Quiet>;
+
+/// How a rung ended when it did not verify; a rung that did is `Ok(())`.
+type Unverified = ladder::Unverified<Quiet>;
 
 /// Wall-clock budget on bring-up's ready attempts: bounds when [`bring_up`]
 /// stops *starting* attempts, not the one already running.
@@ -276,35 +279,18 @@ impl core::fmt::Display for Told<'_> {
     }
 }
 
-/// A rung that did not bring its device back in step, as its line says it:
-/// its TEST UNIT READY broke this way, or a step before it was not answered.
-struct Unverified<'a> {
-    rung: Rung,
-    broke: Option<&'a Broke>,
-}
+/// A rung that did not bring its device back in step, as its line says it.
+struct Ended<'a>(Rung, &'a Unverified);
 
-impl core::fmt::Display for Unverified<'_> {
+impl core::fmt::Display for Ended<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.broke {
-            Some(why) => {
-                write!(f, "transport broke on the {}'s TEST UNIT READY: {}", self.rung.named(), Told(why))
+        match self.1 {
+            Unverified::OutOfStep(why) => {
+                write!(f, "transport broke on the {}'s TEST UNIT READY: {}", self.0.named(), Told(why))
             }
-            None => write!(f, "the {} was not answered", self.rung.named()),
+            Unverified::Failed => write!(f, "the {} was not answered", self.0.named()),
         }
     }
-}
-
-/// How one rung of the ladder ended.
-enum Climbed {
-    /// The device answered the rung's TEST UNIT READY under that command's own
-    /// tag.
-    InStep,
-    /// Everything before the TEST UNIT READY was answered, and it broke this
-    /// way: a break like the one recovered from, and counted as one.
-    OutOfStep(Broke),
-    /// A step before the TEST UNIT READY was not answered, and said so; the
-    /// device was asked nothing after it.
-    Failed,
 }
 
 /// Abandon one bulk transfer without waiting, once per boot, on the first
@@ -539,9 +525,8 @@ pub(in crate::drivers::xhci) mod reset_break {
 const RECOVERING: &str = "recovering";
 
 /// Hold the port rung, once, until its port reads empty: QEMU cannot move a
-/// device off its port on a reset, so the host takes it off and plugs the same
-/// backing in on another port. `usb-reset-moves` holds before the reset's
-/// completion is read, so the rung reads the port empty;
+/// device off its port on a reset, so the host takes it off. `usb-reset-moves`
+/// holds before the reset's completion is read, so the rung reads the port empty;
 /// `usb-reset-moves-after` once it has been read with the device on the port,
 /// as a USB2 port reads a device that leaves under its reset;
 /// `usb-reset-moves-configured` once the rung has configured the device again,
@@ -1093,10 +1078,11 @@ impl XhciController {
         in_step
     }
 
-    fn climb(&mut self, dev: &mut MscDevice, mut broke: Option<(Pipe, u32)>, mut left: Left) -> bool {
+    fn climb(&mut self, dev: &mut MscDevice, mut broke: Option<(Pipe, u32)>, left: Left) -> bool {
         let slot = self.slot(dev.slot_id);
+        let mut climb = dev.run.broke(left);
         loop {
-            let ladder::Climb { rung, skips_class_reset } = dev.run.broke(left);
+            let ladder::Climb { rung, skips_class_reset } = climb;
             if skips_class_reset {
                 log!("usb-storage: {slot} is owed the data of the command that broke, so nothing \
                      can be asked of it on the Bulk-Out: its port is reset with no class reset \
@@ -1113,36 +1099,31 @@ impl XhciController {
                     return false;
                 }
             };
-            let out_of_step = match climbed {
-                Climbed::InStep => {
-                    self.after_break.took(rung);
-                    return true;
-                }
-                Climbed::OutOfStep(why) => Some(why),
-                Climbed::Failed => None,
+            let Err(unverified) = climbed else {
+                self.after_break.took(rung);
+                return true;
             };
-            let ended = Unverified { rung, broke: out_of_step.as_ref() };
-            // A device its port no longer holds left, which is no break and
-            // which no rung above reaches: its port's teardown owns what it
-            // held. Asked of the port here, since a USB2 port detects no
-            // disconnect while it drives a reset (xHCI 1.2 §4.19.1.1.2, note
-            // 57) and reads Enabled once the reset ends (§4.19.1.1.4).
+            // Asked of the port once the rung has ended, since a USB2 port
+            // detects no disconnect while it drives a reset (xHCI 1.2
+            // §4.19.1.1.2, note 57) and reads Enabled once the reset ends
+            // (§4.19.1.1.4).
             let port = self.read_portsc(dev.port_idx);
-            if !port.holds() {
-                log!("usb-storage: {slot} {ended}, and port {} no longer holds the device (PORTSC \
-                     {:#010x}): its port's teardown takes it from here",
-                    u32::from(dev.port_idx) + 1, port.raw());
-                dev.failed = true;
-                dev.left = true;
-                return false;
+            let ended = Ended(rung, &unverified);
+            match dev.run.unverified(&unverified, port.holds()) {
+                AfterRung::Left => {
+                    log!("usb-storage: {slot} {ended}, and port {} no longer holds the device \
+                         (PORTSC {:#010x}): its port's teardown takes it from here",
+                        u32::from(dev.port_idx) + 1, port.raw());
+                    dev.failed = true;
+                    dev.left = true;
+                    return false;
+                }
+                AfterRung::Climbs { climb: next, broke: event } => {
+                    log!("usb-storage: {slot} {ended}; break {} of {MAX_TRANSPORT_BREAKS} running",
+                        dev.run.breaks());
+                    (climb, broke) = (next, event);
+                }
             }
-            log!("usb-storage: {slot} {ended}; break {} of {MAX_TRANSPORT_BREAKS} running",
-                dev.run.breaks().saturating_add(1));
-            // After a step that was not answered the event is spent: the rung
-            // has commanded the pair since, and only the fields speak for it now.
-            broke = out_of_step.as_ref().and_then(Broke::event);
-            // A rung's own TEST UNIT READY has no data phase to be left in.
-            left = Left::Elsewhere;
         }
     }
 
@@ -1286,7 +1267,7 @@ impl XhciController {
     /// their order are `ladder::PORT_RESET`'s; this takes them, one blocking
     /// command or control transfer at a time, and ends on the device's answer
     /// to TEST UNIT READY.
-    fn port_reset_recovery(&mut self, dev: &mut MscDevice, broke: Option<(Pipe, u32)>) -> Climbed {
+    fn port_reset_recovery(&mut self, dev: &mut MscDevice, broke: Option<(Pipe, u32)>) -> Result<(), Unverified> {
         let slot = self.slot(dev.slot_id);
         for step in ladder::PORT_RESET {
             let took = match step {
@@ -1294,7 +1275,7 @@ impl XhciController {
                     self.quiesce_bulk_pair(dev, broke, "stopping it before its port is reset")
                 }
                 // `reset_port` has said which way it did not.
-                PortStep::Reset => self.reset_port(dev, RECOVERING) == AfterReset::Enumerate,
+                PortStep::Reset => self.reset_port(dev, RECOVERING).goes_on(),
                 PortStep::Settle => {
                     let _ = crate::clock::settles(
                         self.after_break
@@ -1330,7 +1311,7 @@ impl XhciController {
                 ),
             };
             if !took && ladder::ends_the_rung(step) {
-                return Climbed::Failed;
+                return Err(Unverified::Failed);
             }
         }
         #[cfg(feature = "boot-actuators")]
@@ -1342,9 +1323,9 @@ impl XhciController {
                 log!("usb-storage: {slot} the port reset took: addressed and configured again, the \
                      device answered TEST UNIT READY under its own tag {:#x}", dev.tag);
                 self.take_held_sense(dev, answer);
-                Climbed::InStep
+                Ok(())
             }
-            Err(why) => Climbed::OutOfStep(why),
+            Err(why) => Err(Unverified::OutOfStep(why)),
         }
     }
 
@@ -1586,15 +1567,15 @@ impl XhciController {
     /// A command that did not take ends it, since the requests after it assume
     /// both endpoints are off their transfers; a request that did not is
     /// followed by the rest, so the device is left with both pipes cleared
-    /// whatever the next rung then does with it. Either is [`Climbed::Failed`].
+    /// whatever the next rung then does with it. Either is [`ladder::Unverified::Failed`].
     ///
     /// **Then the device is asked, and only its answer says the recovery
     /// took**: TEST UNIT READY, whose status must carry that command's own tag.
     ///
     /// `broke` is the transfer event that ended the round trip, where one did.
-    fn reset_recovery(&mut self, dev: &mut MscDevice, broke: Option<(Pipe, u32)>) -> Climbed {
+    fn reset_recovery(&mut self, dev: &mut MscDevice, broke: Option<(Pipe, u32)>) -> Result<(), Unverified> {
         if !self.quiesce_bulk_pair(dev, broke, "recovering") {
-            return Climbed::Failed;
+            return Err(Unverified::Failed);
         }
         let slot = self.slot(dev.slot_id);
         let mut recovered = true;
@@ -1624,16 +1605,16 @@ impl XhciController {
             }
         }
         if !recovered {
-            return Climbed::Failed;
+            return Err(Unverified::Failed);
         }
         match self.bot(dev, &Cdb::TEST_UNIT_READY, None, Asks::Verification(Rung::ClassReset)) {
             Ok(answer) => {
                 log!("usb-storage: {slot} Reset Recovery took: the device answered TEST UNIT \
                      READY under its own tag {:#x}", dev.tag);
                 self.take_held_sense(dev, answer);
-                Climbed::InStep
+                Ok(())
             }
-            Err(why) => Climbed::OutOfStep(why),
+            Err(why) => Err(Unverified::OutOfStep(why)),
         }
     }
 
