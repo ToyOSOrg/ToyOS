@@ -3636,7 +3636,7 @@ fn judge_virt_job(mut qemu: QemuInstance, job: &str, said: &str) -> Result<Strin
 const UNMAP_TOUCH_SAID: &str =
     "unmap_touch: 4 reads of a page just unmapped on the unmapping thread, and 4 on another";
 
-/// The CPUs `virt_smp` boots: as many as the roster holds.
+/// The CPUs `virt_smp` boots.
 const VIRT_CPUS: u32 = 8;
 
 /// Boot `tests/virtsmpcase` under `profile` on `cpus` CPUs, with `params` armed.
@@ -3668,10 +3668,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     if !psci.contains(&format!(" through {conduit}")) {
         return Err(format!("PSCI is not said to be reached through {conduit}: {psci:?}\nserial:\n{serial}"));
     }
-    let mut want = vec![
-        format!("SMP: {VIRT_CPUS} of {VIRT_CPUS} MADT CPUs online"),
-        format!("control registers: {VIRT_CPUS} of {VIRT_CPUS} CPUs hold the declaration"),
-    ];
+    let mut want = vec![format!("SMP: {VIRT_CPUS} of {VIRT_CPUS} MADT CPUs online")];
     for cpu in 1..VIRT_CPUS {
         want.push(format!("SMP: cpu{cpu} mpidr={cpu:#x} online"));
         want.push(format!("CPU {cpu}: joining scheduler"));
@@ -16445,7 +16442,9 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
     let give_up = Instant::now() + qemu::GUEST_QUIET;
     loop {
         let stopped = qemu::stopped_cpus(&mut monitor, arch);
-        if stopped.len() == cpus && stopped.iter().filter(|&&cpu| cpu).count() >= cpus - 1 {
+        // QEMU's CPU#n is the kernel's cpun: its MADT lists them in that order,
+        // the boot CPU first, and the kernel numbers them as the MADT lists them.
+        if stopped.len() == cpus && stopped.iter().enumerate().all(|(cpu, &halted)| halted || cpu == fatal as usize) {
             break;
         }
         if Instant::now() >= give_up {

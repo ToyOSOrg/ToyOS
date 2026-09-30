@@ -129,7 +129,7 @@ fn exception(frame: &Frame, entry: u64) -> ! {
     panic!("{entry}: {} at {:#x}", class_name(frame.esr), frame.elr);
 }
 
-/// One interrupt: acknowledged, handled, ended. From EL0 a tick or a kick
+/// One interrupt. From EL0 a tick or a kick
 /// preempts here, where the interrupted context holds nothing; from EL1 it
 /// only asks for the pass the context will run when it may.
 fn irq(from_el0: bool) {

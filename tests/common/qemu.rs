@@ -708,8 +708,7 @@ pub fn await_marker_new(
 const WFI: u32 = 0xd503_207f;
 const BACK_TO_WFI: u32 = 0x17ff_ffff;
 
-/// Per vCPU in `info registers -a`, whether it is halted with interrupts off,
-/// which no interrupt ends.
+/// Per vCPU in `info registers -a`, whether it is halted with interrupts off.
 ///
 /// x86-64: `HLT=1` with `IF` clear, the stop's `cli; hlt`. An idle CPU halts
 /// with `IF` set, and a running one is not halted, so neither is this.
@@ -1160,8 +1159,7 @@ impl Profile {
         }
     }
 
-    /// How this host provides the machine: [`Profile::VirtEl2`] emulated,
-    /// since only emulation gives a guest EL2.
+    /// How this host provides the machine.
     pub fn accel(self) -> Accel {
         match self {
             Self::VirtEl2 | Self::VirtTcg => Accel::Tcg,

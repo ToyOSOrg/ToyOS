@@ -7,6 +7,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[path = "../arch/mod.rs"]
+mod arch;
+
 /// A retired syscall's number: each call is refused and is one kernel record
 /// naming it.
 const RETIRED: u64 = 26;
@@ -14,19 +17,9 @@ const RETIRED: u64 = 26;
 const SIBLINGS: usize = 3;
 
 fn retired() {
-    let ret: u64;
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: a register-only `syscall` whose number the kernel refuses
-    // without reading any argument; nothing in this process is touched.
-    unsafe {
-        core::arch::asm!("syscall", in("rdi") RETIRED, lateout("rax") ret, out("rcx") _, out("r11") _);
-    }
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: the same call through `svc`, which answers in `x0` and keeps
-    // every other register.
-    unsafe {
-        core::arch::asm!("svc #0", inlateout("x0") RETIRED => ret);
-    }
+    // SAFETY: a retired number, which the kernel refuses without reading any
+    // argument; nothing in this process is touched.
+    let ret = unsafe { arch::bare_syscall(RETIRED) };
     assert_ne!(ret, 0, "syscall {RETIRED} answered as if it were live");
 }
 

@@ -36,7 +36,6 @@ pub fn start(gic: &irqchip::Gic, psci: Option<psci::Conduit>) {
     let others = gic.cpus.iter().filter(|gicc| packed_affinity(gicc.mpidr) != me);
     let Some(psci) = psci else {
         log!("SMP: no PSCI to start the other {} CPUs with; the boot CPU runs alone", others.count());
-        control_regs::report(smp::cpu_count());
         return;
     };
     let root = paging::bringup_root();
@@ -71,9 +70,7 @@ pub fn start(gic: &irqchip::Gic, psci: Option<psci::Conduit>) {
         ROSTER.commit(attempt, packed_affinity(gicc.mpidr));
         log!("SMP: cpu{} mpidr={:#x} online", attempt.id(), gicc.mpidr);
     }
-    let online = smp::cpu_count();
-    log!("SMP: {online} of {} MADT CPUs online", gic.cpus.len());
-    control_regs::report(online);
+    log!("SMP: {} of {} MADT CPUs online", smp::cpu_count(), gic.cpus.len());
 }
 
 /// An AP's first Rust: at EL1, on its bring-up stack with the vectors

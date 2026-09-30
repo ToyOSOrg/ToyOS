@@ -260,7 +260,7 @@ pub fn init_cpu(frame: u64) {
 pub(super) fn acknowledge() -> Option<u32> {
     let intid: u64;
     // SAFETY: reads `ICC_IAR1_EL1`, which acknowledges the highest pending
-    // Group 1 interrupt; the caller ends every one it is given.
+    // Group 1 interrupt.
     unsafe { core::arch::asm!("mrs {}, S3_0_C12_C12_0", out(reg) intid, options(nomem, nostack, preserves_flags)) };
     let intid = (intid & 0xFF_FFFF) as u32;
     (intid != SPURIOUS).then_some(intid)

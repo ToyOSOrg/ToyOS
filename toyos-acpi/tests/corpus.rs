@@ -544,9 +544,7 @@ fn psci_of(table: &[u8]) -> Psci {
     psci(&fadt)
 }
 
-/// `ARM_BOOT_ARCH` on a FADT that defines it. QEMU 11.1.1's `virt`
-/// publishes revision 6, minor 3 and `PSCI_COMPLIANT`, with `PSCI_USE_HVC`
-/// where the guest has no EL2.
+/// `ARM_BOOT_ARCH` on a FADT that defines it.
 #[test]
 fn the_psci_conduit_is_read_off_a_fadt_that_defines_it() {
     assert_eq!(psci_of(&arm_facp(6, 3, 0b01)), Psci::Smc);
