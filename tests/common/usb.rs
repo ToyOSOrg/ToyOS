@@ -1778,7 +1778,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         }
         Ok(())
     };
-    let held = " after this driver reset it; it is held ".to_string();
+    let held = " after this driver reset it; it is held ";
     let mut left = vec![format!("usb-storage: {under_test} is owed the data of the command that broke")];
     if moved == Moved::AfterItsReset {
         left.extend([
@@ -1797,7 +1797,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         // next look: run 79's shape and run 74's, both a device that left
         // under a reset of this driver's.
         "usb-storage: disk 0 left port 1 (".to_string(),
-        held.clone(),
+        held.to_string(),
     ]);
     let inside_the_rung = log.contains("usb-storage: disk 0 left port 1 (its port read empty)");
     let back = [
@@ -1875,11 +1875,11 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             // stall, or every CPU inside a call on the held disk, so no CPU
             // took the pass that binds — and the write was asked again.
             let shape = if moved != Moved::SlowStick && held_end.ends_with(": it completed") {
-                in_order(&[held.clone(), came_back.to_string(), held_end.to_string()])?;
+                in_order(&[held.to_string(), came_back.to_string(), held_end.to_string()])?;
                 held_call(came_back)?;
                 "the write that waited went out again on it"
             } else if held_end.contains(STILL_HELD) {
-                in_order(&[held.clone(), held_end.to_string()])?;
+                in_order(&[held.to_string(), held_end.to_string()])?;
                 held_call(if moved == Moved::SlowStick { STALLED } else { came_back })?;
                 "the call that waited ended on its bound and the write was asked again"
             } else {
