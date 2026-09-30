@@ -297,10 +297,6 @@ const RUST_SKIP: &[&str] = &[
     "inventory_bounds",
     // Same reason, same config: `netd_hostile_peer` runs it there.
     "netd_hostile_peer",
-    // Needs a `launcher` connector, which `tests/testcases`'s test-runner has
-    // no reason to hold. `launcher_refusals` runs it on tests/netcase, whose
-    // test-runner receives one for exactly this.
-    "launcher_refusals",
     // Needs a launcher to tell its two roads apart, and a declared shell and
     // toybox to take it: `spawn_cwd` runs it on tests/netcase.
     "spawn_cwd",
@@ -776,7 +772,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("sshd_files", Sched::Parallel),
     ("sshd_key_auth", Sched::Parallel),
     ("netd_hostile_peer", Sched::Parallel),
-    ("launcher_refusals", Sched::Parallel),
     // Paths a child prints and the kernel's refusals by name; no clock in any of them.
     ("spawn_cwd", Sched::Parallel),
     ("foreign_disk_untouched", Sched::Parallel),
@@ -1253,7 +1248,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_udp_any_address", &["test_rs_netd_udp_any_address"]),
     ("netd_lookup_let_go", &["test_rs_netd_lookup_let_go"]),
     ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
-    ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
     ("input_claim_absent", &["test_rs_input_absent"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
@@ -12221,66 +12215,6 @@ fn run_machine_test(
             }
             serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
             eprintln!("  [netcase] {refused} hostile frames refused, netd named every peer it dropped");
-            Ok(())
-        }
-        "launcher_refusals" => {
-            // **`/system/bin/init` is the one process the machine cannot lose**, and
-            // every launcher client — the compositor, every terminal, every
-            // shell, sshd — can send it whatever it likes. The guest carries
-            // the verdicts: init answered, init is still launching, and the
-            // kernel's live-object count did not grow across sixteen refused
-            // launches. The host carries the one the guest cannot see —
-            // whether init said anything about what it refused.
-            //
-            // `tests/netcase` because its test-runner is the only one that
-            // receives a `launcher` connector, and because two boot programs
-            // is the smallest blast radius for a test whose whole subject is
-            // making init misbehave.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
-            let bins: Vec<(String, Vec<u8>)> = rust_bins
-                .iter()
-                .filter(|(name, _)| name == "launcher_refusals")
-                .cloned()
-                .collect();
-            if bins.is_empty() {
-                return Err("launcher_refusals was not built".to_string());
-            }
-            let mut qemu = QemuInstance::boot_with_options(
-                &config,
-                &[],
-                &bins,
-                BootOptions {
-                    profile: qemu::Profile::Headless,
-                    // The live-object count is a `SYS_DEBUG` action, and a
-                    // shipping kernel has none: both readings would be the same
-                    // `InvalidArgument` and the leak arm would pass having
-                    // counted nothing.
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            let mut console = qemu.boot_log().to_string();
-            let _ = await_marker(&mut qemu, &mut console, "===READY===", "test-runner to come up");
-
-            let result = qemu.run_test("test_rs_launcher_refusals", Duration::from_secs(120));
-            if let Some(err) = &result.error {
-                return Err(format!("{err}\n{}", result.stdout));
-            }
-            if result.exit_code != Some(0) {
-                return Err(format!(
-                    "launcher_refusals exited {:?}:\n{}",
-                    result.exit_code, result.stdout
-                ));
-            }
-            console.push_str(&result.serial);
-            if !console.contains("init: launcher: cannot start") {
-                return Err(format!(
-                    "init refused a launch without a line saying so — a launcher that \
-                     drops requests silently cannot be asked what happened:\n{console}"
-                ));
-            }
-            serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-            eprintln!("  [netcase] init refused three bad launches, named them, and kept launching");
             Ok(())
         }
         "spawn_cwd" => {

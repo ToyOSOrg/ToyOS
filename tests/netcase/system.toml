@@ -29,9 +29,7 @@ service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
-# `launcher` for `launcher_refusals`, whose subject is what a client can make
-# `/system/bin/init` do — so the test estate has to be able to reach it somewhere.
-# This is also the only config whose test binaries take the launcher path to
+# This is the only config whose test binaries take the launcher path to
 # `Command::spawn` at all: everywhere else test-runner holds no connector and
 # every spawn is direct.
 [programs.test-runner]
@@ -44,9 +42,9 @@ syscap = ["logread"]
 # `every_device_class_has_at_most_one_claimant`.
 devices = ["pci:1af4:1041"]
 
-# What `launcher_refusals` asks init to start. A declared program that serves
-# nothing and provides nothing, so a refused launch of it takes no acceptor
-# with it and a granted one is a clean round trip.
+# A declared program that serves nothing and provides nothing, so a refused
+# launch of it takes no acceptor with it and a granted one is a clean round
+# trip.
 [programs.toybox]
 
 # What `spawn_cwd` asks for the owner's `cd` and a launch from it: the shell
