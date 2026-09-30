@@ -48,6 +48,23 @@ pub fn judges_verdict() -> Result<(), String> {
         &format!("{}{{0.600 soundd}} {NULL_SINK}\n{next}", tone(stats(0, 0, 0))),
         false,
     )?;
+    // The next job's stream connected before soundd let the tone's go, so the
+    // tone's last window is both streams' whatever it counted.
+    judged(
+        "a tone another job's stream joined",
+        tone_on_metal,
+        &format!(
+            "{configured}{}{{1.000 soundd}} soundd: client 0 connected (id=1)\n{}{next}\
+             {{3.000 soundd}} soundd: client 1 connected (id=2)\n\
+             {{3.000 soundd}} soundd: client 1 removed (closed)\n{}\
+             {{4.000 soundd}} soundd: client 2 removed (closed)\n{}",
+            spawn("test_rs_audio_tone"),
+            stats(0, 1, 0),
+            stats(0, 1, 0),
+            stats(0, 0, 0),
+        ),
+        false,
+    )?;
 
     let stall = |second: String, rest: &str| {
         format!(
