@@ -61,3 +61,6 @@ by the ToyOS-hosted rustc
 (`issues/build/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). It
 goes when lld runs in the guest: the row, the crate and its host tests go together, the hosted rustc names `rust-lld`, and
 the published crates.io crate is yanked.
+
+**What M3's rustc half is blocked on** is measured in
+`issues/build/the-hosted-rustc-carries-cranelift-because-llvm-does-not-build-for-toyos.md`.
