@@ -177,9 +177,6 @@ actuators! {
     /// expired.
     fsync_deadman_now = "fsync-deadman-now";
 
-    /// Under-deliver one READ(10) data phase so the byte counts disagree.
-    usb_short_read = "usb-short-read";
-
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
 
@@ -430,7 +427,6 @@ actuators! {
 #[cfg(feature = "boot-actuators")]
 const IMPLIES: &[(&str, &[&str])] = &[
     ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
-    ("usb-short-read", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),

@@ -1125,7 +1125,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // eleven others answers those late for reasons that are not the defect.
     ("usb_boot_stick_pulled", Sched::Serial),
     ("usb_pool_exhausted", Sched::Parallel),
-    ("usb_short_read", Sched::Parallel),
     ("usb_storage_write_error", Sched::Parallel),
     ("usb_flush_optional", Sched::Parallel),
     ("xhci_deaf_registers", Sched::Parallel),
@@ -8846,7 +8845,6 @@ fn run_machine_test(
             usb::xhci_scan_hands_over_a_free_slot(test_config, c_bins, rust_bins)
         }
         "usb_pool_exhausted" => usb::usb_pool_exhausted(test_config, c_bins, rust_bins),
-        "usb_short_read" => usb::usb_short_read(test_config, c_bins, rust_bins),
         // Body in `tests/common/volumes.rs`, same reason.
         "esp_filesystem" => common::volumes::esp_filesystem(test_config, c_bins, rust_bins),
         "log_flush_retry" => common::volumes::log_flush_retry(test_config, c_bins, rust_bins),

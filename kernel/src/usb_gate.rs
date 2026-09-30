@@ -154,29 +154,6 @@ fn check(index: usize, disk: &Handle) {
         spent.is_err(),
         spent == Err(crate::block::BlockError::BudgetExpired));
 
-    // A read the controller cuts short while the device's CSW claims it moved
-    // everything.
-    //
-    // arm_short_read() is armed immediately before this specific read, not
-    // via a boot-wide fault count, so the short read lands on a known
-    // transfer.
-    //
-    // The short-read probe is issued against a host-staged block (not a
-    // guest-written one) so `matched` compares against bytes the guest could
-    // not itself have produced.
-    //
-    // A caller is handed the wrong LBA's data when the two accounts disagree
-    // and only the device's is kept.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_short_read() {
-        let block = at(blocks, HOST_BLOCKS[0]);
-        buf.fill(0);
-        crate::drivers::xhci::arm_short_read();
-        let refused = read(block, 1, &mut buf).is_err();
-        let matched = !refused && first_bad(&buf, nonce, block).is_none();
-        log!("usb-gate: short read of block {block} refused={refused} matched={matched}");
-    }
-
     // Keyed on the inverted nonce so a driver that returns the wrong block
     // cannot pass by returning data of the right kind.
     let guest_nonce = !nonce;

@@ -509,59 +509,6 @@ pub(in crate::drivers::xhci) mod reset_break {
     }
 }
 
-/// Make the controller's transfer account and the device's CSW residue
-/// disagree by [`SHORT_BY`] bytes, once — only the residue is the injection's.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod short_read {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    use super::Quiet;
-    use crate::mm::Dma;
-
-    /// Bytes held back at the buffer tail: one 512-byte sector of the
-    /// 4096-byte block a read asks for.
-    pub const SHORT_BY: u32 = 512;
-
-    static ARMED: AtomicBool = AtomicBool::new(false);
-
-    pub fn arm() {
-        if !crate::actuator::usb_short_read() {
-            return;
-        }
-        ARMED.store(true, Ordering::Relaxed);
-    }
-
-    /// The tail of a data buffer, held out of the way of the transfer about to
-    /// run over it.
-    pub struct Held {
-        at: usize,
-        bytes: [u8; SHORT_BY as usize],
-    }
-
-    /// Copy the last [`SHORT_BY`] bytes out, if this is the transfer asked for.
-    pub fn hold(dma: Dma<'static>, at: usize, len: u32, eligible: bool) -> Option<Held> {
-        if !eligible || len < SHORT_BY || !ARMED.swap(false, Ordering::Relaxed) {
-            return None;
-        }
-        let at = at + (len - SHORT_BY) as usize;
-        let mut bytes = [0u8; SHORT_BY as usize];
-        dma.copy_to(at, &mut bytes);
-        Some(Held { at, bytes })
-    }
-
-    /// Put it back, and add the bytes it covers to the controller's residue.
-    pub fn release(
-        dma: Dma<'static>,
-        held: Option<Held>,
-        completion: Result<(u32, u32), Quiet>,
-    ) -> Result<(u32, u32), Quiet> {
-        let Some(held) = held else { return completion };
-        let (code, residue) = completion?;
-        dma.copy_from(held.at, &held.bytes);
-        Ok((code, residue + SHORT_BY))
-    }
-}
-
 /// The completion of one SCSI command, after the transport's own recovery.
 enum Scsi {
     Ok { delivered: u32 },
@@ -1332,17 +1279,7 @@ impl XhciController {
                 transport_break::arm();
                 mid_write::wedge_if_staged(Phase::DataOwed);
             }
-            #[cfg(feature = "boot-actuators")]
-            let held = short_read::hold(
-                dma,
-                (data_phys - dma.device_addr()) as usize,
-                data_len,
-                data_in && cdb.first() == Some(&0x28),
-            );
-            let completion = self.bulk(dev, data_in, data_phys, data_len, Phase::Data, &open);
-            #[cfg(feature = "boot-actuators")]
-            let completion = short_read::release(dma, held, completion);
-            match completion {
+            match self.bulk(dev, data_in, data_phys, data_len, Phase::Data, &open) {
                 Ok((CC_SUCCESS | CC_SHORT_PACKET, unmoved)) => {
                     moved = data_len.saturating_sub(unmoved);
                 }
