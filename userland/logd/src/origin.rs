@@ -173,7 +173,6 @@ impl Origin {
         if !ring.is_laid_out() {
             return Err(format!("{}'s region is not a log ring", tag.as_str()));
         }
-        ring.own(pid);
         Ok(Self {
             tag: tag.as_str().to_string(),
             pid,

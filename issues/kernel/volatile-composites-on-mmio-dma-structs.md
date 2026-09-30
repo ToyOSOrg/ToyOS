@@ -8,10 +8,9 @@ opened: 2026-08-20
 
 `clippy::volatile_composites` (nursery) measured **10**, kernel-only, all in
 driver code that hands a composite type straight to `write_volatile` or
-`read_volatile` instead of touching each primitive field on its own:
+`read_volatile` instead of touching each primitive field on its own. Two were
+the NVMe driver's queue entries, which left the kernel with it; the rest:
 
-- `drivers/nvme.rs:101,119` — `SqEntry`/`CqEntry`, the submission/completion
-  queue entries.
 - `drivers/xhci/wait/boot.rs:446` — `ErstEntry`.
 - `drivers/xhci/mod.rs:560,593,1093` — `Trb`, three sites.
 - `drivers/virtio.rs:414,487` — the virtio descriptor.
@@ -32,9 +31,8 @@ splitting a `write_volatile(ptr, trb)` into per-field stores has to preserve
 that ordering by hand, on a path this driver depends on for every command and
 transfer. Getting that wrong silently (works in QEMU, wrong on some real
 controller's stricter timing, or vice versa) is worse than the current
-implementation-defined-but-tested state. NVMe's `SqEntry`/`CqEntry` and
-virtio's descriptor likely have their own per-field ordering rules from their
-respective specs, not derived here.
+implementation-defined-but-tested state. Virtio's descriptor likely has its
+own per-field ordering rules from its spec, not derived here.
 
 Fixing this is real driver work: read each device's spec for what field
 ordering its rings actually require, decide per site whether one
