@@ -1,5 +1,5 @@
 //! Per-CPU state, reached through `TPIDR_EL1`, which holds this CPU's
-//! [`PerCpu`] from [`init_bsp`] on and which nothing else writes. EL0 cannot
+//! [`PerCpu`] from [`install`] on and which nothing else writes. EL0 cannot
 //! read it, so a thread learns nothing of the kernel's layout from it.
 //!
 //! Every field another context on the same CPU can write — an interrupt, a
@@ -64,20 +64,20 @@ pub struct PerCpu {
 #[inline]
 fn this() -> &'static PerCpu {
     let block: u64;
-    // SAFETY: reads `TPIDR_EL1`, which [`init_bsp`] points at a leaked
-    // `PerCpu` before any accessor here runs (`log::PERCPU_READY` gates them).
+    // SAFETY: reads `TPIDR_EL1`, which [`install`] points at a leaked `PerCpu`
+    // before any accessor here runs on this CPU: `log::PERCPU_READY` gates them
+    // on the boot CPU, and an AP installs its block before it does anything else.
     unsafe {
         core::arch::asm!("mrs {}, tpidr_el1", out(reg) block, options(nomem, nostack, preserves_flags));
         &*(block as *const PerCpu)
     }
 }
 
-/// Build the boot CPU's block and publish it through `TPIDR_EL1`; after it,
-/// every accessor here answers. The thread registers EL0 can read are cleared,
-/// so a thread's first read of one finds nothing firmware left.
-pub fn init_bsp() {
+/// Build CPU `cpu_id`'s block, on the boot CPU and before that CPU runs: its
+/// log shard and interrupt counters are published here, so no reader misses them.
+pub fn alloc(cpu_id: u32) -> &'static PerCpu {
     let block: &'static PerCpu = Box::leak(Box::new(PerCpu {
-        cpu_id: 0,
+        cpu_id,
         current_tid: AtomicU32::new(u32::MAX),
         current_pid: AtomicU32::new(u32::MAX),
         preempt_count: AtomicU32::new(0),
@@ -93,10 +93,17 @@ pub fn init_bsp() {
         syscall_fp: AtomicU64::new(0),
         syscall_sp: AtomicU64::new(0),
         syscall_task: AtomicU64::new(NO_SYSCALL),
-        log_shard: &log::BOOT_SHARD,
+        log_shard: log::shard_for(cpu_id),
         irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
     }));
-    crate::irq_census::publish(0, block.irq_counts.as_ptr());
+    crate::irq_census::publish(cpu_id, block.irq_counts.as_ptr());
+    block
+}
+
+/// Make `block` this CPU's through `TPIDR_EL1`; after it, every accessor here
+/// answers on this CPU. The thread registers EL0 can read are cleared, so a
+/// thread's first read of one finds nothing firmware left.
+pub fn install(block: &'static PerCpu) {
     // SAFETY: the block lives for the machine's life; `TPIDRRO_EL0` and
     // `TPIDR_EL0` are EL0's to read and hold nothing of the kernel's.
     unsafe {
@@ -108,6 +115,11 @@ pub fn init_bsp() {
             options(nostack, preserves_flags),
         );
     }
+}
+
+/// The boot CPU's block, installed.
+pub fn init_bsp() {
+    install(alloc(0));
     crate::log::PERCPU_READY.store(true, core::sync::atomic::Ordering::Release);
     log!("percpu: BSP cpu_id=0 mpidr={:#x}", super::cpu::hardware_id());
 }

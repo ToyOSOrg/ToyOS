@@ -59,7 +59,8 @@
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 
-use crate::arch::{cpu, percpu, pmu, smp, trap};
+use crate::arch::{cpu, percpu, pmu, trap};
+use crate::smp;
 use crate::sched::MAX_CPUS;
 
 /// The negative control, in a file of its own because it says what it staged

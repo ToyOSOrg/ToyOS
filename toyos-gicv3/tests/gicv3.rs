@@ -1,4 +1,4 @@
-use toyos_gicv3::{find_redistributor, packed_affinity, sgi1r, FRAME};
+use toyos_gicv3::{find_redistributor, packed_affinity, sgi1r, sgi1r_others, FRAME};
 
 #[test]
 fn affinity_drops_mpidr_flags_between_aff2_and_aff3() {
@@ -23,6 +23,14 @@ fn sgi_names_aff0_by_range_and_bit() {
 #[test]
 fn sgi_to_cpu_zero_is_bit_zero_of_range_zero() {
     assert_eq!(sgi1r(0, 0), 1);
+}
+
+#[test]
+fn sgi_to_every_other_cpu_is_irm_and_the_intid_alone() {
+    let value = sgi1r_others(15);
+    assert_eq!(value >> 40 & 1, 1, "IRM");
+    assert_eq!(value >> 24 & 0xF, 15, "INTID");
+    assert_eq!(value & !(1 << 40 | 0xF << 24), 0, "no affinity, target list or RES0 bit");
 }
 
 /// A region of redistributors, each `(affinity, vlpis, last)`, as `GICR_TYPER` reads at each one's offset.

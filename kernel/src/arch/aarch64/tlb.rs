@@ -68,6 +68,10 @@ pub fn shootdown(_origin: Origin) {}
 /// Nothing to answer: no CPU waits on another's acknowledgement here.
 pub fn poll() {}
 
+/// Nothing to settle: every broadcast invalidation reached a CPU that was
+/// waiting for the machine's release.
+pub fn join() {}
+
 /// One `tlb:` line when the counts moved, at process exit.
 pub fn log_census() {
     let mut counts = [0u64; Origin::COUNT];

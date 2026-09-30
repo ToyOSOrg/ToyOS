@@ -25,7 +25,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::arch::{irqchip, cpu, percpu, smp};
+use crate::arch::{irqchip, cpu, percpu};
+use crate::smp;
 
 /// What the staged CPU says before it stops answering, and the witness a sealed
 /// record carries in its tail: a `WEDGED` page whose text does not hold this
