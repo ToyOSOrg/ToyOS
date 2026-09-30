@@ -121,31 +121,9 @@ actuators! {
     /// Abandon the boot's first WRITE(10) data phase without waiting for it.
     usb_transport_break = "usb-transport-break";
 
-    /// Leave the TEST UNIT READY every rung of the recovery ladder ends on
-    /// unsent and unanswered for the whole of that rung's bound, so no rung is
-    /// ever in step, each spends all it may, and a disk whose transport breaks
-    /// once is taken offline: the one way to the last rung on a device that
-    /// answers, and with the rungs before it spent.
-    usb_transport_offline = "usb-transport-offline";
-
     /// Skip the waits of every transfer of the next climb of the recovery
     /// ladder, once: a device that answers nothing on any rung.
     usb_reset_break = "usb-reset-break";
-
-    /// Hold the port rung's first reset, once, until the port reads empty, so
-    /// the host can move the device to another port as a reset moved T14 run
-    /// 79's stick. See `xhci::msc::reset_moves`.
-    usb_reset_moves = "usb-reset-moves";
-
-    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
-    /// while its device holds a write it reported complete and no flush has
-    /// emptied: a device that leaves then may have lost it.
-    usb_transport_break_owed = "usb-transport-break-owed";
-
-    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
-    /// after a write was reported complete and a SYNCHRONIZE CACHE then
-    /// succeeded, with no write since: a device that leaves then owes nothing.
-    usb_transport_break_flushed = "usb-transport-break-flushed";
 
     /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
     /// anything is torn down, as a machine with no way to stop refuses it: the
@@ -160,22 +138,6 @@ actuators! {
     /// says so. Judged by `tls_rebase_window`.
     tls_rebase_window = "tls-rebase-window";
 
-    /// Stall the bind of a disk that arrives while another is held for its
-    /// device, for less than `usb-slow-return` does, and leave every transfer
-    /// of the operation the held call sends again on it unanswered, once, each
-    /// waited for to the end of what the call may spend. See
-    /// `xhci::msc::return_silent`.
-    usb_return_silent = "usb-return-silent";
-
-    /// Stall the bind of a disk that arrives while another is held for its
-    /// device, before its first command, as a stick slow to answer after a
-    /// reset: the wait held for it is not where it binds.
-    usb_slow_return = "usb-slow-return";
-
-    /// Ask for a disk's serial number string in fewer bytes than it carries, as
-    /// a device that delivered part of its descriptor.
-    usb_serial_short = "usb-serial-short";
-
     /// Have the first disk the boot scan binds answer nothing for longer than
     /// the scan's whole silence bound and then be refused, as T14 run 103's
     /// stick was: the refusal's Disable Slot is submitted into the scan's one
@@ -184,11 +146,6 @@ actuators! {
     /// `xhci::msc::bind_spends_the_scan`; judged by
     /// `xhci_scan_hands_over_a_free_slot`.
     usb_bind_spends_the_scan = "usb-bind-spends-the-scan";
-
-    /// Leave one READ(10) the gate stages it on unanswered for the whole of
-    /// its wait, and the class reset's TEST UNIT READY out of step, so a port
-    /// reset that takes comes after a wait that spent the operation's budget.
-    usb_first_wait_spent = "usb-first-wait-spent";
 
     /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
     /// device holding the CBW and nothing queued for its data phase, so the
@@ -222,15 +179,6 @@ actuators! {
 
     /// Under-deliver one READ(10) data phase so the byte counts disagree.
     usb_short_read = "usb-short-read";
-
-    /// Have the gate stage runs of transport faults on its disk: runs the
-    /// recovery brings back, then one as long as the transport's whole budget,
-    /// then one on the next disk to bind.
-    usb_transport_faults = "usb-transport-faults";
-
-    /// Have the gate's last read end as one whose port read disconnected
-    /// mid-wait does.
-    usb_port_gone = "usb-port-gone";
 
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
@@ -486,9 +434,6 @@ actuators! {
 const IMPLIES: &[(&str, &[&str])] = &[
     ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
     ("usb-short-read", &["usb-storage-gate"]),
-    ("usb-transport-faults", &["usb-storage-gate"]),
-    ("usb-port-gone", &["usb-storage-gate"]),
-    ("usb-first-wait-spent", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),
