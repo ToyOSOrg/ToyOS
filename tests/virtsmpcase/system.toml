@@ -11,9 +11,9 @@ syscap = ["logread"]
 receives = ["power"]
 # Four minutes from boot: every job here runs on emulated CPUs, and a job past
 # the bound reboots the guest with the job named.
-args = ["--bound-ms=240000", "unmap_seen"]
+args = ["--bound-ms=240000", "unmap_touch"]
 
 [programs.toybox]
 
 [symlinks]
-"bin/unmap_seen" = "/system/bin/toybox"
+"bin/unmap_touch" = "/system/bin/toybox"

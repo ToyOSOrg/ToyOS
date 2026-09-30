@@ -2,22 +2,17 @@ use core::arch::global_asm;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use alloc::alloc::{alloc_zeroed, Layout};
-
 use crate::arch::cpu;
 use crate::arch::{apic, percpu, syscall};
 use crate::clock;
 use crate::drivers::acpi::MadtInfo;
-use crate::smp_roster::Roster;
+use crate::smp::{self, ROSTER};
 use crate::time::{Delay, Duration, AP_START};
 use crate::{log, process};
 
 const TRAMPOLINE_PAGE: u64 = 0x8000;
 const TRAMPOLINE_VECTOR: u8 = 0x08;
-const AP_STACK_SIZE: usize = 64 * 1024;
 const DATA_OFFSET: usize = 0xF00;
-
-static ROSTER: Roster = Roster::new();
 
 /// The `rdtsc` the AP being started read on its first instruction in Rust.
 ///
@@ -28,36 +23,6 @@ static ROSTER: Roster = Roster::new();
 /// serialised, so a synchronised TSC lands inside the bracket by construction
 /// and a skewed one is outside it by at least the skew.
 static AP_TSC: AtomicU64 = AtomicU64::new(0);
-
-const _: () = assert!(crate::smp_roster::MAX_CPUS == crate::scheduler::MAX_CPUS);
-
-pub fn cpu_count() -> u32 {
-    ROSTER.count()
-}
-
-/// LAPIC id of `cpu_id`; panics if `cpu_id` is not online.
-pub fn apic_id_for(cpu_id: u32) -> u32 {
-    assert!(cpu_id < cpu_count(), "apic_id_for: cpu {cpu_id} not online");
-    ROSTER.hardware_id(cpu_id)
-}
-
-/// True once a shootdown must wait for siblings; the word the APs are released by.
-pub(crate) fn answering() -> bool {
-    ROSTER.answering()
-}
-
-/// Release the APs into the scheduler and, by the same store, start answering their shootdowns.
-pub fn set_ready() {
-    ROSTER.release();
-}
-
-/// Whether [`set_ready`] has run: the machine's own word for "the scheduler is
-/// what runs now". `kernel_main` calls it immediately before
-/// `scheduler::enter_idle_loop`, so a `false` here means no task and no
-/// kernel thread can make progress, and the panic path waits for none of them.
-pub fn is_ready() -> bool {
-    ROSTER.released()
-}
 
 // Field offsets are hardcoded in the global_asm! trampoline below; the static assertion at the bottom checks the match.
 
@@ -215,19 +180,13 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
 
         // Refused at MAX_CPUS, bounding a firmware that over-reports CPUs.
         let Some(attempt) = ROSTER.begin_attempt() else {
-            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", cpu_count());
+            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", smp::cpu_count());
             break;
         };
 
-        let stack_layout = Layout::from_size_align(AP_STACK_SIZE, 4096).unwrap();
-        // SAFETY: `AP_STACK_SIZE` is non-zero and 4096 is a power of two, `alloc_zeroed`'s whole contract.
-        // Never freed: the block becomes an AP's `rsp`, so no owning handle can hold it.
-        let stack_base = unsafe { alloc_zeroed(stack_layout) };
-        assert!(!stack_base.is_null(), "SMP: failed to allocate AP stack");
-
         let ap_percpu = percpu::alloc_ap(attempt.id(), attempt.token());
 
-        data.stack_top = stack_base as u64 + AP_STACK_SIZE as u64;
+        data.stack_top = smp::bringup_stack();
         data.entry = ap_entry as *const () as u64;
         data.percpu_ptr = ap_percpu as u64;
         // SAFETY: `target` is reserved physical memory written only here; unaligned because `TrampolineData` is `repr(C, packed)`; this AP has not been sent its SIPI yet, and the loop reaches a second write only after the previous AP committed — which happens in `ap_entry` past every trampoline read — so no CPU is reading it; a failed AP breaks the loop below instead of reaching another write.
@@ -244,7 +203,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         /// SDM §8.4.4.1 asks 200us here; a millisecond gives room and is paid once per AP.
         const BETWEEN_SIPIS: Delay =
             Delay::from_spec(Duration::from_millis(1), "SDM §8.4.4.1, between the two SIPIs");
-        if !skip_startup(attempt.id()) {
+        if !smp::skip_startup(attempt.id()) {
             apic::send_init(ap_id);
             delay(AFTER_INIT);
 
@@ -271,7 +230,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             break;
         }
     }
-    let online = cpu_count();
+    let online = smp::cpu_count();
     log!(
         "SMP: {online} of {} MADT cpus online, {bracketed} of {} APs inside the BSP's TSC bracket",
         madt.apic_ids.len(),
@@ -308,11 +267,6 @@ fn tsc_inside(cpu_id: u32, lo: u64, hi: u64) -> bool {
         );
     }
     false
-}
-
-/// The actuator staging a non-last AP that never starts; `false` without `boot-actuators`.
-fn skip_startup(id: u32) -> bool {
-    crate::actuator::smp_skip_ap() && id == 2
 }
 
 extern "C" fn ap_entry() -> ! {

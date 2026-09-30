@@ -291,12 +291,15 @@ fn sgi(intid: u32, target: u32) {
 
 /// Wake `cpu` so it runs a scheduler pass.
 pub fn kick_cpu(cpu: u32) {
-    sgi(SGI_KICK, super::smp::hardware_id_of(cpu));
+    sgi(SGI_KICK, crate::smp::hardware_id(cpu));
 }
 
+// Each by name, not with `IRM`'s broadcast: that reaches an AP which echoed too
+// late and halted with its SGIs enabled, where a kick left pending wakes the
+// masked `wfi` at once, for good.
 pub fn kick_all_but_self() {
     let me = percpu::cpu_id();
-    for cpu in (0..super::smp::cpu_count()).filter(|&cpu| cpu != me) {
+    for cpu in (0..crate::smp::cpu_count()).filter(|&cpu| cpu != me) {
         kick_cpu(cpu);
     }
 }
@@ -316,7 +319,7 @@ pub fn send_nmi(_cpu: u32) {
 /// that each is waiting for the release with interrupts masked, and the boot
 /// CPU's own interface may not be up to raise anything.
 pub fn stop_other_cpus() {
-    if super::smp::is_ready() {
+    if crate::smp::is_ready() {
         raise(toyos_gicv3::sgi1r_others(SGI_HALT));
     }
 }

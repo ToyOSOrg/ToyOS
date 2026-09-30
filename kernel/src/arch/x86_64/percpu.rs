@@ -102,7 +102,6 @@ pub struct PerCpu {
     log_shard: u64,
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
-    /// The token of the attempt that booted this AP; the AP echoes it into `AP_STARTED` so a stale AP cannot answer for a later attempt. Zero on the BSP.
     ap_token: u32,
     /// `nmi_gate::hold`'s word: the storm asks in it from another CPU, and `arch::syscall`'s entry acknowledges and spins on it inside its window, through [`OFF_NMI_HOLD`].
     #[cfg(feature = "boot-actuators")]

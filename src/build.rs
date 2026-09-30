@@ -3161,6 +3161,7 @@ mod tests {
         "tests/toolkitcase/system.toml",
         "tests/updatecase/system.toml",
         "tests/virtjobcase/system.toml",
+        "tests/virtpaniccase/system.toml",
         "tests/virtsmpcase/system.toml",
     ];
 

@@ -40,6 +40,10 @@ pub fn shard_for(cpu: u32) -> &'static Shard {
     if cpu == 0 {
         return &BOOT_SHARD;
     }
+    assert!(
+        registry::published(registry::kernel_slots(), cpu as usize - 1).is_none(),
+        "log: cpu{cpu} already has a shard, and a second would hide every record written to the first",
+    );
     let layout = alloc::alloc::Layout::new::<Shard>();
     // SAFETY: a `Shard` is not zero-sized; the block is never freed.
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<Shard>();

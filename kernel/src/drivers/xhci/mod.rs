@@ -680,7 +680,7 @@ pub(super) fn ports_wanted(kick: bool) {
         return;
     }
     let me = crate::arch::percpu::cpu_id();
-    for cpu in 0..crate::arch::smp::cpu_count() {
+    for cpu in 0..crate::smp::cpu_count() {
         if cpu != me {
             crate::arch::irqchip::kick_cpu(cpu);
         }

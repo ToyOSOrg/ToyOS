@@ -349,7 +349,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Err(e) => e.to_u64(),
             }
         }
-        SYS_CPU_COUNT => crate::arch::smp::cpu_count() as u64,
+        SYS_CPU_COUNT => crate::smp::cpu_count() as u64,
         SYS_FUTEX_WAIT => match UserAddr::checked(a1) {
             Some(addr) => process::futex_wait(addr, a2 as u32, a3),
             None => bad_addr,

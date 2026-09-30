@@ -1592,14 +1592,14 @@ pub fn handle_fault(error: crate::object::HandleError) -> ! {
 /// An AP's way into the idle loop on either architecture, once it has answered
 /// the BSP: it waits for the machine's release, then joins the scheduler.
 pub fn ap_idle() -> ! {
-    while !crate::arch::smp::is_ready() {
+    while !crate::smp::is_ready() {
         core::hint::spin_loop();
     }
 
     // Only a committed CPU may join: an uncommitted AP has no scheduler slot and
     // no shootdown targets it, so it halts. The acquire above makes the count visible.
     let me = percpu::cpu_id();
-    if me >= crate::arch::smp::cpu_count() {
+    if me >= crate::smp::cpu_count() {
         log!("CPU {me}: bring-up did not commit; halting");
         crate::arch::cpu::halt();
     }

@@ -62,29 +62,26 @@ impl Conduit {
     /// callee's to clobber under SMCCC 1.0, so they are declared so.
     fn call(self, function: u32, a1: u64, a2: u64, a3: u64) -> i32 {
         let answer: u64;
+        macro_rules! smccc {
+            ($instruction:literal) => {
+                core::arch::asm!(
+                    $instruction,
+                    inout("x0") u64::from(function) => answer,
+                    inout("x1") a1 => _, inout("x2") a2 => _, inout("x3") a3 => _,
+                    out("x4") _, out("x5") _, out("x6") _, out("x7") _, out("x8") _, out("x9") _,
+                    out("x10") _, out("x11") _, out("x12") _, out("x13") _, out("x14") _,
+                    out("x15") _, out("x16") _, out("x17") _,
+                    options(nostack),
+                )
+            };
+        }
         // SAFETY: an SMCCC call into firmware or a hypervisor, which returns
         // to the next instruction; not `nomem`, since a callee may read what
         // this CPU stored before it.
         unsafe {
             match self {
-                Self::Smc => core::arch::asm!(
-                    "smc #0",
-                    inout("x0") u64::from(function) => answer,
-                    inout("x1") a1 => _, inout("x2") a2 => _, inout("x3") a3 => _,
-                    out("x4") _, out("x5") _, out("x6") _, out("x7") _, out("x8") _, out("x9") _,
-                    out("x10") _, out("x11") _, out("x12") _, out("x13") _, out("x14") _,
-                    out("x15") _, out("x16") _, out("x17") _,
-                    options(nostack),
-                ),
-                Self::Hvc => core::arch::asm!(
-                    "hvc #0",
-                    inout("x0") u64::from(function) => answer,
-                    inout("x1") a1 => _, inout("x2") a2 => _, inout("x3") a3 => _,
-                    out("x4") _, out("x5") _, out("x6") _, out("x7") _, out("x8") _, out("x9") _,
-                    out("x10") _, out("x11") _, out("x12") _, out("x13") _, out("x14") _,
-                    out("x15") _, out("x16") _, out("x17") _,
-                    options(nostack),
-                ),
+                Self::Smc => smccc!("smc #0"),
+                Self::Hvc => smccc!("hvc #0"),
             }
         }
         answer as i32
@@ -127,6 +124,10 @@ pub fn init(rsdp_addr: u64) -> Option<Conduit> {
         }
         Psci::Undefined { revision, minor } => {
             log!("PSCI: none: the FADT is version {revision}.{minor}, and ARM_BOOT_ARCH begins at 5.1");
+            return None;
+        }
+        Psci::Short => {
+            log!("PSCI: none: the FADT ends before ARM_BOOT_ARCH and the minor version after it");
             return None;
         }
     };

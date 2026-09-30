@@ -118,8 +118,8 @@ fn the_fadt_names_the_reset_register_qemu_acts_on() {
     assert_eq!(reset_register(&fadt), Reset::Port { port: 0xcf9, value: 0x0f });
 }
 
-/// Revision 3, so bytes 129-131 are the reserved ones QEMU 11.1.1 writes zero
-/// (`hw/acpi/aml-build.c:2544-2550`): the table says nothing about PSCI.
+/// Revision 3, so bytes 129-131 are the reserved ones QEMU 11.1.1 writes zero:
+/// the table says nothing about PSCI.
 #[test]
 fn the_q35_fadt_predates_arm_boot_arch() {
     let fadt = find_table(machine(), RSDP, b"FACP", 36).expect("FADT");

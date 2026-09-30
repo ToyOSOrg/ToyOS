@@ -542,6 +542,9 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("virt_debug_refused", Sched::Parallel, Tier::Local),
     ("virt_readonly_copyout", Sched::Parallel, Tier::Local),
     ("virt_smp", Sched::Parallel, Tier::Local),
+    ("virt_el1_smp", Sched::Parallel, Tier::Local),
+    ("virt_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Local),
+    ("virt_fatal_halts_the_others_first", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -3630,32 +3633,42 @@ fn judge_virt_job(mut qemu: QemuInstance, job: &str, said: &str) -> Result<Strin
     Ok(serial)
 }
 
+/// What toybox's `unmap_touch` says once every read of a page just unmapped,
+/// on the unmapping thread and on another, ended its process.
+const UNMAP_TOUCH_SAID: &str =
+    "unmap_touch: 4 reads of a page just unmapped on the unmapping thread, and 4 on another";
+
 /// The CPUs `virt_smp` boots: as many as the roster holds.
 const VIRT_CPUS: u32 = 8;
 
-/// Boot `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs under the EL2 profile, where
-/// PSCI is reached through `SMC`: each is started by `CPU_ON`, holds the
-/// control-register declaration and joins the scheduler, and the case's job
-/// `unmap_seen` ends with exit 0 once a page unmapped beside its reader has
-/// ended the reader's process each time.
-fn virt_smp() -> Result<(), String> {
+/// Boot `tests/virtsmpcase` under `profile` on `cpus` CPUs, with `params` armed.
+fn boot_virt_smp(profile: qemu::Profile, cpus: u32, params: &'static [&'static str]) -> QemuInstance {
     let config = compile::repo_root().join("tests/virtsmpcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    let qemu = QemuInstance::boot_with_options(
+    QemuInstance::boot_with_options(
         case,
         &[],
         &[],
         BootOptions {
-            profile: qemu::Profile::VirtEl2,
-            smp: VIRT_CPUS,
+            profile,
+            smp: cpus,
+            kernel_params: params,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
         },
-    );
-    let serial = judge_virt_job(qemu, "unmap_seen", "unmap_seen: 4 reads on another thread of a page just unmapped")?;
+    )
+}
+
+/// Boot `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs under `profile`, whose
+/// firmware enters every CPU at EL`el` and whose FADT names PSCI's `conduit`:
+/// each CPU is started by `CPU_ON`, holds the control-register declaration as
+/// entered there and joins the scheduler, and the case's job `unmap_touch`
+/// ends with exit 0.
+fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String> {
+    let serial = judge_virt_job(boot_virt_smp(profile, VIRT_CPUS, &[]), "unmap_touch", UNMAP_TOUCH_SAID)?;
     let psci = serial.lines().find(|l| l.contains("PSCI: ")).unwrap_or_default();
-    if !psci.contains(" through SMC") {
-        return Err(format!("PSCI is not said to be reached through SMC: {psci:?}\nserial:\n{serial}"));
+    if !psci.contains(&format!(" through {conduit}")) {
+        return Err(format!("PSCI is not said to be reached through {conduit}: {psci:?}\nserial:\n{serial}"));
     }
     let mut want = vec![
         format!("SMP: {VIRT_CPUS} of {VIRT_CPUS} MADT CPUs online"),
@@ -3670,8 +3683,68 @@ fn virt_smp() -> Result<(), String> {
             return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
         }
     }
-    eprintln!("  [virt] {VIRT_CPUS} CPUs online and scheduling");
+    let entered = format!("as declared; entered at EL{el}");
+    for cpu in 0..VIRT_CPUS {
+        if !serial.lines().any(|l| record_cpu(l) == Some(cpu) && l.contains(&entered)) {
+            return Err(format!("cpu{cpu} never said its registers are {entered:?}\nserial:\n{serial}"));
+        }
+    }
+    eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
     Ok(())
+}
+
+/// `smp_failed_ap_leaves_no_hole` on AArch64: `smp-skip-ap` keeps `CPU_ON`
+/// from the CPU that would be cpu2 of four, and the bring-up stops there, so
+/// cpu2's id goes to no CPU behind it. The case's job, which the scheduler
+/// places across the CPUs that came up, ends with exit 0.
+fn virt_failed_ap_leaves_no_hole() -> Result<(), String> {
+    const CPUS: u32 = 4;
+    let qemu = boot_virt_smp(qemu::Profile::VirtEl2, CPUS, &["smp-skip-ap"]);
+    let serial = judge_virt_job(qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    // The premise, not just a small machine: cpu1 came up and cpu2 did not.
+    for premise in ["SMP: cpu1 mpidr=0x1 online", "SMP: cpu2 mpidr=0x2 did not echo within"] {
+        if !serial.contains(premise) {
+            return Err(format!("{premise:?} not on the PL011, so no non-last AP failed\nserial:\n{serial}"));
+        }
+    }
+    let online = format!("SMP: 2 of {CPUS} MADT CPUs online");
+    if !serial.contains(&online) {
+        return Err(format!("{online:?} not on the PL011\nserial:\n{serial}"));
+    }
+    for phantom in ["CPU 2: joining scheduler", "CPU 3: joining scheduler"] {
+        if serial.contains(phantom) {
+            return Err(format!(
+                "a CPU past the failed AP joined, so `0..cpu_count()` is not the online set: {phantom:?}\nserial:\n{serial}"
+            ));
+        }
+    }
+    eprintln!("  [virt] a non-last AP never started and the dense machine ran its job");
+    Ok(())
+}
+
+/// [`panic_halts_the_others_first`] on AArch64: `tests/virtpaniccase` runs
+/// `test_rs_panic_halts_first` as its one job on [`STOP_CPUS`] CPUs under the
+/// EL2 profile, and the halt SGI stops every CPU but the one going fatal.
+fn virt_fatal_halts_the_others_first() -> Result<(), String> {
+    let config = compile::repo_root().join("tests/virtpaniccase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let profile = qemu::Profile::VirtEl2;
+    let fatal = qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), "panic_halts_first");
+    let qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            smp: STOP_CPUS,
+            kernel_features: ACTUATOR_KERNEL,
+            qmp: true,
+            ready_marker: "control registers: SCTLR_EL1=",
+            extra_root_files: vec![("bin/test_rs_panic_halts_first".to_string(), fatal)],
+            ..Default::default()
+        },
+    );
+    the_others_halt_first(qemu, profile.arch())
 }
 
 /// Boot `test_config` under the EL2 profile with the kernel selftest `armed`
@@ -5201,7 +5274,7 @@ fn run_screen_test(
         }
         "virt_fp_isolation" => virt_job("fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
         "virt_first_entry" => virt_job("first_entry", "first_entry: x1-x30 were zero"),
-        "virt_unmap_touch" => virt_job("unmap_touch", "unmap_touch: 4 reads of a page just unmapped"),
+        "virt_unmap_touch" => virt_job("unmap_touch", UNMAP_TOUCH_SAID),
         "virt_debug_refused" => virt_job(
             "debug_refused",
             "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused",
@@ -5217,7 +5290,12 @@ fn run_screen_test(
             virt_selftest(test_config, &["irq-storm"])
         }
         "virt_timer_floor" => virt_selftest(test_config, &["timer-floor"]),
-        "virt_smp" => virt_smp(),
+        "virt_smp" => virt_smp(qemu::Profile::VirtEl2, "SMC", 2),
+        // The EL1 entry's own arm, which fetches at a physical address under
+        // the bring-up root, and PSCI through `HVC`: the path HVF takes.
+        "virt_el1_smp" => virt_smp(qemu::Profile::VirtTcg, "HVC", 1),
+        "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(),
+        "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(),
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:
             // crash_report, capture, panic_flush, halt_all_cpus, render. The
@@ -16318,23 +16396,17 @@ fn hda_two_live_refused(
 /// path that waited first — for a log, a drain, anything — would leave every
 /// other CPU running userland under it. `test_rs_panic_halts_first` keeps three
 /// siblings making kernel records while its main thread goes fatal.
-///
-/// **QEMU is the judge, and no clock is in it.** Once the fatal path has said
-/// its line past the stop, `panic_reboot::arm`'s, every vCPU but the one that
-/// went fatal must show [`qemu::stopped_cpus`]' `cli; hlt`. The fatal one holds
-/// its panel under the shipped minute, so the machine is still there to ask.
 fn panic_halts_the_others_first(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    const SMP: usize = 4;
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
         rust_bins,
         BootOptions {
-            smp: SMP as u32,
+            smp: STOP_CPUS,
             kernel_features: ACTUATOR_KERNEL,
             qmp: true,
             ..Default::default()
@@ -16342,6 +16414,19 @@ fn panic_halts_the_others_first(
     );
     writeln!(qemu.stdin_mut(), "run test_rs_panic_halts_first").map_err(|e| format!("stdin: {e}"))?;
     qemu.flush_stdin();
+    the_others_halt_first(qemu, qemu::SUITE_ARCH)
+}
+
+/// The CPUs `test_rs_panic_halts_first` runs on: one for it and one per sibling.
+const STOP_CPUS: u32 = 4;
+
+/// **QEMU is the judge, and no clock is in it.** Once the fatal path of the
+/// `test_rs_panic_halts_first` that `qemu` runs has said its line past the
+/// stop, `panic_reboot::arm`'s, every vCPU but the one that went fatal must be
+/// one [`qemu::stopped_cpus`] calls halted. The fatal one holds its panel, so
+/// the machine is still there to ask.
+fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) -> Result<(), String> {
+    let cpus = STOP_CPUS as usize;
     let mut console = String::new();
     await_guest(&mut qemu, &mut console, "the fatal path's line past the stop", |c| {
         fatal_past_the_stop(c).is_some()
@@ -16360,19 +16445,19 @@ fn panic_halts_the_others_first(
     // taken the stop, and this is how long it is waited for.
     let give_up = Instant::now() + qemu::GUEST_QUIET;
     loop {
-        let stopped = qemu::stopped_cpus(&monitor.human("info registers -a"));
-        if stopped.len() == SMP && stopped.iter().filter(|&&cpu| cpu).count() >= SMP - 1 {
+        let stopped = qemu::stopped_cpus(&mut monitor, arch);
+        if stopped.len() == cpus && stopped.iter().filter(|&&cpu| cpu).count() >= cpus - 1 {
             break;
         }
         if Instant::now() >= give_up {
             return Err(format!(
                 "{STALLED} waiting for the other CPUs to halt after the fatal path on cpu{fatal} \
-                 stopped them — QEMU shows each vCPU in `cli; hlt` as {stopped:?}\n{console}"
+                 stopped them — QEMU shows each vCPU halted with interrupts masked as {stopped:?}\n{console}"
             ));
         }
         console.push_str(&qemu.drain_serial(Duration::from_millis(200)));
     }
-    eprintln!("  [panic] the fatal path on cpu{fatal} left every other CPU in `cli; hlt`");
+    eprintln!("  [panic] the fatal path on cpu{fatal} left every other CPU halted with interrupts masked");
     Ok(())
 }
 

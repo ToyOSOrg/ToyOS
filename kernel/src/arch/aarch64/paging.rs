@@ -697,6 +697,27 @@ pub(crate) fn join() {
     }
 }
 
+/// What [`join`] wrote, read back: a CPU on any other roots is refused.
+pub(crate) fn check_joined() {
+    let (ttbr1, ttbr0): (u64, u64);
+    // SAFETY: reads two translation registers; touches no memory.
+    unsafe {
+        core::arch::asm!(
+            "mrs {ttbr1}, ttbr1_el1",
+            "mrs {ttbr0}, ttbr0_el1",
+            ttbr1 = out(reg) ttbr1,
+            ttbr0 = out(reg) ttbr0,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    let root1 = KERNEL_TTBR1.load(core::sync::atomic::Ordering::Acquire);
+    let root0 = KERNEL_TTBR0.load(core::sync::atomic::Ordering::Acquire);
+    assert!(
+        (ttbr1, ttbr0) == (root1, root0),
+        "paging: this CPU holds TTBR1_EL1={ttbr1:#x} TTBR0_EL1={ttbr0:#x}, and the kernel's roots are {root1:#x} and {root0:#x}"
+    );
+}
+
 /// A root for a CPU to turn its MMU on under, running at physical addresses:
 /// the kernel root's direct map, and the same entries again at identity below
 /// it, so one root serves both `TTBR`s as the loader's does. Its tables below

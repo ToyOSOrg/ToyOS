@@ -10,13 +10,9 @@ use toyos_gicv3::packed_affinity;
 use super::percpu::{self, PerCpu};
 use super::{cache, control_regs, cpu, irqchip, paging, psci};
 use crate::mm::DirectMap;
-use crate::smp_roster::Roster;
+use crate::smp::{self, ROSTER};
 use crate::time::AP_START;
 use crate::{clock, log};
-
-static ROSTER: Roster = Roster::new();
-
-const _: () = assert!(crate::smp_roster::MAX_CPUS == crate::scheduler::MAX_CPUS);
 
 /// What an AP's entry reads with its MMU off, at the physical address `CPU_ON`
 /// hands it in `x0`, and what its first Rust reads after.
@@ -32,30 +28,6 @@ pub struct ApStart {
     token: u32,
 }
 
-/// A stack for an AP's bring-up, never freed: the AP runs on it.
-#[repr(C, align(16))]
-struct Stack([u8; crate::process::KERNEL_STACK_SIZE]);
-
-pub fn cpu_count() -> u32 {
-    ROSTER.count()
-}
-
-/// Release the APs into the scheduler.
-pub fn set_ready() {
-    ROSTER.release();
-}
-
-/// Whether [`set_ready`] has run.
-pub fn is_ready() -> bool {
-    ROSTER.released()
-}
-
-/// `cpu`'s packed MPIDR affinity; panics if `cpu` is not online.
-pub fn hardware_id_of(cpu: u32) -> u32 {
-    assert!(cpu < cpu_count(), "smp: cpu{cpu} is not online");
-    ROSTER.hardware_id(cpu)
-}
-
 /// Start every other CPU `gic` names, in the MADT's order, until one does not
 /// echo within [`AP_START`] or the roster is full.
 pub fn start(gic: &irqchip::Gic, psci: Option<psci::Conduit>) {
@@ -64,20 +36,19 @@ pub fn start(gic: &irqchip::Gic, psci: Option<psci::Conduit>) {
     let others = gic.cpus.iter().filter(|gicc| packed_affinity(gicc.mpidr) != me);
     let Some(psci) = psci else {
         log!("SMP: no PSCI to start the other {} CPUs with; the boot CPU runs alone", others.count());
-        control_regs::report(cpu_count());
+        control_regs::report(smp::cpu_count());
         return;
     };
     let root = paging::bringup_root();
     let entry = DirectMap::phys_of(super::boot::ap_start as *const u8);
     for gicc in others {
         let Some(attempt) = ROSTER.begin_attempt() else {
-            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", cpu_count());
+            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", smp::cpu_count());
             break;
         };
-        let stack = Box::leak(Box::<Stack>::new_uninit());
         let start: &'static ApStart = Box::leak(Box::new(ApStart {
             root,
-            stack_top: stack.as_ptr() as u64 + size_of::<Stack>() as u64,
+            stack_top: smp::bringup_stack(),
             percpu: percpu::alloc(attempt.id()),
             redistributor: gic.redistributor(packed_affinity(gicc.mpidr)),
             token: attempt.token(),
@@ -85,9 +56,11 @@ pub fn start(gic: &irqchip::Gic, psci: Option<psci::Conduit>) {
         // Read with the MMU off, so from memory and never from this CPU's cache.
         cache::write_back(start as *const ApStart as u64, size_of::<ApStart>());
         let context = DirectMap::phys_of(start as *const ApStart);
-        if let Err(refused) = psci.cpu_on(gicc.mpidr, entry, context) {
-            log!("SMP: CPU_ON refused cpu{} mpidr={:#x} ({refused:?}); the rest stay off", attempt.id(), gicc.mpidr);
-            break;
+        if !smp::skip_startup(attempt.id()) {
+            if let Err(refused) = psci.cpu_on(gicc.mpidr, entry, context) {
+                log!("SMP: CPU_ON refused cpu{} mpidr={:#x} ({refused:?}); the rest stay off", attempt.id(), gicc.mpidr);
+                break;
+            }
         }
         let deadline = clock::nanos_since_boot() + AP_START.nanos();
         // Committed only on this attempt's own token, so `0..cpu_count()` stays dense.
@@ -98,7 +71,7 @@ pub fn start(gic: &irqchip::Gic, psci: Option<psci::Conduit>) {
         ROSTER.commit(attempt, packed_affinity(gicc.mpidr));
         log!("SMP: cpu{} mpidr={:#x} online", attempt.id(), gicc.mpidr);
     }
-    let online = cpu_count();
+    let online = smp::cpu_count();
     log!("SMP: {online} of {} MADT CPUs online", gic.cpus.len());
     control_regs::report(online);
 }
@@ -109,6 +82,7 @@ pub(super) extern "C" fn ap_entry(start: &'static ApStart, el: u64) -> ! {
     // First: every log line, a fault's report among them, reads it.
     percpu::install(start.percpu);
     paging::join();
+    paging::check_joined();
     control_regs::check(el);
     irqchip::init_cpu(start.redistributor);
     ROSTER.echo(start.token);

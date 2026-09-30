@@ -40,8 +40,6 @@ fn a_reader_that_finds_a_shard_finds_it_built() {
         let publisher = registry.clone();
 
         let w = loom::thread::spawn(move || {
-            // What `alloc_log_shard` does, in the order it does it: build the
-            // shard, then make it reachable.
             let shard = Box::into_raw(Box::new(Shard::new()));
             // SAFETY: leaked, so it outlives every reader; published once.
             unsafe { publish(&publisher[..], 1, shard) };

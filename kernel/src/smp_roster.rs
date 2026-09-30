@@ -1,8 +1,7 @@
 //! The CPU roster and the one release/answer word, two invariants held as a type:
 //! an id commits only after its AP's handshake and `commit` publishes the slot
 //! before the count, so `0..count()` has no dead slot; and the word `release` sets
-//! is the word `answering` reads. Both architectures bring their APs up through
-//! it. Compiled into `kernel-loom/`, so no `crate::`.
+//! is the word `answering` reads. Compiled into `kernel-loom/`, so no `crate::`.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};

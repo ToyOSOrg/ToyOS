@@ -546,8 +546,7 @@ fn psci_of(table: &[u8]) -> Psci {
 
 /// `ARM_BOOT_ARCH` on a FADT that defines it. QEMU 11.1.1's `virt`
 /// publishes revision 6, minor 3 and `PSCI_COMPLIANT`, with `PSCI_USE_HVC`
-/// where the guest has no EL2 (`hw/arm/virt-acpi-build.c:1135-1148`,
-/// `hw/arm/virt.c:2956-2962`).
+/// where the guest has no EL2.
 #[test]
 fn the_psci_conduit_is_read_off_a_fadt_that_defines_it() {
     assert_eq!(psci_of(&arm_facp(6, 3, 0b01)), Psci::Smc);
@@ -564,10 +563,17 @@ fn a_fadt_before_acpi_5_1_says_nothing_about_psci() {
     assert_eq!(psci_of(&arm_facp(5, 0, 0b11)), Psci::Undefined { revision: 5, minor: 0 });
     assert_eq!(psci_of(&arm_facp(3, 0, 0b01)), Psci::Undefined { revision: 3, minor: 0 });
     assert_eq!(psci_of(&arm_facp(5, 0x10, 0b01)), Psci::Undefined { revision: 5, minor: 0 });
+}
 
-    let mut short = arm_facp(6, 3, 0b01);
-    declare_len(&mut short, 130);
-    assert_eq!(psci_of(&short), Psci::Undefined { revision: 6, minor: 0 });
+/// A table that ends inside `ARM_BOOT_ARCH`, or before the minor version that
+/// says whether it has one, is short whatever its revision says.
+#[test]
+fn a_fadt_that_ends_before_arm_boot_arch_is_short() {
+    for len in [130, 131] {
+        let mut short = arm_facp(6, 3, 0b01);
+        declare_len(&mut short, len);
+        assert_eq!(psci_of(&short), Psci::Short, "a FADT of {len} bytes");
+    }
 }
 
 /// Where the two firmwares' descriptor lists sit for the sweep below.

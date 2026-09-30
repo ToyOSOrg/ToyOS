@@ -133,22 +133,28 @@ pub enum Psci {
     Hvc,
     /// `PSCI_COMPLIANT` clear: firmware offers no PSCI.
     Absent,
-    /// A FADT before ACPI 5.1, or one too short to reach the field: those
-    /// bytes are reserved, so nothing is said about PSCI at all.
+    /// A FADT before ACPI 5.1: those bytes are reserved, so nothing is said
+    /// about PSCI at all.
     Undefined { revision: u8, minor: u8 },
+    /// A FADT that ends before `ARM_BOOT_ARCH` and the minor version after it.
+    Short,
 }
 
 /// `ARM_BOOT_ARCH`, read only from a FADT whose version defines it: 5.1 on,
 /// the version its header's major and `FADT Minor Version`'s low nibble spell.
 pub fn psci<P: Phys>(fadt: &Table<P>) -> Psci {
     let revision = fadt.byte(SDT_REVISION).unwrap_or(0);
-    let minor = fadt.byte(FADT_MINOR_VERSION).map_or(0, |byte| byte & 0xF);
-    let defined = revision > 5 || (revision == 5 && minor >= 1);
-    match fadt.u16_at(FADT_ARM_BOOT_ARCH) {
-        Some(flags) if defined && flags & PSCI_COMPLIANT == 0 => Psci::Absent,
-        Some(flags) if defined && flags & PSCI_USE_HVC != 0 => Psci::Hvc,
-        Some(_) if defined => Psci::Smc,
-        _ => Psci::Undefined { revision, minor },
+    let (Some(flags), Some(minor)) = (fadt.u16_at(FADT_ARM_BOOT_ARCH), fadt.byte(FADT_MINOR_VERSION)) else {
+        return Psci::Short;
+    };
+    let minor = minor & 0xF;
+    if revision < 5 || (revision == 5 && minor < 1) {
+        return Psci::Undefined { revision, minor };
+    }
+    match flags {
+        flags if flags & PSCI_COMPLIANT == 0 => Psci::Absent,
+        flags if flags & PSCI_USE_HVC != 0 => Psci::Hvc,
+        _ => Psci::Smc,
     }
 }
 
