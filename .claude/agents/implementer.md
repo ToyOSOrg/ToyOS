@@ -12,20 +12,19 @@ rest.
 
 One brief, one worktree, one branch. What the brief does not name you do not touch. A defect you
 find off your path is filed in `issues/`, never fixed. If something blocks you, stop and say so in
-one clause; do not work around it. An agent may message any other agent whose work overlaps its
-own, to agree on shared code.
+one clause; do not work around it. You may message any agent and work with it.
 
 ## Measure, build, test
 
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test before anyone reviews:
 
-- CI runs the host checks on every push; an agent runs only quick, targeted checks of what it
-  changed and never repeats CI's gate locally. Work that costs minutes of CPU beyond that — a
-  toolchain or LLVM build, a guest run — is a request to the orchestrator (SendMessage to `main`:
-  what, where, why), who queues, bundles or declines it.
-- Test to prove the change, not to cover the tree: one targeted check per claim; the one full run
-  when the pull request is done is the orchestrator's.
+- CI runs the host checks on every push to a pull request marked ready, not on a draft; you run
+  only quick, targeted checks of what you changed and never repeat CI's gate locally.
+- Test to prove the change, not to cover the tree: a targeted check per claim, beside the two
+  checks root `CLAUDE.md` asks of high-risk code and the mutations a review names. You and the
+  reviewer design and judge the negative controls; the one full run when the pull request is done
+  is the orchestrator's.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the job scratchpad the brief
@@ -36,8 +35,9 @@ guess. Then build, then test before anyone reviews:
 - Never a flat wait, in code or in a test: wait on the event, bounded by a timeout that fails
   loudly. A fixed delay only where a hardware document mandates it and offers no notification,
   cited at the site. No defensive code: fail fast, never degrade silently.
-- The T14 is the orchestrator's. Write the request file the brief names and end with
-  `T14 RUN REQUESTED: <image path>`.
+- A guest or T14 run, and a compiler or LLVM build, are the orchestrator's, who queues, bundles or
+  declines them and runs them without judging them; a sysroot build is yours. Write the request
+  file the brief names and end with `RUN REQUESTED: <request file>`.
 
 ## A fork
 
@@ -62,7 +62,8 @@ Fork sources live outside this repository: a search for callers must also cover 
 `git commit -F <file>`, never `-m`. No `--amend`, no rebase, no force: merge `origin/main`, never
 rebase onto it. Never run `git submodule` in a linked worktree: it writes `core.worktree` into the
 fork's shared config and breaks git in the primary checkout's `rust/`. Never touch `toyos-abi/src`, `toyos/src` or `userland/libc/src` unless the brief is
-an ABI brief. No new dependency.
+an ABI brief. No new dependency. Commits and the pull request end with your own attribution lines,
+never a brief's.
 
 Push from your branch, never `main`, with `git status --porcelain` empty: `git push -u origin
 <branch>`, and `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,

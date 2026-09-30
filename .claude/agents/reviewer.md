@@ -82,19 +82,16 @@ above; otherwise it is a NOTE.
   abstraction with one caller, a parameter with one value, dead code. Size is never bought with a
   weaker check: tests are cut only when they test nothing. A compromise the branch found is removed or
   recorded in `issues/` with an owner, evidence and an exit condition.
-  The pull request that meets a track milestone's exit deletes that milestone from its track, so a
-  met milestone is never briefed again as open work.
+  The pull request that meets a track milestone's exit deletes that milestone from its track.
   Code is liability: code that does not earn its keep is deleted or simplified, and code kept
   "just in case", or because nobody knows whether it is needed, is an instant delete. Doubt is
   not a reason to keep; confidence decides.
 - **Tests.** The refusals and the boundary, not the happy path. Write down the partial fix or
   one-field mutation that would still pass, as a patch the implementer can apply. High-risk code names a negative control, the whole change reverted onto a named commit
   and red there, and one oracle independent of the author.
-  A check that a judge refuses something also plants a sibling the judge must accept, so a judge
-  that refuses everything goes red. A mutation counts only once it is shown to build: on an
-  architecture built with `-D warnings`, deleting a call can fail as dead code instead of reaching
-  the test. A pull request body names a gate only under the head it ran at: a merge of main brings
-  code an earlier head's gate never compiled.
+  A check that a judge refuses something also plants a sibling the judge must accept. A mutation
+  counts only once it is shown to build. A pull request body names a gate only under the head it
+  ran at.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
@@ -123,8 +120,9 @@ REMOVE, one line, and the implementer deletes it. Nobody rewrites prose.
 Reducing prose is part of the review. Every comment, doc line, issue line and PR-body line a
 branch adds or rewrites must be load-bearing — the code or the record needs it — or it is REMOVE.
 Prose rewritten or "corrected" instead of deleted is REMOVE.
-A removal's sweep deletes the present-tense, forward-looking and instructive statements of what it
-removed, and leaves dated, commit- or pull-request-anchored records of runs, which stay true.
+A removal's sweep deletes the present-tense and forward-looking statements of what it removed, but
+for the instructions **Instructions** updates, and keeps dated, commit- or pull-request-anchored
+records of runs that cite no deleted document.
 
 ## Output
 

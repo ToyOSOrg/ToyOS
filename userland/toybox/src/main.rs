@@ -1,7 +1,5 @@
-mod arch;
 mod cat;
 mod cp;
-mod debug_refused;
 mod echo;
 mod free;
 mod grep;
@@ -11,7 +9,6 @@ mod ls;
 mod mkdir;
 mod mv;
 mod net;
-mod preempt;
 mod ps;
 mod pwd;
 mod reboot;
@@ -21,7 +18,6 @@ mod shutdown;
 mod spin;
 mod stats;
 mod tone;
-mod unmap_touch;
 
 macro_rules! commands {
     ($($name:ident),*) => {
@@ -34,9 +30,7 @@ macro_rules! commands {
     };
 }
 
-use arch::{first_entry, fp_isolation};
-
-commands!(cat, cp, debug_refused, echo, first_entry, fp_isolation, free, grep, hexdump, locale, ls, mkdir, mv, net, preempt, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone, unmap_touch);
+commands!(cat, cp, echo, free, grep, hexdump, locale, ls, mkdir, mv, net, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
