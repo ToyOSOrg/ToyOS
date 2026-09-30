@@ -119,7 +119,6 @@ const ACTUATOR_TESTS: &[&str] = &[
     // comparison, so on a kernel that answers `InvalidArgument` both readings
     // are the same error and the assertion passes having counted nothing.
     "handle_basic",
-    "handle_kill_policy",
     "handle_transfer",
     // The last two took action 16 in place of `SYS_SYSINFO`: a verdict about
     // what one killed process gave back cannot be the whole machine's free

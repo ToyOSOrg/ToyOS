@@ -463,9 +463,8 @@ impl Readback {
     /// name would find nothing on a perfectly good boot.
     ///
     /// **And the name alone does not identify one process.** A guest binary that
-    /// cannot ask what a handle it does not hold does — the pattern
-    /// `handle_kill_policy` is built on — re-executes *itself*, one child per
-    /// fault, and every child is recorded under that same name with whatever
+    /// cannot ask what a handle it does not hold does re-executes *itself*, one
+    /// child per fault, and every child is recorded under that same name with whatever
     /// exit the fault gave it. Measured on a metal-shaped guest that binary left
     /// forty-two records reading `code=139` and the job's own reading zero, and
     /// the last of them is a child. The job's is the one with the **lowest
