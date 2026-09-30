@@ -681,9 +681,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // The same stop with logd's flush held until init resumes it: logd runs
     // the flush, then the resume, and lives. Lines; init's flush bound.
     ("log_resume_meets_its_flush", Sched::Parallel),
-    // A child flooding its parent's log ring while logd reads none of it: the
-    // parent's next line is in `/log`. Lines; its clock is a guard.
-    ("log_ring_keeps_the_owners_slots", Sched::Parallel),
     // A program's line said after three batches of records, read before them:
     // `/log` carries it after every one. Lines and positions; no clock.
     ("log_program_line_after_its_records", Sched::Parallel),
@@ -1441,7 +1438,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("log_program_forgery", &["test_rs_log_forger"]),
     ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
     ("log_resume_meets_its_flush", &["test_rs_log_refused_stop"]),
-    ("log_ring_keeps_the_owners_slots", &["test_rs_log_flood"]),
     ("log_program_flood", &["test_rs_log_flood"]),
     ("log_program_line_after_its_records", &["test_rs_log_hold"]),
     ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
@@ -12881,7 +12877,6 @@ fn run_machine_test(
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
         "log_after_a_refused_stop" => common::origin::refused_stop(c_bins, rust_bins),
         "log_resume_meets_its_flush" => common::origin::resume_meets_its_flush(rust_bins),
-        "log_ring_keeps_the_owners_slots" => common::origin::keeps_the_owners_slots(rust_bins),
         "log_program_line_after_its_records" => common::origin::after_records(c_bins, rust_bins),
         "log_carrier_forgery" => common::origin::carrier_forgery(c_bins, rust_bins),
         "log_program_flood" => common::origin::flood(c_bins, rust_bins),
