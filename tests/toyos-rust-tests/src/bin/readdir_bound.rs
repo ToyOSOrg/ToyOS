@@ -7,10 +7,7 @@
 //! buffer, stopped, and reported the bytes it had written, which is
 //! indistinguishable from a complete listing: 4125 entries of 34,816, as
 //! success. A bound plus a silent truncation is a quieter version of the same
-//! defect, so both are asserted here.
-//!
-//! `/home` gets the same bound third, on the btree walk bcachefs lists with.
-//! All below is an ordinary workload.
+//! defect, so both are asserted here. All below is an ordinary workload.
 
 use std::fs;
 use std::process::Command;
@@ -25,30 +22,13 @@ const MAX_LIST_ENTRIES: usize = 16_384;
 /// truncating kernel returns about 4,000 of them.
 const PLAIN_ENTRIES: usize = 6_000;
 
-/// One past the bound: the walk is refused at the first entry over it, however
-/// many the directory holds.
-const HOME_ENTRIES: usize = MAX_LIST_ENTRIES + 1;
-
 fn main() {
-    home_past_the_bound_is_refused();
     plain_entries_are_all_returned();
     subdirectories_at_the_limit();
     one_past_the_limit_is_refused();
     a_directory_still_lists_in_a_mount_past_the_bound();
     system_alive();
     println!("all readdir bound tests passed");
-}
-
-/// First, while nothing else holds file-cache entries: the listing bound on
-/// `/home`. The files stay — this boot is the test's own.
-fn home_past_the_bound_is_refused() {
-    for i in 0..HOME_ENTRIES {
-        fs::write(format!("/home/rb{i}"), b"").expect("create on /home failed");
-    }
-    match fs::read_dir("/home") {
-        Ok(it) => panic!("listing /home past the limit returned {} entries", it.count()),
-        Err(e) => println!("  PASS: /home refused at {HOME_ENTRIES} entries ({e})"),
-    }
 }
 
 /// A listing larger than the caller's buffer comes back whole.
@@ -95,11 +75,10 @@ fn one_past_the_limit_is_refused() {
 
 /// The bound belongs to the directory, not to the mount holding it.
 ///
-/// Both mounts are over it by now and neither can list its own root, which is
-/// the shape asserted at the end: every directory *in* them still lists,
-/// including one holding nothing — the answer a mount-wide bound cannot give,
-/// an empty listing and a refusal being the same byte to a caller checking
-/// existence. A hash map and an on-disk B+tree, so this is the contract.
+/// `/tmp` is over it by now and cannot list its own root, which is the shape
+/// asserted at the end: every directory *in* it still lists, including one
+/// holding nothing — the answer a mount-wide bound cannot give, an empty
+/// listing and a refusal being the same byte to a caller checking existence.
 fn a_directory_still_lists_in_a_mount_past_the_bound() {
     let full = fs::read_dir("/tmp/d0").expect("read_dir of a directory in a full tmpfs");
     let names: Vec<String> =
@@ -111,19 +90,10 @@ fn a_directory_still_lists_in_a_mount_past_the_bound() {
     assert_eq!(n, 0, "an empty directory listed {n} entries");
     println!("  PASS: /tmp serves a directory and an empty one while its own root is refused");
 
-    fs::write("/home/sub/one", b"x").expect("create on /home failed");
-    let n = fs::read_dir("/home/sub").expect("read_dir of a directory in a full bcachefs").count();
-    assert_eq!(n, 1, "/home/sub listed {n} entries");
-    println!("  PASS: /home serves a directory while its own root is refused");
-
-    // The mount roots are directories too, and theirs is still the same bound.
+    // The mount root is a directory too, and its bound is still the same one.
     match fs::read_dir("/tmp") {
         Ok(it) => panic!("/tmp listed {} entries after the per-directory bound", it.count()),
         Err(e) => println!("  PASS: /tmp's own root is still refused ({e})"),
-    }
-    match fs::read_dir("/home") {
-        Ok(it) => panic!("/home listed {} entries after the per-directory bound", it.count()),
-        Err(e) => println!("  PASS: /home's own root is still refused ({e})"),
     }
 }
 

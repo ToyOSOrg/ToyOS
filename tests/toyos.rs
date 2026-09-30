@@ -11158,7 +11158,7 @@ fn run_machine_test(
             );
             serial::Serial::boot(&qemu).must_be_clean()?;
 
-            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(1328));
+            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(545));
             if let Some(err) = &result.error {
                 return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
             }
