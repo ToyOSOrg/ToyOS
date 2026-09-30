@@ -15,6 +15,13 @@ layouts build into one `rust/build/`, and neither sees the other's holds:
 - `store::collect` sees neither the old layout's `buildlock` holds nor its
   `.making` claims, so a key an old-layout build is using and no worktree
   records is in reach of it.
+- Every worktree `rust/` the old layout made carries `library/backtrace` as a
+  git worktree of the primary's clone (20 on this host, `git worktree list`
+  there). A build in one whose backtrace gitlink moved to a commit that clone
+  lacks has bootstrap run `git submodule update` over it, which rewrites that
+  clone's `core.worktree`, as `git submodule update rust` did to the primary's
+  fork repository once. The store's own checkouts take no submodule from the
+  primary.
 
 And the old layout leaves on disk what nothing on the store reads:
 `rust/build/<host>/stage2` and the rest of `rust/build/<host>` in the primary
