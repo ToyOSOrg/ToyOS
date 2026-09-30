@@ -34,6 +34,13 @@ pub const fn sgi1r(intid: u32, target: u32) -> u64 {
     aff3 << 48 | (aff0 >> 4) << 44 | aff2 << 32 | (intid as u64) << 24 | aff1 << 16 | 1 << (aff0 & 0xF)
 }
 
+/// `ICC_SGI1R_EL1` raising SGI `intid` on every CPU but the one writing it:
+/// `IRM` set, under which the affinity fields and the target list are not read.
+pub const fn sgi1r_others(intid: u32) -> u64 {
+    assert!(intid < 16, "an SGI's INTID is below 16");
+    1 << 40 | (intid as u64) << 24
+}
+
 /// The offset, in a redistributor region `length` bytes long, of the
 /// redistributor whose affinity is `me`; `typer` reads `GICR_TYPER` of the
 /// redistributor at an offset. The walk steps by each one's own frames and

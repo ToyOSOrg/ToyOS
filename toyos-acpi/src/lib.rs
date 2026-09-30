@@ -23,8 +23,8 @@ mod spcr;
 use toyos_bootmap::DirectMapEnd;
 
 pub use fadt::{
-    century_of, dsdt_address, iapc_boot_arch, reset_register, rtc_century, Century, Reset,
-    CMOS_RAM, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,
+    century_of, dsdt_address, iapc_boot_arch, psci, reset_register, rtc_century, Century, Psci,
+    Reset, CMOS_RAM, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,
 };
 pub use madt::{
     madt_entries, Gicc, IoApicEntry, MadtEntries, MadtEntry, MadtHalt, SourceOverride, MADT_ENTRIES,
