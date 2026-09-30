@@ -14,7 +14,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::shootdown::{Generation, Shootdown};
 
-use super::{apic, percpu, smp};
+use super::{apic, percpu};
+use crate::smp;
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
