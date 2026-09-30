@@ -42,8 +42,7 @@ The machine boots the stick and installs onto its own NVMe, then takes
 `ssh t14 update < image` for every change after. It waits on stage 5 of
 `issues/boot-media/the-loader-does-only-what-must-precede-the-handover.md`,
 whose `update --boot-first` puts the NVMe loader's entry first; taking Ubuntu
-out of `toyos-metal`'s loop is stage 2 of
-`issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md`.
+out of `toyos-metal`'s loop is that track's too.
 
 **Exit**: with the stick pulled, the T14 boots ToyOS off its NVMe, and a
 kernel change sent with `ssh t14 update < image` boots at the next reset.

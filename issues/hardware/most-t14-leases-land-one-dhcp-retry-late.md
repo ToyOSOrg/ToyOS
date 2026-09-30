@@ -12,8 +12,8 @@ after netd came up and 11 at 13.1–13.4 s, so the first lease of a boot, and
 with it `sshd`, arrived at 9.1–9.3 s of boot on 4 of the 13 boots and at
 19.0–19.1 s on the other 9.
 
-The ten-second step is smoltcp 0.12's default `RetryConfig::discover_timeout`
-(`smoltcp-0.12.0/src/socket/dhcpv4.rs:134`), which netd keeps. netd restarts
+The ten-second step is smoltcp 0.12's default `RetryConfig::discover_timeout`,
+which netd keeps. netd restarts
 discovery when the link comes up (`userland/netd/src/dhcp.rs:42-61`), and on
 the late boots the lease came from the DISCOVER sent one timeout after that
 one. What became of the first, whether it left the machine and whether an
@@ -22,10 +22,11 @@ at 4 s, randomized by ±1 s.
 
 The network track owns it: netd leaves smoltcp in stage 5 of
 `issues/design-debt/toyos-has-its-own-network-stack.md`, whose stage 3 is
-`toyos-dhcp`. Stage 2 of
-`issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md` waits on
-it.
+`toyos-dhcp`. Stage 6 of
+`issues/boot-media/the-loader-does-only-what-must-precede-the-handover.md`
+waits on it.
 
-**Exit**: a capture of a T14 boot shows what became of the DISCOVER sent as
-the link came up, and on every boot of a T14 run an unanswered DISCOVER is
-sent again within RFC 2131 §4.1's 4 ± 1 s.
+**Exit**: netd logs each DISCOVER it sends and each OFFER it receives, and a
+T14 boot's log shows what became of the DISCOVER sent as the link came up; on
+every boot of a T14 run an unanswered DISCOVER is sent again within RFC 2131
+§4.1's 4 ± 1 s.
