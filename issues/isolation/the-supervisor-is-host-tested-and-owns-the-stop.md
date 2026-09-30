@@ -84,7 +84,5 @@ A deleted or disabled test covers nothing.
 
 ## Open with the owner
 
-- Before stage 3: the ask's ABI, which is Q6a of
-  `issues/kernel/the-child-process-track-waits-on-the-owners-rulings.md`; whether a program
-  started through `launcher` is asked or only stopped; whether
-  `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.
+- Before stage 3: whether a program started through `launcher` is asked or
+  only stopped; whether `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.
