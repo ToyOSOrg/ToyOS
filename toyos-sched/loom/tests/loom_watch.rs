@@ -24,7 +24,7 @@
 //! `gate-fence-off` removes the [`Gate`]'s two fences, and
 //! `a_transition_racing_an_opening_gate_is_never_missed` must red; and
 //! `poll-fire-load-store`, the kernel's own control for the poll's one-shot
-//! answer, which the ring models below compile, must red both poll models here.
+//! answer, which the ring models below compile, must red every poll model here.
 //!
 //! **The ring entry is the kernel's [`Once`], compiled from
 //! `kernel/src/inbox/once.rs`**, the decision a `PollEntry` makes; what else a
@@ -108,6 +108,15 @@ impl World {
             preempt: &RemoteGuard,
         };
         self.watch.post(WakeCause::new(WakeReason::Woken), &env);
+    }
+
+    fn post_in_place(&self) {
+        let env = Poster {
+            cpus: &self.cpus,
+            kicker: &self.kicks,
+            preempt: &RemoteGuard,
+        };
+        self.watch.post_in_place(WakeCause::new(WakeReason::Woken), &env);
     }
 
     fn post_one(&self, token: u64) -> usize {
@@ -275,31 +284,39 @@ fn a_bounded_post_racing_a_timeout_reaches_a_live_waiter() {
 /// and never by both, which is a completion the process did not ask for.
 #[test]
 fn a_poll_registered_racing_a_post_completes_exactly_once() {
-    model(|| {
-        let (world, _rx) = world();
-        let ready = Arc::new(AtomicBool::new(false));
-        let poll = Entry::new();
+    model(|| poll_racing(World::post));
+}
 
-        let registrant = {
-            let world = world.clone();
-            let ready = ready.clone();
-            let poll = poll.clone();
-            loom::thread::spawn(move || {
-                world.watch.add_ring(poll.clone());
-                if ready.load(Ordering::Acquire) {
-                    poll.fire(Fire::Ready);
-                }
-            })
-        };
-        let producer = loom::thread::spawn(move || {
-            ready.store(true, Ordering::Release);
-            world.post();
-        });
-        registrant.join().unwrap();
-        producer.join().unwrap();
+/// The same, against the post an interrupt handler makes.
+#[test]
+fn a_poll_registered_racing_a_post_in_place_completes_exactly_once() {
+    model(|| poll_racing(World::post_in_place));
+}
 
-        assert_eq!(poll.posts(), 1, "a poll over a ready object completes once");
+fn poll_racing(post: fn(&World)) {
+    let (world, _rx) = world();
+    let ready = Arc::new(AtomicBool::new(false));
+    let poll = Entry::new();
+
+    let registrant = {
+        let world = world.clone();
+        let ready = ready.clone();
+        let poll = poll.clone();
+        loom::thread::spawn(move || {
+            world.watch.add_ring(poll.clone());
+            if ready.load(Ordering::Acquire) {
+                poll.fire(Fire::Ready);
+            }
+        })
+    };
+    let producer = loom::thread::spawn(move || {
+        ready.store(true, Ordering::Release);
+        post(&world);
     });
+    registrant.join().unwrap();
+    producer.join().unwrap();
+
+    assert_eq!(poll.posts(), 1, "a poll over a ready object completes once");
 }
 
 /// The object's end racing its readiness: the poll is answered once, as ready
@@ -621,7 +638,7 @@ impl Ring for RingEntry {
             let ring = &self.0.ring;
             ring.written.with(|n| *n += 1);
             let env = Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
-            ring.parked.post(WakeCause::new(WakeReason::Woken), &env);
+            ring.parked.post_in_place(WakeCause::new(WakeReason::Woken), &env);
         }
     }
 
@@ -630,12 +647,12 @@ impl Ring for RingEntry {
     }
 }
 
-/// **A post fires its rings under its own list lock**, so beneath it are the
-/// ring's lock and the ring's watch. Two devices' watches each hold a poll of
-/// one ring and are posted at once, while the ring's submitter waits for both
-/// completions: the three locks nest in one order, so no schedule deadlocks,
-/// each poll completes once, and a submitter parked with both completions
-/// written was owed the wake the second one posted.
+/// **A post in place fires its rings under its own list lock**, so beneath it
+/// are the ring's lock and the ring's watch. Two devices' watches each hold a
+/// poll of one ring and are posted at once, while the ring's submitter waits
+/// for both completions: the three locks nest in one order, so no schedule
+/// deadlocks, each poll completes once, and a submitter parked with both
+/// completions written was owed the wake the second one posted.
 #[test]
 fn two_posts_through_one_rings_lock_complete_it_once_each_and_lose_no_wake() {
     model(|| {
@@ -687,7 +704,7 @@ fn two_posts_through_one_rings_lock_complete_it_once_each_and_lose_no_wake() {
                 loom::thread::spawn(move || {
                     let env =
                         Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
-                    device.post(WakeCause::new(WakeReason::Woken), &env);
+                    device.post_in_place(WakeCause::new(WakeReason::Woken), &env);
                 })
             })
             .collect();

@@ -1,9 +1,9 @@
 //! What makes a post legal in an interrupt handler, which interrupts whoever
 //! holds the allocator's lock: nothing allocates or frees under a watch's list
-//! lock, and a post frees nothing at all.
+//! lock, and a post in place frees nothing at all.
 //!
 //! The allocator below counts every allocation and free this thread makes
-//! while it holds a list lock, and every one it makes inside a post.
+//! while it holds a list lock, and every one it makes inside a post in place.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -122,11 +122,11 @@ const C0: CpuId = CpuId(0);
 
 fn clean(phase: &str) {
     assert_eq!(UNDER_LOCK.load(Relaxed), 0, "{phase} allocated or freed under the list lock");
-    assert_eq!(IN_POST.load(Relaxed), 0, "{phase}: a post allocated or freed");
+    assert_eq!(IN_POST.load(Relaxed), 0, "{phase}: a post in place allocated or freed");
 }
 
 #[test]
-fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_frees_nothing() {
+fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_nothing() {
     let (tx, mut rx) = mailbox::<Msg>();
     let cpus = CpuHandles::new(vec![CpuHandle::new(C0, tx)]);
     let env = Poster { cpus: &cpus, kicker: &NoKick, preempt: &NoPreempt };
@@ -149,10 +149,10 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_frees_nothing() {
     clean("registering");
 
     POSTING.set(true);
-    w.post(WakeCause::new(WakeReason::Woken), &env);
+    w.post_in_place(WakeCause::new(WakeReason::Woken), &env);
     POSTING.set(false);
-    clean("posting");
-    assert!(polls.iter().all(|p| p.0.load(Acquire) == 1), "a post fired every entry");
+    clean("posting in place");
+    assert!(polls.iter().all(|p| p.0.load(Acquire) == 1), "a post in place fired every entry");
 
     // Every entry is dead now, and a withdrawn one joins them: these two
     // registrations sweep all ten.
@@ -162,6 +162,13 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_frees_nothing() {
     w.add_ring(Entry(Arc::new(Poll::default())));
     clean("sweeping");
     assert!(polls.iter().all(|p| Arc::strong_count(p) == 1), "the sweep let go of every fired entry");
+
+    // A thread's post frees what it fired, with the lock let go.
+    let later = Arc::new(Poll::default());
+    w.add_ring(Entry(later.clone()));
+    w.post(WakeCause::new(WakeReason::Woken), &env);
+    clean("posting");
+    assert_eq!(Arc::strong_count(&later), 1, "the post let go of the entry it fired");
 
     assert_eq!(w.post_n(3, 1, WakeCause::new(WakeReason::Woken), &env), 0, "every waiter is claimed");
     assert_eq!(w.revoke(|token| token % 2 == 0, WakeCause::new(WakeReason::Woken), &env), 5);

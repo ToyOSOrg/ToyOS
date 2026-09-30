@@ -1743,7 +1743,7 @@ pub fn has_irq(slot: usize) -> bool {
 /// `kernel-loom` models it against a concurrent reader.
 pub fn isr(slot: usize) {
     IRQ[slot].took();
-    WATCHES[slot].post();
+    WATCHES[slot].post_in_place();
 }
 
 /// The unit refused this function an access.
@@ -1753,7 +1753,7 @@ pub fn isr(slot: usize) {
 /// the claim to read that refusal, as a message's does.
 pub fn note_fault(slot: usize) {
     IRQ[slot].fault();
-    WATCHES[slot].post();
+    WATCHES[slot].post_in_place();
     crate::preempt::set_need_resched();
 }
 

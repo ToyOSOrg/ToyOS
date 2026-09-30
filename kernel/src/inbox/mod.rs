@@ -20,11 +20,11 @@
 //! entry, and a ring holds at most [`MAX_PENDING_WATCHES`] polls.
 //!
 //! **Locks.** What a completion writes sits behind a `KernelLock` of its own,
-//! held with interrupts off, because a post fires its polls under its list lock
-//! and a device's handler posts; nothing is taken under it. The rest of a ring,
-//! its submissions and its polls, is its `Lock`'s, which no post reaches. A
-//! ring's own watch holds only threads, because no handle names a ring as a
-//! thing to watch.
+//! held with interrupts off, because a device's interrupt handler posts in
+//! place, firing its polls under its list lock; nothing is taken under it. The
+//! rest of a ring, its submissions and its polls, is its `Lock`'s, which no
+//! post reaches. A ring's own watch holds only threads, because no handle names
+//! a ring as a thing to watch.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -314,7 +314,9 @@ impl Inbox {
             .completions
             .with(|c| c.as_mut().map(|c| c.post_completion(user_data, result, 0)));
         if posted.is_some() {
-            self.watch.post();
+            // In place: an interrupt handler's post reaches here through the
+            // poll it fires.
+            self.watch.post_in_place();
         }
     }
 

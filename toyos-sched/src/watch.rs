@@ -15,17 +15,20 @@
 //! waiting side does between its registration and its park can be skipped:
 //! `park::prepare` consumes the flag, and the commit consumes the claim.
 //!
-//! **A post allocates and frees nothing, so an interrupt handler may make
-//! one.** It fires every ring entry where it stands; an entry is one-shot, so a
-//! fired one is dead, and the next registration sweeps the dead out. Nothing
-//! allocates or frees under the list lock at all: a registration grows the list
-//! and drops what it swept with the lock let go.
+//! **Nothing allocates or frees under the list lock**, because an interrupt
+//! handler's post can interrupt the allocator's holder while another CPU holds
+//! the list waiting for the allocator. A registration grows the list and drops
+//! what it swept with the lock let go. [`Watch::post`] takes every ring entry
+//! out and fires and frees them with the lock let go; [`Watch::post_in_place`],
+//! for a handler, which may not free at all, fires them where they stand, and
+//! the next registration sweeps the dead out, since an entry is one-shot.
 //!
-//! **Lock order.** A post fires its rings under the list lock, so beneath it
-//! are each ring's own lock and the watch that ring's submitters park on, which
-//! holds threads and no ring and so nests nothing. The drop of every entry the
-//! list lets go of runs with it let go, because an entry's last reference may
-//! own another watch. So a post may be made under any lock but a ring's own.
+//! **Lock order.** A post in place fires its rings under the list lock, so
+//! beneath it are each ring's own lock and the watch that ring's submitters
+//! park on, which holds threads and no ring and so nests nothing. The drop of
+//! every entry the list lets go of runs with it let go, because an entry's last
+//! reference may own another watch. So a post may be made under any lock but a
+//! ring's own.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -52,9 +55,9 @@ pub trait Ring {
     /// Post this poll's completion. One-shot across every watch the poll is
     /// registered on: an entry that already fired, or whose poll was withdrawn,
     /// posts nothing. Called with at most the posting watch's list lock held,
-    /// from wherever a post is made, an interrupt handler included: may take
-    /// only its ring's own lock and post only the watch its ring's submitters
-    /// park on, and allocates and frees nothing.
+    /// and from an interrupt handler by a post in place: may take only its
+    /// ring's own lock and post only the watch its ring's submitters park on,
+    /// and allocates and frees nothing.
     fn fire(&self, how: Fire);
     /// Whether a fire would still post anything. `false` is permanent.
     fn live(&self) -> bool;
@@ -145,9 +148,28 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
         self.push(entry, |w| &mut w.rings);
     }
 
-    /// Something changed: wake every registered thread, and fire every ring
-    /// entry where it stands.
+    /// Something changed: wake every registered thread, and fire and let go of
+    /// every ring entry, with the list lock let go.
     pub fn post<K: Kicker, P: PreemptGuard>(&self, cause: WakeCause, env: &Poster<'_, M, K, P>) {
+        let fired = self.list.with(|w| {
+            for waiter in &w.threads {
+                notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
+            }
+            core::mem::take(&mut w.rings)
+        });
+        for ring in &fired {
+            ring.fire(Fire::Ready);
+        }
+    }
+
+    /// [`Self::post`] for a context that may not free, an interrupt handler:
+    /// every ring entry is fired where it stands, under the list lock, so the
+    /// cost is every registration on the watch with that lock held.
+    pub fn post_in_place<K: Kicker, P: PreemptGuard>(
+        &self,
+        cause: WakeCause,
+        env: &Poster<'_, M, K, P>,
+    ) {
         self.list.with(|w| {
             for waiter in &w.threads {
                 notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
@@ -676,21 +698,21 @@ mod tests {
         withdrawn.withdraw();
         let fresh = Arc::new(Poll::default());
         w.add_ring(fresh);
-        assert_eq!(Arc::strong_count(&fired), 1, "a fired entry is swept");
+        assert_eq!(Arc::strong_count(&fired), 1, "a post lets go of what it fired");
         assert_eq!(Arc::strong_count(&withdrawn), 1, "a withdrawn entry is swept");
         assert_eq!(w.live_rings(), 1);
     }
 
-    /// A post fires where the entry stands and lets go of nothing: the entry
-    /// it fired is still the list's until a registration sweeps it.
+    /// A post in place fires where the entry stands and lets go of nothing:
+    /// the entry it fired is still the list's until a registration sweeps it.
     #[test]
-    fn a_post_fires_in_place_and_drops_nothing() {
+    fn a_post_in_place_fires_and_drops_nothing() {
         let (handles, _rx) = cpus();
         let env = Poster { cpus: &handles, kicker: &NoKick, preempt: &NoPreempt };
         let w = watch();
         let poll = Arc::new(Poll::default());
         w.add_ring(poll.clone());
-        w.post(woken(), &env);
+        w.post_in_place(woken(), &env);
         assert_eq!(poll.posts.load(Ordering::Acquire), 1);
         assert_eq!(Arc::strong_count(&poll), 2, "the post let go of the entry it fired");
         let t = task(1);

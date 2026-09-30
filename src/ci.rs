@@ -299,6 +299,7 @@ pub(crate) const CONTROLS: &[Control] = &[
     // with. A double panic, so the verdict is the first one's message.
     red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
         "parked with the condition true and no wake owed: the post was lost",
+        "parked with both completions written and no wake owed: a ring's post was lost",
     ]),
     // The notify's flagged arm answering off a load: a second post reads the
     // word from before the waiter consumed the first flag.
@@ -313,6 +314,7 @@ pub(crate) const CONTROLS: &[Control] = &[
     // ring entry.
     red(SCHED_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
         "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
+        "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
         "a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED",
     ]),
     // Reproduces an open defect

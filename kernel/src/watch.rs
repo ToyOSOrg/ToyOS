@@ -8,10 +8,11 @@
 //! thread's state word, which its own next commit reads. Nothing here keeps a
 //! record of what was posted — a waiter re-reads the object, never the post.
 //!
-//! **A post allocates and frees nothing and may be made under any lock but a
-//! poll ring's** (`crate::inbox`), so a device's interrupt handler posts its
-//! watch itself: every lock a post takes is a `KernelLock`, held with
-//! interrupts off. Registration allocates, in the syscall that registers.
+//! **A post allocates nothing and may be made under any lock but a poll
+//! ring's** (`crate::inbox`); a post in place frees nothing either, so a
+//! device's interrupt handler makes one: every lock it takes is a `KernelLock`,
+//! held with interrupts off. Registration allocates, in the syscall that
+//! registers.
 //!
 //! A [`Watch`] is a borrowed reference for the whole of a wait: [`Armed`]
 //! holds it, so an object cannot be freed under a thread waiting on it, and
@@ -55,10 +56,22 @@ impl Watch {
 
     fn post_as(&self, cause: WakeCause) {
         #[cfg(feature = "boot-actuators")]
-        handler_post::note_post();
+        handler_post::note_post(self);
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
             self.0.post(cause, &env);
+        });
+    }
+
+    /// [`Self::post`] for an interrupt handler, which may not free: every poll
+    /// is completed where it stands, with interrupts off, so a handler posts
+    /// only a watch whose registrations are its device's holder's own.
+    pub fn post_in_place(&self) {
+        #[cfg(feature = "boot-actuators")]
+        handler_post::note_post(self);
+        preempt_off(|p| {
+            let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
+            self.0.post_in_place(WakeCause::new(WakeReason::Woken), &env);
         });
     }
 
@@ -252,9 +265,10 @@ mod window {
 /// `handler-post`: claim slot 0's vector, raised on this CPU inside a post of
 /// that slot's own watch while the CPU holds preemption off, posts the watch
 /// once the outer post lets go of it and before any pass can run. A hold counts
-/// the posts made on its CPU: the outer one and the handler's are two, and a
-/// hold that saw fewer by its budget lapsed. One run, on whichever idle loop
-/// reaches it first with interrupts open; its verdict is one
+/// the posts of that watch made on its CPU, and no other watch's, which a poll
+/// the outer post completes also posts: the outer one and the handler's are
+/// two, and a hold that saw fewer by its budget lapsed. One run, on whichever
+/// idle loop reaches it first with interrupts open; its verdict is one
 /// [`handler_post::SAID`] line.
 #[cfg(feature = "boot-actuators")]
 pub mod handler_post {
@@ -318,9 +332,12 @@ pub mod handler_post {
         }
     }
 
-    pub fn note_post() {
+    pub fn note_post(watch: &super::Watch) {
         let holding = HOLDING.load(Relaxed);
-        if holding != NOBODY && holding == crate::arch::percpu::cpu_id() {
+        if holding != NOBODY
+            && holding == crate::arch::percpu::cpu_id()
+            && core::ptr::eq(watch, crate::pcidev::watch(0))
+        {
             POSTS.fetch_add(1, Relaxed);
         }
     }
