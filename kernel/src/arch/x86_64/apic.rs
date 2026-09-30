@@ -147,14 +147,14 @@ pub(super) fn tlb_ipi() {
 // Targeted, not broadcast: a broadcast kick would preempt every sibling per wake and cannot scale.
 pub fn kick_cpu(cpu_id: u32) {
     if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
-    let apic_id = crate::arch::smp::apic_id_for(cpu_id);
+    let apic_id = crate::smp::hardware_id(cpu_id);
     Reg::Icr.write(((apic_id as u64) << 32) | 0x4000 | TIMER_VECTOR as u64);
 }
 
 // Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
 pub fn kick_all_but_self() {
     let me = percpu::cpu_id();
-    for cpu in 0..crate::arch::smp::cpu_count() {
+    for cpu in 0..crate::smp::cpu_count() {
         if cpu != me {
             kick_cpu(cpu);
         }
@@ -165,7 +165,7 @@ pub fn kick_all_but_self() {
 // Diagnostic only: an NMI can land inside any critical section, which this kernel cannot make NMI-safe.
 pub fn send_nmi(cpu_id: u32) {
     if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
-    let apic_id = crate::arch::smp::apic_id_for(cpu_id);
+    let apic_id = crate::smp::hardware_id(cpu_id);
     Reg::Icr.write(((apic_id as u64) << 32) | 0x4400);
 }
 
@@ -189,7 +189,7 @@ pub fn arm_perf_nmi() {
 /// that no sibling has been sent its `SIPI`, so there are only CPUs still waiting
 /// for one rather than CPUs that need halting.
 pub fn stop_other_cpus() {
-    if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::arch::smp::is_ready() {
+    if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::smp::is_ready() {
         Reg::Icr.write(0x000C_0000 | 0xFD);
     }
 }

@@ -37,7 +37,6 @@ pub fn slots() -> Slots {
 /// Publishes `shard` as the shard for `cpu`.
 /// # Safety
 /// `shard` must be a live, initialised [`Shard`] that is never freed.
-// cpu0 never calls this: `alloc_log_shard` returns before reaching it, so a zero `cpu` is a caller bug, not a valid case.
 pub unsafe fn publish(slots: &[AtomicPtr<Shard>], cpu: u32, shard: *mut Shard) {
     let slot = (cpu as usize)
         .checked_sub(1)

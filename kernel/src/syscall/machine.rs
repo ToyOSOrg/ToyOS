@@ -231,7 +231,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     }
 
     let (total_mem, used_mem) = crate::mm::pmm::stats();
-    let cpu_count = crate::arch::smp::cpu_count();
+    let cpu_count = crate::smp::cpu_count();
     let uptime = crate::clock::nanos_since_boot();
     let total_cpu_ns = crate::scheduler::total_cpu_ns();
     let total_available_ns = uptime * cpu_count as u64;

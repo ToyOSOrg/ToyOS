@@ -95,7 +95,7 @@ fn victim(me: usize, cpus: usize) -> Option<(usize, u64)> {
 pub fn storm() {
     static FIRED: AtomicBool = AtomicBool::new(false);
 
-    let cpus = (crate::arch::smp::cpu_count() as usize).min(MAX_CPUS);
+    let cpus = (crate::smp::cpu_count() as usize).min(MAX_CPUS);
     let me = percpu::cpu_id() as usize;
     if cpus < 2 {
         return;

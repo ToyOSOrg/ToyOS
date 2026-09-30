@@ -28,9 +28,8 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 
 ## Owner rulings, 2026-09-26
 
-- **Parked** (owner ruling, 2026-09-29). No later stage starts now. The Exit
-  (LLVM under emulation) needs stages 4-7; until they are
-  picked up it is unmet.
+- **Running** (owner, 2026-09-29): "can we get the most important tracks
+  running in parallel? arm, network and llvm?"
 - **Hardware discovery is ACPI only** (edk2 MADT, GTDT and SPCR under QEMU); no devicetree.
 - **Start.** Stage 0 (shared groundwork on x86) and stages 1-3 (toolchain,
   loader, kernel reaching serial on QEMU `virt`) start now. Stage 0 waits for
@@ -278,7 +277,7 @@ Each stage names its exit; "measured" means a number from a run.
    stage's SMMUv3 first. Stubbed on AArch64, each owned by the small-kernel
    track, which moves the driver out of the kernel:
    - `arch::msi_message` refuses, so the kernel's xHCI (`virt`'s boot stick),
-     NVMe, HDA, virtio-sound, virtio-console and virtio-gpu drivers each
+     HDA, virtio-sound, virtio-console and virtio-gpu drivers each
      refuse their function by name.
    - `drivers::gop` refuses a scanout that is not whole 2 MiB pages of its
      own, which a `ramfb` scanout carved out of RAM need not be.
@@ -292,6 +291,20 @@ Each stage names its exit; "measured" means a number from a run.
    `dlopen` test; until it does the kernel refuses `R_AARCH64_TLSDESC` by name
    (`toyos_elf::rela::ExeRefusal::TlsDescriptor` for an executable,
    `toyos_elf::RelocError::TlsDescriptor` for a library).
+   **Every CPU starts, ahead of small-kernel stage 6 by the owner's word, as
+   stage 4 did:** it ports no device interrupt, so nothing of the relay.
+   Owed before the exit holds:
+   `SYSTEM_RESET`, `SYSTEM_OFF` and `CPU_OFF` behind a reset and power-off
+   seam that takes x86-64's reset register and PM1a out of
+   `drivers/acpi.rs`, and the stop shown on eight CPUs ending in that
+   power-off; the TLS-descriptor resolver;
+   `issues/kernel/the-crash-evidence-records-x86-fault-registers.md`; the
+   blocked-task dump's probe of a CPU that ignored its kick
+   (`sched/dump.rs`'s `probe_silent`), which reaches `irqchip::send_nmi`'s
+   `owed!` on a machine of more than one CPU, and which nothing but the
+   `dump-deaf-cpu` actuator asks for until AArch64 has a keyboard; and, for
+   the first HVF run, the clean of an AP's start block to the point of
+   coherency, which TCG cannot fail on.
 
 6. **Virtio on `virt`.** virtio-pci (ECAM from MCFG) for blk, net, gpu,
    sound, input and rng. virtio-input replaces the i8042 as the
@@ -323,8 +336,9 @@ ARM is done when LLVM compiles under emulation on the development Mac (owner
 ruling, 2026-09-29). One recipe is timed three ways: macOS natively, a Linux
 arm64 guest under QEMU with HVF, and ToyOS arm64 under QEMU with HVF. All
 three times are recorded, and it passes when ToyOS is at least as fast as the
-Linux guest. ToyOS compiling LLVM is `issues/build/toyos-builds-itself.md`'s
-work on AArch64.
+Linux guest. The timing is one measurement, taken by hand and not automated
+(owner ruling, 2026-09-29). ToyOS compiling LLVM is
+`issues/build/toyos-builds-itself.md`'s work on AArch64.
 
 ## Interactions with other tracks
 

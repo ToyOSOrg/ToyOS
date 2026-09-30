@@ -587,6 +587,9 @@ static KERNEL: core::sync::atomic::AtomicPtr<alloc::sync::Arc<Lock<AddressSpace>
 /// Its root, cached for lock-free access from panic and crash paths.
 static KERNEL_TTBR0: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// The kernel's own root, which every CPU's `TTBR1_EL1` holds from [`join`] on.
+static KERNEL_TTBR1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn kernel() -> &'static alloc::sync::Arc<Lock<AddressSpace>> {
     let ptr = KERNEL.load(core::sync::atomic::Ordering::Acquire);
     assert!(!ptr.is_null(), "paging not initialized");
@@ -655,19 +658,29 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], scanout: Option<(u64, u64)>) -
         tables.map_direct(scanout, size, kernel_leaf(CachePolicy::WriteCombining));
     }
 
-    let ttbr1 = tables.root.phys();
+    KERNEL_TTBR1.store(tables.root.phys(), core::sync::atomic::Ordering::Release);
     *high() = Some(tables);
     let space = AddressSpace { tables: Tables::new(), regions: vma::Regions::default(), asid: Asid::Kernel };
-    let ttbr0 = space.root();
-    KERNEL_TTBR0.store(ttbr0.0, core::sync::atomic::Ordering::Release);
+    KERNEL_TTBR0.store(space.root().0, core::sync::atomic::Ordering::Release);
     let published: &'static alloc::sync::Arc<Lock<AddressSpace>> =
         Box::leak(Box::new(alloc::sync::Arc::new(Lock::new(space))));
     KERNEL.store(published as *const _ as *mut _, core::sync::atomic::Ordering::Release);
 
-    // SAFETY: both tables are built and published above, and the new
-    // `TTBR1_EL1` maps the code, stack and data this runs on exactly as the
-    // loader's did; the loader's identity view goes with the old `TTBR0_EL1`,
-    // and the local `TLBI` drops every translation either left behind.
+    join();
+    crate::log!("paging: the direct map holds memory below {end:#x} in {blocks} 2 MiB blocks and {pages} 4 KiB pages");
+    extent
+}
+
+/// Put this CPU on the kernel's tables — `TTBR1_EL1` the kernel's root,
+/// `TTBR0_EL1` the kernel space's empty user half — from the loader's or from
+/// [`bringup_root`], either of which maps the code, stack and data this runs
+/// on exactly as the kernel's root does. The local `TLBI` then drops every
+/// translation the old tables left, global ones among them.
+pub(crate) fn join() {
+    let ttbr1 = KERNEL_TTBR1.load(core::sync::atomic::Ordering::Acquire);
+    let ttbr0 = KERNEL_TTBR0.load(core::sync::atomic::Ordering::Acquire);
+    // SAFETY: both roots are published by `init` and live forever, and the
+    // tables this CPU ran on map everything this function touches as they do.
     unsafe {
         core::arch::asm!(
             "dsb ishst",
@@ -678,12 +691,49 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], scanout: Option<(u64, u64)>) -
             "dsb nsh",
             "isb",
             ttbr1 = in(reg) ttbr1,
-            ttbr0 = in(reg) ttbr0.0,
+            ttbr0 = in(reg) ttbr0,
             options(nostack, preserves_flags),
         );
     }
-    crate::log!("paging: the direct map holds memory below {end:#x} in {blocks} 2 MiB blocks and {pages} 4 KiB pages");
-    extent
+}
+
+/// What [`join`] wrote, read back: a CPU on any other roots is refused.
+pub(crate) fn check_joined() {
+    let (ttbr1, ttbr0): (u64, u64);
+    // SAFETY: reads two translation registers; touches no memory.
+    unsafe {
+        core::arch::asm!(
+            "mrs {ttbr1}, ttbr1_el1",
+            "mrs {ttbr0}, ttbr0_el1",
+            ttbr1 = out(reg) ttbr1,
+            ttbr0 = out(reg) ttbr0,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    let root1 = KERNEL_TTBR1.load(core::sync::atomic::Ordering::Acquire);
+    let root0 = KERNEL_TTBR0.load(core::sync::atomic::Ordering::Acquire);
+    assert!(
+        (ttbr1, ttbr0) == (root1, root0),
+        "paging: this CPU holds TTBR1_EL1={ttbr1:#x} TTBR0_EL1={ttbr0:#x}, and the kernel's roots are {root1:#x} and {root0:#x}"
+    );
+}
+
+/// A root for a CPU to turn its MMU on under, running at physical addresses:
+/// the kernel root's direct map, and the same entries again at identity below
+/// it, so one root serves both `TTBR`s as the loader's does. Its tables below
+/// the root are the kernel's own. Leaked: a CPU that answered too late to be
+/// counted may walk it still.
+pub fn bringup_root() -> u64 {
+    let high = high();
+    let kernel = &high.as_ref().expect("bringup_root: before the kernel's tables exist").root;
+    let mut root = Table::new();
+    let from = index(PHYS_OFFSET, 0);
+    for i in from..512 {
+        root.0[i - from] = kernel.0[i];
+        root.0[i] = kernel.0[i];
+    }
+    published();
+    Box::leak(root).phys()
 }
 
 /// Nothing to seal: every space runs under the one `TTBR1_EL1`, so no space

@@ -1585,7 +1585,30 @@ pub fn handle_fault(error: crate::object::HandleError) -> ! {
     exit(HANDLE_FAULT_EXIT_CODE)
 }
 
-/// AP entry into the scheduler. Called from smp::ap_entry once the machine is released.
+/// An AP's way into the idle loop on either architecture, once it has answered
+/// the BSP: it waits for the machine's release, then joins the scheduler.
 pub fn ap_idle() -> ! {
+    while !crate::smp::is_ready() {
+        core::hint::spin_loop();
+    }
+
+    // Only a committed CPU may join: an uncommitted AP has no scheduler slot and
+    // no shootdown targets it, so it halts. The acquire above makes the count visible.
+    let me = percpu::cpu_id();
+    if me >= crate::smp::cpu_count() {
+        log!("CPU {me}: bring-up did not commit; halting");
+        crate::arch::cpu::halt();
+    }
+
+    // Before touching anything not self-mapped: the acquire on the release
+    // makes the BSP's mappings visible, and this settles every TLB
+    // invalidation the wait could not take.
+    crate::arch::tlb::join();
+
+    // Once this CPU is committed and about to run something: the counter is
+    // per CPU, so a CPU nobody arms here is one the hard-lockup bound does not cover.
+    crate::hardlockup::arm_this_cpu();
+
+    log!("CPU {me}: joining scheduler");
     scheduler::enter_idle_loop();
 }

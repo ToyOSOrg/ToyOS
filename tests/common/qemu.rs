@@ -703,21 +703,51 @@ pub fn await_marker_new(
     await_guest(qemu, log, doing, |log| log[from.min(log.len())..].contains(marker))
 }
 
-/// Per vCPU in `info registers -a`, whether it is halted with interrupts off:
-/// the stop's `cli; hlt`, which no interrupt ends. An idle CPU halts with `IF`
-/// set, and a running one is not halted, so neither is this.
-pub fn stopped_cpus(registers: &str) -> Vec<bool> {
+/// `wfi`, and the branch back to the instruction before it: the loop every
+/// copy of the kernel's `arch::cpu::halt` compiles to on AArch64.
+const WFI: u32 = 0xd503_207f;
+const BACK_TO_WFI: u32 = 0x17ff_ffff;
+
+/// Per vCPU in `info registers -a`, whether it is halted with interrupts off.
+///
+/// x86-64: `HLT=1` with `IF` clear, the stop's `cli; hlt`. An idle CPU halts
+/// with `IF` set, and a running one is not halted, so neither is this.
+///
+/// AArch64: QEMU prints no halt, and an idle CPU waits in `wfi` with `I` set
+/// too (`arch::hw::halt`), so the wait is told apart by where it is: at EL1
+/// with `PSTATE.I` set, a `wfi` just behind the PC (QEMU's halted PC is the
+/// instruction after it) and [`BACK_TO_WFI`] at it, where an idle CPU's next
+/// instruction unmasks instead.
+pub fn stopped_cpus(monitor: &mut QmpMonitor, arch: Arch) -> Vec<bool> {
+    let registers = monitor.human("info registers -a");
     registers
         .split("CPU#")
         .skip(1)
         .map(|cpu| {
-            let field = |name: &str| -> Option<String> {
-                Some(cpu.split(name).nth(1)?.chars().take_while(char::is_ascii_hexdigit).collect())
+            let field = |name: &str| -> Option<u64> {
+                let digits: String = cpu.split(name).nth(1)?.chars().take_while(char::is_ascii_hexdigit).collect();
+                u64::from_str_radix(&digits, 16).ok()
             };
-            let flags = field("RFL=").and_then(|f| u64::from_str_radix(&f, 16).ok());
-            field("HLT=").as_deref() == Some("1") && flags.is_some_and(|f| f & (1 << 9) == 0)
+            match arch {
+                Arch::X86_64 => field("HLT=") == Some(1) && field("RFL=").is_some_and(|f| f & 1 << 9 == 0),
+                Arch::Aarch64 => {
+                    let (Some(pc), Some(pstate)) = (field(" PC="), field("PSTATE=")) else {
+                        return false;
+                    };
+                    let (el, masked) = (pstate >> 2 & 3, pstate & 1 << 7 != 0);
+                    el == 1 && masked && pc.checked_sub(4).is_some_and(|at| words(monitor, at) == [WFI, BACK_TO_WFI])
+                }
+            }
         })
         .collect()
+}
+
+/// The two 32-bit words at guest virtual address `at`, as the monitor's CPU
+/// translates it; none where it cannot.
+fn words(monitor: &mut QmpMonitor, at: u64) -> Vec<u32> {
+    let dump = monitor.human(&format!("x/2wx {at:#x}"));
+    let Some((_, words)) = dump.split_once(':') else { return Vec::new() };
+    words.split_whitespace().filter_map(|word| u32::from_str_radix(word.strip_prefix("0x")?, 16).ok()).collect()
 }
 
 /// The fatal path's last line, which `panic_reboot::reboot_now` writes to the
@@ -1068,13 +1098,18 @@ pub enum Profile {
     /// firmware then hands the loader the CPU at EL2, and the kernel's entry
     /// has to drop from it. HVF gives a guest EL1 only.
     VirtEl2,
+    /// [`Profile::Virt`] emulated on `-cpu max` whatever the host: firmware
+    /// hands the loader the CPU at EL1, as HVF does, and QEMU's FADT names
+    /// PSCI's conduit `HVC`; unlike HVF's, the CPU has RNDR for the kernel's
+    /// hash seed.
+    VirtTcg,
 }
 
 impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtEl2 => Arch::Aarch64,
+            Self::Virt | Self::VirtEl2 | Self::VirtTcg => Arch::Aarch64,
             Self::Headless
             | Self::HeadlessNoIommu
             | Self::VirtioNetNoMsix
@@ -1113,12 +1148,10 @@ impl Profile {
         }
     }
 
-    /// How this host provides the machine: [`Profile::VirtEl2`] emulated,
-    /// since only emulation gives a guest EL2; every other as its
-    /// architecture's own.
+    /// How this host provides the machine.
     pub fn accel(self) -> Accel {
         match self {
-            Self::VirtEl2 => Accel::Tcg,
+            Self::VirtEl2 | Self::VirtTcg => Accel::Tcg,
             _ => self.arch().accel(),
         }
     }
@@ -1437,7 +1470,7 @@ pub const NVME_T14_BLOCKS: u64 = NVME_T14_BYTES / 4096;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
-            Self::VirtEl2 => Self::Virt.shape(),
+            Self::VirtEl2 | Self::VirtTcg => Self::Virt.shape(),
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
