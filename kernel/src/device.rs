@@ -218,13 +218,13 @@ fn partition_view(found: &crate::gpt::Claimable) -> Result<crate::block::Partiti
                 return Err(ClaimError::Unusable);
             }
         };
-    match crate::block::Partition::of(handle, first_block, blocks, Holder::Claim) {
+    match crate::block::Partition::of(handle, first_block, blocks, Holder::Claim(guid)) {
         Ok(view) => Ok(view),
         Err(ViewRefused::Held(Holder::Kernel(what))) => {
             log!("partclaim: {guid} is held by the kernel ({what}) and cannot be claimed");
             Err(ClaimError::KernelDriven)
         }
-        Err(ViewRefused::Held(Holder::Claim)) => Err(ClaimError::Owned),
+        Err(ViewRefused::Held(Holder::Claim(_))) => Err(ClaimError::Owned),
         Err(ViewRefused::OffDevice) => {
             log!(
                 "partclaim: {guid} is at {first_block}+{blocks} blocks, off device {}",

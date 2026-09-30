@@ -469,7 +469,8 @@ pub fn swap_quiets_the_function(
     };
     let text = rig.console.clone();
     let console = serial::Serial::named("the quieting boot", text.as_str());
-    let released = console.must_say("released from slot 0; reset by")?.to_string();
+    let slot = super::iommu::slot_of(&text, "[8086:10d3]")?;
+    let released = console.must_say(&format!("released from slot {slot}; reset by"))?.to_string();
     let inherited = console.must_say("swap_claim_idle: inherited")?.to_string();
     if let Err(why) = console.must_be_clean() {
         return Err(rig.fail(format!("{why}\n  the release said: {}", released.trim_end())));
@@ -514,7 +515,8 @@ pub fn swap_keeps_what_nothing_reset(
     let text = rig.console.clone();
     let judged = (|| {
         let console = serial::Serial::named("the residue boot", text.as_str());
-        let released = console.must_say("[8086:10d3] released from slot 0; reset by")?;
+        let slot = super::iommu::slot_of(&text, "[8086:10d3]")?;
+        let released = console.must_say(&format!("[8086:10d3] released from slot {slot}; reset by"))?;
         if !released.contains("reset by nothing") {
             return Err(format!("the premise: the 82574 was not released by nothing — {released}"));
         }
@@ -529,7 +531,7 @@ pub fn swap_keeps_what_nothing_reset(
             return Err(format!("the premise: the part's receive unit was off when it was claimed — {inherited}"));
         }
         console.must_be_clean()?;
-        let taken_over = console.must_say("pcidev: slot 0 holds 1 range(s)")?;
+        let taken_over = console.must_say(&format!("pcidev: slot {slot} holds 1 range(s)"))?;
         eprintln!(
             "  [swap] {}; {}; {}; mastered through {taken} SYNs, and the unit saw no fault",
             released.trim_end(),
@@ -592,7 +594,8 @@ pub fn swap_fault_tells_its_holder(
     let judged = (|| {
         let console = serial::Serial::named("the astray boot", text.as_str());
         let fault = console.must_say(HOLDER_FAULT)?;
-        if !fault.contains("owner=slot0") || !fault.contains("access=read") {
+        let slot = super::iommu::slot_of(&text, "[8086:10d3]")?;
+        if !fault.contains(&format!("owner=slot{slot} ")) || !fault.contains("access=read") {
             return Err(format!("the premise: the unit refused no descriptor fetch of the claim's part — {fault}"));
         }
         let told = console.must_say(ASTRAY_TOLD)?;

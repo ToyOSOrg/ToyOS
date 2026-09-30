@@ -265,6 +265,7 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
         &log,
         super::https::VIRTIO.claims,
         "neither its MSI-X nor its MSI could be armed",
+        &[],
     )?;
     // And it reached userland rather than stopping at a log line.
     exited?;
@@ -296,7 +297,7 @@ pub fn claim_caps_truncated() -> Result<(), String> {
 
     // Refused by the reason that is true of it: what the list holds past that
     // link was never read — not "it has no table".
-    refused_claim(&log, bench.claims, "its capability list ends at a link the PCI spec forbids")?;
+    refused_claim(&log, bench.claims, "its capability list ends at a link the PCI spec forbids", &[])?;
     // And it reached userland rather than stopping at a log line.
     exited?;
     // And the machine is otherwise whole: one claim refused costs networking
@@ -398,18 +399,20 @@ fn netd_answered(mut qemu: QemuInstance) -> (Serial, Result<(), String>) {
 /// **The claim on [`CLAIMED_AT`] was refused for `why`, and the refusal spent
 /// nothing**: no BAR of that function moved, neither of its two message
 /// mechanisms is armed, `claims` reached no holder, and init said so in the
-/// boot config's own spelling.
+/// boot config's own spelling. `beside` is every other function this machine
+/// refuses, each judged by its own caller.
 ///
 /// The three arms that refuse a claim read this one judge, so a kernel that
 /// answered a refusal by logging it and handing the function over anyway is red
 /// wherever the refusal is reached. `slot_space` put back below `place_bars`
 /// reds on the two unspent lines.
-pub fn refused_claim(log: &Serial, claims: &str, why: &str) -> Result<(), String> {
+pub fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Result<(), String> {
     let refused = functions_named(log, "NOT HANDED OVER")?;
-    if refused.is_empty() || refused.iter().any(|at| *at != CLAIMED_AT) {
+    let others: std::collections::BTreeSet<&str> = refused.iter().copied().filter(|at| *at != CLAIMED_AT).collect();
+    if !refused.contains(&CLAIMED_AT) || others != beside.iter().copied().collect() {
         return Err(format!(
-            "the claim this judges is the one on {CLAIMED_AT}; this console refused \
-             {refused:?}:\n{}",
+            "the claim this judges is the one on {CLAIMED_AT}, beside {beside:?}; this console \
+             refused {refused:?}:\n{}",
             log.text()
         ));
     }
@@ -431,14 +434,9 @@ pub fn refused_claim(log: &Serial, claims: &str, why: &str) -> Result<(), String
     Ok(())
 }
 
-/// A machine with no NVMe controller must boot.
-///
-/// `.expect("NVMe: no controller found")` killed it at 0.08 s — before
-/// storage, before a console on the target laptop, and with the screen still
-/// showing whatever the last checkpoint painted. It is the same class M1
-/// closed for xHCI, on a different controller, and the same class the
-/// designation stamp closed one layer up: absence of storage is a
-/// configuration, not a failure.
+/// A machine with no NVMe controller must boot, and its block service and
+/// file servers serve what they have: absence of storage is a configuration,
+/// not a failure.
 pub fn diskless_boot(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -468,7 +466,8 @@ pub fn diskless_boot(
     // scan is a claim about nothing again.
     log.must_be_clean()?;
     log.must_not_say("no controller found")?;
-    log.must_say("NVMe: no controller on this machine")?;
+    log.must_say("blockd: no NVMe controller this row names is on this machine; serving no partition")?;
+    log.must_say("fsd: this machine has no DATA partition;")?;
     log.must_say("Boot: complete")?;
     Ok(())
 }

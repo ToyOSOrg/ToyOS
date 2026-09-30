@@ -16,11 +16,12 @@
 //! were permanently zero, and nothing here noticed.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::toyos::process::ChildExt;
+use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Command, Stdio};
-use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::endow::{Endowments, SVC_LABEL, SYSCAP_LABEL};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
+use toyos::{namespace, port, AsHandle, Connection};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 
@@ -29,15 +30,27 @@ mod roster;
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_stats";
 
+/// The name the `held-ipc` child finds its parent's port under.
+const HELD_SERVICE: &str = "held";
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("held") => return held(),
+        Some("held-ipc") => return held_ipc(),
+        Some("held-ipc-write") => return held_ipc_write(),
         Some("refused") => return refused_child(),
         _ => {}
     }
+    // Taken once, since a second take of the label finds nothing: each arm
+    // below reads the roster through it.
+    let cap: SysCap = Endowments::get()
+        .take(SYSCAP_LABEL)
+        .expect("test-runner endows every binary it spawns a system capability");
     exited_child();
     live_process();
-    blocked_time_names_what_it_waited_on();
+    blocked_time_names_what_it_waited_on(&cap);
+    a_wait_on_a_connection_is_ipc(&cap);
+    a_wait_to_write_a_full_connection_is_ipc(&cap);
     repeatable();
     refused_without_read();
     refused_calls_are_counted();
@@ -197,7 +210,7 @@ fn live_process() {
 /// asks the object afterwards, which is what `exited_child` above already
 /// relies on. The gap is filed as
 /// `issues/diagnostics/blocked-time-is-invisible-while-the-park-lasts.md`.
-fn blocked_time_names_what_it_waited_on() {
+fn blocked_time_names_what_it_waited_on(cap: &SysCap) {
     let mut child = Command::new(SELF_PATH)
         .arg("held")
         .stdin(Stdio::piped())
@@ -210,11 +223,8 @@ fn blocked_time_names_what_it_waited_on() {
     assert_eq!(line.trim(), "running", "the held child said {line:?}");
 
     // Parked, by the kernel's own roster: the counter has a park to charge.
-    let cap: SysCap = Endowments::get()
-        .take(SYSCAP_LABEL)
-        .expect("test-runner endows every binary it spawns a system capability");
     let pid = stats_of(&child).expect("the held child answers").pid;
-    roster::await_true(|| roster::threads_of(&cap, pid).iter().any(|&(_, state)| state == roster::BLOCKED));
+    roster::await_true(|| roster::threads_of(cap, pid).iter().any(|&(_, state)| state == roster::BLOCKED));
     // Ending the park is what charges it. The child's `read` returns and it
     // exits; its object keeps answering, which is this file's first arm.
     child
@@ -238,6 +248,98 @@ fn blocked_time_names_what_it_waited_on() {
         s.blocked_pipe_ns, s.blocked_io_ns, s.blocked_futex_ns, s.blocked_ipc_ns,
         s.blocked_other_ns,
     );
+}
+
+/// A park on a connection is charged to IPC: it waits for the peer's answer.
+///
+/// The child parks reading a connection whose other end this process
+/// accepted, and is answered only once the kernel's roster says it is blocked,
+/// so the park is there to charge. Nothing else it does waits on IPC, so
+/// `blocked_ipc_ns` moves only if the connection's wait is classed as IPC.
+fn a_wait_on_a_connection_is_ipc(cap: &SysCap) {
+    let s = parked_on_a_connection(cap, "held-ipc", |conn| {
+        conn.write_nonblock(b"g").expect("release the held-ipc child");
+    });
+    assert!(
+        s.blocked_ipc_ns > 0,
+        "a child that parked reading a connection charged {} ns to ipc and {} ns to pipe — a \
+         wait on a connection's answer is IPC",
+        s.blocked_ipc_ns,
+        s.blocked_pipe_ns,
+    );
+    println!("  a connection's wait: ok (ipc={}ns pipe={}ns)", s.blocked_ipc_ns, s.blocked_pipe_ns);
+}
+
+/// The write side of the same wait: the child parks writing a connection it
+/// filled, and this process's read is what makes room.
+fn a_wait_to_write_a_full_connection_is_ipc(cap: &SysCap) {
+    let s = parked_on_a_connection(cap, "held-ipc-write", |conn| {
+        let mut room = [0u8; 4096];
+        conn.read_nonblock(&mut room).expect("make room for the held-ipc-write child");
+    });
+    assert!(
+        s.blocked_ipc_ns > 0,
+        "a child that parked writing a full connection charged {} ns to ipc and {} ns to pipe \
+         — a wait for room on a connection is IPC",
+        s.blocked_ipc_ns,
+        s.blocked_pipe_ns,
+    );
+    println!(
+        "  a full connection's wait: ok (ipc={}ns pipe={}ns)",
+        s.blocked_ipc_ns, s.blocked_pipe_ns,
+    );
+}
+
+fn parked_on_a_connection(cap: &SysCap, role: &str, release: impl FnOnce(&Connection)) -> ProcessStats {
+    let (acceptor, connector) = port::create().expect("a port");
+    let names = namespace::build().add(HELD_SERVICE, &connector).finish().expect("a namespace");
+    let mut child = Command::new(SELF_PATH)
+        .arg(role)
+        .endow(SVC_LABEL, names.into_raw().0)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn the connection child");
+    let mut out = BufReader::new(child.stdout.take().expect("the connection child's stdout"));
+    let mut line = String::new();
+    out.read_line(&mut line).expect("the connection child's marker");
+    assert_eq!(line.trim(), "running", "the {role} child said {line:?}");
+    let conn = acceptor.accept().expect("accept the connection child's connection");
+
+    let pid = stats_of(&child).expect("the connection child answers").pid;
+    roster::await_true(|| {
+        roster::threads_of(cap, pid).iter().any(|&(is_thread, state)| !is_thread && state == roster::BLOCKED)
+    });
+    release(&conn);
+    let status = child.wait().expect("wait the connection child");
+    assert!(status.success(), "the {role} child exited with {status}");
+    stats_of(&child).expect("an exited child still answers")
+}
+
+/// Says it is running, then blocks reading the connection its namespace names
+/// until the parent answers it.
+fn held_ipc() {
+    let conn = toyos::endow::service(HELD_SERVICE).expect("held-ipc: the parent's port");
+    println!("running");
+    std::io::stdout().flush().expect("held-ipc: flush the marker");
+    let mut buf = [0u8; 1];
+    let n = syscall::read(conn.as_handle(), &mut buf).expect("held-ipc: read the connection");
+    assert_eq!(n, 1, "held-ipc: the parent's answer");
+}
+
+fn held_ipc_write() {
+    let conn = toyos::endow::service(HELD_SERVICE).expect("held-ipc-write: the parent's port");
+    let chunk = [0u8; 65536];
+    loop {
+        match conn.write_nonblock(&chunk) {
+            Ok(_) => {}
+            Err(SyscallError::WouldBlock) => break,
+            Err(e) => panic!("held-ipc-write: filling the connection: {e:?}"),
+        }
+    }
+    println!("running");
+    std::io::stdout().flush().expect("held-ipc-write: flush the marker");
+    let n = syscall::write(conn.as_handle(), &[1]).expect("held-ipc-write: write the connection");
+    assert_eq!(n, 1, "held-ipc-write: the byte the parent made room for");
 }
 
 /// Reading does not spend it. This asserted the opposite before the handle:

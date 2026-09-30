@@ -405,12 +405,7 @@ lock converted** — `vfs::VFS` stays a spinlock, `iod` spins in the driver, and
 the drain pops under the VFS lock so `sync_all` cannot commit a device ahead of
 a file's flush. This is the state that unblocks `vfs::VFS`'s conversion (the
 next chunk): a `Drop` reaching this release site now touches neither a sleep
-lock nor a device. Negative controls: `writeback_reopen` (an `iod` stalled by
-`writeback-stall`, a re-open reads the pinned pages) and `writeback_durability`
-(a close with no fsync reaches the `/log` volume through the drain,
-`toyos-fat32-check` the oracle). Measured, and recorded in `iod.rs`'s header: a
-360-file close burst on NVMe `/home` drove worst close-to-drained latency to
-~72 ms, the single `iod` thread draining the backlog serially.
+lock nor a device.
 
 ### Wall 5: demand paging holds `ProcessData` across the device, and a nested trap is a level above the baseline
 

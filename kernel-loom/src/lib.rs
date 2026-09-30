@@ -196,11 +196,6 @@ pub mod dump_request;
 #[path = "../../kernel/src/pcidev/record.rs"]
 pub mod device_irq;
 
-/// Durability debt as generations. Pure `core`, so it compiles here unshimmed;
-/// `tests/durability.rs` drives the kernel's flush protocol over it.
-#[path = "../../kernel/src/durability.rs"]
-pub mod durability;
-
 /// A poll ring's one-shot answer. It names atomics and nothing else, and that
 /// narrowness is load-bearing: a file that named a ring's page or a watch could
 /// not be compiled here at all, and the race would stop being checked by
