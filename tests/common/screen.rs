@@ -173,20 +173,25 @@ impl Ppm {
         None
     }
 
-    /// How many rows of text are on the panel, counted without decoding a
-    /// glyph: no firmware font is committed here, so a row one drew is
-    /// invisible to [`Ppm::text`].
+    /// How many rows of a firmware console's text the panel's first
+    /// [`EDGE_CELLS`] cells carry, counted without decoding a glyph: no firmware
+    /// font is committed here, so a row one drew is invisible to [`Ppm::text`].
+    /// [`edge_rows`] is the count a console's lines put there.
     ///
-    /// A band taller than the pitch is a logo or two rows that touch, and
-    /// neither is one row of text; the pitch is the median distance between
-    /// band tops, because a stray scanline sets a minimum of one and drags a
-    /// mean as well. A panel with fewer than two bands has no pitch to take,
-    /// and is refused rather than counted as none.
+    /// A band taller than the pitch is two rows that touch, and not one row of
+    /// text; the pitch is the median distance between band tops, because a
+    /// stray scanline sets a minimum of one and drags a mean as well. A panel
+    /// with fewer than two bands has no pitch to take, and is refused rather
+    /// than counted as none.
     pub fn text_row_bands(&self) -> Result<usize, String> {
+        let edge = EDGE_CELLS * EFI_GLYPH_WIDTH;
+        if self.width < edge {
+            return Err(format!("the panel is {} pixels wide, narrower than its {edge}-pixel edge", self.width));
+        }
         let mut bands: Vec<(usize, usize)> = Vec::new();
         let mut top = None;
         for y in 0..self.height {
-            let lit = (0..self.width)
+            let lit = (0..edge)
                 .any(|x| self.pixels[y * self.width + x].iter().any(|c| *c >= FG_THRESHOLD));
             match (lit, top) {
                 (true, None) => top = Some(y),
@@ -236,6 +241,32 @@ impl Ppm {
     pub fn identical_to(&self, other: &Ppm) -> bool {
         self.width == other.width && self.height == other.height && self.pixels == other.pixels
     }
+}
+
+/// A firmware console's glyph cell is this wide: UEFI's `EFI_GLYPH_WIDTH`.
+pub const EFI_GLYPH_WIDTH: usize = 8;
+
+/// The cells at the panel's left edge that [`Ppm::text_row_bands`] reads.
+/// Firmware starts every console row there and centres its boot logo (edk2's
+/// `BootLogoEnableLogo`) behind the text, so across the whole width a short row
+/// over the logo joins it into one band too tall to count, and a long row cuts
+/// it into pieces short enough to count.
+pub const EDGE_CELLS: usize = 8;
+
+/// The rows [`Ppm::text_row_bands`] counts where a firmware console printed
+/// `lines` from its top-left cell at `columns` a row: a line takes a row per
+/// `columns` characters it fills, and a row is counted when one of its first
+/// [`EDGE_CELLS`] characters draws.
+pub fn edge_rows<'a>(lines: impl IntoIterator<Item = &'a str>, columns: usize) -> usize {
+    lines
+        .into_iter()
+        .map(|line| {
+            let line: Vec<char> = line.chars().collect();
+            line.chunks(columns)
+                .filter(|row| row.iter().take(EDGE_CELLS).any(|c| !c.is_whitespace()))
+                .count()
+        })
+        .sum()
 }
 
 /// Cells of the console's font, in the alpha values it blits.

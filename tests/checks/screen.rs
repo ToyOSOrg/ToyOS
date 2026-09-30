@@ -97,3 +97,75 @@ fn console_self_test() {
          console test could pass on a screen the console never touched"
     );
 }
+
+/// [`Ppm::text_row_bands`] against a panel drawn the way edk2's graphics
+/// console draws one: 8x19 cells from the top-left corner, every cell a line
+/// reaches blitted whole, over a logo centred behind the text. A short row
+/// over the logo's top is cut free of it by the long row below, and two short
+/// rows over the rest join it into one band, so a count across the whole width
+/// is two rows short where one at the edge is exact.
+pub fn edge_self_test() -> Result<(), String> {
+    const COLUMNS: usize = 80;
+    const ROWS: usize = 20;
+    const EFI_GLYPH_HEIGHT: usize = 19;
+    let (width, height) = (COLUMNS * EFI_GLYPH_WIDTH, ROWS * EFI_GLYPH_HEIGHT);
+    let (logo_w, logo_h) = (160, 58);
+    let long = "Black box: 0x8000000 armed, and the kernel is told so on its line";
+    let wide = "Slot A: signed header 168fd26e79d8b062c82902c22b585649e13f6ff487b5a4079d8d21fbaef273ca verifies";
+    let spaced = format!("{}{}", &wide[..COLUMNS], " ".repeat(20));
+    let lines = [
+        "BdsDxe: loading Boot0002",
+        "ToyOS Bootloader 1.0",
+        "Kernel: 3476976 bytes",
+        "Loading kernel elf...",
+        "Kernel stack size: 8388608",
+        "Kernel memory size: 12783616",
+        "Applied 5053 relocations",
+        "",
+        "GOP: mode 640x380",
+        long,
+        "Starting kernel...",
+        "Boot map: root",
+        spaced.as_str(),
+        wide,
+        "Loader log: the kernel handoff begins",
+    ];
+
+    let (text, logo) = ([0x98u8; 3], [0xFFu8; 3]);
+    let mut pixels = vec![[0u8; 3]; width * height];
+    let (lx, ly) = ((width - logo_w) / 2, (height - logo_h) / 2);
+    for y in ly..ly + logo_h {
+        pixels[y * width + lx..y * width + lx + logo_w].fill(logo);
+    }
+    let mut row = 0;
+    for line in lines {
+        let chars: Vec<char> = line.chars().collect();
+        let wrapped: Vec<&[char]> = if chars.is_empty() { vec![&[]] } else { chars.chunks(COLUMNS).collect() };
+        for cells in wrapped {
+            for (col, c) in cells.iter().enumerate() {
+                for gy in 0..EFI_GLYPH_HEIGHT {
+                    for gx in 0..EFI_GLYPH_WIDTH {
+                        let lit = !c.is_whitespace() && (3..=17).contains(&gy) && (1..=6).contains(&gx);
+                        let (x, y) = (col * EFI_GLYPH_WIDTH + gx, row * EFI_GLYPH_HEIGHT + gy);
+                        pixels[y * width + x] = if lit { text } else { [0; 3] };
+                    }
+                }
+            }
+            row += 1;
+        }
+    }
+
+    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+    for p in &pixels {
+        ppm.extend_from_slice(p);
+    }
+    let counted = Ppm::parse(&ppm).text_row_bands()?;
+    let expected = edge_rows(lines, COLUMNS);
+    if (counted, expected) != (15, 15) {
+        return Err(format!(
+            "the staged panel carries 15 rows at its edge; text_row_bands counted {counted} and \
+             edge_rows expected {expected}"
+        ));
+    }
+    Ok(())
+}

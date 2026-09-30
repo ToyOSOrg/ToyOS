@@ -686,6 +686,11 @@ mod checks {
     }
 
     #[test]
+    fn firmware_rows_at_the_edge() -> Result<(), String> {
+        screen_checks::edge_self_test()
+    }
+
+    #[test]
     fn metal_audio_judges() -> Result<(), String> {
         audio_checks::judges_verdict()
     }

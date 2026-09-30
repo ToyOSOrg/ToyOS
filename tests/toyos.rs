@@ -3627,103 +3627,74 @@ fn run_screen_test(
             // An EXCLUSIVE open of `GraphicsOutput` calls `Stop` on the
             // firmware's graphics console, so with one the panel stops at the
             // GOP query and every later loader line is on serial alone.
-            let dump_at = |marker: &'static str| -> Result<(usize, String), String> {
-                let options = BootOptions {
-                    profile,
-                    qmp: true,
-                    ready_marker: marker,
-                    ..Default::default()
-                };
-                metal_sim_argv_check(&qemu::profile_argv(&options))?;
-                let mut qemu =
-                    QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-                let console = qemu.boot_log().to_string();
-                let dump = qemu.screendump();
-                // A row that decodes in the kernel's font is a row the kernel
-                // drew. Refused rather than counted: its rows are not the
-                // loader's and would only push the growth below green.
-                if dump
-                    .rows()
-                    .iter()
-                    .any(|row| !row.trim().is_empty() && !row.contains(screen::UNKNOWN))
-                {
-                    return Err(format!(
-                        "the kernel had already repainted the panel at {marker:?}, so these are \
-                         its rows and not the loader's\ndecoded screen:\n{}",
-                        dump.text()
-                    ));
+            let options = BootOptions {
+                profile,
+                qmp: true,
+                ready_marker: bootlog::LOADER_LAST_LINE,
+                ..Default::default()
+            };
+            metal_sim_argv_check(&qemu::profile_argv(&options))?;
+            let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let console = qemu.boot_log().to_string();
+            let dump = qemu.screendump();
+            // A row that decodes in the kernel's font is a row the kernel
+            // drew. Refused rather than counted: its rows are not the loader's.
+            if dump.rows().iter().any(|row| !row.trim().is_empty() && !row.contains(screen::UNKNOWN)) {
+                return Err(format!(
+                    "the kernel had already repainted the panel at the loader's last line, so \
+                     these are its rows and not the loader's\ndecoded screen:\n{}",
+                    dump.text()
+                ));
+            }
+
+            // `ClearScreen` blanks the whole panel and puts `ESC[2J` on the
+            // serial, so every line after the last one is on the panel too.
+            let Some((_, shown)) = console.rsplit_once("\x1b[2J") else {
+                return Err(format!(
+                    "the console carries no clear screen, so nothing says which of its lines \
+                     are on the panel\n{console}"
+                ));
+            };
+            // A CSI sequence moves the cursor or sets a colour and draws nothing.
+            let drawn = |line: &str| {
+                let mut text = String::new();
+                let mut chars = line.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\x1b' && chars.clone().next() == Some('[') {
+                        chars.by_ref().skip(1).find(|c| ('\x40'..='\x7e').contains(c));
+                    } else {
+                        text.push(c);
+                    }
                 }
-                Ok((dump.text_row_bands()?, console))
+                text
             };
-
-            let (before, at_query) = dump_at(bootlog::LOADER_GOP_LINE)?;
-            let (after, console) = dump_at(bootlog::LOADER_LAST_LINE)?;
-
-            // The growth below subtracts one boot's rows from the other's, and
-            // says nothing unless the two printed the same number of lines
-            // before the query. The lines themselves are not compared: each
-            // boot builds its own image, so two of them carry partition GUIDs
-            // drawn fresh.
-            let upto = |text: &str| {
-                text.lines().take_while(|line| !line.contains(bootlog::LOADER_GOP_LINE)).count()
-            };
-            if upto(&at_query) != upto(&console) {
-                return Err(format!(
-                    "one boot printed {} lines before the GOP query and the other {}, so their \
-                     row counts are not each other's baseline\n--- first\n{at_query}\n--- \
-                     second\n{console}",
-                    upto(&at_query),
-                    upto(&console)
-                ));
-            }
-
-            // What the loader printed after the query, off its own console.
-            let lines: Vec<&str> = console.lines().collect();
-            let at = |line: &str| {
-                lines
-                    .iter()
-                    .position(|seen| seen.contains(line))
-                    .ok_or_else(|| format!("the loader never printed {line:?}\n{console}"))
-            };
-            let (query, last) =
-                (at(bootlog::LOADER_GOP_LINE)?, at(bootlog::LOADER_LAST_LINE)?);
-            if last <= query {
-                return Err(format!(
-                    "the console carries {:?} at line {last} and {:?} at line {query}, so there \
-                     is nothing between them",
-                    bootlog::LOADER_LAST_LINE,
-                    bootlog::LOADER_GOP_LINE
-                ));
-            }
-            let printed = last - query;
-            // The rows those lines take on the firmware's console, whose glyph is
-            // eight pixels wide (UEFI 2.11 §12.9, `EFI_GLYPH_WIDTH`): a line
-            // wider than the mode's columns — the root bridges' descriptor dump
-            // is one — wraps onto a row per width it fills.
+            let lines: Vec<String> = shown.lines().map(drawn).collect();
+            let query = lines
+                .iter()
+                .position(|line| line.contains(bootlog::LOADER_GOP_LINE))
+                .ok_or_else(|| format!("the loader never printed {:?}\n{console}", bootlog::LOADER_GOP_LINE))?;
             let columns = lines[query]
                 .split("GOP: mode ")
                 .nth(1)
                 .and_then(|mode| mode.split('x').next())
                 .and_then(|width| width.parse::<usize>().ok())
-                .map(|width| width / 8)
+                .map(|width| width / screen::EFI_GLYPH_WIDTH)
                 .filter(|&columns| columns > 0)
                 .ok_or_else(|| format!("the GOP line names no mode width: {:?}", lines[query]))?;
-            let rows: usize = lines[query + 1..=last].iter().map(|line| line.len().div_ceil(columns).max(1)).sum();
-
-            // A range and not an equality: each panel is dumped after its marker
-            // reached the console, so a line drawn in between is on the panel
-            // and not in the count.
-            let grew = after as i64 - before as i64;
-            if !(1..=rows as i64).contains(&grew) {
+            let rows = screen::edge_rows(lines.iter().map(String::as_str), columns);
+            let upto_query = screen::edge_rows(lines[..=query].iter().map(String::as_str), columns);
+            let counted = dump.text_row_bands()?;
+            if counted != rows {
                 return Err(format!(
-                    "the panel carried {before} rows at the GOP query and {after} at the loader's \
-                     last line, a growth of {grew}, where the loader printed {printed} lines \
-                     between them, {rows} rows at {columns} columns\n{console}"
+                    "the panel carries {counted} rows where the console printed {rows} since the \
+                     firmware last cleared it at {columns} columns, {upto_query} of them up to the \
+                     GOP query, which are all a panel the query stopped carries\n{console}"
                 ));
             }
             eprintln!(
-                "  [screen] the panel grew {grew} row(s) across the GOP query, {before} to \
-                 {after}, for {printed} line(s) printed"
+                "  [screen] the panel carries all {rows} rows the console printed, {} of them after \
+                 the GOP query",
+                rows - upto_query
             );
             Ok(())
         }
