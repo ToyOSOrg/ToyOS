@@ -775,7 +775,7 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // It seals this boot's own record under an identity one bit from this
     // stick's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.
-    ("blackbox-foreign-identity", Flash::Ok),
+    (FOREIGN_RECORD_ARM, Flash::Ok),
     // **The one arm that deliberately stops this machine.** At the shutdown
     // syscall, after the job list, every CPU stops taking scheduler passes.
     // Admissible only because `kernel/src/deadline.rs` is what ends it, which
@@ -864,10 +864,22 @@ pub const LOAD_ARM: &str = "usb-reset-under-load";
 /// forgot it reds every boot it was staged for.
 pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM, LOAD_ARM];
 
+/// The arm whose boot the pass after it reads as a hang on purpose: its record
+/// is sealed under another stick's identity, so that pass clears it and finds
+/// an attempt nothing reported, and hands the machine back.
+pub const FOREIGN_RECORD_ARM: &str = "blackbox-foreign-identity";
+
 /// Whether this image is armed to stop itself, and so owes a sealed record
 /// rather than `Rebooting.`.
 pub fn stages_a_wedge(armed: &[String]) -> bool {
     armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_str()))
+}
+
+/// Whether this image is armed so the pass after its reset clears its record
+/// as another image's: nothing crosses on the page but the record's state, and
+/// that pass hands the machine back as a hang.
+pub fn clears_its_own_page(armed: &[impl AsRef<str>]) -> bool {
+    armed.iter().any(|name| name.as_ref() == FOREIGN_RECORD_ARM)
 }
 
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
@@ -2103,6 +2115,19 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         write_readback(dir, &loader, &log, back, stick, wire.as_ref(), replied)?;
         println!("readback written to {}", dir.display());
     }
+    let ms = boot_verdict(&armed, &loader, &log)?;
+    // After the stick's own verdict, which stays the one that names a boot
+    // that never reached its network.
+    if let Some((heard, lines)) = &heard {
+        talk_verdict(heard, lines)?;
+    }
+    Ok(Some(ms))
+}
+
+/// The stick's own verdict on one boot, off what its image is armed with, the
+/// loader's file and the log.
+fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusal> {
+    let staged_hang = clears_its_own_page(armed);
     // **Named by evidence, before the boot record is missed.** A boot that
     // never happened and a boot that failed both leave no `Boot: complete`,
     // and `Unfit::NoBootRecord` says the second where it is often the first.
@@ -2113,10 +2138,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // hand.** The loader bounded a hang and gave the machine back; every
     // other reading of an empty kernel log would send a reader to the wrong
     // place, and `NoBootRecord` would send them to a kernel that never ran.
-    if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) {
+    if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) && !staged_hang {
         return Err(Refusal::HungWithoutARecord);
     }
-    if let Some(said) = reported_and_booted_nothing(&loader, &log) {
+    if let Some(said) = reported_and_booted_nothing(loader, log) {
         return Err(Refusal::ReportedAndBootedNothing { said });
     }
     // **An image armed to stop itself is judged by the record its own bound
@@ -2126,19 +2151,16 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // it was not flashed as. *Which* bound sealed it is the page's to say
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
-    let ms = if stages_a_wedge(&armed) {
-        wedged_boot(&loader, &log)?
-    } else {
-        let ms = bootlog::verdict(&log).map_err(Refusal::Log)?;
-        bootlog::handed_back(&loader).map_err(Refusal::Log)?;
-        ms
-    };
-    // After the stick's own verdict, which stays the one that names a boot
-    // that never reached its network.
-    if let Some((heard, lines)) = &heard {
-        talk_verdict(heard, lines)?;
+    if stages_a_wedge(armed) {
+        return wedged_boot(loader, log);
     }
-    Ok(Some(ms))
+    let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
+    if staged_hang {
+        bootlog::foreign_done(loader).map_err(Refusal::Log)?;
+    } else {
+        bootlog::handed_back(loader).map_err(Refusal::Log)?;
+    }
+    Ok(ms)
 }
 
 /// Where a conversation's facts are written, beside the stick's files.
@@ -3374,5 +3396,63 @@ mod tests {
         // A sample that landed before the bound is not a negative lateness.
         let early = locked.replace("for 60004 ms", "for 59000 ms");
         assert_eq!(lockup_lateness_ms(&early), None);
+    }
+
+    /// The foreign-record arm's pass after the reset: the hang it stages is its
+    /// verdict's premise, the record it cleared says the stop finished, and the
+    /// same pass under any other arm is the hang refusal.
+    #[test]
+    fn the_foreign_record_arm_reaches_its_judge_through_the_hang_it_stages() {
+        let loader = format!(
+            "Loader log: the kernel handoff begins, so this file ends here\n{}\n\
+             ToyOS Bootloader 1.0\n\
+             Black box: 0x8000000 held a DONE record another image left in this memory ([63, 12, \
+             b3, 41, e8, dd, 26, 4a, b9, d6, e7, 17, 3a, 83, d6, 18], and this stick is [9c, 12, \
+             b3, 41, e8, dd, 26, 4a, b9, d6, e7, 17, 3a, 83, d6, 18]), armed at \
+             2026-09-29-103651. It has been cleared and this pass boots its kernel\n\
+             Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n\
+             Boot attempts: the previous boot of this image never reported; the machine is \
+             handed back\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n",
+            bootlog::SEPARATOR
+        );
+        let log = "[2026-09-29 10:36:53 1.171 cpu0] Boot: complete (1171ms)\n\
+                   {2026-09-29 10:36:53 1.186 init} init: power: the machine stops, and logd makes \
+                   the log whole first (Reboot)\n";
+        let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_string()).collect() };
+        assert_eq!(
+            boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &loader, log),
+            Ok(1171)
+        );
+        assert_eq!(
+            boot_verdict(&armed(&["boot-deadline=120000"]), &loader, log),
+            Err(Refusal::HungWithoutARecord)
+        );
+        // A stop that panicked or that a bound ended seals under the foreign
+        // identity too, and hands the machine back the same way.
+        for state in ["PANIC", "WEDGED"] {
+            let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
+            assert_eq!(
+                boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &ended, log),
+                Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+            );
+            // The pass before the handoff cleared a stale foreign `DONE`.
+            let stale = format!(
+                "Black box: 0x8000000 held a DONE record another image left in this memory\n{ended}"
+            );
+            assert_eq!(
+                boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &stale, log),
+                Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+            );
+        }
+        // A chain that never went round has no pass after the reset to read.
+        let unreturned = format!(
+            "Black box: 0x8000000 held a DONE record another image left in this memory\n{}\n",
+            bootlog::LOADER_LAST_LINE
+        );
+        assert_eq!(
+            boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &unreturned, log),
+            Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+        );
     }
 }
