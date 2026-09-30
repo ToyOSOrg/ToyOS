@@ -144,7 +144,7 @@ times:
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
    stick misbehaves.
-6. **The scheduler knows nothing about devices.** A handler posts its
+6. A handler posts its
    device's `Watch` and ends its interrupt; the thread waiting on that watch
    does the work, and no step creates a kernel thread. `irq_ring`, the driver
    list in `drain_irqs` and the idle loop's device checks are gone by step 5.

@@ -37,7 +37,7 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
 
 ## Stages
 
-0. **`SYS_PROCESS_OPEN` goes** (ruled). Deleted: `sys_process_open` and every
+0. **`SYS_PROCESS_OPEN` goes**. Deleted: `sys_process_open` and every
    name only it reaches — `process_open`, `SysCap::open_process`, `MANAGE` in
    init's `SysCap`, the `reopenable` column, `process::process_object`,
    `reopen_selftest` and `sched::kthread::open_selftest` with their actuator,
@@ -51,7 +51,7 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    whose symbols are test data. Negative control: the stage reverted whole,
    where `sys_process_open` answers 110. Oracle: rustc's name resolution,
    which fails the build of any caller left.
-1. **An end is an event** (ruled). `read_watch` and `has_data` answer for a
+1. **An end is an event**. `read_watch` and `has_data` answer for a
    `Process`, whose watch becomes an `Arc` as an `Acceptor`'s is, and
    `close_ends_polls` answers `false` for one; init's waiter threads go.
    *Exit*: children held on their stdin (`process_lifecycle`'s `held` role),
@@ -61,13 +61,13 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    handles to a held child closes, a non-blocking submit finds nothing.
    Negative control: the stage reverted whole (`NotSupported`); mutation:
    `close_ends_polls` at `true` reds the last arm. Oracle: pidfd_open(2).
-2. **An end says how** (ruled). An end reads as an exit, a kill or a fault kind
+2. **An end says how**. An end reads as an exit, a kill or a fault kind
    alike on every architecture, and a bare code reads the last two as failures.
    No end reads as a quit's reason. *Exit*: exited 137, killed, and each fault
    kind the architecture raises, each read from a child that did it. Negative
    control: the stage reverted whole, where the first two read alike. Oracle:
    POSIX `<signal.h>`'s classes.
-3. **libc starts and waits for children** (ruled; blocked on
+3. **libc starts and waits for children** (blocked on
    `issues/isolation/a-childs-stdio-handle-is-not-the-one-command-named.md`).
    libc imitates `SIGCHLD`. A C child starts with descriptors 0–2 and exactly
    what its file actions name, a stated departure from POSIX. `posix_spawn` and
@@ -117,7 +117,7 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    the pipe answering (passed to the kernel, which ends the caller). Negative
    control: today's libc, against which the corpus does not link. Oracle:
    POSIX's `posix_spawn`, `waitpid`, `poll` and `SA_RESTART`, and signal(7).
-4. **A parent takes its children down** (ruled). A spawn's parent is its
+4. **A parent takes its children down**. A spawn's parent is its
    spawner. A launch names its parent in its request, by one of two words: the
    caller, whose place is a copy of the handle to itself every process starts
    holding under the label `self` (`WRITE`, `DUP`, `TRANSFER`), carried as one
@@ -168,7 +168,7 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    place spawned under init (it starts); std's `NotDeclared` fallback, or its
    early return for an endowment or extra slot, kept for init (it starts).
    Oracle: cgroup v2's `cgroup.kill` and `cgroup.max.depth`.
-5. **A login is a session under init** (ruled). Per login init starts a session
+5. **A login is a session under init**. Per login init starts a session
    program that logout ends and that only parents what its user starts — the
    desktop's at boot, one per SSH connection at sshd's request. As it starts
    one, init hands the compositor or sshd a right to start programs in that
@@ -179,7 +179,7 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    a dropped SSH connection ends its session and all under it. Negative control:
    the stage reverted whole, where the compositor's programs die with it.
    Oracle: systemd-logind, whose session scope ends every process of a login.
-6. **A program is asked to quit** (ruled). `SYS_PROCESS_QUIT` (124, never
+6. **A program is asked to quit**. `SYS_PROCESS_QUIT` (124, never
    assigned), `(process, reason)`, needs `MANAGE` as the kill does, and the
    reason is interrupt, hang-up or terminate. A quit reaches the process's
    subtree by stage 4's walk. Each process is started holding its notice, a new
@@ -237,7 +237,7 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    watching only from a handler's install (the ignoring child is killed); a
    spawn carrying no ignore, no mask or no `SETSIGDEF` (each spawned child in
    turn). Oracle: POSIX's signal actions (XSH 2.4.3) and `posix_spawn`.
-7. **Job control** (ruled). The shell hands its terminal a `MANAGE`-only
+7. **Job control**. The shell hands its terminal a `MANAGE`-only
    duplicate of each process of the foreground line over its `surface` port. The
    terminal turns each Ctrl+C into their interrupt, and a second kills only a
    program that has not yet taken the first. Before it closes, the terminal asks
