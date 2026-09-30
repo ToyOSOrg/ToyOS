@@ -75,6 +75,22 @@ impl Error {
             other => Self::Unnamed(other),
         }
     }
+
+    /// The code PSCI answered with: [`Error::of`] undone.
+    pub fn code(self) -> i32 {
+        match self {
+            Self::NotSupported => -1,
+            Self::InvalidParameters => -2,
+            Self::Denied => -3,
+            Self::AlreadyOn => -4,
+            Self::OnPending => -5,
+            Self::InternalFailure => -6,
+            Self::NotPresent => -7,
+            Self::Disabled => -8,
+            Self::InvalidAddress => -9,
+            Self::Unnamed(code) => code,
+        }
+    }
 }
 
 impl Conduit {
@@ -136,14 +152,15 @@ impl Conduit {
     }
 
     /// Power the machine off. Neither this nor [`Conduit::system_reset`]
-    /// returns (DEN0022 §5.1.9, §5.1.11), except where firmware breaks that.
-    pub fn system_off(self) {
-        self.call(SYSTEM_OFF, 0, 0, 0);
+    /// returns (DEN0022 §5.1.9, §5.1.11), so an answer is firmware breaking
+    /// that.
+    pub fn system_off(self) -> Error {
+        Error::of(self.call(SYSTEM_OFF, 0, 0, 0))
     }
 
     /// Reset the machine cold.
-    pub fn system_reset(self) {
-        self.call(SYSTEM_RESET, 0, 0, 0);
+    pub fn system_reset(self) -> Error {
+        Error::of(self.call(SYSTEM_RESET, 0, 0, 0))
     }
 
     fn name(self) -> &'static str {
@@ -189,6 +206,10 @@ pub fn init(rsdp_addr: u64) {
     let (major, minor) = (version >> 16, version & 0xFFFF);
     if major == 0 && minor < 2 {
         log!("PSCI: {major}.{minor} through {}, which numbers no SMC64 CPU_ON; none used", conduit.name());
+        return;
+    }
+    if crate::actuator::psci_withheld() {
+        log!("PSCI: {major}.{minor} through {}, withheld: this kernel keeps no conduit", conduit.name());
         return;
     }
     log!("PSCI: {major}.{minor} through {}", conduit.name());

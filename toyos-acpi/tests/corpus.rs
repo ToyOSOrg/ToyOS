@@ -12,8 +12,8 @@ use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
     dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, memory_windows,
-    psci, reset_register, rtc_century, Century, MadtEntry, MadtHalt, Phys, Psci, Reset, Table,
-    TableError, MADT_ENTRIES, MAX_TABLE_LEN,
+    psci, reset_register, rtc_century, s5_slp_typ, Century, MadtEntry, MadtHalt, Phys, Psci, Reset,
+    Table, TableError, MADT_ENTRIES, MAX_TABLE_LEN, S5,
 };
 
 const RSDP_AT: u64 = 0x1_0000;
@@ -614,4 +614,69 @@ fn no_single_byte_mutation_of_a_firmwares_descriptor_list_panics_or_runs_away() 
     // decoded, would be measuring one path.
     assert_eq!(mutations, 2 * 186 * 255);
     assert!(refused > 0 && refused < mutations, "{refused} of {mutations} refused");
+}
+
+/// `dsdt` opened as the kernel opens one, and its `\_S5_` read.
+fn s5_of(dsdt: &[u8]) -> S5 {
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, dsdt)];
+    let dsdt = Table::open(Machine { regions }, TABLE_AT, b"DSDT", 36).expect("DSDT");
+    s5_slp_typ(&dsdt)
+}
+
+/// `Name (_S5_, Package (4) { first, ... })`: `NameOp`, the name,
+/// `PackageOp`, a one-byte `PkgLength`, `NumElements`, then `first` and three
+/// `ZeroOp`s.
+fn s5_package(first: &[u8]) -> Vec<u8> {
+    let mut aml = vec![0x08, b'_', b'S', b'5', b'_', 0x12, (2 + first.len() + 3) as u8, 0x04];
+    aml.extend_from_slice(first);
+    aml.extend_from_slice(&[0x00; 3]);
+    aml
+}
+
+/// `ZeroOp`, `OneOp` and a `BytePrefix` constant are each the value they
+/// encode, and `\_S4_`'s package before it is not `\_S5_`'s.
+#[test]
+fn s5s_first_element_is_read_whichever_constant_encodes_it() {
+    let s4 = [0x08, b'_', b'S', b'4', b'_', 0x12, 0x08, 0x04, 0x0A, 0x06, 0x0A, 0x06, 0x00, 0x00];
+    for (first, want) in [(&[0x00][..], 0), (&[0x01], 1), (&[0x0A, 0x07], 7)] {
+        let aml = [&s4[..], &s5_package(first)].concat();
+        assert_eq!(s5_of(&sdt(b"DSDT", 2, &aml)), S5::SlpTyp(want), "{first:x?}");
+    }
+}
+
+/// A `PkgLength` whose lead byte says one more follows: the element is past
+/// both, where reading it one byte early would answer `NumElements`, 4.
+#[test]
+fn a_two_byte_package_length_is_stepped_over() {
+    let aml = [0x08, b'_', b'S', b'5', b'_', 0x12, 0x48, 0x00, 0x04, 0x0A, 0x05, 0x00, 0x00, 0x00];
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &aml)), S5::SlpTyp(5));
+}
+
+/// Three bits hold `SLP_TYPx`: a wider constant, and an encoding this scan
+/// does not read as a byte (`WordPrefix`), are refused with the byte, never
+/// shifted into `SLP_EN`.
+#[test]
+fn an_s5_value_wider_than_slp_typ_is_refused_with_it() {
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &s5_package(&[0x0A, 0x08]))), S5::Wide(8));
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &s5_package(&[0x0B, 0x05, 0x00]))), S5::Wide(0x0B));
+}
+
+/// No `_S5_`, an `_S5_` that is not a package, and a package the table ends
+/// inside are all no soft-off.
+#[test]
+fn an_s5_package_that_is_not_there_to_its_first_element_is_absent() {
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &[0u8; 16])), S5::Absent);
+    let method = [0x14, 0x07, b'_', b'S', b'5', b'_', 0x00, 0xA3];
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &method)), S5::Absent);
+    let cut = &s5_package(&[0x0A, 0x05])[..9];
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, cut)), S5::Absent);
+}
+
+/// The scan stops at the declared length: a package in bytes past it, which
+/// the machine holds and the table does not, is not read.
+#[test]
+fn an_s5_package_past_the_declared_length_is_not_read() {
+    let mut dsdt = sdt(b"DSDT", 2, &s5_package(&[0x01]));
+    declare_len(&mut dsdt, 36);
+    assert_eq!(s5_of(&dsdt), S5::Absent);
 }

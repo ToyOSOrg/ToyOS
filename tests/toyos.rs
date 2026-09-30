@@ -523,6 +523,8 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("virt_failed_ap_leaves_no_hole", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_fatal_halts_the_others_first", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_reboot", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_off_names_the_cpus_left_on", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_reboot_refused_without_psci", Sched::Parallel, qemu::Profile::VirtEl2),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -3646,7 +3648,8 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
         }
     }
     eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
-    let (console, calls) = ended_through_psci(&mut qemu, &mut stop, serial, SHUTTING_DOWN, "guest-shutdown", &trace)?;
+    let (console, calls) =
+        ended_through_psci(&mut qemu, &mut stop, serial, SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
     let record = console
         .lines()
         .find_map(toyos_quiesce::Record::parse)
@@ -3654,7 +3657,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     if record.cpus != VIRT_CPUS {
         return Err(format!("the stop ran across {} CPUs, not {VIRT_CPUS}: {record}\n{console}", record.cpus));
     }
-    let last = psci_powered_off(&calls, VIRT_CPUS)?;
+    let last = psci_powered_off(&calls, VIRT_CPUS, &[])?;
     eprintln!("  [virt] {record}; every CPU but {last:#x} called CPU_OFF, then {last:#x} SYSTEM_OFF");
     Ok(())
 }
@@ -3669,8 +3672,9 @@ const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
 
 /// Wait for the boot's `last` word on a guest whose job list asked for its
 /// end, then for QEMU to stop for `reason` and exit; `console` is what it has
-/// said so far. Nothing may follow the last word. Answers the whole console
-/// and every PSCI call QEMU traced into `trace`, in order.
+/// said so far. What follows the last word is `said_after` of the calls, line
+/// for line, and nothing else. Answers the whole console and every PSCI call
+/// QEMU traced into `trace`, in order.
 fn ended_through_psci(
     qemu: &mut QemuInstance,
     stop: &mut qemu::QmpShutdown,
@@ -3678,6 +3682,7 @@ fn ended_through_psci(
     last: &str,
     reason: &str,
     trace: &Path,
+    said_after: impl FnOnce(&[(u64, u64)]) -> Vec<String>,
 ) -> Result<(String, Vec<(u64, u64)>), String> {
     await_marker(qemu, &mut console, last, "the boot's last word")?;
     let stopped = stop.reason();
@@ -3689,11 +3694,17 @@ fn ended_through_psci(
     let lines: Vec<&str> = console.lines().collect();
     let at = lines.iter().position(|l| l.contains(last)).expect("awaited above");
     let after: Vec<&str> = lines[at + 1..].iter().copied().filter(|l| !l.trim().is_empty()).collect();
-    if !after.is_empty() {
-        return Err(format!("{} line(s) after the boot's last word:\n  {}", after.len(), after.join("\n  ")));
-    }
     let traced = fs::read_to_string(trace).map_err(|e| format!("read the PSCI trace: {e}"))?;
-    Ok((console, psci_calls(&traced)?))
+    let calls = psci_calls(&traced)?;
+    let want = said_after(&calls);
+    if !after.iter().map(|l| l.trim_end()).eq(want.iter().map(String::as_str)) {
+        return Err(format!(
+            "{} line(s) after the boot's last word, not {want:?}:\n  {}",
+            after.len(),
+            after.join("\n  ")
+        ));
+    }
+    Ok((console, calls))
 }
 
 /// Every call QEMU's `arm_psci_call` trace `text` records, in order: the
@@ -3715,9 +3726,9 @@ fn psci_calls(text: &str) -> Result<Vec<(u64, u64)>, String> {
 
 /// A power-off by PSCI's own recipe (DEN0022 §5.10.3), read off QEMU's trace
 /// of a machine of `cpus` CPUs whose affinities are `0..cpus`: every CPU but
-/// one called `CPU_OFF`, each once, and then the one left called `SYSTEM_OFF`,
-/// once. Answers that CPU.
-fn psci_powered_off(calls: &[(u64, u64)], cpus: u32) -> Result<u64, String> {
+/// one and those `left_on` called `CPU_OFF`, each once, and then the one left
+/// called `SYSTEM_OFF`, once. Answers that CPU.
+fn psci_powered_off(calls: &[(u64, u64)], cpus: u32, left_on: &[u64]) -> Result<u64, String> {
     let offs: Vec<usize> = (0..calls.len()).filter(|&i| calls[i].0 == PSCI_SYSTEM_OFF).collect();
     let [at] = offs[..] else {
         return Err(format!("QEMU traced {} SYSTEM_OFF calls, not one: {calls:x?}", offs.len()));
@@ -3729,7 +3740,7 @@ fn psci_powered_off(calls: &[(u64, u64)], cpus: u32) -> Result<u64, String> {
     let mut turned_off: Vec<u64> =
         calls[..at].iter().filter(|&&(function, _)| function == PSCI_CPU_OFF).map(|&(_, cpu)| cpu).collect();
     turned_off.sort_unstable();
-    let others: Vec<u64> = (0..u64::from(cpus)).filter(|&cpu| cpu != last).collect();
+    let others: Vec<u64> = (0..u64::from(cpus)).filter(|&cpu| cpu != last && !left_on.contains(&cpu)).collect();
     if turned_off != others || calls[at..].iter().any(|&(function, _)| function == PSCI_CPU_OFF) {
         return Err(format!(
             "before {last:#x}'s SYSTEM_OFF, CPU_OFF came from {turned_off:x?}, not from each of {others:x?} \
@@ -3791,7 +3802,8 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
     );
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
     let console = qemu.boot_log().to_string();
-    let (console, calls) = ended_through_psci(&mut qemu, &mut stop, console, bootlog::REBOOTING, "guest-reset", &trace)?;
+    let (console, calls) =
+        ended_through_psci(&mut qemu, &mut stop, console, bootlog::REBOOTING, "guest-reset", &trace, |_| Vec::new())?;
     // The runner's own deadline also reboots, and is not the job asking.
     if console.contains(bootlog::JOB_DEADLINE_SAID) {
         return Err(format!("the reboot was the job list's deadline, not its job\n{console}"));
@@ -3805,6 +3817,76 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
         return Err(format!("QEMU traced {asked:x?} of CPU_OFF, SYSTEM_OFF and SYSTEM_RESET, not one SYSTEM_RESET"));
     }
     eprintln!("  [virt] Rebooting., then one SYSTEM_RESET, and QEMU stopped for guest-reset");
+    Ok(())
+}
+
+/// `power-off-spares-the-last-two`: cpu6 and cpu7 halt on the power-off's SGI
+/// without `CPU_OFF`, so `AFFINITY_INFO` answers each on to the end of the
+/// budget. Each of them but the one powering off is named after the last
+/// word, in roster order, and nothing else is; every other CPU is off before
+/// the one `SYSTEM_OFF`.
+fn virt_off_names_the_cpus_left_on(profile: qemu::Profile) -> Result<(), String> {
+    let trace = common::lane::dir().join("virt_off_left_on.psci");
+    let _ = fs::remove_file(&trace);
+    let mut qemu = boot_virt_smp(BootOptions {
+        profile,
+        smp: VIRT_CPUS,
+        qmp: true,
+        kernel_params: &["power-off-spares-the-last-two"],
+        psci_trace: Some(trace.clone()),
+        ..Default::default()
+    });
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    let serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let spared = |calls: &[(u64, u64)]| -> Vec<u64> {
+        let last = calls.iter().find(|&&(function, _)| function == PSCI_SYSTEM_OFF).map(|&(_, cpu)| cpu);
+        (u64::from(VIRT_CPUS) - 2..u64::from(VIRT_CPUS)).filter(|&cpu| Some(cpu) != last).collect()
+    };
+    let named = |calls: &[(u64, u64)]| -> Vec<String> {
+        spared(calls)
+            .iter()
+            .map(|cpu| format!("power: cpu{cpu} is not off by PSCI's answer inside the budget; SYSTEM_OFF regardless"))
+            .collect()
+    };
+    let (_, calls) = ended_through_psci(&mut qemu, &mut stop, serial, SHUTTING_DOWN, "guest-shutdown", &trace, named)?;
+    let left_on = spared(&calls);
+    let last = psci_powered_off(&calls, VIRT_CPUS, &left_on)?;
+    eprintln!("  [virt] {left_on:?} left on and named; the rest CPU_OFF, then {last:#x} SYSTEM_OFF");
+    Ok(())
+}
+
+/// What the kernel says refusing a reboot on a machine with no reset.
+const REBOOT_REFUSED: &str = "reboot: this machine has no reset this kernel performs — refused";
+
+/// `psci-withheld` leaves this kernel no PSCI and so no reset:
+/// `tests/virtrebootcase`'s job `reboot` is refused by name before anything is
+/// torn down, ends with exit 1, and the boot never says `Rebooting.`.
+fn virt_reboot_refused_without_psci(profile: qemu::Profile) -> Result<(), String> {
+    let config = compile::repo_root().join("tests/virtrebootcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            kernel_params: &["psci-withheld"],
+            ready_marker: "control registers: SCTLR_EL1=",
+            ..Default::default()
+        },
+    );
+    let mut rest = String::new();
+    await_marker(&mut qemu, &mut rest, "===TEST_END reboot ", "the job reboot to end")?;
+    let console = format!("{}\n{rest}", qemu.boot_log());
+    for said in [REBOOT_REFUSED, "===TEST_END reboot exit=1==="] {
+        if !console.contains(said) {
+            return Err(format!("{said:?} not on the PL011\n{console}"));
+        }
+    }
+    if console.contains(bootlog::REBOOTING) {
+        return Err(format!("a machine with no reset began one\n{console}"));
+    }
+    eprintln!("  [virt] {REBOOT_REFUSED}, and the job ended exit 1");
     Ok(())
 }
 
@@ -5388,6 +5470,8 @@ fn run_screen_test(
         "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
         "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
         "virt_reboot" => virt_reboot(profile),
+        "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
+        "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:
             // crash_report, capture, panic_flush, halt_all_cpus, render. The
@@ -10085,8 +10169,25 @@ fn run_machine_test(
         "pkg_install_gbae" => pkg::pkg_install_gbae(test_config, c_bins, rust_bins),
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
-        "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
-        "machine_shutdown" => power::machine_shutdown(test_config, c_bins, rust_bins),
+        "machine_reboot" => power::machine_stops(
+            test_config,
+            c_bins,
+            rust_bins,
+            "reboot",
+            "ACPI: reset register SystemIO 0xcf9 <- 0x0f",
+            bootlog::REBOOTING,
+            "guest-reset",
+        ),
+        // q35's ICH9 power-management block, and its `\_S5_`.
+        "machine_shutdown" => power::machine_stops(
+            test_config,
+            c_bins,
+            rust_bins,
+            "shutdown",
+            "ACPI: PM1a=0x604 SLP_TYPa=0",
+            SHUTTING_DOWN,
+            "guest-shutdown",
+        ),
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
         "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),

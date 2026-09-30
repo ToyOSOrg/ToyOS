@@ -169,6 +169,19 @@ actuators! {
     /// `log_after_a_refused_stop`.
     power_refused_once = "power-refused-once";
 
+    /// The roster's last two CPUs take the power-off's SGI and halt without
+    /// `CPU_OFF`, so PSCI answers them on for the whole budget. Judged by
+    /// `virt_off_names_the_cpus_left_on`.
+    // PSCI is AArch64's alone, so x86-64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    power_off_spares_the_last_two = "power-off-spares-the-last-two";
+
+    /// `psci::init` keeps no conduit, so this kernel has no reset: a machine
+    /// without PSCI. Judged by `virt_reboot_refused_without_psci`.
+    // PSCI is AArch64's alone, so x86-64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    psci_withheld = "psci-withheld";
+
     /// Hold a typed copy into user memory whose destination carries
     /// `user_ptr::remap_race`'s mark between its translation and its store,
     /// until its own process has mapped memory again: a sibling's `munmap`

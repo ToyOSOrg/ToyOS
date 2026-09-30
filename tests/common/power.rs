@@ -40,70 +40,47 @@ fn returned_to_firmware(reason: Option<String>, never: &str, tail: &str) -> Resu
     }
 }
 
-/// The machine returns to firmware when a process holding `POWER` asks it to.
-pub fn machine_reboot(
+/// The machine ends when a process holding `POWER` types `command`: the boot
+/// said `decoded`, the drain says `last`, and QEMU stops for `reason`.
+///
+/// `decoded` carries a value this kernel read out of the firmware's tables,
+/// so a decode it got wrong fails here and one it bypassed cannot pass: a
+/// kernel writing 0xcf9 without reading the FADT satisfies the stop reason
+/// alone.
+pub fn machine_stops(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
+    command: &str,
+    decoded: &str,
+    last: &str,
+    reason: &str,
 ) -> Result<(), String> {
     let options = BootOptions { qmp: true, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
 
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    // A decode this kernel got wrong, never one it bypassed: a kernel writing
-    // 0xcf9 without reading the FADT satisfies this and the stop reason both.
-    boot.must_say("ACPI: reset register SystemIO 0xcf9 <- 0x0f")?;
+    boot.must_say(decoded)?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
 
-    writeln!(qemu.stdin_mut(), "run reboot").expect("write to QEMU stdin");
+    writeln!(qemu.stdin_mut(), "run {command}").expect("write to QEMU stdin");
     qemu.flush_stdin();
-    let reason = stop.reason();
-    // Ends when QEMU exits and the reader disconnects, so a guest that came back to firmware pays none of this.
+    let stopped = stop.reason();
+    // Ends when QEMU exits and the reader disconnects, so a guest that stopped pays none of this.
     let tail = qemu.drain_serial(WAIT);
 
-    let drain = serial::Serial::named("reboot drain", tail.as_str());
+    let drain = serial::Serial::named(&format!("{command} drain"), tail.as_str());
     drain.must_be_clean()?;
-    drain.must_say(REBOOTING)?;
-    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
-
-    eprintln!("  [power] QEMU stopped the guest for guest-reset");
-    Ok(())
-}
-
-/// The machine powers off when a process holding `POWER` asks it to: ACPI S5
-/// through the PM1a control block the FADT names, with the DSDT's `\_S5_`.
-pub fn machine_shutdown(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let options = BootOptions { qmp: true, ..Default::default() };
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-
-    let boot = serial::Serial::boot(&qemu);
-    boot.must_be_clean()?;
-    // q35's ICH9 power-management block, and its `\_S5_`.
-    boot.must_say("ACPI: PM1a=0x604 SLP_TYPa=0")?;
-
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
-
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    let reason = stop.reason();
-    let tail = qemu.drain_serial(WAIT);
-
-    let drain = serial::Serial::named("shutdown drain", tail.as_str());
-    drain.must_be_clean()?;
-    drain.must_say("Shutting down.")?;
-    match reason.as_deref() {
-        Some("guest-shutdown") => {}
-        Some(seen) => return Err(format!("QEMU stopped this guest for {seen:?}, not a power-off\n{tail}")),
-        None => return Err(format!("QEMU never reported stopping: the guest asked to power off and stayed up\n{tail}")),
+    drain.must_say(last)?;
+    match stopped.as_deref() {
+        Some(seen) if seen == reason => {}
+        Some(seen) => return Err(format!("QEMU stopped this guest for {seen:?}, not {reason:?}\n{tail}")),
+        None => return Err(format!("QEMU never reported stopping: the guest asked to {command} and stayed up\n{tail}")),
     }
 
-    eprintln!("  [power] QEMU stopped the guest for guest-shutdown");
+    eprintln!("  [power] {command}: QEMU stopped the guest for {reason}");
     Ok(())
 }
 
@@ -897,12 +874,6 @@ fn died_and_reset(
 /// A panic inside `percpu::init_bsp`, one statement after it loads the IDT,
 /// finds a reset register already decoded.
 ///
-/// That is the window the owner's T14 stops in and the earliest point a panic is
-/// reportable at all. The FADT's reset register used to be decoded at
-/// `acpi::init_power`, hundreds of statements later, so a panic here said it had
-/// "decoded no reset register to hand the machine back to firmware with" and
-/// held the panel for a hand.
-///
 /// **The reset itself is not asserted here, and cannot be on this guest**: the
 /// bound is carried in TSC cycles, and before `clock::init` those come from
 /// CPUID leaves 15H/16H, which QEMU's model answers with zeros. So this guest
@@ -924,14 +895,13 @@ pub fn panic_before_peripherals_reboots(
     let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
     let boot = serial::Serial::boot(&qemu);
 
-    // Ordering is the whole assertion: this line is what `init_power` used to
-    // print long after the panic below.
+    // Ordering is the whole assertion.
     let decoded = boot.must_say("ACPI: reset register SystemIO")?.to_string();
     boot.must_say("EARLY PANIC: panicked at")?;
     let held = boot.must_say(PANIC_HELD_HEAD)?.to_string();
-    // The one thing this branch removed. A guest reaching the other held branch
-    // for the other reason must not be read as this one passing.
-    boot.must_not_say("decoded no reset register")?;
+    // A guest reaching the other held branch for the other reason must not be
+    // read as this one passing.
+    boot.must_not_say(NO_RESET_HELD)?;
     if !held.contains("states no counter frequency") {
         return Err(format!(
             "the panel held for a reason this guest was not expected to reach\n{held}"
@@ -947,6 +917,9 @@ pub fn panic_before_peripherals_reboots(
 ///
 /// [`panic_reboot::arm`]: kernel/src/panic_reboot.rs
 const PANIC_HELD_HEAD: &str = "panic: holding this panel";
+
+/// The held line's reason on a machine with no reset.
+const NO_RESET_HELD: &str = "this kernel has no reset to hand the machine back to firmware with";
 
 /// The ceiling on the reset past the bound: the flush the reset path makes
 /// before it writes the register, and the host seeing QEMU's event. Scaled by

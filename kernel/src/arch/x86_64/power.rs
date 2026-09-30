@@ -8,7 +8,7 @@
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 
-use toyos_acpi::{Reset, Table, TableError, SDT_HEADER_LEN, SDT_REVISION};
+use toyos_acpi::{Reset, Table, TableError, S5, SDT_HEADER_LEN, SDT_REVISION};
 
 use super::cpu;
 use crate::drivers::acpi::direct_phys;
@@ -17,25 +17,19 @@ use crate::log;
 const SLP_EN: u16 = 1 << 13;
 
 static PM1A_CNT_PORT: AtomicU16 = AtomicU16::new(0);
-static SLP_TYPA: AtomicU16 = AtomicU16::new(0);
+static SLP_TYPA: AtomicU8 = AtomicU8::new(0);
 
 static RESET_PORT: AtomicU16 = AtomicU16::new(0);
 static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
 
-/// Record the FADT's reset register and its S5 soft-off, or say by name why
-/// this machine has either not.
+/// Record the FADT's reset register, or say by name why this machine has none.
 ///
 /// Before `percpu::init_bsp` loads the IDT: from then on every panic can be
 /// reported, and a panic that can be reported but not ended is a machine that
 /// still needs a hand. Walking these tables inside the panic handler instead is
 /// refused — a table walk on a machine that has already failed once is how a
 /// panic becomes a triple fault.
-pub fn init(rsdp_addr: u64) {
-    init_reset(rsdp_addr);
-    init_off(rsdp_addr);
-}
-
-fn init_reset(rsdp_addr: u64) {
+pub fn init_reset(rsdp_addr: u64) {
     let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_RESET) {
         Ok(table) => table,
         Err(e) => {
@@ -53,8 +47,9 @@ fn init_reset(rsdp_addr: u64) {
     }
 }
 
-// A machine without these tables keeps booting without soft-off rather than panicking.
-fn init_off(rsdp_addr: u64) {
+/// Record S5 soft-off, or say by name why this machine has none; it keeps
+/// booting either way. After the IDT, so a fault in the DSDT walk is reported.
+pub fn init_off(rsdp_addr: u64) {
     const FADT_FOR_POWER: usize = toyos_acpi::FADT_PM1A_CNT_BLK + size_of::<u32>();
     const FADT_FOR_X_DSDT: usize = toyos_acpi::FADT_X_DSDT + size_of::<u64>();
 
@@ -66,11 +61,14 @@ fn init_off(rsdp_addr: u64) {
         }
     };
 
-    let Some(pm1a) = fadt.u32_at(toyos_acpi::FADT_PM1A_CNT_BLK) else {
+    let Some(block) = fadt.u32_at(toyos_acpi::FADT_PM1A_CNT_BLK).filter(|&block| block != 0) else {
         log!("ACPI: FADT has no PM1a control block — no soft-off");
         return;
     };
-    let pm1a = pm1a as u16;
+    let Ok(pm1a) = u16::try_from(block) else {
+        log!("ACPI: FADT puts the PM1a control block at {block:#x}, past the 16-bit port space — no soft-off");
+        return;
+    };
 
     // Prefer X_DSDT over DSDT; a revision claiming 2.0 doesn't prove the field is present, so the length is checked rather than trusting the revision alone.
     let dsdt_addr = toyos_acpi::dsdt_address(&fadt);
@@ -94,9 +92,16 @@ fn init_off(rsdp_addr: u64) {
         }
     };
 
-    let Some(slp_typ) = find_s5_slp_typ(&dsdt) else {
-        log!("ACPI: no \\_S5_ package in the DSDT — no soft-off");
-        return;
+    let slp_typ = match toyos_acpi::s5_slp_typ(&dsdt) {
+        S5::SlpTyp(slp_typ) => slp_typ,
+        S5::Absent => {
+            log!("ACPI: no \\_S5_ package in the DSDT — no soft-off");
+            return;
+        }
+        S5::Wide(byte) => {
+            log!("ACPI: the DSDT's \\_S5_ names SLP_TYPa {byte:#x}, wider than its three bits — no soft-off");
+            return;
+        }
     };
 
     PM1A_CNT_PORT.store(pm1a, Ordering::Relaxed);
@@ -124,42 +129,9 @@ pub fn reset() -> ! {
 pub fn off() -> ! {
     let pm1a = PM1A_CNT_PORT.load(Ordering::Relaxed);
     if pm1a != 0 {
-        let val = (SLP_TYPA.load(Ordering::Relaxed) << 10) | SLP_EN;
+        let val = (u16::from(SLP_TYPA.load(Ordering::Relaxed)) << 10) | SLP_EN;
         // SAFETY: pm1a and slp_typ come only from the validated FADT parse via PM1A_CNT_PORT/SLP_TYPA, and the zero check above confirms that parse happened.
         unsafe { cpu::outw(pm1a, val) };
     }
     cpu::halt()
-}
-
-/// Scan DSDT AML bytecode for the \_S5_ package and extract SLP_TYPa.
-// Bounded by the table's declared length via [`Table::byte`].
-fn find_s5_slp_typ<P: toyos_acpi::Phys>(dsdt: &Table<P>) -> Option<u16> {
-    let s5 = b"_S5_";
-    let len = dsdt.len();
-
-    for i in SDT_HEADER_LEN..len.saturating_sub(7) {
-        if (0..4).any(|j| dsdt.byte(i + j) != Some(s5[j])) {
-            continue;
-        }
-        if dsdt.byte(i + 4) != Some(0x12) {
-            continue;
-        }
-
-        let pkg_lead = dsdt.byte(i + 5)?;
-        let pkg_len_bytes = match (pkg_lead >> 6) & 0x03 {
-            0 => 1usize,
-            n => (n + 1) as usize,
-        };
-
-        // Skip: "_S5_"(4) + PackageOp(1) + PkgLength + NumElements(1)
-        let val_off = i + 4 + 1 + pkg_len_bytes + 1;
-        let byte = dsdt.byte(val_off)?;
-        return Some(if byte == 0x0A {
-            dsdt.byte(val_off + 1)? as u16
-        } else {
-            byte as u16
-        });
-    }
-
-    None
 }

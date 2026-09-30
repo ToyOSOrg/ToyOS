@@ -316,8 +316,6 @@ pub struct Platform {
 
 /// Interrupt delivery: this CPU's per-CPU block, the GIC and the timer's
 /// interrupt, and interrupts unmasked. The syscall gate is the vectors' own.
-/// Then PSCI, which starts the other CPUs and resets and powers off the
-/// machine.
 pub fn interrupts(rsdp_addr: u64) -> Platform {
     super::percpu::init_bsp();
     let gic = super::irqchip::init(rsdp_addr);

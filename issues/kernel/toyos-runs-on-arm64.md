@@ -95,7 +95,6 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
 
 - **Port I/O** (`cpu::inb/outb/inw/outw`): `rtc.rs:203-204`,
   `drivers/serial.rs` (16 sites), `drivers/i8042/mod.rs` (12 sites),
-  `drivers/acpi.rs:325,345` (reset and PM1a soft-off),
   `drivers/watchdog.rs:84-158`, `bootloader/src/watchdog.rs:195,204`.
 - **APIC / IOAPIC / MSI.** `hw.rs:1-5`: "Everything here is x2APIC, TSC or a
   single instruction." The MSI doorbell `0xFEE0_0000` is hardcoded three

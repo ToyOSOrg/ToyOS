@@ -1379,6 +1379,9 @@ pub fn init(rsdp_addr: u64) {
     }
 }
 
+/// Whether the panic path reads a key here: [`poll_byte`] is its poll.
+pub const PANIC_KEYS: bool = true;
+
 /// One byte from the controller if it has one; never waits. Only legal once
 /// every CPU is halted — port 0x60's sole reader is otherwise the ISR.
 pub fn poll_byte() -> Option<(u8, bool)> {

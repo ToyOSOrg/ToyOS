@@ -14,6 +14,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod dsdt;
 mod fadt;
 mod gtdt;
 mod madt;
@@ -22,6 +23,7 @@ mod spcr;
 
 use toyos_bootmap::DirectMapEnd;
 
+pub use dsdt::{s5_slp_typ, S5};
 pub use fadt::{
     century_of, dsdt_address, iapc_boot_arch, psci, reset_register, rtc_century, Century, Psci,
     Reset, CMOS_RAM, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,

@@ -951,7 +951,8 @@ mod checks {
 
     /// `arm_psci_call` as QEMU 11.1.1's `trace-events` formats it, with and
     /// without the log backend's `pid@time:` head, and every way a power-off's
-    /// trace falls short of PSCI's recipe refused.
+    /// trace falls short of PSCI's recipe refused, a CPU left on calling
+    /// `CPU_OFF` among them.
     #[test]
     fn psci_power_off_judge() {
         let line = |head: &str, function: u64, cpu: u64| {
@@ -963,7 +964,8 @@ mod checks {
 
         let (off, system_off) = (PSCI_CPU_OFF, PSCI_SYSTEM_OFF);
         let affinity_info = 0xC400_0004;
-        assert_eq!(psci_powered_off(&[(off, 1), (affinity_info, 3), (off, 2), (off, 0), (system_off, 3)], 4), Ok(3));
+        assert_eq!(psci_powered_off(&[(off, 1), (affinity_info, 3), (off, 2), (off, 0), (system_off, 3)], 4, &[]), Ok(3));
+        assert_eq!(psci_powered_off(&[(off, 1), (off, 0), (system_off, 3)], 4, &[2]), Ok(3));
         for short in [
             vec![(off, 1), (off, 0), (system_off, 3)],
             vec![(off, 1), (off, 0), (system_off, 3), (off, 2)],
@@ -973,7 +975,8 @@ mod checks {
             vec![(off, 1), (off, 2), (off, 0), (PSCI_SYSTEM_RESET, 3), (system_off, 3)],
             vec![(off, 1), (off, 2), (off, 3), (system_off, 3)],
         ] {
-            assert!(psci_powered_off(&short, 4).is_err(), "{short:x?}");
+            assert!(psci_powered_off(&short, 4, &[]).is_err(), "{short:x?}");
         }
+        assert!(psci_powered_off(&[(off, 1), (off, 2), (off, 0), (system_off, 3)], 4, &[2]).is_err());
     }
 }
