@@ -123,7 +123,7 @@ pub fn parse_shard(args: &[String]) -> Result<Option<Shard>, String> {
     Ok(Some(Shard { index, count }))
 }
 
-/// Refuse a shard that owns nothing after the ordinary suite's filter, tier,
+/// Refuse a shard that owns nothing after the ordinary suite's filter
 /// and task grouping have all been applied.
 ///
 /// A valid shard number is not enough to establish that the selected suite has
@@ -139,7 +139,7 @@ pub fn validate_ordinary_shard(
         return Ok(());
     }
     Err(format!(
-        "--shard {}/{} with filter {filter:?} owns no ordinary-tier tests after selection; \
+        "--shard {}/{} with filter {filter:?} owns no ordinary tests after selection; \
          refusing a false-green shard run",
         shard.index, shard.count,
     ))
@@ -152,8 +152,6 @@ declare_flags!(pub SUITE = {
     pub JOBS = "--jobs", Next;
     pub JOBS_SHORT = "-j", Next;
     pub SHARD = "--shard", Next;
-    pub NIGHTLY = "--nightly", None;
-    pub WEEKLY = "--weekly", None;
     /// The metal profile: the registrations that run on the T14, batched into
     /// images and judged off the log the stick came back with.
     pub METAL = "--metal", None;
@@ -257,21 +255,6 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
             );
         }
     }
-    if has(&NIGHTLY) && has(&WEEKLY) {
-        return Err(
-            "--weekly runs the nightly tier too, so a --nightly beside it would be read by \
-             nothing; write one"
-                .to_string(),
-        );
-    }
-    for reach in [&NIGHTLY, &WEEKLY] {
-        if has(reach) && has(&METAL) {
-            return Err(format!(
-                "{} and {} are separate tiers and cannot be combined; run one tier at a time",
-                reach.name, METAL.name
-            ));
-        }
-    }
     if has(&HOLD) && (flags != 1 || filter.is_some()) {
         return Err(
             "--hold boots the image it names and holds it, and reads nothing else on the line; \
@@ -336,24 +319,6 @@ mod tests {
     fn a_flags_value_is_not_the_filter() {
         assert_eq!(parse_owned(&["--jobs", "4"]).unwrap(), None);
         assert_eq!(parse_owned(&["-j", "4"]).unwrap(), None);
-    }
-
-    #[test]
-    fn a_reach_and_the_metal_tier_are_refused_by_the_argv_validator() {
-        for (argv, reach) in
-            [(vec!["--metal", "--nightly"], "--nightly"), (vec!["--weekly", "--metal"], "--weekly")]
-        {
-            let refusal = parse_owned(&argv).unwrap_err();
-            assert!(refusal.contains(reach) && refusal.contains("--metal"), "{argv:?}: {refusal}");
-            assert!(refusal.contains("cannot be combined"), "{argv:?}: {refusal}");
-        }
-    }
-
-    #[test]
-    fn the_weekly_reach_refuses_a_nightly_it_already_runs() {
-        let refusal = parse_owned(&["--nightly", "--weekly"])
-            .expect_err("a --nightly beside --weekly was accepted and read by nothing");
-        assert!(refusal.contains("read by nothing"), "{refusal}");
     }
 
     #[test]
@@ -537,7 +502,7 @@ mod tests {
     /// and say nothing about the one it dropped.
     #[test]
     fn a_flag_written_twice_is_refused_by_name() {
-        for argv in [vec!["--jobs", "1", "--jobs", "4"], vec!["--nightly", "--nightly"]] {
+        for argv in [vec!["--jobs", "1", "--jobs", "4"], vec!["--list", "--list"]] {
             let refusal = parse_owned(&argv).unwrap_err();
             assert!(refusal.contains(argv[0]), "{argv:?}: {refusal}");
             assert!(refusal.contains("twice"), "{argv:?}: {refusal}");
@@ -563,9 +528,7 @@ mod tests {
             vec!["--list"],
             vec!["--jobs", "4"],
             vec!["--shard", "2/4"],
-            vec!["--nightly"],
-            vec!["--weekly"],
-            vec!["--weekly", "--shard", "2/12", "--jobs", "1"],
+            vec!["--shard", "2/12", "--jobs", "1"],
             vec!["--debug"],
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
@@ -603,7 +566,7 @@ mod tests {
 
     #[test]
     fn metal_refuses_a_filter_that_is_a_flags_name_or_empty() {
-        for word in ["list", "metal", "jobs", "shard", "debug", "nightly", "metal-readback"] {
+        for word in ["list", "metal", "jobs", "shard", "debug", "metal-readback"] {
             let refusal = metal_owned(&["--metal", word]).expect_err(word);
             assert!(refusal.contains("without its dashes"), "{word}: {refusal}");
         }
@@ -658,7 +621,7 @@ mod tests {
     fn hold_is_alone_on_its_line() {
         for argv in [
             &["--hold", "boot.img", "boot"][..],
-            &["--hold", "boot.img", "--nightly"],
+            &["--hold", "boot.img", "--list"],
             &["-j", "2", "--hold", "boot.img"],
             &["--hold"],
         ] {

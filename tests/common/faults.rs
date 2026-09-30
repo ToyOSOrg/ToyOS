@@ -907,13 +907,6 @@ fn kvm_accelerated() -> bool {
 /// The two negative controls on [`syscall_window_nmi`], which is where the
 /// property is asserted and this is where it is shown not to be vacuous.
 ///
-/// **Nightly.** Two Metal boots, and both end in a halted machine that has to be
-/// drained past its own report — which is what the price is. A control is a
-/// claim about the
-/// instrument rather than about the kernel under review: it says the same test,
-/// run against a kernel with the defect, reds. That does not change per pull
-/// request, and the fixed arm reds per pull request if the kernel does.
-///
 /// `#MC` has no control here and cannot have one: CR4.MCE is set and nothing in
 /// QEMU raises a machine check. Its IST index rides the same table column NMI's
 /// does, plus `arch::idt`'s compile-time assertion over that table.
