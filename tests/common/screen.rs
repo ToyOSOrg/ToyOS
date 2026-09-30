@@ -173,56 +173,53 @@ impl Ppm {
         None
     }
 
-    /// How many rows of a firmware console's text the panel's first
-    /// [`EDGE_CELLS`] cells carry, counted without decoding a glyph: no firmware
-    /// font is committed here, so a row one drew is invisible to [`Ppm::text`].
-    /// [`edge_rows`] is the count a console's lines put there.
-    ///
-    /// A band taller than the pitch is two rows that touch, and not one row of
-    /// text; the pitch is the median distance between band tops, because a
-    /// stray scanline sets a minimum of one and drags a mean as well. A panel
-    /// with fewer than two bands has no pitch to take, and is refused rather
-    /// than counted as none.
-    pub fn text_row_bands(&self) -> Result<usize, String> {
-        let edge = EDGE_CELLS * EFI_GLYPH_WIDTH;
-        if self.width < edge {
-            return Err(format!("the panel is {} pixels wide, narrower than its {edge}-pixel edge", self.width));
+    /// The firmware text mode this panel's text was drawn in, found without
+    /// decoding a glyph: no firmware font is committed here, so a row one drew
+    /// is invisible to [`Ppm::text`]. Of the modes [`TextMode::offered`], it is
+    /// the one whose first column of cells holds the panel's leftmost lit
+    /// pixel, where every row of its text starts, and whose rows hold all that
+    /// is lit in its first [`EDGE_CELLS`] cells.
+    pub fn firmware_text_mode(&self) -> Result<TextMode, String> {
+        let leftmost = (0..self.width)
+            .find(|&x| (0..self.height).any(|y| self.bit(x, y)))
+            .ok_or("the panel has no lit pixel, so no text mode drew on it")?;
+        let fits: Vec<TextMode> = TextMode::offered(self.width, self.height)
+            .into_iter()
+            .filter(|mode| (mode.left..mode.left + EFI_GLYPH_WIDTH).contains(&leftmost))
+            .filter(|mode| {
+                let area = mode.top..mode.top + mode.rows * EFI_GLYPH_HEIGHT;
+                (0..self.height).all(|y| area.contains(&y) || !self.edge_lit(*mode, y))
+            })
+            .collect();
+        match fits[..] {
+            [mode] => Ok(mode),
+            _ => Err(format!(
+                "the panel's text starts at x={leftmost}, and {} of the text modes edk2 offers on \
+                 a {}x{} panel, not one, start there and hold it: {fits:?}",
+                fits.len(),
+                self.width,
+                self.height
+            )),
         }
-        let mut bands: Vec<(usize, usize)> = Vec::new();
-        let mut top = None;
-        for y in 0..self.height {
-            let lit = (0..edge)
-                .any(|x| self.pixels[y * self.width + x].iter().any(|c| *c >= FG_THRESHOLD));
-            match (lit, top) {
-                (true, None) => top = Some(y),
-                (false, Some(from)) => {
-                    bands.push((from, y));
-                    top = None;
-                }
-                _ => {}
-            }
-        }
-        if let Some(from) = top {
-            bands.push((from, self.height));
-        }
-        let mut gaps: Vec<usize> = bands.windows(2).map(|pair| pair[1].0 - pair[0].0).collect();
-        if gaps.is_empty() {
-            return Err(format!(
-                "the panel carries {} band(s) of lit scanlines, too few to take a row pitch from",
-                bands.len()
-            ));
-        }
-        gaps.sort_unstable();
-        let pitch = gaps[gaps.len() / 2];
-        let rows = bands.iter().filter(|(from, to)| to - from <= pitch).count();
-        if rows == 0 {
-            return Err(format!(
-                "every one of the panel's {} band(s) is taller than the {pitch}-pixel pitch, so \
-                 none of them is a row of text",
-                bands.len()
-            ));
-        }
-        Ok(rows)
+    }
+
+    /// Each of `mode`'s rows, `true` where a pixel of its first [`EDGE_CELLS`]
+    /// cells is lit. A firmware console blits a glyph's whole cell and nothing
+    /// outside it, and edk2 centres its boot logo as it centres `mode`, so a
+    /// logo narrower than 512 pixels never reaches these cells of a mode 80 or
+    /// more columns wide.
+    pub fn edge_rows(&self, mode: TextMode) -> Vec<bool> {
+        (0..mode.rows)
+            .map(|row| {
+                let top = mode.top + row * EFI_GLYPH_HEIGHT;
+                (top..top + EFI_GLYPH_HEIGHT).any(|y| self.edge_lit(mode, y))
+            })
+            .collect()
+    }
+
+    /// Whether scanline `y` is lit in `mode`'s first [`EDGE_CELLS`] cells.
+    fn edge_lit(&self, mode: TextMode, y: usize) -> bool {
+        (mode.left..mode.left + EDGE_CELLS * EFI_GLYPH_WIDTH).any(|x| self.bit(x, y))
     }
 
     /// The fill colour, read from the bottom-right pixel. The renderer paints
@@ -243,30 +240,81 @@ impl Ppm {
     }
 }
 
-/// A firmware console's glyph cell is this wide: UEFI's `EFI_GLYPH_WIDTH`.
+/// A firmware console's glyph cell: UEFI's `EFI_GLYPH_WIDTH` by `EFI_GLYPH_HEIGHT`.
 pub const EFI_GLYPH_WIDTH: usize = 8;
+pub const EFI_GLYPH_HEIGHT: usize = 19;
 
-/// The cells at the panel's left edge that [`Ppm::text_row_bands`] reads.
-/// Firmware starts every console row there and centres its boot logo (edk2's
-/// `BootLogoEnableLogo`) behind the text, so across the whole width a short row
-/// over the logo joins it into one band too tall to count, and a long row cuts
-/// it into pieces short enough to count.
+/// The cells at the start of a firmware console's row that [`Ppm::edge_rows`]
+/// reads: every row of its text starts there, and its boot logo never reaches them.
 pub const EDGE_CELLS: usize = 8;
 
-/// The rows [`Ppm::text_row_bands`] counts where a firmware console printed
-/// `lines` from its top-left cell at `columns` a row: a line takes a row per
-/// `columns` characters it fills, and a row is counted when one of its first
-/// [`EDGE_CELLS`] characters draws.
-pub fn edge_rows<'a>(lines: impl IntoIterator<Item = &'a str>, columns: usize) -> usize {
-    lines
-        .into_iter()
-        .map(|line| {
-            let line: Vec<char> = line.chars().collect();
-            line.chunks(columns)
-                .filter(|row| row.iter().take(EDGE_CELLS).any(|c| !c.is_whitespace()))
-                .count()
-        })
-        .sum()
+/// A text mode of edk2's graphics console: `columns` by `rows` cells centred on
+/// the panel, the first of them `left` pixels in and `top` down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextMode {
+    pub columns: usize,
+    pub rows: usize,
+    pub left: usize,
+    pub top: usize,
+}
+
+impl TextMode {
+    /// The text modes edk2's graphics console offers on a `width` x `height`
+    /// panel, each once and each centred (`InitializeGraphicsConsoleTextMode`):
+    /// UEFI's 80x25 and 80x50, then `mGraphicsConsoleModeData`'s, the last of
+    /// them the whole panel, of all these the ones that fit it.
+    pub fn offered(width: usize, height: usize) -> Vec<TextMode> {
+        let whole = (width / EFI_GLYPH_WIDTH, height / EFI_GLYPH_HEIGHT);
+        let mut modes: Vec<TextMode> = Vec::new();
+        for (columns, rows) in [(80, 25), (80, 50), (100, 31), (128, 40), (160, 42), (240, 56), whole] {
+            let (w, h) = (columns * EFI_GLYPH_WIDTH, rows * EFI_GLYPH_HEIGHT);
+            if w > width || h > height {
+                continue;
+            }
+            let mode = TextMode { columns, rows, left: (width - w) >> 1, top: (height - h) >> 1 };
+            if !modes.contains(&mode) {
+                modes.push(mode);
+            }
+        }
+        modes
+    }
+
+    /// The rows `lines` take in this mode, each `true` where one of its first
+    /// [`EDGE_CELLS`] characters draws. A line wraps every `columns`
+    /// characters, and one that fills its last row wraps before its own line
+    /// feed moves the cursor again, which leaves a blank row
+    /// (`GraphicsConsoleConOutOutputString`).
+    pub fn printed<'a>(self, lines: impl IntoIterator<Item = &'a str>) -> Vec<bool> {
+        let mut rows = Vec::new();
+        for line in lines {
+            let chars: Vec<char> = line.chars().collect();
+            rows.extend(
+                chars.chunks(self.columns).map(|row| row.iter().take(EDGE_CELLS).any(|c| !c.is_whitespace())),
+            );
+            if chars.len() % self.columns == 0 {
+                rows.push(false);
+            }
+        }
+        rows
+    }
+
+    /// Each of this mode's rows as [`TextMode::printed`] marks it, once `lines`
+    /// are printed onto a cleared panel: a line feed on the last row scrolls
+    /// the text up a row and blanks the last.
+    pub fn panel<'a>(self, lines: impl IntoIterator<Item = &'a str>) -> Vec<bool> {
+        let mut panel = vec![false; self.rows];
+        let mut cursor = 0;
+        for row in self.printed(lines) {
+            panel[cursor] = row;
+            if cursor + 1 == self.rows {
+                panel.remove(0);
+                panel.push(false);
+            } else {
+                cursor += 1;
+            }
+        }
+        panel
+    }
 }
 
 /// Cells of the console's font, in the alpha values it blits.

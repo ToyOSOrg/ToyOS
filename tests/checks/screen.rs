@@ -98,74 +98,97 @@ fn console_self_test() {
     );
 }
 
-/// [`Ppm::text_row_bands`] against a panel drawn the way edk2's graphics
-/// console draws one: 8x19 cells from the top-left corner, every cell a line
-/// reaches blitted whole, over a logo centred behind the text. A short row
-/// over the logo's top is cut free of it by the long row below, and two short
-/// rows over the rest join it into one band, so a count across the whole width
-/// is two rows short where one at the edge is exact.
+/// [`Ppm::firmware_text_mode`], [`Ppm::edge_rows`] and [`TextMode::panel`]
+/// against the T14's 1920x1080 panel drawn the way edk2's graphics console
+/// draws it, in the two text modes firmware has chosen there: 80x50, whose
+/// text starts 640 pixels in and which these lines scroll, and 240x56, whose
+/// text starts at the edge and which they do not.
 pub fn edge_self_test() -> Result<(), String> {
-    const COLUMNS: usize = 80;
-    const ROWS: usize = 20;
-    const EFI_GLYPH_HEIGHT: usize = 19;
-    let (width, height) = (COLUMNS * EFI_GLYPH_WIDTH, ROWS * EFI_GLYPH_HEIGHT);
-    let (logo_w, logo_h) = (160, 58);
-    let long = "Black box: 0x8000000 armed, and the kernel is told so on its line";
-    let wide = "Slot A: signed header 168fd26e79d8b062c82902c22b585649e13f6ff487b5a4079d8d21fbaef273ca verifies";
-    let spaced = format!("{}{}", &wide[..COLUMNS], " ".repeat(20));
-    let lines = [
-        "BdsDxe: loading Boot0002",
-        "ToyOS Bootloader 1.0",
-        "Kernel: 3476976 bytes",
-        "Loading kernel elf...",
-        "Kernel stack size: 8388608",
-        "Kernel memory size: 12783616",
-        "Applied 5053 relocations",
-        "",
-        "GOP: mode 640x380",
-        long,
-        "Starting kernel...",
-        "Boot map: root",
-        spaced.as_str(),
-        wide,
-        "Loader log: the kernel handoff begins",
-    ];
+    let short: Vec<String> = (0..45).map(|n| format!("Kernel memory size: {n}")).collect();
+    let wide = format!("Slot A: signed header {} verifies", "0123456789abcdef".repeat(9));
+    let lines: Vec<&str> = short
+        .iter()
+        .map(String::as_str)
+        .chain([
+            wide.as_str(),
+            "Boot attempts: this image has had the machine 0 time(s) without reporting; now 1",
+            "",
+            "        Kernel memory located past the edge",
+            "Loader log: the kernel handoff begins",
+        ])
+        .collect();
+    // Counted by hand: at 80 columns the lines take 45 + 3 + 2 + 1 + 1 + 1 = 53
+    // rows and the first four scroll off; at 240 they take 50.
+    for (staged, lit) in [
+        (TextMode { columns: 80, rows: 50, left: 640, top: 65 }, 41 + 3 + 1 + 1),
+        (TextMode { columns: 240, rows: 56, left: 0, top: 8 }, 45 + 1 + 1 + 1),
+    ] {
+        let dump = edk2_panel(1920, 1080, staged, &lines);
+        let mode = dump.firmware_text_mode()?;
+        let (carried, printed) = (dump.edge_rows(mode), mode.panel(lines.iter().copied()));
+        let count = |rows: &[bool]| rows.iter().filter(|&&row| row).count();
+        if (mode, count(&carried), count(&printed)) != (staged, lit, lit) || carried != printed {
+            return Err(format!(
+                "a panel staged in {staged:?} with {lit} rows lit at its edge was read as {mode:?}, \
+                 carrying {} where the console put {}",
+                count(&carried),
+                count(&printed)
+            ));
+        }
+    }
+    Ok(())
+}
 
+/// `lines` printed in `mode` on a cleared `width` x `height` panel, over a
+/// block the size of edk2's `Logo.bmp` centred on it. Every cell a line
+/// reaches is blitted whole, a glyph lighting the pixels an 8x19 capital does;
+/// a line wraps once its row is full; and a line feed on the last row moves
+/// the text area's pixels, the logo's with them, up a row.
+fn edk2_panel(width: usize, height: usize, mode: TextMode, lines: &[&str]) -> Ppm {
     let (text, logo) = ([0x98u8; 3], [0xFFu8; 3]);
+    let (logo_w, logo_h) = (193, 58);
     let mut pixels = vec![[0u8; 3]; width * height];
     let (lx, ly) = ((width - logo_w) / 2, (height - logo_h) / 2);
     for y in ly..ly + logo_h {
-        pixels[y * width + lx..y * width + lx + logo_w].fill(logo);
+        pixels[y * width + lx..][..logo_w].fill(logo);
     }
-    let mut row = 0;
+    let area = mode.columns * EFI_GLYPH_WIDTH;
+    let line_feed = |pixels: &mut Vec<[u8; 3]>, row: &mut usize| {
+        if *row + 1 < mode.rows {
+            *row += 1;
+            return;
+        }
+        for y in mode.top..mode.top + (mode.rows - 1) * EFI_GLYPH_HEIGHT {
+            let from = (y + EFI_GLYPH_HEIGHT) * width + mode.left;
+            pixels.copy_within(from..from + area, y * width + mode.left);
+        }
+        for y in mode.top + (mode.rows - 1) * EFI_GLYPH_HEIGHT..mode.top + mode.rows * EFI_GLYPH_HEIGHT {
+            pixels[y * width + mode.left..][..area].fill([0; 3]);
+        }
+    };
+    let (mut row, mut column) = (0, 0);
     for line in lines {
-        let chars: Vec<char> = line.chars().collect();
-        let wrapped: Vec<&[char]> = if chars.is_empty() { vec![&[]] } else { chars.chunks(COLUMNS).collect() };
-        for cells in wrapped {
-            for (col, c) in cells.iter().enumerate() {
-                for gy in 0..EFI_GLYPH_HEIGHT {
-                    for gx in 0..EFI_GLYPH_WIDTH {
-                        let lit = !c.is_whitespace() && (3..=17).contains(&gy) && (1..=6).contains(&gx);
-                        let (x, y) = (col * EFI_GLYPH_WIDTH + gx, row * EFI_GLYPH_HEIGHT + gy);
-                        pixels[y * width + x] = if lit { text } else { [0; 3] };
-                    }
+        for c in line.chars() {
+            for gy in 0..EFI_GLYPH_HEIGHT {
+                for gx in 0..EFI_GLYPH_WIDTH {
+                    let lit = !c.is_whitespace() && (3..=14).contains(&gy) && gx <= 6;
+                    let (x, y) = (mode.left + column * EFI_GLYPH_WIDTH + gx, mode.top + row * EFI_GLYPH_HEIGHT + gy);
+                    pixels[y * width + x] = if lit { text } else { [0; 3] };
                 }
             }
-            row += 1;
+            column += 1;
+            if column == mode.columns {
+                column = 0;
+                line_feed(&mut pixels, &mut row);
+            }
         }
+        column = 0;
+        line_feed(&mut pixels, &mut row);
     }
 
     let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
     for p in &pixels {
         ppm.extend_from_slice(p);
     }
-    let counted = Ppm::parse(&ppm).text_row_bands()?;
-    let expected = edge_rows(lines, COLUMNS);
-    if (counted, expected) != (15, 15) {
-        return Err(format!(
-            "the staged panel carries 15 rows at its edge; text_row_bands counted {counted} and \
-             edge_rows expected {expected}"
-        ));
-    }
-    Ok(())
+    Ppm::parse(&ppm)
 }

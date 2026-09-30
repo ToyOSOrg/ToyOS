@@ -3673,28 +3673,30 @@ fn run_screen_test(
                 .iter()
                 .position(|line| line.contains(bootlog::LOADER_GOP_LINE))
                 .ok_or_else(|| format!("the loader never printed {:?}\n{console}", bootlog::LOADER_GOP_LINE))?;
-            let columns = lines[query]
-                .split("GOP: mode ")
-                .nth(1)
-                .and_then(|mode| mode.split('x').next())
-                .and_then(|width| width.parse::<usize>().ok())
-                .map(|width| width / screen::EFI_GLYPH_WIDTH)
-                .filter(|&columns| columns > 0)
-                .ok_or_else(|| format!("the GOP line names no mode width: {:?}", lines[query]))?;
-            let rows = screen::edge_rows(lines.iter().map(String::as_str), columns);
-            let upto_query = screen::edge_rows(lines[..=query].iter().map(String::as_str), columns);
-            let counted = dump.text_row_bands()?;
-            if counted != rows {
+            let mode = dump.firmware_text_mode()?;
+            let (carried, printed) = (dump.edge_rows(mode), mode.panel(lines.iter().map(String::as_str)));
+            let count = |rows: &[bool]| rows.iter().filter(|&&lit| lit).count();
+            if carried != printed {
+                let map = |rows: &[bool]| rows.iter().map(|&lit| if lit { '#' } else { '.' }).collect::<String>();
                 return Err(format!(
-                    "the panel carries {counted} rows where the console printed {rows} since the \
-                     firmware last cleared it at {columns} columns, {upto_query} of them up to the \
-                     GOP query, which are all a panel the query stopped carries\n{console}"
+                    "the panel's first {} cells carry {} rows of text where the console put {} there \
+                     in its {}x{} text mode, row by row\npanel:   {}\nconsole: {}\n{console}",
+                    screen::EDGE_CELLS,
+                    count(&carried),
+                    count(&printed),
+                    mode.columns,
+                    mode.rows,
+                    map(&carried),
+                    map(&printed)
                 ));
             }
             eprintln!(
-                "  [screen] the panel carries all {rows} rows the console printed, {} of them after \
-                 the GOP query",
-                rows - upto_query
+                "  [screen] the panel carries all {} rows the console put at its edge in its {}x{} \
+                 text mode, {} of them after the GOP query",
+                count(&printed),
+                mode.columns,
+                mode.rows,
+                count(&mode.printed(lines[query + 1..].iter().map(String::as_str)))
             );
             Ok(())
         }
