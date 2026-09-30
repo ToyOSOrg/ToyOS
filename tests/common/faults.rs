@@ -476,9 +476,6 @@ pub fn diskless_boot(
 /// machine halts on it.
 const NESTED: &str = "NESTED NMI";
 
-/// An NMI handler that returns early through `iretq` un-masks NMIs while still
-/// standing on IST2, which is the one way a second NMI can enter on that stack.
-/// The check has to fire and say so.
 pub fn nested_nmi_is_loud(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

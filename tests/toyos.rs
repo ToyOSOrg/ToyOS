@@ -6124,8 +6124,7 @@ fn await_drained(
 /// shipping kernel**, and the site that arms it cannot see that: a non-empty
 /// `kernel_params` selects the test kernel, and `kernel/src/actuator.rs`'s
 /// `IMPLIES` adds `i8042-fast-health` and `i8042-edge-race` — a scheduler pass
-/// held inside the drain path. Two latent inexactnesses: any drain after the
-/// mark counts, and `drain bytes=` counts the aux port too.
+/// held inside the drain path.
 fn shell_type_line(qemu: &mut QemuInstance, line: &str) -> Result<(), String> {
     let echo = qemu.budget(ECHO_TRY);
     let mut last = String::new();
