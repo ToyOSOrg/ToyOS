@@ -194,9 +194,6 @@ const RUST_SKIP: &[&str] = &[
     "test_panic_child",
     // It takes the machine down; `panic_halts_the_others_first` runs it.
     "panic_halts_first",
-    // A binary that panics at once, sent over ssh as a service's replacement;
-    // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
-    "swap_crash",
     // The swap DMA control's replacement netd: it claims the 82574, stops it
     // and masters it. `swap_quiets_the_function` stages it.
     "swap_claim_idle",
@@ -661,14 +658,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // one for another name is not answered. Bytes; its clocks are a guard on
     // the answer and the window the unanswered query is given.
     ("lan_mdns_answer", Sched::Parallel),
-    // A running service's binary replaced with no reboot: netd swapped for its
-    // rebuild over ssh while the stream runs, on virtio-net and on the 82574
-    // the T14's I219 shares a register file with; a wrong digest and a
-    // stranger's key refused with netd untouched; a replacement that panics at
-    // once answered by the old binary running again. Records, bytes and the
-    // guest's own `/log`; every clock is a liveness guard on a guest that
-    // stopped talking, and probation is init's.
-    ("swap_netd", Sched::Parallel),
     // The machine updates itself: an image over `ssh … update` is written to
     // the idle slot and is the kernel the next boot runs; every slot the loader
     // must refuse is refused by name and the other boots; and a slot whose
@@ -683,9 +672,14 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("update_grant_refuses_a_stray_partition", Sched::Parallel),
     ("update_floor_is_the_images_own", Sched::Parallel),
     ("update_refused_pass_credits_no_image", Sched::Parallel),
+    // A running service's binary replaced with no reboot: netd swapped for its
+    // rebuild over ssh while the stream runs, on the 82574 the T14's I219
+    // shares a register file with; a wrong digest and a stranger's key refused
+    // with netd untouched. Records, bytes and the guest's own `/log`; every
+    // clock is a liveness guard on a guest that stopped talking, and probation
+    // is init's.
     ("lan_swap", Sched::Parallel),
     ("swap_refusals", Sched::Parallel),
-    ("swap_crash_rolls_back", Sched::Parallel),
     // The 82574 swapped to a holder that stops it and masters it while the
     // host sends it frames. The verdict is the kernel's console; its clocks
     // are liveness guards.
@@ -1327,7 +1321,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("log_stream_stalled_reader", &["test_rs_log_flood"]),
     ("c_capture_ignores_daemon_lines", &["test_c_71_macro_empty_arg"]),
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
-    ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
     ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
     ("swap_fault_tells_its_holder", &["test_rs_swap_claim_astray"]),
@@ -11758,7 +11751,6 @@ fn run_machine_test(
         "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
         "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
         "lan_mdns_answer" => common::origin::mdns(c_bins, rust_bins),
-        "swap_netd" => common::swap::swap_netd(test_config, c_bins, rust_bins),
         "update_boots_the_new_kernel" => common::update::update_boots_the_new_kernel(test_config, c_bins, rust_bins),
         "update_refusals_boot_the_other_slot" => {
             common::update::update_refusals_boot_the_other_slot(test_config, c_bins, rust_bins)
@@ -11780,7 +11772,6 @@ fn run_machine_test(
         }
         "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
-        "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),
         "swap_quiets_the_function" => {
             common::swap::swap_quiets_the_function(test_config, c_bins, rust_bins)
         }

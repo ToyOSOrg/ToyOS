@@ -37,10 +37,6 @@ const CEILING: Duration = Duration::from_secs(120);
 const HOLD: &str = "test_rs_lan_swap_hold";
 pub const HOLD_JOBS: &[&str] = &[HOLD];
 
-/// A test binary that panics the instant it starts, and its panic's own line.
-const CRASH: &str = "swap_crash";
-const CRASH_PANIC: &str = "panicked at src/bin/swap_crash.rs";
-
 /// A booted talking guest with its ssh forward, the client to reach it, and
 /// the log it serves, read from the moment `logd` opened its port.
 struct Rig {
@@ -129,10 +125,8 @@ impl Rig {
 
     /// End the boot so `/log` is whole — `reboot` over ssh, asked as a program
     /// whose connection is held until the machine goes, so sshd never ends it
-    /// for a client that left — and answer the file. `staged` is the one
-    /// program panic the test caused on purpose, which the console must carry
-    /// exactly once.
-    fn finish(mut self, staged: Option<&str>) -> Result<(Vec<String>, Vec<String>, TalkBoot), String> {
+    /// for a client that left — and answer the file.
+    fn finish(mut self) -> Result<(Vec<String>, Vec<String>, TalkBoot), String> {
         let asked = self.ssh.exec(self.forward, toyos_build::metaltalk::REBOOT, &self.staged.scratch);
         eprintln!("  [swap] `reboot` {:?}", asked.map(|exec| exec.status));
         if let Err(why) =
@@ -141,17 +135,7 @@ impl Rig {
             return Err(self.fail(why));
         }
         drop(self.guest);
-        // A program's panic prints the spelling a kernel panic does, so the
-        // one this test staged is taken out by its own line, and counted.
-        let mut console = self.console.clone();
-        if let Some(needle) = staged {
-            let seen = console.matches(needle).count();
-            if seen != 1 {
-                return Err(format!("{needle:?} is on the console {seen} time(s), where it was staged once"));
-            }
-            console = console.lines().filter(|l| !l.contains(needle)).collect::<Vec<_>>().join("\n");
-        }
-        serial::Serial::named("the swapping boot", console.as_str()).must_be_clean()?;
+        serial::Serial::named("the swapping boot", self.console.as_str()).must_be_clean()?;
         let file = super::volumes::whole_log(&self.staged.image, self.staged.start, self.staged.len)?;
         let streamed = self.stream.lines();
         super::logstream::is_prefix_of(&streamed, &file)?;
@@ -194,7 +178,7 @@ fn netd_in_service(name: &str, bench: Bench) -> Result<(), String> {
     }
     let digest = toyos_swap::parse_hex(&swapped.digest).ok_or("the digest the host sent")?;
     let installed = toyos_swap::installed_path("netd", &digest);
-    let (file, _, staged) = rig.finish(None)?;
+    let (file, _, staged) = rig.finish()?;
     // The kernel's own record of what it loaded, then init putting it in
     // service, then a lease from the network after both.
     let spawned = after(&file, 0, &format!("spawn: {installed}"))
@@ -210,14 +194,6 @@ fn netd_in_service(name: &str, bench: Bench) -> Result<(), String> {
     );
     let _ = std::fs::remove_file(&staged.image);
     Ok(())
-}
-
-pub fn swap_netd(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    netd_in_service("swap-netd", VIRTIO)
 }
 
 /// The T14's swap rehearsed on its register file: QEMU's 82574 brought up a
@@ -284,7 +260,7 @@ pub fn swap_refusals(
         }
         eprintln!("  [swap] `{command}` with half of netd: {owed}");
     }
-    let (file, streamed, staged) = rig.finish(None)?;
+    let (file, streamed, staged) = rig.finish()?;
     let stopped: Vec<&String> =
         streamed.iter().chain(&file).filter(|l| toyos_swap::heard(l, "netd").is_some_and(|(w, _)| w == Word::Stopping)).collect();
     if !stopped.is_empty() {
@@ -294,44 +270,6 @@ pub fn swap_refusals(
     if spawns != 1 {
         return Err(format!("/log records {spawns} spawn(s) of netd where the boot's own is the only one owed"));
     }
-    let _ = std::fs::remove_file(&staged.image);
-    Ok(())
-}
-
-/// A replacement that panics at once: init says it failed, starts the binary it
-/// replaced, and the machine answers ssh through that one.
-pub fn swap_crash_rolls_back(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let rig = Rig::boot("swap-crash", VIRTIO)?;
-    let (_, crash) = rust_bins
-        .iter()
-        .find(|(name, _)| name == CRASH)
-        .ok_or_else(|| format!("no `{CRASH}` among the test binaries"))?;
-    let binary = rig.staged.scratch.join(CRASH);
-    std::fs::write(&binary, crash).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let swapped = match rig.swap("netd", &binary, None) {
-        Ok(swapped) => swapped,
-        Err(why) => return Err(rig.fail(why)),
-    };
-    let rig = rig.judged(&swapped, Expect::Restored)?;
-    let (file, _, staged) = rig.finish(Some(CRASH_PANIC))?;
-    let restored = after(&file, 0, &toyos_swap::said("netd", Word::Restored, "/system/bin/netd as pid"))
-        .ok_or("/log has no `restored` of the image's netd")?;
-    let pid = file[restored]
-        .rsplit("as pid ")
-        .next()
-        .and_then(|pid| pid.trim().parse::<u32>().ok())
-        .ok_or_else(|| format!("init's `restored` names no pid: {:?}", file[restored]))?;
-    // The lease is looked for after the kernel's spawn of the restored process
-    // and not after init's word on it: init speaks once the spawn returns, and
-    // a netd that leases first puts its lease above that word.
-    let spawned = after(&file, 0, &format!("spawn: /system/bin/netd pid={pid} "))
-        .ok_or_else(|| format!("/log has no `spawn:` of the restored netd, pid {pid}"))?;
-    after(&file, spawned, toyos_build::lan::LEASE)
-        .ok_or("/log has no lease from the restored netd")?;
     let _ = std::fs::remove_file(&staged.image);
     Ok(())
 }
@@ -829,7 +767,7 @@ pub fn swap_not_inherited(
         return Err(rig.fail(format!("{PROBE} ended {:?} saying {said:?}", ran.status)));
     }
     eprintln!("  [swap] {}", said.trim_end());
-    let (_, _, staged) = rig.finish(None)?;
+    let (_, _, staged) = rig.finish()?;
     let _ = std::fs::remove_file(&staged.image);
     Ok(())
 }

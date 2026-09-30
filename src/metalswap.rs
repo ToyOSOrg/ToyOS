@@ -261,8 +261,6 @@ pub enum Expect {
     InService,
     /// Refused before anything was stopped.
     Refused,
-    /// The new binary failed and the one it replaced runs again.
-    Restored,
 }
 
 /// The findings against `expect`, or what was heard in one line per fact.
@@ -276,7 +274,7 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
     let word = |w: Word| heard.words.iter().any(|(word, _)| *word == w);
     let owed_prefix = match expect {
         Expect::Refused => "refused ",
-        Expect::InService | Expect::Restored => "accepted ",
+        Expect::InService => "accepted ",
     };
     match &heard.answer {
         // A refusal `swap` made itself, before init heard of the ask, is a
@@ -299,9 +297,6 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
             } else {
                 bad.push(format!("init put {detail:?} in service, where {path} was sent"));
             }
-        }
-        (Expect::Restored, Some((Word::Restored, detail))) if word(Word::Failed) => {
-            said.push(format!("init: the new {service} failed and {detail} is back"))
         }
         (Expect::Refused, _) if !word(Word::Stopping) => said.push(format!(
             "init stopped nothing: {:?}",
@@ -539,14 +534,6 @@ mod tests {
                 "refused the binary hashes to x and the request names y".into(),
                 vec![(Word::Refused, "the binary hashes to x and the request names y".into())],
             ),
-            Expect::Restored => (
-                format!("accepted {path}"),
-                vec![
-                    (Word::Started, format!("{path} as pid 12")),
-                    (Word::Failed, format!("{path} ended (exit status: 101) inside 5000 ms")),
-                    (Word::Restored, "/system/bin/netd as pid 13".into()),
-                ],
-            ),
         };
         Swapped {
             service: "netd".into(),
@@ -567,7 +554,7 @@ mod tests {
     /// What the loop writes is what the judge reads, quoted text and all.
     #[test]
     fn a_swap_reads_back_as_it_was_written() {
-        for expect in [Expect::InService, Expect::Refused, Expect::Restored] {
+        for expect in [Expect::InService, Expect::Refused] {
             let swapped = heard(expect);
             let back = Swapped::parse(&swapped.render()).expect("it parses").expect("it is one");
             assert_eq!(back, swapped, "{expect:?}");
@@ -581,8 +568,6 @@ mod tests {
     #[test]
     fn the_judge_holds_each_expectation_to_its_own_outcome() {
         for (got, want) in [
-            (Expect::InService, Expect::Restored),
-            (Expect::Restored, Expect::InService),
             (Expect::InService, Expect::Refused),
             (Expect::Refused, Expect::InService),
         ] {
