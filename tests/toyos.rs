@@ -1145,6 +1145,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // `group_of` makes adjacency load-bearing.
     ("locale_detect", Sched::Parallel),
     ("locale_detect_unrecognized", Sched::Parallel),
+    // The wizard on the two surfaces the machine actually has, rather than on
+    // the stand-in `locale_gate` is. Each costs a boot of a different image.
+    ("console_locale_detect", Sched::Parallel),
     ("desktop_locale_detect", Sched::Parallel),
     // Typing at the same desktop, measured rather than transcribed: it waits
     // for its eight echoes instead of asserting how many arrived in a window,
@@ -7359,6 +7362,19 @@ fn shell_echoes(
     Err(format!("{TRIES} typed lines and none of them came back\n{lost}"))
 }
 
+/// A shell must get its prompt back when a windowed child's window goes.
+///
+/// The owner opened snake, closed its window with the X button, and never saw
+/// a prompt again. Both readings of his log are testable here and the two
+/// probes separate them: the first ends the child by *its own* exit, the
+/// second by the compositor taking its window away while it is alive —
+/// GUI+Q, which is the same `windows.remove` + `MSG_WINDOW_CLOSE` + drop the
+/// X button runs and is a keystroke rather than a guess at where the button
+/// is.
+///
+/// The client is a bare `window::Window`, so a reproduction here is about the
+/// shell, the terminal and the window protocol, and a clean run narrows the
+/// defect to what winit does that this does not.
 /// Close the focused window with GUI+Q, retrying until the compositor says a
 /// window went.
 ///
@@ -7378,7 +7394,9 @@ fn shell_echoes(
 /// and here that cuts both ways: #156 is a *freeze*, so the machine this
 /// retries against goes silent, and the wait ends in fifteen seconds instead of
 /// spending `qemu.budget(20 s)` — up to four minutes at width 12 — hammering
-/// GUI+Q at a desktop that has stopped.
+/// GUI+Q at a desktop that has stopped. `issues/design-debt/` names that
+/// cost as a lane this test holds for a quarter of every run, which is what puts
+/// whichever desktop is dispatched beside it into a red nobody acts on.
 fn close_focused_window(qemu: &mut QemuInstance, log: &mut String, new: usize) -> bool {
     const CLOSED: &str = "compositor: window closed";
     let mut live = qemu::Liveness::new(Duration::from_secs(15), Duration::from_secs(60));
@@ -8086,6 +8104,92 @@ fn desktop_typing_damage() -> Result<(), String> {
         "  [desktop] eight lines typed, {echoes} appearances; biggest frame {biggest} of \
          {screen_px} px over {intervals} intervals"
     );
+    Ok(())
+}
+
+/// The wizard under `/system/bin/console`, which is the whole of the surface tree on
+/// a machine with no compositor — and the image that gets flashed.
+///
+/// This is one of the two tests that replaced the refusal gate. `/system/bin/console`
+/// claims the keyboard for its entire run, which is exactly the state that
+/// used to make `locale detect` print "cannot read the keyboard directly" and
+/// stop; the wizard now asks the console for the transitions instead. The
+/// closing assertion is that the console's *own* translator moved with the
+/// config: the key a US board prints `[` on types `ü` afterwards, and nothing
+/// but a re-read of the file this wizard wrote can do that.
+fn console_locale_detect() -> Result<(), String> {
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
+    let options = BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        ready_marker: "console: ready",
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut log = qemu.boot_log().to_string();
+    // The panel, because this is the surface that has one.
+    let ack = Drained::Panel(screen::ConsoleFont::load());
+    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
+        return Err(format!("{why}\nnothing typed at /system/bin/console reached a shell:\n{log}"));
+    }
+
+    shell_type_line(&mut qemu, "locale detect", &ack)?;
+    await_marker(
+        &mut qemu,
+        &mut log,
+        "Press the key labelled",
+        "the wizard to ask for a key under /system/bin/console — the console did not lend it \
+         the keyboard",
+    )
+    .map_err(|why| format!("{why}\n{log}"))?;
+    answer_swiss_wizard(&mut qemu, &mut log, "under /system/bin/console")?;
+
+    for want in ["That is 'swiss-german'", "Keyboard layout set to 'swiss-german'"] {
+        await_marker(&mut qemu, &mut log, want, &format!("{want:?} under /system/bin/console"))
+            .map_err(|why| format!("{why}\n{log}"))?;
+    }
+    // The console acted on the notification. A prefix, not the whole line: the
+    // console is shared and not line-atomic, so a kernel line lands inside
+    // this one often enough to matter (it did, first time this ran). *Which*
+    // layout it re-read is the assertion below, which does not depend on a
+    // line surviving intact.
+    await_marker(
+        &mut qemu,
+        &mut log,
+        "console: keyboard layout",
+        "the console to re-read the config the wizard wrote",
+    )
+    .map_err(|why| format!("{why}\n{log}"))?;
+
+    // And the layout is in force for what is typed next. `bracket_left` is the
+    // key a US board prints `[` on and a Swiss one prints `ü` on, so this is
+    // the substitution the whole exercise exists to make, taken through the
+    // console's translator and the shell.
+    // **Bounded rather than echoed back**, and it is the one line here that can
+    // be: `echo `, the key and Enter are fewer set-1 bytes than the device
+    // queue holds, and the wizard's own last answer has just been consumed — so
+    // a guest that drains nothing from here still receives every one of them.
+    // What `bracket_left` produces is the assertion below, which is that key's
+    // arrival stated as the thing under test.
+    {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+        let typed = "echo ";
+        let bytes: usize = typed.chars().map(qemu::scancode_bytes).sum();
+        assert!(
+            bytes + 4 <= QEMU_PS2_QUEUE,
+            "{typed:?} plus the ISO key and Enter is more than the {QEMU_PS2_QUEUE}-byte \
+             device queue holds"
+        );
+        input.type_burst(typed);
+        input.keys(&[("bracket_left", true), ("bracket_left", false)]);
+        input.keys(&[("ret", true), ("ret", false)]);
+    }
+    await_marker(&mut qemu, &mut log, "\u{fc}", "the `[` key to produce `ü`")
+        .map_err(|why| format!(
+            "{why}\ntyping the `[` key after the wizard did not produce `ü`, so the console is \
+             still translating with the layout it booted with\n{log}"
+        ))?;
+    eprintln!("  [console] the wizard identified swiss-german and the console adopted it");
     Ok(())
 }
 
@@ -10174,6 +10278,7 @@ fn run_machine_test(
             let boot = group_boot(held, SSHD_LOGIN, || common::ssh::boot(rust_bins));
             common::ssh::key_auth_gate(&mut boot.qemu)
         }
+        "console_locale_detect" => console_locale_detect(),
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
         "toolkit_iced" => toolkit_iced(),
