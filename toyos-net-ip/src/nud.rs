@@ -243,7 +243,6 @@ pub(crate) fn request_leaves(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr)
         Nud::Probe(p) => p.mac,
         Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => {
             n.queued = false;
-            drained(i, cx, addr);
             return None;
         }
     };
@@ -433,13 +432,12 @@ pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) -> Optio
     Some(held)
 }
 
-/// A datagram or a request of `addr`'s left the control queue. Every STALE or quiescent
-/// UNREACHABLE entry has a deadline armed but one whose idle lifetime passed while its queue held
-/// datagrams, which goes once nothing of it waits there.
+/// A datagram of `addr`'s left the control queue. Every STALE or quiescent UNREACHABLE entry has a
+/// deadline armed but one whose idle lifetime passed while its queue held datagrams, which goes
+/// with the last of them.
 fn drained(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     let Some(n) = i.neighbours.get(&addr) else { return };
-    let waits = n.state.releasing() || n.queued;
-    let idle = matches!(n.state, Nud::Stale(_) | Nud::Unreachable(_)) && !waits && cx.timers.get(timer(cx, addr)).is_none();
+    let idle = matches!(n.state, Nud::Stale(_) | Nud::Unreachable(_)) && !n.state.releasing() && cx.timers.get(timer(cx, addr)).is_none();
     if idle {
         remove(i, cx, addr);
         route::refresh_active(i, cx);
