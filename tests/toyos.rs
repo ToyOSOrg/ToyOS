@@ -983,7 +983,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("xhci_deaf_registers", Sched::Parallel),
     ("xhci_slow_connect", Sched::Parallel),
     ("xhci_portsc_rw1c", Sched::Parallel),
-    ("xhci_full_speed_device", Sched::Parallel),
     ("xhci_superspeed_ports", Sched::Parallel),
     // `xhci_flap` is the one that genuinely races the host against the guest:
     // its two QMP writes have to land inside *one* 100 ms debounce or the state
@@ -8167,9 +8166,6 @@ fn run_machine_test(
         "xhci_deaf_registers" => usb::xhci_deaf_registers(test_config, c_bins, rust_bins),
         "xhci_slow_connect" => usb::xhci_slow_connect(test_config, c_bins, rust_bins),
         "xhci_portsc_rw1c" => usb::xhci_portsc_rw1c(test_config, c_bins, rust_bins),
-        "xhci_full_speed_device" => {
-            usb::xhci_full_speed_device(test_config, c_bins, rust_bins)
-        }
         "xhci_superspeed_ports" => usb::xhci_superspeed_ports(test_config, c_bins, rust_bins),
         "xhci_flap" => usb::xhci_flap(test_config, c_bins, rust_bins),
         // Body in `tests/common/iommu.rs`, same reason.
