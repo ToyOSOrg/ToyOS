@@ -26,7 +26,7 @@ pub(crate) enum MapRefusal {
 /// it is. An anonymous `MAP_SHARED` is not: with no `fork`, no other process
 /// can map it, so a private mapping is all that sharing it could mean.
 pub(crate) fn mmap_refusal(addr: usize, len: usize, prot: i32, flags: i32) -> Option<MapRefusal> {
-    if len == 0 || (flags & MAP_FIXED != 0 && addr % PAGE != 0) {
+    if len == 0 || (flags & MAP_FIXED != 0 && !addr.is_multiple_of(PAGE)) {
         return Some(MapRefusal::Invalid);
     }
     if flags & MAP_ANONYMOUS == 0 {

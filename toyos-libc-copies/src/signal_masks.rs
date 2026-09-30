@@ -20,7 +20,7 @@ fn each_how_changes_the_mask_as_posix_says() {
     assert_eq!(sigmask::changed(hup, SIG_SETMASK, 0), Some(0));
     // Asked for, and dropped without an error.
     assert_eq!(sigmask::changed(0, SIG_BLOCK, kill | stop | usr1), Some(usr1));
-    assert_eq!(sigmask::changed(0, SIG_SETMASK, u64::MAX), Some(u64::MAX & !(kill | stop)));
+    assert_eq!(sigmask::changed(0, SIG_SETMASK, u64::MAX), Some(!(kill | stop)));
     for how in [-1, 3, 99] {
         assert_eq!(sigmask::changed(hup, how, usr1), None, "how {how}");
     }
