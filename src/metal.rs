@@ -1537,7 +1537,6 @@ declare_flags!(METAL = {
     DRY_RUN = "--dry-run", None;
     SWAP = "--swap", Next;
     BINARY = "--binary", Next;
-    HAND_BACK = "--hand-back", None;
 });
 
 /// The flags a swap of a running machine's service refuses beside it: it
@@ -1598,13 +1597,9 @@ pub struct Args {
     /// The service's key; [`Args::binary`] is the new binary, `--talk` the key
     /// the running machine authorizes — asked for it by name at
     /// `toyos-t14.local`, so no image needs naming — and `--readback` where the
-    /// stream and the swap's facts are written.
+    /// stream is written.
     swap: Option<String>,
     binary: Option<PathBuf>,
-    /// After the swap is judged, whichever way, ask the machine to `reboot`
-    /// over ssh: the host saying it is done with a boot held for it. Absent
-    /// leaves the machine running, which is the development loop.
-    hand_back: bool,
 }
 
 impl Args {
@@ -1638,7 +1633,6 @@ impl Args {
             talk: value(&TALK).map(PathBuf::from),
             swap: value(&SWAP).map(str::to_string),
             binary: value(&BINARY).map(PathBuf::from),
-            hand_back: METAL.present(args, &HAND_BACK),
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host.split_once('@').ok_or_else(|| {
@@ -1680,9 +1674,6 @@ impl Args {
             ));
         }
         match (&out.swap, &out.binary) {
-            (None, None) if out.hand_back => {
-                return Err(Refusal::Usage("--hand-back ends a --swap".to_string()))
-            }
             (None, None) => {}
             (None, Some(_)) => {
                 return Err(Refusal::Usage("--binary is the new binary of a --swap".to_string()))
@@ -1707,8 +1698,7 @@ impl Args {
                 if binary.is_none() || out.talk.is_none() {
                     return Err(Refusal::Usage(
                         "--swap <service> wants --binary <new binary>, --talk <the key the running \
-                         machine authorizes> and --readback <where the stream and the swap are \
-                         written>"
+                         machine authorizes> and --readback <where the stream is written>"
                             .to_string(),
                     ));
                 }
@@ -1796,10 +1786,9 @@ impl Talking {
     }
 }
 
-/// Where a swap writes the stream it connected to and what it heard, beside
-/// whatever else the readback holds.
+/// Where a swap writes the stream it connected to, beside whatever else the
+/// readback holds.
 pub const READBACK_SWAP_STREAM: &str = "swap-stream.log";
-pub const READBACK_SWAP: &str = "swap.txt";
 
 /// Replace `service`'s binary on the machine that answers for its own name,
 /// and judge it: the machine is asked over ssh, init's words are read off the
@@ -1813,14 +1802,6 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     let (Some(key), Some(dir), Some(binary)) = (&args.talk, &args.readback, &args.binary) else {
         return Err(Refusal::Usage("--swap wants --talk, --readback and --binary".into()));
     };
-    // Before anything can refuse: a swap file left standing is one a judge
-    // reads as this swap's.
-    let at = dir.join(READBACK_SWAP);
-    match std::fs::remove_file(&at) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Refusal::File { path: at.display().to_string(), why: e.to_string() }),
-    }
     let cable = Talking::prepare(key, dir)?;
     let by = std::time::Duration::from_secs(args.wait_secs);
     let stream = cable.connect(READBACK_SWAP_STREAM, by)?;
@@ -1838,9 +1819,6 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     );
     stream.give_up();
     let swapped = swapped.map_err(|why| Refusal::Swap(vec![why]))?;
-    let at = dir.join(READBACK_SWAP);
-    std::fs::write(&at, swapped.render())
-        .map_err(|e| Refusal::File { path: at.display().to_string(), why: e.to_string() })?;
     for (word, detail) in &swapped.words {
         println!("  init: {}: {detail}", word.as_str());
     }
@@ -1848,16 +1826,6 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
         print!("  {service}| {line}");
     }
     let judged = crate::metalswap::judge(&swapped, crate::metalswap::Expect::InService);
-    // Whichever way it was judged: a boot held for this host is handed back
-    // either way, over a connection held until the machine drops it.
-    if args.hand_back {
-        let at = match stream.peer() {
-            Some(std::net::SocketAddr::V4(peer)) => std::net::SocketAddr::from((*peer.ip(), crate::metaltalk::SSH_PORT)),
-            _ => std::net::SocketAddr::from((swapped.peer, crate::metaltalk::SSH_PORT)),
-        };
-        let asked = cable.ssh.exec(at, crate::metaltalk::REBOOT, &scratch);
-        println!("handed back: `{}` at {at} answered {asked:?}", crate::metaltalk::REBOOT);
-    }
     for line in judged.map_err(Refusal::Swap)? {
         println!("swap: {line}");
     }
@@ -2698,8 +2666,8 @@ mod tests {
     /// **A swap flashes nothing and reboots nothing**, so every flag that
     /// describes a boot is refused beside it — `--image` among them, since the
     /// machine is found by its name and not by the image it is running — and
-    /// it is refused without the three things it acts with. A `--binary` or a
-    /// `--hand-back` with no swap is no swap.
+    /// it is refused without the three things it acts with. A `--binary` with no
+    /// swap is no swap.
     #[test]
     fn a_swap_is_not_a_boot_and_names_what_it_acts_with() {
         let whole = ["--swap", "netd", "--binary", "n", "--talk", "/tmp/k", "--readback", "/tmp/r"]
@@ -2730,11 +2698,6 @@ mod tests {
         }
         let lone = ["--binary", "n"].map(String::from);
         assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
-        let lone = ["--hand-back"].map(String::from);
-        assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
-        let mut back = whole.to_vec();
-        back.push("--hand-back".into());
-        assert!(Args::parse(&back).expect("a swap that hands back").hand_back);
         let mut bent = whole.to_vec();
         bent[1] = "../netd".to_string();
         assert!(Args::parse(&bent).unwrap_err().to_string().contains("no service"));

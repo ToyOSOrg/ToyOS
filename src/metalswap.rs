@@ -15,7 +15,7 @@
 //! turned away, the first one admitted a connection through the new one — so
 //! the verdict is whatever init said, as the machine's own log carries it.
 
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{SocketAddr, SocketAddrV4};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -53,8 +53,6 @@ pub struct Swapped {
     /// The digest the host named, which is the binary's own unless the caller
     /// named another.
     pub digest: String,
-    /// Who was asked: the peer of the stream when the ask was made.
-    pub peer: Ipv4Addr,
     /// The machine's answer, or the client's last refusal to ask it.
     pub answer: Result<String, String>,
     /// Every word init said about this service on the stream after the ask.
@@ -69,9 +67,8 @@ pub struct Swapped {
     /// Dials the stream made from the ask on that ended with no line: each
     /// redial `logd` or the machine turned away, refusals included.
     pub turned_away: usize,
-    /// From the ask to the answer, to init's final word, and to `echo`'s answer.
+    /// From the ask to the answer, and to `echo`'s answer.
     pub answer_ms: u64,
-    pub outcome_ms: Option<u64>,
     pub again_ms: u64,
 }
 
@@ -209,11 +206,8 @@ pub fn swap(
             println!("  swap: `logd` admitted the stream again {} ms after the redial", redialed.elapsed().as_millis());
         }
     }
-    let mut outcome_ms = None;
     if let Some(until) = until {
-        if stream.wait_until(until.saturating_sub(began.elapsed()), |lines| settled(lines, mark, service)).is_some() {
-            outcome_ms = Some(began.elapsed().as_millis() as u64);
-        }
+        stream.wait_until(until.saturating_sub(began.elapsed()), |lines| settled(lines, mark, service));
     }
     let again_at = match (ssh_at, stream.peer()) {
         (None, Some(SocketAddr::V4(now))) => SocketAddr::V4(SocketAddrV4::new(*now.ip(), SSH_PORT)),
@@ -237,7 +231,6 @@ pub fn swap(
     Ok(Swapped {
         service: service.to_string(),
         digest: toyos_swap::hex(&digest),
-        peer: *peer.ip(),
         answer,
         words: heard(&lines),
         said: lines[mark.min(lines.len())..]
@@ -249,7 +242,6 @@ pub fn swap(
         connections: (before, stream.connections()),
         turned_away: stream.turned_away() - away,
         answer_ms,
-        outcome_ms,
         again_ms,
     })
 }
@@ -332,57 +324,6 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
     }
 }
 
-/// The keys a swap is written under, one `<key> <value>` per line.
-const SERVICE: &str = "swap_service";
-const DIGEST: &str = "swap_digest";
-const PEER: &str = "swap_peer";
-const ANSWER: &str = "swap_answer";
-const ANSWER_FAILED: &str = "swap_answer_failed";
-const WORD: &str = "swap_word";
-const SAID: &str = "swap_said";
-const AGAIN_STATUS: &str = "swap_again_status";
-const AGAIN_STDOUT: &str = "swap_again_stdout";
-const AGAIN_FAILED: &str = "swap_again_failed";
-const CONNECTIONS: &str = "swap_connections";
-const TURNED_AWAY: &str = "swap_turned_away";
-const TIMES: &str = "swap_ms";
-
-/// A value on one line, whatever it carried.
-fn quote(text: &str) -> String {
-    format!("{text:?}")
-}
-
-impl Swapped {
-    pub fn render(&self) -> String {
-        let mut out = format!("{SERVICE} {}\n{DIGEST} {}\n{PEER} {}\n", self.service, self.digest, self.peer);
-        match &self.answer {
-            Ok(answer) => out.push_str(&format!("{ANSWER} {}\n", quote(answer))),
-            Err(why) => out.push_str(&format!("{ANSWER_FAILED} {}\n", quote(why))),
-        }
-        for (word, detail) in &self.words {
-            out.push_str(&format!("{WORD} {}\n", quote(&toyos_swap::said(&self.service, *word, detail))));
-        }
-        for line in &self.said {
-            out.push_str(&format!("{SAID} {}\n", quote(line)));
-        }
-        match &self.again {
-            Ok(exec) => {
-                match exec.status {
-                    Some(code) => out.push_str(&format!("{AGAIN_STATUS} {code}\n")),
-                    None => out.push_str(&format!("{AGAIN_STATUS} none\n")),
-                }
-                out.push_str(&format!("{AGAIN_STDOUT} {}\n", quote(&String::from_utf8_lossy(&exec.stdout))));
-            }
-            Err(why) => out.push_str(&format!("{AGAIN_FAILED} {}\n", quote(why))),
-        }
-        out.push_str(&format!("{CONNECTIONS} {} {}\n", self.connections.0, self.connections.1));
-        out.push_str(&format!("{TURNED_AWAY} {}\n", self.turned_away));
-        let outcome = self.outcome_ms.map_or("none".to_string(), |ms| ms.to_string());
-        out.push_str(&format!("{TIMES} {} {outcome} {}\n", self.answer_ms, self.again_ms));
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,7 +378,6 @@ mod tests {
         Swapped {
             service: "netd".into(),
             digest: toyos_swap::hex(&digest),
-            peer: Ipv4Addr::new(10, 0, 2, 15),
             answer: Ok(answer),
             words,
             said: vec![line("netd", "netd: DHCP: lease 10.0.2.15/24 from 10.0.2.2, \"x\"")],
@@ -445,7 +385,6 @@ mod tests {
             connections: (1, 2),
             turned_away: 3,
             answer_ms: 900,
-            outcome_ms: Some(7_000),
             again_ms: 9_000,
         }
     }
