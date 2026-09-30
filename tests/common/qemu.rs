@@ -3929,19 +3929,6 @@ impl QmpDevices {
         ));
     }
 
-    /// [`Self::blockdev_add`] for a file a drive may still hold open: the
-    /// unplugged device's own, which QEMU may not have let go of yet. Taken
-    /// without the image lock that would refuse it; both read and write the one
-    /// file, so what the first wrote is what the second reads.
-    pub fn blockdev_add_again(&mut self, node: &str, image: &Path) {
-        self.0.execute(&format!(
-            "{{\"execute\":\"blockdev-add\",\"arguments\":{{\"node-name\":\"{node}\",\
-             \"driver\":\"raw\",\"file\":{{\"driver\":\"file\",\"locking\":\"off\",\
-             \"filename\":\"{}\"}}}}}}",
-            image.display()
-        ));
-    }
-
     /// Give QEMU an image to back a device that is not on the machine yet, so
     /// a hot-plugged disk needs nothing in argv. A disk declared at boot is a
     /// disk the guest could have enumerated at boot.

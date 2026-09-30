@@ -158,20 +158,17 @@ actuators! {
 
     /// Hold the port rung's first reset, once, until the port reads empty, so
     /// the host can move the device to another port as a reset moved T14 run
-    /// 79's stick. See `xhci::msc::reset_moves`; judged by
-    /// `usb_transport_break`.
+    /// 79's stick. See `xhci::msc::reset_moves`.
     usb_reset_moves = "usb-reset-moves";
 
     /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
     /// while its device holds a write it reported complete and no flush has
-    /// emptied: a device that leaves then may have lost it. Judged by
-    /// `usb_transport_break`.
+    /// emptied: a device that leaves then may have lost it.
     usb_transport_break_owed = "usb-transport-break-owed";
 
     /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
     /// after a write was reported complete and a SYNCHRONIZE CACHE then
     /// succeeded, with no write since: a device that leaves then owes nothing.
-    /// Judged by `usb_transport_break`.
     usb_transport_break_flushed = "usb-transport-break-flushed";
 
     /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
@@ -197,18 +194,16 @@ actuators! {
     /// device, for less than `usb-slow-return` does, and leave every transfer
     /// of the operation the held call sends again on it unanswered, once, each
     /// waited for to the end of what the call may spend. See
-    /// `xhci::msc::return_silent`; judged by `usb_transport_break`.
+    /// `xhci::msc::return_silent`.
     usb_return_silent = "usb-return-silent";
 
     /// Stall the bind of a disk that arrives while another is held for its
     /// device, before its first command, as a stick slow to answer after a
-    /// reset: the wait held for it is not where it binds. Judged by
-    /// `usb_transport_break`.
+    /// reset: the wait held for it is not where it binds.
     usb_slow_return = "usb-slow-return";
 
     /// Ask for a disk's serial number string in fewer bytes than it carries, as
-    /// a device that delivered part of its descriptor. Judged by
-    /// `usb_transport_break`.
+    /// a device that delivered part of its descriptor.
     usb_serial_short = "usb-serial-short";
 
     /// Have the first disk the boot scan binds answer nothing for longer than
@@ -223,7 +218,6 @@ actuators! {
     /// Leave one READ(10) the gate stages it on unanswered for the whole of
     /// its wait, and the class reset's TEST UNIT READY out of step, so a port
     /// reset that takes comes after a wait that spent the operation's budget.
-    /// Judged by `usb_transport_break`.
     usb_first_wait_spent = "usb-first-wait-spent";
 
     /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the

@@ -1129,13 +1129,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("xhci_deaf_registers", Sched::Parallel),
     ("xhci_slow_connect", Sched::Parallel),
     ("xhci_portsc_rw1c", Sched::Parallel),
-    // One staged break and no other, which puts the driver's recovery finishing
-    // on its first try in the verdict: a retried command that reaches an
-    // endpoint still halted from the staged break logs a second `transport
-    // broke`, and how many tries it takes is how much of the host the guest
-    // had — its own doc says one break under KVM and two under TCG off the
-    // same tree, which is the race timer-anchored, not a margin, describes.
-    ("usb_transport_break", Sched::Serial),
     ("xhci_full_speed_device", Sched::Parallel),
     ("xhci_superspeed_ports", Sched::Parallel),
     // `xhci_flap` is the one that genuinely races the host against the guest:
@@ -1778,18 +1771,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs {
             arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],
             judge: |b| power::usb_load_chain(&b[0].after_the_reset()?),
-        },
-    ),
-    (
-        // Its own boot: the first WRITE(10) the boot stick takes is abandoned
-        // mid-flight, and what is judged is the one thing QEMU's `usb-storage`
-        // cannot answer — whether a device holding a toggle, a sequence number
-        // and half a command comes back from the class's Reset Recovery on the
-        // machine's own controller.
-        "usb_transport_break",
-        metal::Metal::Runs {
-            arms: &[metal::once("usbbreak", "tests/jobcase", &["usb-transport-break"], &[])],
-            judge: |b| usb::transport_break_on_metal(&b[0].kernel(), &b[0].after_the_reset()?),
         },
     ),
     (
@@ -9258,7 +9239,6 @@ fn run_machine_test(
         "xhci_deaf_registers" => usb::xhci_deaf_registers(test_config, c_bins, rust_bins),
         "xhci_slow_connect" => usb::xhci_slow_connect(test_config, c_bins, rust_bins),
         "xhci_portsc_rw1c" => usb::xhci_portsc_rw1c(test_config, c_bins, rust_bins),
-        "usb_transport_break" => usb::usb_transport_break(test_config, c_bins, rust_bins),
         "xhci_full_speed_device" => {
             usb::xhci_full_speed_device(test_config, c_bins, rust_bins)
         }

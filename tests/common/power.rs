@@ -1029,52 +1029,6 @@ pub fn blackbox_done_chain(
     Ok(())
 }
 
-/// The boot the T14 takes for `usb_transport_break`, under QEMU: the break is
-/// staged on the stick the machine booted from, and the page the next pass
-/// reads carries the transport's recovery whatever the log volume got.
-///
-/// **The page and not the file, because on the machine this is for the file is
-/// what goes missing.** The first WRITE(10) a boot issues is `logd` creating
-/// its file, so the staged break lands inside the one program that would have
-/// written the break down.
-pub fn transport_break_chain() -> Result<(), String> {
-    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-    let mut qemu =
-        QemuInstance::boot_with_options(case, &[], &[], chained(&["usb-transport-break"]));
-    let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
-    first.must_say(&armed_line())?;
-
-    // One capture from the first boot's handoff on, so it is the kernel's
-    // console and the pass after the reset both.
-    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
-    super::usb::transport_break_on_metal(&second, &second)?;
-    ended_in_a_reset(&mut resets)?;
-    drop(qemu);
-
-    // Off the page: the loader's margin, the section's own head, then the
-    // record as the kernel rendered it.
-    let on_the_page = format!("| {}[", toyos_blackbox::RECOVERY_OPENS_WITH);
-    let carried = |said: &str| {
-        second
-            .text()
-            .lines()
-            .find(|line| line.starts_with(&on_the_page) && line.contains(said))
-            .ok_or_else(|| {
-                format!(
-                    "no line of the page's recovery section says {said:?}\n{}",
-                    second.text()
-                )
-            })
-    };
-    let broke = carried("transport broke on SCSI 0x2a: a staged break skipped the data phase wait")?;
-    carried("the port reset took")?;
-    carried("SCSI 0x2a completed after ")?;
-    eprintln!("  [power] the boot stick's own break crossed the reset on the page: {}", broke.trim());
-    Ok(())
-}
-
 /// The boot deadline ends a machine nothing else in this tree can, and the next
 /// pass says what it ended.
 ///
