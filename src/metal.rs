@@ -2665,8 +2665,10 @@ mod tests {
     }
 
     /// **A port that accepts is not a machine that came back**, and a machine
-    /// going down is its port closing. Staged through [`port_accepts`] on a
-    /// listener of this host's own, which accepts and never speaks `ssh`.
+    /// going down is its port refusing. Staged through [`port_accepts`] on a
+    /// listener of this host's own, which accepts and never speaks `ssh`, and on
+    /// port 0, which nothing listens on: a port the listener let go of can be
+    /// another socket's by the time it is dialled.
     #[test]
     fn coming_back_is_ssh_answering_and_not_its_port() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
@@ -2682,8 +2684,8 @@ mod tests {
         assert_eq!(wait_on(1, "come back", true, accepts, || true), Ok(0));
         let up = wait_on(1, "go down", false, accepts, || unreachable!("`ssh` asked of one going down"));
         assert_eq!(up, Err(Refusal::Silent { what: "go down", secs: 1 }));
-        drop(listener);
-        assert_eq!(wait_on(1, "go down", false, accepts, || unreachable!()), Ok(0));
+        let refuses = || port_accepts("127.0.0.1", 0);
+        assert_eq!(wait_on(1, "go down", false, refuses, || unreachable!()), Ok(0));
     }
 
     /// **An image with no bound on its own boot never reaches the stick.**
