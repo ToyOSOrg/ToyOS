@@ -7,7 +7,7 @@ opened: 2026-09-26
 # logd still says a budget refusal leaves the device untouched
 
 A write refused on `block::OPERATION` may already be on the medium
-(`IoError::BudgetExpired`'s doc, `toyos-fat32/src/repair.rs`).
+(`toyos-fat32/src/repair.rs`).
 `userland/logd/src/policy.rs` states the opposite twice: its module doc says a
 budget that expired means "nothing was issued, the device is untouched", and
 the comment on `fate`'s `(Step::Flush, WouldBlock)` arm says the same.

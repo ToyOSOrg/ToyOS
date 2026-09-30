@@ -448,3 +448,20 @@ fn handshake(
         _ => Err(Error::Protocol),
     }
 }
+
+/// Every partition the service `names` calls `service` serves: what a client
+/// that finds its partition by type asks before it opens one.
+pub fn list(names: &Namespace, service: &str) -> Result<Vec<wire::Listed>, Error> {
+    let conn = names.open(service).map_err(Error::Kernel)?;
+    conn.signal(wire::MSG_LIST).map_err(|_| Error::Ended)?;
+    let header = conn.recv_header().map_err(|_| Error::Ended)?;
+    let mut payload = vec![0u8; header.len() as usize];
+    let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
+    match header.msg_type {
+        wire::MSG_LISTED => {
+            wire::Listed::decode_all(&payload[..len]).map(Iterator::collect).ok_or(Error::Protocol)
+        }
+        wire::MSG_REFUSED => Err(Refusal::decode(&payload[..len]).map_or(Error::Protocol, Error::Refused)),
+        _ => Err(Error::Protocol),
+    }
+}

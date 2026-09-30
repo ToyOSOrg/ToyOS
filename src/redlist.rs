@@ -30,10 +30,6 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
-    Disabled {
-        test: "ftruncate_flush_race",
-        issue: "issues/build/ftruncate-flush-race-reds-intermittently-and-nothing-says-why.md",
-    },
     Disabled { test: "handle_basic", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
         test: "handle_kill_policy",
@@ -56,10 +52,6 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "partition_claim_departure",
         issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
-    },
-    Disabled {
-        test: "quiesce_leaves_the_volume_whole",
-        issue: "issues/build/quiesce-leaves-the-volume-whole-needs-its-flush-to-close-inside-the-stops-budget.md",
     },
     Disabled {
         test: "quiesce_stops_the_machine",

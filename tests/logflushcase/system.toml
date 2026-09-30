@@ -4,7 +4,7 @@
 # and init's resume reaches `logd` with the flush unrun. The last job stops the
 # machine for real. `log_resume_meets_its_flush` reads the verdict off `/log`.
 [boot]
-start = ["logd", "test-runner"]
+start = ["logd", "blockd", "fsd", "test-runner"]
 
 [programs.logd]
 service = true
@@ -20,3 +20,20 @@ args = ["test_rs_log_refused_stop", "reboot"]
 
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]
