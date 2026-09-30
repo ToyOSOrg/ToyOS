@@ -2,10 +2,11 @@
 //! data flows: an ARP or IGMP frame is built when it leaves, from the state of that moment, and
 //! the timer it feeds starts then. The FIFO holds at most CONTROL_QUEUE frames, at most
 //! ECHO_REPLIES of them echo replies; one of [ip]'s own frames past either is dropped and
-//! counted, and its producer moves on as if it had left. A datagram resolution releases into a
-//! full FIFO is not dropped: it stays at the head of its neighbour's pending queue, within
-//! PENDING_TOTAL, and enters as room appears, before any frame queued after it (§5.4). It is its
-//! neighbour's until it has left.
+//! counted, and its producer moves on as if it had left. Three kinds are never dropped: a
+//! released datagram's turn, an ACD probe and an ACD announcement. One that finds the FIFO full
+//! waits behind it and enters as room appears, ahead of any frame queued later (§5.4, RFC 5227
+//! §2.1). A turn holds no datagram: it names the entry whose queue does, and a turn whose entry
+//! was evicted leaves nothing and spends no credit.
 //!
 //! Every datagram is atomic: DF set, identification 0 (`toyos-net-wire`'s one IPv4 form).
 
@@ -39,13 +40,13 @@ pub(crate) enum FrameKind {
 
 #[derive(Debug)]
 pub(crate) enum Item {
-    Request { iface: IfIndex, target: Ipv4Addr, to: Option<MacAddr> },
+    Request { iface: IfIndex, target: Ipv4Addr },
     Reply { iface: IfIndex, to: MacAddr, target: Ipv4Addr, ours: Ipv4Addr },
     Probe { iface: IfIndex, addr: Ipv4Addr },
     Announce { iface: IfIndex, addr: Ipv4Addr, owed: bool },
     Igmp { iface: IfIndex, report: igmp::Report },
     Frame { iface: IfIndex, frame: Vec<u8>, kind: FrameKind },
-    Released(Released),
+    Turn(Turn),
 }
 
 impl Item {
@@ -57,32 +58,26 @@ impl Item {
             | Self::Announce { iface, .. }
             | Self::Igmp { iface, .. }
             | Self::Frame { iface, .. }
-            | Self::Released(Released { iface, .. }) => *iface,
+            | Self::Turn(Turn { iface, .. }) => *iface,
         }
     }
 }
 
-/// A datagram resolution released: still its neighbour's, whose pending queue holds it until it
-/// has left (§6.5).
+/// A released datagram's place in the FIFO: the oldest of entry `id`'s released datagrams leaves
+/// when it comes (§6.5).
 #[derive(Debug)]
-pub(crate) struct Released {
-    iface: IfIndex,
-    next_hop: Ipv4Addr,
-    held: Held,
-}
-
-impl Released {
-    fn toward(&self, iface: IfIndex, next_hop: Ipv4Addr) -> bool {
-        self.iface == iface && self.next_hop == next_hop
-    }
+pub(crate) struct Turn {
+    pub iface: IfIndex,
+    pub next_hop: Ipv4Addr,
+    pub id: u64,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct Control {
     items: VecDeque<Item>,
     echoes: usize,
-    /// Released datagrams that found `items` full, in release order: empty whenever it has room.
-    waiting: VecDeque<Released>,
+    /// What may not be dropped and found `items` full, in order: empty whenever it has room.
+    waiting: VecDeque<Item>,
 }
 
 impl Control {
@@ -108,31 +103,13 @@ impl Control {
         true
     }
 
-    /// A datagram resolution released toward `next_hop`, in the order it was held.
-    pub fn release(&mut self, iface: IfIndex, next_hop: Ipv4Addr, held: Held) {
-        let released = Released { iface, next_hop, held };
+    /// Queues a turn, a probe or an announcement, which waits for room rather than being dropped.
+    pub fn hold(&mut self, item: Item) {
         if self.full() {
-            self.waiting.push_back(released);
+            self.waiting.push_back(item);
         } else {
-            self.items.push_back(Item::Released(released));
+            self.items.push_back(item);
         }
-    }
-
-    /// Whether datagrams released toward `next_hop` have yet to leave.
-    pub fn holds(&self, iface: IfIndex, next_hop: Ipv4Addr) -> bool {
-        self.waiting.iter().any(|r| r.toward(iface, next_hop))
-            || self.items.iter().any(|item| matches!(item, Item::Released(r) if r.toward(iface, next_hop)))
-    }
-
-    /// Hands back the datagrams released toward `next_hop` that have yet to leave: its entry is
-    /// gone.
-    pub fn take(&mut self, iface: IfIndex, next_hop: Ipv4Addr) -> Vec<Held> {
-        let (items, kept): (Vec<Item>, Vec<Item>) = self.items.drain(..).partition(|item| matches!(item, Item::Released(r) if r.toward(iface, next_hop)));
-        self.items = kept.into();
-        let (waiting, kept): (Vec<Released>, Vec<Released>) = self.waiting.drain(..).partition(|r| r.toward(iface, next_hop));
-        self.waiting = kept.into();
-        self.refill();
-        Self::datagrams(items).chain(waiting.into_iter().map(|r| r.held)).collect()
     }
 
     fn pop(&mut self) -> Option<Item> {
@@ -148,33 +125,23 @@ impl Control {
         }
     }
 
-    /// Room goes to the oldest released datagram waiting for it.
+    /// Room goes to the oldest item waiting for it.
     fn refill(&mut self) {
         while !self.full() {
-            let Some(released) = self.waiting.pop_front() else { return };
-            self.items.push_back(Item::Released(released));
+            let Some(item) = self.waiting.pop_front() else { return };
+            self.items.push_back(item);
         }
     }
 
-    fn datagrams(items: Vec<Item>) -> impl Iterator<Item = Held> {
-        items.into_iter().filter_map(|item| match item {
-            Item::Released(r) => Some(r.held),
-            _ => None,
-        })
-    }
-
-    /// Drops everything waiting for `iface`, whose link went down, and hands back the datagrams
-    /// resolution had released.
-    pub fn purge(&mut self, iface: IfIndex) -> Vec<Held> {
+    /// Drops everything waiting for `iface`, whose link went down.
+    pub fn purge(&mut self, iface: IfIndex) {
         let (gone, kept): (Vec<Item>, Vec<Item>) = self.items.drain(..).partition(|item| item.iface() == iface);
         self.items = kept.into();
         for item in &gone {
             self.forget(item);
         }
-        let (waiting, kept): (Vec<Released>, Vec<Released>) = self.waiting.drain(..).partition(|r| r.iface == iface);
-        self.waiting = kept.into();
+        self.waiting.retain(|item| item.iface() != iface);
         self.refill();
-        Self::datagrams(gone).chain(waiting.into_iter().map(|r| r.held)).collect()
     }
 }
 
@@ -240,11 +207,11 @@ impl Ip {
             }
         };
         match item {
-            Item::Request { target, to, .. } => {
-                let Some(n) = i.neighbours.get(&target).filter(|n| n.queued) else { return false };
-                let sender = n.hint.filter(|h| i.is_usable(*h)).or_else(|| i.source_for(target));
-                nud::request_left(i, &mut cx, target);
-                let left = sender.is_some_and(|s| arp(&Arp::request(mac, s, target), to.unwrap_or(MacAddr::BROADCAST)));
+            Item::Request { target, .. } => {
+                let hint = i.neighbours.get(&target).and_then(|n| n.hint);
+                let Some(to) = nud::request_leaves(i, &mut cx, target) else { return false };
+                let sender = hint.filter(|h| i.is_usable(*h)).or_else(|| i.source_for(target));
+                let left = sender.is_some_and(|s| arp(&Arp::request(mac, s, target), to));
                 if left {
                     cx.log.count(Counter::ArpRequestsSent);
                 }
@@ -291,13 +258,10 @@ impl Ip {
                 sent(&mut cx, kind);
                 true
             }
-            Item::Released(Released { next_hop, held, .. }) => {
-                i.held = i.held.saturating_sub(1);
+            Item::Turn(Turn { next_hop, id, .. }) => {
+                let Some(held) = nud::leave(i, &mut cx, next_hop, id) else { return false };
                 sink(iface, &held.frame);
                 sent(&mut cx, held.kind);
-                if !cx.control.holds(iface, next_hop) {
-                    nud::drained(i, &mut cx, next_hop);
-                }
                 true
             }
         }

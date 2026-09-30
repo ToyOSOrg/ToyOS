@@ -70,7 +70,7 @@ pub use counters::{Counter, Counters, RefusalLog};
 pub use egress::{Sent, UdpOut, FRAME};
 pub use igmp::IgmpMode;
 pub use limiter::Limiter;
-pub use nud::{Incomplete, Linked, Nud, Probing, Reachable, Unreachable};
+pub use nud::{Held, Incomplete, Linked, Nud, Pending, Probing, Reachable, Released, Unreachable};
 pub use route::{NextHop, Route, Source};
 pub use toyos_net_wire::Instant;
 
@@ -342,6 +342,7 @@ impl Ip {
             gateways: Vec::new(),
             active: None,
             neighbours: BTreeMap::new(),
+            entries: 0,
             held: 0,
             reachable,
             reachable_drawn: now,
@@ -422,22 +423,34 @@ impl Ip {
 // Each compile_fail block sits beside one that compiles, so a typo cannot pass it.
 #[cfg(doctest)]
 mod compile_fail {
-    /// NUD-28: a MAC exists only in a state that has one, and only INCOMPLETE takes datagrams into a
-    /// pending queue.
+    /// NUD-28: a MAC exists only in a state that has one; only INCOMPLETE takes datagrams into its
+    /// pending queue, and a resolved state's queue only drains.
     ///
     /// ```
-    /// use toyos_net_ip::{Linked, Nud};
-    /// fn f(n: &Nud) -> usize {
+    /// use toyos_net_ip::{Held, Linked, Nud};
+    /// fn f(n: &mut Nud, d: Held) -> Option<Held> {
     ///     match n {
-    ///         Nud::Incomplete(i) => i.queued(),
-    ///         Nud::Reachable(r) => usize::from(r.mac().0[0]),
-    ///         Nud::Stale(s) | Nud::Delay(s) => {
-    ///             let _: &Linked = s;
-    ///             2
+    ///         Nud::Incomplete(i) => {
+    ///             let _ = i.requests();
+    ///             i.pending.push(d)
     ///         }
-    ///         Nud::Probe(p) => usize::from(p.requests()),
-    ///         Nud::Unreachable(u) => usize::from(u.quiescent()),
-    ///         Nud::Failed => 0,
+    ///         Nud::Reachable(r) => {
+    ///             let _ = r.mac();
+    ///             r.released.pop()
+    ///         }
+    ///         Nud::Stale(s) | Nud::Delay(s) => {
+    ///             let s: &mut Linked = s;
+    ///             s.released.pop()
+    ///         }
+    ///         Nud::Probe(p) => {
+    ///             let _ = p.requests();
+    ///             p.released.pop()
+    ///         }
+    ///         Nud::Unreachable(u) => {
+    ///             let _ = u.quiescent();
+    ///             u.released.pop()
+    ///         }
+    ///         Nud::Failed => None,
     ///     }
     /// }
     /// ```
@@ -453,23 +466,23 @@ mod compile_fail {
     /// ```
     ///
     /// ```compile_fail
-    /// use toyos_net_ip::Nud;
-    /// fn f(n: &Nud) { if let Nud::Reachable(r) = n { let _ = r.queued(); } }
+    /// use toyos_net_ip::{Held, Nud};
+    /// fn f(n: &mut Nud, d: Held) { if let Nud::Reachable(r) = n { r.released.push(d); } }
     /// ```
     ///
     /// ```compile_fail
-    /// use toyos_net_ip::Nud;
-    /// fn f(n: &Nud) { if let Nud::Stale(s) = n { let _ = s.queued(); } }
+    /// use toyos_net_ip::{Held, Nud};
+    /// fn f(n: &mut Nud, d: Held) { if let Nud::Stale(s) = n { s.released.push(d); } }
     /// ```
     ///
     /// ```compile_fail
-    /// use toyos_net_ip::Nud;
-    /// fn f(n: &Nud) { if let Nud::Probe(p) = n { let _ = p.queued(); } }
+    /// use toyos_net_ip::{Held, Nud};
+    /// fn f(n: &mut Nud, d: Held) { if let Nud::Probe(p) = n { p.released.push(d); } }
     /// ```
     ///
     /// ```compile_fail
-    /// use toyos_net_ip::Nud;
-    /// fn f(n: &Nud) { if let Nud::Unreachable(u) = n { let _ = u.queued(); } }
+    /// use toyos_net_ip::{Held, Nud};
+    /// fn f(n: &mut Nud, d: Held) { if let Nud::Unreachable(u) = n { u.released.push(d); } }
     /// ```
     #[allow(non_camel_case_types)]
     pub struct s_ip_nud_028_a_state_holds_only_its_own_fields;

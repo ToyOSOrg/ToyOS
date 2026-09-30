@@ -6,7 +6,7 @@ mod common;
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_ip::{limits, Cast, Counter, Delivery, MTU};
+use toyos_net_ip::{limits, Cast, Counter, Delivery, Nud, MTU};
 use toyos_net_wire::ethernet::MacAddr;
 use toyos_net_wire::ipv4::{Ecn, Ttl};
 
@@ -542,17 +542,20 @@ fn s_ip_out_008_released_datagrams_wait_at_the_head_of_their_queue() {
         let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n));
     }
     h.frame(&hex(V_ARP_REPLY));
-    assert!(h.is_reachable(B));
+    assert!(matches!(h.state(B), Some(Nud::Reachable(r)) if r.released.queued() == 2), "B REACHABLE with only 1 and 2 queued");
     let dropped = [Counter::IpControlQueueFull, Counter::NbPendingOverflow, Counter::NbPendingDropped, Counter::NbPendingEvicted];
     assert!(dropped.iter().all(|&c| h.count(c) == 0), "nothing dropped");
 
-    let first = h.out_with(limits::CONTROL_QUEUE + 1);
-    assert!(first[..limits::CONTROL_QUEUE].iter().all(|o| o.arp().is_some()), "the 64 queued frames first");
-    let mut data: Vec<Vec<u8>> = first[limits::CONTROL_QUEUE..].iter().map(|o| o.ip().unwrap().payload()[8..].to_vec()).collect();
+    // B's request, queued before the reply, never leaves: nothing is sent to maintain REACHABLE.
+    let first = h.out_with(limits::CONTROL_QUEUE);
+    let others = limits::CONTROL_QUEUE - 1;
+    assert!(first[..others].iter().all(|o| o.arp().is_some() && !o.requests(B)), "the other 63 queued frames first");
+    let mut data: Vec<Vec<u8>> = first[others..].iter().map(|o| o.ip().unwrap().payload()[8..].to_vec()).collect();
     assert_eq!(data, [b"1"]);
     // The next opportunity: [ip]'s frames, then datagram 3 from the transport.
     data.extend(h.out_with(1).iter().map(|o| o.ip().unwrap().payload()[8..].to_vec()));
     data.push(ip_of(&h.send(A, B, 5001, 5001, b"3").unwrap().unwrap()).unwrap().payload()[8..].to_vec());
     assert_eq!(data, [b"1", b"2", b"3"]);
+    assert!(h.out().is_empty());
     assert!(dropped.iter().all(|&c| h.count(c) == 0));
 }

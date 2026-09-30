@@ -1,5 +1,4 @@
-//! IPv4 address classes and prefixes (RFC 1122 §3.2.1.3, RFC 6890, RFC 4632, RFC 3021): the one
-//! place a net crate reads them from.
+//! IPv4 address classes and prefixes (RFC 1122 §3.2.1.3, RFC 6890, RFC 4632, RFC 3021).
 
 use core::net::Ipv4Addr;
 

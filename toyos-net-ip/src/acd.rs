@@ -57,12 +57,12 @@ pub(crate) fn start(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     cx.timers.arm(timer(cx, addr), at);
 }
 
+/// Queues an announcement of `addr`: one it owes, or a defence, of which one waits at a time.
 fn announce(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, owed: bool) {
-    if let Some(Address { phase: Phase::Usable { queued, .. }, .. }) = record(i, addr).filter(|_| owed) {
-        *queued = true;
-    }
-    if !cx.control.push(Item::Announce { iface: cx.iface, addr, owed }, cx.log) {
-        announced(i, cx, addr, owed);
+    let Some(Address { phase: Phase::Usable { queued, defending, .. }, .. }) = record(i, addr) else { return };
+    let waits = if owed { queued } else { defending };
+    if !core::mem::replace(waits, true) {
+        cx.control.hold(Item::Announce { iface: cx.iface, addr, owed });
     }
 }
 
@@ -73,12 +73,10 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     match a.phase {
         Phase::Tentative { probes, queued: false } if probes < PROBE_NUM => {
             a.phase = Phase::Tentative { probes, queued: true };
-            if !cx.control.push(Item::Probe { iface: cx.iface, addr }, cx.log) {
-                probed(i, cx, addr);
-            }
+            cx.control.hold(Item::Probe { iface: cx.iface, addr });
         }
         Phase::Tentative { probes, .. } if probes >= PROBE_NUM => {
-            a.phase = Phase::Usable { assigned: false, owed: ANNOUNCE_NUM, queued: false };
+            a.phase = Phase::Usable { assigned: false, owed: ANNOUNCE_NUM, queued: false, defending: false };
             announce(i, cx, addr, true);
             cx.log.count(Counter::AcdVerified);
             cx.log.event(Event::Verified { iface: cx.iface, addr });
@@ -93,7 +91,7 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     }
 }
 
-/// A probe for `addr` left, or was lost.
+/// A probe for `addr` left.
 pub(crate) fn probed(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     let now = cx.now;
     let Some(Address { phase: Phase::Tentative { probes, queued: queued @ true }, .. }) = record(i, addr) else { return };
@@ -106,11 +104,17 @@ pub(crate) fn probed(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     cx.timers.arm(timer(cx, addr), now.after(wait));
 }
 
-/// An announcement of `addr` left, or was lost; a defence owes nothing.
+/// An announcement of `addr` left; a defence owes nothing.
 pub(crate) fn announced(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, owed: bool) {
     let now = cx.now;
-    let Some(Address { phase: Phase::Usable { assigned, owed: left, queued: queued @ true }, .. }) = record(i, addr).filter(|_| owed) else { return };
-    *queued = false;
+    let Some(Address { phase: Phase::Usable { assigned, owed: left, queued, defending }, .. }) = record(i, addr) else { return };
+    if !owed {
+        *defending = false;
+        return;
+    }
+    if !core::mem::replace(queued, false) {
+        return;
+    }
     *left = left.saturating_sub(1);
     if *left > 0 {
         cx.timers.arm(timer(cx, addr), now.after(ANNOUNCE_INTERVAL));
@@ -174,9 +178,10 @@ pub(crate) fn link_down(i: &mut Interface, cx: &mut Cx<'_>) {
     let iface = cx.iface;
     for a in &mut i.addresses {
         cx.timers.cancel(Timer::Acd(iface, a.cidr.addr()));
-        if let Phase::Usable { owed, queued, .. } = &mut a.phase {
+        if let Phase::Usable { owed, queued, defending, .. } = &mut a.phase {
             *owed = 0;
             *queued = false;
+            *defending = false;
         }
     }
     let tentative = i.addresses.iter().filter(|a| !a.usable()).map(|a| a.cidr.addr());

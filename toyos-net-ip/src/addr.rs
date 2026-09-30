@@ -16,8 +16,9 @@ pub enum AddrState {
 pub(crate) enum Phase {
     /// Probing: probes gone so far, and whether one waits to leave.
     Tentative { probes: u8, queued: bool },
-    /// Usable, with the announcements still owed and whether one waits to leave.
-    Usable { assigned: bool, owed: u8, queued: bool },
+    /// Usable, with the announcements still owed, whether one waits to leave, and whether a
+    /// defence waits to leave.
+    Usable { assigned: bool, owed: u8, queued: bool, defending: bool },
 }
 
 #[derive(Clone, Copy, Debug)]

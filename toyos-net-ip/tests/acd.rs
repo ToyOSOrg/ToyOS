@@ -6,8 +6,8 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::*;
-use toyos_net_ip::limits::acd::{ANNOUNCE_INTERVAL, ANNOUNCE_WAIT, PROBE_MAX, PROBE_MIN, PROBE_WAIT};
-use toyos_net_ip::{AddrState, Counter, Event, Instant, Peer, Source};
+use toyos_net_ip::limits::acd::{ANNOUNCE_WAIT, PROBE_MAX, PROBE_MIN, PROBE_WAIT};
+use toyos_net_ip::{limits, AddrState, Counter, Event, Instant, Peer, Source};
 use toyos_net_wire::ethernet::MacAddr;
 
 fn ip4(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
@@ -42,6 +42,9 @@ fn first_probe(h: &mut H) -> Instant {
 
 #[test]
 fn s_ip_acd_001_the_ruled_schedule() {
+    // IP-D1: RFC 5227's 1 s and 2 s times 200/7,000, in whole nanoseconds.
+    let (one, two) = (Duration::from_nanos(28_571_428), Duration::from_nanos(57_142_857));
+    assert_eq!([PROBE_WAIT, PROBE_MIN, PROBE_MAX, ANNOUNCE_WAIT], [one, one, two, two]);
     let mut h = probing();
     let t0 = h.clock();
     let out = run_exact(&mut h, t0.after(Duration::from_secs(5)));
@@ -49,14 +52,14 @@ fn s_ip_acd_001_the_ruled_schedule() {
     let announcements: Vec<Instant> = out.iter().filter(|(_, f)| *f == hex(V_ARP_ANNOUNCE)).map(|(at, _)| *at).collect();
     assert_eq!(probes.len(), 3);
     assert_eq!(announcements.len(), 2);
-    assert!(probes[0].since(t0) <= PROBE_WAIT);
+    assert!(probes[0].since(t0) <= one);
     for pair in probes.windows(2) {
-        assert!((PROBE_MIN..=PROBE_MAX).contains(&pair[1].since(pair[0])));
+        assert!((one..=two).contains(&pair[1].since(pair[0])));
     }
-    assert_eq!(announcements[0].since(probes[2]), ANNOUNCE_WAIT);
-    assert_eq!(announcements[1].since(announcements[0]), ANNOUNCE_INTERVAL);
+    assert_eq!(announcements[0].since(probes[2]), two);
+    assert_eq!(announcements[1].since(announcements[0]), Duration::from_secs(2));
     let usable = announcements[0].since(t0);
-    assert!(usable >= PROBE_MIN * 2 + ANNOUNCE_WAIT && usable <= Duration::from_millis(200), "{usable:?}");
+    assert!(usable >= Duration::from_nanos(114_285_713) && usable <= Duration::from_millis(200), "{usable:?}");
     assert!(h.events.contains(&Event::Verified { iface: h.if0, addr: A }));
     assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Assigned));
 }
@@ -263,4 +266,57 @@ fn s_ip_acd_017_detection_starts_at_the_first_announcement() {
     h.frame(&hex(V_ARP_CONFLICT_B));
     assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Announcing));
     assert_eq!(h.count(Counter::AcdDefended), 1);
+}
+
+#[test]
+fn s_ip_acd_018_a_full_control_queue_holds_probes_and_announcements() {
+    // if1 fills the control queue every interface shares; then if0 probes for A.
+    let mut h = H::raw();
+    let if1 = h.add_if1();
+    h.assign(if1, ip4(198, 51, 100, 1), 24, 0);
+    h.settle();
+    for n in 0..limits::CONTROL_QUEUE as u8 {
+        let m = MacAddr([2, 1, 0, 0, 0, n]);
+        let request = arp_packet(1, m, ip4(198, 51, 100, 100 + n), MacAddr::ZERO, ip4(198, 51, 100, 1));
+        let _ = h.ip.receive(h.clock(), if1, &eth(MacAddr::BROADCAST, m, 0x0806, &request));
+    }
+    h.ip.add_address(h.clock(), h.if0, A, 24).unwrap();
+    let t0 = h.clock();
+    let at = t0.after(Duration::from_secs(1));
+    while let Some(d) = h.ip.next_deadline().filter(|d| *d <= at) {
+        h.ip.fire(d);
+    }
+    h.collect();
+    assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Tentative), "never verified without its probes on the wire");
+    assert!(!h.events.iter().any(|e| matches!(e, Event::Verified { .. })));
+    assert_eq!(h.count(Counter::IpControlQueueFull), 0, "the probe waits; it is not dropped");
+
+    let mut out = Vec::new();
+    h.ip.transmit(at, limits::CONTROL_QUEUE, |iface, f| out.push((iface, f.to_vec())));
+    assert_eq!(out.len(), limits::CONTROL_QUEUE);
+    assert!(out.iter().all(|(iface, _)| *iface == if1), "the replies queued first");
+    out.clear();
+    h.ip.transmit(at, 1, |iface, f| out.push((iface, f.to_vec())));
+    assert_eq!(out, [(h.if0, hex(V_ARP_PROBE))]);
+    let rest: Vec<Vec<u8>> = run_exact(&mut h, at.after(Duration::from_secs(5))).into_iter().map(|(_, f)| f).collect();
+    assert_eq!(rest, [hex(V_ARP_PROBE), hex(V_ARP_PROBE), hex(V_ARP_ANNOUNCE), hex(V_ARP_ANNOUNCE)]);
+    assert!(h.events.contains(&Event::Verified { iface: h.if0, addr: A }));
+    assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Assigned));
+
+    // A defence due while the queue is full waits too, one at a time.
+    let mut h = H::fixture_i();
+    for n in 0..limits::CONTROL_QUEUE as u8 {
+        let m = MacAddr([2, 1, 0, 0, 0, n]);
+        h.frame(&eth(MacAddr::BROADCAST, m, 0x0806, &arp_packet(1, m, ip4(192, 0, 2, 100 + n), MacAddr::ZERO, A)));
+    }
+    h.frame(&hex(V_ARP_CONFLICT_B));
+    h.at(10_001);
+    h.frame(&hex(V_ARP_CONFLICT_B));
+    assert_eq!(h.count(Counter::AcdDefended), 2);
+    assert_eq!(h.count(Counter::IpControlQueueFull), 0);
+    let out = h.out();
+    assert_eq!(out.len(), limits::CONTROL_QUEUE + 1);
+    assert!(out[..limits::CONTROL_QUEUE].iter().all(|o| o.arp().is_some_and(|a| a.operation == toyos_net_wire::arp::Operation::Reply)));
+    assert_eq!(out[limits::CONTROL_QUEUE].frame, hex(V_ARP_ANNOUNCE));
+    assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Assigned));
 }

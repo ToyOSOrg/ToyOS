@@ -220,7 +220,6 @@ pub enum Error {
     Closing,
     WouldBlock,
     AddrInUse,
-    /// The remote is not a unicast address, or names the local endpoint.
     InvalidRemote,
     Failed(Failure),
 }

@@ -23,6 +23,8 @@ pub(crate) struct Interface {
     pub gateways: Vec<Ipv4Addr>,
     pub active: Option<Ipv4Addr>,
     pub neighbours: BTreeMap<Ipv4Addr, nud::Neighbour>,
+    /// Neighbour entries created so far: the next one's id.
+    pub entries: u64,
     /// Datagrams waiting in [ip] for this interface: held for resolution, or released and not
     /// yet left.
     pub held: usize,
