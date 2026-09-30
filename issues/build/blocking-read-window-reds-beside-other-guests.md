@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-09-26
 ---
 
@@ -43,3 +43,7 @@ wake does.
 progress over the window, not only the count at its end), and a cause for these
 runs — a lost wake, or a 3 s budget a starved host cannot meet, and if it is
 the budget, the bound derived rather than measured.
+
+**Its test is deleted**, as a flaky test is: `dc62efca4` took
+`blocking_read_window` out, QEMU and T14 rows both, with `watch-window`, the
+actuator only it armed, and `git revert dc62efca4` brings them back.

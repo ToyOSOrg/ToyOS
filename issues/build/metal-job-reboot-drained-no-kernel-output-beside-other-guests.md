@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-09-26
 ---
 
@@ -27,3 +27,6 @@ content.
 
 **Exit**: the red run's drain printed on failure, and a cause for a job boot
 that drained nothing beside other guests.
+
+**Its test is deleted**, as a flaky test is: `99ee9625d` took
+`metal_job_reboot` out, and `git revert 99ee9625d` brings it back.

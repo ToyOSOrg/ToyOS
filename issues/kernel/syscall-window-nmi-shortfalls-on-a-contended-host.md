@@ -41,4 +41,7 @@ this kernel or the dev host. Owed by whoever next runs a load sweep on this
 instrument.
 
 **Its test is deleted**: `4600f6754` took `syscall_window_nmi` out, and
-`git revert 4600f6754` brings it back. `syscall_window_nmi_controls` stays.
+`539977050` its IST-off control in `syscall_window_nmi_controls` with
+`nmi-without-ist`, the storm's hold in the syscall entry and the report the
+two read. `git revert 539977050 4600f6754` brings both back.
+`syscall_window_nmi_controls` keeps its nested arm.

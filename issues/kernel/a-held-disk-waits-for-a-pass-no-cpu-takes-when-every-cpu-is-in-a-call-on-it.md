@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: defect
 opened: 2026-09-22
 ---
@@ -73,7 +73,22 @@ that the staged break's record came less than 2 s of kernel clock after the
 record before it. That change has never run: the test's first run back is
 also that change's.
 
-**Its test is deleted**: `90ecefed2` took `usb_transport_break` out, QEMU and
-T14 arms both, and `git revert 90ecefed2` brings it back as it stood before
-#536; `git show 84471bc58:tests/common/usb.rs` holds #536's adaptation. PR #588
-re-enables it and holds this.
+**Its test is deleted, with the actuators only it armed.** `90ecefed2` took
+`usb_transport_break` out, QEMU and T14 arms both. `b5c59cbcc` took
+`usb-transport-offline`, `usb-reset-moves`, `usb-transport-break-owed`,
+`usb-transport-break-flushed`, `usb-return-silent`, `usb-slow-return`,
+`usb-serial-short`, `usb-first-wait-spent`, `usb-transport-faults` and
+`usb-port-gone`, and `9ebf080e8` took `usb-transport-break` and
+`usb-reset-break` with `log_flush_retry`, their one other arming site.
+`git revert 9ebf080e8 b5c59cbcc 90ecefed2` brings them back as they stood
+before #536, `log_flush_retry` with them; `git show 84471bc58:tests/common/usb.rs`
+holds #536's adaptation of the test.
+
+**#588 does not hold this.** It keeps the test red, rewrites
+`kernel/src/drivers/xhci/wait/msc.rs`, which these actuators reach, and adds
+`usb-reset-moves-after` and `usb-reset-moves-configured`, which only this test
+arms. Whichever of #588 and #639 lands second resolves `tests/common/usb.rs` as
+the deletion, accounts for every hunk of the other side in its merge message,
+deletes the actuators only this test arms, #588's two among them, and records
+here the commit whose tree holds #588's version of the test: the second parent
+of that merge where #588 landed first, the first where #639 did.

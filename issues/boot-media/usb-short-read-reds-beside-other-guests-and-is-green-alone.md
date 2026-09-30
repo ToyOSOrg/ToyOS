@@ -1,6 +1,6 @@
 ---
 status: open
-kind: tooling
+kind: defect
 opened: 2026-08-22
 ---
 
@@ -30,3 +30,10 @@ whether the sweep's continuation depends on timing the host can stretch.
 Not the diff it was seen from: that branch changes `syscall_window_nmi`'s
 assertions and two kernel doc headers, and touches nothing under `xhci/` or
 `usb_gate`.
+
+**Its test is deleted**, as a flaky test is: `402107ba2` took `usb_short_read`
+out with `usb-short-read`, the actuator only it armed, and `git revert
+402107ba2` brings both back.
+
+**Exit**: a cause for one short read costing the disk the rest of its sweep
+beside other guests, and the test restored and green beside them.

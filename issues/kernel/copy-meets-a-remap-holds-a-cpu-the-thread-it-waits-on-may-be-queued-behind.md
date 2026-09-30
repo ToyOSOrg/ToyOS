@@ -45,5 +45,7 @@ than with this panic. Then this file is deleted.
 
 `kernel/src/user_ptr.rs` `remap_race`, `tests/toyos-rust-tests/src/bin/copy_out_races_munmap.rs`. Nobody holds it.
 
-**Its test is deleted**: `7ea6be15d` took `user_copy_races_munmap` out, and
-`git revert 7ea6be15d` brings it back.
+**Its test and its staging are deleted**: `7ea6be15d` took
+`user_copy_races_munmap` out, and `2f366a930` `copy-meets-a-remap` with
+`remap_race`. `git revert 2f366a930 7ea6be15d` brings both back, this defect
+with them.

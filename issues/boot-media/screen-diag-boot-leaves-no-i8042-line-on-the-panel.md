@@ -23,3 +23,6 @@ The candidates that touch the idle path, the console or the log are #502
 
 **Exit**: the landing named by a build at it and at its parent, and
 `screen_diag_boot` green on a nightly.
+
+**Its test is deleted**, as a red test nobody has a fix for is: `8bf3fc24d`
+took `screen_diag_boot` out, and `git revert 8bf3fc24d` brings it back.

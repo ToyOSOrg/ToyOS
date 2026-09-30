@@ -178,3 +178,9 @@ The base run carries **zero** `usb-storage: … no answer in the data phase in
 class and not the class itself. `ftruncate_flush_race` and `fs_rename_durable`
 are new names for this entry; `main` alone produced four of the family in one
 run, which no earlier pair here had.
+
+## Deleted as flaky tests
+
+`log_flush_retry` (`9ebf080e8`), `fat_backing_revoked` (`3aad43b13`) and
+`fs_dirs_durable` (`690fa3e83`); `git revert` of each commit brings its test
+back.

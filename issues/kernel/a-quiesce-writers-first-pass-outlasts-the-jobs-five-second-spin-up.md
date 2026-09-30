@@ -76,6 +76,7 @@ unasked. That change has never run: the test's first run back is also that
 change's.
 
 **Its test is deleted**: `a5666dc92` took `quiesce_stops_the_machine` out,
-and `git revert a5666dc92` brings it back as it stood before #536;
+and `271840402` the `console-queue-at-the-stop` actuator only it armed.
+`git revert 271840402 a5666dc92` brings both back as they stood before #536;
 `git show 84471bc58` holds #536's adaptation of `tests/quiescecase/system.toml` and
 of `tests/common/power.rs`'s `quiesce_stops_the_machine`.

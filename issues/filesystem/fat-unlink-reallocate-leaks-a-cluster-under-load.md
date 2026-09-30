@@ -70,3 +70,6 @@ own alone/loaded arms are the instrument, and
 
 Found by the comment sweep on `wt/toyos-sw3`, whose diff is comments and
 whitespace only and cannot have caused it.
+
+**Its test is deleted**, as a flaky test is: `3aad43b13` took
+`fat_backing_revoked` out, and `git revert 3aad43b13` brings it back.

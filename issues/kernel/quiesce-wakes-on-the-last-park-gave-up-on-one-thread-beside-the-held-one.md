@@ -70,7 +70,8 @@ quoted above no longer reds it. That change has never run: the test's first run
 back is also that change's.
 
 **Its tests are deleted**: `6b3ce2374` took `quiesce_wakes_on_the_last_park`
-and `quiesce_wakes_on_the_last_teardown` out, and `git revert 6b3ce2374` brings
-them back as they stood before #536; `git show 84471bc58` holds #536's adaptation
-of `tests/quiescelastcase/system.toml` and of `tests/common/power.rs`'s
-`woken_by_the_held_thread`.
+and `quiesce_wakes_on_the_last_teardown` out, and `b82f45e6e` the
+`quiesce-last-teardown` actuator only the second armed. `git revert b82f45e6e
+6b3ce2374` brings both back as they stood before #536; `git show 84471bc58`
+holds #536's adaptation of `tests/quiescelastcase/system.toml` and of
+`tests/common/power.rs`'s `woken_by_the_held_thread`.
