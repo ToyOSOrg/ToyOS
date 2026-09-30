@@ -131,20 +131,22 @@ impl Control {
         }
     }
 
-    /// Drops the turns of `next_hop`'s entry on `iface`, which is gone; returns how many.
-    pub fn drop_turns(&mut self, iface: IfIndex, next_hop: Ipv4Addr) -> usize {
-        let mut dropped = 0usize;
-        let mut keep = |item: &Item| {
-            let theirs = matches!(item, Item::Turn(t) if t.iface == iface && t.next_hop == next_hop);
-            if theirs {
-                dropped = dropped.saturating_add(1);
+    /// Drops the turns and requests of `next_hop`'s entry on `iface`, which is gone; returns how
+    /// many turns.
+    pub fn purge_entry(&mut self, iface: IfIndex, next_hop: Ipv4Addr) -> usize {
+        let mut turns = 0usize;
+        let mut keep = |item: &Item| match item {
+            Item::Turn(t) if t.iface == iface && t.next_hop == next_hop => {
+                turns = turns.saturating_add(1);
+                false
             }
-            !theirs
+            Item::Request { iface: on, target } => *on != iface || *target != next_hop,
+            _ => true,
         };
         self.items.retain(&mut keep);
         self.waiting.retain(&mut keep);
         self.refill();
-        dropped
+        turns
     }
 
     /// Drops everything waiting for `iface`, whose link went down.

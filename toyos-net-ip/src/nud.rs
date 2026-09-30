@@ -300,12 +300,12 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
     true
 }
 
-/// Deletes `addr`'s entry, and with it the released datagrams its queue still holds and their
-/// turns: no turn outlives its entry.
+/// Deletes `addr`'s entry, and with it the released datagrams its queue still holds, their turns
+/// and its queued requests: no item outlives its entry.
 fn remove(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     cx.timers.cancel(timer(cx, addr));
     let Some(mut n) = i.neighbours.remove(&addr) else { return };
-    let turns = cx.control.drop_turns(cx.iface, addr);
+    let turns = cx.control.purge_entry(cx.iface, addr);
     i.held = i.held.saturating_sub(turns);
     for held in n.state.take_released().0 {
         drop_held(cx, held, Counter::NbPendingEvicted);

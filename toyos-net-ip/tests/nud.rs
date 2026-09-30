@@ -695,7 +695,8 @@ fn s_ip_nud_030_released_datagrams_keep_their_entry() {
     }
 
     // B STALE at MAC X since 1,000 holds 1 and 2, with a request queued behind them by the advice
-    // before: its idle lifetime passes, and it goes as 2 leaves.
+    // before: its idle lifetime passes, and it goes as 2 leaves, its request with it. A later entry
+    // at B's address sends its own request, behind a reply queued first.
     let mut h = H::fixture_i();
     for data in [b"1", b"2"] {
         assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
@@ -713,5 +714,10 @@ fn s_ip_nud_030_released_datagrams_keep_their_entry() {
     let out: Vec<(MacAddr, Vec<u8>)> = h.out_with(2).iter().map(|o| (o.to(), payload(o))).collect();
     assert_eq!(out, [(MAC_X, b"1".to_vec()), (MAC_X, b"2".to_vec())]);
     assert!(h.state(B).is_none(), "deleted as 2 leaves");
-    assert!(h.out().is_empty(), "the request finds no entry");
+    h.frame(&eth(MacAddr::BROADCAST, MAC_DNS, 0x0806, &arp_packet(1, MAC_DNS, DNS, MacAddr::ZERO, A)));
+    assert_eq!(h.send(A, B, 5001, 5001, b"3"), Ok(None));
+    let out = h.out();
+    assert_eq!(out.len(), 2);
+    assert!(out[0].arp().is_some_and(|a| a.target_ip == DNS), "the reply");
+    assert!(out[1].requests(B));
 }
