@@ -114,13 +114,10 @@ const ACTUATOR_TESTS: &[&str] = &[
     // kernel's address space, so without them a kernel that still made the write
     // under test answers a userland that cannot notice.
     "abuse_kernel_addr",
-    // Action 16, the live-object census per kind, and 17 and 18 for the idle
-    // stack the deferred release path runs on. A leak is two readings and a
+    // Action 16, the live-object census per kind. A leak is two readings and a
     // comparison, so on a kernel that answers `InvalidArgument` both readings
     // are the same error and the assertion passes having counted nothing.
-    "handle_basic",
-    "handle_transfer",
-    // The last two took action 16 in place of `SYS_SYSINFO`: a verdict about
+    // Both took action 16 in place of `SYS_SYSINFO`: a verdict about
     // what one killed process gave back cannot be the whole machine's free
     // memory, which every other binary in a shared boot moves under it.
     "handle_lifetime",
