@@ -489,7 +489,9 @@ A flaky test is deleted at once. Each commit below takes one out, and
 - `launcher_refusals` — `4c191469f`;
 - `screen_console_shell` — `958ada05e`;
 - `screen_console_clear` — `315526e83`, and `c7d9efeb1` retired `SYS_DEBUG`
-  action 8, which only it asked for: `git revert c7d9efeb1 315526e83`;
+  action 8, which only it asked for: `git revert c7d9efeb1 315526e83`, the
+  second stopping on `sys-debug-action-8-has-no-reader.md`, which it filed and
+  `c7d9efeb1` deleted: delete it;
 - `fs_transactional` — `8e172f7a8`;
 - `fs_dirs_durable` — `690fa3e83`;
 - `i8042_undecoded_bytes` — `c6923cd50`, with `i8042-split-burst`;
