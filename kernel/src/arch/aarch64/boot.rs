@@ -1,18 +1,21 @@
-//! The AArch64 steps of the boot: the entry the loader jumps to, and what
-//! `kernel_main` asks of this architecture at the points where one differs
-//! from another.
+//! The AArch64 steps of the boot: the entries firmware and the loader jump
+//! to, and what `kernel_main` asks of this architecture at the points where
+//! one differs from another.
 //!
-//! **The entry.** The loader leaves the CPU as firmware ran it — at EL2 or
-//! EL1, on firmware's identity tables — cleans the kernel image and its own
+//! **The entries.** The loader leaves the boot CPU as firmware ran it — at EL2
+//! or EL1, on firmware's identity tables — cleans the kernel image and its own
 //! tables to the point of coherency, and jumps to [`_start`]'s physical
-//! address with `x0 = &KernelArgs`. `_start` writes the
+//! address with `x0 = &KernelArgs`. PSCI starts every other CPU at
+//! [`ap_start`]'s physical address, MMU off, at the level firmware gives an
+//! operating system, with `x0` its [`ApStart`]'s physical address. Each names
+//! a root table and branches to [`apply_declaration`], which writes the
 //! [`control_regs`](super::control_regs) declaration whole: at EL2 it writes
 //! `HCR_EL2` first, halts in a named refusal unless it reads back as declared,
-//! then programs EL1's registers with the MMU already on and drops with `ERET`; at EL1 it
-//! turns the MMU off first, so no translation register changes under a live
-//! walk. Either way it arrives at the kernel's link address in the view at
-//! `PHYS_OFFSET`, on the kernel's own stack, with the vectors installed, and
-//! calls `kernel_main`.
+//! then programs EL1's registers with the MMU already on and drops with
+//! `ERET`; at EL1 it turns the MMU off first, so no translation register
+//! changes under a live walk. Either way the entry resumes at its link address
+//! in the view at `PHYS_OFFSET`, installs the vectors on its own stack, and
+//! calls `kernel_main` or `smp::ap_entry`.
 
 use core::mem::offset_of;
 
@@ -20,6 +23,7 @@ use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_acpi::MadtEntry;
 
 use super::control_regs as regs;
+use super::smp::ApStart;
 use crate::drivers::acpi::direct_phys;
 use crate::log;
 use crate::mm::Region;
@@ -39,12 +43,80 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "add x20, x20, x1",
         "ldr x1, [x19, #{stack_size}]",
         "add x20, x20, x1",
-        // x2 = TCR_EL1 whole, x3 = the loader's L0 table, x4 = MAIR_EL1.
+        "ldr x3, [x19, #{root}]",
+        "ldr x22, =1f",
+        "b {declare}",
+        "1:",
+        "ldr x1, ={phys_offset}",
+        "add x20, x20, x1",
+        "mov sp, x20",
+        "add x19, x19, x1",
+        "adrp x1, {entry_el}",
+        "str x21, [x1, :lo12:{entry_el}]",
+        "bl {install}",
+        "mov x0, x19",
+        "mov x29, xzr",
+        "mov x30, xzr",
+        "bl {kernel_main}",
+        kernel_memory = const offset_of!(KernelArgs, kernel_memory_addr),
+        stack_offset = const offset_of!(KernelArgs, kernel_stack_addr),
+        stack_size = const offset_of!(KernelArgs, kernel_stack_size),
+        root = const offset_of!(KernelArgs, boot_pml4_addr),
+        declare = sym apply_declaration,
+        phys_offset = const crate::PHYS_OFFSET,
+        entry_el = sym regs::ENTRY_EL,
+        install = sym super::trap::install,
+        kernel_main = sym crate::kernel_main,
+    );
+}
+
+/// Where PSCI `CPU_ON` starts every other CPU, at its physical address with
+/// its MMU off and `x0` the physical address of its [`ApStart`].
+/// # Safety
+/// Only firmware may enter this, as `super::smp::start` asked it to.
+#[unsafe(naked)]
+pub(super) unsafe extern "C" fn ap_start() -> ! {
+    core::arch::naked_asm!(
+        "mov x19, x0",
+        "ldr x20, [x19, #{stack_top}]",
+        "ldr x3, [x19, #{root}]",
+        "ldr x22, =1f",
+        "b {declare}",
+        "1:",
+        "mov sp, x20",
+        "ldr x1, ={phys_offset}",
+        "add x19, x19, x1",
+        "bl {install}",
+        "mov x0, x19",
+        "mov x1, x21",
+        "mov x29, xzr",
+        "mov x30, xzr",
+        "bl {ap_entry}",
+        stack_top = const offset_of!(ApStart, stack_top),
+        root = const offset_of!(ApStart, root),
+        declare = sym apply_declaration,
+        phys_offset = const crate::PHYS_OFFSET,
+        install = sym super::trap::install,
+        ap_entry = sym super::smp::ap_entry,
+    );
+}
+
+/// The declaration written on this CPU and its MMU turned on under the root
+/// in `x3`, whichever level it was entered at; then a branch to the link
+/// address in `x22` at EL1 on `SP_EL1`, with `x21` the level entered at.
+/// Keeps `x19`, `x20` and `x22`. Entered by a branch from an entry running at
+/// its physical address, and never returns.
+/// # Safety
+/// Only [`_start`] and [`ap_start`] branch here, with `x3` a root that maps the
+/// kernel image at both its physical and its link address.
+#[unsafe(naked)]
+unsafe extern "C" fn apply_declaration() -> ! {
+    core::arch::naked_asm!(
+        // x2 = TCR_EL1 whole, x4 = MAIR_EL1, x5 = SCTLR_EL1.
         "ldr x2, ={tcr}",
         "mrs x1, id_aa64mmfr0_el1",
         "and x1, x1, #0xf",
         "orr x2, x2, x1, lsl #{ips}",
-        "ldr x3, [x19, #{root}]",
         "ldr x4, ={mair}",
         "ldr x5, ={sctlr}",
         "mrs x21, CurrentEL",
@@ -70,8 +142,7 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "isb",
         "msr sctlr_el1, x5",
         "isb",
-        "ldr x1, =3f",
-        "br x1",
+        "br x22",
         // EL2: `HCR_EL2` first, since with `E2H` set every `_el1` name
         // below is an EL2 register; refused unless it reads back as declared.
         // Then EL1's registers with the MMU on, EL2's others, and the drop.
@@ -83,7 +154,7 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "cmp x6, x1",
         "b.ne {refuse_hcr}",
         // `ICC_SRE_EL2`, whose `Enable` lets EL1 write its own `ICC_SRE_EL1`
-        // (`super::irqchip::init`). Skipped where `ID_AA64PFR0_EL1.GIC` names
+        // (`super::irqchip::init_cpu`). Skipped where `ID_AA64PFR0_EL1.GIC` names
         // no system-register interface: there the write is an undefined
         // instruction under firmware's vectors and ends the boot silently,
         // while EL1's own access fails under this kernel's, which report it.
@@ -112,31 +183,13 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "dsb nsh",
         "mov x1, #{spsr}",
         "msr spsr_el2, x1",
-        "ldr x1, =3f",
-        "msr elr_el2, x1",
+        "msr elr_el2, x22",
         "isb",
         "eret",
-        // At the link address, EL1, MMU on.
-        "3:",
-        "ldr x1, ={phys_offset}",
-        "add x20, x20, x1",
-        "mov sp, x20",
-        "add x19, x19, x1",
-        "adrp x1, {entry_el}",
-        "str x21, [x1, :lo12:{entry_el}]",
-        "bl {install}",
-        "mov x0, x19",
-        "mov x29, xzr",
-        "mov x30, xzr",
-        "bl {kernel_main}",
         // EL3, or anything else: nothing here may run there.
         "9:",
         "wfe",
         "b 9b",
-        kernel_memory = const offset_of!(KernelArgs, kernel_memory_addr),
-        stack_offset = const offset_of!(KernelArgs, kernel_stack_addr),
-        stack_size = const offset_of!(KernelArgs, kernel_stack_size),
-        root = const offset_of!(KernelArgs, boot_pml4_addr),
         tcr = const regs::TCR,
         ips = const regs::TCR_IPS_SHIFT,
         mair = const regs::MAIR,
@@ -150,10 +203,6 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         cntkctl = const regs::CNTKCTL,
         icc_sre_el2 = const regs::ICC_SRE_EL2,
         spsr = const regs::SPSR_EL2_TO_EL1,
-        phys_offset = const crate::PHYS_OFFSET,
-        entry_el = sym regs::ENTRY_EL,
-        install = sym super::trap::install,
-        kernel_main = sym crate::kernel_main,
     );
 }
 
@@ -183,7 +232,7 @@ pub fn before_panel() {}
 /// and what this boot found — the memory map and the tables the rest of the
 /// port reads.
 pub fn after_console(args: &KernelArgs, maps: &[MemoryMapEntry]) {
-    regs::check();
+    regs::check(regs::ENTRY_EL.load(core::sync::atomic::Ordering::Relaxed));
     for entry in maps {
         log!("memory: {:#014x}..{:#014x} uefi type {}", entry.start, entry.end, entry.uefi_type);
     }
@@ -259,17 +308,20 @@ pub fn reserved() -> Region {
     Region { start: 0, end: 0 }
 }
 
-/// What the boot learns bringing interrupts up and hands later steps: nothing
-/// yet, since the other CPUs the MADT names are the port's stage 5's to read.
-pub struct Platform;
+/// What the boot learns bringing interrupts up and hands later steps: the
+/// other CPUs the MADT names, and how to start them.
+pub struct Platform {
+    gic: super::irqchip::Gic,
+    psci: Option<super::psci::Conduit>,
+}
 
 /// Interrupt delivery: this CPU's per-CPU block, the GIC and the timer's
 /// interrupt, and interrupts unmasked. The syscall gate is the vectors' own.
 pub fn interrupts(rsdp_addr: u64) -> Platform {
     super::percpu::init_bsp();
-    super::irqchip::init(rsdp_addr);
+    let gic = super::irqchip::init(rsdp_addr);
     super::cpu::enable_interrupts();
-    Platform
+    Platform { gic, psci: super::psci::init(rsdp_addr) }
 }
 
 /// The clock: the generic timer's count, at the rate firmware states in
@@ -295,10 +347,9 @@ pub fn timer() {
 /// drives on an ACPI Arm machine.
 pub fn platform_devices(_rsdp_addr: u64) {}
 
-/// Every other CPU, running: the port's stage 5, which starts each with PSCI
-/// `CPU_ON`. Until then the boot CPU runs alone.
-pub fn start_other_cpus(_platform: &Platform, _args: &KernelArgs) {
-    log!("smp: the boot CPU runs alone; the other CPUs are the port's stage 5 (PSCI CPU_ON)");
+/// Every other CPU, running.
+pub fn start_other_cpus(platform: &Platform, _args: &KernelArgs) {
+    super::smp::start(&platform.gic, platform.psci);
 }
 
 /// The interrupt-controller selftests an actuator asks for.

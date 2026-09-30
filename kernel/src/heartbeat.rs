@@ -68,7 +68,7 @@ pub fn poll() {
     {
         return;
     }
-    let cpus = (crate::arch::smp::cpu_count() as usize).min(MAX_CPUS);
+    let cpus = (crate::smp::cpu_count() as usize).min(MAX_CPUS);
     let dispatched: u64 = (0..cpus).map(|c| DISPATCHED[c].load(Ordering::Relaxed)).sum();
     // Saturating, not `-`: a diagnostic must not be the thing that panics.
     let ran = dispatched.saturating_sub(LAST_DISPATCHED.swap(dispatched, Ordering::Relaxed));

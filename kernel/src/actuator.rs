@@ -339,7 +339,7 @@ actuators! {
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
 
-    /// Skip the startup IPI for the AP that would be cpu2, so a non-last AP never starts.
+    /// Skip the startup for the AP that would be cpu2, so a non-last AP never starts.
     smp_skip_ap = "smp-skip-ap";
 
     /// Time the same read loop on every CPU, either side of the `mov cr0` that enables caching.
