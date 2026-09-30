@@ -22,9 +22,8 @@
 //! writes itself is its `exit: <name> pid=N code=N cpu=Nms` record, which
 //! carries the whole `i32`.
 //! So the headline number leaves through the exit code: a non-negative code is
-//! a measured p99 in microseconds, bounded above by [`BUCKETS`] because a p99
-//! at the histogram's last bucket is a floor rather than a measurement; a
-//! negative one is a [`Refusal`] and no number in that run means anything.
+//! a measured p99 in microseconds; a negative one is a [`Refusal`] and no
+//! number in that run means anything.
 //! `userland/metalprobe` spells the same contract for the device suite, and the
 //! sign is what separates the two halves of it there as here. Every percentile
 //! is on stdout as well, for the host that has a console to read it on.
@@ -47,9 +46,6 @@ const SAMPLES: usize = 10_000;
 /// property of starting rather than of waking.
 const WARMUP: usize = 100;
 
-/// The widest lateness the histogram has a bucket for; a percentile that lands
-/// here is a floor rather than a measurement, and the caller is told so by the
-/// count of samples that had no bucket.
 const BUCKETS: usize = 4096;
 
 /// Why this run measured nothing, as the exit code carries it. Negative,
@@ -60,6 +56,8 @@ const BUCKETS: usize = 4096;
 enum Refusal {
     NoCapability = -1,
     BandRefused = -2,
+    /// The p99 is past the histogram's last bucket: a floor, not a measurement.
+    PastTheHistogram = -3,
 }
 
 fn refuse(why: Refusal, said: &str) -> ! {
@@ -111,27 +109,36 @@ fn main() {
         }
     }
 
-    let percentile = |want: usize| -> u64 {
+    // `None` where the sample wanted is in the overflow, which has no bucket to
+    // name.
+    let percentile = |want: usize| -> Option<u64> {
         let mut seen = 0usize;
         for (us, count) in histogram.iter().enumerate() {
             seen += *count as usize;
             if seen >= want {
-                return us as u64;
+                return Some(us as u64);
             }
         }
-        // Every remaining sample is in the overflow, which has no bucket to name.
-        BUCKETS as u64
+        None
     };
+    let shown = |p: Option<u64>| p.map_or_else(|| format!(">{}", BUCKETS - 1), |us| us.to_string());
 
     let p50 = percentile(SAMPLES / 2);
     let p90 = percentile(SAMPLES * 9 / 10);
     let p99 = percentile(SAMPLES * 99 / 100);
     let p999 = percentile(SAMPLES * 999 / 1000);
     println!(
-        "cyclictest: {SAMPLES} wakes at {}us: p50={p50}us p90={p90}us p99={p99}us \
-         p99.9={p999}us max={worst}us, {overflow} past the {BUCKETS}us histogram",
+        "cyclictest: {SAMPLES} wakes at {}us: p50={}us p90={}us p99={}us p99.9={}us \
+         max={worst}us, {overflow} past the {BUCKETS}us histogram",
         PERIOD_NS / 1_000,
+        shown(p50),
+        shown(p90),
+        shown(p99),
+        shown(p999),
     );
+    let Some(p99) = p99 else {
+        refuse(Refusal::PastTheHistogram, "the p99 is past the histogram, so it is a floor");
+    };
 
     exit(p99 as i32);
 }

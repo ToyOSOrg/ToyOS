@@ -11,6 +11,8 @@ mod checks {
     mod audio_checks;
     #[path = "clock.rs"]
     mod clock_checks;
+    #[path = "metal.rs"]
+    mod metal_checks;
     #[path = "qemu.rs"]
     mod qemu_checks;
     #[path = "screen.rs"]
@@ -690,8 +692,51 @@ mod checks {
         audio_checks::judges_verdict()
     }
 
-    /// `blackbox_unclaimed_page` is a registration `tests/metal-profile.toml` already prices,
-    /// so sizing and batching run for real.
+    #[test]
+    fn metal_stop_owes_its_record_and_leaves_no_operation_open() {
+        metal_checks::the_stop_owes_its_record_and_leaves_no_operation_open();
+    }
+
+    #[test]
+    fn metal_bound_fires_within_one_period_of_itself() {
+        metal_checks::a_bound_fires_within_one_period_of_itself();
+    }
+
+    #[test]
+    fn metal_name_measured_twice_is_refused() {
+        metal_checks::a_name_measured_twice_is_refused();
+    }
+
+    #[test]
+    fn metal_boot_with_a_failure_of_its_own_adds_no_row() {
+        metal_checks::a_boot_with_a_failure_of_its_own_adds_no_row();
+    }
+
+    #[test]
+    fn metal_name_two_boots_measured_is_refused() {
+        metal_checks::a_name_two_boots_measured_is_refused();
+    }
+
+    #[test]
+    fn metal_reading_past_its_record_fails_and_moves_nothing() {
+        metal_checks::a_reading_past_its_record_fails_and_moves_nothing();
+    }
+
+    #[test]
+    fn metal_run_under_another_bios_fails_and_records_nothing() {
+        metal_checks::a_run_under_another_bios_fails_and_records_nothing();
+    }
+
+    #[test]
+    fn metal_failing_shared_member_fails_its_boot() {
+        metal_checks::a_failing_shared_member_fails_its_boot();
+    }
+
+    #[test]
+    fn metal_cleared_page_owes_no_panel() {
+        metal_checks::a_cleared_page_owes_no_panel();
+    }
+
     #[test]
     fn metal_list_from_parse_reaches_run_without_the_machine() -> Result<(), String> {
         let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
@@ -825,16 +870,6 @@ mod checks {
         }
         let unbounded = loader.replace(bootlog::HUNG_WITHOUT_A_RECORD, "");
         assert!(judge(&[&readback("foreignrecord", &unbounded, kernel)]).is_err());
-    }
-
-    /// The foreign-identity boot owes no fact off the page its next pass
-    /// cleared; any other boot owes each one but a path it did not take.
-    #[test]
-    fn a_cleared_page_owes_no_fact_off_it() {
-        let bound = "boot-deadline=120000";
-        assert!(metal::owes_nothing("panel_us", &[toyos_build::metal::FOREIGN_RECORD_ARM, bound]));
-        assert!(!metal::owes_nothing("panel_us", &[bound]));
-        assert!(metal::owes_nothing("park_open_operations", &[bound]));
     }
 
     /// A T14 controller's handoff: it publishes USB Legacy Support and

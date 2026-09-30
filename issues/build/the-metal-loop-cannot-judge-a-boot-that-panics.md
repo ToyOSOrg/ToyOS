@@ -18,9 +18,7 @@ the T14, and the reason is the loop rather than the kernel.
    `Boot: complete (Nms)` *and* a trailing `Rebooting.`. A boot whose subject is
    a panic correctly writes neither the second word nor anything after it, so
    the loop refuses it — the readback is still written, and
-   `tests/common/metal.rs`'s `Mode::Drive` tolerates the non-zero exit, but the
-   boot-level rows `tests/metal-profile.toml` prices are then judged against a
-   log the loop has already called unfit.
+   `tests/common/metal.rs`'s `Mode::Drive` tolerates the non-zero exit.
 
 2. `test-late-panic` fires in `kernel_main` after `spawn_init` and before
    `enter_idle_loop`, so `logd` has not run: that boot writes no `/log` file at
