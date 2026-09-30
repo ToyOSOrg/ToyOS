@@ -67,6 +67,18 @@ impl Sweep {
     }
 }
 
+/// A policy number: how long init waits on one call into a file server that
+/// is alive and has not answered — and so how long a stop request can wait
+/// behind one, since init serves `power` between its loop's passes.
+pub const FILES_MS: u64 = 30_000;
+
+/// A policy number: how long init waits for `logd`'s flush before a stop.
+pub const FLUSH_MS: u64 = 5_000;
+
+/// A policy number: how long init waits for every file server's sync, run
+/// together after the flush, before a stop.
+pub const SYNC_MS: u64 = 5_000;
+
 /// The thread the kernel's quiesce-last actuators hold, by the name its
 /// program gives it: held until it is the one thread the stop still waits
 /// on, so the transition it makes next is the stop's last.

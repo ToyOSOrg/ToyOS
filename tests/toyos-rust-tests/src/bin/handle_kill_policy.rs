@@ -345,6 +345,8 @@ fn spawn_naming(handle: RawHandle) -> Result<RawHandle, SyscallError> {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
+            image: 0,
+            image_len: 0,
         })
     }
 }

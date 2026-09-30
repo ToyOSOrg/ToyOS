@@ -135,6 +135,11 @@ struct ProgramConfig {
     /// A system service: init starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
     service: bool,
+    /// The file-server roles this binary serves, one process each
+    /// (`toyos_manifest::Program::roles`).
+    roles: Vec<String>,
+    /// init starts it again when it ends (`toyos_manifest::Program::restart`).
+    restart: bool,
 }
 
 impl ProgramConfig {
@@ -712,6 +717,8 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
                     service: cfg.service,
+                    roles: cfg.roles.clone(),
+                    restart: cfg.restart,
                 }
             })
             .collect(),
@@ -2656,9 +2663,6 @@ mod tests {
                 // Costs no kernel build, for `wake-fence-off`'s reason: only
                 // `kernel-loom` turns it on, and `dump_request` must red under it.
                 "dump-report-relaxed",
-                // Costs no kernel build, for `wake-fence-off`'s reason: only
-                // `kernel-loom` turns it on, and `durability` must red under it.
-                "durability-settle-blind",
                 // The kernel this tree had before `arch::entry`'s `cld`: the
                 // instruction gone and `DF` back out of the `SYSCALL` mask, so a
                 // build carrying it inherits a set direction flag from whatever
@@ -3129,6 +3133,9 @@ mod tests {
         "tests/e1000leasecase/system.toml",
         "tests/e1000talkcase/system.toml",
         "tests/flrswapcase/system.toml",
+        "tests/fsdclaimcase/system.toml",
+        "tests/fsdmountcase/system.toml",
+        "tests/fsdrestartcase/system.toml",
         "tests/inspectcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",

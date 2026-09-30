@@ -2,7 +2,8 @@
 //!
 //! `SpawnArgs` carries the child's working directory, and the kernel starts the
 //! child there or refuses the spawn by name — it never substitutes the
-//! caller's. std's direct spawn states `Command::current_dir` when it is set
+//! caller's. A directory on a file server the kernel cannot judge, so std judges
+//! it before either road asks. std's direct spawn states `Command::current_dir` when it is set
 //! and this process's own directory when it is not, and init's launcher states
 //! the one its client sent.
 //!
@@ -138,6 +139,8 @@ fn spawn_in(cwd: &str) -> Result<i32, SyscallError> {
         labels_len: 0,
         cwd_ptr: cwd.as_ptr() as u64,
         cwd_len: cwd.len() as u64,
+        image: 0,
+        image_len: 0,
     };
     // SAFETY: every pointer names a live local for the length beside it.
     let child = unsafe { syscall::spawn(&args) }?;
@@ -161,8 +164,6 @@ fn refusals() {
     for (cwd, want) in [
         (ABSENT, SyscallError::NotFound),
         (FILE, SyscallError::NotFound),
-        (LOG_FILE, SyscallError::NotFound),
-        (HOME_FILE, SyscallError::NotFound),
         (SELF, SyscallError::NotFound),
         ("tmp/spawn-cwd/named", SyscallError::InvalidArgument),
         ("", SyscallError::InvalidArgument),
@@ -178,6 +179,23 @@ fn refusals() {
         if std::env::set_current_dir(file).is_ok() {
             wrong.push(format!("chdir into the file {file} succeeded"));
             std::env::set_current_dir("/").expect("chdir to /");
+        }
+    }
+
+    // A file server's path the kernel cannot judge, and starts a raw spawn in:
+    // std judges it before it asks, on either road.
+    for file in [LOG_FILE, HOME_FILE] {
+        match Command::new(SELF).arg("pwd").current_dir(file).spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => wrong.push(format!("std's word for {file}: {:?}, not NotFound", e.kind())),
+            Ok(mut child) => {
+                let _ = child.wait();
+                wrong.push(format!("std spawned into the file {file}"));
+            }
+        }
+        if let Ok(mut child) = Command::new(TOYBOX).arg("pwd").current_dir(file).spawn() {
+            let _ = child.wait();
+            wrong.push(format!("the launcher started a child in the file {file}"));
         }
     }
 

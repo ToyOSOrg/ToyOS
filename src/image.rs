@@ -582,11 +582,11 @@ fn round_up_sectors(n: usize) -> usize {
 
 /// Where each partition is made to start.
 ///
-/// A correctness requirement rather than tidiness. The kernel's `BlockDevice`
-/// transfers whole 4 KiB blocks and each mounted volume keeps its own resident
-/// copies of the blocks it has touched (`fat32_adapter::FatDevice`); two
-/// partitions sharing one device block would make each other's copies stale
-/// with nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
+/// A correctness requirement rather than tidiness. Every block service
+/// transfers whole 4 KiB blocks and each file server keeps its own cached
+/// copies of the blocks it has touched (`userland/fsd`); two partitions
+/// sharing one device block would make each other's copies stale with
+/// nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
 /// because that is what every partitioner uses and what an erase block wants.
 const PARTITION_ALIGN: usize = 1024 * 1024;
 
@@ -918,7 +918,7 @@ pub fn misaligned_data_disk(path: &Path, len: u64) -> u64 {
     start
 }
 
-/// Block 0 of a volume the kernel may format: the magic and its block count.
+/// Block 0 of a volume: the magic and its block count.
 fn designation(blocks: u64) -> [u8; SECTOR] {
     let mut block = [0u8; SECTOR];
     block[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);

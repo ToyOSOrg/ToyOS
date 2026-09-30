@@ -384,15 +384,29 @@ pub struct SpawnArgs {
     /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
     pub labels_ptr: u64,
     pub labels_len: u64,
-    /// The child's working directory: an absolute path to a directory that
-    /// exists, or the spawn is refused — `InvalidArgument` for a path that is
-    /// not absolute, `NotFound` for one that names no directory. **Always the
-    /// caller's statement**: the kernel never substitutes the caller's own.
+    /// The child's working directory, absolute, or the spawn is refused
+    /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
+    /// must be a directory there or the spawn is `NotFound`; under any other
+    /// name it is a file server's directory, which the caller's client asked
+    /// that server about and the kernel cannot. **Always the caller's
+    /// statement**: the kernel never substitutes the caller's own.
     pub cwd_ptr: u64,
     pub cwd_len: u64,
+    /// The program's bytes, in a shared memory object the caller made and
+    /// read the program into: `image` is a handle to it carrying `MAP`, and
+    /// `image_len` how many of its first bytes the program is — or 0, for a
+    /// program the kernel opens at `argv[0]` itself. `PermissionDenied` for a
+    /// handle without `MAP`; `InvalidArgument` for a length the object does not
+    /// hold, or an object that is no memory the kernel allocated. The object
+    /// stays the caller's: what the kernel reads of it, and when, is
+    /// `kernel/src/file_backing.rs`'s (`SharedImage`). `argv[0]` names the
+    /// program and is opened by nobody, and its libraries are found in
+    /// `/system/lib` alone.
+    pub image: u64,
+    pub image_len: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 96);
+const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 112);
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///

@@ -49,8 +49,7 @@ pub const MAGIC: u64 = 0x544F_594F_534C_4F47; // "TOYOSLOG"
 /// The header's words, each group a cache line of its own: writers hammer
 /// `head` and `refused`, the reader `tail`.
 const MAGIC_AT: usize = 0;
-/// The process init started with the ring, as `logd` registered it: zero
-/// until then.
+/// The process init started with the ring.
 const OWNER_AT: usize = 8;
 const HEAD_AT: usize = 64;
 const TAIL_AT: usize = 128;
@@ -189,8 +188,17 @@ impl Ring {
         unsafe { core::ptr::read_volatile(self.at_offset(MAGIC_AT) as *const u64) == MAGIC }
     }
 
+    /// [`Self::lay_out`], owned by a pid no process holds: until the real
+    /// owner is named, every writer is a stranger to it and [`Self::push`]
+    /// leaves it the kept slots rather than the zero it would leave an
+    /// owner it could confuse for none.
+    pub fn lay_out_with_placeholder_owner(&self) {
+        self.lay_out();
+        self.own(toyos_abi::Pid::MAX.0);
+    }
+
     /// Name the process the ring is its log of, which [`Self::push`] keeps
-    /// the ring's last slots for. The reader's to say, once it knows.
+    /// the ring's last slots for.
     pub fn own(&self, pid: u32) {
         self.word(OWNER_AT).store(u64::from(pid), Ordering::Relaxed);
     }
