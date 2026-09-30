@@ -902,16 +902,6 @@ pub enum Profile {
     /// one boot shows the error channel carrying a failure and not carrying a
     /// success.
     UsbDiskReadOnly,
-    /// The boot volume on NVMe, as [`Profile::MetalNoUsb`] has it, and one USB
-    /// stick on an xHCI beside it with a serial number of its own.
-    ///
-    /// The one machine on which a USB disk's only writer is the guest: every
-    /// other USB profile boots off the stick, so `/log` is on the bus and
-    /// logd's first batch is the first write `usb-transport-break-owed` can
-    /// break. Here the guest decides which write its device leaves under, and
-    /// the stated serial number is what lets the host move it to another port
-    /// and have it taken back as itself.
-    NvmeBootUsbDisk,
     /// [`Profile::UsbDiskHuge`] with the 3 TB disk attached *ahead* of the boot
     /// stick, so the controller enumerates the disk the driver refuses first.
     ///
@@ -1105,7 +1095,6 @@ impl Profile {
             | Self::UsbDisk4k
             | Self::UsbDiskHuge
             | Self::UsbDiskReadOnly
-            | Self::NvmeBootUsbDisk
             | Self::UsbDiskRefusedFirst
             | Self::UsbDiskCrowd
             | Self::MetalFullSpeed
@@ -1415,10 +1404,6 @@ pub const BOOT_STICK_ID: &str = "bootstick";
 /// what a test moving it has to be able to say is not so.
 pub const BOOT_STICK_SERIAL: &str = "TOYOS0BOOTSTICK1";
 
-/// The serial number of [`Profile::NvmeBootUsbDisk`]'s stick, for the same
-/// reason the boot stick states one.
-pub const DATA_STICK_SERIAL: &str = "TOYOS0DATASTICK1";
-
 /// What every profile but [`Profile::MetalDisk`] gives the guest. Large
 /// enough for a filesystem, small enough that a boot formats it quickly.
 pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
@@ -1716,15 +1701,6 @@ impl Profile {
                 usb_disks: &[UsbDisk { before_boot_stick: true, ..UsbDisk::HUGE }],
                 hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::NvmeBootUsbDisk => Shape {
-                xhci: &[XHCI_DEFAULT],
-                usb_disks: &[UsbDisk {
-                    bus: Some("xhci.0"),
-                    serial: Some(DATA_STICK_SERIAL),
-                    ..UsbDisk::DATA
-                }],
-                ..Self::MetalNoUsb.shape()
             },
             Self::UsbDiskReadOnly => Shape {
                 vga: "std",

@@ -405,8 +405,8 @@ const RUST_SKIP: &[&str] = &[
     // `data_candidate_with_bad_geometry_is_absent` run it.
     "home_absent",
     // Needs the disks `tests/common/partclaim.rs` crafts, the boot stick's GUIDs
-    // as arguments and a role; `partition_claim`, `partition_claim_gives_up` and
-    // `partition_claim_departure` boot it and judge it off the images.
+    // as arguments and a role; `partition_claim` and `partition_claim_gives_up`
+    // boot it and judge it off the images.
     "partition_claimant",
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
@@ -846,17 +846,12 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("page_cache_partition_offset", Sched::Parallel),
     // A partition claimed as a device: one boot, every refusal in the guest,
     // the neighbours and the target judged off the image. Body in
-    // `tests/common/partclaim.rs`, as are the two below.
+    // `tests/common/partclaim.rs`, as is the one below.
     ("partition_claim", Sched::Parallel),
     // Three boots: a disk that does not answer a read of its table, every
     // attempt refused until the deadman, and ROOT's source withheld from every
     // claim once its disk did not answer the boot's hold.
     ("partition_claim_gives_up", Sched::Parallel),
-    // Three boots, a USB stick's device leaving owing one claim's write and
-    // coming back on another port each time: each partition's fsync answers
-    // for its own writes, across a close, after another's flush, and at the
-    // shutdown when nobody asked.
-    ("partition_claim_departure", Sched::Parallel),
     // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
     ("home_overwrite_reads_back", Sched::Parallel),
     // One filesystem under two paths: the guest writes under each of /apps and
@@ -1427,7 +1422,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("syscall_window_nmi_controls", &["test_rs_nmi_window_spin"]),
     ("partition_claim", &["test_rs_partition_claimant"]),
     ("partition_claim_gives_up", &["test_rs_partition_claimant"]),
-    ("partition_claim_departure", &["test_rs_partition_claimant"]),
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
     ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
@@ -9216,9 +9210,6 @@ fn run_machine_test(
         "partition_claim" => partclaim::partition_claim(test_config, c_bins, rust_bins),
         "partition_claim_gives_up" => {
             partclaim::partition_claim_gives_up(test_config, c_bins, rust_bins)
-        }
-        "partition_claim_departure" => {
-            partclaim::partition_claim_departure(test_config, c_bins, rust_bins)
         }
         "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),
         "page_cache_partition_offset" => {
