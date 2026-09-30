@@ -447,12 +447,6 @@ pub fn init() {
             unclaimed += 1;
         }
     }
-    // Negative control: clears only the IST byte on vector 2's gate, keeping the handler and ring intact.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::nmi_without_ist() {
-        IDT.lock().entries[Vector::Nmi as usize].ist = 0;
-    }
-
     let ptr = IdtPointer {
         limit: (core::mem::size_of::<Idt>() - 1) as u16,
         base: IDT.data_ptr() as u64,

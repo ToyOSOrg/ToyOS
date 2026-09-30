@@ -20,10 +20,8 @@ use crate::arch::percpu::OFF_NMI_ACTIVE;
 
 /// Ten pushes of eight bytes place the interrupt frame's `rip` here.
 const RIP_OFFSET: usize = 80;
-/// `cs` and `rsp` say whether the NMI landed in the CPL-0/user-`rsp` window the IST exists for.
-const CS_OFFSET: usize = RIP_OFFSET + 8;
 const RSP_OFFSET: usize = RIP_OFFSET + 24;
-/// `rflags` is between them, and its `IF` is what separates a cpu that has stopped taking interrupts from one that is merely slow.
+/// `rflags`' `IF` is what separates a cpu that has stopped taking interrupts from one that is merely slow.
 const RFLAGS_OFFSET: usize = RIP_OFFSET + 16;
 
 /// Before any push, the CPU's own five words start at `rsp`.
@@ -50,9 +48,8 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "push r11",
         "push rbp",
         "mov rdi, [rsp + {rip_offset}]",
-        "mov rsi, [rsp + {cs_offset}]",
-        "mov rdx, [rsp + {rsp_offset}]",
-        "mov rcx, [rsp + {rflags_offset}]",
+        "mov rsi, [rsp + {rsp_offset}]",
+        "mov rdx, [rsp + {rflags_offset}]",
         "mov rbp, rsp",
         "and rsp, -16",
         "call {note}",
@@ -80,7 +77,6 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "ud2",
         active = const OFF_NMI_ACTIVE,
         rip_offset = const RIP_OFFSET,
-        cs_offset = const CS_OFFSET,
         rsp_offset = const RSP_OFFSET,
         rflags_offset = const RFLAGS_OFFSET,
         nested_rip = const NESTED_RIP_OFFSET,
@@ -90,13 +86,10 @@ pub(super) extern "sysv64" fn nmi_entry() {
     );
 }
 
-/// Loads all four words in both builds so the observer and shipping handler share one frame layout.
-extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64, rflags: u64) {
+extern "sysv64" fn note(rip: u64, rsp: u64, rflags: u64) {
     crate::arch::percpu::irq_took!(Nmi);
-    #[cfg(not(feature = "boot-actuators"))]
-    let _ = cs;
     #[cfg(feature = "boot-actuators")]
-    crate::arch::nmi_gate::observe(rip, cs, rsp);
+    crate::arch::nmi_gate::observe();
     crate::sched::dump::note_nmi(rip);
     // After the probe's store and before the nested-NMI staging: a hard lockup
     // ends the machine from here, so the sibling asking where this CPU is still

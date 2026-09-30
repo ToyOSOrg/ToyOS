@@ -10,10 +10,8 @@
 //! **The loop is written as assembly because its instruction count is part of
 //! the derivation.** Four instructions per iteration — `mov`, `syscall`, `dec`,
 //! `jnz` — so the boundaries at which an NMI can be delivered while this program
-//! is in Ring 3 are four per iteration, exactly as many as the window has. The
-//! expected number of window arrivals is therefore the number of Ring 3
-//! arrivals, and the gate asserts against that ratio rather than against a
-//! measurement. A `for` loop over `getpid()` would put the count at the mercy of
+//! is in Ring 3 are four per iteration, exactly as many as the window has.
+//! A `for` loop over `getpid()` would put the count at the mercy of
 //! whatever the optimiser did that day.
 //!
 //! `SYS_GETPID` because it is the cheapest thing the kernel answers that takes
