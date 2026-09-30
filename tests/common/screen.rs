@@ -291,7 +291,7 @@ impl TextMode {
             rows.extend(
                 chars.chunks(self.columns).map(|row| row.iter().take(EDGE_CELLS).any(|c| !c.is_whitespace())),
             );
-            if chars.len() % self.columns == 0 {
+            if chars.len().is_multiple_of(self.columns) {
                 rows.push(false);
             }
         }
