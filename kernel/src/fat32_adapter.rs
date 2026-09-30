@@ -555,8 +555,7 @@ pub(crate) fn leave_drain_flush() {
     mirror_refuse::set_in_drain(false);
 }
 
-/// The one file `quiesce-fsync-refuse` refuses the flush of. Mirrored in
-/// `tests/toyos-rust-tests/src/bin/quiesce_fsync.rs`.
+/// The one file `quiesce-fsync-refuse` refuses the flush of.
 #[cfg(feature = "boot-actuators")]
 const FSYNC_STAGED: &str = "quiesce-fsync.bin";
 

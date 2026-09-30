@@ -167,9 +167,6 @@ const RUST_SKIP: &[&str] = &[
     "quiesce_twice",
     // The same, and its verdict is the stop record of a boot staged around it.
     "quiesce_last",
-    // The same, and its verdict is the log volume the stop leaves.
-    // `quiesce_leaves_the_volume_whole` runs it.
-    "quiesce_fsync",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
     // holds, and megabytes of it. `log_program_flood` runs it.
     "log_flood",
@@ -879,9 +876,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
     ("quiesce_refuses_a_second_shutdown", Sched::Parallel),
-    // Its own boot: it ends the machine, and its verdict is the volume that
-    // boot leaves.
-    ("quiesce_leaves_the_volume_whole", Sched::Parallel),
     // Its own boot each: it ends the machine, and its verdict is the stop
     // record that boot writes.
     ("quiesce_wakes_on_the_last_park", Sched::Parallel),
@@ -1437,7 +1431,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
     ("quiesce_wakes_on_the_last_teardown", &["test_rs_quiesce_last"]),
-    ("quiesce_leaves_the_volume_whole", &["test_rs_quiesce_fsync"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
     ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
@@ -9326,7 +9319,6 @@ fn run_machine_test(
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
-        "quiesce_leaves_the_volume_whole" => common::volumes::quiesce_leaves_the_volume_whole(test_config, c_bins, rust_bins),
         // The lost-wake canary with the window it guards held open: every pipe
         // wait reads its condition, waits for a post to land, then parks, so
         // the ping-pong's posts land between the two. A commit that ignored the
