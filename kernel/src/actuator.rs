@@ -153,12 +153,6 @@ actuators! {
     /// `log_after_a_refused_stop`.
     power_refused_once = "power-refused-once";
 
-    /// Hold a typed copy into user memory whose destination carries
-    /// `user_ptr::remap_race`'s mark between its translation and its store,
-    /// until its own process has mapped memory again: a sibling's `munmap`
-    /// and `mmap` staged inside the copy.
-    copy_meets_a_remap = "copy-meets-a-remap";
-
     /// Hold a thread spawn whose argument carries `loader::rebase_window`'s
     /// mark between its TLS block being given an address and the block's
     /// pointers being rebased to it: where the process can already reach the
