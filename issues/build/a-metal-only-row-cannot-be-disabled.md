@@ -16,8 +16,7 @@ row before any boot.
 
 ## Measured
 
-`hda_tone` and `hda_client_stall` red on the T14 run of `main` at `7e151819`
-(`issues/build/a-readbacks-kernel-records-never-count-as-kernel-output.md`).
+`hda_tone` and `hda_client_stall` red on the T14 run of `main` at `7e151819`.
 Only the code reading is verified: `check_redlist` tests `registered.contains`, and
 the metal branch filters `METAL` rows through the same `keep`. Running
 `--known-red hda_tone` and `--list` against a tree with such a row is owed and
