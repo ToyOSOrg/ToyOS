@@ -158,12 +158,8 @@ const RUST_SKIP: &[&str] = &[
     // metal row runs it on the T14.
     "tlb_shootdown_waits",
     // **It reboots the machine**, so in the shared block it would end the boot
-    // under whichever member came next; and its verdict is the order of the
-    // console after that reset, which only its own boot holds.
-    // `quiesce_stops_the_machine` runs it.
-    "quiesce_writers",
-    // The same, and its verdict is where one kernel line lands among others.
-    // `quiesce_refuses_a_second_shutdown` runs it.
+    // under whichever member came next. Its verdict is where one kernel line
+    // lands among others. `quiesce_refuses_a_second_shutdown` runs it.
     "quiesce_twice",
     // The same, and its verdict is the stop record of a boot staged around it.
     "quiesce_last",
@@ -871,8 +867,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("metal_device_probe", Sched::Parallel),
     // Its verdict waits out a staged window.
     ("job_deadline_reboots", Sched::Parallel),
-    // Its own boot, and its verdict waits out the same staged window.
-    ("quiesce_stops_the_machine", Sched::Parallel),
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
     ("quiesce_refuses_a_second_shutdown", Sched::Parallel),
@@ -1427,7 +1421,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("log_stream_e1000e", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
     ("log_stream_stalled_reader", &["test_rs_log_flood"]),
     ("c_capture_ignores_daemon_lines", &["test_c_71_macro_empty_arg"]),
-    ("quiesce_stops_the_machine", &["test_rs_quiesce_writers"]),
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
     ("quiesce_wakes_on_the_last_teardown", &["test_rs_quiesce_last"]),
@@ -9230,7 +9223,6 @@ fn run_machine_test(
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
         "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
-        "quiesce_stops_the_machine" => power::quiesce_stops_the_machine(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
         "quiesce_wakes_on_the_last_park" => power::quiesce_wakes_on_the_last_park(test_config, c_bins, rust_bins),
         "quiesce_wakes_on_the_last_teardown" => power::quiesce_wakes_on_the_last_teardown(test_config, c_bins, rust_bins),
