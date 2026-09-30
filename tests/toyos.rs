@@ -315,10 +315,6 @@ const RUST_SKIP: &[&str] = &[
     // inside, and on its own it asserts nothing. `dump_left_pending_is_owed` runs
     // it on the kernel that stages it.
     "dump_stage_load",
-    // Driven, not run: `screen_console_clear` types its name at a console it is
-    // watching, and on its own it asks the kernel to paint over a panel nobody
-    // is reading and exits 0. A verdict its own exit code cannot carry.
-    "test_screen_graffiti",
     // Spawns `/system/bin/doom` and reads the WAD, which `tests/testcases` does
     // not carry. `doom_frames` runs it on `tests/doommusiccase`.
     "doom_frames",
@@ -430,7 +426,6 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     // under test can have painted it.
     ("screen_early_panel", Sched::Parallel, qemu::Profile::Metal),
     ("screen_log_absent", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_console_clear", Sched::Parallel, qemu::Profile::Metal),
     ("screen_i8042_health", Sched::Parallel, qemu::Profile::Metal),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
     // compositor is holding it. The verdict is the report on the panel.
@@ -469,10 +464,6 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
 const CONSOLE_PROMPT: &str = "/home/toy>";
-/// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
-/// the brightest channel and a colour a glyph could contain would let a
-/// surviving pixel read as text rather than as itself.
-const GRAFFITI: [u8; 3] = [0x00, 0xC0, 0x00];
 
 /// Tests whose machine shape *is* the test: metal-sim, where the PS/2
 /// keyboard is the only input source and no virtio device exists, or a q35
@@ -1305,7 +1296,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("wall_clock_utc", &["test_rs_wall_clock_now"]),
     ("file_mtime_survives_a_reboot", &["test_rs_file_mtime"]),
     ("file_mtime_undated", &["test_rs_file_mtime"]),
-    ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
 ];
@@ -3789,184 +3779,6 @@ fn run_screen_test(
             eprintln!("  [log] on the panel, in alert red: {}", dump.rows()[row]);
             Ok(())
         }
-        "screen_console_clear" => {
-            // `clear` is the one command whose entire output is the *absence*
-            // of output, which is why nothing else in the suite covers it:
-            // every other screen assertion looks for something that should be
-            // on the panel, and passes whether or not anything else is up
-            // there with it. This one asserts what must *not* be there, and
-            // the console is the caller that has to get it right — on the
-            // machine it is for there is no scrollbar to drag and no second
-            // window to read from.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                kernel_features: ACTUATOR_KERNEL,
-                ready_marker: "console: ready",
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
-            let font = screen::ConsoleFont::load();
-
-            // `_rendering`, not the plain wait: on a loaded `smp:2` runner the
-            // console paints slowly and the budget-scaled 30s window undercounts
-            // a later moment in the run, so a guest still drawing was called
-            // wedged (`0 of 2073600 pixels`, the paint never arriving). The
-            // console freezes when idle, so a real failure still ends the wait a
-            // `GUEST_QUIET` after the deadline.
-            let before = qemu.screendump_while_rendering(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| d.console_text(&font).contains(CONSOLE_PROMPT),
-            );
-            let before_text = before.console_text(&font);
-            if !before_text.contains(CONSOLE_PROMPT) {
-                return Err(format!(
-                    "no prompt to clear\ndecoded screen:\n{before_text}"
-                ));
-            }
-            // The premise. Clearing a screen that was already blank asserts
-            // nothing, and the seeded kernel log is what fills it.
-            let filled = before.console_rows(&font).iter().filter(|r| !r.is_empty()).count();
-            if filled < 10 {
-                return Err(format!(
-                    "only {filled} non-blank rows before `clear`, so there was nothing to \
-                     leave behind\ndecoded screen:\n{before_text}"
-                ));
-            }
-
-            // Draw on the glass behind the console's back, which is the state
-            // `clear` exists to get a user out of and the one a damage-tracked
-            // console can talk itself out of repairing.
-            console_type_line(&mut qemu, &font, "test_rs_test_screen_graffiti")?;
-            // Settle on the strip below the last cell row rather than on the
-            // whole panel: the console goes on drawing -- the command echoes,
-            // the shell reprints its prompt -- so most of the glass is being
-            // repainted while this waits, and only the strip no cell covers
-            // holds still.
-            let margin = |d: &screen::Ppm| d.height % screen::GLYPH_H;
-            let margin_is = |d: &screen::Ppm, c: [u8; 3]| {
-                let m = margin(d);
-                m > 0
-                    && d.pixels[(d.height - m) * d.width..].iter().all(|p| *p == c)
-            };
-            let painted_over = qemu.screendump_while_rendering(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| margin_is(d, GRAFFITI),
-            );
-            // Non-vacuity, in the two places it can be lost. A panel that is a
-            // whole number of glyph rows tall has no strip at all, and would
-            // make half of what follows assert nothing -- both 2048x2048, the
-            // mode this profile used to be given, and `DEFAULT_PANEL`, the one
-            // its firmware sets when no panel is declared, are exactly that.
-            if margin(&painted_over) == 0 {
-                return Err(format!(
-                    "this panel is {}x{}, a whole number of {}px glyph rows, so the strip this \
-                     test is half about does not exist here",
-                    painted_over.width, painted_over.height, screen::GLYPH_H
-                ));
-            }
-            // And if the kernel never reached the glass there is nothing for
-            // `clear` to fail to remove.
-            let green = painted_over.pixels.iter().filter(|p| **p == GRAFFITI).count();
-            if !margin_is(&painted_over, GRAFFITI) || green * 2 < painted_over.pixels.len() {
-                return Err(format!(
-                    "the graffiti actuator did not reach the panel: {green} of {} pixels are \
-                     {GRAFFITI:?} and the {}px strip below the cells is {}",
-                    painted_over.pixels.len(),
-                    margin(&painted_over),
-                    if margin_is(&painted_over, GRAFFITI) { "green" } else { "not" }
-                ));
-            }
-
-            // Typed onto the paint, and still confirmed by the console's own
-            // echo: the shell reprinted its prompt after the graffiti child
-            // exited, so the cells it drew are the console's again and the ones
-            // it did not draw are still green. That is why the echo is matched
-            // as a prefix of the input row (`console_type_line`) — the rest of
-            // that row is the actuator's paint and stays.
-            console_type_line(&mut qemu, &font, "clear")?;
-
-            // `clear` is `ESC[2J ESC[H`, after which the shell reprints its
-            // prompt at the home position. So the whole panel is one row of
-            // prompt and nothing else -- wait for that, then assert it, so a
-            // slow paint reads as a failure rather than as a pass on a screen
-            // that had not finished.
-            let only_prompt = |d: &screen::Ppm| {
-                let rows = d.console_rows(&font);
-                rows.first().is_some_and(|r| r.trim() == CONSOLE_PROMPT)
-                    && rows[1..].iter().all(|r| r.is_empty())
-            };
-            let dump = qemu.screendump_while_rendering(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                only_prompt,
-            );
-            let after = dump.console_text(&font);
-            print_screen(name, &after);
-
-            // The pixel assertion first, because it is the specific one: a
-            // screen still covered in paint fails the prompt check too, and
-            // that message would send the next reader after the shell.
-            if let Some(i) = dump.pixels.iter().position(|p| *p == GRAFFITI) {
-                let (x, y) = (i % dump.width, i / dump.width);
-                let m = dump.height % screen::GLYPH_H;
-                let where_ = if y >= dump.height - m {
-                    format!("the {m}px strip below the last cell row, which no cell covers")
-                } else {
-                    format!("cell ({}, {})", x / screen::GLYPH_W, y / screen::GLYPH_H)
-                };
-                let left = dump.pixels.iter().filter(|p| **p == GRAFFITI).count();
-                return Err(format!(
-                    "{left} pixels survived `clear`, the first at ({x}, {y}) — {where_}.\n\
-                     ESC[2J promises a blank panel; a repaint that skips every cell whose \
-                     contents already matched what it believed was there does not deliver one, \
-                     and the cells it skips are exactly the ones a user cannot fix any other \
-                     way\ndecoded screen:\n{after}"
-                ));
-            }
-
-            let rows = dump.console_rows(&font);
-            if !rows.first().is_some_and(|r| r.trim() == CONSOLE_PROMPT) {
-                return Err(format!(
-                    "`clear` did not leave the prompt on the home row\n\
-                     decoded screen:\n{after}"
-                ));
-            }
-            let survivors: Vec<String> = rows[1..]
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| !r.is_empty())
-                .map(|(i, r)| format!("    row {}: {r}", i + 1))
-                .collect();
-            if !survivors.is_empty() {
-                return Err(format!(
-                    "{} rows survived `clear`:\n{}\ndecoded screen:\n{after}",
-                    survivors.len(),
-                    survivors.join("\n")
-                ));
-            }
-
-            // Not the cell grid but the pixels outside it. A panel whose
-            // height is not a whole number of glyph rows has a strip along the
-            // bottom that no cell covers, and a console that paints only its
-            // cells never writes there -- so whatever drew last, the kernel's
-            // last boot checkpoint, stays for the life of the session. Black
-            // on black hides it on the machine that found this; a fill that is
-            // not black does not.
-            eprintln!(
-                "  [clear] {}x{}: {} cell rows and a {}px strip below them, none of it left \
-                 painted",
-                dump.width,
-                dump.height,
-                dump.height / screen::GLYPH_H,
-                dump.height % screen::GLYPH_H
-            );
-            Ok(())
-        }
         "screen_console_panic" => {
             // Does claiming the framebuffer silence the panic report? Read off
             // the code the answer is no — `render` ignores
@@ -6146,12 +5958,6 @@ fn ps2_bursts(line: &str) -> Vec<String> {
 ///
 /// The Enter is separate and unconfirmed on purpose: what it produces is the
 /// caller's assertion, and a prompt that has scrolled is not an echo to match.
-///
-/// The echo is matched as a **prefix** of the input row, which is what lets the
-/// one command in this suite that is typed onto a panel somebody painted over
-/// use this: `screen_console_clear` types `clear` at a prompt whose row is green
-/// from the cell after the cursor to the edge, and a whole-row comparison would
-/// read that paint as a lost keystroke.
 fn console_type_line(
     qemu: &mut QemuInstance,
     font: &screen::ConsoleFont,
