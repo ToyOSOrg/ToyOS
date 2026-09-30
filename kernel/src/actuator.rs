@@ -109,9 +109,6 @@ actuators! {
     /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
     quiesce_last_park = "quiesce-last-park";
 
-    /// The same for the last thread out of its process, between its leaving and its teardown: that teardown is then the stop's last transition.
-    quiesce_last_teardown = "quiesce-last-teardown";
-
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
 
