@@ -39,9 +39,6 @@ it ran, and `git revert aedcf17dc` brings it back. `4db54ffa5` took
 `log_reserve_window` out with `log-nested-reserve`; `3b8102cf5` then took the
 nest vector and the log gate it rode, so `git revert 3b8102cf5 4db54ffa5`
 brings it back, `log_nested_emit` with it.
-`redirty_mid_flush`'s deletion took the `RUST_SKIP` row beside
-`smp_hole_shootdown`'s, so reverting `aedcf17dc` alone stops on it and keeps
-both sides.
 
 **Exit**: a cause for `spawn_init`'s `WouldBlock` and for a root read that
 misses its budget under host load, and both tests restored and green beside

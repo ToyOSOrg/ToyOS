@@ -191,7 +191,3 @@ its binary and `test-small-caches`), `fs_rename_durable` (`63b0874ba`, with
 its binary), `esp_filesystem` (`27a926141`, with `esp_files`),
 `device_claim_lifetime` (`51cc87fcc`) and `screen_i8042_health`
 (`b7f157a72`). `git revert` of each brings its test back.
-
-These deletions and their neighbours took rows from the same lists in
-`tests/toyos.rs` and `tests/common/volumes.rs`, so reverting one whose
-neighbour is already gone stops on that neighbour's row and keeps both sides.

@@ -278,7 +278,8 @@ is deleted with it.
 
 **Its tests are deleted**: `38a5064b6` took `handle_basic`, `handle_transfer`
 and `kill_while_blocked` out, and `009db6db3` retired `SYS_DEBUG` actions 17 and
-18, which only `handle_transfer` read. `git revert 009db6db3 38a5064b6` brings
-them back;
+18, which only `handle_transfer` read. `02c35a85d` then moved `FILL`, which
+`009db6db3` stopped writing over the idle stacks, into x86-64's `percpu`, so
+`git revert 02c35a85d 009db6db3 38a5064b6` brings them back;
 `git show 84471bc58:tests/toyos-rust-tests/src/bin/handle_transfer.rs` holds #536's
 adaptation of the one #536 changed.

@@ -489,14 +489,12 @@ A flaky test is deleted at once. Each commit below takes one out, and
 - `launcher_refusals` — `4c191469f`;
 - `screen_console_shell` — `958ada05e`;
 - `screen_console_clear` — `315526e83`, and `c7d9efeb1` retired `SYS_DEBUG`
-  action 8, which only it asked for: `git revert c7d9efeb1 315526e83`, the
-  second stopping on `sys-debug-action-8-has-no-reader.md`, which it filed and
-  `c7d9efeb1` deleted: delete it;
+  action 8, which only it asked for: `git revert c7d9efeb1 315526e83`;
 - `fs_transactional` — `8e172f7a8`;
 - `fs_dirs_durable` — `690fa3e83`;
 - `i8042_undecoded_bytes` — `c6923cd50`, with `i8042-split-burst`;
 - `log_poll_outlives_a_close` — `ad6dc0781`, with test-runner's `log-close`
-  and `log-close-cancels-any-syscap`;
+  and `log-close-cancels-any-syscap`: `git revert 87f74892d ad6dc0781`;
 - `metal_sim_pointer_churn` — `525e59ad1`;
 - `blocked_dump` — `0a7fc5f70`, red after its retirement here on the
   sightings `issues/build/log-reserve-window-negative-times-out-beside-other-guests.md`
