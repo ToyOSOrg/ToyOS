@@ -355,12 +355,6 @@ actuators! {
     /// stop did not stop.
     quiesce_late_word = "quiesce-late-word";
 
-    /// Queue one console holder's line once the stop has stopped every holder,
-    /// and keep `klogd` off the queue from the stop's claim on: a line still queued
-    /// at the stop with `klogd` behind it, which otherwise only a `klogd` slower
-    /// than `logd` stages.
-    console_queue_at_the_stop = "console-queue-at-the-stop";
-
     /// Make the shutdown's bounded acquisitions of the xHCI controller lock
     /// find it busy for their whole bound — the negative control on "no
     /// shutdown path may fail to reset". A boot armed with it must still hand
