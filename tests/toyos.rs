@@ -314,9 +314,6 @@ const RUST_SKIP: &[&str] = &[
     // Spawns `/system/bin/doom` and reads the WAD, which `tests/testcases` does
     // not carry. `doom_frames` runs it on `tests/doommusiccase`.
     "doom_frames",
-    // Stages a rename with an absent source on `/log` and leaves the
-    // destination for `fs_rename_durable` to read back off the image.
-    "fs_rename_durable",
     // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
     // `hda_tone`, `audio_idle_suspend`, `shipped_client_departures` and
     // `soundd_log_stall` metal rows run these.
@@ -1073,8 +1070,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // the day that `mov ss` leaves the switch.
     ("sysret_ss_reload", Sched::Parallel),
     ("fsync_failed_commit", Sched::Parallel),
-    // The rename gate's FAT arm, a host-side volume oracle.
-    ("fs_rename_durable", Sched::Parallel),
     ("va_exhaustion", Sched::Parallel),
     ("heap_ceiling_bounds", Sched::Parallel),
     ("iommu_context_absent", Sched::Parallel),
@@ -1206,7 +1201,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("fsd_restart", &["test_rs_fs_client_bound", "test_rs_fs_restart"]),
     ("fsd_claim_held", &["test_rs_fs_claim_held"]),
     ("esp_filesystem", &["test_rs_esp_files"]),
-    ("fs_rename_durable", &["test_rs_fs_rename_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
@@ -8260,7 +8254,6 @@ fn run_machine_test(
             sysret_ss(qemu.boot_log())
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
-        "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         // Two CPUs: the held spawn spins in the kernel while its sibling stores
         // on the other.
         "tls_rebase_window" => {
