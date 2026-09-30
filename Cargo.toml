@@ -25,6 +25,7 @@ members = [
     "toyos-bootmap",
     "toyos-cpuvuln",
     "toyos-desktop",
+    "toyos-dhcp",
     "toyos-dns",
     "toyos-dma",
     "toyos-elf",

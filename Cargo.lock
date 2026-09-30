@@ -1031,6 +1031,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-dhcp"
+version = "0.1.0"
+dependencies = [
+ "toyos-net-ip",
+ "toyos-net-udp",
+ "toyos-net-wire",
+]
+
+[[package]]
 name = "toyos-dma"
 version = "0.1.0"
 
