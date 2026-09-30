@@ -168,6 +168,15 @@ pub const HARD_LOCKUP_BOUND_MS: u64 = hard_lockup_bound_ms(WEDGE_BOUND_MS);
 /// hard-locked machine is reported as an ordinary wedge and the CPU is unnamed.
 const _: () = assert!(HARD_LOCKUP_BOUND_MS < WEDGE_BOUND_MS);
 
+/// How often an armed CPU samples itself against [`hard_lockup_bound_ms`], in
+/// nanoseconds of unhalted time, and so how late past that bound a stuck CPU
+/// can be found.
+///
+/// A second: the bound is measured in tens of them, so a sample period this
+/// long costs one NMI per CPU per second and puts the detection within one
+/// period of the bound. It is also the period the report's ages are quoted at.
+pub const HARD_LOCKUP_SAMPLE_NS: u64 = 1_000_000_000;
+
 /// The boot parameter that arms [`WEDGE_BOUND_MS`], with the bound in
 /// milliseconds after it. A value and not a flag, because the bound is the one
 /// thing about this mechanism a boot can legitimately differ on — a negative

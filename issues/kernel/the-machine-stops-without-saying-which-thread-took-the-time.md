@@ -72,7 +72,7 @@ record this issue is about.
 ## Why it is not free to answer
 
 The record is a fixed line rendered by `toyos-quiesce` and read back by
-`src/metal.rs` and the harness, and the profile prices two numbers out of it.
+`src/metal.rs` and the harness.
 Naming a thread means the record carries a pid, a tid and the class of wait
 that thread was in — which the sweep does not collect today, because it counts
 rather than remembers.
@@ -81,5 +81,4 @@ rather than remembers.
 
 The record naming the last thread to stop, and a boot of `tests/metalcase`
 whose stop time can then be attributed to it rather than inferred. Until the
-record names one, its `in N ms` explains nothing about itself, and no profile
-row prices it.
+record names one, its `in N ms` explains nothing about itself.

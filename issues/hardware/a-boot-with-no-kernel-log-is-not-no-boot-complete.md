@@ -22,8 +22,7 @@ readback could say about the run-22 class of hang.
 
 **Exit condition**: the loop names that case as itself — a readback with no
 `logd` file and no harvested report reported as "wedged before its first durable
-record", distinct from "no `Boot: complete`" and from "no readback at all" — and
-a metal-profile row that says which of the three a boot is.
+record", distinct from "no `Boot: complete`" and from "no readback at all".
 
 Off the path of whoever finds this: it is `src/metal.rs`'s verdict and belongs
 to the driver, not to the kernel side that produced the boot.
