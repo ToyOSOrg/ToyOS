@@ -329,12 +329,6 @@ const RUST_SKIP: &[&str] = &[
     // Spawns `/system/bin/doom` and reads the WAD, which `tests/testcases` does
     // not carry. `doom_frames` runs it on `tests/doommusiccase`.
     "doom_frames",
-    // What it stages on `/log` — a file
-    // unlinked out from under a held descriptor, its clusters handed to the next
-    // writer — is only half the claim, and the other half is the volume read
-    // back off the image after a shutdown by a FAT implementation.
-    // `fat_backing_revoked` runs it.
-    "fat_backing_revoked",
     // Stages a rename with an absent source on `/log` and leaves the
     // destination for `fs_rename_durable` to read back off the image.
     "fs_rename_durable",
@@ -1180,16 +1174,12 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
     ("sysret_ss_reload", Sched::Parallel),
-    // The FAT32 read side's revocation gate, and a host-side volume oracle: whether the clusters the
-    // unlink freed were really reissued, and whether the cycle left a volume, are
-    // both questions the guest that staged them cannot answer about itself.
-    ("fat_backing_revoked", Sched::Parallel),
     // F5 and F6's negative controls: an fsync that must keep refusing while the
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel),
     ("redirty_mid_flush", Sched::Parallel),
-    // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
+    // The rename gate's FAT arm, a host-side volume oracle.
     ("fs_rename_durable", Sched::Parallel),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
     ("fs_dirs_durable", Sched::Parallel),
@@ -1328,7 +1318,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("fsd_restart", &["test_rs_fs_client_bound", "test_rs_fs_restart"]),
     ("fsd_claim_held", &["test_rs_fs_claim_held"]),
     ("esp_filesystem", &["test_rs_esp_files"]),
-    ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),
     ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
     ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
@@ -8840,7 +8829,6 @@ fn run_machine_test(
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
-        "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
         // `sysret-ss-probe` has the first syscall null SS, force a switch, and log whether the
         // switch reloaded it; a missing `mov ss` turns `reloaded` into `NOT`.
         "sysret_ss_reload" => {
