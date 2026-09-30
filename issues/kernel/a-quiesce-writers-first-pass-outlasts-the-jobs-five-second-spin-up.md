@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: assigned
 kind: defect
 opened: 2026-09-25
 ---
@@ -63,7 +63,7 @@ The same test, with the same harness message and no `stop:` record:
   break on `SCSI 0x2a` that recovered. Whether its job printed the give-up
   line was not recorded.
 
-**Exit condition.** Re-enabled when a reproduction names what holds a writer's
+**Exit condition.** Restored when a reproduction names what holds a writer's
 first write-and-fsync pass for over 5 s while another writer passes in under a
 third of a second, and the fix is shown against it. Owner: the `/log` write and
 sync path `tests/toyos-rust-tests/src/bin/quiesce_writers.rs` drives; held by
@@ -74,3 +74,8 @@ the orchestrator.
 first pass as slow as those above delays the reset and no longer ends the boot
 unasked. That change has never run: the test's first run back is also that
 change's.
+
+**Its test is deleted**: `a5666dc92` took `quiesce_stops_the_machine` out,
+and `git revert a5666dc92` brings it back as it stood before #536;
+`git show 84471bc58` holds #536's adaptation of `tests/quiescecase/system.toml` and
+of `tests/common/power.rs`'s `quiesce_stops_the_machine`.

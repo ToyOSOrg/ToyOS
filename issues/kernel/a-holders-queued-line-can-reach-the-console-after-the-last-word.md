@@ -48,3 +48,5 @@ keeps `klogd` off the queue from the stop's claim on.
 What is left of "by construction" is a stop that did not stop every holder,
 which it reports at alert level. A holder that still runs after the drain
 can queue a line that follows the last word.
+
+`quiesce_stops_the_machine` is deleted; `issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md` records the commit that restores it.

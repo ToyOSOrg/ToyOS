@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: defect
 opened: 2026-09-28
 ---
@@ -39,8 +39,11 @@ The hold cannot strand the thread it waits for. For example: the racing thread
 is placed on a different CPU from the copier before the cue, or the hold waits
 with the CPU able to run passes. `user_copy_races_munmap` is then green, and a
 mutation that puts both threads on one CPU reds with a line saying so rather
-than with this panic. Then this file and its `src/redlist.rs` row are deleted.
+than with this panic. Then this file is deleted.
 
 ## Owner
 
 `kernel/src/user_ptr.rs` `remap_race`, `tests/toyos-rust-tests/src/bin/copy_out_races_munmap.rs`. Nobody holds it.
+
+**Its test is deleted**: `7ea6be15d` took `user_copy_races_munmap` out, and
+`git revert 7ea6be15d` brings it back.

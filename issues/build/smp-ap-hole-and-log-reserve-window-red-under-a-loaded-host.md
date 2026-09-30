@@ -31,4 +31,4 @@ the root disk's own read missed its 2000 ms budget under the host's load, so
 the GPT scan that follows legitimately found no partition to mount. `ALONE:
 GREEN`, `cargo test -- log_reserve_window` alone immediately after, PASS in 3s.
 
-Neither name is in `src/redlist.rs` yet. Not investigated further.
+Not investigated further.

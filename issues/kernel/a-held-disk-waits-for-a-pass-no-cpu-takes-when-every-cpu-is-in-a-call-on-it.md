@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: assigned
 kind: defect
 opened: 2026-09-22
 ---
@@ -72,3 +72,8 @@ one: `issues/kernel/a-shutdown-on-a-held-usb-disk-left-a-cpu-deaf-to-a-tlb-shoot
 that the staged break's record came less than 2 s of kernel clock after the
 record before it. That change has never run: the test's first run back is
 also that change's.
+
+**Its test is deleted**: `90ecefed2` took `usb_transport_break` out, QEMU and
+T14 arms both, and `git revert 90ecefed2` brings it back as it stood before
+#536; `git show 84471bc58:tests/common/usb.rs` holds #536's adaptation. PR #588
+re-enables it and holds this.

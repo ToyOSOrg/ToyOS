@@ -17,9 +17,6 @@ write still refused after 1 attempt(s)":
   so its Sched::Parallel is wrong. The run stays red on the classification.
 ```
 
-`cargo run -- --known-red partition_claim_gives_up` answers "NO, not
-quarantined — its failure fails the suite."
-
 Re-run immediately after, alone, on the same tree and in the same session:
 **green, 2 of 2**, 8-10 s each. So the observation is the same shape as
 `usb_short_read`'s and `kernel_log_file`'s: 1 red in 3 with no rate behind it,
@@ -32,8 +29,7 @@ Not the diff it was seen from: that branch touches `bcachefs/`,
 binary — nothing under `tests/common/partclaim.rs` or the kernel's `partclaim`
 module.
 
-Owed to whoever next runs a session free to measure it and, if it reproduces,
-to file the `src/redlist.rs` row.
+Owed to whoever next runs a session free to measure it.
 
 **A rate, from `wt/toyos-inspect` (PR #501, round-2 review fixes), same day,
 different diff.** `cargo test --test toyos-build -- partition_claim_gives_up`

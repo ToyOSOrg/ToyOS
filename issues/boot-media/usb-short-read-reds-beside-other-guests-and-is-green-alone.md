@@ -16,8 +16,6 @@ FAIL usb_short_read: one short read cost the disk the rest of its sweep
   Sched::Parallel is wrong. The run stays red on the classification.
 ```
 
-`cargo run -- --known-red usb_short_read` answers `NOT ON THE LIST`.
-
 Re-run immediately after, alone, on the same tree and in the same session:
 **green, 2 of 2**, 2.9 s each, host load average 7.70 with another agent's work
 on the machine. So the observation is 1 red in 3 with no rate behind it.
@@ -35,7 +33,5 @@ assertions and two kernel doc headers, and touches nothing under `xhci/` or
 
 ## Promoted 2026-08-25
 
-A flaky test under load with no known-red row and no rate is real, owed work
-(verified 2026-08-25: `cargo run -- --known-red usb_short_read` still answers
-`NOT ON THE LIST`). Owed to whoever next runs a session free to measure it
-and, if it reproduces, to file the `src/redlist.rs` row.
+A flaky test under load with no rate is real, owed work. Owed to whoever
+next runs a session free to measure it.

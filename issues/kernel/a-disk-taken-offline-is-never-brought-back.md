@@ -34,3 +34,5 @@ a device that is the same device.
 A T14 boot whose stick's transport broke mid-boot and that finishes with its
 mounts intact, on either half of the receptacle; and a disk that left its port
 under a reset and arrived on another keeps its number.
+
+`usb_transport_break` is deleted; `issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md` records the commit that restores it.

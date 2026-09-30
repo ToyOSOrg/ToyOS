@@ -137,8 +137,7 @@ session at 2.13x-2.19x width throughout:
 branch's changes.** That is the both-arms pair this entry's heading claims and
 did not have for any single name: an `ALONE … red again` here is evidence that
 the leak is real and reproducible, and no evidence at all about the branch that
-met it. `cargo run -- --known-red toybox_cp_volume` still answers `NOT ON THE
-LIST`, which is why this is written down.
+met it.
 
 `redirty_mid_flush` was A/B'd the same way: 1 of 3 on the branch, 0 of 3 on
 `main`, and its one red was `ALONE … GREEN`. Six runs cannot separate that, which

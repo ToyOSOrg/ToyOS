@@ -10,8 +10,8 @@ Held by the orchestrator. Every stage waits on PR #536 (`wt/toyos-fsd`).
 
 ## Stages
 
-Every guest test this track names is registered with no `src/redlist.rs` row.
-A deleted or disabled test covers nothing.
+Every guest test this track names is registered. A deleted test covers
+nothing.
 
 1. **The rename**, one mechanical PR, first after #536. Before stage 1 is
    briefed, the exit's search below runs once over the `rust/` fork's delta as

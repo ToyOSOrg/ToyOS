@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-08-23
 ---
@@ -39,3 +39,6 @@ the host reading can be excluded before the classification reading is
 investigated. Until that exists nothing can decide whether the assertion bounds
 this kernel or the dev host. Owed by whoever next runs a load sweep on this
 instrument.
+
+**Its test is deleted**: `4600f6754` took `syscall_window_nmi` out, and
+`git revert 4600f6754` brings it back. `syscall_window_nmi_controls` stays.

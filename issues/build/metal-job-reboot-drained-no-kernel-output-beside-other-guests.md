@@ -10,7 +10,7 @@ Fast tier at `98e803cb` (PR #510's branch; another worktree's DNS work was
 building at the same time): `the job drain carried no kernel output at all (24
 bytes): every assertion below it would be a claim about nothing`, in 5 s. The
 harness's re-run alone was green in 2 s, its log carrying `Boot: complete
-(304ms)` and the loader's 32 lines. `cargo run -- --known-red` answers NO.
+(304ms)` and the loader's 32 lines.
 
 Fast tier at `4ad645a2` (PR #528's branch, load average 21–22 from other
 worktrees' guests): red in the wide run (`QEMU died before ===READY===`) and
@@ -19,8 +19,7 @@ so a re-run alone is not reliably green. Five interleaved rounds in one
 session, that branch against `origin/main` in the same worktree: the branch
 red in 1 of 5, `main` red in 2 of 5, with the same two shapes on both sides
 (`main`: `…no kernel output at all (24 bytes)`, and `"===TEST_START
-reboot===" never reached the job drain`). `cargo run -- --known-red` answers
-NO.
+reboot===" never reached the job drain`).
 
 Not shown: what the drained bytes were, or whether the guest booted at all in
 a red run; the failure message names the drain's size and nothing of its

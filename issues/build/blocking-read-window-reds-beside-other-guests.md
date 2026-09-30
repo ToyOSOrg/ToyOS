@@ -8,7 +8,7 @@ opened: 2026-09-26
 
 The verdict, in the fast tier: `blocking_read_stress: only N of 500 round trips
 completed inside 3s — a wake was not delivered`. The harness's re-run alone is
-green. `cargo run -- --known-red blocking_read_window` answers NO.
+green.
 
 Sightings, all on 2026-09-26:
 
