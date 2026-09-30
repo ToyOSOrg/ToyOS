@@ -18,14 +18,16 @@
 //! cargo test -p toyos-sched-loom --features commit-ignores-notify --test loom_watch
 //! ```
 //!
-//! Three more controls: `notify-flag-load-only` lets a post that finds its bits
+//! Four more controls: `notify-flag-load-only` lets a post that finds its bits
 //! already set answer off a load, and
 //! `a_second_post_is_not_lost_to_a_flag_the_waiter_consumed` must red;
 //! `gate-fence-off` removes the [`Gate`]'s two fences, and
-//! `a_transition_racing_an_opening_gate_is_never_missed` must red; and
+//! `a_transition_racing_an_opening_gate_is_never_missed` must red;
 //! `poll-fire-load-store`, the kernel's own control for the poll's one-shot
 //! answer, which the ring models below compile, must red every
-//! `*_completes_exactly_once` model here.
+//! `*_completes_exactly_once` model here; and `fault-posted-before-it-is-set`
+//! posts before the readiness is stored, and both `a_poll_registered_racing_*`
+//! models must red with a poll completed by neither.
 //!
 //! **The ring entry is the kernel's [`Once`], compiled from
 //! `kernel/src/inbox/once.rs`**, the decision a `PollEntry` makes; what else a
@@ -315,14 +317,22 @@ fn poll_racing(post: fn(&World)) {
     let producer = {
         let world = world.clone();
         loom::thread::spawn(move || {
-            ready.store(true, Ordering::Relaxed);
-            post(&world);
+            // `fault-posted-before-it-is-set` is the control: posted first, the
+            // readiness can land after both the post and the recheck.
+            if cfg!(feature = "fault-posted-before-it-is-set") {
+                post(&world);
+                ready.store(true, Ordering::Relaxed);
+            } else {
+                ready.store(true, Ordering::Relaxed);
+                post(&world);
+            }
         })
     };
     registrant.join().unwrap();
     producer.join().unwrap();
 
     // While `world` lives: its watch's drop answers a live entry as gone.
+    assert_ne!(poll.posts(), 0, "a poll over a ready object was completed by neither");
     assert_eq!(poll.posts(), 1, "a poll over a ready object completes once");
     drop(world);
 }
@@ -331,22 +341,34 @@ fn poll_racing(post: fn(&World)) {
 /// or as gone, and whichever answered it no longer holds it.
 #[test]
 fn an_end_racing_a_post_answers_a_poll_once() {
-    model(|| {
-        let (world, _rx) = world();
-        let poll = Entry::new();
-        world.watch.add_ring(poll.clone());
+    model(|| end_racing(|w| w.watch.cancel_rings(), World::post));
+}
 
-        let ender = {
-            let world = world.clone();
-            loom::thread::spawn(move || world.watch.cancel_rings())
-        };
-        let poster = loom::thread::spawn(move || world.post());
-        ender.join().unwrap();
-        poster.join().unwrap();
+/// The same, for the end and the post a handler may make, both in place.
+#[test]
+fn an_end_in_place_racing_a_post_in_place_answers_a_poll_once() {
+    model(|| end_racing(|w| w.watch.cancel_rings_in_place(), World::post_in_place));
+}
 
-        assert_eq!(poll.posts(), 1);
-        assert!(!poll.live());
-    });
+fn end_racing(end: fn(&World), post: fn(&World)) {
+    let (world, _rx) = world();
+    let poll = Entry::new();
+    world.watch.add_ring(poll.clone());
+
+    let ender = {
+        let world = world.clone();
+        loom::thread::spawn(move || end(&world))
+    };
+    let poster = {
+        let world = world.clone();
+        loom::thread::spawn(move || post(&world))
+    };
+    ender.join().unwrap();
+    poster.join().unwrap();
+
+    assert_eq!(poll.posts(), 1);
+    assert!(!poll.live());
+    drop(world);
 }
 
 /// One waiter, two producers, each storing its own condition and then posting.

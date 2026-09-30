@@ -414,8 +414,9 @@ pub(crate) struct Staged(Arc<Inbox>);
 #[cfg(feature = "boot-actuators")]
 impl Staged {
     pub(crate) fn new() -> Self {
-        // Room for every completion the actuator's holds write.
-        let depth = toyos_sched::watch::handler_post::HOLDS;
+        // Room for every completion the actuator's holds write: two per hold
+        // inside the completions, one per hold inside the watch.
+        let depth = 2 * toyos_sched::watch::handler_post::HOLDS;
         let shm = SharedMemObject::create(crate::mm::PAGE_2M).expect("handler-post: a ring's page");
         let page = shm.phys_before_mapping();
         write_ring_page(page, depth, depth * 2);
@@ -444,6 +445,12 @@ impl Staged {
 
     pub(crate) fn complete(&self) {
         self.0.complete(0, 0);
+    }
+
+    /// Run `f` holding this ring's own watch's list lock, as a registration
+    /// in `submit` holds it.
+    pub(crate) fn holding_its_watch(&self, f: impl FnOnce()) {
+        self.0.watch.holding(f);
     }
 }
 

@@ -17,7 +17,7 @@ use toyos_sched::mailbox::{mailbox, PreemptGuard, SchedMsg};
 use toyos_sched::park::{prepare, Cancel, Commit, CurrentTask};
 use toyos_sched::sync::CellLock;
 use toyos_sched::task::{TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason};
-use toyos_sched::watch::{Fire, Poster, Ring, Waiters, Watch};
+use toyos_sched::watch::{Fire, Poster, Ring, Waiters, Watch, FEW};
 
 thread_local! {
     static HELD: Cell<bool> = const { Cell::new(false) };
@@ -187,8 +187,9 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_noth
 
     POSTING.set(true);
     w.post_in_place(WakeCause::new(WakeReason::Woken), &env);
+    w.cancel_rings_in_place();
     POSTING.set(false);
-    clean("posting in place");
+    clean("posting and cancelling in place");
     assert!(polls.iter().all(|p| p.0.load(Acquire) == 1), "a post in place fired every entry");
 
     // Every entry is dead now, and a withdrawn one joins them: these three
@@ -226,6 +227,44 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_noth
     while rx.pop(&NoPreempt).is_some() {}
     drop(w);
     clean("dropping");
+}
+
+/// A live entry that is the last owner of a heap cell, so its drop frees, and
+/// that counts its fires on a word the test keeps.
+struct Owned {
+    fired: Arc<AtomicU32>,
+    _cell: Box<u64>,
+}
+
+impl Ring for Owned {
+    fn fire(&self, _how: Fire) {
+        self.fired.fetch_add(1, AcqRel);
+    }
+    fn live(&self) -> bool {
+        self.fired.load(Acquire) == 0
+    }
+}
+
+/// One entry past the [`FEW`] a post takes out on its stack: every entry is
+/// fired once, and freed with the list lock let go.
+#[test]
+fn a_post_of_one_entry_past_its_stack_fires_each_once_and_frees_none_under_the_lock() {
+    let (tx, _rx) = mailbox::<Msg>();
+    let cpus = CpuHandles::new(vec![CpuHandle::new(C0, tx)]);
+    let env = Poster { cpus: &cpus, kicker: &NoKick, preempt: &NoPreempt };
+    let w: Watch<Msg, Owned, Watched<Waiters<Msg, Owned>>> =
+        Watch::new(Watched(Mutex::new(Waiters::new())));
+    let fired: Vec<_> = (0..=FEW).map(|_| Arc::new(AtomicU32::new(0))).collect();
+    for word in &fired {
+        w.add_ring(Owned { fired: word.clone(), _cell: Box::new(0) });
+    }
+    clean("registering");
+    w.post(WakeCause::new(WakeReason::Woken), &env);
+    clean("posting");
+    for (at, word) in fired.iter().enumerate() {
+        assert_eq!(word.load(Acquire), 1, "entry {at} of {} fired other than once", FEW + 1);
+        assert_eq!(Arc::strong_count(word), 1, "entry {at} was not let go of");
+    }
 }
 
 /// A registration that finds the list full sizes a bigger buffer with the lock

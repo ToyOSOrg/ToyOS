@@ -1256,10 +1256,10 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
     ("blocking_read_window", Sched::Parallel),
-    // A claimed function's vector posts its watch from the handler: raised on
-    // a CPU holding preemption off, inside a post of that watch or inside a
-    // completion into a ring polling it, it posts once that section lets go
-    // and before any pass. One boot; the verdict is counts.
+    // A claim slot's vector posts its watch from the handler: raised on a CPU
+    // holding preemption off, inside a post of that watch, inside a completion
+    // into a ring polling it or inside that ring's own watch, it posts once
+    // that section lets go and before any pass. One boot; the verdict is counts.
     ("handler_post_without_a_pass", Sched::Parallel),
     // A sibling's munmap and mmap staged between a typed copy's translation
     // and its store (`copy-meets-a-remap`): the store never reaches the region

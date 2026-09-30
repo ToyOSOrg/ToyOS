@@ -21,9 +21,9 @@
 //! can no longer fire out [`FEW`] at a time, grows a full list in a buffer
 //! allocated with the lock let go, and drops both with it let go.
 //! [`Watch::post`] takes every ring entry out and fires and frees them with the
-//! lock let go; [`Watch::post_in_place`], for a handler, which may not free at
-//! all, fires them where they stand, and later registrations sweep the dead
-//! out, since an entry is one-shot.
+//! lock let go; [`Watch::post_in_place`] and [`Watch::cancel_rings_in_place`],
+//! for a handler, which may not free at all, fire them where they stand, and
+//! later registrations sweep the dead out, since an entry is one-shot.
 //!
 //! **Lock order.** A post in place fires its rings under the list lock, so
 //! beneath it are each ring's own lock and the watch that ring's submitters
@@ -107,7 +107,7 @@ pub struct Poster<'a, M, K, P> {
 
 /// How many ring entries one section takes out of the list to drop with the
 /// lock let go, on the stack and so allocating nothing.
-const FEW: usize = 4;
+pub const FEW: usize = 4;
 
 pub struct Watch<M, R: Ring, L: CellLock<Waiters<M, R>>> {
     list: L,
@@ -164,8 +164,10 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
             if w.rings.len() > FEW {
                 return core::mem::take(&mut w.rings);
             }
-            for (slot, ring) in few.iter_mut().zip(w.rings.drain(..)) {
-                *slot = Some(ring);
+            // Indexed, so an entry with no slot panics rather than being
+            // dropped unfired.
+            for (at, ring) in w.rings.drain(..).enumerate() {
+                few[at] = Some(ring);
             }
             Vec::new()
         });
@@ -299,6 +301,23 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
         }
     }
 
+    /// [`Self::cancel_rings`] for a context that may not free: every ring
+    /// entry is fired as [`Fire::Gone`] where it stands, under the list lock,
+    /// and later registrations sweep it.
+    pub fn cancel_rings_in_place(&self) {
+        self.list.with(|w| {
+            for ring in &w.rings {
+                ring.fire(Fire::Gone);
+            }
+        });
+    }
+
+    /// Run `f` holding the list lock, where a registration holds it, touching
+    /// nothing on the list: an actuator's way to raise an interrupt there.
+    pub fn holding<U>(&self, f: impl FnOnce() -> U) -> U {
+        self.list.with(|_| f())
+    }
+
     /// Registered threads, for a model or a report.
     pub fn threads(&self) -> usize {
         self.list.with(|w| w.threads.len())
@@ -399,24 +418,27 @@ pub mod handler_post {
     pub const HOLDS: u32 = 4;
 
     /// The holds a handler's post ended, per arm: its vector raised inside a
-    /// watch's list lock, and inside a ring's completions.
+    /// watch's list lock, inside a ring's completions, and inside the list
+    /// lock of the watch that ring's own submitters park on.
     #[derive(Clone, Copy)]
     pub struct Verdict {
         pub in_a_list: u32,
         pub in_a_ring: u32,
+        pub in_a_rings_watch: u32,
     }
 
     impl Verdict {
-        pub const GREEN: Self = Self { in_a_list: HOLDS, in_a_ring: HOLDS };
+        pub const GREEN: Self =
+            Self { in_a_list: HOLDS, in_a_ring: HOLDS, in_a_rings_watch: HOLDS };
     }
 
     impl fmt::Display for Verdict {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(
                 f,
-                "{SAID} of {HOLDS} holds per arm, a handler posted into {} inside a list lock \
-                 and {} inside a ring's completions",
-                self.in_a_list, self.in_a_ring,
+                "{SAID} of {HOLDS} holds per arm, a handler posted into {} inside a list lock, \
+                 {} inside a ring's completions and {} inside a ring's own watch",
+                self.in_a_list, self.in_a_ring, self.in_a_rings_watch,
             )
         }
     }
@@ -771,6 +793,22 @@ mod tests {
         drop(w);
         assert_eq!(dropped.state.load(Ordering::Acquire), 2);
         assert_eq!(dropped.posts.load(Ordering::Acquire), 1);
+    }
+
+    /// A cancel in place answers where the entry stands and lets go of
+    /// nothing, as a post in place does.
+    #[test]
+    fn a_cancel_in_place_answers_every_live_poll_as_gone_and_drops_nothing() {
+        let w = watch();
+        let poll = Arc::new(Poll::default());
+        w.add_ring(poll.clone());
+        w.cancel_rings_in_place();
+        assert_eq!(poll.state.load(Ordering::Acquire), 2);
+        assert_eq!(Arc::strong_count(&poll), 2, "the cancel let go of the entry it fired");
+        let t = task(1);
+        w.register(&t, 0);
+        assert_eq!(Arc::strong_count(&poll), 1, "the registration did not sweep it");
+        w.unregister(&t);
     }
 
     #[test]

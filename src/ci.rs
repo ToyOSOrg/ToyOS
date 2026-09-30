@@ -307,6 +307,13 @@ pub(crate) const CONTROLS: &[Control] = &[
         "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
         "a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED",
     ]),
+    // The ring models' lost-completion half: the producer posts before it
+    // stores the readiness its registrant rechecks.
+    red(SCHED_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[
+        "a poll over a ready object was completed by neither",
+        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
+        "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
+    ]),
     // Reproduces an open defect
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
     // proving a lie is caught, and goes with its fix.

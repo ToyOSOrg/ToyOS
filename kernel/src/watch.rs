@@ -10,10 +10,10 @@
 //!
 //! **A post allocates nothing and may be made under any lock but a poll
 //! ring's** (`crate::inbox`). A watch an interrupt handler posts is an
-//! [`IrqWatch`]: its list sits behind an [`IrqLock`], and its one post is made
-//! in place and frees nothing. Every other watch's list lock leaves interrupts
-//! open, and no handler takes it. Registration allocates, in the syscall that
-//! registers.
+//! [`IrqWatch`]: its list sits behind an [`IrqLock`], and its post and its
+//! cancel are made in place and free nothing. Every other watch's list lock
+//! leaves interrupts open, and no handler takes it. Registration allocates, in
+//! the syscall that registers.
 //!
 //! A [`Watch`] is a borrowed reference for the whole of a wait: [`Armed`]
 //! holds it, so an object cannot be freed under a thread waiting on it, and
@@ -33,7 +33,6 @@ use crate::inbox::PollEntry;
 use crate::sched::driver::{cpus, preempt_off};
 use crate::sched::payload::{KMsg, KShared, KernelLock, TaskHandle};
 use crate::scheduler::Parkable;
-use crate::sync::Lock;
 use crate::time::Deadline;
 
 type List = Waiters<KMsg, PollEntry>;
@@ -45,18 +44,18 @@ pub struct Waitable<L: CellLock<List>>(toyos_sched::watch::Watch<KMsg, PollEntry
 pub type Watch = Waitable<KernelLock<List>>;
 
 /// A watch an interrupt handler posts, and the watch of a ring such a post
-/// completes into. It has no `post`, which frees: only
-/// [`IrqWatch::post_in_place`].
+/// completes into. It has no `post` and no `cancel_polls`, which free: only
+/// [`IrqWatch::post_in_place`] and [`IrqWatch::cancel_polls_in_place`].
 pub type IrqWatch = Waitable<IrqLock<List>>;
 
 /// What an interrupt handler's post takes: an [`IrqWatch`]'s list and a poll
 /// ring's completions. Held with interrupts off, so a handler never finds one
 /// held by the context it interrupted; nothing allocates or frees under it.
-pub struct IrqLock<T>(Lock<T>);
+pub struct IrqLock<T>(masked::Masked<T>);
 
 impl<T> IrqLock<T> {
     pub const fn new(value: T) -> Self {
-        Self(Lock::new(value))
+        Self(masked::Masked::new(value))
     }
 }
 
@@ -65,14 +64,31 @@ impl<T: Send> CellLock<T> for IrqLock<T> {
         // Raised first, so the lock's own release never reaches depth zero, and
         // a pass, with interrupts masked.
         preempt_off(|_| {
-            let _irq = crate::arch::IrqGuard::close();
-            let mut held = self.0.lock();
+            let irq = crate::arch::IrqGuard::close();
+            let mut held = self.0.lock(&irq);
             #[cfg(feature = "boot-actuators")]
             handler_post::raise_if_staged();
-            let out = f(&mut held);
-            drop(held);
-            out
+            f(&mut held)
         })
+    }
+}
+
+mod masked {
+    use crate::arch::IrqGuard;
+    use crate::sync::{Lock, LockGuard};
+
+    /// A lock taken only through a borrow of a closed [`IrqGuard`]: never
+    /// before the mask, and never held past it.
+    pub struct Masked<T>(Lock<T>);
+
+    impl<T> Masked<T> {
+        pub const fn new(value: T) -> Self {
+            Self(Lock::new(value))
+        }
+
+        pub fn lock<'a>(&'a self, _closed: &'a IrqGuard) -> LockGuard<'a, T> {
+            self.0.lock()
+        }
     }
 }
 
@@ -121,6 +137,11 @@ impl Watch {
             )
         })
     }
+
+    /// Answer every poll registered here as gone: the source it watched ended.
+    pub fn cancel_polls(&self) {
+        self.0.cancel_rings();
+    }
 }
 
 impl IrqWatch {
@@ -140,6 +161,12 @@ impl IrqWatch {
             self.0.post_in_place(WakeCause::new(WakeReason::Woken), &env);
         });
     }
+
+    /// Answer every poll registered here as gone, where it stands, freeing
+    /// nothing: the source it watched ended.
+    pub fn cancel_polls_in_place(&self) {
+        self.0.cancel_rings_in_place();
+    }
 }
 
 impl<L: CellLock<List>> Waitable<L> {
@@ -148,9 +175,10 @@ impl<L: CellLock<List>> Waitable<L> {
         self.0.add_ring(entry);
     }
 
-    /// Answer every poll registered here as gone: the source it watched ended.
-    pub fn cancel_polls(&self) {
-        self.0.cancel_rings();
+    /// `handler-post`'s stand where a registration holds the list lock.
+    #[cfg(feature = "boot-actuators")]
+    pub(crate) fn holding(&self, f: impl FnOnce()) {
+        self.0.holding(f);
     }
 }
 
@@ -315,22 +343,28 @@ mod window {
     }
 }
 
-/// `handler-post`: claim slot 0's vector, raised on this CPU while it holds
-/// preemption off, posts that slot's watch from the handler before any pass
-/// can run. Raised inside a post of the watch itself, the handler's post
-/// follows once the outer one lets go; raised inside a completion written into
-/// a ring that polls the watch, the handler's post completes that poll once the
-/// writer lets go. A hold counts the posts of the watch made on its CPU, and no
-/// other watch's, and lapses at its budget. One run of [`HOLDS`] holds per arm,
-/// on whichever idle loop reaches it first with interrupts open; its verdict is
-/// one [`Verdict`] line.
+/// `handler-post`: the last claim slot's vector, which no claim holds, raised
+/// on this CPU while it holds preemption off, posts that slot's watch from the
+/// handler before any pass can run. Raised inside a post of the watch itself,
+/// the handler's post follows once the outer one lets go; raised inside a
+/// completion written into a ring that polls the watch, or inside that ring's
+/// own watch's list lock, the handler's post completes that poll once the
+/// section lets go. A hold counts the posts of the watch made on its CPU, and
+/// no other watch's, and lapses at its budget. One run of [`HOLDS`] holds per
+/// arm, on whichever idle loop reaches it first with interrupts open; its
+/// verdict is one [`Verdict`] line.
 #[cfg(feature = "boot-actuators")]
 pub mod handler_post {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
     use toyos_sched::watch::handler_post::{Verdict, HOLDS};
 
+    use crate::pcidev::{MAX_FUNCTIONS, VECTORS};
     use crate::time::{Budget, Deadline, Duration};
+
+    /// A claim takes the first free slot, so the last is held only when every
+    /// slot is.
+    const SLOT: usize = MAX_FUNCTIONS - 1;
 
     const WINDOW: Budget = Budget::of(
         Duration::from_secs(1),
@@ -349,8 +383,10 @@ pub mod handler_post {
         if RAN.load(Relaxed) || !crate::arch::cpu::interrupts_enabled() || RAN.swap(true, Relaxed) {
             return;
         }
+        // A held slot's driver would take counts its device never raised.
+        assert!(crate::pcidev::held_at(SLOT).is_none(), "handler-post: claim slot {SLOT} is held");
         let me = crate::arch::percpu::cpu_id();
-        let claim = crate::pcidev::watch(0);
+        let claim = crate::pcidev::watch(SLOT);
         let ring = crate::inbox::Staged::new();
         let verdict = crate::sched::driver::preempt_off(|_| {
             HOLDING.store(me, Relaxed);
@@ -364,8 +400,13 @@ pub mod handler_post {
                 RAISE_INSIDE.store(me, Relaxed);
                 ring.complete();
             });
+            // Where a submitter's registration holds it.
+            let in_a_rings_watch = holds(1, || {
+                ring.poll(claim);
+                ring.holding_its_watch(raise);
+            });
             HOLDING.store(NOBODY, Relaxed);
-            Verdict { in_a_list, in_a_ring }
+            Verdict { in_a_list, in_a_ring, in_a_rings_watch }
         });
         crate::log!("{verdict}");
     }
@@ -392,13 +433,17 @@ pub mod handler_post {
         posted
     }
 
+    fn raise() {
+        crate::arch::irqchip::send_self(VECTORS[SLOT]);
+    }
+
     /// From inside an interrupts-off section: the staged CPU's next one raises
     /// the vector while it holds.
     pub fn raise_if_staged() {
         let staged = RAISE_INSIDE.load(Relaxed);
         if staged != NOBODY && staged == crate::arch::percpu::cpu_id() {
             RAISE_INSIDE.store(NOBODY, Relaxed);
-            crate::arch::irqchip::send_self(crate::pcidev::VECTORS[0]);
+            raise();
         }
     }
 
@@ -406,7 +451,7 @@ pub mod handler_post {
         let holding = HOLDING.load(Relaxed);
         if holding != NOBODY
             && holding == crate::arch::percpu::cpu_id()
-            && core::ptr::eq(watch, crate::pcidev::watch(0))
+            && core::ptr::eq(watch, crate::pcidev::watch(SLOT))
         {
             POSTS.fetch_add(1, Relaxed);
         }

@@ -162,16 +162,18 @@ times:
       The thread is the holder's: netd's, blockd's, soundd's mix thread, and
       the `isa` claim's when #592 lands. **Exit**: `handler_post_without_a_pass`,
       a vector taken on a CPU holding preemption off, inside a post of its own
-      watch or inside a completion into a ring polling it, posting once that
-      section lets go and before any pass, red on the base; the watch's loom
-      models over the new post.
+      watch, inside a completion into a ring polling it, or inside that ring's
+      own watch, posting once that section lets go and before any pass, red on
+      the base; the watch's loom models over the new post.
    2. **The windows, measured**: the longest interrupts-off and preemption-off
       windows per CPU, reported beside the IRQ census and fed by each
       architecture's masking primitives and entries, the number the ARM
       track's stage 4 owes as well. Applied to stage 6's first commit for
       the baseline. **Exit**: both windows read on the T14, which is x86
       metal, at stage 6's start and at step 1's head, and neither is longer
-      at step 1's head than at the start.
+      at step 1's head than at the start, under the load
+      `issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`
+      names as well.
    3. **The i8042's thread is ps2server's** (#592's i8042 stage): `irq_ring`'s
       `I8042`, `keyboard_controller::service` and the idle loop's
       `verdict_due` go with the kernel's driver. **Exit**: that stage's.

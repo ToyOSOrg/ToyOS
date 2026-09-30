@@ -1486,7 +1486,7 @@ fn tear_down(slot: usize, mut bound: Bound) {
     }
     IRQ[slot].clear();
     // The function is gone from this slot, so a poll on it is answered rather than left for the next holder's interrupts.
-    WATCHES[slot].cancel_polls();
+    WATCHES[slot].cancel_polls_in_place();
     log!(
         "pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] released from slot {slot}; reset by {how}",
         bound.pci.bus,
