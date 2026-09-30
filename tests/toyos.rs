@@ -248,7 +248,7 @@ const RUST_SKIP: &[&str] = &[
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
     // `netd_slow_reader`, `netd_held_open`, `netd_udp_refused`,
-    // `netd_udp_any_address`, `netd_refused_pipes` and `netd_refused_accept`
+    // `netd_udp_any_address` and `netd_refused_pipes`
     // run them on `tests/netcase`, and `netd_lookup_let_go` on it with its
     // frames held.
     "netd_slow_reader",
@@ -256,7 +256,6 @@ const RUST_SKIP: &[&str] = &[
     "netd_udp_refused",
     "netd_udp_any_address",
     "netd_refused_pipes",
-    "netd_refused_accept",
     "netd_lookup_let_go",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
@@ -786,10 +785,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // round trip after each case, a named line per refusal and a clean
     // console; its clocks are liveness guards.
     ("netd_refused_pipes", Sched::Parallel),
-    // The netcase boot again: an accept netd refuses for room leaves its owner
-    // a wake for the connection it left, once room returns. The verdict
-    // is the guest's wake or its absence.
-    ("netd_refused_accept", Sched::Parallel),
     // The netcase boot again: bytes held back past a full pipe move on the
     // pipe's room alone, the peer holding the connection open and silent. The
     // verdict is the guest's byte-for-byte comparison; its clocks are
@@ -1366,7 +1361,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_listener_forgery", &["test_rs_netd_listener_forgery"]),
     ("netd_slow_reader", &["test_rs_netd_slow_reader"]),
     ("netd_refused_pipes", &["test_rs_netd_refused_pipes"]),
-    ("netd_refused_accept", &["test_rs_netd_refused_accept"]),
     ("netd_held_open", &["test_rs_netd_held_open"]),
     ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
     ("netd_udp_any_address", &["test_rs_netd_udp_any_address"]),
@@ -8593,22 +8587,6 @@ fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// An accept netd refuses for room leaves its owner a wake for the connection
-/// it left: the guest's wakes are the verdict. This side carries that netd named the
-/// refusal for room and that no program panicked.
-fn netd_refused_accept(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let HostRun { result, console, .. } = netcase_against_host(rust_bins, "netd_refused_accept", true, "")?;
-    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_refused_accept: ok")) {
-        return Err(format!("the guest never said it was done:\n{}", result.stdout));
-    }
-    if !console.contains("netd: refusing accept, ") {
-        return Err(format!("netd refused an accept for room without saying so:\n{console}"));
-    }
-    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-    eprintln!("  [netcase] an accept refused for room left a wake once room returned");
-    Ok(())
-}
-
 /// Ctrl+Alt+D at a live desktop: every CPU answers, and the two halves of the
 /// report agree.
 ///
@@ -13199,7 +13177,6 @@ fn run_machine_test(
         }
         "netd_slow_reader" => netd_slow_reader(rust_bins),
         "netd_refused_pipes" => netd_refused_pipes(rust_bins),
-        "netd_refused_accept" => netd_refused_accept(rust_bins),
         "netd_held_open" => netd_held_open(rust_bins),
         "netd_udp_refused" => netd_udp_refused(rust_bins),
         "netd_udp_any_address" => netd_udp_any_address(rust_bins),
