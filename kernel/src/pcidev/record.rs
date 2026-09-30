@@ -6,20 +6,16 @@
 //! not an ordering, and no guest test in this suite lands on it.
 //!
 //! **Two parties race**: the ISR, on whichever CPU the unit routed the message
-//! to, and the holder reading its record through a syscall on any CPU. The
-//! scheduler pass that turns a message into a wake runs on the ISR's own CPU
-//! after it, so those two do not interleave.
+//! to, and the holder reading its record through a syscall on any CPU.
 //!
-//! **The invariant is that every message is counted exactly once, and owes
-//! exactly one wake.** Both are read-modify-writes and neither is a load
-//! followed by a store: a reader that loaded a count and then cleared it drops
-//! every message the ISR recorded in between, and a driver that misses one
-//! waits for a device that has already spoken. No ordering carries anything
-//! across these words — each is the whole of what it says — so the orderings
-//! here are `Relaxed` and the model is about the interleaving, **but for one
-//! edge**: a fault arms the same wake a message does, and the pass that takes
-//! that wake has to read the fault, so `pending` is released by [`Interrupt::fault`]
-//! and acquired by [`Interrupt::take_pending`].
+//! **The invariant is that every message is counted exactly once.** The count
+//! is a read-modify-write on both sides and never a load followed by a store:
+//! a reader that loaded a count and then cleared it drops every message the ISR
+//! recorded in between, and a driver that misses one waits for a device that
+//! has already spoken. No ordering carries anything across these words — each
+//! is the whole of what it says — so the orderings here are `Relaxed` and the
+//! model is about the interleaving; the holder reads them after the wake the
+//! claim's watch post owes it, which orders them.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -32,16 +28,13 @@ use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 /// control for and `kernel-loom` is the model of.
 const ORDER: Ordering = Ordering::Relaxed;
 
-/// The negative control: the two read-modify-writes become a load and a store,
+/// The negative control: the read-modify-writes become a load and a store,
 /// which is the whole of what this record's design is. Never on in a kernel
 /// build.
 #[cfg(feature = "device-irq-lossy")]
 macro_rules! take_word {
-    ($word:expr, $empty:expr) => {
-        take_word!($word, $empty, ORDER)
-    };
-    ($word:expr, $empty:expr, $order:expr) => {{
-        let held = $word.load($order);
+    ($word:expr, $empty:expr) => {{
+        let held = $word.load(ORDER);
         $word.store($empty, ORDER);
         held
     }};
@@ -49,10 +42,7 @@ macro_rules! take_word {
 #[cfg(not(feature = "device-irq-lossy"))]
 macro_rules! take_word {
     ($word:expr, $empty:expr) => {
-        take_word!($word, $empty, ORDER)
-    };
-    ($word:expr, $empty:expr, $order:expr) => {
-        $word.swap($empty, $order)
+        $word.swap($empty, ORDER)
     };
 }
 
@@ -72,12 +62,10 @@ macro_rules! bump {
 
 /// What the ISR writes and the claim reads back.
 ///
-/// Atomics only: the handler takes no lock and allocates nothing.
+/// Atomics only: the handler allocates nothing.
 pub struct Interrupt {
     /// Messages since the holder's last read.
     count: AtomicU32,
-    /// Set by the ISR, cleared by the scheduler pass that turns it into a wake.
-    pending: AtomicBool,
     /// The unit refused this function an access. Every call the claim answers
     /// refuses from here on: its bus mastering is gone, so a driver that kept
     /// going would be driving nothing.
@@ -97,7 +85,6 @@ impl Interrupt {
     pub const fn new() -> Self {
         Self {
             count: AtomicU32::new(0),
-            pending: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
             unannounced: AtomicBool::new(true),
         }
@@ -109,7 +96,6 @@ impl Interrupt {
     pub fn new() -> Self {
         Self {
             count: AtomicU32::new(0),
-            pending: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
             unannounced: AtomicBool::new(true),
         }
@@ -122,12 +108,6 @@ impl Interrupt {
     /// two of these, and what it took plus what is left has to be what arrived.
     pub fn took(&self) {
         bump!(self.count);
-        // `swap` and not a store: [`Self::fault`] releases through this same
-        // word, and a plain write landing after that release in `pending`'s
-        // modification order ends the release sequence there — the pass that
-        // later takes the fault's wake would then synchronize with nothing.
-        // An RMW extends the sequence instead, whichever order it lands in.
-        self.pending.swap(true, ORDER);
     }
 
     /// The messages since the last read, or `None` for none.
@@ -147,36 +127,19 @@ impl Interrupt {
         self.count.load(ORDER) != 0
     }
 
-    /// Whether a wake is owed, taken at most once per message. Answers `true`
-    /// for the pass that owes it and `false` for every pass after.
-    ///
-    /// `swap` for the same reason as [`Self::take`]: two passes that both
-    /// loaded `true` would both wake one message's watchers. `Acquire`, so
-    /// the pass that takes a fault's wake reads [`Self::faulted`] set.
-    pub fn take_pending(&self) -> bool {
-        take_word!(self.pending, false, Ordering::Acquire)
-    }
-
     /// Whether this is the first message this slot has taken. Answers `true`
     /// once per claim and `false` ever after, so a caller may log on it.
     ///
-    /// `swap` for [`Self::take_pending`]'s reason: two passes that both loaded
-    /// `true` would both announce one message.
+    /// `swap` for [`Self::take`]'s reason: two reads that both loaded `true`
+    /// would both announce one message.
     pub fn take_unannounced(&self) -> bool {
         take_word!(self.unannounced, false)
     }
 
-    /// The unit refused this function an access. Called from the fault handler,
-    /// which takes no lock: every call the claim answers refuses from here on,
-    /// and a wake is owed as for a message, because a holder waiting on the
-    /// claim would otherwise wait for a function that can no longer speak.
-    ///
-    /// The wake is a `swap` and not a store: this one races a pass on another
-    /// CPU, and loom 0.7 lets a plain store be lost to a concurrent `swap`, which
-    /// C11 forbids, so a store here is a wake the model cannot show is owed.
+    /// The unit refused this function an access. Called from the fault handler:
+    /// every call the claim answers refuses from here on.
     pub fn fault(&self) {
         self.faulted.store(true, ORDER);
-        self.pending.swap(true, Ordering::Release);
     }
 
     pub fn faulted(&self) -> bool {
@@ -187,7 +150,6 @@ impl Interrupt {
     /// up. The holder is not running at either point.
     pub fn clear(&self) {
         self.count.store(0, ORDER);
-        self.pending.store(false, ORDER);
         self.faulted.store(false, ORDER);
         self.unannounced.store(true, ORDER);
     }

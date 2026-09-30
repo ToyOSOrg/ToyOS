@@ -10,6 +10,10 @@ use super::serial::Serial;
 /// that carries `clients=0`, which soundd writes after the removal — and not at
 /// the next job's spawn, which can land before it. A job that plays nothing
 /// (`sessions` of 0) ends at the next test binary's spawn.
+///
+/// Sessions are refused unless each is one stream: soundd counts one window
+/// across every client it holds, so a session another job's stream shared has
+/// no count that is the job's alone.
 fn job_window<'a>(log: &'a str, job: &str, sessions: usize) -> Result<&'a str, String> {
     let head = format!("spawn: /system/bin/{job} ");
     let at = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
@@ -32,7 +36,21 @@ fn job_window<'a>(log: &'a str, job: &str, sessions: usize) -> Result<&'a str, S
             })?;
         end = rest[flushed..].find('\n').map_or(rest.len(), |nl| flushed + nl + 1);
     }
-    Ok(&rest[..end])
+    let window = &rest[..end];
+    let said = |what: &str| {
+        window.lines().filter(|l| l.contains("soundd: client ") && l.contains(what)).count()
+    };
+    // A removal counts too: a stream soundd held before the spawn connected
+    // outside the window and leaves inside it.
+    let (streams, removed) = (said(" connected (id="), said(" removed ("));
+    if streams != sessions || removed != sessions {
+        return Err(format!(
+            "soundd connected {streams} and removed {removed} stream(s) in {job}'s {sessions} \
+             session(s): another job's stream shared soundd with {job}'s, and no count in the \
+             window is {job}'s alone:\n{window}"
+        ));
+    }
+    Ok(window)
 }
 
 /// What soundd's flush on its last client leaving carries, and no other stats

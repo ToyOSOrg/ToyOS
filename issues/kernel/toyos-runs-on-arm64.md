@@ -317,6 +317,16 @@ Each stage names its exit; "measured" means a number from a run.
    before its body) get a test here that reds with `put` written back as one
    `self.buf.write(off, trb)`; x86's TSO hides all three from every guest
    test until then.
+   **The claim's handler is the first arm of `irq()`
+   (`kernel/src/arch/aarch64/trap.rs:135`) that posts a watch or lets go of a
+   `Lock`**, and either runs `preempt::enable`, whose pass at depth zero
+   (`kernel/src/preempt.rs:67`) reads nothing of `DAIF`; `do_preempt`'s
+   `assert_baseline(BASELINE_IRQ_EXIT)` (`kernel/src/scheduler.rs:358`) passes
+   at depth zero, so that pass would run inside the handler, before
+   `irqchip::end`. Owed before that arm lands: `irq()` holds the preempt count
+   across every device arm, as x86-64's `device_irq_entry` does, or
+   `preempt::enable` refuses a pass with interrupts masked, which `IrqOff`'s
+   SAFETY (`kernel/src/sched/driver.rs:49`) already assumes.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
    built for `aarch64-unknown-toyos`. C programs stay x86-only until this

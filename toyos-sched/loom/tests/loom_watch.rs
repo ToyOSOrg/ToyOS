@@ -18,13 +18,16 @@
 //! cargo test -p toyos-sched-loom --features commit-ignores-notify --test loom_watch
 //! ```
 //!
-//! Three more controls: `notify-flag-load-only` lets a post that finds its bits
+//! Four more controls: `notify-flag-load-only` lets a post that finds its bits
 //! already set answer off a load, and
 //! `a_second_post_is_not_lost_to_a_flag_the_waiter_consumed` must red;
 //! `gate-fence-off` removes the [`Gate`]'s two fences, and
-//! `a_transition_racing_an_opening_gate_is_never_missed` must red; and
+//! `a_transition_racing_an_opening_gate_is_never_missed` must red;
 //! `poll-fire-load-store`, the kernel's own control for the poll's one-shot
-//! answer, which the ring models below compile, must red both poll models here.
+//! answer, which the ring models below compile, must red every
+//! `*_completes_exactly_once` model here; and `fault-posted-before-it-is-set`
+//! posts before the readiness is stored, and both `a_poll_registered_racing_*`
+//! models must red with a poll completed by neither.
 //!
 //! **The ring entry is the kernel's [`Once`], compiled from
 //! `kernel/src/inbox/once.rs`**, the decision a `PollEntry` makes; what else a
@@ -49,6 +52,7 @@ use toyos_sched_loom::park::{prepare, Cancel, Commit, CurrentTask};
 use toyos_sched_loom::task::{
     Claim, Refused, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason,
 };
+use toyos_sched_loom::sync::CellLock;
 use toyos_sched_loom::watch::{Fire, Gate, Poster, Ring, Waiters, Watch};
 
 #[path = "../../../kernel/src/inbox/once.rs"]
@@ -107,6 +111,15 @@ impl World {
             preempt: &RemoteGuard,
         };
         self.watch.post(WakeCause::new(WakeReason::Woken), &env);
+    }
+
+    fn post_in_place(&self) {
+        let env = Poster {
+            cpus: &self.cpus,
+            kicker: &self.kicks,
+            preempt: &RemoteGuard,
+        };
+        self.watch.post_in_place(WakeCause::new(WakeReason::Woken), &env);
     }
 
     fn post_one(&self, token: u64) -> usize {
@@ -274,53 +287,89 @@ fn a_bounded_post_racing_a_timeout_reaches_a_live_waiter() {
 /// and never by both, which is a completion the process did not ask for.
 #[test]
 fn a_poll_registered_racing_a_post_completes_exactly_once() {
-    model(|| {
-        let (world, _rx) = world();
-        let ready = Arc::new(AtomicBool::new(false));
-        let poll = Entry::new();
+    model(|| poll_racing(World::post));
+}
 
-        let registrant = {
-            let world = world.clone();
-            let ready = ready.clone();
-            let poll = poll.clone();
-            loom::thread::spawn(move || {
-                world.watch.add_ring(poll.clone());
-                if ready.load(Ordering::Acquire) {
-                    poll.fire(Fire::Ready);
-                }
-            })
-        };
-        let producer = loom::thread::spawn(move || {
-            ready.store(true, Ordering::Release);
-            world.post();
-        });
-        registrant.join().unwrap();
-        producer.join().unwrap();
+/// The same, against the post an interrupt handler makes.
+#[test]
+fn a_poll_registered_racing_a_post_in_place_completes_exactly_once() {
+    model(|| poll_racing(World::post_in_place));
+}
 
-        assert_eq!(poll.posts(), 1, "a poll over a ready object completes once");
-    });
+/// `ready` is `Relaxed` on both sides, as a claim's `faulted` is: the list lock
+/// alone orders it against the registrant's recheck.
+fn poll_racing(post: fn(&World)) {
+    let (world, _rx) = world();
+    let ready = Arc::new(AtomicBool::new(false));
+    let poll = Entry::new();
+
+    let registrant = {
+        let world = world.clone();
+        let ready = ready.clone();
+        let poll = poll.clone();
+        loom::thread::spawn(move || {
+            world.watch.add_ring(poll.clone());
+            if ready.load(Ordering::Relaxed) {
+                poll.fire(Fire::Ready);
+            }
+        })
+    };
+    let producer = {
+        let world = world.clone();
+        loom::thread::spawn(move || {
+            // `fault-posted-before-it-is-set` is the control: posted first, the
+            // readiness can land after both the post and the recheck.
+            if cfg!(feature = "fault-posted-before-it-is-set") {
+                post(&world);
+                ready.store(true, Ordering::Relaxed);
+            } else {
+                ready.store(true, Ordering::Relaxed);
+                post(&world);
+            }
+        })
+    };
+    registrant.join().unwrap();
+    producer.join().unwrap();
+
+    // While `world` lives: its watch's drop answers a live entry as gone.
+    assert_ne!(poll.posts(), 0, "a poll over a ready object was completed by neither");
+    assert_eq!(poll.posts(), 1, "a poll over a ready object completes once");
+    drop(world);
 }
 
 /// The object's end racing its readiness: the poll is answered once, as ready
-/// or as gone, and whichever answered it no longer holds it.
+/// or as gone.
 #[test]
 fn an_end_racing_a_post_answers_a_poll_once() {
-    model(|| {
-        let (world, _rx) = world();
-        let poll = Entry::new();
-        world.watch.add_ring(poll.clone());
+    model(|| end_racing(|w| w.watch.cancel_rings(), World::post));
+}
 
-        let ender = {
-            let world = world.clone();
-            loom::thread::spawn(move || world.watch.cancel_rings())
-        };
-        let poster = loom::thread::spawn(move || world.post());
-        ender.join().unwrap();
-        poster.join().unwrap();
+/// The same, for a thread's end racing a handler's post, which is made in
+/// place.
+#[test]
+fn an_end_racing_a_post_in_place_answers_a_poll_once() {
+    model(|| end_racing(|w| w.watch.cancel_rings(), World::post_in_place));
+}
 
-        assert_eq!(poll.posts(), 1);
-        assert!(!poll.live());
-    });
+fn end_racing(end: fn(&World), post: fn(&World)) {
+    let (world, _rx) = world();
+    let poll = Entry::new();
+    world.watch.add_ring(poll.clone());
+
+    let ender = {
+        let world = world.clone();
+        loom::thread::spawn(move || end(&world))
+    };
+    let poster = {
+        let world = world.clone();
+        loom::thread::spawn(move || post(&world))
+    };
+    ender.join().unwrap();
+    poster.join().unwrap();
+
+    assert_eq!(poll.posts(), 1);
+    assert!(!poll.live());
+    drop(world);
 }
 
 /// One waiter, two producers, each storing its own condition and then posting.
@@ -592,5 +641,120 @@ fn a_poll_on_two_watches_racing_both_posts_completes_exactly_once() {
             "the replaced poll was answered {} time(s), withdrawn={withdrew}",
             older.posts(),
         );
+    });
+}
+
+/// A poll ring as the kernel's is: its completions behind a lock of its own,
+/// and a watch its submitter parks on, which holds threads and no ring.
+struct PollRing {
+    cpus: CpuHandles<Msg>,
+    kicks: Kicks,
+    written: LoomLock<u32>,
+    parked: RingWatch,
+}
+
+/// One of that ring's polls, registered on one device's watch.
+struct RingPoll {
+    ring: Arc<PollRing>,
+    state: once::Once,
+}
+
+struct RingEntry(Arc<RingPoll>);
+
+type RingWatch = Watch<Msg, RingEntry, LoomLock<Waiters<Msg, RingEntry>>>;
+
+impl Ring for RingEntry {
+    fn fire(&self, _how: Fire) {
+        if self.0.state.fire() {
+            let ring = &self.0.ring;
+            ring.written.with(|n| *n += 1);
+            let env = Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
+            ring.parked.post_in_place(WakeCause::new(WakeReason::Woken), &env);
+        }
+    }
+
+    fn live(&self) -> bool {
+        self.0.state.armed()
+    }
+}
+
+/// **A post in place fires its rings under its own list lock**, so beneath it
+/// are the ring's lock and the ring's watch. Two devices' watches each hold a
+/// poll of one ring and are posted at once, while the ring's submitter waits
+/// for both completions: a submitter parked with both completions written was
+/// owed the wake the second one posted.
+#[test]
+fn two_posts_through_one_rings_lock_lose_no_wake() {
+    model(|| {
+        let (tx, mut rx) = mailbox::<Msg>();
+        let ring = Arc::new(PollRing {
+            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)]),
+            kicks: Kicks::new(),
+            written: LoomLock::new(0),
+            parked: Watch::new(watch_list()),
+        });
+        let devices: Vec<Arc<RingWatch>> =
+            (0..2).map(|_| Arc::new(Watch::new(watch_list()))).collect();
+        for device in &devices {
+            device.add_ring(RingEntry(Arc::new(RingPoll {
+                ring: ring.clone(),
+                state: once::Once::new(),
+            })));
+        }
+        let submitter = task(1);
+
+        let waiting = {
+            let ring = ring.clone();
+            let submitter = submitter.clone();
+            loom::thread::spawn(move || {
+                ring.parked.register(&submitter, 0);
+                // Each post ends at most one iteration.
+                for _ in 0..4 {
+                    if ring.written.with(|n| *n) == 2 {
+                        return false;
+                    }
+                    let Ok(ticket) =
+                        prepare(&CurrentTask::new(&submitter, CPU0), Cancel::Answers, WaitClass::Io)
+                    else {
+                        continue;
+                    };
+                    match ticket.commit() {
+                        Commit::Parked(_) => return true,
+                        Commit::AlreadyWoken => continue,
+                        Commit::Killed => unreachable!("nothing retires in this model"),
+                    }
+                }
+                unreachable!("two posts ended more than three iterations")
+            })
+        };
+        let posters: Vec<_> = devices
+            .iter()
+            .map(|device| {
+                let (device, ring) = (device.clone(), ring.clone());
+                loom::thread::spawn(move || {
+                    let env =
+                        Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
+                    device.post_in_place(WakeCause::new(WakeReason::Woken), &env);
+                })
+            })
+            .collect();
+
+        let parked = waiting.join().unwrap();
+        for poster in posters {
+            poster.join().unwrap();
+        }
+        let guard = PreemptModel::new();
+        let msgs = drain(&mut rx, &guard);
+
+        if parked {
+            assert_eq!(
+                msgs,
+                [Msg::Wake(TaskKey(1), WakeReason::Woken)],
+                "parked with both completions written and no wake owed: a ring's post was lost",
+            );
+        } else {
+            assert!(msgs.is_empty(), "a submitter that never parked is owed nothing: {msgs:?}");
+        }
+        ring.parked.unregister(&submitter);
     });
 }

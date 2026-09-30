@@ -268,7 +268,6 @@ pub(crate) const CONTROLS: &[Control] = &[
     ]),
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
         "every_message_is_counted_once ... FAILED",
-        "one_message_is_one_wake ... FAILED",
     ]),
     red(KERNEL_LOOM, "dump-report-relaxed", Some("dump_request"), &[
         "a_request_filed_during_a_report_is_reported ... FAILED",
@@ -290,6 +289,7 @@ pub(crate) const CONTROLS: &[Control] = &[
     // with. A double panic, so the verdict is the first one's message.
     red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
         "parked with the condition true and no wake owed: the post was lost",
+        "parked with both completions written and no wake owed: a ring's post was lost",
     ]),
     // The notify's flagged arm answering off a load: a second post reads the
     // word from before the waiter consumed the first flag.
@@ -304,7 +304,15 @@ pub(crate) const CONTROLS: &[Control] = &[
     // ring entry.
     red(SCHED_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
         "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
+        "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
         "a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED",
+    ]),
+    // The ring models' lost-completion half: the producer posts before it
+    // stores the readiness its registrant rechecks.
+    red(SCHED_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[
+        "a poll over a ready object was completed by neither",
+        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
+        "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
     ]),
     // Reproduces an open defect
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than

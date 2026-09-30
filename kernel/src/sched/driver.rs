@@ -671,18 +671,6 @@ fn drain_irqs(entered: super::dump::Entered) {
     super::dump::serve_if_owed();
     // Repaints the panel if whoever owns the screen has drawn over the report.
     crate::drivers::panic_console::hold_report();
-
-    if crate::irq_ring::take(crate::irq_ring::IrqSource::UserDev).is_some() {
-        // Which claim it was is the per-slot flag `pcidev` keeps; the record
-        // here says only that a pass is owed, so one function's interrupt does
-        // not wake every user driver in the machine.
-        crate::pcidev::drain_pending();
-    }
-    if crate::irq_ring::take(crate::irq_ring::IrqSource::Audio).is_some() {
-        // Both backends share one watch, so a second would need the parking side
-        // to know which driver bound, which it doesn't.
-        crate::drivers::AUDIO_WATCH.post();
-    }
 }
 
 /// Leave the current stack for this CPU's idle stack and never come back.
@@ -714,6 +702,10 @@ extern "C" fn idle_loop() -> ! {
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");
+        }
+        #[cfg(feature = "boot-actuators")]
+        if crate::actuator::handler_post() {
+            crate::watch::handler_post::run();
         }
         crate::scheduler::log_health();
         crate::scheduler::reap_finished();
