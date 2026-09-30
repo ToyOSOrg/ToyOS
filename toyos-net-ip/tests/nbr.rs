@@ -89,6 +89,21 @@ fn s_ip_nbr_008_a_known_router_moving() {
     assert_eq!(h.mac_of(R), Some(MAC_X));
     assert_eq!(h.count(Counter::ArpMacChanged), 1);
     assert_eq!(h.refusals(Counter::ArpMacChanged)[0].peer, Peer::MacChange { ip: R, old: MAC_R, new: MAC_X });
+
+    // A datagram released to R that still waits for room leaves to the MAC R holds then.
+    let mut h = H::fixture_i();
+    assert_eq!(h.send(A, R, 5001, 5001, b"1"), Ok(None));
+    h.out();
+    for n in 0..toyos_net_ip::limits::CONTROL_QUEUE as u8 {
+        h.frame(&request(MacAddr([2, 1, 0, 0, 0, n]), ip4(192, 0, 2, 100 + n), A));
+    }
+    h.frame(&request(MAC_R, R, A));
+    assert!(matches!(h.state(R), Some(Nud::Stale(s)) if s.released.queued() == 1));
+    h.frame(&hex(V_ARP_ROUTER_MOVED));
+    assert_eq!(h.mac_of(R), Some(MAC_X));
+    let out = h.out();
+    assert_eq!(out.last().map(|o| (o.to(), o.ip().is_some())), Some((MAC_X, true)));
+    assert!(out.iter().all(|o| o.to() != MAC_R));
 }
 
 #[test]
