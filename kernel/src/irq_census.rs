@@ -135,7 +135,7 @@ pub fn taken_here() -> u64 {
 /// Logs one `irq: cpuN total=… <source>=…` line per online CPU; counts are cumulative since boot.
 /// Allocates nothing, takes no lock, touches no device.
 pub fn log_census() {
-    for cpu in 0..crate::arch::smp::cpu_count() {
+    for cpu in 0..crate::smp::cpu_count() {
         let Some(counts) = read(cpu) else { continue };
         crate::log!(
             "irq: cpu{cpu} total={}{}",
