@@ -371,25 +371,32 @@ fn s_udp_us_053_accepted_datagrams_outlive_close() {
     let order: String = u.out().iter().map(|f| char::from(ip_of(f).unwrap().payload()[8])).collect();
     assert_eq!(order, "aaaaaaaaaabbbbbb");
 
-    // A slot a closed socket leaves takes no turn with it, and closed sockets take one turn.
+    // The slot a closed socket leaves takes no turn with it to the next socket in it, and closed
+    // sockets' datagrams take one turn among the sockets.
     let mut u = U::uf();
     let x = u.bind(ANY, 50_001).unwrap();
-    u.udp.send_to(&mut u.ip, x, DNS, 53, b"x").unwrap();
+    for _ in 0..2 {
+        u.udp.send_to(&mut u.ip, x, DNS, 53, b"x").unwrap();
+    }
     u.udp.close(x).unwrap();
-    assert_eq!(u.out_with(1).len(), 1);
     let y = u.bind(ANY, 50_002).unwrap();
     let z = u.bind(ANY, 50_003).unwrap();
-    for _ in 0..2 {
-        u.udp.send_to(&mut u.ip, y, DNS, 53, b"y").unwrap();
-        u.udp.send_to(&mut u.ip, z, DNS, 53, b"z").unwrap();
-    }
+    let send_yz = |u: &mut U| {
+        for _ in 0..2 {
+            u.udp.send_to(&mut u.ip, y, DNS, 53, b"y").unwrap();
+            u.udp.send_to(&mut u.ip, z, DNS, 53, b"z").unwrap();
+        }
+    };
+    let order = |u: &mut U| -> String { u.out().iter().map(|f| char::from(ip_of(f).unwrap().payload()[8])).collect() };
+    send_yz(&mut u);
+    assert_eq!(order(&mut u), "xyzxyz");
+    send_yz(&mut u);
     let w = u.bind(ANY, 50_004).unwrap();
     for _ in 0..2 {
         u.udp.send_to(&mut u.ip, w, DNS, 53, b"w").unwrap();
     }
     u.udp.close(w).unwrap();
-    let order: String = u.out().iter().map(|f| char::from(ip_of(f).unwrap().payload()[8])).collect();
-    assert_eq!(order, "yzwyzw");
+    assert_eq!(order(&mut u), "yzwyzw");
 }
 
 #[test]
