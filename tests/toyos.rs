@@ -1209,6 +1209,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // had — its own doc says one break under KVM and two under TCG off the
     // same tree, which is the race timer-anchored, not a margin, describes.
     ("usb_transport_break", Sched::Serial),
+    // The host's unplug has to land inside the port rung's bound, which the
+    // hold spends waiting for it.
+    ("usb_stick_left", Sched::Serial),
     ("xhci_full_speed_device", Sched::Parallel),
     ("xhci_superspeed_ports", Sched::Parallel),
     // `xhci_flap` is the one that genuinely races the host against the guest:
@@ -1863,12 +1866,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // Its own boot: the first WRITE(10) the boot stick takes is abandoned
-        // mid-flight, and what is judged is the one thing QEMU's `usb-storage`
-        // cannot answer — whether a device holding a toggle, a sequence number
-        // and half a command comes back from the class's Reset Recovery on the
-        // machine's own controller.
-        "usb_transport_break",
+        "usb_stick_left",
         metal::Metal::Runs {
             arms: &[metal::once("usbbreak", "tests/jobcase", &["usb-transport-break"], &[])],
             judge: |b| usb::transport_break_on_metal(&b[0].kernel(), &b[0].after_the_reset()?),
@@ -10464,6 +10462,7 @@ fn run_machine_test(
         "xhci_slow_connect" => usb::xhci_slow_connect(test_config, c_bins, rust_bins),
         "xhci_portsc_rw1c" => usb::xhci_portsc_rw1c(test_config, c_bins, rust_bins),
         "usb_transport_break" => usb::usb_transport_break(test_config, c_bins, rust_bins),
+        "usb_stick_left" => usb::usb_stick_left(test_config, c_bins, rust_bins),
         "xhci_full_speed_device" => {
             usb::xhci_full_speed_device(test_config, c_bins, rust_bins)
         }
