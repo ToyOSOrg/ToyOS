@@ -44,14 +44,10 @@ mod input_merge_test;
 #[cfg(feature = "boot-actuators")]
 mod usb_gate;
 #[cfg(feature = "boot-actuators")]
-mod nvme_gate;
-#[cfg(feature = "boot-actuators")]
 mod sched_gate;
 mod block;
-mod durability;
 mod gpt;
 mod inventory;
-mod page_cache;
 mod rollback;
 mod rootfs;
 mod file_cache;
@@ -59,11 +55,9 @@ mod file_cache;
 mod leak_selftest;
 #[cfg(feature = "boot-actuators")]
 mod revoke_selftest;
-mod writeback;
 mod tmpfs;
 mod file_backing;
 mod bcachefs_adapter;
-mod fat32_adapter;
 mod fs_rename;
 #[cfg(feature = "boot-actuators")]
 mod heartbeat;
@@ -84,7 +78,6 @@ mod time;
 mod clock;
 
 mod watch;
-mod iod;
 mod object;
 mod inbox;
 mod pipe;
@@ -115,9 +108,8 @@ mod late_panic {
 
 use crate::mm::policy::MmioPolicy;
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 use arch::{cpu, percpu};
-use drivers::{acpi, gop, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
+use drivers::{acpi, gop, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
@@ -186,10 +178,6 @@ fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
     gpu::register(driver, info);
 }
 
-/// The names DATA answers to. One filesystem, so `/apps/x` and `/home/x` are
-/// two directories of it and never two volumes.
-const DATA_PATHS: [&str; 4] = ["apps", "config", "home", "state"];
-
 /// The boot from power-on, off the loader's TSC readings and `complete`'s, at
 /// the calibrated rate. The TSC counts from reset, so the first span is
 /// firmware's unless firmware wrote the counter.
@@ -216,10 +204,19 @@ fn report_power_on(args: &KernelArgs, complete: u64) {
 /// Says where this boot's log can be read, on the last surface still showing it once userland owns the screen.
 fn report_log_destination() {
     // Kernel-side because panic_console owns the panel; logd reports which file it opened separately.
-    // has_log reflects whether /log mounted, not whether logd could open a file on it.
-    let has_log = vfs::lock().has_mount(fat32_adapter::Role::Log.mount());
+    // Whether the partition is on a disk this kernel reads, not whether its file server mounted it:
+    // that server says so itself, and this kernel mounts nothing but ROOT.
+    let console = drivers::serial::has_console();
+    let has_log = match gpt::log_place() {
+        gpt::LogPlace::Driven => true,
+        gpt::LogPlace::Unnamed | gpt::LogPlace::Absent => false,
+        gpt::LogPlace::Undriven => {
+            log!("log: /log is on a disk this kernel does not drive; its file server says whether it mounted");
+            return;
+        }
+    };
     // ASCII only: the panel's font renders anything outside 0x20..=0x7E as a dot.
-    match (drivers::serial::has_console(), has_log) {
+    match (console, has_log) {
         (true, true) => log!("log: this boot is on the console and on /log"),
         (false, true) => log!("log: no serial console - this boot is on /log and on the screen"),
         // alert! reddens the panel's Level for exactly the two states that leave no account of this boot anywhere.
@@ -506,100 +503,34 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     log!("{} {}", rootfs::INIT_WITHOUT_A_DISK, block::census::commands_issued());
 
     // After init's spawn and before it runs: nothing runs a task until
-    // `smp::set_ready` below, and `/home`, `/apps`, `/boot` and `/log` are
-    // mounted and every device is up by then. Before the device phase: its
-    // IOMMU controls aim at the pool NVMe stages.
+    // `smp::set_ready` below. This kernel mounts no disk: `/apps`, `/config`,
+    // `/home`, `/state`, `/log` and `/boot` are file servers' (`/system/bin/fsd`),
+    // and an NVMe controller is `/system/bin/blockd`'s. The USB disks are still
+    // this kernel's, served to their file servers as partition claims, until
+    // usbd drives the controller.
     let t_storage = clock::nanos_since_boot();
-
-    // No controller is a configuration, not a failure — same as a missing xHCI, NIC, or sound device.
-    match nvme::init(&pci_devices) {
-        Some(nvme_dev) => {
-            let sector_size = nvme_dev.sector_size();
-            let dev = page_cache::instrumented(Box::new(nvme_dev));
-            if let Some(handle) = block::register(dev) {
-                gpt::probe(&handle, sector_size);
-                // Before anything mounts the device: the block the gate reads is one nothing else is touching yet.
-                #[cfg(feature = "boot-actuators")]
-                if actuator::nvme_spent_budget() {
-                    nvme_gate::run(&handle);
-                }
-                #[cfg(feature = "boot-actuators")]
-                if actuator::nvme_command_silent() {
-                    nvme_gate::silent_command(&handle);
-                }
-                // Before DATA is mounted: the device blocks it reads back are ones nothing else has written.
-                #[cfg(feature = "boot-actuators")]
-                if actuator::page_cache_partition_offset() {
-                    page_cache::partition_offset_selftest(&handle);
-                }
-            }
-        }
-        None => log!("NVMe: no controller on this machine, storage unavailable"),
-    }
 
     xhci::init(&pci_devices);
     #[cfg(feature = "boot-actuators")]
     if actuator::usb_storage_gate() {
         usb_gate::run();
     }
-    // After xhci::init, not beside the NVMe probe: a USB-booted disk doesn't exist until the controller binds it.
-    fat32_adapter::probe_boot_disks();
+    // After xhci::init: a USB-booted disk doesn't exist until the controller binds it.
+    gpt::probe_usb_disks();
     #[cfg(feature = "boot-actuators")]
     if actuator::partclaim_root_withheld() {
-        page_cache::refuse_table_reads();
+        block::unanswered::refuse();
     }
     rootfs::hold_source();
     #[cfg(feature = "boot-actuators")]
     if actuator::partclaim_root_withheld() {
-        page_cache::answer_table_reads();
+        block::unanswered::answer();
+    }
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_table_unanswered() {
+        block::unanswered::refuse();
     }
 
-    // One filesystem, four paths: each of `DATA_PATHS` is a directory of DATA,
-    // so one sync settles them all and none can outlive the others.
-    // tmpfs when there is no DATA volume this kernel may write: persistence is
-    // the only difference, so the earlier refusal doesn't cascade. Nothing at
-    // all when the volume is ours and did not mount.
-    #[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-    let data_cache = match bcachefs_adapter::open_data() {
-        bcachefs_adapter::Data::Mounted(cache, fs) => {
-            let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(&cache));
-            vfs::lock().mount(&DATA_PATHS, Box::new(adapter), UserAccess::ReadWrite);
-            Some(cache)
-        }
-        bcachefs_adapter::Data::Volatile => {
-            log!("storage: /apps, /config, /home and /state are a tmpfs — they will not survive a reboot");
-            vfs::lock().mount(
-                &DATA_PATHS,
-                Box::new(crate::tmpfs::TmpFs::new()),
-                UserAccess::ReadWrite,
-            );
-            None
-        }
-        bcachefs_adapter::Data::Absent => {
-            log!("storage: /apps, /config, /home and /state are absent this boot — the DATA volume is ours and did not mount");
-            None
-        }
-    };
-
-    // Named by role, not type: both partitions are FAT32 and neither is selected for being FAT32 — a missing one just has no mount.
-    use fat32_adapter::Role;
-    // /boot is KernelOnly: a writable /boot lets a process brick the machine — esp_files replayed exactly that attack.
-    // The filesystem sits outside the capability model by ruling, so no handle is owed for /boot.
-    // /log is ReadWrite on purpose: it's an ordinary userland file logd owns, and the worst a process can do is cost the diagnostic.
-    match fat32_adapter::mount(Role::Boot) {
-        Some(fs) => vfs::lock().mount(&[Role::Boot.mount()], Box::new(fs), UserAccess::KernelOnly),
-        None => log!("boot-volume: not mounted; the kernel has no /boot this boot"),
-    }
-    match fat32_adapter::mount(Role::Log) {
-        Some(fs) => {
-            vfs::lock().mount(&[Role::Log.mount()], Box::new(fs), UserAccess::ReadWrite);
-        }
-        // No fallback onto /boot: with no log partition the log stays in the in-memory shards, still reachable via screen and console.
-        None => log!("log-volume: not mounted; this boot's kernel log stays in memory"),
-    }
-
-
-    // After the mounts above: the FAT reopen control drives `/log`.
     #[cfg(feature = "boot-actuators")]
     if actuator::leak_rollback_selftest() {
         leak_selftest::run();
@@ -607,17 +538,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     #[cfg(feature = "boot-actuators")]
     if actuator::revoked_backing_selftest() {
         revoke_selftest::run();
-    }
-    #[cfg(feature = "boot-actuators")]
-    if actuator::pc_unbind_selftest() {
-        match &data_cache {
-            Some(cache) => page_cache::unbind_selftest(cache),
-            None => log!("pc-unbind-selftest: FAIL (this boot has no metadata page cache)"),
-        }
-    }
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_table_unanswered() {
-        page_cache::refuse_table_reads();
     }
     // After every driver has registered: the number under test is one a real device holds.
     #[cfg(feature = "boot-actuators")]
@@ -702,7 +622,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.
     log::console::start();
-    iod::start();
 
     // Here: the last kernel thread is spawned.
     #[cfg(feature = "boot-actuators")]
@@ -732,3 +651,4 @@ fn pre_idle_wedge() -> ! {
         core::hint::spin_loop();
     }
 }
+

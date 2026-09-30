@@ -1,24 +1,26 @@
-//! Resolves the partitions the bootloader handed off ([`KernelArgs`]) to
-//! locations on a probed block device ([`probe`]), and collects every DATA
-//! candidate those devices carry. ROOT is none of this module's business: the
-//! loader reads it into memory (`rootfs`).
+//! The partitions of the disks this kernel drives — the USB disks, until usbd
+//! drives the controller — and the ones the bootloader named.
 //!
-//! The boot partition's location must match firmware's account or is
-//! refused; the log partition is trusted only on the device already found
-//! to carry the boot partition, since its GUID names a file on that volume.
-//! A DATA candidate is selected by partition *type* and nothing more — which of
-//! them is the role's filesystem is answered against each one's own superblock,
-//! by `bcachefs_adapter::probe`. A partition a process claims is found by
-//! [`claimable`], on the disks [`probe`] read, and the inventory is answered
-//! from the tables [`probe`] listed ([`inventory`]).
-//! Nothing here writes.
+//! **The loader names three partitions** ([`KernelArgs`]): the ROOT it read,
+//! the running slot's volume and the log's. This kernel mounts none of them
+//! but ROOT, which is in memory (`rootfs`); it answers their GUIDs in the
+//! inventory ([`loaded`]) so the file servers for those roles find them, on
+//! whatever disk and whoever drives it.
+//!
+//! The boot partition's location must match firmware's account on a disk
+//! [`probe`] read, and [`probe_usb_disks`] waits for the disk that carries it
+//! to appear. A partition a process claims is found by [`claimable`], on the
+//! disks [`probe`] read, and the inventory is answered from the tables
+//! [`probe`] listed ([`inventory`]). Nothing here writes.
 
 use alloc::vec::Vec;
 
 use crate::block::{BlockDevice, DeviceId, Handle};
 use crate::device::ClaimError;
+use crate::drivers::{usb_storage, xhci};
 use crate::sync::Lock;
 use toyos_abi::boot::KernelArgs;
+use toyos_abi::inventory::Role;
 use toyos_abi::part::PartGuid;
 use toyos_gpt::{GptError, Guid, Partition, Sectors};
 
@@ -41,27 +43,19 @@ pub struct Volume {
     pub blocks: u64,
 }
 
-/// What the kernel knows about where the given partitions live. `Ambiguous`
+/// What the kernel knows about where the boot partition lives. `Ambiguous`
 /// is permanent: two devices carrying one partition GUID means one is a
 /// clone, and nothing here can tell which one firmware read.
 enum Resolution {
     Unknown,
-    Found { boot: Volume, log: Option<Volume> },
+    Found { boot: Volume },
     Ambiguous,
 }
 
-/// One partition of a ToyOS type, on a device that answered for it.
-#[derive(Clone, Copy, Debug)]
-pub struct Candidate {
-    pub volume: Volume,
-    pub guid: Guid,
-}
-
 static FIRMWARE: Lock<Option<BootPartition>> = Lock::new(None);
-/// The log partition's identity; `None` only before [`init`] runs.
-static LOG_GUID: Lock<Option<Guid>> = Lock::new(None);
 static RESOLVED: Lock<Resolution> = Lock::new(Resolution::Unknown);
-static DATA: Lock<Vec<Candidate>> = Lock::new(Vec::new());
+/// The partitions the loader named, by role; empty before [`init`].
+static LOADED: Lock<Vec<(Role, Guid)>> = Lock::new(Vec::new());
 /// Every device [`probe`] read, with its logical block size: the disks a
 /// partition claim is looked for on. Taken alone.
 static DISKS: Lock<Vec<(Handle, u32)>> = Lock::new(Vec::new());
@@ -103,12 +97,44 @@ pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
     out
 }
 
+/// The partitions the loader named, for the inventory.
+pub fn loaded() -> Vec<(Role, Guid)> {
+    LOADED.lock().clone()
+}
+
+/// Where the log partition the loader named is, as far as this kernel sees.
+pub enum LogPlace {
+    /// The loader named none.
+    Unnamed,
+    /// On a disk this kernel drives, where its file server claims it.
+    Driven,
+    /// Not on the disk this kernel booted from and drives, which is where an
+    /// image carries it: this machine has no log partition.
+    Absent,
+    /// The boot disk is one this kernel does not drive, so whether the log
+    /// partition is on it is its file server's to say.
+    Undriven,
+}
+
+/// [`LogPlace`], once [`probe_usb_disks`] has read every disk it will.
+pub fn log_place() -> LogPlace {
+    let Some(guid) = LOADED.lock().iter().find(|(role, _)| *role == Role::Log).map(|(_, g)| *g) else {
+        return LogPlace::Unnamed;
+    };
+    if LISTED.lock().iter().any(|disk| disk.parts.iter().any(|p| p.unique_guid() == guid)) {
+        return LogPlace::Driven;
+    }
+    match *RESOLVED.lock() {
+        Resolution::Found { .. } => LogPlace::Absent,
+        Resolution::Unknown | Resolution::Ambiguous => LogPlace::Undriven,
+    }
+}
+
 /// List `handle`'s table into [`LISTED`], once per disk.
 fn list(sectors: &mut DeviceSectors<'_>, handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
     let mut found = alloc::vec![None; MAX_LISTED];
-    // A disk with no table this kernel parses carries no partition, and
-    // `collect` says so, naming the refusal.
+    // A disk with no table this kernel parses carries no partition.
     let Ok(scan) = toyos_gpt::list(sectors, &mut found) else { return };
     if scan.matched as usize > MAX_LISTED {
         log!(
@@ -133,19 +159,17 @@ fn list(sectors: &mut DeviceSectors<'_>, handle: &Handle, lba_bytes: u32) {
     LISTED.lock().push(Listed { handle: handle.clone(), lba_bytes, parts });
 }
 
-/// How many partitions of one ToyOS type one device may offer this kernel.
-///
-/// A bound rather than a `Vec` because [`toyos_gpt::locate_type`] fills a
-/// caller's slice; a device carrying more says so in the log, and a boot that
-/// then finds no match panics naming what it did see.
-const MAX_PER_DEVICE: usize = 4;
-
-/// Take both partitions' identities out of the bootloader's handoff.
+/// Take the partitions the loader named out of its handoff.
 pub fn init(args: &KernelArgs) {
-    let log_guid = Guid(args.log_partition_guid);
-    log!("gpt: the boot volume names {log_guid} as the log partition");
-    *LOG_GUID.lock() = Some(log_guid);
-
+    let mut loaded = LOADED.lock();
+    if args.root_partition_guid != [0; 16] {
+        loaded.push((Role::Root, Guid(args.root_partition_guid)));
+    }
+    if args.log_partition_guid != [0; 16] {
+        let log_guid = Guid(args.log_partition_guid);
+        log!("gpt: the boot volume names {log_guid} as the log partition");
+        loaded.push((Role::Log, log_guid));
+    }
     if args.boot_partition_present == 0 {
         log!("gpt: firmware named no boot partition — this machine has none");
         return;
@@ -159,6 +183,7 @@ pub fn init(args: &KernelArgs) {
         "gpt: firmware booted us from partition {} at LBA {}+{}",
         part.guid, part.start_lba, part.blocks
     );
+    loaded.push((Role::Boot, part.guid));
     *FIRMWARE.lock() = Some(part);
 }
 
@@ -166,33 +191,65 @@ pub fn boot_partition() -> Option<BootPartition> {
     *FIRMWARE.lock()
 }
 
-/// Where the boot partition is, if a device has been found to carry it.
-pub fn boot_volume() -> Option<Volume> {
-    match *RESOLVED.lock() {
-        Resolution::Found { boot, .. } => Some(boot),
-        Resolution::Unknown | Resolution::Ambiguous => None,
-    }
-}
-
 /// True only while resolution is still `Unknown`; `Ambiguous` is permanent.
 pub fn boot_volume_still_possible() -> bool {
     matches!(*RESOLVED.lock(), Resolution::Unknown)
 }
 
-/// Where the log partition is, on the device that carries the boot partition.
-pub fn log_volume() -> Option<Volume> {
-    match *RESOLVED.lock() {
-        Resolution::Found { log, .. } => log,
-        Resolution::Unknown | Resolution::Ambiguous => None,
+/// Ask every USB disk for its table, retrying while the boot partition is
+/// still not found: a USB-booted disk appears only once the controller binds
+/// it, and a claim of one of its partitions is found on the disks read here.
+pub fn probe_usb_disks() {
+    let deadline = crate::clock::nanos_since_boot() + xhci::PORT_SETTLE_CEILING.nanos();
+    let mut probed = 0;
+    loop {
+        probed = probe_announced(probed);
+        // Nothing further can change: no partition named, resolved, or
+        // ambiguity no device can repair.
+        if boot_partition().is_none() || !boot_volume_still_possible() {
+            return;
+        }
+        if crate::clock::nanos_since_boot() >= deadline {
+            log!(
+                "usb-storage: {probed} disk(s) on this machine and none carries the boot \
+                 partition after {} ms of looking",
+                xhci::PORT_SETTLE_CEILING.duration().millis()
+            );
+            return;
+        }
+        // Paced, not spun: one MMIO read per port under the controller lock,
+        // on physical hardware.
+        let next = crate::clock::nanos_since_boot() + xhci::PORT_POLL.nanos();
+        while crate::clock::nanos_since_boot() < next {
+            core::hint::spin_loop();
+        }
+        xhci::recheck_ports();
     }
 }
 
-/// Every DATA candidate seen so far, across every device probed.
-pub fn data_candidates() -> Vec<Candidate> {
-    DATA.lock().clone()
+/// Probe every disk announced since the last call; indices are stable and
+/// dense, so a disk is never probed twice.
+fn probe_announced(mut probed: usize) -> usize {
+    let count = usb_storage::count();
+    while probed < count {
+        let index = probed;
+        probed += 1;
+        // One call for both the handle and the block size; the disk carries its
+        // own geometry, and registering it is what makes it openable by number.
+        let Some((handle, lba_bytes)) = usb_storage::handle(index) else {
+            log!(
+                "usb-storage: disk {index} was announced and was gone again before its partition \
+                 table could be read — not probed"
+            );
+            continue;
+        };
+        probe(&handle, lba_bytes);
+    }
+    probed
 }
 
-/// Ask one registered block device what it carries: DATA candidates always, and the boot partition when firmware named one.
+/// Ask one registered block device what it carries: its table for the
+/// inventory, and the boot partition when firmware named one.
 pub fn probe(handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
     let first = {
@@ -207,12 +264,10 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
     if first {
         list(&mut sectors, handle, lba_bytes);
     }
-    collect(&mut sectors, id, lba_bytes, "DATA", Guid::TOYOS_DATA, &DATA);
 
     let Some(firmware) = boot_partition() else {
         return;
     };
-
     let found = match toyos_gpt::locate(&mut sectors, firmware.guid) {
         Ok(found) => found,
         Err(GptError::NotFound { used_entries }) => {
@@ -250,8 +305,6 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
     let mut resolved = RESOLVED.lock();
     match *resolved {
         Resolution::Unknown => {
-            // Only here: the log GUID names a file on this volume, not on any other disk.
-            let log = locate_log(&mut sectors, id, lba_bytes);
             log!(
                 "gpt: device {id} carries the boot partition at LBA {}+{} ({}-byte blocks), \
                  entry {} of {} on disk {}{}",
@@ -263,7 +316,7 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
                 found.disk_guid(),
                 if part.is_efi_system() { "" } else { " — and its type is not ESP" }
             );
-            *resolved = Resolution::Found { boot: volume, log };
+            *resolved = Resolution::Found { boot: volume };
         }
         Resolution::Found { boot: first, .. } => {
             log!(
@@ -277,63 +330,6 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
         Resolution::Ambiguous => {
             log!("gpt: device {id} also carries the boot partition GUID");
         }
-    }
-}
-
-/// Record every partition on this device whose type is `ty`.
-///
-/// Each type match is then located again by its own *unique* GUID, because
-/// that road is the one carrying the range and overlap checks: a candidate this
-/// records has passed everything `toyos-gpt` refuses a partition for.
-fn collect(
-    sectors: &mut DeviceSectors<'_>,
-    id: DeviceId,
-    lba_bytes: u32,
-    what: &str,
-    ty: Guid,
-    into: &Lock<Vec<Candidate>>,
-) {
-    let mut found = [None; MAX_PER_DEVICE];
-    let scan = match toyos_gpt::locate_type(sectors, ty, &mut found) {
-        Ok(scan) => scan,
-        Err(e) => {
-            log!("gpt: device {id} carries no {what} this kernel can read: {e:?}");
-            return;
-        }
-    };
-    if scan.matched as usize > MAX_PER_DEVICE {
-        log!(
-            "gpt: device {id} carries {} {what} partitions and this kernel looks at {MAX_PER_DEVICE}",
-            scan.matched
-        );
-    }
-    // An entry whose blocks are no partition was logged once, by `list`.
-    for candidate in found.iter().flatten().flatten() {
-        let checked = match toyos_gpt::locate(sectors, candidate.unique_guid()) {
-            Ok(located) => located.partition(),
-            Err(e) => {
-                log!(
-                    "gpt: device {id} names a {what} {} its own table then refuses: {e:?}",
-                    candidate.unique_guid()
-                );
-                continue;
-            }
-        };
-        log!(
-            "gpt: device {id} carries the {what} candidate {} at LBA {}+{}",
-            checked.unique_guid(),
-            checked.first_lba(),
-            checked.lba_count()
-        );
-        into.lock().push(Candidate {
-            volume: Volume {
-                device: id,
-                lba_bytes,
-                start_lba: checked.first_lba(),
-                blocks: checked.lba_count().get(),
-            },
-            guid: checked.unique_guid(),
-        });
     }
 }
 
@@ -496,36 +492,6 @@ fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<Unread, Unna
     }
 }
 
-/// The log partition on the device already proven to carry the boot partition, or `None`.
-fn locate_log(sectors: &mut DeviceSectors<'_>, id: DeviceId, lba_bytes: u32) -> Option<Volume> {
-    let target = LOG_GUID.lock().expect("gpt::init runs before any device is probed");
-    match toyos_gpt::locate(sectors, target) {
-        Ok(found) => {
-            let part = found.partition();
-            log!(
-                "gpt: device {id} carries the log partition {target} at LBA {}+{}, entry {} of {}",
-                part.first_lba(),
-                part.lba_count(),
-                part.index(),
-                found.used_entries()
-            );
-            Some(Volume {
-                device: id,
-                lba_bytes,
-                start_lba: part.first_lba(),
-                blocks: part.lba_count().get(),
-            })
-        }
-        Err(e) => {
-            log!(
-                "gpt: device {id} carries the boot partition but nothing with the log partition's \
-                 GUID {target}: {e:?} — this stick has no log partition and the kernel's log \
-                 stays in memory"
-            );
-            None
-        }
-    }
-}
 
 /// The kernel's 4 KiB `BlockDevice`, seen in the device's own logical blocks; caches one block.
 struct DeviceSectors<'a> {

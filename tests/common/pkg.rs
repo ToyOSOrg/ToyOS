@@ -19,7 +19,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::qemu::{self, BootOptions, QemuInstance};
-use super::storage::{superblock_at, FileBlocks};
+use super::storage::{superblock_at, FileBlocks, IN_MEMORY};
 
 /// gbae v0.2.0's release archive and the sums file published beside it, both
 /// committed under `tests/fixtures` and named in `NOTICE`.
@@ -78,9 +78,9 @@ pub fn pkg_install_gbae(
     };
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
     let boot = qemu.boot_log().to_string();
-    if boot.contains("are a tmpfs") {
+    if boot.contains(IN_MEMORY) {
         return Err(format!(
-            "/apps and /home fell back to tmpfs, so the readback below would judge no device:\n\
+            "/apps and /home fell back to memory, so the readback below would judge no device:\n\
              {boot}"
         ));
     }

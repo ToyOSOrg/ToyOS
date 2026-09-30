@@ -70,8 +70,8 @@ const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 ///
 /// **The kernel does not wait for `/system/bin/logd`, so it does not know what
 /// reached `/log`.** `/system/bin/init` has `logd` flush before it asks for the
-/// stop; everything committed after that — the stop's own record, `Syncing
-/// filesystems...`, the last word — is on the console, and here, where the next
+/// stop; everything committed after that — the stop's own record, the last
+/// word — is on the console, and here, where the next
 /// loader pass prints it into `loader.log`.
 ///
 /// Called from the quiesce path under [`crate::blackbox::record_done`], where

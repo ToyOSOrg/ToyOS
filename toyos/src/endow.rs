@@ -143,6 +143,19 @@ pub fn namespace() -> Option<&'static Namespace> {
     NAMESPACE.get().as_ref()
 }
 
+/// Make `ns` this process's namespace, for the one process no parent endows
+/// one: init, which builds the machine's ports itself and resolves its own
+/// files through them as every program does. Refused when this process already
+/// has a namespace or has asked for one.
+pub fn adopt_namespace(ns: Namespace) -> Result<(), Namespace> {
+    let mut offered = Some(ns);
+    NAMESPACE.0.get_or_init(|| offered.take());
+    match offered {
+        None => Ok(()),
+        Some(ns) => Err(ns),
+    }
+}
+
 /// Open a connection to `name` in this process's namespace.
 ///
 /// The one place a name becomes a connection. It works from the caller's first

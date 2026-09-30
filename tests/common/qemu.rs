@@ -2198,13 +2198,11 @@ pub struct BootOptions {
     /// A second NVMe controller, for a driver in userland, backed by this file.
     ///
     /// QEMU's NVMe under Intel's ids (`use-intel-id`, `8086:5845`), so a claim
-    /// names it apart from the one the kernel drives; its MSI-X table in a BAR
+    /// names it; its MSI-X table in a BAR
     /// of its own (`msix-exclusive-bar`), because a claim never maps the BAR
     /// holding the table and NVMe keeps its registers in BAR 0; and its
     /// namespace's write cache on, so the controller has a volatile cache a
-    /// flush has to issue Flush for. Emitted after the kernel's controller, so
-    /// the kernel's first-by-class probe takes that one, and refused on a
-    /// profile with none — the kernel would take this one.
+    /// flush has to issue Flush for.
     pub userland_nvme: Option<PathBuf>,
     /// Have QEMU record every NVMe command it is sent, every completion it
     /// posts, every write with its sectors, every flush it runs and every
@@ -4266,7 +4264,7 @@ fn qemu_command(
     // volume rides its own NVMe controller and every xHCI carries HID alone.
     if shape.storage_bus.is_empty() {
         qemu.arg("-device")
-            .arg("nvme,serial=bootdisk,id=nvmebootctl,bootindex=0")
+            .arg("nvme,serial=bootdisk,id=nvmebootctl,bootindex=0,msix-exclusive-bar=on")
             .arg("-device")
             .arg("nvme-ns,drive=stick,bus=nvmebootctl,logical_block_size=512,\
                   physical_block_size=512");
@@ -4321,14 +4319,21 @@ fn qemu_command(
     // the guest no controller at all, rather than an empty one. A machine
     // with no NVMe is a shape, and the argv is the only place it is visible:
     // no console line and no screendump can see a device that is absent.
+    //
+    // Its MSI-X table in a BAR of its own, because blockd drives it and a claim
+    // never maps the BAR holding the table. On a machine that boots off NVMe it
+    // answers under Intel's ids, so the `pci:1b36:0010` row names the boot
+    // controller alone and this one is nobody's, as the kernel's first-by-class
+    // probe left it.
     if shape.nvme_bytes != 0 {
+        let ids = if shape.storage_bus.is_empty() { ",use-intel-id=on" } else { "" };
         qemu.arg("-drive")
             .arg(format!(
                 "if=none,id=nvme0,format=raw,file={}",
                 nvme_image.display()
             ))
             .arg("-device")
-            .arg("nvme,serial=deadbeef,id=nvme0ctl")
+            .arg(format!("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on{ids}"))
             .arg("-device")
             .arg(format!(
                 "nvme-ns,drive=nvme0,bus=nvme0ctl,logical_block_size={0},physical_block_size={0}",
@@ -4336,10 +4341,6 @@ fn qemu_command(
             ));
     }
     if let Some(image) = &options.userland_nvme {
-        assert!(
-            shape.nvme_bytes != 0,
-            "a userland NVMe on a machine whose kernel drives none is the one the kernel takes"
-        );
         qemu.arg("-drive")
             .arg(format!("if=none,id=nvme1,format=raw,file={}", image.display()))
             .arg("-device")

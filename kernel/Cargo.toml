@@ -53,9 +53,6 @@ log-commit-release-off = []
 # `src/log/registry.rs`'s pointer store and load go `Relaxed`, and
 # `log_publish` reds.
 shard-publish-relaxed = []
-# `src/durability.rs`'s `settle` becomes the pre-generation blind clear, and
-# `durability` reds.
-durability-settle-blind = []
 # `src/pcidev/record.rs`'s two read-modify-writes become a load and a store, so
 # a message the ISR records between a reader's two halves is lost and a wake can
 # be owed twice, and `device_irq` reds. That pair *is* the record's design, so
