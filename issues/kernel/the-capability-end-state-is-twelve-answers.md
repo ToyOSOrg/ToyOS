@@ -30,13 +30,6 @@ committed, four are open" was this line's own summary and stopped being true
 when those four rulings landed; "The ruling set" below is a record of decisions
 taken, not a queue waiting on anybody.
 
-Four of the rulings are enforced in code, each at a site that demands a right
-where none was demanded before: `SYS_SHUTDOWN` takes a `SysCap` carrying
-`Rights::POWER` (`kernel/src/syscall/machine.rs:46-48`), and `SYS_SYSINFO`'s
-roster takes `Rights::ROSTER`, demanded only once the buffer has room for an
-entry (`kernel/src/syscall/machine.rs:84`, `:94`), spelled `roster` in
-`toyos-manifest/src/lib.rs:80`.
-
 **Every `4a98107f^:kernel/src/arch/syscall.rs` citation below points into
 history**: that one-file syscall layer is what `4a98107f` split, and the
 syscalls are `kernel/src/syscall/` now, twelve files with `dispatch.rs`
@@ -104,10 +97,6 @@ field: "Not authority — no syscall takes a pid" (`toyos-abi/src/syscall.rs`'s
 `SYS_THREAD_JOIN` resolves through `thread_sched(caller, tid)` and
 `collect_thread_zombie(table, tid, parent_pid)`, both keyed on the caller's own
 pid (`4a98107f^:kernel/src/arch/syscall.rs:2393`, `kernel/src/process.rs:1412`, `:848`).
-Five pid-addressed syscalls were deleted and their numbers retired rather than
-reused — 26 `SYS_WAITPID`, 33 `SYS_FIND_PID`, 37 `SYS_GRANT_SHARED`, 65
-`SYS_KILL` (`4a98107f^:kernel/src/arch/syscall.rs:63`), and 110
-`SYS_PROCESS_OPEN` (`kernel/src/syscall/dispatch.rs`'s `retired_syscalls!`).
 
 ## 4. Can a process enumerate objects it lacks authority over? — RULED 2026-08-20, IMPLEMENTED 2026-08-22
 

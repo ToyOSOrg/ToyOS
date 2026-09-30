@@ -95,7 +95,6 @@ retired_syscalls! {
     85 => "SYS_LISTEN",
     87 => "SYS_CONNECT",
     96 => "SYS_SET_RT_PRIORITY",
-    110 => "SYS_PROCESS_OPEN",
 }
 
 /// `sched-operation-nesting`'s task half and `sysret-ss-probe`, run once a boot

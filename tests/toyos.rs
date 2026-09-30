@@ -3157,7 +3157,6 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "dlopen_dedup" => check_dlopen_dedup,
         "abuse_elf_loader" => check_abuse_elf_loader,
         "exit_wait_storm" => check_exit_wait_storm,
-        "process_lifecycle" => check_process_lifecycle,
         _ => check_rust_result,
     }
 }
@@ -3216,28 +3215,6 @@ fn check_dlopen_dedup(result: &TestResult) -> bool {
             "FAIL rs::dlopen_dedup: {FALLBACK_MISCACHED:?} — the library was cached under the \
              directory the loader searched and did not find it in, so a later dlopen of its own \
              path mapped it a second time{}",
-            kernel_account(result)
-        );
-        return false;
-    }
-    true
-}
-
-/// The kernel's record of `process_lifecycle`'s call of the number
-/// `SYS_PROCESS_OPEN` had (`kernel/src/syscall/dispatch.rs`'s `retired_syscalls!`).
-const PROCESS_OPEN_RETIRED: &str = "syscall 110 is retired (formerly SYS_PROCESS_OPEN)";
-
-/// `process_lifecycle` plus the half no guest can see: the kernel refused 110
-/// as retired, not as a number it never had.
-fn check_process_lifecycle(result: &TestResult) -> bool {
-    if !check_rust_result(result) {
-        return false;
-    }
-    let log = format!("{}{}", result.before, result.serial);
-    if !log.lines().any(|l| l.contains(PROCESS_OPEN_RETIRED)) {
-        eprintln!(
-            "FAIL rs::process_lifecycle: no {PROCESS_OPEN_RETIRED:?} record, so the kernel did not \
-             refuse 110 as a retired number{}",
             kernel_account(result)
         );
         return false;

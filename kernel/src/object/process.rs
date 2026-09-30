@@ -84,4 +84,3 @@ impl ProcessObject {
         self.watch.post();
     }
 }
-

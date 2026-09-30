@@ -263,10 +263,6 @@ pub const SYS_PROCESS_WAIT: u64 = 108;
 ///
 /// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
 pub const SYS_PROCESS_KILL: u64 = 109;
-// Syscall number 110 is retired and unused: it was `SYS_PROCESS_OPEN`, which
-// turned a pid into a `Process` handle on a `SysCap` carrying
-// `Rights::MANAGE`. A process is reached only through the handle its spawn
-// answered, or one a holder of that handle moved.
 
 /// Mint a device claim for a class, gated by [`Rights::DEVICE`] on a `SysCap`.
 /// Only `init` holds such a cap, so the set of processes that can ever
