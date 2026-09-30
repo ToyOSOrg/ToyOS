@@ -160,9 +160,9 @@ finish when the machine shuts down
   decides what to do: an editor saves, a compiler deletes its half-written
   output, Ctrl+C in a shell or an editor stops what it is doing and ends
   nothing, and a server may take a hang-up as the signal to reload its
-  settings. The shell and a login's session program listen, so the programs
-  under them are asked too. Whoever asked still kills if the end it wants does
-  not come. The kernel gains one call and one kind of object.
+  settings. The shell, the terminal and a login's session program listen, so
+  the programs under them are asked too. Whoever asked still kills if the end
+  it wants does not come. The kernel gains one call and one kind of object.
 - **Yes, without a reason.** A server that reloads on a hang-up and exits on
   terminate would exit when asked to reload, and no program could tell Ctrl+C
   from shutdown.
@@ -183,8 +183,8 @@ Most programs never listen: `ls`, `cat`, a Rust program that does not ask.
   first press. The cost: a program that listens still dies at once, without
   cleaning up, when the program that started it does not listen, because it
   dies with that program; on Unix only the one that does not listen would die.
-  ToyOS's own shell and each login's session program listen, so a compiler
-  run from a login cleans up.
+  ToyOS's own shell and terminal and each login's session program listen, so
+  a compiler run from a login cleans up.
 - **Nothing, until whoever asked gives up and kills it.** Ctrl+C does nothing
   to `cat` until a second press, and shutdown waits out its whole deadline for
   every program that never listens.
