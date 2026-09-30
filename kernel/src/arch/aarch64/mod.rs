@@ -72,18 +72,6 @@ impl IrqGuard {
         }
         Self { daif, _not_send_sync: core::marker::PhantomData }
     }
-
-    /// The mask captured and interrupts left as they are: what the
-    /// `log-unbracketed-reserve` actuator stages a log reservation with.
-    #[cfg(feature = "boot-actuators")]
-    pub fn unclosed() -> Self {
-        let daif: u64;
-        // SAFETY: reads `DAIF` and writes nothing.
-        unsafe {
-            core::arch::asm!("mrs {saved}, daif", saved = out(reg) daif);
-        }
-        Self { daif, _not_send_sync: core::marker::PhantomData }
-    }
 }
 
 impl Drop for IrqGuard {

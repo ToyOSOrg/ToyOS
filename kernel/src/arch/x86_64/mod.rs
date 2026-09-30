@@ -74,18 +74,6 @@ impl IrqGuard {
         }
         Self { rflags, _not_send_sync: core::marker::PhantomData }
     }
-
-    /// The flags captured and interrupts left as they are: what the
-    /// `log-unbracketed-reserve` actuator stages a log reservation with.
-    #[cfg(feature = "boot-actuators")]
-    pub fn unclosed() -> Self {
-        let rflags: u64;
-        // SAFETY: pushfq/pop is balanced and writes no RFLAGS bit.
-        unsafe {
-            core::arch::asm!("pushfq", "pop {saved}", saved = out(reg) rflags);
-        }
-        Self { rflags, _not_send_sync: core::marker::PhantomData }
-    }
 }
 
 impl Drop for IrqGuard {

@@ -298,9 +298,6 @@ actuators! {
     /// Log the monotonic time and which CPUs are alive every 250ms.
     heartbeat = "heartbeat";
 
-    /// Remove the IF/TF bracket around shard selection through publication — the negative control on the log's interrupt-atomicity claim.
-    log_unbracketed_reserve = "log-unbracketed-reserve";
-
     /// Send this CPU an IPI mid record-copy and emit one shard generation from the handler.
     log_nested_emit = "log-nested-emit";
 

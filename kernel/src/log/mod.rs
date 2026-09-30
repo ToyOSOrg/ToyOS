@@ -194,14 +194,6 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
     record.len = message.len as u16;
     record.elided = message.elided.min(u16::MAX as usize) as u16;
 
-    // `log-unbracketed-reserve` stages a reservation made with interrupts open.
-    #[cfg(feature = "boot-actuators")]
-    let guard = if crate::actuator::log_unbracketed_reserve() {
-        crate::arch::IrqGuard::unclosed()
-    } else {
-        crate::arch::IrqGuard::close()
-    };
-    #[cfg(not(feature = "boot-actuators"))]
     let guard = crate::arch::IrqGuard::close();
     // Stamped inside the bracket: outside it, ordering by seq and by at_ns
     // could disagree. The NMI handler never logs and #MC halts rather than
