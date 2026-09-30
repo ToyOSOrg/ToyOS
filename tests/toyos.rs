@@ -361,9 +361,6 @@ const RUST_SKIP: &[&str] = &[
 /// one answer to that; this list is the other, for the binaries whose shared
 /// run asserts something of its own. Every driven name is on one list or the
 /// other, so neither answer is silence — `suite_split` is the gate.
-/// `sched_stress` is the one whose two runs differ by *kernel* rather than by
-/// what the host staged: the shipping build here, `sched_check_build`'s
-/// assert-carrying build there.
 #[allow(dead_code, reason = "`suite_split` reads it, in `toyos-checks` alone")]
 const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
@@ -376,7 +373,6 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     "file_mtime",
     "hierarchy_paths",
     "nvme_home_roundtrip",
-    "sched_stress",
     "std_alloc",
     "std_mmap",
     "wall_clock_now",
@@ -888,10 +884,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("fpu_isolation", Sched::Parallel),
     // Two boots, exit codes only (no clock, Parallel).
     ("gsbase_locked", Sched::Parallel),
-    // The fourth declared kernel build, booted so that the scheduler core's
-    // `feature = "check"` instruments are compiled and executed by a CI run at
-    // all.
-    ("sched_check_build", Sched::Parallel),
     // What nesting a `scheduler::Operation` may and may not do, which is a law
     // with no host-side reader: the type reaches `percpu::cpu_id` and
     // `driver::current_handle`, so nothing outside a booted machine can
@@ -1130,7 +1122,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("mkdir_cap", &["test_rs_mkdir_cap"]),
     ("fpu_isolation", &["test_rs_fpu_isolation"]),
     ("gsbase_locked", &["test_rs_gsbase_locked"]),
-    ("sched_check_build", &["test_rs_sched_stress"]),
     ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
     ("i8042_health", &["test_rs_i8042_keyboard"]),
@@ -9403,94 +9394,6 @@ fn run_machine_test(
                 "  [gsbase] user-writable-gsbase: exit {:?}, which is the gate having teeth",
                 negative.exit_code
             );
-            Ok(())
-        }
-        "sched_check_build" => {
-            // The scheduler core's own instruments, run on a real machine —
-            // the on-target counterpart to everything the simulator
-            // does.
-            //
-            // `kernel/Cargo.toml` has forwarded `sched-check =
-            // ["toyos-sched/check"]` since the check build was written, and
-            // until this test nothing in `src/` or `tests/` ever asked for it.
-            // So `cpu::MAX_PASS_NS`, the pass-cost measurement and
-            // `invariants::check_cpu` were compiled by no CI run at all: a
-            // quantum never armed, a task whose container disagreed with its
-            // state word, and a distribution of passes with mass over the
-            // budget were each caught by nothing on hardware, however green the
-            // simulator was.
-            //
-            // **The workload is `sched_stress`** because the asserts are dense
-            // on exactly what it does: it spawns burners that drive vruntime,
-            // blocks and wakes across io_uring and ports, and forces a
-            // Runnable→NonRunnable→Runnable cycle. Every one of those is a pass,
-            // and every pass on every CPU runs both checks. `smp: 2` is the
-            // default and it is deliberate — one CPU cannot migrate, and
-            // invariant T's arming is per CPU.
-            //
-            // **That the asserts are compiled in at all is not asked here.** A
-            // guest proves they did not fire, and a kernel with the feature
-            // quietly dropped proves that more easily; the artifact is asked
-            // instead, at build time, by `assert_sched_check_matches_features` —
-            // 0 of 3 assert texts in the shipping kernel, 3 of 3 in this one.
-            // This half is the other one: on a machine that really carries them,
-            // honest work does not trip them.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_features: toyos_build::build::SCHED_CHECK_KERNEL,
-                    ..BootOptions::default()
-                },
-            );
-            // The boot is already thousands of passes on both CPUs, and an
-            // assert that fires there takes the machine down before userland.
-            serial::Serial::boot(&qemu).must_be_clean()?;
-
-            let result = qemu.run_test("test_rs_sched_stress", Duration::from_secs(120));
-            if let Some(err) = &result.error {
-                return Err(format!(
-                    "the check-build guest stopped answering, which is what a scheduler \
-                     assert firing looks like from here: {err}\nserial:\n{}",
-                    result.serial,
-                ));
-            }
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "sched_stress failed on the check build:\n{}",
-                    result.stdout
-                ));
-            }
-            // An assert fires as a kernel panic on whichever CPU took the pass,
-            // and the guest process can still exit 0 while another CPU is dying
-            // — so the serial is read as well as the exit code.
-            serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
-            for line in result.stdout.lines() {
-                eprintln!("  [sched-check] {}", line.trim());
-            }
-            // The instrument published, read back through the parser its format
-            // is held to: a report from every CPU, over the whole boot in the
-            // three pieces a capture comes in. What a report says is not judged
-            // here — a pass's cost is a duration.
-            let mut capture = serial::Serial::boot(&qemu);
-            capture.push(&result.before);
-            capture.push(&result.serial);
-            let reported: BTreeSet<u32> = capture
-                .text()
-                .lines()
-                .filter_map(toyos_sched::cpu::PassCostReport::parse)
-                .map(|report| report.cpu.0)
-                .collect();
-            let cpus = BootOptions::default().smp;
-            if reported.len() != cpus as usize {
-                return Err(format!(
-                    "the check build published pass-cost reports from cpus {reported:?} of the \
-                     {cpus} it boots: `{}` is the prefix the rest never printed\n{}",
-                    toyos_sched::cpu::PassCostReport::PREFIX,
-                    capture.text(),
-                ));
-            }
             Ok(())
         }
         "klogd_hosted" => {

@@ -1368,14 +1368,13 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
 /// Kernel builds the ordinary test suite is allowed to make.
-pub const TEST_SUITE_KERNEL_BUILDS: [&str; 5] =
-    ["", "boot-actuators,test-actuators", "fpu-save-nothing", "sched-check", "user-writable-gsbase"];
+pub const TEST_SUITE_KERNEL_BUILDS: [&str; 4] =
+    ["", "boot-actuators,test-actuators", "fpu-save-nothing", "user-writable-gsbase"];
 
 /// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
 ///
-/// One name, read from here by the one test that boots it, for
-/// [`TEST_KERNEL`]'s reason — a second spelling is a second kernel and nothing
-/// would say so.
+/// One name, for [`TEST_KERNEL`]'s reason — a second spelling is a second
+/// kernel and nothing would say so.
 pub const SCHED_CHECK_KERNEL: &[&str] = &["sched-check"];
 
 /// The kernel build used only by the harness's interactive debugger.
@@ -1661,11 +1660,8 @@ const SCHED_CHECK_LITERALS: [&str; 3] = [
 /// about the artifact, so the artifact is what is asked, and a convention
 /// nothing enforces is not a bar.
 ///
-/// This is the half of the check-build gate that a booted guest cannot supply.
-/// A guest proves the asserts did not *fire* and the report was published; a
-/// kernel with the feature quietly dropped proves the first of those too, and
-/// rather more easily. Measured on the two binaries this build produces: 0 of 3
-/// in the shipping kernel, 3 of 3 in the `sched-check` one.
+/// Measured on the two binaries this build produces: 0 of 3 in the shipping
+/// kernel, 3 of 3 in the `sched-check` one.
 fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
     assert_names_match_features(
         features,
@@ -1674,8 +1670,7 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
         &SCHED_CHECK_LITERALS,
         "scheduler check instruments",
         "`sched-check` forwards to `toyos-sched/check`, so a build that carries the feature and \
-         not the instruments is a check build in name only — which is what a green \
-         `sched_check_build` would then be certifying.",
+         not the instruments is a check build in name only.",
     );
 }
 

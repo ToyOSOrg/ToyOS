@@ -173,15 +173,7 @@ toyos-userbound = { path = "toyos-userbound" }
 # declaration. Pure and `no_std`, so it compiles for the host as it does for
 # the guest.
 toyos-i219 = { path = "toyos-i219" }
-# The scheduler core, for what the harness reads the kernel's words by:
-# `cpu::PassCostReport`, whose `Display`/`parse` pair
-# keeps the check build that publishes the pass-cost report and
-# `sched_check_build` that reads it on one format. `check` because that is
-# where the report lives: `src/build.rs`'s artifact gate asks the shipping
-# kernel to carry none of the check instruments' literals. `kernel/` is
-# excluded from this workspace with its own lockfile, so nothing here reaches
-# the kernel's resolution of the same crate.
-toyos-sched = { path = "toyos-sched", features = ["check"] }
+toyos-sched = { path = "toyos-sched" }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }
