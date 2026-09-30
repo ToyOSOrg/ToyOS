@@ -516,3 +516,27 @@ fn s_ip_out_006_the_control_queue_is_bounded() {
     assert_eq!(h.count(Counter::IpControlQueueFull), 1);
     assert_eq!(h.out().len(), limits::CONTROL_QUEUE);
 }
+
+/// The bound is on [ip]'s own frames: a datagram its sender was told is held stays bounded by
+/// the pending queues it was held in, and is never dropped on release.
+#[test]
+fn s_ip_out_006_released_datagrams_are_bounded_where_held() {
+    let mut h = H::fixture_i();
+    let held = |n: u8| ip4(192, 0, 2, 10 + n);
+    for n in 0..8 {
+        for _ in 0..8 {
+            assert_eq!(h.udp_to(held(n)), Ok(None));
+        }
+    }
+    h.out();
+    for n in 0..limits::CONTROL_QUEUE as u8 {
+        let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n));
+    }
+    for n in 0..8 {
+        h.reply_from(held(n), MacAddr([2, 0, 0, 0, 1, n]));
+    }
+    let out = h.out();
+    assert_eq!(out.iter().filter(|o| o.ip().is_some()).count(), limits::nud::PENDING_TOTAL);
+    assert_eq!(out.len(), limits::CONTROL_QUEUE + limits::nud::PENDING_TOTAL);
+    assert_eq!(h.count(Counter::IpControlQueueFull), 0);
+}
