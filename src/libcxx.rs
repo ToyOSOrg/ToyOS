@@ -55,8 +55,8 @@ pub(crate) const OPTIONS: [(&str, &str); 20] = [
     ("LIBCXX_INCLUDE_TESTS", "OFF"),
 ];
 
-/// cargo's install of n2, the Rust Ninja, but for its `--root`: one commit, with
-/// its own lock and without its default jemalloc, which is C.
+/// cargo's install of n2, the Rust Ninja, but for its `--root`: without its
+/// default jemalloc, which is C.
 const N2: [&str; 7] = [
     "install",
     "--locked",
