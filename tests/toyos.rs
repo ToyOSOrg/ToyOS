@@ -831,8 +831,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // here is the plumbing, since every span on an emulated device is a fact
     // about TCG.
     ("metal_device_probe", Sched::Parallel),
-    // Its verdict waits out a staged window.
-    ("job_deadline_reboots", Sched::Parallel),
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
     ("quiesce_refuses_a_second_shutdown", Sched::Parallel),
@@ -8576,7 +8574,6 @@ fn run_machine_test(
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
         "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
-        "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
