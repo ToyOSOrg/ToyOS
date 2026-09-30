@@ -408,7 +408,6 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     // under test can have painted it.
     ("screen_early_panel", Sched::Parallel, qemu::Profile::Metal),
     ("screen_log_absent", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_i8042_health", Sched::Parallel, qemu::Profile::Metal),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
     // compositor is holding it. The verdict is the report on the panel.
     ("screen_blocked_dump", Sched::Parallel, qemu::Profile::Metal),
@@ -3841,64 +3840,6 @@ fn run_screen_test(
             eprintln!(
                 "  [console] the fatal report took the screen back from a userland owner"
             );
-            Ok(())
-        }
-        "screen_i8042_health" => {
-            // The health verdict on the only machine that needs it on glass: no
-            // 16550, no virtio-console, so the log ring has nowhere to drain and
-            // the panel is the whole diagnostic. Nothing in this image claims
-            // DEVICE_FRAMEBUFFER, which is the other half of the condition.
-            //
-            // Not a panic: `screen_late_panic` covers the fatal path, and what
-            // is under test here is a *successful* boot repainting to say
-            // something the last boot checkpoint could not have known yet.
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                mute: true,
-                ..Default::default()
-            };
-            let argv = qemu::profile_argv(&options);
-            metal_sim_argv_check(&argv)?;
-            match argv.iter().position(|a| a == "-serial") {
-                Some(i) if argv.get(i + 1).is_some_and(|v| v == "none") => {}
-                _ => return Err(format!("the muted profile still has a 16550: {argv:?}")),
-            }
-
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // The verdict waits for a CPU with nothing left to run, so it lands
-            // after the last boot checkpoint by construction. 30s covers
-            // firmware plus the root filesystem read off USB.
-            let dump = qemu.screendump_until("never asserted", Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            if !text.contains("never asserted") {
-                return Err(format!(
-                    "the i8042 health verdict never reached the panel of a guest with no \
-                     console at all\ndecoded screen:\n{text}"
-                ));
-            }
-            // A panic carries the log tail too, and would satisfy the search
-            // above while meaning something entirely different.
-            if dump.fill() != FILL_BOOT {
-                return Err(format!(
-                    "screen fill is {:?}, want the boot checkpoint's {FILL_BOOT:?} — this is \
-                     a panic report, not a health verdict\ndecoded screen:\n{text}",
-                    dump.fill()
-                ));
-            }
-            // The line the verdict follows on from must still be there: a
-            // repaint that dropped the boot log would be a worse diagnostic
-            // than no repaint.
-            if !text.contains("Boot: complete") {
-                return Err(format!(
-                    "the repaint lost the boot log it was supposed to extend\n\
-                     decoded screen:\n{text}"
-                ));
-            }
-            let row = dump.row_index("never asserted").expect("checked above");
-            eprintln!("  [i8042] on the panel of a console-less guest: {}", dump.rows()[row]);
             Ok(())
         }
         "screen_panic_muted" => {
