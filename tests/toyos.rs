@@ -7362,19 +7362,6 @@ fn shell_echoes(
     Err(format!("{TRIES} typed lines and none of them came back\n{lost}"))
 }
 
-/// A shell must get its prompt back when a windowed child's window goes.
-///
-/// The owner opened snake, closed its window with the X button, and never saw
-/// a prompt again. Both readings of his log are testable here and the two
-/// probes separate them: the first ends the child by *its own* exit, the
-/// second by the compositor taking its window away while it is alive —
-/// GUI+Q, which is the same `windows.remove` + `MSG_WINDOW_CLOSE` + drop the
-/// X button runs and is a keystroke rather than a guess at where the button
-/// is.
-///
-/// The client is a bare `window::Window`, so a reproduction here is about the
-/// shell, the terminal and the window protocol, and a clean run narrows the
-/// defect to what winit does that this does not.
 /// Close the focused window with GUI+Q, retrying until the compositor says a
 /// window went.
 ///
@@ -7394,9 +7381,7 @@ fn shell_echoes(
 /// and here that cuts both ways: #156 is a *freeze*, so the machine this
 /// retries against goes silent, and the wait ends in fifteen seconds instead of
 /// spending `qemu.budget(20 s)` — up to four minutes at width 12 — hammering
-/// GUI+Q at a desktop that has stopped. `issues/design-debt/` names that
-/// cost as a lane this test holds for a quarter of every run, which is what puts
-/// whichever desktop is dispatched beside it into a red nobody acts on.
+/// GUI+Q at a desktop that has stopped.
 fn close_focused_window(qemu: &mut QemuInstance, log: &mut String, new: usize) -> bool {
     const CLOSED: &str = "compositor: window closed";
     let mut live = qemu::Liveness::new(Duration::from_secs(15), Duration::from_secs(60));
