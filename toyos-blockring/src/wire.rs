@@ -13,6 +13,11 @@ pub const MSG_OPEN: u32 = 1;
 pub const MSG_OPENED: u32 = 2;
 /// Refused; the payload is a [`Refusal`]'s word.
 pub const MSG_REFUSED: u32 = 3;
+/// What partitions the service serves, for a client that finds its own by
+/// type: no payload, no handles; answered [`MSG_LISTED`].
+pub const MSG_LIST: u32 = 4;
+/// The answer to [`MSG_LIST`]: one [`Listed`] after another.
+pub const MSG_LISTED: u32 = 5;
 
 /// The bytes of a GUID payload.
 pub const GUID_BYTES: usize = 16;
@@ -45,6 +50,40 @@ impl Opened {
     }
 }
 
+/// One partition of the table a service drives, as [`MSG_LISTED`] carries
+/// it: its unique and type GUIDs as the table stores them. Every entry is
+/// listed, one the service will not open among them, so a client that finds
+/// its partition by type learns why from the open's refusal rather than
+/// taking the partition for missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub unique: [u8; GUID_BYTES],
+    pub kind: [u8; GUID_BYTES],
+}
+
+impl Listed {
+    pub const BYTES: usize = 2 * GUID_BYTES;
+
+    pub fn encode(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        out[..GUID_BYTES].copy_from_slice(&self.unique);
+        out[GUID_BYTES..].copy_from_slice(&self.kind);
+        out
+    }
+
+    /// Every entry of a listing, or `None` for one that is not whole entries.
+    pub fn decode_all(bytes: &[u8]) -> Option<impl Iterator<Item = Self> + '_> {
+        if !bytes.len().is_multiple_of(Self::BYTES) {
+            return None;
+        }
+        let (chunks, _) = bytes.as_chunks::<{ Self::BYTES }>();
+        Some(chunks.iter().map(|c| Self {
+            unique: c[..GUID_BYTES].try_into().expect("sixteen bytes"),
+            kind: c[GUID_BYTES..].try_into().expect("sixteen bytes"),
+        }))
+    }
+}
+
 /// Why an open was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -54,12 +93,17 @@ pub enum Refusal {
     /// A session holds it already.
     Held,
     /// The partition is there and cannot be served: its range is not whole
-    /// blocks, its GUID is on two entries, or its table did not read.
+    /// blocks, its GUID is on two entries, its table did not read, or its
+    /// controller would not open — the answer to a listing then too.
     Unusable,
     /// The frame, its handles or its region are not what this protocol sends.
     Malformed,
     /// The service is holding as many sessions as it serves.
     Exhausted,
+    /// The controller is on this machine and the kernel would not hand the
+    /// service its claim: nothing on it is served, and a listing is refused
+    /// the same.
+    ClaimRefused,
 }
 
 impl Refusal {
@@ -70,6 +114,7 @@ impl Refusal {
             Self::Unusable => 3,
             Self::Malformed => 4,
             Self::Exhausted => 5,
+            Self::ClaimRefused => 6,
         }
     }
 
@@ -80,6 +125,7 @@ impl Refusal {
             3 => Some(Self::Unusable),
             4 => Some(Self::Malformed),
             5 => Some(Self::Exhausted),
+            6 => Some(Self::ClaimRefused),
             _ => None,
         }
     }
@@ -104,10 +150,24 @@ mod tests {
 
     #[test]
     fn opened_and_refusal_survive_their_bytes_and_nothing_else_decodes() {
+        let listed = [
+            Listed { unique: [1; GUID_BYTES], kind: [2; GUID_BYTES] },
+            Listed { unique: [4; GUID_BYTES], kind: [5; GUID_BYTES] },
+        ];
+        let bytes: Vec<u8> = listed.iter().flat_map(|l| l.encode()).collect();
+        assert_eq!(Listed::decode_all(&bytes).map(|all| all.collect::<Vec<_>>()), Some(listed.to_vec()));
+        assert!(Listed::decode_all(&bytes[1..]).is_none());
         let opened = Opened { blocks: u64::MAX - 3, unique: [7; GUID_BYTES] };
         assert_eq!(Opened::decode(&opened.encode()), Some(opened));
         assert_eq!(Opened::decode(&opened.encode()[1..]), None);
-        for r in [Refusal::NotFound, Refusal::Held, Refusal::Unusable, Refusal::Malformed, Refusal::Exhausted] {
+        for r in [
+            Refusal::NotFound,
+            Refusal::Held,
+            Refusal::Unusable,
+            Refusal::Malformed,
+            Refusal::Exhausted,
+            Refusal::ClaimRefused,
+        ] {
             assert_eq!(Refusal::decode(&r.encode()), Some(r));
         }
         assert_eq!(Refusal::decode(&0u32.to_le_bytes()), None);

@@ -11,7 +11,7 @@
 # would spend one of them.
 
 [boot]
-start = ["logd", "netd", "sshd", "test-runner"]
+start = ["logd", "blockd", "fsd", "netd", "sshd", "test-runner"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
@@ -51,3 +51,20 @@ syscap = ["logread"]
 "bin/echo" = "/system/bin/toybox"
 "bin/cat" = "/system/bin/toybox"
 "bin/spin" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

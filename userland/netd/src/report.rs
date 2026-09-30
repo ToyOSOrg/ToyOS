@@ -2,9 +2,8 @@
 //! file on the log volume, each flushed to the device before the process goes
 //! on.
 //!
-//! **`sync_all` is the whole claim**: `SYS_FSYNC` reaches the device's own cache
-//! flush, which is what `/system/bin/logd` rests its durability word on, so a
-//! line this returned from is on the stick whatever the machine does next. A
+//! **`sync_all` is the whole claim**: a line this returned from is on the
+//! stick whatever the machine does next. A
 //! line that cannot be made durable ends the process: a report with a hole in
 //! it says the wrong thing.
 
