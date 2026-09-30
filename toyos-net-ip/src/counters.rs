@@ -60,6 +60,7 @@ toyos_net_wire::counters! {
     ArpRepliesSent = "arp.replies-sent";
     NbPendingOverflow = "nb.pending-overflow";
     NbPendingFull = "nb.pending-full";
+    NbPendingDropped = "nb.pending-dropped";
     NbFailedRefused = "nb.failed-refused";
     NbTableFull = "nb.table-full";
     NbResolved = "nb.resolved";

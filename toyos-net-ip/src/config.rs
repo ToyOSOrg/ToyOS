@@ -101,7 +101,6 @@ impl Ip {
             nud::flush(i, &mut cx);
             acd::link_down(i, &mut cx);
             igmp::link_down(i, &mut cx);
-            cx.control.purge(iface);
             route::refresh_active(i, &mut cx);
         }
         Ok(())

@@ -43,7 +43,7 @@ pub(crate) enum Item {
     Announce { iface: IfIndex, addr: Ipv4Addr, owed: bool },
     Igmp { iface: IfIndex, report: igmp::Report },
     Frame { iface: IfIndex, frame: Vec<u8>, kind: FrameKind },
-    Released { iface: IfIndex, frame: Vec<u8>, kind: FrameKind },
+    Released { iface: IfIndex, held: Held },
 }
 
 impl Item {
@@ -88,8 +88,8 @@ impl Control {
     }
 
     /// A datagram resolution released, in the order it was held.
-    pub fn release(&mut self, iface: IfIndex, frame: Vec<u8>, kind: FrameKind) {
-        self.items.push_back(Item::Released { iface, frame, kind });
+    pub fn release(&mut self, iface: IfIndex, held: Held) {
+        self.items.push_back(Item::Released { iface, held });
     }
 
     fn pop(&mut self) -> Option<Item> {
@@ -109,13 +109,20 @@ impl Control {
         }
     }
 
-    /// Drops everything waiting for `iface`, whose link went down.
-    pub fn purge(&mut self, iface: IfIndex) {
+    /// Drops everything waiting for `iface`, whose link went down, and hands back the datagrams
+    /// resolution had released.
+    pub fn purge(&mut self, iface: IfIndex) -> Vec<Held> {
         let (gone, kept): (Vec<Item>, Vec<Item>) = self.items.drain(..).partition(|item| item.iface() == iface);
+        self.items = kept.into();
         for item in &gone {
             self.forget(item);
         }
-        self.items = kept.into();
+        gone.into_iter()
+            .filter_map(|item| match item {
+                Item::Released { held, .. } => Some(held),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -232,10 +239,10 @@ impl Ip {
                 sent(&mut cx, kind);
                 true
             }
-            Item::Released { frame, kind, .. } => {
+            Item::Released { held, .. } => {
                 i.held = i.held.saturating_sub(1);
-                sink(iface, &frame);
-                sent(&mut cx, kind);
+                sink(iface, &held.frame);
+                sent(&mut cx, held.kind);
                 true
             }
         }

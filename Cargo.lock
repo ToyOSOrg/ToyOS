@@ -1144,6 +1144,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-net-udp"
+version = "0.1.0"
+dependencies = [
+ "toyos-net-ip",
+ "toyos-net-wire",
+]
+
+[[package]]
 name = "toyos-net-wire"
 version = "0.1.0"
 

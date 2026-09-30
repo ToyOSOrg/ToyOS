@@ -355,16 +355,22 @@ fn probe(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, at: Instant) {
     }
 }
 
-/// INCOMPLETE gave up: every held datagram is dropped and its sender told (§6.5, §9.6).
+/// A held datagram that will never leave: counted, and its sender told (§6.5, §9.6).
+pub(crate) fn drop_held(cx: &mut Cx<'_>, held: Held) {
+    cx.log.count(Counter::NbPendingDropped);
+    if let Some(flow) = held.flow {
+        cx.log.event(Event::Unreachable(flow));
+    }
+}
+
+/// INCOMPLETE gave up: every held datagram is dropped.
 fn fail(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     let now = cx.now;
     let Some(n) = i.neighbours.get_mut(&addr) else { return };
     let Nud::Incomplete(s) = core::mem::replace(&mut n.state, Nud::Failed(Failed { since: now })) else { return };
     for held in s.pending {
         i.held = i.held.saturating_sub(1);
-        if let Some(flow) = held.flow {
-            cx.log.event(Event::Unreachable(flow));
-        }
+        drop_held(cx, held);
     }
     cx.log.count(Counter::NbFailed);
     cx.log.event(Event::Failed { iface: cx.iface, next_hop: addr });
@@ -374,12 +380,11 @@ fn fail(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
 
 /// INCOMPLETE learned `mac`: its datagrams leave in arrival order, ahead of any sent later (§6.5).
 fn resolved(cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr, pending: VecDeque<Held>) {
-    for held in pending {
-        let mut frame = held.frame;
-        if let Some((destination, _)) = frame.split_first_chunk_mut::<6>() {
+    for mut held in pending {
+        if let Some((destination, _)) = held.frame.split_first_chunk_mut::<6>() {
             *destination = mac.0;
         }
-        cx.control.release(cx.iface, frame, held.kind);
+        cx.control.release(cx.iface, held);
     }
     cx.log.count(Counter::NbResolved);
     cx.log.event(Event::Resolved { iface: cx.iface, next_hop: addr });
@@ -482,17 +487,18 @@ pub(crate) fn advise(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, confirm
     }
 }
 
-/// The link went down: every entry goes, and the senders of held datagrams are told (§6.10).
+/// The link went down: every entry goes, and with it every datagram held here (§6.10).
 pub(crate) fn flush(i: &mut Interface, cx: &mut Cx<'_>) {
     for (addr, n) in core::mem::take(&mut i.neighbours) {
         cx.timers.cancel(timer(cx, addr));
         if let Nud::Incomplete(s) = n.state {
             for held in s.pending {
-                if let Some(flow) = held.flow {
-                    cx.log.event(Event::Unreachable(flow));
-                }
+                drop_held(cx, held);
             }
         }
+    }
+    for held in cx.control.purge(cx.iface) {
+        drop_held(cx, held);
     }
     i.held = 0;
 }

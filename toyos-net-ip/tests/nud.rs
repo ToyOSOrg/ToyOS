@@ -45,6 +45,7 @@ fn s_ip_nud_002_three_requests_then_failed() {
     assert_eq!(out.len(), 3);
     assert!(matches!(h.state(B), Some(Nud::Failed(_))));
     assert_eq!(h.count(Counter::NbFailed), 1);
+    assert_eq!(h.count(Counter::NbPendingDropped), 1);
     assert!(h.events.contains(&Event::Unreachable(flow_to(B))));
     assert!(h.run(10_000).is_empty());
 }
@@ -396,8 +397,20 @@ fn s_ip_nud_023_link_down_drops_the_table() {
     assert!(h.state(B).is_none() && h.state(DNS).is_none());
     let told = h.events.iter().filter(|e| matches!(e, Event::Unreachable(_))).count();
     assert_eq!(told, 3);
+    assert_eq!(h.count(Counter::NbPendingDropped), 3);
     h.ip.link_up(h.clock(), h.if0).unwrap();
     assert!(h.state(B).is_none() && h.state(DNS).is_none());
+
+    let mut h = H::fixture_i();
+    h.udp_to(B).unwrap();
+    h.out();
+    h.frame(&hex(V_ARP_REPLY));
+    h.ip.link_down(h.clock(), h.if0).unwrap();
+    h.collect();
+    assert_eq!(h.count(Counter::NbPendingDropped), 1, "released, never sent");
+    assert!(h.events.contains(&Event::Unreachable(flow_to(B))));
+    h.ip.link_up(h.clock(), h.if0).unwrap();
+    assert!(h.out().iter().all(|o| o.ip().is_none_or(|ip| ip.protocol() != toyos_net_wire::ipv4::Protocol::Udp)));
 }
 
 #[test]
