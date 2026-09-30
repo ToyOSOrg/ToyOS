@@ -817,8 +817,7 @@ pub mod debug_action {
     pub const HEAP_AT_CEILING: u64 = 5;
     pub const HEAP_OVER_CEILING: u64 = 6;
     pub const HEAP_AT_CEILING_PAGE_ALIGNED: u64 = 7;
-    /// Draw over the screen a userland process owns.
-    pub const SCREEN_GRAFFITI: u64 = 8;
+    // Action 8 is retired and unused: it was SCREEN_GRAFFITI, and no test reads it.
     /// Read the guard page below this CPU's idle stack.
     pub const IDLE_GUARD_READ: u64 = 9;
     /// The kernel canary's address, and whether it still holds what the kernel

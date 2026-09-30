@@ -574,11 +574,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::HEAP_AT_CEILING => debug_heap_alloc(crate::mm::MAX_HEAP_ALLOC, 8),
             DA::HEAP_OVER_CEILING => debug_heap_alloc(crate::mm::PAGE_2M as usize, 8),
             DA::HEAP_AT_CEILING_PAGE_ALIGNED => debug_heap_alloc(crate::mm::MAX_HEAP_ALLOC, 4096),
-            // Returns, unlike other actions here: the console must survive being drawn over.
-            DA::SCREEN_GRAFFITI => {
-                crate::drivers::panic_console::graffiti();
-                0
-            }
             // A read, not a write: tests the page is absent without the feature also
             // handing userland a kernel store; returning 0 means the guard failed.
             DA::IDLE_GUARD_READ => {
