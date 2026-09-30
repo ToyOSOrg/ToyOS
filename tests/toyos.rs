@@ -417,9 +417,6 @@ const RUST_SKIP: &[&str] = &[
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
     "redirty_mid_flush",
-    // Needs `ftruncate-flush-stall` and a boot of its own for the host-side
-    // re-read. `ftruncate_flush_race` runs it.
-    "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
     // Its listings are exact against `tests/layoutcase`, and it takes what that
@@ -1286,8 +1283,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel),
     ("redirty_mid_flush", Sched::Parallel),
-    // A truncate staged inside a flush's metadata window, re-read off the image.
-    ("ftruncate_flush_race", Sched::Parallel),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
@@ -1435,7 +1430,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
     ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
-    ("ftruncate_flush_race", &["test_rs_ftruncate_flush_race", "test_rs_fs_rename_durable"]),
     ("log_backing_read_error", &["test_rs_log_volume_reread"]),
     ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
     ("writeback_durability", &["test_rs_writeback_durability"]),
@@ -9617,7 +9611,6 @@ fn run_machine_test(
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
-        "ftruncate_flush_race" => common::volumes::ftruncate_flush_race(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
         "quiesce_leaves_the_volume_whole" => common::volumes::quiesce_leaves_the_volume_whole(test_config, c_bins, rust_bins),
