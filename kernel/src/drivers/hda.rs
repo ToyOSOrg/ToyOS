@@ -166,7 +166,7 @@ pub fn isr_complete() {
     }
     ISR.timestamp.store(timestamp, Ordering::Relaxed);
     ISR.mask.fetch_or(mask, Ordering::Release);
-    crate::irq_ring::isr_publish(crate::irq_ring::IrqSource::Audio, timestamp);
+    super::AUDIO_WATCH.post_in_place();
     crate::preempt::set_need_resched();
 }
 
@@ -470,7 +470,7 @@ pub fn init(devices: &[PciDevice]) {
 /// controller's own domain does not map, and start the stream: the list is fetched at `RUN`.
 #[cfg(feature = "boot-actuators")]
 fn run_on_a_foreign_bdl(stream: Mmio) {
-    let foreign = super::nvme::FOREIGN_PROBE.load(Ordering::Relaxed);
+    let foreign = super::xhci::FOREIGN_PROBE.load(Ordering::Relaxed);
     assert!(foreign != 0, "hda: this machine staged no foreign pool to aim at");
     stream.write_u32(SD_BDPL, foreign as u32);
     stream.write_u32(SD_BDPU, (foreign >> 32) as u32);

@@ -15,7 +15,7 @@ assets = ["assets"]
 # here first: the port exists before either process runs. No soundd or filepicker
 # in this config, so nothing receives them.
 [boot]
-start = ["logd", "compositor", "terminal"]
+start = ["logd", "blockd", "fsd", "compositor", "terminal"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
@@ -59,3 +59,20 @@ receives = ["compositor"]
 [symlinks]
 "bin/echo" = "/system/bin/toybox"
 "bin/locale" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

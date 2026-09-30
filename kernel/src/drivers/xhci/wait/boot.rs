@@ -359,6 +359,13 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         }
 
         op_base.write_u64(OP_DCBAAP, dma.device_addr() + OFF_DCBAA as u64);
+        #[cfg(feature = "boot-actuators")]
+        let _ = super::super::FOREIGN_PROBE.compare_exchange(
+            0,
+            dma.subview(super::super::PROBE_OFF, super::super::PROBE_LEN).host_phys(),
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+        );
 
         // CRCR bit 0 is RCS; the pointer is 64-byte aligned so `| 1` only sets
         // that bit (xHCI 1.2 §5.4.5).

@@ -1,11 +1,9 @@
 use alloc::boxed::Box;
 use alloc::collections::btree_map::Entry;
 use alloc::collections::BTreeMap;
-use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 
 use crate::block;
-use crate::durability::{Owed, Settlement};
 use crate::file_backing::FileBacking;
 use crate::sync::Lock;
 use crate::user_ptr::{ByteSource, UserBytesMut};
@@ -21,16 +19,8 @@ pub const MAX_FILE_SIZE: u64 = (u32::MAX as u64 + 1) * PAGE_SIZE as u64;
 
 struct CachedPage {
     data: Box<[u8; PAGE_SIZE]>,
-    /// Dirty state as generations, settled only against what a flush copied.
-    dirt: Owed,
     /// CLOCK's second-chance bit: set on every hit, cleared when the sweep passes it over.
     referenced: bool,
-}
-
-impl CachedPage {
-    fn is_dirty(&self) -> bool {
-        self.dirt.is_owed()
-    }
 }
 
 struct CachedFile {
@@ -41,14 +31,8 @@ struct CachedFile {
     backing: Option<Arc<dyn FileBacking>>,
     ref_count: u32,
     deleted: bool,
-    /// Pins the file alive at `ref_count == 0` for the write-back queue; cleared only by [`finish_writeback`].
-    teardown_owed: bool,
-    /// The file, not any one handle, owes a flush; settled only by [`settle_file`] on a flush that succeeded.
-    dirt: Owed,
-    /// The smallest size a shrink has taken this file to since the last settled
-    /// metadata write; `None` when none has. Everything at or above it was
-    /// discarded, so a page missing from here is zeros and never the backing's.
-    shrunk_to: Option<u64>,
+    /// When it was last written, for a mount whose pages are the file.
+    mtime: u64,
 }
 
 impl CachedFile {
@@ -67,8 +51,6 @@ struct FileCache {
     evictions: u64,
     /// CLOCK hand, in (file, page) key order; kept across calls so eviction costs one step, not a full scan.
     hand: (FileId, u32),
-    /// The over-budget state has been said; cleared when residency returns within budget, so an episode costs one line.
-    over_said: bool,
 }
 
 static FILE_CACHE: Lock<FileCache> = Lock::new(FileCache {
@@ -79,7 +61,6 @@ static FILE_CACHE: Lock<FileCache> = Lock::new(FileCache {
     max_pages: 0,
     evictions: 0,
     hand: (0, 0),
-    over_said: false,
 });
 
 /// Install the memory budget; must run after the PMM sizes RAM and before any file is opened.
@@ -90,7 +71,7 @@ pub fn init() {
 }
 
 /// Allocate a new FileId. The file cache is the sole allocator.
-pub fn create_file(evictable: bool) -> FileId {
+pub fn create_file(evictable: bool, mtime: u64) -> FileId {
     let mut cache = FILE_CACHE.lock();
     let id = cache.next_id;
     cache.next_id += 1;
@@ -101,9 +82,7 @@ pub fn create_file(evictable: bool) -> FileId {
         backing: None,
         ref_count: 1,
         deleted: false,
-        teardown_owed: false,
-        dirt: Owed::new(),
-        shrunk_to: None,
+        mtime,
     });
     id
 }
@@ -122,15 +101,9 @@ pub fn set_backing(file_id: FileId, backing: Arc<dyn FileBacking>) {
     evict_if_needed(&mut cache);
 }
 
-/// Whether an evicted page of this file could be read back; false for tmpfs and for a disk file with no blocks yet.
-pub fn has_backing(file_id: FileId) -> bool {
-    FILE_CACHE.lock().files.get(&file_id).is_some_and(|f| f.backing.is_some())
-}
-
 /// Increment ref_count for one more open, returning a guard that undoes the
 /// increment on drop unless committed: a re-open whose backing lookup fails
-/// after this must not pin the file. Caller holds the VFS lock, which
-/// [`finish_writeback`] also reads `ref_count` under to serialise against teardown.
+/// after this must not pin the file.
 #[must_use = "commit() once the re-open cannot fail, or the reference is released"]
 pub fn open(file_id: FileId) -> crate::rollback::Rollback<impl FnOnce()> {
     {
@@ -142,7 +115,7 @@ pub fn open(file_id: FileId) -> crate::rollback::Rollback<impl FnOnce()> {
     crate::rollback::Rollback::new(move || undo_open(file_id))
 }
 
-/// Undo one [`open`]: a re-open decrements a count another handle or a pending teardown keeps, never orphaning the file.
+/// Undo one [`open`]: a re-open decrements a count another handle keeps, never orphaning the file.
 fn undo_open(file_id: FileId) {
     let mut cache = FILE_CACHE.lock();
     if let Some(file) = cache.files.get_mut(&file_id) {
@@ -150,89 +123,28 @@ fn undo_open(file_id: FileId) {
     }
 }
 
-/// This file's open-reference count, for the leak-rollback self-test's census.
-#[cfg(feature = "boot-actuators")]
-pub fn ref_count(file_id: FileId) -> u32 {
-    FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.ref_count)
-}
-
-/// The verdict [`release_to_writeback`] hands its caller.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Release {
-    /// Other handles still hold the file. Nothing is owed.
-    StillHeld,
-    /// This was the last handle: the file is pinned for write-back and the caller must [`crate::writeback::enqueue`] it.
-    TeardownOwed,
-    /// This was the last handle, but a teardown was already owed and enqueued; nothing to enqueue.
-    AlreadyOwed,
-}
-
-/// Drop one open reference; if it was the last, pins the file for write-back instead of dropping it here — eviction never takes a dirty page, so a re-open before the drain reads the pinned data, not the device.
-pub fn release_to_writeback(file_id: FileId) -> Release {
+/// Drop one open reference. The last of a deleted file takes its pages with
+/// it; any other file stays, its pages clean and CLOCK's to evict, so a
+/// re-open finds the id its mount keeps for the name.
+pub fn release(file_id: FileId) {
     let mut cache = FILE_CACHE.lock();
-    let Some(file) = cache.files.get_mut(&file_id) else { return Release::StillHeld };
+    let Some(file) = cache.files.get_mut(&file_id) else { return };
     file.ref_count = file.ref_count.saturating_sub(1);
-    if file.ref_count != 0 {
-        return Release::StillHeld;
-    }
-    if file.teardown_owed {
-        return Release::AlreadyOwed;
-    }
-    file.teardown_owed = true;
-    Release::TeardownOwed
-}
-
-/// What [`finish_writeback`] found, and what the drainer does with the filesystem-side handle.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Teardown {
-    /// The file left the cache (or is a live tmpfs file whose pages stay): release the handle with `Vfs::close_file`.
-    Released,
-    /// A re-open adopted the file between the enqueue and the drain, so it is left alive with its handle.
-    Adopted,
-    /// The file is already gone from the cache. Nothing to close.
-    Vanished,
-}
-
-/// What `iod`/shutdown needs to know before flushing a queued file, read in one lock.
-#[derive(Clone, Copy)]
-pub struct WritebackProbe {
-    pub flush_owed: bool,
-    /// A deleted file's drain skips the flush — its data is going away.
-    pub deleted: bool,
-}
-
-/// Read a queued file's flush state; a file the queue pinned is always present, so absence reads as "nothing to flush" rather than a panic.
-pub fn writeback_probe(file_id: FileId) -> WritebackProbe {
-    let cache = FILE_CACHE.lock();
-    match cache.files.get(&file_id) {
-        Some(file) => WritebackProbe { flush_owed: file.dirt.is_owed(), deleted: file.deleted },
-        None => WritebackProbe { flush_owed: false, deleted: false },
-    }
-}
-
-/// The FILE_CACHE half of a write-back teardown; must run under the VFS lock, which serialises the drain against a re-open.
-pub fn finish_writeback(file_id: FileId) -> Teardown {
-    let mut cache = FILE_CACHE.lock();
-    let Some(file) = cache.files.get_mut(&file_id) else { return Teardown::Vanished };
-    if !file.teardown_owed {
-        // A re-open's own release already cleared it; nothing owed here.
-        return Teardown::Adopted;
-    }
-    file.teardown_owed = false;
-    if file.ref_count != 0 {
-        // A re-open adopted the file between the enqueue and now.
-        return Teardown::Adopted;
-    }
-    if file.deleted || file.evictable {
+    if file.ref_count == 0 && file.deleted {
         drop_file(&mut cache, file_id);
     }
-    // else: a live tmpfs file keeps its (non-evictable) pages.
-    Teardown::Released
 }
 
-/// Whether a shrink discarded this page, so the backing's copy is no longer the file's.
-fn discarded(file: &CachedFile, page_idx: u32) -> bool {
-    file.shrunk_to.is_some_and(|mark| page_idx as u64 * PAGE_SIZE as u64 >= mark)
+/// When the file was last written, as [`create_file`] and [`touch`] said.
+pub fn mtime(file_id: FileId) -> u64 {
+    FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.mtime)
+}
+
+/// Record a write at `mtime`.
+pub fn touch(file_id: FileId, mtime: u64) {
+    if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
+        file.mtime = mtime;
+    }
 }
 
 /// Read a file page into `buf`; on `Err` the fetch failed and `buf` holds zeros, not the file's bytes.
@@ -260,7 +172,7 @@ pub fn read_page(
             copy_page_region_to_buf(&page.data[..], offset, buf, avail);
             return Ok(());
         }
-        backing = if discarded(file, page_idx) { None } else { file.backing.clone() };
+        backing = file.backing.clone();
     }
     // Cache miss: unlock, fetch from backing, re-lock, insert if still absent.
 
@@ -311,8 +223,6 @@ pub fn write_page<S: ByteSource + ?Sized>(
             if file.pages.contains_key(&page_idx) {
                 apply_write(file, page_idx, offset, data);
                 backing = None;
-            } else if discarded(file, page_idx) {
-                backing = Some(None);
             } else {
                 backing = Some(file.backing.clone());
             }
@@ -333,7 +243,7 @@ pub fn write_page<S: ByteSource + ?Sized>(
         }
     }
 
-    // Re-fetching after a sibling's eviction is always correct: only clean pages are ever evicted.
+    // Re-fetching after a sibling's eviction is always correct: a page written is never evicted.
     let mut cache = FILE_CACHE.lock();
     let mut added = 0;
     {
@@ -359,10 +269,7 @@ fn apply_write<S: ByteSource + ?Sized>(
     let page = file.pages.get_mut(&page_idx).expect("write_page: page not resident");
     let end = (offset + data.len()).min(PAGE_SIZE);
     data.read_at(0, &mut page.data[offset..end]);
-    page.dirt.record_write();
     page.referenced = true;
-    // Both recorded under the one FILE_CACHE lock, so a flush never observes one without the other.
-    file.dirt.record_write();
 
     let write_end = page_idx as u64 * PAGE_SIZE as u64 + end as u64;
     if write_end > file.size {
@@ -370,73 +277,14 @@ fn apply_write<S: ByteSource + ?Sized>(
     }
 }
 
-/// Copy a resident page out, with the settlement its flusher must present to
-/// mark it clean; `None` leaves `buf` untouched — an absent page is not zeros.
-#[must_use]
-pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) -> Option<Settlement> {
+/// Copy a resident page out; `false` leaves `buf` untouched — an absent page is not zeros.
+pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) -> bool {
     let cache = FILE_CACHE.lock();
-    let file = cache.files.get(&file_id)?;
-    let page = file.pages.get(&page_idx)?;
+    let Some(page) = cache.files.get(&file_id).and_then(|file| file.pages.get(&page_idx)) else {
+        return false;
+    };
     *buf = *page.data;
-    Some(page.dirt.snapshot())
-}
-
-/// What one flush attempt owes, snapshotted in one lock; nothing is cleared
-/// here — a write landing mid-flush outruns the settlement and stays owed.
-pub struct FlushPlan {
-    pub file: Settlement,
-    pub pages: BTreeSet<u32>,
-    /// What the mount has to give back before this flush's pages land on top of it.
-    pub shrunk_to: Option<u64>,
-}
-
-pub fn begin_flush(file_id: FileId) -> FlushPlan {
-    let cache = FILE_CACHE.lock();
-    match cache.files.get(&file_id) {
-        Some(file) => FlushPlan {
-            file: file.dirt.snapshot(),
-            pages: file.pages.iter().filter(|(_, p)| p.is_dirty()).map(|(&i, _)| i).collect(),
-            shrunk_to: file.shrunk_to,
-        },
-        None => FlushPlan {
-            file: Owed::new().snapshot(),
-            pages: BTreeSet::new(),
-            shrunk_to: None,
-        },
-    }
-}
-
-/// Whether a file owes a write-back; `fsync` reads this so a handle that did not itself write still flushes a file another handle dirtied.
-pub fn flush_owed(file_id: FileId) -> bool {
-    FILE_CACHE.lock().files.get(&file_id).is_some_and(|f| f.dirt.is_owed())
-}
-
-/// Settle each page up to what its flush copied; a page written since keeps its debt and the next flush delivers it.
-pub fn settle_pages(file_id: FileId, flushed: &[(u32, Settlement)]) {
-    let mut cache = FILE_CACHE.lock();
-    if let Some(file) = cache.files.get_mut(&file_id) {
-        for (page_idx, copied) in flushed {
-            if let Some(page) = file.pages.get_mut(page_idx) {
-                page.dirt.settle(*copied);
-            }
-        }
-    }
-}
-
-/// Settle the file's flush debt; only a flush that wrote its pages and its metadata calls this.
-pub fn settle_file(file_id: FileId, upto: Settlement) {
-    if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
-        file.dirt.settle(upto);
-    }
-}
-
-/// Clear the shrink mark: the mount has given the tail back, so nothing above it
-/// is named any more and a second trim would free what the flush then writes.
-/// Sound without a generation because every shrink runs under the VFS lock a flush holds.
-pub fn settle_shrink(file_id: FileId) {
-    if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
-        file.shrunk_to = None;
-    }
+    true
 }
 
 /// Get the authoritative file size.
@@ -444,143 +292,10 @@ pub fn size(file_id: FileId) -> u64 {
     FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.size)
 }
 
-/// Set file size and drop pages past it; the establishing form (mount-time), does not mark the file dirty — see [`resize`] for a user truncate.
+/// Set file size and drop pages past it.
 pub fn set_size(file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
     set_size_locked(&mut cache, file_id, new_size);
-    if let Some(file) = cache.files.get_mut(&file_id) {
-        file.shrunk_to = None;
-    }
-}
-
-/// A user truncate: [`set_size`], plus marks the file dirty even when no page changed.
-/// The `&mut Vfs` is the witness: every flusher's size-read/`update_metadata`
-/// pair runs under the VFS lock, so a resize outside it could record a stale size.
-/// `Err` is the straddled page unreadable, with nothing resized.
-pub fn resize(
-    _vfs: &mut crate::vfs::Vfs,
-    file_id: FileId,
-    new_size: u64,
-) -> Result<(), block::BlockError> {
-    // Fetched outside the lock because it is a device read, and admitted below
-    // under the same hold that spends it: a page admitted and released again is
-    // clean and unreferenced, which is what a sweep takes at or after its hand —
-    // and `sys_read`/`sys_write` sweep holding no VFS lock, so they run here.
-    let straddled = straddled_by_shrink(file_id, new_size);
-    #[cfg(feature = "boot-actuators")]
-    if straddled.is_some() && refuse_fault(new_size) {
-        return Err(block::BlockError::Device);
-    }
-    let fetched = match straddled {
-        Some(page_idx) => fetch_page(file_id, page_idx)?.map(|page| (page_idx, page)),
-        None => None,
-    };
-    #[cfg(feature = "boot-actuators")]
-    swept_fault_window(file_id, fetched.as_ref().map(|&(idx, _)| idx));
-
-    let mut cache = FILE_CACHE.lock();
-    if let Some((page_idx, page)) = fetched {
-        admit_locked(&mut cache, file_id, page_idx, page);
-    }
-    let shrank = cache.files.get(&file_id).is_some_and(|f| new_size < f.size);
-    set_size_locked(&mut cache, file_id, new_size);
-    if let Some(file) = cache.files.get_mut(&file_id) {
-        file.dirt.record_write();
-        if shrank {
-            file.shrunk_to = Some(file.shrunk_to.map_or(new_size, |mark| mark.min(new_size)));
-        }
-    }
-    // Safe on the page just admitted: `set_size_locked` dirtied it, and
-    // `evict_one` never takes a dirty page.
-    evict_if_needed(&mut cache);
-    Ok(())
-}
-
-/// The `resize-fault-refuse` actuator: the device read a shrink makes for its
-/// straddled page, refused. Keyed on the staged length, so no other shrink in
-/// the boot can spend it.
-#[cfg(feature = "boot-actuators")]
-fn refuse_fault(new_size: u64) -> bool {
-    /// Mirrored in `tests/toyos-rust-tests/src/bin/writeback_durability.rs`.
-    const STAGED: u64 = 133;
-    let refuse = crate::actuator::resize_fault_refuse() && new_size == STAGED;
-    if refuse {
-        log!("file cache: resize-fault-refuse: refusing the straddled read of a shrink to {STAGED}");
-    }
-    refuse
-}
-
-/// The `resize-evict-window` actuator: one other CPU's CLOCK sweep, landing in
-/// the window between the fault's device read and the lock that spends it.
-#[cfg(feature = "boot-actuators")]
-fn swept_fault_window(file_id: FileId, page_idx: Option<u32>) {
-    let Some(page_idx) = page_idx.filter(|_| crate::actuator::resize_evict_window()) else {
-        return;
-    };
-    let mut cache = FILE_CACHE.lock();
-    let mut taken = false;
-    if let Some(file) = cache.files.get_mut(&file_id) {
-        let is_cache = file.is_cache();
-        if file.pages.get(&page_idx).is_some_and(|p| !p.is_dirty()) {
-            file.pages.remove(&page_idx);
-            taken = is_cache;
-        }
-    }
-    cache.cached_pages -= usize::from(taken);
-    drop(cache);
-    log!("file cache: resize-evict-window swept page {page_idx} of file {file_id}: took it = {taken}");
-}
-
-/// The page a shrink to `new_size` would cut in half and does not hold.
-///
-/// [`set_size_locked`] can only zero and dirty a *resident* page, and
-/// [`discarded`] cannot cover this one: it is partly still the file's.
-fn straddled_by_shrink(file_id: FileId, new_size: u64) -> Option<u32> {
-    if new_size.is_multiple_of(PAGE_SIZE as u64) {
-        return None;
-    }
-    let idx = (new_size / PAGE_SIZE as u64) as u32;
-    let cache = FILE_CACHE.lock();
-    let file = cache.files.get(&file_id)?;
-    (new_size < file.size && !file.pages.contains_key(&idx) && file.backing.is_some())
-        .then_some(idx)
-}
-
-/// Read `page_idx` through the backing, holding no lock across the device.
-/// `None` is nothing to admit: the page arrived, or the mark now covers it.
-fn fetch_page(
-    file_id: FileId,
-    page_idx: u32,
-) -> Result<Option<Box<[u8; PAGE_SIZE]>>, block::BlockError> {
-    let backing = {
-        let cache = FILE_CACHE.lock();
-        let Some(file) = cache.files.get(&file_id) else { return Ok(None) };
-        if file.pages.contains_key(&page_idx) || discarded(file, page_idx) {
-            return Ok(None);
-        }
-        file.backing.clone()
-    };
-    let mut fetched = blank_page();
-    if let Some(backing) = &backing {
-        backing.read_page(page_idx as u64 * PAGE_SIZE as u64, &mut fetched)?;
-    }
-    Ok(Some(fetched))
-}
-
-/// Insert a fetched page if the file still wants it, under the caller's lock.
-/// Re-checked here because the fetch above released the lock across a device read.
-fn admit_locked(cache: &mut FileCache, file_id: FileId, page_idx: u32, page: Box<[u8; PAGE_SIZE]>) {
-    let mut added = 0;
-    if let Some(file) = cache.files.get_mut(&file_id) {
-        let is_cache = file.is_cache();
-        if !discarded(file, page_idx) {
-            if let Entry::Vacant(slot) = file.pages.entry(page_idx) {
-                slot.insert(CachedPage::new(page));
-                added = usize::from(is_cache);
-            }
-        }
-    }
-    cache.cached_pages += added;
 }
 
 fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
@@ -596,16 +311,13 @@ fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
                 file.pages.remove(k);
             }
             // The page the new end falls inside is kept; zero its bytes past the
-            // new end and dirty it, in the one step that sets the size, so a
-            // later grow reads the hole as zeros rather than the discarded tail
-            // and the flush carries those zeros to the device.
+            // new end in the one step that sets the size, so a later grow reads
+            // the hole as zeros rather than the discarded tail.
             let tail = (new_size % PAGE_SIZE as u64) as usize;
             if tail != 0 {
                 let straddled = (new_size / PAGE_SIZE as u64) as u32;
                 if let Some(page) = file.pages.get_mut(&straddled) {
                     page.data[tail..].fill(0);
-                    page.dirt.record_write();
-                    file.dirt.record_write();
                 }
             }
             if is_cache { removed.len() } else { 0 }
@@ -617,32 +329,20 @@ fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
     cache.cached_pages -= dropped;
 }
 
-/// What the cache holds for a file after an operation that may have freed it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Residency {
-    /// Something still holds it — an open handle, or the write-back queue — so its filesystem handle must survive until that holder's teardown.
-    Held,
-    /// The cache holds nothing for this id; a filesystem may drop whatever it keeps alongside.
-    Gone,
-}
-
-/// Mark a file as deleted (unlink). If no handles hold it, free immediately.
-#[must_use]
-pub fn mark_deleted(file_id: FileId) -> Residency {
+/// Mark a file as deleted (unlink). If no handles hold it, free immediately;
+/// otherwise the last [`release`] does.
+pub fn mark_deleted(file_id: FileId) {
     let mut cache = FILE_CACHE.lock();
-    let Some(file) = cache.files.get_mut(&file_id) else { return Residency::Gone };
+    let Some(file) = cache.files.get_mut(&file_id) else { return };
     file.deleted = true;
-    // A pinned file (teardown_owed) is left marked deleted for `finish_writeback` to drop; `Held` because the cache still holds it.
-    if file.ref_count > 0 || file.teardown_owed {
-        return Residency::Held;
+    if file.ref_count == 0 {
+        drop_file(&mut cache, file_id);
     }
-    drop_file(&mut cache, file_id);
-    Residency::Gone
 }
 
 impl CachedPage {
     fn new(data: Box<[u8; PAGE_SIZE]>) -> Self {
-        Self { data, dirt: Owed::new(), referenced: false }
+        Self { data, referenced: false }
     }
 }
 
@@ -685,47 +385,22 @@ fn copy_page_region_to_buf(page: &[u8], offset: usize, buf: &mut UserBytesMut, v
 
 fn evict_if_needed(cache: &mut FileCache) {
     assert!(cache.max_pages != 0, "file cache used before init installed a budget");
-    if cache.cached_pages <= cache.max_pages {
-        // A teardown can end an over-budget episode between admissions; the closing line still prints.
-        if cache.over_said {
-            cache.over_said = false;
-            turnover_line(cache);
-        }
-        return;
-    }
     let before = cache.evictions;
     while cache.cached_pages > cache.max_pages {
-        if !evict_one(cache) {
-            // Everything resident is dirty: write-back is the handle layer's job, so nothing here bounds dirty pages further.
-            break;
-        }
+        // A governed page is a read-only mount's and never written, so one
+        // revolution always finds one to take.
+        assert!(
+            evict_one(cache),
+            "file cache: {}/{} pages resident and none evictable",
+            cache.cached_pages,
+            cache.max_pages
+        );
     }
-    // Once per full turnover so the rate scales with the budget, plus once at
-    // each over-budget episode's start and end.
+    // Once per full turnover, so the rate scales with the budget.
     let turnover = cache.max_pages as u64;
-    let over = cache.cached_pages > cache.max_pages;
-    let crossed =
-        cache.evictions != before && (before == 0 || before / turnover != cache.evictions / turnover);
-    if crossed || over != cache.over_said {
-        turnover_line(cache);
+    if cache.evictions != before && (before == 0 || before / turnover != cache.evictions / turnover) {
+        log!("file cache: {} evictions, {}/{} pages resident", cache.evictions, cache.cached_pages, cache.max_pages);
     }
-    cache.over_said = over;
-}
-
-/// Dirty is on the line because over-budget is lawful exactly when every resident page is dirty; the harness holds that shape.
-fn turnover_line(cache: &FileCache) {
-    log!("file cache: {} evictions, {}/{} pages resident, {} dirty",
-        cache.evictions, cache.cached_pages, cache.max_pages, dirty_pages(cache));
-}
-
-/// Governed dirty pages, counted under the same lock hold as the residency they explain.
-fn dirty_pages(cache: &FileCache) -> usize {
-    cache
-        .files
-        .values()
-        .filter(|f| f.is_cache())
-        .map(|f| f.pages.values().filter(|p| p.is_dirty()).count())
-        .sum()
 }
 
 /// One CLOCK step-and-evict; returns false when a full revolution found no page it was allowed to take.
@@ -742,9 +417,6 @@ fn evict_one(cache: &mut FileCache) -> bool {
         {
             let Some(file) = cache.files.get_mut(&fid) else { continue };
             let Some(page) = file.pages.get_mut(&idx) else { continue };
-            if page.is_dirty() {
-                continue;
-            }
             if page.referenced {
                 page.referenced = false;
                 continue;

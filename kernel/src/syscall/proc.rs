@@ -35,9 +35,10 @@ pub(super) fn sys_spawn(
     pending: crate::loader::PendingHandles,
     cwd: alloc::string::String,
     env: Vec<u8>,
+    image: Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>,
 ) -> u64 {
     // Nothing to clean up yet: spawn's frame owns the child's resources on error.
-    let object = match process::spawn(args, pending, cwd, env) {
+    let object = match process::spawn(args, pending, cwd, env, image) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
     };

@@ -209,6 +209,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bcachefs"
+version = "0.1.0"
+
+[[package]]
 name = "bcrypt-pbkdf"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -601,7 +605,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.0"
-source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#7e9775d5dc50b0da933fb947c806bd420ff6e85d"
+source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#29180f7b5a524e6709d30c010e7e0280cd82ccda"
 dependencies = [
  "alsa",
  "block2 0.6.2",
@@ -1272,6 +1276,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
+name = "fsd"
+version = "0.0.0"
+dependencies = [
+ "bcachefs",
+ "blockd",
+ "toyos",
+ "toyos-abi",
+ "toyos-blockring",
+ "toyos-fat32",
+ "toyos-gpt",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1632,9 +1649,11 @@ version = "0.1.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-blockring",
  "toyos-gpt",
  "toyos-logstream",
  "toyos-manifest",
+ "toyos-quiesce",
  "toyos-swap",
  "toyos-update",
 ]
@@ -4133,6 +4152,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-mixer"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-quiesce"
 version = "0.1.0"
 
 [[package]]

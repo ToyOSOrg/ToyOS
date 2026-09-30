@@ -13,7 +13,6 @@ FAIL hda_client_stall: soundd resumed 0 time(s) — the second stream did not fi
 ```
 
 The job itself exits 0 and prints `stalled 8 then 2 times, soundd survived`.
-Its cause is not measured; whether the judge or soundd is wrong is open.
 
 ## Measured
 
@@ -43,6 +42,40 @@ The `testcases` boot's log, from the job's spawn to its end, in order:
   second stream. The first stream opens with no `soundd: suspended` between
   the previous client's removal at `6.275` and its open at `6.333`, so
   `client_stall_on_metal`'s `resumes < 2` reds on that span too.
+
+## Measured once a job's stream is gone before the job exits
+
+The `testcases` boot of the orchestrator's T14 `--metal hda_tone` run at
+`1621eb5f0` (#641), from the tone's removal to the stall's end, in order:
+
+```
+{… 5.670 soundd} soundd: client 0 removed (closed)
+{… 5.670 soundd} soundd: wakes=645 … clients=0 …
+[… 5.670 cpu4] exit: test_rs_audio_tone pid=11 code=0 cpu=2ms
+[… 5.672 cpu7] spawn: /system/bin/test_rs_hda_client_stall pid=12 …
+{… 5.673 tid=1 soundd} soundd: opening stream: 44100Hz 2ch fmt=0
+{… 5.673 soundd} soundd: client 0 connected (id=1)
+{… 7.830 soundd} soundd: client 1 removed (closed)
+{… 7.830 soundd} soundd: wakes=79 … clients=0 …
+{… 7.854 soundd} soundd: suspended
+{… 8.130 tid=1 soundd} soundd: opening stream: 44100Hz 2ch fmt=0
+{… 8.131 soundd} soundd: client 0 connected (id=2)
+{… 8.131 soundd} soundd: resumed
+{… 9.040 soundd} soundd: client 2 removed (closed)
+{… 9.040 soundd} soundd: wakes=465 … clients=0 …
+{… 9.063 soundd} soundd: suspended
+```
+
+- The tone's stream is removed, and its session flushed, before its job
+  exits; the stall's first stream opens 3 ms after that exit.
+- soundd suspends 20 to 25 ms after the last removal: `7.830`→`7.854` and
+  `9.040`→`9.063` here, `8.565`→`8.585` and `9.755`→`9.780` above.
+- So the first stream opens on a soundd that has not suspended, which is not
+  the premise `client_stall_on_metal` asks of it. The judge reads this log as:
+
+```
+FAIL hda_client_stall: soundd resumed 1 time(s) — the second stream did not find a suspended daemon, so nothing here tests a resume:
+```
 
 ## Exit condition
 

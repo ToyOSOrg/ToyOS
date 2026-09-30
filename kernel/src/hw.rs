@@ -120,7 +120,7 @@ pub(crate) fn note_running(ctx: *const KernelCtx) {
 /// could try to take.
 pub fn report_contexts(sp: u64, subject: Option<u64>) {
     let me = percpu::cpu_id() as usize;
-    let count = (crate::arch::smp::cpu_count() as usize).min(crate::sched::MAX_CPUS);
+    let count = (crate::smp::cpu_count() as usize).min(crate::sched::MAX_CPUS);
     let mine = RUNNING_CTX.get(me).map_or(0, |slot| slot.load(Relaxed));
     let subject = subject.unwrap_or(mine);
     crate::log!("  Contexts: cpu{me} crashed at sp={sp:#018x}, asking about ctx {subject:#x}");

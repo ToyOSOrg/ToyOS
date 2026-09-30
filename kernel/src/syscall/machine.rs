@@ -86,11 +86,8 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::arch::watchdog::disarm();
-    // **Before the sync, because the sync is a claim about a machine.** A
-    // process that issues a `write` after `sync_all` returns has dirty pages
-    // nothing will flush. Every userland thread stops here, the log's writer
-    // with the rest: `/system/bin/init` had it flush before it asked for this
-    // stop, and what it wrote since is in the page cache the sync below takes.
+    // Every userland thread stops here, the log's writer with the rest:
+    // `/system/bin/init` had it flush before it asked for this stop.
     #[cfg(feature = "boot-actuators")]
     crate::quiesce::last::await_the_held_thread();
     let stopped = crate::quiesce::stop();
@@ -101,13 +98,8 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
         assert!(queued, "console-queue-at-the-stop: the queue had no room for its one line");
     }
     crate::log::console::drain_for_the_stop();
-    log!("Syncing filesystems...");
-    // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
-    crate::writeback::drain_all();
-    crate::vfs::lock().sync_all();
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
-    crate::drivers::nvme::log_census();
     crate::drivers::panic_console::log_census();
     // A shortfall is the budget spent, not the reset refused: it is said at
     // alert level, and the reset lands anyway.
@@ -203,21 +195,34 @@ pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
 /// The most live threads `SYS_SYSINFO` will describe; kept under `mm::MAX_HEAP_ALLOC` so an unbounded thread count cannot trip the allocator's fail-fast assert.
 const MAX_SYSINFO_THREADS: usize = 65_536;
 
-/// Test-only override for `MAX_SYSINFO_THREADS`, armed at runtime by `DA::LOWER_SYSINFO_BOUND` so the shipped bound stays exercised.
+/// How far past the machine's live threads at arming `DA::LOWER_SYSINFO_BOUND` puts the bound.
 #[cfg(feature = "test-actuators")]
-const GATED_SYSINFO_THREADS: usize = 16;
+const LOWERED_SYSINFO_HEADROOM: usize = 16;
 
+/// `MAX_SYSINFO_THREADS` until `DA::LOWER_SYSINFO_BOUND` lowers it for the rest of the boot.
 #[cfg(feature = "test-actuators")]
-pub(super) static SYSINFO_BOUND_LOWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static SYSINFO_BOUND: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(MAX_SYSINFO_THREADS);
+
+/// Lowers [`sys_sysinfo`]'s bound to the machine's own live threads plus a fixed headroom, counted as `sys_sysinfo` counts them.
+#[cfg(feature = "test-actuators")]
+pub(super) fn lower_sysinfo_bound() {
+    let guard = process::PROCESS_TABLE.lock();
+    let live = live_threads(guard.as_ref().unwrap());
+    SYSINFO_BOUND.store(live + LOWERED_SYSINFO_HEADROOM, core::sync::atomic::Ordering::Relaxed);
+}
 
 /// What [`sys_sysinfo`] compares against on this boot.
 fn sysinfo_thread_bound() -> usize {
     #[cfg(feature = "test-actuators")]
-    if SYSINFO_BOUND_LOWERED.load(core::sync::atomic::Ordering::Relaxed) {
-        return GATED_SYSINFO_THREADS;
-    }
+    return SYSINFO_BOUND.load(core::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(feature = "test-actuators"))]
     MAX_SYSINFO_THREADS
+}
+
+/// Every thread in the process table, zombies included: the roster's entries.
+fn live_threads(table: &process::ProcessTable) -> usize {
+    table.iter().map(|(_, proc)| proc.threads().iter().count()).sum()
 }
 
 /// The machine's header, then the live-thread roster for as much of `out` as fits; the roster requires a `SysCap` carrying `Rights::ROSTER`, demanded only when `out` has room for an entry.
@@ -236,7 +241,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     }
 
     let (total_mem, used_mem) = crate::mm::pmm::stats();
-    let cpu_count = crate::arch::smp::cpu_count();
+    let cpu_count = crate::smp::cpu_count();
     let uptime = crate::clock::nanos_since_boot();
     let total_cpu_ns = crate::scheduler::total_cpu_ns();
     let total_available_ns = uptime * cpu_count as u64;
@@ -244,7 +249,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     let guard = process::PROCESS_TABLE.lock();
     let table = guard.as_ref().unwrap();
 
-    let entry_count: u32 = table.iter().flat_map(|(_, proc)| proc.threads().iter().map(move |(tid, thread)| (tid, proc, thread))).count() as u32;
+    let entry_count = live_threads(table) as u32;
     if entry_count as usize > sysinfo_thread_bound() {
         return SyscallError::ResourceExhausted.to_u64();
     }

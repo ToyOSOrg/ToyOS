@@ -20,10 +20,8 @@
 //! **Tasks stop; CPUs do not.** Every CPU keeps `IF` set, keeps taking its
 //! LAPIC timer and every device interrupt, and keeps taking scheduler passes —
 //! it simply has no userland left to dispatch. That is what the USB stop below
-//! the boot's last word needs, and what the kernel threads that carry the
-//! sync to its volumes need. Freezing CPUs inside a pass instead would strand
-//! whatever lock the thread on that CPU was holding, and `sync_all` is the
-//! first thing that would wait on it.
+//! the boot's last word needs. Freezing CPUs inside a pass instead would strand
+//! whatever lock the thread on that CPU was holding.
 //!
 //! Kernel threads are exempt by identity, not by accident:
 //! [`crate::sched::kthread::is_kernel_task`] is what tells them apart.
@@ -55,10 +53,8 @@ use crate::time::{Budget, Deadline, Duration};
 /// **A budget, and not a bound the kernel can prove.** One `QUANTUM_NS` is
 /// what a thread running in Ring 3 needs to reach the boundary, and one
 /// `block::OPERATION` is the longest a thread lies inside the block layer
-/// without parking — but one syscall may open several operations in a row,
-/// parking between them inside a `block::OpenUpdate` this stop waits out, and
-/// `block::DEADMAN` is what bounds that sequence. A thread can therefore
-/// outlast this, which is why its expiry is a clause in the record.
+/// without parking. A thread can therefore outlast this, which is why its
+/// expiry is a clause in the record.
 pub(crate) const PARK: Budget = Budget::of(
     Duration::from_nanos(toyos_sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
     "the reset lands wherever the threads that never reached a safe point are, and \
@@ -98,8 +94,7 @@ fn stops(stage: u32) -> bool {
         return false;
     };
     // A kernel thread reaches this boundary on its first dispatch and has no
-    // Ring 3 to be stopped from; `iod` is also what carries the sync to its
-    // volume while userland is being stopped around it.
+    // Ring 3 to be stopped from.
     if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
         return false;
     }
@@ -134,19 +129,6 @@ pub fn note_progress() {
     }
 }
 
-/// Whether the running thread is the one performing the shutdown: what the
-/// `quiesce-drain-refuse` actuator refuses by.
-#[cfg(feature = "boot-actuators")]
-pub fn runs_the_shutdown() -> bool {
-    if STAGE.read() != STOPPING {
-        return false;
-    }
-    let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
-        return false;
-    };
-    ThreadId { pid: pid.raw(), tid: tid.raw() } == caller()
-}
-
 /// Stop every userland thread but the caller, and answer with what it took.
 ///
 /// Returns when the machine is stopped or when [`PARK`] is spent, never
@@ -173,7 +155,7 @@ pub fn stop() -> Record {
         .expect("quiesce::stop: the caller holds no task to park");
     // The kick is the timer vector, whose return to Ring 3 is the gate.
     crate::arch::irqchip::kick_all_but_self();
-    let cpus = crate::arch::smp::cpu_count();
+    let cpus = crate::smp::cpu_count();
 
     let began = crate::clock::now();
     let deadline = Deadline::at(began + PARK.duration());
@@ -230,9 +212,9 @@ fn sweep(caller: ThreadId) -> Sweep {
             let sched = thread
                 .sched()
                 .expect("quiesce::sweep: a live thread in the table with no task");
-            // `stop_if_blocked` refuses a running thread and one parked inside
-            // a `block::OpenUpdate`: each has to reach its own safe point, and
-            // until it does it is what this sweep is waiting for.
+            // `stop_if_blocked` refuses a running thread: it has to reach its
+            // own safe point, and until it does it is what this sweep is
+            // waiting for.
             if sched.shared.stop_pending() || sched.shared.stop_if_blocked() {
                 out.stopped += 1;
             } else {
@@ -291,9 +273,14 @@ pub mod last {
         }
     }
 
-    /// How long either side waits for the other before the boot dies by name.
+    /// How long either side waits for the other before the boot dies by name:
+    /// the thread is held before init takes the stop request, so its wait is
+    /// init's file call, flush and sync, then the stop's own sweeps.
     const STAGED: Budget = Budget::of(
-        Duration::from_secs(10),
+        Duration::from_nanos(
+            (toyos_quiesce::FILES_MS + toyos_quiesce::FLUSH_MS + toyos_quiesce::SYNC_MS) * 1_000_000
+                + super::PARK.nanos(),
+        ),
         "the boot panics naming the side of the staging that never arrived",
     );
 

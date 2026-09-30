@@ -39,9 +39,7 @@ byte.
 
 ## What it is not
 
-Not
-`issues/filesystem/a-page-faulted-through-an-old-backing-is-nobodys.md` either:
-no mapping is taken across the write here.
+Not a mapping taken across the write: none is taken here.
 
 Which half is wrong is not established. Either the allocator handed out a block
 whose old contents were never overwritten and the new file's first extent was

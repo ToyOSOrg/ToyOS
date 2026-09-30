@@ -53,8 +53,7 @@ const SPELLINGS: [&str; 5] = [
 /// nothing gave it. Exit 0 is every spelling refused.
 fn symlink_row() -> std::process::ExitCode {
     std::fs::create_dir_all(PLANTED_DIR).expect("/apps is writable");
-    toyos_abi::syscall::symlink(DECLARED.as_bytes(), PLANTED.as_bytes())
-        .expect("a symlink under /apps is allowed");
+    std::os::toyos::fs::symlink(DECLARED, PLANTED).expect("a symlink under /apps is allowed");
     for spelling in SPELLINGS {
         let target = std::fs::read_link(spelling).expect("every spelling reaches the link");
         assert_eq!(target.to_str(), Some(DECLARED), "{spelling} does not reach the planted link");
@@ -90,8 +89,7 @@ fn relative_path() -> std::process::ExitCode {
     std::fs::create_dir_all(DIR).expect("/home is writable");
     let link = format!("{DIR}/echo");
     let _ = std::fs::remove_file(&link);
-    toyos_abi::syscall::symlink(DECLARED.as_bytes(), link.as_bytes())
-        .expect("a symlink under /home is allowed");
+    std::os::toyos::fs::symlink(DECLARED, &link).expect("a symlink under /home is allowed");
 
     let mut ran = 0;
     for typed in ["./home/toy/reltest/echo", "../home/toy/reltest/echo"] {

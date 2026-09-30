@@ -18,7 +18,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub use super::dump_request::Entered;
 use super::dump_request::{DumpRequest, Left};
 
-use crate::arch::{irqchip, percpu, smp};
+use crate::arch::{irqchip, percpu};
+use crate::smp;
 use crate::sched::payload::{SCHED_BLOCKED, SCHED_READY, SCHED_RUNNING};
 use crate::time::{Budget, Duration, Floor};
 
@@ -450,7 +451,7 @@ pub mod staged {
         };
         if !ARMED.load(Ordering::Acquire) {
             // The release: every CPU has joined, so the count above is the machine's.
-            if crate::arch::smp::is_ready() && !ARMED.swap(true, Ordering::AcqRel) {
+            if crate::smp::is_ready() && !ARMED.swap(true, Ordering::AcqRel) {
                 log!("dump-in-blocking-pass: armed");
             }
             return;

@@ -101,6 +101,15 @@ gate-fence-off = []
 #   cargo test -p toyos-sched-loom --release --features poll-fire-load-store --test loom_watch
 #
 poll-fire-load-store = []
+# The control for `poll_racing`'s lost-completion half: its producer posts, then
+# stores the readiness, the reverse of the order `pcidev::note_fault` keeps, so
+# both `*_racing_a_post*_completes_exactly_once` models must red with a poll
+# completed by neither:
+#
+#   cargo test -p toyos-sched-loom --features fault-posted-before-it-is-set --test loom_watch
+#
+# `toyos-sched` declares no twin, because this decides nothing in `../src`.
+fault-posted-before-it-is-set = []
 
 [dependencies]
 loom = "0.7"

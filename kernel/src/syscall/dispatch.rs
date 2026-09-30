@@ -45,12 +45,12 @@ use super::machine::{
     MAX_INVENTORY_RECORDS,
 };
 #[cfg(feature = "test-actuators")]
-use super::machine::SYSINFO_BOUND_LOWERED;
+use super::machine::lower_sysinfo_bound;
 use super::proc::{
     sys_endowments, sys_exit, sys_nanosleep, sys_process_open, sys_process_stats,
     sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
-use super::vm::{sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
+use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
 
 /// A number a deleted syscall used is retired, never reused.
 macro_rules! retired_syscalls {
@@ -97,10 +97,32 @@ retired_syscalls! {
     96 => "SYS_SET_RT_PRIORITY",
 }
 
+/// `sched-operation-nesting`'s task half and `sysret-ss-probe`, run once a boot
+/// on the first syscall: a task's own deadline slot, and a park that switches
+/// away from it and back.
+#[cfg(feature = "boot-actuators")]
+fn task_probes() {
+    use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    static RAN: AtomicBool = AtomicBool::new(false);
+    let nesting = crate::actuator::sched_operation_nesting();
+    let ss = crate::actuator::sysret_ss_probe();
+    if !(nesting || ss) || RAN.swap(true, Relaxed) {
+        return;
+    }
+    if nesting {
+        crate::sched_gate::run("syscall");
+    }
+    if ss {
+        crate::arch::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
+    }
+}
+
 pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     // Placed first so the architecture counts the call whatever it turns out to be.
     #[cfg(feature = "boot-actuators")]
     crate::arch::syscall::note_entry();
+    #[cfg(feature = "boot-actuators")]
+    task_probes();
     let t0 = crate::clock::nanos_since_boot();
 
     process::with_current_data(|data| {
@@ -185,6 +207,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_PIPE => sys_pipe(),
         SYS_SPAWN => {
             let Ok(args) = ctx.copy_in::<SpawnArgs>(UserAddr::new(a1)) else { return bad_addr };
+            // First, and nothing copied: the image is the caller's object, and
+            // an endowment below may move the caller's own handle to it.
+            let image = match args.image_len {
+                0 => None,
+                len => match shared_image(args.image, len) {
+                    Ok(image) => Some(alloc::sync::Arc::new(image) as alloc::sync::Arc<dyn crate::file_backing::FileBacking>),
+                    Err(refused) => return refused,
+                },
+            };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
                 Ok(cwd) => cwd,
@@ -231,7 +262,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 alloc::vec::Vec::new()
             };
             let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-            sys_spawn(&argv, pending, cwd, env)
+            sys_spawn(&argv, pending, cwd, env, image)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {
@@ -349,7 +380,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Err(e) => e.to_u64(),
             }
         }
-        SYS_CPU_COUNT => crate::arch::smp::cpu_count() as u64,
+        SYS_CPU_COUNT => crate::smp::cpu_count() as u64,
         SYS_FUTEX_WAIT => match UserAddr::checked(a1) {
             Some(addr) => process::futex_wait(addr, a2 as u32, a3),
             None => bad_addr,
@@ -587,7 +618,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // Armed, not #[cfg]'d, so it doesn't ship in every kernel this suite boots:
             // the real bound is unreachable (no guest makes 65,536 threads).
             DA::LOWER_SYSINFO_BOUND => {
-                SYSINFO_BOUND_LOWERED.store(true, core::sync::atomic::Ordering::Relaxed);
+                lower_sysinfo_bound();
                 0
             }
             // Puts one free slot one lifecycle from the end so retirement is reachable without

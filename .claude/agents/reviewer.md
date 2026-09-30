@@ -50,11 +50,19 @@ above; otherwise it is a NOTE.
   `arch::aarch64` in no generic kernel code; and none of them in a crate whose manifest
   `description` says pure.
   A `4096` in the kernel that means a page is a private copy of `mm::PAGE_SIZE`.
-- **Arrivals.** A binary outside Rust's toolchain, git, QEMU and this repository's own Rust is
-  refused, whether the host starts it — `Command::new`, `libc::system`, an `exec` or
-  `posix_spawn`, a tool a build script or `cc::Build` drives — or `.github/` installs it, by
-  whatever manager or `sh -c`. The ones that stand are those
-  `issues/build/python-and-cc-are-declared.md` declares.
+- **Instructions.** A change that removes or renames a command, flag or step an agent runs updates
+  every prompt that names it — each `CLAUDE.md` and `.claude/agents/*.md` — in the same diff,
+  saying what to do instead. Such an instruction is not the prose "Prose is removed, never
+  reviewed" governs, and `CLAUDE.md`'s "Stale or false prose is deleted", "an agent edits one
+  only when briefed to" and "a `CLAUDE.md` never grows" do not bar the implementer updating it:
+  one left naming what is gone is a BLOCKER.
+- **Arrivals.** A host tool outside Rust and QEMU arrives by `Command::new`, `libc::system`,
+  `exec`, `posix_spawn`, a build script or `cc::Build`, a `.github/` `run:` step or package
+  manager, or `sh -c`, and is declared in
+  `issues/build/the-build-runs-host-tools-outside-rust-and-qemu.md` and nowhere else. A BLOCKER
+  each: an undeclared host tool; one, like Go's `gh`, not built from C or C++ source ToyOS can
+  one day build and run; a binary for one host OS alone; a C or C++ tool taken where a Rust tool
+  does the job; new Python, Perl or shell of ToyOS's own.
   A third-party action `main` does not use is refused, and every `uses:` pins a 40-hex commit
   with its tag in a trailing comment or names a local path that resolves.
   A file added to or deleted from `tests/testcases/tinycc/` moves the count

@@ -108,8 +108,7 @@ pub fn isr_complete() {
         return;
     }
     isr_push_completion(mask, timestamp);
-    crate::irq_ring::isr_publish(crate::irq_ring::IrqSource::Audio, timestamp);
-    // Force a scheduler entry on IRQ return so the record becomes wakes now, not at next tick.
+    super::AUDIO_WATCH.post_in_place();
     crate::preempt::set_need_resched();
 }
 
@@ -401,7 +400,7 @@ fn answer_into_a_foreign_page(
     shared: Dma<'static>,
 ) {
     const FOREIGN_DESC: usize = 2;
-    let foreign = super::nvme::FOREIGN_PROBE.load(Ordering::Relaxed);
+    let foreign = super::xhci::FOREIGN_PROBE.load(Ordering::Relaxed);
     assert!(foreign != 0, "virtio-sound: this machine staged no foreign pool to aim at");
     let slot = controlq.initial_slots().swap_remove(FOREIGN_DESC);
     controlq.submit(

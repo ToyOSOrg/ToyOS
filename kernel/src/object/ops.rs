@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError};
+use toyos_sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;
@@ -16,7 +17,8 @@ use crate::time::Deadline;
 use crate::pipe::{self, PipeId};
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
-use crate::watch::Watch;
+use crate::inbox::PollEntry;
+use crate::watch::{IrqWatch, Watch};
 use crate::{device as device_registry, keyboard, mouse};
 
 use super::device::DeviceClaim;
@@ -135,15 +137,14 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                 Err(e) => Err(e),
             }
         };
-        built.map(|(file_id, mtime, position)| (target, file_id, mtime, position))
+        built
     };
 
-    let (target, file_id, mtime, position) = match opened {
+    let (file_id, mtime, position) = match opened {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
     };
     let object = KObjectRef::File(FileObject::new(OpenFileState {
-        path: target.into_string(),
         file_id,
         position,
         mtime,
@@ -203,9 +204,19 @@ pub fn close_all(table: &mut HandleTable) {
 }
 
 pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
+    pipe_read(object).map(|(id, _)| id)
+}
+
+pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
+    pipe_write(object).map(|(id, _)| id)
+}
+
+/// The pipe a blocking read of `object` parks on, and the class its wait is
+/// charged to: a connection's is its peer's answer, which is IPC.
+pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
     match object {
-        KObjectRef::PipeRead(r) => Some(r.id()),
-        KObjectRef::Connection(c) => Some(c.rx()),
+        KObjectRef::PipeRead(r) => Some((r.id(), WaitClass::Pipe)),
+        KObjectRef::Connection(c) => Some((c.rx(), WaitClass::Ipc)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
@@ -214,10 +225,11 @@ pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
     }
 }
 
-pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
+/// [`pipe_read`]'s answer for a blocking write.
+pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
     match object {
-        KObjectRef::PipeWrite(w) => Some(w.id()),
-        KObjectRef::Connection(c) => Some(c.tx()),
+        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe)),
+        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
@@ -231,14 +243,24 @@ pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
 pub enum WatchRef {
     Static(&'static Watch),
     Shared(Arc<Watch>),
+    /// A device's, which its interrupt handler posts.
+    Irq(&'static IrqWatch),
 }
 
-impl core::ops::Deref for WatchRef {
-    type Target = Watch;
-    fn deref(&self) -> &Watch {
+impl WatchRef {
+    pub(crate) fn add_poll(&self, entry: PollEntry) {
         match self {
-            Self::Static(watch) => watch,
-            Self::Shared(watch) => watch,
+            Self::Static(watch) => watch.add_poll(entry),
+            Self::Shared(watch) => watch.add_poll(entry),
+            Self::Irq(watch) => watch.add_poll(entry),
+        }
+    }
+
+    pub fn cancel_polls(&self) {
+        match self {
+            Self::Static(watch) => watch.cancel_polls(),
+            Self::Shared(watch) => watch.cancel_polls(),
+            Self::Irq(watch) => watch.cancel_polls(),
         }
     }
 }
@@ -255,10 +277,10 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
             device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
             device_registry::DeviceType::Mouse => Some(WatchRef::Static(&mouse::WATCH)),
             device_registry::DeviceType::PciFunction => {
-                d.pci_slot().map(|slot| WatchRef::Static(crate::pcidev::watch(slot)))
+                d.pci_slot().map(|slot| WatchRef::Irq(crate::pcidev::watch(slot)))
             }
             device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
-                Some(WatchRef::Static(&crate::drivers::AUDIO_WATCH))
+                Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH))
             }
             device_registry::DeviceType::Framebuffer => None,
             // A partition answers its description and has nothing to wait for.
@@ -522,8 +544,8 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
                 return Some(SyscallError::Io.to_u64());
             }
             state.position += written;
-            // Dirty state lives in the cache now, set by `write_page`; the handle keeps only the mtime.
             state.mtime = crate::clock::mtime_now();
+            file_cache::touch(state.file_id, state.mtime);
             Some(written as u64)
         }),
         KObjectRef::PipeWrite(w) => write_pipe(w.id(), buf),
@@ -606,61 +628,14 @@ pub fn fstat(object: &KObjectRef) -> Stat {
     }
 }
 
-/// `SYS_FSYNC`: the file's bytes on the device, and the device told to commit them.
-///
-/// The device-commit step is not optional: `/system/bin/logd` calls a line durable off `fsync`'s result, so a flush that stopped at the page cache would make that a claim about nothing.
+/// `SYS_FSYNC`: a partition claim's writes on its device and the device told to
+/// commit them; a kernel file's pages are the file (`/tmp`) or never written
+/// (ROOT), so it owes nothing.
 pub fn fsync(object: &KObjectRef) -> u64 {
-    let file = match object {
-        KObjectRef::File(file) => file,
-        KObjectRef::Device(claim) => return partition_fsync(claim),
-        _ => return SyscallError::PermissionDenied.to_u64(),
-    };
-    let (path, file_id, mtime) =
-        file.with(|state| (state.path.clone(), state.file_id, state.mtime));
-    // The file's debt or its mount's, not the handle's: another handle's write, and a
-    // device commit an earlier attempt failed to deliver, are both still owed here.
-    if !crate::vfs::lock().durability_owed(&path, file_id) {
-        return 0;
-    }
-    // A refused attempt can leave the two FATs split, and the park between two attempts is where the machine's stop would find this thread.
-    let _update = crate::block::begin_update();
-    // A refused attempt discards nothing — an unsettled debt needs no restoring.
-    let run = until_answered(|| Run::Fsync(file_id), || {
-        // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
-        // Flush and sync share one acquisition so this file cannot be unmounted between them.
-        let mut vfs = crate::vfs::lock();
-        // Tags the flush as `SYS_FSYNC`'s, for `quiesce-fsync-refuse` to stage on this path.
-        #[cfg(feature = "boot-actuators")]
-        crate::fat32_adapter::enter_fsync_flush(&path);
-        let done = vfs
-            .flush_file(&path, file_id, mtime)
-            .and_then(|()| vfs.sync_for_path(&path));
-        #[cfg(feature = "boot-actuators")]
-        crate::fat32_adapter::leave_fsync_flush();
-        drop(vfs);
-        done
-    });
-    match run {
-        Answered::Answer { answer: Ok(()), attempts, took } => {
-            if attempts > 1 {
-                crate::log!(
-                    "fsync: {path} durable on attempt {attempts} after {took} — a refused \
-                     attempt kept every page dirty and a later one delivered them",
-                );
-            }
-            // `flush_file` settled the file's debt and `sync_for_path` the mount's; there is no per-handle flag to clear.
-            0
-        }
-        // The device's own word (an error status, or a recovery that gave up) is passed through unchanged.
-        Answered::Answer { answer: Err(e), .. } => e.to_u64(),
-        Answered::Killed => SyscallError::WouldBlock.to_u64(),
-        Answered::Deadman { attempts, took } => {
-            crate::log!(
-                "fsync: {path} is not durable after {attempts} attempt(s) in {took} — {}",
-                crate::block::DEADMAN,
-            );
-            SyscallError::Io.to_u64()
-        }
+    match object {
+        KObjectRef::File(_) => 0,
+        KObjectRef::Device(claim) => partition_fsync(claim),
+        _ => SyscallError::PermissionDenied.to_u64(),
     }
 }
 
@@ -681,8 +656,6 @@ pub(crate) enum Answered {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
 pub(crate) enum Run {
-    /// `SYS_FSYNC` on one file.
-    Fsync(file_cache::FileId),
     /// One kind of transfer on one claimed partition; `None` for a claim
     /// whose partition is already let go, whose every attempt answers `Gone`.
     Claim(Option<(crate::block::DeviceId, [u8; 16])>, ClaimOp),
@@ -776,6 +749,15 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
         Some(view) => view.flush().map_err(block_word),
         None => Err(SyscallError::Gone),
     });
+    if let (Answered::Answer { answer: Ok(()), attempts, took }, Some((_, guid))) = (&run, claim.partition_on()) {
+        if *attempts > 1 {
+            crate::log!(
+                "partclaim: a flush of {} durable on attempt {attempts} after {took} — a refused \
+                 attempt was asked again on a fresh budget",
+                toyos_gpt::Guid(guid),
+            );
+        }
+    }
     partition_word("a flush", run)
 }
 
@@ -802,23 +784,11 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     if size > file_cache::MAX_FILE_SIZE {
         return SyscallError::InvalidArgument.to_u64();
     }
-    let file_id = file.with(|state| state.file_id);
-    {
-        // The VFS lock outside `FileObject`'s (fsync's order) is `resize`'s witness.
-        let mut vfs = crate::vfs::lock();
-        // A refused resize changed nothing, so the size stays as it was.
-        // A budget expiry is the caller's own bound and not a fact about the device: retryable.
-        if let Err(e) = file_cache::resize(&mut vfs, file_id, size) {
-            return match e {
-                crate::block::BlockError::BudgetExpired => SyscallError::WouldBlock,
-                crate::block::BlockError::Device => SyscallError::Io,
-            }
-            .to_u64();
-        }
-    }
     // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
     file.with(|state| {
+        file_cache::set_size(state.file_id, size);
         state.mtime = crate::clock::mtime_now();
+        file_cache::touch(state.file_id, state.mtime);
         0
     })
 }
