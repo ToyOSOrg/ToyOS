@@ -6,12 +6,6 @@ opened: 2026-08-08
 
 # The audio pops are four spinlocks, not one spinning driver
 
-**Measured before the file servers.** `log_file::SINK`, `vfs::VFS` and
-`fat32_adapter::VOLUMES` are no longer on the path: logd's writes reach the stick
-through fsd and a USB partition claim, whose transfer takes the disk's
-block-layer lock and `xhci::XHCI`.
-Whether that removes the pops is not measured.
-
 Measured 2026-08-08 on `wt/toyos-asyncusb` at `87835d1`: at the moment a disk
 transfer is waited for, an ordinary guest is **four ticket spinlocks deep** —
 `log_file::SINK`, `vfs::VFS`, `fat32_adapter::VOLUMES` and `xhci::XHCI` — and

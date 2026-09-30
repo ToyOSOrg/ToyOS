@@ -98,6 +98,20 @@ fn dated(dir: &str) -> (u64, u64) {
         resized > created,
         "{truncated} was created at {created} ns and a later truncation stamped it {resized} ns"
     );
+
+    let shrunk = judged(&truncated, "a shrinking truncation", || {
+        let f = OpenOptions::new()
+            .write(true)
+            .open(&truncated)
+            .unwrap_or_else(|e| panic!("reopen {truncated}: {e}"));
+        f.set_len(0).unwrap_or_else(|e| panic!("ftruncate {truncated} to 0: {e}"));
+        f.sync_all().unwrap_or_else(|e| panic!("fsync {truncated}: {e}"));
+    });
+    assert!(
+        shrunk > resized,
+        "{truncated} was grown at {resized} ns and a later shrinking truncation stamped it \
+         {shrunk} ns"
+    );
     (first, second)
 }
 

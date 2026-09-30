@@ -2,6 +2,7 @@
 name = "fsd"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+description = "ToyOS's file server: one process per storage role — DATA, the log or the boot volume — serves that role's paths."
 
 # The library is the server's decisions — the block cache, the volumes and the
 # resolver — so the host can test them; the service is `src/main.rs`.

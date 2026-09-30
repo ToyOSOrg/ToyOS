@@ -4,9 +4,7 @@ kind: tooling
 opened: 2026-09-28
 ---
 
-# The `quiesce-last-*` staging dies on ten seconds of guest clock
-
-`kernel/src/quiesce.rs`'s `last::STAGED` is a 10 s in-guest deadline. `hold`
+`hold`
 panics the boot when the stop has not counted the held thread alone within it,
 and `await_the_held_thread` panics when no thread named `quiesce-last` has
 reached its syscall within it. `quiesce-last-park` and

@@ -6,12 +6,6 @@ opened: 2026-08-12
 
 # Every wait in this kernel is a spin, and a killed task dies by having its stack discarded
 
-**The storage chains below are older than the file servers.** The kernel holds
-no FAT, NVMe or page-cache lock any more: `/apps`, `/config`, `/home`, `/state`,
-`/log` and `/boot` are `/system/bin/fsd`'s, over blockd or a USB partition
-claim, so what is left of a disk wait in the kernel is a claim's transfer
-(`block` → `xhci::XHCI`) and `vfs::VFS` over ROOT and `/tmp`.
-
 **The heading and the paragraph under it are the state at opening, not the
 state of the tree.** What exists now: the completion core, where every wait in
 the kernel rechecks one predicate and a waiter lends a watch to the object it
@@ -411,12 +405,7 @@ lock converted** — `vfs::VFS` stays a spinlock, `iod` spins in the driver, and
 the drain pops under the VFS lock so `sync_all` cannot commit a device ahead of
 a file's flush. This is the state that unblocks `vfs::VFS`'s conversion (the
 next chunk): a `Drop` reaching this release site now touches neither a sleep
-lock nor a device. Negative controls: `writeback_reopen` (an `iod` stalled by
-`writeback-stall`, a re-open reads the pinned pages) and `writeback_durability`
-(a close with no fsync reached the `/log` volume through the drain, which the
-kernel no longer serves). Measured, and recorded in `iod.rs`'s header: a
-360-file close burst on NVMe `/home` drove worst close-to-drained latency to
-~72 ms, the single `iod` thread draining the backlog serially.
+lock nor a device.
 
 ### Wall 5: demand paging holds `ProcessData` across the device, and a nested trap is a level above the baseline
 

@@ -250,6 +250,8 @@ actuators! {
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
 
+    /// Hold every thread that waits on a watch between reading its condition and
+    /// parking, so a post lands in the window its commit must refuse the park over.
     watch_window = "watch-window";
 
     /// Starve the four xHCI bring-up register waits in `init_one`.

@@ -51,7 +51,10 @@ fn main() {
     let mut buf = [Record::EMPTY; BATCH];
     let poller = Poller::new(1);
     poller.watch(&cap, READABLE, LOG_TOKEN);
-    poller.wait(0, 0, |_| {});
+    // A completion drained while arming is the watch spent: waiting on it
+    // afterwards parks on nothing.
+    let mut spent = false;
+    poller.wait(0, 0, |_| spent = true);
     loop {
         let batch = tail.read(&cap, &mut buf).unwrap_or_else(|e| {
             eprintln!("quiesce_twice: the log would not read ({e:?})");
@@ -65,9 +68,12 @@ fn main() {
         }
         // No deadline: a first call that never waits is a hang the harness
         // ceiling reds.
-        poller.wait(1, u64::MAX, |_| {});
+        if !spent {
+            poller.wait(1, u64::MAX, |_| {});
+        }
         poller.watch(&cap, READABLE, LOG_TOKEN);
-        poller.wait(0, 0, |_| {});
+        spent = false;
+        poller.wait(0, 0, |_| spent = true);
     }
 
     // The other power syscall, so the one boot judges the claim on both.

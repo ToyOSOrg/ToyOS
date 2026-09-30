@@ -24,7 +24,7 @@ impl FileBacking for TmpfsBacking {
         // copy_page_out, not file_cache::read_page: reading through the miss path here would recurse.
         // A hole below the file size, left by a seek-and-write, reads as zero.
         if file_offset >= file_cache::size(self.file_id)
-            || !file_cache::copy_page_out(self.file_id, (file_offset / 4096) as u32, buf)
+            || !file_cache::copy_page_out(self.file_id, (file_offset / PAGE_BYTES as u64) as u32, buf)
         {
             // After the miss: `retire` clears the flag before the pages drop.
             if !self.alive.load(Ordering::Acquire) {
