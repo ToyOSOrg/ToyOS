@@ -527,9 +527,9 @@ fn s_ip_nud_027_prop_reachable_time_is_drawn_every_two_hours() {
     }
 }
 
-/// wide() with B, neighbour(0), holding 1 and 2 unresolved, and the other 511 entries made one per
-/// ms behind it: REACHABLE, or STALE.
-fn b_and_511(reachable: bool) -> H {
+/// wide() with B, neighbour(0), holding 1 and 2 unresolved, and the rest of a full table made one
+/// per ms behind it: REACHABLE, or STALE.
+fn b_in_a_full_table(reachable: bool) -> H {
     let mut h = wide();
     for data in [b"1", b"2"] {
         assert_eq!(h.send(WIDE_A, neighbour(0), 5001, 5001, data), Ok(None));
@@ -555,7 +555,7 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
     // interface's bound.
     for arm in 0..3 {
         let others_reachable = arm > 0;
-        let mut h = b_and_511(others_reachable);
+        let mut h = b_in_a_full_table(others_reachable);
         for n in 1..=limits::CONTROL_QUEUE as u32 {
             ask_wide(&mut h, neighbour(n));
         }
@@ -613,7 +613,7 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
     // B resolves while the control queue has room, so its turns are inside it; 62 replies fill it
     // behind them, and a defence waits. The room B's eviction frees is the defence's, so it leaves
     // ahead of the new entry's request.
-    let mut h = b_and_511(true);
+    let mut h = b_in_a_full_table(true);
     announce_wide(&mut h, b);
     for n in 1..=limits::CONTROL_QUEUE as u32 - 2 {
         ask_wide(&mut h, neighbour(n));
