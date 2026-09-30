@@ -542,7 +542,7 @@ pub(crate) fn tracked_files(dir: &Path, pathspecs: &[&str]) -> Result<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::tests::{backtrace_behind_a_staged_gitlink, estate, git, refusal, write};
+    use crate::store::tests::{behind_a_staged_gitlink, estate, git, refusal, write};
     use toyos_tmpdir::TempDir;
 
     /// **The key is the compiler's and the trees std and libc are built
@@ -810,7 +810,7 @@ mod tests {
     fn a_sysroot_built_off_a_submodule_s_gitlink_is_refused() {
         let e = estate("sysroot-gitlink");
         let fork = e.a.join("rust");
-        let (head, staged) = backtrace_behind_a_staged_gitlink(&fork);
+        let (head, staged) = behind_a_staged_gitlink(&fork, "library/backtrace");
         let base = TempDir::new("sysroot-gitlink");
         write(&base.join("stage2/bin/rustc"), "rustc");
         let said = refusal("a sysroot built from a submodule its gitlink does not name was taken", || {

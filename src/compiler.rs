@@ -163,7 +163,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
-    use crate::store::tests::{backtrace_behind_a_staged_gitlink, estate, git, refusal, write, LLVM_B};
+    use crate::store::tests::{behind_a_staged_gitlink, estate, git, refusal, write, LLVM_B};
 
     /// Bootstrap's stand-in: a `stage2` that says which target spec it knows,
     /// with what every toolchain directory carries.
@@ -269,19 +269,21 @@ mod tests {
     }
 
     /// **A compiler built from a submodule at another commit than its gitlink
-    /// is never placed**: bootstrap leaves `library/backtrace` at `HEAD`'s
-    /// gitlink under a staged one, and builds it.
+    /// is never placed**, `library/backtrace` or the `src/tools/cargo` it
+    /// ships: bootstrap leaves either at `HEAD`'s gitlink under a staged one,
+    /// and builds it.
     #[test]
     fn a_compiler_built_off_a_submodule_s_gitlink_is_never_placed() {
-        let e = estate("compiler-gitlink");
-        let fork = e.a.join("rust");
-        let backtrace = fork.join("library/backtrace");
-        let (head, staged) = backtrace_behind_a_staged_gitlink(&fork);
-        let said = refusal("a compiler built from a submodule its gitlink does not name was placed", || {
-            choose(&e.a, &e.rust_dir, &Fork::Checkout(fork.clone()), &sources(&e.a), fake_build);
-        });
-        assert!(said.contains(&format!("{} is at {head}, and its gitlink names {staged}", backtrace.display())), "{said}");
-        let placed: Vec<_> = fs::read_dir(Kind::Compiler.dir(&e.rust_dir)).into_iter().flatten().flatten().map(|e| e.file_name()).collect();
-        assert!(placed.is_empty(), "placed: {placed:?}");
+        for path in ["library/backtrace", "src/tools/cargo"] {
+            let e = estate("compiler-gitlink");
+            let fork = e.a.join("rust");
+            let (head, staged) = behind_a_staged_gitlink(&fork, path);
+            let said = refusal(&format!("a compiler built from a {path} its gitlink does not name was placed"), || {
+                choose(&e.a, &e.rust_dir, &Fork::Checkout(fork.clone()), &sources(&e.a), fake_build);
+            });
+            assert!(said.contains(&format!("{} is at {head}, and its gitlink names {staged}", fork.join(path).display())), "{said}");
+            let placed: Vec<_> = fs::read_dir(Kind::Compiler.dir(&e.rust_dir)).into_iter().flatten().flatten().map(|e| e.file_name()).collect();
+            assert!(placed.is_empty(), "placed: {placed:?}");
+        }
     }
 }

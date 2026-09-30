@@ -12,12 +12,9 @@ the primary's `rust` (`git worktree add --detach`), and a linked worktree's own
 `git submodule update --init library/backtrace` in either, from
 `sysroot::build_std` and `compiler::build_in_fork`, whenever its
 `library/backtrace` is empty or gone, which `.claude/agents/implementer.md`
-forbids: `git submodule` in a linked worktree writes `core.worktree` into
-shared config and breaks git in the primary checkout's `rust/`. The
-orchestrator measured that for `git submodule update rust` in a linked worktree
-of the monorepo, which set the primary's `.git/modules/rust/config`
-`core.worktree` to a path that does not exist; this arm is the same command one
-level down and is unmeasured.
+forbids. The orchestrator measured that for `git submodule update rust` in a
+linked worktree of the monorepo, which set the primary's
+`.git/modules/rust/config` `core.worktree` to a path that does not exist.
 
 **Exit**: the build system runs no `git submodule` in a linked worktree's fork
 checkout.

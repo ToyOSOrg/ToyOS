@@ -11,9 +11,7 @@ carries an actuator by searching the kernel image for each declared name as a
 byte string. The kernel image embeds absolute source paths, so the search also
 matches the directory the checkout sits in.
 
-Measured on a worktree made by the documented command,
-`cargo run -- --worktree add /Users/jan/Dev/jan/toyos-heartbeat`, at
-`dc38a054`:
+Measured on a worktree at `dc38a054`:
 
 ```
 $ cargo run -- --build-only

@@ -721,19 +721,20 @@ pub(crate) mod tests {
         Estate { primary, rust_dir, same, a, b, scratch }
     }
 
-    /// Check `fork`'s `library/backtrace` out at its gitlink, stage a newer
-    /// commit of it, and leave the checkout where it was: a staged bump, under
-    /// which bootstrap leaves the submodule at `HEAD`'s gitlink. Returns the
-    /// commit checked out and the one staged.
-    pub(crate) fn backtrace_behind_a_staged_gitlink(fork: &Path) -> (String, String) {
-        let backtrace = fork.join("library/backtrace");
-        git(fork, &["submodule", "update", "-q", "--init", "library/backtrace"]);
-        let head = git(&backtrace, &["rev-parse", "HEAD"]);
-        write(&backtrace.join("lib.rs"), "pub fn trace() { newer() }\n");
-        git(&backtrace, &["commit", "-qam", "a newer backtrace"]);
-        let staged = git(&backtrace, &["rev-parse", "HEAD"]);
-        git(fork, &["add", "library/backtrace"]);
-        git(&backtrace, &["checkout", "-q", "--detach", &head]);
+    /// Check `fork`'s submodule `path` out at its gitlink, stage a newer commit
+    /// of it, and leave the checkout where it was: a staged bump, under which
+    /// bootstrap leaves the submodule at `HEAD`'s gitlink. Returns the commit
+    /// checked out and the one staged.
+    pub(crate) fn behind_a_staged_gitlink(fork: &Path, path: &str) -> (String, String) {
+        let submodule = fork.join(path);
+        git(fork, &["submodule", "update", "-q", "--init", path]);
+        let head = git(&submodule, &["rev-parse", "HEAD"]);
+        write(&submodule.join("newer.rs"), "pub fn newer() {}\n");
+        git(&submodule, &["add", "newer.rs"]);
+        git(&submodule, &["commit", "-qm", "a newer commit"]);
+        let staged = git(&submodule, &["rev-parse", "HEAD"]);
+        git(fork, &["add", path]);
+        git(&submodule, &["checkout", "-q", "--detach", &head]);
         (head, staged)
     }
 
@@ -1162,6 +1163,21 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(library(), clean);
+    }
+
+    /// **A build from a submodule's directory holding files and no checkout is
+    /// refused**: no gitlink names what bootstrap built from them.
+    #[test]
+    fn a_build_from_a_submodule_holding_files_and_no_checkout_is_refused() {
+        let e = estate("store-no-checkout");
+        let fork = e.a.join("rust");
+        let backtrace = fork.join("library/backtrace");
+        assert_built_at_gitlinks(&fork, &["library"], "a sysroot");
+        write(&backtrace.join("lib.rs"), "pub fn trace() {}\n");
+        let said = refusal("a build from files no gitlink names was kept", || {
+            assert_built_at_gitlinks(&fork, &["library"], "a sysroot");
+        });
+        assert!(said.contains(&format!("{} holds files and is no checkout of its gitlink", backtrace.display())), "{said}");
     }
 
     /// **A maker lets go of the key it placed before it collects**: a build

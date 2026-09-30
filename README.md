@@ -233,9 +233,7 @@ clone needs one, and so does every toolchain change. And that bootstrap builds
 LLVM and clang from source with CMake and Ninja, whenever the LLVM commit
 `rust/` names has not been built on the machine before. The toolchain's cargo
 is the fork's own, built with its compiler, and it carries its own OpenSSL,
-which `openssl-src` configures with Perl and builds with `make`: upstream cargo
-hard-wires git2's `https` and `ssh`, and `libssh2-sys` needs `openssl-sys` on
-Unix, so no Rust TLS does that job without a change to cargo.
+which `openssl-src` configures with Perl and builds with `make`.
 
 Nothing in the OS goes near any of them. `bootloader/`, `kernel/` and
 `userland/` all link with the toolchain's `rust-lld`, and no image contains a C
