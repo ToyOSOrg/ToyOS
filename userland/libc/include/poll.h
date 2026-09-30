@@ -1,6 +1,10 @@
 #ifndef _POLL_H
 #define _POLL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define POLLIN   0x001
 #define POLLPRI  0x002
 #define POLLOUT  0x004
@@ -15,5 +19,9 @@ struct pollfd {
 };
 
 int poll(struct pollfd *fds, unsigned int nfds, int timeout);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

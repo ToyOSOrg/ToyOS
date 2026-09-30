@@ -176,6 +176,19 @@ pub unsafe extern "C" fn strerror(_errnum: i32) -> *const u8 {
     b"unknown error\0".as_ptr()
 }
 
+/// POSIX's `strerror_r`: `strerror`'s text in `buf`, or `ERANGE` when it does
+/// not fit with its terminator.
+#[no_mangle]
+pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) -> i32 {
+    let text = strerror(errnum);
+    let len = strlen(text);
+    if len >= buflen {
+        return crate::errno::ERANGE;
+    }
+    ptr::copy_nonoverlapping(text, buf, len + 1);
+    0
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> usize {
     let mut count = 0;

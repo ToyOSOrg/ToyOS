@@ -260,12 +260,3 @@ pub unsafe extern "C" fn frexp(x: f64, exp: *mut i32) -> f64 {
     *exp = biased - 1022; // exponent such that x = mantissa * 2^exp, mantissa in [0.5, 1.0)
     f64::from_bits((bits & 0x800FFFFFFFFFFFFF) | 0x3FE0000000000000)
 }
-
-#[no_mangle]
-pub extern "C" fn isnan(x: f64) -> i32 { x.is_nan() as i32 }
-
-#[no_mangle]
-pub extern "C" fn isinf(x: f64) -> i32 { x.is_infinite() as i32 }
-
-#[no_mangle]
-pub extern "C" fn isfinite(x: f64) -> i32 { x.is_finite() as i32 }
