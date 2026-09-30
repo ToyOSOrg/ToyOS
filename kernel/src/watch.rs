@@ -11,9 +11,9 @@
 //! **A post allocates nothing and may be made under any lock but a poll
 //! ring's** (`crate::inbox`). A watch an interrupt handler posts is an
 //! [`IrqWatch`]: its list sits behind an [`IrqLock`], and its post and its
-//! cancel are made in place and free nothing. Every other watch's list lock
-//! leaves interrupts open, and no handler takes it. Registration allocates, in
-//! the syscall that registers.
+//! cancel are made in place and free nothing; the thread that ends its source
+//! sweeps. Every other watch's list lock leaves interrupts open, and no
+//! handler takes it. Registration allocates, in the syscall that registers.
 //!
 //! A [`Watch`] is a borrowed reference for the whole of a wait: [`Armed`]
 //! holds it, so an object cannot be freed under a thread waiting on it, and
@@ -44,8 +44,9 @@ pub struct Waitable<L: CellLock<List>>(toyos_sched::watch::Watch<KMsg, PollEntry
 pub type Watch = Waitable<KernelLock<List>>;
 
 /// A watch an interrupt handler posts, and the watch of a ring such a post
-/// completes into. It has no `post` and no `cancel_polls`, which free: only
-/// [`IrqWatch::post_in_place`] and [`IrqWatch::cancel_polls_in_place`].
+/// completes into. It has no `post` and no `cancel_polls`, which free:
+/// [`IrqWatch::post_in_place`] and [`IrqWatch::cancel_polls_in_place`] free
+/// nothing, and [`IrqWatch::sweep`] is a thread's.
 pub type IrqWatch = Waitable<IrqLock<List>>;
 
 /// What an interrupt handler's post takes: an [`IrqWatch`]'s list and a poll
@@ -166,6 +167,12 @@ impl IrqWatch {
     /// nothing: the source it watched ended.
     pub fn cancel_polls_in_place(&self) {
         self.0.cancel_rings_in_place();
+    }
+
+    /// Let go of every poll a post or a cancel in place answered. A thread's,
+    /// since it frees: where the source ended, no registration comes to.
+    pub fn sweep(&self) {
+        self.0.sweep();
     }
 }
 
@@ -362,8 +369,6 @@ pub mod handler_post {
     use crate::pcidev::{MAX_FUNCTIONS, VECTORS};
     use crate::time::{Budget, Deadline, Duration};
 
-    /// A claim takes the first free slot, so the last is held only when every
-    /// slot is.
     const SLOT: usize = MAX_FUNCTIONS - 1;
 
     const WINDOW: Budget = Budget::of(

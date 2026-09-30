@@ -24,6 +24,7 @@
 //! lock let go; [`Watch::post_in_place`] and [`Watch::cancel_rings_in_place`],
 //! for a handler, which may not free at all, fire them where they stand, and
 //! later registrations sweep the dead out, since an entry is one-shot.
+//! [`Watch::sweep`] lets go of them where no registration will come.
 //!
 //! **Lock order.** A post in place fires its rings under the list lock, so
 //! beneath it are each ring's own lock and the watch that ring's submitters
@@ -204,16 +205,7 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
         loop {
             let mut dead: [Option<R>; FEW] = [const { None }; FEW];
             let full = self.list.with(|w| {
-                let (mut at, mut taken) = (0, 0);
-                // Order is nothing to a ring entry: every post fires them all.
-                while at < w.rings.len() && taken < FEW {
-                    if w.rings[at].live() {
-                        at += 1;
-                    } else {
-                        dead[taken] = Some(w.rings.swap_remove(at));
-                        taken += 1;
-                    }
-                }
+                take_dead(&mut w.rings, &mut dead);
                 let v = list(w);
                 // Only a buffer that holds the whole list and `item`: another
                 // registration may have outgrown it since it was sized.
@@ -312,6 +304,18 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
         });
     }
 
+    /// Let go of every ring entry that can no longer fire, [`FEW`] a section,
+    /// each section's dropped with the list lock let go: for a thread, after
+    /// an end in place that no registration may follow.
+    pub fn sweep(&self) {
+        loop {
+            let mut dead: [Option<R>; FEW] = [const { None }; FEW];
+            if self.list.with(|w| take_dead(&mut w.rings, &mut dead)) < FEW {
+                return;
+            }
+        }
+    }
+
     /// Run `f` holding the list lock, where a registration holds it, touching
     /// nothing on the list: an actuator's way to raise an interrupt there.
     pub fn holding<U>(&self, f: impl FnOnce() -> U) -> U {
@@ -327,6 +331,22 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
     pub fn live_rings(&self) -> usize {
         self.list.with(|w| w.rings.iter().filter(|r| r.live()).count())
     }
+}
+
+/// Take up to [`FEW`] entries that can no longer fire out of `rings` into
+/// `dead`, and answer how many.
+fn take_dead<R: Ring>(rings: &mut Vec<R>, dead: &mut [Option<R>; FEW]) -> usize {
+    let (mut at, mut taken) = (0, 0);
+    // Order is nothing to a ring entry: every post fires them all.
+    while at < rings.len() && taken < FEW {
+        if rings[at].live() {
+            at += 1;
+        } else {
+            dead[taken] = Some(rings.swap_remove(at));
+            taken += 1;
+        }
+    }
+    taken
 }
 
 /// A word in front of a watch that its posters read to learn whether a post is
@@ -795,20 +815,43 @@ mod tests {
         assert_eq!(dropped.posts.load(Ordering::Acquire), 1);
     }
 
-    /// A cancel in place answers where the entry stands and lets go of
+    /// A cancel in place answers where each entry stands and lets go of
     /// nothing, as a post in place does.
     #[test]
     fn a_cancel_in_place_answers_every_live_poll_as_gone_and_drops_nothing() {
         let w = watch();
-        let poll = Arc::new(Poll::default());
-        w.add_ring(poll.clone());
+        let polls: Vec<_> = (0..=FEW).map(|_| Arc::new(Poll::default())).collect();
+        for poll in &polls {
+            w.add_ring(poll.clone());
+        }
         w.cancel_rings_in_place();
-        assert_eq!(poll.state.load(Ordering::Acquire), 2);
-        assert_eq!(Arc::strong_count(&poll), 2, "the cancel let go of the entry it fired");
-        let t = task(1);
-        w.register(&t, 0);
-        assert_eq!(Arc::strong_count(&poll), 1, "the registration did not sweep it");
-        w.unregister(&t);
+        for (at, poll) in polls.iter().enumerate() {
+            assert_eq!(poll.state.load(Ordering::Acquire), 2, "poll {at} was not answered as gone");
+            assert_eq!(Arc::strong_count(poll), 2, "the cancel let go of poll {at}");
+        }
+    }
+
+    /// Where no registration follows an end in place, the sweep lets go of
+    /// every entry that can no longer fire, past the [`FEW`] one section
+    /// takes, and of no live one.
+    #[test]
+    fn a_sweep_lets_go_of_every_entry_that_can_no_longer_fire() {
+        let w = watch();
+        let live = Arc::new(Poll::default());
+        w.add_ring(live.clone());
+        let dead: Vec<_> = (0..=2 * FEW).map(|_| Arc::new(Poll::default())).collect();
+        for poll in &dead {
+            w.add_ring(poll.clone());
+        }
+        for poll in &dead {
+            poll.withdraw();
+        }
+        w.sweep();
+        for (at, poll) in dead.iter().enumerate() {
+            assert_eq!(Arc::strong_count(poll), 1, "the sweep kept dead entry {at} of {}", dead.len());
+        }
+        assert_eq!(Arc::strong_count(&live), 2, "the sweep let go of a live entry");
+        assert_eq!(w.live_rings(), 1);
     }
 
     #[test]

@@ -414,8 +414,6 @@ pub(crate) struct Staged(Arc<Inbox>);
 #[cfg(feature = "boot-actuators")]
 impl Staged {
     pub(crate) fn new() -> Self {
-        // Room for every completion the actuator's holds write: two per hold
-        // inside the completions, one per hold inside the watch.
         let depth = 2 * toyos_sched::watch::handler_post::HOLDS;
         let shm = SharedMemObject::create(crate::mm::PAGE_2M).expect("handler-post: a ring's page");
         let page = shm.phys_before_mapping();

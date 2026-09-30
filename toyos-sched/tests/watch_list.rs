@@ -245,25 +245,65 @@ impl Ring for Owned {
     }
 }
 
-/// One entry past the [`FEW`] a post takes out on its stack: every entry is
-/// fired once, and freed with the list lock let go.
-#[test]
-fn a_post_of_one_entry_past_its_stack_fires_each_once_and_frees_none_under_the_lock() {
+type OwnedWatch = Watch<Msg, Owned, Watched<Waiters<Msg, Owned>>>;
+
+fn owned(fired: &Arc<AtomicU32>) -> Owned {
+    Owned { fired: fired.clone(), _cell: Box::new(0) }
+}
+
+/// A thread's post of `n` live entries: every entry is fired once, and freed
+/// with the list lock let go.
+fn post_live(n: usize) -> OwnedWatch {
     let (tx, _rx) = mailbox::<Msg>();
     let cpus = CpuHandles::new(vec![CpuHandle::new(C0, tx)]);
     let env = Poster { cpus: &cpus, kicker: &NoKick, preempt: &NoPreempt };
-    let w: Watch<Msg, Owned, Watched<Waiters<Msg, Owned>>> =
-        Watch::new(Watched(Mutex::new(Waiters::new())));
-    let fired: Vec<_> = (0..=FEW).map(|_| Arc::new(AtomicU32::new(0))).collect();
+    let w: OwnedWatch = Watch::new(Watched(Mutex::new(Waiters::new())));
+    let fired: Vec<_> = (0..n).map(|_| Arc::new(AtomicU32::new(0))).collect();
     for word in &fired {
-        w.add_ring(Owned { fired: word.clone(), _cell: Box::new(0) });
+        w.add_ring(owned(word));
     }
     clean("registering");
     w.post(WakeCause::new(WakeReason::Woken), &env);
     clean("posting");
     for (at, word) in fired.iter().enumerate() {
-        assert_eq!(word.load(Acquire), 1, "entry {at} of {} fired other than once", FEW + 1);
-        assert_eq!(Arc::strong_count(word), 1, "entry {at} was not let go of");
+        assert_eq!(word.load(Acquire), 1, "entry {at} of {n} fired other than once");
+        assert_eq!(Arc::strong_count(word), 1, "entry {at} of {n} was not let go of");
+    }
+    w
+}
+
+/// One entry past the [`FEW`] a post takes out on its stack.
+#[test]
+fn a_post_of_one_entry_past_its_stack_fires_each_once_and_frees_none_under_the_lock() {
+    post_live(FEW + 1);
+}
+
+/// Exactly the [`FEW`] a post takes out on its stack: the list's buffer is
+/// left to the re-arm.
+#[test]
+fn a_re_arm_after_a_post_of_few_entries_is_one_section() {
+    let w = post_live(FEW);
+    let rearmed = owned(&Arc::new(AtomicU32::new(0)));
+    assert_eq!(sections(|| w.add_ring(rearmed)), 1, "a re-arm after a post regrew the list");
+}
+
+/// An end in place and the sweep after it: the sweep lets go of every entry,
+/// past the [`FEW`] one section takes, and frees each with the lock let go.
+#[test]
+fn a_sweep_frees_none_under_the_lock() {
+    let w: OwnedWatch = Watch::new(Watched(Mutex::new(Waiters::new())));
+    let fired: Vec<_> = (0..=2 * FEW).map(|_| Arc::new(AtomicU32::new(0))).collect();
+    for word in &fired {
+        w.add_ring(owned(word));
+    }
+    POSTING.set(true);
+    w.cancel_rings_in_place();
+    POSTING.set(false);
+    clean("cancelling in place");
+    w.sweep();
+    clean("sweeping");
+    for (at, word) in fired.iter().enumerate() {
+        assert_eq!(Arc::strong_count(word), 1, "entry {at} of {} was not let go of", fired.len());
     }
 }
 
