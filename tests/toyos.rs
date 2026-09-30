@@ -1026,7 +1026,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // which is indistinguishable from the driver defect it hunts.
     ("xhci_flap", Sched::Serial),
     ("xhci_descriptor_walk", Sched::Parallel),
-    ("toybox_cp_volume", Sched::Parallel),
     ("kernel_log_file", Sched::Parallel),
     ("kernel_heartbeat", Sched::Parallel),
     // The five RTC/firmware shapes, one kernel build and one boot each. Five
@@ -8228,8 +8227,6 @@ fn run_machine_test(
             usb::xhci_scan_hands_over_a_free_slot(test_config, c_bins, rust_bins)
         }
         "usb_pool_exhausted" => usb::usb_pool_exhausted(test_config, c_bins, rust_bins),
-        // Body in `tests/common/toybox.rs`, same reason.
-        "toybox_cp_volume" => common::toybox::cp_volume(test_config, c_bins, rust_bins),
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.

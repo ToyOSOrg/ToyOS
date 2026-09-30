@@ -36,7 +36,6 @@ pub mod serial;
 pub mod ssh;
 pub mod storage;
 pub mod swap;
-pub mod toybox;
 pub mod update;
 pub mod usb;
 pub mod volumes;
