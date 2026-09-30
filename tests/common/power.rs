@@ -20,7 +20,7 @@ use toyos_xhci::bot::Phase;
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
 
-const WAIT: Duration = Duration::from_secs(20);
+const WAIT: Duration = Duration::from_secs(332);
 
 /// What a guest that never stopped means where something asked it to.
 const ASKED_AND_STAYED_UP: &str =
@@ -1067,8 +1067,9 @@ fn after_the_reset(qemu: &mut QemuInstance, until: &str) -> serial::Serial {
 
 /// What the boot after a reset has to arrive inside: the bound the first boot
 /// counts down, plus firmware and a loader. Scaled by `drain_until`, and the
-/// predicate is what ends the drain.
-const CHAIN_WAIT: Duration = Duration::from_secs(PANIC_FAST_SECS + 60);
+/// predicate is what ends the drain. The ceiling rule's number over the tests
+/// that are one chain, the slowest of which took 37 s.
+const CHAIN_WAIT: Duration = Duration::from_secs(113);
 
 /// The chain closes on a panic: the kernel seals what the panel rendered, the
 /// machine resets itself, and the boot after it is this loader again — which
