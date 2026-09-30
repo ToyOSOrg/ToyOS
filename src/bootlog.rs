@@ -133,6 +133,10 @@ pub const LOADER_LOG: &str = "loader.log";
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
 pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so this file ends here";
 
+/// The line the loader prints once it has opened `GraphicsOutput`, which the
+/// kernel's own `GOP:` line does not begin with.
+pub const LOADER_GOP_LINE: &str = "GOP: mode";
+
 /// The head the loader writes every line about the black-box page under, and
 /// the line a harvested report goes under.
 pub const BLACKBOX_HEAD: &str = "Black box:";
@@ -655,6 +659,7 @@ mod tests {
             ("bootloader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{SEPARATOR}\"")),
             ("bootloader/src/main.rs", format!("\"{HUNG_WITHOUT_A_RECORD}\"")),
+            ("bootloader/src/loaderlog.rs", format!("\"{LOADER_GOP_LINE}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{TAIL_IN_THE_FILE}\"")),

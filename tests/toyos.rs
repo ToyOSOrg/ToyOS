@@ -438,6 +438,10 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 /// kept because these are read the way they are
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
+    // Two boots, each ended at a loader line rather than at the kernel's ready
+    // marker. Every verdict is a count of rows against a count of lines off the
+    // same boot's console; no clock is in either.
+    ("screen_loader_lines", Sched::Parallel, qemu::Profile::Metal),
     ("screen_gop_firmware_mode", Sched::Parallel, qemu::Profile::Gop),
     // The log is still on the panel once every program the image starts has
     // run: an event, and no clock in it.
@@ -3504,6 +3508,110 @@ fn run_screen_test(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     match name {
+        "screen_loader_lines" => {
+            // An EXCLUSIVE open of `GraphicsOutput` calls `Stop` on the
+            // firmware's graphics console, so with one the panel stops at the
+            // GOP query and every later loader line is on serial alone.
+            let dump_at = |marker: &'static str| -> Result<(usize, String), String> {
+                let options = BootOptions {
+                    profile,
+                    qmp: true,
+                    ready_marker: marker,
+                    ..Default::default()
+                };
+                metal_sim_argv_check(&qemu::profile_argv(&options))?;
+                let mut qemu =
+                    QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+                let console = qemu.boot_log().to_string();
+                let dump = qemu.screendump();
+                // A row that decodes in the kernel's font is a row the kernel
+                // drew. Refused rather than counted: its rows are not the
+                // loader's and would only push the growth below green.
+                if dump
+                    .rows()
+                    .iter()
+                    .any(|row| !row.trim().is_empty() && !row.contains(screen::UNKNOWN))
+                {
+                    return Err(format!(
+                        "the kernel had already repainted the panel at {marker:?}, so these are \
+                         its rows and not the loader's\ndecoded screen:\n{}",
+                        dump.text()
+                    ));
+                }
+                Ok((dump.text_row_bands()?, console))
+            };
+
+            let (before, at_query) = dump_at(bootlog::LOADER_GOP_LINE)?;
+            let (after, console) = dump_at(bootlog::LOADER_LAST_LINE)?;
+
+            // The growth below subtracts one boot's rows from the other's, and
+            // says nothing unless the two printed the same number of lines
+            // before the query. The lines themselves are not compared: each
+            // boot builds its own image, so two of them carry partition GUIDs
+            // drawn fresh.
+            let upto = |text: &str| {
+                text.lines().take_while(|line| !line.contains(bootlog::LOADER_GOP_LINE)).count()
+            };
+            if upto(&at_query) != upto(&console) {
+                return Err(format!(
+                    "one boot printed {} lines before the GOP query and the other {}, so their \
+                     row counts are not each other's baseline\n--- first\n{at_query}\n--- \
+                     second\n{console}",
+                    upto(&at_query),
+                    upto(&console)
+                ));
+            }
+
+            // What the loader printed after the query, off its own console.
+            let lines: Vec<&str> = console.lines().collect();
+            let at = |line: &str| {
+                lines
+                    .iter()
+                    .position(|seen| seen.contains(line))
+                    .ok_or_else(|| format!("the loader never printed {line:?}\n{console}"))
+            };
+            let (query, last) =
+                (at(bootlog::LOADER_GOP_LINE)?, at(bootlog::LOADER_LAST_LINE)?);
+            if last <= query {
+                return Err(format!(
+                    "the console carries {:?} at line {last} and {:?} at line {query}, so there \
+                     is nothing between them",
+                    bootlog::LOADER_LAST_LINE,
+                    bootlog::LOADER_GOP_LINE
+                ));
+            }
+            let printed = last - query;
+            // The rows those lines take on the firmware's console, whose glyph is
+            // eight pixels wide (UEFI 2.11 §12.9, `EFI_GLYPH_WIDTH`): a line
+            // wider than the mode's columns — the root bridges' descriptor dump
+            // is one — wraps onto a row per width it fills.
+            let columns = lines[query]
+                .split("GOP: mode ")
+                .nth(1)
+                .and_then(|mode| mode.split('x').next())
+                .and_then(|width| width.parse::<usize>().ok())
+                .map(|width| width / 8)
+                .filter(|&columns| columns > 0)
+                .ok_or_else(|| format!("the GOP line names no mode width: {:?}", lines[query]))?;
+            let rows: usize = lines[query + 1..=last].iter().map(|line| line.len().div_ceil(columns).max(1)).sum();
+
+            // A range and not an equality: each panel is dumped after its marker
+            // reached the console, so a line drawn in between is on the panel
+            // and not in the count.
+            let grew = after as i64 - before as i64;
+            if !(1..=rows as i64).contains(&grew) {
+                return Err(format!(
+                    "the panel carried {before} rows at the GOP query and {after} at the loader's \
+                     last line, a growth of {grew}, where the loader printed {printed} lines \
+                     between them, {rows} rows at {columns} columns\n{console}"
+                ));
+            }
+            eprintln!(
+                "  [screen] the panel grew {grew} row(s) across the GOP query, {before} to \
+                 {after}, for {printed} line(s) printed"
+            );
+            Ok(())
+        }
         "screen_gop_firmware_mode" => {
             // Four of `GopInfo`'s six fields, on two machines advertising
             // different panels. QMP's `screendump` is the geometry QEMU scans
