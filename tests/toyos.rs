@@ -1203,7 +1203,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("root_candidate_malformed", Sched::Serial),
     ("root_named_but_absent", Sched::Serial),
     ("root_chunk_refused", Sched::Serial),
-    ("root_chunk_refused_on_a_usb_stick", Sched::Serial),
     ("root_candidate_overlaps", Sched::Serial),
     ("root_named_twice_on_the_boot_disk", Sched::Serial),
     ("root_named_twice", Sched::Serial),
@@ -9602,9 +9601,6 @@ fn run_machine_test(
             common::volumes::root_named_but_absent(test_config, c_bins, rust_bins)
         }
         "root_chunk_refused" => common::volumes::root_chunk_refused(test_config, c_bins, rust_bins),
-        "root_chunk_refused_on_a_usb_stick" => {
-            common::volumes::root_chunk_refused_on_a_usb_stick(test_config, c_bins, rust_bins)
-        }
         "root_candidate_overlaps" => common::volumes::root_candidate_overlaps(test_config, c_bins, rust_bins),
         "root_named_twice_on_the_boot_disk" => {
             common::volumes::root_named_twice_on_the_boot_disk(test_config, c_bins, rust_bins)

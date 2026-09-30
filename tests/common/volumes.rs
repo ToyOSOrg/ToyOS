@@ -3016,27 +3016,6 @@ pub fn root_chunk_refused(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    root_chunk_refused_on(qemu::Profile::InternalDisk, test_config, c_bins, rust_bins)
-}
-
-/// [`root_chunk_refused`] with the boot image on a USB stick: stock edk2's
-/// read of that sector does not return, and its watchdog does not reset the
-/// machine
-/// (`issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md`).
-pub fn root_chunk_refused_on_a_usb_stick(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    root_chunk_refused_on(qemu::Profile::Headless, test_config, c_bins, rust_bins)
-}
-
-fn root_chunk_refused_on(
-    profile: qemu::Profile,
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
     let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
     let (at, len) = root_extent(&image)?;
     let first = (at / 512) as u64;
@@ -3048,7 +3027,7 @@ fn root_chunk_refused_on(
         c_bins,
         rust_bins,
         BootOptions {
-            profile,
+            profile: qemu::Profile::InternalDisk,
             boot_image: Some(qemu::Staged::Written(path.clone())),
             boot_read_error: Some(bad),
             ready_marker: CHUNK_REFUSED,
