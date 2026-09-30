@@ -18,6 +18,13 @@ USB2 half of that receptacle, at speed 3 (high speed):
   flash.
 - T14 run 75: port 13, slot 5 — the one boot that began with no power cycle of
   the stick since run 74's reset had moved it there.
+- T14, the `usb_transport_break` boot of PR #588 at 95ebbafdd (2026-09-29):
+  slot 1, port 1, speed 3, and port 13 did not read connected at the scan. The
+  scan's own reset of port 1 (0.375 s to 0.430 s) left the stick there; the
+  port rung's (1.174 s to 1.229 s) did not. That reset's completion read it
+  Enabled at high speed (`PORTSC 0x00200e03`), port 1 read Disconnected at
+  1.279 s (`0x000202a0`), and port 13 connected, link already trained, speed 4,
+  at 2.210 s.
 
 So which half the stick is on at ToyOS's first look is decided before the
 driver acts, by something between the firmware's hand-off and the boot scan,
@@ -28,8 +35,11 @@ lose the volume's disk number
 (`issues/kernel/a-disk-taken-offline-is-never-brought-back.md`).
 
 Not investigated. What is not known: what the firmware leaves the two ports in,
-whether the boot scan's own reset of port 1 is what keeps the stick there, and
-whether the USB3 port reads connected at the scan.
+whether the boot scan's own reset of port 1 is what keeps the stick there,
+whether the USB3 port reads connected at the scan, and why the port rung's
+reset moved the stick where the scan's reset of the same port 0.8 s earlier
+did not. xHCI 1.2 says why the USB2 port cannot see the stick leave, not why
+the stick leaves: that is the USB 3.x specification's device-side rule.
 
 ## Exit condition
 
