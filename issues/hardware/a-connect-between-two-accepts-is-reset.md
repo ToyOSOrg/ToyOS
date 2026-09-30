@@ -23,3 +23,12 @@ that window is told nothing is there.
 What is not known is whether the window is netd's re-arm or sshd's accept loop,
 and how wide it gets under load. A backlog of one is not a listener. Retrying at
 the client hides this and does not fix it.
+
+**`lan_swap` is deleted**, as a red test is: `bb68c186c` took it out, its
+QEMU and T14 rows both, with `lan_swap_hold`, the T14 row's judge and the
+metal harness's swapping boots, which that row was the one user of. `git
+revert bb68c186c` brings them back. The metal driver's own `--swap` mode is
+untouched.
+
+**Exit**: a listener that queues a connect arriving between two accepts, and
+`lan_swap` restored and green.

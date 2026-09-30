@@ -43,5 +43,9 @@ instrument.
 **Its test is deleted**: `4600f6754` took `syscall_window_nmi` out, and
 `539977050` its IST-off control in `syscall_window_nmi_controls` with
 `nmi-without-ist`, the storm's hold in the syscall entry and the report the
-two read. `git revert 539977050 4600f6754` brings both back.
-`syscall_window_nmi_controls` keeps its nested arm.
+two read.
+`2a4893921` then took the storm itself, which only those two arms needed: the
+`syscall-window-nmi` actuator, `nmi_gate`'s aiming and counting, the syscall
+count on every dispatch, and the Ring 3 spinner. The nested arm stayed, as
+`nested_nmi_is_loud`, with one NMI sent from the idle loop. `git revert
+2a4893921 539977050 4600f6754` brings all three back.

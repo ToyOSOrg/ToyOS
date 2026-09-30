@@ -488,17 +488,27 @@ A flaky test is deleted at once. Each commit below takes one out, and
 - `swap_netd` and `swap_crash_rolls_back` — `4a60c35c8`;
 - `launcher_refusals` — `4c191469f`;
 - `screen_console_shell` — `958ada05e`;
-- `screen_console_clear` — `315526e83`;
+- `screen_console_clear` — `315526e83`, and `c7d9efeb1` retired `SYS_DEBUG`
+  action 8, which only it asked for: `git revert c7d9efeb1 315526e83`;
 - `fs_transactional` — `8e172f7a8`;
 - `fs_dirs_durable` — `690fa3e83`;
 - `i8042_undecoded_bytes` — `c6923cd50`, with `i8042-split-burst`;
 - `log_poll_outlives_a_close` — `ad6dc0781`, with test-runner's `log-close`
   and `log-close-cancels-any-syscap`;
-- `metal_sim_pointer_churn` — `525e59ad1`.
+- `metal_sim_pointer_churn` — `525e59ad1`;
+- `blocked_dump` — `0a7fc5f70`, red after its retirement here on the
+  sightings `issues/build/log-reserve-window-negative-times-out-beside-other-guests.md`
+  and `issues/build/process-stats-exits-101-beside-other-guests.md` record;
+- `metal_sim_input` — `415d9a102`;
+- `xhci_full_speed_device` — `5e4223525`, with `Profile::MetalFullSpeed`.
 
-Named above and not deleted: `desktop_typing_damage` waits on `terminal:
+`log_poll_outlives_a_close` was the one judge of `close_ends_polls` answering
+`false` for a `SysCap`, so one process closing a capability cancels no
+other's log poll. Since `87f74892d` `sourcegate`'s
+`a_capability_closing_ends_no_log_poll` holds that arm at `false`: a gate on
+the decision at its one site, not on the behaviour the deleted test drove.
+
+Named in this file and not deleted: `desktop_typing_damage` waits on `terminal:
 ready` since its row; `i8042_absent` no longer has the two-boot allowance its
 row is about; `hda_tone`, `tlb_shootdown_waits` and `wake_storm_cost` are T14
-rows and no QEMU guest runs them; `metal_sim_input`'s and
-`xhci_full_speed_device`'s reds were kernel panics during boot, which name the
-workload and not a cause; `screen_loader_lines` is #640's to fix.
+rows and no QEMU guest runs them; `screen_loader_lines` is #640's to fix.

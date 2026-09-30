@@ -184,3 +184,10 @@ run, which no earlier pair here had.
 `log_flush_retry` (`9ebf080e8`), `fat_backing_revoked` (`3aad43b13`) and
 `fs_dirs_durable` (`690fa3e83`); `git revert` of each commit brings its test
 back.
+
+Then the rest of this file's names: `toybox_cp_volume` (`e1103545c`, with
+its module `tests/common/toybox.rs`), `redirty_mid_flush` (`5c3f464a1`, with
+its binary and `test-small-caches`), `fs_rename_durable` (`63b0874ba`, with
+its binary), `esp_filesystem` (`27a926141`, with `esp_files`),
+`device_claim_lifetime` (`51cc87fcc`) and `screen_i8042_health`
+(`b7f157a72`). `git revert` of each brings its test back.

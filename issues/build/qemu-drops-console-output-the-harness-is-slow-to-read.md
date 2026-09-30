@@ -52,3 +52,8 @@ The console chardev the harness reads cannot refuse a write — for example a
 file chardev the harness follows, or a `virtserialport`, which QEMU throttles
 instead of dropping. Shown by `log_stream_stalled_reader` green in 20 of 20
 runs beside a full suite.
+
+**`log_stream_stalled_reader` is deleted**, as a flaky test is, on the two
+reds recorded here: `96763794e` took it out, and `git revert 96763794e`
+brings it back. `BootOptions::console_file` stays; no test sets it now, so
+the exit condition's twenty runs wait on that restore.

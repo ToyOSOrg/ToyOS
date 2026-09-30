@@ -75,3 +75,7 @@ and `git revert ed5df7232` brings it back. The last sighting before it went is
 the orchestrator's, a stall on the dev host under a load average over 250; it
 was green on the five nightlies 36400924827, 36496779560, 36550208853,
 36600425263 and 36696295750.
+
+**`sched_check_build` is deleted**, as a flaky test is: `4d3e2b164` took it
+out with `sched-check` from the suite's kernel builds, and `git revert
+4d3e2b164` brings both back.

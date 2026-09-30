@@ -151,6 +151,5 @@ the adapter's author did not have to rediscover it.
 the kernel writes no log file — `/system/bin/logd` does, an ordinary user process that
 owns "every policy about files — where they go, what they are called, how many
 there are, what happens when the stick stops answering"
-(`userland/logd/src/main.rs:1-10`). Gated by `esp_filesystem`,
-`kernel_log_file`, `log_partition_layout` and `log_partition_identity`,
-plus `toybox_cp_volume`.
+(`userland/logd/src/main.rs:1-10`). Gated by
+`kernel_log_file`, `log_partition_layout` and `log_partition_identity`.

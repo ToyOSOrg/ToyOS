@@ -25,3 +25,5 @@ needing a hand. What is owed is a decision: a boot staged for the swap loop
 whose hold is not the runner's — longer, or held until the host lets it go
 over the cable — with the kernel's deadline widened to match, and a ruling on
 what bounds such a boot instead.
+
+`lanswapcase` and `lan_swap_hold` are deleted with `lan_swap`; `issues/hardware/a-connect-between-two-accepts-is-reset.md` records the commit that restores them.
