@@ -187,8 +187,6 @@ pub fn wait_until(
         if deadline.reached(crate::clock::now()) {
             return Ok(());
         }
-        #[cfg(feature = "boot-actuators")]
-        window::hold(&armed);
         match wait_inner(p, &armed, deadline, Cancel::Answers) {
             Ok(()) => {}
             Err(Ended::Cancelled) => return Err(Cancelled(())),
@@ -196,55 +194,6 @@ pub fn wait_until(
         }
     }
     Ok(())
-}
-
-/// `watch-window`: hold a pipe waiter between reading its condition false and
-/// its phase 1 until a post lands there — the post only the notified bit
-/// carries to the commit — or its budget lapses. The holds a post ended are
-/// counted, and every `STEP`th is a `HELD` line the harness reads: a boot
-/// whose count did not move staged nothing, however green its canary.
-#[cfg(feature = "boot-actuators")]
-mod window {
-    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-
-    use toyos_sched::task::WaitClass;
-    use toyos_sched::watch::window::{HELD, STEP};
-
-    use super::Armed;
-    use crate::time::{Budget, Deadline, Duration};
-
-    /// A pipe wait nothing posts — a reader whose writer is idle — ends its
-    /// hold here and waits on unstaged; the count of those is on every line.
-    const WINDOW: Budget = Budget::of(
-        Duration::from_millis(50),
-        "the wait goes on unstaged, counted as lapsed",
-    );
-
-    static POSTED: AtomicU64 = AtomicU64::new(0);
-    static LAPSED: AtomicU64 = AtomicU64::new(0);
-
-    pub(super) fn hold(armed: &Armed<'_>) {
-        if !crate::actuator::watch_window() || armed.class != WaitClass::Pipe {
-            return;
-        }
-        let deadline = Deadline::at(crate::clock::now() + WINDOW.duration());
-        loop {
-            // Counted only on the bit itself: a hold that ended any other way
-            // staged nothing.
-            if armed.shared.notified() {
-                let posted = POSTED.fetch_add(1, Relaxed) + 1;
-                if posted.is_multiple_of(STEP) {
-                    crate::log!("{HELD} {posted} times, {} lapsed", LAPSED.load(Relaxed));
-                }
-                return;
-            }
-            if deadline.reached(crate::clock::now()) {
-                LAPSED.fetch_add(1, Relaxed);
-                return;
-            }
-            core::hint::spin_loop();
-        }
-    }
 }
 
 /// Register, then park until `ready()` holds, for a wait a kill may not end

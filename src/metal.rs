@@ -807,10 +807,6 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // writes no firmware state; the CPU rejoins, and the boot goes on to
     // userland and ends the way an unarmed one does.
     ("dump-deaf-cpu", Flash::Ok),
-    // It holds each pipe waiter up to a short budget of its own clock for a post
-    // to land between its condition and its park. It reaches no device and
-    // writes no firmware state, and a hold nothing posts into lapses.
-    ("watch-window", Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(

@@ -173,9 +173,8 @@ toyos-userbound = { path = "toyos-userbound" }
 # declaration. Pure and `no_std`, so it compiles for the host as it does for
 # the guest.
 toyos-i219 = { path = "toyos-i219" }
-# The scheduler core, for two things the harness reads the kernel's words by:
-# the watch window's count (`watch::window`) that `blocking_read_window`'s
-# metal row judges, and `cpu::PassCostReport`, whose `Display`/`parse` pair
+# The scheduler core, for what the harness reads the kernel's words by:
+# `cpu::PassCostReport`, whose `Display`/`parse` pair
 # keeps the check build that publishes the pass-cost report and
 # `sched_check_build` that reads it on one format. `check` because that is
 # where the report lives: `src/build.rs`'s artifact gate asks the shipping

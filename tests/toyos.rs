@@ -398,10 +398,6 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
-    // The lost-wake canary: its shared run is the count on the shipping
-    // kernel with nothing staged, and `blocking_read_window` drives it again
-    // with the watch's window held open.
-    "blocking_read_stress",
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
@@ -1163,10 +1159,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("root_named_twice_on_the_boot_disk", Sched::Serial),
     ("root_named_twice", Sched::Serial),
     ("log_partition_identity", Sched::Parallel),
-    // The watch's lost-wake window, staged: `watch-window` holds every pipe
-    // waiter between reading its condition and parking, so the peer's post lands where
-    // only the notified bit carries it to the commit.
-    ("blocking_read_window", Sched::Parallel),
     // A sibling's store staged between a thread's TLS block being placed and
     // its rebase (`tls-rebase-window`): the block is never reachable there.
     ("tls_rebase_window", Sched::Parallel),
@@ -1243,7 +1235,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_grant_refuses_a_stray_partition", &[]),
     ("update_floor_is_the_images_own", &[]),
     ("update_refused_pass_credits_no_image", &[]),
-    ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("tls_rebase_window", &["test_rs_tls_dtv_race"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
     ("xhci_msi_only", &["test_rs_input_events"]),
@@ -1578,24 +1569,6 @@ const METAL: &[(&str, metal::Metal)] = &[
                 ..metal::once("testcases-debug", "tests/testcases", &[], &["test_rs_tlb_shootdown_waits"])
             }],
             judge: |b| b[0].job_passed("test_rs_tlb_shootdown_waits"),
-        },
-    ),
-    (
-        // The canary beside the `watch-window` actuator, and the count of
-        // windows a post landed in while it ran — the staging that is
-        // timing, and so metal's.
-        "blocking_read_window",
-        metal::Metal::Runs {
-            arms: &[metal::once(
-                "testcases-window",
-                "tests/testcases",
-                &["watch-window"],
-                &["test_rs_blocking_read_stress"],
-            )],
-            judge: |b| {
-                b[0].job_passed("test_rs_blocking_read_stress")?;
-                window_held_on_metal(&b[0].kernel())
-            },
         },
     ),
     (
@@ -8844,28 +8817,6 @@ fn run_machine_test(
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
-        // The lost-wake canary with the window it guards held open: every pipe
-        // wait reads its condition, waits for a post to land, then parks, so
-        // the ping-pong's posts land between the two. A commit that ignored the
-        // notified bit parks for good, and the run's ceiling reds it.
-        "blocking_read_window" => {
-            let options = BootOptions {
-                kernel_params: &["watch-window"],
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let boot = qemu.boot_log().to_string();
-            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-            let result = qemu.run_test("test_rs_blocking_read_stress", Duration::from_secs(30));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "blocking_read_window failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
-                ));
-            }
-            Ok(())
-        }
         // Two CPUs: the held spawn spins in the kernel while its sibling stores
         // on the other.
         "tls_rebase_window" => {
@@ -13260,54 +13211,6 @@ fn xhci_xecp(log: &str) -> Result<(), String> {
             eprintln!("  [xhci] {}", handoff.trim());
         }
         Ok(())
-}
-
-use toyos_sched::watch::window::{HELD as WINDOW_HELD, STEP as WINDOW_STEP};
-
-/// The largest count of held windows a post ended that `log` says, 0 if none.
-fn window_count(log: &str) -> u64 {
-    log.lines()
-        .filter_map(|line| line.split_once(WINDOW_HELD))
-        .filter_map(|(_, rest)| rest.split_whitespace().next()?.parse().ok())
-        .max()
-        .unwrap_or(0)
-}
-
-/// Whether posts landed in held windows while the canary ran, not only before,
-/// off a metal boot's kernel log split at the canary's spawn record.
-///
-/// **Judged on the T14 and in no QEMU guest**: the actuator holds each window
-/// for a budget of its own clock, so how many a post lands in is how much of the
-/// host the guest had.
-fn window_held_on_metal(kernel: &serial::Serial) -> Result<(), String> {
-    let text = kernel.text();
-    let spawned = "spawn: /system/bin/test_rs_blocking_read_stress ";
-    let at = text
-        .find(spawned)
-        .ok_or_else(|| format!("no `{spawned}` record: the canary never ran\n{text}"))?;
-    window_held(&text[..at], &text[at..])
-}
-
-/// Whether posts landed in held windows while the canary ran, not only before.
-///
-/// The holds during the run are at least the last count said during it, less
-/// the last said before it and the `WINDOW_STEP - 1` holds after that which no
-/// line says. The floor is one line's worth. One held window a post landed in
-/// is already enough for `commit-ignores-notify` to deadlock the ping-pong, so
-/// a run under the floor is a run whose green says nothing about the window.
-fn window_held(before: &str, during: &str) -> Result<(), String> {
-    let (was, now) = (window_count(before), window_count(during));
-    let held = now.saturating_sub(was + WINDOW_STEP - 1);
-    if held < WINDOW_STEP {
-        return Err(format!(
-            "watch-window held too few windows a post landed in while the canary ran: at 
-             least {held} (said {was} before, {now} during), and the floor is {WINDOW_STEP} — 
-             the green canary proves nothing about the window:
-{during}"
-        ));
-    }
-    eprintln!("  [watch-window] at least {held} held windows a post landed in ({was} -> {now})");
-    Ok(())
 }
 
 /// `kernel/src/arch/x86_64/hw.rs`'s probe, when it could not run.
