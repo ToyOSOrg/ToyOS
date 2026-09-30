@@ -405,20 +405,39 @@ const F_GETOWN: i32 = 9;
 const F_DUPFD_CLOEXEC: i32 = 1030;
 
 #[no_mangle]
-pub unsafe extern "C" fn fcntl(_fd: i32, cmd: i32, _arg: i64) -> i32 {
+pub unsafe extern "C" fn fcntl(fd: i32, cmd: i32, arg: i64) -> i32 {
     let refused = match cmd {
+        F_DUPFD if arg >= 0 => return unsafe { dup_at_least(fd, arg) },
         // Close-on-exec is the descriptor table's of stage 3 of
         // issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md.
         F_GETFD | F_SETFD => return 0,
         // POSIX's answer for a file that supports no locking, which none here does.
         F_GETLK | F_SETLK | F_SETLKW => EINVAL,
-        // A descriptor's lowest free number, its status flags and its owner are
-        // nothing this library knows.
-        F_DUPFD | F_DUPFD_CLOEXEC | F_GETFL | F_SETFL | F_GETOWN | F_SETOWN => crate::errno::ENOSYS,
+        // A descriptor's status flags, its close-on-exec and its owner are
+        // nothing this library keeps.
+        F_DUPFD_CLOEXEC | F_GETFL | F_SETFL | F_GETOWN | F_SETOWN => crate::errno::ENOSYS,
         _ => EINVAL,
     };
     crate::errno::set(refused);
     -1
+}
+
+/// A duplicate of `raw_fd` numbered `floor` or above. The kernel picks each
+/// number `dup` answers, so this is the first such answer and not the lowest
+/// free number, and every lower one taken on the way is closed again.
+unsafe fn dup_at_least(raw_fd: i32, floor: i64) -> i32 {
+    let mut below = alloc::vec::Vec::new();
+    let answer = loop {
+        let duplicate = unsafe { dup(raw_fd) };
+        if duplicate < 0 || i64::from(duplicate) >= floor {
+            break duplicate;
+        }
+        below.push(duplicate);
+    };
+    for lower in below {
+        unsafe { close(lower) };
+    }
+    answer
 }
 
 // Directory operations

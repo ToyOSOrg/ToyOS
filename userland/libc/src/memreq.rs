@@ -42,10 +42,3 @@ pub(crate) fn mmap_refusal(addr: usize, len: usize, prot: i32, flags: i32) -> Op
 pub(crate) fn is_advice(advice: i32) -> bool {
     (0..=4).contains(&advice)
 }
-
-/// Whether `aligned_alloc` beside std can align to `align`: std's `malloc`
-/// aligns every block to 16, and its `free` knows no other alignment.
-#[cfg(feature = "std-runtime")]
-pub(crate) fn std_aligns(align: usize) -> bool {
-    align.is_power_of_two() && align <= 16
-}

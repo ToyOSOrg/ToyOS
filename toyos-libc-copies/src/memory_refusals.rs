@@ -1,7 +1,6 @@
 //! What libc's memory calls refuse before the kernel or the allocator is
 //! asked: `mmap` a file, executable memory, no bytes, or a fixed place off a
-//! page; `posix_madvise` anything but its five; `aligned_alloc` beside std any
-//! alignment std's `malloc` does not give.
+//! page; `posix_madvise` anything but its five.
 
 use crate::memreq::{self, MapRefusal, MAP_ANONYMOUS, MAP_FIXED, PROT_EXEC, PROT_READ, PROT_WRITE};
 
@@ -33,11 +32,4 @@ fn mmap_refuses_what_the_kernel_cannot_map_and_nothing_else() {
 fn posix_madvise_takes_its_five_and_only_them() {
     let taken: Vec<i32> = (-2..8).filter(|&a| memreq::is_advice(a)).collect();
     assert_eq!(taken, [0, 1, 2, 3, 4]);
-}
-
-#[test]
-fn aligned_alloc_beside_std_gives_what_malloc_aligns_to() {
-    let given: Vec<usize> = (0..=64).filter(|&a| memreq::std_aligns(a)).collect();
-    assert_eq!(given, [1, 2, 4, 8, 16]);
-    assert!(!memreq::std_aligns(1 << 12));
 }

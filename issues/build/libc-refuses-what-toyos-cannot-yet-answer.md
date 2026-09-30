@@ -29,12 +29,12 @@ names:
 - `mmap` of a file, `ENODEV`, and of executable memory, `ENOTSUP`: the kernel
   maps neither.
 - `fcntl`: a record lock, `EINVAL`, POSIX's answer for a file that supports no
-  locking; `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFL`, `F_SETFL`, `F_GETOWN` and
-  `F_SETOWN`, `ENOSYS`. `F_GETFD` and `F_SETFD` answer 0 and keep nothing:
-  close-on-exec is the descriptor table of stage 3 of
+  locking; `F_DUPFD_CLOEXEC`, `F_GETFL`, `F_SETFL`, `F_GETOWN` and `F_SETOWN`,
+  `ENOSYS`. `F_GETFD` and `F_SETFD` answer 0 and keep nothing: close-on-exec is
+  the descriptor table of stage 3 of
   `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`.
-- `aligned_alloc` beside std, above 16, `EINVAL`: std's `malloc` aligns to 16
-  and its `free` knows no other alignment.
+  `F_DUPFD` answers a duplicate at or above its argument, the first the kernel
+  hands `dup`, where POSIX has the lowest free number.
 
 Ruled out, and owed nothing while the ruling stands: `execv` and `execve`, no
 call replacing a process's image; `setsid` and `getsid`, no POSIX session;

@@ -80,7 +80,17 @@ int main(void) {
     said("fcntl F_SETLK", fcntl(fd, F_SETLK, &lock));
     said("fcntl F_SETLKW", fcntl(fd, F_SETLKW, &lock));
     said("fcntl F_GETLK", fcntl(fd, F_GETLK, &lock));
-    said("fcntl F_DUPFD", fcntl(fd, F_DUPFD, 10));
+    said("fcntl F_DUPFD -1", fcntl(fd, F_DUPFD, -1));
+    said("fcntl F_DUPFD_CLOEXEC", fcntl(fd, F_DUPFD_CLOEXEC, 10));
+    /* F_DUPFD itself duplicates: its answer is at or above its argument, and
+       fstat reads the file's one byte through it. */
+    int duplicate = fcntl(fd, F_DUPFD, 10);
+    struct stat through;
+    int read_back = duplicate >= 0 && fstat(duplicate, &through) == 0 && through.st_size == 1;
+    printf("fcntl F_DUPFD 10: %s; fstat of it: %s\n", duplicate >= 10 ? "10 or above" : "below 10",
+           read_back ? "the file's one byte" : "not the file");
+    if (duplicate >= 0)
+        close(duplicate);
     said("fcntl F_GETFL", fcntl(fd, F_GETFL));
     said("fcntl F_SETFL", fcntl(fd, F_SETFL, O_NONBLOCK));
     said("fcntl 12345", fcntl(fd, 12345));

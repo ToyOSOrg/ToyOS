@@ -133,24 +133,6 @@ fn empty_libraries(lib: &Path) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use toyos_tmpdir::TempDir;
-
-    /// **`-lm` finds a library in the C sysroot**, and so do POSIX's other
-    /// three: each an `ar` archive of no members.
-    #[test]
-    fn the_c_sysroot_names_the_posix_libraries() {
-        let lib = TempDir::new("libc-empty");
-        empty_libraries(&lib);
-        for name in ["m", "pthread", "dl", "rt"] {
-            let path = lib.join(format!("lib{name}.a"));
-            assert_eq!(fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())), b"!<arch>\n");
-        }
-    }
-}
-
 /// Extract .o files from rlibs and merge them into a single GNU-format ar archive.
 fn merge_rlibs(rlib_paths: &[std::path::PathBuf]) -> Vec<u8> {
     let mut members: Vec<(String, Vec<u8>)> = Vec::new();
@@ -304,6 +286,24 @@ fn extract_rlib_objects(data: &[u8], out: &mut Vec<(String, Vec<u8>)>) {
         }
         if name.ends_with(".o") {
             out.push((name, member_data.to_vec()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toyos_tmpdir::TempDir;
+
+    /// **`-lm` finds a library in the C sysroot**, and so do POSIX's other
+    /// three: each an `ar` archive of no members.
+    #[test]
+    fn the_c_sysroot_names_the_posix_libraries() {
+        let lib = TempDir::new("libc-empty");
+        empty_libraries(&lib);
+        for name in ["m", "pthread", "dl", "rt"] {
+            let path = lib.join(format!("lib{name}.a"));
+            assert_eq!(fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())), b"!<arch>\n");
         }
     }
 }

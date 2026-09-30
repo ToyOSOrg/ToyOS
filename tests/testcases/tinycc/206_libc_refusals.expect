@@ -18,7 +18,9 @@ realpath: -1, ENOSYS
 fcntl F_SETLK: -1, EINVAL
 fcntl F_SETLKW: -1, EINVAL
 fcntl F_GETLK: -1, EINVAL
-fcntl F_DUPFD: -1, ENOSYS
+fcntl F_DUPFD -1: -1, EINVAL
+fcntl F_DUPFD_CLOEXEC: -1, ENOSYS
+fcntl F_DUPFD 10: 10 or above; fstat of it: the file's one byte
 fcntl F_GETFL: -1, ENOSYS
 fcntl F_SETFL: -1, ENOSYS
 fcntl 12345: -1, EINVAL
