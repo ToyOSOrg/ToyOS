@@ -28,8 +28,7 @@ Constraints a reader would otherwise pay to re-derive:
 - **A machine with no IOMMU unit** is governed by
   `issues/kernel/a-machine-without-an-iommu-refuses-every-claim.md`. Today
   every claim there is refused by name, netd exits, and the machine boots on;
-  Nothing reads that back while `iommu_virtio_platform` is deleted
-  (`issues/build/iommu-virtio-platform-reads-netds-line-off-a-boot-log-that-ends-before-it.md`). The T14
+  `iommu_virtio_platform`'s no-unit arm is where that is read back. The T14
   has VT-d, so this is not a bound on the bench — but a `pcidev` refusal there
   is the first thing to check before suspecting the driver.
 - **ssh is the bench's transport and a real feature**: sshd is built on russh

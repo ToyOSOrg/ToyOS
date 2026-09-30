@@ -780,6 +780,12 @@ pub fn await_reset(
 #[derive(Clone, Copy, PartialEq)]
 pub enum Profile {
     Headless,
+    /// [`Profile::Headless`] with no unit at all: the negative control for
+    /// whether a virtio function is behind one. QEMU offers
+    /// `VIRTIO_F_ACCESS_PLATFORM` only for a function created with
+    /// `iommu_platform=on`, and the harness sets that only where a unit exists,
+    /// so the guest's own negotiation comes out the other way here.
+    HeadlessNoIommu,
     /// [`Profile::Headless`] with the NIC's MSI-X capability taken away.
     ///
     /// The one configuration in this suite where a device the kernel has
@@ -1070,6 +1076,7 @@ impl Profile {
         match self {
             Self::Virt | Self::VirtEl2 => Arch::Aarch64,
             Self::Headless
+            | Self::HeadlessNoIommu
             | Self::VirtioNetNoMsix
             | Self::E1000e
             | Self::E1000eNoServer
@@ -1461,6 +1468,7 @@ impl Profile {
                 hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
             },
+            Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::E1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::E1000eNoServer => Shape { nic: Nic::E1000eNoServer, ..Self::Headless.shape() },
             Self::E1000eBesideIgb => Shape { nic: Nic::E1000eBesideIgb, ..Self::Headless.shape() },

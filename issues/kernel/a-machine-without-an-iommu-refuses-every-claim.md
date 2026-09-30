@@ -44,7 +44,3 @@ The refusal is named in `pcidev`'s `Refusal`, not as a new `ClaimError`:
 `ClaimError` splits only where a caller acts differently, and its one caller,
 init's `refused`, answers every `Unusable` alike, by pointing at the
 `pcidev:` line that names why.
-
-**`iommu_virtio_platform` is deleted**
-(`issues/build/iommu-virtio-platform-reads-netds-line-off-a-boot-log-that-ends-before-it.md`):
-the arms the exit names come back with it.
