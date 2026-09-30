@@ -187,9 +187,12 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// were compiled by no CI run at all. `sched_check_build` is the test that asks.
 ///
 /// A fifth entry is that decision again, and it gets this paragraph's argument
-/// made afresh. Interactive debug mode is separate: it builds
-/// [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
-pub const DECLARED_KERNEL_BUILDS: [&str; 5] =
+/// made afresh. [`toyos_build::build::MASK_WINDOWS_KERNEL`] made it: its hooks
+/// sit on every entry and masking primitive, where a parameter would be a
+/// branch on the path they measure, and it carries the test kernel's actuators
+/// so a staged span can hold it to one. Interactive debug mode is separate: it
+/// builds [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
+pub const DECLARED_KERNEL_BUILDS: [&str; 6] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
 /// How many guests the phase now running may have up at once.
@@ -2618,8 +2621,8 @@ fn refuse_a_staged_image_this_boot_did_not_ask_for(image: &Path, options: &BootO
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
 ///
 /// **A parameter never decides a build.** Every actuator lives in the one test
-/// kernel, so asking for one selects that kernel and nothing more; the third
-/// build is asked for by name and by one test.
+/// kernel, so asking for one selects that kernel and nothing more; a build
+/// asked for by name arms one only if it carries them all too.
 ///
 /// A boot handed a [`BootOptions::boot_image`] builds nothing at all, and this
 /// then answers what that image already carries: the two agree or the boot was
@@ -2628,14 +2631,17 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     if options.kernel_params.is_empty() {
         return options.kernel_features.to_vec();
     }
+    if options.kernel_features.is_empty() {
+        return toyos_build::build::TEST_KERNEL.to_vec();
+    }
     assert!(
-        options.kernel_features.is_empty(),
-        "a boot asking to arm {:?} also asks for the kernel build {:?}; an actuator is a \
-         parameter and the test kernel carries all of them",
+        options.kernel_features.contains(&"boot-actuators"),
+        "a boot asking to arm {:?} asks for the kernel build {:?}, which carries no actuator; \
+         an actuator is a parameter and the test kernel carries all of them",
         options.kernel_params,
         options.kernel_features,
     );
-    toyos_build::build::TEST_KERNEL.to_vec()
+    options.kernel_features.to_vec()
 }
 
 // Eight, because an image is its architecture as much as its files and its kernel.

@@ -279,17 +279,25 @@ pub fn preempt_count() -> u32 {
 
 #[inline]
 pub fn set_preempt_count(value: u32) {
+    #[cfg(feature = "mask-windows")]
+    let old = preempt_count();
     this().preempt_count.store(value, Relaxed);
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_set(old, value);
 }
 
 /// One increment, atomic against an interrupt on this CPU.
 #[inline]
 pub fn preempt_count_up() {
     this().preempt_count.fetch_add(1, Relaxed);
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_raised();
 }
 
 #[inline]
 pub fn preempt_count_down() {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_lowering();
     this().preempt_count.fetch_sub(1, Relaxed);
 }
 

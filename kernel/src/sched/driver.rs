@@ -529,6 +529,8 @@ pub fn pass(dispose: Dispose) {
         };
         disposed.finish()
     });
+    #[cfg(feature = "mask-windows")]
+    crate::windows::scheduled();
     charge_cpu_time(now);
     with_cpu(|cpu| {
         if let Some(current) = cpu.running() {
@@ -600,6 +602,8 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
             Commit::Killed => (pass.dispose_none().finish(), false),
         }
     });
+    #[cfg(feature = "mask-windows")]
+    crate::windows::scheduled();
     charge_cpu_time(now);
     with_cpu(|cpu| {
         if let Some(current) = cpu.running() {
@@ -675,6 +679,8 @@ fn drain_irqs(entered: super::dump::Entered) {
 
 /// Leave the current stack for this CPU's idle stack and never come back.
 pub fn enter_idle_loop() -> ! {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::start_here();
     percpu::set_current_tid(None);
     percpu::set_current_pid(None);
     // SAFETY: `set_kernel_stack` requires the caller be the CPU its GS base belongs to — true here, on that CPU, after its base was set.

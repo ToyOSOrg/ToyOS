@@ -173,11 +173,20 @@ extern "sysv64" fn syscall_entry() {
 
 /// The syscall bracket: the entry's diagnostic stores stay readable only while [`percpu::in_syscall`] is true.
 extern "sysv64" fn syscall_handler(num: u64, a1: u64, a2: u64, _: u64, a3: u64, a4: u64) -> u64 {
+    // `IA32_FMASK` masked interrupts, and the entry raised the preempt count by one.
+    #[cfg(feature = "mask-windows")]
+    {
+        crate::windows::irqs_masked();
+        crate::windows::preempt_raised();
+    }
     #[cfg(feature = "df-witness")]
     cpu::df_witness("syscall_handler");
     percpu::enter_syscall();
     let out = syscall_dispatch(num, a1, a2, a3, a4);
     percpu::leave_syscall();
+    // The entry lowers it by one next; `exit_to_user` opens interrupts.
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_lowering();
     out
 }
 

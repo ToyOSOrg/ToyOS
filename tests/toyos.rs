@@ -162,6 +162,10 @@ const RUST_SKIP: &[&str] = &[
     // is read off the clock around the syscall. The `tlb_shootdown_waits`
     // metal row runs it on the T14.
     "tlb_shootdown_waits",
+    // Its product is the windows a `mask-windows` kernel reports under it, and
+    // its 256 threads' stacks would crowd every member after it in one boot.
+    // `mask_windows` runs it.
+    "ring_park_herd",
     // **It reboots the machine**, so in the shared block it would end the boot
     // under whichever member came next; and its verdict is the order of the
     // console after that reset, which only its own boot holds.
@@ -518,6 +522,9 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("virt_unmap_touch", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_debug_refused", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_readonly_copyout", Sched::Parallel, qemu::Profile::VirtEl2),
+    // `mask_windows`' judge over every AArch64 job: the windows each report
+    // carries and the staged span, counts and an order; no clock.
+    ("virt_mask_windows", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_smp", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_el1_smp", Sched::Parallel, qemu::Profile::VirtTcg),
     ("virt_failed_ap_leaves_no_hole", Sched::Parallel, qemu::Profile::VirtEl2),
@@ -576,6 +583,11 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // arithmetic over counters the guest printed, and there is no clock in any
     // of it.
     ("irq_census_conservation", Sched::Parallel),
+    // The longest interrupts-off and preemption-off windows, beside the
+    // census, under one process's 256 threads parked on one ring: a staged
+    // span is carried by a later report, and every hook's check held. Counts
+    // and an order of reports; no clock in the verdict.
+    ("mask_windows", Sched::Parallel),
     ("control_regs", Sched::Parallel),
     ("control_regs_negative", Sched::Parallel),
     // The boot facts the metal suite reads off a machine's own records: every
@@ -1366,6 +1378,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
     ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
+    ("mask_windows", &["test_rs_ring_park_herd"]),
     ("i8042_health", &["test_rs_i8042_keyboard"]),
     ("i8042_fadt_denial", &["test_rs_i8042_keyboard"]),
     ("i8042_kbd_echo", &["test_rs_i8042_keyboard"]),
@@ -1572,6 +1585,12 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| irq_census(b[0].kernel().text()),
         },
+    ),
+    (
+        // The windows on the machine that owes them: every CPU reported beside
+        // its census, and the boot's longest and the herd's own recorded.
+        "mask_windows",
+        metal::Metal::Runs { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
     ),
     (
         // `log-close` is a runner builtin and prints its `survived=` evidence to
@@ -2076,6 +2095,13 @@ const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
 
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
+
+/// The shipping kernel with the windows' instrument and nothing else, so what
+/// it reads is that kernel under the herd.
+const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
+    features: &["mask-windows"],
+    ..metal::once("windowscase", "tests/testcases", &[], &["test_rs_ring_park_herd"])
+}];
 
 /// A `logd` that leaves soundd's ring unread until the job says the tone played.
 const LOGSTALLCASE: &[metal::Arm] =
@@ -3571,6 +3597,30 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
         },
     );
     judge_virt_job(qemu, job, said).map(drop)
+}
+
+/// `mask_windows` on AArch64: every job of `tests/virtjobcase` run on a
+/// `mask-windows` kernel with a span staged in the first exit, judged once the
+/// last has ended.
+fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
+    let config = compile::repo_root().join("tests/virtjobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            smp: 1,
+            kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
+            kernel_params: &["windows-staged"],
+            ready_marker: "control registers: SCTLR_EL1=",
+            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), virt_copyout(profile.arch()).to_vec())],
+            ..Default::default()
+        },
+    );
+    let serial = judge_virt_job(qemu, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")?;
+    mask_windows(&serial, 1)
 }
 
 /// Wait for `job`'s end on a guest booted with it, and judge it: it ends with
@@ -5248,6 +5298,7 @@ fn run_screen_test(
         "virt_readonly_copyout" => {
             virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
         }
+        "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
             // thousand times through the flood, then waits for every SGI it
@@ -12081,6 +12132,31 @@ fn run_machine_test(
                 first.before, first.serial, second.before, second.serial
             ))
         }
+        "mask_windows" => {
+            // Four CPUs, and a first process whose exit the staged span is
+            // spun inside, so the herd's exit reports it: every hook runs
+            // under the herd, and a transition none saw panics the guest.
+            let options = BootOptions {
+                smp: 4,
+                kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
+                kernel_params: &["windows-staged"],
+                ..BootOptions::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let boot = qemu.boot_log().to_string();
+            let first = qemu.run_test("echo one", Duration::from_secs(30));
+            let herd = qemu.run_test("test_rs_ring_park_herd", Duration::from_secs(120));
+            if let Some(err) = &herd.error {
+                return Err(format!("the herd's guest stopped answering: {err}\nserial:\n{}", herd.serial));
+            }
+            if !check_rust_result(&herd) {
+                return Err(format!("ring_park_herd failed:\n{}", herd.stdout));
+            }
+            let capture =
+                format!("{boot}\n{}\n{}\n{}\n{}", first.before, first.serial, herd.before, herd.serial);
+            mask_windows(&capture, 4)
+        }
         "ioapic_topology" => {
             // Everything the I/O APIC driver says happens in Phase 2, long
             // before the virtio-console exists, so the 16550 file is where a
@@ -14167,6 +14243,65 @@ fn parse_xhci_binds(log: &str) -> Vec<XhciBind> {
 /// Both halves, because the kernel writes both registers whole: every bit named
 /// below must hold its named value, **and a bit named nowhere below may not be
 /// set at all**. Silence about a bit is a hole rather than a permission.
+/// A `windows-staged` boot's windows: `common::irqcensus::windows`'s verdict,
+/// with the staged span said and `cpus` CPUs reporting.
+fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
+    if !capture.contains(common::irqcensus::STAGED) {
+        return Err(format!("`windows-staged` said no span, so nothing was held to one:\n{capture}"));
+    }
+    let longest = common::irqcensus::windows(capture)?;
+    if longest.len() != cpus as usize {
+        return Err(format!("{} of {cpus} CPUs reported windows: {longest:?}", longest.len()));
+    }
+    for most in longest.values() {
+        eprintln!(
+            "  [windows] cpu{} irqs_off_ns={} preempt_off_ns={}",
+            most.cpu, most.irqs_off_ns, most.preempt_off_ns
+        );
+    }
+    Ok(())
+}
+
+/// The T14's windows: `common::irqcensus::windows`' verdict with every CPU
+/// reporting, and the longest over the boot and in the herd's own report — the
+/// one its exit printed, just before its exit record — recorded.
+fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
+    const HERD: &str = "test_rs_ring_park_herd";
+    boot.job_passed(HERD)?;
+    let kernel = boot.kernel();
+    let text = kernel.text();
+    let longest = common::irqcensus::windows(text)?;
+    let cpus = boot.cpus()?;
+    if longest.len() != cpus as usize {
+        return Err(format!("{} of {cpus} CPUs reported windows: {longest:?}", longest.len()));
+    }
+    let exited = format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(HERD));
+    let mut latest = std::collections::BTreeMap::new();
+    let mut herd = None;
+    for line in text.lines() {
+        if let Some(Ok(report)) = common::irqcensus::Windows::parse(line) {
+            latest.insert(report.cpu, report);
+        } else if line.contains(&exited) {
+            herd = Some(latest.clone());
+            break;
+        }
+    }
+    let herd = herd.ok_or_else(|| format!("no `{exited}` record after a report:\n{text}"))?;
+    let most = |of: &mut dyn Iterator<Item = &common::irqcensus::Windows>| {
+        of.fold((0, 0), |(i, p), w| (w.irqs_off_ns.max(i), w.preempt_off_ns.max(p)))
+    };
+    let (irqs, preempt) = most(&mut longest.values());
+    let (herd_irqs, herd_preempt) = most(&mut herd.values());
+    eprintln!(
+        "  [windows] boot irqs_off_ns={irqs} preempt_off_ns={preempt}; herd irqs_off_ns={herd_irqs} \
+         preempt_off_ns={herd_preempt}"
+    );
+    boot.measured("windows.windowscase.irqs_off_ns", irqs)?;
+    boot.measured("windows.windowscase.preempt_off_ns", preempt)?;
+    boot.measured("windows.windowscase.herd_irqs_off_ns", herd_irqs)?;
+    boot.measured("windows.windowscase.herd_preempt_off_ns", herd_preempt)
+}
+
 /// The interrupt census adds up, is monotonic, and every device delivery is
 /// still cpu0's.
 ///

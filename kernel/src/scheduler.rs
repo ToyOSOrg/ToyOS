@@ -414,6 +414,10 @@ pub fn exit_to_user() {
             if crate::actuator::dump_in_blocking_pass() {
                 crate::sched::dump::staged::note_return_to_user();
             }
+            // Every caller's next unmask is the return to user mode, or a
+            // kernel thread's first.
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_unmasking();
             return;
         }
         assert!(!in_schedule_self(), "exit-to-user inside a scheduler pass");

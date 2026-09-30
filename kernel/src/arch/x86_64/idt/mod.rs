@@ -369,11 +369,42 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),
         Vector::PageFault => {
+            #[cfg(feature = "mask-windows")]
+            windows_entered(frame);
             cpu::enable_interrupts();
             exceptions::page_fault_handler(frame);
             cpu::disable_interrupts();
+            #[cfg(feature = "mask-windows")]
+            windows_leaving(frame);
         }
-        _ => exceptions::exception_handler(frame),
+        _ => {
+            #[cfg(feature = "mask-windows")]
+            windows_entered(frame);
+            exceptions::exception_handler(frame)
+        }
+    }
+}
+
+/// The gate masked interrupts if the frame says they were open, and a window
+/// is already open if it says they were not; `common_entry` raised the preempt
+/// count by one.
+#[cfg(feature = "mask-windows")]
+fn windows_entered(frame: &TrapFrame) {
+    if frame_interrupts_enabled(frame.rflags) {
+        crate::windows::irqs_masked();
+    } else {
+        crate::windows::irqs_found_masked();
+    }
+    crate::windows::preempt_raised();
+}
+
+/// `common_entry` lowers the count next; its `iretq` opens interrupts on a
+/// return to Ring 0 that had them, and `exit_to_user` on one to Ring 3.
+#[cfg(feature = "mask-windows")]
+fn windows_leaving(frame: &TrapFrame) {
+    crate::windows::preempt_lowering();
+    if frame.cs & 3 == 0 && frame_interrupts_enabled(frame.rflags) {
+        crate::windows::irqs_unmasking();
     }
 }
 

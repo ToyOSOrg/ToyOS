@@ -1,4 +1,5 @@
-//! The kernel's interrupt census, read back on the host.
+//! The kernel's interrupt census, and the windows a `mask-windows` kernel
+//! prints beside it, read back on the host.
 //!
 //! The guest prints `irq: cpuN total=… timer=… …` per online CPU whenever a
 //! process exits, on `SYS_SHUTDOWN` and on the blocked-task dump
@@ -96,6 +97,113 @@ impl Census {
     pub fn sum_of_sources(&self) -> u64 {
         self.by_source.iter().sum()
     }
+}
+
+/// One CPU's longest interrupts-off and preemption-off windows since the report
+/// before, out of the line a `mask-windows` kernel prints beside that CPU's
+/// census (`kernel/src/windows.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Windows {
+    pub cpu: u32,
+    pub irqs_off_ns: u64,
+    pub preempt_off_ns: u64,
+}
+
+impl Windows {
+    /// One line, or why it is not one; anything before `windows: cpu` is ignored.
+    pub fn parse(line: &str) -> Option<Result<Self, String>> {
+        let rest = line.split("windows: cpu").nth(1)?;
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let value = |at: usize, name: &str| -> Result<u64, String> {
+            fields
+                .get(at)
+                .and_then(|f| f.strip_prefix(name))
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| format!("no `{name}<ns>` field at {at} in {rest:?}"))
+        };
+        let parsed = (|| {
+            if fields.len() != 3 {
+                return Err(format!("{} fields, want 3, in {rest:?}", fields.len()));
+            }
+            let cpu = fields[0].parse().map_err(|_| format!("unreadable cpu number in {rest:?}"))?;
+            Ok(Self { cpu, irqs_off_ns: value(1, "irqs_off_ns=")?, preempt_off_ns: value(2, "preempt_off_ns=")? })
+        })();
+        Some(parsed)
+    }
+}
+
+/// The head of the line `windows-staged` says what it spun with,
+/// `windows: staged cpuK <n>ns`.
+pub const STAGED: &str = "windows: staged cpu";
+
+fn staged(line: &str) -> Option<Result<(u32, u64), String>> {
+    let rest = line.split(STAGED).nth(1)?;
+    let parsed = rest
+        .trim()
+        .split_once(' ')
+        .and_then(|(cpu, ns)| Some((cpu.parse().ok()?, ns.strip_suffix("ns")?.parse().ok()?)))
+        .ok_or_else(|| format!("unreadable staged span in {rest:?}"));
+    Some(parsed)
+}
+
+/// The judge of every `mask-windows` boot: each census line has its CPU's
+/// windows line beside it, each CPU closed both kinds of window at some point
+/// of the boot, and a span `windows-staged` spun is carried, in both windows,
+/// by a later report of the CPU it spun on. Answers each CPU's longest windows
+/// over the whole capture.
+pub fn windows(capture: &str) -> Result<BTreeMap<u32, Windows>, String> {
+    let mut censuses: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut reports: Vec<Windows> = Vec::new();
+    // Where each staged span was said, as a position in `reports`.
+    let mut spun: Vec<(usize, u32, u64)> = Vec::new();
+    for line in capture.lines() {
+        if let Some(census) = Census::parse(line) {
+            *censuses.entry(census.map_err(|why| format!("{why}\nline: {line}"))?.cpu).or_default() += 1;
+        } else if let Some(report) = Windows::parse(line) {
+            reports.push(report.map_err(|why| format!("{why}\nline: {line}"))?);
+        } else if let Some(said) = staged(line) {
+            let (cpu, ns) = said?;
+            spun.push((reports.len(), cpu, ns));
+        }
+    }
+    if censuses.is_empty() {
+        return Err(format!("no `irq: cpu` census in the capture:\n{capture}"));
+    }
+    let mut beside: BTreeMap<u32, usize> = BTreeMap::new();
+    for report in &reports {
+        *beside.entry(report.cpu).or_default() += 1;
+    }
+    if beside != censuses {
+        return Err(format!(
+            "census lines per cpu {censuses:?} and windows lines per cpu {beside:?}: a census \
+             went out without its windows, or windows without their census"
+        ));
+    }
+    let mut longest: BTreeMap<u32, Windows> = BTreeMap::new();
+    for report in &reports {
+        let most = longest.entry(report.cpu).or_insert(Windows { irqs_off_ns: 0, preempt_off_ns: 0, ..*report });
+        most.irqs_off_ns = most.irqs_off_ns.max(report.irqs_off_ns);
+        most.preempt_off_ns = most.preempt_off_ns.max(report.preempt_off_ns);
+    }
+    for most in longest.values() {
+        if most.irqs_off_ns == 0 || most.preempt_off_ns == 0 {
+            return Err(format!(
+                "cpu{} closed no window of one kind in the whole boot, and every CPU masks and \
+                 passes: {most:?}",
+                most.cpu
+            ));
+        }
+    }
+    for (at, cpu, ns) in spun {
+        let later: Vec<&Windows> = reports[at..].iter().filter(|r| r.cpu == cpu).collect();
+        if !later.iter().any(|r| r.irqs_off_ns >= ns) || !later.iter().any(|r| r.preempt_off_ns >= ns) {
+            return Err(format!(
+                "cpu{cpu} spun {ns}ns with both windows open, and no later report of it carries \
+                 both that long: {later:?}"
+            ));
+        }
+    }
+    Ok(longest)
 }
 
 /// The newest census each CPU of each guest printed, keyed by the boot's own

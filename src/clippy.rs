@@ -39,13 +39,17 @@ struct Shape {
 const INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
                            pass-spin,stack-witness,switch-witness,switch-witness-mutate-frame,\
                            switch-witness-mutate-rsp,df-witness,df-witness-mutate,\
-                           entry-df-unclean,fpu-save-nothing,user-writable-gsbase";
+                           entry-df-unclean,fpu-save-nothing,user-writable-gsbase,mask-windows";
 
 /// [`INSTRUMENTS`] less the direction-flag three, which are x86-64's alone.
 const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
                                    pass-spin,stack-witness,switch-witness,\
                                    switch-witness-mutate-frame,switch-witness-mutate-rsp,\
-                                   fpu-save-nothing,user-writable-gsbase";
+                                   fpu-save-nothing,user-writable-gsbase,mask-windows";
+
+/// `build::MASK_WINDOWS_KERNEL`, the one build whose arms need both the
+/// windows and the actuators.
+const MASK_WINDOWS_KERNEL: &str = "boot-actuators,mask-windows,test-actuators";
 
 const UNCONTROLLED: &[&str] = &["toyos-pcid/counting-allocator", "toyos-sched/tripwire"];
 
@@ -98,6 +102,11 @@ const SHAPES: &[Shape] = &[
     },
     Shape {
         dir: "kernel",
+        before: &["--target", Arch::X86_64.kernel(), "--features", MASK_WINDOWS_KERNEL],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
         before: &["--target", Arch::X86_64.kernel(), "--features", "heap-band-notail,heap-lockspin"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
@@ -124,6 +133,11 @@ const SHAPES: &[Shape] = &[
     Shape {
         dir: "kernel",
         before: &["--target", Arch::Aarch64.kernel(), "--features", AARCH64_INSTRUMENTS],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
+        before: &["--target", Arch::Aarch64.kernel(), "--features", MASK_WINDOWS_KERNEL],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {

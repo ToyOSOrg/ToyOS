@@ -958,6 +958,13 @@ fn teardown_resources(
             data.peak_memory / (1024 * 1024), data.alloc_count, data.free_count);
     }
 
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::windows_staged() {
+        #[cfg(feature = "mask-windows")]
+        crate::windows::stage_once();
+        #[cfg(not(feature = "mask-windows"))]
+        panic!("windows-staged: armed on a kernel without `mask-windows`, which has no window to hold to it");
+    }
     // Machine-wide, cumulative counters, printed here (not at shutdown) because process exit is the one recurring moment every boot reaches.
     crate::irq_census::log_census();
     // After the irq lines: the tlb conservation check reads deliveries first, issues second.
