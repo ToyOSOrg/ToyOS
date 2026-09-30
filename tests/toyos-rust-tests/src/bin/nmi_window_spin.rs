@@ -1,6 +1,6 @@
 //! A Ring 3 loop that is inside `SYSCALL` as often as a program can be.
 //!
-//! **The victim half of `syscall_window_nmi`.** The kernel's storm sends NMIs
+//! **The victim half of `syscall_window_nmi_controls`.** The kernel's storm sends NMIs
 //! from another CPU; where each one lands is decided by this loop's timing, and
 //! the window it has to land in is the three instructions of `arch::syscall`'s
 //! entry that run at CPL 0 on this stack plus the one between its `pop rsp` and

@@ -325,7 +325,7 @@ const RUST_SKIP: &[&str] = &[
     "locale_gate",
     // A victim, not a test: it spins on `SYS_GETPID` so that another CPU's NMIs
     // have somewhere to land, and on its own it asserts nothing and costs ten
-    // seconds. `syscall_window_nmi` runs it on the kernel that storms it.
+    // seconds. `syscall_window_nmi_controls` runs it on the kernel that storms it.
     "nmi_window_spin",
     // A victim, not a test: the load `dump-in-blocking-pass` files Ctrl+Alt+D
     // inside, and on its own it asserts nothing. `dump_left_pending_is_owed` runs
@@ -906,15 +906,10 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // The exception entry's own seal, off the page's bytes on an ordinary boot.
     ("blackbox_fault_sealed", Sched::Parallel),
     ("double_fault_stack", Sched::Parallel),
-    // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
-    // a count the kernel printed or a line it printed: how many NMIs landed at
-    // CPL 0 with a user `rsp`, against how many landed in Ring 3, both off the
-    // same storm. No host clock is in any of it — the ten seconds are how long
-    // the victim spins, not a margin anything is measured against — so Parallel.
-    ("syscall_window_nmi", Sched::Parallel),
-    // The two controls on the name above: the kernel with vector 2's IST index
-    // taken off, which must double fault at the entry on the NMI aimed at the
-    // CPU the storm holds inside it, with `cr2 = rsp - 8` at the held `rsp`, and
+    // Two controls on the syscall window's NMI storm: the kernel with vector
+    // 2's IST index taken off, which must double fault at the entry on the NMI
+    // aimed at the CPU the storm holds inside it, with `cr2 = rsp - 8` at the
+    // held `rsp`, and
     // the one nested NMI an early `iretq` can stage, which must take the loud
     // path. Both boots end in a halted machine that has to be drained past its
     // own report, which is where the price is. Nothing in either verdict is a
@@ -1382,7 +1377,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("lock_across_switch_halts", &["test_rs_test_panic_child"]),
     ("heap_over_ceiling_halts", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
-    ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
     ("syscall_window_nmi_controls", &["test_rs_nmi_window_spin"]),
     ("partition_claim", &["test_rs_partition_claimant"]),
     ("partition_claim_gives_up", &["test_rs_partition_claimant"]),
@@ -9336,7 +9330,6 @@ fn run_machine_test(
             common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
         }
         "double_fault_stack" => faults::double_fault_stack(test_config, c_bins, rust_bins),
-        "syscall_window_nmi" => faults::syscall_window_nmi(test_config, c_bins, rust_bins),
         "syscall_window_nmi_controls" => {
             faults::syscall_window_nmi_controls(test_config, c_bins, rust_bins)
         }
