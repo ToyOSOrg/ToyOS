@@ -477,16 +477,14 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("screen_paged_scrollback", Sched::Parallel, qemu::Profile::Gop),
     ("screen_panic_muted", Sched::Parallel, qemu::Profile::Metal),
     ("screen_console_panic", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_fatal_halt", Sched::Parallel, qemu::Profile::Gop),
-    // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
+    // The fatal path from inside Ctrl+Alt+D's report painter, holding the
     // panel's latch it will never give back: the report has to take the screen
     // anyway, and its CPU has to go on to watch the reset bound.
     ("screen_fatal_behind_a_painter", Sched::Parallel, qemu::Profile::Gop),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in and the one no screen
-    // test covered: `screen_fatal_halt` boots a config with no compositor, and
-    // `screen_blocked_dump` has one but paints through `paint_report` rather
-    // than through `halt_all_cpus`.
+    // test covered: `screen_blocked_dump` has one but paints through
+    // `paint_report` rather than through `halt_all_cpus`.
     ("screen_fatal_halt_composited", Sched::Parallel, qemu::Profile::Metal),
     // Every PageUp moves the page one back, which the unattended deadline
     // never does: order, and no clock in it.
@@ -1421,7 +1419,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("file_mtime_undated", &["test_rs_file_mtime"]),
     ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
-    ("screen_fatal_halt", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
 ];
 
@@ -2374,8 +2371,7 @@ const T14_COLS: usize = 1920 / 8;
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
 /// It exists only on a `test-actuators` kernel — every other action costs the
 /// caller its own process, this one costs the machine. Kept in sync with
-/// `kernel/src/syscall/debug.rs` by this comment and by screen_fatal_halt
-/// failing loudly if it drifts.
+/// `kernel/src/syscall/debug.rs` by this comment.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 
 /// How far a corpus case gets before it stops, and what it says when it does.
@@ -4461,9 +4457,7 @@ fn run_screen_test(
             // the code the answer is no — `render` ignores
             // SCREEN_OWNED_BY_USERLAND entirely and only `boot_checkpoint`
             // honours it — but nothing in the suite had ever staged the state
-            // that answers it: `screen_fatal_halt` boots `tests/testcases`,
-            // whose init list contains no framebuffer claimer at all, so the
-            // flag is false on every screen test that panics.
+            // that answers it.
             //
             // Staged the real way round: the panic is triggered *through the
             // console*, by typing at its prompt, so the screen the report has
@@ -4490,8 +4484,7 @@ fn run_screen_test(
                 |d| d.console_text(&font).contains(CONSOLE_PROMPT),
             );
             // The premise. Without a console-drawn screen underneath, a
-            // report reaching the panel proves nothing about ownership and
-            // this test would be `screen_fatal_halt` on a different config.
+            // report reaching the panel proves nothing about ownership.
             if !before.console_text(&font).contains(CONSOLE_PROMPT) {
                 return Err(format!(
                     "no console prompt to panic over\ndecoded screen:\n{}",
@@ -5123,71 +5116,8 @@ fn run_screen_test(
             print_screen(name, &format!("every one of {SAMPLES} PageUps moved the page one back"));
             Ok(())
         }
-        "screen_fatal_halt" => {
-            // The steady-state fatal path: userland is up, the display is
-            // idle, and SYS_DEBUG action 3 runs halt_all_cpus for real.
-            //
-            // The path this covers used to paint a *single line*: nothing had
-            // panicked during boot, so the idle loop had drained the ring into
-            // the console long before, and `capture` found only what was
-            // logged since the last drain. It is the case that proves the ring
-            // retains what serial has already collected.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile,
-                    qmp: true,
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            if !qemu.command_until(
-                "run test_rs_test_panic_child 3",
-                FATAL_HALT_NONCE,
-                Duration::from_secs(15),
-            ) {
-                return Err(format!("{FATAL_HALT_NONCE:?} never reached the console"));
-            }
-            // Polled, not sampled once: the report is longer than a screen
-            // here, so the nonce is on one page of a cycling set.
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            if !text.contains(FATAL_HALT_NONCE) {
-                return Err(format!(
-                    "{FATAL_HALT_NONCE:?} reached serial but not the screen\ndecoded screen:\n{text}"
-                ));
-            }
-            // The teeth for ring *retention*, and the only ones in the suite:
-            // this is the one screen test whose panic comes after the
-            // scheduler exists, so it is the only one where the idle loop has
-            // already drained the log to serial. Reading the drained cursor
-            // instead of the retained window painted exactly one row here —
-            // the nonce, and no context at all — which every assertion above
-            // passes happily, because the nonce *was* that row.
-            //
-            // Counted rather than matched on a particular line: which line
-            // lands on the page carrying the nonce depends on how much
-            // userland printed, and the measured states are 1 row and 96, so
-            // any bound between them is a five-fold margin rather than a
-            // threshold anyone has to tune.
-            const MIN_CONTEXT_ROWS: usize = 20;
-            let filled = dump.rows().iter().filter(|r| !r.is_empty()).count();
-            if filled < MIN_CONTEXT_ROWS {
-                return Err(format!(
-                    "the fatal report is {filled} rows: the ring kept only what serial had not \
-                     taken\ndecoded screen:\n{text}"
-                ));
-            }
-            if dump.fill() != FILL_FATAL {
-                return Err(format!("fatal fill is {:?}, want {FILL_FATAL:?}", dump.fill()));
-            }
-            Ok(())
-        }
         "screen_fatal_behind_a_painter" => {
-            // `screen_fatal_halt` with a painter holding the panel's latch and
+            // The fatal path with a painter holding the panel's latch and
             // never giving it back — which is what a painter is when the halt
             // IPI lands mid-paint. The actuator has Ctrl+Alt+D's report painter
             // go fatal once it holds the latch, so the fatal path meets a
@@ -5243,10 +5173,8 @@ fn run_screen_test(
         "screen_fatal_halt_composited" => {
             // **Can a fatal panic reach the panel once a compositor owns the
             // scanout?** Three investigations into the T14 have rested on the
-            // answer being yes and nothing has ever asked it. `screen_fatal_halt`
-            // boots a config with no compositor, so the screen it paints is one
-            // nothing else had claimed; `screen_blocked_dump` does have a
-            // compositor, but Ctrl+Alt+D paints through `paint_report`, and
+            // answer being yes and nothing has ever asked it. `screen_blocked_dump`
+            // has a compositor, but Ctrl+Alt+D paints through `paint_report`, and
             // `halt_all_cpus` paints through `render` with a different fill and
             // a different source. The owner pulled his stick, waited a minute,
             // and saw the desktop unchanged — which is what this test is for:
@@ -5281,11 +5209,7 @@ fn run_screen_test(
                 d.fill() != FILL_BOOT
             });
             if up.fill() == FILL_BOOT {
-                return Err(
-                    "the compositor never took the screen, so this would have retested \
-                     screen_fatal_halt on a different config"
-                        .to_string(),
-                );
+                return Err("the compositor never took the screen".to_string());
             }
 
             // The probe fires 5 s after the claim; the poll is for that plus
