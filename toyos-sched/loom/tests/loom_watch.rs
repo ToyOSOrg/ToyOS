@@ -324,6 +324,7 @@ fn poll_racing(post: fn(&World)) {
 
     // While `world` lives: its watch's drop answers a live entry as gone.
     assert_eq!(poll.posts(), 1, "a poll over a ready object completes once");
+    drop(world);
 }
 
 /// The object's end racing its readiness: the poll is answered once, as ready
