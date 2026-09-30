@@ -7,9 +7,10 @@
 //! `core::str::from_utf8`, the number reader against the host C library's,
 //! AArch64's `long double` widening against compiler-builtins', and the errno
 //! codes against `include/errno.h`. `strnlen`, `modf` and `logb` against the
-//! host C library's, `strsignal`'s texts, the readdir answer's reader,
-//! `dladdr`'s symbol search on an image laid out here, and what the memory
-//! calls refuse. And libc's headers against its definitions (`prototypes`).
+//! host C library's, `strsignal`'s texts, a signal mask's changes, the readdir
+//! answer's reader, `dladdr`'s symbol search on an image laid out here, and
+//! what the memory calls refuse. And libc's headers against its definitions
+//! (`prototypes`).
 
 #[cfg(test)]
 extern crate alloc;
@@ -29,6 +30,9 @@ mod listing;
 #[cfg(test)]
 #[path = "../../userland/libc/src/memreq.rs"]
 mod memreq;
+#[cfg(test)]
+#[path = "../../userland/libc/src/sigmask.rs"]
+mod sigmask;
 #[cfg(test)]
 #[path = "../../userland/libc/src/strtonum.rs"]
 mod strtonum;
@@ -53,6 +57,8 @@ mod long_double;
 mod memory_refusals;
 #[cfg(test)]
 mod prototypes;
+#[cfg(test)]
+mod signal_masks;
 #[cfg(test)]
 mod strtonum_differential;
 #[cfg(test)]

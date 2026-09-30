@@ -1,7 +1,8 @@
 /* What libc does for the names LLVM builds against: creat, symlink and
-   readlink as POSIX has them; a directory listed with the name and kind of
-   each entry; dladdr naming the image and the exported symbol an address lies
-   in; and strnlen, strsignal, modf, logb and the <endian.h> conversions. */
+   readlink as POSIX has them, each read back; a directory listed with the name
+   and kind of each entry; dladdr naming the image and the exported symbol an
+   address lies in; and strnlen, strsignal, modf, logb and the <endian.h>
+   conversions. */
 #include <dirent.h>
 #include <dlfcn.h>
 #include <endian.h>
@@ -19,6 +20,7 @@
 #define DIR_PATH "/tmp/207_libc_names"
 #define TARGET DIR_PATH "/target"
 #define LINK DIR_PATH "/link"
+#define LISTED DIR_PATH "/listed"
 /* The image's test library, which exports tls_get_label. */
 #define LIB "/system/lib/libtls_lib.so"
 
@@ -33,6 +35,11 @@ static const char *errno_name(int e) {
     }
 }
 
+/* A call that answers -1 and sets errno: what it answered, and errno. */
+static void refused(const char *what, long answer) {
+    printf("%s: %ld, %s\n", what, answer, errno_name(errno));
+}
+
 static int by_name(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
@@ -45,17 +52,17 @@ static void links(void) {
         return;
     }
     printf("symlink: %d\n", symlink(TARGET, LINK));
-    printf("symlink over the link: %d, %s\n", symlink(TARGET, LINK), errno_name(errno));
-    printf("symlink over a file: %d, %s\n", symlink(LINK, TARGET), errno_name(errno));
+    refused("symlink over the link", symlink(TARGET, LINK));
+    refused("symlink over a file", symlink(LINK, TARGET));
 
     ssize_t n = readlink(LINK, buf, sizeof buf);
     printf("readlink: %zd, \"%.*s\"\n", n, n > 0 ? (int)n : 0, buf);
     memset(buf, '#', sizeof buf);
     n = readlink(LINK, buf, 4);
     printf("readlink into 4: %zd, \"%.5s\"\n", n, buf);
-    printf("readlink of a file: %zd, %s\n", readlink(TARGET, buf, sizeof buf), errno_name(errno));
-    printf("readlink of nothing: %zd, %s\n", readlink(DIR_PATH "/none", buf, sizeof buf), errno_name(errno));
-    printf("readlink into 0: %zd, %s\n", readlink(LINK, buf, 0), errno_name(errno));
+    refused("readlink of a file", readlink(TARGET, buf, sizeof buf));
+    refused("readlink of nothing", readlink(DIR_PATH "/none", buf, sizeof buf));
+    refused("readlink into 0", readlink(LINK, buf, 0));
 
     fd = open(LINK, O_RDONLY);
     n = fd < 0 ? -1 : read(fd, buf, sizeof buf);
@@ -65,13 +72,14 @@ static void links(void) {
 }
 
 static void listing(void) {
-    if (mkdir(DIR_PATH "/sub", 0755) != 0 || close(creat(DIR_PATH "/sub/inner", 0644)) != 0) {
-        printf("could not make %s/sub\n", DIR_PATH);
+    if (mkdir(LISTED, 0755) != 0 || mkdir(LISTED "/sub", 0755) != 0 || close(creat(LISTED "/a", 0644)) != 0
+        || close(creat(LISTED "/b", 0644)) != 0 || close(creat(LISTED "/sub/inner", 0644)) != 0) {
+        printf("could not make %s\n", LISTED);
         return;
     }
-    DIR *dir = opendir(DIR_PATH);
+    DIR *dir = opendir(LISTED);
     if (!dir) {
-        printf("opendir %s: %s\n", DIR_PATH, errno_name(errno));
+        refused("opendir", -1);
         return;
     }
     char *names[16];
@@ -88,7 +96,7 @@ static void listing(void) {
     for (int i = 0; i < count; i++)
         printf("entry: %s\n", names[i]);
     errno = 0;
-    printf("opendir of nothing: %s, %s\n", opendir(DIR_PATH "/none") ? "a stream" : "null", errno_name(errno));
+    refused("opendir of nothing", opendir(LISTED "/none") == NULL ? -1 : 0);
 }
 
 static int first_image(struct dl_phdr_info *info, size_t size, void *data) {
@@ -141,7 +149,7 @@ int main(void) {
     double part = modf(-3.25, &whole);
     printf("modf(-3.25): %g and %g\n", whole, part);
     printf("logb: %g %g %g\n", logb(0.1), logb(1024.0), logb(0.0));
-    printf("endian: %s %#x %#x\n", BYTE_ORDER == LITTLE_ENDIAN ? "little" : "big",
+    printf("endian: %s 0x%x 0x%x\n", BYTE_ORDER == LITTLE_ENDIAN ? "little" : "big",
            (unsigned)htobe32(0x01020304), (unsigned)le16toh(0x0102));
     return 0;
 }

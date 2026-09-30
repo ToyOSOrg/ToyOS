@@ -12,14 +12,6 @@ fn refuse() -> i32 {
     -1
 }
 
-/// No signal is ever raised, `SIGALRM` among them. POSIX reserves no value of
-/// `alarm`'s for failure: the 0 says no alarm was pending, which is so.
-#[no_mangle]
-pub extern "C" fn alarm(_seconds: u32) -> u32 {
-    errno::set(ENOSYS);
-    0
-}
-
 /// A process never replaces its image: a program starts as a new process.
 #[no_mangle]
 pub unsafe extern "C" fn execv(_path: *const u8, _argv: *const *const u8) -> i32 {

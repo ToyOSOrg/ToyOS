@@ -211,11 +211,17 @@ pub unsafe extern "C" fn sigaction(
     0 // success
 }
 
+/// The calling thread's mask, which is what POSIX's process mask is in a
+/// process of one thread (`pthread_sigmask`).
 #[no_mangle]
-pub unsafe extern "C" fn sigprocmask(
-    _how: i32, _set: *const u64, _oldset: *mut u64,
-) -> i32 {
-    0
+pub unsafe extern "C" fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32 {
+    match unsafe { crate::pthread::pthread_sigmask(how, set, oldset) } {
+        0 => 0,
+        refused => {
+            crate::errno::set(refused);
+            -1
+        }
+    }
 }
 
 #[no_mangle]

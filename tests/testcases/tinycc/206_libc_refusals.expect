@@ -1,4 +1,3 @@
-alarm: 0, ENOSYS
 execv: -1, ENOSYS
 execve: -1, ENOSYS
 setsid: -1, ENOSYS
@@ -16,9 +15,13 @@ setrlimit: -1, ENOSYS
 msync: -1, ENOSYS
 mprotect: -1, ENOSYS
 realpath: -1, ENOSYS
-fcntl F_SETLK: -1, ENOSYS
-fcntl F_SETLKW: -1, ENOSYS
-fcntl F_GETLK: -1, ENOSYS
+fcntl F_SETLK: -1, EINVAL
+fcntl F_SETLKW: -1, EINVAL
+fcntl F_GETLK: -1, EINVAL
+fcntl F_DUPFD: -1, ENOSYS
+fcntl F_GETFL: -1, ENOSYS
+fcntl F_SETFL: -1, ENOSYS
+fcntl 12345: -1, EINVAL
 getpwnam_r: ENOSYS, entry null
 getpwuid_r: ENOSYS, entry null
 mmap a file: -1, ENODEV
@@ -30,4 +33,6 @@ sysconf _SC_GETPW_R_SIZE_MAX: -1, no errno
 sysconf 12345: -1, EINVAL
 posix_madvise WILLNEED: 0
 posix_madvise 99: EINVAL
-file: 1 bytes; second name: none
+file: 1 bytes; mode as it was; second name: none
+page after mprotect: y
+limit after getrlimit: 0 0

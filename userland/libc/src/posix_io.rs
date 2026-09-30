@@ -392,21 +392,33 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
     old
 }
 
+const F_DUPFD: i32 = 0;
+const F_GETFD: i32 = 1;
+const F_SETFD: i32 = 2;
+const F_GETFL: i32 = 3;
+const F_SETFL: i32 = 4;
 const F_GETLK: i32 = 5;
 const F_SETLK: i32 = 6;
 const F_SETLKW: i32 = 7;
+const F_SETOWN: i32 = 8;
+const F_GETOWN: i32 = 9;
+const F_DUPFD_CLOEXEC: i32 = 1030;
 
 #[no_mangle]
 pub unsafe extern "C" fn fcntl(_fd: i32, cmd: i32, _arg: i64) -> i32 {
-    match cmd {
-        // No file keeps a record lock, so none can be taken or tested.
-        F_GETLK | F_SETLK | F_SETLKW => {
-            crate::errno::set(crate::errno::ENOSYS);
-            -1
-        }
-        // issues/build/libc-fcntl-answers-0-to-commands-it-does-not-do.md
-        _ => 0,
-    }
+    let refused = match cmd {
+        // Close-on-exec is the descriptor table's of stage 3 of
+        // issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md.
+        F_GETFD | F_SETFD => return 0,
+        // POSIX's answer for a file that supports no locking, which none here does.
+        F_GETLK | F_SETLK | F_SETLKW => EINVAL,
+        // A descriptor's lowest free number, its status flags and its owner are
+        // nothing this library knows.
+        F_DUPFD | F_DUPFD_CLOEXEC | F_GETFL | F_SETFL | F_GETOWN | F_SETOWN => crate::errno::ENOSYS,
+        _ => EINVAL,
+    };
+    crate::errno::set(refused);
+    -1
 }
 
 // Directory operations

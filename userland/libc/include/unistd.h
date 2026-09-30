@@ -38,7 +38,6 @@ ssize_t readlink(const char *path, char *buf, size_t size);
 int symlink(const char *target, const char *linkpath);
 int link(const char *existing, const char *newpath);
 int fchown(int fd, uid_t owner, gid_t group);
-unsigned int alarm(unsigned int seconds);
 int gethostname(char *name, size_t len);
 
 pid_t getpid(void);

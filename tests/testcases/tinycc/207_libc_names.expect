@@ -1,0 +1,21 @@
+symlink: 0
+symlink over the link: -1, EEXIST
+symlink over a file: -1, EEXIST
+readlink: 26, "/tmp/207_libc_names/target"
+readlink into 4: 4, "/tmp#"
+readlink of a file: -1, EINVAL
+readlink of nothing: -1, ENOENT
+readlink into 0: -1, EINVAL
+read through the link: "hello"
+entry: a DT_UNKNOWN
+entry: b DT_UNKNOWN
+entry: sub DT_DIR
+opendir of nothing: -1, ENOENT
+dladdr(main): 1; names this program: yes; starts where dl_iterate_phdr says: yes; symbol: none
+dladdr(a stack address): 0
+dladdr(tls_get_label + 1): 1, /system/lib/libtls_lib.so, tls_get_label at the symbol's address: yes
+strnlen: 3 2 0
+strsignal: Segmentation fault; Unknown signal
+modf(-3.25): -3 and -0.25
+logb: -4 10 -inf
+endian: little 0x4030201 0x102

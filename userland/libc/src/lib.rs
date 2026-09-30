@@ -20,6 +20,7 @@ mod posix_io;
 mod printf;
 mod pthread;
 mod refused;
+mod sigmask;
 mod socket;
 mod stdio;
 mod string;

@@ -1,0 +1,45 @@
+---
+status: open
+kind: defect
+opened: 2026-10-01
+---
+
+# libc refuses what ToyOS cannot yet answer
+
+These answer failure in their POSIX form and do nothing
+(`userland/libc/src/refused.rs`, `posix_io.rs`, `memory.rs`), each asserted by
+`tests/testcases/tinycc/206_libc_refusals.c`. A program that calls one and
+carries on without it runs; one that needs it does not. Each waits on what it
+names:
+
+- `link`, `ENOSYS`: no call gives a file a second name.
+- `chmod` and `fchmod`, `ENOSYS`: a file has no mode bits to set.
+- `statvfs` and `fstatvfs`, `ENOSYS`: no call answers a filesystem's size or
+  free space.
+- `getrlimit` and `setrlimit`, `ENOSYS`: no call answers a process's limits.
+  LLVM's `getDefaultStackSize` (`llvm/lib/Support/ProgramStack.cpp`) ignores
+  the failure and reads the `rlimit` it did not get.
+- `gethostname` and `uname`, `ENOSYS`: no host name, release or version is
+  published to a process.
+- `realpath`, `ENOSYS`: the kernel resolves a path by rules of its own (`..`
+  read off the text, only the last name's link followed, a relative link read
+  against its mount), and no call answers where a path leads.
+- `msync` and `mprotect`, `ENOSYS`: no call answers which pages of a range are
+  mapped, and a mapping's protection is fixed when it is made.
+- `mmap` of a file, `ENODEV`, and of executable memory, `ENOTSUP`: the kernel
+  maps neither.
+- `fcntl`: a record lock, `EINVAL`, POSIX's answer for a file that supports no
+  locking; `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFL`, `F_SETFL`, `F_GETOWN` and
+  `F_SETOWN`, `ENOSYS`. `F_GETFD` and `F_SETFD` answer 0 and keep nothing:
+  close-on-exec is the descriptor table of stage 3 of
+  `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`.
+- `aligned_alloc` beside std, above 16, `EINVAL`: std's `malloc` aligns to 16
+  and its `free` knows no other alignment.
+
+Ruled out, and owed nothing while the ruling stands: `execv` and `execve`, no
+call replacing a process's image; `setsid` and `getsid`, no POSIX session;
+`fchown`, no owner; `getpwnam_r` and `getpwuid_r`, no user database.
+
+**Exit**: each above either does what POSIX says, asserted by a guest C case
+that reads its effect back, or is ruled out by the owner and moved to the list
+above.

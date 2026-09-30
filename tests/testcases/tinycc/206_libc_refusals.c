@@ -1,6 +1,6 @@
 /* What libc refuses: each call answers failure in its own POSIX form, errno
-   says why, and nothing is done. ENOSYS where ToyOS lacks the function; mmap's
-   own errno where it refuses a mapping. */
+   says why, and nothing is done: ENOSYS where ToyOS lacks the function, and
+   the errno POSIX names for a lock or a mapping it cannot take. */
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -52,9 +52,14 @@ int main(void) {
         printf("could not map a page\n");
         return 1;
     }
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        printf("could not stat " FILE_PATH "\n");
+        return 1;
+    }
+    mode_t mode = st.st_mode;
     errno = 0;
 
-    said("alarm", alarm(1));
     said("execv", execv("/system/bin/shell", argv));
     said("execve", execve("/system/bin/shell", argv, envp));
     said("setsid", setsid());
@@ -75,6 +80,10 @@ int main(void) {
     said("fcntl F_SETLK", fcntl(fd, F_SETLK, &lock));
     said("fcntl F_SETLKW", fcntl(fd, F_SETLKW, &lock));
     said("fcntl F_GETLK", fcntl(fd, F_GETLK, &lock));
+    said("fcntl F_DUPFD", fcntl(fd, F_DUPFD, 10));
+    said("fcntl F_GETFL", fcntl(fd, F_GETFL));
+    said("fcntl F_SETFL", fcntl(fd, F_SETFL, O_NONBLOCK));
+    said("fcntl 12345", fcntl(fd, 12345));
 
     /* The _r lookups answer their error, and null for the entry. */
     int answer = getpwnam_r("root", &pw, buf, sizeof buf, &found);
@@ -99,10 +108,14 @@ int main(void) {
     printf("posix_madvise WILLNEED: %d\n", posix_madvise(page, 4096, POSIX_MADV_WILLNEED));
     printf("posix_madvise 99: %s\n", errno_name(posix_madvise(page, 4096, 99)));
 
-    /* The file is as it was: its one byte, and no second name. */
-    struct stat st;
-    printf("file: %ld bytes; second name: %s\n", fstat(fd, &st) == 0 ? (long)st.st_size : -1L,
+    /* Nothing refused was done: the file has its one byte, its mode and no
+       second name; the page is still writable; the limit is as it was. */
+    long size = fstat(fd, &st) == 0 ? (long)st.st_size : -1L;
+    printf("file: %ld bytes; mode %s; second name: %s\n", size, st.st_mode == mode ? "as it was" : "changed",
            access(FILE_PATH ".link", F_OK) == 0 ? "made" : "none");
+    page[0] = 'y';
+    printf("page after mprotect: %c\n", page[0]);
+    printf("limit after getrlimit: %lu %lu\n", (unsigned long)limit.rlim_cur, (unsigned long)limit.rlim_max);
     close(fd);
     unlink(FILE_PATH);
     return 0;
