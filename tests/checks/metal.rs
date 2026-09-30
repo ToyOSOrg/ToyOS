@@ -218,8 +218,8 @@ pub fn a_name_two_boots_measured_is_refused() {
     assert_eq!(record.measured.len(), 6, "{:?}", record.measured);
 }
 
-/// Every row `passing` measures, at the values its planted readback carries,
-/// taken under `bios`.
+/// `passing`'s four rows under `bios`: its planted readings, with `complete_ms`
+/// as given.
 fn committed(bios: &str, complete_ms: u64) -> Record {
     let machine = t14();
     Record {
@@ -277,34 +277,41 @@ pub fn a_run_under_another_bios_fails_and_records_nothing() {
     assert_eq!(judged_against(&lacking(&bios)), (false, committed(&bios, 1165)));
 }
 
-/// **A failing shared member fails its boot**: the run is red, and the boot the
-/// member rode adds no row while the boot beside it is recorded whole.
+/// **A failing shared member fails its boot**: the run is red, and that boot
+/// adds no row while the shared boot whose members all passed is recorded
+/// whole.
 pub fn a_failing_shared_member_fails_its_boot() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
-    plant(&dir, "passing", PANEL, BOOTED, None);
-    let exits = format!(
-        "{BOOTED}[2026-09-29 18:22:41 2.310 cpu3] exit: test_rs_std_tls pid=12 code=0 cpu=4ms\n\
-         [2026-09-29 18:22:42 3.120 cpu5] exit: test_rs_fs_large_file pid=13 code=101 cpu=9ms\n"
-    );
-    plant(&dir, "shared", PANEL, &exits, None);
-    let shared = metal::SharedBoot {
-        boot: "shared".to_string(),
+    let jobs = ["test_rs_std_tls", "test_rs_fs_large_file"];
+    let exits = |code: i32| {
+        format!(
+            "{BOOTED}[2026-09-29 18:22:41 2.310 cpu3] exit: {} pid=12 code=0 cpu=4ms\n\
+             [2026-09-29 18:22:42 3.120 cpu5] exit: {} pid=13 code={code} cpu=9ms\n",
+            jobs[0], jobs[1]
+        )
+    };
+    plant(&dir, "passing", PANEL, &exits(0), None);
+    plant(&dir, "failing", PANEL, &exits(101), None);
+    let shared = |boot: &str| metal::SharedBoot {
+        boot: boot.to_string(),
         config: "tests/testcases",
         params: &[],
         features: &[],
         members: const { std::num::NonZeroUsize::new(38).expect("a chunk holds a member") },
-        jobs: vec!["test_rs_std_tls".to_string(), "test_rs_fs_large_file".to_string()],
+        jobs: Vec::from(jobs.map(String::from)),
         files: Vec::new(),
         links: Vec::new(),
     };
-    let tests = [("passes", &PASSING)];
-    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
-    let readbacks = read(&dir, &["passing", "shared"]);
+    let readbacks = read(&dir, &["passing", "failing"]);
     assert!(
-        metal::judge_readbacks(&root, &readbacks, &runs, &[shared]),
+        metal::judge_readbacks(&root, &readbacks, &[], &[shared("passing"), shared("failing")]),
         "a failing member judged green"
     );
     let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
-    assert_eq!(record, committed(&t14().bios, 1165));
+    let names: Vec<&str> = record.measured.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        ["boot.passing.complete_ms", "boot.passing.panel_max_us", "boot.passing.panel_us"]
+    );
 }
