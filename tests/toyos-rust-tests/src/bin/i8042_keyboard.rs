@@ -22,9 +22,8 @@ const EVENT_SIZE: usize = std::mem::size_of::<RawKeyEvent>();
 
 /// The host's end-of-run marker: the HID usage for the End key. None of this
 /// binary's callers' own injections presses it, so its release is
-/// unambiguous — the same shape as `input_events.rs`'s right-button release
-/// and `i8042_mouse.rs`'s own `ended`. No deadline: a lost sentinel is a hang
-/// the host's ceiling reds.
+/// unambiguous — the same shape as `input_events.rs`'s right-button release.
+/// No deadline: a lost sentinel is a hang the host's ceiling reds.
 const SENTINEL: u8 = 0x4D;
 
 fn main() {
