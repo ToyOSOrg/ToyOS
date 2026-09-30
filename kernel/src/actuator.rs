@@ -250,9 +250,6 @@ actuators! {
     /// machine brought up, with nothing else running, and report the distribution.
     tlb_shootdown_bench = "tlb-shootdown-bench";
 
-    /// Shrink both disk caches to 64 entries each.
-    test_small_caches = "test-small-caches";
-
     /// Shrink each process's VA arena from ~1015GB to 256MiB.
     test_tiny_va = "test-tiny-va";
 

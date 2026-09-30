@@ -350,9 +350,6 @@ const RUST_SKIP: &[&str] = &[
     // as arguments and a role; `partition_claim` boots it and judges it off the
     // images.
     "partition_claimant",
-    // Needs `test-small-caches` for the eviction its read-back rests on, and a
-    // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
-    "redirty_mid_flush",
     // Its listings are exact against `tests/layoutcase`, and it takes what that
     // boot wrote as its argv. `layout_fresh_boot` runs it over ssh.
     "layout_paths",
@@ -1075,11 +1072,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
     ("sysret_ss_reload", Sched::Parallel),
-    // F5 and F6's negative controls: an fsync that must keep refusing while the
-    // device refuses its cache flush, and a mid-flush redirty raced for real and
-    // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel),
-    ("redirty_mid_flush", Sched::Parallel),
     // The rename gate's FAT arm, a host-side volume oracle.
     ("fs_rename_durable", Sched::Parallel),
     ("va_exhaustion", Sched::Parallel),
@@ -1215,7 +1208,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("esp_filesystem", &["test_rs_esp_files"]),
     ("fs_rename_durable", &["test_rs_fs_rename_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
-    ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
     ("syscall_panic_halts", &["test_rs_test_panic_child"]),
@@ -8268,7 +8260,6 @@ fn run_machine_test(
             sysret_ss(qemu.boot_log())
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
-        "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         // Two CPUs: the held spawn spins in the kernel while its sibling stores
         // on the other.

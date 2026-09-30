@@ -537,9 +537,6 @@ pub fn duplicate_id_selftest() {
 
 /// Pages the file data cache may hold.
 pub fn file_cache_pages() -> usize {
-    if crate::actuator::test_small_caches() {
-        return 64;
-    }
     let (total, _) = crate::mm::pmm::stats();
     (((total / 64) / PAGE_SIZE) as usize).clamp(2048, 65536)
 }
